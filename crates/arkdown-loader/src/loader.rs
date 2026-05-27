@@ -1,11 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use crossbeam_channel::unbounded;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 use arkdown_core::{
-    ArkdownError, ArkdownPlugin, ImportEdge, Module, ModuleMeta, ModuleSource, NormalModule,
+    ArkdownError, ArkdownPlugin, Module, ModuleMeta, ModuleSource, NormalModule,
     ModuleIdx, ResolvedId,
 };
 
@@ -23,59 +22,95 @@ impl ModuleLoader {
         }
     }
 
-    /// Load all modules reachable from `entry_ids`.
-    /// Returns a map from module ID string → [`Module`].
+    /// Load all modules transitively reachable from `entry_ids`.
     ///
-    /// Note: This is a simplified implementation that loads entry modules and
-    /// their first-level imports in parallel. Full recursive graph traversal
-    /// (BFS over the import graph) is owned by SPEC-005 (`arkdown` bundler core).
+    /// Uses a BFS loop over import edges so that deep dependency chains
+    /// (e.g. EntryAbility → Helper → Types) are fully included in the result.
+    /// Each BFS wave is loaded in parallel via rayon.
+    ///
+    /// # Cycle safety
+    /// Modules are added to the `visited` set before loading begins, so
+    /// circular imports (A → B → A) terminate after one round-trip.
+    ///
+    /// # External modules
+    /// Any module whose `ResolvedId.external` flag is set (OHM URLs such as
+    /// `@bundle:`, `@shared:`, or SDK specifiers like `@ohos/hilog`) is
+    /// skipped — it is resolved at runtime by ArkRuntime, not bundled.
+    ///
+    /// # Error handling
+    /// A failure to load an individual module emits a warning on stderr and
+    /// continues the build.  This is intentional: some import specifiers
+    /// point to ambient declarations that exist only in `.d.ts` files and
+    /// are never on disk.
     pub fn load_all(
         &self,
         entry_ids: Vec<ResolvedId>,
     ) -> Result<HashMap<String, Module>, ArkdownError> {
         let visited: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
-        let results: Arc<Mutex<HashMap<String, Module>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let results: Arc<Mutex<HashMap<String, Module>>> = Arc::new(Mutex::new(HashMap::new()));
 
-        let (tx, rx) = unbounded::<ResolvedId>();
+        // BFS queue — start with entries.
+        let mut queue: Vec<ResolvedId> = entry_ids;
 
-        for id in entry_ids {
-            tx.send(id).ok();
-        }
-        // Close the sender so the receiver drains without blocking.
-        drop(tx);
-
-        // Collect all pending work up front.
-        let pending: Vec<ResolvedId> = rx.into_iter().collect();
-
-        pending.into_par_iter().for_each(|resolved_id| {
-            let id_str = resolved_id.id.clone();
-            {
+        while !queue.is_empty() {
+            // Mark all pending IDs as visited BEFORE loading to prevent
+            // double-enqueue when two modules in the same wave import the
+            // same dependency.
+            let batch: Vec<ResolvedId> = {
                 let mut v = visited.lock().unwrap();
-                if !v.insert(id_str.clone()) {
-                    return;
-                }
+                queue
+                    .drain(..)
+                    .filter(|id| v.insert(id.id.clone()))
+                    .collect()
+            };
+
+            if batch.is_empty() {
+                break;
             }
 
-            if let Ok(module) = Self::load_single(&resolved_id) {
-                // Collect child IDs that haven't been visited yet, for
-                // future passes (currently unused — SPEC-005 drives traversal).
-                let _child_imports: Vec<ResolvedId> = module
-                    .imports()
-                    .iter()
-                    .filter_map(|imp: &ImportEdge| {
-                        let v = visited.lock().unwrap();
-                        if !v.contains(&imp.resolved.id) {
-                            Some(imp.resolved.clone())
-                        } else {
+            // Load this wave in parallel.
+            let new_modules: Vec<(String, Module)> = batch
+                .into_par_iter()
+                .filter_map(|resolved_id| {
+                    // External modules (OHM URLs, SDK APIs) are never read from disk.
+                    if resolved_id.external {
+                        return None;
+                    }
+                    match Self::load_single(&resolved_id) {
+                        Ok(module) => Some((resolved_id.id.clone(), module)),
+                        Err(e) => {
+                            eprintln!("Warning: failed to load {}: {}", resolved_id.id, e);
                             None
                         }
-                    })
-                    .collect();
+                    }
+                })
+                .collect();
 
-                results.lock().unwrap().insert(id_str, module);
+            // Enqueue imports discovered in this wave for the next BFS round.
+            let mut next_wave: Vec<ResolvedId> = Vec::new();
+            {
+                let v = visited.lock().unwrap();
+                let mut r = results.lock().unwrap();
+                for (id, module) in new_modules {
+                    // Enqueue static imports not yet visited.
+                    for imp in module.imports() {
+                        if !v.contains(&imp.resolved.id) {
+                            next_wave.push(imp.resolved.clone());
+                        }
+                    }
+                    // Enqueue dynamic imports not yet visited.
+                    if let Module::Normal(nm) = &module {
+                        for dyn_imp in &nm.dynamic_imports {
+                            if !v.contains(&dyn_imp.resolved.id) {
+                                next_wave.push(dyn_imp.resolved.clone());
+                            }
+                        }
+                    }
+                    r.insert(id, module);
+                }
             }
-        });
+            queue = next_wave;
+        }
 
         let r = results.lock().unwrap().clone();
         Ok(r)

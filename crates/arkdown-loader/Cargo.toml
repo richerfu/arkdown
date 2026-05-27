@@ -15,4 +15,3 @@ async-trait = { workspace = true }
 rayon = { workspace = true }
 thiserror = { workspace = true }
 fs-err = { workspace = true }
-crossbeam-channel = { workspace = true }

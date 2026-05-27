@@ -1,22 +1,23 @@
-//! Integration tests for `arkdown-loader`'s `PluginDriver`.
+//! Integration tests for `arkdown-loader`'s `PluginDriver` and `ModuleLoader`.
 //!
 //! These tests exercise:
 //! - First-plugin-wins semantics for `resolve_id` and `load`
 //! - `HookUsage` filtering (plugins without a flag are skipped)
 //! - Sequential transform chaining
 //! - Short-circuit load semantics
+//! - BFS module graph traversal (transitive imports, circular import safety)
 
 use std::sync::{
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, AtomicU64, Ordering},
     Arc,
 };
 
 use async_trait::async_trait;
 use arkdown_core::{
     ArkdownPlugin, HookLoadOutput, HookResolveIdOutput, HookTransformOutput, HookUsage,
-    ModuleType, PluginContext, PluginResult,
+    ModuleDefFormat, ModuleType, PluginContext, PluginResult, ResolvedId,
 };
-use arkdown_loader::PluginDriver;
+use arkdown_loader::{ModuleLoader, PluginDriver};
 
 // ---------------------------------------------------------------------------
 // Helpers / spy plugins
@@ -418,4 +419,115 @@ async fn test_load_hook_usage_filtering_skips_undeclared_plugin() {
     // Should complete without panicking.
     let result = driver.load("any/module.ts").await.unwrap();
     assert!(result.is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Tests: ModuleLoader::load_all — BFS graph traversal
+// ---------------------------------------------------------------------------
+
+static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Create a fresh temp directory for a test, identified by `label`.
+fn make_test_dir(label: &str) -> std::path::PathBuf {
+    let n = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "arkdown-loader-test-{}-{}-{}",
+        std::process::id(),
+        label,
+        n
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// Build a `ResolvedId` for a local `.ts` file at `absolute_path`.
+fn local_ts(absolute_path: &str) -> ResolvedId {
+    ResolvedId {
+        id: absolute_path.to_owned(),
+        external: false,
+        module_type: ModuleType::Ts,
+        module_def_format: ModuleDefFormat::Unknown,
+    }
+}
+
+/// Test that a three-module chain A → B → C causes all three modules to be
+/// present in the result of `load_all`.
+///
+/// Graph:
+///   a.ts  imports  b.ts
+///   b.ts  imports  c.ts
+///   c.ts  (leaf, no imports)
+#[test]
+fn test_load_all_chain_a_imports_b_imports_c() {
+    let dir = make_test_dir("chain");
+
+    let a = dir.join("a.ts");
+    let b = dir.join("b.ts");
+    let c = dir.join("c.ts");
+
+    std::fs::write(&a, "import './b.ts';\n").unwrap();
+    std::fs::write(&b, "import './c.ts';\n").unwrap();
+    std::fs::write(&c, "export const value = 1;\n").unwrap();
+
+    let loader = ModuleLoader::new(vec![]);
+    let entry = local_ts(a.to_str().unwrap());
+
+    let modules = loader.load_all(vec![entry]).unwrap();
+
+    let a_key = a.to_str().unwrap();
+    let b_key = b.to_str().unwrap();
+    let c_key = c.to_str().unwrap();
+
+    assert!(
+        modules.contains_key(a_key),
+        "entry module a.ts should be in graph; got keys: {:?}",
+        modules.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        modules.contains_key(b_key),
+        "b.ts (depth 1) should be in graph; got keys: {:?}",
+        modules.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        modules.contains_key(c_key),
+        "c.ts (depth 2) should be in graph; got keys: {:?}",
+        modules.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(modules.len(), 3, "exactly 3 modules expected");
+}
+
+/// Test that circular imports A → B → A do not cause an infinite loop and
+/// that both modules end up in the result.
+///
+/// Graph:
+///   a.ts  imports  b.ts
+///   b.ts  imports  a.ts   ← cycle back
+#[test]
+fn test_load_all_circular_import_terminates() {
+    let dir = make_test_dir("circular");
+
+    let a = dir.join("a.ts");
+    let b = dir.join("b.ts");
+
+    std::fs::write(&a, "import './b.ts';\n").unwrap();
+    std::fs::write(&b, "import './a.ts';\n").unwrap();
+
+    let loader = ModuleLoader::new(vec![]);
+    let entry = local_ts(a.to_str().unwrap());
+
+    // Must not hang or panic.
+    let modules = loader.load_all(vec![entry]).unwrap();
+
+    let a_key = a.to_str().unwrap();
+    let b_key = b.to_str().unwrap();
+
+    assert!(
+        modules.contains_key(a_key),
+        "a.ts must be in graph"
+    );
+    assert!(
+        modules.contains_key(b_key),
+        "b.ts must be in graph even with circular reference"
+    );
+    assert_eq!(modules.len(), 2, "exactly 2 modules expected (no duplicates from cycle)");
 }
