@@ -2,3 +2,11 @@
 name = "arkdown-plugin-duplicate-check"
 version = "0.1.0"
 edition = "2021"
+
+[dependencies]
+arkdown-core = { path = "../arkdown-core" }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+index_vec = { workspace = true }
+rustc-hash = { workspace = true }
