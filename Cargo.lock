@@ -94,12 +94,21 @@ dependencies = [
 name = "arkdown"
 version = "0.1.0"
 dependencies = [
+ "arkdown-config",
  "arkdown-core",
  "arkdown-loader",
+ "arkdown-plugin-chunk-wrapper",
+ "arkdown-plugin-duplicate-check",
+ "arkdown-plugin-ets-transform",
+ "arkdown-plugin-json5",
+ "arkdown-plugin-module-meta",
+ "arkdown-plugin-ohos-resolve",
  "arkdown-profile",
+ "arkdown-resolver",
  "async-trait",
  "fs-err",
  "index_vec",
+ "json5",
  "oxc_allocator",
  "oxc_codegen",
  "oxc_parser",
