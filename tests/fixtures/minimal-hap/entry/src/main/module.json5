@@ -1,0 +1,22 @@
+{
+  module: {
+    name: "entry",
+    type: "entry",
+    description: "Test HAP entry module",
+    mainElement: "EntryAbility",
+    deviceTypes: ["phone"],
+    deliveryWithInstall: true,
+    installationFree: false,
+    pages: "$profile:main_pages",
+    abilities: [
+      {
+        name: "EntryAbility",
+        srcEntry: "./ets/entryability/EntryAbility.ets",
+        description: "Test entry ability",
+        exported: true,
+        startWindowIcon: "$media:icon",
+        startWindowBackground: "$color:start_window_background"
+      }
+    ]
+  }
+}
