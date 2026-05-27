@@ -91,6 +91,9 @@ const-oid   = "0.9"
 spki        = "0.7"
 rand        = "0.8"
 p12         = "0.6"
+aes-gcm     = "0.10"
+pbkdf2      = { version = "0.12", default-features = false, features = ["hmac"] }
+hex         = "0.4"
 
 [profile.release]
 lto = true

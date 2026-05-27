@@ -11,6 +11,7 @@ use arkdown_abc::{AbcCompileOptions, AbcCompiler, AbcModule};
 use arkdown_config::load_config;
 use arkdown_core::{ArkdownPlugin, BuildMode, ModuleJson5, ModuleJson5Module, OutputTarget};
 use arkdown_pack::{HarPackInput, PackInput, Packager};
+use arkdown_sign::HapSigner;
 use arkdown_plugin_chunk_wrapper::ChunkWrapperPlugin;
 use arkdown_plugin_duplicate_check::DuplicateCheckPlugin;
 use arkdown_plugin_ets_transform::EtsTransformPlugin;
@@ -271,6 +272,16 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             }
         };
         if let Some(path) = out {
+            // Sign the HAP/HSP in-place (skip for HAR targets or if no signing config)
+            if !matches!(&config_arc.output_target, OutputTarget::Har) {
+                HapSigner::sign_or_skip(
+                    &path,
+                    &path,
+                    config_arc.product.signing_config.as_ref(),
+                    config_arc.sdk_config.compile_api_version,
+                )
+                .map_err(|e| anyhow::anyhow!("Sign failed: {}", e))?;
+            }
             output_paths.push(path);
         }
     }

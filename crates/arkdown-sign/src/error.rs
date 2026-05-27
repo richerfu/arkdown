@@ -38,6 +38,10 @@ pub enum SignError {
     #[error("DER encoding error: {0}")]
     DerError(String),
 
+    // Config / password decryption errors
+    #[error("config error: {0}")]
+    Config(String),
+
     // IO errors
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),

@@ -44,10 +44,16 @@ impl HapSigner {
     ) -> Result<Self, SignError> {
         let p12_bytes = fs_err::read(&config.store_file)?;
 
-        let store_password = std::env::var("ARKDOWN_STORE_PASSWORD")
-            .unwrap_or_else(|_| config.store_password.clone());
-        let key_password = std::env::var("ARKDOWN_KEY_PASSWORD")
-            .unwrap_or_else(|_| config.key_password.clone());
+        let config_dir = config.store_file.parent().unwrap_or(Path::new("."));
+
+        let store_password = std::env::var("ARKDOWN_STORE_PASSWORD").unwrap_or_else(|_| {
+            decrypt_deveco_password(&config.store_password, config_dir)
+                .unwrap_or_else(|_| config.store_password.clone())
+        });
+        let key_password = std::env::var("ARKDOWN_KEY_PASSWORD").unwrap_or_else(|_| {
+            decrypt_deveco_password(&config.key_password, config_dir)
+                .unwrap_or_else(|_| config.key_password.clone())
+        });
 
         let signing_key = SigningKey::from_pkcs12(
             &p12_bytes,
@@ -147,6 +153,111 @@ fn parse_alg_id(sign_alg: &str) -> u32 {
         "SHA256withRSA/PSS" | "SHA256withRSA" => signing_block::ALG_RSA_PSS_SHA256,
         _ => signing_block::ALG_ECDSA_SHA256, // default
     }
+}
+
+// ---------------------------------------------------------------------------
+// DevEco password decryption
+// ---------------------------------------------------------------------------
+
+/// Decrypt a DevEco Studio AES-128-GCM encrypted password string.
+///
+/// DevEco stores signing passwords as hex-encoded AES-GCM ciphertext.
+/// The key is derived from files in `~/.ohos/config/material/`.
+///
+/// Returns the plaintext password, or falls back to the raw string if
+/// it doesn't look like a DevEco-encrypted string (no `000000` prefix).
+pub fn decrypt_deveco_password(
+    encrypted_hex: &str,
+    material_dir: &Path,
+) -> Result<String, SignError> {
+    // Only attempt decryption for strings that look like DevEco-encrypted passwords
+    // (they start with 8 hex '0' chars: "0000001A" or "0000001B" etc.)
+    if encrypted_hex.len() < 16 || !encrypted_hex.starts_with("000000") {
+        return Ok(encrypted_hex.to_string());
+    }
+
+    let mat = material_dir.join("material");
+
+    // 1. Read fd components
+    let component: [u8; 16] = [
+        49, 243, 9, 115, 214, 175, 91, 184, 211, 190, 177, 88, 101, 131, 192, 119,
+    ];
+    let fd_dir = mat.join("fd");
+    let fd_parts: Vec<[u8; 16]> = {
+        let mut parts = Vec::new();
+        for sub in ["0", "1", "2"] {
+            let sub_dir = fd_dir.join(sub);
+            let bytes = read_single_dir_file(&sub_dir)?;
+            let mut arr = [0u8; 16];
+            arr.copy_from_slice(&bytes[..16]);
+            parts.push(arr);
+        }
+        parts
+    };
+
+    // 2. XOR fd0 ^ fd1 ^ fd2 ^ component
+    let mut xored = [0u8; 16];
+    for i in 0..16 {
+        xored[i] = fd_parts[0][i] ^ fd_parts[1][i] ^ fd_parts[2][i] ^ component[i];
+    }
+
+    // 3. Convert xored bytes to UTF-8 string (raw bytes as UTF-8)
+    let xored_str = String::from_utf8_lossy(&xored).into_owned();
+
+    // 4. Read salt and derive root key via PBKDF2-SHA256
+    let ac_bytes = read_single_dir_file(&mat.join("ac"))?;
+    let mut root_key = [0u8; 16];
+    pbkdf2::pbkdf2_hmac::<sha2::Sha256>(xored_str.as_bytes(), &ac_bytes, 10000, &mut root_key);
+
+    // 5. Decrypt work material (ce/) with root_key via AES-128-GCM
+    let ce_bytes = read_single_dir_file(&mat.join("ce"))?;
+    let work_key_bytes = aes_gcm_decrypt(&root_key, &ce_bytes)?;
+
+    // 6. Decrypt the password hex string with work_key
+    let enc_bytes = hex::decode(encrypted_hex)
+        .map_err(|e| SignError::Config(format!("invalid hex password: {e}")))?;
+    let work_key_arr: [u8; 16] = work_key_bytes
+        .try_into()
+        .map_err(|_| SignError::Config("work key is not 16 bytes".into()))?;
+    let plaintext = aes_gcm_decrypt(&work_key_arr, &enc_bytes)?;
+
+    String::from_utf8(plaintext)
+        .map_err(|e| SignError::Config(format!("decrypted password is not UTF-8: {e}")))
+}
+
+fn read_single_dir_file(dir: &Path) -> Result<Vec<u8>, SignError> {
+    let entries: Vec<_> = std::fs::read_dir(dir)
+        .map_err(|e| SignError::Config(format!("cannot read dir {:?}: {e}", dir)))?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name() != ".DS_Store")
+        .collect();
+    let path = entries
+        .first()
+        .ok_or_else(|| SignError::Config(format!("empty dir: {:?}", dir)))?
+        .path();
+    fs_err::read(&path).map_err(|e| SignError::Io(e.into()))
+}
+
+fn aes_gcm_decrypt(key: &[u8; 16], data: &[u8]) -> Result<Vec<u8>, SignError> {
+    use aes_gcm::{aead::Aead, Aes128Gcm, KeyInit, Nonce};
+
+    if data.len() < 20 {
+        return Err(SignError::Config("encrypted data too short".into()));
+    }
+
+    // Parse: first 4 bytes = BE uint32 = r (ciphertext + tag region size)
+    let r = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+    let iv_len = data.len() - 4 - r;
+    let iv = &data[4..4 + iv_len];
+    let ciphertext_and_tag = &data[4 + iv_len..]; // ciphertext + 16-byte auth tag
+
+    let cipher = Aes128Gcm::new_from_slice(key)
+        .map_err(|e| SignError::Config(format!("AES key error: {e}")))?;
+    let nonce = Nonce::from_slice(iv);
+
+    cipher
+        .decrypt(nonce, ciphertext_and_tag)
+        .map_err(|_| SignError::Config("AES-GCM decryption failed: wrong key or corrupt data".into()))
 }
 
 // ---------------------------------------------------------------------------
