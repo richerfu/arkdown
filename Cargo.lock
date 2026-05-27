@@ -135,6 +135,15 @@ dependencies = [
 [[package]]
 name = "arkdown-obfuscate"
 version = "0.1.0"
+dependencies = [
+ "arkdown-core",
+ "fs-err",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "walkdir",
+]
 
 [[package]]
 name = "arkdown-pack"
