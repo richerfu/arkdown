@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -8,9 +9,16 @@ use clap::Args;
 use arkdown::Bundler;
 use arkdown_abc::{AbcCompileOptions, AbcCompiler, AbcModule};
 use arkdown_config::load_config;
-use arkdown_core::{BuildMode, ModuleJson5, ModuleJson5Module, OutputTarget};
-use arkdown_pack::{PackInput, Packager};
+use arkdown_core::{ArkdownPlugin, BuildMode, ModuleJson5, ModuleJson5Module, OutputTarget};
+use arkdown_pack::{HarPackInput, PackInput, Packager};
+use arkdown_plugin_chunk_wrapper::ChunkWrapperPlugin;
+use arkdown_plugin_duplicate_check::DuplicateCheckPlugin;
+use arkdown_plugin_ets_transform::EtsTransformPlugin;
+use arkdown_plugin_json5::Json5Plugin;
+use arkdown_plugin_module_meta::ModuleMetaPlugin;
+use arkdown_plugin_ohos_resolve::OhosResolvePlugin;
 use arkdown_profile::ProfileProcessor;
+use arkdown_resolver::ResolverConfig;
 use arkdown_resource::{ResourceCompileConfig, ResourceCompileInput, ResourceCompiler};
 
 use crate::progress::Progress;
@@ -100,7 +108,45 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         }
 
         // Bundling
-        let bundler = Bundler::new((*config_arc).clone(), vec![]);
+        let plugins: Vec<Arc<dyn ArkdownPlugin>> = vec![
+            // 1. ETS transform — must be first, desugars .ets before any other plugin sees it
+            Arc::new(EtsTransformPlugin::new(config_arc.clone())),
+            // 2. OHOS module resolver — maps specifiers to OHM URLs / local paths
+            Arc::new(OhosResolvePlugin::new(
+                ResolverConfig {
+                    project_root: project_root.clone(),
+                    sdk_api_dirs: vec![],
+                    sdk_kits_dirs: vec![],
+                    pkg_name_to_pkg_info: HashMap::new(),
+                    use_normalized_ohm_url: config_arc
+                        .product
+                        .build_option
+                        .strict_mode
+                        .use_normalized_ohm_url,
+                    case_sensitive_check: config_arc
+                        .product
+                        .build_option
+                        .strict_mode
+                        .case_sensitive_check,
+                    oh_modules_roots: vec![
+                        module.src_path.join("oh_modules"),
+                        project_root.join("oh_modules"),
+                    ],
+                    module_src_roots: vec![module.src_path.join("src/main/ets")],
+                },
+                project_root.clone(),
+                config_arc.product.build_option.strict_mode.case_sensitive_check,
+            )),
+            // 3. Module metadata — annotates each module with OHOS package context
+            Arc::new(ModuleMetaPlugin::new(project_root.clone(), module.name.clone())),
+            // 4. JSON5 import support
+            Arc::new(Json5Plugin),
+            // 5. Duplicate filename check
+            Arc::new(DuplicateCheckPlugin),
+            // 6. IIFE chunk wrapper — MUST be last, transforms code output
+            Arc::new(ChunkWrapperPlugin::new(loader_json.support_chunks)),
+        ];
+        let bundler = Bundler::new((*config_arc).clone(), plugins);
         let _bundle_out = bundler
             .bundle(loader_json)
             .await
@@ -161,18 +207,56 @@ pub async fn run(args: BuildArgs) -> Result<()> {
 
         std::fs::create_dir_all(output.parent().expect("output path has no parent"))?;
 
-        if module_json.exists() && resources_index.exists() && modules_abc.exists() {
-            let out = packager
-                .pack_hap(PackInput {
-                    module_name: module.name.clone(),
-                    abc_path: modules_abc,
-                    resources_index,
-                    module_json,
-                    native_libs: vec![],
-                    output_path: output.clone(),
-                })
-                .map_err(|e| anyhow::anyhow!("Pack failed: {}", e))?;
-            output_paths.push(out);
+        let out = match &config_arc.output_target {
+            OutputTarget::Har => {
+                // HAR: package ETS sources rather than compiled ABC
+                let source_dir = module.src_path.join("src/main/ets");
+                let oh_package_json = module.src_path.join("oh-package.json5");
+                if source_dir.exists() {
+                    Some(
+                        packager
+                            .pack_har(HarPackInput {
+                                module_name: module.name.clone(),
+                                source_dir,
+                                resources_dir: module.src_path.join("src/main/resources"),
+                                oh_package_json,
+                                output_path: output.clone(),
+                            })
+                            .map_err(|e| anyhow::anyhow!("Pack failed: {}", e))?,
+                    )
+                } else {
+                    None
+                }
+            }
+            _ => {
+                // HAP / HSP: need module.json and modules.abc; resources.index is optional
+                if module_json.exists() && modules_abc.exists() {
+                    // Create an empty resources.index placeholder if resources were not compiled
+                    if !resources_index.exists() {
+                        if let Some(parent) = resources_index.parent() {
+                            std::fs::create_dir_all(parent)?;
+                        }
+                        std::fs::write(&resources_index, &[])?;
+                    }
+                    Some(
+                        packager
+                            .pack_hap(PackInput {
+                                module_name: module.name.clone(),
+                                abc_path: modules_abc,
+                                resources_index,
+                                module_json,
+                                native_libs: vec![],
+                                output_path: output.clone(),
+                            })
+                            .map_err(|e| anyhow::anyhow!("Pack failed: {}", e))?,
+                    )
+                } else {
+                    None
+                }
+            }
+        };
+        if let Some(path) = out {
+            output_paths.push(path);
         }
     }
     progress.done();

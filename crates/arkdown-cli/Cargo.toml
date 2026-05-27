@@ -15,6 +15,13 @@ arkdown-resource = { path = "../arkdown-resource" }
 arkdown = { path = "../arkdown" }
 arkdown-abc = { path = "../arkdown-abc" }
 arkdown-pack = { path = "../arkdown-pack" }
+arkdown-plugin-ets-transform = { path = "../arkdown-plugin-ets-transform" }
+arkdown-plugin-chunk-wrapper = { path = "../arkdown-plugin-chunk-wrapper" }
+arkdown-plugin-ohos-resolve = { path = "../arkdown-plugin-ohos-resolve" }
+arkdown-plugin-module-meta = { path = "../arkdown-plugin-module-meta" }
+arkdown-plugin-duplicate-check = { path = "../arkdown-plugin-duplicate-check" }
+arkdown-plugin-json5 = { path = "../arkdown-plugin-json5" }
+arkdown-resolver = { path = "../arkdown-resolver" }
 clap = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
