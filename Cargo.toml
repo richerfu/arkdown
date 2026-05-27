@@ -86,12 +86,16 @@ signature   = "2"
 der         = "0.7"
 x509-cert   = { version = "0.2", features = ["pem"] }
 pkcs12      = "0.1"
+pkcs5       = { version = "0.7", features = ["pbes2"] }
+pkcs8       = { version = "0.10", features = ["alloc", "pkcs5"] }
 cms         = "0.2"
-const-oid   = "0.9"
+const-oid   = { version = "0.9", features = ["db"] }
 spki        = "0.7"
 rand        = "0.8"
 p12         = "0.6"
 aes-gcm     = "0.10"
+aes         = { version = "0.8", features = ["zeroize"] }
+cbc         = "0.1"
 pbkdf2      = { version = "0.12", default-features = false, features = ["hmac"] }
 hex         = "0.4"
 

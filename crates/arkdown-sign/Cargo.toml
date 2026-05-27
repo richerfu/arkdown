@@ -13,7 +13,11 @@ signature      = { workspace = true }
 der            = { workspace = true }
 x509-cert      = { workspace = true }
 pkcs12         = { workspace = true }
+pkcs5          = { workspace = true }
+pkcs8          = { workspace = true }
 p12            = { workspace = true }
+aes            = { workspace = true }
+cbc            = { workspace = true }
 cms            = { workspace = true }
 const-oid      = { workspace = true }
 spki           = { workspace = true }
