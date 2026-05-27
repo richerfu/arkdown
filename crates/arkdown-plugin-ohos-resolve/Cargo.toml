@@ -2,3 +2,10 @@
 name = "arkdown-plugin-ohos-resolve"
 version = "0.1.0"
 edition = "2021"
+
+[dependencies]
+arkdown-core = { path = "../arkdown-core" }
+arkdown-resolver = { path = "../arkdown-resolver" }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
