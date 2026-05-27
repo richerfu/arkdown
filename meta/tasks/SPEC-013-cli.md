@@ -32,15 +32,42 @@ Full build pipeline for the specified target:
 
 ```
 1. Config parsing (SPEC-002)
+   └─ load_app_json5() for bundleName (AppScope/app.json5)
+   └─ signing configs resolved from build-profile.json5#app.signingConfigs
 2. Profile processing → loader.json (SPEC-010)
+   └─ write_module_json() generates merged app+module module.json
+   └─ loader.json includes moduleName, apiVersion, modulePathMap, fallbackAnBuild
 3. Resource compilation (SPEC-011)     ┐ parallel
 4. Bundling (SPEC-005)                 ┘
+   └─ 6 plugins wired in order (see below)
 5. ABC compilation (SPEC-009)
+   └─ TypeScript stripping via oxc_codegen before IR lowering
 6. Packaging (SPEC-012)
+   └─ HAP: calls pack_hap() — includes pack.info, pkgContextInfo.json, resource files
+   └─ HAR: calls pack_har() (not pack_hap())
+   └─ Resources optional: creates empty placeholder if src/main/resources/ is missing
 7. Signing (SPEC-021, if signingConfig present)
 ```
 
 Steps 3 and 4 run in parallel (resources and JS bundling are independent).
+
+### Plugin Wiring (required in `build.rs`)
+
+The bundler must be constructed with exactly these 6 plugins in this order:
+
+```rust
+let plugins: Vec<Arc<dyn ArkdownPlugin>> = vec![
+    Arc::new(EtsTransformPlugin::new(&config)),        // 1. ArkTS desugar (first)
+    Arc::new(OhosResolvePlugin::new(&config, resolver)), // 2. module resolution
+    Arc::new(ModuleMetaPlugin::new(&config)),           // 3. OHOS metadata
+    Arc::new(Json5Plugin::new()),                       // 4. JSON/JSON5 imports
+    Arc::new(DuplicateCheckPlugin::new()),              // 5. filename uniqueness
+    Arc::new(ChunkWrapperPlugin::new(&config)),         // 6. IIFE wrap (last)
+];
+```
+
+Missing any plugin or ordering them differently will produce incorrect output or panics.
+`EtsTransformPlugin` must be first; `ChunkWrapperPlugin` must be last.
 
 ### `arkdown clean`
 

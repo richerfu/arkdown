@@ -124,6 +124,25 @@ See `meta/design/module-resolution.md`.
 `arkdown-profile`) instead of `build-profile.json5` or `module.json5`. The `compileEntry`
 array is the definitive list of entry points. See `meta/design/hvigorw-analysis.md`.
 
+**8. `bundleName` comes from `AppScope/app.json5`, not `products`.** In real DevEco Studio
+projects, `build-profile.json5` products do NOT contain `bundleName`. Read it from
+`AppScope/app.json5` via `load_app_json5()`. Signing configs live at
+`build-profile.json5#app.signingConfigs`; products reference them by name.
+
+**9. The CLI must wire exactly 6 plugins in order: EtsTransform → OhosResolve → ModuleMeta →
+Json5 → DuplicateCheck → ChunkWrapper.** `EtsTransformPlugin` must be first (ArkTS desugar
+before resolve). `ChunkWrapperPlugin` must be last (IIFE wrap via `render_chunk`). Missing or
+misordering any plugin produces incorrect output. For HAR builds use `pack_har()`, not `pack_hap()`.
+
+**10. HAP zip structure requires `pack.info` and `pkgContextInfo.json`.** Every HAP must contain:
+`module.json` (with `app` + `module` sections merged), `pack.info`, `pkgContextInfo.json`,
+`resources.index`, `ets/modules.abc` (PANDA magic, API >= 9), `resources/base/` (copied from
+`src/main/resources/base/`). See `meta/design/hvigorw-analysis.md` section 10 and SPEC-012.
+
+**11. TypeScript stripping is required before ABC compilation.** Use `oxc_codegen` to strip
+remaining TS type annotations from IIFE chunks before IR lowering in `arkdown-abc`. The Panda
+IR builder only handles plain JavaScript. Panda `.abc` magic: `b"PANDA\x00\x00\x00"` (8 bytes).
+
 ---
 
 ## SDK Paths

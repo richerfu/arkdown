@@ -53,20 +53,45 @@ Implements two closely related tasks from hvigor:
    `@bundle:<bundleName>/<harModuleName>/<relativePath>`
 6. Set `module.requestPermissions` from product overlay if present
 
-### Output: module.json (in intermediates)
+### Output: module.json (in intermediates and in HAP)
+
+The final `module.json` placed in the HAP **must contain both `app` and `module` sections**:
 
 ```json
 {
+  "app": {
+    "bundleName": "com.example.myapp",
+    "vendor": "example",
+    "versionCode": 1000000,
+    "versionName": "1.0.0",
+    "icon": "$media:app_icon",
+    "label": "$string:app_name"
+  },
   "module": {
     "name": "entry",
     "type": "entry",
-    "virtualMachine": "ark3.5.0.0",
+    "virtualMachine": "ark12.0.1.0",
     "compileMode": "esmodule",
     "deviceTypes": ["phone", "tablet"],
     ...
   }
 }
 ```
+
+The `app` section is sourced from `AppScope/app.json5` (via SPEC-002 `load_app_json5()`).
+The `module` section is the processed `module.json5` content with the fields below added.
+
+**`write_module_json()` method**: merges `app` + `module` into the final JSON and writes it
+to both:
+- `build/default/intermediates/res/<target>/module.json` (intermediates)
+- Embedded into the HAP zip at `module.json` (by SPEC-012)
+
+Key fields added by `process_profile()`:
+
+| Field                  | Value example        | Rule                                                                   |
+| ---------------------- | -------------------- | ---------------------------------------------------------------------- |
+| `module.virtualMachine`| `"ark12.0.1.0"`      | `"ark<apiVersion>.0.1.0"` for API >= 9 (stage model)                  |
+| `module.compileMode`   | `"esmodule"`         | `"esmodule"` for stage model (API >= 9); `"jsbundle"` for FA model    |
 
 Output path: `build/default/intermediates/res/<target>/module.json`
 
@@ -83,7 +108,11 @@ reads this file instead of directly reading `module.json5`.
 {
   "compileEntry": ["./ets/entryability/EntryAbility.ets", "./ets/pages/Index.ets"],
   "projectRootPath": "/abs/path/to/project",
-  "moduleRootPath": "/abs/path/to/entry",
+  "moduleRootPath": "/abs/path/to/entry/src/main",
+  "moduleName": "entry",
+  "apiVersion": 12,
+  "modulePathMap": { "entry": "/abs/path/to/entry" },
+  "fallbackAnBuild": false,
   "cachePath": "build/default/intermediates/ets/default/loader_out/default/cache/",
   "aceModuleBuild": "build/default/intermediates/ets/default/loader_out/default/",
   "buildMode": "debug",
@@ -111,6 +140,16 @@ reads this file instead of directly reading `module.json5`.
   }
 }
 ```
+
+Field notes:
+
+| Field            | Value                                   | Change from prior spec                     |
+| ---------------- | --------------------------------------- | ------------------------------------------ |
+| `moduleRootPath` | `/abs/path/to/entry/src/main`           | Now points to `src/main`, not module root  |
+| `moduleName`     | `"entry"`                               | Added field; OHOS module name              |
+| `apiVersion`     | `12`                                    | Added field; numeric API version           |
+| `modulePathMap`  | `{ "entry": "/abs/path/to/entry" }`     | Added field; name → absolute path map      |
+| `fallbackAnBuild`| `false`                                 | Added field; AN build fallback flag        |
 
 ### Entry Point Collection
 
@@ -145,6 +184,10 @@ impl ProfileProcessor {
     pub fn generate_loader_json(&self, module: &ModuleConfig, manifest: &HapManifest)
         -> Result<LoaderJson, ArkdownError>;
     pub fn write_loader_json(&self, loader_json: &LoaderJson, path: &Path) -> Result<(), ArkdownError>;
+
+    /// Write merged module.json (app + module sections combined) to the intermediates path.
+    /// This is the file placed directly in the HAP zip by SPEC-012.
+    pub fn write_module_json(&self, manifest: &HapManifest, path: &Path) -> Result<(), ArkdownError>;
 }
 ```
 

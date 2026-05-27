@@ -36,6 +36,33 @@ The input to `arkdown-abc` is already-bundled IIFE JS (not raw ArkTS), so:
   re-parse the IIFE JS output (which is standard JavaScript after ArkTS desugaring)
 - Steps 3–4 are the core of what we implement
 
+## TypeScript Stripping (Required Pre-Step)
+
+Before lowering to Panda IR, any TypeScript type annotations remaining in the IIFE output
+**must be stripped** using `oxc_codegen`. Even after bundling, some `.ts`/`.ets` type syntax may
+survive into the chunk JS (e.g., type casts, interface references). The Panda IR builder only
+handles plain JavaScript.
+
+```rust
+// Strip TS types before bytecode generation
+use oxc_codegen::{CodeGenerator, CodegenOptions};
+use oxc_parser::Parser;
+use oxc_span::SourceType;
+
+fn strip_types(source: &str) -> String {
+    let source_type = SourceType::ts();
+    let allocator = Allocator::default();
+    let ret = Parser::new(&allocator, source, source_type).parse();
+    CodeGenerator::new()
+        .with_options(CodegenOptions { ..Default::default() })
+        .build(&ret.program)
+        .code
+}
+```
+
+This step produces clean JavaScript that the IR lowering stage can process without encountering
+type-only constructs (`interface`, `: Type`, `as Type`, `<Type>` casts, etc.).
+
 ---
 
 ## Panda Bytecode Format
@@ -44,7 +71,7 @@ The `.abc` file format is defined in `arkcompiler_runtime_core`. Key structures:
 
 ```
 .abc file layout:
-  Header (magic: 0x414243, version, file_size, ...)
+  Header (magic: b"PANDA\x00\x00\x00" (8 bytes), version, file_size, ...)
   ClassIndex        ← table of class records
   MethodIndex       ← table of method records
   StringTable       ← interned strings
@@ -52,6 +79,10 @@ The `.abc` file format is defined in `arkcompiler_runtime_core`. Key structures:
   CodeSection       ← bytecode instruction sequences
   DebugInfoSection  ← source positions (when --debug-info)
 ```
+
+**Magic bytes**: The Panda `.abc` header starts with `b"PANDA\x00\x00\x00"` (8 bytes, null-padded
+to 8). This is distinct from older references to `0x414243` — the correct magic for files produced
+by the current ArkCompiler is the `PANDA` ASCII string.
 
 Reference: `arkcompiler_runtime_core/libpandafile/file_format.md` (if present) or
 the `.abc` format documentation in `runtime_core`.
@@ -219,7 +250,8 @@ crates/arkdown-abc/
 
 ## Test Requirements
 
-- `AbcCompiler::compile()` on minimal IIFE JS `(function() { var x = 1; })()` produces a binary starting with the Panda ABC magic bytes (`0x414243` or the correct magic from runtime_core)
+- `AbcCompiler::compile()` on minimal IIFE JS `(function() { var x = 1; })()` produces a binary starting with `b"PANDA\x00\x00\x00"` (8 bytes)
+- TypeScript stripping: IIFE JS containing type annotations (e.g., `var x: number = 1`) is stripped to plain JS before IR lowering; the compiled `.abc` is valid (no type-annotation parse errors)
 - Compiled `.abc` header: version field matches the expected version for `target_api_version = 12`
 - Compiled `.abc` is accepted by ArkRuntime: install a minimal HAP on device/emulator and verify `hdc install` succeeds
 - `merge_abc: true` with two `AbcModule` inputs produces one `.abc` file with two named records; verify record names match input `record_name` values

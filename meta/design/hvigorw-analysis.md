@@ -434,6 +434,97 @@ arkdown must write this exact format (or a superset that the SDK plugins can con
 
 ---
 
+## 10. Real HAP Structure (ground truth from MyApplication1)
+
+The following zip structure was verified from a real DevEco Studio-built HAP (`entry-default-signed.hap`).
+Use this as the reference when implementing `pack_hap()` in SPEC-012.
+
+```
+entry.hap
+├── module.json               ← app + module sections merged; "virtualMachine": "ark12.0.1.0",
+│                                "compileMode": "esmodule"
+├── pack.info                 ← bundle summary (see below)
+├── pkgContextInfo.json       ← package context OHM URL mappings (see below)
+├── resources.index           ← binary, begins with RestoolV2 magic bytes
+├── ets/
+│   └── modules.abc           ← binary, begins with b"PANDA\x00\x00\x00" (8 bytes); API >= 9
+├── resources/
+│   └── base/
+│       ├── element/          ← string.json, color.json, etc.
+│       ├── media/            ← app_icon.png, etc.
+│       └── profile/          ← main_pages.json, etc.
+└── libs/                     ← optional; only present when native .so files exist
+    └── arm64-v8a/
+        └── *.so
+```
+
+### `pack.info` structure
+
+```json
+{
+  "summary": {
+    "app": {
+      "bundleName": "com.example.myapplication",
+      "bundleType": "app",
+      "version": { "code": 1000000, "name": "1.0.0" }
+    },
+    "modules": [{
+      "mainAbility": "EntryAbility",
+      "deviceTypes": ["phone", "tablet"],
+      "name": "entry",
+      "type": "entry",
+      "abilities": [{ "name": "EntryAbility", "label": "$string:EntryAbility_label", "exported": true }]
+    }]
+  },
+  "packages": [{
+    "deviceTypes": ["phone", "tablet"],
+    "moduleType": "entry",
+    "deliveryWithInstall": true,
+    "name": "entry"
+  }]
+}
+```
+
+### `pkgContextInfo.json` structure
+
+```json
+{
+  "entry": {
+    "packageName": "entry",
+    "bundleName": "com.example.myapplication",
+    "moduleName": "entry",
+    "version": "",
+    "entryPath": "ets/modules.abc",
+    "isSO": false
+  }
+}
+```
+
+### `module.json` must have both sections
+
+```json
+{
+  "app": {
+    "bundleName": "com.example.myapplication",
+    "vendor": "example",
+    "versionCode": 1000000,
+    "versionName": "1.0.0",
+    "icon": "$media:app_icon",
+    "label": "$string:app_name"
+  },
+  "module": {
+    "name": "entry",
+    "type": "entry",
+    "virtualMachine": "ark12.0.1.0",
+    "compileMode": "esmodule",
+    "deviceTypes": ["phone", "tablet"],
+    "abilities": [...]
+  }
+}
+```
+
+---
+
 ## Cross-Reference
 
 - [pipeline.md](pipeline.md) — full pipeline overview

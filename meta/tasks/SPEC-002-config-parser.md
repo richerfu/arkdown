@@ -17,31 +17,55 @@ the resolved config.
 
 ## Files Consumed
 
-| File                  | Location                  | Purpose                                                                                                    |
-| --------------------- | ------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `build-profile.json5` | project root              | products, modules, signing configs, build options                                                          |
-| `oh-package.json5`    | each module root          | package name, version, dependencies                                                                        |
-| `module.json5`        | each module's `src/main/` | abilities, srcEntry, deviceTypes, pages                                                                    |
-| `hvigorfile.ts`       | project root              | plugin registration (arkdown reads this only to validate it's a standard app project; does not execute it) |
+| File                    | Location                  | Purpose                                                                                                    |
+| ----------------------- | ------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `AppScope/app.json5`    | project root              | **bundle name** (`app.bundleName`), app-level icon/label/version                                          |
+| `build-profile.json5`   | project root              | products, modules, **signing configs** (at `app.signingConfigs`), build options                            |
+| `oh-package.json5`      | each module root          | package name, version, dependencies                                                                        |
+| `module.json5`          | each module's `src/main/` | abilities, srcEntry, deviceTypes, pages                                                                    |
+| `hvigorfile.ts`         | project root              | plugin registration (arkdown reads this only to validate it's a standard app project; does not execute it) |
+
+> **Important**: `bundleName` is read from `AppScope/app.json5` (`app.bundleName`), NOT from
+> `build-profile.json5` products. The `new load_app_json5()` function handles this file.
 
 ---
 
 ## Key Requirements
 
-### build-profile.json5 Schema
+### AppScope/app.json5 Schema (bundle name source)
 
 ```json5
 {
   app: {
+    bundleName: "com.example.myapp",   // ← definitive bundle name
+    vendor: "example",
+    versionCode: 1000000,
+    versionName: "1.0.0",
+    icon: "$media:app_icon",
+    label: "$string:app_name",
+  }
+}
+```
+
+### build-profile.json5 Schema
+
+`signingConfigs` is at `app` level (not inside products). Products reference a signing config by
+name via `signingConfig: "default"`. `targetSdkVersion` may appear alongside `compatibleSdkVersion`.
+
+```json5
+{
+  app: {
+    signingConfigs: [{         // ← signing configs live here, NOT in products
+      name: "default",
+      type: "HarmonyOS",
+      material: { certpath, keyAlias, keyPassword, profile, signAlg, storeFile, storePassword }
+    }],
     products: [{
       name: "default",
-      bundleName: "com.example.myapp",
+      signingConfig: "default",           // ← reference by name
       compatibleSdkVersion: "5.0.0(12)",  // → compile_api_version = 12
+      targetSdkVersion: "5.0.0(12)",      // optional; same format as compatibleSdkVersion
       runtimeOS: "HarmonyOS",
-      signingConfigs: [{
-        name: "default",
-        material: { certpath, keyAlias, keyPassword, profile, signAlg, storeFile, storePassword }
-      }],
       buildOption: {
         strictMode: { caseSensitiveCheck: true, useNormalizedOHMUrl: true },
         arkOptions: { obfuscation: { ruleOptions: { enable: false } } }
@@ -92,7 +116,10 @@ From the SDK path, derive:
 ### Parsing Rules
 
 - All config files use JSON5 format (use the `json5` crate)
+- `bundleName` is read from `AppScope/app.json5` at the project root — **not** from `products`
+- `signingConfigs` lives at `build-profile.json5#app.signingConfigs`; products reference them by name
 - `compatibleSdkVersion` format: `"X.Y.Z(N)"` → extract `N` as `compile_api_version: u32`
+- `targetSdkVersion` uses the same format; parse it the same way as `compatibleSdkVersion`
 - `products` × `modules` × `targets` defines a matrix; resolve to the selected product+module combination
   - CLI flag `--product <name>` selects the product (default: first product)
   - CLI flag `--module <name>` scopes to one module (default: all modules)
@@ -125,6 +152,34 @@ pub struct ModuleConfig {
 
 ---
 
+## Public API Additions
+
+```rust
+/// Parse AppScope/app.json5 (source of bundleName).
+pub fn load_app_json5(project_root: &Path) -> Result<AppJson5, ArkdownError>;
+
+pub struct AppJson5 {
+    pub bundle_name: String,
+    pub vendor: Option<String>,
+    pub version_code: u32,
+    pub version_name: String,
+}
+
+pub struct ProductConfig {
+    pub name: String,
+    pub signing_config: Option<String>,     // name reference into signingConfigs
+    pub compatible_sdk_version: String,
+    pub target_sdk_version: Option<String>, // same format as compatible_sdk_version
+    pub runtime_os: String,
+    pub build_option: BuildOption,
+}
+
+pub struct SigningConfig {
+    pub name: String,
+    pub material: SigningMaterial,
+}
+```
+
 ## Files to Create
 
 ```
@@ -132,6 +187,7 @@ crates/arkdown-config/
 ├── Cargo.toml
 └── src/
     ├── lib.rs
+    ├── app_json5.rs        (parse AppScope/app.json5 — bundle name source)
     ├── build_profile.rs    (parse build-profile.json5)
     ├── oh_package.rs       (parse oh-package.json5)
     ├── module_json.rs      (parse module.json5)
@@ -157,6 +213,10 @@ crates/arkdown-config/
 - `meta/design/hvigorw-analysis.md` — config file schemas and field semantics
 - `meta/design/types.md` — `ArkdownConfig`, `SdkConfig`, `ProductConfig`, `BuildOption` types
 
+> **Key discovery**: `AppScope/app.json5` is the canonical source of `bundleName` in real DevEco
+> Studio projects. The `products` array in `build-profile.json5` does not contain `bundleName`.
+> `signingConfigs` is at `build-profile.json5#app.signingConfigs`, referenced from products by name.
+
 ---
 
 ## Rolldown Alignment
@@ -165,7 +225,7 @@ crates/arkdown-config/
 | --- | --- | --- |
 | `ArkdownConfig` | rolldown `InputOptions` + `OutputOptions` | arkdown merges both into a single config struct; rolldown separates build-time from emit-time options |
 | `BuildMode::Debug/Release` | rolldown `treeshake` option + `minify` option | arkdown uses a single mode enum; rolldown sets these independently |
-| `ProductConfig::bundle_name` | no rolldown equivalent | OHOS-specific: identifies the app bundle in OHM URLs |
+| `AppJson5::bundle_name` | no rolldown equivalent | OHOS-specific: read from `AppScope/app.json5`, not from `products`; identifies the app bundle in OHM URLs |
 | `StrictModeConfig::use_normalized_ohm_url` | no rolldown equivalent | OHOS-specific: controls whether module IDs are OHM URLs or file paths |
 | `ModuleConfig::oh_package` | rolldown reads `package.json`; no `oh-package.json5` concept | OHOS uses ohpm, not npm; `oh-package.json5` replaces `package.json` |
 | `SdkConfig` | rolldown has no SDK concept | Pure arkdown addition: SDK version determines ArkTS API rewrites and signing block version |

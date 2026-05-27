@@ -15,8 +15,14 @@ hvigor uses rollup 3 internally (via `@ohos/hvigor-arkts-compose` which depends 
 ## Phase 1: Config Parsing
 
 **Crate**: `arkdown-config`
-**Inputs**: `build-profile.json5`, `oh-package.json5`, `module.json5`, `hvigorfile.ts` (entry point config)
+**Inputs**: `AppScope/app.json5`, `build-profile.json5`, `oh-package.json5`, `module.json5`, `hvigorfile.ts`
 **Outputs**: `ArkdownConfig` — fully resolved build configuration struct
+
+> **Key discovery**: `bundleName` comes from `AppScope/app.json5` (`app.bundleName`), NOT from
+> `build-profile.json5` products. `signingConfigs` lives at `build-profile.json5#app.signingConfigs`
+> and is referenced from products by name via `signingConfig: "default"`. Use `load_app_json5()`
+> to read `AppScope/app.json5`. `targetSdkVersion` may appear alongside `compatibleSdkVersion`
+> and uses the same `"X.Y.Z(N)"` format.
 
 ### hvigor behavior
 
@@ -303,10 +309,14 @@ This is entirely OHOS-specific. Standard web bundlers do not need this IIFE wrap
 
 `arkdown-abc` reimplements this pipeline in Rust:
 
-- Reuses `ohos-rs/oxc` to parse the IIFE JS input (no separate parser needed)
+- **TypeScript stripping**: before IR lowering, `oxc_codegen` strips any remaining TS type
+  annotations from the IIFE JS. Even post-bundle, type syntax can survive into chunk JS.
+  This produces clean JavaScript for the Panda IR builder.
+- Reuses `ohos-rs/oxc` to parse the stripped JS input
 - Ports the IR lowering and Panda bytecode emit stages from `arkcompiler_ets_frontend`
 - Parallel compilation via Rayon (one task per module)
 - Same incremental cache semantics (function-level, msgpack)
+- **Panda magic**: `.abc` files begin with `b"PANDA\x00\x00\x00"` (8 bytes)
 
 See [abc-pipeline.md](abc-pipeline.md) for the complete Panda IR and bytecode format.
 
@@ -339,22 +349,29 @@ All resource scanning, ID assignment, and binary serialization runs in-process.
 ## Phase 11: module.json5 Merge / Process Profile
 
 **Crate**: `arkdown-profile`
-**Inputs**: module `module.json5`, HAR dependency `module.json5` files, product config
+**Inputs**: module `module.json5`, `AppScope/app.json5`, HAR dependency `module.json5` files, product config
 **Outputs**: processed `module.json` placed in `intermediates/res/<target>/`
 
 ### hvigor behavior
 
 `MergeProfile` task merges base `module.json5` with product overlays. `ProcessProfile` task:
 
-1. Sets `module.virtualMachine` = `"ark<version>"` (for ArkTS modules)
-2. Sets `module.compileMode` = `esmodule` or `jsbundle`
+1. Sets `module.virtualMachine` = `"ark<apiVersion>.0.1.0"` (for ArkTS stage model modules, API >= 9)
+2. Sets `module.compileMode` = `"esmodule"` (stage model) or `"jsbundle"` (FA model)
 3. Sets `module.deviceTypes`
 4. Collects abilities from HAR dependencies (`collectHarAbilities`) and merges into `module.abilities`
 5. Generates OHM URL for HAR ability `srcEntry` fields: `@bundle:bundleName/harModuleName/path`
 
 ### OHOS divergences
 
-The `virtualMachine` field is critical — it tells the OS runtime which VM to use. For ArkTS modules with API >= 9, it is `ark<version>` (e.g., `ark3.5.0.0`).
+The `virtualMachine` field is critical — it tells the OS runtime which VM to use. For ArkTS stage
+model modules with API >= 9, it is `"ark<apiVersion>.0.1.0"` (e.g., `"ark12.0.1.0"` for API 12).
+
+**module.json must have both `app` and `module` sections.** `write_module_json()` merges:
+- `app` section from `AppScope/app.json5` (bundle name, version, icon, label)
+- `module` section from processed `module.json5` (with virtualMachine, compileMode added)
+
+The merged file is placed in intermediates and also embedded directly in the HAP zip.
 
 ---
 
@@ -369,14 +386,25 @@ The `virtualMachine` field is critical — it tells the OS runtime which VM to u
 `PackageHap` task (or `PackageHsp`, `PackageHar`) assembles the output package. The HAP structure is a zip containing:
 
 ```
-EntryAbility.abc
-resources.index
-module.json
-libs/arm64-v8a/*.so     (optional native libs)
-ets/modules.abc          (merged ABC, optional)
+module.json               ← app + module sections merged (from write_module_json())
+pack.info                 ← bundle summary JSON
+pkgContextInfo.json       ← package context OHM URL mappings
+resources.index           ← binary resource index (RestoolV2 magic)
+ets/
+  modules.abc             ← merged Panda bytecode (PANDA magic, API >= 9)
+resources/
+  base/
+    element/              ← string, color, etc. resource files
+    media/                ← image resources
+    profile/              ← profile JSON files (e.g., main_pages.json)
+libs/arm64-v8a/*.so       ← optional native libs
 ```
 
-`PackageHap` extends `BasePackHapTask` which handles the zip assembly using streams. The `ProcessCompiledResources` task runs before packaging to process any preloaded SO files.
+`PackageHap` extends `BasePackHapTask` which handles the zip assembly using streams. The
+`ProcessCompiledResources` task runs before packaging to process any preloaded SO files.
+
+For HAR builds, use `pack_har()` (not `pack_hap()`). Resources are optional: if
+`src/main/resources/` is absent, an empty placeholder is created.
 
 ### OHOS divergences
 

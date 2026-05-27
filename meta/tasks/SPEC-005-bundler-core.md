@@ -123,6 +123,35 @@ pub struct BundleOutput {
 
 ---
 
+## Required Plugin Wiring Order
+
+The bundler (and CLI) must wire exactly these 6 plugins, **in this order**:
+
+```
+1. EtsTransformPlugin      (arkdown-plugin-ets-transform)   — ArkTS desugar; runs first on .ets files
+2. OhosResolvePlugin       (arkdown-plugin-ohos-resolve)    — OHOS module resolution
+3. ModuleMetaPlugin        (arkdown-plugin-module-meta)     — per-module OHOS metadata annotation
+4. Json5Plugin             (arkdown-plugin-json5)           — JSON/JSON5 import support
+5. DuplicateCheckPlugin    (arkdown-plugin-duplicate-check) — filename uniqueness enforcement
+6. ChunkWrapperPlugin      (arkdown-plugin-chunk-wrapper)   — IIFE wrapping, globalThis registry (runs last)
+```
+
+`EtsTransformPlugin` must be first (transform must happen before resolve + parse). `ChunkWrapperPlugin`
+must be last (post-bundle IIFE wrap via `render_chunk`). Order of 2–5 is stable but these must
+all come before ChunkWrapper.
+
+```rust
+let plugins: Vec<Arc<dyn ArkdownPlugin>> = vec![
+    Arc::new(EtsTransformPlugin::new(&config)),
+    Arc::new(OhosResolvePlugin::new(&config, resolver.clone())),
+    Arc::new(ModuleMetaPlugin::new(&config)),
+    Arc::new(Json5Plugin::new()),
+    Arc::new(DuplicateCheckPlugin::new()),
+    Arc::new(ChunkWrapperPlugin::new(&config)),
+];
+let bundler = Bundler::new(config, plugins);
+```
+
 ## loader.json Integration
 
 The bundler reads `loader.json` (written by SPEC-010) to get entry points. The `loader.json`
@@ -132,7 +161,11 @@ contract (from `GenerateLoaderJson`):
 {
   "compileEntry": ["./ets/entryability/EntryAbility.ets", "./ets/pages/Index.ets"],
   "projectRootPath": "/path/to/project",
-  "moduleRootPath": "/path/to/entry",
+  "moduleRootPath": "/path/to/entry/src/main",
+  "moduleName": "entry",
+  "apiVersion": 12,
+  "modulePathMap": { "entry": "/path/to/entry" },
+  "fallbackAnBuild": false,
   "cachePath": "build/default/intermediates/ets/.../cache/",
   "aceModuleBuild": "build/default/intermediates/ets/.../loader_out/default/",
   "buildMode": "debug",
@@ -141,6 +174,16 @@ contract (from `GenerateLoaderJson`):
   "pkgNameToPkgBriefInfo": { ... }
 }
 ```
+
+Key fields added/updated:
+
+| Field             | Value                                  | Note                                          |
+| ----------------- | -------------------------------------- | --------------------------------------------- |
+| `moduleRootPath`  | `/abs/path/to/entry/src/main`          | Points to `src/main`, not just module root    |
+| `moduleName`      | `"entry"`                              | OHOS module name                              |
+| `apiVersion`      | `12`                                   | Numeric API version (from compatibleSdkVersion) |
+| `modulePathMap`   | `{ "entry": "/abs/path/to/entry" }`    | Maps module name → absolute path              |
+| `fallbackAnBuild` | `false`                                | AN (ahead-of-native) build fallback flag      |
 
 The bundler consumes `compileEntry` for entry points and writes output to `aceModuleBuild`.
 

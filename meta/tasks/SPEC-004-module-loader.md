@@ -126,6 +126,57 @@ impl PluginDriver {
 }
 ```
 
+### Full BFS Traversal in `load_all()`
+
+`load_all()` performs a **complete breadth-first traversal** of the import graph, not just
+entry + first-level imports. The BFS continues until no new modules are discovered:
+
+```rust
+pub async fn load_all(
+    entries: Vec<String>,
+    plugin_driver: &PluginDriver,
+) -> Result<Vec<Module>, ArkdownError> {
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut queue: VecDeque<String> = VecDeque::from(entries.clone());
+    let mut modules = Vec::new();
+
+    while let Some(id) = queue.pop_front() {
+        if visited.contains(&id) {
+            continue;
+        }
+        visited.insert(id.clone());
+
+        let module = load_module(&id, plugin_driver).await?;
+
+        // Enqueue imports — but skip external modules (BFS leaves)
+        for import in &module.imports {
+            let specifier = &import.specifier;
+            if is_external_specifier(specifier) {
+                // @kit.*, @ohos/*, @bundle:, @shared: — skip, do not follow
+                continue;
+            }
+            if !visited.contains(&import.resolved_id) {
+                queue.push_back(import.resolved_id.clone());
+            }
+        }
+        modules.push(module);
+    }
+    Ok(modules)
+}
+
+fn is_external_specifier(s: &str) -> bool {
+    s.starts_with("@bundle:")
+        || s.starts_with("@shared:")
+        || s.starts_with("@kit.")
+        || s.starts_with("@ohos/")
+        || s.starts_with("@system/")
+}
+```
+
+**Bug fix**: prior versions of `load_all()` only loaded entry modules plus their direct imports
+(`_child_imports`), silently dropping transitive dependencies. The BFS loop above is the correct
+implementation — all reachable local modules must be loaded.
+
 ### Parallel Loading
 
 Use Rayon to load independent modules in parallel. Modules with circular dependencies
@@ -141,7 +192,9 @@ while let Ok(id) = rx.recv() {
     rayon::spawn(|| {
         let module = load_module(&id, &plugin_driver);
         for import in &module.imports {
-            tx.send(import.resolved.id.clone());
+            if !is_external_specifier(&import.specifier) {
+                tx.send(import.resolved.id.clone());
+            }
         }
         result_tx.send(module);
     });

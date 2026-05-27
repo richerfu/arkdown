@@ -19,14 +19,90 @@ for signing (SPEC-021).
 
 ```
 entry.hap
-├── module.json               ← from SPEC-010 output
-├── resources.index           ← from SPEC-011 output
-├── modules.abc               ← from SPEC-009 output (merged ABC)
+├── module.json               ← from SPEC-010 write_module_json() (app + module sections merged)
+├── pack.info                 ← bundle summary (see format below)
+├── pkgContextInfo.json       ← package context OHM URL mappings (see format below)
+├── resources.index           ← from SPEC-011 output (binary, RestoolV2 magic)
 ├── ets/
-│   └── modules.abc           ← alternative location (API version dependent)
+│   └── modules.abc           ← from SPEC-009 output (PANDA magic, API >= 9)
+├── resources/
+│   └── base/
+│       ├── element/          ← string/color/etc resource files
+│       ├── media/            ← image resources
+│       └── profile/          ← profile JSON files (e.g., main_pages.json)
 └── libs/
     └── arm64-v8a/
         └── *.so              ← native shared libraries (optional)
+```
+
+> **Note on `modules.abc` path**: For API >= 9 (stage model), the ABC is at `ets/modules.abc`.
+> For API < 9 (FA model, legacy), it may be at the archive root as `modules.abc`.
+> `module.json` must contain **both** `app` and `module` sections (see SPEC-010).
+
+### `pack.info` Format
+
+`pack.info` is a JSON file at the root of the HAP zip that summarizes the bundle:
+
+```json
+{
+  "summary": {
+    "app": {
+      "bundleName": "com.example.myapp",
+      "bundleType": "app",
+      "version": {
+        "code": 1000000,
+        "name": "1.0.0"
+      }
+    },
+    "modules": [{
+      "mainAbility": "EntryAbility",
+      "deviceTypes": ["phone", "tablet"],
+      "name": "entry",
+      "type": "entry",
+      "abilities": [{
+        "name": "EntryAbility",
+        "label": "$string:EntryAbility_label",
+        "exported": true
+      }]
+    }]
+  },
+  "packages": [{
+    "deviceTypes": ["phone", "tablet"],
+    "moduleType": "entry",
+    "deliveryWithInstall": true,
+    "name": "entry"
+  }]
+}
+```
+
+### `pkgContextInfo.json` Format
+
+`pkgContextInfo.json` maps package names to their OHM URL context for the runtime module registry:
+
+```json
+{
+  "entry": {
+    "packageName": "entry",
+    "bundleName": "com.example.myapp",
+    "moduleName": "entry",
+    "version": "",
+    "entryPath": "ets/modules.abc",
+    "isSO": false
+  }
+}
+```
+
+### Resource File Copying
+
+Resource files from `src/main/resources/` are copied verbatim into the HAP under the `resources/`
+directory. The `resources.index` binary (compiled by SPEC-011) accompanies them. Both must be
+present — the runtime uses `resources.index` for ID lookup and the `resources/` files for
+actual content retrieval.
+
+```
+src/main/resources/base/element/string.json   → resources/base/element/string.json
+src/main/resources/base/media/app_icon.png    → resources/base/media/app_icon.png
+src/main/resources/base/profile/main_pages.json → resources/base/profile/main_pages.json
 ```
 
 ## HSP Structure (zip)
@@ -66,11 +142,12 @@ pub struct Packager {
 
 pub struct PackInput {
     pub module: ModuleConfig,
-    pub abc_path: PathBuf,            // modules.abc from SPEC-009
-    pub resources_index: PathBuf,     // resources.index from SPEC-011
-    pub module_json: PathBuf,         // processed module.json from SPEC-010
-    pub native_libs: Vec<PathBuf>,    // .so files (optional)
-    pub output_path: PathBuf,         // e.g., build/default/outputs/default/entry.hap
+    pub abc_path: PathBuf,              // ets/modules.abc from SPEC-009
+    pub resources_index: PathBuf,       // resources.index from SPEC-011
+    pub resources_src_dir: Option<PathBuf>, // src/main/resources/ — copied into HAP
+    pub module_json: PathBuf,           // processed module.json from SPEC-010 (app+module merged)
+    pub native_libs: Vec<PathBuf>,      // .so files (optional)
+    pub output_path: PathBuf,           // e.g., build/default/outputs/default/entry.hap
 }
 
 impl Packager {
@@ -128,7 +205,12 @@ build/default/outputs/har/my-har.har
 
 ## Test Requirements
 
-- `pack_hap()` produces a ZIP file with `module.json`, `resources.index`, and `modules.abc` at the correct paths
+- `pack_hap()` produces a ZIP file with `module.json`, `pack.info`, `pkgContextInfo.json`, `resources.index`, `ets/modules.abc`, and `resources/` files at the correct paths
+- `module.json` in the HAP contains both `"app"` and `"module"` top-level keys
+- `pack.info` parses as valid JSON with `summary.app.bundleName` matching the project bundle name
+- `pkgContextInfo.json` parses as valid JSON with the module entry mapped correctly
+- `resources/base/` directory in the HAP contains copied resource files from `src/main/resources/base/`
+- When `resources_src_dir` is `None`, the `resources/` directory is still absent from the HAP (no crash)
 - `modules.abc` is stored (compression method 0) in the ZIP — not deflate-compressed
 - `module.json` and `resources.index` are deflate-compressed in the ZIP
 - ZIP entry paths inside the archive match hvigor's output exactly (verified via manual comparison with a reference HAP)

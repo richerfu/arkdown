@@ -139,11 +139,38 @@ crates/arkdown-resolver/
 
 ---
 
+## BFS Traversal: External Module Skipping
+
+During module loading (`load_all()` in `arkdown-loader`), the BFS walk must **skip** importing
+further dependencies from external modules. The following specifier forms are treated as leaves
+in the BFS graph — they are resolved but their own imports are not followed:
+
+| Specifier prefix        | Reason to skip                                               |
+| ----------------------- | ------------------------------------------------------------ |
+| `@bundle:` / `@shared:` | Runtime-resolved cross-bundle references — not bundled here  |
+| `@kit.*`                | SDK kit aggregation modules — declarations only, no source   |
+| `@ohos/*`               | SDK API declarations — declarations only, no source          |
+| `@system/*`             | Legacy SDK system APIs — declarations only                   |
+
+Relative imports (`./`, `../`) and bare ohpm package specifiers that resolve to `LocalSource`
+are always followed in BFS.
+
+## Import Path Resolution
+
+All relative import paths in `parse.rs` are resolved to **absolute paths** based on the importer
+file's directory, not the module root. This ensures that:
+
+- `import './utils/helper'` from `/project/entry/src/main/ets/pages/Index.ets` resolves to
+  `/project/entry/src/main/ets/pages/utils/helper.ets` (not the module root)
+- Paths passed to the resolver are always absolute — specifiers with `./` or `../` are
+  joined with `importer.parent()` before being passed to `OxcResolver`
+
 ## Acceptance Criteria
 
 - `OhosResolver::resolve("@ohos/hilog", importer)` returns `SdkDeclaration` pointing to SDK api dir
-- `OhosResolver::resolve("./utils/helper", importer)` returns `LocalSource` with correct absolute path
+- `OhosResolver::resolve("./utils/helper", importer)` returns `LocalSource` with correct **absolute** path
 - `OhosResolver::resolve("@bundle:com.foo/mod/path", importer)` returns `ExternalBundle`
+- `@kit.*`, `@ohos/*`, `@bundle:`, `@shared:` modules are not BFS-expanded (their imports are not followed)
 - Bare specifier from `oh_modules/` resolves to the package entry file
 - `file:` local HAR resolves to the HAR's source entry
 - Unit tests for each specifier form
