@@ -400,3 +400,220 @@ pub trait ArkdownPlugin: Send + Sync {
 
 /// Convenience alias — a boxed, object-safe plugin.
 pub type BoxedPlugin = Box<dyn ArkdownPlugin>;
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── HookUsage bitflags ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_hook_usage_empty_is_default() {
+        let default: HookUsage = Default::default();
+        assert_eq!(default, HookUsage::empty());
+        assert!(default.is_empty());
+    }
+
+    #[test]
+    fn test_hook_usage_all_contains_all_flags() {
+        let all = HookUsage::all();
+        assert!(all.contains(HookUsage::BuildStart));
+        assert!(all.contains(HookUsage::ResolveId));
+        assert!(all.contains(HookUsage::Load));
+        assert!(all.contains(HookUsage::Transform));
+        assert!(all.contains(HookUsage::ModuleParsed));
+        assert!(all.contains(HookUsage::BuildEnd));
+        assert!(all.contains(HookUsage::RenderStart));
+        assert!(all.contains(HookUsage::RenderChunk));
+        assert!(all.contains(HookUsage::AugmentChunkHash));
+        assert!(all.contains(HookUsage::GenerateBundle));
+        assert!(all.contains(HookUsage::WriteBundle));
+        assert!(all.contains(HookUsage::CloseBundle));
+        assert!(all.contains(HookUsage::WatchChange));
+        assert!(all.contains(HookUsage::CloseWatcher));
+        assert!(all.contains(HookUsage::Banner));
+        assert!(all.contains(HookUsage::Footer));
+        assert!(all.contains(HookUsage::ShouldInvalidateCache));
+    }
+
+    #[test]
+    fn test_hook_usage_combine_flags() {
+        let flags = HookUsage::ResolveId | HookUsage::Load;
+        assert!(flags.contains(HookUsage::ResolveId));
+        assert!(flags.contains(HookUsage::Load));
+        assert!(!flags.contains(HookUsage::Transform));
+        assert!(!flags.contains(HookUsage::BuildStart));
+    }
+
+    #[test]
+    fn test_hook_usage_contains_single_flag() {
+        let flags = HookUsage::Transform;
+        assert!(flags.contains(HookUsage::Transform));
+        assert!(!flags.contains(HookUsage::Load));
+    }
+
+    // ── HookResolveIdArgs ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_hook_resolve_id_args_no_importer() {
+        let args = HookResolveIdArgs {
+            specifier: "./index",
+            importer: None,
+            is_entry: true,
+            kind: ImportKind::Import,
+        };
+        assert_eq!(args.specifier, "./index");
+        assert!(args.importer.is_none());
+        assert!(args.is_entry);
+        assert_eq!(args.kind, ImportKind::Import);
+    }
+
+    #[test]
+    fn test_hook_resolve_id_args_with_importer() {
+        let importer_path = "/project/entry/src/main.ets";
+        let args = HookResolveIdArgs {
+            specifier: "@ohos/hilog",
+            importer: Some(importer_path),
+            is_entry: false,
+            kind: ImportKind::DynamicImport,
+        };
+        assert_eq!(args.importer, Some(importer_path));
+        assert!(!args.is_entry);
+        assert_eq!(args.kind, ImportKind::DynamicImport);
+    }
+
+    #[test]
+    fn test_hook_resolve_id_args_all_import_kinds() {
+        for kind in [
+            ImportKind::Import,
+            ImportKind::DynamicImport,
+            ImportKind::Require,
+            ImportKind::New,
+        ] {
+            let args = HookResolveIdArgs {
+                specifier: "some/module",
+                importer: None,
+                is_entry: false,
+                kind,
+            };
+            assert_eq!(args.kind, kind);
+        }
+    }
+
+    #[test]
+    fn test_import_kind_default_is_import() {
+        let kind: ImportKind = Default::default();
+        assert_eq!(kind, ImportKind::Import);
+    }
+
+    // ── HookLoadOutput ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_hook_load_output_none_optionals() {
+        let out = HookLoadOutput {
+            code: "const x = 1;".to_string(),
+            source_map: None,
+            module_type: None,
+        };
+        assert_eq!(out.code, "const x = 1;");
+        assert!(out.source_map.is_none());
+        assert!(out.module_type.is_none());
+    }
+
+    #[test]
+    fn test_hook_load_output_with_optionals() {
+        use crate::module::ModuleType;
+        let out = HookLoadOutput {
+            code: "export default 42;".to_string(),
+            source_map: Some("{\"version\":3}".to_string()),
+            module_type: Some(ModuleType::Ts),
+        };
+        assert!(out.source_map.is_some());
+        assert_eq!(out.module_type, Some(ModuleType::Ts));
+    }
+
+    // ── HookTransformOutput ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_hook_transform_output_construction() {
+        let out = HookTransformOutput {
+            code: "transformed code".to_string(),
+            source_map: Some("{\"mappings\":\"\"}".to_string()),
+        };
+        assert_eq!(out.code, "transformed code");
+        assert!(out.source_map.is_some());
+    }
+
+    #[test]
+    fn test_hook_transform_output_no_map() {
+        let out = HookTransformOutput {
+            code: "code".to_string(),
+            source_map: None,
+        };
+        assert!(out.source_map.is_none());
+    }
+
+    // ── ModuleInfo ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_module_info_construction_and_access() {
+        use crate::module::ModuleType;
+        let info = ModuleInfo {
+            id: "@bundle:com.example/entry/ets/entryability/EntryAbility".to_string(),
+            is_entry: true,
+            module_type: ModuleType::Ets,
+            importers: vec![],
+            dynamic_importers: vec![],
+            imported_ids: vec!["./utils/helper".to_string()],
+            dynamically_imported_ids: vec![],
+            exports: vec!["default".to_string()],
+        };
+        assert!(info.is_entry);
+        assert_eq!(info.module_type, ModuleType::Ets);
+        assert_eq!(info.imported_ids.len(), 1);
+        assert_eq!(info.exports[0], "default");
+    }
+
+    // ── RenderedChunkMeta ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_rendered_chunk_meta_construction() {
+        let meta = RenderedChunkMeta {
+            name: "entry".to_string(),
+            chunk_hash: "abcd1234".to_string(),
+            is_entry: true,
+            is_dynamic_entry: false,
+            facade_module_id: Some("EntryAbility.ets".to_string()),
+            module_ids: vec!["id1".to_string(), "id2".to_string()],
+            exports: vec!["default".to_string()],
+            imports: vec!["commons".to_string()],
+            dynamic_imports: vec![],
+        };
+        assert_eq!(meta.name, "entry");
+        assert_eq!(meta.chunk_hash, "abcd1234");
+        assert!(meta.is_entry);
+        assert!(!meta.is_dynamic_entry);
+        assert_eq!(meta.facade_module_id.as_deref(), Some("EntryAbility.ets"));
+        assert_eq!(meta.module_ids.len(), 2);
+    }
+
+    #[test]
+    fn test_rendered_chunk_meta_no_facade() {
+        let meta = RenderedChunkMeta {
+            name: "commons".to_string(),
+            chunk_hash: "beef0000".to_string(),
+            is_entry: false,
+            is_dynamic_entry: false,
+            facade_module_id: None,
+            module_ids: vec![],
+            exports: vec![],
+            imports: vec![],
+            dynamic_imports: vec![],
+        };
+        assert!(meta.facade_module_id.is_none());
+    }
+}

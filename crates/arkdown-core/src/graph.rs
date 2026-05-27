@@ -193,3 +193,190 @@ pub struct ModuleGraph {
     /// Entry modules (from `loader.json` `compileEntry`).
     pub entries: Vec<ModuleIdx>,
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use index_vec::Idx as _;
+    use crate::module::{ModuleSource, ResolvedId};
+    use crate::plugin::ImportKind;
+    use super::{
+        ExportBinding, ExternalModule, ImportEdge, ImportedName,
+        Module, ModuleIdx, ModuleMeta, NormalModule,
+    };
+
+    fn make_normal_module(idx: u32) -> NormalModule {
+        NormalModule {
+            idx: ModuleIdx(idx),
+            exec_order: idx,
+            id: ResolvedId::default(),
+            source: ModuleSource {
+                id: ResolvedId::default(),
+                content: String::new(),
+                source_map: None,
+            },
+            ast: (),
+            imports: vec![],
+            dynamic_imports: vec![],
+            exports: vec![],
+            meta: ModuleMeta::default(),
+            is_entry: false,
+            has_side_effects: false,
+        }
+    }
+
+    fn make_external_module(idx: u32) -> ExternalModule {
+        ExternalModule {
+            idx: ModuleIdx(idx),
+            id: ResolvedId::default(),
+            exec_order: u32::MAX,
+        }
+    }
+
+    // ── NormalModule ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_normal_module_construction() {
+        let m = make_normal_module(0);
+        assert_eq!(m.idx, ModuleIdx(0));
+        assert_eq!(m.exec_order, 0);
+        assert!(!m.is_entry);
+        assert!(!m.has_side_effects);
+        assert!(m.imports.is_empty());
+        assert!(m.exports.is_empty());
+    }
+
+    #[test]
+    fn test_normal_module_with_entry_flag() {
+        let mut m = make_normal_module(1);
+        m.is_entry = true;
+        assert!(m.is_entry);
+        assert_eq!(m.idx.index(), 1);
+    }
+
+    // ── ExternalModule ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_external_module_exec_order_is_max() {
+        let ext = make_external_module(5);
+        assert_eq!(ext.exec_order, u32::MAX);
+        assert_eq!(ext.idx, ModuleIdx(5));
+    }
+
+    // ── Module enum — Normal variant ─────────────────────────────────────────
+
+    #[test]
+    fn test_module_normal_id_idx_is_not_external() {
+        let inner = make_normal_module(0);
+        let m = Module::Normal(Box::new(inner));
+        // id() and idx() delegate correctly
+        assert_eq!(m.idx(), ModuleIdx(0));
+        assert!(!m.is_external());
+    }
+
+    #[test]
+    fn test_module_normal_as_normal_returns_some() {
+        let m = Module::Normal(Box::new(make_normal_module(0)));
+        assert!(m.as_normal().is_some());
+    }
+
+    #[test]
+    fn test_module_normal_is_entry_delegates() {
+        let mut inner = make_normal_module(0);
+        inner.is_entry = true;
+        let m = Module::Normal(Box::new(inner));
+        assert!(m.is_entry());
+    }
+
+    #[test]
+    fn test_module_normal_imports_slice() {
+        let m = Module::Normal(Box::new(make_normal_module(0)));
+        assert_eq!(m.imports().len(), 0);
+    }
+
+    // ── Module enum — External variant ──────────────────────────────────────
+
+    #[test]
+    fn test_module_external_is_external() {
+        let m = Module::External(Box::new(make_external_module(2)));
+        assert!(m.is_external());
+        assert_eq!(m.idx(), ModuleIdx(2));
+    }
+
+    #[test]
+    fn test_module_external_as_normal_returns_none() {
+        let m = Module::External(Box::new(make_external_module(0)));
+        assert!(m.as_normal().is_none());
+    }
+
+    #[test]
+    fn test_module_external_is_not_entry() {
+        let m = Module::External(Box::new(make_external_module(0)));
+        assert!(!m.is_entry());
+    }
+
+    #[test]
+    fn test_module_external_imports_is_empty_slice() {
+        let m = Module::External(Box::new(make_external_module(0)));
+        assert_eq!(m.imports().len(), 0);
+    }
+
+    // ── ImportEdge ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_import_edge_dynamic_import_kind() {
+        let edge = ImportEdge {
+            specifier: "./lazy-page".to_string(),
+            resolved: ResolvedId::default(),
+            imported_names: vec![],
+            kind: ImportKind::DynamicImport,
+        };
+        assert_eq!(edge.kind, ImportKind::DynamicImport);
+        assert_eq!(edge.specifier, "./lazy-page");
+    }
+
+    #[test]
+    fn test_import_edge_static_import_with_names() {
+        let edge = ImportEdge {
+            specifier: "@ohos/hilog".to_string(),
+            resolved: ResolvedId::default(),
+            imported_names: vec![ImportedName {
+                imported: "hilog".to_string(),
+                local: "hilog".to_string(),
+            }],
+            kind: ImportKind::Import,
+        };
+        assert_eq!(edge.imported_names.len(), 1);
+        assert_eq!(edge.imported_names[0].imported, "hilog");
+    }
+
+    // ── ExportBinding ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_export_binding_construction() {
+        let eb = ExportBinding {
+            exported_name: "default".to_string(),
+            local_name: "_default".to_string(),
+        };
+        assert_eq!(eb.exported_name, "default");
+        assert_eq!(eb.local_name, "_default");
+    }
+
+    // ── ModuleIdx ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_module_idx_from_usize_round_trip() {
+        let idx = ModuleIdx::from_usize(42);
+        assert_eq!(idx.index(), 42);
+        assert_eq!(idx, ModuleIdx(42));
+    }
+
+    #[test]
+    fn test_module_idx_default_is_zero() {
+        let idx: ModuleIdx = Default::default();
+        assert_eq!(idx.index(), 0);
+    }
+}

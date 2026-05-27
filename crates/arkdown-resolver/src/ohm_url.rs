@@ -54,6 +54,28 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_ohm_url_with_dotted_bundle_name() {
+        // Verify a full real-world OHM URL parses correctly.
+        let url = "@bundle:com.example.app/entry/ets/entryability/EntryAbility";
+        let (bundle, module, path) = parse_ohm_url(url).expect("should parse");
+        assert_eq!(bundle, "com.example.app");
+        assert_eq!(module, "entry");
+        assert_eq!(path, "ets/entryability/EntryAbility");
+        // Verify the three components when split by '/'
+        let parts: Vec<&str> = path.split('/').collect();
+        assert_eq!(parts, vec!["ets", "entryability", "EntryAbility"]);
+    }
+
+    #[test]
+    fn test_parse_ohm_url_deeply_nested_path() {
+        let url = "@bundle:com.ohos.example/feature/ets/utils/http/client";
+        let (bundle, module, path) = parse_ohm_url(url).expect("should parse");
+        assert_eq!(bundle, "com.ohos.example");
+        assert_eq!(module, "feature");
+        assert_eq!(path, "ets/utils/http/client");
+    }
+
+    #[test]
     fn test_generate_ohm_url() {
         use std::path::PathBuf;
         let pkg_ctx = PkgContext {
