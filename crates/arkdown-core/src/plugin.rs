@@ -17,49 +17,49 @@ pub struct BuildContext {
 }
 
 /// Context available during the `resolve_id` hook.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ResolveContext {
     /// The module that issued the import, if any.
     pub importer: Option<String>,
 }
 
 /// Context available during the `load` hook.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct LoadContext {
     /// The resolved module ID being loaded.
     pub id: String,
 }
 
 /// Context available during the `transform` hook.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TransformContext {
     /// The resolved module ID being transformed.
     pub id: String,
 }
 
 /// Context available during the `module_parsed` hook.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ModuleParsedContext {
     /// The resolved module ID that was just parsed.
     pub id: String,
 }
 
 /// Context available during the `render_chunk` hook.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct RenderChunkContext {
     /// Chunk name / file name.
     pub chunk_name: String,
 }
 
 /// Context available during the `generate_bundle` hook.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct GenerateBundleContext {
     /// Output directory for the bundle.
     pub output_dir: std::path::PathBuf,
 }
 
 /// Context available during the `should_invalidate_cache` hook.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct CacheContext {
     /// Current build configuration fingerprint (e.g. compiler version, flags).
     pub build_fingerprint: String,
