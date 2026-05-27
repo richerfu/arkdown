@@ -300,6 +300,11 @@ dependencies = [
 [[package]]
 name = "arkdown-sign"
 version = "0.1.0"
+dependencies = [
+ "arkdown-core",
+ "tempfile",
+ "thiserror",
+]
 
 [[package]]
 name = "async-trait"

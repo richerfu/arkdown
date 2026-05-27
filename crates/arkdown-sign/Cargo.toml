@@ -2,3 +2,10 @@
 name = "arkdown-sign"
 version = "0.1.0"
 edition = "2021"
+
+[dependencies]
+arkdown-core = { path = "../arkdown-core" }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
