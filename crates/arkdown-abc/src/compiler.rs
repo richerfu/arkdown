@@ -149,7 +149,7 @@ impl AbcCompiler {
         if let Some(parent) = output.parent() {
             if !parent.as_os_str().is_empty() {
                 fs_err::create_dir_all(parent)
-                    .map_err(|e| AbcError::Io(e.into()))?;
+                    .map_err(AbcError::Io)?;
             }
         }
         std::fs::write(output, &bytes).map_err(AbcError::Io)?;
