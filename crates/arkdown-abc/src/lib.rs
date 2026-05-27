@@ -155,9 +155,14 @@ mod tests {
         assert!(result.is_ok(), "multi-module compile must succeed: {:?}", result.err());
         let bytes = std::fs::read(&tmp).unwrap();
         assert_eq!(&bytes[0..8], b"PANDA\x00\x00\x00");
-        // num_classes field at 0x1C (with 8-byte magic) should be 2
+        // num_classes at 0x1C includes 2 user modules + 3 annotation stubs
+        // (L_ESModuleRecord, L_ESSlotNumberAnnotation, L_ESTypeInfoRecord) +
+        // 1 foreign class (L_ESTypeAnnotation) = 6 total.
         let num_classes = u32::from_le_bytes(bytes[0x1C..0x20].try_into().unwrap());
-        assert_eq!(num_classes, 2, "num_classes must equal the number of input modules");
+        assert_eq!(
+            num_classes, 6,
+            "num_classes must be user_modules + 3 annotation stubs + 1 foreign = 6"
+        );
         let _ = std::fs::remove_file(&tmp);
     }
 
