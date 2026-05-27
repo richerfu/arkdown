@@ -14,7 +14,7 @@ impl ArkdownPlugin for DuplicateCheckPlugin {
 
     async fn generate_bundle(
         &self,
-        _ctx: &mut GenerateBundleContext,
+        _ctx: &PluginContext,
         bundle: &mut ChunkGraph,
         _is_write: bool,
     ) -> PluginResult<()> {
@@ -159,7 +159,7 @@ mod tests {
         // Empty graph should pass
         let mut cg = chunk_graph;
         let result = plugin
-            .generate_bundle(&mut GenerateBundleContext::default(), &mut cg, false)
+            .generate_bundle(&PluginContext::default(), &mut cg, false)
             .await;
         assert!(result.is_ok());
     }

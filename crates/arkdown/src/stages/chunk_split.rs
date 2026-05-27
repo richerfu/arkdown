@@ -39,13 +39,13 @@ pub fn split_chunks(graph: &ModuleGraph, support_chunks: bool) -> ChunkGraph {
                     module_to_chunk[idx] = Some(chunk_idx);
                     chunks[chunk_idx].modules.push(idx);
                 }
-                for import in &graph.modules[idx].imports {
+                for import in graph.modules[idx].imports() {
                     if let Some(&dep) = graph.id_to_idx.get(&import.resolved.id) {
                         if !visited.insert(dep) {
                             continue;
                         }
                         // Skip excluded modules (tree-shaken out).
-                        if !graph.modules[dep].is_entry && !graph.modules[dep].has_side_effects {
+                        if !graph.modules[dep].is_entry() && !graph.modules[dep].has_side_effects() {
                             continue;
                         }
                         stack.push(dep);
@@ -76,13 +76,13 @@ pub fn split_chunks(graph: &ModuleGraph, support_chunks: bool) -> ChunkGraph {
                         module_to_chunk[idx] = Some(chunk_idx);
                         chunks[chunk_idx].modules.push(idx);
                     }
-                    for import in &graph.modules[idx].imports {
+                    for import in graph.modules[idx].imports() {
                         if let Some(&dep) = graph.id_to_idx.get(&import.resolved.id) {
                             if !visited.insert(dep) {
                                 continue;
                             }
-                            if !graph.modules[dep].is_entry
-                                && !graph.modules[dep].has_side_effects
+                            if !graph.modules[dep].is_entry()
+                                && !graph.modules[dep].has_side_effects()
                             {
                                 continue;
                             }
@@ -108,15 +108,13 @@ fn allocate_entry_chunk(
     entry_idx: ModuleIdx,
 ) -> ChunkIdx {
     let entry_module = &graph.modules[entry_idx];
-    let name = derive_chunk_name(&entry_module.id.id);
+    let name = derive_chunk_name(&entry_module.id().id);
     chunks.push(ArkChunk {
         name,
-        chunk_hash: String::new(),
-        modules: vec![entry_idx],
         is_entry: true,
         entry_module: Some(entry_idx),
-        code: String::new(),
-        source_map: None,
+        modules: vec![entry_idx],
+        ..Default::default()
     })
 }
 
@@ -140,8 +138,8 @@ fn derive_chunk_name(id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use arkdown_core::{
-        ImportEdge, Module, ModuleGraph, ModuleIdx, ModuleMeta, ModuleSource,
-        ModuleType, ResolvedId,
+        ImportEdge, ImportKind, Module, ModuleGraph, ModuleIdx, ModuleMeta, ModuleSource,
+        ModuleType, NormalModule, ResolvedId,
     };
     use index_vec::IndexVec;
     use rustc_hash::FxHashMap;
@@ -149,17 +147,21 @@ mod tests {
     use super::*;
 
     fn make_module(id: &str, imports: Vec<&str>, is_entry: bool) -> Module {
-        Module {
+        Module::Normal(Box::new(NormalModule {
+            idx: ModuleIdx(0),
+            exec_order: 0,
             id: ResolvedId {
                 id: id.to_string(),
                 external: false,
                 module_type: ModuleType::Ts,
+                ..Default::default()
             },
             source: ModuleSource {
                 id: ResolvedId {
                     id: id.to_string(),
                     external: false,
                     module_type: ModuleType::Ts,
+                    ..Default::default()
                 },
                 content: String::new(),
                 source_map: None,
@@ -173,8 +175,10 @@ mod tests {
                         id: s.to_string(),
                         external: false,
                         module_type: ModuleType::Ts,
+                        ..Default::default()
                     },
                     imported_names: vec![],
+                    kind: ImportKind::Import,
                 })
                 .collect(),
             dynamic_imports: vec![],
@@ -182,7 +186,7 @@ mod tests {
             meta: ModuleMeta::default(),
             is_entry,
             has_side_effects: true,
-        }
+        }))
     }
 
     fn make_graph(modules: Vec<(&str, Vec<&str>, bool)>) -> (ModuleGraph, Vec<ModuleIdx>) {

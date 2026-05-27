@@ -173,6 +173,7 @@ name = "arkdown-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bitflags 2.11.1",
  "index_vec",
  "rustc-hash",
  "serde",

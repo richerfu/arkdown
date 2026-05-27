@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
 use async_trait::async_trait;
-use arkdown_core::*;
+use arkdown_core::{
+    ArkdownError, ArkdownPlugin, HookLoadOutput, HookResolveIdArgs, HookResolveIdOutput,
+    ModuleType, PluginContext, PluginResult,
+};
 
 pub struct Json5Plugin;
 
@@ -10,26 +13,27 @@ impl ArkdownPlugin for Json5Plugin {
 
     async fn resolve_id(
         &self,
-        _ctx: &ResolveContext,
-        specifier: &str,
-        importer: Option<&str>,
-    ) -> PluginResult<Option<ResolvedId>> {
+        _ctx: &PluginContext,
+        args: &HookResolveIdArgs<'_>,
+    ) -> PluginResult<Option<HookResolveIdOutput>> {
+        let specifier = args.specifier;
         if !specifier.ends_with(".json") && !specifier.ends_with(".json5") {
             return Ok(None);
         }
-        let resolved_path = resolve_relative_path(specifier, importer)?;
-        Ok(Some(ResolvedId {
+        let resolved_path = resolve_relative_path(specifier, args.importer)?;
+        Ok(Some(HookResolveIdOutput {
             id: resolved_path.to_string_lossy().to_string(),
             external: false,
             module_type: ModuleType::Json5,
+            side_effects: None,
         }))
     }
 
     async fn load(
         &self,
-        _ctx: &LoadContext,
+        _ctx: &PluginContext,
         id: &str,
-    ) -> PluginResult<Option<ModuleSource>> {
+    ) -> PluginResult<Option<HookLoadOutput>> {
         if !id.ends_with(".json") && !id.ends_with(".json5") {
             return Ok(None);
         }
@@ -49,14 +53,10 @@ impl ArkdownPlugin for Json5Plugin {
         };
 
         let code = generate_esm_from_json(&value);
-        Ok(Some(ModuleSource {
-            id: ResolvedId {
-                id: id.to_string(),
-                external: false,
-                module_type: ModuleType::Json5,
-            },
-            content: code,
+        Ok(Some(HookLoadOutput {
+            code,
             source_map: None,
+            module_type: Some(ModuleType::Json5),
         }))
     }
 }
@@ -155,8 +155,8 @@ mod tests {
         let path = tmp.path().to_string_lossy().to_string();
 
         let plugin = Json5Plugin;
-        let result = plugin.load(&LoadContext::default(), &path).await.unwrap();
-        let src = result.unwrap();
-        assert!(src.content.contains("export var hello"));
+        let result = plugin.load(&PluginContext::default(), &path).await.unwrap();
+        let out = result.unwrap();
+        assert!(out.code.contains("export var hello"));
     }
 }

@@ -4,10 +4,11 @@ use index_vec::IndexVec;
 use rustc_hash::FxHashMap;
 
 use crate::module::{ModuleSource, OxcAstRef, ResolvedId};
+use crate::plugin::ImportKind;
 
 /// Opaque index into [`ModuleGraph::modules`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ModuleIdx(u32);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct ModuleIdx(pub u32);
 
 impl index_vec::Idx for ModuleIdx {
     fn from_usize(n: usize) -> Self {
@@ -20,7 +21,11 @@ impl index_vec::Idx for ModuleIdx {
 
 /// A fully parsed and transformed module in the build graph.
 #[derive(Debug, Clone)]
-pub struct Module {
+pub struct NormalModule {
+    /// This module's position in the graph's `IndexVec`.
+    pub idx: ModuleIdx,
+    /// Execution order assigned during linking (topological sort).
+    pub exec_order: u32,
     pub id: ResolvedId,
     pub source: ModuleSource,
     /// Parsed abstract syntax tree (oxc AST reference).
@@ -37,6 +42,82 @@ pub struct Module {
     pub is_entry: bool,
     /// Whether this module has side effects (used for tree-shaking).
     pub has_side_effects: bool,
+}
+
+/// A module that is referenced but not bundled (e.g. `@bundle:` / `@shared:` URLs).
+#[derive(Debug, Clone)]
+pub struct ExternalModule {
+    pub idx: ModuleIdx,
+    pub id: ResolvedId,
+    /// Execution order (external modules are always last).
+    pub exec_order: u32,
+}
+
+/// A module in the build graph — either a normal (bundled) module or an
+/// external reference that is resolved but not included in the output.
+#[derive(Debug, Clone)]
+pub enum Module {
+    Normal(Box<NormalModule>),
+    External(Box<ExternalModule>),
+}
+
+impl Module {
+    /// The resolved identifier of this module.
+    pub fn id(&self) -> &ResolvedId {
+        match self {
+            Module::Normal(m) => &m.id,
+            Module::External(m) => &m.id,
+        }
+    }
+
+    /// The graph index of this module.
+    pub fn idx(&self) -> ModuleIdx {
+        match self {
+            Module::Normal(m) => m.idx,
+            Module::External(m) => m.idx,
+        }
+    }
+
+    /// Whether this is an external module.
+    pub fn is_external(&self) -> bool {
+        matches!(self, Module::External(_))
+    }
+
+    /// Borrow the inner [`NormalModule`], or `None` if this is external.
+    pub fn as_normal(&self) -> Option<&NormalModule> {
+        if let Module::Normal(m) = self {
+            Some(m)
+        } else {
+            None
+        }
+    }
+
+    /// Mutably borrow the inner [`NormalModule`], or `None` if this is external.
+    pub fn as_normal_mut(&mut self) -> Option<&mut NormalModule> {
+        if let Module::Normal(m) = self {
+            Some(m)
+        } else {
+            None
+        }
+    }
+
+    // ── Convenience delegations to NormalModule ──────────────────────────────
+
+    /// Static import edges, or empty slice for external modules.
+    pub fn imports(&self) -> &[ImportEdge] {
+        self.as_normal().map_or(&[], |m| &m.imports)
+    }
+
+    /// Whether this is an entry module (`false` for external modules).
+    pub fn is_entry(&self) -> bool {
+        self.as_normal().map_or(false, |m| m.is_entry)
+    }
+
+    /// Whether this module has observable side effects.
+    /// External modules are conservatively treated as side-effect-free.
+    pub fn has_side_effects(&self) -> bool {
+        self.as_normal().map_or(false, |m| m.has_side_effects)
+    }
 }
 
 /// OHOS-specific per-module metadata.
@@ -82,6 +163,8 @@ pub struct ImportEdge {
     pub resolved: ResolvedId,
     /// Imported binding names (empty for namespace/side-effect imports).
     pub imported_names: Vec<ImportedName>,
+    /// The kind of import (static, dynamic, require, etc.).
+    pub kind: ImportKind,
 }
 
 /// A named binding brought in by an import.

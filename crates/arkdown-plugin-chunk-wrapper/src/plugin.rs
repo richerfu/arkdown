@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use arkdown_core::{ArkChunk, ArkdownPlugin, PluginResult, RenderChunkContext, RenderedChunk};
+use arkdown_core::{
+    ArkdownPlugin, HookTransformOutput, PluginContext, PluginResult, RenderedChunkMeta,
+};
 
 use crate::{registry, rewrite};
 
@@ -34,10 +36,10 @@ impl ArkdownPlugin for ChunkWrapperPlugin {
 
     async fn render_chunk(
         &self,
-        _ctx: &RenderChunkContext,
-        code: String,
-        chunk: &ArkChunk,
-    ) -> PluginResult<Option<RenderedChunk>> {
+        _ctx: &PluginContext,
+        code: &str,
+        chunk: &RenderedChunkMeta,
+    ) -> PluginResult<Option<HookTransformOutput>> {
         let mut output = String::with_capacity(code.len() + 128);
 
         output.push_str("(function () {\n");
@@ -46,10 +48,10 @@ impl ArkdownPlugin for ChunkWrapperPlugin {
             // Replace var x = require('./chunkId') with globalThis['chunkId_hash'].
             // Without a chunk manifest in the context, we do a best-effort pass
             // using the require path as a hash key placeholder.
-            let rewritten = rewrite::replace_require_calls(&code, &chunk.chunk_hash);
+            let rewritten = rewrite::replace_require_calls(code, &chunk.chunk_hash);
             output.push_str(&rewritten);
         } else {
-            output.push_str(&code);
+            output.push_str(code);
         }
 
         output.push_str("\n})()");
@@ -57,13 +59,13 @@ impl ArkdownPlugin for ChunkWrapperPlugin {
         // Append globalThis registry export for the current chunk.
         // Only emitted when the chunk has a non-empty hash (all real chunks do).
         if !chunk.chunk_hash.is_empty() {
-            let reg = registry::generate_registry_export(chunk);
+            let reg = registry::generate_registry_export(&chunk.name, &chunk.chunk_hash);
             if !reg.is_empty() {
                 output.push('\n');
                 output.push_str(&reg);
             }
         }
 
-        Ok(Some(RenderedChunk { code: output, map: None }))
+        Ok(Some(HookTransformOutput { code: output, source_map: None }))
     }
 }

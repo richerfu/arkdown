@@ -19,6 +19,16 @@ impl index_vec::Idx for ChunkIdx {
     }
 }
 
+/// A single cross-chunk import item: one export from another chunk that this
+/// chunk references, along with the local name it is bound to.
+#[derive(Debug, Clone)]
+pub struct CrossChunkImportItem {
+    /// The name as exported by the other chunk.
+    pub export_ref: String,
+    /// The name this chunk uses locally for that export.
+    pub local_name: String,
+}
+
 /// An output chunk produced by the code-splitting stage.
 #[derive(Debug, Clone)]
 pub struct ArkChunk {
@@ -30,12 +40,57 @@ pub struct ArkChunk {
     pub modules: Vec<ModuleIdx>,
     /// Whether this chunk is an entry chunk.
     pub is_entry: bool,
+    /// Whether this chunk is a dynamic-import entry.
+    pub is_dynamic_entry: bool,
+    /// The facade module that this chunk represents, if any.
+    pub facade_module_id: Option<String>,
     /// Entry module index (for entry chunks).
     pub entry_module: Option<ModuleIdx>,
     /// IIFE-wrapped JavaScript source (after `renderChunk`).
     pub code: String,
     /// Source map for this chunk.
     pub source_map: Option<SourceMap>,
+
+    // ── Cross-chunk reference tracking ──────────────────────────────────────
+    /// Chunk indices that this chunk statically imports from.
+    pub cross_chunk_imports: Vec<ChunkIdx>,
+    /// Chunk indices that this chunk dynamically imports.
+    pub cross_chunk_dynamic_imports: Vec<ChunkIdx>,
+    /// Per-source-chunk list of items this chunk imports from it.
+    pub imports_from_other_chunks: FxHashMap<ChunkIdx, Vec<CrossChunkImportItem>>,
+    /// Map from exported local name → the name exposed to other chunks.
+    pub exports_to_other_chunks: FxHashMap<String, String>,
+
+    // ── Bundle metadata (mirrors RenderedChunkMeta) ──────────────────────────
+    /// Names exported by this chunk.
+    pub exports: Vec<String>,
+    /// Specifiers of chunks this chunk imports (for manifest/loader.json).
+    pub imports: Vec<String>,
+    /// Specifiers of chunks this chunk dynamically imports.
+    pub dynamic_imports: Vec<String>,
+}
+
+impl Default for ArkChunk {
+    fn default() -> Self {
+        ArkChunk {
+            name: String::new(),
+            chunk_hash: String::new(),
+            modules: vec![],
+            is_entry: false,
+            is_dynamic_entry: false,
+            facade_module_id: None,
+            entry_module: None,
+            code: String::new(),
+            source_map: None,
+            cross_chunk_imports: vec![],
+            cross_chunk_dynamic_imports: vec![],
+            imports_from_other_chunks: FxHashMap::default(),
+            exports_to_other_chunks: FxHashMap::default(),
+            exports: vec![],
+            imports: vec![],
+            dynamic_imports: vec![],
+        }
+    }
 }
 
 /// The full chunk assignment for one OHOS module build.

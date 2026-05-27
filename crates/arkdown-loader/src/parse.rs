@@ -3,7 +3,7 @@ use oxc_ast::ast::{ModuleExportName, Statement};
 use oxc_parser::{Parser, ParserReturn};
 use oxc_span::SourceType;
 
-use arkdown_core::{ExportBinding, ImportEdge, ModuleSource, ModuleType, ResolvedId};
+use arkdown_core::{ExportBinding, ImportEdge, ImportKind, ModuleSource, ModuleType, ResolvedId};
 
 pub struct ParsedModule {
     pub imports: Vec<ImportEdge>,
@@ -62,8 +62,10 @@ pub fn parse_module(source: &ModuleSource) -> ParsedModule {
                         id: specifier,
                         external: false,
                         module_type: ModuleType::Ts,
+                        ..Default::default()
                     },
                     imported_names: vec![],
+                    kind: ImportKind::Import,
                 });
             }
             // ArkUI lazy import: `import lazy { X } from 'specifier'`
@@ -75,8 +77,10 @@ pub fn parse_module(source: &ModuleSource) -> ParsedModule {
                         id: specifier,
                         external: false,
                         module_type: ModuleType::Ts,
+                        ..Default::default()
                     },
                     imported_names: vec![],
+                    kind: ImportKind::Import,
                 });
             }
             // `export { a as b }` or `export function foo() {}`
@@ -115,8 +119,10 @@ pub fn parse_module(source: &ModuleSource) -> ParsedModule {
                         id: specifier,
                         external: false,
                         module_type: ModuleType::Ts,
+                        ..Default::default()
                     },
                     imported_names: vec![],
+                    kind: ImportKind::Import,
                 });
                 // If aliased (`export * as ns from ...`) the alias is an export binding.
                 if let Some(exported) = &decl.exported {

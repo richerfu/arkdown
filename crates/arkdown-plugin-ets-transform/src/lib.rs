@@ -29,8 +29,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use arkdown_core::{
-    ArkdownConfig, ArkdownError, ArkdownPlugin, ModuleSource, ModuleType, PluginResult,
-    ResolvedId, TransformContext,
+    ArkdownConfig, ArkdownError, ArkdownPlugin, HookTransformOutput, ModuleSource, ModuleType,
+    PluginContext, PluginResult, ResolvedId,
 };
 
 /// ArkTS transform plugin — desugars `.ets` files into TypeScript.
@@ -61,15 +61,28 @@ impl ArkdownPlugin for EtsTransformPlugin {
     /// 2. Run `etsChecker` — validation diagnostics, never fatal on warnings.
     /// 3. Run `etsTransform` — struct/decorator desugaring.
     /// 4. Run `apiTransform` — version-gated API import rewrites.
-    /// 5. Return a new `ModuleSource` with `module_type` changed to `ModuleType::Ts`.
+    /// 5. Return a new `HookTransformOutput` with the desugared TypeScript source.
     async fn transform(
         &self,
-        _ctx: &TransformContext,
-        source: ModuleSource,
-    ) -> PluginResult<Option<ModuleSource>> {
-        if source.id.module_type != ModuleType::Ets {
+        _ctx: &PluginContext,
+        code: &str,
+        id: &str,
+    ) -> PluginResult<Option<HookTransformOutput>> {
+        if !id.ends_with(".ets") {
             return Ok(None);
         }
+
+        // Build a temporary ModuleSource so the existing transform logic can be reused.
+        let source = ModuleSource {
+            id: ResolvedId {
+                id: id.to_string(),
+                external: false,
+                module_type: ModuleType::Ets,
+                ..Default::default()
+            },
+            content: code.to_string(),
+            source_map: None,
+        };
 
         let transformed = transform::transform_ets(&source).map_err(|e| {
             ArkdownError::PluginError {
@@ -81,16 +94,8 @@ impl ArkdownPlugin for EtsTransformPlugin {
         let api_version = self.config.sdk_config.compile_api_version;
         let final_source = api_transform::apply(&transformed, api_version);
 
-        Ok(Some(ModuleSource {
-            id: ResolvedId {
-                id: source.id.id.clone(),
-                external: false,
-                // The module type is promoted from Ets → Ts so that downstream
-                // TypeScript-aware plugins (parser, type-checker, bundler) handle
-                // this module as ordinary TypeScript.
-                module_type: ModuleType::Ts,
-            },
-            content: final_source,
+        Ok(Some(HookTransformOutput {
+            code: final_source,
             source_map: None,
         }))
     }
@@ -154,46 +159,27 @@ mod tests {
     #[tokio::test]
     async fn test_plugin_passthrough_non_ets() {
         let plugin = EtsTransformPlugin::new(make_config(12));
-        let source = ModuleSource {
-            id: ResolvedId {
-                id: "test.ts".to_string(),
-                external: false,
-                module_type: ModuleType::Ts,
-            },
-            content: "const x = 1;".to_string(),
-            source_map: None,
-        };
-        let ctx = TransformContext { id: "test.ts".to_string() };
-        let result = plugin.transform(&ctx, source).await.unwrap();
+        let result = plugin
+            .transform(&PluginContext::default(), "const x = 1;", "test.ts")
+            .await
+            .unwrap();
         assert!(result.is_none(), "non-ETS modules must pass through as None");
     }
 
     #[tokio::test]
     async fn test_plugin_transforms_ets_to_ts() {
         let plugin = EtsTransformPlugin::new(make_config(12));
-        let source = ModuleSource {
-            id: ResolvedId {
-                id: "entry/src/main/ets/pages/Index.ets".to_string(),
-                external: false,
-                module_type: ModuleType::Ets,
-            },
-            content: "@Entry\n@Component\nstruct Index {\n  build() {}\n}".to_string(),
-            source_map: None,
-        };
-        let ctx = TransformContext {
-            id: "entry/src/main/ets/pages/Index.ets".to_string(),
-        };
-        let result = plugin.transform(&ctx, source).await.unwrap();
-        let out = result.expect("ETS transform must return Some(ModuleSource)");
-        assert_eq!(
-            out.id.module_type,
-            ModuleType::Ts,
-            "module_type must be promoted to Ts"
-        );
+        let code = "@Entry\n@Component\nstruct Index {\n  build() {}\n}";
+        let id = "entry/src/main/ets/pages/Index.ets";
+        let result = plugin
+            .transform(&PluginContext::default(), code, id)
+            .await
+            .unwrap();
+        let out = result.expect("ETS transform must return Some(HookTransformOutput)");
         assert!(
-            out.content.contains("class Index extends ViewPU"),
+            out.code.contains("class Index extends ViewPU"),
             "struct must be desugared to ViewPU class; got:\n{}",
-            out.content
+            out.code
         );
     }
 }

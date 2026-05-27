@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use async_trait::async_trait;
-use arkdown_core::{ArkdownPlugin, ArkdownError, LoadContext, ModuleSource, PluginResult};
+use arkdown_core::{ArkdownPlugin, ArkdownError, HookLoadOutput, PluginContext, PluginResult};
 
 /// Plugin that validates import specifiers match the actual filesystem case.
 ///
@@ -34,9 +34,9 @@ impl ArkdownPlugin for SensitiveCheckPlugin {
 
     async fn load(
         &self,
-        _ctx: &LoadContext,
+        _ctx: &PluginContext,
         id: &str,
-    ) -> PluginResult<Option<ModuleSource>> {
+    ) -> PluginResult<Option<HookLoadOutput>> {
         if !self.enabled {
             return Ok(None);
         }
@@ -106,7 +106,7 @@ mod tests {
     async fn test_disabled_plugin_passthrough() {
         let plugin = SensitiveCheckPlugin::new(false);
         let result = plugin
-            .load(&LoadContext::default(), "/any/path/Module.ts")
+            .load(&PluginContext::default(), "/any/path/Module.ts")
             .await
             .unwrap();
         assert!(result.is_none());
@@ -118,7 +118,7 @@ mod tests {
         // Directory does not exist — read_dir silently returns Err, we pass through.
         let result = plugin
             .load(
-                &LoadContext::default(),
+                &PluginContext::default(),
                 "/nonexistent_dir_arkdown_test/Module.ts",
             )
             .await
@@ -135,7 +135,7 @@ mod tests {
         let _ = std::fs::write(&file, "");
         let id = file.to_string_lossy().to_string();
         // Exact case match — should not error.
-        let result = plugin.load(&LoadContext::default(), &id).await.unwrap();
+        let result = plugin.load(&PluginContext::default(), &id).await.unwrap();
         assert!(result.is_none());
         let _ = std::fs::remove_dir_all(&tmp);
     }

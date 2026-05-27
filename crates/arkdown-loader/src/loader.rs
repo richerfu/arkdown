@@ -5,7 +5,8 @@ use crossbeam_channel::unbounded;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 use arkdown_core::{
-    ArkdownError, ArkdownPlugin, ImportEdge, Module, ModuleMeta, ModuleSource, ResolvedId,
+    ArkdownError, ArkdownPlugin, ImportEdge, Module, ModuleMeta, ModuleSource, NormalModule,
+    ModuleIdx, ResolvedId,
 };
 
 use crate::parse::parse_module;
@@ -60,7 +61,7 @@ impl ModuleLoader {
                 // Collect child IDs that haven't been visited yet, for
                 // future passes (currently unused — SPEC-005 drives traversal).
                 let _child_imports: Vec<ResolvedId> = module
-                    .imports
+                    .imports()
                     .iter()
                     .filter_map(|imp: &ImportEdge| {
                         let v = visited.lock().unwrap();
@@ -97,7 +98,9 @@ impl ModuleLoader {
 
         let parsed = parse_module(&source);
 
-        Ok(Module {
+        Ok(Module::Normal(Box::new(NormalModule {
+            idx: ModuleIdx(0), // placeholder; updated by bundler after insertion
+            exec_order: 0,
             id: resolved.clone(),
             source,
             ast: (),
@@ -107,6 +110,6 @@ impl ModuleLoader {
             meta: ModuleMeta::default(),
             is_entry: false,
             has_side_effects: parsed.has_side_effects,
-        })
+        })))
     }
 }

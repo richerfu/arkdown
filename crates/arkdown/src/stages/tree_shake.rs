@@ -18,7 +18,7 @@ pub fn tree_shake(graph: &mut ModuleGraph) {
 
     while let Some(idx) = stack.pop() {
         if included.insert(idx) {
-            for import in &graph.modules[idx].imports {
+            for import in graph.modules[idx].imports() {
                 if let Some(&dep_idx) = graph.id_to_idx.get(&import.resolved.id) {
                     if !included.contains(&dep_idx) {
                         stack.push(dep_idx);
@@ -32,7 +32,9 @@ pub fn tree_shake(graph: &mut ModuleGraph) {
     // We mark them by clearing `has_side_effects` so chunk_split can skip them.
     for (idx, module) in graph.modules.iter_mut_enumerated() {
         if !included.contains(&idx) {
-            module.has_side_effects = false;
+            if let Some(nm) = module.as_normal_mut() {
+                nm.has_side_effects = false;
+            }
         }
     }
 }
@@ -40,24 +42,28 @@ pub fn tree_shake(graph: &mut ModuleGraph) {
 #[cfg(test)]
 mod tests {
     use arkdown_core::{
-        ImportEdge, Module, ModuleGraph, ModuleIdx, ModuleMeta, ModuleSource,
-        ModuleType, ResolvedId,
+        ImportEdge, ImportKind, Module, ModuleGraph, ModuleIdx, ModuleMeta, ModuleSource,
+        ModuleType, NormalModule, ResolvedId,
     };
     use index_vec::IndexVec;
     use rustc_hash::FxHashMap;
 
     fn make_module(id: &str, imports: Vec<&str>) -> Module {
-        Module {
+        Module::Normal(Box::new(NormalModule {
+            idx: ModuleIdx(0),
+            exec_order: 0,
             id: ResolvedId {
                 id: id.to_string(),
                 external: false,
                 module_type: ModuleType::Ts,
+                ..Default::default()
             },
             source: ModuleSource {
                 id: ResolvedId {
                     id: id.to_string(),
                     external: false,
                     module_type: ModuleType::Ts,
+                    ..Default::default()
                 },
                 content: String::new(),
                 source_map: None,
@@ -71,8 +77,10 @@ mod tests {
                         id: s.to_string(),
                         external: false,
                         module_type: ModuleType::Ts,
+                        ..Default::default()
                     },
                     imported_names: vec![],
+                    kind: ImportKind::Import,
                 })
                 .collect(),
             dynamic_imports: vec![],
@@ -80,7 +88,7 @@ mod tests {
             meta: ModuleMeta::default(),
             is_entry: false,
             has_side_effects: true,
-        }
+        }))
     }
 
     #[test]
@@ -111,9 +119,9 @@ mod tests {
 
         // entry, a, b are included → has_side_effects left as-is (true)
         // c is excluded → has_side_effects set to false
-        assert!(graph.modules[entry_idx].has_side_effects);
-        assert!(graph.modules[a_idx].has_side_effects);
-        assert!(graph.modules[b_idx].has_side_effects);
-        assert!(!graph.modules[c_idx].has_side_effects);
+        assert!(graph.modules[entry_idx].has_side_effects());
+        assert!(graph.modules[a_idx].has_side_effects());
+        assert!(graph.modules[b_idx].has_side_effects());
+        assert!(!graph.modules[c_idx].has_side_effects());
     }
 }

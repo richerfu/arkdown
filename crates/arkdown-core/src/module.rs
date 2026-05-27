@@ -5,11 +5,21 @@ pub type OxcAstRef = ();
 /// Source map as a serialized JSON string.
 pub type SourceMap = String;
 
+/// The format of a module's definition (how it exports).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ModuleDefFormat {
+    #[default]
+    Unknown,
+    Esm,
+    Cjs,
+    Iife,
+}
+
 /// A fully resolved module identifier.
 ///
 /// In OHOS projects with `useNormalizedOHMUrl=true`, this is an OHM URL.
 /// Otherwise it is a canonical absolute filesystem path.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ResolvedId {
     /// The canonical identifier string.
     /// - OHM URL: `"@bundle:com.example/entry/ets/entryability/EntryAbility"`
@@ -20,6 +30,8 @@ pub struct ResolvedId {
     pub external: bool,
     /// Module type inferred from extension or resolver metadata.
     pub module_type: ModuleType,
+    /// Definition format of the module (ESM, CJS, IIFE, or unknown).
+    pub module_def_format: ModuleDefFormat,
 }
 
 /// The raw source text of a module, after loading but before parsing.
@@ -33,13 +45,14 @@ pub struct ModuleSource {
 }
 
 /// The primary module type discriminator.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ModuleType {
     /// ArkTS source file (`.ets`) — requires ArkTS desugar transform.
     Ets,
     /// TypeScript source file (`.ts`).
     Ts,
     /// JavaScript source file (`.js`, `.mjs`, `.cjs`).
+    #[default]
     Js,
     /// JSON or JSON5 file.
     Json5,
