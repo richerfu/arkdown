@@ -54,30 +54,32 @@ pub fn build_record(
         });
     }
 
-    let name_idx = strings.intern(record_name);
     let mut methods: Vec<MethodRecord> = Vec::new();
 
-    // Build the `main` method — the module execution entry point.
-    let main_idx = strings.intern("main");
+    // Build the `func_main_0` method — the module execution entry point.
+    //
+    // ArkRuntime always invokes `func_main_0` when executing a module buffer.
+    // It passes exactly 3 arguments (JSThread*, this, args[]), so `num_args`
+    // must be 3 regardless of the actual JS parameter list.
     let bytecode = compile_program_body(&program, strings);
     let num_vregs = estimate_vregs(&bytecode);
     methods.push(MethodRecord {
-        name_idx: main_idx,
+        name: "func_main_0".to_string(),
         bytecode,
         num_vregs,
-        num_args: 0,
+        num_args: 3,
     });
 
     // Emit a method entry for each named top-level FunctionDeclaration.
     for stmt in &program.body {
         if let Statement::FunctionDeclaration(func) = stmt {
             if let Some(id) = &func.id {
-                let func_name_idx = strings.intern(id.name.as_str());
+                let func_name = id.name.as_str().to_string();
                 let func_bytecode =
                     compile_function_body(func.body.as_deref(), strings);
                 let num_vregs = estimate_vregs(&func_bytecode);
                 methods.push(MethodRecord {
-                    name_idx: func_name_idx,
+                    name: func_name,
                     bytecode: func_bytecode,
                     num_vregs,
                     num_args: func.params.items.len() as u16,
@@ -86,7 +88,7 @@ pub fn build_record(
         }
     }
 
-    Ok(ClassRecord { name_idx, methods })
+    Ok(ClassRecord { name: record_name.to_string(), methods })
 }
 
 // ── Byte-count heuristics ─────────────────────────────────────────────────────
