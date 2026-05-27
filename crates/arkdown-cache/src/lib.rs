@@ -296,4 +296,164 @@ mod tests {
         cache.load_from_disk().unwrap();
         assert!(cache.is_empty());
     }
+
+    // ── get() and len() ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_get_returns_inserted_entry() {
+        let tmp = std::env::temp_dir().join("arkdown_cache_get_test");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        let mut cache = BuildCache::new(tmp.clone());
+        let entry = make_entry("src/Index.ets", "hash_get");
+        cache.insert(entry.clone()).unwrap();
+
+        let found = cache.get("src/Index.ets");
+        assert!(found.is_some(), "get must return the inserted entry");
+        assert_eq!(found.unwrap().key.content_hash, "hash_get");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_get_returns_none_for_unknown_id() {
+        let tmp = std::env::temp_dir().join("arkdown_cache_get_none_test");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        let mut cache = BuildCache::new(tmp.clone());
+        cache.insert(make_entry("a.ts", "h")).unwrap();
+
+        assert!(cache.get("b.ts").is_none(), "get must return None for an ID that was never inserted");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_len_tracks_insertions() {
+        let tmp = std::env::temp_dir().join("arkdown_cache_len_test");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        let mut cache = BuildCache::new(tmp.clone());
+        assert_eq!(cache.len(), 0);
+
+        cache.insert(make_entry("a.ts", "h1")).unwrap();
+        assert_eq!(cache.len(), 1);
+
+        cache.insert(make_entry("b.ts", "h2")).unwrap();
+        assert_eq!(cache.len(), 2);
+
+        // Re-inserting the same id should update, not grow
+        cache.insert(make_entry("a.ts", "h1_updated")).unwrap();
+        assert_eq!(cache.len(), 2, "re-inserting same ID must not increase len");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── CacheKey equality semantics ──────────────────────────────────────
+
+    #[test]
+    fn test_cache_key_equality() {
+        let k1 = CacheKey {
+            content_hash: "abc".to_string(),
+            config_hash: 42,
+            dependency_hash: 7,
+        };
+        let k2 = CacheKey {
+            content_hash: "abc".to_string(),
+            config_hash: 42,
+            dependency_hash: 7,
+        };
+        assert_eq!(k1, k2, "identical CacheKeys must be equal");
+    }
+
+    #[test]
+    fn test_cache_key_inequality_on_dependency_hash() {
+        let k1 = CacheKey { content_hash: "x".to_string(), config_hash: 0, dependency_hash: 1 };
+        let k2 = CacheKey { content_hash: "x".to_string(), config_hash: 0, dependency_hash: 2 };
+        assert_ne!(k1, k2, "differing dependency_hash must make keys unequal");
+    }
+
+    // ── compute_content_hash ─────────────────────────────────────────────
+
+    #[test]
+    fn test_content_hash_is_16_hex_chars() {
+        let h = compute_content_hash("some source code");
+        assert_eq!(h.len(), 16, "content hash must be a 16-char hex string (FNV-1a 64-bit)");
+        assert!(h.chars().all(|c| c.is_ascii_hexdigit()), "content hash must be hex digits only");
+    }
+
+    #[test]
+    fn test_content_hash_empty_string() {
+        let h = compute_content_hash("");
+        assert_eq!(h.len(), 16, "content hash for empty string must still be 16 chars");
+    }
+
+    // ── Concurrency: two threads insert different keys ───────────────────
+
+    #[test]
+    fn test_concurrent_inserts_to_different_dirs_do_not_corrupt() {
+        // Each thread gets its own cache directory so they never conflict.
+        let base = std::env::temp_dir().join("arkdown_cache_concurrent_test");
+        let _ = std::fs::remove_dir_all(&base);
+
+        let dir_a = base.join("a");
+        let dir_b = base.join("b");
+
+        let t1 = std::thread::spawn({
+            let dir = dir_a.clone();
+            move || {
+                let mut cache = BuildCache::new(dir);
+                for i in 0..20u32 {
+                    let id = format!("module_{i}.ts");
+                    let hash = compute_content_hash(&format!("content_{i}"));
+                    cache
+                        .insert(CachedEntry {
+                            id: id.clone(),
+                            key: CacheKey { content_hash: hash, config_hash: 0, dependency_hash: 0 },
+                            transformed_code: format!("// module {i}"),
+                            source_map: None,
+                        })
+                        .expect("insert must not fail");
+                }
+                cache.len()
+            }
+        });
+
+        let t2 = std::thread::spawn({
+            let dir = dir_b.clone();
+            move || {
+                let mut cache = BuildCache::new(dir);
+                for i in 0..20u32 {
+                    let id = format!("util_{i}.ts");
+                    let hash = compute_content_hash(&format!("util_content_{i}"));
+                    cache
+                        .insert(CachedEntry {
+                            id: id.clone(),
+                            key: CacheKey { content_hash: hash, config_hash: 1, dependency_hash: 0 },
+                            transformed_code: format!("// util {i}"),
+                            source_map: None,
+                        })
+                        .expect("insert must not fail");
+                }
+                cache.len()
+            }
+        });
+
+        let len_a = t1.join().expect("thread A must not panic");
+        let len_b = t2.join().expect("thread B must not panic");
+
+        assert_eq!(len_a, 20, "thread A cache must have 20 entries");
+        assert_eq!(len_b, 20, "thread B cache must have 20 entries");
+
+        // Verify disk state for both caches.
+        let mut cache_a = BuildCache::new(dir_a);
+        cache_a.load_from_disk().expect("reload A");
+        assert_eq!(cache_a.len(), 20, "reloaded cache A must have 20 entries");
+
+        let mut cache_b = BuildCache::new(dir_b);
+        cache_b.load_from_disk().expect("reload B");
+        assert_eq!(cache_b.len(), 20, "reloaded cache B must have 20 entries");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

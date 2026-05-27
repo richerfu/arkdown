@@ -3,6 +3,9 @@ name = "arkdown-abc"
 version = "0.1.0"
 edition = "2021"
 
+[dev-dependencies]
+tempfile = "3"
+
 [dependencies]
 oxc_allocator = { workspace = true }
 oxc_parser    = { workspace = true }

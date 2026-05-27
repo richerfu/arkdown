@@ -3,6 +3,10 @@ name = "arkdown-profile"
 version = "0.1.0"
 edition = "2021"
 
+[dev-dependencies]
+arkdown-core = { path = "../arkdown-core" }
+tempfile = "3"
+
 [dependencies]
 arkdown-core = { path = "../arkdown-core" }
 arkdown-config = { path = "../arkdown-config" }
