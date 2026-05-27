@@ -4,8 +4,22 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-arkdown-core = { path = "../arkdown-core" }
-thiserror = { workspace = true }
+arkdown-core   = { path = "../arkdown-core" }
+thiserror      = { workspace = true }
+sha2           = { workspace = true }
+p256           = { workspace = true }
+rsa            = { workspace = true }
+signature      = { workspace = true }
+der            = { workspace = true }
+x509-cert      = { workspace = true }
+pkcs12         = { workspace = true }
+p12            = { workspace = true }
+cms            = { workspace = true }
+const-oid      = { workspace = true }
+spki           = { workspace = true }
+rand           = { workspace = true }
+fs-err         = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+hex-literal = "0.4"
