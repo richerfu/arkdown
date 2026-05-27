@@ -133,6 +133,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "arkdown-obfuscate"
+version = "0.1.0"
+
+[[package]]
 name = "arkdown-pack"
 version = "0.1.0"
 dependencies = [
@@ -305,6 +309,10 @@ dependencies = [
  "tempfile",
  "thiserror",
 ]
+
+[[package]]
+name = "arkdown-watcher"
+version = "0.1.0"
 
 [[package]]
 name = "async-trait"

@@ -22,6 +22,8 @@ members = [
     "crates/arkdown-cache",
     "crates/arkdown-sign",
     "crates/arkdown-cli",
+    "crates/arkdown-obfuscate",
+    "crates/arkdown-watcher",
 ]
 
 [workspace.dependencies]
