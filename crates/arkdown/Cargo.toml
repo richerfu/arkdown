@@ -2,3 +2,21 @@
 name = "arkdown"
 version = "0.1.0"
 edition = "2021"
+
+[dependencies]
+arkdown-core = { path = "../arkdown-core" }
+arkdown-loader = { path = "../arkdown-loader" }
+arkdown-profile = { path = "../arkdown-profile" }
+oxc_allocator = { workspace = true }
+oxc_parser = { workspace = true }
+oxc_codegen = { workspace = true }
+oxc_span = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+fs-err = { workspace = true }
+index_vec = { workspace = true }
+rustc-hash = { workspace = true }
