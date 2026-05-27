@@ -105,6 +105,17 @@ version = "0.1.0"
 [[package]]
 name = "arkdown-plugin-ets-transform"
 version = "0.1.0"
+dependencies = [
+ "arkdown-core",
+ "async-trait",
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_codegen",
+ "oxc_parser",
+ "oxc_span",
+ "thiserror",
+ "tokio",
+]
 
 [[package]]
 name = "arkdown-plugin-har-dedup"

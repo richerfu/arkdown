@@ -2,3 +2,20 @@
 name = "arkdown-plugin-ets-transform"
 version = "0.1.0"
 edition = "2021"
+
+[dependencies]
+arkdown-core = { path = "../arkdown-core" }
+
+# Parser, transformer, codegen — ohos-rs fork only
+oxc_allocator = { workspace = true }
+oxc_parser    = { workspace = true }
+oxc_ast       = { workspace = true }
+oxc_codegen   = { workspace = true }
+oxc_span      = { workspace = true }
+
+# Async trait
+async-trait = { workspace = true }
+tokio       = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
