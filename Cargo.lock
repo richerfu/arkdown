@@ -110,6 +110,14 @@ dependencies = [
 [[package]]
 name = "arkdown-plugin-duplicate-check"
 version = "0.1.0"
+dependencies = [
+ "arkdown-core",
+ "async-trait",
+ "index_vec",
+ "rustc-hash",
+ "thiserror",
+ "tokio",
+]
 
 [[package]]
 name = "arkdown-plugin-ets-transform"
