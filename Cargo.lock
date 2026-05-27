@@ -95,6 +95,15 @@ version = "0.1.0"
 [[package]]
 name = "arkdown-profile"
 version = "0.1.0"
+dependencies = [
+ "arkdown-config",
+ "arkdown-core",
+ "fs-err",
+ "json5",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "arkdown-resolver"
