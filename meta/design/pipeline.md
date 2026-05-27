@@ -127,13 +127,13 @@ rolldown's `module_loader` stage handles parallel module loading. Each module go
 
 ## Phase 4: Transform (ArkTS Desugar)
 
-**Crate**: `arkdown-transform` (delegates to SDK `ets-loader` transforms via subprocess, or oxc)
+**Crate**: `arkdown-plugin-ets-transform` (pure Rust port of SDK ets-loader; see SPEC-004a)
 **Inputs**: parsed ArkTS AST
 **Outputs**: standard TypeScript / JavaScript AST
 
 ### hvigor behavior
 
-The `etsTransform` SDK plugin applies decorator desugaring. `@Component` structs become class-like constructs. `@Entry` marks ability entry points. `@State`, `@Prop`, `@Link` decorators are desugared to runtime state management calls. This transform is closed-source within the SDK.
+The `etsTransform` SDK plugin applies decorator desugaring. `@Component` structs become class-like constructs. `@Entry` marks ability entry points. `@State`, `@Prop`, `@Link` decorators are desugared to runtime state management calls.
 
 ### rolldown equivalent
 
@@ -141,7 +141,7 @@ rolldown's transform stage (the `transform` plugin hook). arkdown calls these tr
 
 ### OHOS divergences
 
-- ArkTS decorators have OHOS-specific semantics that standard Babel/oxc decorators do not model. In the short term, arkdown will invoke the SDK `ets-loader` transform as a subprocess or via NAPI binding.
+- ArkTS decorators have OHOS-specific semantics that standard Babel/oxc decorators do not model. `arkdown-plugin-ets-transform` ports all three transform passes (`etsTransform`, `etsChecker`, `apiTransform`) in pure Rust using `ohos-rs/oxc`. No subprocess invocation, no SDK dependency.
 - The `useTscResolve` flag enables `tscResolve` plugin for TypeScript path mapping resolution.
 
 ---

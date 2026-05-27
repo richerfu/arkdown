@@ -3,7 +3,7 @@
 **Crate**: `arkdown-loader`
 **Priority**: P0
 **Blocked by**: SPEC-001, SPEC-003
-**Blocks**: SPEC-005
+**Blocks**: SPEC-005, SPEC-004a
 
 ---
 
@@ -59,19 +59,16 @@ let options = ParseOptions {
 
 ### SDK Transform (ets-loader)
 
-The ArkTS transform (desugaring `@Component` structs, `@State` decorators, etc.) is done by
-the SDK's closed-source `ets-loader`. In the short term, arkdown invokes the SDK transform
-as a subprocess:
+The ArkTS transform (desugaring `@Component` structs, `@State` decorators, etc.) is
+implemented by `arkdown-plugin-ets-transform` — a pure Rust port of the SDK's ets-loader.
+See **SPEC-004a** for the full implementation spec.
 
-```
-sdk/ets/build-tools/ets-loader/bin/ets-loader --input <file> --output <transformed.ts>
-```
+The plugin is registered automatically when `module_type == ModuleType::Ets`. No subprocess
+invocation, no `OHOS_SDK_HOME` dependency.
 
-This is done in the `transform` hook of a built-in plugin `arkdown-plugin-ets-transform`.
-The plugin is registered automatically when `module_type == ModuleType::Ets`.
-
-If the SDK ets-loader transform subprocess model is too slow, the oxc transformer can handle
-standard TypeScript decorators directly — but OHOS-specific ArkUI decorators require the SDK.
+`transform.rs` in this crate is a thin shim: it delegates entirely to the plugin chain and
+contains no SDK subprocess logic. When SPEC-004a is implemented, remove any subprocess
+fallback from this file.
 
 ### Import/Export Extraction
 
@@ -163,7 +160,7 @@ crates/arkdown-loader/
     ├── loader.rs         (ModuleLoader, parallel loading loop)
     ├── plugin_driver.rs  (PluginDriver: hook chain execution)
     ├── parse.rs          (oxc_parser invocation + import/export extraction)
-    └── transform.rs      (ets-loader subprocess invocation for .ets files)
+    └── transform.rs      (delegates .ets transform to plugin chain; see SPEC-004a)
 ```
 
 ---

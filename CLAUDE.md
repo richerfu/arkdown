@@ -58,6 +58,7 @@ arkdown/
 │   ├── arkdown-plugin-har-dedup/      ← HAR deduplication for HSP builds (SPEC-016)
 │   ├── arkdown-plugin-router-map/     ← router map cache invalidation (SPEC-017)
 │   ├── arkdown-plugin-sensitive-check/ ← case-sensitivity import check (SPEC-018)
+│   ├── arkdown-plugin-ets-transform/  ← pure Rust ArkTS transform, ports ets-loader (SPEC-004a)
 │   ├── arkdown-abc/          ← Rust ArkCompiler bytecode compiler (SPEC-009)
 │   ├── arkdown-resource/     ← Rust resource compiler, ports restool (SPEC-011)
 │   ├── arkdown-profile/      ← module.json5 processor + loader.json gen (SPEC-010)
@@ -71,18 +72,19 @@ arkdown/
 
 ## Read These Before Working in an Area
 
-| Working on                 | Read first                                                                |
-| -------------------------- | ------------------------------------------------------------------------- |
-| Any crate                  | `meta/design/README.md` (key discoveries summary)                         |
-| Type definitions           | `meta/design/types.md`                                                    |
-| Module loading, resolution | `meta/design/module-resolution.md`                                        |
-| Chunk output format        | `meta/design/chunk-model.md` — the IIFE/globalThis pattern is non-obvious |
-| ABC compiler (arkdown-abc) | `meta/design/abc-pipeline.md` — Panda bytecode format, IR pipeline        |
-| hvigorw replacement        | `meta/design/compat.md`                                                   |
-| Plugin work                | `meta/design/plugins.md` — which JS plugins we're replacing and why       |
-| Full pipeline              | `meta/design/pipeline.md`                                                 |
-| Build task details         | `meta/design/hvigorw-analysis.md`                                         |
-| Implementation spec        | `meta/tasks/SPEC-<N>-*.md` for the relevant crate                         |
+| Working on                   | Read first                                                                         |
+| ---------------------------- | ---------------------------------------------------------------------------------- |
+| Any crate                    | `meta/design/README.md` (key discoveries summary)                                  |
+| Type definitions             | `meta/design/types.md`                                                             |
+| Module loading, resolution   | `meta/design/module-resolution.md`                                                 |
+| Chunk output format          | `meta/design/chunk-model.md` — the IIFE/globalThis pattern is non-obvious          |
+| ABC compiler (arkdown-abc)   | `meta/design/abc-pipeline.md` — Panda bytecode format, IR pipeline                 |
+| hvigorw replacement          | `meta/design/compat.md`                                                            |
+| Plugin work                  | `meta/design/plugins.md` — which JS plugins we're replacing and why                |
+| ArkTS transform (ets-loader) | `meta/tasks/SPEC-004a-ets-transform.md` — decorator rules, transform output format |
+| Full pipeline                | `meta/design/pipeline.md`                                                          |
+| Build task details           | `meta/design/hvigorw-analysis.md`                                                  |
+| Implementation spec          | `meta/tasks/SPEC-<N>-*.md` for the relevant crate                                  |
 
 ---
 
@@ -119,14 +121,19 @@ array is the definitive list of entry points. See `meta/design/hvigorw-analysis.
 
 ## SDK Paths
 
-`es2abc` and `restool` are replaced by pure Rust crates — no SDK binaries needed for
-those. `OHOS_SDK_HOME` is still required for the ArkTS transform (`ets-loader`), which
-desugars `@Component`/`@State`/etc. until that step is also ported to Rust.
+`es2abc`, `restool`, and `ets-loader` are all replaced by pure Rust crates — no SDK
+binaries are required at build time. `OHOS_SDK_HOME` is not needed for compilation.
 
 ```bash
+# OHOS_SDK_HOME is no longer required. Set it only if debugging against the SDK directly.
 export OHOS_SDK_HOME=/path/to/sdk/default/openharmony
-# ets-loader path: $OHOS_SDK_HOME/ets/build-tools/ets-loader/
 ```
+
+| SDK binary   | Rust replacement               | SPEC      |
+| ------------ | ------------------------------ | --------- |
+| `es2abc`     | `arkdown-abc`                  | SPEC-009  |
+| `restool`    | `arkdown-resource`             | SPEC-011  |
+| `ets-loader` | `arkdown-plugin-ets-transform` | SPEC-004a |
 
 ---
 

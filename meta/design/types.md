@@ -542,11 +542,11 @@ pub struct ArkOptions {
 }
 
 pub struct SdkConfig {
-    /// Path to ets-loader directory.
+    /// Path to ets-loader directory. Unused — ets-loader is ported to Rust (SPEC-004a).
     pub ets_loader_path: PathBuf,
-    /// Path to es2abc binary.
+    /// Path to es2abc binary. Unused — es2abc is ported to Rust (SPEC-009, arkdown-abc).
     pub es2abc_path: PathBuf,
-    /// Path to restool binary.
+    /// Path to restool binary. Unused — restool is ported to Rust (SPEC-011, arkdown-resource).
     pub restool_path: PathBuf,
     /// SDK API version (numeric).
     pub compile_api_version: u32,

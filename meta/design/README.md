@@ -40,4 +40,4 @@ Read these documents before working in a covered area. Keep them in sync with im
 1. **Ground truth is the source code**. Every claim in these documents was verified against the actual hvigor JavaScript sources.
 2. **Compatibility first**. Output artifacts must be byte-for-byte compatible with what hvigor produces (same file paths, same JSON schemas, same zip structure) so DevEco Studio and the OHOS toolchain work without modification.
 3. **Replace the engine, keep the contract**. arkdown replaces Node.js/rollup with Rust/rolldown but preserves all external contracts: `loader.json` format, intermediate artifact paths, es2abc invocation, restool invocation.
-4. **Port, don't wrap**. `es2abc` and `restool` are ported to pure Rust (`arkdown-abc` and `arkdown-resource`) from their OpenHarmony source. No subprocess invocation for these. The ArkTS transform (`ets-loader`) remains a subprocess until its port is complete.
+4. **Port, don't wrap**. `es2abc`, `restool`, and `ets-loader` are all ported to pure Rust (`arkdown-abc`, `arkdown-resource`, `arkdown-plugin-ets-transform`). No subprocess invocation, no SDK binary dependency at build time.

@@ -86,7 +86,7 @@ From the SDK path, derive:
 
 - `es2abc`: `sdk/default/openharmony/ets/build-tools/ets-loader/bin/ark/build-{platform}/bin/es2abc`
 - `restool`: `sdk/default/openharmony/toolchains/restool`
-- `ets_loader_path`: `sdk/default/openharmony/ets/build-tools/ets-loader/`
+- `ets_loader_path`: `sdk/default/openharmony/ets/build-tools/ets-loader/` _(unused; ets-loader is ported to Rust — SPEC-004a)_
 - `compile_api_version`: parse numeric version from `compatibleSdkVersion` (e.g., `"5.0.0(12)"` → `12`)
 
 ### Parsing Rules

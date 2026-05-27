@@ -10,9 +10,8 @@ exact behavioral parity cases derived from reading the original source.
   Never put all tests in one file; split by the behavior being tested.
 - Integration tests that span multiple crates live in `tests/integration/`.
 - Device tests require `#[cfg(feature = "device-tests")]` and `ARKDOWN_TEST_DEVICE` env var.
-- Tests that require the ArkTS transform subprocess (`ets-loader`) are gated with
-  `#[cfg(feature = "ets-loader-tests")]` and require `OHOS_SDK_HOME` to be set.
-  `es2abc` and `restool` are pure Rust — no feature gate needed for those.
+- `es2abc`, `restool`, and `ets-loader` are all pure Rust — no feature gate or `OHOS_SDK_HOME`
+  needed for any of them. ArkTS transform tests live in `arkdown-plugin-ets-transform` (SPEC-004a).
 - Snapshot tests (for generated JSON, loader.json, module.json) use `insta`.
 
 ## Files
