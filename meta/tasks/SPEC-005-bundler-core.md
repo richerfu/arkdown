@@ -181,3 +181,43 @@ crates/arkdown/
 - `meta/design/chunk-model.md` — chunk splitting, supportChunks, IIFE requirement
 - `meta/design/hvigorw-analysis.md` — loader.json schema, aceModuleBuild path
 - `meta/design/types.md` — `ModuleGraph`, `ChunkGraph`, `ArkChunk`
+
+---
+
+## Rolldown Alignment
+
+| arkdown concept | rolldown equivalent | note |
+| --- | --- | --- |
+| `Bundler::bundle()` | rolldown `Bundler::write()` | Same: takes entry points, returns chunk graph and writes files |
+| Stage 1 (Link) | rolldown link stage | Identical: resolve cross-module symbol references |
+| Stage 2 (Tree Shake) | rolldown tree-shaking (`treeshake: true`) | Same algorithm (inclusion marking); arkdown enables only in `BuildMode::Release` |
+| Stage 3 (Chunk Split) | rolldown `manualChunks` + automatic splitting | arkdown reads `loader.json` `compileEntry`; rolldown reads `input` option; both produce `ChunkGraph` |
+| Stage 4 (Code Generation, CJS output) | rolldown `OutputOptions::format = Cjs` | **Intentional divergence**: both emit CJS; arkdown then wraps in IIFE (SPEC-006); rolldown would emit ESM for browsers |
+| `render_chunk` hook dispatch | rolldown `PluginDriver::render_chunk()` | Identical hook semantics |
+| `generate_bundle` hook dispatch | rolldown `PluginDriver::generate_bundle()` | Identical |
+| `BundleOutput::chunk_graph` | rolldown `BundleOutput` / `RolldownOutput` | Same concept; arkdown adds `output_dir` and `chunk_files` for direct file path tracking |
+| `LoaderJson::compileEntry` | rolldown `InputOptions::input` | Functionally equivalent: both specify entry point file paths |
+| `supportChunks` flag | rolldown always splits chunks | OHOS-specific: when `false`, one chunk per entry (no shared chunks) |
+| `ArkChunk::chunk_hash` | rolldown `Chunk::content_hash` | Same purpose (fingerprinting); arkdown uses it as the `globalThis` registry key suffix |
+| `cross_chunk_imports` on `ArkChunk` | rolldown `Chunk::cross_chunk_imports` | Identical semantics; drives the `require()` → `globalThis[]` replacement in SPEC-006 |
+
+**Key divergences from rolldown that must always be preserved:**
+1. Output format is CJS (Stage 4), not ESM. This is required so wrapper-chunk-plugin (SPEC-006) can rewrite `require()` calls to `globalThis[]`.
+2. Entry points come from `loader.json` `compileEntry`, not from an `input` option struct.
+3. `supportChunks = false` (the most common OHOS case) means exactly one chunk per entry — no shared chunk extraction.
+
+---
+
+## Test Requirements
+
+- `Bundler::bundle()` on a two-file project (`A.ets` imports from `B.ets`) produces a single chunk per entry with both modules inlined (when `supportChunks: false`)
+- CJS output verification: chunk code contains `var _b = require("./B")` style calls (not ESM `import`)
+- With `supportChunks: true`, a module imported from two entries is extracted into a separate chunk
+- Tree shaking in release mode: an exported but never-imported function is absent from the output
+- Tree shaking in debug mode: all exports are present regardless of whether they are imported
+- Source maps written alongside each `.js` chunk file in `aceModuleBuild/`
+- `render_chunk` hook is called once per chunk; returning `None` from all plugins leaves code unchanged
+- `generate_bundle` hook is called once after all chunks are rendered; modifying `bundle.chunks` in the hook affects written output
+- `loader.json` with `compileEntry: ["./ets/pages/Index.ets"]` produces exactly one entry chunk named `"Index"`
+- Circular import between two modules is warned about (via `tracing::warn!`) but does not abort the build
+- `BundleOutput::chunk_files` entries all exist on disk after `bundle()` completes

@@ -6,8 +6,8 @@ use index_vec::IndexVec;
 use rustc_hash::FxHashMap;
 
 use arkdown_core::{
-    ArkdownConfig, ArkdownError, ArkdownPlugin, BuildMode, ChunkGraph, Module, ModuleGraph,
-    ModuleIdx, ModuleType, RenderChunkContext, ResolvedId,
+    ArkdownConfig, ArkdownError, ArkdownPlugin, BuildMode, ChunkGraph, Module,
+    ModuleGraph, ModuleIdx, ModuleType, PluginContext, RenderedChunkMeta, ResolvedId,
 };
 use arkdown_loader::ModuleLoader;
 use arkdown_profile::LoaderJson;
@@ -69,6 +69,7 @@ impl Bundler {
                     id: path,
                     external: false,
                     module_type: ModuleType::Ets,
+                    ..Default::default()
                 }
             })
             .collect();
@@ -95,15 +96,24 @@ impl Bundler {
         codegen::generate_code(&graph, &mut chunk_graph)?;
 
         // ── 8. render_chunk plugin hooks ─────────────────────────────────────
+        let ctx = PluginContext::default();
         for chunk in chunk_graph.chunks.iter_mut() {
             let mut code = chunk.code.clone();
-            let ctx = RenderChunkContext {
-                chunk_name: chunk.name.clone(),
+            let chunk_meta = RenderedChunkMeta {
+                name: chunk.name.clone(),
+                chunk_hash: chunk.chunk_hash.clone(),
+                is_entry: chunk.is_entry,
+                is_dynamic_entry: chunk.is_dynamic_entry,
+                facade_module_id: chunk.facade_module_id.clone(),
+                module_ids: vec![], // populated by SPEC-005 full linker
+                exports: chunk.exports.clone(),
+                imports: chunk.imports.clone(),
+                dynamic_imports: chunk.dynamic_imports.clone(),
             };
             for plugin in &self.plugins {
-                if let Some(rendered) = plugin.render_chunk(&ctx, code.clone(), chunk).await? {
+                if let Some(rendered) = plugin.render_chunk(&ctx, &code, &chunk_meta).await? {
                     code = rendered.code;
-                    if let Some(map) = rendered.map {
+                    if let Some(map) = rendered.source_map {
                         chunk.source_map = Some(map);
                     }
                 }
@@ -136,9 +146,15 @@ fn build_module_graph(
 
     for (id, mut module) in modules {
         if entry_ids.contains(&id) {
-            module.is_entry = true;
+            if let Some(nm) = module.as_normal_mut() {
+                nm.is_entry = true;
+            }
         }
         let idx = module_vec.push(module);
+        // Update the module's self-idx now that we know its position.
+        if let Some(nm) = module_vec[idx].as_normal_mut() {
+            nm.idx = idx;
+        }
         id_to_idx.insert(id, idx);
     }
 

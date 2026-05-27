@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use arkdown_core::{
-    ArkdownError, ArkdownPlugin, BuildContext, BuildError, ModuleParsedContext, ModuleType,
-    PluginResult, ResolveContext, ResolvedId, Module,
+    ArkdownError, ArkdownPlugin, BuildError, HookResolveIdArgs, HookResolveIdOutput,
+    HookUsage, ModuleInfo, ModuleType, PluginContext, PluginResult,
 };
 
 // ---------------------------------------------------------------------------
@@ -73,20 +73,24 @@ impl ArkdownPlugin for HarDeduplicatePlugin {
         "har-dedup"
     }
 
+    fn register_hook_usage(&self) -> HookUsage {
+        HookUsage::ResolveId | HookUsage::ModuleParsed | HookUsage::BuildEnd
+    }
+
     /// In `RealBuild` mode, mark excluded HAR modules as external.
     async fn resolve_id(
         &self,
-        _ctx: &ResolveContext,
-        specifier: &str,
-        _importer: Option<&str>,
-    ) -> PluginResult<Option<ResolvedId>> {
+        _ctx: &PluginContext,
+        args: &HookResolveIdArgs<'_>,
+    ) -> PluginResult<Option<HookResolveIdOutput>> {
         if let HarDedupMode::RealBuild { ref excluded_files } = self.mode {
-            let path = PathBuf::from(specifier);
+            let path = PathBuf::from(args.specifier);
             if excluded_files.contains(&path) {
-                return Ok(Some(ResolvedId {
-                    id: specifier.to_string(),
+                return Ok(Some(HookResolveIdOutput {
+                    id: args.specifier.to_string(),
                     external: true,
                     module_type: ModuleType::Ts,
+                    side_effects: None,
                 }));
             }
         }
@@ -96,20 +100,18 @@ impl ArkdownPlugin for HarDeduplicatePlugin {
     /// In `CollectPass` mode, record every HAR module that is parsed.
     ///
     /// A module is considered a HAR module when its ID contains `oh_modules`
-    /// (ohpm install path) or when the module-meta plugin has flagged it as a
-    /// local dependency.
+    /// (ohpm install path).
     async fn module_parsed(
         &self,
-        _ctx: &ModuleParsedContext,
-        module: &Module,
+        _ctx: &PluginContext,
+        module: &ModuleInfo,
     ) -> PluginResult<()> {
         if matches!(self.mode, HarDedupMode::CollectPass) {
-            let id = &module.id.id;
-            if id.contains("oh_modules") || module.meta.is_local_dependency {
+            if module.id.contains("oh_modules") {
                 self.collected
                     .lock()
                     .unwrap()
-                    .push(id.clone());
+                    .push(module.id.clone());
             }
         }
         Ok(())
@@ -118,7 +120,7 @@ impl ArkdownPlugin for HarDeduplicatePlugin {
     /// In `CollectPass` mode, flush collected IDs to disk when the build finishes.
     async fn build_end(
         &self,
-        _ctx: &BuildContext,
+        _ctx: &PluginContext,
         _error: Option<&BuildError>,
     ) -> PluginResult<()> {
         if matches!(self.mode, HarDedupMode::CollectPass) {
@@ -183,6 +185,16 @@ pub enum HarDedupError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arkdown_core::ImportKind;
+
+    fn make_args<'a>(specifier: &'a str) -> HookResolveIdArgs<'a> {
+        HookResolveIdArgs {
+            specifier,
+            importer: None,
+            is_entry: true,
+            kind: ImportKind::Import,
+        }
+    }
 
     #[test]
     fn test_collect_file_roundtrip() {
@@ -221,9 +233,8 @@ mod tests {
         let plugin = HarDeduplicatePlugin::real_build(path).unwrap();
         let result = plugin
             .resolve_id(
-                &ResolveContext::default(),
-                "/project/oh_modules/lib/index.ets",
-                None,
+                &PluginContext::default(),
+                &make_args("/project/oh_modules/lib/index.ets"),
             )
             .await
             .unwrap();
@@ -241,9 +252,8 @@ mod tests {
         let plugin = HarDeduplicatePlugin::real_build(path).unwrap();
         let result = plugin
             .resolve_id(
-                &ResolveContext::default(),
-                "/project/entry/src/main/ets/Index.ets",
-                None,
+                &PluginContext::default(),
+                &make_args("/project/entry/src/main/ets/Index.ets"),
             )
             .await
             .unwrap();

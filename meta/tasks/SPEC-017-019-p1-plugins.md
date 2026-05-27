@@ -164,3 +164,64 @@ if let Some(cached) = cache.get(&id) {
 - Second build of unchanged `MyApplication` completes in < 200ms
 - Modifying one source file only re-processes that file and its dependents
 - Config change (e.g., `useNormalizedOHMUrl` toggle) invalidates all cached entries
+
+---
+
+## Rolldown Alignment
+
+### SPEC-017: Router Map Plugin
+
+| arkdown concept | rolldown equivalent | note |
+| --- | --- | --- |
+| `RouterMapPlugin::should_invalidate_cache` | `Plugin::shouldInvalidCache` (rollup hook) | Direct port; same semantics: return `true` to force re-compilation of a cached module |
+| `router_map_hash` comparison | rolldown cache key mechanism | rolldown uses content hashing for cache keys; arkdown uses a separate hash for router map state |
+
+**Key divergence:** rolldown does not have a router map concept. This plugin is OHOS-specific. In arkdown the router map hash is incorporated into `CacheKey::config_hash` as a simpler alternative.
+
+### SPEC-018: Case-Sensitive Check Plugin
+
+| arkdown concept | rolldown equivalent | note |
+| --- | --- | --- |
+| `SensitiveCheckPlugin::load` (case check) | no rolldown equivalent | rolldown does not perform case-sensitivity validation; this is OHOS-specific for cross-platform compatibility |
+| `find_actual_filename()` via `read_dir` | no equivalent | Filesystem-level check; only meaningful on case-insensitive FSes (macOS, Windows) |
+
+**Key divergence:** Standard bundlers (including rolldown) rely on the OS to reject mismatched-case imports. This plugin adds an explicit cross-platform check.
+
+### SPEC-019: Incremental Build Cache
+
+| arkdown concept | rolldown equivalent | note |
+| --- | --- | --- |
+| `CacheKey { content_hash, config_hash, dependency_hash }` | rolldown module cache key | rolldown uses content hash only; arkdown adds `config_hash` and `dependency_hash` for OHOS-specific invalidation |
+| `CachedModule` | rolldown cached `NormalModule` | rolldown stores AST + resolved imports; arkdown stores transformed code + serialized import/export edges (no AST in cache) |
+| `should_invalidate_cache` hook | rollup `shouldInvalidCache` hook | Identical concept; both are sync boolean functions |
+| msgpack cache files in `build/.arkdown_cache/` | rolldown in-memory cache | rolldown keeps its cache in memory only; arkdown persists to disk for cross-process incremental builds |
+
+---
+
+## Test Requirements
+
+### SPEC-017
+
+- `should_invalidate_cache` returns `true` when `ctx.build_context.router_map_hash` differs from the stored hash
+- `should_invalidate_cache` returns `false` when hashes match
+- First build (no stored hash): `should_invalidate_cache` returns `true` for all modules
+- Plugin name returns `"router-map"`
+
+### SPEC-018
+
+- Case mismatch `"./Utils/Helper"` for actual file `"./utils/helper"` → `Err(ArkdownError::CaseMismatch)` when `enabled = true`
+- Correct case `"./utils/helper"` → `Ok(None)` (pass-through to next plugin)
+- `enabled = false`: all specifiers pass through as `Ok(None)` without any filesystem check
+- On Linux: `enabled = true` but the `read_dir` check is skipped (no error possible from case mismatch on case-sensitive FS)
+- Plugin name returns `"sensitive-check"`
+
+### SPEC-019
+
+- A module loaded twice with the same source content hits the cache on the second call (no re-parse, no re-transform)
+- Changing the source content invalidates the cache entry
+- Changing `config_hash` (e.g., `useNormalizedOHMUrl` toggle) invalidates all cached entries
+- Changing the resolved ID of one of a module's imports invalidates that module's cache entry (`dependency_hash` change)
+- Cached module round-trip: `CachedModule` serialized to msgpack and deserialized produces identical `transformed_code`, `imports`, and `exports`
+- Cache directory created at `build/default/.arkdown_cache/` if absent
+- `should_invalidate_cache` returning `true` from any plugin causes cache bypass for that module
+- `should_invalidate_cache` returning `false` from all plugins uses the cached module (load + transform hooks not called)

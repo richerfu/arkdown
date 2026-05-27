@@ -108,3 +108,35 @@ build/default/outputs/har/my-har.har
 - `meta/design/pipeline.md` — Phase 12 (HAP/HSP/HAR Packaging)
 - `meta/design/chunk-model.md` — per-module bundle layout (HAP/HSP/HAR sections)
 - `meta/design/hvigorw-analysis.md` — PackageHap task, zip structure
+
+---
+
+## Rolldown Alignment
+
+`arkdown-pack` has no rolldown equivalent. rolldown produces JS files; it does not create zip archives. The packaging step is unique to OHOS.
+
+| arkdown concept | closest analogue | note |
+| --- | --- | --- |
+| `Packager::pack_hap()` | webpack `ZipPlugin` / Vite build output | Conceptually similar (archive JS output); OHOS zip structure and compression rules are specific |
+| `PackInput::abc_path` | webpack `output.path` | The `.abc` file is the analogue of the JS bundle; it replaces the JS output in the final archive |
+| HAP/HSP/HAR zip structure | npm `pack` (produces `.tgz`) | Both create distributable archives; different format and manifest requirements |
+| `modules.abc` placement path (API version dependent) | no equivalent | OHOS-specific: the path inside the zip differs between API versions |
+| `.abc` / `.so` stored (no deflate) | webpack `assetModuleFilename` | OHOS requirement: runnable files must be stored (not compressed) for mmap-based loading |
+| 4096-byte alignment for `.abc`/`.so` | no JS bundler equivalent | OHOS-specific: required for page-aligned mmap; enforced via `ZipEntry` extra field padding |
+
+---
+
+## Test Requirements
+
+- `pack_hap()` produces a ZIP file with `module.json`, `resources.index`, and `modules.abc` at the correct paths
+- `modules.abc` is stored (compression method 0) in the ZIP — not deflate-compressed
+- `module.json` and `resources.index` are deflate-compressed in the ZIP
+- ZIP entry paths inside the archive match hvigor's output exactly (verified via manual comparison with a reference HAP)
+- `pack_har()` includes `oh-package.json5` and `src/main/ets/` source files for source HARs
+- ByteCode HAR pack: `pack_har()` includes only `oh-package.json5`, `index.abc`, and `index.d.ts`
+- `pack_hsp()` sets `"type": "shared"` in `module.json` (inherited from profile processor output)
+- Native `.so` files are placed under `libs/arm64-v8a/` in the HAP ZIP
+- Output path `build/default/outputs/default/entry.hap` is created by `pack_hap()`
+- Empty `native_libs` list: no `libs/` directory created in the ZIP
+- Missing `abc_path` input returns `Err` (not panic)
+- Produced HAP can be installed on an OHOS device via `hdc install` (acceptance criterion; requires device)

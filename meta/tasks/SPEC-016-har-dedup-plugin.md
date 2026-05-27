@@ -111,3 +111,32 @@ if config.output_target == OutputTarget::Hsp && has_local_har_deps {
 - `meta/design/plugins.md` — `har-deduplicate/` plugin analysis
 - `meta/design/chunk-model.md` — HAR deduplication in HAR vs HAP vs HSP section
 - `meta/design/hvigorw-analysis.md` — `processHarDeduplicate` in GenerateLoaderJson
+
+---
+
+## Rolldown Alignment
+
+| arkdown concept | rolldown equivalent | note |
+| --- | --- | --- |
+| `HarDedupMode::CollectPass` | no rolldown equivalent | OHOS-specific two-pass build; rolldown does not have a graph collection pass |
+| `HarDedupMode::RealBuild { excluded_files }` | rolldown `external` option | Functionally similar: marking modules as external skips bundling them; rolldown does this per-entry via the `external` input option; arkdown does it dynamically by mutating `module.id.external` in the hook |
+| `before_build_end` hook (collection) | `Plugin::build_end` | Closest rolldown hook that fires after all modules are parsed |
+| `before_build_end` hook (exclusion) | rolldown `external` option processing | In rolldown, externals are configured before the build; arkdown sets them at `before_build_end` time because the exclusion set is determined by the collect pass |
+| `write_collect_file()` / `read_collect_file()` | no equivalent | Cross-pass communication via filesystem; rolldown is single-pass so no inter-pass file exchange needed |
+
+**Key divergence:** rolldown is always single-pass. arkdown requires two passes for HSP builds to determine HAR deduplication. This two-pass architecture is OHOS-specific and has no rolldown equivalent.
+
+---
+
+## Test Requirements
+
+- `HarDedupMode::CollectPass`: after `before_build_end`, the collect file contains all HAR-origin module paths from the module graph
+- `HarDedupMode::CollectPass`: ByteCode HAR paths are written to `BYTECODE_HAR_DUPLICATE_FILES_INFO`, not `SOURCE_HAR_DUPLICATE_FILES_INFO`
+- `HarDedupMode::RealBuild { excluded_files }`: modules in `excluded_files` have `id.external = true` after `before_build_end`
+- `HarDedupMode::RealBuild`: modules NOT in `excluded_files` are unchanged (`external` stays false)
+- Single-HAP project (no HSP): `HarDeduplicatePlugin` is never activated; build completes normally
+- `OutputTarget::Hap` (not HSP): plugin is not activated even if local HAR deps exist
+- The CLI correctly runs collect pass first, reads exclusion set, then runs real build with exclusions
+- Produced HAP does not include any module files that were compiled into the HSP
+- Plugin name returns `"har-dedup"`
+- Collect file is created in the configured `cachePath` directory

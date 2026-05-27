@@ -110,3 +110,57 @@ crates/arkdown-plugin-ohos-resolve/
 
 - `meta/design/module-resolution.md` — full resolver algorithm
 - `meta/design/plugins.md` — `resolve/index` + `import-resolver` + `process-importee` analysis
+
+---
+
+## Rolldown Alignment
+
+| arkdown concept | rolldown equivalent | note |
+| --- | --- | --- |
+| `OhosResolvePlugin::resolve_id` | `Plugin::resolve_id` returning `HookResolveIdOutput` | Identical hook; arkdown maps `OhosResolvedModule` → `ResolvedId` here |
+| `OhosResolvePlugin::generate_bundle` | `Plugin::generate_bundle` | Same hook; used for post-bundle import path rewriting (process-importee equivalent) |
+| `OhosResolvePlugin::case_check` | no direct rolldown equivalent | The case-sensitivity check is integrated into the resolve hook; rolldown does not have this |
+| `ExternalBundle` → `ResolvedId { external: true }` | `HookResolveIdOutput { external: true }` | Identical semantics |
+| `SdkDeclaration` → `external: true, module_type: Declaration` | rolldown has no `Declaration` type | arkdown adds `ModuleType::Declaration` to signal "skip loading"; rolldown would use `external: true` alone |
+| `BytecodeHar` → `external: true, module_type: BytecodeHar` | no rolldown equivalent | OHOS-specific: ABC path carried in the ID string for use by packager |
+| `generate_bundle` / `rewrite_bytecode_har_imports` | rolldown chunk rendering | In rolldown, cross-chunk imports are rewritten during code generation; arkdown does this post-bundle for ByteCode HAR cases |
+| `@rollup/plugin-node-resolve` replacement | rolldown built-in resolver | rolldown has a built-in resolver; arkdown replaces it with this OHOS-aware plugin |
+
+---
+
+## Public API
+
+```rust
+pub struct OhosResolvePlugin {
+    resolver: Arc<OhosResolver>,
+    project_root: PathBuf,
+}
+
+impl OhosResolvePlugin {
+    pub fn new(config: &ArkdownConfig, meta: &PkgNameToPkgBriefInfo) -> Self;
+}
+
+impl ArkdownPlugin for OhosResolvePlugin {
+    fn name(&self) -> &str;
+    async fn resolve_id(&self, ctx: &ResolveContext, specifier: &str, importer: Option<&str>)
+        -> PluginResult<Option<ResolvedId>>;
+    async fn generate_bundle(&self, ctx: &mut GenerateBundleContext, bundle: &mut ChunkGraph,
+        is_write: bool) -> PluginResult<()>;
+    // load, transform: no-op defaults
+}
+```
+
+---
+
+## Test Requirements
+
+- `resolve_id("@ohos/hilog", importer)` → `ResolvedId { external: true, module_type: Declaration }`
+- `resolve_id("@bundle:com.foo/mod/path", importer)` → `ResolvedId { id: "@bundle:com.foo/mod/path", external: true }`
+- `resolve_id("./utils/helper", importer)` → `ResolvedId { id: abs_path, external: false, module_type: Ets }`
+- `resolve_id` for a ByteCode HAR package → `ResolvedId { external: true, module_type: BytecodeHar }`
+- `generate_bundle`: ByteCode HAR import in a chunk has its source path rewritten to the ABC reference
+- Case-sensitivity check enabled: `resolve_id("./Utils/Helper")` when actual path is `./utils/helper` → `Err(ArkdownError::CaseMismatch)` on macOS/Windows
+- Case-sensitivity check disabled: `resolve_id("./Utils/Helper")` passes through to the resolver without case validation
+- Case-sensitivity check is a no-op on Linux (skip the `read_dir` call on case-sensitive filesystems)
+- `resolve_id` returning `Ok(None)` for a specifier that OhosResolver cannot handle defers to the next plugin
+- Plugin name returns `"ohos-resolve"`

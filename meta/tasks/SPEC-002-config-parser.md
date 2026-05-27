@@ -156,3 +156,37 @@ crates/arkdown-config/
 - `meta/design/pipeline.md` — Phase 1 (Config Parsing)
 - `meta/design/hvigorw-analysis.md` — config file schemas and field semantics
 - `meta/design/types.md` — `ArkdownConfig`, `SdkConfig`, `ProductConfig`, `BuildOption` types
+
+---
+
+## Rolldown Alignment
+
+| arkdown concept | rolldown equivalent | note |
+| --- | --- | --- |
+| `ArkdownConfig` | rolldown `InputOptions` + `OutputOptions` | arkdown merges both into a single config struct; rolldown separates build-time from emit-time options |
+| `BuildMode::Debug/Release` | rolldown `treeshake` option + `minify` option | arkdown uses a single mode enum; rolldown sets these independently |
+| `ProductConfig::bundle_name` | no rolldown equivalent | OHOS-specific: identifies the app bundle in OHM URLs |
+| `StrictModeConfig::use_normalized_ohm_url` | no rolldown equivalent | OHOS-specific: controls whether module IDs are OHM URLs or file paths |
+| `ModuleConfig::oh_package` | rolldown reads `package.json`; no `oh-package.json5` concept | OHOS uses ohpm, not npm; `oh-package.json5` replaces `package.json` |
+| `SdkConfig` | rolldown has no SDK concept | Pure arkdown addition: SDK version determines ArkTS API rewrites and signing block version |
+| `ArkdownConfig::from_project()` | rolldown `Bundler::new(BundlerOptions)` | rolldown takes options as a struct; arkdown parses from the filesystem |
+| `compatibleSdkVersion` parsing (`"5.0.0(12)"` → `12`) | no equivalent | OHOS-specific numeric API version extraction |
+
+**Key divergence:** rolldown accepts explicit entry points from options. arkdown derives entry points from `module.json5` abilities and the profile processor (SPEC-010) — there is no direct `entry: [...]` config field.
+
+---
+
+## Test Requirements
+
+- Parse a minimal valid `build-profile.json5` with one product and one module; assert `bundle_name` and `compatible_sdk_version` are correct
+- Parse a full `build-profile.json5` with multiple products and modules; assert the correct product is selected by `--product` name
+- `compatibleSdkVersion` extraction: `"5.0.0(12)"` → `compile_api_version = 12`; also test `"4.1.7(11)"` → `11`
+- Missing required field `bundleName` in products returns `Err` with a descriptive message (not a panic)
+- Malformed JSON5 (unterminated string) returns `Err(ArkdownError::ParseError { .. })`
+- SDK path discovery: mock `OHOS_SDK_HOME` env var and assert it takes precedence over default paths
+- SDK path discovery: when `OHOS_SDK_HOME` is unset, falls back to `~/Library/Huawei/Sdk/` on macOS (or equivalent platform default)
+- `BuildOption::strict_mode.case_sensitive_check` defaults to `false` when `strictMode` block is absent from `build-profile.json5`
+- `BuildOption::strict_mode.use_normalized_ohm_url` defaults to `false` when absent
+- `oh-package.json5` with `file:../my-har` local dependency parses as a `file:` reference (not treated as an ohpm package name)
+- `oh-package.json5` with `dynamicDependencies` parses without error; dynamic deps do not appear in `dependencies`
+- `ArkdownConfig::from_project()` on the `hmosworld` sample project returns `Ok` with correct module count

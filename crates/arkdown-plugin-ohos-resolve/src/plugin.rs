@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use arkdown_core::{
-    ArkdownPlugin, ModuleType, OhosResolvedModule, PluginResult, ResolveContext, ResolvedId,
+    ArkdownPlugin, HookResolveIdArgs, HookResolveIdOutput, HookUsage, ModuleType,
+    OhosResolvedModule, PluginContext, PluginResult,
 };
 use arkdown_resolver::{OhosResolver, ResolverConfig};
 
@@ -34,59 +35,69 @@ impl ArkdownPlugin for OhosResolvePlugin {
         "ohos-resolve"
     }
 
+    fn register_hook_usage(&self) -> HookUsage {
+        HookUsage::ResolveId
+    }
+
     async fn resolve_id(
         &self,
-        _ctx: &ResolveContext,
-        specifier: &str,
-        importer: Option<&str>,
-    ) -> PluginResult<Option<ResolvedId>> {
-        let importer_path = importer
+        _ctx: &PluginContext,
+        args: &HookResolveIdArgs<'_>,
+    ) -> PluginResult<Option<HookResolveIdOutput>> {
+        let importer_path = args
+            .importer
             .map(Path::new)
             .unwrap_or(&self.project_root);
 
-        let resolved = match self.resolver.resolve(specifier, importer_path) {
+        let resolved = match self.resolver.resolve(args.specifier, importer_path) {
             Ok(r) => r,
             Err(_) => return Ok(None), // let next plugin try
         };
 
         let result = match resolved {
-            OhosResolvedModule::ExternalBundle { ohm_url } => ResolvedId {
+            OhosResolvedModule::ExternalBundle { ohm_url } => HookResolveIdOutput {
                 id: ohm_url,
                 external: true,
                 module_type: ModuleType::Ts,
+                side_effects: None,
             },
             OhosResolvedModule::ExternalHsp {
                 bundle_name,
                 module_name,
                 entry_path,
-            } => ResolvedId {
+            } => HookResolveIdOutput {
                 id: format!("@shared:{}/{}/{}", bundle_name, module_name, entry_path),
                 external: true,
                 module_type: ModuleType::Ts,
+                side_effects: None,
             },
-            OhosResolvedModule::SdkDeclaration { path, .. } => ResolvedId {
+            OhosResolvedModule::SdkDeclaration { path, .. } => HookResolveIdOutput {
                 id: path.to_string_lossy().to_string(),
                 external: true,
                 module_type: ModuleType::Declaration,
+                side_effects: None,
             },
-            OhosResolvedModule::BytecodeHar { ohm_url, .. } => ResolvedId {
+            OhosResolvedModule::BytecodeHar { ohm_url, .. } => HookResolveIdOutput {
                 id: ohm_url,
                 external: true,
                 module_type: ModuleType::BytecodeHar,
+                side_effects: None,
             },
             OhosResolvedModule::LocalSource {
                 path, module_type, ..
-            } => ResolvedId {
+            } => HookResolveIdOutput {
                 id: path.to_string_lossy().to_string(),
                 external: false,
                 module_type,
+                side_effects: None,
             },
             OhosResolvedModule::RemotePackage {
                 path, module_type, ..
-            } => ResolvedId {
+            } => HookResolveIdOutput {
                 id: path.to_string_lossy().to_string(),
                 external: false,
                 module_type,
+                side_effects: None,
             },
         };
 
@@ -116,14 +127,23 @@ mod tests {
         )
     }
 
+    fn make_args<'a>(specifier: &'a str, importer: Option<&'a str>) -> HookResolveIdArgs<'a> {
+        use arkdown_core::ImportKind;
+        HookResolveIdArgs {
+            specifier,
+            importer,
+            is_entry: importer.is_none(),
+            kind: ImportKind::Import,
+        }
+    }
+
     #[tokio::test]
     async fn test_bundle_ref_is_external() {
         let plugin = make_plugin();
         let result = plugin
             .resolve_id(
-                &ResolveContext::default(),
-                "@bundle:com.foo/entry/ets/Index",
-                None,
+                &PluginContext::default(),
+                &make_args("@bundle:com.foo/entry/ets/Index", None),
             )
             .await
             .unwrap();
@@ -137,9 +157,8 @@ mod tests {
         let plugin = make_plugin();
         let result = plugin
             .resolve_id(
-                &ResolveContext::default(),
-                "some-unknown-package",
-                Some("/tmp/main.ets"),
+                &PluginContext::default(),
+                &make_args("some-unknown-package", Some("/tmp/main.ets")),
             )
             .await
             .unwrap();
@@ -151,9 +170,8 @@ mod tests {
         let plugin = make_plugin();
         let result = plugin
             .resolve_id(
-                &ResolveContext::default(),
-                "@shared:com.example/sharedlib",
-                None,
+                &PluginContext::default(),
+                &make_args("@shared:com.example/sharedlib", None),
             )
             .await
             .unwrap();

@@ -358,6 +358,244 @@ impl HapZip {
 // EOCD finding
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Alignment constants ──────────────────────────────────────────────
+
+    #[test]
+    fn test_alignment_runnable_is_4096() {
+        assert_eq!(ALIGNMENT_RUNNABLE, 4096);
+    }
+
+    #[test]
+    fn test_alignment_normal_is_4() {
+        assert_eq!(ALIGNMENT_NORMAL, 4);
+    }
+
+    // ── Helper: build a minimal single-entry stored ZIP in memory ────────
+
+    /// Build a minimal ZIP with a single stored (uncompressed) file.
+    ///
+    /// Returns raw ZIP bytes that `HapZip::parse` should accept.
+    fn make_zip_bytes(filename: &[u8], data: &[u8]) -> Vec<u8> {
+        let fn_len = filename.len() as u16;
+        let data_len = data.len() as u32;
+
+        let mut zip: Vec<u8> = Vec::new();
+
+        // ── Local file header ──
+        zip.extend_from_slice(&0x04034b50u32.to_le_bytes()); // signature
+        zip.extend_from_slice(&20u16.to_le_bytes()); // version needed
+        zip.extend_from_slice(&0u16.to_le_bytes()); // flags
+        zip.extend_from_slice(&0u16.to_le_bytes()); // method: stored
+        zip.extend_from_slice(&0u16.to_le_bytes()); // mod time
+        zip.extend_from_slice(&0u16.to_le_bytes()); // mod date
+        zip.extend_from_slice(&0u32.to_le_bytes()); // crc32
+        zip.extend_from_slice(&data_len.to_le_bytes()); // compressed size
+        zip.extend_from_slice(&data_len.to_le_bytes()); // uncompressed size
+        zip.extend_from_slice(&fn_len.to_le_bytes()); // filename length
+        zip.extend_from_slice(&0u16.to_le_bytes()); // extra length
+        zip.extend_from_slice(filename); // filename
+        zip.extend_from_slice(data); // file data
+
+        let cd_offset = zip.len() as u32;
+
+        // ── Central directory entry ──
+        let cd_start = zip.len();
+        zip.extend_from_slice(&0x02014b50u32.to_le_bytes()); // signature
+        zip.extend_from_slice(&20u16.to_le_bytes()); // version made by
+        zip.extend_from_slice(&20u16.to_le_bytes()); // version needed
+        zip.extend_from_slice(&0u16.to_le_bytes()); // flags
+        zip.extend_from_slice(&0u16.to_le_bytes()); // method: stored
+        zip.extend_from_slice(&0u16.to_le_bytes()); // mod time
+        zip.extend_from_slice(&0u16.to_le_bytes()); // mod date
+        zip.extend_from_slice(&0u32.to_le_bytes()); // crc32
+        zip.extend_from_slice(&data_len.to_le_bytes()); // compressed size
+        zip.extend_from_slice(&data_len.to_le_bytes()); // uncompressed size
+        zip.extend_from_slice(&fn_len.to_le_bytes()); // filename length
+        zip.extend_from_slice(&0u16.to_le_bytes()); // extra length
+        zip.extend_from_slice(&0u16.to_le_bytes()); // comment length
+        zip.extend_from_slice(&0u16.to_le_bytes()); // disk number start
+        zip.extend_from_slice(&0u16.to_le_bytes()); // internal attributes
+        zip.extend_from_slice(&0u32.to_le_bytes()); // external attributes
+        zip.extend_from_slice(&0u32.to_le_bytes()); // local header offset = 0
+        zip.extend_from_slice(filename); // filename
+
+        let cd_size = (zip.len() - cd_start) as u32;
+
+        // ── End of central directory ──
+        zip.extend_from_slice(&0x06054b50u32.to_le_bytes()); // signature
+        zip.extend_from_slice(&0u16.to_le_bytes()); // disk number
+        zip.extend_from_slice(&0u16.to_le_bytes()); // disk with start of CD
+        zip.extend_from_slice(&1u16.to_le_bytes()); // entries on disk
+        zip.extend_from_slice(&1u16.to_le_bytes()); // total entries
+        zip.extend_from_slice(&cd_size.to_le_bytes()); // CD size
+        zip.extend_from_slice(&cd_offset.to_le_bytes()); // CD offset
+        zip.extend_from_slice(&0u16.to_le_bytes()); // comment length
+
+        zip
+    }
+
+    // ── HapZip::parse ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_empty_slice_returns_error() {
+        let result = HapZip::parse(&[]);
+        assert!(result.is_err(), "parsing empty bytes must return Err");
+    }
+
+    #[test]
+    fn test_parse_too_short_returns_error() {
+        let result = HapZip::parse(&[0u8; 10]);
+        assert!(result.is_err(), "parsing 10 bytes must return Err");
+    }
+
+    #[test]
+    fn test_parse_random_bytes_returns_error() {
+        let junk = b"this is not a zip file at all!!";
+        let result = HapZip::parse(junk);
+        assert!(result.is_err(), "parsing random bytes must return Err");
+    }
+
+    #[test]
+    fn test_parse_minimal_zip_succeeds() {
+        let bytes = make_zip_bytes(b"test.txt", b"hello");
+        let result = HapZip::parse(&bytes);
+        assert!(result.is_ok(), "valid minimal ZIP must parse successfully: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_parse_returns_correct_entry_count() {
+        let bytes = make_zip_bytes(b"data.json", b"{}");
+        let hap = HapZip::parse(&bytes).expect("parse must succeed");
+        assert_eq!(hap.entries.len(), 1, "should have exactly 1 entry");
+    }
+
+    #[test]
+    fn test_parse_preserves_filename() {
+        let bytes = make_zip_bytes(b"ets/modules.abc", b"PAND");
+        let hap = HapZip::parse(&bytes).expect("parse must succeed");
+        assert_eq!(hap.entries[0].name, "ets/modules.abc");
+    }
+
+    #[test]
+    fn test_parse_recognises_abc_as_runnable() {
+        let bytes = make_zip_bytes(b"ets/modules.abc", b"PAND\x00\x00");
+        let hap = HapZip::parse(&bytes).expect("parse must succeed");
+        assert!(hap.entries[0].is_runnable, ".abc file must be marked runnable");
+    }
+
+    #[test]
+    fn test_parse_recognises_so_as_runnable() {
+        let bytes = make_zip_bytes(b"libs/libfoo.so", b"\x7fELF");
+        let hap = HapZip::parse(&bytes).expect("parse must succeed");
+        assert!(hap.entries[0].is_runnable, ".so file must be marked runnable");
+    }
+
+    #[test]
+    fn test_parse_json_file_not_runnable() {
+        let bytes = make_zip_bytes(b"module.json", b"{}");
+        let hap = HapZip::parse(&bytes).expect("parse must succeed");
+        assert!(!hap.entries[0].is_runnable, ".json file must not be marked runnable");
+    }
+
+    // ── sort_entries ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_sort_puts_abc_before_json() {
+        // Build a two-entry ZIP: json first, then abc. After sort, abc should be first.
+        // We approximate by checking sort_by_key order directly on a constructed HapZip.
+
+        let abc_bytes = make_zip_bytes(b"ets/modules.abc", b"PAND");
+        let json_bytes = make_zip_bytes(b"module.json", b"{}");
+
+        let mut hap_abc = HapZip::parse(&abc_bytes).expect("abc parse");
+        let hap_json = HapZip::parse(&json_bytes).expect("json parse");
+
+        // Manually combine entries: json first, abc second
+        hap_abc.entries = vec![
+            hap_json.entries[0].clone(),
+            hap_abc.entries[0].clone(),
+        ];
+        hap_abc.sort_entries();
+
+        assert!(
+            hap_abc.entries[0].is_runnable,
+            "after sort, first entry must be the runnable .abc file"
+        );
+        assert!(
+            !hap_abc.entries[1].is_runnable,
+            "after sort, second entry must be the non-runnable .json file"
+        );
+    }
+
+    // ── align ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_align_abc_pads_to_4096() {
+        let bytes = make_zip_bytes(b"ets/modules.abc", b"PAND\x00\x00\x00\x00");
+        let mut hap = HapZip::parse(&bytes).expect("parse must succeed");
+        hap.align();
+
+        // After alignment, data must start at a multiple of 4096.
+        // Data offset = LOCAL_HEADER_FIXED(30) + filename.len() + extra.len()
+        let e = &hap.entries[0];
+        let data_offset = 30 + e.filename.len() + e.extra.len();
+        assert_eq!(
+            data_offset % 4096,
+            0,
+            "aligned .abc data offset ({data_offset}) must be a multiple of 4096"
+        );
+    }
+
+    #[test]
+    fn test_align_json_pads_to_4() {
+        let bytes = make_zip_bytes(b"module.json", b"{}");
+        let mut hap = HapZip::parse(&bytes).expect("parse must succeed");
+        hap.align();
+
+        let e = &hap.entries[0];
+        let data_offset = 30 + e.filename.len() + e.extra.len();
+        assert_eq!(
+            data_offset % 4,
+            0,
+            "aligned .json data offset ({data_offset}) must be a multiple of 4"
+        );
+    }
+
+    // ── sections_for_signing / with_signing_block ─────────────────────
+
+    #[test]
+    fn test_sections_for_signing_returns_nonempty_entries_section() {
+        let bytes = make_zip_bytes(b"test.txt", b"payload");
+        let mut hap = HapZip::parse(&bytes).expect("parse");
+        hap.sort_entries();
+        hap.align();
+        let (entries_bytes, cd_bytes, eocd_zeroed) = hap.sections_for_signing();
+        assert!(!entries_bytes.is_empty(), "entries section must not be empty");
+        assert!(!cd_bytes.is_empty(), "CD section must not be empty");
+        assert!(!eocd_zeroed.is_empty(), "EOCD section must not be empty");
+    }
+
+    #[test]
+    fn test_with_signing_block_increases_output_size() {
+        let bytes = make_zip_bytes(b"test.txt", b"payload");
+        let hap = HapZip::parse(&bytes).expect("parse");
+        let signing_block = vec![0xFFu8; 128];
+        let signed = hap.with_signing_block(&signing_block);
+        assert!(
+            signed.len() > bytes.len(),
+            "signed output must be larger than the unsigned input"
+        );
+    }
+}
+
 /// Locate and parse the End of Central Directory record.
 fn find_eocd(bytes: &[u8]) -> Result<EocdRecord, SignError> {
     // EOCD is at minimum 22 bytes, and comment can be up to 65535 bytes.

@@ -6,6 +6,11 @@ Prioritized implementation tasks for the arkdown bundler.
 - **P1** — Required for production/release-quality builds.
 - **P2** — Advanced features (hot-reload, HAR publishing, preview mode).
 
+Each SPEC file contains three standard sections:
+- **Public API** — the exact Rust API surface to implement
+- **Rolldown Alignment** — maps arkdown types/hooks to rolldown equivalents; notes intentional OHOS divergences
+- **Test Requirements** — concrete, specific test cases for the crate
+
 ---
 
 ## P0 — Minimum Viable HAP Build

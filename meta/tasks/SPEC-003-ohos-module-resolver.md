@@ -155,3 +155,36 @@ crates/arkdown-resolver/
 - `meta/design/module-resolution.md` — complete specifier algorithm, oh_modules layout, SDK paths
 - `meta/design/types.md` — `OhosResolvedModule`, `PkgContext`
 - `meta/design/pipeline.md` — Phase 2 (Dependency Resolution)
+
+---
+
+## Rolldown Alignment
+
+| arkdown concept | rolldown equivalent | note |
+| --- | --- | --- |
+| `OhosResolver::resolve()` | `resolve_id` hook result (`HookResolveIdOutput`) | In rolldown a plugin returns `HookResolveIdOutput { id, external, side_effects }`; arkdown uses a richer `OhosResolvedModule` enum that the plugin layer (SPEC-015) then maps to `ResolvedId` |
+| `OhosResolvedModule::ExternalBundle` | `HookResolveIdOutput { external: true }` | Same semantics: the bundler will not attempt to load the module |
+| `OhosResolvedModule::LocalSource` | `HookResolveIdOutput { external: false, id: abs_path }` | Identical; rolldown uses `id` as absolute path |
+| `OhosResolvedModule::SdkDeclaration` | `HookResolveIdOutput { external: true }` with `ModuleType::Declaration` | rolldown has no concept of declaration-only modules; arkdown skips loading them entirely |
+| `OhosResolvedModule::BytecodeHar` | no rolldown equivalent | OHOS-specific: resolved as external (`external: true`) but carries `abc_path` for the packager |
+| `ResolverConfig::pkg_name_to_pkg_info` | rolldown reads `node_modules/` + `package.json` | OHOS uses `oh_modules/` + `oh-package.json5`; the map replaces Node.js package resolution |
+| `ResolverConfig::oh_modules_roots` | rolldown `resolve.modules` option (`["node_modules"]`) | Same purpose: list of directories to search for bare specifiers |
+| Extension resolution order (`.ets`, `.ts`, `.js`) | rolldown `resolve.extensions` option | OHOS tries `.ets` first (arkdown-specific); rolldown default is `[".js", ".ts"]` |
+| `to_ohm_url()` | no rolldown equivalent | OHOS-specific: converts resolved paths to `@bundle:bundleName/moduleName/path` strings |
+
+---
+
+## Test Requirements
+
+- `resolve("@ohos/hilog", importer)` → `SdkDeclaration` pointing to SDK api dir
+- `resolve("@kit.ArkUI", importer)` → `SdkDeclaration` pointing to SDK kits dir
+- `resolve("@bundle:com.foo/mod/path", importer)` → `ExternalBundle { ohm_url: "@bundle:com.foo/mod/path" }`
+- `resolve("@shared:com.foo/hsp/ets/index", importer)` → `ExternalHsp { .. }`
+- `resolve("./utils/helper", importer)` → `LocalSource` with `.ets` extension tried first, then `.ts`, then `.js`
+- `resolve("my-ohpm-pkg", importer)` → reads `oh_modules/my-ohpm-pkg/oh-package.json5` `main` field and returns `LocalSource` at that path
+- `resolve("my-bytecode-har", importer)` where `oh-package.json5` has `metadata.abcPath` → `BytecodeHar`
+- `resolve("file:../my-local-har", importer)` → `LocalSource` at the local HAR's `src/main/ets/index.ets`
+- `resolve("nonexistent-pkg", importer)` → `Err(ResolveError::NotFound { .. })`
+- OHM URL generation with `use_normalized_ohm_url = true`: `to_ohm_url()` on a local source file produces `"@bundle:com.example/entry/ets/utils/helper"` (no `.ets` extension, path relative to `src/main/`)
+- Case-sensitivity check: resolving `"./Utils/Helper"` when actual file is `"./utils/helper"` returns `Err(ResolveError::CaseMismatch)` when `case_sensitive_check = true`
+- Relative specifier `"../../../outside"` that escapes module root returns `Err` (no directory traversal outside project root)

@@ -3,7 +3,7 @@ use oxc_codegen::Codegen;
 use oxc_parser::{Parser, ParserReturn};
 use oxc_span::SourceType;
 
-use arkdown_core::{ArkdownError, ChunkGraph, ModuleGraph, ModuleType};
+use arkdown_core::{ArkdownError, ChunkGraph, Module, ModuleGraph, ModuleType};
 
 /// Generate CJS-compatible JavaScript for every chunk.
 ///
@@ -21,10 +21,13 @@ pub fn generate_code(
 
         for &module_idx in &chunk.modules {
             let module = &graph.modules[module_idx];
-            let module_code =
-                regenerate_module(&module.source.content, &module.id.id, module.id.module_type.clone())?;
-            bundle_code.push_str(&module_code);
-            bundle_code.push('\n');
+            // Only normal (non-external) modules contribute source code.
+            if let Module::Normal(nm) = module {
+                let module_code =
+                    regenerate_module(&nm.source.content, &nm.id.id, nm.id.module_type.clone())?;
+                bundle_code.push_str(&module_code);
+                bundle_code.push('\n');
+            }
         }
 
         chunk.chunk_hash = format!("{:x}", fnv1a_hash(&bundle_code));

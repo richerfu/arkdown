@@ -99,6 +99,57 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_module_json_with_abilities() {
+        let json = r#"{
+            module: {
+                name: "entry",
+                type: "entry",
+                srcEntry: "./ets/entryability/EntryAbility.ets",
+                deviceTypes: ["phone"],
+                abilities: [{
+                    "name": "EntryAbility",
+                    "srcEntry": "./ets/entryability/EntryAbility.ets",
+                    "description": "$string:ability_description",
+                    "exported": true
+                }]
+            }
+        }"#;
+        let m = parse_module_json(json, Path::new("module.json5")).unwrap();
+        assert_eq!(m.module.abilities.len(), 1);
+        let ability = &m.module.abilities[0];
+        assert_eq!(ability["name"], "EntryAbility");
+        assert_eq!(
+            ability["srcEntry"],
+            "./ets/entryability/EntryAbility.ets"
+        );
+    }
+
+    #[test]
+    fn test_parse_module_json_har_type() {
+        let json = r#"{
+            module: {
+                name: "mylib",
+                type: "har",
+                srcEntry: "./ets/index.ets",
+                deviceTypes: ["phone", "tablet"]
+            }
+        }"#;
+        let m = parse_module_json(json, Path::new("module.json5")).unwrap();
+        assert_eq!(m.module.module_type, "har");
+        assert_eq!(map_module_type(&m.module.module_type), arkdown_core::OhosModuleType::Har);
+    }
+
+    #[test]
+    fn test_parse_module_json_missing_optional_fields() {
+        // Only required: `module` key. All inner fields have defaults.
+        let json = r#"{ module: {} }"#;
+        let m = parse_module_json(json, Path::new("module.json5")).unwrap();
+        assert!(m.module.name.is_empty());
+        assert!(m.module.device_types.is_empty());
+        assert!(m.module.abilities.is_empty());
+    }
+
+    #[test]
     fn test_map_module_type() {
         assert_eq!(
             map_module_type("entry"),

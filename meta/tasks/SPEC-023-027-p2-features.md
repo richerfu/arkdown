@@ -141,3 +141,81 @@ let need_widget_compile = module_json.form_json_paths.len() > 0
 
 Widget source files are identified by `buildOption.arkOptions` referencing form extension
 source files listed in `formJsonPathArr`.
+
+---
+
+## Rolldown Alignment
+
+### SPEC-023: Watch Mode
+
+| arkdown concept | rolldown equivalent | note |
+| --- | --- | --- |
+| `Watcher` | rolldown `Bundler` in watch mode (`--watch`) | rolldown has built-in watch mode; arkdown implements watch via `notify` crate and wraps the full pipeline (not just bundling) |
+| `notify::recommended_watcher` | rolldown uses OS filesystem events via `notify` crate too | Same underlying crate; rolldown watches only JS/TS files; arkdown must also watch `.ets`, `resources/`, and `module.json5` |
+| `collect_events` debounce | rolldown 50ms default debounce | Same default debounce window |
+| `incremental_build` using SPEC-019 cache | rolldown incremental rebuild via module cache | Both re-run only changed modules; rolldown uses rollup cache format; arkdown uses msgpack cache (SPEC-019) |
+| `WatchChangeKind::Create\|Update\|Delete` | rolldown `WatchChangeKind` enum | Identical enum; arkdown maps `notify::EventKind` to this |
+
+### SPEC-024: Hot-Reload Importer Graph Plugin
+
+| arkdown concept | rolldown equivalent | note |
+| --- | --- | --- |
+| `CollectImportersPlugin::build_end` | `Plugin::build_end` | Same hook |
+| `importer_map: HashMap<String, Vec<String>>` | rolldown `ModuleInfo::importers` | rolldown tracks importers in `ModuleInfo`; arkdown writes them to a JSON file for DevEco Studio |
+
+### SPEC-025: Preview Mode Resource Watcher
+
+No rolldown equivalent. Preview mode is DevEco Studio-specific.
+
+### SPEC-026: HAR TGZ Clean Plugin
+
+| arkdown concept | rolldown equivalent | note |
+| --- | --- | --- |
+| Strip ArkTS decorators from source | Babel `@babel/plugin-strip-type-annotations` | Similar: remove runtime-irrelevant syntax before publishing; different: ArkTS decorators are more complex |
+
+### SPEC-027: ArkTS Widget Compilation
+
+| arkdown concept | rolldown equivalent | note |
+| --- | --- | --- |
+| `AbcCompiler::compile_widget()` | rolldown multi-entry build with separate `output.dir` | Both run a separate compilation pass; rolldown uses separate output options; arkdown uses a separate cache dir and loader.json |
+
+---
+
+## Test Requirements
+
+### SPEC-023
+
+- Initial build completes and HAP is produced before watch loop starts
+- Saving a `.ets` file triggers a rebuild within 2 seconds
+- Saving an untracked file outside `src/main/ets/` does not trigger a rebuild
+- Only the changed module and its dependents are recompiled (verified via `tracing::debug` log: unchanged modules say "cache hit")
+- `WatchChangeKind::Delete`: removing a source file triggers rebuild; build fails if the file is still imported
+- Debounce: saving 10 files in rapid succession triggers exactly one rebuild (not 10)
+- `Ctrl+C` exits the watch loop cleanly (no zombie processes or dangling file handles)
+
+### SPEC-024
+
+- `CollectImportersPlugin` writes a JSON file to `output_path` after `build_end`
+- The JSON maps module IDs to arrays of importer module IDs
+- A module with no importers maps to an empty array
+- Only active when `PatchMode::HotReload` or `PatchMode::ColdReload`; inactive in normal build mode
+- Plugin name returns `"collect-importers"`
+
+### SPEC-025
+
+- `ResourceWatcherPlugin` only activates when `config.output_target == OutputTarget::Preview`
+- A change to `resources/base/element/string.json` triggers `arkdown-resource::compile()` without a full rebuild
+- Non-resource file changes (`.ets`) do not trigger resource recompilation
+
+### SPEC-026
+
+- `EtsTgzCleanPlugin` strips `@Component`, `@Entry`, `@State` decorators from `.ets` files
+- Resulting cleaned source is valid TypeScript (parseable without ArkTS extension)
+- Non-decorator content (regular class methods, imports) is preserved unchanged
+
+### SPEC-027
+
+- `compile_widget()` is called when `need_widget_compile = true` (form JSON paths present in `module.json5`)
+- Widget compilation uses a separate cache directory from the main module compilation
+- Widget `.abc` output is placed at the widget-specific path, not overwriting the main `modules.abc`
+- `compile_widget()` is never called for HAR modules (`module.type_ == "har"`)

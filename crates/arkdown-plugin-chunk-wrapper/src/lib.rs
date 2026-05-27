@@ -13,27 +13,29 @@ pub use plugin::ChunkWrapperPlugin;
 #[cfg(test)]
 mod tests {
     use super::plugin::ChunkWrapperPlugin;
-    use arkdown_core::{ArkChunk, ArkdownPlugin, RenderChunkContext};
+    use arkdown_core::{ArkdownPlugin, PluginContext, RenderedChunkMeta};
 
-    fn make_chunk(name: &str, code: &str) -> (ArkChunk, String) {
-        let chunk = ArkChunk {
+    fn make_chunk_meta(name: &str) -> RenderedChunkMeta {
+        RenderedChunkMeta {
             name: name.to_string(),
             chunk_hash: "a1b2c3d4".to_string(),
-            modules: vec![],
             is_entry: true,
-            entry_module: None,
-            code: code.to_string(),
-            source_map: None,
-        };
-        (chunk, code.to_string())
+            is_dynamic_entry: false,
+            facade_module_id: None,
+            module_ids: vec![],
+            exports: vec![],
+            imports: vec![],
+            dynamic_imports: vec![],
+        }
     }
 
     #[tokio::test]
     async fn test_iife_wrap_basic() {
         let plugin = ChunkWrapperPlugin::new(false);
-        let (chunk, code) = make_chunk("Entry", "var x = 1;");
+        let chunk = make_chunk_meta("Entry");
+        let code = "var x = 1;";
         let result = plugin
-            .render_chunk(&RenderChunkContext::default(), code, &chunk)
+            .render_chunk(&PluginContext::default(), code, &chunk)
             .await
             .unwrap();
         let rendered = result.unwrap();
@@ -46,9 +48,9 @@ mod tests {
     async fn test_require_rewrite() {
         let plugin = ChunkWrapperPlugin::new(true);
         let code = r#"var _helper = require("./helper");"#;
-        let (chunk, _) = make_chunk("Entry", code);
+        let chunk = make_chunk_meta("Entry");
         let result = plugin
-            .render_chunk(&RenderChunkContext::default(), code.to_string(), &chunk)
+            .render_chunk(&PluginContext::default(), code, &chunk)
             .await
             .unwrap();
         let rendered = result.unwrap();
@@ -60,9 +62,9 @@ mod tests {
     async fn test_external_require_unchanged() {
         let plugin = ChunkWrapperPlugin::new(true);
         let code = r#"var fs = require("fs");"#;
-        let (chunk, _) = make_chunk("Entry", code);
+        let chunk = make_chunk_meta("Entry");
         let result = plugin
-            .render_chunk(&RenderChunkContext::default(), code.to_string(), &chunk)
+            .render_chunk(&PluginContext::default(), code, &chunk)
             .await
             .unwrap();
         let rendered = result.unwrap();
@@ -73,9 +75,10 @@ mod tests {
     #[tokio::test]
     async fn test_registry_export_appended() {
         let plugin = ChunkWrapperPlugin::new(false);
-        let (chunk, code) = make_chunk("Entry", "var x = 1;");
+        let chunk = make_chunk_meta("Entry");
+        let code = "var x = 1;";
         let result = plugin
-            .render_chunk(&RenderChunkContext::default(), code, &chunk)
+            .render_chunk(&PluginContext::default(), code, &chunk)
             .await
             .unwrap();
         let rendered = result.unwrap();
@@ -87,9 +90,9 @@ mod tests {
     async fn test_support_chunks_false_no_rewrite() {
         let plugin = ChunkWrapperPlugin::new(false);
         let code = r#"var _h = require("./helper");"#;
-        let (chunk, _) = make_chunk("Entry", code);
+        let chunk = make_chunk_meta("Entry");
         let result = plugin
-            .render_chunk(&RenderChunkContext::default(), code.to_string(), &chunk)
+            .render_chunk(&PluginContext::default(), code, &chunk)
             .await
             .unwrap();
         let rendered = result.unwrap();
@@ -100,9 +103,10 @@ mod tests {
     #[tokio::test]
     async fn test_iife_structure() {
         let plugin = ChunkWrapperPlugin::new(false);
-        let (chunk, code) = make_chunk("MyPage", "console.log('hello');");
+        let chunk = make_chunk_meta("MyPage");
+        let code = "console.log('hello');";
         let result = plugin
-            .render_chunk(&RenderChunkContext::default(), code, &chunk)
+            .render_chunk(&PluginContext::default(), code, &chunk)
             .await
             .unwrap();
         let rendered = result.unwrap();

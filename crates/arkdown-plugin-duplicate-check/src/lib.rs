@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use async_trait::async_trait;
-use arkdown_core::*;
+use arkdown_core::{
+    ArkdownError, ArkdownPlugin, ChunkGraph, HookUsage, PluginContext, PluginResult,
+};
 
 pub struct DuplicateCheckPlugin;
 
@@ -12,9 +14,13 @@ impl ArkdownPlugin for DuplicateCheckPlugin {
         "duplicate-check"
     }
 
+    fn register_hook_usage(&self) -> HookUsage {
+        HookUsage::GenerateBundle
+    }
+
     async fn generate_bundle(
         &self,
-        _ctx: &mut GenerateBundleContext,
+        _ctx: &PluginContext,
         bundle: &mut ChunkGraph,
         _is_write: bool,
     ) -> PluginResult<()> {
@@ -159,7 +165,7 @@ mod tests {
         // Empty graph should pass
         let mut cg = chunk_graph;
         let result = plugin
-            .generate_bundle(&mut GenerateBundleContext::default(), &mut cg, false)
+            .generate_bundle(&PluginContext::default(), &mut cg, false)
             .await;
         assert!(result.is_ok());
     }

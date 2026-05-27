@@ -122,6 +122,7 @@ dependencies = [
  "oxc_parser",
  "oxc_span",
  "rayon",
+ "tempfile",
  "thiserror",
 ]
 
@@ -173,6 +174,7 @@ name = "arkdown-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bitflags 2.11.1",
  "index_vec",
  "rustc-hash",
  "serde",
@@ -347,6 +349,7 @@ dependencies = [
  "json5",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
 ]
 
@@ -396,6 +399,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "x509-cert",
+ "zip",
 ]
 
 [[package]]

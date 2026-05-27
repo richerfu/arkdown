@@ -122,3 +122,154 @@ pub fn encode_digest_pairs(pairs: &[(u32, &[u8])]) -> Vec<u8> {
     }
     buf
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Magic constant byte values ──────────────────────────────────────
+
+    #[test]
+    fn test_magic_v2_exact_bytes() {
+        assert_eq!(MAGIC_V2, b"HAP Sig Block 42");
+        assert_eq!(MAGIC_V2.len(), 16);
+    }
+
+    #[test]
+    fn test_magic_v3_exact_bytes() {
+        assert_eq!(MAGIC_V3, b"<hap sign block>");
+        assert_eq!(MAGIC_V3.len(), 16);
+    }
+
+    #[test]
+    fn test_magic_v2_and_v3_differ() {
+        assert_ne!(MAGIC_V2, MAGIC_V3, "V2 and V3 magic must be distinct");
+    }
+
+    // ── Block ID constants ──────────────────────────────────────────────
+
+    #[test]
+    fn test_block_id_signature_v1_value() {
+        assert_eq!(BLOCK_ID_SIGNATURE_V1, 0x20000000);
+    }
+
+    #[test]
+    fn test_block_id_proof_of_rotation_value() {
+        assert_eq!(BLOCK_ID_PROOF_OF_ROTATION, 0x20000001);
+    }
+
+    #[test]
+    fn test_block_id_profile_value() {
+        assert_eq!(BLOCK_ID_PROFILE, 0x20000002);
+    }
+
+    #[test]
+    fn test_block_id_property_value() {
+        assert_eq!(BLOCK_ID_PROPERTY, 0x20000003);
+    }
+
+    // ── Algorithm ID constants ──────────────────────────────────────────
+
+    #[test]
+    fn test_alg_ecdsa_sha256_value() {
+        assert_eq!(ALG_ECDSA_SHA256, 0x201);
+    }
+
+    #[test]
+    fn test_alg_rsa_pss_sha256_value() {
+        assert_eq!(ALG_RSA_PSS_SHA256, 0x101);
+    }
+
+    // ── build_signing_block magic selection ────────────────────────────
+
+    #[test]
+    fn test_sdk_lt_8_selects_v2_magic() {
+        let block = build_signing_block(&[(BLOCK_ID_SIGNATURE_V1, vec![0xAA; 4])], 7);
+        let len = block.len();
+        // magic is at: block.len() - 4(version) - 16(magic)
+        let magic_start = len - 4 - 16;
+        assert_eq!(&block[magic_start..magic_start + 16], MAGIC_V2.as_slice());
+    }
+
+    #[test]
+    fn test_sdk_gte_8_selects_v3_magic() {
+        let block = build_signing_block(&[(BLOCK_ID_SIGNATURE_V1, vec![0xBB; 4])], 8);
+        let len = block.len();
+        let magic_start = len - 4 - 16;
+        assert_eq!(&block[magic_start..magic_start + 16], MAGIC_V3.as_slice());
+    }
+
+    #[test]
+    fn test_sdk_version_12_selects_v3_magic() {
+        let block = build_signing_block(&[(BLOCK_ID_SIGNATURE_V1, vec![1u8])], 12);
+        let len = block.len();
+        let magic_start = len - 4 - 16;
+        assert_eq!(&block[magic_start..magic_start + 16], MAGIC_V3.as_slice());
+    }
+
+    // ── Version field ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_sdk_lt_8_sets_version_2() {
+        let block = build_signing_block(&[(BLOCK_ID_SIGNATURE_V1, vec![1u8])], 5);
+        let version = u32::from_le_bytes(block[block.len() - 4..].try_into().unwrap());
+        assert_eq!(version, 2);
+    }
+
+    #[test]
+    fn test_sdk_gte_8_sets_version_3() {
+        let block = build_signing_block(&[(BLOCK_ID_SIGNATURE_V1, vec![1u8])], 12);
+        let version = u32::from_le_bytes(block[block.len() - 4..].try_into().unwrap());
+        assert_eq!(version, 3);
+    }
+
+    // ── Total size field ───────────────────────────────────────────────
+
+    #[test]
+    fn test_total_size_field_correct_for_two_blocks() {
+        let data1 = vec![0u8; 50];
+        let data2 = vec![0u8; 100];
+        let block = build_signing_block(
+            &[(BLOCK_ID_SIGNATURE_V1, data1), (BLOCK_ID_PROFILE, data2)],
+            12,
+        );
+        // total = 2*12 (headers) + 50+100 (data) + 4 (count) + 8 (size) + 16 (magic) + 4 (version)
+        let expected: u64 = (2 * 12 + 150 + 4 + 8 + 16 + 4) as u64;
+        let total_start = block.len() - 4 - 16 - 8;
+        let total = u64::from_le_bytes(block[total_start..total_start + 8].try_into().unwrap());
+        assert_eq!(total, expected);
+    }
+
+    // ── encode_digest_pairs ────────────────────────────────────────────
+
+    #[test]
+    fn test_encode_digest_pairs_empty_is_empty() {
+        let encoded = encode_digest_pairs(&[]);
+        assert!(encoded.is_empty());
+    }
+
+    #[test]
+    fn test_encode_digest_pairs_single() {
+        let digest = [0xDEu8; 32];
+        let encoded = encode_digest_pairs(&[(ALG_ECDSA_SHA256, &digest)]);
+        assert_eq!(encoded.len(), 4 + 4 + 32); // alg_id + len + digest
+        assert_eq!(&encoded[0..4], &ALG_ECDSA_SHA256.to_le_bytes());
+        assert_eq!(&encoded[4..8], &32u32.to_le_bytes());
+        assert_eq!(&encoded[8..40], &digest[..]);
+    }
+
+    #[test]
+    fn test_encode_digest_pairs_multiple() {
+        let d1 = [0x11u8; 32];
+        let d2 = [0x22u8; 32];
+        let encoded = encode_digest_pairs(&[
+            (ALG_ECDSA_SHA256, &d1),
+            (ALG_RSA_PSS_SHA256, &d2),
+        ]);
+        assert_eq!(encoded.len(), 2 * (4 + 4 + 32));
+        // Second entry starts at offset 40
+        assert_eq!(&encoded[40..44], &ALG_RSA_PSS_SHA256.to_le_bytes());
+        assert_eq!(&encoded[44..48], &32u32.to_le_bytes());
+        assert_eq!(&encoded[48..80], &d2[..]);
+    }
+}

@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use arkdown_core::{
-    ArkdownError, ArkdownPlugin, BuildContext, HostModuleInfo, LoadContext, Module,
-    ModuleMeta, ModuleParsedContext, ModuleSource, PluginResult,
+    ArkdownError, ArkdownPlugin, HostModuleInfo, HookUsage, ModuleInfo, ModuleMeta, PluginContext,
+    PluginResult,
 };
 
 use crate::meta_compute;
@@ -45,7 +45,7 @@ impl ModuleMetaPlugin {
     /// Compute [`ModuleMeta`] for the given `module_id` using this plugin's
     /// `project_root` and `module_name`.
     ///
-    /// Call this before constructing the [`Module`] so that metadata is
+    /// Call this before constructing the module so that metadata is
     /// available as soon as the module enters the build graph.
     pub fn meta_for(&self, module_id: &str) -> ModuleMeta {
         meta_compute::compute_meta(module_id, &self.project_root, &self.module_name)
@@ -58,20 +58,25 @@ impl ArkdownPlugin for ModuleMetaPlugin {
         "module-meta"
     }
 
-    /// This plugin does not load content — defer to the default file loader.
-    async fn load(&self, _ctx: &LoadContext, _id: &str) -> PluginResult<Option<ModuleSource>> {
-        Ok(None)
+    fn register_hook_usage(&self) -> HookUsage {
+        HookUsage::ModuleParsed | HookUsage::BuildStart
     }
 
     /// After a module is parsed, record all of its import edges in the
     /// reverse map so that each imported module knows its consumers.
     async fn module_parsed(
         &self,
-        _ctx: &ModuleParsedContext,
-        module: &Module,
+        _ctx: &PluginContext,
+        module: &ModuleInfo,
     ) -> PluginResult<()> {
-        let host_dep = module.meta.pkg_name.clone().unwrap_or_default();
-        let host_mod = module.meta.module_name.clone().unwrap_or_default();
+        // Derive the hosting package/module info from the module's own ID.
+        let meta = meta_compute::compute_meta(
+            &module.id,
+            &self.project_root,
+            &self.module_name,
+        );
+        let host_dep = meta.pkg_name.unwrap_or_default();
+        let host_mod = meta.module_name.unwrap_or_default();
 
         let mut map = self.reverse_map.lock().map_err(|e| ArkdownError::PluginError {
             plugin: self.name().to_string(),
@@ -88,17 +93,17 @@ impl ArkdownPlugin for ModuleMetaPlugin {
             });
         };
 
-        for import in &module.imports {
-            push_host(&mut map, &import.resolved.id);
+        for id in &module.imported_ids {
+            push_host(&mut map, id);
         }
-        for import in &module.dynamic_imports {
-            push_host(&mut map, &import.resolved.id);
+        for id in &module.dynamically_imported_ids {
+            push_host(&mut map, id);
         }
 
         Ok(())
     }
 
-    async fn build_start(&self, _ctx: &mut BuildContext) -> PluginResult<()> {
+    async fn build_start(&self, _ctx: &PluginContext) -> PluginResult<()> {
         // Clear stale state from a previous incremental build.
         self.reverse_map
             .lock()
@@ -116,7 +121,7 @@ impl ArkdownPlugin for ModuleMetaPlugin {
 
 /// Compute [`ModuleMeta`] for a module with the given `module_id`.
 ///
-/// Called by the loader before constructing a [`Module`] so that metadata is
+/// Called by the loader before constructing a module so that metadata is
 /// available as soon as the module enters the graph.
 pub fn compute_module_meta(
     module_id: &str,

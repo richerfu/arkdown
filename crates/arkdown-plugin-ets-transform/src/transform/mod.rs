@@ -107,6 +107,7 @@ mod tests {
                 id: "test.ets".to_string(),
                 external: false,
                 module_type: ModuleType::Ets,
+                ..Default::default()
             },
             content: content.to_string(),
             source_map: None,

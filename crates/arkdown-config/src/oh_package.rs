@@ -73,6 +73,52 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_oh_package_empty_dependencies_object() {
+        let json = r#"{
+            name: "entry",
+            version: "1.0.0",
+            dependencies: {}
+        }"#;
+        let pkg = parse_oh_package(json, Path::new("oh-package.json5")).unwrap();
+        assert!(pkg.dependencies.is_empty());
+        assert!(pkg.dev_dependencies.is_empty());
+    }
+
+    #[test]
+    fn test_parse_oh_package_multiple_dependencies() {
+        let json = r#"{
+            modelVersion: "5.0.0",
+            name: "entry",
+            version: "2.0.0",
+            dependencies: {
+                "@ohos/axios": "2.2.0",
+                "@ohos/lottie": "^2.0.0",
+                "local-lib": "file:../libs/local"
+            }
+        }"#;
+        let pkg = parse_oh_package(json, Path::new("oh-package.json5")).unwrap();
+        assert_eq!(pkg.name, "entry");
+        assert_eq!(pkg.version, "2.0.0");
+        assert_eq!(pkg.dependencies.len(), 3);
+        assert_eq!(pkg.dependencies["@ohos/axios"], "2.2.0");
+        assert_eq!(pkg.dependencies["local-lib"], "file:../libs/local");
+    }
+
+    #[test]
+    fn test_parse_oh_package_dynamic_dependencies() {
+        let json = r#"{
+            name: "hsp-lib",
+            version: "1.0.0",
+            dynamicDependencies: {
+                "@remote/shared": "1.0.0"
+            }
+        }"#;
+        let pkg = parse_oh_package(json, Path::new("oh-package.json5")).unwrap();
+        assert_eq!(pkg.dynamic_dependencies.len(), 1);
+        assert_eq!(pkg.dynamic_dependencies["@remote/shared"], "1.0.0");
+    }
+
+    #[test]
     fn test_parse_oh_package_with_deps() {
         let json = r#"{
             modelVersion: "5.0.0",

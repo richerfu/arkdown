@@ -129,3 +129,36 @@ Use `clap` for argument parsing.
 
 - `meta/design/compat.md` — command mapping from hvigorw
 - `meta/design/pipeline.md` — full pipeline for orchestration order
+
+---
+
+## Rolldown Alignment
+
+| arkdown concept | rolldown equivalent | note |
+| --- | --- | --- |
+| `arkdown build` command | rolldown `Bundler::write()` orchestration | rolldown is a library; its CLI (`rolldown` command) calls `Bundler::write()`; arkdown CLI does the same plus resource compilation, ABC compilation, and packaging |
+| `--mode debug\|release` | rolldown watch mode vs production build | arkdown's mode flag maps to `BuildMode` which controls tree-shaking and obfuscation; rolldown uses `process.env.NODE_ENV` convention |
+| `--target hap\|hsp\|har` | rolldown `format` option (`esm`, `cjs`, `iife`) | Different concept: arkdown target determines archive format; rolldown format determines JS module format |
+| `--module <name>` | no direct rolldown equivalent | OHOS-specific: scopes the build to one OHOS module; rolldown always builds all entries |
+| `--product <name>` | no direct rolldown equivalent | OHOS-specific: selects the product variant from `build-profile.json5` |
+| Steps 3+4 in parallel | rolldown parallel module loading | Both run independent tasks concurrently; in arkdown it is resource compilation (step 3) and JS bundling (step 4) |
+| `ARKDOWN_LOG` env var | rolldown `ROLLDOWN_LOG_LEVEL` | Same purpose: log verbosity control |
+| `ARKDOWN_JOBS` env var | rolldown `ROLLDOWN_CONCURRENCY` | Both control worker parallelism |
+| Cargo-style error formatting | rolldown diagnostic output | Same `error[CODE]: message\n  --> file:line:col` format |
+
+---
+
+## Test Requirements
+
+- `arkdown build --target hap` on `MyApplication` exits with code 0 and produces `build/default/outputs/default/entry.hap`
+- `arkdown build --mode release` applies tree shaking (verified: unused export absent from `.abc`)
+- `arkdown build --module entry` builds only the `entry` module; `feature` module is not built
+- `arkdown build --product default` selects the correct product from `build-profile.json5`
+- `arkdown build` with a missing `module.json5` exits with code 2 and prints a config error message
+- `arkdown build` with a duplicate filename exits with code 1 and prints a `duplicate-check` error with both file paths
+- `arkdown clean` deletes the `build/` directory and exits with code 0
+- `arkdown --version` prints the crate version string and exits with code 0
+- Resource compilation (step 3) and bundling (step 4) are confirmed to run concurrently (timing test or log ordering)
+- `ARKDOWN_LOG=debug` causes debug-level log lines to appear on stderr
+- Progress output format: each step line contains the step number, description, and elapsed time
+- Exit code 1 on any `ArkdownError` from any pipeline step

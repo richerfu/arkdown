@@ -206,6 +206,67 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_build_profile_module_src_path() {
+        let json = r#"{
+            app: {
+                products: [{ name: "default", bundleName: "com.test", compatibleSdkVersion: "5.0.0(12)", runtimeOS: "HarmonyOS" }],
+            },
+            modules: [{
+                name: "entry",
+                srcPath: "./entry",
+            }]
+        }"#;
+        let profile =
+            parse_build_profile(json, std::path::Path::new("build-profile.json5")).unwrap();
+        assert_eq!(profile.modules[0].name, "entry");
+        assert_eq!(profile.modules[0].src_path, "./entry");
+    }
+
+    #[test]
+    fn test_parse_build_profile_bundle_name_access() {
+        let json = r#"{
+            app: {
+                products: [{
+                    name: "release",
+                    bundleName: "com.example.myapp",
+                    compatibleSdkVersion: "5.0.0(12)",
+                    runtimeOS: "HarmonyOS",
+                }],
+            },
+            modules: [{ name: "entry", srcPath: "./entry" }]
+        }"#;
+        let profile =
+            parse_build_profile(json, std::path::Path::new("build-profile.json5")).unwrap();
+        assert_eq!(profile.app.products[0].bundle_name, "com.example.myapp");
+    }
+
+    #[test]
+    fn test_parse_build_profile_missing_required_field_returns_err() {
+        // `app` key is missing entirely — required by `RawBuildProfile`
+        let json = r#"{ modules: [] }"#;
+        let result = parse_build_profile(json, std::path::Path::new("build-profile.json5"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_build_profile_multiple_modules() {
+        let json = r#"{
+            app: {
+                products: [{ name: "default", bundleName: "com.multi", compatibleSdkVersion: "5.0.0(12)", runtimeOS: "HarmonyOS" }],
+            },
+            modules: [
+                { name: "entry", srcPath: "./entry" },
+                { name: "feature", srcPath: "./feature" }
+            ]
+        }"#;
+        let profile =
+            parse_build_profile(json, std::path::Path::new("build-profile.json5")).unwrap();
+        assert_eq!(profile.modules.len(), 2);
+        assert_eq!(profile.modules[1].name, "feature");
+        assert_eq!(profile.modules[1].src_path, "./feature");
+    }
+
+    #[test]
     fn test_parse_build_profile_with_signing() {
         let json = r#"{
             app: {

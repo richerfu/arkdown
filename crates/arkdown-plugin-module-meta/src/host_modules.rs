@@ -11,18 +11,16 @@ pub fn build_reverse_map(modules: &[&Module]) -> HashMap<String, Vec<HostModuleI
     let mut map: HashMap<String, Vec<HostModuleInfo>> = HashMap::new();
 
     for module in modules {
-        let host_dep = module
-            .meta
-            .pkg_name
-            .clone()
-            .unwrap_or_default();
-        let host_mod = module
-            .meta
-            .module_name
-            .clone()
-            .unwrap_or_default();
+        // Only normal (non-external) modules contribute to the reverse map.
+        let nm = match module.as_normal() {
+            Some(m) => m,
+            None => continue,
+        };
 
-        for import in &module.imports {
+        let host_dep = nm.meta.pkg_name.clone().unwrap_or_default();
+        let host_mod = nm.meta.module_name.clone().unwrap_or_default();
+
+        for import in &nm.imports {
             map.entry(import.resolved.id.clone())
                 .or_default()
                 .push(HostModuleInfo {
@@ -33,7 +31,7 @@ pub fn build_reverse_map(modules: &[&Module]) -> HashMap<String, Vec<HostModuleI
 
         // Dynamic imports are also reverse-mapped so hot-reload can track
         // every consumer, not just static ones.
-        for import in &module.dynamic_imports {
+        for import in &nm.dynamic_imports {
             map.entry(import.resolved.id.clone())
                 .or_default()
                 .push(HostModuleInfo {
