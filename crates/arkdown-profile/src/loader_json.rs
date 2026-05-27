@@ -254,6 +254,8 @@ mod tests {
                 name: "EntryAbility".to_string(),
                 src_entry: "./ets/entryability/EntryAbility.ets".to_string(),
                 exported: true,
+                icon: None, label: None, description: None,
+                start_window_icon: None, start_window_background: None,
             }],
             extension_abilities: vec![],
             dependencies: vec![],

@@ -73,6 +73,16 @@ pub struct AbilityEntry {
     pub name: String,
     pub src_entry: String,
     pub exported: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_window_icon: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_window_background: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,6 +135,16 @@ pub struct AbilityConfig {
     pub exported: bool,
     #[serde(default)]
     pub skills: Vec<SkillConfig>,
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(rename = "startWindowIcon", default)]
+    pub start_window_icon: Option<String>,
+    #[serde(rename = "startWindowBackground", default)]
+    pub start_window_background: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

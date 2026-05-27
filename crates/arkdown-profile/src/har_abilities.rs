@@ -36,6 +36,8 @@ mod tests {
                     name: "ExportedAbility".to_string(),
                     src_entry: "./ets/ExportedAbility.ets".to_string(),
                     exported: true,
+                    icon: None, label: None, description: None,
+                    start_window_icon: None, start_window_background: None,
                 },
             },
             HarAbility {
@@ -44,6 +46,8 @@ mod tests {
                     name: "InternalAbility".to_string(),
                     src_entry: "./ets/InternalAbility.ets".to_string(),
                     exported: false,
+                    icon: None, label: None, description: None,
+                    start_window_icon: None, start_window_background: None,
                 },
             },
         ];

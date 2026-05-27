@@ -22,6 +22,11 @@ pub fn process_profile(
             name: a.name.clone(),
             src_entry: a.src_entry.clone(),
             exported: a.exported,
+            icon: a.icon.clone(),
+            label: a.label.clone(),
+            description: a.description.clone(),
+            start_window_icon: a.start_window_icon.clone(),
+            start_window_background: a.start_window_background.clone(),
         })
         .collect();
 
@@ -81,6 +86,11 @@ mod tests {
                     src_entry: "./ets/entryability/EntryAbility.ets".to_string(),
                     exported: true,
                     skills: vec![],
+                    icon: None,
+                    label: None,
+                    description: None,
+                    start_window_icon: None,
+                    start_window_background: None,
                 }],
                 extension_abilities: vec![],
                 src_entry: None,

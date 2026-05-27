@@ -156,11 +156,18 @@ fn manifest_to_json(manifest: &HapManifest) -> serde_json::Value {
         .abilities
         .iter()
         .map(|a| {
-            serde_json::json!({
+            let mut ability = serde_json::json!({
                 "name": a.name,
                 "srcEntry": a.src_entry,
                 "exported": a.exported
-            })
+            });
+            let obj = ability.as_object_mut().unwrap();
+            if let Some(v) = &a.icon { obj.insert("icon".into(), v.clone().into()); }
+            if let Some(v) = &a.label { obj.insert("label".into(), v.clone().into()); }
+            if let Some(v) = &a.description { obj.insert("description".into(), v.clone().into()); }
+            if let Some(v) = &a.start_window_icon { obj.insert("startWindowIcon".into(), v.clone().into()); }
+            if let Some(v) = &a.start_window_background { obj.insert("startWindowBackground".into(), v.clone().into()); }
+            ability
         })
         .collect();
 
@@ -247,6 +254,8 @@ mod tests {
                     src_entry: "./ets/entryability/EntryAbility.ets".to_string(),
                     exported: true,
                     skills: vec![],
+                    icon: None, label: None, description: None,
+                    start_window_icon: None, start_window_background: None,
                 }],
                 extension_abilities: vec![],
                 src_entry: None,
