@@ -10,8 +10,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 rolldown design and replaces Huawei's `hvigorw`/hvigor build tool. It takes `.ets`/`.ts`
 source files and produces installable `.hap`/`.hsp`/`.har` artifacts.
 
-**Parser**: Uses `ohos-rs/oxc` (`https://github.com/ohos-rs/oxc`) — a fork of OXC with
-ArkTS support. Do not use upstream `oxc-project/oxc`; always use the ohos-rs fork.
+**Parser**: Uses `ohos-rs/oxc` (`https://github.com/ohos-rs/oxc`) — a fork of OXC pinned
+at the commit that `ohos-rs/oxc-ark` depends on (`rev = "5caa6d54ae977b8a76ed68b8aba06b38e1c6a614"`).
+Always use this pinned fork for `.ets` parsing. **Do not use upstream `oxc-project/oxc` crates.io
+releases** — they do not parse `.ets` syntax correctly.
+
+Note: `ohos-rs/oxc-ark` (`https://github.com/ohos-rs/oxc-ark`) is a separate ArkTS lint/format
+CLI tool (`oxk`). It is NOT used as a library dependency here; it is only a reference for which
+`ohos-rs/oxc` commit to pin.
 
 **Key design constraint**: ArkRuntime does NOT execute native ESM. All output chunks must
 be IIFE-wrapped and use `globalThis['name_hash']` for cross-chunk references. This is
@@ -104,9 +110,10 @@ dependency. All `.abc` compilation logic is in this crate.
 **4. `arkdown-resource` is a pure Rust resource compiler.** It ports `restool` from
 `https://gitcode.com/openharmony/developtools_restool`. No subprocess invocation.
 
-**5. Use ohos-rs/oxc, not oxc-project/oxc.** The ohos-rs fork adds ArkTS grammar support
-(`.ets` files, `@Entry`, `@Component` struct syntax, decorator metadata). The upstream OXC
-does not parse `.ets` files correctly.
+**5. Use ohos-rs/oxc (pinned rev), not oxc-project/oxc crates.io.** The ohos-rs fork (pinned at
+`rev = "5caa6d54ae977b8a76ed68b8aba06b38e1c6a614"`) supports `.ets` parsing. The upstream
+crates.io releases do not. Always specify the `rev` in Cargo.toml; do not use a floating branch.
+`ohos-rs/oxc-ark` is a lint/format CLI, not a parser library — do not confuse the two.
 
 **6. OHM URLs are module identities.** With `useNormalizedOHMUrl: true`, every module
 identifier in the bundle is an OHM URL: `@bundle:<bundleName>/<moduleName>/<path>`. These
