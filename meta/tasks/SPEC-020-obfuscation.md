@@ -9,11 +9,19 @@
 
 ## Summary
 
-Invokes the OHOS obfuscation tool (part of the SDK) on the bundled JS output before es2abc
-compilation. Replaces hvigor's obfuscation step in `ArkCompile.getObfuscationOptions()`.
+Pure Rust JS obfuscation using `oxc_parser` + span-based identifier renaming.
+Replaces the previous approach of invoking a closed-source SDK binary as a subprocess.
 
-The obfuscation tool is a closed-source SDK binary — arkdown invokes it as a subprocess
-between the bundler output and the es2abc invocation.
+The crate is inserted between bundler output and `arkdown-abc` compilation.  It parses
+each bundled JS file with `oxc_parser`, collects top-level binding names
+(`var`/`let`/`const`, `function`, `class`), generates short replacement names
+(a, b, …, z, aa, …), and rewrites all whole-word occurrences in the source text using
+descending-offset splice (so earlier offsets are not invalidated by shorter replacements).
+Property accesses (`.name`) are excluded from renaming.
+
+OHOS rule files (the same `.txt` format used by hvigor) are parsed natively and control
+which names are kept, which categories are obfuscated, and whether `console.log` calls
+are stripped.
 
 ---
 
@@ -41,28 +49,27 @@ if (buildOption.debuggable) return; // obfuscation is only for release
 
 ---
 
-## Obfuscation Config Types
+## Rule File Format
 
-```rust
-pub struct ObfuscationOptions {
-    pub self_config: ObfuscationSelfConfig,
-    pub dependencies: ObfuscationDependencies,
-    pub obfuscation_cache_dir: PathBuf,
-    pub export_rule_path: PathBuf,
-}
+```text
+# comment
+-enable-obfuscation
+-enable-property-obfuscation
+-enable-toplevel-obfuscation
+-compact
+-remove-log
 
-pub struct ObfuscationSelfConfig {
-    pub rule_options: RuleOptions,
-    pub consumer_rules: Vec<PathBuf>,
-    pub lib_dir: PathBuf,
-}
+-keep-property-name
+propertyToKeep
+anotherProperty
 
-pub struct ObfuscationDependencies {
-    pub hars: Vec<PathBuf>,
-    pub hsps: Vec<PathBuf>,
-    pub libraries: Vec<LibraryObfuscation>,
-}
+-keep-global-name
+GlobalClass
+globalFunction
 ```
+
+Directives are parsed by `crate::rules::parse_rules_str`.  Multiple rule files are merged
+with logical-OR for flags and set-union for keep-name lists.
 
 ---
 
@@ -75,7 +82,7 @@ arkdown bundle → bundled .js files
                            │
                     [if obfuscation.enable && release]
                            │
-                    obfuscation tool subprocess
+                    arkdown-obfuscate (pure Rust, oxc_parser)
                            │
                     obfuscated .js files
                            │
@@ -86,16 +93,18 @@ arkdown bundle → bundled .js files
 
 ## Cache Invalidation
 
-Compute a hash of all obfuscation rule files. If the hash changes between builds, discard
-the es2abc cache for affected modules (same logic as in hvigor's `ArkCompile.beforeTask()`).
+Compute a FNV-1a hash of all obfuscation rule file contents with `compute_rule_hash`.
+If the hash changes between builds, discard the es2abc cache for affected modules
+(same logic as hvigor's `ArkCompile.beforeTask()`).
 
 ---
 
 ## Acceptance Criteria
 
-- Release build with `ruleOptions.enable: true` runs obfuscation tool before es2abc
-- Debug build never runs obfuscation tool
+- Release build with `ruleOptions.enable: true` runs obfuscation before es2abc
+- Debug build never runs obfuscation
 - Obfuscation cache invalidated when rule files change
+- No subprocess invocation — entirely in-process Rust
 
 ---
 
@@ -110,45 +119,78 @@ the es2abc cache for affected modules (same logic as in hvigor's `ArkCompile.bef
 
 | arkdown concept | rolldown equivalent | note |
 | --- | --- | --- |
-| Obfuscation tool subprocess invocation | rolldown `minify` option (built-in oxc minifier) | In rolldown, minification is a built-in stage using oxc's minifier; in arkdown, OHOS obfuscation is a separate closed-source tool invoked as a subprocess — not the same as minification |
+| `oxc_parser` + span-based renaming | rolldown `minify` option (built-in oxc minifier) | rolldown uses the full oxc minifier; arkdown uses a targeted identifier-rename pass controlled by OHOS rule files |
 | Insert between bundler output and ABC compilation | no rolldown equivalent | rolldown has no compilation stage after JS emit; this step is OHOS-specific |
-| `ObfuscationOptions::self_config.rule_options` | rolldown `minify` configuration | Different mechanism: OHOS obfuscation uses rule files for identifier renaming; rolldown's minifier uses built-in heuristics |
+| `ObfuscationRules::keep_global_names` | rolldown `minify` configuration | Different mechanism: OHOS obfuscation uses rule files for identifier renaming; rolldown's minifier uses built-in heuristics |
 | Obfuscation rule file hash → cache invalidation | rolldown watches `rollup.config.js` for changes | Both invalidate caches when configuration changes; different mechanisms |
-| `is_debug: true` → skip obfuscation | rolldown dev mode (watch mode) | Both skip obfuscation/minification in development builds |
-
-**Key divergence:** The OHOS obfuscation tool is closed-source and must be invoked as a subprocess. Unlike the Rust-ported tools (es2abc, restool, ets-loader), there is no open-source reference to port. This crate manages subprocess I/O and cache invalidation around the tool.
+| `BuildMode::Debug` → skip obfuscation | rolldown dev mode (watch mode) | Both skip obfuscation/minification in development builds |
 
 ---
 
 ## Public API
 
 ```rust
-pub struct ObfuscationRunner {
-    options: ObfuscationOptions,
-    rule_file_hash: u64,
+/// Configuration for a single obfuscation pass.
+pub struct ObfuscationOptions {
+    pub rule_files: Vec<PathBuf>,
+    pub cache_dir: PathBuf,
+    pub export_rule_path: Option<PathBuf>,
 }
 
-impl ObfuscationRunner {
+pub struct Obfuscator { /* opaque */ }
+
+impl Obfuscator {
+    /// Parse rule files and build the obfuscator.  Returns
+    /// `ObfuscationError::RuleFileNotFound` if any rule file is absent.
     pub fn new(options: ObfuscationOptions) -> Result<Self, ObfuscationError>;
-    
-    /// Run obfuscation on bundled JS files. Only call in release builds.
-    /// Returns paths to the obfuscated JS files (replacing input files in-place or to a new dir).
-    pub fn run(&self, js_files: &[PathBuf]) -> Result<Vec<PathBuf>, ObfuscationError>;
-    
-    /// Hash of all rule files. Used to detect configuration changes for cache invalidation.
+
+    /// Obfuscate JS source in memory.
+    pub fn obfuscate_source(&self, source: &str, filename: &str)
+        -> Result<ObfuscationOutput, ObfuscationError>;
+
+    /// Obfuscate a single .js file (read input, write output).
+    pub fn obfuscate_file(&self, input: &Path, output: &Path)
+        -> Result<PathBuf, ObfuscationError>;
+
+    /// Obfuscate all .js files up to 2 levels deep in a directory, in-place.
+    pub fn obfuscate_dir(&self, dir: &Path) -> Result<Vec<PathBuf>, ObfuscationError>;
+
+    /// FNV-1a hash of all rule file contents.  Used for ABC cache invalidation.
     pub fn rule_hash(&self) -> u64;
 }
+
+#[derive(Debug, thiserror::Error)]
+pub enum ObfuscationError {
+    Io(#[from] std::io::Error),
+    RuleFileNotFound(PathBuf),
+    ParseError { file: String, message: String },
+    CodegenError(String),
+}
+
+pub fn compute_rule_hash(rule_files: &[PathBuf]) -> u64;
+pub fn should_obfuscate(build_mode: &BuildMode, config: Option<&ObfuscationConfig>) -> bool;
+pub fn parse_rules_str(content: &str) -> ObfuscationRules;
+pub fn parse_rules_file(path: &Path) -> std::io::Result<ObfuscationRules>;
+pub fn merge_rules(base: ObfuscationRules, extra: ObfuscationRules) -> ObfuscationRules;
 ```
 
 ---
 
 ## Test Requirements
 
-- Debug build (`BuildMode::Debug`): `ObfuscationRunner::run()` is never called — verified by checking the bundler output is unchanged
-- Release build with `ruleOptions.enable: false`: `ObfuscationRunner::run()` is never called
-- Release build with `ruleOptions.enable: true`: subprocess is invoked; output files are written
-- `rule_hash()` changes when a rule file content changes
-- `rule_hash()` is stable when rule files are unchanged
-- Cache invalidation: when `rule_hash()` changes between builds, `should_invalidate_cache` returns `true` for all ABC-compiled modules
-- `ObfuscationError::ToolNotFound` returned when obfuscation binary is absent from SDK (not panic)
-- `ObfuscationError::SubprocessFailed { exit_code, stderr }` returned when tool exits non-zero
+- `BuildMode::Debug` + any config: `should_obfuscate` returns `false`
+- `BuildMode::Release` + `enable_obfuscation: false`: `should_obfuscate` returns `false`
+- `BuildMode::Release` + `enable_obfuscation: true`: `should_obfuscate` returns `true`
+- `compute_rule_hash` is deterministic for unchanged rule files
+- `compute_rule_hash` changes when rule file content changes
+- Rule parser correctly sets all enable flags and keep-name sets
+- Comments and blank lines in rule files are ignored
+- `-disable-*` directive overrides earlier `-enable-*`
+- `Obfuscator::new` with no rule files produces an obfuscator that passes source through
+- `obfuscate_source` renames top-level `var` declarations when `-enable-obfuscation` is set
+- `obfuscate_source` preserves names in `-keep-global-name`
+- `-remove-log` strips `console.log(...)` lines
+- `obfuscate_file` reads input, writes obfuscated output, returns output path
+- `ObfuscationError::RuleFileNotFound` returned when rule file is absent
+- Top-level `function` declarations are renamed
+- Property accesses (`.propName`) are NOT renamed even when the identifier appears in bindings

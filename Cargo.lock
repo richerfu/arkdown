@@ -204,9 +204,11 @@ name = "arkdown-obfuscate"
 version = "0.1.0"
 dependencies = [
  "arkdown-core",
- "fs-err",
- "serde",
- "serde_json",
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_parser",
+ "oxc_span",
+ "rustc-hash",
  "tempfile",
  "thiserror",
  "walkdir",
