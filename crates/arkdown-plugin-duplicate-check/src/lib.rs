@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use async_trait::async_trait;
-use arkdown_core::*;
+use arkdown_core::{
+    ArkdownError, ArkdownPlugin, ChunkGraph, HookUsage, PluginContext, PluginResult,
+};
 
 pub struct DuplicateCheckPlugin;
 
@@ -10,6 +12,10 @@ pub struct DuplicateCheckPlugin;
 impl ArkdownPlugin for DuplicateCheckPlugin {
     fn name(&self) -> &str {
         "duplicate-check"
+    }
+
+    fn register_hook_usage(&self) -> HookUsage {
+        HookUsage::GenerateBundle
     }
 
     async fn generate_bundle(

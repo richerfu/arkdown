@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use async_trait::async_trait;
-use arkdown_core::{ArkdownPlugin, ArkdownError, HookLoadOutput, PluginContext, PluginResult};
+use arkdown_core::{ArkdownPlugin, ArkdownError, HookLoadOutput, HookUsage, PluginContext, PluginResult};
 
 /// Plugin that validates import specifiers match the actual filesystem case.
 ///
@@ -30,6 +30,10 @@ impl Default for SensitiveCheckPlugin {
 impl ArkdownPlugin for SensitiveCheckPlugin {
     fn name(&self) -> &str {
         "sensitive-check"
+    }
+
+    fn register_hook_usage(&self) -> HookUsage {
+        HookUsage::Load
     }
 
     async fn load(

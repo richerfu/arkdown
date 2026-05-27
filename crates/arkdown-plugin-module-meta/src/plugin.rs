@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use arkdown_core::{
-    ArkdownError, ArkdownPlugin, HostModuleInfo, ModuleInfo, ModuleMeta, PluginContext,
+    ArkdownError, ArkdownPlugin, HostModuleInfo, HookUsage, ModuleInfo, ModuleMeta, PluginContext,
     PluginResult,
 };
 
@@ -56,6 +56,10 @@ impl ModuleMetaPlugin {
 impl ArkdownPlugin for ModuleMetaPlugin {
     fn name(&self) -> &str {
         "module-meta"
+    }
+
+    fn register_hook_usage(&self) -> HookUsage {
+        HookUsage::ModuleParsed | HookUsage::BuildStart
     }
 
     /// After a module is parsed, record all of its import edges in the

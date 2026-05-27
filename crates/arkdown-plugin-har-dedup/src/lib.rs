@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use arkdown_core::{
     ArkdownError, ArkdownPlugin, BuildError, HookResolveIdArgs, HookResolveIdOutput,
-    ModuleInfo, ModuleType, PluginContext, PluginResult,
+    HookUsage, ModuleInfo, ModuleType, PluginContext, PluginResult,
 };
 
 // ---------------------------------------------------------------------------
@@ -71,6 +71,10 @@ impl HarDeduplicatePlugin {
 impl ArkdownPlugin for HarDeduplicatePlugin {
     fn name(&self) -> &str {
         "har-dedup"
+    }
+
+    fn register_hook_usage(&self) -> HookUsage {
+        HookUsage::ResolveId | HookUsage::ModuleParsed | HookUsage::BuildEnd
     }
 
     /// In `RealBuild` mode, mark excluded HAR modules as external.

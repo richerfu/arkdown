@@ -29,8 +29,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use arkdown_core::{
-    ArkdownConfig, ArkdownError, ArkdownPlugin, HookTransformOutput, ModuleSource, ModuleType,
-    PluginContext, PluginResult, ResolvedId,
+    ArkdownConfig, ArkdownError, ArkdownPlugin, HookTransformOutput, HookUsage, ModuleSource,
+    ModuleType, PluginContext, PluginResult, ResolvedId,
 };
 
 /// ArkTS transform plugin — desugars `.ets` files into TypeScript.
@@ -52,6 +52,10 @@ impl EtsTransformPlugin {
 impl ArkdownPlugin for EtsTransformPlugin {
     fn name(&self) -> &str {
         "ets-transform"
+    }
+
+    fn register_hook_usage(&self) -> HookUsage {
+        HookUsage::Transform
     }
 
     /// Transform an ArkTS `.ets` module into TypeScript.

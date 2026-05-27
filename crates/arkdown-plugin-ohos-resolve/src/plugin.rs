@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use arkdown_core::{
-    ArkdownPlugin, HookResolveIdArgs, HookResolveIdOutput, ModuleType, OhosResolvedModule,
-    PluginContext, PluginResult,
+    ArkdownPlugin, HookResolveIdArgs, HookResolveIdOutput, HookUsage, ModuleType,
+    OhosResolvedModule, PluginContext, PluginResult,
 };
 use arkdown_resolver::{OhosResolver, ResolverConfig};
 
@@ -33,6 +33,10 @@ impl OhosResolvePlugin {
 impl ArkdownPlugin for OhosResolvePlugin {
     fn name(&self) -> &str {
         "ohos-resolve"
+    }
+
+    fn register_hook_usage(&self) -> HookUsage {
+        HookUsage::ResolveId
     }
 
     async fn resolve_id(
