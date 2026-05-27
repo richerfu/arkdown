@@ -90,8 +90,8 @@ cms         = "0.2"
 const-oid   = "0.9"
 spki        = "0.7"
 rand        = "0.8"
+p12         = "0.6"
 
 [profile.release]
 lto = true
 codegen-units = 1
-p12         = "0.6"
