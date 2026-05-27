@@ -2,3 +2,22 @@
 name = "arkdown-cli"
 version = "0.1.0"
 edition = "2021"
+
+[[bin]]
+name = "arkdown"
+path = "src/main.rs"
+
+[dependencies]
+arkdown-core = { path = "../arkdown-core" }
+arkdown-config = { path = "../arkdown-config" }
+arkdown-profile = { path = "../arkdown-profile" }
+arkdown-resource = { path = "../arkdown-resource" }
+arkdown = { path = "../arkdown" }
+arkdown-abc = { path = "../arkdown-abc" }
+arkdown-pack = { path = "../arkdown-pack" }
+clap = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+fs-err = { workspace = true }
+json5 = { workspace = true }
+walkdir = { workspace = true }
