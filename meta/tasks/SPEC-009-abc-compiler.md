@@ -1,0 +1,201 @@
+# SPEC-009: ArkCompiler Bytecode Compiler (Rust)
+
+**Crate**: `arkdown-abc`
+**Priority**: P0
+**Blocked by**: SPEC-005, SPEC-006
+**Blocks**: SPEC-012, SPEC-027
+
+---
+
+## Summary
+
+Implement the ArkCompiler bytecode (`.abc`) compilation pipeline in pure Rust. This is a
+Rust port of `es2abc` — the ETS/JS → bytecode compiler from OpenHarmony's
+`arkcompiler_ets_frontend` project.
+
+**Reference implementation**: `https://gitcode.com/openharmony/arkcompiler_ets_frontend`
+**Bytecode format spec**: `https://gitcode.com/openharmony/arkcompiler_runtime_core`
+
+The compiled Rust implementation replaces the closed-source `es2abc` binary entirely.
+No subprocess invocation. All compilation logic lives in this crate.
+
+---
+
+## Background: What es2abc Does
+
+From reading `arkcompiler_ets_frontend`, `es2abc` (internally `es2panda`) performs:
+
+1. **Parse** — JS/TS source → AST (using its own parser, not OXC)
+2. **Check** — semantic analysis, type checking (for TS)
+3. **Lower** — AST → IR (intermediate representation)
+4. **Emit** — IR → Panda Bytecode (`.abc` binary format)
+
+The input to `arkdown-abc` is already-bundled IIFE JS (not raw ArkTS), so:
+
+- Steps 1–2 are simplified: OXC already parsed and transformed the source; we just need to
+  re-parse the IIFE JS output (which is standard JavaScript after ArkTS desugaring)
+- Steps 3–4 are the core of what we implement
+
+---
+
+## Panda Bytecode Format
+
+The `.abc` file format is defined in `arkcompiler_runtime_core`. Key structures:
+
+```
+.abc file layout:
+  Header (magic: 0x414243, version, file_size, ...)
+  ClassIndex        ← table of class records
+  MethodIndex       ← table of method records
+  StringTable       ← interned strings
+  LiteralArrayTable ← constant arrays
+  CodeSection       ← bytecode instruction sequences
+  DebugInfoSection  ← source positions (when --debug-info)
+```
+
+Reference: `arkcompiler_runtime_core/libpandafile/file_format.md` (if present) or
+the `.abc` format documentation in `runtime_core`.
+
+---
+
+## Key Implementation Components
+
+### 1. JS IR Lowering
+
+From the IIFE-wrapped CJS chunk (already a standard JS AST after bundling):
+
+- Map JS constructs to Panda IR opcodes
+- `function` → method record
+- `var`/`let`/`const` → register allocation
+- `globalThis['x']` access → `ldglobalvar` opcode
+
+### 2. Panda Instruction Set
+
+Key opcodes (from `arkcompiler_runtime_core/isa/isa.yaml`):
+
+```
+ldundefined          # load undefined
+ldnull               # load null
+ldtrue / ldfalse     # load boolean literals
+ldai <imm>           # load integer immediate
+fldai <imm>          # load float immediate
+lda.str <id>         # load string from string table
+lda <vreg>           # load from virtual register
+sta <vreg>           # store to virtual register
+add2 <vreg>          # add acc + vreg
+call.short <method>, <vreg...>   # call method (≤ 4 args)
+call <method>, <vreg...>         # call method (any args)
+callthis.short <method>, <this>, <vreg...>
+return               # return accumulator value
+returnundefined      # return undefined
+```
+
+Full ISA in `arkcompiler_runtime_core/isa/`.
+
+### 3. Module Record System (--merge-abc)
+
+With `--merge-abc`, multiple JS files become named "records" in one `.abc`:
+
+```
+merged.abc
+  └── record "EntryAbility"     ← from EntryAbility.js
+  └── record "commons"          ← from commons.js
+  └── record "vendors"          ← from vendors.js
+```
+
+Each record has its own class index and method index. The globalThis registry allows
+cross-record references at runtime.
+
+### 4. Incremental Compilation Cache
+
+Mirror es2abc's `--cache-file` behavior:
+
+- Cache stores function-level bytecode keyed by source hash
+- On rebuild: compare source hash; emit cached bytecode for unchanged functions
+- Cache format: msgpack (use `rmp-serde`)
+
+---
+
+## API
+
+```rust
+pub struct AbcCompiler {
+    options: AbcCompileOptions,
+}
+
+pub struct AbcCompileOptions {
+    pub debug_info: bool,
+    pub opt_level: u8,          // 0, 1, or 2
+    pub target_api_version: u32,
+    pub merge_abc: bool,
+    pub cache_path: Option<PathBuf>,
+}
+
+pub struct AbcModule {
+    pub record_name: String,
+    pub source: String,             // IIFE JS from bundler output
+    pub source_map: Option<SourceMap>,
+}
+
+impl AbcCompiler {
+    pub fn new(options: AbcCompileOptions) -> Self;
+
+    /// Compile one or more modules into a merged .abc file.
+    /// For HAP builds: one call with all chunk modules → one modules.abc
+    pub fn compile(&self, modules: Vec<AbcModule>, output: &Path)
+        -> Result<AbcArtifact, AbcError>;
+}
+```
+
+---
+
+## Files to Create
+
+```
+crates/arkdown-abc/
+├── Cargo.toml
+└── src/
+    ├── lib.rs
+    ├── compiler.rs         (AbcCompiler: orchestration)
+    ├── ir/
+    │   ├── mod.rs
+    │   ├── builder.rs      (IR builder: JS AST → Panda IR)
+    │   └── opcodes.rs      (Panda ISA opcode definitions)
+    ├── emit/
+    │   ├── mod.rs
+    │   ├── file.rs         (AbcFile: binary format writer)
+    │   ├── record.rs       (record/class index writing)
+    │   ├── method.rs       (method bytecode emission)
+    │   ├── strings.rs      (string table)
+    │   └── literals.rs     (literal array table)
+    ├── cache.rs            (incremental compilation cache)
+    └── debug.rs            (debug info section emission)
+```
+
+---
+
+## Development Approach
+
+1. Start from `arkcompiler_ets_frontend` source (C++) to understand the IR and emit stages
+2. Implement binary format writer (`emit/`) first — can be tested against existing `.abc` files
+3. Implement IR builder for basic JS constructs
+4. Add OXC integration: use `oxc_parser` to parse the IIFE chunks (standard JS after bundling)
+5. Validate output: compiled `.abc` files must be loadable by ArkRuntime
+
+---
+
+## Acceptance Criteria
+
+- `AbcCompiler::compile()` on minimal IIFE JS produces a valid `.abc`
+- Produced `.abc` is accepted by the OHOS ArkRuntime (installable via `hdc install`)
+- Panda binary header bytes match expected magic and version
+- `--merge-abc` equivalent: multiple modules merged into one `.abc` with correct records
+
+---
+
+## Design References
+
+- `meta/design/abc-pipeline.md` — input format (IIFE JS), source map chain, flags context
+- `meta/design/chunk-model.md` — the IIFE JS format this compiler receives as input
+- OpenHarmony source: `https://gitcode.com/openharmony/arkcompiler_ets_frontend`
+- Bytecode format: `https://gitcode.com/openharmony/arkcompiler_runtime_core`
