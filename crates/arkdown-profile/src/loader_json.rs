@@ -19,7 +19,7 @@ pub struct LoaderJson {
     pub compile_entry: Vec<String>,
     /// Absolute path to the project root directory.
     pub project_root_path: String,
-    /// Absolute path to the module root directory (e.g. `<project>/entry/`).
+    /// Absolute path to the module source root directory (e.g. `<project>/entry/src/main`).
     pub module_root_path: String,
     /// Absolute path to the incremental compilation cache directory.
     pub cache_path: String,
@@ -33,6 +33,15 @@ pub struct LoaderJson {
     pub use_normalized_ohm_url: bool,
     /// Package manager type — always `"ohpm"` for OHOS projects.
     pub package_manager_type: String,
+    /// The OHOS module name (e.g. `"entry"`).
+    pub module_name: String,
+    /// Numeric SDK API version (e.g. `12`).
+    pub api_version: u32,
+    /// Map of module name → absolute module root path.
+    #[serde(rename = "modulePathMap")]
+    pub module_path_map: HashMap<String, String>,
+    /// Whether to fall back to AN (Ark Native) build. Always `false`.
+    pub fallback_an_build: bool,
     /// Map of package name → brief package info (source roots, etc.).
     #[serde(rename = "pkgNameToPkgBriefInfo")]
     pub pkg_name_to_pkg_brief_info: HashMap<String, PkgBriefInfo>,
@@ -112,6 +121,7 @@ pub fn generate_loader_json(
 
     let module_root = module_cfg.src_path.to_string_lossy().to_string();
     let project_root = config.project_root.to_string_lossy().to_string();
+    let src_main = format!("{}/src/main", module_root);
 
     let build_mode_str = match config.build_mode {
         BuildMode::Debug => "debug".to_string(),
@@ -124,10 +134,13 @@ pub fn generate_loader_json(
         .strict_mode
         .use_normalized_ohm_url;
 
+    let mut module_path_map = HashMap::new();
+    module_path_map.insert(module_cfg.name.clone(), module_root.clone());
+
     LoaderJson {
         compile_entry,
         project_root_path: project_root.clone(),
-        module_root_path: module_root.clone(),
+        module_root_path: src_main.clone(),
         cache_path: format!(
             "{}/build/default/intermediates/ets/default/cache/",
             module_root
@@ -140,6 +153,10 @@ pub fn generate_loader_json(
         support_chunks: false,
         use_normalized_ohm_url,
         package_manager_type: "ohpm".to_string(),
+        module_name: module_cfg.name.clone(),
+        api_version: config.sdk_config.compile_api_version,
+        module_path_map,
+        fallback_an_build: false,
         pkg_name_to_pkg_brief_info: build_pkg_brief_info(config, module_cfg),
         byte_code_har_info: HashMap::new(),
         hsp_name_ohm_map: HashMap::new(),
@@ -268,12 +285,17 @@ mod tests {
         assert!(!loader2.use_normalized_ohm_url);
         assert!(!loader2.support_chunks);
         assert_eq!(loader2.project_root_path, "/project");
-        assert_eq!(loader2.module_root_path, "/project/entry");
+        assert_eq!(loader2.module_root_path, "/project/entry/src/main");
         assert_eq!(loader2.compile_entry.len(), 1);
         assert_eq!(
             loader2.compile_entry[0],
             "./ets/entryability/EntryAbility.ets"
         );
+        assert_eq!(loader2.module_name, "entry");
+        assert_eq!(loader2.api_version, 12);
+        assert!(loader2.module_path_map.contains_key("entry"));
+        assert_eq!(loader2.module_path_map["entry"], "/project/entry");
+        assert!(!loader2.fallback_an_build);
     }
 
     #[test]
@@ -314,6 +336,10 @@ mod tests {
             json_str.contains("pkgNameToPkgBriefInfo"),
             "missing pkgNameToPkgBriefInfo"
         );
+        assert!(json_str.contains("moduleName"), "missing moduleName");
+        assert!(json_str.contains("apiVersion"), "missing apiVersion");
+        assert!(json_str.contains("modulePathMap"), "missing modulePathMap");
+        assert!(json_str.contains("fallbackAnBuild"), "missing fallbackAnBuild");
     }
 
     #[test]
@@ -347,5 +373,65 @@ mod tests {
             loader.ace_module_build.starts_with("/project/entry"),
             "ace_module_build should be under module root"
         );
+    }
+
+    #[test]
+    fn test_loader_json_module_root_path_is_src_main() {
+        let config = make_config(false);
+        let module_cfg = make_module_cfg();
+        let manifest = make_manifest();
+
+        let loader = generate_loader_json(&config, &module_cfg, &manifest);
+        assert_eq!(
+            loader.module_root_path, "/project/entry/src/main",
+            "module_root_path must point to src/main, not the module root"
+        );
+    }
+
+    #[test]
+    fn test_loader_json_module_name_populated() {
+        let config = make_config(false);
+        let module_cfg = make_module_cfg();
+        let manifest = make_manifest();
+
+        let loader = generate_loader_json(&config, &module_cfg, &manifest);
+        assert_eq!(loader.module_name, "entry");
+    }
+
+    #[test]
+    fn test_loader_json_api_version() {
+        let config = make_config(false);
+        let module_cfg = make_module_cfg();
+        let manifest = make_manifest();
+
+        let loader = generate_loader_json(&config, &module_cfg, &manifest);
+        assert_eq!(loader.api_version, 12);
+    }
+
+    #[test]
+    fn test_loader_json_module_path_map() {
+        let config = make_config(false);
+        let module_cfg = make_module_cfg();
+        let manifest = make_manifest();
+
+        let loader = generate_loader_json(&config, &module_cfg, &manifest);
+        assert!(
+            loader.module_path_map.contains_key("entry"),
+            "modulePathMap must contain the module name key"
+        );
+        assert_eq!(
+            loader.module_path_map["entry"], "/project/entry",
+            "modulePathMap value must be the module root (not src/main)"
+        );
+    }
+
+    #[test]
+    fn test_loader_json_fallback_an_build_is_false() {
+        let config = make_config(false);
+        let module_cfg = make_module_cfg();
+        let manifest = make_manifest();
+
+        let loader = generate_loader_json(&config, &module_cfg, &manifest);
+        assert!(!loader.fallback_an_build);
     }
 }
