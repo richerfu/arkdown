@@ -40,7 +40,7 @@ pub struct Module {
 }
 
 /// OHOS-specific per-module metadata.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ModuleMeta {
     /// ohpm package name (e.g., `"my-har"`, `"@ohos/lib"`).
     pub pkg_name: Option<String>,
