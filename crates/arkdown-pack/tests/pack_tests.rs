@@ -54,6 +54,26 @@ fn write_minimal_inputs(tmp: &std::path::Path) -> (std::path::PathBuf, std::path
     (abc, res, modj)
 }
 
+fn minimal_pack_input(
+    abc: std::path::PathBuf,
+    res: std::path::PathBuf,
+    modj: std::path::PathBuf,
+    out: std::path::PathBuf,
+) -> PackInput {
+    PackInput {
+        module_name: "entry".into(),
+        abc_path: abc,
+        resources_index: res,
+        module_json: modj,
+        native_libs: vec![],
+        output_path: out,
+        resources_src_dir: None,
+        bundle_version_code: 1000000,
+        bundle_version_name: "1.0.0".to_string(),
+        bundle_type: "app".to_string(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // HAP output format
 // ---------------------------------------------------------------------------
@@ -65,14 +85,7 @@ fn test_hap_output_is_valid_zip() {
     let out = tmp.path().join("entry.hap");
 
     Packager::new(make_config())
-        .pack_hap(PackInput {
-            module_name: "entry".into(),
-            abc_path: abc,
-            resources_index: res,
-            module_json: modj,
-            native_libs: vec![],
-            output_path: out.clone(),
-        })
+        .pack_hap(minimal_pack_input(abc, res, modj, out.clone()))
         .expect("pack_hap must succeed");
 
     // Verify ZIP magic bytes: PK\x03\x04
@@ -91,14 +104,7 @@ fn test_hap_output_is_readable_by_zip_crate() {
     let out = tmp.path().join("readable.hap");
 
     Packager::new(make_config())
-        .pack_hap(PackInput {
-            module_name: "entry".into(),
-            abc_path: abc,
-            resources_index: res,
-            module_json: modj,
-            native_libs: vec![],
-            output_path: out.clone(),
-        })
+        .pack_hap(minimal_pack_input(abc, res, modj, out.clone()))
         .expect("pack_hap must succeed");
 
     let file = fs::File::open(&out).expect("open HAP");
@@ -118,14 +124,7 @@ fn test_hap_contains_module_json() {
     let out = tmp.path().join("entries.hap");
 
     Packager::new(make_config())
-        .pack_hap(PackInput {
-            module_name: "entry".into(),
-            abc_path: abc,
-            resources_index: res,
-            module_json: modj,
-            native_libs: vec![],
-            output_path: out.clone(),
-        })
+        .pack_hap(minimal_pack_input(abc, res, modj, out.clone()))
         .expect("pack_hap must succeed");
 
     let file = fs::File::open(&out).expect("open HAP");
@@ -139,6 +138,46 @@ fn test_hap_contains_module_json() {
 }
 
 #[test]
+fn test_hap_contains_pack_info() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (abc, res, modj) = write_minimal_inputs(tmp.path());
+    let out = tmp.path().join("pack_info.hap");
+
+    Packager::new(make_config())
+        .pack_hap(minimal_pack_input(abc, res, modj, out.clone()))
+        .expect("pack_hap must succeed");
+
+    let file = fs::File::open(&out).expect("open HAP");
+    let archive = zip::ZipArchive::new(file).expect("valid ZIP");
+    let names: Vec<_> = archive.file_names().collect();
+    assert!(
+        names.iter().any(|n| *n == "pack.info"),
+        "HAP must contain 'pack.info'; entries: {:?}",
+        names
+    );
+}
+
+#[test]
+fn test_hap_contains_pkg_context_info() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (abc, res, modj) = write_minimal_inputs(tmp.path());
+    let out = tmp.path().join("pkg_ctx.hap");
+
+    Packager::new(make_config())
+        .pack_hap(minimal_pack_input(abc, res, modj, out.clone()))
+        .expect("pack_hap must succeed");
+
+    let file = fs::File::open(&out).expect("open HAP");
+    let archive = zip::ZipArchive::new(file).expect("valid ZIP");
+    let names: Vec<_> = archive.file_names().collect();
+    assert!(
+        names.iter().any(|n| *n == "pkgContextInfo.json"),
+        "HAP must contain 'pkgContextInfo.json'; entries: {:?}",
+        names
+    );
+}
+
+#[test]
 fn test_hap_contains_abc_at_ets_path_for_api12() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (abc, res, modj) = write_minimal_inputs(tmp.path());
@@ -146,14 +185,7 @@ fn test_hap_contains_abc_at_ets_path_for_api12() {
 
     // Default config uses compile_api_version = 12
     Packager::new(make_config())
-        .pack_hap(PackInput {
-            module_name: "entry".into(),
-            abc_path: abc,
-            resources_index: res,
-            module_json: modj,
-            native_libs: vec![],
-            output_path: out.clone(),
-        })
+        .pack_hap(minimal_pack_input(abc, res, modj, out.clone()))
         .expect("pack_hap must succeed");
 
     let file = fs::File::open(&out).expect("open HAP");
@@ -173,14 +205,7 @@ fn test_hap_contains_resources_index() {
     let out = tmp.path().join("res_idx.hap");
 
     Packager::new(make_config())
-        .pack_hap(PackInput {
-            module_name: "entry".into(),
-            abc_path: abc,
-            resources_index: res,
-            module_json: modj,
-            native_libs: vec![],
-            output_path: out.clone(),
-        })
+        .pack_hap(minimal_pack_input(abc, res, modj, out.clone()))
         .expect("pack_hap must succeed");
 
     let file = fs::File::open(&out).expect("open HAP");
@@ -189,6 +214,42 @@ fn test_hap_contains_resources_index() {
     assert!(
         names.iter().any(|n| n.contains("resources")),
         "HAP must contain a resources entry; entries: {:?}",
+        names
+    );
+}
+
+#[test]
+fn test_hap_resource_files_copied_from_src() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (abc, res, modj) = write_minimal_inputs(tmp.path());
+    let out = tmp.path().join("res_copy.hap");
+
+    // Create a minimal resources/base/element/string.json under src/main/resources
+    let res_src = tmp.path().join("src/main/resources/base/element");
+    fs::create_dir_all(&res_src).unwrap();
+    fs::write(res_src.join("string.json"), br#"{"string":[]}"#).unwrap();
+
+    Packager::new(make_config())
+        .pack_hap(PackInput {
+            module_name: "entry".into(),
+            abc_path: abc,
+            resources_index: res,
+            module_json: modj,
+            native_libs: vec![],
+            output_path: out.clone(),
+            resources_src_dir: Some(tmp.path().join("src/main/resources")),
+            bundle_version_code: 1000000,
+            bundle_version_name: "1.0.0".to_string(),
+            bundle_type: "app".to_string(),
+        })
+        .expect("pack_hap must succeed");
+
+    let file = fs::File::open(&out).expect("open HAP");
+    let archive = zip::ZipArchive::new(file).expect("valid ZIP");
+    let names: Vec<_> = archive.file_names().collect();
+    assert!(
+        names.iter().any(|n| n.ends_with("string.json")),
+        "HAP must contain copied string.json; entries: {:?}",
         names
     );
 }
@@ -212,6 +273,10 @@ fn test_missing_abc_returns_missing_input_error() {
         module_json: modj,
         native_libs: vec![],
         output_path: tmp.path().join("out.hap"),
+        resources_src_dir: None,
+        bundle_version_code: 1000000,
+        bundle_version_name: "1.0.0".to_string(),
+        bundle_type: "app".to_string(),
     });
     assert!(result.is_err(), "missing ABC must return Err");
     assert!(
@@ -230,6 +295,10 @@ fn test_missing_module_json_returns_missing_input_error() {
         module_json: tmp.path().join("m.json"), // does not exist
         native_libs: vec![],
         output_path: tmp.path().join("out.hap"),
+        resources_src_dir: None,
+        bundle_version_code: 1000000,
+        bundle_version_name: "1.0.0".to_string(),
+        bundle_type: "app".to_string(),
     });
     assert!(result.is_err());
     assert!(matches!(result.unwrap_err(), PackError::MissingInput(_)));
@@ -255,6 +324,10 @@ fn test_hsp_output_is_valid_zip() {
             module_json: modj,
             native_libs: vec![],
             output_path: out.clone(),
+            resources_src_dir: None,
+            bundle_version_code: 1000000,
+            bundle_version_name: "1.0.0".to_string(),
+            bundle_type: "app".to_string(),
         })
         .expect("pack_hsp must succeed");
 

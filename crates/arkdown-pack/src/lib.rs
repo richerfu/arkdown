@@ -69,6 +69,10 @@ mod tests {
             module_json: modj,
             native_libs: vec![],
             output_path: out.clone(),
+            resources_src_dir: None,
+            bundle_version_code: 1000000,
+            bundle_version_name: "1.0.0".to_string(),
+            bundle_type: "app".to_string(),
         });
         assert!(result.is_ok(), "{:?}", result.err());
         assert!(out.exists());
@@ -110,6 +114,10 @@ mod tests {
                 module_json: modj,
                 native_libs: vec![],
                 output_path: out.clone(),
+                resources_src_dir: None,
+                bundle_version_code: 1000000,
+                bundle_version_name: "1.0.0".to_string(),
+                bundle_type: "app".to_string(),
             })
             .unwrap();
 
@@ -134,6 +142,10 @@ mod tests {
             module_json: tmp.path().join("missing.json"),
             native_libs: vec![],
             output_path: tmp.path().join("out.hap"),
+            resources_src_dir: None,
+            bundle_version_code: 1000000,
+            bundle_version_name: "1.0.0".to_string(),
+            bundle_type: "app".to_string(),
         });
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -202,6 +214,10 @@ mod tests {
             module_json: modj,
             native_libs: vec![],
             output_path: out.clone(),
+            resources_src_dir: None,
+            bundle_version_code: 1000000,
+            bundle_version_name: "1.0.0".to_string(),
+            bundle_type: "app".to_string(),
         });
         assert!(result.is_ok(), "{:?}", result.err());
         assert!(out.exists());
