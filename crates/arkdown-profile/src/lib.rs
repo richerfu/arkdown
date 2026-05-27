@@ -27,7 +27,7 @@ pub use router_map::{RouterMapEntry, collect_router_entries};
 use std::path::Path;
 use std::sync::Arc;
 
-use arkdown_core::{ArkdownConfig, ArkdownError, CompileMode, HapManifest, ModuleConfig, ModuleJson5};
+use arkdown_core::{ArkdownConfig, ArkdownError, CompileMode, HapManifest, ModuleConfig, ModuleJson5, OhosModuleType};
 
 /// Top-level driver for profile processing and loader.json generation.
 ///
@@ -80,6 +80,110 @@ impl ProfileProcessor {
         fs_err::write(path, json)?;
         Ok(())
     }
+
+    /// Write the processed `module.json` for inclusion in the HAP.
+    ///
+    /// The output is a standard JSON file (not JSON5) combining:
+    /// - `app` section from `AppScope/app.json5` (falls back to config values)
+    /// - `module` section from the processed manifest (with `virtualMachine` and `compileMode`)
+    pub fn write_module_json(
+        &self,
+        manifest: &HapManifest,
+        output_path: &Path,
+    ) -> Result<(), ArkdownError> {
+        // Read AppScope/app.json5 for the app section
+        let app_json5_path = self.config.project_root.join("AppScope/app.json5");
+        let app_section = if app_json5_path.exists() {
+            let content = fs_err::read_to_string(&app_json5_path)
+                .map_err(|e| ArkdownError::Io(e.into()))?;
+            let raw: serde_json::Value = json5::from_str(&content)
+                .map_err(|e| ArkdownError::Io(std::io::Error::other(e.to_string())))?;
+            raw.get("app")
+                .cloned()
+                .unwrap_or_else(|| serde_json::Value::Object(Default::default()))
+        } else {
+            // Fallback: construct from config
+            serde_json::json!({
+                "bundleName": self.config.product.bundle_name,
+                "bundleType": "app",
+                "versionCode": 1000000,
+                "versionName": "1.0.0"
+            })
+        };
+
+        let module_section = manifest_to_json(manifest);
+
+        let combined = serde_json::json!({
+            "app": app_section,
+            "module": module_section
+        });
+
+        if let Some(parent) = output_path.parent() {
+            fs_err::create_dir_all(parent)
+                .map_err(|e| ArkdownError::Io(e.into()))?;
+        }
+
+        let json_str = serde_json::to_string_pretty(&combined)
+            .map_err(|e| ArkdownError::Io(std::io::Error::other(e.to_string())))?;
+        fs_err::write(output_path, json_str.as_bytes())
+            .map_err(|e| ArkdownError::Io(e.into()))?;
+
+        Ok(())
+    }
+}
+
+/// Convert an [`OhosModuleType`] to its lowercase string representation.
+fn module_type_str(t: &OhosModuleType) -> &'static str {
+    match t {
+        OhosModuleType::Entry => "entry",
+        OhosModuleType::Feature => "feature",
+        OhosModuleType::Shared => "shared",
+        OhosModuleType::Har => "har",
+    }
+}
+
+/// Convert a [`CompileMode`] to its string representation for `module.json`.
+fn compile_mode_str(m: &CompileMode) -> &'static str {
+    match m {
+        CompileMode::EsModule => "esmodule",
+        CompileMode::JsBundle => "jsbundle",
+    }
+}
+
+/// Build the `module` JSON object from a processed [`HapManifest`].
+fn manifest_to_json(manifest: &HapManifest) -> serde_json::Value {
+    let abilities: Vec<serde_json::Value> = manifest
+        .abilities
+        .iter()
+        .map(|a| {
+            serde_json::json!({
+                "name": a.name,
+                "srcEntry": a.src_entry,
+                "exported": a.exported
+            })
+        })
+        .collect();
+
+    let mut obj = serde_json::json!({
+        "name": manifest.module_name,
+        "type": module_type_str(&manifest.module_type),
+        "virtualMachine": manifest.virtual_machine,
+        "compileMode": compile_mode_str(&manifest.compile_mode),
+        "deviceTypes": manifest.device_types,
+        "deliveryWithInstall": true,
+        "installationFree": false,
+        "abilities": abilities
+    });
+
+    if let Some(main_el) = &manifest.main_element {
+        obj["mainElement"] = serde_json::Value::String(main_el.clone());
+    }
+
+    if let Some(pages) = &manifest.pages {
+        obj["pages"] = serde_json::Value::String(pages.clone());
+    }
+
+    obj
 }
 
 // ---------------------------------------------------------------------------

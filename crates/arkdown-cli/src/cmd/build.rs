@@ -84,6 +84,15 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         let (manifest, loader_json) = processor
             .process_module(module, &module_json5)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        // Write merged module.json for HAP (app + module sections with virtualMachine, compileMode)
+        let module_json_out = module
+            .src_path
+            .join("build/default/intermediates/res/module.json");
+        processor
+            .write_module_json(&manifest, &module_json_out)
+            .map_err(|e| anyhow::anyhow!("write module.json failed: {}", e))?;
+
         loader_jsons.push((module.clone(), manifest, loader_json));
     }
     progress.done();
@@ -247,6 +256,12 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                                 module_json,
                                 native_libs: vec![],
                                 output_path: output.clone(),
+                                resources_src_dir: Some(
+                                    module.src_path.join("src/main/resources"),
+                                ),
+                                bundle_version_code: 1000000,
+                                bundle_version_name: "1.0.0".to_string(),
+                                bundle_type: "app".to_string(),
                             })
                             .map_err(|e| anyhow::anyhow!("Pack failed: {}", e))?,
                     )
