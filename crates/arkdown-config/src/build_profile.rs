@@ -5,6 +5,28 @@ use serde::Deserialize;
 use crate::error::ConfigError;
 
 // ---------------------------------------------------------------------------
+// Raw deserialization structs for AppScope/app.json5
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct RawAppJson5 {
+    pub app: RawAppJson5App,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RawAppJson5App {
+    #[serde(default)]
+    pub bundle_name: String,
+    #[serde(default)]
+    pub vendor: String,
+    #[serde(default)]
+    pub version_code: u64,
+    #[serde(default)]
+    pub version_name: String,
+}
+
+// ---------------------------------------------------------------------------
 // Raw deserialization structs for build-profile.json5
 // ---------------------------------------------------------------------------
 
@@ -18,20 +40,42 @@ pub struct RawBuildProfile {
 #[serde(rename_all = "camelCase")]
 pub struct RawApp {
     pub products: Vec<RawProduct>,
+    /// Top-level signing configurations (real OHOS format: under `app`, not per-product).
+    #[serde(default)]
+    pub signing_configs: Vec<RawSigningConfig>,
     #[serde(default)]
     pub build_mode_set: Vec<RawBuildMode>,
+}
+
+/// Top-level signing config entry (under `app.signingConfigs` in real OHOS projects).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RawSigningConfig {
+    pub name: String,
+    #[serde(rename = "type", default)]
+    pub config_type: String,
+    pub material: Option<RawSigningMaterial>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RawProduct {
     pub name: String,
+    /// Kept for backward compatibility (old format had bundleName in product).
+    /// Real OHOS projects put bundleName in AppScope/app.json5 instead.
     #[serde(default)]
     pub bundle_name: String,
     #[serde(default)]
     pub compatible_sdk_version: String,
+    /// Real OHOS projects use targetSdkVersion; takes priority over compatibleSdkVersion.
+    #[serde(default)]
+    pub target_sdk_version: Option<String>,
     #[serde(default)]
     pub runtime_os: String,
+    /// Reference to a signing config by name (looks up `app.signingConfigs`).
+    #[serde(default)]
+    pub signing_config: Option<String>,
+    /// Kept for backward compatibility (old format embedded signingConfigs in products).
     #[serde(default)]
     pub signing_configs: Vec<RawSigningConfigEntry>,
     #[serde(default)]
@@ -43,6 +87,7 @@ pub struct RawBuildMode {
     pub name: String,
 }
 
+/// Per-product signing config entry (old / backward-compat format).
 #[derive(Debug, Deserialize)]
 pub struct RawSigningConfigEntry {
     pub name: String,
@@ -52,7 +97,8 @@ pub struct RawSigningConfigEntry {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RawSigningMaterial {
-    #[serde(default)]
+    /// Real OHOS projects write `certpath` (lowercase p); old format uses `certPath` (camelCase).
+    #[serde(alias = "certpath", default)]
     pub cert_path: String,
     #[serde(default)]
     pub key_alias: String,
@@ -156,6 +202,24 @@ pub fn load_build_profile(root: &std::path::Path) -> Result<RawBuildProfile, Con
     }
     let content = fs_err::read_to_string(&path)?;
     parse_build_profile(&content, &path)
+}
+
+/// Load and parse `AppScope/app.json5` from the project root.
+///
+/// Returns a default (all-empty) value if the file does not exist, so callers
+/// can use it without failing on older-layout projects.
+pub fn load_app_json5(root: &std::path::Path) -> Result<RawAppJson5, ConfigError> {
+    let path: PathBuf = root.join("AppScope/app.json5");
+    if !path.exists() {
+        return Ok(RawAppJson5 {
+            app: RawAppJson5App::default(),
+        });
+    }
+    let content = fs_err::read_to_string(&path)?;
+    json5::from_str(&content).map_err(|e| ConfigError::ParseError {
+        file: path,
+        message: e.to_string(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -313,5 +377,111 @@ mod tests {
         let strict = build_option.strict_mode.as_ref().unwrap();
         assert!(strict.case_sensitive_check);
         assert!(strict.use_normalized_ohm_url);
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests for the real OHOS project format
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_real_format_app_level_signing_configs() {
+        // Real OHOS: signingConfigs live under app, products reference by name.
+        let json = r#"{
+            app: {
+                signingConfigs: [
+                    {
+                        name: "default",
+                        type: "HarmonyOS",
+                        material: {
+                            certpath: "/certs/debug.cer",
+                            keyAlias: "debugKey",
+                            keyPassword: "enc_pass",
+                            profile: "/certs/debug.p7b",
+                            signAlg: "SHA256withECDSA",
+                            storeFile: "/certs/debug.p12",
+                            storePassword: "enc_store"
+                        }
+                    }
+                ],
+                products: [
+                    {
+                        name: "default",
+                        signingConfig: "default",
+                        targetSdkVersion: "5.0.5(17)",
+                        compatibleSdkVersion: "5.0.5(17)",
+                        runtimeOS: "HarmonyOS"
+                    }
+                ],
+                buildModeSet: [{ name: "debug" }, { name: "release" }]
+            },
+            modules: [{ name: "entry", srcPath: "./entry" }]
+        }"#;
+
+        let profile =
+            parse_build_profile(json, std::path::Path::new("build-profile.json5")).unwrap();
+
+        // App-level signing configs
+        assert_eq!(profile.app.signing_configs.len(), 1);
+        let sc = &profile.app.signing_configs[0];
+        assert_eq!(sc.name, "default");
+        assert_eq!(sc.config_type, "HarmonyOS");
+        let mat = sc.material.as_ref().unwrap();
+        // certpath (lowercase p) should deserialise into cert_path
+        assert_eq!(mat.cert_path, "/certs/debug.cer");
+        assert_eq!(mat.key_alias, "debugKey");
+
+        // Product references signing config by name (not embedded)
+        let product = &profile.app.products[0];
+        assert_eq!(product.signing_config.as_deref(), Some("default"));
+        assert_eq!(product.target_sdk_version.as_deref(), Some("5.0.5(17)"));
+        // bundle_name absent → empty string
+        assert_eq!(product.bundle_name, "");
+    }
+
+    #[test]
+    fn test_parse_api_version_target_sdk() {
+        // targetSdkVersion uses the same "(N)" format as compatibleSdkVersion.
+        assert_eq!(parse_api_version("5.0.5(17)"), Some(17));
+        assert_eq!(parse_api_version("5.0.0(12)"), Some(12));
+    }
+
+    #[test]
+    fn test_load_app_json5_missing_file() {
+        // Missing file → default (all empty), no error.
+        let tmp = std::env::temp_dir().join("arkdown_no_appscope");
+        std::fs::create_dir_all(&tmp).unwrap();
+        // Ensure AppScope/app.json5 does not exist.
+        let _ = std::fs::remove_file(tmp.join("AppScope/app.json5"));
+
+        let result = load_app_json5(&tmp).unwrap();
+        assert_eq!(result.app.bundle_name, "");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_load_app_json5_present() {
+        use std::io::Write;
+
+        let tmp = std::env::temp_dir().join("arkdown_appscope_test");
+        std::fs::create_dir_all(tmp.join("AppScope")).unwrap();
+
+        let content = r#"{
+            "app": {
+                "bundleName": "com.example.myapplication",
+                "vendor": "example",
+                "versionCode": 1000000,
+                "versionName": "1.0.0"
+            }
+        }"#;
+        let mut f = std::fs::File::create(tmp.join("AppScope/app.json5")).unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+
+        let app = load_app_json5(&tmp).unwrap();
+        assert_eq!(app.app.bundle_name, "com.example.myapplication");
+        assert_eq!(app.app.vendor, "example");
+        assert_eq!(app.app.version_code, 1000000);
+        assert_eq!(app.app.version_name, "1.0.0");
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

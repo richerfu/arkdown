@@ -5,7 +5,7 @@ use arkdown_core::{
     OutputTarget, ProductConfig, SigningConfig, StrictModeConfig,
 };
 
-use crate::build_profile::{load_build_profile, parse_api_version};
+use crate::build_profile::{load_app_json5, load_build_profile, parse_api_version};
 use crate::error::ConfigError;
 use crate::module_json::{load_module_json, map_module_type};
 use crate::sdk::discover_sdk;
@@ -26,12 +26,21 @@ pub fn load_config(
     module_name: Option<&str>,
 ) -> Result<ArkdownConfig, ConfigError> {
     // -----------------------------------------------------------------------
-    // 1. Parse build-profile.json5
+    // 1. Parse build-profile.json5 and AppScope/app.json5
     // -----------------------------------------------------------------------
     let profile = load_build_profile(root)?;
+    let app_json5 = load_app_json5(root)?;
 
     // -----------------------------------------------------------------------
-    // 2. Select product
+    // 2. Destructure app-level fields before consuming products
+    // -----------------------------------------------------------------------
+    // We destructure here so we can access both products and app.signing_configs
+    // without partial-move issues.
+    let app_signing_configs = profile.app.signing_configs;
+    let raw_modules_list = profile.modules;
+
+    // -----------------------------------------------------------------------
+    // 3. Select product
     // -----------------------------------------------------------------------
     let raw_product = match product_name {
         Some(name) => profile
@@ -49,21 +58,56 @@ pub fn load_config(
     };
 
     // -----------------------------------------------------------------------
-    // 3. Build ProductConfig
+    // 4. Bundle name: AppScope/app.json5 takes priority over product.bundle_name
     // -----------------------------------------------------------------------
+    let bundle_name = if !app_json5.app.bundle_name.is_empty() {
+        app_json5.app.bundle_name
+    } else {
+        raw_product.bundle_name.clone()
+    };
+
+    // -----------------------------------------------------------------------
+    // 5. Build ProductConfig
+    // -----------------------------------------------------------------------
+
+    // Extract old-format per-product signing_configs before other field moves.
+    let raw_signing_configs_compat = raw_product.signing_configs;
+
+    // Resolve signing config: new format references by name under app.signingConfigs;
+    // fall back to old per-product embedded signingConfigs for backward compat.
     let signing_config = raw_product
-        .signing_configs
-        .into_iter()
-        .next()
-        .and_then(|sc| sc.material)
-        .map(|m| SigningConfig {
-            cert_path: m.cert_path.into(),
-            key_alias: m.key_alias,
-            key_password: m.key_password,
-            profile_path: m.profile.into(),
-            sign_alg: m.sign_alg,
-            store_file: m.store_file.into(),
-            store_password: m.store_password,
+        .signing_config
+        .as_deref()
+        .and_then(|name| {
+            app_signing_configs
+                .iter()
+                .find(|sc| sc.name == name)
+                .and_then(|sc| sc.material.as_ref())
+                .map(|m| SigningConfig {
+                    cert_path: m.cert_path.clone().into(),
+                    key_alias: m.key_alias.clone(),
+                    key_password: m.key_password.clone(),
+                    profile_path: m.profile.clone().into(),
+                    sign_alg: m.sign_alg.clone(),
+                    store_file: m.store_file.clone().into(),
+                    store_password: m.store_password.clone(),
+                })
+        })
+        .or_else(|| {
+            // Backward compat: old format had signing_configs embedded in products.
+            raw_signing_configs_compat
+                .into_iter()
+                .next()
+                .and_then(|sc| sc.material)
+                .map(|m| SigningConfig {
+                    cert_path: m.cert_path.into(),
+                    key_alias: m.key_alias,
+                    key_password: m.key_password,
+                    profile_path: m.profile.into(),
+                    sign_alg: m.sign_alg,
+                    store_file: m.store_file.into(),
+                    store_password: m.store_password,
+                })
         });
 
     let strict_mode = raw_product
@@ -108,7 +152,7 @@ pub fn load_config(
 
     let product = ProductConfig {
         name: raw_product.name,
-        bundle_name: raw_product.bundle_name,
+        bundle_name,
         compatible_sdk_version: raw_product.compatible_sdk_version.clone(),
         runtime_os: raw_product.runtime_os,
         signing_config,
@@ -116,15 +160,14 @@ pub fn load_config(
     };
 
     // -----------------------------------------------------------------------
-    // 4. Filter & build ModuleConfig list
+    // 6. Filter & build ModuleConfig list
     // -----------------------------------------------------------------------
     let raw_modules: Vec<_> = match module_name {
-        Some(name) => profile
-            .modules
+        Some(name) => raw_modules_list
             .into_iter()
             .filter(|m| m.name == name)
             .collect(),
-        None => profile.modules,
+        None => raw_modules_list,
     };
 
     let mut modules: Vec<ModuleConfig> = Vec::with_capacity(raw_modules.len());
@@ -146,10 +189,14 @@ pub fn load_config(
     }
 
     // -----------------------------------------------------------------------
-    // 5. Discover SDK
+    // 7. Discover SDK
     // -----------------------------------------------------------------------
-    let compile_api_version =
-        parse_api_version(&raw_product.compatible_sdk_version).unwrap_or(12);
+    // targetSdkVersion (new format) takes priority over compatibleSdkVersion.
+    let sdk_version_str = raw_product
+        .target_sdk_version
+        .as_deref()
+        .unwrap_or(&raw_product.compatible_sdk_version);
+    let compile_api_version = parse_api_version(sdk_version_str).unwrap_or(12);
 
     let sdk_config = discover_sdk(compile_api_version)?;
 
@@ -190,7 +237,7 @@ mod tests {
         );
     }
 
-    /// Smoke test: `load_config` with a valid temp project directory.
+    /// Smoke test: `load_config` with a valid temp project directory (old format, bundleName in product).
     #[test]
     fn test_load_config_temp_project() {
         use std::io::Write;
@@ -242,6 +289,90 @@ mod tests {
         }
 
         // Cleanup
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// load_config with real OHOS format: bundleName from AppScope/app.json5,
+    /// signingConfigs at app level, product references signing by name.
+    #[test]
+    fn test_load_config_real_format_appscope_bundle_name() {
+        use std::io::Write;
+
+        let tmp = std::env::temp_dir().join("arkdown_config_real_format_test");
+        std::fs::create_dir_all(tmp.join("AppScope")).unwrap();
+
+        // AppScope/app.json5
+        let app_content = r#"{
+            "app": {
+                "bundleName": "com.example.realapp",
+                "vendor": "example",
+                "versionCode": 1000000,
+                "versionName": "1.0.0"
+            }
+        }"#;
+        let mut f = std::fs::File::create(tmp.join("AppScope/app.json5")).unwrap();
+        f.write_all(app_content.as_bytes()).unwrap();
+
+        // build-profile.json5 — no bundleName in product, signingConfigs at app level
+        let bp_content = r#"{
+            app: {
+                signingConfigs: [
+                    {
+                        name: "default",
+                        type: "HarmonyOS",
+                        material: {
+                            certpath: "/test/cert.cer",
+                            keyAlias: "testKey",
+                            keyPassword: "enc_kp",
+                            profile: "/test/debug.p7b",
+                            signAlg: "SHA256withECDSA",
+                            storeFile: "/test/debug.p12",
+                            storePassword: "enc_sp"
+                        }
+                    }
+                ],
+                products: [{
+                    name: "default",
+                    signingConfig: "default",
+                    targetSdkVersion: "5.0.5(17)",
+                    compatibleSdkVersion: "5.0.5(17)",
+                    runtimeOS: "HarmonyOS",
+                }],
+                buildModeSet: [{ name: "debug" }, { name: "release" }]
+            },
+            modules: [{
+                name: "entry",
+                srcPath: "./entry",
+            }]
+        }"#;
+        let mut f = std::fs::File::create(tmp.join("build-profile.json5")).unwrap();
+        f.write_all(bp_content.as_bytes()).unwrap();
+
+        let result = load_config(
+            &tmp,
+            BuildMode::Debug,
+            OutputTarget::Hap,
+            None,
+            None,
+        );
+
+        match result {
+            Ok(cfg) => {
+                // bundleName comes from AppScope/app.json5
+                assert_eq!(cfg.product.bundle_name, "com.example.realapp");
+                // Signing config resolved by name
+                let sc = cfg.product.signing_config.as_ref().expect("signing config present");
+                assert_eq!(sc.key_alias, "testKey");
+                assert_eq!(sc.cert_path.to_str().unwrap(), "/test/cert.cer");
+                // targetSdkVersion used for compile_api_version
+                assert_eq!(cfg.sdk_config.compile_api_version, 17);
+            }
+            Err(ConfigError::SdkNotFound) => {
+                // Acceptable on machines without DevEco Studio
+            }
+            Err(e) => panic!("unexpected error: {e}"),
+        }
+
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

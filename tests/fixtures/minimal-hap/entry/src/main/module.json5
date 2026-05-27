@@ -2,7 +2,7 @@
   module: {
     name: "entry",
     type: "entry",
-    description: "Test HAP entry module",
+    description: "$string:module_desc",
     mainElement: "EntryAbility",
     deviceTypes: ["phone"],
     deliveryWithInstall: true,
@@ -12,10 +12,15 @@
       {
         name: "EntryAbility",
         srcEntry: "./ets/entryability/EntryAbility.ets",
-        description: "Test entry ability",
+        description: "$string:EntryAbility_desc",
         exported: true,
-        startWindowIcon: "$media:icon",
-        startWindowBackground: "$color:start_window_background"
+        startWindowBackground: "$color:start_window_background",
+        skills: [
+          {
+            entities: ["entity.system.home"],
+            actions: ["ohos.want.action.home"]
+          }
+        ]
       }
     ]
   }

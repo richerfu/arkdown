@@ -1,20 +1,7 @@
 {
   "string": [
-    {
-      "name": "app_name",
-      "value": "ArkdownTest"
-    },
-    {
-      "name": "module_desc",
-      "value": "Test module for arkdown build system"
-    },
-    {
-      "name": "EntryAbility_desc",
-      "value": "Entry ability description"
-    },
-    {
-      "name": "EntryAbility_label",
-      "value": "Entry"
-    }
+    { "name": "module_desc", "value": "Test module" },
+    { "name": "EntryAbility_desc", "value": "description" },
+    { "name": "EntryAbility_label", "value": "Entry" }
   ]
 }
