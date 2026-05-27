@@ -1,6 +1,20 @@
 {
   app: {
-    signingConfigs: [],
+    signingConfigs: [
+      {
+        "name": "default",
+        "type": "HarmonyOS",
+        "material": {
+          "certpath": "/Users/ranger/.ohos/config/default_minimal-hap_YwKQ1z12UQE8RNArp0QtmNHBdgynkTMsX5TAEv24uWE=.cer",
+          "keyAlias": "debugKey",
+          "keyPassword": "0000001BC94D8EA444408A6DD5B9B2E7AFB303C0AEF591DEE04E81166829A731E324C76E467B833C626AC8",
+          "profile": "/Users/ranger/.ohos/config/default_minimal-hap_YwKQ1z12UQE8RNArp0QtmNHBdgynkTMsX5TAEv24uWE=.p7b",
+          "signAlg": "SHA256withECDSA",
+          "storeFile": "/Users/ranger/.ohos/config/default_minimal-hap_YwKQ1z12UQE8RNArp0QtmNHBdgynkTMsX5TAEv24uWE=.p12",
+          "storePassword": "0000001BEF470AA449EB449B670A5EAF58F67FE02F4B154CD4B8078EF9BC1CE3FD13F635846FA7C3E5154A"
+        }
+      }
+    ],
     products: [
       {
         name: "default",
@@ -16,8 +30,12 @@
       }
     ],
     buildModeSet: [
-      { name: "debug" },
-      { name: "release" }
+      {
+        name: "debug"
+      },
+      {
+        name: "release"
+      }
     ]
   },
   modules: [
@@ -27,7 +45,9 @@
       targets: [
         {
           name: "default",
-          applyToProducts: ["default"]
+          applyToProducts: [
+            "default"
+          ]
         }
       ]
     }
