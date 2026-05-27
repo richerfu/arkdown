@@ -1,4 +1,4 @@
-# SPEC-021: HAP Signing
+# SPEC-021: HAP Signing (Pure Rust)
 
 # SPEC-022: hvigorw Compatibility Wrapper
 
@@ -13,144 +13,237 @@
 
 ### Summary
 
-Signs the unsigned `.hap`/`.hsp` output from the packager using the Huawei HAP signing tool
-(`hap-sign-tool`). Signing credentials come from `build-profile.json5#app.signingConfigs`.
+Signs `.hap`/`.hsp` in **pure Rust** — no Java subprocess, no SDK binary dependency.
+Ports `developtools_hapsigner` (Apache 2.0) from Java/BouncyCastle to Rust.
 
-The HAP signing tool is a Java JAR distributed with the SDK. arkdown invokes it via
-`java -jar hap-sign-tool.jar`.
-
-### Signing Config
-
-From `build-profile.json5`:
-
-```json5
-signingConfigs: [{
-  name: "default",
-  type: "HarmonyOS",
-  material: {
-    certpath: "path/to/cert.cer",
-    keyAlias: "myKey",
-    keyPassword: "encrypted_password",
-    profile: "path/to/profile.p7b",
-    signAlg: "SHA256withECDSA",
-    storeFile: "path/to/keystore.p12",
-    storePassword: "encrypted_password"
-  }
-}]
-```
-
-Passwords are AES-encrypted by DevEco Studio. arkdown must decrypt them using the same
-key derivation as DevEco Studio (or require plaintext passwords via environment variable
-`ARKDOWN_KEY_PASSWORD` and `ARKDOWN_STORE_PASSWORD` as a pragmatic alternative).
-
-### Invocation
-
-```bash
-java -jar hap-sign-tool.jar sign-app \
-    -keyAlias <keyAlias> \
-    -signAlg SHA256withECDSA \
-    -mode localSign \
-    -appCertFile <certpath> \
-    -profileFile <profile> \
-    -inFile <unsigned.hap> \
-    -outFile <signed.hap> \
-    -keystoreFile <storeFile> \
-    -keystorePwd <storePassword> \
-    -keyPwd <keyPassword>
-```
-
-### Acceptance Criteria
-
-- Signed `.hap` is accepted by `hdc install` on a real OHOS device
-- Build succeeds without signing config (produces unsigned `.hap` with a warning)
-- Clear error when `java` is not in PATH
+Reference implementations:
+- `https://github.com/openharmony/developtools_hapsigner` — Java hapsigner source
+- `https://github.com/openharmony/security_code_signature` — verification side
 
 ---
 
-## SPEC-022: hvigorw Compatibility Wrapper
+## HAP Signing Block Binary Format
 
-**Crate**: `arkdown-cli` (extension to SPEC-013)
-**Priority**: P1
-**Blocked by**: SPEC-013
+The signing block is inserted between the last local file entry and the Central Directory.
 
-### Summary
+### Overall signing block layout (little-endian)
 
-Provides a drop-in `hvigorw` shell script that translates hvigor commands to arkdown. Existing
-CI pipelines that call `./hvigorw assembleHap` work without modification.
+```
+For each optional block (TLV header, 12 bytes each):
+  u32: type      (e.g. 0x20000000 for main sig, 0x20000002 for profile)
+  u32: length    (byte length of this block's value)
+  u32: offset    (byte offset from start of block-data section)
 
-### hvigorw Shell Script
+Block data section (concatenated values):
+  [block 0 bytes]
+  [block 1 bytes]
+  ...
 
-Write this file to `./hvigorw` in the project root (or as a template users install):
-
-```bash
-#!/bin/bash
-# hvigorw — drop-in replacement for arkdown
-# See meta/design/compat.md for the full command mapping.
-
-ARKDOWN_BIN="${ARKDOWN_HOME:-$(which arkdown 2>/dev/null)}"
-if [ -z "$ARKDOWN_BIN" ]; then
-    echo "ERROR: arkdown not found. Install arkdown or set ARKDOWN_HOME." >&2
-    exit 2
-fi
-
-CMD="${1:-default}"; shift 2>/dev/null || true
-ARGS=()
-MODE="debug"
-MODULE=""
-PRODUCT=""
-
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --mode)   MODE="$2";    shift 2 ;;
-        -m)       MODULE="$2";  shift 2 ;;
-        --product) PRODUCT="$2"; shift 2 ;;
-        -p)       ARGS+=("-p" "$2"); shift 2 ;;
-        *)        ARGS+=("$1"); shift ;;
-    esac
-done
-
-TARGET_ARGS=()
-[[ -n "$MODULE" ]]  && TARGET_ARGS+=("--module"  "$MODULE")
-[[ -n "$PRODUCT" ]] && TARGET_ARGS+=("--product" "$PRODUCT")
-
-case "$CMD" in
-    assembleHap)  exec "$ARKDOWN_BIN" build --target hap --mode "$MODE" "${TARGET_ARGS[@]}" "${ARGS[@]}" ;;
-    assembleHsp)  exec "$ARKDOWN_BIN" build --target hsp --mode "$MODE" "${TARGET_ARGS[@]}" "${ARGS[@]}" ;;
-    assembleHar)  exec "$ARKDOWN_BIN" build --target har --mode "$MODE" "${TARGET_ARGS[@]}" "${ARGS[@]}" ;;
-    assembleApp)  exec "$ARKDOWN_BIN" build --target app --mode "$MODE" "${TARGET_ARGS[@]}" "${ARGS[@]}" ;;
-    clean)        exec "$ARKDOWN_BIN" clean "${TARGET_ARGS[@]}" "${ARGS[@]}" ;;
-    test)         exec "$ARKDOWN_BIN" test  "${TARGET_ARGS[@]}" "${ARGS[@]}" ;;
-    default|"")   exec "$ARKDOWN_BIN" build "${TARGET_ARGS[@]}" "${ARGS[@]}" ;;
-    *)
-        echo "ERROR: Unknown hvigorw command: $CMD" >&2
-        echo "arkdown supports: assembleHap, assembleHsp, assembleHar, assembleApp, clean, test" >&2
-        exit 2
-        ;;
-esac
+u32:    block count
+u64:    total signing block size (includes this u64 + magic + u32 version)
+16 bytes: magic
+  V2 (compatibleSdkVersion < 8): b"HAP Sig Block 42"
+  V3 (compatibleSdkVersion >= 8): b"<hap sign block>"
+u32:    version (2 for V2, 3 for V3)
 ```
 
-### `arkdown init` Command (optional)
+### Block IDs
 
-Add `arkdown init --compat` which writes the `hvigorw` script to the project root and
-makes it executable.
+| Constant                         | Value        | Meaning                              |
+| -------------------------------- | ------------ | ------------------------------------ |
+| `HAP_SIGNATURE_SCHEME_V1`        | `0x20000000` | Main CMS SignedData block            |
+| `PROOF_OF_ROTATION`              | `0x20000001` | Proof-of-rotation certificate chain  |
+| `PROFILE_BLOCK`                  | `0x20000002` | Embedded `.p7b` profile              |
+| `PROPERTY_BLOCK`                 | `0x20000003` | Build property metadata              |
 
-### Unsupported hvigor Features
+---
 
-Document clearly that these hvigor features are NOT supported:
+## Content Digest Algorithm
 
-- Custom `hvigorfile.ts` task definitions (Gradle plugin extension points)
-- Java daemon (`hvigor-java-daemon.jar`) — arkdown is a single native binary
-- `--daemon` / `--no-daemon` flags (no-op)
-- Gradle build cache compatibility
+Split the unsigned HAP into four logical sections:
 
-### Acceptance Criteria
+1. All local file entry bytes (from offset 0 up to CD offset, minus any existing signing block)
+2. Signing block placeholder (zero-length initially; signing block bytes during verification)
+3. Central Directory bytes
+4. EOCD bytes (with the CD offset field zeroed out for signing, restored for verification)
 
-- `./hvigorw assembleHap` in `MyApplication` produces the same `.hap` as `arkdown build --target hap`
-- `./hvigorw assembleHap --mode release` passes `--mode release` to arkdown
-- `-m entry` scopes build to the `entry` module
+Process each section as a stream of **1 MB chunks** (`CHUNK_SIZE = 1_048_576`).
+
+```
+For each chunk:
+  write byte 0xa5                        (second-level chunk marker)
+  write u32 LE: chunk_content_size       (size of the chunk's actual data)
+  write chunk bytes
+
+Then prefix everything with:
+  byte 0x5a                              (first-level marker)
+  u32 LE: total_chunk_count              (across all sections)
+
+Final: SHA-256 of [0x5a | u32(count) | 0xa5 | u32(size0) | chunk0 | 0xa5 | u32(size1) | chunk1 | ...]
+```
+
+Optional blocks' `.value` bytes are also fed into `sha256.update()` before finalising,
+after all content chunks are processed.
+
+---
+
+## CMS / PKCS#7 SignedData Structure
+
+The `HAP_SIGNATURE_SCHEME_V1` block value is a DER-encoded CMS `SignedData`:
+
+```
+ContentInfo {
+  contentType: id-signedData (1.2.840.113549.1.7.2)
+  content: SignedData {
+    version: 1
+    digestAlgorithms: SET { AlgorithmIdentifier(SHA-256) }
+    encapContentInfo: ContentInfo {
+      contentType: id-data (1.2.840.113549.1.7.1)
+      content: OCTET STRING { encoded (alg_id, digest) pairs — see below }
+    }
+    certificates: [0] IMPLICIT SEQUENCE { leaf cert, intermediate certs... }
+    signerInfos: SET {
+      SignerInfo {
+        version: 1
+        sid: IssuerAndSerialNumber { issuer, serialNumber }
+        digestAlgorithm: AlgorithmIdentifier(SHA-256)
+        signedAttrs: [0] IMPLICIT SET {
+          Attribute(id-contentType = id-data)
+          Attribute(id-signingTime = UTCTime(now))
+          Attribute(id-messageDigest = SHA-256(encapContentInfo.content))
+        }
+        signatureAlgorithm: AlgorithmIdentifier(id-ecPublicKey or rsaPSS)
+        signature: OCTET STRING { sign(DER(signedAttrs), privateKey) }
+      }
+    }
+  }
+}
+```
+
+### Content of `encapContentInfo.content` (the "unsigned HAP digest" blob)
+
+```
+For each signature algorithm (usually just one):
+  u32 LE: algorithm ID  (e.g. 0x201 for ECDSA_WITH_SHA256)
+  u32 LE: digest length
+  bytes:  SHA-256 content digest (computed above)
+```
+
+---
+
+## Signature Algorithm IDs
+
+| ID      | Algorithm                    | JCA name                  |
+| ------- | ---------------------------- | ------------------------- |
+| `0x101` | RSA-PSS + SHA-256            | `SHA256withRSA/PSS`       |
+| `0x102` | RSA-PSS + SHA-384            | `SHA384withRSA/PSS`       |
+| `0x103` | RSA-PSS + SHA-512            | `SHA512withRSA/PSS`       |
+| `0x104` | RSA PKCS#1 v1.5 + SHA-256   | `SHA256withRSA`           |
+| `0x201` | ECDSA + SHA-256 (P-256)     | `SHA256withECDSA`         |
+| `0x202` | ECDSA + SHA-384              | `SHA384withECDSA`         |
+| `0x203` | ECDSA + SHA-512              | `SHA512withECDSA`         |
+
+Most HarmonyOS builds use `0x201` (ECDSA_WITH_SHA256).
+
+---
+
+## ZIP Alignment
+
+Before signing, the ZIP must be aligned:
+
+- Entries sorted: runnable uncompressed (.abc, .so) → bitmap → other uncompressed → compressed
+- `.abc` and `.so` files (stored, not deflate): **4096-byte** alignment
+- First compressed-method entry after runnable block: 4096-byte alignment
+- All other files: **4-byte** alignment (or configurable)
+- Alignment achieved by padding the `ZipEntry` local file header's extra field
+
+---
+
+## Files to Create / Rewrite
+
+```
+crates/arkdown-sign/src/
+├── lib.rs          ← HapSigner public API
+├── error.rs        ← SignError
+├── zip.rs          ← ZIP parse, sort, align, signing-block insertion
+├── digest.rs       ← HAP content digest (chunked SHA-256)
+├── signing_block.rs← signing block TLV assembly + magic
+├── pkcs7.rs        ← CMS SignedData builder (pure Rust)
+└── keystore.rs     ← PKCS#12 loading → (PrivateKey, cert chain)
+```
+
+### Cargo.toml additions (workspace)
+
+```toml
+# Crypto
+p256        = { version = "0.13", features = ["ecdsa"] }
+rsa         = { version = "0.9",  features = ["sha2"] }
+sha2        = { version = "0.10" }
+signature   = { version = "2" }
+# ASN.1 / CMS
+der         = { version = "0.7" }
+x509-cert   = { version = "0.2" }
+pkcs12      = { version = "0.1" }
+cms         = { version = "0.2" }
+const-oid   = { version = "0.9" }
+spki        = { version = "0.7" }
+# Random (for signing time)
+rand        = { version = "0.8" }
+```
+
+---
+
+## Public API
+
+```rust
+pub struct HapSigner {
+    key:   PrivateKeyInfo,   // from PKCS#12
+    certs: Vec<Certificate>, // full chain
+    profile: Vec<u8>,        // raw .p7b bytes
+    alg_id: SignatureAlgorithmId,
+}
+
+pub enum SignatureAlgorithmId {
+    EcdsaWithSha256 = 0x201,
+    RsaPssWithSha256 = 0x101,
+    // ...
+}
+
+impl HapSigner {
+    /// Load from PKCS#12 keystore.
+    pub fn from_pkcs12(
+        p12_bytes: &[u8],
+        store_password: &str,
+        key_alias: &str,
+        key_password: &str,
+        cert_path: &Path,
+        profile_path: &Path,
+        alg: SignatureAlgorithmId,
+    ) -> Result<Self, SignError>;
+
+    /// Sign an unsigned HAP/HSP in place (overwrites output_path).
+    pub fn sign(&self, unsigned_hap: &[u8]) -> Result<Vec<u8>, SignError>;
+}
+```
+
+---
+
+## Acceptance Criteria
+
+- `sign()` produces a HAP accepted by `hdc install` on OHOS device
+- No Java, no SDK binary invocation
+- Password inputs as plaintext (DevEco-encrypted passwords: accept via
+  `ARKDOWN_KEY_PASSWORD` / `ARKDOWN_STORE_PASSWORD` env vars as plaintext override)
+- Magic bytes match expected V2/V3 values
+- SHA-256 chunk digest reproducible against reference Java tool output
 
 ---
 
 ## Design References
 
-- `meta/design/compat.md` — complete command mapping, migration guide
+- `developtools_hapsigner` source:
+  - `hap/sign/SignHap.java` — signing block assembly + digest
+  - `hap/sign/BcPkcs7Generator.java` — CMS SignedData via BouncyCastle
+  - `hap/utils/HapUtils.java` — magic constants, block IDs, chunk digest
+  - `zip/Zip.java` — ZIP parsing, alignment, signing block location
+  - `entity/SignatureAlgorithm.java` — algorithm IDs
