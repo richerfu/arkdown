@@ -78,6 +78,19 @@ notify = "6"
 # Channels
 crossbeam-channel = "0.5"
 
+# Cryptography — pure Rust HAP signing (arkdown-sign, SPEC-021)
+p256        = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+rsa         = { version = "0.9",  features = ["sha2", "pem"] }
+sha2        = "0.10"
+signature   = "2"
+der         = "0.7"
+x509-cert   = { version = "0.2", features = ["pem"] }
+pkcs12      = "0.1"
+cms         = "0.2"
+const-oid   = "0.9"
+spki        = "0.7"
+rand        = "0.8"
+
 [profile.release]
 lto = true
 codegen-units = 1
