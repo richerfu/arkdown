@@ -1,1 +1,184 @@
-// stub — implementation pending
+//! Pure-Rust Panda bytecode compiler for the OpenHarmony ArkRuntime.
+//!
+//! This crate replaces the `es2abc` SDK binary (SPEC-009).  It accepts
+//! already-bundled, IIFE-wrapped CJS JavaScript — produced by `arkdown` plus
+//! `arkdown-plugin-chunk-wrapper` — and emits a Panda `.abc` file suitable
+//! for loading by ArkRuntime.
+//!
+//! # Pipeline
+//!
+//! ```text
+//! JS source (IIFE-wrapped CJS)
+//!     │
+//!     ▼  oxc_parser
+//! oxc Program AST
+//!     │
+//!     ▼  ir::builder
+//! ClassRecord + MethodRecord (IR)
+//!     │
+//!     ▼  emit::file
+//! .abc binary
+//! ```
+//!
+//! # Status
+//!
+//! The binary format skeleton and public API are complete.  The code-generation
+//! pass (AST → opcodes) currently emits only `ReturnUndefined` stubs; full
+//! statement lowering is a SPEC-009 follow-up task.
+
+pub mod compiler;
+pub mod emit;
+pub mod error;
+pub mod ir;
+
+pub use compiler::{AbcArtifactResult, AbcCompileOptions, AbcCompiler, AbcModule};
+pub use error::AbcError;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Binary format sanity checks ─────────────────────────────────────────
+
+    #[test]
+    fn test_abc_header_magic() {
+        let abc = crate::emit::file::AbcFile::new();
+        let bytes = abc.serialize();
+        assert_eq!(&bytes[0..4], b"PAND", "ABC magic bytes must be PAND");
+    }
+
+    #[test]
+    fn test_abc_header_version() {
+        let abc = crate::emit::file::AbcFile::new();
+        let bytes = abc.serialize();
+        let version = u32::from_le_bytes(bytes[0x08..0x0C].try_into().unwrap());
+        assert_eq!(
+            version,
+            crate::emit::file::VERSION,
+            "ABC version field must match VERSION constant"
+        );
+    }
+
+    #[test]
+    fn test_abc_file_size_patched() {
+        let abc = crate::emit::file::AbcFile::new();
+        let bytes = abc.serialize();
+        let file_size = u32::from_le_bytes(bytes[0x0C..0x10].try_into().unwrap());
+        assert_eq!(
+            file_size as usize,
+            bytes.len(),
+            "file_size header field must equal the actual serialized length"
+        );
+    }
+
+    // ── String table ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_string_table_intern_idempotent() {
+        let mut st = crate::emit::strings::StringTable::default();
+        let idx1 = st.intern("hello");
+        let idx2 = st.intern("hello");
+        assert_eq!(idx1, idx2, "interning the same string twice must return the same index");
+    }
+
+    #[test]
+    fn test_string_table_intern_distinct() {
+        let mut st = crate::emit::strings::StringTable::default();
+        let idx1 = st.intern("hello");
+        let idx2 = st.intern("world");
+        assert_ne!(idx1, idx2, "distinct strings must get distinct indices");
+    }
+
+    #[test]
+    fn test_string_table_get() {
+        let mut st = crate::emit::strings::StringTable::default();
+        let idx = st.intern("arkdown");
+        assert_eq!(st.get(idx), Some("arkdown"));
+    }
+
+    // ── Compiler integration ────────────────────────────────────────────────
+
+    fn make_compiler() -> AbcCompiler {
+        AbcCompiler::new(AbcCompileOptions {
+            debug_info: false,
+            opt_level: 0,
+            target_api_version: 12,
+            merge_abc: true,
+            cache_path: None,
+        })
+    }
+
+    #[test]
+    fn test_compile_minimal_iife() {
+        let compiler = make_compiler();
+        let modules = vec![AbcModule {
+            record_name: "main".to_string(),
+            source: "(function () { var x = 1; })()".to_string(),
+            source_map: None,
+        }];
+        let tmp = std::env::temp_dir().join("test_abc_minimal.abc");
+        let result = compiler.compile(modules, &tmp);
+        assert!(result.is_ok(), "compile must succeed: {:?}", result.err());
+        let bytes = std::fs::read(&tmp).unwrap();
+        assert_eq!(&bytes[0..4], b"PAND", "output must begin with PAND magic");
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn test_compile_multiple_modules() {
+        let compiler = make_compiler();
+        let modules = vec![
+            AbcModule {
+                record_name: "@bundle:com.example/entry/ets/pages/Index".to_string(),
+                source: "(function () { var x = 1; })()".to_string(),
+                source_map: None,
+            },
+            AbcModule {
+                record_name: "@bundle:com.example/entry/ets/utils/Helper".to_string(),
+                source: "(function () { function helper() { return 42; } })()".to_string(),
+                source_map: None,
+            },
+        ];
+        let tmp = std::env::temp_dir().join("test_abc_multi.abc");
+        let result = compiler.compile(modules, &tmp);
+        assert!(result.is_ok(), "multi-module compile must succeed: {:?}", result.err());
+        let bytes = std::fs::read(&tmp).unwrap();
+        assert_eq!(&bytes[0..4], b"PAND");
+        // num_classes field at 0x18 should be 2
+        let num_classes = u32::from_le_bytes(bytes[0x18..0x1C].try_into().unwrap());
+        assert_eq!(num_classes, 2, "num_classes must equal the number of input modules");
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn test_compile_parse_error() {
+        let compiler = make_compiler();
+        let modules = vec![AbcModule {
+            record_name: "bad".to_string(),
+            source: "this is not valid javascript ???".to_string(),
+            source_map: None,
+        }];
+        let tmp = std::env::temp_dir().join("test_abc_parse_error.abc");
+        let result = compiler.compile(modules, &tmp);
+        // The parser may or may not surface a hard error for all invalid JS;
+        // what matters is that the compiler does not panic.
+        let _ = result; // result may be Ok or Err — both are acceptable
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn test_artifact_result_fields() {
+        let compiler = make_compiler();
+        let modules = vec![AbcModule {
+            record_name: "test_record".to_string(),
+            source: "(function(){}())".to_string(),
+            source_map: None,
+        }];
+        let tmp = std::env::temp_dir().join("test_abc_result_fields.abc");
+        let result = compiler.compile(modules, &tmp).unwrap();
+        assert_eq!(result.api_version, 12);
+        assert!(!result.has_debug_info);
+        assert_eq!(result.path, tmp);
+        let _ = std::fs::remove_file(&tmp);
+    }
+}

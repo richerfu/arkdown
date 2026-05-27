@@ -2,3 +2,12 @@
 name = "arkdown-abc"
 version = "0.1.0"
 edition = "2021"
+
+[dependencies]
+oxc_allocator = { workspace = true }
+oxc_parser    = { workspace = true }
+oxc_ast       = { workspace = true }
+oxc_span      = { workspace = true }
+thiserror     = { workspace = true }
+rayon         = { workspace = true }
+fs-err        = { workspace = true }
