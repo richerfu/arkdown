@@ -97,6 +97,15 @@ version = "0.1.0"
 [[package]]
 name = "arkdown-plugin-chunk-wrapper"
 version = "0.1.0"
+dependencies = [
+ "arkdown-core",
+ "async-trait",
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_parser",
+ "thiserror",
+ "tokio",
+]
 
 [[package]]
 name = "arkdown-plugin-duplicate-check"
