@@ -9,6 +9,7 @@ tempfile = "3"
 [dependencies]
 oxc_allocator = { workspace = true }
 oxc_parser    = { workspace = true }
+oxc_codegen   = { workspace = true }
 oxc_ast       = { workspace = true }
 oxc_span      = { workspace = true }
 thiserror     = { workspace = true }

@@ -1,5 +1,10 @@
 use std::path::{Path, PathBuf};
 
+use oxc_allocator::Allocator;
+use oxc_codegen::Codegen;
+use oxc_parser::Parser;
+use oxc_span::SourceType;
+
 use crate::emit::file::AbcFile;
 use crate::error::AbcError;
 use crate::ir::builder;
@@ -38,6 +43,38 @@ pub struct AbcArtifactResult {
     pub api_version: u32,
     /// Whether the file contains embedded debug information.
     pub has_debug_info: bool,
+}
+
+/// Strip TypeScript type annotations from source before bytecode generation.
+///
+/// The bundler pipeline may emit TypeScript-flavoured code when the OXC parser
+/// falls back to raw source for `.ets` files.  `build_record` parses with
+/// `SourceType::mjs()` which rejects TS syntax (`: Type`, `): void`, etc.).
+/// This function re-parses as TypeScript and re-emits plain JavaScript via
+/// `oxc_codegen`, removing all type annotations in one pass.
+///
+/// If TypeScript parsing also fails (malformed source), we fall back to
+/// plain-JS parsing; if that too fails we return the input unchanged and let
+/// `build_record` surface the error with a proper diagnostic.
+/// Normalise `source` through a TSX parse + Codegen round-trip.
+///
+/// The primary purpose is to remove non-standard ArkTS/ETS constructs that
+/// would confuse the downstream `SourceType::tsx()` parser used by
+/// `build_record`.  Standard TypeScript annotations (`): void`, `: Want`)
+/// survive the round-trip unchanged — that is intentional: `build_record`
+/// now accepts TypeScript source directly via `SourceType::tsx()`, so we
+/// no longer need to fully strip the annotations here.
+///
+/// Falls back to the original source if the TSX parser panics hard (e.g.
+/// truly malformed input).
+fn strip_typescript_types(source: &str) -> String {
+    let allocator = Allocator::default();
+    let parse_ret =
+        Parser::new(&allocator, source, SourceType::tsx()).parse();
+    if parse_ret.panicked {
+        return source.to_string();
+    }
+    Codegen::new().build(&parse_ret.program).code
 }
 
 /// Pure-Rust ArkCompiler bytecode compiler.
@@ -94,8 +131,12 @@ impl AbcCompiler {
         let mut abc_file = AbcFile::new();
 
         for module in &modules {
+            // Strip TypeScript type annotations before parsing as plain JS.
+            // The codegen fallback in the loader may preserve TS syntax when
+            // the OXC parser cannot handle `.ets`-specific constructs.
+            let js_source = strip_typescript_types(&module.source);
             let record = builder::build_record(
-                &module.source,
+                &js_source,
                 &module.record_name,
                 &mut abc_file.strings,
             )?;

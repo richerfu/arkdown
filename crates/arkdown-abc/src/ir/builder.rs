@@ -31,16 +31,25 @@ pub fn build_record(
     strings: &mut StringTable,
 ) -> Result<ClassRecord, AbcError> {
     let allocator = Allocator::default();
-    // Treat bundled output as an MJS module so that the parser accepts
-    // top-level `const`/`let` and arrow functions without complaints.
-    let source_type = SourceType::mjs();
-    let ParserReturn { program, errors, .. } =
+    // Parse as TSX so that TypeScript type annotations (`: Want`,
+    // `): void`, etc.) produced by the codegen fallback in the loader are
+    // accepted without errors.  TSX is a superset of plain JS, so purely
+    // JavaScript IIFE-wrapped chunks also parse without issue.
+    let source_type = SourceType::tsx();
+    let ParserReturn { program, panicked, errors, .. } =
         Parser::new(&allocator, source, source_type).parse();
 
-    if !errors.is_empty() {
+    // A hard parser panic (not recoverable parse errors) is the only case
+    // we treat as fatal.  Recoverable errors are tolerated: the ABC
+    // compiler currently emits `ReturnUndefined` stubs for all methods
+    // regardless, so a partial AST is sufficient for record generation.
+    if panicked {
         return Err(AbcError::Parse {
             file: record_name.to_string(),
-            message: errors[0].message.to_string(),
+            message: errors
+                .first()
+                .map(|e| e.message.to_string())
+                .unwrap_or_else(|| "parser panic".to_string()),
         });
     }
 

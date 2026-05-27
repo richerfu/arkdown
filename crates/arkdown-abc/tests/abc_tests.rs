@@ -67,7 +67,12 @@ fn test_output_starts_with_pand_magic() {
         )
         .expect("compile must succeed");
     let bytes = std::fs::read(&out).expect("read .abc");
-    assert_eq!(&bytes[0..4], b"PAND", "output must begin with PAND magic bytes");
+    // Magic is 8 bytes: ASCII "PANDA" + 3 null bytes.
+    assert_eq!(
+        &bytes[0..8],
+        b"PANDA\x00\x00\x00",
+        "output must begin with 8-byte PANDA magic"
+    );
 }
 
 #[test]

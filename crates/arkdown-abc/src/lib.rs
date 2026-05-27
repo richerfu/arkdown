@@ -44,14 +44,20 @@ mod tests {
     fn test_abc_header_magic() {
         let abc = crate::emit::file::AbcFile::new();
         let bytes = abc.serialize();
-        assert_eq!(&bytes[0..4], b"PAND", "ABC magic bytes must be PAND");
+        // Magic is 8 bytes: ASCII "PANDA" + 3 null bytes.
+        assert_eq!(
+            &bytes[0..8],
+            b"PANDA\x00\x00\x00",
+            "ABC magic bytes must be PANDA\\x00\\x00\\x00 (8 bytes)"
+        );
     }
 
     #[test]
     fn test_abc_header_version() {
         let abc = crate::emit::file::AbcFile::new();
         let bytes = abc.serialize();
-        let version = u32::from_le_bytes(bytes[0x08..0x0C].try_into().unwrap());
+        // With 8-byte magic: checksum is at 0x08, version is at 0x0C.
+        let version = u32::from_le_bytes(bytes[0x0C..0x10].try_into().unwrap());
         assert_eq!(
             version,
             crate::emit::file::VERSION,
@@ -63,7 +69,8 @@ mod tests {
     fn test_abc_file_size_patched() {
         let abc = crate::emit::file::AbcFile::new();
         let bytes = abc.serialize();
-        let file_size = u32::from_le_bytes(bytes[0x0C..0x10].try_into().unwrap());
+        // With 8-byte magic: file_size is at 0x10.
+        let file_size = u32::from_le_bytes(bytes[0x10..0x14].try_into().unwrap());
         assert_eq!(
             file_size as usize,
             bytes.len(),
@@ -120,7 +127,11 @@ mod tests {
         let result = compiler.compile(modules, &tmp);
         assert!(result.is_ok(), "compile must succeed: {:?}", result.err());
         let bytes = std::fs::read(&tmp).unwrap();
-        assert_eq!(&bytes[0..4], b"PAND", "output must begin with PAND magic");
+        assert_eq!(
+            &bytes[0..8],
+            b"PANDA\x00\x00\x00",
+            "output must begin with 8-byte PANDA magic"
+        );
         let _ = std::fs::remove_file(&tmp);
     }
 
@@ -143,9 +154,9 @@ mod tests {
         let result = compiler.compile(modules, &tmp);
         assert!(result.is_ok(), "multi-module compile must succeed: {:?}", result.err());
         let bytes = std::fs::read(&tmp).unwrap();
-        assert_eq!(&bytes[0..4], b"PAND");
-        // num_classes field at 0x18 should be 2
-        let num_classes = u32::from_le_bytes(bytes[0x18..0x1C].try_into().unwrap());
+        assert_eq!(&bytes[0..8], b"PANDA\x00\x00\x00");
+        // num_classes field at 0x1C (with 8-byte magic) should be 2
+        let num_classes = u32::from_le_bytes(bytes[0x1C..0x20].try_into().unwrap());
         assert_eq!(num_classes, 2, "num_classes must equal the number of input modules");
         let _ = std::fs::remove_file(&tmp);
     }
