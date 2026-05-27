@@ -1,0 +1,4 @@
+[package]
+name = "arkdown-plugin-chunk-wrapper"
+version = "0.1.0"
+edition = "2021"
