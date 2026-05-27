@@ -2,3 +2,5 @@
 target
 tests/fixtures/minimal-hap/entry/build
 tests/fixtures/minimal-hap/build
+.worktrees/
+.claude/
