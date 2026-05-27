@@ -189,6 +189,16 @@ dependencies = [
 [[package]]
 name = "arkdown-plugin-har-dedup"
 version = "0.1.0"
+dependencies = [
+ "arkdown-core",
+ "async-trait",
+ "fs-err",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
 
 [[package]]
 name = "arkdown-plugin-json5"
@@ -222,6 +232,13 @@ dependencies = [
 [[package]]
 name = "arkdown-plugin-ohos-resolve"
 version = "0.1.0"
+dependencies = [
+ "arkdown-core",
+ "arkdown-resolver",
+ "async-trait",
+ "thiserror",
+ "tokio",
+]
 
 [[package]]
 name = "arkdown-plugin-router-map"
@@ -283,6 +300,11 @@ dependencies = [
 [[package]]
 name = "arkdown-sign"
 version = "0.1.0"
+dependencies = [
+ "arkdown-core",
+ "tempfile",
+ "thiserror",
+]
 
 [[package]]
 name = "async-trait"
