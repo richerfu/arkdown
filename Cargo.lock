@@ -133,6 +133,16 @@ version = "0.1.0"
 [[package]]
 name = "arkdown-plugin-json5"
 version = "0.1.0"
+dependencies = [
+ "arkdown-core",
+ "async-trait",
+ "fs-err",
+ "json5",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
 
 [[package]]
 name = "arkdown-plugin-module-meta"
