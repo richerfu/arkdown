@@ -76,3 +76,29 @@ impl ArkdownPlugin for DuplicateCheckPlugin {
 
 - `meta/design/plugins.md` — `check-duplicate-filenames-plugin` entry
 - `meta/design/abc-pipeline.md` — why merge-abc requires unique record names
+
+---
+
+## Rolldown Alignment
+
+| arkdown concept | rolldown equivalent | note |
+| --- | --- | --- |
+| `DuplicateCheckPlugin::before_build_end` | `Plugin::buildEnd` (rollup) / `Plugin::build_end` (rolldown) | Closest rolldown equivalent; arkdown uses `before_build_end` which fires before chunk generation |
+| File stem uniqueness check | no rolldown equivalent | OHOS-specific constraint from es2abc `--merge-abc`; standard JS bundlers have no such requirement |
+| `BuildContext::module_graph()` | rolldown `PluginContext::get_module_info()` | rolldown exposes per-module info via an API call; arkdown exposes the full graph via the context |
+
+**Key divergence:** This check has no rolldown/rollup equivalent. The constraint arises from es2abc's `--merge-abc` flag which uses the JS filename as the Panda bytecode record name. Two files with the same stem (e.g., `utils/Logger.ets` and `components/Logger.ets`) would both compile to a record named `"Logger"` causing a conflict.
+
+---
+
+## Test Requirements
+
+- Two modules with paths `src/main/ets/utils/Logger.ets` and `src/main/ets/components/Logger.ets` → `Err(ArkdownError::DuplicateFilename)` with both paths in the error message
+- Module graph with all unique stems → `Ok(())`
+- SDK declaration files (`.d.ts`, `.d.ets`, `module_type = Declaration`) are excluded from the check; two files both named `hilog.d.ts` do not trigger an error
+- External modules (`external: true`) are excluded from the check
+- `BytecodeHar` modules are excluded from the check
+- A single module (no duplicates possible) → `Ok(())`
+- Empty module graph → `Ok(())`
+- Error message includes both conflicting file paths and the stem string that collides
+- Plugin name returns `"duplicate-check"`

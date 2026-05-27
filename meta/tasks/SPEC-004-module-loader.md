@@ -180,3 +180,37 @@ crates/arkdown-loader/
 - `meta/design/pipeline.md` — Phase 3 (Module Loading), Phase 4 (Transform)
 - `meta/design/types.md` — `Module`, `ModuleSource`, `ArkdownPlugin` trait
 - `meta/design/plugins.md` — `common-plugin` and `module-meta-info-plugin` context
+
+---
+
+## Rolldown Alignment
+
+| arkdown concept | rolldown equivalent | note |
+| --- | --- | --- |
+| `ModuleLoader` | rolldown `ModuleLoader` | Near-identical design: concurrent queue-based loader; rolldown uses Tokio tasks, arkdown uses Rayon |
+| `PluginDriver` | rolldown `PluginDriver` | Same concept; runs hook chains in plugin registration order |
+| `PluginDriver::resolve_id()` | rolldown `PluginDriver::resolve_id()` | Identical semantics: first `Some(id)` wins; fallback to default resolver |
+| `PluginDriver::load()` | rolldown `PluginDriver::load()` with `HookLoadOutput` | Identical; fallback is `fs::read_to_string` |
+| `PluginDriver::transform()` | rolldown `PluginDriver::transform()` with `HookTransformOutput` | Sequential: each plugin receives the output of the prior plugin |
+| `PluginDriver::module_parsed()` | rolldown `PluginDriver::module_parsed()` | Notification only; no return value |
+| Rayon parallel loading | rolldown uses Tokio `JoinSet` for concurrent module loading | Functional equivalent; both process independent modules concurrently |
+| Import/export extraction via `oxc_semantic` | rolldown uses its own AST analysis | Same underlying oxc library; rolldown extracts `ModuleRecord`; arkdown reads `import_entries` + `exported_bindings` |
+| `ModuleType::BytecodeHar` stub | rolldown `Module::External` | arkdown creates a real `Module` stub with empty imports; rolldown uses an `ExternalModule` |
+
+**Key divergence:** rolldown's `ModuleLoader` uses a `ModuleId` type that is distinct from the string ID. arkdown uses `String` (the OHM URL or file path) as the canonical ID. No numeric module ID is exposed in the loader API; `ModuleIdx` is internal to `ModuleGraph`.
+
+---
+
+## Test Requirements
+
+- Loading a `.ets` file invokes `EtsTransformPlugin::transform` and returns a `Module` with `module_type = ModuleType::Ts` (the transform changes the type)
+- Loading a `.ts` file skips ETS transform; returns `module_type = ModuleType::Ts`
+- Loading a `.json5` file returns synthetic ES module code (handled by `Json5Plugin`)
+- Loading a `ModuleType::BytecodeHar` module produces a stub `Module` with empty `imports` and `exports`
+- `PluginDriver::resolve_id`: first plugin returning `Some` wins; subsequent plugins are not called
+- `PluginDriver::load`: first plugin returning `Some` wins; fallback `fs::read` is called only when all plugins return `None`
+- `PluginDriver::transform`: all plugins run sequentially; second plugin receives output of first
+- `module_parsed` notifies all plugins even when earlier plugins returned errors (notification, not pipeline)
+- Circular import `A → B → A` detected during graph construction in SPEC-005, not in loader; loader does not panic on first encounter of a circular edge
+- Parallel loading: 100 independent modules load concurrently faster than sequentially (property-based or timing test)
+- SDK declaration modules (`external: true`, `module_type: Declaration`) are not passed to `load` hook

@@ -195,3 +195,34 @@ crates/arkdown-resource/
 - `meta/design/pipeline.md` — Phase 10 (Resource Compilation)
 - `meta/design/hvigorw-analysis.md` — CompileResource task context
 - OpenHarmony source: `https://gitcode.com/openharmony/developtools_restool`
+
+---
+
+## Rolldown Alignment
+
+`arkdown-resource` has no rolldown equivalent — resource compilation is entirely OHOS-specific. Standard JS bundlers do not process binary resource indexes. The closest analogue in the JS ecosystem is a Vite/webpack asset plugin, but the OHOS `resources.index` binary format and ID assignment system are unique to OpenHarmony.
+
+| arkdown concept | closest analogue | note |
+| --- | --- | --- |
+| `ResourceCompiler::compile()` | Vite `transformAssets` / webpack `file-loader` | Conceptually similar (process non-JS assets) but the binary output format is completely different |
+| Resource ID assignment (`0x01000000+`) | CSS Modules class name hashing | Different: OHOS uses sequential integer IDs; CSS Modules use content hashes |
+| `resources.index` binary format | no equivalent in rolldown/rollup | Unique OHOS binary format; must be ported from `developtools_restool` source |
+| Qualifier-based locale merging (`base/`, `en_US/`) | webpack `i18n-loader` | Functionally similar but different format |
+| Profile JSON passthrough (`profile/*.json`) | webpack `copy-webpack-plugin` | Profile JSON files are bundled as-is, not compiled |
+
+---
+
+## Test Requirements
+
+- `compile()` on a minimal `resources/base/element/string.json` with two string entries produces `resources.index` with both entries and sequential IDs starting at `0x01000000`
+- `resources.index` magic bytes match the expected value from `developtools_restool` source
+- String resource from `base/` and locale override from `en_US/` both appear in the index under the same resource ID but different qualifier entries
+- Color resource from `element/color.json`: hex value `"#FF0000"` is correctly parsed and stored
+- Media file (`media/app_icon.png`) is copied to output directory with preserved filename
+- Profile JSON (`profile/main_pages.json`) is copied to `resources/base/profile/` without modification (not compiled into binary index)
+- Resource IDs are stable across rebuilds when the resource set is unchanged (deterministic assignment)
+- Missing `resources/` directory returns `Err` (not panic)
+- Malformed `element/string.json` (invalid JSON) returns `Err(ResourceError::ParseError)`
+- `ResourceTable.txt` lists all assigned IDs in `entry: 0x01000000 string app_name` format
+- HAR dependency resources merged with entry resources: IDs do not collide between HAR and entry resource sets
+- `compile()` result `resources_index` path exists on disk after successful call

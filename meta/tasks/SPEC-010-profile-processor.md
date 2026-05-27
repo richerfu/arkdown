@@ -180,3 +180,36 @@ crates/arkdown-profile/
 - `meta/design/pipeline.md` — Phase 11 (module.json5 merge)
 - `meta/design/chunk-model.md` — entry point collection from module.json5
 - `meta/design/types.md` — `HapManifest`, `ModuleJson5`, `OhPackageJson5`
+
+---
+
+## Rolldown Alignment
+
+| arkdown concept | rolldown equivalent | note |
+| --- | --- | --- |
+| `generate_loader_json()` | rolldown `InputOptions::input` derivation | Both determine bundler entry points; rolldown receives them as explicit options; arkdown derives them from `module.json5` abilities and writes them to `loader.json` |
+| `LoaderJson::compileEntry` | rolldown `input` array | Direct equivalent: list of entry file paths for the bundler |
+| `LoaderJson::pkgNameToPkgBriefInfo` | no rolldown equivalent | OHOS-specific: maps package names to source roots; used by the resolver to locate local HAR files |
+| `LoaderJson::byteCodeHarInfo` | no rolldown equivalent | OHOS-specific: maps HAR package names to pre-compiled ABC paths |
+| `process_profile()` | no rolldown equivalent | Produces `module.json`; rolldown has no manifest processing concept |
+| `HapManifest::virtual_machine` | no rolldown equivalent | OHOS-specific: `"ark3.5.0.0"` version string set in output `module.json` |
+| `LoaderJson::supportChunks` | rolldown `manualChunks` / chunk splitting options | Analogue: controls whether shared chunks are extracted |
+| `LoaderJson::aceModuleBuild` | rolldown `OutputOptions::dir` | Both specify the output directory for JS chunk files |
+
+---
+
+## Test Requirements
+
+- `process_profile()` on a minimal `module.json5` with one ability sets `module.virtualMachine = "ark<version>"` and `module.compileMode = "esmodule"` in the output `module.json`
+- `generate_loader_json()` includes all `abilities[*].srcEntry` paths in `compileEntry`
+- `generate_loader_json()` includes `module.srcEntry` in `compileEntry` when present
+- Worker files from `buildOption.sourceOption.workers` appear in `compileEntry`
+- ByteCode HAR dependency (with `metadata.abcPath`) appears in `byteCodeHarInfo`, not in `compileEntry`
+- `pkgNameToPkgBriefInfo` includes the entry module's own package info (not just dependencies)
+- Local HAR dependency (`file:../my-har`) appears in `pkgNameToPkgBriefInfo` with the correct `pkgRoot` and `sourceRoots`
+- HAR abilities from dependencies are collected and merged into `module.abilities` in `process_profile()`
+- HAR ability `srcEntry` is rewritten to OHM URL `"@bundle:bundleName/harModuleName/relativePath"` in the output
+- `write_loader_json()` produces valid JSON that round-trips through `serde_json::from_str`
+- Missing `module.json5` file returns `Err` (not panic)
+- `module.json5` with `pages: "$profile:main_pages"` preserves the `$profile:` reference in the output `module.json`
+- `LoaderJson::buildMode` is `"debug"` for `BuildMode::Debug` and `"release"` for `BuildMode::Release`

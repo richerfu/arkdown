@@ -105,3 +105,32 @@ fn generate_esm_from_json(value: &serde_json::Value) -> String {
 ## Design References
 
 - `meta/design/plugins.md` — `@rollup/plugin-json` entry
+
+---
+
+## Rolldown Alignment
+
+| arkdown concept | rolldown equivalent | note |
+| --- | --- | --- |
+| `Json5Plugin::resolve_id` | `@rollup/plugin-json` `resolveId` hook | Identical: intercepts `.json`/`.json5` extensions before the default resolver |
+| `Json5Plugin::load` | `@rollup/plugin-json` `load` hook | Identical semantics: reads file, returns synthetic ESM code |
+| `generate_esm_from_json()` | rolldown built-in JSON transform | rolldown has native JSON module support; arkdown implements it explicitly to also handle `.json5` (the `json5` crate) |
+| Named exports for top-level keys | `@rollup/plugin-json namedExports: true` | Same behavior: valid-identifier top-level keys become named exports |
+| `export default { ... }` | `@rollup/plugin-json` default export | Identical |
+
+**Key difference from rolldown:** rolldown natively understands `.json` as `ModuleType::Json`. arkdown represents JSON5 as `ModuleType::Json5` and handles it entirely in this plugin; there is no built-in JSON module loader in arkdown.
+
+---
+
+## Test Requirements
+
+- `import config from "./config.json5"` where `config.json5` is `{ name: "foo", version: 2 }` → module code contains `export const name = "foo"`, `export const version = 2`, `export default { name: "foo", version: 2 }`
+- `import x from "./data.json"` (plain JSON, not JSON5) → same named exports behavior
+- JSON5 with comments (`// ...` and `/* ... */`) parses correctly and generates valid ESM
+- JSON5 with trailing commas parses correctly
+- Top-level array (not object): only `export default [...]` is emitted; no named exports
+- Top-level string (`"hello"`): `export default "hello"`; no named exports
+- Key that is not a valid JS identifier (e.g., `"my-key"`, `"123abc"`) is not emitted as a named export; only `export default` is emitted
+- Invalid JSON5 content returns `Err(ArkdownError::ParseError)` with the file path in the error message
+- `resolve_id` returns `Ok(None)` for non-JSON/JSON5 extensions (`.ts`, `.ets`, `.js`)
+- `load` returns `Ok(None)` for non-JSON/JSON5 IDs

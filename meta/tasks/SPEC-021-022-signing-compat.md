@@ -247,3 +247,82 @@ impl HapSigner {
   - `hap/utils/HapUtils.java` — magic constants, block IDs, chunk digest
   - `zip/Zip.java` — ZIP parsing, alignment, signing block location
   - `entity/SignatureAlgorithm.java` — algorithm IDs
+
+---
+
+## Rolldown Alignment
+
+`arkdown-sign` has no rolldown equivalent. rolldown produces JS files; it does not sign ZIP archives. HAP signing is unique to the OHOS ecosystem.
+
+| arkdown concept | closest analogue | note |
+| --- | --- | --- |
+| `HapSigner::sign()` | npm `publish` code signing / macOS codesign | Both produce signed artifacts; completely different formats and protocols |
+| PKCS#12 keystore loading | Node.js `crypto` module PKCS#12 support | Same standard; arkdown uses `pkcs12` Rust crate (no Java/BouncyCastle) |
+| CMS SignedData (PKCS#7) | no JS bundler equivalent | Standard cryptographic format; arkdown uses `cms` Rust crate |
+| ZIP alignment (4096-byte for `.abc`/`.so`) | no rolldown equivalent | OHOS-specific requirement for mmap-based loading |
+| HAP signing block insertion | no rolldown equivalent | OHOS-specific: signing block is inserted between last local file entry and Central Directory |
+
+---
+
+## Test Requirements (SPEC-021)
+
+- V3 magic bytes: produced HAP bytes at signing block offset contain `b"<hap sign block>"` (for `compatibleSdkVersion >= 8`)
+- V2 magic bytes: produced HAP bytes at signing block offset contain `b"HAP Sig Block 42"` (for `compatibleSdkVersion < 8`)
+- Signing block `HAP_SIGNATURE_SCHEME_V1` block ID `0x20000000` is present in the signing block
+- Profile block `PROFILE_BLOCK` block ID `0x20000002` is present when a `.p7b` profile is provided
+- Content digest: SHA-256 of the chunked content is reproducible — signing the same unsigned HAP twice with the same key produces the same digest (but different CMS signature due to `signingTime`)
+- Content digest chunk size: each chunk is exactly 1 MB (`1_048_576` bytes) except the final chunk which may be smaller
+- Type markers: first byte of content digest input is `0x5a`; each chunk prefixed with `0xa5`
+- ZIP alignment: `.abc` entries have 4096-byte alignment in the produced signed HAP
+- ZIP alignment: `.so` entries have 4096-byte alignment
+- ZIP alignment: non-runnable entries have 4-byte alignment
+- ECDSA P-256 signature: `sign()` with algorithm `EcdsaWithSha256` produces a valid signature verifiable with the public key from the certificate
+- RSA-PSS signature: `sign()` with algorithm `RsaPssWithSha256` produces a valid RSA-PSS signature
+- `HapSigner::from_pkcs12()` with incorrect store password returns `Err(SignError::KeystoreDecryptFailed)`
+- `sign()` output accepted by `hdc install` on an OHOS device (acceptance criterion; requires device)
+- No Java subprocess is invoked at any point — verified by asserting no `Command::new("java")` exists in the crate
+
+---
+
+## SPEC-022: hvigorw Compatibility Wrapper
+
+**Crate**: `arkdown-cli` (extension)
+**Priority**: P1
+**Blocked by**: SPEC-013
+
+### Summary
+
+Provide a `hvigorw`-compatible wrapper script so projects can swap out hvigor without changing their CI pipelines. Maps hvigor task invocations to `arkdown build` subcommands.
+
+### Command Mapping
+
+```
+hvigorw assembleHap --mode debug    →  arkdown build --target hap --mode debug
+hvigorw assembleHsp --mode release  →  arkdown build --target hsp --mode release
+hvigorw assembleHar                 →  arkdown build --target har
+hvigorw clean                       →  arkdown clean
+hvigorw test                        →  arkdown test
+```
+
+### Implementation
+
+Add a `hvigorw` binary target to `arkdown-cli/Cargo.toml`:
+
+```toml
+[[bin]]
+name = "hvigorw"
+path = "src/hvigorw.rs"
+```
+
+`hvigorw.rs` parses the hvigor task name and flags, maps them to `arkdown` subcommands, and calls the same pipeline as `arkdown build`.
+
+### Rolldown Alignment
+
+No rolldown equivalent. This is a compatibility shim specific to OHOS project tooling.
+
+### Test Requirements
+
+- `hvigorw assembleHap --mode debug` exits with code 0 and produces a `.hap` (same as `arkdown build --target hap --mode debug`)
+- `hvigorw assembleHsp --mode release` → `arkdown build --target hsp --mode release` (same output)
+- `hvigorw clean` → deletes `build/` directory
+- Unknown hvigor task name (e.g., `hvigorw unknownTask`) → exits with code 2 and prints a descriptive error

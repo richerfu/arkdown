@@ -199,3 +199,34 @@ crates/arkdown-abc/
 - `meta/design/chunk-model.md` — the IIFE JS format this compiler receives as input
 - OpenHarmony source: `https://gitcode.com/openharmony/arkcompiler_ets_frontend`
 - Bytecode format: `https://gitcode.com/openharmony/arkcompiler_runtime_core`
+
+---
+
+## Rolldown Alignment
+
+| arkdown concept | rolldown equivalent | note |
+| --- | --- | --- |
+| `AbcCompiler::compile()` | no rolldown equivalent | rolldown produces JS; arkdown goes further and compiles JS → Panda bytecode |
+| `AbcModule::record_name` | rolldown chunk `name` field | Used as the Panda record name in `--merge-abc` output |
+| `AbcCompileOptions::opt_level` | rolldown `minify` option | Different mechanism: rolldown uses JS minification; arkdown sets the bytecode optimizer level |
+| `AbcCompileOptions::debug_info` | rolldown `sourcemap` option | Analogous: includes debug info (source positions) in the `.abc` output |
+| `AbcCompileOptions::merge_abc` | rolldown multi-entry `input` → multiple output chunks | With `merge_abc: true`, multiple modules compile into one `.abc` file; with `false`, one `.abc` per module |
+| Incremental cache (function-level) | rolldown module-level transform cache (SPEC-019) | arkdown caches at the bytecode function level; rolldown caches at the JS module level |
+
+**Key divergence:** This crate has no rolldown equivalent. rolldown is a JS bundler; it does not produce bytecode. `arkdown-abc` is a novel Rust port of `es2abc` (OpenHarmony's `arkcompiler_ets_frontend`). The input to this crate is IIFE-wrapped CJS JavaScript produced by SPEC-006.
+
+---
+
+## Test Requirements
+
+- `AbcCompiler::compile()` on minimal IIFE JS `(function() { var x = 1; })()` produces a binary starting with the Panda ABC magic bytes (`0x414243` or the correct magic from runtime_core)
+- Compiled `.abc` header: version field matches the expected version for `target_api_version = 12`
+- Compiled `.abc` is accepted by ArkRuntime: install a minimal HAP on device/emulator and verify `hdc install` succeeds
+- `merge_abc: true` with two `AbcModule` inputs produces one `.abc` file with two named records; verify record names match input `record_name` values
+- `merge_abc: false` compiles each module to a separate `.abc` file
+- `debug_info: true` includes source position entries in the `.abc`; `debug_info: false` produces a smaller file without them
+- `opt_level: 0` vs `opt_level: 2`: release-mode output is smaller
+- Incremental cache: compiling the same JS twice reuses cached bytecode (second call faster, output identical)
+- Cache invalidation: changing the JS source produces different bytecode (not stale cached output)
+- `globalThis['name_hash']` access in IIFE JS maps to `ldglobalvar` opcode in the output (verify via bytecode disassembly or binary inspection)
+- `AbcError::CompilationFailed` is returned (not panic) when given syntactically invalid JS

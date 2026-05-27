@@ -343,3 +343,57 @@ invoking the SDK binary directly.
 - `meta/design/plugins.md` — plugin inventory (no dedicated entry; ets-loader was a subprocess)
 - `meta/tasks/SPEC-004-module-loader.md` — defines the `transform` hook and plugin chain
 - `meta/design/types.md` — `ModuleSource`, `ArkdownPlugin` trait, `ArkdownConfig`
+
+---
+
+## Rolldown Alignment
+
+| arkdown concept | rolldown equivalent | note |
+| --- | --- | --- |
+| `EtsTransformPlugin::transform` | `Plugin::transform` returning `HookTransformOutput { code, map, module_type }` | Same hook; arkdown changes `module_type` from `Ets` to `Ts` in the output |
+| `etsTransform` (ArkUI desugar) | Babel/SWC decorator transforms in the rollup/rolldown ecosystem | Functionally equivalent: AST rewrite that desugars custom syntax to standard TS; arkdown uses `ohos-rs/oxc` instead of Babel |
+| `etsChecker` | rolldown/Vite `vite-plugin-checker` pattern | Diagnostic emission without aborting; rolldown does not have built-in type checking |
+| `apiTransform` (SDK API rewrite) | Babel `@babel/plugin-transform-*` plugins | Version-gated rewrite table; no rolldown equivalent |
+| Source map from ETS → TS | `HookTransformOutput::map` | Identical: the transform produces a source map that is chained with downstream maps |
+| `ModuleSource.module_type` change `Ets → Ts` | `HookTransformOutput::module_type` field | rolldown allows transforms to change the module type; arkdown does the same |
+
+**Key divergence:** This transform runs only on `ModuleType::Ets` files. There is no equivalent in rolldown — ArkTS is OHOS-specific. The entire `etsTransform` stage has no counterpart in standard JS bundlers.
+
+---
+
+## Public API
+
+```rust
+/// Single exported type — registered in the plugin list by arkdown-loader.
+pub struct EtsTransformPlugin {
+    pub config: Arc<ArkdownConfig>,
+}
+
+impl ArkdownPlugin for EtsTransformPlugin {
+    fn name(&self) -> &str;
+    async fn transform(&self, ctx: &TransformContext, source: ModuleSource)
+        -> PluginResult<Option<ModuleSource>>;
+    // All other hooks: default no-op
+}
+```
+
+No other public types are exported. `EtsTransformer`, `EtsChecker`, and `ApiTransformer` are crate-private.
+
+---
+
+## Test Requirements
+
+- `@Component struct Counter` with `@State count: number` round-trip: transform output contains `class Counter extends ViewPU` with `__count: ObservedPropertySimplePU<number>`
+- `@Entry` on a component generates `ViewStackProcessor.StartGetAccessRecordingFor` after the class definition
+- `@Prop` field appears in `updateStateVars` method; `@State` field does not
+- `@Builder myBuilder()` method is preserved as a class method (not lifted to standalone function) and its `build()`-style body is desugared
+- `build()` with `Column { Text("hi") }` → two `observeComponentCreation2` calls with `Column.pop()` and `Text.pop()`
+- Method chains in `build()` (`.onClick(...)`) appear inside the `observeComponentCreation2` callback
+- `etsChecker` rule `missing-build-method`: `@Component struct Foo {}` (no build) → `Err(ArkdownError::EtsCheck)` with rule ID `missing-build-method`
+- `etsChecker` rule `entry-without-component`: `@Entry struct Foo {}` (no `@Component`) → error
+- `etsChecker` rule `worker-uses-ui-decorator`: file in `workers/` with `@State` → error
+- `apiTransform` for API version < 9: `import * as X from '@ohos/Y'` → `import X from '@system.Y'`
+- `apiTransform` for API version >= 9: no rewrite applied
+- Transform returns `Ok(None)` immediately for `module_type != ModuleType::Ets` without parsing
+- Source map is present in `ModuleSource.source_map` after transform (not `None`)
+- `OHOS_SDK_HOME` is not read at any point — confirmed by test that sets `OHOS_SDK_HOME=""` and asserts no error
