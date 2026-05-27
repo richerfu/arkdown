@@ -84,8 +84,8 @@ fn test_process_profile_virtual_machine_api12() {
     let json5 = single_ability_json5("entry");
     let manifest = process_profile(&json5, 12, "com.example.test", CompileMode::EsModule);
     assert_eq!(
-        manifest.virtual_machine, "ark1.2.0.0",
-        "API 12 must produce virtual_machine = 'ark1.2.0.0'"
+        manifest.virtual_machine, "ark12.0.1.0",
+        "API 12 must produce virtual_machine = 'ark12.0.1.0'"
     );
 }
 
@@ -94,7 +94,7 @@ fn test_process_profile_virtual_machine_api9() {
     use arkdown_core::CompileMode;
     let json5 = single_ability_json5("entry");
     let manifest = process_profile(&json5, 9, "com.example.test", CompileMode::EsModule);
-    assert_eq!(manifest.virtual_machine, "ark0.9.0.0");
+    assert_eq!(manifest.virtual_machine, "ark9.0.1.0");
 }
 
 #[test]

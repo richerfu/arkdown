@@ -274,8 +274,8 @@ mod tests {
             .process_module(&module_cfg, &module_json5)
             .expect("process_module failed");
 
-        // virtualMachine from api version 12 → "ark1.2.0.0"
-        assert_eq!(manifest.virtual_machine, "ark1.2.0.0");
+        // virtualMachine from api version 12 → "ark12.0.1.0"
+        assert_eq!(manifest.virtual_machine, "ark12.0.1.0");
         assert_eq!(manifest.module_name, "entry");
 
         // loader.json should contain one compile entry

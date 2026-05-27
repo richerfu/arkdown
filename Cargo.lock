@@ -169,8 +169,10 @@ dependencies = [
  "clap",
  "fs-err",
  "json5",
+ "serde_json",
  "tokio",
  "walkdir",
+ "zip",
 ]
 
 [[package]]

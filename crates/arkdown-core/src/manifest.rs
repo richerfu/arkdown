@@ -95,30 +95,40 @@ pub struct ModuleJson5 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ModuleJson5Module {
+    #[serde(default)]
     pub name: String,
     /// `"entry"` | `"feature"` | `"shared"` | `"har"`
-    #[serde(rename = "type")]
+    #[serde(rename = "type", default)]
     pub type_: String,
     pub main_element: Option<String>,
+    #[serde(default)]
     pub device_types: Vec<String>,
     pub pages: Option<String>,
+    #[serde(default)]
     pub abilities: Vec<AbilityConfig>,
+    #[serde(default)]
     pub extension_abilities: Vec<ExtensionAbilityConfig>,
     pub src_entry: Option<String>,
+    #[serde(default)]
     pub metadata: Vec<MetadataEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AbilityConfig {
     pub name: String,
     /// e.g. `"./ets/entryability/EntryAbility.ets"`
     pub src_entry: String,
+    #[serde(default)]
     pub exported: bool,
+    #[serde(default)]
     pub skills: Vec<SkillConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ExtensionAbilityConfig {
     pub name: String,
     pub src_entry: String,
@@ -127,8 +137,11 @@ pub struct ExtensionAbilityConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillConfig {
+    #[serde(default)]
     pub actions: Vec<String>,
+    #[serde(default)]
     pub entities: Vec<String>,
+    #[serde(default)]
     pub uris: Vec<SkillUri>,
 }
 

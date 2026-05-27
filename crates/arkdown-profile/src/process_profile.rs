@@ -40,12 +40,8 @@ pub fn process_profile(
         module_name: module_json5.module.name.clone(),
         module_type: map_module_type(&module_json5.module.type_),
         device_types: module_json5.module.device_types.clone(),
-        // e.g. api version 12 → "ark1.2.0.0"
-        virtual_machine: format!(
-            "ark{}.{}.0.0",
-            compile_api_version / 10,
-            compile_api_version % 10
-        ),
+        // e.g. api version 12 → "ark12.0.1.0", api version 17 → "ark17.0.1.0"
+        virtual_machine: format!("ark{}.0.1.0", compile_api_version),
         compile_mode,
         abilities,
         extension_abilities,
@@ -93,12 +89,12 @@ mod tests {
         }
     }
 
-    /// API version 12 → virtualMachine = "ark1.2.0.0"
+    /// API version 12 → virtualMachine = "ark12.0.1.0"
     #[test]
     fn test_process_profile_sets_virtual_machine() {
         let mj = make_module_json5("entry", "entry");
         let manifest = process_profile(&mj, 12, "com.example.app", CompileMode::EsModule);
-        assert_eq!(manifest.virtual_machine, "ark1.2.0.0");
+        assert_eq!(manifest.virtual_machine, "ark12.0.1.0");
         assert_eq!(manifest.module_name, "entry");
         assert_eq!(manifest.module_type, OhosModuleType::Entry);
         assert_eq!(manifest.compile_mode, CompileMode::EsModule);
@@ -128,9 +124,9 @@ mod tests {
 
     #[test]
     fn test_process_profile_api_version_35() {
-        // API version 35 → "ark3.5.0.0"
+        // API version 35 → "ark35.0.1.0"
         let mj = make_module_json5("feature1", "feature");
         let manifest = process_profile(&mj, 35, "com.example.app", CompileMode::EsModule);
-        assert_eq!(manifest.virtual_machine, "ark3.5.0.0");
+        assert_eq!(manifest.virtual_machine, "ark35.0.1.0");
     }
 }
