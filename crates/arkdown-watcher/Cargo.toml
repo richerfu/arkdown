@@ -2,3 +2,11 @@
 name = "arkdown-watcher"
 version = "0.1.0"
 edition = "2021"
+
+[dependencies]
+arkdown-core = { path = "../arkdown-core" }
+notify = { workspace = true }
+tokio = { workspace = true }
+crossbeam-channel = { workspace = true }
+thiserror = { workspace = true }
+fs-err = { workspace = true }
