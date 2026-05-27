@@ -106,7 +106,15 @@ fn run_build(fixture: &PathBuf) -> PathBuf {
     let modules_abc = module
         .src_path
         .join("build/default/intermediates/ets/modules.abc");
-    let abc_modules: Vec<AbcModule> = collect_js_chunks(&chunk_dir);
+    // Compute OHOS module path record names: "{module_name}/src/main/{path_no_ext}"
+    let record_name_map: std::collections::HashMap<String, String> = loader_json
+        .compile_entry.iter()
+        .filter_map(|ep| {
+            let stem = std::path::Path::new(ep).file_stem()?.to_str()?.to_string();
+            let stripped = ep.trim_start_matches("./").trim_end_matches(".ets").trim_end_matches(".ts");
+            Some((stem, format!("{}/src/main/{}", loader_json.module_name, stripped)))
+        }).collect();
+    let abc_modules: Vec<AbcModule> = collect_js_chunks(&chunk_dir, &record_name_map);
     if !abc_modules.is_empty() {
         AbcCompiler::new(AbcCompileOptions {
             debug_info: true,
@@ -147,7 +155,10 @@ fn run_build(fixture: &PathBuf) -> PathBuf {
     output
 }
 
-fn collect_js_chunks(dir: &PathBuf) -> Vec<arkdown_abc::AbcModule> {
+fn collect_js_chunks(
+    dir: &PathBuf,
+    record_name_map: &std::collections::HashMap<String, String>,
+) -> Vec<arkdown_abc::AbcModule> {
     if !dir.exists() {
         return vec![];
     }
@@ -156,15 +167,14 @@ fn collect_js_chunks(dir: &PathBuf) -> Vec<arkdown_abc::AbcModule> {
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("js"))
-        .map(|e| arkdown_abc::AbcModule {
-            record_name: e
-                .path()
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("chunk")
-                .to_string(),
-            source: fs_err::read_to_string(e.path()).unwrap_or_default(),
-            source_map: None,
+        .map(|e| {
+            let stem = e.path().file_stem().and_then(|s| s.to_str()).unwrap_or("chunk").to_string();
+            let record_name = record_name_map.get(&stem).cloned().unwrap_or(stem);
+            arkdown_abc::AbcModule {
+                record_name,
+                source: fs_err::read_to_string(e.path()).unwrap_or_default(),
+                source_map: None,
+            }
         })
         .collect()
 }

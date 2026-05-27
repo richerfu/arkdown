@@ -155,14 +155,15 @@ binaries are required at build time. `OHOS_SDK_HOME` is not needed for compilati
 export OHOS_SDK_HOME=/path/to/sdk/default/openharmony
 ```
 
-| SDK binary / tool        | Rust replacement               | SPEC      |
-| ------------------------ | ------------------------------ | --------- |
-| `es2abc`                 | `arkdown-abc`                  | SPEC-009  |
-| `restool`                | `arkdown-resource`             | SPEC-011  |
-| `ets-loader`             | `arkdown-plugin-ets-transform` | SPEC-004a |
-| `hap-sign-tool.jar`      | `arkdown-sign`                 | SPEC-021  |
+| SDK binary / tool   | Rust replacement               | SPEC      |
+| ------------------- | ------------------------------ | --------- |
+| `es2abc`            | `arkdown-abc`                  | SPEC-009  |
+| `restool`           | `arkdown-resource`             | SPEC-011  |
+| `ets-loader`        | `arkdown-plugin-ets-transform` | SPEC-004a |
+| `hap-sign-tool.jar` | `arkdown-sign`                 | SPEC-021  |
 
 **No Java required.** `arkdown-sign` implements the full HAP signing pipeline in pure Rust:
+
 - PKCS#12 keystore loading (`pkcs12` crate)
 - CMS/PKCS#7 SignedData generation (`cms` + `der` crates)
 - ECDSA P-256 / RSA-PSS signing (`p256`, `rsa` crates)
@@ -170,6 +171,7 @@ export OHOS_SDK_HOME=/path/to/sdk/default/openharmony
 - HAP-specific chunk digest (SHA-256 with `0x5a`/`0xa5` type-prefixed chunking)
 
 Magic constants from `developtools_hapsigner`:
+
 - V2 magic (compatibleSdkVersion < 8): `b"HAP Sig Block 42"` (16 bytes)
 - V3 magic (>= 8): `b"<hap sign block>"` (16 bytes)
 - Main sig block ID: `0x20000000`, profile block ID: `0x20000002`

@@ -228,27 +228,28 @@ crates/arkdown-core/
 
 ## Rolldown Alignment
 
-| arkdown concept | rolldown equivalent | note |
-| --- | --- | --- |
-| `ArkdownPlugin` trait | `Plugin` trait | arkdown uses `async_trait`; rolldown uses `register_hook_usage` bitflags — arkdown omits the bitflag registration (no parallel hook dispatch needed yet) |
-| `resolve_id` hook | `resolve_id(&self, ctx, args: &HookResolveIdArgs)` | Same semantics: first `Some` wins; arkdown passes `specifier + importer` directly instead of a wrapper args struct |
-| `load` hook | `load(&self, ctx, args: &HookLoadArgs)` | Same semantics; fallback to fs::read |
-| `transform` hook | `transform(&self, ctx, args: &HookTransformArgs)` | Same; sequential, each plugin may modify source |
-| `render_chunk` hook | `render_chunk(&self, ctx, args)` | Same; used by chunk-wrapper to IIFE-wrap |
-| `generate_bundle` hook | `generate_bundle(&self, ctx, bundle, is_write)` | Same; post-render, pre-write |
-| `should_invalidate_cache` | `shouldInvalidCache` (rollup hook) | arkdown keeps this as a sync fn returning bool |
-| `Module` struct | `NormalModule` inside `Module::Normal(Box<NormalModule>)` | arkdown has no `ExternalModule` type; external references are `ResolvedId { external: true }` |
-| `ModuleGraph` | rolldown `ModuleTable` + `IndexVec<NormalModuleId, NormalModule>` | arkdown uses `IndexVec<ModuleIdx, Module>` — same pattern, different index name |
-| `ArkChunk` | rolldown `Chunk` | arkdown adds `chunk_hash: String` used for `globalThis` registry keys; rolldown calls this `content_hash` |
-| `IifeChunk` | rolldown has no equivalent | OHOS-specific: carries `require_replacements` and `registry_export` produced by wrapper-chunk-plugin |
-| `ChunkGraph` | rolldown `ChunkTable` | same `IndexVec` pattern |
-| `ModuleType` | `ModuleType` enum in rolldown (`Js`, `Ts`, `Json`, etc.) | arkdown adds `Ets`, `BytecodeHar`, `Declaration`, `NativeResource` |
-| `HookResolveIdOutput { external, id }` | `ResolvedId { external, id, module_type }` | arkdown merges side-effects into module_type rather than a separate `HookSideEffects` field |
-| `RenderedChunk` | `HookRenderChunkOutput { code, map }` | identical semantics |
-| `BuildMode::Debug/Release` | rolldown `OutputFormat` + watch flags | arkdown combines build mode + output format in one enum |
-| `OutputTarget::Hap/Hsp/Har` | no rolldown equivalent | OHOS-specific artifact types |
+| arkdown concept                        | rolldown equivalent                                               | note                                                                                                                                                     |
+| -------------------------------------- | ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ArkdownPlugin` trait                  | `Plugin` trait                                                    | arkdown uses `async_trait`; rolldown uses `register_hook_usage` bitflags — arkdown omits the bitflag registration (no parallel hook dispatch needed yet) |
+| `resolve_id` hook                      | `resolve_id(&self, ctx, args: &HookResolveIdArgs)`                | Same semantics: first `Some` wins; arkdown passes `specifier + importer` directly instead of a wrapper args struct                                       |
+| `load` hook                            | `load(&self, ctx, args: &HookLoadArgs)`                           | Same semantics; fallback to fs::read                                                                                                                     |
+| `transform` hook                       | `transform(&self, ctx, args: &HookTransformArgs)`                 | Same; sequential, each plugin may modify source                                                                                                          |
+| `render_chunk` hook                    | `render_chunk(&self, ctx, args)`                                  | Same; used by chunk-wrapper to IIFE-wrap                                                                                                                 |
+| `generate_bundle` hook                 | `generate_bundle(&self, ctx, bundle, is_write)`                   | Same; post-render, pre-write                                                                                                                             |
+| `should_invalidate_cache`              | `shouldInvalidCache` (rollup hook)                                | arkdown keeps this as a sync fn returning bool                                                                                                           |
+| `Module` struct                        | `NormalModule` inside `Module::Normal(Box<NormalModule>)`         | arkdown has no `ExternalModule` type; external references are `ResolvedId { external: true }`                                                            |
+| `ModuleGraph`                          | rolldown `ModuleTable` + `IndexVec<NormalModuleId, NormalModule>` | arkdown uses `IndexVec<ModuleIdx, Module>` — same pattern, different index name                                                                          |
+| `ArkChunk`                             | rolldown `Chunk`                                                  | arkdown adds `chunk_hash: String` used for `globalThis` registry keys; rolldown calls this `content_hash`                                                |
+| `IifeChunk`                            | rolldown has no equivalent                                        | OHOS-specific: carries `require_replacements` and `registry_export` produced by wrapper-chunk-plugin                                                     |
+| `ChunkGraph`                           | rolldown `ChunkTable`                                             | same `IndexVec` pattern                                                                                                                                  |
+| `ModuleType`                           | `ModuleType` enum in rolldown (`Js`, `Ts`, `Json`, etc.)          | arkdown adds `Ets`, `BytecodeHar`, `Declaration`, `NativeResource`                                                                                       |
+| `HookResolveIdOutput { external, id }` | `ResolvedId { external, id, module_type }`                        | arkdown merges side-effects into module_type rather than a separate `HookSideEffects` field                                                              |
+| `RenderedChunk`                        | `HookRenderChunkOutput { code, map }`                             | identical semantics                                                                                                                                      |
+| `BuildMode::Debug/Release`             | rolldown `OutputFormat` + watch flags                             | arkdown combines build mode + output format in one enum                                                                                                  |
+| `OutputTarget::Hap/Hsp/Har`            | no rolldown equivalent                                            | OHOS-specific artifact types                                                                                                                             |
 
 **Key divergences from rolldown that must always be preserved:**
+
 - No `ModuleDefFormat::Esm` output — always CJS internally, then IIFE-wrapped by chunk-wrapper-plugin
 - `ArkChunk::chunk_hash` used in `globalThis['name_hash']` registry keys, not in file content-hashing
 - `ModuleType::Ets` triggers mandatory ArkTS desugar before any other transform

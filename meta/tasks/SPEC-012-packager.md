@@ -54,24 +54,30 @@ entry.hap
         "name": "1.0.0"
       }
     },
-    "modules": [{
-      "mainAbility": "EntryAbility",
-      "deviceTypes": ["phone", "tablet"],
-      "name": "entry",
-      "type": "entry",
-      "abilities": [{
-        "name": "EntryAbility",
-        "label": "$string:EntryAbility_label",
-        "exported": true
-      }]
-    }]
+    "modules": [
+      {
+        "mainAbility": "EntryAbility",
+        "deviceTypes": ["phone", "tablet"],
+        "name": "entry",
+        "type": "entry",
+        "abilities": [
+          {
+            "name": "EntryAbility",
+            "label": "$string:EntryAbility_label",
+            "exported": true
+          }
+        ]
+      }
+    ]
   },
-  "packages": [{
-    "deviceTypes": ["phone", "tablet"],
-    "moduleType": "entry",
-    "deliveryWithInstall": true,
-    "name": "entry"
-  }]
+  "packages": [
+    {
+      "deviceTypes": ["phone", "tablet"],
+      "moduleType": "entry",
+      "deliveryWithInstall": true,
+      "name": "entry"
+    }
+  ]
 }
 ```
 
@@ -192,14 +198,14 @@ build/default/outputs/har/my-har.har
 
 `arkdown-pack` has no rolldown equivalent. rolldown produces JS files; it does not create zip archives. The packaging step is unique to OHOS.
 
-| arkdown concept | closest analogue | note |
-| --- | --- | --- |
-| `Packager::pack_hap()` | webpack `ZipPlugin` / Vite build output | Conceptually similar (archive JS output); OHOS zip structure and compression rules are specific |
-| `PackInput::abc_path` | webpack `output.path` | The `.abc` file is the analogue of the JS bundle; it replaces the JS output in the final archive |
-| HAP/HSP/HAR zip structure | npm `pack` (produces `.tgz`) | Both create distributable archives; different format and manifest requirements |
-| `modules.abc` placement path (API version dependent) | no equivalent | OHOS-specific: the path inside the zip differs between API versions |
-| `.abc` / `.so` stored (no deflate) | webpack `assetModuleFilename` | OHOS requirement: runnable files must be stored (not compressed) for mmap-based loading |
-| 4096-byte alignment for `.abc`/`.so` | no JS bundler equivalent | OHOS-specific: required for page-aligned mmap; enforced via `ZipEntry` extra field padding |
+| arkdown concept                                      | closest analogue                        | note                                                                                             |
+| ---------------------------------------------------- | --------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `Packager::pack_hap()`                               | webpack `ZipPlugin` / Vite build output | Conceptually similar (archive JS output); OHOS zip structure and compression rules are specific  |
+| `PackInput::abc_path`                                | webpack `output.path`                   | The `.abc` file is the analogue of the JS bundle; it replaces the JS output in the final archive |
+| HAP/HSP/HAR zip structure                            | npm `pack` (produces `.tgz`)            | Both create distributable archives; different format and manifest requirements                   |
+| `modules.abc` placement path (API version dependent) | no equivalent                           | OHOS-specific: the path inside the zip differs between API versions                              |
+| `.abc` / `.so` stored (no deflate)                   | webpack `assetModuleFilename`           | OHOS requirement: runnable files must be stored (not compressed) for mmap-based loading          |
+| 4096-byte alignment for `.abc`/`.so`                 | no JS bundler equivalent                | OHOS-specific: required for page-aligned mmap; enforced via `ZipEntry` extra field padding       |
 
 ---
 

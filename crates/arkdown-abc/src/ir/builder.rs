@@ -88,7 +88,18 @@ pub fn build_record(
         }
     }
 
-    Ok(ClassRecord { name: record_name.to_string(), methods })
+    // ArkRuntime finds modules by their OHOS class name format: "L&{module_path}&;"
+    // where module_path is e.g. "entry/src/main/ets/entryability/EntryAbility".
+    // This must match the record name that hvigorw uses in its merged ABC output.
+    // If record_name is a bare stem (e.g. "EntryAbility"), fall back to L_GLOBAL;
+    // for compatibility with single-file es2abc output.
+    let class_name = if record_name.contains('/') {
+        format!("L&{}&;", record_name)
+    } else {
+        // Bare name (legacy / test path) — use OHOS global module class name
+        format!("L_{};", record_name)
+    };
+    Ok(ClassRecord { name: class_name, methods })
 }
 
 // ── Byte-count heuristics ─────────────────────────────────────────────────────

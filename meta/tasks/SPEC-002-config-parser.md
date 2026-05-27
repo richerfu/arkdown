@@ -17,13 +17,13 @@ the resolved config.
 
 ## Files Consumed
 
-| File                    | Location                  | Purpose                                                                                                    |
-| ----------------------- | ------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `AppScope/app.json5`    | project root              | **bundle name** (`app.bundleName`), app-level icon/label/version                                          |
-| `build-profile.json5`   | project root              | products, modules, **signing configs** (at `app.signingConfigs`), build options                            |
-| `oh-package.json5`      | each module root          | package name, version, dependencies                                                                        |
-| `module.json5`          | each module's `src/main/` | abilities, srcEntry, deviceTypes, pages                                                                    |
-| `hvigorfile.ts`         | project root              | plugin registration (arkdown reads this only to validate it's a standard app project; does not execute it) |
+| File                  | Location                  | Purpose                                                                                                    |
+| --------------------- | ------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `AppScope/app.json5`  | project root              | **bundle name** (`app.bundleName`), app-level icon/label/version                                           |
+| `build-profile.json5` | project root              | products, modules, **signing configs** (at `app.signingConfigs`), build options                            |
+| `oh-package.json5`    | each module root          | package name, version, dependencies                                                                        |
+| `module.json5`        | each module's `src/main/` | abilities, srcEntry, deviceTypes, pages                                                                    |
+| `hvigorfile.ts`       | project root              | plugin registration (arkdown reads this only to validate it's a standard app project; does not execute it) |
 
 > **Important**: `bundleName` is read from `AppScope/app.json5` (`app.bundleName`), NOT from
 > `build-profile.json5` products. The `new load_app_json5()` function handles this file.
@@ -37,13 +37,13 @@ the resolved config.
 ```json5
 {
   app: {
-    bundleName: "com.example.myapp",   // ← definitive bundle name
+    bundleName: "com.example.myapp", // ← definitive bundle name
     vendor: "example",
     versionCode: 1000000,
     versionName: "1.0.0",
     icon: "$media:app_icon",
     label: "$string:app_name",
-  }
+  },
 }
 ```
 
@@ -221,16 +221,16 @@ crates/arkdown-config/
 
 ## Rolldown Alignment
 
-| arkdown concept | rolldown equivalent | note |
-| --- | --- | --- |
-| `ArkdownConfig` | rolldown `InputOptions` + `OutputOptions` | arkdown merges both into a single config struct; rolldown separates build-time from emit-time options |
-| `BuildMode::Debug/Release` | rolldown `treeshake` option + `minify` option | arkdown uses a single mode enum; rolldown sets these independently |
-| `AppJson5::bundle_name` | no rolldown equivalent | OHOS-specific: read from `AppScope/app.json5`, not from `products`; identifies the app bundle in OHM URLs |
-| `StrictModeConfig::use_normalized_ohm_url` | no rolldown equivalent | OHOS-specific: controls whether module IDs are OHM URLs or file paths |
-| `ModuleConfig::oh_package` | rolldown reads `package.json`; no `oh-package.json5` concept | OHOS uses ohpm, not npm; `oh-package.json5` replaces `package.json` |
-| `SdkConfig` | rolldown has no SDK concept | Pure arkdown addition: SDK version determines ArkTS API rewrites and signing block version |
-| `ArkdownConfig::from_project()` | rolldown `Bundler::new(BundlerOptions)` | rolldown takes options as a struct; arkdown parses from the filesystem |
-| `compatibleSdkVersion` parsing (`"5.0.0(12)"` → `12`) | no equivalent | OHOS-specific numeric API version extraction |
+| arkdown concept                                       | rolldown equivalent                                          | note                                                                                                      |
+| ----------------------------------------------------- | ------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
+| `ArkdownConfig`                                       | rolldown `InputOptions` + `OutputOptions`                    | arkdown merges both into a single config struct; rolldown separates build-time from emit-time options     |
+| `BuildMode::Debug/Release`                            | rolldown `treeshake` option + `minify` option                | arkdown uses a single mode enum; rolldown sets these independently                                        |
+| `AppJson5::bundle_name`                               | no rolldown equivalent                                       | OHOS-specific: read from `AppScope/app.json5`, not from `products`; identifies the app bundle in OHM URLs |
+| `StrictModeConfig::use_normalized_ohm_url`            | no rolldown equivalent                                       | OHOS-specific: controls whether module IDs are OHM URLs or file paths                                     |
+| `ModuleConfig::oh_package`                            | rolldown reads `package.json`; no `oh-package.json5` concept | OHOS uses ohpm, not npm; `oh-package.json5` replaces `package.json`                                       |
+| `SdkConfig`                                           | rolldown has no SDK concept                                  | Pure arkdown addition: SDK version determines ArkTS API rewrites and signing block version                |
+| `ArkdownConfig::from_project()`                       | rolldown `Bundler::new(BundlerOptions)`                      | rolldown takes options as a struct; arkdown parses from the filesystem                                    |
+| `compatibleSdkVersion` parsing (`"5.0.0(12)"` → `12`) | no equivalent                                                | OHOS-specific numeric API version extraction                                                              |
 
 **Key divergence:** rolldown accepts explicit entry points from options. arkdown derives entry points from `module.json5` abilities and the profile processor (SPEC-010) — there is no direct `entry: [...]` config field.
 

@@ -12,7 +12,7 @@
 Pure Rust JS obfuscation using `oxc_parser` + span-based identifier renaming.
 Replaces the previous approach of invoking a closed-source SDK binary as a subprocess.
 
-The crate is inserted between bundler output and `arkdown-abc` compilation.  It parses
+The crate is inserted between bundler output and `arkdown-abc` compilation. It parses
 each bundled JS file with `oxc_parser`, collects top-level binding names
 (`var`/`let`/`const`, `function`, `class`), generates short replacement names
 (a, b, …, z, aa, …), and rewrites all whole-word occurrences in the source text using
@@ -68,7 +68,7 @@ GlobalClass
 globalFunction
 ```
 
-Directives are parsed by `crate::rules::parse_rules_str`.  Multiple rule files are merged
+Directives are parsed by `crate::rules::parse_rules_str`. Multiple rule files are merged
 with logical-OR for flags and set-union for keep-name lists.
 
 ---
@@ -117,13 +117,13 @@ If the hash changes between builds, discard the es2abc cache for affected module
 
 ## Rolldown Alignment
 
-| arkdown concept | rolldown equivalent | note |
-| --- | --- | --- |
-| `oxc_parser` + span-based renaming | rolldown `minify` option (built-in oxc minifier) | rolldown uses the full oxc minifier; arkdown uses a targeted identifier-rename pass controlled by OHOS rule files |
-| Insert between bundler output and ABC compilation | no rolldown equivalent | rolldown has no compilation stage after JS emit; this step is OHOS-specific |
-| `ObfuscationRules::keep_global_names` | rolldown `minify` configuration | Different mechanism: OHOS obfuscation uses rule files for identifier renaming; rolldown's minifier uses built-in heuristics |
-| Obfuscation rule file hash → cache invalidation | rolldown watches `rollup.config.js` for changes | Both invalidate caches when configuration changes; different mechanisms |
-| `BuildMode::Debug` → skip obfuscation | rolldown dev mode (watch mode) | Both skip obfuscation/minification in development builds |
+| arkdown concept                                   | rolldown equivalent                              | note                                                                                                                        |
+| ------------------------------------------------- | ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------- |
+| `oxc_parser` + span-based renaming                | rolldown `minify` option (built-in oxc minifier) | rolldown uses the full oxc minifier; arkdown uses a targeted identifier-rename pass controlled by OHOS rule files           |
+| Insert between bundler output and ABC compilation | no rolldown equivalent                           | rolldown has no compilation stage after JS emit; this step is OHOS-specific                                                 |
+| `ObfuscationRules::keep_global_names`             | rolldown `minify` configuration                  | Different mechanism: OHOS obfuscation uses rule files for identifier renaming; rolldown's minifier uses built-in heuristics |
+| Obfuscation rule file hash → cache invalidation   | rolldown watches `rollup.config.js` for changes  | Both invalidate caches when configuration changes; different mechanisms                                                     |
+| `BuildMode::Debug` → skip obfuscation             | rolldown dev mode (watch mode)                   | Both skip obfuscation/minification in development builds                                                                    |
 
 ---
 

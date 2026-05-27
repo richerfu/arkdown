@@ -235,14 +235,14 @@ crates/arkdown-abc/
 
 ## Rolldown Alignment
 
-| arkdown concept | rolldown equivalent | note |
-| --- | --- | --- |
-| `AbcCompiler::compile()` | no rolldown equivalent | rolldown produces JS; arkdown goes further and compiles JS → Panda bytecode |
-| `AbcModule::record_name` | rolldown chunk `name` field | Used as the Panda record name in `--merge-abc` output |
-| `AbcCompileOptions::opt_level` | rolldown `minify` option | Different mechanism: rolldown uses JS minification; arkdown sets the bytecode optimizer level |
-| `AbcCompileOptions::debug_info` | rolldown `sourcemap` option | Analogous: includes debug info (source positions) in the `.abc` output |
-| `AbcCompileOptions::merge_abc` | rolldown multi-entry `input` → multiple output chunks | With `merge_abc: true`, multiple modules compile into one `.abc` file; with `false`, one `.abc` per module |
-| Incremental cache (function-level) | rolldown module-level transform cache (SPEC-019) | arkdown caches at the bytecode function level; rolldown caches at the JS module level |
+| arkdown concept                    | rolldown equivalent                                   | note                                                                                                       |
+| ---------------------------------- | ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `AbcCompiler::compile()`           | no rolldown equivalent                                | rolldown produces JS; arkdown goes further and compiles JS → Panda bytecode                                |
+| `AbcModule::record_name`           | rolldown chunk `name` field                           | Used as the Panda record name in `--merge-abc` output                                                      |
+| `AbcCompileOptions::opt_level`     | rolldown `minify` option                              | Different mechanism: rolldown uses JS minification; arkdown sets the bytecode optimizer level              |
+| `AbcCompileOptions::debug_info`    | rolldown `sourcemap` option                           | Analogous: includes debug info (source positions) in the `.abc` output                                     |
+| `AbcCompileOptions::merge_abc`     | rolldown multi-entry `input` → multiple output chunks | With `merge_abc: true`, multiple modules compile into one `.abc` file; with `false`, one `.abc` per module |
+| Incremental cache (function-level) | rolldown module-level transform cache (SPEC-019)      | arkdown caches at the bytecode function level; rolldown caches at the JS module level                      |
 
 **Key divergence:** This crate has no rolldown equivalent. rolldown is a JS bundler; it does not produce bytecode. `arkdown-abc` is a novel Rust port of `es2abc` (OpenHarmony's `arkcompiler_ets_frontend`). The input to this crate is IIFE-wrapped CJS JavaScript produced by SPEC-006.
 

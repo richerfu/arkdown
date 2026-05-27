@@ -145,12 +145,12 @@ During module loading (`load_all()` in `arkdown-loader`), the BFS walk must **sk
 further dependencies from external modules. The following specifier forms are treated as leaves
 in the BFS graph — they are resolved but their own imports are not followed:
 
-| Specifier prefix        | Reason to skip                                               |
-| ----------------------- | ------------------------------------------------------------ |
-| `@bundle:` / `@shared:` | Runtime-resolved cross-bundle references — not bundled here  |
-| `@kit.*`                | SDK kit aggregation modules — declarations only, no source   |
-| `@ohos/*`               | SDK API declarations — declarations only, no source          |
-| `@system/*`             | Legacy SDK system APIs — declarations only                   |
+| Specifier prefix        | Reason to skip                                              |
+| ----------------------- | ----------------------------------------------------------- |
+| `@bundle:` / `@shared:` | Runtime-resolved cross-bundle references — not bundled here |
+| `@kit.*`                | SDK kit aggregation modules — declarations only, no source  |
+| `@ohos/*`               | SDK API declarations — declarations only, no source         |
+| `@system/*`             | Legacy SDK system APIs — declarations only                  |
 
 Relative imports (`./`, `../`) and bare ohpm package specifiers that resolve to `LocalSource`
 are always followed in BFS.
@@ -187,17 +187,17 @@ file's directory, not the module root. This ensures that:
 
 ## Rolldown Alignment
 
-| arkdown concept | rolldown equivalent | note |
-| --- | --- | --- |
-| `OhosResolver::resolve()` | `resolve_id` hook result (`HookResolveIdOutput`) | In rolldown a plugin returns `HookResolveIdOutput { id, external, side_effects }`; arkdown uses a richer `OhosResolvedModule` enum that the plugin layer (SPEC-015) then maps to `ResolvedId` |
-| `OhosResolvedModule::ExternalBundle` | `HookResolveIdOutput { external: true }` | Same semantics: the bundler will not attempt to load the module |
-| `OhosResolvedModule::LocalSource` | `HookResolveIdOutput { external: false, id: abs_path }` | Identical; rolldown uses `id` as absolute path |
-| `OhosResolvedModule::SdkDeclaration` | `HookResolveIdOutput { external: true }` with `ModuleType::Declaration` | rolldown has no concept of declaration-only modules; arkdown skips loading them entirely |
-| `OhosResolvedModule::BytecodeHar` | no rolldown equivalent | OHOS-specific: resolved as external (`external: true`) but carries `abc_path` for the packager |
-| `ResolverConfig::pkg_name_to_pkg_info` | rolldown reads `node_modules/` + `package.json` | OHOS uses `oh_modules/` + `oh-package.json5`; the map replaces Node.js package resolution |
-| `ResolverConfig::oh_modules_roots` | rolldown `resolve.modules` option (`["node_modules"]`) | Same purpose: list of directories to search for bare specifiers |
-| Extension resolution order (`.ets`, `.ts`, `.js`) | rolldown `resolve.extensions` option | OHOS tries `.ets` first (arkdown-specific); rolldown default is `[".js", ".ts"]` |
-| `to_ohm_url()` | no rolldown equivalent | OHOS-specific: converts resolved paths to `@bundle:bundleName/moduleName/path` strings |
+| arkdown concept                                   | rolldown equivalent                                                     | note                                                                                                                                                                                          |
+| ------------------------------------------------- | ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `OhosResolver::resolve()`                         | `resolve_id` hook result (`HookResolveIdOutput`)                        | In rolldown a plugin returns `HookResolveIdOutput { id, external, side_effects }`; arkdown uses a richer `OhosResolvedModule` enum that the plugin layer (SPEC-015) then maps to `ResolvedId` |
+| `OhosResolvedModule::ExternalBundle`              | `HookResolveIdOutput { external: true }`                                | Same semantics: the bundler will not attempt to load the module                                                                                                                               |
+| `OhosResolvedModule::LocalSource`                 | `HookResolveIdOutput { external: false, id: abs_path }`                 | Identical; rolldown uses `id` as absolute path                                                                                                                                                |
+| `OhosResolvedModule::SdkDeclaration`              | `HookResolveIdOutput { external: true }` with `ModuleType::Declaration` | rolldown has no concept of declaration-only modules; arkdown skips loading them entirely                                                                                                      |
+| `OhosResolvedModule::BytecodeHar`                 | no rolldown equivalent                                                  | OHOS-specific: resolved as external (`external: true`) but carries `abc_path` for the packager                                                                                                |
+| `ResolverConfig::pkg_name_to_pkg_info`            | rolldown reads `node_modules/` + `package.json`                         | OHOS uses `oh_modules/` + `oh-package.json5`; the map replaces Node.js package resolution                                                                                                     |
+| `ResolverConfig::oh_modules_roots`                | rolldown `resolve.modules` option (`["node_modules"]`)                  | Same purpose: list of directories to search for bare specifiers                                                                                                                               |
+| Extension resolution order (`.ets`, `.ts`, `.js`) | rolldown `resolve.extensions` option                                    | OHOS tries `.ets` first (arkdown-specific); rolldown default is `[".js", ".ts"]`                                                                                                              |
+| `to_ohm_url()`                                    | no rolldown equivalent                                                  | OHOS-specific: converts resolved paths to `@bundle:bundleName/moduleName/path` strings                                                                                                        |
 
 ---
 

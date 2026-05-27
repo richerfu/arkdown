@@ -182,16 +182,17 @@ crates/arkdown-plugin-chunk-wrapper/
 
 ## Rolldown Alignment
 
-| arkdown concept | rolldown equivalent | note |
-| --- | --- | --- |
-| `ChunkWrapperPlugin::render_chunk` | `Plugin::render_chunk` | Same hook; rolldown passes `RenderedChunk` meta; arkdown passes `&ArkChunk` |
-| IIFE wrapping `(function () { ... })()` | rolldown `OutputOptions::format = Iife` | rolldown can emit IIFE natively; arkdown implements it as an explicit plugin because it also needs the `globalThis` registry injection that rolldown's IIFE format does not produce |
-| `require()` → `globalThis['name_hash']` replacement | rolldown cross-chunk `import` → `require()` in CJS format | arkdown goes one step further: CJS `require()` calls for same-bundle chunks are replaced with `globalThis` lookups because ArkRuntime has no module loader |
-| `globalThis['fileName_hash'] = { ... }` registry export | rolldown chunk's `exports` object | Rolldown emits `Object.defineProperty(exports, ...)` in CJS; arkdown appends a `globalThis` assignment instead |
-| `chunk.chunk_hash` in registry key | rolldown `Chunk::content_hash` | Same value; both are derived from chunk content |
-| `RenderChunkContext::chunks` (full chunk manifest) | rolldown `RenderChunkContext::get_module_info` + chunk graph | arkdown's context must expose the full `ChunkGraph` so `chunk_hash` for other chunks can be looked up |
+| arkdown concept                                         | rolldown equivalent                                          | note                                                                                                                                                                                |
+| ------------------------------------------------------- | ------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ChunkWrapperPlugin::render_chunk`                      | `Plugin::render_chunk`                                       | Same hook; rolldown passes `RenderedChunk` meta; arkdown passes `&ArkChunk`                                                                                                         |
+| IIFE wrapping `(function () { ... })()`                 | rolldown `OutputOptions::format = Iife`                      | rolldown can emit IIFE natively; arkdown implements it as an explicit plugin because it also needs the `globalThis` registry injection that rolldown's IIFE format does not produce |
+| `require()` → `globalThis['name_hash']` replacement     | rolldown cross-chunk `import` → `require()` in CJS format    | arkdown goes one step further: CJS `require()` calls for same-bundle chunks are replaced with `globalThis` lookups because ArkRuntime has no module loader                          |
+| `globalThis['fileName_hash'] = { ... }` registry export | rolldown chunk's `exports` object                            | Rolldown emits `Object.defineProperty(exports, ...)` in CJS; arkdown appends a `globalThis` assignment instead                                                                      |
+| `chunk.chunk_hash` in registry key                      | rolldown `Chunk::content_hash`                               | Same value; both are derived from chunk content                                                                                                                                     |
+| `RenderChunkContext::chunks` (full chunk manifest)      | rolldown `RenderChunkContext::get_module_info` + chunk graph | arkdown's context must expose the full `ChunkGraph` so `chunk_hash` for other chunks can be looked up                                                                               |
 
 **Key divergences from rolldown that must always be preserved:**
+
 - IIFE wrapping is always applied, even for single-chunk builds (ArkRuntime requires it)
 - `globalThis` registry export is arkdown-specific: rolldown does not produce `globalThis` assignments
 - `require()` calls to unknown (non-chunk) IDs must be left unchanged — external references use the OHM URL as their ID, not a relative path

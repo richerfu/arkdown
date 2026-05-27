@@ -281,6 +281,7 @@ dependencies = [
  "oxc_allocator",
  "oxc_ast",
  "oxc_parser",
+ "oxc_span",
  "thiserror",
  "tokio",
 ]

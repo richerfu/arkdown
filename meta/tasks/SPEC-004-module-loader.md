@@ -238,17 +238,17 @@ crates/arkdown-loader/
 
 ## Rolldown Alignment
 
-| arkdown concept | rolldown equivalent | note |
-| --- | --- | --- |
-| `ModuleLoader` | rolldown `ModuleLoader` | Near-identical design: concurrent queue-based loader; rolldown uses Tokio tasks, arkdown uses Rayon |
-| `PluginDriver` | rolldown `PluginDriver` | Same concept; runs hook chains in plugin registration order |
-| `PluginDriver::resolve_id()` | rolldown `PluginDriver::resolve_id()` | Identical semantics: first `Some(id)` wins; fallback to default resolver |
-| `PluginDriver::load()` | rolldown `PluginDriver::load()` with `HookLoadOutput` | Identical; fallback is `fs::read_to_string` |
-| `PluginDriver::transform()` | rolldown `PluginDriver::transform()` with `HookTransformOutput` | Sequential: each plugin receives the output of the prior plugin |
-| `PluginDriver::module_parsed()` | rolldown `PluginDriver::module_parsed()` | Notification only; no return value |
-| Rayon parallel loading | rolldown uses Tokio `JoinSet` for concurrent module loading | Functional equivalent; both process independent modules concurrently |
-| Import/export extraction via `oxc_semantic` | rolldown uses its own AST analysis | Same underlying oxc library; rolldown extracts `ModuleRecord`; arkdown reads `import_entries` + `exported_bindings` |
-| `ModuleType::BytecodeHar` stub | rolldown `Module::External` | arkdown creates a real `Module` stub with empty imports; rolldown uses an `ExternalModule` |
+| arkdown concept                             | rolldown equivalent                                             | note                                                                                                                |
+| ------------------------------------------- | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `ModuleLoader`                              | rolldown `ModuleLoader`                                         | Near-identical design: concurrent queue-based loader; rolldown uses Tokio tasks, arkdown uses Rayon                 |
+| `PluginDriver`                              | rolldown `PluginDriver`                                         | Same concept; runs hook chains in plugin registration order                                                         |
+| `PluginDriver::resolve_id()`                | rolldown `PluginDriver::resolve_id()`                           | Identical semantics: first `Some(id)` wins; fallback to default resolver                                            |
+| `PluginDriver::load()`                      | rolldown `PluginDriver::load()` with `HookLoadOutput`           | Identical; fallback is `fs::read_to_string`                                                                         |
+| `PluginDriver::transform()`                 | rolldown `PluginDriver::transform()` with `HookTransformOutput` | Sequential: each plugin receives the output of the prior plugin                                                     |
+| `PluginDriver::module_parsed()`             | rolldown `PluginDriver::module_parsed()`                        | Notification only; no return value                                                                                  |
+| Rayon parallel loading                      | rolldown uses Tokio `JoinSet` for concurrent module loading     | Functional equivalent; both process independent modules concurrently                                                |
+| Import/export extraction via `oxc_semantic` | rolldown uses its own AST analysis                              | Same underlying oxc library; rolldown extracts `ModuleRecord`; arkdown reads `import_entries` + `exported_bindings` |
+| `ModuleType::BytecodeHar` stub              | rolldown `Module::External`                                     | arkdown creates a real `Module` stub with empty imports; rolldown uses an `ExternalModule`                          |
 
 **Key divergence:** rolldown's `ModuleLoader` uses a `ModuleId` type that is distinct from the string ID. arkdown uses `String` (the OHM URL or file path) as the canonical ID. No numeric module ID is exposed in the loader API; `ModuleIdx` is internal to `ModuleGraph`.
 

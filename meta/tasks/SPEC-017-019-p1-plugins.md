@@ -171,30 +171,30 @@ if let Some(cached) = cache.get(&id) {
 
 ### SPEC-017: Router Map Plugin
 
-| arkdown concept | rolldown equivalent | note |
-| --- | --- | --- |
-| `RouterMapPlugin::should_invalidate_cache` | `Plugin::shouldInvalidCache` (rollup hook) | Direct port; same semantics: return `true` to force re-compilation of a cached module |
-| `router_map_hash` comparison | rolldown cache key mechanism | rolldown uses content hashing for cache keys; arkdown uses a separate hash for router map state |
+| arkdown concept                            | rolldown equivalent                        | note                                                                                            |
+| ------------------------------------------ | ------------------------------------------ | ----------------------------------------------------------------------------------------------- |
+| `RouterMapPlugin::should_invalidate_cache` | `Plugin::shouldInvalidCache` (rollup hook) | Direct port; same semantics: return `true` to force re-compilation of a cached module           |
+| `router_map_hash` comparison               | rolldown cache key mechanism               | rolldown uses content hashing for cache keys; arkdown uses a separate hash for router map state |
 
 **Key divergence:** rolldown does not have a router map concept. This plugin is OHOS-specific. In arkdown the router map hash is incorporated into `CacheKey::config_hash` as a simpler alternative.
 
 ### SPEC-018: Case-Sensitive Check Plugin
 
-| arkdown concept | rolldown equivalent | note |
-| --- | --- | --- |
+| arkdown concept                           | rolldown equivalent    | note                                                                                                          |
+| ----------------------------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------- |
 | `SensitiveCheckPlugin::load` (case check) | no rolldown equivalent | rolldown does not perform case-sensitivity validation; this is OHOS-specific for cross-platform compatibility |
-| `find_actual_filename()` via `read_dir` | no equivalent | Filesystem-level check; only meaningful on case-insensitive FSes (macOS, Windows) |
+| `find_actual_filename()` via `read_dir`   | no equivalent          | Filesystem-level check; only meaningful on case-insensitive FSes (macOS, Windows)                             |
 
 **Key divergence:** Standard bundlers (including rolldown) rely on the OS to reject mismatched-case imports. This plugin adds an explicit cross-platform check.
 
 ### SPEC-019: Incremental Build Cache
 
-| arkdown concept | rolldown equivalent | note |
-| --- | --- | --- |
-| `CacheKey { content_hash, config_hash, dependency_hash }` | rolldown module cache key | rolldown uses content hash only; arkdown adds `config_hash` and `dependency_hash` for OHOS-specific invalidation |
-| `CachedModule` | rolldown cached `NormalModule` | rolldown stores AST + resolved imports; arkdown stores transformed code + serialized import/export edges (no AST in cache) |
-| `should_invalidate_cache` hook | rollup `shouldInvalidCache` hook | Identical concept; both are sync boolean functions |
-| msgpack cache files in `build/.arkdown_cache/` | rolldown in-memory cache | rolldown keeps its cache in memory only; arkdown persists to disk for cross-process incremental builds |
+| arkdown concept                                           | rolldown equivalent              | note                                                                                                                       |
+| --------------------------------------------------------- | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `CacheKey { content_hash, config_hash, dependency_hash }` | rolldown module cache key        | rolldown uses content hash only; arkdown adds `config_hash` and `dependency_hash` for OHOS-specific invalidation           |
+| `CachedModule`                                            | rolldown cached `NormalModule`   | rolldown stores AST + resolved imports; arkdown stores transformed code + serialized import/export edges (no AST in cache) |
+| `should_invalidate_cache` hook                            | rollup `shouldInvalidCache` hook | Identical concept; both are sync boolean functions                                                                         |
+| msgpack cache files in `build/.arkdown_cache/`            | rolldown in-memory cache         | rolldown keeps its cache in memory only; arkdown persists to disk for cross-process incremental builds                     |
 
 ---
 

@@ -93,7 +93,7 @@ impl ProfileProcessor {
     ) -> Result<(), ArkdownError> {
         // Read AppScope/app.json5 for the app section
         let app_json5_path = self.config.project_root.join("AppScope/app.json5");
-        let app_section = if app_json5_path.exists() {
+        let mut app_section = if app_json5_path.exists() {
             let content = fs_err::read_to_string(&app_json5_path)
                 .map_err(|e| ArkdownError::Io(e.into()))?;
             let raw: serde_json::Value = json5::from_str(&content)
@@ -102,14 +102,33 @@ impl ProfileProcessor {
                 .cloned()
                 .unwrap_or_else(|| serde_json::Value::Object(Default::default()))
         } else {
-            // Fallback: construct from config
             serde_json::json!({
                 "bundleName": self.config.product.bundle_name,
-                "bundleType": "app",
                 "versionCode": 1000000,
                 "versionName": "1.0.0"
             })
         };
+
+        // Merge in required runtime fields that hvigorw adds during profile processing.
+        // These are required by the device package manager (bm install).
+        if let Some(obj) = app_section.as_object_mut() {
+            let numeric_api = compute_numeric_api_version(
+                &self.config.product.compatible_sdk_version,
+            );
+            let is_debug = matches!(self.config.build_mode, arkdown_core::BuildMode::Debug);
+            obj.entry("bundleType").or_insert_with(|| "app".into());
+            obj.entry("bundleName")
+                .or_insert_with(|| self.config.product.bundle_name.clone().into());
+            obj.insert("targetAPIVersion".into(), numeric_api.into());
+            obj.insert("minAPIVersion".into(), numeric_api.into());
+            obj.insert("targetPatchAPIVersion".into(), 0.into());
+            obj.insert("targetMinorAPIVersion".into(), 0.into());
+            obj.insert("buildMode".into(), if is_debug { "debug" } else { "release" }.into());
+            obj.insert("debug".into(), is_debug.into());
+            obj.insert("compileSdkType".into(), "HarmonyOS".into());
+            obj.insert("apiReleaseType".into(), "Release".into());
+            obj.entry("appEnvironments").or_insert_with(|| serde_json::Value::Array(vec![]));
+        }
 
         let module_section = manifest_to_json(manifest);
 
@@ -174,11 +193,13 @@ fn manifest_to_json(manifest: &HapManifest) -> serde_json::Value {
     let mut obj = serde_json::json!({
         "name": manifest.module_name,
         "type": module_type_str(&manifest.module_type),
+        "packageName": manifest.module_name,   // required for OHOS module resolution
         "virtualMachine": manifest.virtual_machine,
         "compileMode": compile_mode_str(&manifest.compile_mode),
         "deviceTypes": manifest.device_types,
         "deliveryWithInstall": true,
         "installationFree": false,
+        "dependencies": serde_json::Value::Array(vec![]),  // required by device runtime
         "abilities": abilities
     });
 
@@ -325,4 +346,30 @@ mod tests {
         // Cleanup
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
+}
+
+/// Convert a version string like `"5.0.5(17)"` to the numeric API version
+/// that the HAP module.json requires: `A*1e7 + B*1e5 + C*1e3 + D`.
+/// Falls back to the digit-in-parens value for simple strings like `"12"`.
+fn compute_numeric_api_version(version: &str) -> u64 {
+    // Extract the part in parentheses, e.g. "5.0.5(17)" → "17"
+    let api_int: u64 = if let Some(start) = version.find('(') {
+        let rest = &version[start + 1..];
+        let end = rest.find(')').unwrap_or(rest.len());
+        rest[..end].parse().unwrap_or(0)
+    } else {
+        version.parse().unwrap_or(0)
+    };
+
+    // Extract major.minor.patch prefix, e.g. "5.0.5(17)" → [5, 0, 5]
+    let prefix = version.split('(').next().unwrap_or("").trim_end_matches('.');
+    let parts: Vec<u64> = prefix
+        .split('.')
+        .filter_map(|s| s.parse().ok())
+        .collect();
+    let major = parts.first().copied().unwrap_or(0);
+    let minor = parts.get(1).copied().unwrap_or(0);
+    let patch = parts.get(2).copied().unwrap_or(0);
+
+    major * 10_000_000 + minor * 100_000 + patch * 1_000 + api_int
 }

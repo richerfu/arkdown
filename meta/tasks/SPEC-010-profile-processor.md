@@ -83,15 +83,16 @@ The `module` section is the processed `module.json5` content with the fields bel
 
 **`write_module_json()` method**: merges `app` + `module` into the final JSON and writes it
 to both:
+
 - `build/default/intermediates/res/<target>/module.json` (intermediates)
 - Embedded into the HAP zip at `module.json` (by SPEC-012)
 
 Key fields added by `process_profile()`:
 
-| Field                  | Value example        | Rule                                                                   |
-| ---------------------- | -------------------- | ---------------------------------------------------------------------- |
-| `module.virtualMachine`| `"ark12.0.1.0"`      | `"ark<apiVersion>.0.1.0"` for API >= 9 (stage model)                  |
-| `module.compileMode`   | `"esmodule"`         | `"esmodule"` for stage model (API >= 9); `"jsbundle"` for FA model    |
+| Field                   | Value example   | Rule                                                               |
+| ----------------------- | --------------- | ------------------------------------------------------------------ |
+| `module.virtualMachine` | `"ark12.0.1.0"` | `"ark<apiVersion>.0.1.0"` for API >= 9 (stage model)               |
+| `module.compileMode`    | `"esmodule"`    | `"esmodule"` for stage model (API >= 9); `"jsbundle"` for FA model |
 
 Output path: `build/default/intermediates/res/<target>/module.json`
 
@@ -143,13 +144,13 @@ reads this file instead of directly reading `module.json5`.
 
 Field notes:
 
-| Field            | Value                                   | Change from prior spec                     |
-| ---------------- | --------------------------------------- | ------------------------------------------ |
-| `moduleRootPath` | `/abs/path/to/entry/src/main`           | Now points to `src/main`, not module root  |
-| `moduleName`     | `"entry"`                               | Added field; OHOS module name              |
-| `apiVersion`     | `12`                                    | Added field; numeric API version           |
-| `modulePathMap`  | `{ "entry": "/abs/path/to/entry" }`     | Added field; name → absolute path map      |
-| `fallbackAnBuild`| `false`                                 | Added field; AN build fallback flag        |
+| Field             | Value                               | Change from prior spec                    |
+| ----------------- | ----------------------------------- | ----------------------------------------- |
+| `moduleRootPath`  | `/abs/path/to/entry/src/main`       | Now points to `src/main`, not module root |
+| `moduleName`      | `"entry"`                           | Added field; OHOS module name             |
+| `apiVersion`      | `12`                                | Added field; numeric API version          |
+| `modulePathMap`   | `{ "entry": "/abs/path/to/entry" }` | Added field; name → absolute path map     |
+| `fallbackAnBuild` | `false`                             | Added field; AN build fallback flag       |
 
 ### Entry Point Collection
 
@@ -228,16 +229,16 @@ crates/arkdown-profile/
 
 ## Rolldown Alignment
 
-| arkdown concept | rolldown equivalent | note |
-| --- | --- | --- |
-| `generate_loader_json()` | rolldown `InputOptions::input` derivation | Both determine bundler entry points; rolldown receives them as explicit options; arkdown derives them from `module.json5` abilities and writes them to `loader.json` |
-| `LoaderJson::compileEntry` | rolldown `input` array | Direct equivalent: list of entry file paths for the bundler |
-| `LoaderJson::pkgNameToPkgBriefInfo` | no rolldown equivalent | OHOS-specific: maps package names to source roots; used by the resolver to locate local HAR files |
-| `LoaderJson::byteCodeHarInfo` | no rolldown equivalent | OHOS-specific: maps HAR package names to pre-compiled ABC paths |
-| `process_profile()` | no rolldown equivalent | Produces `module.json`; rolldown has no manifest processing concept |
-| `HapManifest::virtual_machine` | no rolldown equivalent | OHOS-specific: `"ark3.5.0.0"` version string set in output `module.json` |
-| `LoaderJson::supportChunks` | rolldown `manualChunks` / chunk splitting options | Analogue: controls whether shared chunks are extracted |
-| `LoaderJson::aceModuleBuild` | rolldown `OutputOptions::dir` | Both specify the output directory for JS chunk files |
+| arkdown concept                     | rolldown equivalent                               | note                                                                                                                                                                 |
+| ----------------------------------- | ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `generate_loader_json()`            | rolldown `InputOptions::input` derivation         | Both determine bundler entry points; rolldown receives them as explicit options; arkdown derives them from `module.json5` abilities and writes them to `loader.json` |
+| `LoaderJson::compileEntry`          | rolldown `input` array                            | Direct equivalent: list of entry file paths for the bundler                                                                                                          |
+| `LoaderJson::pkgNameToPkgBriefInfo` | no rolldown equivalent                            | OHOS-specific: maps package names to source roots; used by the resolver to locate local HAR files                                                                    |
+| `LoaderJson::byteCodeHarInfo`       | no rolldown equivalent                            | OHOS-specific: maps HAR package names to pre-compiled ABC paths                                                                                                      |
+| `process_profile()`                 | no rolldown equivalent                            | Produces `module.json`; rolldown has no manifest processing concept                                                                                                  |
+| `HapManifest::virtual_machine`      | no rolldown equivalent                            | OHOS-specific: `"ark3.5.0.0"` version string set in output `module.json`                                                                                             |
+| `LoaderJson::supportChunks`         | rolldown `manualChunks` / chunk splitting options | Analogue: controls whether shared chunks are extracted                                                                                                               |
+| `LoaderJson::aceModuleBuild`        | rolldown `OutputOptions::dir`                     | Both specify the output directory for JS chunk files                                                                                                                 |
 
 ---
 

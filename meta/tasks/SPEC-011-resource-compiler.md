@@ -202,13 +202,13 @@ crates/arkdown-resource/
 
 `arkdown-resource` has no rolldown equivalent — resource compilation is entirely OHOS-specific. Standard JS bundlers do not process binary resource indexes. The closest analogue in the JS ecosystem is a Vite/webpack asset plugin, but the OHOS `resources.index` binary format and ID assignment system are unique to OpenHarmony.
 
-| arkdown concept | closest analogue | note |
-| --- | --- | --- |
-| `ResourceCompiler::compile()` | Vite `transformAssets` / webpack `file-loader` | Conceptually similar (process non-JS assets) but the binary output format is completely different |
-| Resource ID assignment (`0x01000000+`) | CSS Modules class name hashing | Different: OHOS uses sequential integer IDs; CSS Modules use content hashes |
-| `resources.index` binary format | no equivalent in rolldown/rollup | Unique OHOS binary format; must be ported from `developtools_restool` source |
-| Qualifier-based locale merging (`base/`, `en_US/`) | webpack `i18n-loader` | Functionally similar but different format |
-| Profile JSON passthrough (`profile/*.json`) | webpack `copy-webpack-plugin` | Profile JSON files are bundled as-is, not compiled |
+| arkdown concept                                    | closest analogue                               | note                                                                                              |
+| -------------------------------------------------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `ResourceCompiler::compile()`                      | Vite `transformAssets` / webpack `file-loader` | Conceptually similar (process non-JS assets) but the binary output format is completely different |
+| Resource ID assignment (`0x01000000+`)             | CSS Modules class name hashing                 | Different: OHOS uses sequential integer IDs; CSS Modules use content hashes                       |
+| `resources.index` binary format                    | no equivalent in rolldown/rollup               | Unique OHOS binary format; must be ported from `developtools_restool` source                      |
+| Qualifier-based locale merging (`base/`, `en_US/`) | webpack `i18n-loader`                          | Functionally similar but different format                                                         |
+| Profile JSON passthrough (`profile/*.json`)        | webpack `copy-webpack-plugin`                  | Profile JSON files are bundled as-is, not compiled                                                |
 
 ---
 

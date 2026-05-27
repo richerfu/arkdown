@@ -177,13 +177,13 @@ contract (from `GenerateLoaderJson`):
 
 Key fields added/updated:
 
-| Field             | Value                                  | Note                                          |
-| ----------------- | -------------------------------------- | --------------------------------------------- |
-| `moduleRootPath`  | `/abs/path/to/entry/src/main`          | Points to `src/main`, not just module root    |
-| `moduleName`      | `"entry"`                              | OHOS module name                              |
-| `apiVersion`      | `12`                                   | Numeric API version (from compatibleSdkVersion) |
-| `modulePathMap`   | `{ "entry": "/abs/path/to/entry" }`    | Maps module name → absolute path              |
-| `fallbackAnBuild` | `false`                                | AN (ahead-of-native) build fallback flag      |
+| Field             | Value                               | Note                                            |
+| ----------------- | ----------------------------------- | ----------------------------------------------- |
+| `moduleRootPath`  | `/abs/path/to/entry/src/main`       | Points to `src/main`, not just module root      |
+| `moduleName`      | `"entry"`                           | OHOS module name                                |
+| `apiVersion`      | `12`                                | Numeric API version (from compatibleSdkVersion) |
+| `modulePathMap`   | `{ "entry": "/abs/path/to/entry" }` | Maps module name → absolute path                |
+| `fallbackAnBuild` | `false`                             | AN (ahead-of-native) build fallback flag        |
 
 The bundler consumes `compileEntry` for entry points and writes output to `aceModuleBuild`.
 
@@ -229,22 +229,23 @@ crates/arkdown/
 
 ## Rolldown Alignment
 
-| arkdown concept | rolldown equivalent | note |
-| --- | --- | --- |
-| `Bundler::bundle()` | rolldown `Bundler::write()` | Same: takes entry points, returns chunk graph and writes files |
-| Stage 1 (Link) | rolldown link stage | Identical: resolve cross-module symbol references |
-| Stage 2 (Tree Shake) | rolldown tree-shaking (`treeshake: true`) | Same algorithm (inclusion marking); arkdown enables only in `BuildMode::Release` |
-| Stage 3 (Chunk Split) | rolldown `manualChunks` + automatic splitting | arkdown reads `loader.json` `compileEntry`; rolldown reads `input` option; both produce `ChunkGraph` |
-| Stage 4 (Code Generation, CJS output) | rolldown `OutputOptions::format = Cjs` | **Intentional divergence**: both emit CJS; arkdown then wraps in IIFE (SPEC-006); rolldown would emit ESM for browsers |
-| `render_chunk` hook dispatch | rolldown `PluginDriver::render_chunk()` | Identical hook semantics |
-| `generate_bundle` hook dispatch | rolldown `PluginDriver::generate_bundle()` | Identical |
-| `BundleOutput::chunk_graph` | rolldown `BundleOutput` / `RolldownOutput` | Same concept; arkdown adds `output_dir` and `chunk_files` for direct file path tracking |
-| `LoaderJson::compileEntry` | rolldown `InputOptions::input` | Functionally equivalent: both specify entry point file paths |
-| `supportChunks` flag | rolldown always splits chunks | OHOS-specific: when `false`, one chunk per entry (no shared chunks) |
-| `ArkChunk::chunk_hash` | rolldown `Chunk::content_hash` | Same purpose (fingerprinting); arkdown uses it as the `globalThis` registry key suffix |
-| `cross_chunk_imports` on `ArkChunk` | rolldown `Chunk::cross_chunk_imports` | Identical semantics; drives the `require()` → `globalThis[]` replacement in SPEC-006 |
+| arkdown concept                       | rolldown equivalent                           | note                                                                                                                   |
+| ------------------------------------- | --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `Bundler::bundle()`                   | rolldown `Bundler::write()`                   | Same: takes entry points, returns chunk graph and writes files                                                         |
+| Stage 1 (Link)                        | rolldown link stage                           | Identical: resolve cross-module symbol references                                                                      |
+| Stage 2 (Tree Shake)                  | rolldown tree-shaking (`treeshake: true`)     | Same algorithm (inclusion marking); arkdown enables only in `BuildMode::Release`                                       |
+| Stage 3 (Chunk Split)                 | rolldown `manualChunks` + automatic splitting | arkdown reads `loader.json` `compileEntry`; rolldown reads `input` option; both produce `ChunkGraph`                   |
+| Stage 4 (Code Generation, CJS output) | rolldown `OutputOptions::format = Cjs`        | **Intentional divergence**: both emit CJS; arkdown then wraps in IIFE (SPEC-006); rolldown would emit ESM for browsers |
+| `render_chunk` hook dispatch          | rolldown `PluginDriver::render_chunk()`       | Identical hook semantics                                                                                               |
+| `generate_bundle` hook dispatch       | rolldown `PluginDriver::generate_bundle()`    | Identical                                                                                                              |
+| `BundleOutput::chunk_graph`           | rolldown `BundleOutput` / `RolldownOutput`    | Same concept; arkdown adds `output_dir` and `chunk_files` for direct file path tracking                                |
+| `LoaderJson::compileEntry`            | rolldown `InputOptions::input`                | Functionally equivalent: both specify entry point file paths                                                           |
+| `supportChunks` flag                  | rolldown always splits chunks                 | OHOS-specific: when `false`, one chunk per entry (no shared chunks)                                                    |
+| `ArkChunk::chunk_hash`                | rolldown `Chunk::content_hash`                | Same purpose (fingerprinting); arkdown uses it as the `globalThis` registry key suffix                                 |
+| `cross_chunk_imports` on `ArkChunk`   | rolldown `Chunk::cross_chunk_imports`         | Identical semantics; drives the `require()` → `globalThis[]` replacement in SPEC-006                                   |
 
 **Key divergences from rolldown that must always be preserved:**
+
 1. Output format is CJS (Stage 4), not ESM. This is required so wrapper-chunk-plugin (SPEC-006) can rewrite `require()` calls to `globalThis[]`.
 2. Entry points come from `loader.json` `compileEntry`, not from an `input` option struct.
 3. `supportChunks = false` (the most common OHOS case) means exactly one chunk per entry — no shared chunk extraction.

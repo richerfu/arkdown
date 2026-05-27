@@ -81,11 +81,11 @@ impl ArkdownPlugin for DuplicateCheckPlugin {
 
 ## Rolldown Alignment
 
-| arkdown concept | rolldown equivalent | note |
-| --- | --- | --- |
-| `DuplicateCheckPlugin::before_build_end` | `Plugin::buildEnd` (rollup) / `Plugin::build_end` (rolldown) | Closest rolldown equivalent; arkdown uses `before_build_end` which fires before chunk generation |
-| File stem uniqueness check | no rolldown equivalent | OHOS-specific constraint from es2abc `--merge-abc`; standard JS bundlers have no such requirement |
-| `BuildContext::module_graph()` | rolldown `PluginContext::get_module_info()` | rolldown exposes per-module info via an API call; arkdown exposes the full graph via the context |
+| arkdown concept                          | rolldown equivalent                                          | note                                                                                              |
+| ---------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------- |
+| `DuplicateCheckPlugin::before_build_end` | `Plugin::buildEnd` (rollup) / `Plugin::build_end` (rolldown) | Closest rolldown equivalent; arkdown uses `before_build_end` which fires before chunk generation  |
+| File stem uniqueness check               | no rolldown equivalent                                       | OHOS-specific constraint from es2abc `--merge-abc`; standard JS bundlers have no such requirement |
+| `BuildContext::module_graph()`           | rolldown `PluginContext::get_module_info()`                  | rolldown exposes per-module info via an API call; arkdown exposes the full graph via the context  |
 
 **Key divergence:** This check has no rolldown/rollup equivalent. The constraint arises from es2abc's `--merge-abc` flag which uses the JS filename as the Panda bytecode record name. Two files with the same stem (e.g., `utils/Logger.ets` and `components/Logger.ets`) would both compile to a record named `"Logger"` causing a conflict.
 

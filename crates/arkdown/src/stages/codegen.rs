@@ -5,13 +5,6 @@ use oxc_span::SourceType;
 
 use arkdown_core::{ArkdownError, ChunkGraph, Module, ModuleGraph, ModuleType};
 
-/// Generate CJS-compatible JavaScript for every chunk.
-///
-/// For each chunk we concatenate all included modules' source text, re-parsing
-/// and re-emitting via oxc_codegen to normalise whitespace and strip TypeScript
-/// annotations. The actual ESM→CJS rewrite (`import` → `require`, `export` →
-/// `module.exports`) is handled downstream by `arkdown-plugin-chunk-wrapper`
-/// (SPEC-006).
 pub fn generate_code(
     graph: &ModuleGraph,
     chunk_graph: &mut ChunkGraph,
@@ -21,7 +14,6 @@ pub fn generate_code(
 
         for &module_idx in &chunk.modules {
             let module = &graph.modules[module_idx];
-            // Only normal (non-external) modules contribute source code.
             if let Module::Normal(nm) = module {
                 let module_code =
                     regenerate_module(&nm.source.content, &nm.id.id, nm.id.module_type.clone())?;
@@ -38,8 +30,16 @@ pub fn generate_code(
 
 /// Re-parse and re-emit a single module's source through oxc_codegen.
 ///
-/// This strips TypeScript annotations and normalises formatting.
-/// Parse errors are tolerated by falling back to the raw source text.
+/// NOTE: The ohos-rs/oxc fork's `Codegen` does NOT strip TypeScript type
+/// annotations — it outputs TypeScript-aware code that preserves all type
+/// annotations. `oxc_transformer` would strip types but is not usable with
+/// this toolchain (it uses the unstable `if_let_guard` feature).
+///
+/// As a result, the bundled output retains TypeScript annotations. These are
+/// handled downstream:
+/// - `arkdown-abc`'s `strip_typescript_types` uses `SourceType::tsx()` which
+///   allows parsing TypeScript, enabling bytecode generation from the AST.
+/// - The chunk-wrapper plugin correctly hoists imports before the IIFE.
 fn regenerate_module(
     source: &str,
     file_path: &str,
@@ -52,8 +52,6 @@ fn regenerate_module(
         Parser::new(&allocator, source, source_type).parse();
 
     if !errors.is_empty() {
-        // Fall back to raw source on parse error — downstream stages will report
-        // the diagnostic properly.
         return Ok(source.to_owned());
     }
 
@@ -63,14 +61,25 @@ fn regenerate_module(
 
 /// Map module type and file extension to an oxc [`SourceType`].
 fn infer_source_type(file_path: &str, module_type: &ModuleType) -> SourceType {
-    // Try path-based inference first (handles .ets, .ts, .js, .mjs, .cjs).
+    let ext = std::path::Path::new(file_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+
+    // ETS files: use standard TypeScript+module (not the ohos-rs ArkTS parser mode
+    // which has stricter rules for ArkUI struct syntax).
+    if ext == "ets" || matches!(module_type, ModuleType::Ets) {
+        return SourceType::default().with_typescript(true).with_module(true);
+    }
+
+    // TypeScript/JS files: try path inference first.
     if let Ok(st) = SourceType::from_path(std::path::Path::new(file_path)) {
         return st;
     }
-    // Fallback.
+
     match module_type {
-        ModuleType::Ets | ModuleType::Ts | ModuleType::Declaration => {
-            SourceType::default().with_typescript(true)
+        ModuleType::Ts | ModuleType::Declaration => {
+            SourceType::default().with_typescript(true).with_module(true)
         }
         _ => SourceType::default(),
     }
@@ -98,16 +107,7 @@ mod tests {
 
     #[test]
     fn test_fnv1a_hash_empty() {
-        // FNV offset basis
         assert_eq!(fnv1a_hash(""), 0xcbf29ce484222325);
-    }
-
-    #[test]
-    fn test_regenerate_module_ts() {
-        let src = "const x: number = 42;";
-        let result = regenerate_module(src, "test.ts", ModuleType::Ts).unwrap();
-        // After stripping TypeScript annotations, the type annotation is gone.
-        assert!(result.contains("const x") || result.contains("42"));
     }
 
     #[test]
@@ -119,9 +119,26 @@ mod tests {
 
     #[test]
     fn test_regenerate_module_parse_error_fallback() {
-        // Deliberately broken source — should fall back to raw source.
         let src = "this is not valid javascript !!!@@@@";
         let result = regenerate_module(src, "bad.js", ModuleType::Js).unwrap();
         assert_eq!(result, src);
+    }
+
+    #[test]
+    fn test_regenerate_module_ets_parses_without_errors() {
+        // Verify that ETS TypeScript source parses without errors using the
+        // explicit TypeScript+module source type (bypasses ohos-rs ArkTS strict mode).
+        let src = r#"import { UIAbility } from "@kit.AbilityKit";
+export default class EntryAbility extends UIAbility {
+    onCreate(want: any, launchParam: any): void {
+        console.log("onCreate");
+    }
+}"#;
+        // Should NOT fall back to raw source (errors.is_empty() should be true).
+        // We can't assert TypeScript is stripped (ohos-rs Codegen preserves types),
+        // but we CAN assert the class structure is preserved.
+        let result = regenerate_module(src, "EntryAbility.ets", ModuleType::Ets).unwrap();
+        assert!(result.contains("class EntryAbility"), "class must be present in output");
+        assert!(result.contains("onCreate"), "method must be present in output");
     }
 }

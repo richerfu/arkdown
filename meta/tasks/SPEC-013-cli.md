@@ -161,17 +161,17 @@ Use `clap` for argument parsing.
 
 ## Rolldown Alignment
 
-| arkdown concept | rolldown equivalent | note |
-| --- | --- | --- |
-| `arkdown build` command | rolldown `Bundler::write()` orchestration | rolldown is a library; its CLI (`rolldown` command) calls `Bundler::write()`; arkdown CLI does the same plus resource compilation, ABC compilation, and packaging |
-| `--mode debug\|release` | rolldown watch mode vs production build | arkdown's mode flag maps to `BuildMode` which controls tree-shaking and obfuscation; rolldown uses `process.env.NODE_ENV` convention |
-| `--target hap\|hsp\|har` | rolldown `format` option (`esm`, `cjs`, `iife`) | Different concept: arkdown target determines archive format; rolldown format determines JS module format |
-| `--module <name>` | no direct rolldown equivalent | OHOS-specific: scopes the build to one OHOS module; rolldown always builds all entries |
-| `--product <name>` | no direct rolldown equivalent | OHOS-specific: selects the product variant from `build-profile.json5` |
-| Steps 3+4 in parallel | rolldown parallel module loading | Both run independent tasks concurrently; in arkdown it is resource compilation (step 3) and JS bundling (step 4) |
-| `ARKDOWN_LOG` env var | rolldown `ROLLDOWN_LOG_LEVEL` | Same purpose: log verbosity control |
-| `ARKDOWN_JOBS` env var | rolldown `ROLLDOWN_CONCURRENCY` | Both control worker parallelism |
-| Cargo-style error formatting | rolldown diagnostic output | Same `error[CODE]: message\n  --> file:line:col` format |
+| arkdown concept              | rolldown equivalent                             | note                                                                                                                                                              |
+| ---------------------------- | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `arkdown build` command      | rolldown `Bundler::write()` orchestration       | rolldown is a library; its CLI (`rolldown` command) calls `Bundler::write()`; arkdown CLI does the same plus resource compilation, ABC compilation, and packaging |
+| `--mode debug\|release`      | rolldown watch mode vs production build         | arkdown's mode flag maps to `BuildMode` which controls tree-shaking and obfuscation; rolldown uses `process.env.NODE_ENV` convention                              |
+| `--target hap\|hsp\|har`     | rolldown `format` option (`esm`, `cjs`, `iife`) | Different concept: arkdown target determines archive format; rolldown format determines JS module format                                                          |
+| `--module <name>`            | no direct rolldown equivalent                   | OHOS-specific: scopes the build to one OHOS module; rolldown always builds all entries                                                                            |
+| `--product <name>`           | no direct rolldown equivalent                   | OHOS-specific: selects the product variant from `build-profile.json5`                                                                                             |
+| Steps 3+4 in parallel        | rolldown parallel module loading                | Both run independent tasks concurrently; in arkdown it is resource compilation (step 3) and JS bundling (step 4)                                                  |
+| `ARKDOWN_LOG` env var        | rolldown `ROLLDOWN_LOG_LEVEL`                   | Same purpose: log verbosity control                                                                                                                               |
+| `ARKDOWN_JOBS` env var       | rolldown `ROLLDOWN_CONCURRENCY`                 | Both control worker parallelism                                                                                                                                   |
+| Cargo-style error formatting | rolldown diagnostic output                      | Same `error[CODE]: message\n  --> file:line:col` format                                                                                                           |
 
 ---
 

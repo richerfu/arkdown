@@ -182,7 +182,27 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         let modules_abc = module
             .src_path
             .join("build/default/intermediates/ets/modules.abc");
-        let abc_modules: Vec<AbcModule> = collect_js_chunks(&chunk_dir)?;
+        // Build record name map: chunk_stem → OHOS class path.
+        // The class path format is "{module_name}/src/main/{path_no_ext}" which
+        // corresponds to the "L&path&;" class name ArkRuntime uses to look up
+        // module entries in the merged modules.abc.
+        let record_name_map: std::collections::HashMap<String, String> = loader_json
+            .compile_entry
+            .iter()
+            .filter_map(|entry_path| {
+                let path = std::path::Path::new(entry_path);
+                let stem = path.file_stem()?.to_str()?.to_string();
+                // entry_path like "./ets/entryability/EntryAbility.ets"
+                let stripped = entry_path
+                    .trim_start_matches("./")
+                    .trim_end_matches(".ets")
+                    .trim_end_matches(".ts")
+                    .trim_end_matches(".js");
+                let record_name = format!("{}/src/main/{}", loader_json.module_name, stripped);
+                Some((stem, record_name))
+            })
+            .collect();
+        let abc_modules: Vec<AbcModule> = collect_js_chunks(&chunk_dir, &record_name_map)?;
         if !abc_modules.is_empty() {
             abc_compiler
                 .compile(abc_modules, &modules_abc)
@@ -325,7 +345,10 @@ fn read_module_json5(path: &std::path::Path) -> Result<ModuleJson5> {
     json5::from_str(&content).context("Failed to parse module.json5")
 }
 
-fn collect_js_chunks(chunk_dir: &std::path::Path) -> Result<Vec<AbcModule>> {
+fn collect_js_chunks(
+    chunk_dir: &std::path::Path,
+    record_name_map: &std::collections::HashMap<String, String>,
+) -> Result<Vec<AbcModule>> {
     let mut modules = Vec::new();
     if !chunk_dir.exists() {
         return Ok(modules);
@@ -336,12 +359,14 @@ fn collect_js_chunks(chunk_dir: &std::path::Path) -> Result<Vec<AbcModule>> {
         .filter_map(|e| e.ok())
     {
         if entry.path().extension().and_then(|e| e.to_str()) == Some("js") {
-            let record_name = entry
+            let stem = entry
                 .path()
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("chunk")
                 .to_string();
+            // Use OHOS module path as record name if available; fall back to stem.
+            let record_name = record_name_map.get(&stem).cloned().unwrap_or(stem);
             let source = fs_err::read_to_string(entry.path())?;
             modules.push(AbcModule {
                 record_name,

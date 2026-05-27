@@ -348,14 +348,14 @@ invoking the SDK binary directly.
 
 ## Rolldown Alignment
 
-| arkdown concept | rolldown equivalent | note |
-| --- | --- | --- |
-| `EtsTransformPlugin::transform` | `Plugin::transform` returning `HookTransformOutput { code, map, module_type }` | Same hook; arkdown changes `module_type` from `Ets` to `Ts` in the output |
-| `etsTransform` (ArkUI desugar) | Babel/SWC decorator transforms in the rollup/rolldown ecosystem | Functionally equivalent: AST rewrite that desugars custom syntax to standard TS; arkdown uses `ohos-rs/oxc` instead of Babel |
-| `etsChecker` | rolldown/Vite `vite-plugin-checker` pattern | Diagnostic emission without aborting; rolldown does not have built-in type checking |
-| `apiTransform` (SDK API rewrite) | Babel `@babel/plugin-transform-*` plugins | Version-gated rewrite table; no rolldown equivalent |
-| Source map from ETS → TS | `HookTransformOutput::map` | Identical: the transform produces a source map that is chained with downstream maps |
-| `ModuleSource.module_type` change `Ets → Ts` | `HookTransformOutput::module_type` field | rolldown allows transforms to change the module type; arkdown does the same |
+| arkdown concept                              | rolldown equivalent                                                            | note                                                                                                                         |
+| -------------------------------------------- | ------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
+| `EtsTransformPlugin::transform`              | `Plugin::transform` returning `HookTransformOutput { code, map, module_type }` | Same hook; arkdown changes `module_type` from `Ets` to `Ts` in the output                                                    |
+| `etsTransform` (ArkUI desugar)               | Babel/SWC decorator transforms in the rollup/rolldown ecosystem                | Functionally equivalent: AST rewrite that desugars custom syntax to standard TS; arkdown uses `ohos-rs/oxc` instead of Babel |
+| `etsChecker`                                 | rolldown/Vite `vite-plugin-checker` pattern                                    | Diagnostic emission without aborting; rolldown does not have built-in type checking                                          |
+| `apiTransform` (SDK API rewrite)             | Babel `@babel/plugin-transform-*` plugins                                      | Version-gated rewrite table; no rolldown equivalent                                                                          |
+| Source map from ETS → TS                     | `HookTransformOutput::map`                                                     | Identical: the transform produces a source map that is chained with downstream maps                                          |
+| `ModuleSource.module_type` change `Ets → Ts` | `HookTransformOutput::module_type` field                                       | rolldown allows transforms to change the module type; arkdown does the same                                                  |
 
 **Key divergence:** This transform runs only on `ModuleType::Ets` files. There is no equivalent in rolldown — ArkTS is OHOS-specific. The entire `etsTransform` stage has no counterpart in standard JS bundlers.
 

@@ -148,19 +148,19 @@ source files listed in `formJsonPathArr`.
 
 ### SPEC-023: Watch Mode
 
-| arkdown concept | rolldown equivalent | note |
-| --- | --- | --- |
-| `Watcher` | rolldown `Bundler` in watch mode (`--watch`) | rolldown has built-in watch mode; arkdown implements watch via `notify` crate and wraps the full pipeline (not just bundling) |
-| `notify::recommended_watcher` | rolldown uses OS filesystem events via `notify` crate too | Same underlying crate; rolldown watches only JS/TS files; arkdown must also watch `.ets`, `resources/`, and `module.json5` |
-| `collect_events` debounce | rolldown 50ms default debounce | Same default debounce window |
-| `incremental_build` using SPEC-019 cache | rolldown incremental rebuild via module cache | Both re-run only changed modules; rolldown uses rollup cache format; arkdown uses msgpack cache (SPEC-019) |
-| `WatchChangeKind::Create\|Update\|Delete` | rolldown `WatchChangeKind` enum | Identical enum; arkdown maps `notify::EventKind` to this |
+| arkdown concept                           | rolldown equivalent                                       | note                                                                                                                          |
+| ----------------------------------------- | --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `Watcher`                                 | rolldown `Bundler` in watch mode (`--watch`)              | rolldown has built-in watch mode; arkdown implements watch via `notify` crate and wraps the full pipeline (not just bundling) |
+| `notify::recommended_watcher`             | rolldown uses OS filesystem events via `notify` crate too | Same underlying crate; rolldown watches only JS/TS files; arkdown must also watch `.ets`, `resources/`, and `module.json5`    |
+| `collect_events` debounce                 | rolldown 50ms default debounce                            | Same default debounce window                                                                                                  |
+| `incremental_build` using SPEC-019 cache  | rolldown incremental rebuild via module cache             | Both re-run only changed modules; rolldown uses rollup cache format; arkdown uses msgpack cache (SPEC-019)                    |
+| `WatchChangeKind::Create\|Update\|Delete` | rolldown `WatchChangeKind` enum                           | Identical enum; arkdown maps `notify::EventKind` to this                                                                      |
 
 ### SPEC-024: Hot-Reload Importer Graph Plugin
 
-| arkdown concept | rolldown equivalent | note |
-| --- | --- | --- |
-| `CollectImportersPlugin::build_end` | `Plugin::build_end` | Same hook |
+| arkdown concept                              | rolldown equivalent              | note                                                                                            |
+| -------------------------------------------- | -------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `CollectImportersPlugin::build_end`          | `Plugin::build_end`              | Same hook                                                                                       |
 | `importer_map: HashMap<String, Vec<String>>` | rolldown `ModuleInfo::importers` | rolldown tracks importers in `ModuleInfo`; arkdown writes them to a JSON file for DevEco Studio |
 
 ### SPEC-025: Preview Mode Resource Watcher
@@ -169,14 +169,14 @@ No rolldown equivalent. Preview mode is DevEco Studio-specific.
 
 ### SPEC-026: HAR TGZ Clean Plugin
 
-| arkdown concept | rolldown equivalent | note |
-| --- | --- | --- |
+| arkdown concept                    | rolldown equivalent                          | note                                                                                                      |
+| ---------------------------------- | -------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
 | Strip ArkTS decorators from source | Babel `@babel/plugin-strip-type-annotations` | Similar: remove runtime-irrelevant syntax before publishing; different: ArkTS decorators are more complex |
 
 ### SPEC-027: ArkTS Widget Compilation
 
-| arkdown concept | rolldown equivalent | note |
-| --- | --- | --- |
+| arkdown concept                 | rolldown equivalent                                   | note                                                                                                                           |
+| ------------------------------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
 | `AbcCompiler::compile_widget()` | rolldown multi-entry build with separate `output.dir` | Both run a separate compilation pass; rolldown uses separate output options; arkdown uses a separate cache dir and loader.json |
 
 ---

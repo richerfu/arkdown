@@ -368,6 +368,7 @@ The `virtualMachine` field is critical — it tells the OS runtime which VM to u
 model modules with API >= 9, it is `"ark<apiVersion>.0.1.0"` (e.g., `"ark12.0.1.0"` for API 12).
 
 **module.json must have both `app` and `module` sections.** `write_module_json()` merges:
+
 - `app` section from `AppScope/app.json5` (bundle name, version, icon, label)
 - `module` section from processed `module.json5` (with virtualMachine, compileMode added)
 

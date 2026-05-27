@@ -17,6 +17,7 @@ Signs `.hap`/`.hsp` in **pure Rust** — no Java subprocess, no SDK binary depen
 Ports `developtools_hapsigner` (Apache 2.0) from Java/BouncyCastle to Rust.
 
 Reference implementations:
+
 - `https://github.com/openharmony/developtools_hapsigner` — Java hapsigner source
 - `https://github.com/openharmony/security_code_signature` — verification side
 
@@ -49,12 +50,12 @@ u32:    version (2 for V2, 3 for V3)
 
 ### Block IDs
 
-| Constant                         | Value        | Meaning                              |
-| -------------------------------- | ------------ | ------------------------------------ |
-| `HAP_SIGNATURE_SCHEME_V1`        | `0x20000000` | Main CMS SignedData block            |
-| `PROOF_OF_ROTATION`              | `0x20000001` | Proof-of-rotation certificate chain  |
-| `PROFILE_BLOCK`                  | `0x20000002` | Embedded `.p7b` profile              |
-| `PROPERTY_BLOCK`                 | `0x20000003` | Build property metadata              |
+| Constant                  | Value        | Meaning                             |
+| ------------------------- | ------------ | ----------------------------------- |
+| `HAP_SIGNATURE_SCHEME_V1` | `0x20000000` | Main CMS SignedData block           |
+| `PROOF_OF_ROTATION`       | `0x20000001` | Proof-of-rotation certificate chain |
+| `PROFILE_BLOCK`           | `0x20000002` | Embedded `.p7b` profile             |
+| `PROPERTY_BLOCK`          | `0x20000003` | Build property metadata             |
 
 ---
 
@@ -133,15 +134,15 @@ For each signature algorithm (usually just one):
 
 ## Signature Algorithm IDs
 
-| ID      | Algorithm                    | JCA name                  |
-| ------- | ---------------------------- | ------------------------- |
-| `0x101` | RSA-PSS + SHA-256            | `SHA256withRSA/PSS`       |
-| `0x102` | RSA-PSS + SHA-384            | `SHA384withRSA/PSS`       |
-| `0x103` | RSA-PSS + SHA-512            | `SHA512withRSA/PSS`       |
-| `0x104` | RSA PKCS#1 v1.5 + SHA-256   | `SHA256withRSA`           |
-| `0x201` | ECDSA + SHA-256 (P-256)     | `SHA256withECDSA`         |
-| `0x202` | ECDSA + SHA-384              | `SHA384withECDSA`         |
-| `0x203` | ECDSA + SHA-512              | `SHA512withECDSA`         |
+| ID      | Algorithm                 | JCA name            |
+| ------- | ------------------------- | ------------------- |
+| `0x101` | RSA-PSS + SHA-256         | `SHA256withRSA/PSS` |
+| `0x102` | RSA-PSS + SHA-384         | `SHA384withRSA/PSS` |
+| `0x103` | RSA-PSS + SHA-512         | `SHA512withRSA/PSS` |
+| `0x104` | RSA PKCS#1 v1.5 + SHA-256 | `SHA256withRSA`     |
+| `0x201` | ECDSA + SHA-256 (P-256)   | `SHA256withECDSA`   |
+| `0x202` | ECDSA + SHA-384           | `SHA384withECDSA`   |
+| `0x203` | ECDSA + SHA-512           | `SHA512withECDSA`   |
 
 Most HarmonyOS builds use `0x201` (ECDSA_WITH_SHA256).
 
@@ -254,13 +255,13 @@ impl HapSigner {
 
 `arkdown-sign` has no rolldown equivalent. rolldown produces JS files; it does not sign ZIP archives. HAP signing is unique to the OHOS ecosystem.
 
-| arkdown concept | closest analogue | note |
-| --- | --- | --- |
-| `HapSigner::sign()` | npm `publish` code signing / macOS codesign | Both produce signed artifacts; completely different formats and protocols |
-| PKCS#12 keystore loading | Node.js `crypto` module PKCS#12 support | Same standard; arkdown uses `pkcs12` Rust crate (no Java/BouncyCastle) |
-| CMS SignedData (PKCS#7) | no JS bundler equivalent | Standard cryptographic format; arkdown uses `cms` Rust crate |
-| ZIP alignment (4096-byte for `.abc`/`.so`) | no rolldown equivalent | OHOS-specific requirement for mmap-based loading |
-| HAP signing block insertion | no rolldown equivalent | OHOS-specific: signing block is inserted between last local file entry and Central Directory |
+| arkdown concept                            | closest analogue                            | note                                                                                         |
+| ------------------------------------------ | ------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `HapSigner::sign()`                        | npm `publish` code signing / macOS codesign | Both produce signed artifacts; completely different formats and protocols                    |
+| PKCS#12 keystore loading                   | Node.js `crypto` module PKCS#12 support     | Same standard; arkdown uses `pkcs12` Rust crate (no Java/BouncyCastle)                       |
+| CMS SignedData (PKCS#7)                    | no JS bundler equivalent                    | Standard cryptographic format; arkdown uses `cms` Rust crate                                 |
+| ZIP alignment (4096-byte for `.abc`/`.so`) | no rolldown equivalent                      | OHOS-specific requirement for mmap-based loading                                             |
+| HAP signing block insertion                | no rolldown equivalent                      | OHOS-specific: signing block is inserted between last local file entry and Central Directory |
 
 ---
 

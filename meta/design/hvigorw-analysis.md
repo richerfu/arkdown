@@ -468,20 +468,26 @@ entry.hap
       "bundleType": "app",
       "version": { "code": 1000000, "name": "1.0.0" }
     },
-    "modules": [{
-      "mainAbility": "EntryAbility",
-      "deviceTypes": ["phone", "tablet"],
-      "name": "entry",
-      "type": "entry",
-      "abilities": [{ "name": "EntryAbility", "label": "$string:EntryAbility_label", "exported": true }]
-    }]
+    "modules": [
+      {
+        "mainAbility": "EntryAbility",
+        "deviceTypes": ["phone", "tablet"],
+        "name": "entry",
+        "type": "entry",
+        "abilities": [
+          { "name": "EntryAbility", "label": "$string:EntryAbility_label", "exported": true }
+        ]
+      }
+    ]
   },
-  "packages": [{
-    "deviceTypes": ["phone", "tablet"],
-    "moduleType": "entry",
-    "deliveryWithInstall": true,
-    "name": "entry"
-  }]
+  "packages": [
+    {
+      "deviceTypes": ["phone", "tablet"],
+      "moduleType": "entry",
+      "deliveryWithInstall": true,
+      "name": "entry"
+    }
+  ]
 }
 ```
 

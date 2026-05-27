@@ -134,15 +134,15 @@ crates/arkdown-plugin-module-meta/
 
 ## Rolldown Alignment
 
-| arkdown concept | rolldown equivalent | note |
-| --- | --- | --- |
-| `ModuleMetaPlugin::build_start` | `Plugin::build_start` | Same hook; used to initialize the plugin's caches |
-| `ModuleMetaPlugin::load` (meta computation) | `Plugin::load` + `ModuleInfo::meta` | rolldown allows plugins to attach arbitrary `meta` to a module via `HookLoadOutput`; arkdown uses `ModuleMeta` struct on `Module` |
-| `ModuleMetaPlugin::module_parsed` (reverse graph) | `Plugin::module_parsed` | Identical hook; rolldown's `ModuleInfo::importers` is a rolldown-managed list; arkdown builds its own `host_modules_info` because it needs OHOS package context |
-| `ModuleMetaPlugin::before_build_end` (SO preload tagging) | no rolldown equivalent | OHOS-specific: marks modules reachable from ability entry points for `.so` preloading |
-| `pkg_info_cache` | rolldown's internal module cache | Both cache parsed package manifests; rolldown caches module graphs; arkdown caches `oh-package.json5` parse results |
-| `pkgNameToPkgBriefInfo` output | rolldown `ModuleInfo::meta` per module | arkdown aggregates cross-module metadata into a single map; rolldown keeps it per-module |
-| `host_modules_info` (reverse importer map) | rolldown `ModuleInfo::importers` | rolldown tracks importers automatically in `ModuleInfo`; arkdown builds an explicit OHOS-annotated map that includes `pkg_name` and `module_name` per importer |
+| arkdown concept                                           | rolldown equivalent                    | note                                                                                                                                                            |
+| --------------------------------------------------------- | -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ModuleMetaPlugin::build_start`                           | `Plugin::build_start`                  | Same hook; used to initialize the plugin's caches                                                                                                               |
+| `ModuleMetaPlugin::load` (meta computation)               | `Plugin::load` + `ModuleInfo::meta`    | rolldown allows plugins to attach arbitrary `meta` to a module via `HookLoadOutput`; arkdown uses `ModuleMeta` struct on `Module`                               |
+| `ModuleMetaPlugin::module_parsed` (reverse graph)         | `Plugin::module_parsed`                | Identical hook; rolldown's `ModuleInfo::importers` is a rolldown-managed list; arkdown builds its own `host_modules_info` because it needs OHOS package context |
+| `ModuleMetaPlugin::before_build_end` (SO preload tagging) | no rolldown equivalent                 | OHOS-specific: marks modules reachable from ability entry points for `.so` preloading                                                                           |
+| `pkg_info_cache`                                          | rolldown's internal module cache       | Both cache parsed package manifests; rolldown caches module graphs; arkdown caches `oh-package.json5` parse results                                             |
+| `pkgNameToPkgBriefInfo` output                            | rolldown `ModuleInfo::meta` per module | arkdown aggregates cross-module metadata into a single map; rolldown keeps it per-module                                                                        |
+| `host_modules_info` (reverse importer map)                | rolldown `ModuleInfo::importers`       | rolldown tracks importers automatically in `ModuleInfo`; arkdown builds an explicit OHOS-annotated map that includes `pkg_name` and `module_name` per importer  |
 
 **Key divergence:** rolldown's `ModuleInfo` is read-only from plugins after the build. arkdown's `ModuleMeta` is populated by this plugin during the load hook and is mutable. This is intentional: OHOS metadata must be attached at load time because it is needed by other hooks in the same build.
 

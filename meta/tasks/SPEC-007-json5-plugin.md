@@ -110,13 +110,13 @@ fn generate_esm_from_json(value: &serde_json::Value) -> String {
 
 ## Rolldown Alignment
 
-| arkdown concept | rolldown equivalent | note |
-| --- | --- | --- |
-| `Json5Plugin::resolve_id` | `@rollup/plugin-json` `resolveId` hook | Identical: intercepts `.json`/`.json5` extensions before the default resolver |
-| `Json5Plugin::load` | `@rollup/plugin-json` `load` hook | Identical semantics: reads file, returns synthetic ESM code |
-| `generate_esm_from_json()` | rolldown built-in JSON transform | rolldown has native JSON module support; arkdown implements it explicitly to also handle `.json5` (the `json5` crate) |
-| Named exports for top-level keys | `@rollup/plugin-json namedExports: true` | Same behavior: valid-identifier top-level keys become named exports |
-| `export default { ... }` | `@rollup/plugin-json` default export | Identical |
+| arkdown concept                  | rolldown equivalent                      | note                                                                                                                  |
+| -------------------------------- | ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `Json5Plugin::resolve_id`        | `@rollup/plugin-json` `resolveId` hook   | Identical: intercepts `.json`/`.json5` extensions before the default resolver                                         |
+| `Json5Plugin::load`              | `@rollup/plugin-json` `load` hook        | Identical semantics: reads file, returns synthetic ESM code                                                           |
+| `generate_esm_from_json()`       | rolldown built-in JSON transform         | rolldown has native JSON module support; arkdown implements it explicitly to also handle `.json5` (the `json5` crate) |
+| Named exports for top-level keys | `@rollup/plugin-json namedExports: true` | Same behavior: valid-identifier top-level keys become named exports                                                   |
+| `export default { ... }`         | `@rollup/plugin-json` default export     | Identical                                                                                                             |
 
 **Key difference from rolldown:** rolldown natively understands `.json` as `ModuleType::Json`. arkdown represents JSON5 as `ModuleType::Json5` and handles it entirely in this plugin; there is no built-in JSON module loader in arkdown.
 

@@ -115,16 +115,16 @@ crates/arkdown-plugin-ohos-resolve/
 
 ## Rolldown Alignment
 
-| arkdown concept | rolldown equivalent | note |
-| --- | --- | --- |
-| `OhosResolvePlugin::resolve_id` | `Plugin::resolve_id` returning `HookResolveIdOutput` | Identical hook; arkdown maps `OhosResolvedModule` → `ResolvedId` here |
-| `OhosResolvePlugin::generate_bundle` | `Plugin::generate_bundle` | Same hook; used for post-bundle import path rewriting (process-importee equivalent) |
-| `OhosResolvePlugin::case_check` | no direct rolldown equivalent | The case-sensitivity check is integrated into the resolve hook; rolldown does not have this |
-| `ExternalBundle` → `ResolvedId { external: true }` | `HookResolveIdOutput { external: true }` | Identical semantics |
-| `SdkDeclaration` → `external: true, module_type: Declaration` | rolldown has no `Declaration` type | arkdown adds `ModuleType::Declaration` to signal "skip loading"; rolldown would use `external: true` alone |
-| `BytecodeHar` → `external: true, module_type: BytecodeHar` | no rolldown equivalent | OHOS-specific: ABC path carried in the ID string for use by packager |
-| `generate_bundle` / `rewrite_bytecode_har_imports` | rolldown chunk rendering | In rolldown, cross-chunk imports are rewritten during code generation; arkdown does this post-bundle for ByteCode HAR cases |
-| `@rollup/plugin-node-resolve` replacement | rolldown built-in resolver | rolldown has a built-in resolver; arkdown replaces it with this OHOS-aware plugin |
+| arkdown concept                                               | rolldown equivalent                                  | note                                                                                                                        |
+| ------------------------------------------------------------- | ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `OhosResolvePlugin::resolve_id`                               | `Plugin::resolve_id` returning `HookResolveIdOutput` | Identical hook; arkdown maps `OhosResolvedModule` → `ResolvedId` here                                                       |
+| `OhosResolvePlugin::generate_bundle`                          | `Plugin::generate_bundle`                            | Same hook; used for post-bundle import path rewriting (process-importee equivalent)                                         |
+| `OhosResolvePlugin::case_check`                               | no direct rolldown equivalent                        | The case-sensitivity check is integrated into the resolve hook; rolldown does not have this                                 |
+| `ExternalBundle` → `ResolvedId { external: true }`            | `HookResolveIdOutput { external: true }`             | Identical semantics                                                                                                         |
+| `SdkDeclaration` → `external: true, module_type: Declaration` | rolldown has no `Declaration` type                   | arkdown adds `ModuleType::Declaration` to signal "skip loading"; rolldown would use `external: true` alone                  |
+| `BytecodeHar` → `external: true, module_type: BytecodeHar`    | no rolldown equivalent                               | OHOS-specific: ABC path carried in the ID string for use by packager                                                        |
+| `generate_bundle` / `rewrite_bytecode_har_imports`            | rolldown chunk rendering                             | In rolldown, cross-chunk imports are rewritten during code generation; arkdown does this post-bundle for ByteCode HAR cases |
+| `@rollup/plugin-node-resolve` replacement                     | rolldown built-in resolver                           | rolldown has a built-in resolver; arkdown replaces it with this OHOS-aware plugin                                           |
 
 ---
 
