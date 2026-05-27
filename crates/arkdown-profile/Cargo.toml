@@ -2,3 +2,12 @@
 name = "arkdown-profile"
 version = "0.1.0"
 edition = "2021"
+
+[dependencies]
+arkdown-core = { path = "../arkdown-core" }
+arkdown-config = { path = "../arkdown-config" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+json5 = { workspace = true }
+thiserror = { workspace = true }
+fs-err = { workspace = true }
