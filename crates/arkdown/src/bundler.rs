@@ -23,10 +23,10 @@ use std::sync::Arc;
 use index_vec::IndexVec;
 use rustc_hash::FxHashMap;
 
-use arkdown_core::{ArkChunk, ArkdownConfig, ArkdownError, ArkdownPlugin, ChunkGraph};
+use arkdown_core::{ArkChunk, ArkdownConfig, ArkdownError, ArkdownPlugin, BuildMode, ChunkGraph};
 use arkdown_profile::LoaderJson;
 use rolldown::{BundlerOptions, InputItem, OutputFormat};
-use rolldown_common::{ModuleType as RdModuleType, Output, SourceMapType};
+use rolldown_common::{ModuleType as RdModuleType, Output, SourceMapType, TreeshakeOptions};
 use rolldown_plugin::__inner::SharedPluginable;
 
 use crate::output;
@@ -146,12 +146,25 @@ impl Bundler {
             }
         });
 
+        // Disable tree-shaking for debug builds.  ArkRuntime entry pages
+        // (@Entry @Component struct) have no exports — only a side-effect
+        // `registerNamedRoute(...)` call at module level.  With tree-shaking
+        // enabled rolldown eliminates the entire module body when nothing
+        // imports from it, producing an empty chunk (0 bytes).
+        // hvigor also disables tree-shaking in debug mode.
+        let treeshake = if matches!(self.config.build_mode, BuildMode::Debug) {
+            TreeshakeOptions::Boolean(false)
+        } else {
+            TreeshakeOptions::Boolean(true)
+        };
+
         let options = BundlerOptions {
             input: Some(input),
             cwd: Some(cwd),
             format: Some(OutputFormat::Esm),
             module_types: Some(module_types),
             sourcemap: Some(SourceMapType::Hidden),
+            treeshake,
             ..Default::default()
         };
 

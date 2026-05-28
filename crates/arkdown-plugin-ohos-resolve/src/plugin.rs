@@ -44,6 +44,25 @@ impl ArkdownPlugin for OhosResolvePlugin {
         _ctx: &PluginContext,
         args: &HookResolveIdArgs<'_>,
     ) -> PluginResult<Option<HookResolveIdOutput>> {
+        // SDK built-in modules that ArkRuntime provides natively must stay as
+        // ESM imports in the bundler output so es2abc sees normal import
+        // statements rather than CJS require() + interop helpers.
+        // The ETS kit-rewrite produces "@ohos:xxx" specifiers (colon); the
+        // resolver uses "@ohos/xxx" (slash).  Handle both forms here.
+        let s = args.specifier;
+        if s.starts_with("@ohos:")
+            || s.starts_with("@ohos/")
+            || s.starts_with("@system.")
+            || s.starts_with("@native:")
+        {
+            return Ok(Some(HookResolveIdOutput {
+                id: s.to_string(),
+                external: true,
+                module_type: ModuleType::Ts,
+                side_effects: None,
+            }));
+        }
+
         let importer_path = args.importer.map(Path::new).unwrap_or(&self.project_root);
 
         let resolved = match self.resolver.resolve(args.specifier, importer_path) {
