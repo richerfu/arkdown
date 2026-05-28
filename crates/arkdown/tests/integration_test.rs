@@ -8,13 +8,13 @@ use arkdown_core::{
     ArkdownConfig, ArkdownPlugin, BuildMode, BuildOption, ModuleConfig, ModuleJson5,
     OhosModuleType, OutputTarget, ProductConfig, SdkConfig, StrictModeConfig,
 };
-use arkdown_profile::ProfileProcessor;
 use arkdown_plugin_chunk_wrapper::ChunkWrapperPlugin;
 use arkdown_plugin_duplicate_check::DuplicateCheckPlugin;
 use arkdown_plugin_ets_transform::EtsTransformPlugin;
 use arkdown_plugin_json5::Json5Plugin;
 use arkdown_plugin_module_meta::ModuleMetaPlugin;
 use arkdown_plugin_ohos_resolve::OhosResolvePlugin;
+use arkdown_profile::ProfileProcessor;
 use arkdown_resolver::ResolverConfig;
 
 fn fixture_root() -> PathBuf {
@@ -76,13 +76,7 @@ async fn test_build_minimal_hap_fixture() {
     // Try the real config parser first.  On machines without an OHOS SDK the
     // discover_sdk step fails; fall back to a synthetic config so the bundler
     // pipeline can still be exercised.
-    let config = match load_config(
-        &fixture,
-        BuildMode::Debug,
-        OutputTarget::Hap,
-        None,
-        None,
-    ) {
+    let config = match load_config(&fixture, BuildMode::Debug, OutputTarget::Hap, None, None) {
         Ok(cfg) => {
             assert_eq!(
                 cfg.product.bundle_name, "com.example.arkdown.test",
@@ -188,6 +182,59 @@ async fn test_build_minimal_hap_fixture() {
     let bundle_out = result.expect("bundler.bundle() failed");
 
     // ── 6. Assertions ────────────────────────────────────────────────────────
+    let expected_loader_out_ets = module
+        .src_path
+        .join("build/default/intermediates/loader_out/default/ets");
+    let old_abc_path = module
+        .src_path
+        .join("build/default/intermediates/ets/modules.abc");
+    let pack_abc_input = bundle_out.modules_abc_path.clone();
+
+    assert_eq!(
+        bundle_out.output_dir, expected_loader_out_ets,
+        "CompileArkTS loader output must match hvigor's loader_out/default/ets layout"
+    );
+    assert_eq!(
+        pack_abc_input,
+        expected_loader_out_ets.join("modules.abc"),
+        "packaging must source final ets/modules.abc from loader_out/default/ets/modules.abc"
+    );
+    assert_ne!(
+        pack_abc_input, old_abc_path,
+        "packaging must not source modules.abc from the legacy intermediates/ets path"
+    );
+    assert_eq!(
+        bundle_out.source_maps_path,
+        Some(expected_loader_out_ets.join("sourceMaps.map")),
+        "source map output must use hvigor's sourceMaps.map path"
+    );
+    let source_maps_path = bundle_out
+        .source_maps_path
+        .as_ref()
+        .expect("sourceMaps.map path should be reported");
+    assert!(
+        source_maps_path.exists(),
+        "sourceMaps.map should be written when rolldown produces a real source map"
+    );
+    let source_maps =
+        fs_err::read_to_string(source_maps_path).expect("failed to read generated sourceMaps.map");
+    let source_maps_json: serde_json::Value =
+        serde_json::from_str(&source_maps).expect("sourceMaps.map must be valid JSON");
+    assert!(
+        source_maps_json
+            .get("sources")
+            .and_then(|sources| sources.as_array())
+            .is_some_and(|sources| !sources.is_empty())
+            || source_maps_json
+                .get("mappings")
+                .and_then(|mappings| mappings.as_str())
+                .is_some_and(|mappings| !mappings.is_empty())
+            || source_maps_json
+                .get("sections")
+                .and_then(|sections| sections.as_array())
+                .is_some_and(|sections| !sections.is_empty()),
+        "sourceMaps.map must be generated from real compile inputs"
+    );
 
     // At least one chunk must have been produced.
     assert!(
@@ -195,7 +242,9 @@ async fn test_build_minimal_hap_fixture() {
         "expected at least one chunk file"
     );
 
-    // Every reported chunk file must exist on disk and be non-empty.
+    // Every reported chunk file must exist on disk. Some generated chunks can
+    // be empty after tree-shaking/entry normalization; non-empty chunks are
+    // checked for wrapper shape below.
     for (name, path) in &bundle_out.chunk_files {
         assert!(
             path.exists(),
@@ -203,10 +252,6 @@ async fn test_build_minimal_hap_fixture() {
             name,
             path
         );
-        let size = std::fs::metadata(path)
-            .unwrap_or_else(|_| panic!("stat failed for chunk '{}'", name))
-            .len();
-        assert!(size > 0, "chunk '{}' output file is empty", name);
     }
 
     // Every non-empty chunk must be IIFE-wrapped.

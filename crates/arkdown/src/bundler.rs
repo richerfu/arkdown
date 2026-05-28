@@ -11,7 +11,8 @@
 //!    The `render_chunk` hook is where [`arkdown-plugin-chunk-wrapper`] converts
 //!    CJS output to IIFE and installs the `globalThis` registry entry.
 //! 5. Convert rolldown's [`BundleOutput`] → our [`ChunkGraph`].
-//! 6. Write `.js` (and `.js.map`) files via [`output::write_chunks`].
+//! 6. Write loader_out `.js`, `sourceMaps.map`, and ABC handoff paths via
+//!    [`output::write_output`].
 //!
 //! The old custom stages (`link`, `tree_shake`, `chunk_split`, `codegen`) in
 //! `crates/arkdown/src/stages/` are superseded by this rolldown-backed pipeline
@@ -27,7 +28,7 @@ use rustc_hash::FxHashMap;
 use arkdown_core::{ArkChunk, ArkdownConfig, ArkdownError, ArkdownPlugin, ChunkGraph};
 use arkdown_profile::LoaderJson;
 use rolldown::{BundlerOptions, InputItem, OutputFormat};
-use rolldown_common::{ModuleType as RdModuleType, Output};
+use rolldown_common::{ModuleType as RdModuleType, Output, SourceMapType};
 use rolldown_plugin::__inner::SharedPluginable;
 
 use crate::output;
@@ -47,6 +48,11 @@ pub struct BundleOutput {
     pub output_dir: PathBuf,
     /// `(chunk_name, absolute_path)` for each written `.js` file.
     pub chunk_files: Vec<(String, PathBuf)>,
+    /// Native ABC backend output path. Packagers must use this path as the
+    /// source for the final archive entry `ets/modules.abc`.
+    pub modules_abc_path: PathBuf,
+    /// `sourceMaps.map` if a real source map was produced from bundler inputs.
+    pub source_maps_path: Option<PathBuf>,
 }
 
 impl Bundler {
@@ -68,8 +74,8 @@ impl Bundler {
         // module_root_path may be relative and may contain `./` segments
         // (e.g. `tests/fixtures/minimal-hap/./entry/src/main`).  Canonicalize
         // produces an absolute, clean path that rolldown's resolver can use.
-        let module_root = std::fs::canonicalize(&loader_json.module_root_path)
-            .unwrap_or_else(|_| {
+        let module_root =
+            std::fs::canonicalize(&loader_json.module_root_path).unwrap_or_else(|_| {
                 // Fallback: manual `./` removal + join with process cwd
                 let normalized = normalize_path(&loader_json.module_root_path);
                 std::env::current_dir()
@@ -112,9 +118,7 @@ impl Bundler {
         let rd_plugins: Vec<SharedPluginable> = self
             .plugins
             .iter()
-            .map(|p| {
-                Arc::new(ArkdownPluginAdapter(Arc::clone(p))) as SharedPluginable
-            })
+            .map(|p| Arc::new(ArkdownPluginAdapter(Arc::clone(p))) as SharedPluginable)
             .collect();
 
         // ── 3. Build rolldown BundlerOptions ─────────────────────────────────
@@ -134,19 +138,23 @@ impl Bundler {
 
         // cwd: canonicalize the project root so rolldown's resolver operates on
         // an absolute path.  The entry paths built above are already absolute.
-        let cwd = std::fs::canonicalize(&loader_json.project_root_path)
-            .unwrap_or_else(|_| {
-                let raw = PathBuf::from(&loader_json.project_root_path);
-                if raw.is_absolute() { raw } else {
-                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(raw)
-                }
-            });
+        let cwd = std::fs::canonicalize(&loader_json.project_root_path).unwrap_or_else(|_| {
+            let raw = PathBuf::from(&loader_json.project_root_path);
+            if raw.is_absolute() {
+                raw
+            } else {
+                std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join(raw)
+            }
+        });
 
         let options = BundlerOptions {
             input: Some(input),
             cwd: Some(cwd),
             format: Some(OutputFormat::Cjs),
             module_types: Some(module_types),
+            sourcemap: Some(SourceMapType::Hidden),
             ..Default::default()
         };
 
@@ -162,14 +170,17 @@ impl Bundler {
         // ── 5. Convert rolldown output → ChunkGraph ───────────────────────────
         let chunk_graph = build_chunk_graph(rd_output)?;
 
-        // ── 6. Write .js (and .js.map) files to disk ─────────────────────────
+        // ── 6. Write loader_out/default/ets artifacts to disk ────────────────
         let output_dir = PathBuf::from(&loader_json.ace_module_build);
-        let chunk_files = output::write_chunks(&chunk_graph, &output_dir)?;
+        let written_output = output::write_output(&chunk_graph, &output_dir)?;
+        let modules_abc_path = output::modules_abc_path(&output_dir);
 
         Ok(BundleOutput {
             chunk_graph,
             output_dir,
-            chunk_files,
+            chunk_files: written_output.chunk_files,
+            modules_abc_path,
+            source_maps_path: written_output.source_maps_path,
         })
     }
 }
@@ -182,9 +193,7 @@ impl Bundler {
 ///
 /// Asset outputs (CSS, images, etc.) are ignored — only `Output::Chunk`
 /// entries are included in the chunk graph.
-fn build_chunk_graph(
-    rd_output: rolldown::BundleOutput,
-) -> Result<ChunkGraph, ArkdownError> {
+fn build_chunk_graph(rd_output: rolldown::BundleOutput) -> Result<ChunkGraph, ArkdownError> {
     use arkdown_core::ChunkIdx;
 
     let mut chunks: IndexVec<ChunkIdx, ArkChunk> = IndexVec::new();
@@ -194,9 +203,7 @@ fn build_chunk_graph(
             let ark_chunk = ArkChunk {
                 name: chunk.name.to_string(),
                 code: chunk.code.clone(),
-                // Source map conversion (oxc_sourcemap::SourceMap → String JSON)
-                // is deferred to a follow-up.  Set to None for now.
-                source_map: None,
+                source_map: chunk.map.as_ref().map(|map| map.to_json_string()),
                 is_entry: chunk.is_entry,
                 is_dynamic_entry: chunk.is_dynamic_entry,
                 facade_module_id: chunk
