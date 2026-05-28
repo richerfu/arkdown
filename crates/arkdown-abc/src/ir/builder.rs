@@ -24,8 +24,8 @@ use crate::ir::opcodes::Insn;
 ///
 /// Steps:
 /// 1. Parse as TSX (accepts TypeScript annotations and `.ets` syntax).
-/// 2. Detect and unwrap the IIFE pattern `(function () { ... })()`, compiling
-///    the inner body as the `main` method.
+/// 2. Compile top-level module statements as the `main` method. In non-module
+///    compatibility mode, a single top-level IIFE may be unwrapped.
 /// 3. Emit stub methods for each top-level `FunctionDeclaration`.
 ///
 /// ## Code generation coverage
@@ -46,7 +46,7 @@ pub fn build_record(
     strings: &mut StringTable,
     literal_arrays: &mut Vec<LiteralArray>,
 ) -> Result<ClassRecord, AbcError> {
-    build_record_with_debug(source, record_name, strings, literal_arrays, None)
+    build_record_with_debug(source, record_name, strings, literal_arrays, None, false)
 }
 
 pub fn build_record_with_debug(
@@ -55,9 +55,10 @@ pub fn build_record_with_debug(
     strings: &mut StringTable,
     literal_arrays: &mut Vec<LiteralArray>,
     source_file: Option<&str>,
+    is_module: bool,
 ) -> Result<ClassRecord, AbcError> {
     let allocator = Allocator::default();
-    let source_type = SourceType::tsx();
+    let source_type = SourceType::tsx().with_module(is_module);
     let ParserReturn {
         program,
         panicked,
@@ -77,8 +78,8 @@ pub fn build_record_with_debug(
 
     // Collect module import/export records before lowering so bytecode can use
     // hvigor/es2abc's module-variable opcodes instead of global lookups.
-    let module_record = collect_module_record(&program);
-    let lexical_bindings = collect_module_lexical_bindings(&program);
+    let module_record = collect_module_record(&program, is_module);
+    let lexical_bindings = collect_module_lexical_bindings(&program, is_module);
     let lowering = LoweringContext::from_module_record(&module_record, lexical_bindings);
 
     let mut methods: Vec<MethodRecord> = Vec::new();
@@ -88,7 +89,7 @@ pub fn build_record_with_debug(
     // ArkRuntime always invokes `func_main_0` when executing a module buffer.
     // It passes exactly 3 arguments (JSThread*, this, args[]), so `num_args`
     // must be 3 regardless of the actual JS parameter list.
-    let bytecode = compile_program_body(&program, strings, literal_arrays, &lowering);
+    let bytecode = compile_program_body(&program, strings, literal_arrays, &lowering, is_module);
     let num_vregs = estimate_vregs(&bytecode);
     methods.push(MethodRecord {
         name: "func_main_0".to_string(),
@@ -98,11 +99,10 @@ pub fn build_record_with_debug(
         debug_info: None,
     });
 
-    // Determine which statement slice to scan for declarations.
-    // If the program is a single IIFE, compile its inner body; otherwise scan
-    // the top-level statements directly.
-    let scan_stmts: &[Statement<'_>] =
-        extract_iife_stmts(&program).unwrap_or(program.body.as_slice());
+    // Determine which statement slice to scan for declarations. Upstream
+    // module mode scans normal top-level statements. The IIFE unwrap path is
+    // retained only for non-module CommonJS compatibility cases.
+    let scan_stmts: &[Statement<'_>] = statement_scan_body(&program, is_module);
 
     // Emit a method entry for each named top-level FunctionDeclaration.
     for stmt in scan_stmts {
@@ -144,9 +144,9 @@ pub fn build_record_with_debug(
         }
     }
 
-    // Compile class method bodies found in the scanned statements.
-    // Class declarations inside the IIFE (the common OHOS bundle pattern)
-    // produce real bytecode for each lifecycle/method body here.
+    // Compile class method bodies found in the selected statement body.
+    // Module mode scans top-level statements directly; non-module compatibility
+    // inputs may scan the inner body of a single bundler IIFE.
     compile_class_method_bodies(scan_stmts, strings, literal_arrays, &lowering, &mut methods);
 
     // ArkRuntime finds modules by their OHM URL class name format:
@@ -398,6 +398,14 @@ fn extract_iife_stmts<'a>(program: &'a Program<'_>) -> Option<&'a [Statement<'a>
         }
     }
     None
+}
+
+fn statement_scan_body<'a>(program: &'a Program<'_>, is_module: bool) -> &'a [Statement<'a>] {
+    if is_module {
+        program.body.as_slice()
+    } else {
+        extract_iife_stmts(program).unwrap_or(program.body.as_slice())
+    }
 }
 
 /// Walk `stmts` for `ClassDeclaration`s and compile each method body into a
@@ -665,17 +673,20 @@ fn is_class_buffer_method(method: &MethodDefinition<'_>) -> bool {
 
 /// Compile the top-level program body into bytecode for the `main` method.
 ///
-/// Detects the IIFE pattern `(function () { ... })()` and compiles the inner
-/// body directly; the IIFE wrapper is transparent at the bytecode level because
-/// ArkRuntime calls `main` directly.
+/// Module mode follows upstream `es2abc --module` and compiles top-level
+/// statements directly. Non-module compatibility mode unwraps a single bundler
+/// IIFE when present.
 fn compile_program_body(
     program: &Program<'_>,
     strings: &mut StringTable,
     literal_arrays: &mut Vec<LiteralArray>,
     lowering: &LoweringContext,
+    is_module: bool,
 ) -> Vec<u8> {
-    if let Some(stmts) = extract_iife_stmts(program) {
-        return compile_body_stmts(stmts, strings, literal_arrays, lowering, true);
+    if !is_module {
+        if let Some(stmts) = extract_iife_stmts(program) {
+            return compile_body_stmts(stmts, strings, literal_arrays, lowering, true);
+        }
     }
     compile_body_stmts(&program.body, strings, literal_arrays, lowering, true)
 }
@@ -1502,11 +1513,11 @@ impl ModuleRecordInfo {
 
 /// Collect libpandafile module-record data from `program`.
 ///
-/// The function unwraps a top-level IIFE wrapper before scanning. It recognises
-/// the CommonJS patterns produced by the current bundler:
+/// Module mode scans top-level `import`/`export` declarations directly.
+/// Non-module compatibility mode also recognises CommonJS patterns such as
 /// `var import_X = require("@ohos:...")` and `module.exports = Local`.
-fn collect_module_record(program: &Program<'_>) -> ModuleRecordInfo {
-    let stmts = extract_iife_stmts(program).unwrap_or(program.body.as_slice());
+fn collect_module_record(program: &Program<'_>, is_module: bool) -> ModuleRecordInfo {
+    let stmts = statement_scan_body(program, is_module);
     let mut info = ModuleRecordInfo::default();
     for stmt in stmts {
         scan_stmt_for_module_record(stmt, &mut info);
@@ -1514,8 +1525,8 @@ fn collect_module_record(program: &Program<'_>) -> ModuleRecordInfo {
     info
 }
 
-fn collect_module_lexical_bindings(program: &Program<'_>) -> Vec<String> {
-    let stmts = extract_iife_stmts(program).unwrap_or(program.body.as_slice());
+fn collect_module_lexical_bindings(program: &Program<'_>, is_module: bool) -> Vec<String> {
+    let stmts = statement_scan_body(program, is_module);
     let mut names = Vec::new();
     for stmt in stmts {
         let Statement::VariableDeclaration(decl) = stmt else {

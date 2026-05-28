@@ -19,9 +19,10 @@ Note: `ohos-rs/oxc-ark` (`https://github.com/ohos-rs/oxc-ark`) is a separate Ark
 CLI tool (`oxk`). It is NOT used as a library dependency here; it is only a reference for which
 `ohos-rs/oxc` commit to pin.
 
-**Key design constraint**: ArkRuntime does NOT execute native ESM. All output chunks must
-be IIFE-wrapped and use `globalThis['name_hash']` for cross-chunk references. This is
-non-negotiable.
+**Key design constraint**: the final artifact must contain ArkCompiler bytecode, not raw
+JavaScript. The upstream `es2abc` entry accepts normal JS/TS source files; `--module`
+selects ECMAScript module parsing. IIFE-wrapped CommonJS remains a compatibility shape
+for legacy chunk-wrapper paths, not the required bytecode compiler input.
 
 ---
 
@@ -83,7 +84,7 @@ arkdown/
 | Any crate                    | `meta/design/README.md` (key discoveries summary)                                  |
 | Type definitions             | `meta/design/types.md`                                                             |
 | Module loading, resolution   | `meta/design/module-resolution.md`                                                 |
-| Chunk output format          | `meta/design/chunk-model.md` — the IIFE/globalThis pattern is non-obvious          |
+| Chunk output format          | `meta/design/chunk-model.md` — legacy IIFE/globalThis chunk behavior               |
 | ABC compiler (arkdown-abc)   | `meta/design/abc-pipeline.md` — Panda bytecode format, IR pipeline                 |
 | hvigorw replacement          | `meta/design/compat.md`                                                            |
 | Plugin work                  | `meta/design/plugins.md` — which JS plugins we're replacing and why                |
@@ -96,12 +97,15 @@ arkdown/
 
 ## Critical Design Rules
 
-**1. IIFE wrapping is always required.** Every output chunk must be wrapped in `(function () { ... })()`.
-ArkRuntime never runs raw JS. The `arkdown-plugin-chunk-wrapper` crate owns this. Never skip it.
+**1. Bytecode compilation is always required.** ArkRuntime executes `.abc`, not raw
+JavaScript. `arkdown-abc` must match upstream `es2abc` on both final bytecode and
+intermediate output files under the loader output tree.
 
-**2. Output format is CJS, not ESM.** The bundler core (`arkdown`) must generate CJS output
-(with `require()` calls). The chunk wrapper plugin converts `require()` to `globalThis[]`.
-Do not generate ESM output.
+**2. es2abc/ts2abc module inputs are normal source files.** Upstream
+`arkcompiler_ets_frontend` builds `SourceFile(..., options->IsModule(), ...)` and the
+`ts2abc.js` wrapper only forwards bytecode-version flags to `es2abc`. Do not add an IIFE
+or CommonJS wrapper just to satisfy the bytecode compiler; use `--module` semantics for
+stage-model ESM output.
 
 **3. `arkdown-abc` is a pure Rust ArkCompiler bytecode compiler.** It ports `es2abc` from
 `https://gitcode.com/openharmony/arkcompiler_ets_frontend`. No subprocess, no SDK binary
@@ -129,19 +133,18 @@ projects, `build-profile.json5` products do NOT contain `bundleName`. Read it fr
 `AppScope/app.json5` via `load_app_json5()`. Signing configs live at
 `build-profile.json5#app.signingConfigs`; products reference them by name.
 
-**9. The CLI must wire exactly 6 plugins in order: EtsTransform → OhosResolve → ModuleMeta →
-Json5 → DuplicateCheck → ChunkWrapper.** `EtsTransformPlugin` must be first (ArkTS desugar
-before resolve). `ChunkWrapperPlugin` must be last (IIFE wrap via `render_chunk`). Missing or
-misordering any plugin produces incorrect output. For HAR builds use `pack_har()`, not `pack_hap()`.
+**9. The CLI plugin order must match hvigor's compile stage.** `EtsTransformPlugin` must
+run before resolution-sensitive plugins. Avoid injecting helper wrappers or rollup defaults
+that hvigor does not emit. For HAR builds use `pack_har()`, not `pack_hap()`.
 
 **10. HAP zip structure requires `pack.info` and `pkgContextInfo.json`.** Every HAP must contain:
 `module.json` (with `app` + `module` sections merged), `pack.info`, `pkgContextInfo.json`,
 `resources.index`, `ets/modules.abc` (PANDA magic, API >= 9), `resources/base/` (copied from
 `src/main/resources/base/`). See `meta/design/hvigorw-analysis.md` section 10 and SPEC-012.
 
-**11. TypeScript stripping is required before ABC compilation.** Use `oxc_codegen` to strip
-remaining TS type annotations from IIFE chunks before IR lowering in `arkdown-abc`. The Panda
-IR builder only handles plain JavaScript. Panda `.abc` magic: `b"PANDA\x00\x00\x00"` (8 bytes).
+**11. TypeScript normalization is required before ABC compilation.** Use the pinned
+`ohos-rs/oxc` parser/codegen path for TS/ETS syntax before IR lowering in `arkdown-abc`.
+Panda `.abc` magic: `b"PANDA\x00\x00\x00"` (8 bytes).
 
 ---
 

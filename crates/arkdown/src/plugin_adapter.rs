@@ -224,9 +224,8 @@ impl Plugin for ArkdownPluginAdapter {
 
     // -- Output / render hooks ------------------------------------------------
 
-    /// Delegates to `ArkdownPlugin::render_chunk`, which is where the
-    /// `arkdown-plugin-chunk-wrapper` wraps CJS output in IIFE and installs
-    /// the `globalThis` registry entry.
+    /// Delegates to `ArkdownPlugin::render_chunk` for plugins that need final
+    /// chunk edits, such as legacy chunk-wrapper registry handling.
     fn render_chunk(
         &self,
         _ctx: &PluginContext,
@@ -285,9 +284,17 @@ fn rollup_chunk_to_meta(chunk: &RollupRenderedChunk) -> RenderedChunkMeta {
             .facade_module_id
             .as_ref()
             .map(|id| id.as_str().to_owned()),
-        module_ids: chunk.module_ids.iter().map(|id| id.as_str().to_owned()).collect(),
+        module_ids: chunk
+            .module_ids
+            .iter()
+            .map(|id| id.as_str().to_owned())
+            .collect(),
         exports: chunk.exports.iter().map(|e| e.to_string()).collect(),
         imports: chunk.imports.iter().map(|i| i.to_string()).collect(),
-        dynamic_imports: chunk.dynamic_imports.iter().map(|d| d.to_string()).collect(),
+        dynamic_imports: chunk
+            .dynamic_imports
+            .iter()
+            .map(|d| d.to_string())
+            .collect(),
     }
 }

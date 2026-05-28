@@ -20,16 +20,23 @@ pub struct AbcCompileOptions {
     pub target_api_version: u32,
     /// Merge all records into a single `.abc` output file.
     pub merge_abc: bool,
+    /// Parse and lower inputs as ECMAScript modules, matching upstream
+    /// `es2abc --module`.
+    pub module: bool,
     /// Optional path to an incremental build cache directory.
     pub cache_path: Option<PathBuf>,
 }
 
-/// An input JavaScript module to compile.
+/// An input source file to compile.
 pub struct AbcModule {
     /// Record name — typically the OHM URL of the chunk
     /// (`@bundle:<bundleName>/<moduleName>/<relpath>`).
     pub record_name: String,
-    /// IIFE-wrapped CJS JavaScript source produced by the bundler pipeline.
+    /// JavaScript/TypeScript source passed to the bytecode compiler.
+    ///
+    /// Upstream `es2abc` accepts normal files directly; when `--module` is set,
+    /// the input is parsed as an ECMAScript module. IIFE-wrapped CommonJS is
+    /// supported only as a legacy/non-module compatibility shape.
     pub source: String,
     /// Optional source-map JSON string for the input source.
     pub source_map: Option<String>,
@@ -48,10 +55,8 @@ pub struct AbcArtifactResult {
 /// Strip TypeScript type annotations from source before bytecode generation.
 ///
 /// The bundler pipeline may emit TypeScript-flavoured code when the OXC parser
-/// falls back to raw source for `.ets` files.  `build_record` parses with
-/// `SourceType::mjs()` which rejects TS syntax (`: Type`, `): void`, etc.).
-/// This function re-parses as TypeScript and re-emits plain JavaScript via
-/// `oxc_codegen`, removing all type annotations in one pass.
+/// falls back to raw source for `.ets` files. This function normalises source
+/// through OXC before bytecode lowering.
 ///
 /// If TypeScript parsing also fails (malformed source), we fall back to
 /// plain-JS parsing; if that too fails we return the input unchanged and let
@@ -120,9 +125,9 @@ fn source_file_from_record_name(record_name: &str) -> String {
 
 /// Pure-Rust ArkCompiler bytecode compiler.
 ///
-/// Replaces the `es2abc` SDK binary described in SPEC-009.  The compiler
-/// accepts already-bundled, IIFE-wrapped CJS JavaScript (produced by
-/// `arkdown` + `arkdown-plugin-chunk-wrapper`) and emits a Panda `.abc` file.
+/// Replaces the `es2abc` SDK binary described in SPEC-009. Upstream `es2abc`
+/// accepts source files directly; `--module` selects ECMAScript module parsing
+/// rather than an IIFE entry contract.
 ///
 /// # Example
 ///
@@ -135,11 +140,12 @@ fn source_file_from_record_name(record_name: &str) -> String {
 ///     opt_level: 0,
 ///     target_api_version: 12,
 ///     merge_abc: true,
+///     module: true,
 ///     cache_path: None,
 /// });
 ///
 /// let result = compiler.compile(
-///     vec![AbcModule { record_name: "entry/main".into(), source: "(function(){})()" .into(), source_map: None }],
+///     vec![AbcModule { record_name: "entry/main".into(), source: "export const x = 1;" .into(), source_map: None }],
 ///     Path::new("output/modules.abc"),
 /// )?;
 /// println!("wrote {} bytes to {:?}", std::fs::metadata(&result.path)?.len(), result.path);
@@ -190,6 +196,7 @@ impl AbcCompiler {
                 &mut abc_file.strings,
                 &mut abc_file.literal_arrays,
                 source_file.as_deref(),
+                self.options.module,
             )?;
             abc_file.add_record(record);
         }

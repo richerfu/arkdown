@@ -1,7 +1,7 @@
 # ABC Pipeline: ArkCompiler Bytecode Compilation
 
 This document describes the ArkCompiler bytecode (`.abc`) compilation step — the mandatory
-transformation from bundled JavaScript to ArkRuntime-executable bytecode. In arkdown this
+transformation from JS/TS source to ArkRuntime-executable bytecode. In arkdown this
 is implemented as a pure Rust crate (`arkdown-abc`), porting the reference implementation
 at `https://gitcode.com/openharmony/arkcompiler_ets_frontend`.
 
@@ -15,8 +15,8 @@ Bytecode (`.abc`) before deployment. The `.abc` format is a Panda-derived binary
 ```
 .ets/.ts source
     │
-    ▼  arkdown bundler (ArkTS transform + IIFE wrap)
-.js  (IIFE-wrapped CJS, globalThis chunk registry)
+    ▼  arkdown bundler (ArkTS transform + hvigor-aligned module output)
+.js/.ts  (normal source file; `--module` selects ESM parsing)
     │
     ▼  arkdown-abc  (Rust, ports arkcompiler_ets_frontend)
 .abc (ArkCompiler Bytecode)
@@ -41,8 +41,10 @@ The reference `es2abc` tool (C++) performs:
 3. **Lower** — AST → Panda IR
 4. **Emit** — IR → `.abc` binary (Panda bytecode format)
 
-arkdown-abc ports stages 3–4 in Rust. For stage 1–2, it reuses `ohos-rs/oxc` (which
-already parses the IIFE-wrapped JS output from the bundler).
+arkdown-abc ports stages 3–4 in Rust. For stage 1–2, it reuses the pinned `ohos-rs/oxc`
+fork. Upstream `es2abc` accepts source files directly (`./es2abc [options] file.js`);
+`--module` controls module parsing. The `ts2abc.js` wrapper in upstream sources forwards
+bytecode-version options to `es2abc`; it does not impose an IIFE entry file.
 
 ---
 
@@ -88,28 +90,29 @@ Defined in `arkcompiler_runtime_core/libpandafile/`. Key sections:
 
 ---
 
-## 4. Input Format: Bundled IIFE JS
+## 4. Input Format: Source File Plus Module Mode
 
-The input to `arkdown-abc` is the output of `arkdown-plugin-chunk-wrapper`. It is
-standard JavaScript (CJS, already transformed from ArkTS) wrapped in an IIFE:
+The input to `arkdown-abc` is the same source shape hvigor sends to `es2abc`: a normal
+JS/TS source file plus compile flags. Stage-model builds use module mode, so imports and
+exports remain top-level syntax and the compiler parses them as ECMAScript modules:
 
 ```javascript
-(function () {
-  "use strict";
-  // ... bundled module code ...
-  var exports = {};
-  exports.MyComponent = MyComponent;
-  globalThis["EntryAbility_a1b2c3d4"] = globalThis["EntryAbility_a1b2c3d4"] || {
-    default: exports.default,
-  };
-})();
+import { hilog } from "@kit.PerformanceAnalysisKit";
+
+export class EntryAbility {
+  onCreate() {
+    hilog.info(0, "entry", "created");
+  }
+}
 ```
 
-Key IR lowering rules for OHOS-specific patterns:
+Legacy/non-module compatibility may still compile an IIFE-wrapped CommonJS chunk, but
+that is not the required `es2abc`/`ts2abc` entry contract. Key IR lowering rules include:
 
+- top-level `import` / `export` → module record entries and module-variable opcodes
 - `globalThis['key']` read → `ldglobalvar` opcode
 - `globalThis['key'] = value` → `stglobalvar` opcode
-- `(function() { ... })()` → top-level method with no class context
+- non-module `(function() { ... })()` → compatibility top-level body unwrap
 
 ---
 
@@ -181,7 +184,7 @@ See SPEC-027 for details.
 
 ## Cross-Reference
 
-- [chunk-model.md](chunk-model.md) — IIFE wrapping format (input to abc compiler)
+- [chunk-model.md](chunk-model.md) — legacy IIFE wrapping and chunk registry behavior
 - [pipeline.md](pipeline.md) — where ABC compilation fits in the overall build
 - [hvigorw-analysis.md](hvigorw-analysis.md) — original ArkCompile task context
-- [plugins.md](plugins.md) — `arkdown-plugin-chunk-wrapper` produces the input
+- [plugins.md](plugins.md) — compile-stage plugin context

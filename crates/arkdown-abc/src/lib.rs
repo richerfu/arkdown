@@ -1,14 +1,15 @@
 //! Pure-Rust Panda bytecode compiler for the OpenHarmony ArkRuntime.
 //!
-//! This crate replaces the `es2abc` SDK binary (SPEC-009).  It accepts
-//! already-bundled, IIFE-wrapped CJS JavaScript — produced by `arkdown` plus
-//! `arkdown-plugin-chunk-wrapper` — and emits a Panda `.abc` file suitable
-//! for loading by ArkRuntime.
+//! This crate replaces the `es2abc` SDK binary (SPEC-009). It accepts normal
+//! JavaScript/TypeScript input files directly. When invoked through
+//! `ts2abc --module` / `es2abc --module`, the source is parsed and lowered as
+//! an ECMAScript module. IIFE-wrapped CommonJS remains supported as a legacy
+//! non-module input shape.
 //!
 //! # Pipeline
 //!
 //! ```text
-//! JS source (IIFE-wrapped CJS)
+//! JS/TS source file
 //!     │
 //!     ▼  oxc_parser
 //! oxc Program AST
@@ -85,7 +86,10 @@ mod tests {
         let mut st = crate::emit::strings::StringTable::default();
         let idx1 = st.intern("hello");
         let idx2 = st.intern("hello");
-        assert_eq!(idx1, idx2, "interning the same string twice must return the same index");
+        assert_eq!(
+            idx1, idx2,
+            "interning the same string twice must return the same index"
+        );
     }
 
     #[test]
@@ -111,6 +115,7 @@ mod tests {
             opt_level: 0,
             target_api_version: 12,
             merge_abc: true,
+            module: false,
             cache_path: None,
         })
     }
@@ -152,7 +157,11 @@ mod tests {
         ];
         let tmp = std::env::temp_dir().join("test_abc_multi.abc");
         let result = compiler.compile(modules, &tmp);
-        assert!(result.is_ok(), "multi-module compile must succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "multi-module compile must succeed: {:?}",
+            result.err()
+        );
         let bytes = std::fs::read(&tmp).unwrap();
         assert_eq!(&bytes[0..8], b"PANDA\x00\x00\x00");
         // API 13+ / hvigorw: num_classes = 2 user modules + 7 SDK framework stubs
@@ -251,8 +260,8 @@ mod tests {
     /// the ABC class item matches es2abc output.
     #[test]
     fn test_cjs_helpers_become_method_records() {
-        use crate::emit::strings::StringTable;
         use crate::emit::file::LiteralArray;
+        use crate::emit::strings::StringTable;
         use crate::ir::builder::build_record;
 
         let source = r#"(function () {
@@ -281,31 +290,42 @@ mod tests {
 
         let mut strings = StringTable::default();
         let mut literal_arrays: Vec<LiteralArray> = Vec::new();
-        let record = build_record(source, "com.example.app/entry/ets/entryability/EntryAbility", &mut strings, &mut literal_arrays)
-            .expect("build_record failed");
+        let record = build_record(
+            source,
+            "com.example.app/entry/ets/entryability/EntryAbility",
+            &mut strings,
+            &mut literal_arrays,
+        )
+        .expect("build_record failed");
 
         // func_main_0 + 6 helpers + 2 class methods = 9 minimum; order may vary.
         let method_names: Vec<&str> = record.methods.iter().map(|m| m.name.as_str()).collect();
         assert!(
             method_names.contains(&"__create"),
-            "Expected __create method; got: {:?}", method_names
+            "Expected __create method; got: {:?}",
+            method_names
         );
         assert!(
             method_names.contains(&"__defProp"),
-            "Expected __defProp method; got: {:?}", method_names
+            "Expected __defProp method; got: {:?}",
+            method_names
         );
         assert!(
             method_names.contains(&"__copyProps"),
-            "Expected __copyProps method; got: {:?}", method_names
+            "Expected __copyProps method; got: {:?}",
+            method_names
         );
         assert!(
             method_names.contains(&"__toESM"),
-            "Expected __toESM method; got: {:?}", method_names
+            "Expected __toESM method; got: {:?}",
+            method_names
         );
         // Should have at least 9 methods (func_main_0 + 6 helpers + 2 class methods).
         assert!(
             record.methods.len() >= 9,
-            "Expected >= 9 methods, got {} ({:?})", record.methods.len(), method_names
+            "Expected >= 9 methods, got {} ({:?})",
+            record.methods.len(),
+            method_names
         );
     }
 }

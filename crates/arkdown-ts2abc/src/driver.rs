@@ -70,6 +70,7 @@ impl BytecodeBackend for ArkdownAbcBackend {
             opt_level: options.opt_level,
             target_api_version: options.target_api_version,
             merge_abc: options.merge_abc,
+            module: options.module,
             cache_path: options.cache_file.clone(),
         });
         let artifact = compiler.compile(modules, &options.output)?;

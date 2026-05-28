@@ -249,15 +249,16 @@ rolldown's `generate_chunks()` in `code_splitting.rs`: BitSet-based reachability
 
 ---
 
-## Phase 8: IIFE Chunk Wrap
+## Phase 8: Chunk Finalization
 
-**Crate**: `arkdown-plugin-chunk-wrapper`
-**Inputs**: rolldown output chunks (CJS format)
-**Outputs**: IIFE-wrapped JS with `globalThis[name_hash]` cross-chunk registry
+**Crate**: `arkdown` / compile-stage plugins
+**Inputs**: rolldown output chunks in hvigor's compile-stage module shape
+**Outputs**: source files under loader output that are accepted by `es2abc --module`
 
 ### hvigor behavior
 
-The `wrapperChunkPlugin` (`wrapper-chunk-plugin.js`) implements the `renderChunk` hook:
+Legacy hvigor plugin stacks include `wrapperChunkPlugin` (`wrapper-chunk-plugin.js`) for
+CommonJS chunk registry rewriting:
 
 ```javascript
 function renderChunk(code, chunk, options, {chunks}) {
@@ -276,7 +277,10 @@ When `supportChunks` is enabled:
 - `require('chunkId')` calls are replaced with `globalThis['chunkFileName_chunkHash']`
 - Each chunk exports via: `globalThis['fileName_chunkHash'] = globalThis['fileName_chunkHash'] || { export1: exports.export1, ... }`
 
-This is required because ArkRuntime does not support native ESM `import`/`export` at the JS level. The bundled output is consumed by `es2abc` before it reaches the runtime. See [chunk-model.md](chunk-model.md) for full details.
+For the bytecode compiler entry itself, upstream `es2abc` accepts normal source files and
+uses `--module` to parse ECMAScript modules. Do not introduce an IIFE/CommonJS wrapper only
+to satisfy `es2abc`; keep this path aligned with the actual hvigor output for the module
+being compiled.
 
 ### rolldown equivalent
 
@@ -284,35 +288,36 @@ rolldown's `render_chunk` plugin hook. arkdown implements `arkdown-plugin-chunk-
 
 ### OHOS divergences
 
-This is entirely OHOS-specific. Standard web bundlers do not need this IIFE wrapper.
+This stage is OHOS-specific because its observable output is the exact loader output that
+feeds ArkCompiler bytecode generation.
 
 ---
 
 ## Phase 9: es2abc Compilation
 
 **Crate**: `arkdown-abc` (pure Rust, ports `arkcompiler_ets_frontend`)
-**Inputs**: IIFE-wrapped JS chunks (`.js` files in `aceModuleBuild/`)
+**Inputs**: JS/TS source files from loader output; stage-model builds use module mode
 **Outputs**: `.abc` ArkCompiler bytecode files
 
 ### hvigor behavior
 
 `ArkCompile` task calls `submitArkCompileWork` → `run-ark.js` worker pool → invokes
-`es2abc` binary (closed-source). Key behaviors:
+`es2abc` / `ts2abc` frontends from `arkcompiler_ets_frontend`. Key behaviors:
 
 - Merges multiple chunk records into one `.abc` per module (`--merge-abc`)
 - Incremental cache keyed by input file hashes (`--cache-file` msgpack format)
 - Parallel compilation: one worker thread per module
 - Target API version from `compatibleSdkVersion` (`--target-api-version`)
 - Debug builds include source positions (`--debug-info`)
+- `--module` selects ECMAScript module parsing; the input file does not need an IIFE
 
 ### arkdown replacement
 
 `arkdown-abc` reimplements this pipeline in Rust:
 
-- **TypeScript stripping**: before IR lowering, `oxc_codegen` strips any remaining TS type
-  annotations from the IIFE JS. Even post-bundle, type syntax can survive into chunk JS.
-  This produces clean JavaScript for the Panda IR builder.
-- Reuses `ohos-rs/oxc` to parse the stripped JS input
+- **TypeScript normalization**: before IR lowering, the pinned `ohos-rs/oxc` parser/codegen
+  path normalizes TS/ETS syntax while preserving module semantics.
+- Reuses `ohos-rs/oxc` to parse JS/TS input in script or module mode
 - Ports the IR lowering and Panda bytecode emit stages from `arkcompiler_ets_frontend`
 - Parallel compilation via Rayon (one task per module)
 - Same incremental cache semantics (function-level, msgpack)
@@ -470,7 +475,7 @@ AssembleHap            ──── hook task (entry point for `hvigorw assemble
 ## Cross-Reference
 
 - [hvigorw-analysis.md](hvigorw-analysis.md) — full task dependency graph
-- [chunk-model.md](chunk-model.md) — IIFE chunk architecture
+- [chunk-model.md](chunk-model.md) — legacy IIFE chunk architecture
 - [abc-pipeline.md](abc-pipeline.md) — es2abc compilation details
 - [module-resolution.md](module-resolution.md) — OHOS module resolution
 - [plugins.md](plugins.md) — plugin inventory and Rust replacements

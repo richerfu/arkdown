@@ -16,7 +16,7 @@ Rust port of `es2abc` — the ETS/JS → bytecode compiler from OpenHarmony's
 **Reference implementation**: `https://gitcode.com/openharmony/arkcompiler_ets_frontend`
 **Bytecode format spec**: `https://gitcode.com/openharmony/arkcompiler_runtime_core`
 
-The compiled Rust implementation replaces the closed-source `es2abc` binary entirely.
+The compiled Rust implementation replaces the SDK `es2abc` binary entirely.
 No subprocess invocation. All compilation logic lives in this crate.
 
 ---
@@ -30,37 +30,33 @@ From reading `arkcompiler_ets_frontend`, `es2abc` (internally `es2panda`) perfor
 3. **Lower** — AST → IR (intermediate representation)
 4. **Emit** — IR → Panda Bytecode (`.abc` binary format)
 
-The input to `arkdown-abc` is already-bundled IIFE JS (not raw ArkTS), so:
+The input to `arkdown-abc` is the source file shape hvigor passes to `es2abc`, so:
 
-- Steps 1–2 are simplified: OXC already parsed and transformed the source; we just need to
-  re-parse the IIFE JS output (which is standard JavaScript after ArkTS desugaring)
+- Steps 1–2 are simplified: the pinned `ohos-rs/oxc` fork parses JS/TS/ETS syntax before
+  lowering. Stage-model builds pass module-mode input, matching upstream `--module`.
 - Steps 3–4 are the core of what we implement
 
-## TypeScript Stripping (Required Pre-Step)
+## TypeScript/ETS Normalization (Required Pre-Step)
 
-Before lowering to Panda IR, any TypeScript type annotations remaining in the IIFE output
-**must be stripped** using `oxc_codegen`. Even after bundling, some `.ts`/`.ets` type syntax may
-survive into the chunk JS (e.g., type casts, interface references). The Panda IR builder only
-handles plain JavaScript.
+Before lowering to Panda IR, TypeScript/ETS syntax must be normalized through the pinned
+`ohos-rs/oxc` parser/codegen path. This must preserve module-mode semantics; upstream
+`es2abc --module` accepts normal source files and does not require an IIFE wrapper.
 
 ```rust
-// Strip TS types before bytecode generation
-use oxc_codegen::{CodeGenerator, CodegenOptions};
+// Normalize TS/ETS before bytecode generation.
+use oxc_codegen::Codegen;
 use oxc_parser::Parser;
 use oxc_span::SourceType;
 
 fn strip_types(source: &str) -> String {
-    let source_type = SourceType::ts();
+    let source_type = SourceType::tsx().with_module(true);
     let allocator = Allocator::default();
     let ret = Parser::new(&allocator, source, source_type).parse();
-    CodeGenerator::new()
-        .with_options(CodegenOptions { ..Default::default() })
-        .build(&ret.program)
-        .code
+    Codegen::new().build(&ret.program).code
 }
 ```
 
-This step produces clean JavaScript that the IR lowering stage can process without encountering
+This step produces source that the IR lowering stage can process without encountering
 type-only constructs (`interface`, `: Type`, `as Type`, `<Type>` casts, etc.).
 
 ---
@@ -93,11 +89,12 @@ the `.abc` format documentation in `runtime_core`.
 
 ### 1. JS IR Lowering
 
-From the IIFE-wrapped CJS chunk (already a standard JS AST after bundling):
+From the parsed JS/TS source:
 
 - Map JS constructs to Panda IR opcodes
 - `function` → method record
 - `var`/`let`/`const` → register allocation
+- `import`/`export` → module record metadata and module-variable opcodes
 - `globalThis['x']` access → `ldglobalvar` opcode
 
 ### 2. Panda Instruction Set
@@ -159,12 +156,13 @@ pub struct AbcCompileOptions {
     pub opt_level: u8,          // 0, 1, or 2
     pub target_api_version: u32,
     pub merge_abc: bool,
+    pub module: bool,           // upstream es2abc --module semantics
     pub cache_path: Option<PathBuf>,
 }
 
 pub struct AbcModule {
     pub record_name: String,
-    pub source: String,             // IIFE JS from bundler output
+    pub source: String,             // normal JS/TS source file
     pub source_map: Option<SourceMap>,
 }
 
@@ -210,14 +208,14 @@ crates/arkdown-abc/
 1. Start from `arkcompiler_ets_frontend` source (C++) to understand the IR and emit stages
 2. Implement binary format writer (`emit/`) first — can be tested against existing `.abc` files
 3. Implement IR builder for basic JS constructs
-4. Add OXC integration: use `oxc_parser` to parse the IIFE chunks (standard JS after bundling)
+4. Add OXC integration: use `oxc_parser` to parse source files in script or module mode
 5. Validate output: compiled `.abc` files must be loadable by ArkRuntime
 
 ---
 
 ## Acceptance Criteria
 
-- `AbcCompiler::compile()` on minimal IIFE JS produces a valid `.abc`
+- `AbcCompiler::compile()` on minimal module source produces a valid `.abc`
 - Produced `.abc` is accepted by the OHOS ArkRuntime (installable via `hdc install`)
 - Panda binary header bytes match expected magic and version
 - `--merge-abc` equivalent: multiple modules merged into one `.abc` with correct records
@@ -226,8 +224,8 @@ crates/arkdown-abc/
 
 ## Design References
 
-- `meta/design/abc-pipeline.md` — input format (IIFE JS), source map chain, flags context
-- `meta/design/chunk-model.md` — the IIFE JS format this compiler receives as input
+- `meta/design/abc-pipeline.md` — module input contract, source map chain, flags context
+- `meta/design/chunk-model.md` — legacy IIFE chunk behavior where applicable
 - OpenHarmony source: `https://gitcode.com/openharmony/arkcompiler_ets_frontend`
 - Bytecode format: `https://gitcode.com/openharmony/arkcompiler_runtime_core`
 
@@ -244,14 +242,14 @@ crates/arkdown-abc/
 | `AbcCompileOptions::merge_abc`     | rolldown multi-entry `input` → multiple output chunks | With `merge_abc: true`, multiple modules compile into one `.abc` file; with `false`, one `.abc` per module |
 | Incremental cache (function-level) | rolldown module-level transform cache (SPEC-019)      | arkdown caches at the bytecode function level; rolldown caches at the JS module level                      |
 
-**Key divergence:** This crate has no rolldown equivalent. rolldown is a JS bundler; it does not produce bytecode. `arkdown-abc` is a novel Rust port of `es2abc` (OpenHarmony's `arkcompiler_ets_frontend`). The input to this crate is IIFE-wrapped CJS JavaScript produced by SPEC-006.
+**Key divergence:** This crate has no rolldown equivalent. rolldown is a JS bundler; it does not produce bytecode. `arkdown-abc` is a Rust port of `es2abc` (OpenHarmony's `arkcompiler_ets_frontend`). The input contract follows upstream `es2abc`: normal source files, with `--module` selecting ECMAScript module parsing. Legacy IIFE/CJS input remains a compatibility path.
 
 ---
 
 ## Test Requirements
 
-- `AbcCompiler::compile()` on minimal IIFE JS `(function() { var x = 1; })()` produces a binary starting with `b"PANDA\x00\x00\x00"` (8 bytes)
-- TypeScript stripping: IIFE JS containing type annotations (e.g., `var x: number = 1`) is stripped to plain JS before IR lowering; the compiled `.abc` is valid (no type-annotation parse errors)
+- `AbcCompiler::compile()` on minimal module JS `export const x = 1;` with `module: true` produces a binary starting with `b"PANDA\x00\x00\x00"` (8 bytes)
+- TypeScript normalization: TS/ETS syntax is normalized before IR lowering; the compiled `.abc` is valid (no type-annotation parse errors)
 - Compiled `.abc` header: version field matches the expected version for `target_api_version = 12`
 - Compiled `.abc` is accepted by ArkRuntime: install a minimal HAP on device/emulator and verify `hdc install` succeeds
 - `merge_abc: true` with two `AbcModule` inputs produces one `.abc` file with two named records; verify record names match input `record_name` values
@@ -260,5 +258,5 @@ crates/arkdown-abc/
 - `opt_level: 0` vs `opt_level: 2`: release-mode output is smaller
 - Incremental cache: compiling the same JS twice reuses cached bytecode (second call faster, output identical)
 - Cache invalidation: changing the JS source produces different bytecode (not stale cached output)
-- `globalThis['name_hash']` access in IIFE JS maps to `ldglobalvar` opcode in the output (verify via bytecode disassembly or binary inspection)
+- module exports map to module-variable metadata/opcodes, and legacy `globalThis['name_hash']` access maps to `ldglobalvar` in non-module compatibility tests
 - `AbcError::CompilationFailed` is returned (not panic) when given syntactically invalid JS

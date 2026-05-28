@@ -46,7 +46,7 @@ pub struct ArkChunk {
     pub facade_module_id: Option<String>,
     /// Entry module index (for entry chunks).
     pub entry_module: Option<ModuleIdx>,
-    /// IIFE-wrapped JavaScript source (after `renderChunk`).
+    /// Final JavaScript source after render hooks.
     pub code: String,
     /// Source map for this chunk.
     pub source_map: Option<SourceMap>,
@@ -103,8 +103,8 @@ pub struct ChunkGraph {
     pub entry_module_to_entry_chunk: FxHashMap<ModuleIdx, ChunkIdx>,
 }
 
-/// The final IIFE-wrapped chunk as produced by `arkdown-plugin-chunk-wrapper`.
-/// This is the direct input to `arkdown-abc`.
+/// Legacy IIFE-wrapped chunk metadata produced by `arkdown-plugin-chunk-wrapper`.
+/// Current module-mode ABC compilation does not require this wrapper shape.
 #[derive(Debug, Clone)]
 pub struct IifeChunk {
     pub chunk: ArkChunk,
@@ -133,9 +133,9 @@ pub struct RequireReplacement {
 
 #[cfg(test)]
 mod tests {
-    use index_vec::Idx as _;
     use super::*;
     use crate::graph::ModuleIdx;
+    use index_vec::Idx as _;
 
     // ── ChunkIdx ─────────────────────────────────────────────────────────────
 

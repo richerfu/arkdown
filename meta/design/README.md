@@ -14,7 +14,7 @@ Read these documents before working in a covered area. Keep them in sync with im
 | [hvigorw-analysis.md](hvigorw-analysis.md)   | Reverse-engineering of hvigorw: full task dependency graph, task descriptions, config file schemas, intermediate artifact layout, daemon architecture, and incremental cache strategy                  |
 | [hvigor-gap-plan.md](hvigor-gap-plan.md)     | Current implementation gap analysis against the locally installed hvigor pipeline, with a staged plan for compile-stage and full-artifact parity                                                       |
 | [module-resolution.md](module-resolution.md) | OHOS module resolution deep dive: all specifier forms (@ohos/_, @kit/_, @bundle:, bare ohpm), oh-package.json5 dependency types, oxc-resolver integration, OHM URL normalization, SDK path conventions |
-| [abc-pipeline.md](abc-pipeline.md)           | es2abc compilation step: why ABC is required, all relevant CLI flags (confirmed from installed SDK), input IIFE format, source map chain, incremental cache, worker pool parallelism                   |
+| [abc-pipeline.md](abc-pipeline.md)           | es2abc compilation step: why ABC is required, module-mode input contract, source map chain, incremental cache, worker pool parallelism                                                                  |
 | [chunk-model.md](chunk-model.md)             | OHOS chunk architecture: why ArkRuntime forbids native ESM, the IIFE/globalThis registry pattern, @Entry entry points, supportChunks flag, per-module bundle layouts (HAP/HSP/HAR), HAR deduplication  |
 | [types.md](types.md)                         | Canonical shared type definitions: ResolvedId, Module, ModuleGraph, ArkChunk, ChunkGraph, IifeChunk, AbcArtifact, HapManifest, OhPackageJson5, ArkdownPlugin trait, enums                              |
 | [compat.md](compat.md)                       | hvigorw compatibility layer: command mapping, hvigorw wrapper script, build-profile.json5 field mapping, plugin API differences, unsupported features, migration guide                                 |
@@ -24,9 +24,9 @@ Read these documents before working in a covered area. Keep them in sync with im
 
 ## Quick Reference: Key Discoveries
 
-**The fundamental output constraint**: ArkRuntime does not run native ESM. Every output chunk is wrapped in an IIFE, and cross-chunk dependencies use `globalThis['chunkName_hash']` as a module registry. This is implemented by `wrapper-chunk-plugin` and is the first thing to implement correctly. See [chunk-model.md](chunk-model.md).
+**The fundamental output constraint**: ArkRuntime runs `.abc`, not raw JS. hvigor sends normal JS/TS files to `es2abc`; stage-model builds set module mode instead of requiring an IIFE entry wrapper. See [abc-pipeline.md](abc-pipeline.md).
 
-**The compilation chain**: `.ets` source → rolldown bundle (IIFE JS) → `es2abc` → `.abc` bytecode → HAP zip. There is no way to ship a HAP without going through es2abc. See [abc-pipeline.md](abc-pipeline.md).
+**The compilation chain**: `.ets` source → ArkTS transform/bundle output → `es2abc --module` semantics → `.abc` bytecode → HAP zip. There is no way to ship a HAP without going through es2abc-equivalent bytecode generation. See [abc-pipeline.md](abc-pipeline.md).
 
 **Current gap to hvigor**: The largest remaining mismatch is the compile stage: real SDK `ets-loader` semantics, post-rollup importee processing, source maps, caches, release obfuscation/minification, and full `es2abc` parity. See [hvigor-gap-plan.md](hvigor-gap-plan.md).
 

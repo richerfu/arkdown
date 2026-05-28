@@ -44,6 +44,7 @@ fn compile_case(case: &UpstreamCase) -> Vec<u8> {
         opt_level: 0,
         target_api_version: 12,
         merge_abc: true,
+        module: false,
         cache_path: None,
     });
     compiler

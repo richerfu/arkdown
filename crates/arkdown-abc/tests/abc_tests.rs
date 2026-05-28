@@ -16,6 +16,7 @@ fn make_compiler() -> AbcCompiler {
         opt_level: 0,
         target_api_version: 12,
         merge_abc: true,
+        module: false,
         cache_path: None,
     })
 }
@@ -526,6 +527,7 @@ fn test_artifact_api_version_propagated() {
         opt_level: 0,
         target_api_version: 9,
         merge_abc: true,
+        module: false,
         cache_path: None,
     });
     let result = compiler
@@ -559,6 +561,7 @@ fn test_artifact_debug_info_true() {
         opt_level: 0,
         target_api_version: 12,
         merge_abc: true,
+        module: false,
         cache_path: None,
     });
     let result = compiler
