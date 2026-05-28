@@ -65,20 +65,33 @@ impl Bundler {
     /// hook — no post-processing step is required here.
     pub async fn bundle(&self, loader_json: &LoaderJson) -> Result<BundleOutput, ArkdownError> {
         // ── 1. Build rolldown input entries ──────────────────────────────────
-        let module_root = PathBuf::from(&loader_json.module_root_path);
+        // module_root_path may be relative and may contain `./` segments
+        // (e.g. `tests/fixtures/minimal-hap/./entry/src/main`).  Canonicalize
+        // produces an absolute, clean path that rolldown's resolver can use.
+        let module_root = std::fs::canonicalize(&loader_json.module_root_path)
+            .unwrap_or_else(|_| {
+                // Fallback: manual `./` removal + join with process cwd
+                let normalized = normalize_path(&loader_json.module_root_path);
+                std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join(normalized)
+            });
+
         let input: Vec<InputItem> = loader_json
             .compile_entry
             .iter()
             .enumerate()
             .map(|(i, entry)| {
                 let import_path = if entry.starts_with('/') || entry.starts_with('@') {
-                    // Absolute path or OHM URL — pass through as-is.
+                    // Already absolute or an OHM URL — pass through.
                     entry.clone()
                 } else {
-                    module_root
-                        .join(entry.trim_start_matches("./"))
-                        .to_string_lossy()
-                        .to_string()
+                    // Build the candidate path, then canonicalize to get an
+                    // absolute path without any `.` or `..` components.
+                    let candidate = module_root.join(entry.trim_start_matches("./"));
+                    std::fs::canonicalize(&candidate)
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_else(|_| candidate.to_string_lossy().to_string())
                 };
                 InputItem {
                     // Stable names drive the chunk file names rolldown produces.
@@ -112,10 +125,19 @@ impl Bundler {
         let mut module_types = rustc_hash::FxHashMap::default();
         module_types.insert("ets".to_string(), RdModuleType::Ts);
 
+        // cwd: canonicalize the project root so rolldown's resolver operates on
+        // an absolute path.  The entry paths built above are already absolute.
+        let cwd = std::fs::canonicalize(&loader_json.project_root_path)
+            .unwrap_or_else(|_| {
+                let raw = PathBuf::from(&loader_json.project_root_path);
+                if raw.is_absolute() { raw } else {
+                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(raw)
+                }
+            });
+
         let options = BundlerOptions {
             input: Some(input),
-            // Use the project root as cwd so that relative entry paths resolve.
-            cwd: Some(PathBuf::from(&loader_json.project_root_path)),
+            cwd: Some(cwd),
             format: Some(OutputFormat::Cjs),
             module_types: Some(module_types),
             ..Default::default()
@@ -196,4 +218,22 @@ fn build_chunk_graph(
         module_to_chunk: IndexVec::new(),
         entry_module_to_entry_chunk: FxHashMap::default(),
     })
+}
+
+/// Normalize a file-system path by resolving `./` (current-dir) components.
+///
+/// `build-profile.json5` often has `srcPath: "./entry"` which, when joined,
+/// produces paths like `project/./entry/src/main/…` that confuse rolldown's
+/// file resolver.  This removes all `CurDir` components without touching the
+/// rest of the path (no symlink resolution, no allocation if already clean).
+fn normalize_path(path: &str) -> String {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for comp in PathBuf::from(path).components() {
+        match comp {
+            Component::CurDir => {} // drop `.` segments
+            other => out.push(other),
+        }
+    }
+    out.to_string_lossy().to_string()
 }
