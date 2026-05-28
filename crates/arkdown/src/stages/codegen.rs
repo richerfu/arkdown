@@ -1,7 +1,9 @@
 use oxc_allocator::Allocator;
 use oxc_codegen::Codegen;
 use oxc_parser::{Parser, ParserReturn};
+use oxc_semantic::SemanticBuilder;
 use oxc_span::SourceType;
+use oxc_transformer::{TransformOptions, Transformer};
 
 use arkdown_core::{ArkdownError, ChunkGraph, Module, ModuleGraph, ModuleType};
 
@@ -28,18 +30,18 @@ pub fn generate_code(
     Ok(())
 }
 
-/// Re-parse and re-emit a single module's source through oxc_codegen.
+/// Re-parse and re-emit a single module's source, stripping TypeScript type
+/// annotations via `oxc_transformer`.
 ///
-/// NOTE: The ohos-rs/oxc fork's `Codegen` does NOT strip TypeScript type
-/// annotations — it outputs TypeScript-aware code that preserves all type
-/// annotations. `oxc_transformer` would strip types but is not usable with
-/// this toolchain (it uses the unstable `if_let_guard` feature).
+/// Pipeline:
+/// 1. Parse with TypeScript+module source type.
+/// 2. Build semantic information (required by the transformer).
+/// 3. Run `Transformer` with default `TransformOptions` — this strips all
+///    TypeScript annotations, decorators, and enums from the AST in-place.
+/// 4. Emit JavaScript via `Codegen`.
 ///
-/// As a result, the bundled output retains TypeScript annotations. These are
-/// handled downstream:
-/// - `arkdown-abc`'s `strip_typescript_types` uses `SourceType::tsx()` which
-///   allows parsing TypeScript, enabling bytecode generation from the AST.
-/// - The chunk-wrapper plugin correctly hoists imports before the IIFE.
+/// Falls back to the raw source string on parse errors or transformer panics
+/// so that downstream stages can still attempt to process the module.
 fn regenerate_module(
     source: &str,
     file_path: &str,
@@ -47,16 +49,38 @@ fn regenerate_module(
 ) -> Result<String, ArkdownError> {
     let allocator = Allocator::default();
     let source_type = infer_source_type(file_path, &module_type);
+    let path = std::path::Path::new(file_path);
 
-    let ParserReturn { program, errors, .. } =
+    let ParserReturn { mut program, errors, .. } =
         Parser::new(&allocator, source, source_type).parse();
 
     if !errors.is_empty() {
         return Ok(source.to_owned());
     }
 
-    let result = Codegen::new().build(&program);
-    Ok(result.code)
+    // Build semantic analysis — required by the transformer to resolve scopes
+    // and symbol bindings.
+    let scoping = SemanticBuilder::new().build(&program).semantic.into_scoping();
+
+    // TransformOptions::default() enables TypeScript stripping (TypeScriptOptions
+    // is the default preset, strips all type annotations and type-only constructs).
+    let transform_options = TransformOptions::default();
+
+    // Catch any transformer panic as a safety net (should not occur in 0.133.0).
+    let transform_result =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Transformer::new(&allocator, path, &transform_options)
+                .build_with_scoping(scoping, &mut program)
+        }));
+
+    match transform_result {
+        Ok(_) => {
+            // `program` is now a JavaScript AST — all TypeScript annotations removed.
+            let code = Codegen::new().build(&program).code;
+            Ok(code)
+        }
+        Err(_) => Ok(source.to_owned()),
+    }
 }
 
 /// Map module type and file extension to an oxc [`SourceType`].
@@ -125,20 +149,22 @@ mod tests {
     }
 
     #[test]
-    fn test_regenerate_module_ets_parses_without_errors() {
-        // Verify that ETS TypeScript source parses without errors using the
-        // explicit TypeScript+module source type (bypasses ohos-rs ArkTS strict mode).
+    fn test_regenerate_module_ets_strips_typescript() {
+        // Verify that TypeScript type annotations are stripped from ETS source.
+        // Previously Codegen preserved them; now Transformer removes them so
+        // es2abc can parse the output as plain JavaScript.
         let src = r#"import { UIAbility } from "@kit.AbilityKit";
 export default class EntryAbility extends UIAbility {
     onCreate(want: any, launchParam: any): void {
         console.log("onCreate");
     }
 }"#;
-        // Should NOT fall back to raw source (errors.is_empty() should be true).
-        // We can't assert TypeScript is stripped (ohos-rs Codegen preserves types),
-        // but we CAN assert the class structure is preserved.
         let result = regenerate_module(src, "EntryAbility.ets", ModuleType::Ets).unwrap();
-        assert!(result.contains("class EntryAbility"), "class must be present in output");
-        assert!(result.contains("onCreate"), "method must be present in output");
+        // TypeScript annotations MUST be stripped.
+        assert!(!result.contains(": any"), "type annotations should be stripped: {result}");
+        assert!(!result.contains(": void"), "return type should be stripped: {result}");
+        // Class structure must survive.
+        assert!(result.contains("class EntryAbility"), "class must survive stripping: {result}");
+        assert!(result.contains("onCreate"), "method must survive stripping: {result}");
     }
 }

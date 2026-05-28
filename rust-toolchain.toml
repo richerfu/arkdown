@@ -1,0 +1,4 @@
+[toolchain]
+# Rust 1.95.0: first stable release with `if_let_guards` stabilized
+# (required by oxc_transformer at the pinned ohos-rs/oxc rev c8d02452)
+channel = "1.95.0"
