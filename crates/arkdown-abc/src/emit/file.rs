@@ -492,13 +492,19 @@ impl AbcFile {
             let class_method_pool_start = method_pool_cursor;
             let class_method_pool_end =
                 class_method_pool_start.saturating_add(class.methods.len() as u16);
+            let ctor_pool_index = class
+                .methods
+                .iter()
+                .position(|method| method.name.contains("#~@0="))
+                .map(|index| class_method_pool_start.saturating_add(index as u16))
+                .unwrap_or(class_method_pool_start);
             let mut definefunc_pool_cursor = class_method_pool_start.saturating_add(1);
             for method in &class.methods {
                 class_code_offs.push(code_cur);
                 let bytecode = patch_bytecode_index_operands(
                     &method.bytecode,
                     self.strings.len() as u16,
-                    class_method_pool_start,
+                    ctor_pool_index,
                     class_method_pool_end,
                     &mut definefunc_pool_cursor,
                 );
