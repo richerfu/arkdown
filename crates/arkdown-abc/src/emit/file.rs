@@ -207,16 +207,12 @@ impl AbcFile {
             },
         ];
 
-        // ── Annotation stub classes (API 13+, acc=0x2001 = ACC_PUBLIC|ACC_ANNOTATION) ──
+        // ── Annotation stub classes (API 13+ / hvigorw) ──────────────────────────
+        // hvigorw emits exactly 2 annotation stubs (acc=0x2001 = ACC_PUBLIC|ACC_ANNOTATION).
+        // L_ESExpectedPropertyCountAnnotation is NOT emitted by hvigorw.
         let annotation_stubs = [
             ClassRecord {
                 name: "L_ESConcurrentModuleRequestsAnnotation;".to_string(),
-                methods: vec![],
-                access_flags: 0x2001,
-                module_requests: vec![],
-            },
-            ClassRecord {
-                name: "L_ESExpectedPropertyCountAnnotation;".to_string(),
                 methods: vec![],
                 access_flags: 0x2001,
                 module_requests: vec![],

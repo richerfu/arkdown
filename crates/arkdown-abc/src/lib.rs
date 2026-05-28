@@ -155,15 +155,14 @@ mod tests {
         assert!(result.is_ok(), "multi-module compile must succeed: {:?}", result.err());
         let bytes = std::fs::read(&tmp).unwrap();
         assert_eq!(&bytes[0..8], b"PANDA\x00\x00\x00");
-        // API 13+: num_classes = 2 user modules + 7 SDK framework stubs
+        // API 13+ / hvigorw: num_classes = 2 user modules + 7 SDK framework stubs
         // (L@ohos.app, L@ohos.curves, L@ohos.matrix4, L@system.app, L@system.curves,
-        //  L@system.matrix4, L@system.router) + 3 annotation stubs
-        // (L_ESConcurrentModuleRequestsAnnotation, L_ESExpectedPropertyCountAnnotation,
-        //  L_ESSlotNumberAnnotation) = 12 total.  No foreign section.
+        //  L@system.matrix4, L@system.router) + 2 annotation stubs
+        // (L_ESConcurrentModuleRequestsAnnotation, L_ESSlotNumberAnnotation) = 11 total.
         let num_classes = u32::from_le_bytes(bytes[0x1C..0x20].try_into().unwrap());
         assert_eq!(
-            num_classes, 12,
-            "num_classes must be user_modules(2) + sdk_stubs(7) + annotation_stubs(3) = 12"
+            num_classes, 11,
+            "num_classes must be user_modules(2) + sdk_stubs(7) + annotation_stubs(2) = 11"
         );
         let _ = std::fs::remove_file(&tmp);
     }

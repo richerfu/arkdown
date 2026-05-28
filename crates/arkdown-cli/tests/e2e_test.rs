@@ -120,13 +120,15 @@ fn run_build(fixture: &PathBuf) -> PathBuf {
     let modules_abc = module
         .src_path
         .join("build/default/intermediates/ets/modules.abc");
-    // Compute OHOS module path record names: "{module_name}/src/main/{path_no_ext}"
+    // Compute OHM URL module paths: "{bundleName}/{moduleName}/{pathFromEts}"
+    // Matches es2abc/hvigorw format: "com.example.app/entry/ets/entryability/EntryAbility"
+    let bundle_name = &config.product.bundle_name;
     let record_name_map: std::collections::HashMap<String, String> = loader_json
         .compile_entry.iter()
         .filter_map(|ep| {
             let stem = std::path::Path::new(ep).file_stem()?.to_str()?.to_string();
             let stripped = ep.trim_start_matches("./").trim_end_matches(".ets").trim_end_matches(".ts");
-            Some((stem, format!("{}/src/main/{}", loader_json.module_name, stripped)))
+            Some((stem, format!("{}/{}/{}", bundle_name, loader_json.module_name, stripped)))
         }).collect();
     // Use the explicit chunk file list from bundle_out instead of scanning the
     // directory — prevents stale files from prior runs producing wrong record names.

@@ -220,10 +220,11 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         let modules_abc = module
             .src_path
             .join("build/default/intermediates/ets/modules.abc");
-        // Build record name map: chunk_stem → OHOS class path.
-        // The class path format is "{module_name}/src/main/{path_no_ext}" which
-        // corresponds to the "L&path&;" class name ArkRuntime uses to look up
-        // module entries in the merged modules.abc.
+        // Build record name map: chunk_stem → OHM URL module path.
+        // Format matches es2abc/hvigorw: "{bundleName}/{moduleName}/{pathFromEts}"
+        // e.g. "com.example.arkdown.test/entry/ets/entryability/EntryAbility"
+        // The ABC class is "L{record_name};" (no src/main, no & wrappers).
+        let bundle_name = &config_arc.product.bundle_name;
         let record_name_map: std::collections::HashMap<String, String> = loader_json
             .compile_entry
             .iter()
@@ -236,7 +237,10 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                     .trim_end_matches(".ets")
                     .trim_end_matches(".ts")
                     .trim_end_matches(".js");
-                let record_name = format!("{}/src/main/{}", loader_json.module_name, stripped);
+                let record_name = format!(
+                    "{}/{}/{}",
+                    bundle_name, loader_json.module_name, stripped
+                );
                 Some((stem, record_name))
             })
             .collect();

@@ -102,15 +102,17 @@ pub fn build_record(
     // produce real bytecode for each lifecycle/method body here.
     compile_class_method_bodies(scan_stmts, strings, literal_arrays, &mut methods);
 
-    // ArkRuntime finds modules by their OHOS class name format: "L&{module_path}&;"
-    // where module_path is e.g. "entry/src/main/ets/entryability/EntryAbility".
-    // This must match the record name that hvigorw uses in its merged ABC output.
-    // If record_name is a bare stem (e.g. "EntryAbility"), fall back to L_GLOBAL;
-    // for compatibility with single-file es2abc output.
+    // ArkRuntime finds modules by their OHM URL class name format:
+    //   "L{bundleName}/{moduleName}/{pathFromEts};"
+    // e.g. "Lcom.example.myapp/entry/ets/entryability/EntryAbility;"
+    //
+    // This matches exactly what hvigorw and es2abc produce.
+    // The record_name passed from the CLI is already:
+    //   "{bundleName}/{module}/{path}"  (no src/main prefix)
     let class_name = if record_name.contains('/') {
-        format!("L&{}&;", record_name)
+        format!("L{};", record_name)   // OHM URL format: no & wrappers
     } else {
-        // Bare name (legacy / test path) — use OHOS global module class name
+        // Bare name (legacy / test path) — fall back to OHOS module class
         format!("L_{};", record_name)
     };
 
