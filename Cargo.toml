@@ -78,6 +78,9 @@ notify = "6"
 # Channels
 crossbeam-channel = "0.5"
 
+# Regex
+regex = "1"
+
 # Cryptography — pure Rust HAP signing (arkdown-sign, SPEC-021)
 p256        = { version = "0.13", features = ["ecdsa", "pkcs8"] }
 rsa         = { version = "0.9",  features = ["sha2", "pem"] }

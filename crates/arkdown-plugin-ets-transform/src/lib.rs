@@ -23,6 +23,7 @@
 pub mod api_transform;
 pub mod checker;
 pub mod error;
+pub mod kit_map;
 pub mod transform;
 
 use std::sync::Arc;
@@ -58,25 +59,46 @@ impl ArkdownPlugin for EtsTransformPlugin {
         HookUsage::Transform
     }
 
-    /// Transform an ArkTS `.ets` module into TypeScript.
+    /// Transform an ArkTS `.ets` or `.ts` module.
     ///
     /// The pipeline:
-    /// 1. Bail out immediately for non-`.ets` modules (`Ok(None)` → pass through).
-    /// 2. Run `etsChecker` — validation diagnostics, never fatal on warnings.
-    /// 3. Run `etsTransform` — struct/decorator desugaring.
-    /// 4. Run `apiTransform` — version-gated API import rewrites.
-    /// 5. Return a new `HookTransformOutput` with the desugared TypeScript source.
+    /// 1. Bail out immediately for files that are neither `.ets` nor `.ts`.
+    /// 2. **Kit import rewrite** — `@kit.XxxKit` → individual `@ohos:xxx` imports
+    ///    (both `.ets` and `.ts`; matches hvigorw ets-loader behaviour).
+    /// 3. `.ets` only: run `etsChecker` diagnostics and `etsTransform` struct/decorator
+    ///    desugaring.
+    /// 4. Apply version-gated API import rewrites (`@ohos/* → @system.*` for API < 9).
+    /// 5. Return a new `HookTransformOutput`.
     async fn transform(
         &self,
         _ctx: &PluginContext,
         code: &str,
         id: &str,
     ) -> PluginResult<Option<HookTransformOutput>> {
-        if !id.ends_with(".ets") {
+        let is_ets = id.ends_with(".ets");
+        let is_ts = !is_ets && id.ends_with(".ts");
+
+        if !is_ets && !is_ts {
             return Ok(None);
         }
 
-        // Build a temporary ModuleSource so the existing transform logic can be reused.
+        // Step 1: Rewrite @kit.XxxKit imports to individual @ohos:xxx imports.
+        // Must happen before struct desugaring so the oxc parser sees the final
+        // import specifiers.
+        let code = api_transform::rewrite_kit_imports(code);
+
+        let api_version = self.config.sdk_config.compile_api_version;
+
+        if !is_ets {
+            // .ts files: kit rewrite + version-gated rewrites only.
+            let final_source = api_transform::rewrite_imports_for_version(&code, api_version);
+            return Ok(Some(HookTransformOutput {
+                code: final_source,
+                source_map: None,
+            }));
+        }
+
+        // Step 2: ArkTS struct/decorator desugaring (.ets only).
         let source = ModuleSource {
             id: ResolvedId {
                 id: id.to_string(),
@@ -84,7 +106,7 @@ impl ArkdownPlugin for EtsTransformPlugin {
                 module_type: ModuleType::Ets,
                 ..Default::default()
             },
-            content: code.to_string(),
+            content: code.clone(),
             source_map: None,
         };
 
@@ -95,8 +117,8 @@ impl ArkdownPlugin for EtsTransformPlugin {
             }
         })?;
 
-        let api_version = self.config.sdk_config.compile_api_version;
-        let final_source = api_transform::apply(&transformed, api_version);
+        // Step 3: Apply version-gated API import rewrites.
+        let final_source = api_transform::rewrite_imports_for_version(&transformed, api_version);
 
         Ok(Some(HookTransformOutput {
             code: final_source,
@@ -141,6 +163,7 @@ mod tests {
                 restool_path: PathBuf::from("/unused"),
                 compile_api_version: api_version,
                 has_rollup_plugin: true,
+                compile_sdk_version: "6.0.0.47".to_string(),
             },
         })
     }
@@ -161,13 +184,57 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_plugin_passthrough_non_ets() {
+    async fn test_plugin_passthrough_non_ets_non_ts() {
         let plugin = EtsTransformPlugin::new(make_config(12));
+        // .js files are not handled by this plugin
         let result = plugin
-            .transform(&PluginContext::default(), "const x = 1;", "test.ts")
+            .transform(&PluginContext::default(), "const x = 1;", "test.js")
             .await
             .unwrap();
-        assert!(result.is_none(), "non-ETS modules must pass through as None");
+        assert!(result.is_none(), "non-ETS/non-TS modules must pass through as None");
+    }
+
+    #[tokio::test]
+    async fn test_plugin_kit_rewrite_in_ts_file() {
+        let plugin = EtsTransformPlugin::new(make_config(12));
+        let code = r#"import { hilog } from "@kit.PerformanceAnalysisKit";"#;
+        let result = plugin
+            .transform(&PluginContext::default(), code, "app/src/main/ets/util.ts")
+            .await
+            .unwrap();
+        let out = result.expect("TS file with kit import must return Some");
+        assert!(
+            out.code.contains("@ohos:hilog"),
+            "@kit.PerformanceAnalysisKit/hilog must be rewritten to @ohos:hilog; got:\n{}",
+            out.code
+        );
+        assert!(
+            !out.code.contains("@kit."),
+            "@kit.* specifier must be gone; got:\n{}",
+            out.code
+        );
+    }
+
+    #[tokio::test]
+    async fn test_plugin_kit_rewrite_in_ets_file() {
+        let plugin = EtsTransformPlugin::new(make_config(12));
+        let code = "import { UIAbility } from \"@kit.AbilityKit\";\n@Entry\n@Component\nstruct Index {\n  build() {}\n}";
+        let id = "entry/src/main/ets/entryability/EntryAbility.ets";
+        let result = plugin
+            .transform(&PluginContext::default(), code, id)
+            .await
+            .unwrap();
+        let out = result.expect("ETS transform must return Some");
+        assert!(
+            out.code.contains("@ohos:app.ability.UIAbility"),
+            "UIAbility must be rewritten to @ohos:app.ability.UIAbility; got:\n{}",
+            out.code
+        );
+        assert!(
+            !out.code.contains("@kit.AbilityKit"),
+            "@kit.AbilityKit must be gone; got:\n{}",
+            out.code
+        );
     }
 
     #[tokio::test]
