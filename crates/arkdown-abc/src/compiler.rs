@@ -69,12 +69,53 @@ pub struct AbcArtifactResult {
 /// truly malformed input).
 fn strip_typescript_types(source: &str) -> String {
     let allocator = Allocator::default();
-    let parse_ret =
-        Parser::new(&allocator, source, SourceType::tsx()).parse();
+    let parse_ret = Parser::new(&allocator, source, SourceType::tsx()).parse();
     if parse_ret.panicked {
         return source.to_string();
     }
     Codegen::new().build(&parse_ret.program).code
+}
+
+fn source_file_from_source_map(source_map: Option<&str>) -> Option<String> {
+    let map = source_map?;
+    let key = map.find("\"sources\"")?;
+    let after_key = &map[key + "\"sources\"".len()..];
+    let array_start = after_key.find('[')?;
+    let mut rest = after_key[array_start + 1..].trim_start();
+    if !rest.starts_with('"') {
+        return None;
+    }
+    rest = &rest[1..];
+
+    let mut out = String::new();
+    let mut chars = rest.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' => return (!out.is_empty()).then_some(out),
+            '\\' => {
+                let escaped = chars.next()?;
+                match escaped {
+                    '"' | '\\' | '/' => out.push(escaped),
+                    'b' => out.push('\u{0008}'),
+                    'f' => out.push('\u{000c}'),
+                    'n' => out.push('\n'),
+                    'r' => out.push('\r'),
+                    't' => out.push('\t'),
+                    _ => return None,
+                }
+            }
+            _ => out.push(ch),
+        }
+    }
+    None
+}
+
+fn source_file_from_record_name(record_name: &str) -> String {
+    record_name
+        .strip_prefix("@bundle:")
+        .unwrap_or(record_name)
+        .trim_start_matches('/')
+        .to_string()
 }
 
 /// Pure-Rust ArkCompiler bytecode compiler.
@@ -129,17 +170,26 @@ impl AbcCompiler {
         output: &Path,
     ) -> Result<AbcArtifactResult, AbcError> {
         let mut abc_file = AbcFile::new();
+        let mut has_debug_info = false;
 
         for module in &modules {
             // Strip TypeScript type annotations before parsing as plain JS.
             // The codegen fallback in the loader may preserve TS syntax when
             // the OXC parser cannot handle `.ets`-specific constructs.
             let js_source = strip_typescript_types(&module.source);
-            let record = builder::build_record(
+            let source_file =
+                source_file_from_source_map(module.source_map.as_deref()).or_else(|| {
+                    self.options
+                        .debug_info
+                        .then(|| source_file_from_record_name(&module.record_name))
+                });
+            has_debug_info |= source_file.is_some();
+            let record = builder::build_record_with_debug(
                 &js_source,
                 &module.record_name,
                 &mut abc_file.strings,
                 &mut abc_file.literal_arrays,
+                source_file.as_deref(),
             )?;
             abc_file.add_record(record);
         }
@@ -149,8 +199,7 @@ impl AbcCompiler {
         // Ensure the output directory exists.
         if let Some(parent) = output.parent() {
             if !parent.as_os_str().is_empty() {
-                fs_err::create_dir_all(parent)
-                    .map_err(AbcError::Io)?;
+                fs_err::create_dir_all(parent).map_err(AbcError::Io)?;
             }
         }
         std::fs::write(output, &bytes).map_err(AbcError::Io)?;
@@ -158,7 +207,7 @@ impl AbcCompiler {
         Ok(AbcArtifactResult {
             path: output.to_path_buf(),
             api_version: self.options.target_api_version,
-            has_debug_info: self.options.debug_info,
+            has_debug_info,
         })
     }
 }

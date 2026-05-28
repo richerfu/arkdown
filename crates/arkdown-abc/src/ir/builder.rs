@@ -10,7 +10,7 @@ use oxc_span::SourceType;
 
 use crate::emit::file::LiteralArray;
 use crate::emit::record::{
-    ClassRecord, FieldRecord, FieldValue, MethodRecord, FIELD_OWNER_CLASS_IDX,
+    ClassRecord, DebugInfoRecord, FieldRecord, FieldValue, MethodRecord, FIELD_OWNER_CLASS_IDX,
 };
 use crate::emit::strings::StringTable;
 use crate::error::AbcError;
@@ -43,6 +43,16 @@ pub fn build_record(
     record_name: &str,
     strings: &mut StringTable,
     literal_arrays: &mut Vec<LiteralArray>,
+) -> Result<ClassRecord, AbcError> {
+    build_record_with_debug(source, record_name, strings, literal_arrays, None)
+}
+
+pub fn build_record_with_debug(
+    source: &str,
+    record_name: &str,
+    strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
+    source_file: Option<&str>,
 ) -> Result<ClassRecord, AbcError> {
     let allocator = Allocator::default();
     let source_type = SourceType::tsx();
@@ -77,6 +87,7 @@ pub fn build_record(
         bytecode,
         num_vregs,
         num_args: 3,
+        debug_info: None,
     });
 
     // Determine which statement slice to scan for declarations.
@@ -98,6 +109,7 @@ pub fn build_record(
                     bytecode: func_bytecode,
                     num_vregs,
                     num_args: func.params.items.len() as u16,
+                    debug_info: None,
                 });
             }
         }
@@ -153,11 +165,22 @@ pub fn build_record(
         },
     ];
 
+    let source_file = source_file.map(str::to_string);
+    if let Some(file) = &source_file {
+        for method in &mut methods {
+            method.debug_info = Some(DebugInfoRecord {
+                line_start: 1,
+                source_file: file.clone(),
+            });
+        }
+    }
+
     Ok(ClassRecord {
         name: class_name,
         methods,
         access_flags: 1,
         source_lang: 0x04,
+        source_file,
         module_requests,
         fields: module_fields,
     })
@@ -286,6 +309,7 @@ fn compile_class_method_bodies(
                     bytecode,
                     num_vregs,
                     num_args: 0,
+                    debug_info: None,
                 });
             }
         }
@@ -315,6 +339,7 @@ fn compile_class_elements(
                 bytecode,
                 num_vregs,
                 num_args,
+                debug_info: None,
             });
         }
     }
