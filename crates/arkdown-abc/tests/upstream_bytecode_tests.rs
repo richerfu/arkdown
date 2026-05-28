@@ -87,7 +87,6 @@ fn upstream_class_constructor_case_reaches_class_lowering() {
 }
 
 #[test]
-#[ignore = "tracks upstream closure lexical-env parity; enable after nested closure lowering is ported"]
 fn upstream_lexical_arrow_matches_required_bytecode_shape() {
     let bytes = compile_case(&LEXICAL_ARROW);
     assert!(LEXICAL_ARROW.expected.contains("newlexenv"));
@@ -100,7 +99,6 @@ fn upstream_lexical_arrow_matches_required_bytecode_shape() {
 }
 
 #[test]
-#[ignore = "tracks upstream CommonJS wrapper parity; enable after wrapper lowering is ported"]
 fn upstream_commonjs_main_wrapper_matches_required_bytecode_shape() {
     let bytes = compile_case(&COMMONJS_ARGS);
     assert!(COMMONJS_ARGS.expected.contains("Reflect"));

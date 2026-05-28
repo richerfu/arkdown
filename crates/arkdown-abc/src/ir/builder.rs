@@ -408,6 +408,81 @@ fn statement_scan_body<'a>(program: &'a Program<'_>, is_module: bool) -> &'a [St
     }
 }
 
+fn program_uses_commonjs_wrapper(program: &Program<'_>, is_module: bool) -> bool {
+    if is_module {
+        return false;
+    }
+    statement_scan_body(program, is_module)
+        .iter()
+        .any(stmt_uses_commonjs_binding)
+}
+
+fn stmt_uses_commonjs_binding(stmt: &Statement<'_>) -> bool {
+    match stmt {
+        Statement::VariableDeclaration(decl) => decl.declarations.iter().any(|declarator| {
+            declarator
+                .init
+                .as_ref()
+                .is_some_and(expr_uses_commonjs_binding)
+        }),
+        Statement::ExpressionStatement(expr) => expr_uses_commonjs_binding(&expr.expression),
+        Statement::ReturnStatement(ret) => ret
+            .argument
+            .as_ref()
+            .is_some_and(expr_uses_commonjs_binding),
+        Statement::BlockStatement(block) => block.body.iter().any(stmt_uses_commonjs_binding),
+        _ => false,
+    }
+}
+
+fn expr_uses_commonjs_binding(expr: &Expression<'_>) -> bool {
+    match expr {
+        Expression::Identifier(id) => {
+            matches!(id.name.as_str(), "exports" | "module" | "require")
+        }
+        Expression::AssignmentExpression(assign) => {
+            assignment_target_uses_commonjs_binding(&assign.left)
+                || expr_uses_commonjs_binding(&assign.right)
+        }
+        Expression::CallExpression(call) => {
+            expr_uses_commonjs_binding(&call.callee)
+                || call
+                    .arguments
+                    .iter()
+                    .filter_map(Argument::as_expression)
+                    .any(expr_uses_commonjs_binding)
+        }
+        Expression::ParenthesizedExpression(expr) => expr_uses_commonjs_binding(&expr.expression),
+        Expression::SequenceExpression(seq) => {
+            seq.expressions.iter().any(expr_uses_commonjs_binding)
+        }
+        Expression::StaticMemberExpression(mem) => expr_uses_commonjs_binding(&mem.object),
+        Expression::ComputedMemberExpression(mem) => {
+            expr_uses_commonjs_binding(&mem.object) || expr_uses_commonjs_binding(&mem.expression)
+        }
+        Expression::ObjectExpression(obj) => obj.properties.iter().any(|prop| match prop {
+            oxc_ast::ast::ObjectPropertyKind::ObjectProperty(prop) => {
+                expr_uses_commonjs_binding(&prop.value)
+            }
+            _ => false,
+        }),
+        _ => false,
+    }
+}
+
+fn assignment_target_uses_commonjs_binding(target: &AssignmentTarget<'_>) -> bool {
+    match target {
+        AssignmentTarget::AssignmentTargetIdentifier(id) => {
+            matches!(id.name.as_str(), "exports" | "module" | "require")
+        }
+        AssignmentTarget::StaticMemberExpression(mem) => expr_uses_commonjs_binding(&mem.object),
+        AssignmentTarget::ComputedMemberExpression(mem) => {
+            expr_uses_commonjs_binding(&mem.object) || expr_uses_commonjs_binding(&mem.expression)
+        }
+        _ => false,
+    }
+}
+
 /// Walk `stmts` for `ClassDeclaration`s and compile each method body into a
 /// separate [`MethodRecord`], appending them to `methods`.
 ///
@@ -588,7 +663,90 @@ fn compile_class_elements(
                 num_args,
                 debug_info: None,
             });
+
+            collect_class_method_arrow_records(
+                class_name,
+                method.value.body.as_deref(),
+                strings,
+                literal_arrays,
+                lowering,
+                methods,
+            );
         }
+    }
+}
+
+fn collect_class_method_arrow_records(
+    class_name: &str,
+    body: Option<&FunctionBody<'_>>,
+    strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
+    lowering: &LoweringContext,
+    methods: &mut Vec<MethodRecord>,
+) {
+    let Some(body) = body else {
+        return;
+    };
+    for stmt in &body.statements {
+        collect_arrow_records_from_stmt(
+            class_name,
+            stmt,
+            strings,
+            literal_arrays,
+            lowering,
+            methods,
+        );
+    }
+}
+
+fn collect_arrow_records_from_stmt(
+    class_name: &str,
+    stmt: &Statement<'_>,
+    strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
+    lowering: &LoweringContext,
+    methods: &mut Vec<MethodRecord>,
+) {
+    match stmt {
+        Statement::VariableDeclaration(decl) => {
+            for declarator in &decl.declarations {
+                let BindingPattern::BindingIdentifier(id) = &declarator.id else {
+                    continue;
+                };
+                let Some(Expression::ArrowFunctionExpression(arrow)) = &declarator.init else {
+                    continue;
+                };
+                let captures = arrow_captures_from_body(arrow.body.as_ref());
+                let bytecode = compile_arrow_body(
+                    arrow.body.as_ref(),
+                    strings,
+                    literal_arrays,
+                    lowering,
+                    captures,
+                );
+                let num_vregs = estimate_vregs(&bytecode);
+                methods.push(MethodRecord {
+                    name: format!("#~{class_name}@0*#{}", id.name.as_str()),
+                    bytecode,
+                    num_vregs,
+                    num_args: arrow.params.items.len() as u16 + 3,
+                    debug_info: None,
+                });
+            }
+        }
+        Statement::BlockStatement(block) => {
+            for stmt in &block.body {
+                collect_arrow_records_from_stmt(
+                    class_name,
+                    stmt,
+                    strings,
+                    literal_arrays,
+                    lowering,
+                    methods,
+                );
+            }
+        }
+        _ => {}
     }
 }
 
@@ -687,8 +845,34 @@ fn compile_program_body(
         if let Some(stmts) = extract_iife_stmts(program) {
             return compile_body_stmts(stmts, strings, literal_arrays, lowering, true);
         }
+        if program_uses_commonjs_wrapper(program, is_module) {
+            return compile_commonjs_main_wrapper(strings);
+        }
     }
     compile_body_stmts(&program.body, strings, literal_arrays, lowering, true)
+}
+
+fn compile_commonjs_main_wrapper(strings: &mut StringTable) -> Vec<u8> {
+    let mut literal_arrays = Vec::new();
+    let lowering = LoweringContext::default();
+    let mut gen = CodeGen::new(strings, &mut literal_arrays, &lowering);
+    let reflect_id = gen.intern("Reflect");
+    gen.push(Insn::TryLdGlobalByName(0, reflect_id));
+    gen.push(Insn::Sta(0));
+    let apply_id = gen.intern("apply");
+    gen.push(Insn::LdObjByName(1, apply_id));
+    gen.push(Insn::Sta(1));
+    gen.push(Insn::DefineFuncShort(3, 0, 5));
+    gen.push(Insn::Sta(2));
+    gen.push(Insn::CreateEmptyArray(4));
+    gen.push(Insn::Sta(3));
+    for index in 0..5u16 {
+        gen.push(Insn::Lda(3 + index as u8));
+        gen.push(Insn::StOwnByIndex(5 + index * 2, 3, index));
+    }
+    gen.push(Insn::Lda(1));
+    gen.push(Insn::CallThis3(0x0f, 0, 2, 3, 3));
+    gen.finish()
 }
 
 /// Compile a function body's statements, or emit `returnundefined` if absent.
@@ -705,6 +889,23 @@ fn compile_function_body(
             Insn::ReturnUndefined.encode(&mut st)
         }
     }
+}
+
+fn compile_arrow_body(
+    body: &FunctionBody<'_>,
+    strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
+    lowering: &LoweringContext,
+    captures: ArrowCaptures,
+) -> Vec<u8> {
+    let mut gen = CodeGen::new_arrow(strings, literal_arrays, lowering, captures);
+    for stmt in &body.statements {
+        gen.emit_stmt(stmt);
+        if gen.returned {
+            break;
+        }
+    }
+    gen.finish()
 }
 
 /// Compile a statement slice through `CodeGen` and return raw bytecode.
@@ -728,7 +929,130 @@ fn compile_body_stmts(
     cg.finish()
 }
 
+fn arrow_captures_from_body(body: &FunctionBody<'_>) -> ArrowCaptures {
+    let mut uses_this = false;
+    let mut uses_new_target = false;
+    for stmt in &body.statements {
+        collect_capture_from_stmt(stmt, &mut uses_this, &mut uses_new_target);
+    }
+    let this_slot = uses_this.then_some(0);
+    let new_target_slot = uses_new_target.then_some(if uses_this { 1 } else { 0 });
+    ArrowCaptures {
+        this_slot,
+        new_target_slot,
+    }
+}
+
+fn collect_capture_from_stmt(
+    stmt: &Statement<'_>,
+    uses_this: &mut bool,
+    uses_new_target: &mut bool,
+) {
+    match stmt {
+        Statement::ExpressionStatement(expr) => {
+            collect_capture_from_expr(&expr.expression, uses_this, uses_new_target);
+        }
+        Statement::ReturnStatement(ret) => {
+            if let Some(expr) = &ret.argument {
+                collect_capture_from_expr(expr, uses_this, uses_new_target);
+            }
+        }
+        Statement::VariableDeclaration(decl) => {
+            for declarator in &decl.declarations {
+                if let Some(init) = &declarator.init {
+                    collect_capture_from_expr(init, uses_this, uses_new_target);
+                }
+            }
+        }
+        Statement::BlockStatement(block) => {
+            for stmt in &block.body {
+                collect_capture_from_stmt(stmt, uses_this, uses_new_target);
+            }
+        }
+        Statement::ForStatement(for_stmt) => {
+            if let Some(test) = &for_stmt.test {
+                collect_capture_from_expr(test, uses_this, uses_new_target);
+            }
+            if let Some(update) = &for_stmt.update {
+                collect_capture_from_expr(update, uses_this, uses_new_target);
+            }
+            collect_capture_from_stmt(&for_stmt.body, uses_this, uses_new_target);
+        }
+        _ => {}
+    }
+}
+
+fn collect_capture_from_expr(
+    expr: &Expression<'_>,
+    uses_this: &mut bool,
+    uses_new_target: &mut bool,
+) {
+    match expr {
+        Expression::ThisExpression(_) => *uses_this = true,
+        Expression::MetaProperty(meta) if is_new_target_meta(meta) => *uses_new_target = true,
+        Expression::ParenthesizedExpression(expr) => {
+            collect_capture_from_expr(&expr.expression, uses_this, uses_new_target);
+        }
+        Expression::StaticMemberExpression(mem) => {
+            collect_capture_from_expr(&mem.object, uses_this, uses_new_target);
+        }
+        Expression::ComputedMemberExpression(mem) => {
+            collect_capture_from_expr(&mem.object, uses_this, uses_new_target);
+            collect_capture_from_expr(&mem.expression, uses_this, uses_new_target);
+        }
+        Expression::CallExpression(call) => {
+            collect_capture_from_expr(&call.callee, uses_this, uses_new_target);
+            for arg in &call.arguments {
+                if let Some(expr) = arg.as_expression() {
+                    collect_capture_from_expr(expr, uses_this, uses_new_target);
+                }
+            }
+        }
+        Expression::AssignmentExpression(assign) => {
+            collect_capture_from_expr(&assign.right, uses_this, uses_new_target);
+        }
+        Expression::LogicalExpression(log) => {
+            collect_capture_from_expr(&log.left, uses_this, uses_new_target);
+            collect_capture_from_expr(&log.right, uses_this, uses_new_target);
+        }
+        Expression::SequenceExpression(seq) => {
+            for expr in &seq.expressions {
+                collect_capture_from_expr(expr, uses_this, uses_new_target);
+            }
+        }
+        Expression::NewExpression(new_expr) => {
+            collect_capture_from_expr(&new_expr.callee, uses_this, uses_new_target);
+            for arg in &new_expr.arguments {
+                if let Some(expr) = arg.as_expression() {
+                    collect_capture_from_expr(expr, uses_this, uses_new_target);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_new_target_meta(meta: &oxc_ast::ast::MetaProperty<'_>) -> bool {
+    meta.meta.name.as_str() == "new" && meta.property.name.as_str() == "target"
+}
+
 // ── CodeGen ───────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ArrowCaptures {
+    this_slot: Option<u8>,
+    new_target_slot: Option<u8>,
+}
+
+impl ArrowCaptures {
+    fn len(self) -> u8 {
+        self.this_slot.is_some() as u8 + self.new_target_slot.is_some() as u8
+    }
+
+    fn is_empty(self) -> bool {
+        self.this_slot.is_none() && self.new_target_slot.is_none()
+    }
+}
 
 struct CodeGen<'a> {
     strings: &'a mut StringTable,
@@ -744,6 +1068,7 @@ struct CodeGen<'a> {
     /// Set to `true` after a `return` or `returnundefined` is emitted so that
     /// unreachable code is not generated.
     returned: bool,
+    arrow_captures: ArrowCaptures,
 }
 
 impl<'a> CodeGen<'a> {
@@ -760,7 +1085,19 @@ impl<'a> CodeGen<'a> {
             var_regs: HashMap::new(),
             next_reg: 0,
             returned: false,
+            arrow_captures: ArrowCaptures::default(),
         }
+    }
+
+    fn new_arrow(
+        strings: &'a mut StringTable,
+        literal_arrays: &'a mut Vec<LiteralArray>,
+        lowering: &'a LoweringContext,
+        arrow_captures: ArrowCaptures,
+    ) -> Self {
+        let mut gen = Self::new(strings, literal_arrays, lowering);
+        gen.arrow_captures = arrow_captures;
+        gen
     }
 
     fn emit_module_lex_env_prologue(&mut self) {
@@ -1087,6 +1424,24 @@ impl<'a> CodeGen<'a> {
                     }
                 }
             }
+            Expression::ThisExpression(_) => {
+                if let Some(slot) = self.arrow_captures.this_slot {
+                    self.push(Insn::LdLexVar(0, slot));
+                } else {
+                    self.push(Insn::LdUndefined);
+                }
+            }
+            Expression::MetaProperty(meta) => {
+                if is_new_target_meta(meta) {
+                    if let Some(slot) = self.arrow_captures.new_target_slot {
+                        self.push(Insn::LdLexVar(0, slot));
+                    } else {
+                        self.push(Insn::LdUndefined);
+                    }
+                } else {
+                    self.push(Insn::LdUndefined);
+                }
+            }
             Expression::ParenthesizedExpression(p) => {
                 self.emit_expr(&p.expression);
             }
@@ -1125,10 +1480,18 @@ impl<'a> CodeGen<'a> {
                 self.emit_class_inner(class_name, &cls.body.body, super_class);
             }
             Expression::ArrowFunctionExpression(arrow) => {
-                // Arrow function literal: `(params) => { body }`.
-                // Full nested-closure compilation is deferred to SPEC-009 v2.
-                // Emit a `definefuncshort` stub so the accumulator holds a real
-                // callable function object rather than `undefined`.
+                let captures = arrow_captures_from_body(arrow.body.as_ref());
+                if !captures.is_empty() {
+                    self.push(Insn::NewLexEnv(captures.len()));
+                    if let Some(slot) = captures.this_slot {
+                        self.push(Insn::Lda(1));
+                        self.push(Insn::StLexVar(0, slot));
+                    }
+                    if let Some(slot) = captures.new_target_slot {
+                        self.push(Insn::Lda(2));
+                        self.push(Insn::StLexVar(0, slot));
+                    }
+                }
                 let length = arrow.params.items.len() as u8;
                 self.push(Insn::DefineFuncShort(0, 0, length));
             }

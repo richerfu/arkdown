@@ -152,6 +152,9 @@ pub enum Insn {
     /// `0xB6` — create a named lexical environment.
     NewLexEnvWithName(u8, u16),
 
+    /// `0x09` — create an anonymous lexical environment.
+    NewLexEnv(u8),
+
     /// `0xFE 0x09` — throw if accumulator is hole, using name string id.
     ThrowUndefinedIfHoleWithName(u16),
 
@@ -177,6 +180,12 @@ pub enum Insn {
     /// methods; `proto_vreg` = register holding the prototype object.
     /// Encoding: `[0x35] [slot:u8] [ctor_id:u16 LE] [buf_id:u16 LE] [proto_argc:u16 LE] [proto_vreg:u8]` = 9 bytes.
     DefineClassWithBuffer(u8, u16, u16, u16, u8),
+
+    /// `0x05` / `0x80` — create an empty array, carrying an IC slot.
+    CreateEmptyArray(u16),
+
+    /// `0x79` / `0xCB` — store accumulator into own array index.
+    StOwnByIndex(u16, u8, u16),
 
     // ── Object construction ──────────────────────────────────────────────────
     /// `0x08` `op_imm1_8_imm2_8_v_8` — construct new object.
@@ -313,6 +322,7 @@ impl Insn {
                 v.extend_from_slice(&literal_id.to_le_bytes());
                 v
             }
+            Insn::NewLexEnv(count) => vec![0x09, *count],
             Insn::ThrowUndefinedIfHoleWithName(name_id) => {
                 let mut v = vec![0xfe, 0x09];
                 v.extend_from_slice(&name_id.to_le_bytes());
@@ -345,6 +355,24 @@ impl Insn {
                 v.extend_from_slice(&buf_id.to_le_bytes());
                 v.extend_from_slice(&proto_argc.to_le_bytes());
                 v.push(*proto_vreg);
+                v
+            }
+            Insn::CreateEmptyArray(slot) if *slot <= u8::MAX as u16 => vec![0x05, *slot as u8],
+            Insn::CreateEmptyArray(slot) => {
+                let mut v = vec![0x80];
+                v.extend_from_slice(&slot.to_le_bytes());
+                v
+            }
+            Insn::StOwnByIndex(slot, array, index) if *slot <= u8::MAX as u16 => {
+                let mut v = vec![0x79, *slot as u8, *array];
+                v.extend_from_slice(&index.to_le_bytes());
+                v
+            }
+            Insn::StOwnByIndex(slot, array, index) => {
+                let mut v = vec![0xcb];
+                v.extend_from_slice(&slot.to_le_bytes());
+                v.push(*array);
+                v.extend_from_slice(&index.to_le_bytes());
                 v
             }
 
@@ -419,11 +447,26 @@ impl Insn {
             | Insn::LdObjByName(_, _) => 4,
             Insn::LdExternalModuleVar(_) | Insn::StModuleVar(_) => 2,
             Insn::LdLexVar(_, _) | Insn::StLexVar(_, _) => 2,
+            Insn::NewLexEnv(_) => 2,
             Insn::NewLexEnvWithName(_, _) => 4,
             Insn::ThrowUndefinedIfHoleWithName(_) => 4,
             Insn::StObjByName(_, _, _) => 5,
             Insn::DefineFuncShort(_, _, _) => 5,
             Insn::DefineClassWithBuffer(_, _, _, _, _) => 9,
+            Insn::CreateEmptyArray(slot) => {
+                if *slot <= u8::MAX as u16 {
+                    2
+                } else {
+                    3
+                }
+            }
+            Insn::StOwnByIndex(slot, _, _) => {
+                if *slot <= u8::MAX as u16 {
+                    5
+                } else {
+                    6
+                }
+            }
             Insn::NewObjRange(_, _, _) => 4,
             Insn::Return | Insn::ReturnUndefined => 1,
             Insn::Jmp(_) | Insn::Jeqz(_) | Insn::Jnez(_) => 3,
