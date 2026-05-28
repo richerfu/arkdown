@@ -18,6 +18,7 @@
 
 pub mod bundler;
 pub mod output;
+pub mod plugin_adapter;
 pub mod stages;
 
 pub use bundler::{BundleOutput, Bundler};

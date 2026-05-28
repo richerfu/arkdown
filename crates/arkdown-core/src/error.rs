@@ -23,6 +23,9 @@ pub enum ArkdownError {
     #[error("ABC compilation failed: {message}")]
     AbcCompilationFailed { message: String },
 
+    #[error("Bundler error: {0}")]
+    Bundler(String),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }

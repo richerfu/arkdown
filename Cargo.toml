@@ -105,3 +105,17 @@ hex         = "0.4"
 [profile.release]
 lto = true
 codegen-units = 1
+
+# ---------------------------------------------------------------------------
+# NOTE: No [patch.crates-io] is used for oxc.
+#
+# Our workspace crates (arkdown-plugin-ets-transform, arkdown-loader, etc.) use
+# the ohos-rs/oxc fork (rev c8d02452) via [workspace.dependencies] for ArkTS
+# (.ets) parser support.
+#
+# rolldown 1.0.3 uses upstream crates.io oxc 0.133.0.  No oxc types cross the
+# plugin adapter boundary — only Rust Strings (source code) and our own
+# structs are exchanged — so the two copies of oxc coexist without conflict.
+# Patching rolldown's oxc deps to the fork would cause an oxc_sourcemap v6/v7
+# type mismatch in rolldown_ecmascript and must NOT be done.
+# ---------------------------------------------------------------------------
