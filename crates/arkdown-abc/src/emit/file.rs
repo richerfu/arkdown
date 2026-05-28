@@ -39,9 +39,13 @@ pub const MAGIC: [u8; 8] = *b"PANDA\x00\x00\x00";
 
 /// File format version at offset 0x0C.
 ///
-/// DevEco Studio 6.0 / es2abc v13.0.1.0 (API 13+) produces version
-/// `[0x0D, 0x00, 0x01, 0x00]` = `0x0001_000D` in little-endian.
-pub const VERSION: u32 = 0x0001_000D;
+/// hvigorw (DevEco Studio 6.0, target SDK 5.0.5(17)) produces version
+/// `[0x0C, 0x00, 0x06, 0x00]` = `0x0006_000C` in little-endian.
+/// This matches what the ArkRuntime at API 17 expects.
+///
+/// Note: the standalone DevEco 6.0 es2abc binary produces `0x0001_000D`,
+/// but hvigorw's internal es2abc uses `0x0006_000C`.  We match hvigorw.
+pub const VERSION: u32 = 0x0006_000C;
 
 /// Byte length of the fixed `.abc` file header.
 ///
