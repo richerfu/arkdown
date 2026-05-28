@@ -28,7 +28,6 @@
 #[derive(Debug, Clone, PartialEq)]
 pub enum Insn {
     // ── Constant loaders (1 byte) ────────────────────────────────────────────
-
     /// `0x00` `op_none` — load `undefined` into accumulator.
     LdUndefined,
     /// `0x01` `op_none` — load `null` into accumulator.
@@ -39,7 +38,6 @@ pub enum Insn {
     LdFalse,
 
     // ── Integer / float immediates ────────────────────────────────────────────
-
     /// `0x62` `op_imm_32` — load signed 32-bit integer into accumulator.
     /// Encoding: `[0x62] [i32 LE]` = 5 bytes.
     LdAi(i32),
@@ -49,13 +47,11 @@ pub enum Insn {
     FLdAi(f64),
 
     // ── String load ──────────────────────────────────────────────────────────
-
     /// `0x3E` `op_id_16` — load string (by 16-bit string index) into accumulator.
     /// Encoding: `[0x3E] [string_id: u16 LE]` = 3 bytes.
     LdaStr(u16),
 
     // ── Register moves ───────────────────────────────────────────────────────
-
     /// `0x60` `op_v_8` — load virtual register `v` into accumulator.
     /// Encoding: `[0x60] [vreg: u8]` = 2 bytes.
     Lda(u8),
@@ -78,7 +74,6 @@ pub enum Insn {
 
     // ── Arithmetic (accumulator op register) ─────────────────────────────────
     // Format: `op_imm_8_v_8` — opcode(1) + IC-slot(1) + vreg(1) = 3 bytes.
-
     /// `0x0A` — `acc = acc + v[vreg]`.  `slot` is the IC slot (pass 0).
     Add2(u8, u8),
     /// `0x0B` — `acc = acc - v[vreg]`.
@@ -89,7 +84,6 @@ pub enum Insn {
     Div2(u8, u8),
 
     // ── Function calls (IC-slot first, then register operands) ───────────────
-
     /// `0x29` `op_imm_8` — call function in accumulator with 0 args.
     /// Encoding: `[0x29] [slot: u8]` = 2 bytes.
     CallArg0(u8),
@@ -136,7 +130,6 @@ pub enum Insn {
 
     // ── Global variable access ────────────────────────────────────────────────
     // Short form (imm=u8): opcode(1) + slot(1) + name_id(2) = 4 bytes.
-
     /// `0x3F` — load `globalThis.<name>` into accumulator.
     /// `name_id` is a 16-bit index into the string table.
     TryLdGlobalByName(u8, u16),
@@ -144,8 +137,22 @@ pub enum Insn {
     /// `0x40` — store accumulator into `globalThis.<name>`.
     TryStGlobalByName(u8, u16),
 
-    // ── Object property access ────────────────────────────────────────────────
+    /// `0x7E` — load an imported module binding by module variable index.
+    LdExternalModuleVar(u8),
 
+    /// `0x7C` — store accumulator into an exported module binding.
+    StModuleVar(u8),
+
+    /// `0x3C` — load a lexical environment binding.
+    LdLexVar(u8, u8),
+
+    /// `0x3D` — store accumulator into a lexical environment binding.
+    StLexVar(u8, u8),
+
+    /// `0xFE 0x09` — throw if accumulator is hole, using name string id.
+    ThrowUndefinedIfHoleWithName(u16),
+
+    // ── Object property access ────────────────────────────────────────────────
     /// `0x42` — load `acc.<name>` into accumulator (acc is the object).
     /// Short form: `[0x42] [slot: u8] [name_id: u16 LE]` = 4 bytes.
     LdObjByName(u8, u16),
@@ -155,7 +162,6 @@ pub enum Insn {
     StObjByName(u8, u16, u8),
 
     // ── Definition instructions ───────────────────────────────────────────────
-
     /// `0x33` — define function literal.
     /// `slot` = IC slot; `method_id` = 16-bit method literal index;
     /// `length` = formal parameter count.
@@ -170,7 +176,6 @@ pub enum Insn {
     DefineClassWithBuffer(u8, u16, u16, u16, u8),
 
     // ── Object construction ──────────────────────────────────────────────────
-
     /// `0x08` `op_imm1_8_imm2_8_v_8` — construct new object.
     /// `slot` = IC slot; `argc` = arg count (includes constructor arg in v_start);
     /// `v_start` = first register (holds the constructor function).
@@ -178,7 +183,6 @@ pub enum Insn {
     NewObjRange(u8, u8, u8),
 
     // ── Returns ──────────────────────────────────────────────────────────────
-
     /// `0x64` `op_none` — return accumulator value.
     Return,
 
@@ -186,7 +190,6 @@ pub enum Insn {
     ReturnUndefined,
 
     // ── Unconditional branch ─────────────────────────────────────────────────
-
     /// `0x4E` `op_imm_16` — jump by signed 16-bit byte offset.
     /// Encoding: `[0x4E] [offset: i16 LE]` = 3 bytes.
     Jmp(i16),
@@ -196,7 +199,6 @@ pub enum Insn {
     JmpWide(i32),
 
     // ── Conditional branches ─────────────────────────────────────────────────
-
     /// `0x50` `op_imm_16` — jump if accumulator equals zero / is falsy.
     /// Encoding: `[0x50] [offset: i16 LE]` = 3 bytes.
     Jeqz(i16),
@@ -212,7 +214,6 @@ pub enum Insn {
     JnezWide(i32),
 
     // ── Exception ────────────────────────────────────────────────────────────
-
     /// `0xFE 0x00` — throw the value in the accumulator.
     /// Encoding: `[0xFE] [0x00]` = 2 bytes (prefixed instruction).
     Throw,
@@ -229,10 +230,10 @@ impl Insn {
     pub fn encode(&self, _strings: &mut crate::emit::strings::StringTable) -> Vec<u8> {
         match self {
             // ── constant loaders ─────────────────────────────────────────────
-            Insn::LdUndefined  => vec![0x00],
-            Insn::LdNull       => vec![0x01],
-            Insn::LdTrue       => vec![0x02],
-            Insn::LdFalse      => vec![0x03],
+            Insn::LdUndefined => vec![0x00],
+            Insn::LdNull => vec![0x01],
+            Insn::LdTrue => vec![0x02],
+            Insn::LdFalse => vec![0x03],
 
             // ── immediates ───────────────────────────────────────────────────
             Insn::LdAi(n) => {
@@ -277,17 +278,17 @@ impl Insn {
             Insn::Div2(slot, vreg) => vec![0x0D, *slot, *vreg],
 
             // ── calls ────────────────────────────────────────────────────────
-            Insn::CallArg0(slot)                    => vec![0x29, *slot],
-            Insn::CallArg1(slot, v0)                => vec![0x2A, *slot, *v0],
-            Insn::CallArgs2(slot, v0, v1)           => vec![0x2B, *slot, *v0, *v1],
-            Insn::CallArgs3(slot, v0, v1, v2)       => vec![0x2C, *slot, *v0, *v1, *v2],
-            Insn::CallRange(slot, argc, v_start)    => vec![0x73, *slot, *argc, *v_start],
+            Insn::CallArg0(slot) => vec![0x29, *slot],
+            Insn::CallArg1(slot, v0) => vec![0x2A, *slot, *v0],
+            Insn::CallArgs2(slot, v0, v1) => vec![0x2B, *slot, *v0, *v1],
+            Insn::CallArgs3(slot, v0, v1, v2) => vec![0x2C, *slot, *v0, *v1, *v2],
+            Insn::CallRange(slot, argc, v_start) => vec![0x73, *slot, *argc, *v_start],
 
-            Insn::CallThis0(slot, this)                    => vec![0x2D, *slot, *this],
-            Insn::CallThis1(slot, this, v0)                => vec![0x2E, *slot, *this, *v0],
-            Insn::CallThis2(slot, this, v0, v1)            => vec![0x2F, *slot, *this, *v0, *v1],
-            Insn::CallThis3(slot, this, v0, v1, v2)        => vec![0x30, *slot, *this, *v0, *v1, *v2],
-            Insn::CallThisRange(slot, argc, this_vreg)     => vec![0x31, *slot, *argc, *this_vreg],
+            Insn::CallThis0(slot, this) => vec![0x2D, *slot, *this],
+            Insn::CallThis1(slot, this, v0) => vec![0x2E, *slot, *this, *v0],
+            Insn::CallThis2(slot, this, v0, v1) => vec![0x2F, *slot, *this, *v0, *v1],
+            Insn::CallThis3(slot, this, v0, v1, v2) => vec![0x30, *slot, *this, *v0, *v1, *v2],
+            Insn::CallThisRange(slot, argc, this_vreg) => vec![0x31, *slot, *argc, *this_vreg],
 
             // ── global access ────────────────────────────────────────────────
             Insn::TryLdGlobalByName(slot, name_id) => {
@@ -297,6 +298,15 @@ impl Insn {
             }
             Insn::TryStGlobalByName(slot, name_id) => {
                 let mut v = vec![0x40, *slot];
+                v.extend_from_slice(&name_id.to_le_bytes());
+                v
+            }
+            Insn::LdExternalModuleVar(index) => vec![0x7e, *index],
+            Insn::StModuleVar(index) => vec![0x7c, *index],
+            Insn::LdLexVar(level, slot) => vec![0x3c, (level << 4) | slot],
+            Insn::StLexVar(level, slot) => vec![0x3d, (level << 4) | slot],
+            Insn::ThrowUndefinedIfHoleWithName(name_id) => {
+                let mut v = vec![0xfe, 0x09];
                 v.extend_from_slice(&name_id.to_le_bytes());
                 v
             }
@@ -334,7 +344,7 @@ impl Insn {
             Insn::NewObjRange(slot, argc, v_start) => vec![0x08, *slot, *argc, *v_start],
 
             // ── returns ──────────────────────────────────────────────────────
-            Insn::Return          => vec![0x64],
+            Insn::Return => vec![0x64],
             Insn::ReturnUndefined => vec![0x65],
 
             // ── branches ─────────────────────────────────────────────────────
@@ -378,28 +388,30 @@ impl Insn {
     pub fn byte_len(&self) -> usize {
         match self {
             Insn::LdUndefined | Insn::LdNull | Insn::LdTrue | Insn::LdFalse => 1,
-            Insn::LdAi(_)             => 5,
-            Insn::FLdAi(_)            => 9,
-            Insn::LdaStr(_)           => 3,
+            Insn::LdAi(_) => 5,
+            Insn::FLdAi(_) => 9,
+            Insn::LdaStr(_) => 3,
             Insn::Lda(_) | Insn::Sta(_) => 2,
-            Insn::MovV4(_, _)         => 2,
-            Insn::MovV8(_, _)         => 3,
-            Insn::MovV16(_, _)        => 5,
-            Insn::Add2(_, _) | Insn::Sub2(_, _) |
-            Insn::Mul2(_, _) | Insn::Div2(_, _) => 3,
-            Insn::CallArg0(_)         => 2,
-            Insn::CallArg1(_, _)      => 3,
-            Insn::CallArgs2(_, _, _)  => 4,
+            Insn::MovV4(_, _) => 2,
+            Insn::MovV8(_, _) => 3,
+            Insn::MovV16(_, _) => 5,
+            Insn::Add2(_, _) | Insn::Sub2(_, _) | Insn::Mul2(_, _) | Insn::Div2(_, _) => 3,
+            Insn::CallArg0(_) => 2,
+            Insn::CallArg1(_, _) => 3,
+            Insn::CallArgs2(_, _, _) => 4,
             Insn::CallArgs3(_, _, _, _) => 5,
-            Insn::CallRange(_, _, _)  => 4,
-            Insn::CallThis0(_, _)     => 3,
-            Insn::CallThis1(_, _, _)  => 4,
+            Insn::CallRange(_, _, _) => 4,
+            Insn::CallThis0(_, _) => 3,
+            Insn::CallThis1(_, _, _) => 4,
             Insn::CallThis2(_, _, _, _) => 5,
             Insn::CallThis3(_, _, _, _, _) => 6,
             Insn::CallThisRange(_, _, _) => 4,
-            Insn::TryLdGlobalByName(_, _) |
-            Insn::TryStGlobalByName(_, _) |
-            Insn::LdObjByName(_, _)   => 4,
+            Insn::TryLdGlobalByName(_, _)
+            | Insn::TryStGlobalByName(_, _)
+            | Insn::LdObjByName(_, _) => 4,
+            Insn::LdExternalModuleVar(_) | Insn::StModuleVar(_) => 2,
+            Insn::LdLexVar(_, _) | Insn::StLexVar(_, _) => 2,
+            Insn::ThrowUndefinedIfHoleWithName(_) => 4,
             Insn::StObjByName(_, _, _) => 5,
             Insn::DefineFuncShort(_, _, _) => 5,
             Insn::DefineClassWithBuffer(_, _, _, _, _) => 9,

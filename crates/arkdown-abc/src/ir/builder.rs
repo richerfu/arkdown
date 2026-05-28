@@ -75,6 +75,11 @@ pub fn build_record_with_debug(
         });
     }
 
+    // Collect module import/export records before lowering so bytecode can use
+    // hvigor/es2abc's module-variable opcodes instead of global lookups.
+    let module_record = collect_module_record(&program);
+    let lowering = LoweringContext::from_module_record(&module_record);
+
     let mut methods: Vec<MethodRecord> = Vec::new();
 
     // Build the `func_main_0` method — the module execution entry point.
@@ -82,7 +87,7 @@ pub fn build_record_with_debug(
     // ArkRuntime always invokes `func_main_0` when executing a module buffer.
     // It passes exactly 3 arguments (JSThread*, this, args[]), so `num_args`
     // must be 3 regardless of the actual JS parameter list.
-    let bytecode = compile_program_body(&program, strings, literal_arrays);
+    let bytecode = compile_program_body(&program, strings, literal_arrays, &lowering);
     let num_vregs = estimate_vregs(&bytecode);
     methods.push(MethodRecord {
         name: "func_main_0".to_string(),
@@ -104,7 +109,7 @@ pub fn build_record_with_debug(
             if let Some(id) = &func.id {
                 let func_name = id.name.as_str().to_string();
                 let func_bytecode =
-                    compile_function_body(func.body.as_deref(), strings, literal_arrays);
+                    compile_function_body(func.body.as_deref(), strings, literal_arrays, &lowering);
                 let num_vregs = estimate_vregs(&func_bytecode);
                 methods.push(MethodRecord {
                     name: func_name,
@@ -119,8 +124,12 @@ pub fn build_record_with_debug(
             if let Some(Declaration::FunctionDeclaration(func)) = &export.declaration {
                 if let Some(id) = &func.id {
                     let func_name = id.name.as_str().to_string();
-                    let func_bytecode =
-                        compile_function_body(func.body.as_deref(), strings, literal_arrays);
+                    let func_bytecode = compile_function_body(
+                        func.body.as_deref(),
+                        strings,
+                        literal_arrays,
+                        &lowering,
+                    );
                     let num_vregs = estimate_vregs(&func_bytecode);
                     methods.push(MethodRecord {
                         name: func_name,
@@ -137,7 +146,7 @@ pub fn build_record_with_debug(
     // Compile class method bodies found in the scanned statements.
     // Class declarations inside the IIFE (the common OHOS bundle pattern)
     // produce real bytecode for each lifecycle/method body here.
-    compile_class_method_bodies(scan_stmts, strings, literal_arrays, &mut methods);
+    compile_class_method_bodies(scan_stmts, strings, literal_arrays, &lowering, &mut methods);
 
     // ArkRuntime finds modules by their OHM URL class name format:
     //   "L{bundleName}/{moduleName}/{pathFromEts};"
@@ -155,7 +164,6 @@ pub fn build_record_with_debug(
 
     // Collect module import/export records so that the ABC serializer can emit
     // the compact libpandafile module record buffer used by hvigor/es2abc.
-    let module_record = collect_module_record(&program);
     let module_record_idx = literal_arrays.len();
     literal_arrays.push(module_record_literal_array(&module_record));
     let scope_names_idx = literal_arrays.len();
@@ -218,6 +226,48 @@ fn module_u8_field(name: impl Into<String>) -> FieldRecord {
         type_idx: 0,
         access_flags: 0,
         value: Some(FieldValue::U8(0)),
+    }
+}
+
+#[derive(Debug, Default)]
+struct LoweringContext {
+    import_indices: HashMap<String, u8>,
+    export_indices: HashMap<String, u8>,
+}
+
+impl LoweringContext {
+    fn from_module_record(module_record: &ModuleRecordInfo) -> Self {
+        let import_indices = module_record
+            .regular_imports
+            .iter()
+            .filter_map(|import| {
+                u8::try_from(import.module_request_idx)
+                    .ok()
+                    .map(|idx| (import.local_name.clone(), idx))
+            })
+            .collect();
+        let export_indices = module_record
+            .local_exports
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, export)| {
+                u8::try_from(idx)
+                    .ok()
+                    .map(|idx| (export.local_name.clone(), idx))
+            })
+            .collect();
+        Self {
+            import_indices,
+            export_indices,
+        }
+    }
+
+    fn import_index(&self, name: &str) -> Option<u8> {
+        self.import_indices.get(name).copied()
+    }
+
+    fn export_index(&self, name: &str) -> Option<u8> {
+        self.export_indices.get(name).copied()
     }
 }
 
@@ -337,13 +387,21 @@ fn compile_class_method_bodies(
     stmts: &[Statement<'_>],
     strings: &mut StringTable,
     literal_arrays: &mut Vec<LiteralArray>,
+    lowering: &LoweringContext,
     methods: &mut Vec<MethodRecord>,
 ) {
     for stmt in stmts {
         // Handle `class Foo { ... }` (ClassDeclaration)
         if let Statement::ClassDeclaration(cls) = stmt {
             let class_name = cls.id.as_ref().map(|id| id.name.as_str());
-            compile_class_elements(class_name, &cls.body.body, strings, literal_arrays, methods);
+            compile_class_elements(
+                class_name,
+                &cls.body.body,
+                strings,
+                literal_arrays,
+                lowering,
+                methods,
+            );
             continue;
         }
         if let Statement::ExportDefaultDeclaration(export) = stmt {
@@ -354,6 +412,7 @@ fn compile_class_method_bodies(
                     &cls.body.body,
                     strings,
                     literal_arrays,
+                    lowering,
                     methods,
                 );
             }
@@ -367,6 +426,7 @@ fn compile_class_method_bodies(
                     &cls.body.body,
                     strings,
                     literal_arrays,
+                    lowering,
                     methods,
                 );
             }
@@ -392,6 +452,7 @@ fn compile_class_method_bodies(
                             &cls.body.body,
                             strings,
                             literal_arrays,
+                            lowering,
                             methods,
                         );
                         continue;
@@ -412,11 +473,15 @@ fn compile_class_method_bodies(
                                 Some(arrow.body.as_ref()),
                                 strings,
                                 literal_arrays,
+                                lowering,
                             )
                         }
-                        Expression::FunctionExpression(func) => {
-                            compile_function_body(func.body.as_deref(), strings, literal_arrays)
-                        }
+                        Expression::FunctionExpression(func) => compile_function_body(
+                            func.body.as_deref(),
+                            strings,
+                            literal_arrays,
+                            lowering,
+                        ),
                         _ => {
                             // Simple assignment (e.g. `var __create = Object.create`):
                             // emit a stub method that immediately returns undefined.
@@ -448,6 +513,7 @@ fn compile_class_elements(
     elements: &[ClassElement<'_>],
     strings: &mut StringTable,
     literal_arrays: &mut Vec<LiteralArray>,
+    lowering: &LoweringContext,
     methods: &mut Vec<MethodRecord>,
 ) {
     let class_name = class_name.unwrap_or("_");
@@ -475,8 +541,12 @@ fn compile_class_elements(
                 continue;
             };
             let key_name = suffix_duplicate_method_name(key_name, &mut seen_names);
-            let bytecode =
-                compile_function_body(method.value.body.as_deref(), strings, literal_arrays);
+            let bytecode = compile_function_body(
+                method.value.body.as_deref(),
+                strings,
+                literal_arrays,
+                lowering,
+            );
             let num_vregs = estimate_vregs(&bytecode);
             let num_args = class_method_num_args(method);
             methods.push(MethodRecord {
@@ -578,11 +648,12 @@ fn compile_program_body(
     program: &Program<'_>,
     strings: &mut StringTable,
     literal_arrays: &mut Vec<LiteralArray>,
+    lowering: &LoweringContext,
 ) -> Vec<u8> {
     if let Some(stmts) = extract_iife_stmts(program) {
-        return compile_body_stmts(stmts, strings, literal_arrays);
+        return compile_body_stmts(stmts, strings, literal_arrays, lowering);
     }
-    compile_body_stmts(&program.body, strings, literal_arrays)
+    compile_body_stmts(&program.body, strings, literal_arrays, lowering)
 }
 
 /// Compile a function body's statements, or emit `returnundefined` if absent.
@@ -590,9 +661,10 @@ fn compile_function_body(
     body: Option<&FunctionBody<'_>>,
     strings: &mut StringTable,
     literal_arrays: &mut Vec<LiteralArray>,
+    lowering: &LoweringContext,
 ) -> Vec<u8> {
     match body {
-        Some(fb) => compile_body_stmts(&fb.statements, strings, literal_arrays),
+        Some(fb) => compile_body_stmts(&fb.statements, strings, literal_arrays, lowering),
         None => {
             let mut st = StringTable::default();
             Insn::ReturnUndefined.encode(&mut st)
@@ -605,8 +677,9 @@ fn compile_body_stmts(
     stmts: &[Statement<'_>],
     strings: &mut StringTable,
     literal_arrays: &mut Vec<LiteralArray>,
+    lowering: &LoweringContext,
 ) -> Vec<u8> {
-    let mut cg = CodeGen::new(strings, literal_arrays);
+    let mut cg = CodeGen::new(strings, literal_arrays, lowering);
     for stmt in stmts {
         cg.emit_stmt(stmt);
         if cg.returned {
@@ -622,6 +695,7 @@ struct CodeGen<'a> {
     strings: &'a mut StringTable,
     /// Literal arrays accumulated by class definitions.
     literal_arrays: &'a mut Vec<LiteralArray>,
+    lowering: &'a LoweringContext,
     /// Raw bytecode bytes accumulated so far.
     insns: Vec<u8>,
     /// Maps JS binding name → virtual register number.
@@ -634,10 +708,15 @@ struct CodeGen<'a> {
 }
 
 impl<'a> CodeGen<'a> {
-    fn new(strings: &'a mut StringTable, literal_arrays: &'a mut Vec<LiteralArray>) -> Self {
+    fn new(
+        strings: &'a mut StringTable,
+        literal_arrays: &'a mut Vec<LiteralArray>,
+        lowering: &'a LoweringContext,
+    ) -> Self {
         CodeGen {
             strings,
             literal_arrays,
+            lowering,
             insns: Vec::new(),
             var_regs: HashMap::new(),
             next_reg: 0,
@@ -715,6 +794,10 @@ impl<'a> CodeGen<'a> {
                     let name_id = self.intern(&name);
                     self.push(Insn::Lda(reg));
                     self.push(Insn::TryStGlobalByName(0, name_id));
+                    if let Some(export_index) = self.lowering.export_index(&name) {
+                        self.push(Insn::Lda(reg));
+                        self.push(Insn::StModuleVar(export_index));
+                    }
                 }
             }
             Statement::ExportDefaultDeclaration(export) => {
@@ -730,6 +813,10 @@ impl<'a> CodeGen<'a> {
                         let name_id = self.intern(&name);
                         self.push(Insn::Lda(reg));
                         self.push(Insn::TryStGlobalByName(0, name_id));
+                        if let Some(export_index) = self.lowering.export_index(&name) {
+                            self.push(Insn::Lda(reg));
+                            self.push(Insn::StModuleVar(export_index));
+                        }
                     }
                 }
             }
@@ -746,6 +833,10 @@ impl<'a> CodeGen<'a> {
                         let name_id = self.intern(&name);
                         self.push(Insn::Lda(reg));
                         self.push(Insn::TryStGlobalByName(0, name_id));
+                        if let Some(export_index) = self.lowering.export_index(&name) {
+                            self.push(Insn::Lda(reg));
+                            self.push(Insn::StModuleVar(export_index));
+                        }
                     }
                 }
             }
@@ -917,6 +1008,10 @@ impl<'a> CodeGen<'a> {
                     _ => {
                         if let Some(&reg) = self.var_regs.get(name) {
                             self.push(Insn::Lda(reg));
+                        } else if let Some(import_index) = self.lowering.import_index(name) {
+                            self.push(Insn::LdExternalModuleVar(import_index));
+                            let name_id = self.intern(name);
+                            self.push(Insn::ThrowUndefinedIfHoleWithName(name_id));
                         } else {
                             let name_id = self.intern(name);
                             self.push(Insn::TryLdGlobalByName(0, name_id));
