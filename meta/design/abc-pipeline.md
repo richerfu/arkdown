@@ -158,6 +158,39 @@ When `opt_level = 0` (debug builds):
 - Source positions chain: `.ets` → bundled JS (rolldown source map) → `.abc` offsets
 - DevEco Studio debugger reads this chain to show breakpoints in `.ets` source
 
+### DebugInfoItem binary layout
+
+Each method with debug info emits one `DebugInfoItem` followed by one `LineNumberProgramItem`:
+
+```
+DebugInfoItem:
+  line_start:           ULEB128    # initial 1-based source line
+  num_parameters:       ULEB128    # count of named formal parameters
+    [× ULEB128 string_idx]         # file offset of each parameter name StringItem
+  constant_pool_count:  ULEB128    # count of constant pool entries (= 1 for source file)
+    [× ULEB128 string_idx]         # file offset of each string (entry 0 = source file path)
+  lnp_index:            ULEB128    # index into the LNP index table in the file header
+```
+
+`constant_pool_count` is the **count of entries**, not the byte length of encoded values.
+One entry is always emitted: the file offset of the source file `StringItem`.
+
+### LineNumberProgramItem opcodes
+
+```
+0x00  END_SEQUENCE                    # terminates the program
+0x01  ADVANCE_PC    (ULEB128 delta)   # advance pc without emitting a row
+0x02  ADVANCE_LINE  (SLEB128 delta)   # change line counter without emitting a row
+0x03  START_LOCAL   (str_u32, reg_u8, type_str_u32)  # begin variable scope
+0x04  END_LOCAL     (reg_u8)          # end variable scope
+0x05  SET_FILE      (str_u32)         # set current source file (4-byte LE file offset)
+0x07  SET_PROLOGUE_END               # mark end of function prologue
+0x08+ SPECIAL_OPCODE                 # combined PC+line advance: op = (pc/15)*15 + (line%15) + 0x08
+```
+
+Minimum valid LNP body: `[0x05, <4 bytes source file string offset LE>, 0x00]`
+(SET_FILE pointing at the class source file + END_SEQUENCE).
+
 ---
 
 ## 8. Optimization Levels

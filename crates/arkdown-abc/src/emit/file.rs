@@ -532,6 +532,9 @@ impl AbcFile {
             let mut lnp_buf = Vec::new();
             let mut debug_cur = code_cur;
             let mut lnp_index = 0u32;
+            // Collect the source-file string offset for each LNP in emission order
+            // so the LNP body can embed the correct SET_FILE operand.
+            let mut lnp_source_file_offs: Vec<u32> = Vec::with_capacity(num_lnp as usize);
 
             for (class_idx, class) in all_classes.iter().enumerate() {
                 let mut class_offsets = Vec::with_capacity(class.methods.len());
@@ -544,6 +547,7 @@ impl AbcFile {
                         let bytes = encode_debug_info(debug.line_start, source_file_off, lnp_index);
                         debug_cur += bytes.len() as u32;
                         debug_buf.extend_from_slice(&bytes);
+                        lnp_source_file_offs.push(source_file_off);
                         lnp_index += 1;
                     } else {
                         class_offsets.push(None);
@@ -554,11 +558,13 @@ impl AbcFile {
 
             let mut lnp_offsets = Vec::with_capacity(num_lnp as usize);
             let mut lnp_cur = debug_cur;
-            for _ in 0..num_lnp {
+            for &src_off in &lnp_source_file_offs {
                 lnp_offsets.push(lnp_cur);
-                // LineNumberProgramItem opcodes: SET_FILE, END_SEQUENCE.
-                lnp_buf.extend_from_slice(&[0x09, 0x00]);
-                lnp_cur += 2;
+                // SET_FILE (0x05) + 4-byte string offset LE + END_SEQUENCE (0x00).
+                lnp_buf.push(0x05);
+                lnp_buf.extend_from_slice(&src_off.to_le_bytes());
+                lnp_buf.push(0x00);
+                lnp_cur += 6;
             }
 
             debug_assert_eq!(lnp_index, num_lnp);
@@ -920,12 +926,14 @@ fn adler32(data: &[u8]) -> u32 {
 }
 
 fn encode_debug_info(line_start: u32, source_file_offset: u32, lnp_index: u32) -> Vec<u8> {
-    let mut constant_pool = uleb128(source_file_offset as u64);
-    let mut out = Vec::with_capacity(8 + constant_pool.len());
+    let source_file_entry = uleb128(source_file_offset as u64);
+    let mut out = Vec::with_capacity(8 + source_file_entry.len());
     out.extend_from_slice(&uleb128(line_start as u64));
     out.extend_from_slice(&uleb128(0)); // num_parameters
-    out.extend_from_slice(&uleb128(constant_pool.len() as u64));
-    out.append(&mut constant_pool);
+    // constant_pool_count = 1: one entry — the source file string offset.
+    // Use count (1), not byte length, to match libpandafile DebugInfoItem layout.
+    out.extend_from_slice(&uleb128(1));
+    out.extend_from_slice(&source_file_entry);
     out.extend_from_slice(&uleb128(lnp_index as u64));
     out
 }

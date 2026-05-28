@@ -224,6 +224,7 @@ pub fn build_record_with_debug(
             method.debug_info = Some(DebugInfoRecord {
                 line_start: 1,
                 source_file: file.clone(),
+                param_names: vec![],
             });
         }
     }

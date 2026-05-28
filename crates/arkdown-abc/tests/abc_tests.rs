@@ -702,16 +702,13 @@ fn test_source_map_emits_source_file_debug_info_and_lnp() {
     let mut pos = debug_info as usize;
     assert_eq!(read_uleb(&bytes, &mut pos), 1, "line_start is 1");
     assert_eq!(read_uleb(&bytes, &mut pos), 0, "no parameter names emitted");
-    let cp_len = read_uleb(&bytes, &mut pos) as usize;
-    let cp_start = pos;
-    let mut cp_pos = cp_start;
+    let cp_count = read_uleb(&bytes, &mut pos) as usize;
+    assert_eq!(cp_count, 1, "constant pool has exactly one entry: the source file offset");
     assert_eq!(
-        read_uleb(&bytes, &mut cp_pos),
+        read_uleb(&bytes, &mut pos),
         class_source_file as u64,
         "DebugInfo constant pool stores the source file offset"
     );
-    assert_eq!(cp_pos, cp_start + cp_len);
-    pos += cp_len;
     assert_eq!(
         read_uleb(&bytes, &mut pos),
         0,
@@ -719,11 +716,13 @@ fn test_source_map_emits_source_file_debug_info_and_lnp() {
     );
 
     let lnp_offset = read_u32(&bytes, lnp_idx_off) as usize;
+    assert_eq!(bytes[lnp_offset], 0x05, "LNP starts with SET_FILE opcode");
     assert_eq!(
-        &bytes[lnp_offset..lnp_offset + 2],
-        &[0x09, 0x00],
-        "minimal LNP sets source file then ends"
+        read_u32(&bytes, lnp_offset + 1),
+        class_source_file,
+        "SET_FILE operand is the source file string offset"
     );
+    assert_eq!(bytes[lnp_offset + 5], 0x00, "LNP ends with END_SEQUENCE");
 }
 
 // ── New opcode coverage tests ────────────────────────────────────────────────

@@ -103,6 +103,9 @@ pub struct DebugInfoRecord {
     pub line_start: u32,
     /// Source file path stored in the class SOURCE_FILE tag and LNP SET_FILE.
     pub source_file: String,
+    /// Formal parameter names, parallel to the method's parameter list.
+    /// Empty for methods whose params are unnamed or not tracked.
+    pub param_names: Vec<String>,
 }
 
 /// A field (instance or static) in a Panda `ClassItem`.
