@@ -55,7 +55,7 @@ fn run_build(fixture: &PathBuf) -> PathBuf {
         .src_path
         .join("build/default/intermediates/res/module.json");
     processor
-        .write_module_json(&manifest, &module_json_out)
+        .write_module_json(&manifest, &module_json_out, None)
         .expect("write_module_json");
 
     // Resource compilation

@@ -75,49 +75,68 @@ pub async fn run(args: BuildArgs) -> Result<()> {
 
     let config_arc = Arc::new(config);
 
-    // Step 2: Profile processing
+    // Step 2: Resource compilation + Profile processing.
+    // Resources must be compiled first so their numeric IDs (iconId, labelId,
+    // descriptionId) can be embedded in module.json by write_module_json.
     progress.step(2, 6, "Processing profiles");
     let processor = ProfileProcessor::new(config_arc.clone());
     let mut loader_jsons = Vec::new();
     for module in &config_arc.modules {
-        let module_json5_path = module.src_path.join("src/main/module.json5");
-        let module_json5 = read_module_json5(&module_json5_path)?;
-        let (manifest, loader_json) = processor
-            .process_module(module, &module_json5)
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-
-        // Write merged module.json for HAP (app + module sections with virtualMachine, compileMode)
-        let module_json_out = module
-            .src_path
-            .join("build/default/intermediates/res/module.json");
-        processor
-            .write_module_json(&manifest, &module_json_out)
-            .map_err(|e| anyhow::anyhow!("write module.json failed: {}", e))?;
-
-        loader_jsons.push((module.clone(), manifest, loader_json));
-    }
-    progress.done();
-
-    // Steps 3 & 4: Resources + Bundling
-    progress.step(3, 6, "Compiling resources + bundling");
-    let mut bundle_outs = Vec::new();
-    for (module, _manifest, loader_json) in &loader_jsons {
-        // Resource compilation
+        // --- Resource compilation (precedes profile so IDs are available) ---
         let resource_compiler = ResourceCompiler::new(ResourceCompileConfig {
             package_name: config_arc.product.bundle_name.clone(),
             module_name: module.name.clone(),
             device_types: vec!["phone".to_string()],
             is_debug: matches!(config_arc.build_mode, BuildMode::Debug),
         });
-        let res_dir = module.src_path.join("src/main/resources");
         let res_out = module.src_path.join("build/default/intermediates/res");
-        if res_dir.exists() {
-            let _ = resource_compiler.compile(ResourceCompileInput {
-                resources_dirs: vec![res_dir],
-                output_dir: res_out,
-            });
+        // Include AppScope/resources so app-level icon/label IDs are assigned.
+        let mut res_dirs: Vec<PathBuf> = vec![];
+        let app_scope_res = project_root.join("AppScope/resources");
+        if app_scope_res.exists() {
+            res_dirs.push(app_scope_res);
         }
+        let module_res_dir = module.src_path.join("src/main/resources");
+        if module_res_dir.exists() {
+            res_dirs.push(module_res_dir);
+        }
+        let resource_ids: HashMap<String, u32> = if !res_dirs.is_empty() {
+            match resource_compiler.compile(ResourceCompileInput {
+                resources_dirs: res_dirs,
+                output_dir: res_out.clone(),
+            }) {
+                Ok(out) => out.resource_ids,
+                Err(e) => {
+                    eprintln!("[warn] resource compilation failed: {e}");
+                    HashMap::new()
+                }
+            }
+        } else {
+            HashMap::new()
+        };
 
+        // --- Profile processing ---
+        let module_json5_path = module.src_path.join("src/main/module.json5");
+        let module_json5 = read_module_json5(&module_json5_path)?;
+        let (manifest, loader_json) = processor
+            .process_module(module, &module_json5)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        // Write merged module.json; pass resource_ids so iconId/labelId/descriptionId
+        // are resolved from the just-compiled resources.
+        let module_json_out = res_out.join("module.json");
+        processor
+            .write_module_json(&manifest, &module_json_out, Some(&resource_ids))
+            .map_err(|e| anyhow::anyhow!("write module.json failed: {}", e))?;
+
+        loader_jsons.push((module.clone(), manifest, loader_json));
+    }
+    progress.done();
+
+    // Step 3: Bundling
+    progress.step(3, 6, "Bundling");
+    let mut bundle_outs = Vec::new();
+    for (module, _manifest, loader_json) in &loader_jsons {
         // Clean stale .js files from previous builds so that collect_js_chunks_from_output
         // (which uses the explicit file list) is the authoritative source, and any leftover
         // files from a prior run do not sneak into the ABC compiler.
@@ -357,6 +376,7 @@ fn read_module_json5(path: &std::path::Path) -> Result<ModuleJson5> {
                 main_element: None,
                 device_types: vec!["phone".to_string()],
                 pages: None,
+                description: None,
                 abilities: vec![],
                 extension_abilities: vec![],
                 src_entry: None,

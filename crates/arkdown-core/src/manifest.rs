@@ -66,6 +66,9 @@ pub struct HapManifest {
     /// e.g. `"$profile:main_pages"`
     pub pages: Option<String>,
     pub main_element: Option<String>,
+    /// Module-level description resource reference, e.g. `"$string:module_desc"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,6 +119,9 @@ pub struct ModuleJson5Module {
     #[serde(default)]
     pub device_types: Vec<String>,
     pub pages: Option<String>,
+    /// Module description resource reference, e.g. `"$string:module_desc"`.
+    #[serde(default)]
+    pub description: Option<String>,
     #[serde(default)]
     pub abilities: Vec<AbilityConfig>,
     #[serde(default)]

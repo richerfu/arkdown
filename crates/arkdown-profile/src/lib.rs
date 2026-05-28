@@ -24,6 +24,7 @@ pub use loader_json::{ByteCodeHarEntry, LoaderJson, PkgBriefInfo, generate_loade
 pub use process_profile::process_profile;
 pub use router_map::{RouterMapEntry, collect_router_entries};
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -86,10 +87,15 @@ impl ProfileProcessor {
     /// The output is a standard JSON file (not JSON5) combining:
     /// - `app` section from `AppScope/app.json5` (falls back to config values)
     /// - `module` section from the processed manifest (with `virtualMachine` and `compileMode`)
+    ///
+    /// If `resource_ids` is provided, resource references in `icon`/`label` (app section)
+    /// and `description` (module section) are resolved to numeric IDs and written as
+    /// `iconId`, `labelId`, and `descriptionId` respectively.
     pub fn write_module_json(
         &self,
         manifest: &HapManifest,
         output_path: &Path,
+        resource_ids: Option<&HashMap<String, u32>>,
     ) -> Result<(), ArkdownError> {
         // Read AppScope/app.json5 for the app section
         let app_json5_path = self.config.project_root.join("AppScope/app.json5");
@@ -133,9 +139,23 @@ impl ProfileProcessor {
             obj.insert("apiReleaseType".into(), "Release".into());
             obj.insert("asanEnabled".into(), is_debug.into());
             obj.entry("appEnvironments").or_insert_with(|| serde_json::Value::Array(vec![]));
+
+            // Resolve $media:name / $string:name references to numeric IDs.
+            if let Some(ids) = resource_ids {
+                if let Some(icon_ref) = obj.get("icon").and_then(|v| v.as_str()).map(|s| s.to_string()) {
+                    if let Some(id) = resolve_res_ref(&icon_ref, ids) {
+                        obj.insert("iconId".into(), (id as u64).into());
+                    }
+                }
+                if let Some(label_ref) = obj.get("label").and_then(|v| v.as_str()).map(|s| s.to_string()) {
+                    if let Some(id) = resolve_res_ref(&label_ref, ids) {
+                        obj.insert("labelId".into(), (id as u64).into());
+                    }
+                }
+            }
         }
 
-        let module_section = manifest_to_json(manifest);
+        let module_section = manifest_to_json(manifest, resource_ids);
 
         let combined = serde_json::json!({
             "app": app_section,
@@ -154,6 +174,19 @@ impl ProfileProcessor {
 
         Ok(())
     }
+}
+
+/// Resolve a resource reference string like `"$media:icon"` or `"$string:app_name"`
+/// to a numeric resource ID by looking up the name part in `resource_ids`.
+///
+/// Returns `None` if `value` is not a `$type:name` reference or the name is not found.
+fn resolve_res_ref(value: &str, resource_ids: &HashMap<String, u32>) -> Option<u32> {
+    if !value.starts_with('$') {
+        return None;
+    }
+    // Format: "$type:name" — take everything after the ':'
+    let name = value.splitn(2, ':').nth(1)?;
+    resource_ids.get(name).copied()
 }
 
 /// Convert an [`OhosModuleType`] to its lowercase string representation.
@@ -175,7 +208,7 @@ fn compile_mode_str(m: &CompileMode) -> &'static str {
 }
 
 /// Build the `module` JSON object from a processed [`HapManifest`].
-fn manifest_to_json(manifest: &HapManifest) -> serde_json::Value {
+fn manifest_to_json(manifest: &HapManifest, resource_ids: Option<&HashMap<String, u32>>) -> serde_json::Value {
     let abilities: Vec<serde_json::Value> = manifest
         .abilities
         .iter()
@@ -214,6 +247,13 @@ fn manifest_to_json(manifest: &HapManifest) -> serde_json::Value {
 
     if let Some(pages) = &manifest.pages {
         obj["pages"] = serde_json::Value::String(pages.clone());
+    }
+
+    // Resolve module-level description resource reference to a numeric ID.
+    if let (Some(desc_ref), Some(ids)) = (manifest.description.as_deref(), resource_ids) {
+        if let Some(id) = resolve_res_ref(desc_ref, ids) {
+            obj["descriptionId"] = (id as u64).into();
+        }
     }
 
     obj
@@ -276,6 +316,7 @@ mod tests {
                 main_element: Some("EntryAbility".to_string()),
                 device_types: vec!["phone".to_string()],
                 pages: Some("$profile:main_pages".to_string()),
+                description: None,
                 abilities: vec![AbilityConfig {
                     name: "EntryAbility".to_string(),
                     src_entry: "./ets/entryability/EntryAbility.ets".to_string(),

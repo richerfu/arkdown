@@ -267,6 +267,7 @@ mod tests {
             router_map: None,
             pages: Some("$profile:main_pages".to_string()),
             main_element: Some("EntryAbility".to_string()),
+            description: None,
         }
     }
 

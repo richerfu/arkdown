@@ -4,6 +4,7 @@
 //! element JSON files, copies media and profile files, and writes
 //! `resources.index` and `ResourceTable.txt` to the output directory.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use crate::{element, index, scan, table};
 use crate::error::ResourceError;
@@ -40,6 +41,11 @@ pub struct ResourceCompileOutput {
     pub resource_table: PathBuf,
     /// `(name, path)` pairs for every profile file that was copied.
     pub profiles: Vec<(String, PathBuf)>,
+    /// Map of resource name → assigned numeric ID (e.g. `"app_name"` → `0x01000000`).
+    ///
+    /// These IDs are used by the profile processor to write `iconId`, `labelId`, and
+    /// `descriptionId` into `module.json`.
+    pub resource_ids: HashMap<String, u32>,
 }
 
 /// A single compiled resource entry ready to be written to `resources.index`.
@@ -83,6 +89,8 @@ impl ResourceCompiler {
         let mut profiles: Vec<(String, PathBuf)> = Vec::new();
         // Resource IDs start at 0x01000000 and increment monotonically.
         let mut next_id: u32 = 0x0100_0000;
+        // Tracks name → numeric ID for every resource that is assigned an ID.
+        let mut resource_ids: HashMap<String, u32> = HashMap::new();
 
         for res_dir in &input.resources_dirs {
             let files = scan::scan_resources(res_dir);
@@ -92,6 +100,7 @@ impl ResourceCompiler {
                     ResourceCategory::Element => {
                         let entries = element::parse_element_file(&file.path);
                         for e in entries {
+                            resource_ids.insert(e.name.clone(), next_id);
                             all_entries.push(CompiledEntry {
                                 id: next_id,
                                 entry_type: e.entry_type.resource_type_id(),
@@ -109,6 +118,7 @@ impl ResourceCompiler {
                         let filename = file.path.file_name().expect("media file has no filename");
                         let out_path = media_out_dir.join(filename);
                         fs_err::copy(&file.path, &out_path)?;
+                        resource_ids.insert(file.name.clone(), next_id);
                         all_entries.push(CompiledEntry {
                             id: next_id,
                             entry_type: 0x1, // MEDIA type
@@ -147,6 +157,7 @@ impl ResourceCompiler {
             resources_index: index_path,
             resource_table: table_path,
             profiles,
+            resource_ids,
         })
     }
 }
@@ -294,6 +305,7 @@ mod tests {
             .unwrap();
 
         let bytes = fs::read(&result.resources_index).unwrap();
-        assert_eq!(&bytes[0..4], &0xF00F_1234_u32.to_le_bytes());
+        // RestoolV2 magic: ASCII "RestoolV2 " (10 bytes)
+        assert_eq!(&bytes[0..10], b"RestoolV2 ");
     }
 }
