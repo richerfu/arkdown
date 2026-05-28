@@ -129,6 +129,13 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             .write_module_json(&manifest, &module_json_out, Some(&resource_ids))
             .map_err(|e| anyhow::anyhow!("write module.json failed: {}", e))?;
 
+        let loader_json_out = module
+            .src_path
+            .join("build/default/intermediates/loader/default/loader.json");
+        processor
+            .write_loader_json(&loader_json, &loader_json_out)
+            .map_err(|e| anyhow::anyhow!("write loader.json failed: {}", e))?;
+
         loader_jsons.push((module.clone(), manifest, loader_json));
     }
     progress.done();

@@ -277,9 +277,20 @@ fn test_write_and_read_loader_json_roundtrip() {
     let content = std::fs::read_to_string(&out_path).expect("read loader.json");
     let parsed: arkdown_profile::LoaderJson =
         serde_json::from_str(&content).expect("loader.json must be valid JSON");
-    assert_eq!(parsed.build_mode, loader.build_mode);
+    assert_eq!(parsed.compile_mode, "esmodule");
     assert_eq!(parsed.package_manager_type, "ohpm");
-    assert_eq!(parsed.compile_entry, loader.compile_entry);
+    assert!(
+        !loader.compile_entry.is_empty(),
+        "internal bundler entries must remain available"
+    );
+    assert!(
+        parsed.hvigor_compile_entry.is_empty(),
+        "minimal hvigor loader.json compileEntry must be empty"
+    );
+    assert!(
+        parsed.compile_entry.is_empty(),
+        "serialized loader.json must not repopulate internal bundler entries"
+    );
 }
 
 #[test]
@@ -290,11 +301,16 @@ fn test_write_loader_json_creates_parent_dirs() {
     let (_, loader) = processor.process_module(&module_cfg, &json5).unwrap();
 
     let tmp = tempfile::tempdir().expect("tempdir");
-    let out_path = tmp.path().join("deeply/nested/build/loader.json");
+    let out_path = tmp
+        .path()
+        .join("entry/build/default/intermediates/loader/default/loader.json");
 
     processor
         .write_loader_json(&loader, &out_path)
         .expect("write_loader_json must create parent directories");
 
-    assert!(out_path.exists(), "loader.json must be written even with missing parent dirs");
+    assert!(
+        out_path.exists(),
+        "loader.json must be written at the hvigor intermediate path"
+    );
 }

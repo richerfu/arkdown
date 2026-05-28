@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -8,54 +9,84 @@ use arkdown_core::{ArkdownConfig, BuildMode, HapManifest, ModuleConfig};
 // loader.json schema types
 // ---------------------------------------------------------------------------
 
-/// Top-level `loader.json` structure consumed by `arkdown-loader`.
+/// Top-level `loader.json` structure.
 ///
-/// This is generated from [`generate_loader_json`] and written by
-/// [`crate::ProfileProcessor::write_loader_json`].
+/// The serialized fields match the hvigor `GenerateLoaderJson` artifact. The
+/// skipped fields are retained for arkdown's in-process bundler, which still
+/// needs an explicit entry list and output paths.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LoaderJson {
-    /// Ordered list of entry-point source paths / OHM URLs.
-    pub compile_entry: Vec<String>,
+    /// Map of module name → absolute module root path.
+    pub module_path_map: HashMap<String, String>,
+    /// hvigor compile mode string, e.g. `"esmodule"`.
+    pub compile_mode: String,
     /// Absolute path to the project root directory.
     pub project_root_path: String,
-    /// Absolute path to the module source root directory (e.g. `<project>/entry/src/main`).
-    pub module_root_path: String,
-    /// Absolute path to the incremental compilation cache directory.
-    pub cache_path: String,
-    /// Absolute path where the ArkTS loader writes its output `.js` files.
-    pub ace_module_build: String,
-    /// `"debug"` or `"release"`.
-    pub build_mode: String,
-    /// Whether the bundler may split output into multiple chunks.
-    pub support_chunks: bool,
-    /// Whether OHM URL module identifiers are used in the bundle graph.
-    pub use_normalized_ohm_url: bool,
-    /// Package manager type — always `"ohpm"` for OHOS projects.
-    pub package_manager_type: String,
+    /// hvigor node_modules sandbox path under `intermediates/loader_out`.
+    pub node_modules_path: String,
+    /// ByteCode HAR dependency metadata.
+    pub byte_code_har_info: HashMap<String, ByteCodeHarEntry>,
+    /// ByteCode HAR declaration entries. Empty for the minimal HAP fixture.
+    pub declaration_entry: Vec<String>,
     /// The OHOS module name (e.g. `"entry"`).
     pub module_name: String,
-    /// Numeric SDK API version (e.g. `12`).
-    pub api_version: u32,
-    /// Map of module name → absolute module root path.
-    #[serde(rename = "modulePathMap")]
-    pub module_path_map: HashMap<String, String>,
-    /// Whether to fall back to AN (Ark Native) build. Always `false`.
-    pub fallback_an_build: bool,
-    /// Map of package name → brief package info (source roots, etc.).
-    #[serde(rename = "pkgNameToPkgBriefInfo")]
-    pub pkg_name_to_pkg_brief_info: HashMap<String, PkgBriefInfo>,
-    /// ByteCode HAR dependency metadata.
-    #[serde(rename = "byteCodeHarInfo")]
-    pub byte_code_har_info: HashMap<String, ByteCodeHarEntry>,
     /// HSP package name → OHM URL map.
-    #[serde(rename = "hspNameOhmMap")]
     pub hsp_name_ohm_map: HashMap<String, String>,
     /// HAR package name → OHM URL map.
-    #[serde(rename = "harNameOhmMap")]
     pub har_name_ohm_map: HashMap<String, String>,
+    /// Package manager type — `"ohpm"` for OHOS projects.
+    pub package_manager_type: String,
+    /// hvigor's serialized compile entries. Empty for the minimal HAP fixture.
+    #[serde(rename = "compileEntry")]
+    pub hvigor_compile_entry: Vec<String>,
+    /// Additional compile files emitted by hvigor. Empty for the minimal fixture.
+    pub other_compile_files: Vec<String>,
+    /// Dynamic import metadata. Empty until dependency collection is implemented.
+    pub dynamic_import_lib_info: HashMap<String, serde_json::Value>,
+    /// Router map entries. Empty for the minimal fixture.
+    pub router_map: Vec<serde_json::Value>,
+    /// HSP resource table map. Empty for the minimal fixture.
+    pub hsp_resources_map: HashMap<String, String>,
+    /// Incremental update metadata. Empty for the minimal fixture.
+    pub update_version_info: HashMap<String, serde_json::Value>,
+    /// Ark Native output path emitted by hvigor.
+    pub an_build_out_put: String,
+    /// Ark Native build mode emitted by hvigor.
+    pub an_build_mode: String,
+
+    /// Ordered list of entry-point source paths used by arkdown's bundler.
+    #[serde(skip)]
+    pub compile_entry: Vec<String>,
+    /// Absolute path to the module source root directory (e.g. `<project>/entry/src/main`).
+    #[serde(skip)]
+    pub module_root_path: String,
+    /// Absolute path to the incremental compilation cache directory.
+    #[serde(skip)]
+    pub cache_path: String,
+    /// Absolute path where the ArkTS loader writes its output `.js` files.
+    #[serde(skip)]
+    pub ace_module_build: String,
+    /// `"debug"` or `"release"`.
+    #[serde(skip, default = "default_build_mode")]
+    pub build_mode: String,
+    /// Whether the bundler may split output into multiple chunks.
+    #[serde(skip)]
+    pub support_chunks: bool,
+    /// Whether OHM URL module identifiers are used in the bundle graph.
+    #[serde(skip)]
+    pub use_normalized_ohm_url: bool,
+    /// Numeric SDK API version (e.g. `12`).
+    #[serde(skip)]
+    pub api_version: u32,
+    /// Whether to fall back to AN (Ark Native) build.
+    #[serde(skip)]
+    pub fallback_an_build: bool,
+    /// Map of package name → brief package info (source roots, etc.).
+    #[serde(skip)]
+    pub pkg_name_to_pkg_brief_info: HashMap<String, PkgBriefInfo>,
     /// WebWorker source file paths.
-    #[serde(default)]
+    #[serde(skip)]
     pub workers: Vec<String>,
 }
 
@@ -83,6 +114,10 @@ pub struct ByteCodeHarEntry {
     pub abc_path: String,
     /// Compatible SDK version string (e.g. `"5.0.0(12)"`).
     pub compatible_sdk_version: String,
+}
+
+fn default_build_mode() -> String {
+    "debug".to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -151,14 +186,20 @@ pub fn generate_loader_json(
         compile_entry.retain(|e| seen.insert(e.clone()));
     }
 
-    let module_root = module_cfg.src_path.to_string_lossy().to_string();
-    let project_root = config.project_root.to_string_lossy().to_string();
+    let module_root = normalize_path_string(&module_cfg.src_path);
+    let project_root = normalize_path_string(&config.project_root);
     let src_main = format!("{}/src/main", module_root);
 
     let build_mode_str = match config.build_mode {
         BuildMode::Debug => "debug".to_string(),
         BuildMode::Release => "release".to_string(),
     };
+
+    let compile_mode = match manifest.compile_mode {
+        arkdown_core::CompileMode::EsModule => "esmodule",
+        arkdown_core::CompileMode::JsBundle => "jsbundle",
+    }
+    .to_string();
 
     let use_normalized_ohm_url = config
         .product
@@ -170,29 +211,47 @@ pub fn generate_loader_json(
     module_path_map.insert(module_cfg.name.clone(), module_root.clone());
 
     LoaderJson {
-        compile_entry,
+        module_path_map,
+        compile_mode,
         project_root_path: project_root.clone(),
+        node_modules_path: format!(
+            "{}/build/default/intermediates/loader_out/default/node_modules",
+            module_root
+        ),
+        byte_code_har_info: HashMap::new(),
+        declaration_entry: vec![],
+        module_name: module_cfg.name.clone(),
+        hsp_name_ohm_map: HashMap::new(),
+        har_name_ohm_map: HashMap::new(),
+        package_manager_type: "ohpm".to_string(),
+        hvigor_compile_entry: vec![],
+        other_compile_files: vec![],
+        dynamic_import_lib_info: HashMap::new(),
+        router_map: vec![],
+        hsp_resources_map: HashMap::new(),
+        update_version_info: HashMap::new(),
+        an_build_out_put: format!(
+            "{}/build/default/intermediates/loader_out/default/an/arm64-v8a",
+            module_root
+        ),
+        an_build_mode: "type".to_string(),
+
+        compile_entry,
         module_root_path: src_main.clone(),
         cache_path: format!(
-            "{}/build/default/intermediates/ets/default/cache/",
+            "{}/build/default/intermediates/loader_out/default/ets/cache/",
             module_root
         ),
         ace_module_build: format!(
-            "{}/build/default/intermediates/ets/default/loader_out/",
+            "{}/build/default/intermediates/loader_out/default/ets/",
             module_root
         ),
         build_mode: build_mode_str,
         support_chunks: false,
         use_normalized_ohm_url,
-        package_manager_type: "ohpm".to_string(),
-        module_name: module_cfg.name.clone(),
         api_version: config.sdk_config.compile_api_version,
-        module_path_map,
         fallback_an_build: false,
         pkg_name_to_pkg_brief_info: build_pkg_brief_info(config, module_cfg),
-        byte_code_har_info: HashMap::new(),
-        hsp_name_ohm_map: HashMap::new(),
-        har_name_ohm_map: HashMap::new(),
         workers: vec![],
     }
 }
@@ -206,7 +265,7 @@ fn build_pkg_brief_info(
     module_cfg: &ModuleConfig,
 ) -> HashMap<String, PkgBriefInfo> {
     let mut map = HashMap::new();
-    let module_root = module_cfg.src_path.to_string_lossy().to_string();
+    let module_root = normalize_path_string(&module_cfg.src_path);
     let ets_src = format!("{}/src/main/ets", module_root);
 
     map.insert(
@@ -219,6 +278,26 @@ fn build_pkg_brief_info(
         },
     );
     map
+}
+
+fn normalize_path_string(path: &Path) -> String {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        ".".to_string()
+    } else {
+        normalized.to_string_lossy().to_string()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -288,8 +367,11 @@ mod tests {
                 name: "EntryAbility".to_string(),
                 src_entry: "./ets/entryability/EntryAbility.ets".to_string(),
                 exported: true,
-                icon: None, label: None, description: None,
-                start_window_icon: None, start_window_background: None,
+                icon: None,
+                label: None,
+                description: None,
+                start_window_icon: None,
+                start_window_background: None,
             }],
             extension_abilities: vec![],
             dependencies: vec![],
@@ -313,26 +395,23 @@ mod tests {
         let json_str = serde_json::to_string_pretty(&loader).expect("serialization failed");
 
         // Deserialize back
-        let loader2: LoaderJson =
-            serde_json::from_str(&json_str).expect("deserialization failed");
+        let loader2: LoaderJson = serde_json::from_str(&json_str).expect("deserialization failed");
 
-        // Verify key fields survived the round-trip
-        assert_eq!(loader2.build_mode, "debug");
+        // Verify serialized hvigor fields survived the round-trip. Internal
+        // bundler-only fields are intentionally not part of loader.json.
+        assert_eq!(loader2.compile_mode, "esmodule");
         assert_eq!(loader2.package_manager_type, "ohpm");
-        assert!(!loader2.use_normalized_ohm_url);
-        assert!(!loader2.support_chunks);
         assert_eq!(loader2.project_root_path, "/project");
-        assert_eq!(loader2.module_root_path, "/project/entry/src/main");
-        assert_eq!(loader2.compile_entry.len(), 1);
         assert_eq!(
-            loader2.compile_entry[0],
-            "./ets/entryability/EntryAbility.ets"
+            loader2.node_modules_path,
+            "/project/entry/build/default/intermediates/loader_out/default/node_modules"
         );
+        assert!(loader2.hvigor_compile_entry.is_empty());
+        assert!(loader2.other_compile_files.is_empty());
         assert_eq!(loader2.module_name, "entry");
-        assert_eq!(loader2.api_version, 12);
         assert!(loader2.module_path_map.contains_key("entry"));
         assert_eq!(loader2.module_path_map["entry"], "/project/entry");
-        assert!(!loader2.fallback_an_build);
+        assert_eq!(loader2.an_build_mode, "type");
     }
 
     #[test]
@@ -346,38 +425,88 @@ mod tests {
     }
 
     #[test]
-    fn test_loader_json_camel_case_keys() {
+    fn test_loader_json_hvigor_keys() {
         let config = make_config(false);
         let module_cfg = make_module_cfg();
         let manifest = make_manifest();
 
         let loader = generate_loader_json(&config, &module_cfg, &manifest);
-        let json_str = serde_json::to_string(&loader).expect("serialization failed");
+        let value = serde_json::to_value(&loader).expect("serialization failed");
+        let keys = value
+            .as_object()
+            .expect("loader.json must serialize as object")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
 
-        // camelCase keys must be present
-        assert!(json_str.contains("compileEntry"), "missing compileEntry");
-        assert!(json_str.contains("projectRootPath"), "missing projectRootPath");
-        assert!(json_str.contains("moduleRootPath"), "missing moduleRootPath");
-        assert!(json_str.contains("cachePath"), "missing cachePath");
-        assert!(
-            json_str.contains("aceModuleBuild"),
-            "missing aceModuleBuild"
+        assert_eq!(
+            keys,
+            vec![
+                "anBuildMode",
+                "anBuildOutPut",
+                "byteCodeHarInfo",
+                "compileEntry",
+                "compileMode",
+                "declarationEntry",
+                "dynamicImportLibInfo",
+                "harNameOhmMap",
+                "hspNameOhmMap",
+                "hspResourcesMap",
+                "moduleName",
+                "modulePathMap",
+                "nodeModulesPath",
+                "otherCompileFiles",
+                "packageManagerType",
+                "projectRootPath",
+                "routerMap",
+                "updateVersionInfo",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>()
         );
-        assert!(json_str.contains("buildMode"), "missing buildMode");
-        assert!(json_str.contains("supportChunks"), "missing supportChunks");
-        assert!(
-            json_str.contains("useNormalizedOHMUrl") || json_str.contains("useNormalizedOhmUrl"),
-            "missing useNormalizedOHMUrl"
+        assert!(value.get("apiVersion").is_none());
+        assert!(value.get("buildMode").is_none());
+        assert!(value.get("supportChunks").is_none());
+        assert!(value.get("useNormalizedOHMUrl").is_none());
+        assert!(value.get("pkgNameToPkgBriefInfo").is_none());
+        assert!(value.get("workers").is_none());
+    }
+
+    #[test]
+    fn test_loader_json_serializes_minimal_hvigor_shape() {
+        let config = make_config(false);
+        let module_cfg = make_module_cfg();
+        let manifest = make_manifest();
+
+        let loader = generate_loader_json(&config, &module_cfg, &manifest);
+        let json = serde_json::to_string_pretty(&loader).expect("serialization failed");
+
+        assert_eq!(
+            json,
+            r#"{
+  "modulePathMap": {
+    "entry": "/project/entry"
+  },
+  "compileMode": "esmodule",
+  "projectRootPath": "/project",
+  "nodeModulesPath": "/project/entry/build/default/intermediates/loader_out/default/node_modules",
+  "byteCodeHarInfo": {},
+  "declarationEntry": [],
+  "moduleName": "entry",
+  "hspNameOhmMap": {},
+  "harNameOhmMap": {},
+  "packageManagerType": "ohpm",
+  "compileEntry": [],
+  "otherCompileFiles": [],
+  "dynamicImportLibInfo": {},
+  "routerMap": [],
+  "hspResourcesMap": {},
+  "updateVersionInfo": {},
+  "anBuildOutPut": "/project/entry/build/default/intermediates/loader_out/default/an/arm64-v8a",
+  "anBuildMode": "type"
+}"#
         );
-        assert!(
-            json_str.contains("pkgNameToPkgBriefInfo"),
-            "missing pkgNameToPkgBriefInfo"
-        );
-        assert!(json_str.contains("moduleName"), "missing moduleName");
-        assert!(json_str.contains("apiVersion"), "missing apiVersion");
-        assert!(json_str.contains("modulePathMap"), "missing modulePathMap");
-        assert!(json_str.contains("fallbackAnBuild"), "missing fallbackAnBuild");
-        assert!(json_str.contains("\"workers\""), "missing workers");
     }
 
     #[test]
@@ -410,6 +539,10 @@ mod tests {
         assert!(
             loader.ace_module_build.starts_with("/project/entry"),
             "ace_module_build should be under module root"
+        );
+        assert_eq!(
+            loader.ace_module_build,
+            "/project/entry/build/default/intermediates/loader_out/default/ets/"
         );
     }
 
@@ -464,6 +597,31 @@ mod tests {
     }
 
     #[test]
+    fn test_loader_json_normalizes_dot_segments_in_hvigor_paths() {
+        let config = ArkdownConfig {
+            project_root: PathBuf::from("/project/./app"),
+            ..make_config(false)
+        };
+        let module_cfg = ModuleConfig {
+            src_path: PathBuf::from("/project/./app/./entry"),
+            ..make_module_cfg()
+        };
+        let manifest = make_manifest();
+
+        let loader = generate_loader_json(&config, &module_cfg, &manifest);
+        assert_eq!(loader.project_root_path, "/project/app");
+        assert_eq!(loader.module_path_map["entry"], "/project/app/entry");
+        assert_eq!(
+            loader.node_modules_path,
+            "/project/app/entry/build/default/intermediates/loader_out/default/node_modules"
+        );
+        assert_eq!(
+            loader.an_build_out_put,
+            "/project/app/entry/build/default/intermediates/loader_out/default/an/arm64-v8a"
+        );
+    }
+
+    #[test]
     fn test_loader_json_fallback_an_build_is_false() {
         let config = make_config(false);
         let module_cfg = make_module_cfg();
@@ -471,5 +629,29 @@ mod tests {
 
         let loader = generate_loader_json(&config, &module_cfg, &manifest);
         assert!(!loader.fallback_an_build);
+    }
+
+    #[test]
+    fn test_loader_json_serialized_compile_entry_is_separate_from_internal_entries() {
+        let config = make_config(false);
+        let module_cfg = make_module_cfg();
+        let manifest = make_manifest();
+
+        let loader = generate_loader_json(&config, &module_cfg, &manifest);
+        assert_eq!(
+            loader.compile_entry,
+            vec!["./ets/entryability/EntryAbility.ets".to_string()]
+        );
+        assert!(loader.hvigor_compile_entry.is_empty());
+
+        let value = serde_json::to_value(&loader).expect("serialization failed");
+        assert_eq!(
+            value
+                .get("compileEntry")
+                .and_then(|v| v.as_array())
+                .unwrap()
+                .len(),
+            0
+        );
     }
 }
