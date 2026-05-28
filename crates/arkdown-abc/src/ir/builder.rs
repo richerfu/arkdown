@@ -186,29 +186,52 @@ fn compile_class_method_bodies(
     methods: &mut Vec<MethodRecord>,
 ) {
     for stmt in stmts {
+        // Handle `class Foo { ... }` (ClassDeclaration)
         if let Statement::ClassDeclaration(cls) = stmt {
-            for element in &cls.body.body {
-                if let ClassElement::MethodDefinition(method) = element {
-                    let key_name = match &method.key {
-                        PropertyKey::StaticIdentifier(id) => id.name.as_str().to_string(),
-                        PropertyKey::StringLiteral(s) => s.value.as_str().to_string(),
-                        _ => continue,
-                    };
-                    let bytecode = compile_function_body(
-                        method.value.body.as_deref(),
-                        strings,
-                        literal_arrays,
-                    );
-                    let num_vregs = estimate_vregs(&bytecode);
-                    let num_args = method.value.params.items.len() as u16;
-                    methods.push(MethodRecord {
-                        name: key_name,
-                        bytecode,
-                        num_vregs,
-                        num_args,
-                    });
+            compile_class_elements(&cls.body.body, strings, literal_arrays, methods);
+            continue;
+        }
+        // Handle `var Foo = class extends Bar { ... }` (VariableDeclaration with ClassExpression)
+        // This is the pattern rolldown CJS output uses.
+        if let Statement::VariableDeclaration(var_decl) = stmt {
+            for declarator in &var_decl.declarations {
+                if let Some(init) = &declarator.init {
+                    if let Expression::ClassExpression(cls) = init {
+                        compile_class_elements(&cls.body.body, strings, literal_arrays, methods);
+                    }
                 }
             }
+        }
+    }
+}
+
+/// Compile method bodies from a class element list and append MethodRecords.
+fn compile_class_elements(
+    elements: &[ClassElement<'_>],
+    strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
+    methods: &mut Vec<MethodRecord>,
+) {
+    for element in elements {
+        if let ClassElement::MethodDefinition(method) = element {
+            let key_name = match &method.key {
+                PropertyKey::StaticIdentifier(id) => id.name.as_str().to_string(),
+                PropertyKey::StringLiteral(s) => s.value.as_str().to_string(),
+                _ => continue,
+            };
+            let bytecode = compile_function_body(
+                method.value.body.as_deref(),
+                strings,
+                literal_arrays,
+            );
+            let num_vregs = estimate_vregs(&bytecode);
+            let num_args = method.value.params.items.len() as u16;
+            methods.push(MethodRecord {
+                name: key_name,
+                bytecode,
+                num_vregs,
+                num_args,
+            });
         }
     }
 }
