@@ -14,6 +14,9 @@ fn uleb128(mut value: u64) -> Vec<u8> {
     out
 }
 
+const METHOD_ITEM_SIZE: usize = 18;
+pub const FIELD_OWNER_CLASS_IDX: u16 = u16::MAX;
+
 /// Encode a Panda `StringItem` as an inline ULEB128-prefixed null-terminated string.
 ///
 /// Panda wire format (from `libpandafile/file_items.h`):
@@ -97,10 +100,27 @@ pub struct MethodRecord {
 pub struct FieldRecord {
     /// Field name string (stored as a StringItem in the file).
     pub name: String,
-    /// Type index (0 = generic; these fields use Panda's dynamic Any type).
+    /// Owning class index in the file IndexHeader class table.
+    ///
+    /// Use [`FIELD_OWNER_CLASS_IDX`] to let serialization fill in the enclosing
+    /// class index after final class-table ordering is known.
+    pub class_idx: u16,
+    /// Field type index in the owning class. hvigor uses `0` for `u8` metadata
+    /// fields and `1` for `u32` metadata fields.
     pub type_idx: u16,
     /// Access flags — 1 = ACC_PUBLIC.
     pub access_flags: u32,
+    /// Optional constant value emitted in the field's tagged section.
+    pub value: Option<FieldValue>,
+}
+
+/// Constant field values used by hvigor module metadata records.
+#[derive(Debug, Clone, Copy)]
+pub enum FieldValue {
+    /// `u8` zero (`FieldTag::VALUE = 0x01`, one-byte payload).
+    U8(u8),
+    /// `u32` file offset (`FieldTag::VALUE = 0x02`, four-byte payload).
+    U32(u32),
 }
 
 /// A compiled module, represented as a Panda `ClassItem`.
@@ -117,6 +137,11 @@ pub struct ClassRecord {
     /// Regular JS module classes use `1` (ACC_PUBLIC).
     /// Annotation stub classes (API 13+) use `0x2001` (ACC_PUBLIC | ACC_ANNOTATION).
     pub access_flags: u32,
+    /// Class and method source-language byte.
+    ///
+    /// hvigor's API 17 output uses `0x04` for user ArkTS records and `0x00`
+    /// for fixed SDK/annotation ECMAScript records.
+    pub source_lang: u8,
     /// Module specifiers referenced by `require("@ohos:xxx")` calls in this
     /// module's code.
     ///
@@ -151,21 +176,53 @@ impl ClassRecord {
         let methods_count = uleb128(self.methods.len() as u64).len();
         // ClassTag::SOURCE_LANG (1) + lang byte (1) + ClassTag::NOTHING (1)
         let class_tags = 3;
-        // Per-field bytes:
-        // class_idx(2) + type_idx(2) + name_off(4) + access_flags_uleb128(1)
-        // + FieldTag::NOTHING(1) = 10 bytes per field
-        let per_field = 10;
+        let field_bytes = self.field_items_byte_size();
         // Per-method bytes:
         // class_idx(2) + proto_idx(2) + name_off(4) + access_flags_uleb128(2)
         // + MethodTag::CODE(1) + code_off(4)
         // + MethodTag::SOURCE_LANG(1) + lang(1) + MethodTag::NOTHING(1)
         // = 18 bytes per method
-        let per_method = 18;
+        let per_method = METHOD_ITEM_SIZE;
 
-        name_bytes + super_off + acc_flags + fields_count + methods_count
+        name_bytes
+            + super_off
+            + acc_flags
+            + fields_count
+            + methods_count
             + class_tags
-            + self.fields.len() * per_field
+            + field_bytes
             + self.methods.len() * per_method
+    }
+
+    /// Return absolute offsets for this class's inline MethodItem records.
+    pub fn method_item_offsets(&self, class_item_offset: u32) -> Vec<u32> {
+        let first_method = class_item_offset + self.method_items_start_offset() as u32;
+        (0..self.methods.len())
+            .map(|idx| first_method + (idx * METHOD_ITEM_SIZE) as u32)
+            .collect()
+    }
+
+    fn method_items_start_offset(&self) -> usize {
+        inline_string(&self.name).len()
+            + 4
+            + uleb128(self.access_flags as u64).len()
+            + uleb128(self.fields.len() as u64).len()
+            + uleb128(self.methods.len() as u64).len()
+            + 3
+            + self.field_items_byte_size()
+    }
+
+    fn field_items_byte_size(&self) -> usize {
+        self.fields
+            .iter()
+            .map(|field| {
+                2 + 2
+                    + 4
+                    + uleb128(field.access_flags as u64).len()
+                    + field.value.map_or(0, FieldValue::encoded_len)
+                    + 1
+            })
+            .sum()
     }
 
     /// Serialize this record into the correct Panda `ClassItem` binary format.
@@ -233,9 +290,9 @@ impl ClassRecord {
 
         // ── ClassTag tagged section ───────────────────────────────────────────
 
-        // ClassTag::SOURCE_LANG = 0x02, lang = 0x00 (ECMAScript)
+        // ClassTag::SOURCE_LANG = 0x02.
         buf.push(0x02);
-        buf.push(0x00);
+        buf.push(self.source_lang);
         // ClassTag::NOTHING = 0x00 (terminates tagged section)
         buf.push(0x00);
 
@@ -249,14 +306,22 @@ impl ClassRecord {
         //   [FieldTag::NOTHING = 0x00]
 
         for (field, &name_off) in self.fields.iter().zip(field_name_offsets.iter()) {
-            // class_idx: u16 LE
-            buf.extend_from_slice(&class_idx.to_le_bytes());
+            // class_idx/type slot: u16 LE
+            let field_class_idx = if field.class_idx == FIELD_OWNER_CLASS_IDX {
+                class_idx
+            } else {
+                field.class_idx
+            };
+            buf.extend_from_slice(&field_class_idx.to_le_bytes());
             // type_idx: u16 LE
             buf.extend_from_slice(&field.type_idx.to_le_bytes());
             // name_off: u32 LE (file offset to field's StringItem)
             buf.extend_from_slice(&name_off.to_le_bytes());
             // access_flags: ULEB128
             buf.extend_from_slice(&uleb128(field.access_flags as u64));
+            if let Some(value) = field.value {
+                value.encode_into(&mut buf);
+            }
             // FieldTag::NOTHING = 0x00
             buf.push(0x00);
         }
@@ -269,8 +334,12 @@ impl ClassRecord {
 
             // class_idx: u16 LE
             buf.extend_from_slice(&class_idx.to_le_bytes());
-            // proto_idx: u16 LE = 0
-            buf.extend_from_slice(&0u16.to_le_bytes());
+            // proto_idx: u16 LE = 0xffff.
+            //
+            // hvigor/es2abc uses this sentinel for JS/ArkTS methods without an
+            // explicit ProtoItem.  Using 0 makes libpandafile resolve proto
+            // index 0, but API 17 output has no proto index table.
+            buf.extend_from_slice(&0xFFFFu16.to_le_bytes());
             // name_off: u32 LE (file offset to method's StringItem)
             buf.extend_from_slice(&name_off.to_le_bytes());
             // access_flags: ULEB128 = 0x108
@@ -281,14 +350,36 @@ impl ClassRecord {
             buf.push(0x01);
             // code_off: u32 LE (file offset to CodeItem)
             buf.extend_from_slice(&code_off.to_le_bytes());
-            // MethodTag::SOURCE_LANG = 0x02, lang = 0x00 (ECMAScript)
+            // MethodTag::SOURCE_LANG = 0x02.
             buf.push(0x02);
-            buf.push(0x00);
+            buf.push(self.source_lang);
             // MethodTag::NOTHING = 0x00
             buf.push(0x00);
         }
 
         buf
+    }
+}
+
+impl FieldValue {
+    fn encoded_len(self) -> usize {
+        match self {
+            FieldValue::U8(_) => 2,
+            FieldValue::U32(_) => 5,
+        }
+    }
+
+    fn encode_into(self, buf: &mut Vec<u8>) {
+        match self {
+            FieldValue::U8(value) => {
+                buf.push(0x01);
+                buf.push(value);
+            }
+            FieldValue::U32(value) => {
+                buf.push(0x02);
+                buf.extend_from_slice(&value.to_le_bytes());
+            }
+        }
     }
 }
 
@@ -338,7 +429,11 @@ mod tests {
         // 264 & 0x7F = 8, set continuation → 0x88
         // 264 >> 7 = 2, no continuation → 0x02
         let encoded = uleb128(0x108);
-        assert_eq!(encoded, vec![0x88, 0x02], "ULEB128(0x108) must encode to [0x88, 0x02]");
+        assert_eq!(
+            encoded,
+            vec![0x88, 0x02],
+            "ULEB128(0x108) must encode to [0x88, 0x02]"
+        );
     }
 
     #[test]
@@ -352,6 +447,7 @@ mod tests {
                 num_args: 3,
             }],
             access_flags: 1,
+            source_lang: 0,
             module_requests: vec![],
             fields: vec![],
         };
@@ -377,6 +473,7 @@ mod tests {
                 num_args: 3,
             }],
             access_flags: 1,
+            source_lang: 0,
             module_requests: vec![],
             fields: vec![],
         };
@@ -403,9 +500,9 @@ mod tests {
         assert_eq!(bytes[19], 0x00, "lang ECMAScript");
         assert_eq!(bytes[20], 0x00, "ClassTag::NOTHING");
 
-        // Method[0]: class_idx=4, proto_idx=0
+        // Method[0]: class_idx=4, proto_idx=0xffff
         assert_eq!(&bytes[21..23], &[0x04, 0x00], "class_idx=4");
-        assert_eq!(&bytes[23..25], &[0x00, 0x00], "proto_idx=0");
+        assert_eq!(&bytes[23..25], &[0xff, 0xff], "proto_idx=0xffff");
         // name_off = 0x12a LE
         assert_eq!(&bytes[25..29], &[0x2a, 0x01, 0x00, 0x00], "name_off=0x12a");
         // access_flags = ULEB128(0x108) = [0x88, 0x02]

@@ -27,6 +27,67 @@ fn iife_module(record_name: &str, source: &str) -> AbcModule {
     }
 }
 
+fn read_u32(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
+}
+
+fn read_uleb(bytes: &[u8], offset: &mut usize) -> u64 {
+    let mut value = 0u64;
+    let mut shift = 0;
+    loop {
+        let byte = bytes[*offset];
+        *offset += 1;
+        value |= ((byte & 0x7f) as u64) << shift;
+        if byte & 0x80 == 0 {
+            return value;
+        }
+        shift += 7;
+    }
+}
+
+fn skip_inline_string(bytes: &[u8], offset: &mut usize) {
+    let header = read_uleb(bytes, offset);
+    let len = (header >> 1) as usize;
+    let is_ascii = header & 1 == 1;
+    *offset += if is_ascii { len + 1 } else { len * 2 + 2 };
+}
+
+fn class_offsets(bytes: &[u8]) -> Vec<u32> {
+    let num_classes = read_u32(bytes, 0x1c) as usize;
+    let class_idx_off = read_u32(bytes, 0x20) as usize;
+    (0..num_classes)
+        .map(|idx| read_u32(bytes, class_idx_off + idx * 4))
+        .collect()
+}
+
+fn class_name_at(bytes: &[u8], offset: usize) -> String {
+    let mut pos = offset;
+    let header = read_uleb(bytes, &mut pos);
+    let len = (header >> 1) as usize;
+    let is_ascii = header & 1 == 1;
+    assert!(is_ascii, "test fixtures use ASCII class names");
+    String::from_utf8(bytes[pos..pos + len].to_vec()).unwrap()
+}
+
+fn class_header_counts(bytes: &[u8], offset: usize) -> (u32, u64, u64, u8, u8, u8) {
+    let mut pos = offset;
+    skip_inline_string(bytes, &mut pos);
+    let super_off = read_u32(bytes, pos);
+    pos += 4;
+    let access_flags = read_uleb(bytes, &mut pos);
+    let fields_count = read_uleb(bytes, &mut pos);
+    let methods_count = read_uleb(bytes, &mut pos);
+    assert_eq!(access_flags, 1);
+    (
+        super_off,
+        fields_count,
+        methods_count,
+        bytes[pos],
+        bytes[pos + 1],
+        bytes[pos + 2],
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Output file creation
 // ---------------------------------------------------------------------------
@@ -86,6 +147,140 @@ fn test_output_has_nonzero_length() {
     assert!(meta.len() > 0, "output .abc file must not be empty");
 }
 
+#[test]
+fn test_literal_array_index_header_is_valid_when_classes_emit_literals() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = tmp.path().join("literal-index.abc");
+    make_compiler()
+        .compile(
+            vec![iife_module(
+                "com.example.app/entry/ets/pages/Index",
+                "(function(){ var Index = class {}; })();",
+            )],
+            &out,
+        )
+        .expect("compile must succeed");
+
+    let bytes = std::fs::read(&out).expect("read .abc");
+    let num_classes = read_u32(&bytes, 0x1c);
+    let class_idx_off = read_u32(&bytes, 0x20);
+    let num_literalarrays = read_u32(&bytes, 0x2c);
+    let literalarray_idx_off = read_u32(&bytes, 0x30);
+    let idx_section_off = read_u32(&bytes, 0x38);
+
+    assert!(
+        num_literalarrays > 0,
+        "class lowering must register a literal array"
+    );
+    assert_eq!(
+        literalarray_idx_off,
+        class_idx_off + num_classes * 4,
+        "literal-array index follows class index in hvigor API 17 layout"
+    );
+    assert_eq!(
+        idx_section_off,
+        literalarray_idx_off + num_literalarrays * 4,
+        "IndexSection follows the literal-array index"
+    );
+
+    let first_literal = read_u32(&bytes, literalarray_idx_off as usize);
+    assert!(
+        first_literal < bytes.len() as u32,
+        "literal-array offsets must point inside the file"
+    );
+
+    let index_start = read_u32(&bytes, idx_section_off as usize);
+    let index_end = read_u32(&bytes, idx_section_off as usize + 4);
+    let index_class_size = read_u32(&bytes, idx_section_off as usize + 8);
+    let index_class_off = read_u32(&bytes, idx_section_off as usize + 12);
+    let index_method_size = read_u32(&bytes, idx_section_off as usize + 16);
+    let index_method_off = read_u32(&bytes, idx_section_off as usize + 20);
+    let index_field_size = read_u32(&bytes, idx_section_off as usize + 24);
+    let index_proto_size = read_u32(&bytes, idx_section_off as usize + 32);
+
+    assert!(index_start < bytes.len() as u32);
+    assert_eq!(index_end, bytes.len() as u32);
+    assert_eq!(
+        index_class_off,
+        idx_section_off + 40,
+        "IndexHeader is followed by its class index array"
+    );
+    assert_eq!(
+        index_method_off,
+        index_class_off + index_class_size * 4,
+        "method/constant index follows class index array"
+    );
+    assert!(
+        index_method_size > 0,
+        "bytecode strings and methods are indexed for id operands"
+    );
+    assert_eq!(read_u32(&bytes, index_class_off as usize), 2);
+    assert_eq!(read_u32(&bytes, index_class_off as usize + 4), 6);
+    assert_eq!(index_field_size, 0xFFFF_FFFF);
+    assert_eq!(index_proto_size, 0xFFFF_FFFF);
+}
+
+#[test]
+fn test_user_records_are_marked_arkts_and_sdk_stubs_have_native_fields() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = tmp.path().join("records.abc");
+    make_compiler()
+        .compile(
+            vec![iife_module(
+                "com.example.app/entry/ets/entryability/EntryAbility",
+                "(function(){ var EntryAbility = class {}; })();",
+            )],
+            &out,
+        )
+        .expect("compile must succeed");
+    let bytes = std::fs::read(&out).expect("read .abc");
+
+    let offsets = class_offsets(&bytes);
+    let sdk_off = offsets
+        .iter()
+        .copied()
+        .find(|off| class_name_at(&bytes, *off as usize) == "L@ohos.app;")
+        .expect("sdk stub record exists") as usize;
+    let user_off = offsets
+        .iter()
+        .copied()
+        .find(|off| {
+            class_name_at(&bytes, *off as usize)
+                == "Lcom.example.app/entry/ets/entryability/EntryAbility;"
+        })
+        .expect("user record exists") as usize;
+
+    let (_, sdk_fields, _, sdk_tag, sdk_lang, sdk_end) = class_header_counts(&bytes, sdk_off);
+    assert_eq!(
+        sdk_fields, 1,
+        "SDK stubs carry one @native field in hvigor output"
+    );
+    assert_eq!((sdk_tag, sdk_lang, sdk_end), (0x02, 0x00, 0x00));
+    assert!(
+        bytes
+            .windows(b"@native.ohos.app".len())
+            .any(|w| w == b"@native.ohos.app"),
+        "SDK native field name must be emitted as a StringItem"
+    );
+
+    let (_, user_fields, _, user_tag, user_lang, user_end) = class_header_counts(&bytes, user_off);
+    assert_eq!(
+        user_fields, 6,
+        "user module records carry six module metadata fields"
+    );
+    assert_eq!(
+        (user_tag, user_lang, user_end),
+        (0x02, 0x04, 0x00),
+        "user records use ArkTS source language byte 0x04"
+    );
+    assert!(
+        bytes
+            .windows(b"pkgName@entry".len())
+            .any(|w| w == b"pkgName@entry"),
+        "pkgName field includes the module name suffix"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // AbcArtifactResult fields
 // ---------------------------------------------------------------------------
@@ -104,7 +299,10 @@ fn test_artifact_api_version_propagated() {
     let result = compiler
         .compile(vec![iife_module("api_test", "(function(){}())")], &out)
         .expect("compile must succeed");
-    assert_eq!(result.api_version, 9, "api_version must match compile option");
+    assert_eq!(
+        result.api_version, 9,
+        "api_version must match compile option"
+    );
 }
 
 #[test]
@@ -114,7 +312,10 @@ fn test_artifact_debug_info_false() {
     let result = make_compiler()
         .compile(vec![iife_module("nodebug", "(function(){}())")], &out)
         .expect("compile must succeed");
-    assert!(!result.has_debug_info, "has_debug_info must be false when debug_info=false");
+    assert!(
+        !result.has_debug_info,
+        "has_debug_info must be false when debug_info=false"
+    );
 }
 
 #[test]
@@ -131,7 +332,10 @@ fn test_artifact_debug_info_true() {
     let result = compiler
         .compile(vec![iife_module("debug_test", "(function(){}())")], &out)
         .expect("compile must succeed");
-    assert!(result.has_debug_info, "has_debug_info must be true when debug_info=true");
+    assert!(
+        result.has_debug_info,
+        "has_debug_info must be true when debug_info=true"
+    );
 }
 
 #[test]
@@ -175,10 +379,7 @@ fn test_compile_empty_source_does_not_panic() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = tmp.path().join("empty.abc");
     // Empty source: either Ok or Err is acceptable — must not panic.
-    let result = make_compiler().compile(
-        vec![iife_module("empty_module", "")],
-        &out,
-    );
+    let result = make_compiler().compile(vec![iife_module("empty_module", "")], &out);
     let _ = result;
 }
 
@@ -195,10 +396,7 @@ fn test_compile_empty_module_list_does_not_panic() {
 fn test_compile_invalid_js_does_not_panic() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = tmp.path().join("invalid.abc");
-    let result = make_compiler().compile(
-        vec![iife_module("bad", "@@@ not javascript !!!")],
-        &out,
-    );
+    let result = make_compiler().compile(vec![iife_module("bad", "@@@ not javascript !!!")], &out);
     // Must not panic regardless of parse outcome.
     let _ = result;
 }
