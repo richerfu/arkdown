@@ -83,3 +83,12 @@ SPEC-001 (core types)
                     │
             SPEC-019 (cache), SPEC-023 (watch)
 ```
+
+---
+
+## Research Documents
+
+| Document | Date | Topic |
+|----------|------|-------|
+| `meta/design/rolldown-integration.md` | 2026-05-28 | Rolldown integration options (i/ii/iii) — verdict: use as reference only |
+| `meta/design/hvigorw-pipeline.md` | 2026-05-28 | Complete hvigorw build pipeline flowchart and plugin inventory |
