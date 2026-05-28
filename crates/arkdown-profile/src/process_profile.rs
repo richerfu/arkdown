@@ -20,9 +20,8 @@ pub fn process_profile(
 
 /// Transform a raw [`ModuleJson5`] using an Ark VM version discovered from the SDK.
 ///
-/// hvigor obtains this by invoking `ts2abc.js --target-api-version <api>` and
-/// writes `module.virtualMachine` as `ark<version>`, for example
-/// `ark12.0.6.0`.
+/// hvigor obtains this from the SDK Ark tooling and writes
+/// `module.virtualMachine` as `ark<version>`, for example `ark12.0.6.0`.
 pub fn process_profile_with_ark_vm_version(
     module_json5: &ModuleJson5,
     ark_vm_version: &str,

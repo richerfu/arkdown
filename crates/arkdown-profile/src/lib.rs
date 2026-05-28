@@ -30,6 +30,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
+use arkdown_config::sdk::discover_ark_vm_version;
 use arkdown_core::{ArkdownConfig, ArkdownError, CompileMode, HapManifest, ModuleConfig, ModuleJson5, OhosModuleType};
 
 /// Top-level driver for profile processing and loader.json generation.
@@ -57,12 +58,25 @@ impl ProfileProcessor {
         module_cfg: &ModuleConfig,
         module_json5: &ModuleJson5,
     ) -> Result<(HapManifest, LoaderJson), ArkdownError> {
-        let manifest = process_profile(
-            module_json5,
+        let discovered_ark_vm_version = discover_ark_vm_version(
+            &self.config.sdk_config.ets_loader_path,
             self.config.sdk_config.compile_api_version,
-            &self.config.product.bundle_name,
-            CompileMode::EsModule,
         );
+        let manifest = if let Some(ark_vm_version) = discovered_ark_vm_version {
+            process_profile_with_ark_vm_version(
+                module_json5,
+                &ark_vm_version,
+                &self.config.product.bundle_name,
+                CompileMode::EsModule,
+            )
+        } else {
+            process_profile(
+                module_json5,
+                self.config.sdk_config.compile_api_version,
+                &self.config.product.bundle_name,
+                CompileMode::EsModule,
+            )
+        };
         let loader = generate_loader_json(&self.config, module_cfg, &manifest);
         Ok((manifest, loader))
     }
@@ -272,7 +286,11 @@ fn manifest_to_json(manifest: &HapManifest, resource_ids: Option<&HashMap<String
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     use arkdown_core::{
         AbilityConfig, ArkdownConfig, BuildMode, BuildOption, ModuleConfig, ModuleJson5,
@@ -347,6 +365,36 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    fn write_fake_es2abc(es2abc: &Path) {
+        fs::create_dir_all(es2abc.parent().expect("es2abc parent"))
+            .expect("create fake es2abc dir");
+        fs::write(
+            es2abc,
+            r#"#!/bin/sh
+stage=""
+previous=""
+for arg in "$@"; do
+  if [ "$previous" = "--target-api-sub-version" ]; then
+    stage="$arg"
+  fi
+  previous="$arg"
+done
+if [ "$stage" = "Release" ]; then
+  printf '12.0.6.0\n'
+else
+  printf '12.0.2.0\n'
+fi
+"#,
+        )
+        .expect("write fake es2abc");
+        let mut permissions = fs::metadata(es2abc)
+            .expect("fake es2abc metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(es2abc, permissions).expect("chmod fake es2abc");
+    }
+
     #[test]
     fn test_profile_processor_process_module() {
         let config = Arc::new(make_config());
@@ -369,6 +417,47 @@ mod tests {
             "./ets/entryability/EntryAbility.ets"
         );
         assert_eq!(loader.build_mode, "debug");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_profile_processor_uses_discovered_ark_vm_version() {
+        let temp_dir = tempfile::tempdir().expect("create temp sdk");
+        let ets_dir = temp_dir.path().join("ets");
+        let ets_loader = ets_dir.join("build-tools").join("ets-loader");
+        let es2abc = ets_loader
+            .join("bin")
+            .join("ark")
+            .join(if cfg!(target_os = "macos") {
+                "build-mac"
+            } else if cfg!(target_os = "windows") {
+                "build-win"
+            } else {
+                "build-linux"
+            })
+            .join("bin")
+            .join("es2abc");
+
+        fs::create_dir_all(&ets_dir).expect("create fake ets dir");
+        fs::write(
+            ets_dir.join("oh-uni-package.json"),
+            r#"{"version":"6.0.1.112","releaseType":"Release"}"#,
+        )
+        .expect("write fake ets metadata");
+        write_fake_es2abc(&es2abc);
+
+        let mut config = make_config();
+        config.sdk_config.ets_loader_path = ets_loader;
+        config.sdk_config.es2abc_path = es2abc;
+        let processor = ProfileProcessor::new(Arc::new(config));
+        let module_cfg = make_module_cfg();
+        let module_json5 = make_module_json5();
+
+        let (manifest, _) = processor
+            .process_module(&module_cfg, &module_json5)
+            .expect("process_module failed");
+
+        assert_eq!(manifest.virtual_machine, "ark12.0.6.0");
     }
 
     #[test]
