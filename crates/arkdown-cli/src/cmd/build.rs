@@ -89,7 +89,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             device_types: vec!["phone".to_string()],
             is_debug: matches!(config_arc.build_mode, BuildMode::Debug),
         });
-        let res_out = module.src_path.join("build/default/intermediates/res");
+        let res_out = module.src_path.join("build/default/intermediates/res/default");
         // Include AppScope/resources so app-level icon/label IDs are assigned.
         let mut res_dirs: Vec<PathBuf> = vec![];
         let app_scope_res = project_root.join("AppScope/resources");
@@ -276,10 +276,10 @@ pub async fn run(args: BuildArgs) -> Result<()> {
     for (module, manifest, _loader_json) in &loader_jsons {
         let module_json = module
             .src_path
-            .join("build/default/intermediates/res/module.json");
+            .join("build/default/intermediates/res/default/module.json");
         let resources_index = module
             .src_path
-            .join("build/default/intermediates/res/resources.index");
+            .join("build/default/intermediates/res/default/resources.index");
         let modules_abc = module
             .src_path
             .join("build/default/intermediates/ets/modules.abc");
@@ -357,7 +357,9 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                                     native_libs: vec![],
                                     output_path: output.clone(),
                                     resources_src_dir: Some(
-                                        module.src_path.join("src/main/resources"),
+                                        module.src_path.join(
+                                            "build/default/intermediates/res/default/resources",
+                                        ),
                                     ),
                                     bundle_version_code: 1000000,
                                     bundle_version_name: "1.0.0".to_string(),
