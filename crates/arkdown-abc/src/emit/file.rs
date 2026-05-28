@@ -1,5 +1,6 @@
 use crate::emit::record::{
-    encode_code_item, inline_string, ClassRecord, FieldRecord, FieldValue, FIELD_OWNER_CLASS_IDX,
+    encode_code_item, inline_string, uleb128, ClassRecord, FieldRecord, FieldValue,
+    FIELD_OWNER_CLASS_IDX,
 };
 use crate::emit::strings::StringTable;
 
@@ -175,6 +176,7 @@ impl AbcFile {
                 methods: vec![],
                 access_flags: 0x0001,
                 source_lang: SOURCE_LANG_ECMASCRIPT,
+                source_file: None,
                 module_requests: vec![],
                 fields: vec![sdk_native_field("@native.ohos.app")],
             },
@@ -183,6 +185,7 @@ impl AbcFile {
                 methods: vec![],
                 access_flags: 0x0001,
                 source_lang: SOURCE_LANG_ECMASCRIPT,
+                source_file: None,
                 module_requests: vec![],
                 fields: vec![sdk_native_field("@native.ohos.curves")],
             },
@@ -191,6 +194,7 @@ impl AbcFile {
                 methods: vec![],
                 access_flags: 0x0001,
                 source_lang: SOURCE_LANG_ECMASCRIPT,
+                source_file: None,
                 module_requests: vec![],
                 fields: vec![sdk_native_field("@native.ohos.matrix4")],
             },
@@ -199,6 +203,7 @@ impl AbcFile {
                 methods: vec![],
                 access_flags: 0x0001,
                 source_lang: SOURCE_LANG_ECMASCRIPT,
+                source_file: None,
                 module_requests: vec![],
                 fields: vec![sdk_native_field("@native.system.app")],
             },
@@ -207,6 +212,7 @@ impl AbcFile {
                 methods: vec![],
                 access_flags: 0x0001,
                 source_lang: SOURCE_LANG_ECMASCRIPT,
+                source_file: None,
                 module_requests: vec![],
                 fields: vec![sdk_native_field("@native.system.curves")],
             },
@@ -215,6 +221,7 @@ impl AbcFile {
                 methods: vec![],
                 access_flags: 0x0001,
                 source_lang: SOURCE_LANG_ECMASCRIPT,
+                source_file: None,
                 module_requests: vec![],
                 fields: vec![sdk_native_field("@native.system.matrix4")],
             },
@@ -223,6 +230,7 @@ impl AbcFile {
                 methods: vec![],
                 access_flags: 0x0001,
                 source_lang: SOURCE_LANG_ECMASCRIPT,
+                source_file: None,
                 module_requests: vec![],
                 fields: vec![sdk_native_field("@native.system.router")],
             },
@@ -237,6 +245,7 @@ impl AbcFile {
                 methods: vec![],
                 access_flags: 0x2001,
                 source_lang: SOURCE_LANG_ECMASCRIPT,
+                source_file: None,
                 module_requests: vec![],
                 fields: vec![],
             },
@@ -245,6 +254,7 @@ impl AbcFile {
                 methods: vec![],
                 access_flags: 0x2001,
                 source_lang: SOURCE_LANG_ECMASCRIPT,
+                source_file: None,
                 module_requests: vec![],
                 fields: vec![],
             },
@@ -271,15 +281,26 @@ impl AbcFile {
             .sum::<u32>();
         let method_index_count = self.strings.len() as u32 + total_methods;
 
-        let num_literal_arrays = self.literal_arrays.len() as u32;
-        let literalarray_idx_off = if num_literal_arrays == 0 {
+        let num_lnp = all_classes
+            .iter()
+            .flat_map(|class| class.methods.iter())
+            .filter(|method| method.debug_info.is_some())
+            .count() as u32;
+        let lnp_idx_off = if num_lnp == 0 {
             0
         } else {
             class_idx_off + total_classes * 4
         };
 
+        let num_literal_arrays = self.literal_arrays.len() as u32;
+        let literalarray_idx_off = if num_literal_arrays == 0 {
+            0
+        } else {
+            class_idx_off + total_classes * 4 + num_lnp * 4
+        };
+
         // IndexSection is placed after the class index and literal-array index.
-        let idx_sect_off = class_idx_off + total_classes * 4 + num_literal_arrays * 4;
+        let idx_sect_off = class_idx_off + total_classes * 4 + num_lnp * 4 + num_literal_arrays * 4;
         let index_class_count = 2 + 1 + self.records.len() as u32 + sdk_stubs.len() as u32;
         let index_header_size: u32 = 40;
         let index_class_idx_off = idx_sect_off + index_header_size;
@@ -354,7 +375,26 @@ impl AbcFile {
             all_field_name_strings.push(f_strings);
         }
 
-        // ── 1d. Compute bytecode StringItem offsets ──────────────────────────
+        // ── 1d. Compute source-file StringItem offsets ───────────────────────
+        //
+        // ClassTag::SOURCE_FILE and method DebugInfo/LNP SET_FILE both point to
+        // a standalone StringItem containing the original source path.
+        let mut source_file_string_offsets: Vec<Option<u32>> = Vec::new();
+        let mut all_source_file_strings: Vec<Option<Vec<u8>>> = Vec::new();
+
+        for class in &all_classes {
+            if let Some(source_file) = &class.source_file {
+                source_file_string_offsets.push(Some(cur));
+                let s = inline_string(source_file);
+                cur += s.len() as u32;
+                all_source_file_strings.push(Some(s));
+            } else {
+                source_file_string_offsets.push(None);
+                all_source_file_strings.push(None);
+            }
+        }
+
+        // ── 1e. Compute bytecode StringItem offsets ──────────────────────────
         //
         // Bytecode id operands use the IndexHeader method/constant index.  The
         // string table indices allocated during lowering therefore need real
@@ -443,15 +483,65 @@ impl AbcFile {
         }
         debug_assert_eq!(method_index_offsets.len() as u32, method_index_count);
 
+        // ── Pre-compute DebugInfo and LineNumberProgram sections ─────────────
+        // Each debug method gets a minimal LNP: SET_FILE, END_SEQUENCE. The
+        // source-file offset is stored in the DebugInfo constant pool, matching
+        // libpandafile's LineNumberProgramItem::EmitSetFile convention.
+        let (debug_info_offsets, debug_info_section, lnp_offsets, lnp_section): (
+            Vec<Vec<Option<u32>>>,
+            Vec<u8>,
+            Vec<u32>,
+            Vec<u8>,
+        ) = {
+            let mut per_class_offsets = Vec::with_capacity(all_classes.len());
+            let mut debug_buf = Vec::new();
+            let mut lnp_buf = Vec::new();
+            let mut debug_cur = code_cur;
+            let mut lnp_index = 0u32;
+
+            for (class_idx, class) in all_classes.iter().enumerate() {
+                let mut class_offsets = Vec::with_capacity(class.methods.len());
+                let source_file_off = source_file_string_offsets[class_idx];
+                for method in &class.methods {
+                    if let (Some(debug), Some(source_file_off)) =
+                        (&method.debug_info, source_file_off)
+                    {
+                        class_offsets.push(Some(debug_cur));
+                        let bytes = encode_debug_info(debug.line_start, source_file_off, lnp_index);
+                        debug_cur += bytes.len() as u32;
+                        debug_buf.extend_from_slice(&bytes);
+                        lnp_index += 1;
+                    } else {
+                        class_offsets.push(None);
+                    }
+                }
+                per_class_offsets.push(class_offsets);
+            }
+
+            let mut lnp_offsets = Vec::with_capacity(num_lnp as usize);
+            let mut lnp_cur = debug_cur;
+            for _ in 0..num_lnp {
+                lnp_offsets.push(lnp_cur);
+                // LineNumberProgramItem opcodes: SET_FILE, END_SEQUENCE.
+                lnp_buf.extend_from_slice(&[0x09, 0x00]);
+                lnp_cur += 2;
+            }
+
+            debug_assert_eq!(lnp_index, num_lnp);
+            (per_class_offsets, debug_buf, lnp_offsets, lnp_buf)
+        };
+
+        let post_lnp_offset = code_cur + debug_info_section.len() as u32 + lnp_section.len() as u32;
+
         // ── Pre-compute LiteralArray section bytes ────────────────────────────
-        // The section is appended after all CodeItems.
+        // The section is appended after all CodeItems and debug sections.
         // Format per LiteralArray:
         //   [num_entries: u32 LE]
         //   Per entry: [tag: u8] [value: variable]
         let (literal_array_offsets, lit_arr_section): (Vec<u32>, Vec<u8>) = {
             let mut buf = Vec::new();
             let mut offsets = Vec::with_capacity(self.literal_arrays.len());
-            let mut offset_cur = code_cur;
+            let mut offset_cur = post_lnp_offset;
             for lit_arr in &self.literal_arrays {
                 offsets.push(offset_cur);
                 let before = buf.len();
@@ -480,7 +570,7 @@ impl AbcFile {
             (offsets, buf)
         };
 
-        let total_size = code_cur + lit_arr_section.len() as u32;
+        let total_size = post_lnp_offset + lit_arr_section.len() as u32;
 
         // ── IndexSection values (computed before emission) ────────────────────
         // class_item_offsets is sorted by class name (same order as all_classes).
@@ -497,8 +587,10 @@ impl AbcFile {
                 class.serialize_class_item(
                     class_idx,
                     &field_name_string_offsets[ci],
+                    source_file_string_offsets[ci],
                     &method_string_offsets[ci],
                     &code_offsets[ci],
+                    &debug_info_offsets[ci],
                 )
             })
             .collect();
@@ -529,8 +621,8 @@ impl AbcFile {
         file.extend_from_slice(&0u32.to_le_bytes()); // 0x18 foreign_size = 0
         file.extend_from_slice(&total_classes.to_le_bytes()); // 0x1C num_classes
         file.extend_from_slice(&class_idx_off.to_le_bytes()); // 0x20 class_idx_off = 0x3C
-        file.extend_from_slice(&0u32.to_le_bytes()); // 0x24 num_lnp = 0
-        file.extend_from_slice(&0u32.to_le_bytes()); // 0x28 lnp_idx_off = 0
+        file.extend_from_slice(&num_lnp.to_le_bytes()); // 0x24 num_lnp
+        file.extend_from_slice(&lnp_idx_off.to_le_bytes()); // 0x28 lnp_idx_off
         file.extend_from_slice(&num_literal_arrays.to_le_bytes()); // 0x2C num_literalarrays
         file.extend_from_slice(&literalarray_idx_off.to_le_bytes()); // 0x30 literalarray_idx_off
         file.extend_from_slice(&1u32.to_le_bytes()); // 0x34 num_idx_regions = 1
@@ -547,7 +639,17 @@ impl AbcFile {
         debug_assert_eq!(
             file.len() as u32,
             class_idx_off + total_classes * 4,
-            "class index must end exactly before the optional literal-array index"
+            "class index must end exactly before the optional LNP index"
+        );
+
+        // ── LineNumberProgram index ─────────────────────────────────────────
+        for offset in &lnp_offsets {
+            file.extend_from_slice(&offset.to_le_bytes());
+        }
+        debug_assert_eq!(
+            file.len() as u32,
+            class_idx_off + total_classes * 4 + num_lnp * 4,
+            "LNP index must end exactly before the optional literal-array index"
         );
 
         // ── LiteralArray index ───────────────────────────────────────────────
@@ -622,6 +724,11 @@ impl AbcFile {
             }
         }
 
+        // ── Source File StringItems ─────────────────────────────────────────
+        for s in all_source_file_strings.iter().flatten() {
+            file.extend_from_slice(s);
+        }
+
         // ── Bytecode StringItems ─────────────────────────────────────────────
         for s in &all_bytecode_strings {
             file.extend_from_slice(s);
@@ -642,6 +749,11 @@ impl AbcFile {
             }
         }
         debug_assert_eq!(file.len() as u32, code_cur);
+
+        // ── DebugInfo and LineNumberProgram sections ────────────────────────
+        file.extend_from_slice(&debug_info_section);
+        file.extend_from_slice(&lnp_section);
+        debug_assert_eq!(file.len() as u32, post_lnp_offset);
 
         // ── LiteralArray section (after all CodeItems) ────────────────────────
         file.extend_from_slice(&lit_arr_section);
@@ -671,6 +783,17 @@ fn adler32(data: &[u8]) -> u32 {
         b = (b + a) % MOD;
     }
     (b << 16) | a
+}
+
+fn encode_debug_info(line_start: u32, source_file_offset: u32, lnp_index: u32) -> Vec<u8> {
+    let mut constant_pool = uleb128(source_file_offset as u64);
+    let mut out = Vec::with_capacity(8 + constant_pool.len());
+    out.extend_from_slice(&uleb128(line_start as u64));
+    out.extend_from_slice(&uleb128(0)); // num_parameters
+    out.extend_from_slice(&uleb128(constant_pool.len() as u64));
+    out.append(&mut constant_pool);
+    out.extend_from_slice(&uleb128(lnp_index as u64));
+    out
 }
 
 impl Default for AbcFile {

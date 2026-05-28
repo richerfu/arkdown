@@ -69,6 +69,15 @@ fn class_name_at(bytes: &[u8], offset: usize) -> String {
     String::from_utf8(bytes[pos..pos + len].to_vec()).unwrap()
 }
 
+fn inline_string_at(bytes: &[u8], offset: usize) -> String {
+    let mut pos = offset;
+    let header = read_uleb(bytes, &mut pos);
+    let len = (header >> 1) as usize;
+    let is_ascii = header & 1 == 1;
+    assert!(is_ascii, "test fixtures use ASCII strings");
+    String::from_utf8(bytes[pos..pos + len].to_vec()).unwrap()
+}
+
 fn class_header_counts(bytes: &[u8], offset: usize) -> (u32, u64, u64, u8, u8, u8) {
     let mut pos = offset;
     skip_inline_string(bytes, &mut pos);
@@ -86,6 +95,69 @@ fn class_header_counts(bytes: &[u8], offset: usize) -> (u32, u64, u64, u8, u8, u
         bytes[pos + 1],
         bytes[pos + 2],
     )
+}
+
+fn first_user_method_debug_info(bytes: &[u8], class_offset: usize) -> (Option<u32>, Option<u32>) {
+    let mut pos = class_offset;
+    skip_inline_string(bytes, &mut pos);
+    pos += 4; // super_class_off
+    let access_flags = read_uleb(bytes, &mut pos);
+    let fields_count = read_uleb(bytes, &mut pos) as usize;
+    let methods_count = read_uleb(bytes, &mut pos) as usize;
+    assert_eq!(access_flags, 1);
+    assert!(methods_count > 0);
+
+    let mut class_source_file = None;
+    loop {
+        let tag = bytes[pos];
+        pos += 1;
+        match tag {
+            0x00 => break,
+            0x02 => pos += 1,
+            0x07 => {
+                class_source_file = Some(read_u32(bytes, pos));
+                pos += 4;
+            }
+            other => panic!("unexpected class tag {other:#x}"),
+        }
+    }
+
+    for _ in 0..fields_count {
+        pos += 2 + 2 + 4;
+        let _access_flags = read_uleb(bytes, &mut pos);
+        loop {
+            let tag = bytes[pos];
+            pos += 1;
+            match tag {
+                0x00 => break,
+                0x01 => pos += 1,
+                0x02 => pos += 4,
+                other => panic!("unexpected field tag {other:#x}"),
+            }
+        }
+    }
+
+    pos += 2 + 2 + 4;
+    let _access_flags = read_uleb(bytes, &mut pos);
+    let mut method_debug_info = None;
+    loop {
+        let tag = bytes[pos];
+        pos += 1;
+        match tag {
+            0x00 => break,
+            0x01 | 0x05 => {
+                let off = read_u32(bytes, pos);
+                pos += 4;
+                if tag == 0x05 {
+                    method_debug_info = Some(off);
+                }
+            }
+            0x02 => pos += 1,
+            other => panic!("unexpected method tag {other:#x}"),
+        }
+    }
+
+    (class_source_file, method_debug_info)
 }
 
 // ---------------------------------------------------------------------------
@@ -418,5 +490,75 @@ fn test_compile_source_map_field_ignored_safely() {
         result.is_ok(),
         "compile with source_map must succeed: {:?}",
         result.err()
+    );
+}
+
+#[test]
+fn test_source_map_emits_source_file_debug_info_and_lnp() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = tmp.path().join("sourcemap-debug.abc");
+    let source_file = "entry/src/main/ets/pages/Index.ts";
+    let result = make_compiler()
+        .compile(
+            vec![AbcModule {
+                record_name: "com.example.app/entry/ets/pages/Index".to_string(),
+                source: "(function(){ var x = 1; })();".to_string(),
+                source_map: Some(format!(
+                    r#"{{"version":3,"sources":["{source_file}"],"mappings":""}}"#
+                )),
+            }],
+            &out,
+        )
+        .expect("compile must succeed");
+    assert!(
+        result.has_debug_info,
+        "source-map backed LNP data marks the artifact as debug-bearing"
+    );
+
+    let bytes = std::fs::read(&out).expect("read .abc");
+    let num_lnp = read_u32(&bytes, 0x24);
+    let lnp_idx_off = read_u32(&bytes, 0x28) as usize;
+    assert_eq!(num_lnp, 1, "one method gets one line-number program");
+    assert!(lnp_idx_off > 0, "LNP index offset must be present");
+
+    let user_off = class_offsets(&bytes)
+        .into_iter()
+        .find(|off| {
+            class_name_at(&bytes, *off as usize) == "Lcom.example.app/entry/ets/pages/Index;"
+        })
+        .expect("user record exists") as usize;
+    let (class_source_file, method_debug_info) = first_user_method_debug_info(&bytes, user_off);
+    let class_source_file = class_source_file.expect("class SOURCE_FILE tag exists");
+    let debug_info = method_debug_info.expect("method DEBUG_INFO tag exists");
+    assert_eq!(
+        inline_string_at(&bytes, class_source_file as usize),
+        source_file,
+        "source_map.sources[0] drives the emitted source file StringItem"
+    );
+
+    let mut pos = debug_info as usize;
+    assert_eq!(read_uleb(&bytes, &mut pos), 1, "line_start is 1");
+    assert_eq!(read_uleb(&bytes, &mut pos), 0, "no parameter names emitted");
+    let cp_len = read_uleb(&bytes, &mut pos) as usize;
+    let cp_start = pos;
+    let mut cp_pos = cp_start;
+    assert_eq!(
+        read_uleb(&bytes, &mut cp_pos),
+        class_source_file as u64,
+        "DebugInfo constant pool stores the source file offset"
+    );
+    assert_eq!(cp_pos, cp_start + cp_len);
+    pos += cp_len;
+    assert_eq!(
+        read_uleb(&bytes, &mut pos),
+        0,
+        "debug info references LNP index 0"
+    );
+
+    let lnp_offset = read_u32(&bytes, lnp_idx_off) as usize;
+    assert_eq!(
+        &bytes[lnp_offset..lnp_offset + 2],
+        &[0x09, 0x00],
+        "minimal LNP sets source file then ends"
     );
 }

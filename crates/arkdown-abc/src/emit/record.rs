@@ -1,5 +1,5 @@
 /// Encode `value` as an unsigned LEB-128 byte sequence.
-fn uleb128(mut value: u64) -> Vec<u8> {
+pub(crate) fn uleb128(mut value: u64) -> Vec<u8> {
     let mut out = Vec::with_capacity(2);
     loop {
         let byte = (value & 0x7F) as u8;
@@ -89,6 +89,18 @@ pub struct MethodRecord {
     /// ArkRuntime always passes **3** arguments when invoking `func_main_0`:
     /// `(JSThread*, JSTaggedValue this, JSTaggedValue[] args)` — set this to 3.
     pub num_args: u16,
+    /// Optional method debug metadata. hvigor/es2abc emits this in non-stripped
+    /// output so ArkRuntime can link bytecode spans back to source files.
+    pub debug_info: Option<DebugInfoRecord>,
+}
+
+/// Minimal method debug info linked through a Panda LineNumberProgram.
+#[derive(Debug, Clone)]
+pub struct DebugInfoRecord {
+    /// Initial 1-based source line for the method.
+    pub line_start: u32,
+    /// Source file path stored in the class SOURCE_FILE tag and LNP SET_FILE.
+    pub source_file: String,
 }
 
 /// A field (instance or static) in a Panda `ClassItem`.
@@ -142,6 +154,8 @@ pub struct ClassRecord {
     /// hvigor's API 17 output uses `0x04` for user ArkTS records and `0x00`
     /// for fixed SDK/annotation ECMAScript records.
     pub source_lang: u8,
+    /// Optional source file path written as ClassTag::SOURCE_FILE.
+    pub source_file: Option<String>,
     /// Module specifiers referenced by `require("@ohos:xxx")` calls in this
     /// module's code.
     ///
@@ -182,24 +196,31 @@ impl ClassRecord {
         // + MethodTag::CODE(1) + code_off(4)
         // + MethodTag::SOURCE_LANG(1) + lang(1) + MethodTag::NOTHING(1)
         // = 18 bytes per method
-        let per_method = METHOD_ITEM_SIZE;
-
         name_bytes
             + super_off
             + acc_flags
             + fields_count
             + methods_count
             + class_tags
+            + self.source_file.as_ref().map_or(0, |_| 1 + 4)
             + field_bytes
-            + self.methods.len() * per_method
+            + self
+                .methods
+                .iter()
+                .map(MethodRecord::method_item_byte_size)
+                .sum::<usize>()
     }
 
     /// Return absolute offsets for this class's inline MethodItem records.
     pub fn method_item_offsets(&self, class_item_offset: u32) -> Vec<u32> {
         let first_method = class_item_offset + self.method_items_start_offset() as u32;
-        (0..self.methods.len())
-            .map(|idx| first_method + (idx * METHOD_ITEM_SIZE) as u32)
-            .collect()
+        let mut offsets = Vec::with_capacity(self.methods.len());
+        let mut cur = first_method;
+        for method in &self.methods {
+            offsets.push(cur);
+            cur += method.method_item_byte_size() as u32;
+        }
+        offsets
     }
 
     fn method_items_start_offset(&self) -> usize {
@@ -209,6 +230,7 @@ impl ClassRecord {
             + uleb128(self.fields.len() as u64).len()
             + uleb128(self.methods.len() as u64).len()
             + 3
+            + self.source_file.as_ref().map_or(0, |_| 1 + 4)
             + self.field_items_byte_size()
     }
 
@@ -262,12 +284,15 @@ impl ClassRecord {
         &self,
         class_idx: u16,
         field_name_offsets: &[u32],
+        source_file_offset: Option<u32>,
         method_name_offsets: &[u32],
         code_offsets: &[u32],
+        debug_info_offsets: &[Option<u32>],
     ) -> Vec<u8> {
         debug_assert_eq!(field_name_offsets.len(), self.fields.len());
         debug_assert_eq!(method_name_offsets.len(), self.methods.len());
         debug_assert_eq!(code_offsets.len(), self.methods.len());
+        debug_assert_eq!(debug_info_offsets.len(), self.methods.len());
 
         let mut buf = Vec::with_capacity(self.class_item_byte_size());
 
@@ -293,6 +318,10 @@ impl ClassRecord {
         // ClassTag::SOURCE_LANG = 0x02.
         buf.push(0x02);
         buf.push(self.source_lang);
+        if let Some(source_file_offset) = source_file_offset {
+            buf.push(0x07);
+            buf.extend_from_slice(&source_file_offset.to_le_bytes());
+        }
         // ClassTag::NOTHING = 0x00 (terminates tagged section)
         buf.push(0x00);
 
@@ -353,11 +382,21 @@ impl ClassRecord {
             // MethodTag::SOURCE_LANG = 0x02.
             buf.push(0x02);
             buf.push(self.source_lang);
+            if let Some(debug_info_off) = debug_info_offsets[i] {
+                buf.push(0x05);
+                buf.extend_from_slice(&debug_info_off.to_le_bytes());
+            }
             // MethodTag::NOTHING = 0x00
             buf.push(0x00);
         }
 
         buf
+    }
+}
+
+impl MethodRecord {
+    fn method_item_byte_size(&self) -> usize {
+        METHOD_ITEM_SIZE + self.debug_info.as_ref().map_or(0, |_| 1 + 4)
     }
 }
 
@@ -445,9 +484,11 @@ mod tests {
                 bytecode: vec![0x65],
                 num_vregs: 0,
                 num_args: 3,
+                debug_info: None,
             }],
             access_flags: 1,
             source_lang: 0,
+            source_file: None,
             module_requests: vec![],
             fields: vec![],
         };
@@ -471,13 +512,15 @@ mod tests {
                 bytecode: vec![0x65],
                 num_vregs: 0,
                 num_args: 3,
+                debug_info: None,
             }],
             access_flags: 1,
             source_lang: 0,
+            source_file: None,
             module_requests: vec![],
             fields: vec![],
         };
-        let bytes = record.serialize_class_item(4, &[], &[0x12a], &[0x1a1]);
+        let bytes = record.serialize_class_item(4, &[], None, &[0x12a], &[0x1a1], &[None]);
         assert_eq!(bytes.len(), record.class_item_byte_size());
 
         // Verify inline class name starts with ULEB128(0x13) = "L_GLOBAL;"
