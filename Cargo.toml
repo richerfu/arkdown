@@ -16,6 +16,7 @@ members = [
     "crates/arkdown-plugin-sensitive-check",
     "crates/arkdown-plugin-ets-transform",
     "crates/arkdown-abc",
+    "crates/arkdown-ts2abc",
     "crates/arkdown-resource",
     "crates/arkdown-profile",
     "crates/arkdown-pack",

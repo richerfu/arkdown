@@ -486,6 +486,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "arkdown-ts2abc"
+version = "0.1.0"
+dependencies = [
+ "arkdown-abc",
+ "fs-err",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "arkdown-watcher"
 version = "0.1.0"
 dependencies = [
