@@ -2,7 +2,8 @@ use std::collections::HashMap;
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    Argument, AssignmentTarget, BindingPattern, Expression, FunctionBody, Program, Statement,
+    Argument, AssignmentTarget, BindingPattern, ClassElement, Expression, FunctionBody, Program,
+    PropertyKey, Statement,
 };
 use oxc_parser::{Parser, ParserReturn};
 use oxc_span::SourceType;
@@ -72,8 +73,14 @@ pub fn build_record(
         num_args: 3,
     });
 
+    // Determine which statement slice to scan for declarations.
+    // If the program is a single IIFE, compile its inner body; otherwise scan
+    // the top-level statements directly.
+    let scan_stmts: &[Statement<'_>] =
+        extract_iife_stmts(&program).unwrap_or(program.body.as_slice());
+
     // Emit a method entry for each named top-level FunctionDeclaration.
-    for stmt in &program.body {
+    for stmt in scan_stmts {
         if let Statement::FunctionDeclaration(func) = stmt {
             if let Some(id) = &func.id {
                 let func_name = id.name.as_str().to_string();
@@ -89,6 +96,11 @@ pub fn build_record(
             }
         }
     }
+
+    // Compile class method bodies found in the scanned statements.
+    // Class declarations inside the IIFE (the common OHOS bundle pattern)
+    // produce real bytecode for each lifecycle/method body here.
+    compile_class_method_bodies(scan_stmts, strings, literal_arrays, &mut methods);
 
     // ArkRuntime finds modules by their OHOS class name format: "L&{module_path}&;"
     // where module_path is e.g. "entry/src/main/ets/entryability/EntryAbility".
@@ -114,21 +126,13 @@ fn estimate_vregs(bytecode: &[u8]) -> u16 {
 
 // ── Program-level compilation ─────────────────────────────────────────────────
 
-/// Compile the top-level program body into bytecode for the `main` method.
-///
-/// Detects the IIFE pattern `(function () { ... })()` and compiles the inner
-/// body directly; the IIFE wrapper is transparent at the bytecode level because
-/// ArkRuntime calls `main` directly.
-fn compile_program_body(
-    program: &Program<'_>,
-    strings: &mut StringTable,
-    literal_arrays: &mut Vec<LiteralArray>,
-) -> Vec<u8> {
-    // Detect a single top-level IIFE.
+/// Return the inner statement slice if `program` consists of a single IIFE,
+/// i.e. `(function () { … })()`.  Otherwise return `None`.
+fn extract_iife_stmts<'a>(program: &'a Program<'_>) -> Option<&'a [Statement<'a>]> {
     if let [Statement::ExpressionStatement(es)] = program.body.as_slice() {
         if let Expression::CallExpression(call) = &es.expression {
             if call.arguments.is_empty() {
-                let inner_stmts = match &call.callee {
+                return match &call.callee {
                     Expression::FunctionExpression(fe) => {
                         fe.body.as_deref().map(|b| b.statements.as_slice())
                     }
@@ -141,13 +145,66 @@ fn compile_program_body(
                     }
                     _ => None,
                 };
-                if let Some(stmts) = inner_stmts {
-                    return compile_body_stmts(stmts, strings, literal_arrays);
+            }
+        }
+    }
+    None
+}
+
+/// Walk `stmts` for `ClassDeclaration`s and compile each method body into a
+/// separate [`MethodRecord`], appending them to `methods`.
+///
+/// This covers the common OHOS bundle pattern where EntryAbility and other
+/// classes are declared inside the top-level IIFE: each lifecycle method
+/// (`onCreate`, `onWindowStageCreate`, etc.) gets its own bytecode record so
+/// ArkRuntime can dispatch to the real implementation.
+fn compile_class_method_bodies(
+    stmts: &[Statement<'_>],
+    strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
+    methods: &mut Vec<MethodRecord>,
+) {
+    for stmt in stmts {
+        if let Statement::ClassDeclaration(cls) = stmt {
+            for element in &cls.body.body {
+                if let ClassElement::MethodDefinition(method) = element {
+                    let key_name = match &method.key {
+                        PropertyKey::StaticIdentifier(id) => id.name.as_str().to_string(),
+                        PropertyKey::StringLiteral(s) => s.value.as_str().to_string(),
+                        _ => continue,
+                    };
+                    let bytecode = compile_function_body(
+                        method.value.body.as_deref(),
+                        strings,
+                        literal_arrays,
+                    );
+                    let num_vregs = estimate_vregs(&bytecode);
+                    let num_args = method.value.params.items.len() as u16;
+                    methods.push(MethodRecord {
+                        name: key_name,
+                        bytecode,
+                        num_vregs,
+                        num_args,
+                    });
                 }
             }
         }
     }
+}
 
+/// Compile the top-level program body into bytecode for the `main` method.
+///
+/// Detects the IIFE pattern `(function () { ... })()` and compiles the inner
+/// body directly; the IIFE wrapper is transparent at the bytecode level because
+/// ArkRuntime calls `main` directly.
+fn compile_program_body(
+    program: &Program<'_>,
+    strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
+) -> Vec<u8> {
+    if let Some(stmts) = extract_iife_stmts(program) {
+        return compile_body_stmts(stmts, strings, literal_arrays);
+    }
     compile_body_stmts(&program.body, strings, literal_arrays)
 }
 
@@ -292,10 +349,7 @@ impl<'a> CodeGen<'a> {
                 }
             }
             Statement::IfStatement(if_stmt) => {
-                self.emit_expr(&if_stmt.test);
-                // Emit a placeholder jeqz offset; branch patching is TODO.
-                self.push(Insn::Jeqz(0));
-                self.emit_stmt(&if_stmt.consequent);
+                self.emit_if_stmt(if_stmt);
             }
             Statement::BlockStatement(block) => {
                 for s in &block.body {
@@ -307,6 +361,82 @@ impl<'a> CodeGen<'a> {
             }
             // Everything else: no bytecode emitted.
             _ => {}
+        }
+    }
+
+    // ── If statement with jump patching ──────────────────────────────────────
+
+    /// Emit an `if (test) { consequent } [else { alternate }]` with correct
+    /// branch offsets.
+    ///
+    /// Layout (no-else):
+    /// ```text
+    ///   <test>
+    ///   jeqz  +N        ← if falsy jump past consequent
+    ///   <consequent>
+    ///   <after>
+    /// ```
+    ///
+    /// Layout (with-else):
+    /// ```text
+    ///   <test>
+    ///   jeqz  +M        ← if falsy jump to alternate
+    ///   <consequent>
+    ///   jmp   +K        ← skip alternate
+    ///   <alternate>
+    ///   <after>
+    /// ```
+    ///
+    /// `Jeqz` encodes a 16-bit signed offset measured from the **start** of the
+    /// `jeqz` instruction itself.  `Jmp` likewise is measured from its own start.
+    fn emit_if_stmt(&mut self, if_stmt: &oxc_ast::ast::IfStatement<'_>) {
+        // 1. Emit the test expression; result in accumulator.
+        self.emit_expr(&if_stmt.test);
+
+        // 2. Emit `jeqz` with a placeholder offset; remember its byte position.
+        let jeqz_pos = self.insns.len();
+        self.push(Insn::Jeqz(0)); // 3 bytes: [0x50, lo, hi]
+
+        // 3. Emit consequent; preserve outer `returned` flag across the branch.
+        let outer_returned = self.returned;
+        self.returned = false;
+        self.emit_stmt(&if_stmt.consequent);
+        let consequent_returned = self.returned;
+        self.returned = outer_returned;
+
+        if let Some(alt) = &if_stmt.alternate {
+            // 4a. Emit `jmp` to skip the alternate; remember its position.
+            let jmp_pos = self.insns.len();
+            self.push(Insn::Jmp(0)); // 3 bytes: [0x4E, lo, hi]
+
+            // Patch jeqz → start of alternate (= current byte position).
+            let alt_start = self.insns.len();
+            let jeqz_offset = (alt_start as i32 - jeqz_pos as i32) as i16;
+            let [lo, hi] = jeqz_offset.to_le_bytes();
+            self.insns[jeqz_pos + 1] = lo;
+            self.insns[jeqz_pos + 2] = hi;
+
+            // 5a. Emit alternate.
+            let alt_outer_returned = self.returned;
+            self.returned = false;
+            self.emit_stmt(alt);
+            let _alt_returned = self.returned;
+            self.returned = alt_outer_returned;
+
+            // Patch jmp → just past the alternate.
+            let end_pos = self.insns.len();
+            let jmp_offset = (end_pos as i32 - jmp_pos as i32) as i16;
+            let [lo2, hi2] = jmp_offset.to_le_bytes();
+            self.insns[jmp_pos + 1] = lo2;
+            self.insns[jmp_pos + 2] = hi2;
+        } else {
+            // 4b. Patch jeqz → just past the consequent (no else branch).
+            let _ = consequent_returned; // informational only for now
+            let end_pos = self.insns.len();
+            let jeqz_offset = (end_pos as i32 - jeqz_pos as i32) as i16;
+            let [lo, hi] = jeqz_offset.to_le_bytes();
+            self.insns[jeqz_pos + 1] = lo;
+            self.insns[jeqz_pos + 2] = hi;
         }
     }
 
@@ -410,6 +540,19 @@ impl<'a> CodeGen<'a> {
                 // so the caller (e.g. emit_var_decl) can assign it as needed.
                 let super_class = cls.super_class.as_ref();
                 self.emit_class_inner(super_class);
+            }
+            Expression::ArrowFunctionExpression(arrow) => {
+                // Arrow function literal: `(params) => { body }`.
+                // Full nested-closure compilation is deferred to SPEC-009 v2.
+                // Emit a `definefuncshort` stub so the accumulator holds a real
+                // callable function object rather than `undefined`.
+                let length = arrow.params.items.len() as u8;
+                self.push(Insn::DefineFuncShort(0, 0, length));
+            }
+            Expression::FunctionExpression(func) => {
+                // Named or anonymous function expression: `function(params) {}`.
+                let length = func.params.items.len() as u8;
+                self.push(Insn::DefineFuncShort(0, 0, length));
             }
             _ => {
                 self.push(Insn::LdUndefined);
