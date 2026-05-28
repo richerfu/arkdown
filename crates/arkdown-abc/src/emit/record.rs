@@ -88,6 +88,21 @@ pub struct MethodRecord {
     pub num_args: u16,
 }
 
+/// A field (instance or static) in a Panda `ClassItem`.
+///
+/// Used to emit the 6 module metadata fields that es2abc always writes:
+/// `pkgName@`, `isCommonjs`, `hasTopLevelAwait`, `isSharedModule`,
+/// `scopeNames`, `moduleRecordIdx`.
+#[derive(Debug)]
+pub struct FieldRecord {
+    /// Field name string (stored as a StringItem in the file).
+    pub name: String,
+    /// Type index (0 = generic; these fields use Panda's dynamic Any type).
+    pub type_idx: u16,
+    /// Access flags — 1 = ACC_PUBLIC.
+    pub access_flags: u32,
+}
+
 /// A compiled module, represented as a Panda `ClassItem`.
 ///
 /// One `ClassRecord` is produced per bundled JavaScript chunk file.
@@ -111,6 +126,11 @@ pub struct ClassRecord {
     /// toward a fully annotated `ModuleRecord`; full `L_ESConcurrentModuleRequestsAnnotation`
     /// field encoding is left as a follow-up.
     pub module_requests: Vec<String>,
+    /// Module metadata fields — the 6 fixed fields that es2abc writes into every
+    /// user class so that ArkRuntime knows how to load this module's dependencies.
+    ///
+    /// Annotation and SDK stub classes leave this empty (`vec![]`).
+    pub fields: Vec<FieldRecord>,
 }
 
 impl ClassRecord {
@@ -125,12 +145,16 @@ impl ClassRecord {
         let super_off = 4;
         // access_flags ULEB128(self.access_flags) — size depends on value
         let acc_flags = uleb128(self.access_flags as u64).len();
-        // fields_count ULEB128(0) = 1 byte
-        let fields_count = 1;
+        // fields_count ULEB128(self.fields.len())
+        let fields_count = uleb128(self.fields.len() as u64).len();
         // methods_count: ULEB128 (1 byte for counts < 128)
         let methods_count = uleb128(self.methods.len() as u64).len();
         // ClassTag::SOURCE_LANG (1) + lang byte (1) + ClassTag::NOTHING (1)
         let class_tags = 3;
+        // Per-field bytes:
+        // class_idx(2) + type_idx(2) + name_off(4) + access_flags_uleb128(1)
+        // + FieldTag::NOTHING(1) = 10 bytes per field
+        let per_field = 10;
         // Per-method bytes:
         // class_idx(2) + proto_idx(2) + name_off(4) + access_flags_uleb128(2)
         // + MethodTag::CODE(1) + code_off(4)
@@ -140,6 +164,7 @@ impl ClassRecord {
 
         name_bytes + super_off + acc_flags + fields_count + methods_count
             + class_tags
+            + self.fields.len() * per_field
             + self.methods.len() * per_method
     }
 
@@ -179,9 +204,11 @@ impl ClassRecord {
     pub fn serialize_class_item(
         &self,
         class_idx: u16,
+        field_name_offsets: &[u32],
         method_name_offsets: &[u32],
         code_offsets: &[u32],
     ) -> Vec<u8> {
+        debug_assert_eq!(field_name_offsets.len(), self.fields.len());
         debug_assert_eq!(method_name_offsets.len(), self.methods.len());
         debug_assert_eq!(code_offsets.len(), self.methods.len());
 
@@ -198,8 +225,8 @@ impl ClassRecord {
         // access_flags: ULEB128 (1 = ACC_PUBLIC for user classes; 0x2001 = ACC_PUBLIC|ACC_ANNOTATION for stubs)
         buf.extend_from_slice(&uleb128(self.access_flags as u64));
 
-        // fields_count: ULEB128 = 0
-        buf.extend_from_slice(&uleb128(0));
+        // fields_count: ULEB128
+        buf.extend_from_slice(&uleb128(self.fields.len() as u64));
 
         // methods_count: ULEB128
         buf.extend_from_slice(&uleb128(self.methods.len() as u64));
@@ -211,6 +238,28 @@ impl ClassRecord {
         buf.push(0x00);
         // ClassTag::NOTHING = 0x00 (terminates tagged section)
         buf.push(0x00);
+
+        // ── FieldItem entries ────────────────────────────────────────────────
+        //
+        // Binary layout per FieldItem (from Panda ABC spec / es2abc output):
+        //   [class_idx: u16 LE]      index of the owning class
+        //   [type_idx: u16 LE]       0 = generic/Any type
+        //   [name_off: u32 LE]       file offset of the field name StringItem
+        //   [access_flags: ULEB128]  1 = ACC_PUBLIC
+        //   [FieldTag::NOTHING = 0x00]
+
+        for (field, &name_off) in self.fields.iter().zip(field_name_offsets.iter()) {
+            // class_idx: u16 LE
+            buf.extend_from_slice(&class_idx.to_le_bytes());
+            // type_idx: u16 LE
+            buf.extend_from_slice(&field.type_idx.to_le_bytes());
+            // name_off: u32 LE (file offset to field's StringItem)
+            buf.extend_from_slice(&name_off.to_le_bytes());
+            // access_flags: ULEB128
+            buf.extend_from_slice(&uleb128(field.access_flags as u64));
+            // FieldTag::NOTHING = 0x00
+            buf.push(0x00);
+        }
 
         // ── MethodItem entries ────────────────────────────────────────────────
 
@@ -304,6 +353,7 @@ mod tests {
             }],
             access_flags: 1,
             module_requests: vec![],
+            fields: vec![],
         };
         // inline_string("L_GLOBAL;") = 11 bytes
         // super_off = 4
@@ -328,8 +378,9 @@ mod tests {
             }],
             access_flags: 1,
             module_requests: vec![],
+            fields: vec![],
         };
-        let bytes = record.serialize_class_item(4, &[0x12a], &[0x1a1]);
+        let bytes = record.serialize_class_item(4, &[], &[0x12a], &[0x1a1]);
         assert_eq!(bytes.len(), record.class_item_byte_size());
 
         // Verify inline class name starts with ULEB128(0x13) = "L_GLOBAL;"

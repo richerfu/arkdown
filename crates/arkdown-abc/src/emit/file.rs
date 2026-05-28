@@ -168,42 +168,49 @@ impl AbcFile {
                 methods: vec![],
                 access_flags: 0x0001,
                 module_requests: vec![],
+                fields: vec![],
             },
             ClassRecord {
                 name: "L@ohos.curves;".to_string(),
                 methods: vec![],
                 access_flags: 0x0001,
                 module_requests: vec![],
+                fields: vec![],
             },
             ClassRecord {
                 name: "L@ohos.matrix4;".to_string(),
                 methods: vec![],
                 access_flags: 0x0001,
                 module_requests: vec![],
+                fields: vec![],
             },
             ClassRecord {
                 name: "L@system.app;".to_string(),
                 methods: vec![],
                 access_flags: 0x0001,
                 module_requests: vec![],
+                fields: vec![],
             },
             ClassRecord {
                 name: "L@system.curves;".to_string(),
                 methods: vec![],
                 access_flags: 0x0001,
                 module_requests: vec![],
+                fields: vec![],
             },
             ClassRecord {
                 name: "L@system.matrix4;".to_string(),
                 methods: vec![],
                 access_flags: 0x0001,
                 module_requests: vec![],
+                fields: vec![],
             },
             ClassRecord {
                 name: "L@system.router;".to_string(),
                 methods: vec![],
                 access_flags: 0x0001,
                 module_requests: vec![],
+                fields: vec![],
             },
         ];
 
@@ -216,12 +223,14 @@ impl AbcFile {
                 methods: vec![],
                 access_flags: 0x2001,
                 module_requests: vec![],
+                fields: vec![],
             },
             ClassRecord {
                 name: "L_ESSlotNumberAnnotation;".to_string(),
                 methods: vec![],
                 access_flags: 0x2001,
                 module_requests: vec![],
+                fields: vec![],
             },
         ];
 
@@ -290,6 +299,28 @@ impl AbcFile {
         // Suppress unused-variable warnings; offsets will be used when full
         // ModuleRecord annotation emission is implemented.
         let _ = &module_req_string_offsets;
+
+        // ── 1c. Compute field StringItem offsets ──────────────────────────────
+        //
+        // Field name strings (e.g. "pkgName@", "isCommonjs", …) are emitted as
+        // standalone StringItems immediately after the module-request strings.
+        // Their file offsets are passed to `serialize_class_item()` so the
+        // FieldItem `name_off` fields point to the correct bytes.
+        let mut field_name_string_offsets: Vec<Vec<u32>> = Vec::new();
+        let mut all_field_name_strings: Vec<Vec<Vec<u8>>> = Vec::new();
+
+        for class in &all_classes {
+            let mut f_offsets = Vec::new();
+            let mut f_strings = Vec::new();
+            for field in &class.fields {
+                f_offsets.push(cur);
+                let s = inline_string(&field.name);
+                cur += s.len() as u32;
+                f_strings.push(s);
+            }
+            field_name_string_offsets.push(f_offsets);
+            all_field_name_strings.push(f_strings);
+        }
 
         // ── 2. Compute ClassItem sizes & start offsets ────────────────────────
         let class_section_start = cur;
@@ -398,6 +429,7 @@ impl AbcFile {
                     .expect("class name must be in sorted list");
                 class.serialize_class_item(
                     class_idx,
+                    &field_name_string_offsets[ci],
                     &method_string_offsets[ci],
                     &code_offsets[ci],
                 )
@@ -503,6 +535,18 @@ impl AbcFile {
                 file.extend_from_slice(s);
             }
         }
+
+        // ── Field Name StringItems ────────────────────────────────────────────
+        //
+        // Emit the field name string for each FieldRecord (e.g. "pkgName@",
+        // "isCommonjs", etc.) so that each FieldItem's `name_off` field can
+        // point to the correct byte offset in the file.
+        for class_field_strings in &all_field_name_strings {
+            for s in class_field_strings {
+                file.extend_from_slice(s);
+            }
+        }
+
         debug_assert_eq!(file.len() as u32, class_section_start);
 
         // ── ClassItems ────────────────────────────────────────────────────────

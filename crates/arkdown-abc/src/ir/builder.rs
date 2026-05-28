@@ -9,7 +9,7 @@ use oxc_parser::{Parser, ParserReturn};
 use oxc_span::SourceType;
 
 use crate::emit::file::LiteralArray;
-use crate::emit::record::{ClassRecord, MethodRecord};
+use crate::emit::record::{ClassRecord, FieldRecord, MethodRecord};
 use crate::emit::strings::StringTable;
 use crate::error::AbcError;
 use crate::ir::opcodes::Insn;
@@ -122,7 +122,19 @@ pub fn build_record(
     // each import specifier by its file offset.
     let module_requests = collect_module_requests(&program);
 
-    Ok(ClassRecord { name: class_name, methods, access_flags: 1, module_requests })
+    // The 6 module metadata fields that es2abc always writes into every user
+    // class record.  ArkRuntime reads these to understand how to load the
+    // module's dependencies.
+    let module_fields = vec![
+        FieldRecord { name: "pkgName@".to_string(), type_idx: 0, access_flags: 1 },
+        FieldRecord { name: "isCommonjs".to_string(), type_idx: 0, access_flags: 1 },
+        FieldRecord { name: "hasTopLevelAwait".to_string(), type_idx: 0, access_flags: 1 },
+        FieldRecord { name: "isSharedModule".to_string(), type_idx: 0, access_flags: 1 },
+        FieldRecord { name: "scopeNames".to_string(), type_idx: 0, access_flags: 1 },
+        FieldRecord { name: "moduleRecordIdx".to_string(), type_idx: 0, access_flags: 1 },
+    ];
+
+    Ok(ClassRecord { name: class_name, methods, access_flags: 1, module_requests, fields: module_fields })
 }
 
 // ── Byte-count heuristics ─────────────────────────────────────────────────────
