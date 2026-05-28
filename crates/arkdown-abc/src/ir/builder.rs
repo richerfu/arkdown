@@ -9,7 +9,9 @@ use oxc_parser::{Parser, ParserReturn};
 use oxc_span::SourceType;
 
 use crate::emit::file::LiteralArray;
-use crate::emit::record::{ClassRecord, FieldRecord, MethodRecord};
+use crate::emit::record::{
+    ClassRecord, FieldRecord, FieldValue, MethodRecord, FIELD_OWNER_CLASS_IDX,
+};
 use crate::emit::strings::StringTable;
 use crate::error::AbcError;
 use crate::ir::opcodes::Insn;
@@ -44,8 +46,12 @@ pub fn build_record(
 ) -> Result<ClassRecord, AbcError> {
     let allocator = Allocator::default();
     let source_type = SourceType::tsx();
-    let ParserReturn { program, panicked, errors, .. } =
-        Parser::new(&allocator, source, source_type).parse();
+    let ParserReturn {
+        program,
+        panicked,
+        errors,
+        ..
+    } = Parser::new(&allocator, source, source_type).parse();
 
     if panicked {
         return Err(AbcError::Parse {
@@ -110,7 +116,7 @@ pub fn build_record(
     // The record_name passed from the CLI is already:
     //   "{bundleName}/{module}/{path}"  (no src/main prefix)
     let class_name = if record_name.contains('/') {
-        format!("L{};", record_name)   // OHM URL format: no & wrappers
+        format!("L{};", record_name) // OHM URL format: no & wrappers
     } else {
         // Bare name (legacy / test path) — fall back to OHOS module class
         format!("L_{};", record_name)
@@ -125,16 +131,50 @@ pub fn build_record(
     // The 6 module metadata fields that es2abc always writes into every user
     // class record.  ArkRuntime reads these to understand how to load the
     // module's dependencies.
+    let module_name = module_name_from_record_name(record_name).unwrap_or("entry");
     let module_fields = vec![
-        FieldRecord { name: "pkgName@".to_string(), type_idx: 0, access_flags: 1 },
-        FieldRecord { name: "isCommonjs".to_string(), type_idx: 0, access_flags: 1 },
-        FieldRecord { name: "hasTopLevelAwait".to_string(), type_idx: 0, access_flags: 1 },
-        FieldRecord { name: "isSharedModule".to_string(), type_idx: 0, access_flags: 1 },
-        FieldRecord { name: "scopeNames".to_string(), type_idx: 0, access_flags: 1 },
-        FieldRecord { name: "moduleRecordIdx".to_string(), type_idx: 0, access_flags: 1 },
+        module_u8_field(format!("pkgName@{module_name}")),
+        module_u8_field("isCommonjs"),
+        module_u8_field("hasTopLevelAwait"),
+        module_u8_field("isSharedModule"),
+        FieldRecord {
+            name: "scopeNames".to_string(),
+            class_idx: FIELD_OWNER_CLASS_IDX,
+            type_idx: 1,
+            access_flags: 0,
+            value: None,
+        },
+        FieldRecord {
+            name: "moduleRecordIdx".to_string(),
+            class_idx: FIELD_OWNER_CLASS_IDX,
+            type_idx: 1,
+            access_flags: 0,
+            value: None,
+        },
     ];
 
-    Ok(ClassRecord { name: class_name, methods, access_flags: 1, module_requests, fields: module_fields })
+    Ok(ClassRecord {
+        name: class_name,
+        methods,
+        access_flags: 1,
+        source_lang: 0x04,
+        module_requests,
+        fields: module_fields,
+    })
+}
+
+fn module_name_from_record_name(record_name: &str) -> Option<&str> {
+    record_name.split('/').nth(1).filter(|s| !s.is_empty())
+}
+
+fn module_u8_field(name: impl Into<String>) -> FieldRecord {
+    FieldRecord {
+        name: name.into(),
+        class_idx: FIELD_OWNER_CLASS_IDX,
+        type_idx: 0,
+        access_flags: 0,
+        value: Some(FieldValue::U8(0)),
+    }
 }
 
 // ── Byte-count heuristics ─────────────────────────────────────────────────────
@@ -226,11 +266,7 @@ fn compile_class_method_bodies(
                             )
                         }
                         Expression::FunctionExpression(func) => {
-                            compile_function_body(
-                                func.body.as_deref(),
-                                strings,
-                                literal_arrays,
-                            )
+                            compile_function_body(func.body.as_deref(), strings, literal_arrays)
                         }
                         _ => {
                             // Simple assignment (e.g. `var __create = Object.create`):
@@ -270,11 +306,8 @@ fn compile_class_elements(
                 PropertyKey::StringLiteral(s) => s.value.as_str().to_string(),
                 _ => continue,
             };
-            let bytecode = compile_function_body(
-                method.value.body.as_deref(),
-                strings,
-                literal_arrays,
-            );
+            let bytecode =
+                compile_function_body(method.value.body.as_deref(), strings, literal_arrays);
             let num_vregs = estimate_vregs(&bytecode);
             let num_args = method.value.params.items.len() as u16;
             methods.push(MethodRecord {
@@ -678,12 +711,16 @@ impl<'a> CodeGen<'a> {
 
         // Register a stub literal array and use its index as buf_id.
         let lit_arr_id = self.literal_arrays.len() as u16;
-        self.literal_arrays.push(LiteralArray { entries: Vec::new() });
+        self.literal_arrays.push(LiteralArray {
+            entries: Vec::new(),
+        });
 
         // Emit defineclasswithbuffer:
         //   slot=0, ctor_id=lit_arr_id (stub), buf_id=lit_arr_id,
         //   proto_argc, proto_vreg
-        self.push(Insn::DefineClassWithBuffer(0, lit_arr_id, lit_arr_id, proto_argc, proto_vreg));
+        self.push(Insn::DefineClassWithBuffer(
+            0, lit_arr_id, lit_arr_id, proto_argc, proto_vreg,
+        ));
     }
 
     // ── Computed member: obj[expr] ────────────────────────────────────────────
@@ -833,25 +870,24 @@ impl<'a> CodeGen<'a> {
 
     fn emit_method_call(&mut self, call: &oxc_ast::ast::CallExpression<'_>, slot: u8) {
         // Extract receiver and method name from the callee.
-        let (recv_expr, method_name): (&Expression<'_>, Option<String>) =
-            match &call.callee {
-                Expression::StaticMemberExpression(mem) => {
-                    (&mem.object, Some(mem.property.name.as_str().to_string()))
-                }
-                Expression::ComputedMemberExpression(mem) => {
-                    let name = if let Expression::StringLiteral(s) = &mem.expression {
-                        Some(s.value.as_str().to_string())
-                    } else {
-                        None
-                    };
-                    (&mem.object, name)
-                }
-                other => {
-                    self.emit_expr(other);
-                    self.push(Insn::CallArg0(slot));
-                    return;
-                }
-            };
+        let (recv_expr, method_name): (&Expression<'_>, Option<String>) = match &call.callee {
+            Expression::StaticMemberExpression(mem) => {
+                (&mem.object, Some(mem.property.name.as_str().to_string()))
+            }
+            Expression::ComputedMemberExpression(mem) => {
+                let name = if let Expression::StringLiteral(s) = &mem.expression {
+                    Some(s.value.as_str().to_string())
+                } else {
+                    None
+                };
+                (&mem.object, name)
+            }
+            other => {
+                self.emit_expr(other);
+                self.push(Insn::CallArg0(slot));
+                return;
+            }
+        };
 
         // Load receiver → this_reg.
         self.emit_expr(recv_expr);

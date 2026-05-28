@@ -1,4 +1,6 @@
-use crate::emit::record::{encode_code_item, inline_string, ClassRecord};
+use crate::emit::record::{
+    encode_code_item, inline_string, ClassRecord, FieldRecord, FieldValue, FIELD_OWNER_CLASS_IDX,
+};
 use crate::emit::strings::StringTable;
 
 // ── LiteralArray types (Task 1) ───────────────────────────────────────────────
@@ -53,6 +55,8 @@ pub const VERSION: u32 = 0x0006_000C;
 /// immediately after the header at offset `class_idx_off = 0x3C`.
 const HEADER_SIZE: usize = 0x3C;
 
+const SOURCE_LANG_ECMASCRIPT: u8 = 0x00;
+
 /// Assembled Panda `.abc` file ready for serialization.
 pub struct AbcFile {
     /// Interned string table for bytecode string operands (`lda.str`,
@@ -66,6 +70,16 @@ pub struct AbcFile {
     /// used in the `DefineClassWithBuffer` opcode.  The section is appended
     /// to the file after all CodeItems.
     pub literal_arrays: Vec<LiteralArray>,
+}
+
+fn sdk_native_field(name: &str) -> FieldRecord {
+    FieldRecord {
+        name: name.to_string(),
+        class_idx: FIELD_OWNER_CLASS_IDX,
+        type_idx: 0,
+        access_flags: 0,
+        value: Some(FieldValue::U8(0)),
+    }
 }
 
 impl AbcFile {
@@ -91,7 +105,7 @@ impl AbcFile {
     /// Offset     Size   Field
     /// 0x00         8    magic            = b"PANDA\x00\x00\x00"
     /// 0x08         4    checksum         = Adler-32 over file[0x0C..]  (patched last)
-    /// 0x0C         4    version          = VERSION (0x0001_000D)
+    /// 0x0C         4    version          = VERSION (0x0006_000C)
     /// 0x10         4    file_size        = total serialized length      (patched)
     /// 0x14         4    foreign_off      = 0   (no foreign section in API 13+)
     /// 0x18         4    foreign_size     = 0
@@ -99,28 +113,21 @@ impl AbcFile {
     /// 0x20         4    class_idx_off    = 0x3C (immediately after header)
     /// 0x24         4    num_lnp          = 0   (no line-number programs)
     /// 0x28         4    lnp_idx_off      = 0
-    /// 0x2C         4                     = 0xFFFFFFFF  (unused marker)
-    /// 0x30         4                     = 0xFFFFFFFF  (unused marker)
+    /// 0x2C         4    num_literalarrays
+    /// 0x30         4    literalarray_idx_off
     /// 0x34         4    num_idx_regions  = 1
-    /// 0x38         4    idx_section_off  = 0x3C + num_classes * 4
-    ///                                      (immediately after class index)
+    /// 0x38         4    idx_section_off  = after class and literal-array indexes
     ///
     /// ── class index (at 0x3C) ─────────────────────────────────────────────
     ///      4*N    class_idx  [u32 file-offsets, sorted alphabetically by name]
     ///
-    /// ── IndexSection (60 bytes, immediately after class index) ───────────
-    ///        4    region_start      = first_class_off
-    ///        4    region_end        = file_size
-    ///        4    num_entries       = num_classes
-    ///        4    entity_id_0       = idx_sect_off + 40
-    ///        4    tag_0             = 1
-    ///        4    entity_id_1       = idx_sect_off + 56
-    ///     4*4    padding            = 0xFFFFFFFF
-    ///        4    2                 (static sub-table header)
-    ///        4    6                 (num standard module fields, static)
-    ///        4    first_class_off   (= class_offsets[0])
-    ///        4    last_class_off    (= class_offsets[N-1])
-    ///        4    class_section_end (= code_section_start)
+    /// ── literal-array index ──────────────────────────────────────────────
+    ///      4*M    literal array file offsets
+    ///
+    /// ── IndexSection ─────────────────────────────────────────────────────
+    ///       40    libpandafile `IndexHeader`
+    ///      4*N    class index table used by FieldItem/MethodItem class_idx
+    ///      4*K    method/constant index table used by bytecode id operands
     ///
     /// ── method StringItems ────────────────────────────────────────────────
     ///          ?    one ULEB128-prefixed StringItem per method per class
@@ -134,12 +141,11 @@ impl AbcFile {
     ///
     /// ## Annotation stub classes (API 13+)
     ///
-    /// API 13+ replaces old API 9 stubs.  All three are regular ClassItems
+    /// API 13+ replaces old API 9 stubs. hvigor emits two regular ClassItems
     /// with 0 fields, 0 methods, and access_flags = 0x2001 (ACC_PUBLIC |
     /// ACC_ANNOTATION):
     ///
     /// * `L_ESConcurrentModuleRequestsAnnotation;`
-    /// * `L_ESExpectedPropertyCountAnnotation;`
     /// * `L_ESSlotNumberAnnotation;`
     ///
     /// There is **no** ForeignClassItem or foreign section.
@@ -151,66 +157,74 @@ impl AbcFile {
     /// depend on the offset values themselves, only on method counts), derive
     /// CodeItem start offsets, then serialize with correct absolute offsets.
     pub fn serialize(&self) -> Vec<u8> {
-        // ── SDK framework foreign class stubs ────────────────────────────────
+        // ── SDK framework namespace stubs ────────────────────────────────────
         //
-        // hvigorw always emits these 7 empty ClassItems as placeholder stubs for
-        // the OHOS SDK runtime namespaces.  They are NOT derived from the user's
-        // imports — they are a fixed set present in every merged ABC file.
+        // hvigorw always emits these 7 ClassItems as placeholder stubs for the
+        // OHOS SDK runtime namespaces, each with one `@native.*` u8 field.
+        // They are NOT derived from the user's imports — they are a fixed set
+        // present in every merged ABC file.
         //
         // Class names start with 'L@' (0x40) so they sort before 'L_' annotation
         // stubs (0x5F) and before user class names that start with 'L' followed by
         // a bundle letter.
         //
-        // access_flags = 0x0001 (ACC_PUBLIC): regular empty class, not an annotation.
+        // access_flags = 0x0001 (ACC_PUBLIC): regular class, not an annotation.
         let sdk_stubs = [
             ClassRecord {
                 name: "L@ohos.app;".to_string(),
                 methods: vec![],
                 access_flags: 0x0001,
+                source_lang: SOURCE_LANG_ECMASCRIPT,
                 module_requests: vec![],
-                fields: vec![],
+                fields: vec![sdk_native_field("@native.ohos.app")],
             },
             ClassRecord {
                 name: "L@ohos.curves;".to_string(),
                 methods: vec![],
                 access_flags: 0x0001,
+                source_lang: SOURCE_LANG_ECMASCRIPT,
                 module_requests: vec![],
-                fields: vec![],
+                fields: vec![sdk_native_field("@native.ohos.curves")],
             },
             ClassRecord {
                 name: "L@ohos.matrix4;".to_string(),
                 methods: vec![],
                 access_flags: 0x0001,
+                source_lang: SOURCE_LANG_ECMASCRIPT,
                 module_requests: vec![],
-                fields: vec![],
+                fields: vec![sdk_native_field("@native.ohos.matrix4")],
             },
             ClassRecord {
                 name: "L@system.app;".to_string(),
                 methods: vec![],
                 access_flags: 0x0001,
+                source_lang: SOURCE_LANG_ECMASCRIPT,
                 module_requests: vec![],
-                fields: vec![],
+                fields: vec![sdk_native_field("@native.system.app")],
             },
             ClassRecord {
                 name: "L@system.curves;".to_string(),
                 methods: vec![],
                 access_flags: 0x0001,
+                source_lang: SOURCE_LANG_ECMASCRIPT,
                 module_requests: vec![],
-                fields: vec![],
+                fields: vec![sdk_native_field("@native.system.curves")],
             },
             ClassRecord {
                 name: "L@system.matrix4;".to_string(),
                 methods: vec![],
                 access_flags: 0x0001,
+                source_lang: SOURCE_LANG_ECMASCRIPT,
                 module_requests: vec![],
-                fields: vec![],
+                fields: vec![sdk_native_field("@native.system.matrix4")],
             },
             ClassRecord {
                 name: "L@system.router;".to_string(),
                 methods: vec![],
                 access_flags: 0x0001,
+                source_lang: SOURCE_LANG_ECMASCRIPT,
                 module_requests: vec![],
-                fields: vec![],
+                fields: vec![sdk_native_field("@native.system.router")],
             },
         ];
 
@@ -222,6 +236,7 @@ impl AbcFile {
                 name: "L_ESConcurrentModuleRequestsAnnotation;".to_string(),
                 methods: vec![],
                 access_flags: 0x2001,
+                source_lang: SOURCE_LANG_ECMASCRIPT,
                 module_requests: vec![],
                 fields: vec![],
             },
@@ -229,6 +244,7 @@ impl AbcFile {
                 name: "L_ESSlotNumberAnnotation;".to_string(),
                 methods: vec![],
                 access_flags: 0x2001,
+                source_lang: SOURCE_LANG_ECMASCRIPT,
                 module_requests: vec![],
                 fields: vec![],
             },
@@ -249,10 +265,26 @@ impl AbcFile {
 
         let total_classes = all_classes.len() as u32;
         let class_idx_off = HEADER_SIZE as u32; // 0x3C
+        let total_methods = all_classes
+            .iter()
+            .map(|class| class.methods.len() as u32)
+            .sum::<u32>();
+        let method_index_count = self.strings.len() as u32 + total_methods;
 
-        // IndexSection is placed immediately after the class index (no foreign section).
-        let idx_sect_off = class_idx_off + total_classes * 4;
-        let idx_sect_size: u32 = 60; // fixed 60 bytes = 15 × u32
+        let num_literal_arrays = self.literal_arrays.len() as u32;
+        let literalarray_idx_off = if num_literal_arrays == 0 {
+            0
+        } else {
+            class_idx_off + total_classes * 4
+        };
+
+        // IndexSection is placed after the class index and literal-array index.
+        let idx_sect_off = class_idx_off + total_classes * 4 + num_literal_arrays * 4;
+        let index_class_count = 2 + 1 + self.records.len() as u32 + sdk_stubs.len() as u32;
+        let index_header_size: u32 = 40;
+        let index_class_idx_off = idx_sect_off + index_header_size;
+        let index_method_idx_off = index_class_idx_off + index_class_count * 4;
+        let idx_sect_size = index_header_size + index_class_count * 4 + method_index_count * 4;
 
         // Method StringItems start immediately after the IndexSection.
         let string_section_start = idx_sect_off + idx_sect_size;
@@ -322,11 +354,27 @@ impl AbcFile {
             all_field_name_strings.push(f_strings);
         }
 
+        // ── 1d. Compute bytecode StringItem offsets ──────────────────────────
+        //
+        // Bytecode id operands use the IndexHeader method/constant index.  The
+        // string table indices allocated during lowering therefore need real
+        // file offsets in the same stable order.
+        let mut bytecode_string_offsets = Vec::with_capacity(self.strings.len());
+        let mut all_bytecode_strings = Vec::with_capacity(self.strings.len());
+        for string in self.strings.iter() {
+            bytecode_string_offsets.push(cur);
+            let s = inline_string(string);
+            cur += s.len() as u32;
+            all_bytecode_strings.push(s);
+        }
+
         // ── 2. Compute ClassItem sizes & start offsets ────────────────────────
         let class_section_start = cur;
 
-        let class_item_sizes: Vec<usize> =
-            all_classes.iter().map(|c| c.class_item_byte_size()).collect();
+        let class_item_sizes: Vec<usize> = all_classes
+            .iter()
+            .map(|c| c.class_item_byte_size())
+            .collect();
 
         let class_item_offsets: Vec<u32> = {
             let mut offsets = Vec::with_capacity(all_classes.len());
@@ -345,12 +393,27 @@ impl AbcFile {
             .map(|(c, &off)| (c.name.as_str(), off))
             .collect();
 
-        // Build a map from class name → sorted position (for class_idx fields in MethodItems).
-        let name_to_sorted_idx: std::collections::HashMap<&str, u16> = all_classes
-            .iter()
-            .enumerate()
-            .map(|(i, c)| (c.name.as_str(), i as u16))
-            .collect();
+        // Build the IndexHeader class table used by FieldItem/MethodItem
+        // `class_idx` values. hvigor keeps two non-EntityId scalar entries at
+        // the front, then `_ESSlotNumberAnnotation`, user records, and SDK
+        // namespace stubs. `_ESConcurrentModuleRequestsAnnotation` is present
+        // in the top-level class index but not in this typed class table.
+        let mut index_class_offsets = Vec::with_capacity(index_class_count as usize);
+        index_class_offsets.extend_from_slice(&[2, 6]);
+        let mut name_to_index_class_idx = std::collections::HashMap::new();
+        let mut next_index_class_idx = 2u16;
+        for class in std::iter::once(&annotation_stubs[1])
+            .chain(self.records.iter())
+            .chain(sdk_stubs.iter())
+        {
+            let off = *name_to_class_offset
+                .get(class.name.as_str())
+                .expect("indexed class name must have a ClassItem offset");
+            index_class_offsets.push(off);
+            name_to_index_class_idx.insert(class.name.as_str(), next_index_class_idx);
+            next_index_class_idx += 1;
+        }
+        debug_assert_eq!(index_class_offsets.len() as u32, index_class_count);
 
         // ── 3. Compute CodeItem start offsets ─────────────────────────────────
         let code_section_start: u32 =
@@ -373,14 +436,25 @@ impl AbcFile {
             all_code_items.push(class_code_items);
         }
 
+        let mut method_index_offsets = Vec::with_capacity(method_index_count as usize);
+        method_index_offsets.extend(bytecode_string_offsets.iter().copied());
+        for (class, &class_off) in all_classes.iter().zip(class_item_offsets.iter()) {
+            method_index_offsets.extend(class.method_item_offsets(class_off));
+        }
+        debug_assert_eq!(method_index_offsets.len() as u32, method_index_count);
+
         // ── Pre-compute LiteralArray section bytes ────────────────────────────
         // The section is appended after all CodeItems.
         // Format per LiteralArray:
         //   [num_entries: u32 LE]
         //   Per entry: [tag: u8] [value: variable]
-        let lit_arr_section: Vec<u8> = {
+        let (literal_array_offsets, lit_arr_section): (Vec<u32>, Vec<u8>) = {
             let mut buf = Vec::new();
+            let mut offsets = Vec::with_capacity(self.literal_arrays.len());
+            let mut offset_cur = code_cur;
             for lit_arr in &self.literal_arrays {
+                offsets.push(offset_cur);
+                let before = buf.len();
                 buf.extend_from_slice(&(lit_arr.entries.len() as u32).to_le_bytes());
                 for entry in &lit_arr.entries {
                     match entry {
@@ -401,8 +475,9 @@ impl AbcFile {
                         }
                     }
                 }
+                offset_cur += (buf.len() - before) as u32;
             }
-            buf
+            (offsets, buf)
         };
 
         let total_size = code_cur + lit_arr_section.len() as u32;
@@ -410,23 +485,15 @@ impl AbcFile {
         // ── IndexSection values (computed before emission) ────────────────────
         // class_item_offsets is sorted by class name (same order as all_classes).
         let first_class_off = *class_item_offsets.first().expect("at least one class");
-        let last_class_off = *class_item_offsets.last().expect("at least one class");
-        let class_section_end = code_section_start; // = last_class_off + last_class_size
-
-        // Entity IDs: file offsets pointing to specific words WITHIN the IndexSection.
-        //   entity_id_0 → IndexSection[+40] (the static "2" sub-table header)
-        //   entity_id_1 → IndexSection[+56] (the class_section_end field)
-        let entity_id_0 = idx_sect_off + 40;
-        let entity_id_1 = idx_sect_off + 56;
 
         // ── 4. Serialize ClassItems with actual offsets ───────────────────────
         let class_item_bytes: Vec<Vec<u8>> = all_classes
             .iter()
             .enumerate()
             .map(|(ci, class)| {
-                let class_idx = *name_to_sorted_idx
+                let class_idx = *name_to_index_class_idx
                     .get(class.name.as_str())
-                    .expect("class name must be in sorted list");
+                    .unwrap_or(&0);
                 class.serialize_class_item(
                     class_idx,
                     &field_name_string_offsets[ci],
@@ -437,8 +504,10 @@ impl AbcFile {
             .collect();
 
         // Verify sizes are consistent
-        for (i, (expected, actual)) in
-            class_item_sizes.iter().zip(class_item_bytes.iter()).enumerate()
+        for (i, (expected, actual)) in class_item_sizes
+            .iter()
+            .zip(class_item_bytes.iter())
+            .enumerate()
         {
             debug_assert_eq!(
                 *expected,
@@ -452,20 +521,20 @@ impl AbcFile {
         let mut file: Vec<u8> = Vec::with_capacity(total_size as usize + 4);
 
         // ── Header (60 bytes = 0x3C) ──────────────────────────────────────────
-        file.extend_from_slice(&MAGIC);                                    // 0x00 magic[8]
-        file.extend_from_slice(&0u32.to_le_bytes());                       // 0x08 checksum (patched)
-        file.extend_from_slice(&VERSION.to_le_bytes());                    // 0x0C version
-        file.extend_from_slice(&0u32.to_le_bytes());                       // 0x10 file_size (patched)
-        file.extend_from_slice(&0u32.to_le_bytes());                       // 0x14 foreign_off = 0
-        file.extend_from_slice(&0u32.to_le_bytes());                       // 0x18 foreign_size = 0
-        file.extend_from_slice(&total_classes.to_le_bytes());              // 0x1C num_classes
-        file.extend_from_slice(&class_idx_off.to_le_bytes());              // 0x20 class_idx_off = 0x3C
-        file.extend_from_slice(&0u32.to_le_bytes());                       // 0x24 num_lnp = 0
-        file.extend_from_slice(&0u32.to_le_bytes());                       // 0x28 lnp_idx_off = 0
-        file.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());             // 0x2C = -1 (unused)
-        file.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());             // 0x30 = -1 (unused)
-        file.extend_from_slice(&1u32.to_le_bytes());                       // 0x34 num_idx_regions = 1
-        file.extend_from_slice(&idx_sect_off.to_le_bytes());               // 0x38 idx_section_off
+        file.extend_from_slice(&MAGIC); // 0x00 magic[8]
+        file.extend_from_slice(&0u32.to_le_bytes()); // 0x08 checksum (patched)
+        file.extend_from_slice(&VERSION.to_le_bytes()); // 0x0C version
+        file.extend_from_slice(&0u32.to_le_bytes()); // 0x10 file_size (patched)
+        file.extend_from_slice(&0u32.to_le_bytes()); // 0x14 foreign_off = 0
+        file.extend_from_slice(&0u32.to_le_bytes()); // 0x18 foreign_size = 0
+        file.extend_from_slice(&total_classes.to_le_bytes()); // 0x1C num_classes
+        file.extend_from_slice(&class_idx_off.to_le_bytes()); // 0x20 class_idx_off = 0x3C
+        file.extend_from_slice(&0u32.to_le_bytes()); // 0x24 num_lnp = 0
+        file.extend_from_slice(&0u32.to_le_bytes()); // 0x28 lnp_idx_off = 0
+        file.extend_from_slice(&num_literal_arrays.to_le_bytes()); // 0x2C num_literalarrays
+        file.extend_from_slice(&literalarray_idx_off.to_le_bytes()); // 0x30 literalarray_idx_off
+        file.extend_from_slice(&1u32.to_le_bytes()); // 0x34 num_idx_regions = 1
+        file.extend_from_slice(&idx_sect_off.to_le_bytes()); // 0x38 idx_section_off
         debug_assert_eq!(file.len(), HEADER_SIZE, "header must be exactly 0x3C bytes");
 
         // ── Class index (at 0x3C, sorted by class name) ───────────────────────
@@ -477,44 +546,50 @@ impl AbcFile {
         }
         debug_assert_eq!(
             file.len() as u32,
-            idx_sect_off,
-            "class index must end exactly at idx_sect_off"
+            class_idx_off + total_classes * 4,
+            "class index must end exactly before the optional literal-array index"
         );
 
-        // ── IndexSection (60 bytes, immediately after class index) ────────────
+        // ── LiteralArray index ───────────────────────────────────────────────
         //
-        // Structure (15 × u32):
-        //   [00] region_start = first_class_off
-        //   [04] region_end   = file_size (total_size)
-        //   [08] num_entries  = num_classes
-        //   [0c] entity_id_0  = idx_sect_off + 40  → points to [+40] below
-        //   [10] tag_0        = 1
-        //   [14] entity_id_1  = idx_sect_off + 56  → points to [+56] below
-        //   [18..27]          = 0xFFFFFFFF × 4 (padding)
-        //   [28] 2            = sub-table count (static)
-        //   [2c] 6            = num standard module fields (static)
-        //   [30] first_class_off
-        //   [34] last_class_off
-        //   [38] class_section_end  ← entity_id_1 points here
-        file.extend_from_slice(&first_class_off.to_le_bytes());         // [+00] region_start
-        file.extend_from_slice(&total_size.to_le_bytes());              // [+04] region_end
-        file.extend_from_slice(&total_classes.to_le_bytes());           // [+08] num_entries
-        file.extend_from_slice(&entity_id_0.to_le_bytes());             // [+0c] entity_id_0
-        file.extend_from_slice(&1u32.to_le_bytes());                    // [+10] tag_0 = 1
-        file.extend_from_slice(&entity_id_1.to_le_bytes());             // [+14] entity_id_1
-        file.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());          // [+18] padding
-        file.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());          // [+1c] padding
-        file.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());          // [+20] padding
-        file.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());          // [+24] padding
-        file.extend_from_slice(&2u32.to_le_bytes());                    // [+28] sub-table header
-        file.extend_from_slice(&6u32.to_le_bytes());                    // [+2c] num std fields
-        file.extend_from_slice(&first_class_off.to_le_bytes());         // [+30] first_class_off
-        file.extend_from_slice(&last_class_off.to_le_bytes());          // [+34] last_class_off
-        file.extend_from_slice(&class_section_end.to_le_bytes());       // [+38] class_section_end
+        // API 17 hvigor output stores a u32 file offset for each LiteralArray
+        // between the class index and IndexSection.  Leaving the old
+        // 0xFFFF_FFFF markers makes SDK ark_disasm reject the file.
+        for offset in &literal_array_offsets {
+            file.extend_from_slice(&offset.to_le_bytes());
+        }
+        debug_assert_eq!(
+            file.len() as u32,
+            idx_sect_off,
+            "literal-array index must end exactly at idx_sect_off"
+        );
+
+        // ── IndexSection ─────────────────────────────────────────────────────
+        //
+        // libpandafile expects a 40-byte IndexHeader followed by EntityId
+        // arrays.  The old 60-byte placeholder made class_idx/proto_idx
+        // resolution read into arbitrary bytes after the header.
+        file.extend_from_slice(&first_class_off.to_le_bytes()); // start
+        file.extend_from_slice(&total_size.to_le_bytes()); // end
+        file.extend_from_slice(&index_class_count.to_le_bytes()); // class_idx_size
+        file.extend_from_slice(&index_class_idx_off.to_le_bytes()); // class_idx_off
+        file.extend_from_slice(&method_index_count.to_le_bytes()); // method_idx_size
+        file.extend_from_slice(&index_method_idx_off.to_le_bytes()); // method_idx_off
+        file.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // field_idx_size
+        file.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // field_idx_off
+        file.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // proto_idx_size
+        file.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // proto_idx_off
+
+        for offset in &index_class_offsets {
+            file.extend_from_slice(&offset.to_le_bytes());
+        }
+        for offset in &method_index_offsets {
+            file.extend_from_slice(&offset.to_le_bytes());
+        }
         debug_assert_eq!(
             file.len() as u32,
             idx_sect_off + idx_sect_size,
-            "IndexSection must be exactly 60 bytes"
+            "IndexSection must match its computed header and array size"
         );
 
         // ── Method StringItems ────────────────────────────────────────────────
@@ -545,6 +620,11 @@ impl AbcFile {
             for s in class_field_strings {
                 file.extend_from_slice(s);
             }
+        }
+
+        // ── Bytecode StringItems ─────────────────────────────────────────────
+        for s in &all_bytecode_strings {
+            file.extend_from_slice(s);
         }
 
         debug_assert_eq!(file.len() as u32, class_section_start);

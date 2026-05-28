@@ -78,6 +78,11 @@ impl StringTable {
         self.strings.is_empty()
     }
 
+    /// Iterate strings in their stable intern order.
+    pub fn iter(&self) -> impl Iterator<Item = &str> {
+        self.strings.iter().map(String::as_str)
+    }
+
     /// Serialise the string table.
     ///
     /// Layout:
