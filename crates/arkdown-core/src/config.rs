@@ -135,7 +135,7 @@ pub struct SdkConfig {
     pub compile_api_version: u32,
     /// Whether the SDK has the rollup plugin (required for stage mode).
     pub has_rollup_plugin: bool,
-    /// DevEco Studio SDK version string (e.g. `"6.0.0.47"`).
+    /// DevEco Studio SDK version string discovered from SDK metadata.
     /// Written into `module.json` as `app.compileSdkVersion`.
     #[serde(default = "default_compile_sdk_version")]
     pub compile_sdk_version: String,
