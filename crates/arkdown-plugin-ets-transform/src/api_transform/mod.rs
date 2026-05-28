@@ -2,6 +2,80 @@ mod version_table;
 
 pub use version_table::rewrite_imports_for_version;
 
+/// Replace ArkUI `build()` method DSL bodies with valid JavaScript stubs.
+///
+/// The ArkUI declarative syntax like `Row() { Column() { } }.width()` is not
+/// valid TypeScript and cannot be parsed by standard parsers. For bundling
+/// purposes we replace the entire body with `return;` so the class structure
+/// remains valid TypeScript.
+///
+/// Only exact `build()` method declarations are matched — names such as
+/// `rebuild()` or `_build()` are left untouched.
+pub fn stub_arkui_build_bodies(source: &str) -> String {
+    let mut result = source.to_string();
+    let mut search_from = 0usize;
+
+    loop {
+        // Look for the literal "build()" starting from our current position.
+        let Some(rel_pos) = result[search_from..].find("build()") else {
+            break;
+        };
+        let abs_pos = search_from + rel_pos;
+
+        // Reject occurrences that are part of a longer identifier, e.g. "rebuild()".
+        let pre_char = result[..abs_pos].chars().last();
+        if matches!(pre_char, Some(c) if c.is_alphanumeric() || c == '_') {
+            search_from = abs_pos + 1;
+            continue;
+        }
+
+        // Find the opening brace '{' that starts the method body.
+        // There may be optional whitespace between "build()" and "{".
+        let after_decl = abs_pos + "build()".len();
+        let Some(rel_brace) = result[after_decl..].find('{') else {
+            break;
+        };
+        // Make sure there is only whitespace between "build()" and "{".
+        let between = &result[after_decl..after_decl + rel_brace];
+        if !between.chars().all(|c| c.is_whitespace()) {
+            search_from = abs_pos + 1;
+            continue;
+        }
+
+        let abs_brace = after_decl + rel_brace;
+
+        // Walk forward from the opening brace counting depth to find the
+        // matching closing brace.
+        let mut depth = 0usize;
+        let mut end_pos: Option<usize> = None;
+        for (i, ch) in result[abs_brace..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end_pos = Some(abs_brace + i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(end) = end_pos else {
+            // Unbalanced braces — leave the rest of the source unchanged.
+            break;
+        };
+
+        // Replace the entire "build() { ... }" span with the stub.
+        let stub = "build() { return; }";
+        result = format!("{}{}{}", &result[..abs_brace], stub, &result[end + 1..]);
+        // Advance past the stub so we do not re-scan it.
+        search_from = abs_brace + stub.len();
+    }
+
+    result
+}
+
 /// Apply all API-version-gated source transforms.
 ///
 /// Order of transforms:
@@ -163,5 +237,51 @@ mod tests {
         let src = "import { hilog } from '@kit.PerformanceAnalysisKit';";
         let out = rewrite_kit_imports(src);
         assert!(out.contains("import hilog from \"@ohos:hilog\""), "got: {out}");
+    }
+
+    // -----------------------------------------------------------------------
+    // stub_arkui_build_bodies
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_stub_empty_build_body() {
+        let src = "class Index extends ViewPU {\n  build() {}\n}";
+        let out = super::stub_arkui_build_bodies(src);
+        // An already-empty body is replaced with the canonical stub.
+        assert!(out.contains("build() { return; }"), "got: {out}");
+    }
+
+    #[test]
+    fn test_stub_simple_arkui_build() {
+        let src = "class Index extends ViewPU {\n  build() {\n    Row() {\n      Column() {\n        Text('hi')\n      }\n    }\n  }\n}";
+        let out = super::stub_arkui_build_bodies(src);
+        assert!(out.contains("build() { return; }"), "body must be stubbed; got: {out}");
+        assert!(!out.contains("Row()"), "ArkUI DSL must be gone; got: {out}");
+    }
+
+    #[test]
+    fn test_stub_does_not_touch_rebuild() {
+        let src = "class Foo {\n  rebuild() {\n    doSomething();\n  }\n}";
+        let out = super::stub_arkui_build_bodies(src);
+        // "rebuild()" must not be touched.
+        assert!(out.contains("rebuild()"), "rebuild() must be preserved; got: {out}");
+        assert!(out.contains("doSomething()"), "body must be preserved; got: {out}");
+    }
+
+    #[test]
+    fn test_stub_nested_braces() {
+        // build() body contains an object literal — nested braces must balance correctly.
+        let src = "class C extends ViewPU {\n  build() {\n    if (true) {\n      let x = { a: 1 };\n    }\n  }\n  other() { return 42; }\n}";
+        let out = super::stub_arkui_build_bodies(src);
+        assert!(out.contains("build() { return; }"), "got: {out}");
+        // other() must remain untouched.
+        assert!(out.contains("other() { return 42; }"), "other() body must be unchanged; got: {out}");
+    }
+
+    #[test]
+    fn test_stub_no_build_passthrough() {
+        let src = "class Foo {\n  render() {\n    return null;\n  }\n}";
+        let out = super::stub_arkui_build_bodies(src);
+        assert_eq!(out, src, "source without build() must be returned unchanged");
     }
 }

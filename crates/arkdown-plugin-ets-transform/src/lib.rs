@@ -65,10 +65,12 @@ impl ArkdownPlugin for EtsTransformPlugin {
     /// 1. Bail out immediately for files that are neither `.ets` nor `.ts`.
     /// 2. **Kit import rewrite** — `@kit.XxxKit` → individual `@ohos:xxx` imports
     ///    (both `.ets` and `.ts`; matches hvigorw ets-loader behaviour).
-    /// 3. `.ets` only: run `etsChecker` diagnostics and `etsTransform` struct/decorator
+    /// 3. `.ets` only: **ArkUI build() stub** — replaces declarative DSL bodies with
+    ///    `return;` so the OXC parser can accept the file as TypeScript.
+    /// 4. `.ets` only: run `etsChecker` diagnostics and `etsTransform` struct/decorator
     ///    desugaring.
-    /// 4. Apply version-gated API import rewrites (`@ohos/* → @system.*` for API < 9).
-    /// 5. Return a new `HookTransformOutput`.
+    /// 5. Apply version-gated API import rewrites (`@ohos/* → @system.*` for API < 9).
+    /// 6. Return a new `HookTransformOutput`.
     async fn transform(
         &self,
         _ctx: &PluginContext,
@@ -98,7 +100,13 @@ impl ArkdownPlugin for EtsTransformPlugin {
             }));
         }
 
-        // Step 2: ArkTS struct/decorator desugaring (.ets only).
+        // Step 2: Stub ArkUI build() DSL bodies so the source is valid TypeScript
+        // for the downstream OXC parser.  The ArkUI declarative syntax
+        // (e.g. `Row() { Column() { } }.width()`) is not legal TypeScript; replace
+        // it with `return;` before struct desugaring.
+        let code = api_transform::stub_arkui_build_bodies(&code);
+
+        // Step 3: ArkTS struct/decorator desugaring (.ets only).
         let source = ModuleSource {
             id: ResolvedId {
                 id: id.to_string(),
@@ -117,7 +125,7 @@ impl ArkdownPlugin for EtsTransformPlugin {
             }
         })?;
 
-        // Step 3: Apply version-gated API import rewrites.
+        // Step 4: Apply version-gated API import rewrites.
         let final_source = api_transform::rewrite_imports_for_version(&transformed, api_version);
 
         Ok(Some(HookTransformOutput {
@@ -250,6 +258,51 @@ mod tests {
         assert!(
             out.code.contains("class Index extends ViewPU"),
             "struct must be desugared to ViewPU class; got:\n{}",
+            out.code
+        );
+    }
+
+    #[tokio::test]
+    async fn test_plugin_stubs_arkui_build_body() {
+        let plugin = EtsTransformPlugin::new(make_config(12));
+        // Typical Index.ets page with ArkUI declarative DSL in build().
+        let code = "\
+@Entry\n\
+@Component\n\
+struct Index {\n\
+  @State message: string = 'Hello World';\n\
+\n\
+  build() {\n\
+    Row() {\n\
+      Column() {\n\
+        Text(this.message)\n\
+          .fontSize(50)\n\
+          .fontWeight(FontWeight.Bold)\n\
+      }\n\
+      .width('100%')\n\
+    }\n\
+    .height('100%')\n\
+  }\n\
+}";
+        let id = "entry/src/main/ets/pages/Index.ets";
+        let result = plugin
+            .transform(&PluginContext::default(), code, id)
+            .await
+            .unwrap();
+        let out = result.expect("ETS transform must return Some(HookTransformOutput)");
+        assert!(
+            out.code.contains("class Index extends ViewPU"),
+            "struct must be desugared to ViewPU class; got:\n{}",
+            out.code
+        );
+        assert!(
+            out.code.contains("build() { return; }"),
+            "ArkUI build() DSL must be stubbed; got:\n{}",
+            out.code
+        );
+        assert!(
+            !out.code.contains("Row()"),
+            "ArkUI Row() DSL must be gone; got:\n{}",
             out.code
         );
     }

@@ -116,10 +116,34 @@ pub fn generate_loader_json(
         compile_entry.push(ext.src_entry.clone());
     }
 
-    // NOTE: hvigorw also bundles pages from $profile:main_pages, but our bundler
-    // cannot yet parse ArkUI DSL syntax (Row(){...}.width(), etc.) that appears
-    // in page components.  Pages are skipped here until full ArkUI desugaring is
-    // implemented in arkdown-plugin-ets-transform.
+    // Include pages from $profile:main_pages so that page components are
+    // compiled alongside ability entry points.  The EtsTransformPlugin stubs
+    // out ArkUI build() DSL bodies before the bundler parses the TypeScript,
+    // so page files can now be processed safely.
+    if let Some(pages_ref) = &manifest.pages {
+        // pages_ref is typically "$profile:main_pages"; strip the "$profile:" prefix
+        // to get the profile file name.
+        if let Some(profile_name) = pages_ref.strip_prefix("$profile:") {
+            let profile_path = module_cfg
+                .src_path
+                .join("src/main/resources/base/profile")
+                .join(format!("{}.json", profile_name));
+
+            if let Ok(content) = std::fs::read_to_string(&profile_path) {
+                #[derive(serde::Deserialize)]
+                struct MainPages {
+                    src: Vec<String>,
+                }
+                if let Ok(pages) = serde_json::from_str::<MainPages>(&content) {
+                    for page in &pages.src {
+                        // page is e.g. "pages/Index"; map to "./ets/pages/Index.ets"
+                        let entry = format!("./ets/{}.ets", page);
+                        compile_entry.push(entry);
+                    }
+                }
+            }
+        }
+    }
 
     // Deduplicate while preserving order.
     {
