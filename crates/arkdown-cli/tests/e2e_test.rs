@@ -54,7 +54,6 @@ fn run_build(fixture: &PathBuf) -> PathBuf {
     use arkdown_config::load_config;
     use arkdown_core::{ArkdownPlugin, BuildMode, ModuleJson5, OutputTarget};
     use arkdown_pack::{PackInput, Packager};
-    use arkdown_plugin_chunk_wrapper::ChunkWrapperPlugin;
     use arkdown_plugin_duplicate_check::DuplicateCheckPlugin;
     use arkdown_plugin_ets_transform::EtsTransformPlugin;
     use arkdown_plugin_json5::Json5Plugin;
@@ -131,7 +130,6 @@ fn run_build(fixture: &PathBuf) -> PathBuf {
         Arc::new(ModuleMetaPlugin::new(fixture.clone(), module.name.clone())),
         Arc::new(Json5Plugin),
         Arc::new(DuplicateCheckPlugin),
-        Arc::new(ChunkWrapperPlugin::new(loader_json.support_chunks)),
     ];
     // Clean stale .js files before bundling so the explicit chunk_files list
     // from bundle_out is the single source of truth for ABC compilation.

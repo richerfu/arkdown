@@ -13,7 +13,6 @@ use arkdown_core::{
     OutputTarget,
 };
 use arkdown_pack::{HarPackInput, PackAbility, PackInput, Packager};
-use arkdown_plugin_chunk_wrapper::ChunkWrapperPlugin;
 use arkdown_plugin_duplicate_check::DuplicateCheckPlugin;
 use arkdown_plugin_ets_transform::EtsTransformPlugin;
 use arkdown_plugin_json5::Json5Plugin;
@@ -211,8 +210,6 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             Arc::new(Json5Plugin),
             // 5. Duplicate filename check
             Arc::new(DuplicateCheckPlugin),
-            // 6. IIFE chunk wrapper — MUST be last, transforms code output
-            Arc::new(ChunkWrapperPlugin::new(loader_json.support_chunks)),
         ];
         let bundler = Bundler::new((*config_arc).clone(), plugins);
         let bundle_out = bundler

@@ -2,8 +2,9 @@ use std::collections::HashMap;
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    Argument, AssignmentTarget, BindingPattern, ClassElement, Expression, FunctionBody, Program,
-    PropertyKey, Statement,
+    Argument, AssignmentTarget, BindingPattern, ClassElement, Declaration,
+    ExportDefaultDeclarationKind, Expression, FunctionBody, ImportDeclarationSpecifier,
+    ImportOrExportKind, ModuleExportName, Program, PropertyKey, Statement,
 };
 use oxc_parser::{Parser, ParserReturn};
 use oxc_span::SourceType;
@@ -111,6 +112,23 @@ pub fn build_record_with_debug(
                     num_args: func.params.items.len() as u16,
                     debug_info: None,
                 });
+            }
+        }
+        if let Statement::ExportNamedDeclaration(export) = stmt {
+            if let Some(Declaration::FunctionDeclaration(func)) = &export.declaration {
+                if let Some(id) = &func.id {
+                    let func_name = id.name.as_str().to_string();
+                    let func_bytecode =
+                        compile_function_body(func.body.as_deref(), strings, literal_arrays);
+                    let num_vregs = estimate_vregs(&func_bytecode);
+                    methods.push(MethodRecord {
+                        name: func_name,
+                        bytecode: func_bytecode,
+                        num_vregs,
+                        num_args: func.params.items.len() as u16,
+                        debug_info: None,
+                    });
+                }
             }
         }
     }
@@ -300,6 +318,18 @@ fn compile_class_method_bodies(
         // Handle `class Foo { ... }` (ClassDeclaration)
         if let Statement::ClassDeclaration(cls) = stmt {
             compile_class_elements(&cls.body.body, strings, literal_arrays, methods);
+            continue;
+        }
+        if let Statement::ExportDefaultDeclaration(export) = stmt {
+            if let ExportDefaultDeclarationKind::ClassDeclaration(cls) = &export.declaration {
+                compile_class_elements(&cls.body.body, strings, literal_arrays, methods);
+            }
+            continue;
+        }
+        if let Statement::ExportNamedDeclaration(export) = stmt {
+            if let Some(Declaration::ClassDeclaration(cls)) = &export.declaration {
+                compile_class_elements(&cls.body.body, strings, literal_arrays, methods);
+            }
             continue;
         }
         // Handle `var Foo = class extends Bar { ... }` (VariableDeclaration with ClassExpression)
@@ -538,6 +568,36 @@ impl<'a> CodeGen<'a> {
                     let name_id = self.intern(&name);
                     self.push(Insn::Lda(reg));
                     self.push(Insn::TryStGlobalByName(0, name_id));
+                }
+            }
+            Statement::ExportDefaultDeclaration(export) => {
+                if let ExportDefaultDeclarationKind::ClassDeclaration(cls) = &export.declaration {
+                    let super_class = cls.super_class.as_ref();
+                    self.emit_class_inner(super_class);
+                    if let Some(id) = &cls.id {
+                        let reg = self.alloc_reg();
+                        self.push(Insn::Sta(reg));
+                        let name = id.name.as_str().to_string();
+                        self.var_regs.insert(name.clone(), reg);
+                        let name_id = self.intern(&name);
+                        self.push(Insn::Lda(reg));
+                        self.push(Insn::TryStGlobalByName(0, name_id));
+                    }
+                }
+            }
+            Statement::ExportNamedDeclaration(export) => {
+                if let Some(Declaration::ClassDeclaration(cls)) = &export.declaration {
+                    let super_class = cls.super_class.as_ref();
+                    self.emit_class_inner(super_class);
+                    if let Some(id) = &cls.id {
+                        let reg = self.alloc_reg();
+                        self.push(Insn::Sta(reg));
+                        let name = id.name.as_str().to_string();
+                        self.var_regs.insert(name.clone(), reg);
+                        let name_id = self.intern(&name);
+                        self.push(Insn::Lda(reg));
+                        self.push(Insn::TryStGlobalByName(0, name_id));
+                    }
                 }
             }
             Statement::FunctionDeclaration(func) => {
@@ -1091,6 +1151,10 @@ impl ModuleRecordInfo {
     }
 
     fn add_regular_import(&mut self, local_name: String, specifier: &str) {
+        self.add_named_import(local_name, "default".to_string(), specifier);
+    }
+
+    fn add_named_import(&mut self, local_name: String, import_name: String, specifier: &str) {
         let module_request_idx = self.request_index(specifier);
         if self.regular_imports.iter().any(|import| {
             import.local_name == local_name && import.module_request_idx == module_request_idx
@@ -1099,7 +1163,7 @@ impl ModuleRecordInfo {
         }
         self.regular_imports.push(RegularImportEntry {
             local_name,
-            import_name: "default".to_string(),
+            import_name,
             module_request_idx,
         });
     }
@@ -1157,6 +1221,42 @@ fn scan_stmt_for_module_record(stmt: &Statement<'_>, info: &mut ModuleRecordInfo
                 }
             }
         }
+        Statement::ImportDeclaration(import) => {
+            if import.import_kind == ImportOrExportKind::Type {
+                return;
+            }
+            let specifier = import.source.value.as_str();
+            if !specifier.starts_with("@ohos:") {
+                return;
+            }
+            if let Some(specifiers) = &import.specifiers {
+                for spec in specifiers {
+                    match spec {
+                        ImportDeclarationSpecifier::ImportDefaultSpecifier(default) => {
+                            info.add_regular_import(
+                                default.local.name.as_str().to_string(),
+                                specifier,
+                            );
+                        }
+                        ImportDeclarationSpecifier::ImportSpecifier(named) => {
+                            if named.import_kind == ImportOrExportKind::Type {
+                                continue;
+                            }
+                            info.add_named_import(
+                                named.local.name.as_str().to_string(),
+                                module_export_name(&named.imported),
+                                specifier,
+                            );
+                        }
+                        ImportDeclarationSpecifier::ImportNamespaceSpecifier(ns) => {
+                            info.add_regular_import(ns.local.name.as_str().to_string(), specifier);
+                        }
+                    }
+                }
+            } else {
+                info.request_index(specifier);
+            }
+        }
         Statement::BlockStatement(block) => {
             for s in &block.body {
                 scan_stmt_for_module_record(s, info);
@@ -1169,6 +1269,43 @@ fn scan_stmt_for_module_record(stmt: &Statement<'_>, info: &mut ModuleRecordInfo
         }
         Statement::ExportDefaultDeclaration(_) => {
             info.add_local_export("default".to_string(), "default");
+        }
+        Statement::ExportNamedDeclaration(export) => {
+            if export.export_kind == ImportOrExportKind::Type {
+                return;
+            }
+            if export.source.is_none() {
+                for spec in &export.specifiers {
+                    if spec.export_kind == ImportOrExportKind::Type {
+                        continue;
+                    }
+                    info.add_local_export(
+                        module_export_name(&spec.local),
+                        &module_export_name(&spec.exported),
+                    );
+                }
+                if let Some(declaration) = &export.declaration {
+                    match declaration {
+                        Declaration::ClassDeclaration(cls) => {
+                            if let Some(id) = &cls.id {
+                                info.add_local_export(
+                                    id.name.as_str().to_string(),
+                                    id.name.as_str(),
+                                );
+                            }
+                        }
+                        Declaration::FunctionDeclaration(func) => {
+                            if let Some(id) = &func.id {
+                                info.add_local_export(
+                                    id.name.as_str().to_string(),
+                                    id.name.as_str(),
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
         }
         _ => {}
     }
@@ -1260,4 +1397,12 @@ fn default_import_name(specifier: &str) -> String {
         .filter(|name| !name.is_empty())
         .unwrap_or(specifier)
         .to_string()
+}
+
+fn module_export_name(name: &ModuleExportName<'_>) -> String {
+    match name {
+        ModuleExportName::IdentifierName(ident) => ident.name.as_str().to_string(),
+        ModuleExportName::IdentifierReference(ident) => ident.name.as_str().to_string(),
+        ModuleExportName::StringLiteral(lit) => lit.value.as_str().to_string(),
+    }
 }

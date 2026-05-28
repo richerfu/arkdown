@@ -8,7 +8,6 @@ use arkdown_core::{
     ArkdownConfig, ArkdownPlugin, BuildMode, BuildOption, ModuleConfig, ModuleJson5,
     OhosModuleType, OutputTarget, ProductConfig, SdkConfig, StrictModeConfig,
 };
-use arkdown_plugin_chunk_wrapper::ChunkWrapperPlugin;
 use arkdown_plugin_duplicate_check::DuplicateCheckPlugin;
 use arkdown_plugin_ets_transform::EtsTransformPlugin;
 use arkdown_plugin_json5::Json5Plugin;
@@ -161,8 +160,6 @@ async fn test_build_minimal_hap_fixture() {
         Arc::new(Json5Plugin),
         // Duplicate filename check.
         Arc::new(DuplicateCheckPlugin),
-        // IIFE chunk wrapper — must be last so it wraps final CJS code.
-        Arc::new(ChunkWrapperPlugin::new(loader_json.support_chunks)),
     ];
 
     // ── 5. Bundle ────────────────────────────────────────────────────────────
@@ -244,7 +241,7 @@ async fn test_build_minimal_hap_fixture() {
 
     // Every reported chunk file must exist on disk. Some generated chunks can
     // be empty after tree-shaking/entry normalization; non-empty chunks are
-    // checked for wrapper shape below.
+    // checked for helper-free ESM shape below.
     for (name, path) in &bundle_out.chunk_files {
         assert!(
             path.exists(),
@@ -254,7 +251,8 @@ async fn test_build_minimal_hap_fixture() {
         );
     }
 
-    // Every non-empty chunk must be IIFE-wrapped.
+    // Every non-empty chunk must stay close to CompileArkTS ESM output.  The
+    // ABC backend must not see rolldown's CJS helper layer.
     for chunk in bundle_out.chunk_graph.chunks.iter() {
         if chunk.code.is_empty() {
             continue;
@@ -267,15 +265,17 @@ async fn test_build_minimal_hap_fixture() {
             &chunk.code[..preview_len]
         );
         assert!(
-            chunk.code.contains("(function ()") || chunk.code.contains("(function()"),
-            "chunk '{}' is missing IIFE wrapper — check ChunkWrapperPlugin is last in plugin list.\nCode:\n{}",
+            !chunk.code.contains("__toESM")
+                && !chunk.code.contains("__copyProps")
+                && !chunk.code.contains("require("),
+            "chunk '{}' contains rolldown CJS helper output.\nCode:\n{}",
             chunk.name,
             &chunk.code[..chunk.code.len().min(500)]
         );
     }
 
     println!(
-        "Integration test PASSED: {} chunk(s) built with IIFE wrapping",
+        "Integration test PASSED: {} helper-free ESM chunk(s) built",
         bundle_out.chunk_files.len()
     );
 }

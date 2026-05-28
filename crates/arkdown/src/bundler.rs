@@ -4,12 +4,10 @@
 //!
 //! 1. Convert [`LoaderJson`] entry points → rolldown [`InputItem`] list.
 //! 2. Wrap each `Arc<dyn ArkdownPlugin>` in [`ArkdownPluginAdapter`].
-//! 3. Construct a rolldown [`Bundler`] with CJS output format.
+//! 3. Construct a rolldown [`Bundler`] with ESM output format.
 //! 4. Call [`Bundler::generate()`] — in-memory bundle, no disk writes.
 //!    During this step rolldown invokes the standard plugin hook sequence:
 //!    `build_start` → `resolve_id` → `load` → `transform` → … → `render_chunk`.
-//!    The `render_chunk` hook is where [`arkdown-plugin-chunk-wrapper`] converts
-//!    CJS output to IIFE and installs the `globalThis` registry entry.
 //! 5. Convert rolldown's [`BundleOutput`] → our [`ChunkGraph`].
 //! 6. Write loader_out `.js`, `sourceMaps.map`, and ABC handoff paths via
 //!    [`output::write_output`].
@@ -66,9 +64,8 @@ impl Bundler {
 
     /// Run the full bundle pipeline and return the chunk outputs.
     ///
-    /// The IIFE-wrapping and `globalThis` registry installation are performed
-    /// by the `arkdown-plugin-chunk-wrapper` plugin via rolldown's `render_chunk`
-    /// hook — no post-processing step is required here.
+    /// The output remains ESM so the Rust ABC backend compiles the same
+    /// CompileArkTS-stage module shape that hvigor sends to es2abc.
     pub async fn bundle(&self, loader_json: &LoaderJson) -> Result<BundleOutput, ArkdownError> {
         // ── 1. Build rolldown input entries ──────────────────────────────────
         // module_root_path may be relative and may contain `./` segments
@@ -123,10 +120,10 @@ impl Bundler {
 
         // ── 3. Build rolldown BundlerOptions ─────────────────────────────────
         //
-        // Output format is CJS: rolldown generates CommonJS `require()` calls
-        // for cross-chunk references.  The chunk-wrapper plugin's `render_chunk`
-        // hook then converts the CJS bundle to an OHOS-style IIFE with
-        // `globalThis[key]` lookups.
+        // Output format is ESM.  hvigor's CompileArkTS phase feeds es2abc the
+        // transformed module source directly; generating CJS here injects
+        // rolldown helpers (`__toESM`, `__copyProps`, etc.) that do not exist
+        // in hvigor's bytecode.
         //
         // module_types maps ".ets" → Ts so rolldown uses the TypeScript parser
         // for ArkTS source files.  Rolldown's transform hook runs AFTER the
@@ -152,7 +149,7 @@ impl Bundler {
         let options = BundlerOptions {
             input: Some(input),
             cwd: Some(cwd),
-            format: Some(OutputFormat::Cjs),
+            format: Some(OutputFormat::Esm),
             module_types: Some(module_types),
             sourcemap: Some(SourceMapType::Hidden),
             ..Default::default()
