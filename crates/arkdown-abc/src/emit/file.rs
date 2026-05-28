@@ -8,20 +8,20 @@ use crate::emit::strings::StringTable;
 
 /// A single entry in a Panda `LiteralArray`.
 ///
-/// Wire format per entry: `[tag: u8] [value: variable]`
-///
-/// | Tag  | Type    | Value width |
-/// |------|---------|-------------|
-/// | 0x00 | integer | u32 LE      |
-/// | 0x02 | string  | u16 LE (string-table index) |
-/// | 0x05 | method  | u32 LE (file offset of CodeItem) |
-/// | 0x0F | null    | none (tag only) |
+/// Generic class/scope buffers are encoded as item pairs:
+/// `[tag_value: u8] [value: variable]`. The array count is the raw item count,
+/// so each tagged entry contributes two items. Module records are a special
+/// compact libpandafile layout and store raw values without tag-value items.
 #[derive(Debug)]
 pub enum LiteralEntry {
-    Integer(u32),
-    String(u16),
-    Method(u32),
-    Null,
+    TaggedInteger(u32),
+    TaggedString(String),
+    TaggedMethod(u32),
+    TaggedMethodAffiliate(u16),
+    TaggedNull,
+    RawU32(u32),
+    RawU16(u16),
+    RawString(String),
 }
 
 /// A literal array referenced by `defineclasswithbuffer`.
@@ -32,6 +32,19 @@ pub enum LiteralEntry {
 pub struct LiteralArray {
     /// Entries serialised into the literal-array section.
     pub entries: Vec<LiteralEntry>,
+}
+
+impl LiteralEntry {
+    fn item_count(&self) -> u32 {
+        match self {
+            LiteralEntry::TaggedInteger(_)
+            | LiteralEntry::TaggedString(_)
+            | LiteralEntry::TaggedMethod(_)
+            | LiteralEntry::TaggedMethodAffiliate(_)
+            | LiteralEntry::TaggedNull => 2,
+            LiteralEntry::RawU32(_) | LiteralEntry::RawU16(_) | LiteralEntry::RawString(_) => 1,
+        }
+    }
 }
 
 /// Magic bytes at offset 0x00 of every `.abc` file.
@@ -279,7 +292,8 @@ impl AbcFile {
             .iter()
             .map(|class| class.methods.len() as u32)
             .sum::<u32>();
-        let method_index_count = self.strings.len() as u32 + total_methods;
+        let method_index_count =
+            self.strings.len() as u32 + self.literal_arrays.len() as u32 + total_methods;
 
         let num_lnp = all_classes
             .iter()
@@ -328,35 +342,10 @@ impl AbcFile {
             all_method_strings.push(class_strings);
         }
 
-        // ── 1b. Compute module_request StringItem offsets ─────────────────────
-        //
-        // Module specifier strings (e.g. "@ohos:app.ability.UIAbility") are
-        // emitted as standalone StringItems immediately after the method name
-        // strings.  Their file offsets are tracked here for future use in the
-        // full ModuleRecord annotation encoding.
-        let mut module_req_string_offsets: Vec<Vec<u32>> = Vec::new();
-        let mut all_module_req_strings: Vec<Vec<Vec<u8>>> = Vec::new();
-
-        for class in &all_classes {
-            let mut req_offsets = Vec::new();
-            let mut req_strings = Vec::new();
-            for spec in &class.module_requests {
-                req_offsets.push(cur);
-                let s = inline_string(spec);
-                cur += s.len() as u32;
-                req_strings.push(s);
-            }
-            module_req_string_offsets.push(req_offsets);
-            all_module_req_strings.push(req_strings);
-        }
-        // Suppress unused-variable warnings; offsets will be used when full
-        // ModuleRecord annotation emission is implemented.
-        let _ = &module_req_string_offsets;
-
-        // ── 1c. Compute field StringItem offsets ──────────────────────────────
+        // ── 1b. Compute field StringItem offsets ──────────────────────────────
         //
         // Field name strings (e.g. "pkgName@", "isCommonjs", …) are emitted as
-        // standalone StringItems immediately after the module-request strings.
+        // standalone StringItems immediately after the method-name strings.
         // Their file offsets are passed to `serialize_class_item()` so the
         // FieldItem `name_off` fields point to the correct bytes.
         let mut field_name_string_offsets: Vec<Vec<u32>> = Vec::new();
@@ -375,7 +364,7 @@ impl AbcFile {
             all_field_name_strings.push(f_strings);
         }
 
-        // ── 1d. Compute source-file StringItem offsets ───────────────────────
+        // ── 1c. Compute source-file StringItem offsets ───────────────────────
         //
         // ClassTag::SOURCE_FILE and method DebugInfo/LNP SET_FILE both point to
         // a standalone StringItem containing the original source path.
@@ -394,7 +383,7 @@ impl AbcFile {
             }
         }
 
-        // ── 1e. Compute bytecode StringItem offsets ──────────────────────────
+        // ── 1d. Compute bytecode StringItem offsets ──────────────────────────
         //
         // Bytecode id operands use the IndexHeader method/constant index.  The
         // string table indices allocated during lowering therefore need real
@@ -406,6 +395,26 @@ impl AbcFile {
             let s = inline_string(string);
             cur += s.len() as u32;
             all_bytecode_strings.push(s);
+        }
+
+        // ── 1e. Compute LiteralArray-owned StringItem offsets ───────────────
+        let mut literal_string_offsets: Vec<Vec<Option<u32>>> = self
+            .literal_arrays
+            .iter()
+            .map(|array| vec![None; array.entries.len()])
+            .collect();
+        let mut all_literal_strings = Vec::new();
+        for (array_idx, array) in self.literal_arrays.iter().enumerate() {
+            for (entry_idx, entry) in array.entries.iter().enumerate() {
+                let value = match entry {
+                    LiteralEntry::TaggedString(value) | LiteralEntry::RawString(value) => value,
+                    _ => continue,
+                };
+                literal_string_offsets[array_idx][entry_idx] = Some(cur);
+                let s = inline_string(value);
+                cur += s.len() as u32;
+                all_literal_strings.push(s);
+            }
         }
 
         // ── 2. Compute ClassItem sizes & start offsets ────────────────────────
@@ -463,25 +472,26 @@ impl AbcFile {
         let mut all_code_items: Vec<Vec<Vec<u8>>> = Vec::new();
 
         let mut code_cur = code_section_start;
+        let mut method_pool_cursor = self.strings.len() as u16 + self.literal_arrays.len() as u16;
         for class in &all_classes {
             let mut class_code_offs = Vec::new();
             let mut class_code_items = Vec::new();
+            let class_method_pool_start = method_pool_cursor;
             for method in &class.methods {
                 class_code_offs.push(code_cur);
-                let ci = encode_code_item(method.num_vregs, method.num_args, &method.bytecode);
+                let bytecode = patch_defineclass_indices(
+                    &method.bytecode,
+                    self.strings.len() as u16,
+                    class_method_pool_start,
+                );
+                let ci = encode_code_item(method.num_vregs, method.num_args, &bytecode);
                 code_cur += ci.len() as u32;
                 class_code_items.push(ci);
+                method_pool_cursor = method_pool_cursor.saturating_add(1);
             }
             code_offsets.push(class_code_offs);
             all_code_items.push(class_code_items);
         }
-
-        let mut method_index_offsets = Vec::with_capacity(method_index_count as usize);
-        method_index_offsets.extend(bytecode_string_offsets.iter().copied());
-        for (class, &class_off) in all_classes.iter().zip(class_item_offsets.iter()) {
-            method_index_offsets.extend(class.method_item_offsets(class_off));
-        }
-        debug_assert_eq!(method_index_offsets.len() as u32, method_index_count);
 
         // ── Pre-compute DebugInfo and LineNumberProgram sections ─────────────
         // Each debug method gets a minimal LNP: SET_FILE, END_SEQUENCE. The
@@ -536,32 +546,56 @@ impl AbcFile {
         // ── Pre-compute LiteralArray section bytes ────────────────────────────
         // The section is appended after all CodeItems and debug sections.
         // Format per LiteralArray:
-        //   [num_entries: u32 LE]
-        //   Per entry: [tag: u8] [value: variable]
+        //   [num_items: u32 LE]
+        //   Tagged entries: [tag_value: u8] [value: variable]
+        //   Raw module entries: [value: variable]
         let (literal_array_offsets, lit_arr_section): (Vec<u32>, Vec<u8>) = {
             let mut buf = Vec::new();
             let mut offsets = Vec::with_capacity(self.literal_arrays.len());
             let mut offset_cur = post_lnp_offset;
-            for lit_arr in &self.literal_arrays {
+            for (array_idx, lit_arr) in self.literal_arrays.iter().enumerate() {
                 offsets.push(offset_cur);
                 let before = buf.len();
-                buf.extend_from_slice(&(lit_arr.entries.len() as u32).to_le_bytes());
-                for entry in &lit_arr.entries {
+                let item_count = lit_arr
+                    .entries
+                    .iter()
+                    .map(LiteralEntry::item_count)
+                    .sum::<u32>();
+                buf.extend_from_slice(&item_count.to_le_bytes());
+                for (entry_idx, entry) in lit_arr.entries.iter().enumerate() {
                     match entry {
-                        LiteralEntry::Integer(v) => {
-                            buf.push(0x00);
+                        LiteralEntry::TaggedInteger(v) => {
+                            buf.push(0x02);
                             buf.extend_from_slice(&v.to_le_bytes());
                         }
-                        LiteralEntry::String(idx) => {
-                            buf.push(0x02);
-                            buf.extend_from_slice(&idx.to_le_bytes());
-                        }
-                        LiteralEntry::Method(off) => {
+                        LiteralEntry::TaggedString(_) => {
+                            let offset = literal_string_offsets[array_idx][entry_idx]
+                                .expect("tagged string literal offset must be resolved");
                             buf.push(0x05);
+                            buf.extend_from_slice(&offset.to_le_bytes());
+                        }
+                        LiteralEntry::TaggedMethod(off) => {
+                            buf.push(0x06);
                             buf.extend_from_slice(&off.to_le_bytes());
                         }
-                        LiteralEntry::Null => {
-                            buf.push(0x0F);
+                        LiteralEntry::TaggedMethodAffiliate(value) => {
+                            buf.push(0x09);
+                            buf.extend_from_slice(&value.to_le_bytes());
+                        }
+                        LiteralEntry::TaggedNull => {
+                            buf.push(0xff);
+                            buf.push(0);
+                        }
+                        LiteralEntry::RawU32(value) => {
+                            buf.extend_from_slice(&value.to_le_bytes());
+                        }
+                        LiteralEntry::RawU16(value) => {
+                            buf.extend_from_slice(&value.to_le_bytes());
+                        }
+                        LiteralEntry::RawString(_) => {
+                            let offset = literal_string_offsets[array_idx][entry_idx]
+                                .expect("raw string literal offset must be resolved");
+                            buf.extend_from_slice(&offset.to_le_bytes());
                         }
                     }
                 }
@@ -571,6 +605,14 @@ impl AbcFile {
         };
 
         let total_size = post_lnp_offset + lit_arr_section.len() as u32;
+
+        let mut method_index_offsets = Vec::with_capacity(method_index_count as usize);
+        method_index_offsets.extend(bytecode_string_offsets.iter().copied());
+        method_index_offsets.extend(literal_array_offsets.iter().copied());
+        for (class, &class_off) in all_classes.iter().zip(class_item_offsets.iter()) {
+            method_index_offsets.extend(class.method_item_offsets(class_off));
+        }
+        debug_assert_eq!(method_index_offsets.len() as u32, method_index_count);
 
         // ── IndexSection values (computed before emission) ────────────────────
         // class_item_offsets is sorted by class name (same order as all_classes).
@@ -591,6 +633,7 @@ impl AbcFile {
                     &method_string_offsets[ci],
                     &code_offsets[ci],
                     &debug_info_offsets[ci],
+                    &literal_array_offsets,
                 )
             })
             .collect();
@@ -701,18 +744,6 @@ impl AbcFile {
             }
         }
 
-        // ── Module Request StringItems ────────────────────────────────────────
-        //
-        // Emit each module specifier (e.g. "@ohos:app.ability.UIAbility") as a
-        // standalone StringItem accessible by its file offset.  This lets
-        // ArkRuntime discover the imported module specifiers; the full
-        // ModuleRecord annotation encoding is a follow-up task.
-        for class_req_strings in &all_module_req_strings {
-            for s in class_req_strings {
-                file.extend_from_slice(s);
-            }
-        }
-
         // ── Field Name StringItems ────────────────────────────────────────────
         //
         // Emit the field name string for each FieldRecord (e.g. "pkgName@",
@@ -731,6 +762,11 @@ impl AbcFile {
 
         // ── Bytecode StringItems ─────────────────────────────────────────────
         for s in &all_bytecode_strings {
+            file.extend_from_slice(s);
+        }
+
+        // ── LiteralArray StringItems ────────────────────────────────────────
+        for s in &all_literal_strings {
             file.extend_from_slice(s);
         }
 
@@ -768,6 +804,47 @@ impl AbcFile {
         file[0x08..0x0C].copy_from_slice(&checksum.to_le_bytes());
 
         file
+    }
+}
+
+fn patch_defineclass_indices(
+    bytecode: &[u8],
+    literal_pool_base: u16,
+    ctor_pool_index: u16,
+) -> Vec<u8> {
+    let mut patched = bytecode.to_vec();
+    let mut pos = 0;
+    while pos < patched.len() {
+        let Some(opcode) = patched.get(pos).copied() else {
+            break;
+        };
+        if opcode == 0x35 && pos + 8 < patched.len() {
+            let ctor_pos = pos + 2;
+            patched[ctor_pos..ctor_pos + 2].copy_from_slice(&ctor_pool_index.to_le_bytes());
+            let buf_pos = pos + 4;
+            let old_buf = u16::from_le_bytes([patched[buf_pos], patched[buf_pos + 1]]);
+            let new_buf = old_buf.saturating_add(literal_pool_base);
+            patched[buf_pos..buf_pos + 2].copy_from_slice(&new_buf.to_le_bytes());
+            pos += 9;
+            continue;
+        }
+        pos += instruction_len(opcode, patched.get(pos + 1).copied());
+    }
+    patched
+}
+
+fn instruction_len(opcode: u8, next: Option<u8>) -> usize {
+    match opcode {
+        0x00..=0x03 | 0x64 | 0x65 => 1,
+        0x29 | 0x44 | 0x60 | 0x61 => 2,
+        0x2a | 0x2d | 0x3e | 0x45 | 0x50 | 0x9b | 0x4e => 3,
+        0x0a..=0x0d | 0x2b | 0x2e | 0x31 | 0x3f | 0x40 | 0x42 | 0x73 => 4,
+        0x08 | 0x2c | 0x33 | 0x43 | 0x62 | 0x8f | 0x98 | 0x9a | 0x9c => 5,
+        0x2f => 5,
+        0x30 => 6,
+        0x35 | 0x63 => 9,
+        0xfe if next == Some(0x00) => 2,
+        _ => 1,
     }
 }
 

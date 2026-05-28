@@ -133,6 +133,8 @@ pub enum FieldValue {
     U8(u8),
     /// `u32` file offset (`FieldTag::VALUE = 0x02`, four-byte payload).
     U32(u32),
+    /// `u32` file offset of a literal array, resolved during file layout.
+    LiteralArray(usize),
 }
 
 /// A compiled module, represented as a Panda `ClassItem`.
@@ -159,11 +161,9 @@ pub struct ClassRecord {
     /// Module specifiers referenced by `require("@ohos:xxx")` calls in this
     /// module's code.
     ///
-    /// These strings are emitted as standalone `StringItem`s in the file's
-    /// string section (using `inline_string()`) so that ArkRuntime can locate
-    /// each module import specifier by its file offset.  This is the first step
-    /// toward a fully annotated `ModuleRecord`; full `L_ESConcurrentModuleRequestsAnnotation`
-    /// field encoding is left as a follow-up.
+    /// These strings are emitted through the compact `moduleRecordIdx` literal
+    /// array so that ArkRuntime can locate each module import specifier by file
+    /// offset.
     pub module_requests: Vec<String>,
     /// Module metadata fields — the 6 fixed fields that es2abc writes into every
     /// user class so that ArkRuntime knows how to load this module's dependencies.
@@ -288,6 +288,7 @@ impl ClassRecord {
         method_name_offsets: &[u32],
         code_offsets: &[u32],
         debug_info_offsets: &[Option<u32>],
+        literal_array_offsets: &[u32],
     ) -> Vec<u8> {
         debug_assert_eq!(field_name_offsets.len(), self.fields.len());
         debug_assert_eq!(method_name_offsets.len(), self.methods.len());
@@ -349,7 +350,7 @@ impl ClassRecord {
             // access_flags: ULEB128
             buf.extend_from_slice(&uleb128(field.access_flags as u64));
             if let Some(value) = field.value {
-                value.encode_into(&mut buf);
+                value.encode_into(&mut buf, literal_array_offsets);
             }
             // FieldTag::NOTHING = 0x00
             buf.push(0x00);
@@ -404,17 +405,25 @@ impl FieldValue {
     fn encoded_len(self) -> usize {
         match self {
             FieldValue::U8(_) => 2,
-            FieldValue::U32(_) => 5,
+            FieldValue::U32(_) | FieldValue::LiteralArray(_) => 5,
         }
     }
 
-    fn encode_into(self, buf: &mut Vec<u8>) {
+    fn encode_into(self, buf: &mut Vec<u8>, literal_array_offsets: &[u32]) {
         match self {
             FieldValue::U8(value) => {
                 buf.push(0x01);
                 buf.push(value);
             }
             FieldValue::U32(value) => {
+                buf.push(0x02);
+                buf.extend_from_slice(&value.to_le_bytes());
+            }
+            FieldValue::LiteralArray(index) => {
+                let value = literal_array_offsets
+                    .get(index)
+                    .copied()
+                    .expect("field literal array index must be resolved");
                 buf.push(0x02);
                 buf.extend_from_slice(&value.to_le_bytes());
             }
@@ -520,7 +529,7 @@ mod tests {
             module_requests: vec![],
             fields: vec![],
         };
-        let bytes = record.serialize_class_item(4, &[], None, &[0x12a], &[0x1a1], &[None]);
+        let bytes = record.serialize_class_item(4, &[], None, &[0x12a], &[0x1a1], &[None], &[]);
         assert_eq!(bytes.len(), record.class_item_byte_size());
 
         // Verify inline class name starts with ULEB128(0x13) = "L_GLOBAL;"

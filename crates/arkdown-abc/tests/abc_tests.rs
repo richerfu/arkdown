@@ -4,6 +4,7 @@
 //! without access to crate internals.
 
 use arkdown_abc::{AbcCompileOptions, AbcCompiler, AbcModule};
+use std::collections::BTreeMap;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -158,6 +159,57 @@ fn first_user_method_debug_info(bytes: &[u8], class_offset: usize) -> (Option<u3
     }
 
     (class_source_file, method_debug_info)
+}
+
+fn user_field_values(bytes: &[u8], class_offset: usize) -> BTreeMap<String, u32> {
+    let mut pos = class_offset;
+    skip_inline_string(bytes, &mut pos);
+    pos += 4; // super_class_off
+    let access_flags = read_uleb(bytes, &mut pos);
+    let fields_count = read_uleb(bytes, &mut pos) as usize;
+    let methods_count = read_uleb(bytes, &mut pos) as usize;
+    assert_eq!(access_flags, 1);
+    assert!(methods_count > 0);
+
+    loop {
+        let tag = bytes[pos];
+        pos += 1;
+        match tag {
+            0x00 => break,
+            0x02 => pos += 1,
+            0x07 => pos += 4,
+            other => panic!("unexpected class tag {other:#x}"),
+        }
+    }
+
+    let mut fields = BTreeMap::new();
+    for _ in 0..fields_count {
+        pos += 2 + 2;
+        let name_off = read_u32(bytes, pos) as usize;
+        pos += 4;
+        let _access_flags = read_uleb(bytes, &mut pos);
+        let mut value = None;
+        loop {
+            let tag = bytes[pos];
+            pos += 1;
+            match tag {
+                0x00 => break,
+                0x01 => {
+                    value = Some(bytes[pos] as u32);
+                    pos += 1;
+                }
+                0x02 => {
+                    value = Some(read_u32(bytes, pos));
+                    pos += 4;
+                }
+                other => panic!("unexpected field tag {other:#x}"),
+            }
+        }
+        if let Some(value) = value {
+            fields.insert(inline_string_at(bytes, name_off), value);
+        }
+    }
+    fields
 }
 
 // ---------------------------------------------------------------------------
@@ -350,6 +402,95 @@ fn test_user_records_are_marked_arkts_and_sdk_stubs_have_native_fields() {
             .windows(b"pkgName@entry".len())
             .any(|w| w == b"pkgName@entry"),
         "pkgName field includes the module name suffix"
+    );
+}
+
+#[test]
+fn test_module_record_scope_names_and_class_buffer_literals_are_linked() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = tmp.path().join("module-record.abc");
+    make_compiler()
+        .compile(
+            vec![iife_module(
+                "com.example.app/entry/ets/pages/Index",
+                r#"(function(){
+                    var ability = require("@ohos:app.ability.UIAbility");
+                    var Index = class { onCreate(){} };
+                })();"#,
+            )],
+            &out,
+        )
+        .expect("compile must succeed");
+    let bytes = std::fs::read(&out).expect("read .abc");
+
+    let num_literalarrays = read_u32(&bytes, 0x2c) as usize;
+    let literalarray_idx_off = read_u32(&bytes, 0x30) as usize;
+    assert!(
+        num_literalarrays >= 3,
+        "class buffer, module record, and scopeNames literal arrays are emitted"
+    );
+    let literal_offsets: Vec<u32> = (0..num_literalarrays)
+        .map(|idx| read_u32(&bytes, literalarray_idx_off + idx * 4))
+        .collect();
+
+    let user_off = class_offsets(&bytes)
+        .into_iter()
+        .find(|off| {
+            class_name_at(&bytes, *off as usize) == "Lcom.example.app/entry/ets/pages/Index;"
+        })
+        .expect("user record exists") as usize;
+    let fields = user_field_values(&bytes, user_off);
+    let module_record = *fields
+        .get("moduleRecordIdx")
+        .expect("moduleRecordIdx field has a literal-array value");
+    let scope_names = *fields
+        .get("scopeNames")
+        .expect("scopeNames field has a literal-array value");
+    assert!(literal_offsets.contains(&module_record));
+    assert!(literal_offsets.contains(&scope_names));
+
+    let mut pos = module_record as usize;
+    assert_eq!(
+        read_u32(&bytes, pos),
+        7,
+        "one request plus five section counts"
+    );
+    pos += 4;
+    assert_eq!(read_u32(&bytes, pos), 1, "one module request");
+    pos += 4;
+    let request_string = read_u32(&bytes, pos) as usize;
+    pos += 4;
+    assert_eq!(
+        inline_string_at(&bytes, request_string),
+        "@ohos:app.ability.UIAbility"
+    );
+    for _ in 0..5 {
+        assert_eq!(
+            read_u32(&bytes, pos),
+            0,
+            "empty module-record section count"
+        );
+        pos += 4;
+    }
+
+    let mut scope_pos = scope_names as usize;
+    let scope_item_count = read_u32(&bytes, scope_pos);
+    scope_pos += 4;
+    assert!(scope_item_count >= 2 && scope_item_count % 2 == 0);
+    assert_eq!(
+        bytes[scope_pos], 0x05,
+        "scopeNames entries are tagged strings"
+    );
+
+    let has_minimal_class_buffer = literal_offsets.iter().any(|offset| {
+        let offset = *offset as usize;
+        read_u32(&bytes, offset) == 2
+            && bytes[offset + 4] == 0x02
+            && read_u32(&bytes, offset + 5) == 0
+    });
+    assert!(
+        has_minimal_class_buffer,
+        "class buffer literal array carries tagged instancePropertyCount=0"
     );
 }
 
