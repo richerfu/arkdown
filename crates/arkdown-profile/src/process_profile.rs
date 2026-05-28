@@ -5,12 +5,27 @@ use arkdown_core::{
 /// Transform a raw [`ModuleJson5`] into a processed [`HapManifest`].
 ///
 /// This mirrors the `ProcessProfile` task in hvigor:
-/// - Sets `virtualMachine` from `compileApiVersion`
+/// - Sets `virtualMachine`
 /// - Fills `compileMode` from build configuration
 /// - Maps ability entries
 pub fn process_profile(
     module_json5: &ModuleJson5,
     compile_api_version: u32,
+    _bundle_name: &str,
+    compile_mode: CompileMode,
+) -> HapManifest {
+    let ark_vm_version = fallback_ark_vm_version(compile_api_version);
+    process_profile_with_ark_vm_version(module_json5, &ark_vm_version, _bundle_name, compile_mode)
+}
+
+/// Transform a raw [`ModuleJson5`] using an Ark VM version discovered from the SDK.
+///
+/// hvigor obtains this by invoking `ts2abc.js --target-api-version <api>` and
+/// writes `module.virtualMachine` as `ark<version>`, for example
+/// `ark12.0.6.0`.
+pub fn process_profile_with_ark_vm_version(
+    module_json5: &ModuleJson5,
+    ark_vm_version: &str,
     _bundle_name: &str,
     compile_mode: CompileMode,
 ) -> HapManifest {
@@ -45,8 +60,7 @@ pub fn process_profile(
         module_name: module_json5.module.name.clone(),
         module_type: map_module_type(&module_json5.module.type_),
         device_types: module_json5.module.device_types.clone(),
-        // e.g. api version 12 → "ark12.0.1.0", api version 17 → "ark17.0.1.0"
-        virtual_machine: format!("ark{}.0.1.0", compile_api_version),
+        virtual_machine: ark_virtual_machine_from_version(ark_vm_version),
         compile_mode,
         abilities,
         extension_abilities,
@@ -56,6 +70,19 @@ pub fn process_profile(
         main_element: module_json5.module.main_element.clone(),
         description: module_json5.module.description.clone(),
     }
+}
+
+/// Convert a raw SDK Ark VM version into the `module.json` field value.
+pub fn ark_virtual_machine_from_version(ark_vm_version: &str) -> String {
+    if ark_vm_version.starts_with("ark") {
+        ark_vm_version.to_string()
+    } else {
+        format!("ark{}", ark_vm_version)
+    }
+}
+
+fn fallback_ark_vm_version(compile_api_version: u32) -> String {
+    format!("{}.0.1.0", compile_api_version)
 }
 
 fn map_module_type(t: &str) -> OhosModuleType {
@@ -70,9 +97,7 @@ fn map_module_type(t: &str) -> OhosModuleType {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arkdown_core::{
-        AbilityConfig, ModuleJson5Module,
-    };
+    use arkdown_core::{AbilityConfig, ModuleJson5Module};
 
     fn make_module_json5(name: &str, type_: &str) -> ModuleJson5 {
         ModuleJson5 {
@@ -115,6 +140,26 @@ mod tests {
         assert_eq!(
             manifest.abilities[0].src_entry,
             "./ets/entryability/EntryAbility.ets"
+        );
+    }
+
+    #[test]
+    fn test_process_profile_accepts_sdk_ark_vm_version() {
+        let mj = make_module_json5("entry", "entry");
+        let manifest = process_profile_with_ark_vm_version(
+            &mj,
+            "12.0.6.0",
+            "com.example.app",
+            CompileMode::EsModule,
+        );
+        assert_eq!(manifest.virtual_machine, "ark12.0.6.0");
+    }
+
+    #[test]
+    fn test_ark_virtual_machine_from_version_accepts_prefixed_value() {
+        assert_eq!(
+            ark_virtual_machine_from_version("ark12.0.6.0"),
+            "ark12.0.6.0"
         );
     }
 

@@ -32,4 +32,5 @@ walkdir = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+tempfile = "3"
 zip = { workspace = true }

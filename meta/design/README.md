@@ -12,6 +12,7 @@ Read these documents before working in a covered area. Keep them in sync with im
 | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | [pipeline.md](pipeline.md)                   | Complete end-to-end build pipeline: all phases from config parsing through HAP signing, with hvigor behavior, rolldown equivalent, and OHOS divergences for each phase                                 |
 | [hvigorw-analysis.md](hvigorw-analysis.md)   | Reverse-engineering of hvigorw: full task dependency graph, task descriptions, config file schemas, intermediate artifact layout, daemon architecture, and incremental cache strategy                  |
+| [hvigor-gap-plan.md](hvigor-gap-plan.md)     | Current implementation gap analysis against the locally installed hvigor pipeline, with a staged plan for compile-stage and full-artifact parity                                                       |
 | [module-resolution.md](module-resolution.md) | OHOS module resolution deep dive: all specifier forms (@ohos/_, @kit/_, @bundle:, bare ohpm), oh-package.json5 dependency types, oxc-resolver integration, OHM URL normalization, SDK path conventions |
 | [abc-pipeline.md](abc-pipeline.md)           | es2abc compilation step: why ABC is required, all relevant CLI flags (confirmed from installed SDK), input IIFE format, source map chain, incremental cache, worker pool parallelism                   |
 | [chunk-model.md](chunk-model.md)             | OHOS chunk architecture: why ArkRuntime forbids native ESM, the IIFE/globalThis registry pattern, @Entry entry points, supportChunks flag, per-module bundle layouts (HAP/HSP/HAR), HAR deduplication  |
@@ -26,6 +27,8 @@ Read these documents before working in a covered area. Keep them in sync with im
 **The fundamental output constraint**: ArkRuntime does not run native ESM. Every output chunk is wrapped in an IIFE, and cross-chunk dependencies use `globalThis['chunkName_hash']` as a module registry. This is implemented by `wrapper-chunk-plugin` and is the first thing to implement correctly. See [chunk-model.md](chunk-model.md).
 
 **The compilation chain**: `.ets` source → rolldown bundle (IIFE JS) → `es2abc` → `.abc` bytecode → HAP zip. There is no way to ship a HAP without going through es2abc. See [abc-pipeline.md](abc-pipeline.md).
+
+**Current gap to hvigor**: The largest remaining mismatch is the compile stage: real SDK `ets-loader` semantics, post-rollup importee processing, source maps, caches, release obfuscation/minification, and full `es2abc` parity. See [hvigor-gap-plan.md](hvigor-gap-plan.md).
 
 **Module identity**: With `useNormalizedOHMUrl: true` (the production setting), all module identifiers are OHM URLs in the format `@bundle:bundleName/moduleName/filePath`. This affects the resolver, the chunk registry keys, and the HAR/HSP dependency maps. See [module-resolution.md](module-resolution.md).
 

@@ -21,7 +21,9 @@ pub mod router_map;
 
 pub use har_abilities::{HarAbility, collect_har_abilities};
 pub use loader_json::{ByteCodeHarEntry, LoaderJson, PkgBriefInfo, generate_loader_json};
-pub use process_profile::process_profile;
+pub use process_profile::{
+    ark_virtual_machine_from_version, process_profile, process_profile_with_ark_vm_version,
+};
 pub use router_map::{RouterMapEntry, collect_router_entries};
 
 use std::collections::HashMap;

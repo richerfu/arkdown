@@ -11,7 +11,6 @@ use arkdown_abc::{AbcCompileOptions, AbcCompiler, AbcModule};
 use arkdown_config::load_config;
 use arkdown_core::{ArkdownPlugin, BuildMode, ModuleJson5, ModuleJson5Module, OutputTarget};
 use arkdown_pack::{HarPackInput, PackAbility, PackInput, Packager};
-use arkdown_sign::HapSigner;
 use arkdown_plugin_chunk_wrapper::ChunkWrapperPlugin;
 use arkdown_plugin_duplicate_check::DuplicateCheckPlugin;
 use arkdown_plugin_ets_transform::EtsTransformPlugin;
@@ -21,6 +20,7 @@ use arkdown_plugin_ohos_resolve::OhosResolvePlugin;
 use arkdown_profile::ProfileProcessor;
 use arkdown_resolver::ResolverConfig;
 use arkdown_resource::{ResourceCompileConfig, ResourceCompileInput, ResourceCompiler};
+use arkdown_sign::HapSigner;
 
 use crate::progress::Progress;
 
@@ -181,10 +181,17 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                     module_src_roots: vec![module.src_path.join("src/main/ets")],
                 },
                 project_root.clone(),
-                config_arc.product.build_option.strict_mode.case_sensitive_check,
+                config_arc
+                    .product
+                    .build_option
+                    .strict_mode
+                    .case_sensitive_check,
             )),
             // 3. Module metadata — annotates each module with OHOS package context
-            Arc::new(ModuleMetaPlugin::new(project_root.clone(), module.name.clone())),
+            Arc::new(ModuleMetaPlugin::new(
+                project_root.clone(),
+                module.name.clone(),
+            )),
             // 4. JSON5 import support
             Arc::new(Json5Plugin),
             // 5. Duplicate filename check
@@ -237,10 +244,8 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                     .trim_end_matches(".ets")
                     .trim_end_matches(".ts")
                     .trim_end_matches(".js");
-                let record_name = format!(
-                    "{}/{}/{}",
-                    bundle_name, loader_json.module_name, stripped
-                );
+                let record_name =
+                    format!("{}/{}/{}", bundle_name, loader_json.module_name, stripped);
                 Some((stem, record_name))
             })
             .collect();
@@ -320,7 +325,11 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                             let p = module.src_path.join(
                                 "build/default/intermediates/loader_out/default/ets/sourceMaps.map",
                             );
-                            if p.exists() { Some(p) } else { None }
+                            if p.exists() {
+                                Some(p)
+                            } else {
+                                None
+                            }
                         };
                         // Abilities from the processed manifest
                         let abilities: Vec<PackAbility> = manifest

@@ -1,7 +1,7 @@
 # hvigorw Build Pipeline Analysis
 
 Complete reverse-engineering of the HarmonyOS hvigorw build tool pipeline
-(DevEco Studio 6.0.0.858, conducted 2026-05-28).
+(checked against a local DevEco command-line-tools installation on 2026-05-28).
 
 ---
 
@@ -10,18 +10,24 @@ Complete reverse-engineering of the HarmonyOS hvigorw build tool pipeline
 **hvigorw does NOT use rolldown.** It uses a Huawei fork of rollup 3:
 
 ```
-rollup@3.19.1-htrunk1.AllScenario.devecostudio.r6
+rollup@3.19.1-htrunk1.AllScenario.devecostudio.r8
 ```
 
 Located at:
 
 ```
-DevEco-Studio-6.0.0.858.app/Contents/tools/hvigor/
-  hvigor-ohos-plugin/node_modules/@ohos/hvigor-arkts-base/
+<command-line-tools>/hvigor/hvigor-ohos-plugin/
+  node_modules/@ohos/hvigor-arkts-base/
     node_modules/rollup/
 ```
 
-Package: `@ohos/hvigor-arkts-base@6.0.6`
+Package versions in the local command-line tools:
+
+```
+@ohos/hvigor-arkts-base    6.21.1
+@ohos/hvigor-arkts-compose 6.21.1
+rollup                    3.19.1-htrunk1.AllScenario.devecostudio.r8
+```
 
 ---
 
@@ -310,8 +316,8 @@ arkdown replaces all three with pure-Rust implementations:
 
 ## References
 
-- DevEco Studio: `~/.meat/ide/DevEco-Studio-6.0.0.858.app`
-- hvigor-ohos-plugin: `DevEco.app/Contents/tools/hvigor/hvigor-ohos-plugin/`
+- DevEco Studio: `<DevEco Studio app>`
+- hvigor-ohos-plugin: `<DevEco Studio app>/Contents/tools/hvigor/hvigor-ohos-plugin/`
 - Existing analysis: `meta/design/hvigorw-analysis.md`
 - Existing plugins doc: `meta/design/plugins.md`
 - Existing pipeline doc: `meta/design/pipeline.md`

@@ -68,9 +68,9 @@ pub fn stub_arkui_build_bodies(source: &str) -> String {
 
         // Replace the entire "build() { ... }" span with the stub.
         let stub = "build() { return; }";
-        result = format!("{}{}{}", &result[..abs_brace], stub, &result[end + 1..]);
+        result = format!("{}{}{}", &result[..abs_pos], stub, &result[end + 1..]);
         // Advance past the stub so we do not re-scan it.
-        search_from = abs_brace + stub.len();
+        search_from = abs_pos + stub.len();
     }
 
     result
@@ -249,6 +249,7 @@ mod tests {
         let out = super::stub_arkui_build_bodies(src);
         // An already-empty body is replaced with the canonical stub.
         assert!(out.contains("build() { return; }"), "got: {out}");
+        assert!(!out.contains("build() build()"), "build() declaration must not be duplicated; got: {out}");
     }
 
     #[test]
@@ -256,6 +257,7 @@ mod tests {
         let src = "class Index extends ViewPU {\n  build() {\n    Row() {\n      Column() {\n        Text('hi')\n      }\n    }\n  }\n}";
         let out = super::stub_arkui_build_bodies(src);
         assert!(out.contains("build() { return; }"), "body must be stubbed; got: {out}");
+        assert!(!out.contains("build() build()"), "build() declaration must not be duplicated; got: {out}");
         assert!(!out.contains("Row()"), "ArkUI DSL must be gone; got: {out}");
     }
 
@@ -274,6 +276,7 @@ mod tests {
         let src = "class C extends ViewPU {\n  build() {\n    if (true) {\n      let x = { a: 1 };\n    }\n  }\n  other() { return 42; }\n}";
         let out = super::stub_arkui_build_bodies(src);
         assert!(out.contains("build() { return; }"), "got: {out}");
+        assert!(!out.contains("build() build()"), "build() declaration must not be duplicated; got: {out}");
         // other() must remain untouched.
         assert!(out.contains("other() { return 42; }"), "other() body must be unchanged; got: {out}");
     }

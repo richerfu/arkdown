@@ -223,6 +223,7 @@ dependencies = [
  "fs-err",
  "json5",
  "serde_json",
+ "tempfile",
  "tokio",
  "walkdir",
  "zip",
