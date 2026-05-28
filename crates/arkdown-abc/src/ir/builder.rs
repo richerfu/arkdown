@@ -8,7 +8,7 @@ use oxc_ast::ast::{
 use oxc_parser::{Parser, ParserReturn};
 use oxc_span::SourceType;
 
-use crate::emit::file::LiteralArray;
+use crate::emit::file::{LiteralArray, LiteralEntry};
 use crate::emit::record::{
     ClassRecord, DebugInfoRecord, FieldRecord, FieldValue, MethodRecord, FIELD_OWNER_CLASS_IDX,
 };
@@ -135,10 +135,12 @@ pub fn build_record_with_debug(
     };
 
     // Collect module specifiers from require("@ohos:xxx") calls so that the
-    // ABC serializer can emit them as standalone StringItems.  This is the first
-    // step toward a proper ModuleRecord annotation; ArkRuntime can then locate
-    // each import specifier by its file offset.
+    // ABC serializer can emit the compact libpandafile module record buffer.
     let module_requests = collect_module_requests(&program);
+    let module_record_idx = literal_arrays.len();
+    literal_arrays.push(module_record_literal_array(&module_requests));
+    let scope_names_idx = literal_arrays.len();
+    literal_arrays.push(scope_names_literal_array(&methods));
 
     // The 6 module metadata fields that es2abc always writes into every user
     // class record.  ArkRuntime reads these to understand how to load the
@@ -154,14 +156,14 @@ pub fn build_record_with_debug(
             class_idx: FIELD_OWNER_CLASS_IDX,
             type_idx: 1,
             access_flags: 0,
-            value: None,
+            value: Some(FieldValue::LiteralArray(scope_names_idx)),
         },
         FieldRecord {
             name: "moduleRecordIdx".to_string(),
             class_idx: FIELD_OWNER_CLASS_IDX,
             type_idx: 1,
             access_flags: 0,
-            value: None,
+            value: Some(FieldValue::LiteralArray(module_record_idx)),
         },
     ];
 
@@ -197,6 +199,29 @@ fn module_u8_field(name: impl Into<String>) -> FieldRecord {
         type_idx: 0,
         access_flags: 0,
         value: Some(FieldValue::U8(0)),
+    }
+}
+
+fn module_record_literal_array(module_requests: &[String]) -> LiteralArray {
+    let mut entries = Vec::with_capacity(module_requests.len() + 6);
+    entries.push(LiteralEntry::RawU32(module_requests.len() as u32));
+    entries.extend(module_requests.iter().cloned().map(LiteralEntry::RawString));
+    entries.extend([
+        LiteralEntry::RawU32(0), // regular imports
+        LiteralEntry::RawU32(0), // namespace imports
+        LiteralEntry::RawU32(0), // local exports
+        LiteralEntry::RawU32(0), // indirect exports
+        LiteralEntry::RawU32(0), // star exports
+    ]);
+    LiteralArray { entries }
+}
+
+fn scope_names_literal_array(methods: &[MethodRecord]) -> LiteralArray {
+    let mut names: Vec<String> = methods.iter().map(|method| method.name.clone()).collect();
+    names.sort();
+    names.dedup();
+    LiteralArray {
+        entries: names.into_iter().map(LiteralEntry::TaggedString).collect(),
     }
 }
 
@@ -737,7 +762,7 @@ impl<'a> CodeGen<'a> {
         // Register a stub literal array and use its index as buf_id.
         let lit_arr_id = self.literal_arrays.len() as u16;
         self.literal_arrays.push(LiteralArray {
-            entries: Vec::new(),
+            entries: vec![LiteralEntry::TaggedInteger(0)],
         });
 
         // Emit defineclasswithbuffer:
