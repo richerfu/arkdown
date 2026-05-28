@@ -32,6 +32,10 @@ fn read_u32(bytes: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
 }
 
+fn read_u16(bytes: &[u8], offset: usize) -> u16 {
+    u16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap())
+}
+
 fn read_uleb(bytes: &[u8], offset: &mut usize) -> u64 {
     let mut value = 0u64;
     let mut shift = 0;
@@ -452,8 +456,8 @@ fn test_module_record_scope_names_and_class_buffer_literals_are_linked() {
     let mut pos = module_record as usize;
     assert_eq!(
         read_u32(&bytes, pos),
-        7,
-        "one request plus five section counts"
+        10,
+        "one request, one regular import, and four empty section counts"
     );
     pos += 4;
     assert_eq!(read_u32(&bytes, pos), 1, "one module request");
@@ -464,12 +468,23 @@ fn test_module_record_scope_names_and_class_buffer_literals_are_linked() {
         inline_string_at(&bytes, request_string),
         "@ohos:app.ability.UIAbility"
     );
-    for _ in 0..5 {
-        assert_eq!(
-            read_u32(&bytes, pos),
-            0,
-            "empty module-record section count"
-        );
+    assert_eq!(read_u32(&bytes, pos), 1, "one regular import");
+    pos += 4;
+    let local_name = read_u32(&bytes, pos) as usize;
+    pos += 4;
+    let import_name = read_u32(&bytes, pos) as usize;
+    pos += 4;
+    assert_eq!(read_u16(&bytes, pos), 0, "regular import request index");
+    pos += 2;
+    assert_eq!(inline_string_at(&bytes, local_name), "ability");
+    assert_eq!(inline_string_at(&bytes, import_name), "default");
+    for label in [
+        "namespace imports",
+        "local exports",
+        "indirect exports",
+        "star exports",
+    ] {
+        assert_eq!(read_u32(&bytes, pos), 0, "empty {label} section count");
         pos += 4;
     }
 

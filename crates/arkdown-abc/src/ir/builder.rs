@@ -134,11 +134,11 @@ pub fn build_record_with_debug(
         format!("L_{};", record_name)
     };
 
-    // Collect module specifiers from require("@ohos:xxx") calls so that the
-    // ABC serializer can emit the compact libpandafile module record buffer.
-    let module_requests = collect_module_requests(&program);
+    // Collect module import/export records so that the ABC serializer can emit
+    // the compact libpandafile module record buffer used by hvigor/es2abc.
+    let module_record = collect_module_record(&program);
     let module_record_idx = literal_arrays.len();
-    literal_arrays.push(module_record_literal_array(&module_requests));
+    literal_arrays.push(module_record_literal_array(&module_record));
     let scope_names_idx = literal_arrays.len();
     literal_arrays.push(scope_names_literal_array(&methods));
 
@@ -183,7 +183,7 @@ pub fn build_record_with_debug(
         access_flags: 1,
         source_lang: 0x04,
         source_file,
-        module_requests,
+        module_requests: module_record.module_requests,
         fields: module_fields,
     })
 }
@@ -202,14 +202,37 @@ fn module_u8_field(name: impl Into<String>) -> FieldRecord {
     }
 }
 
-fn module_record_literal_array(module_requests: &[String]) -> LiteralArray {
-    let mut entries = Vec::with_capacity(module_requests.len() + 6);
-    entries.push(LiteralEntry::RawU32(module_requests.len() as u32));
-    entries.extend(module_requests.iter().cloned().map(LiteralEntry::RawString));
+fn module_record_literal_array(module_record: &ModuleRecordInfo) -> LiteralArray {
+    let mut entries = Vec::new();
+    entries.push(LiteralEntry::RawU32(
+        module_record.module_requests.len() as u32
+    ));
+    entries.extend(
+        module_record
+            .module_requests
+            .iter()
+            .cloned()
+            .map(LiteralEntry::RawString),
+    );
+
+    entries.push(LiteralEntry::RawU32(
+        module_record.regular_imports.len() as u32
+    ));
+    for import in &module_record.regular_imports {
+        entries.push(LiteralEntry::RawString(import.local_name.clone()));
+        entries.push(LiteralEntry::RawString(import.import_name.clone()));
+        entries.push(LiteralEntry::RawU16(import.module_request_idx));
+    }
+
+    entries.push(LiteralEntry::RawU32(0)); // namespace imports
+    entries.push(LiteralEntry::RawU32(
+        module_record.local_exports.len() as u32
+    ));
+    for export in &module_record.local_exports {
+        entries.push(LiteralEntry::RawString(export.local_name.clone()));
+        entries.push(LiteralEntry::RawString(export.export_name.clone()));
+    }
     entries.extend([
-        LiteralEntry::RawU32(0), // regular imports
-        LiteralEntry::RawU32(0), // namespace imports
-        LiteralEntry::RawU32(0), // local exports
         LiteralEntry::RawU32(0), // indirect exports
         LiteralEntry::RawU32(0), // star exports
     ]);
@@ -1031,70 +1054,210 @@ fn is_global_this(expr: &Expression<'_>) -> bool {
     matches!(expr, Expression::Identifier(id) if id.name.as_str() == "globalThis")
 }
 
-// ── Module-request collection ─────────────────────────────────────────────────
+// ── Module-record collection ─────────────────────────────────────────────────
 
-/// Collect all `require("@ohos:xxx")` specifiers from `program`.
-///
-/// The function unwraps a top-level IIFE wrapper (the same pattern handled by
-/// `compile_program_body`) before scanning, so that require() calls inside the
-/// IIFE body are found regardless of whether the source is bare or wrapped.
-///
-/// Returned specifiers are deduplicated and sorted for deterministic output.
-fn collect_module_requests(program: &Program<'_>) -> Vec<String> {
-    let stmts = extract_iife_stmts(program).unwrap_or(program.body.as_slice());
-    let mut requests: Vec<String> = Vec::new();
-    for stmt in stmts {
-        scan_stmt_for_requires(stmt, &mut requests);
-    }
-    requests.sort();
-    requests.dedup();
-    requests
+#[derive(Debug, Default, Clone)]
+struct ModuleRecordInfo {
+    module_requests: Vec<String>,
+    regular_imports: Vec<RegularImportEntry>,
+    local_exports: Vec<LocalExportEntry>,
 }
 
-/// Scan a statement for `require("@ohos:xxx")` call expressions.
-fn scan_stmt_for_requires(stmt: &Statement<'_>, out: &mut Vec<String>) {
+#[derive(Debug, Clone)]
+struct RegularImportEntry {
+    local_name: String,
+    import_name: String,
+    module_request_idx: u16,
+}
+
+#[derive(Debug, Clone)]
+struct LocalExportEntry {
+    local_name: String,
+    export_name: String,
+}
+
+impl ModuleRecordInfo {
+    fn request_index(&mut self, specifier: &str) -> u16 {
+        if let Some(index) = self
+            .module_requests
+            .iter()
+            .position(|request| request == specifier)
+        {
+            return index as u16;
+        }
+        let index = self.module_requests.len() as u16;
+        self.module_requests.push(specifier.to_string());
+        index
+    }
+
+    fn add_regular_import(&mut self, local_name: String, specifier: &str) {
+        let module_request_idx = self.request_index(specifier);
+        if self.regular_imports.iter().any(|import| {
+            import.local_name == local_name && import.module_request_idx == module_request_idx
+        }) {
+            return;
+        }
+        self.regular_imports.push(RegularImportEntry {
+            local_name,
+            import_name: "default".to_string(),
+            module_request_idx,
+        });
+    }
+
+    fn add_local_export(&mut self, local_name: String, export_name: &str) {
+        if self
+            .local_exports
+            .iter()
+            .any(|export| export.local_name == local_name && export.export_name == export_name)
+        {
+            return;
+        }
+        self.local_exports.push(LocalExportEntry {
+            local_name,
+            export_name: export_name.to_string(),
+        });
+    }
+}
+
+/// Collect libpandafile module-record data from `program`.
+///
+/// The function unwraps a top-level IIFE wrapper before scanning. It recognises
+/// the CommonJS patterns produced by the current bundler:
+/// `var import_X = require("@ohos:...")` and `module.exports = Local`.
+fn collect_module_record(program: &Program<'_>) -> ModuleRecordInfo {
+    let stmts = extract_iife_stmts(program).unwrap_or(program.body.as_slice());
+    let mut info = ModuleRecordInfo::default();
+    for stmt in stmts {
+        scan_stmt_for_module_record(stmt, &mut info);
+    }
+    info
+}
+
+/// Scan a statement for module import/export patterns.
+fn scan_stmt_for_module_record(stmt: &Statement<'_>, info: &mut ModuleRecordInfo) {
     match stmt {
         Statement::ExpressionStatement(es) => {
-            scan_expr_for_requires(&es.expression, out);
+            scan_expr_for_module_record(&es.expression, info);
         }
         Statement::VariableDeclaration(decl) => {
             for declarator in &decl.declarations {
+                let local_name = match &declarator.id {
+                    BindingPattern::BindingIdentifier(id) => Some(id.name.as_str()),
+                    _ => None,
+                };
                 if let Some(init) = &declarator.init {
-                    scan_expr_for_requires(init, out);
+                    if let (Some(local_name), Some(specifier)) =
+                        (local_name, require_specifier(init))
+                    {
+                        let local_name = normalize_import_local_name(local_name, specifier);
+                        info.add_regular_import(local_name, specifier);
+                    } else {
+                        scan_expr_for_module_record(init, info);
+                    }
                 }
             }
         }
         Statement::BlockStatement(block) => {
             for s in &block.body {
-                scan_stmt_for_requires(s, out);
+                scan_stmt_for_module_record(s, info);
             }
         }
         Statement::ReturnStatement(ret) => {
             if let Some(arg) = &ret.argument {
-                scan_expr_for_requires(arg, out);
+                scan_expr_for_module_record(arg, info);
             }
+        }
+        Statement::ExportDefaultDeclaration(_) => {
+            info.add_local_export("default".to_string(), "default");
         }
         _ => {}
     }
 }
 
-/// Scan an expression for `require("@ohos:xxx")` patterns.
-///
-/// Only the direct `require("specifier")` call form is recognised; nested
-/// expressions (member chains, logical operators, etc.) are not traversed
-/// because the bundler always emits `require` at the top level of variable
-/// initialisers.
-fn scan_expr_for_requires(expr: &Expression<'_>, out: &mut Vec<String>) {
-    if let Expression::CallExpression(call) = expr {
-        if let Expression::Identifier(id) = &call.callee {
-            if id.name.as_str() == "require" && call.arguments.len() == 1 {
-                if let Some(Expression::StringLiteral(s)) = call.arguments[0].as_expression() {
-                    let spec = s.value.as_str();
-                    if spec.starts_with("@ohos:") && !out.iter().any(|r| r == spec) {
-                        out.push(spec.to_string());
-                    }
+fn scan_expr_for_module_record(expr: &Expression<'_>, info: &mut ModuleRecordInfo) {
+    if let Some(specifier) = require_specifier(expr) {
+        info.request_index(specifier);
+        return;
+    }
+
+    match expr {
+        Expression::AssignmentExpression(assign) => {
+            if is_module_exports_target(&assign.left) {
+                if let Expression::Identifier(id) = &assign.right {
+                    info.add_local_export(id.name.as_str().to_string(), "default");
+                }
+            }
+            scan_expr_for_module_record(&assign.right, info);
+        }
+        Expression::CallExpression(call) => {
+            for arg in &call.arguments {
+                if let Some(expr) = arg.as_expression() {
+                    scan_expr_for_module_record(expr, info);
                 }
             }
         }
+        Expression::ParenthesizedExpression(expr) => {
+            scan_expr_for_module_record(&expr.expression, info);
+        }
+        Expression::SequenceExpression(seq) => {
+            for expr in &seq.expressions {
+                scan_expr_for_module_record(expr, info);
+            }
+        }
+        Expression::LogicalExpression(log) => {
+            scan_expr_for_module_record(&log.left, info);
+            scan_expr_for_module_record(&log.right, info);
+        }
+        _ => {}
     }
+}
+
+fn require_specifier<'a>(expr: &'a Expression<'_>) -> Option<&'a str> {
+    let Expression::CallExpression(call) = expr else {
+        return None;
+    };
+    let Expression::Identifier(id) = &call.callee else {
+        return None;
+    };
+    if id.name.as_str() != "require" || call.arguments.len() != 1 {
+        return None;
+    }
+    let Some(Expression::StringLiteral(s)) = call.arguments[0].as_expression() else {
+        return None;
+    };
+    let specifier = s.value.as_str();
+    specifier.starts_with("@ohos:").then_some(specifier)
+}
+
+fn is_module_exports_target(target: &AssignmentTarget<'_>) -> bool {
+    let AssignmentTarget::StaticMemberExpression(member) = target else {
+        return false;
+    };
+    if member.property.name.as_str() != "exports" {
+        return false;
+    }
+    matches!(&member.object, Expression::Identifier(id) if id.name.as_str() == "module")
+}
+
+fn normalize_import_local_name(binding: &str, specifier: &str) -> String {
+    if binding.starts_with("_ohos_") {
+        return default_import_name(specifier);
+    }
+    let stripped = binding
+        .strip_prefix("import_")
+        .or_else(|| binding.strip_prefix("__import_"))
+        .unwrap_or(binding);
+    if stripped == "default" || stripped.is_empty() {
+        return default_import_name(specifier);
+    }
+    stripped.to_string()
+}
+
+fn default_import_name(specifier: &str) -> String {
+    specifier
+        .rsplit(['.', ':'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(specifier)
+        .to_string()
 }
