@@ -477,12 +477,17 @@ impl AbcFile {
             let mut class_code_offs = Vec::new();
             let mut class_code_items = Vec::new();
             let class_method_pool_start = method_pool_cursor;
+            let class_method_pool_end =
+                class_method_pool_start.saturating_add(class.methods.len() as u16);
+            let mut definefunc_pool_cursor = class_method_pool_start.saturating_add(1);
             for method in &class.methods {
                 class_code_offs.push(code_cur);
-                let bytecode = patch_defineclass_indices(
+                let bytecode = patch_bytecode_index_operands(
                     &method.bytecode,
                     self.strings.len() as u16,
                     class_method_pool_start,
+                    class_method_pool_end,
+                    &mut definefunc_pool_cursor,
                 );
                 let ci = encode_code_item(method.num_vregs, method.num_args, &bytecode);
                 code_cur += ci.len() as u32;
@@ -807,10 +812,12 @@ impl AbcFile {
     }
 }
 
-fn patch_defineclass_indices(
+fn patch_bytecode_index_operands(
     bytecode: &[u8],
     literal_pool_base: u16,
     ctor_pool_index: u16,
+    method_pool_end: u16,
+    definefunc_pool_cursor: &mut u16,
 ) -> Vec<u8> {
     let mut patched = bytecode.to_vec();
     let mut pos = 0;
@@ -818,6 +825,19 @@ fn patch_defineclass_indices(
         let Some(opcode) = patched.get(pos).copied() else {
             break;
         };
+        if opcode == 0x33 && pos + 4 < patched.len() {
+            let method_pos = pos + 2;
+            let method_index = if *definefunc_pool_cursor < method_pool_end {
+                let index = *definefunc_pool_cursor;
+                *definefunc_pool_cursor = (*definefunc_pool_cursor).saturating_add(1);
+                index
+            } else {
+                ctor_pool_index
+            };
+            patched[method_pos..method_pos + 2].copy_from_slice(&method_index.to_le_bytes());
+            pos += 5;
+            continue;
+        }
         if opcode == 0x35 && pos + 8 < patched.len() {
             let ctor_pos = pos + 2;
             patched[ctor_pos..ctor_pos + 2].copy_from_slice(&ctor_pool_index.to_le_bytes());
@@ -838,7 +858,8 @@ fn instruction_len(opcode: u8, next: Option<u8>) -> usize {
         0x00..=0x03 | 0x64 | 0x65 => 1,
         0x29 | 0x44 | 0x60 | 0x61 => 2,
         0x2a | 0x2d | 0x3e | 0x45 | 0x50 | 0x9b | 0x4e => 3,
-        0x0a..=0x0d | 0x2b | 0x2e | 0x31 | 0x3f | 0x40 | 0x42 | 0x73 => 4,
+        0x0a..=0x0d => 3,
+        0x2b | 0x2e | 0x31 | 0x3f | 0x40 | 0x42 | 0x73 => 4,
         0x08 | 0x2c | 0x33 | 0x43 | 0x62 | 0x8f | 0x98 | 0x9a | 0x9c => 5,
         0x2f => 5,
         0x30 => 6,

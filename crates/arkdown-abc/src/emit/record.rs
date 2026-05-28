@@ -58,16 +58,18 @@ pub fn inline_string(s: &str) -> Vec<u8> {
 /// ULEB128(num_vregs)   – number of virtual registers required
 /// ULEB128(num_args)    – number of formal parameters (3 for module func_main_0)
 /// ULEB128(num_insns)   – byte length of the bytecode that follows
+/// ULEB128(tries_size)  – number of try-block records that follow bytecode
 /// [bytecode: u8 * num_insns]
 /// ```
 ///
 /// No try-catch block footer is emitted (empty try-block list).  ArkRuntime
 /// accepts this for functions without exception handlers.
 pub fn encode_code_item(num_vregs: u16, num_args: u16, bytecode: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(6 + bytecode.len());
+    let mut out = Vec::with_capacity(7 + bytecode.len());
     out.extend_from_slice(&uleb128(num_vregs as u64));
     out.extend_from_slice(&uleb128(num_args as u64));
     out.extend_from_slice(&uleb128(bytecode.len() as u64));
+    out.extend_from_slice(&uleb128(0));
     out.extend_from_slice(bytecode);
     out
 }
@@ -459,16 +461,16 @@ mod tests {
 
     #[test]
     fn test_encode_code_item_empty() {
-        // Empty bytecode: just the three ULEB128 headers (all 0/0/0)
+        // Empty bytecode: four ULEB128 headers (vregs/args/code_size/tries_size).
         let ci = encode_code_item(0, 0, &[]);
-        assert_eq!(ci, vec![0x00, 0x00, 0x00]);
+        assert_eq!(ci, vec![0x00, 0x00, 0x00, 0x00]);
     }
 
     #[test]
     fn test_encode_code_item_with_bytecode() {
         // num_vregs=0, num_args=3, bytecode=[0x65] (ReturnUndefined)
         let ci = encode_code_item(0, 3, &[0x65]);
-        assert_eq!(ci, vec![0x00, 0x03, 0x01, 0x65]);
+        assert_eq!(ci, vec![0x00, 0x03, 0x01, 0x00, 0x65]);
     }
 
     #[test]
