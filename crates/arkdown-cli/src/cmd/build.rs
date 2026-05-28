@@ -100,6 +100,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
 
     // Steps 3 & 4: Resources + Bundling
     progress.step(3, 6, "Compiling resources + bundling");
+    let mut bundle_outs = Vec::new();
     for (module, _manifest, loader_json) in &loader_jsons {
         // Resource compilation
         let resource_compiler = ResourceCompiler::new(ResourceCompileConfig {
@@ -115,6 +116,22 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 resources_dirs: vec![res_dir],
                 output_dir: res_out,
             });
+        }
+
+        // Clean stale .js files from previous builds so that collect_js_chunks_from_output
+        // (which uses the explicit file list) is the authoritative source, and any leftover
+        // files from a prior run do not sneak into the ABC compiler.
+        let chunk_dir_pre = PathBuf::from(loader_json.ace_module_build.as_str());
+        if chunk_dir_pre.exists() {
+            for entry in walkdir::WalkDir::new(&chunk_dir_pre)
+                .max_depth(1)
+                .into_iter()
+                .filter_map(|e| e.ok())
+            {
+                if entry.path().extension().and_then(|e| e.to_str()) == Some("js") {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
         }
 
         // Bundling
@@ -157,10 +174,11 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             Arc::new(ChunkWrapperPlugin::new(loader_json.support_chunks)),
         ];
         let bundler = Bundler::new((*config_arc).clone(), plugins);
-        let _bundle_out = bundler
+        let bundle_out = bundler
             .bundle(loader_json)
             .await
             .map_err(|e| anyhow::anyhow!("Bundle failed: {}", e))?;
+        bundle_outs.push(bundle_out);
     }
     progress.done();
 
@@ -177,8 +195,9 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         merge_abc: true,
         cache_path: None,
     });
-    for (module, _manifest, loader_json) in &loader_jsons {
-        let chunk_dir = PathBuf::from(loader_json.ace_module_build.as_str());
+    for ((module, _manifest, loader_json), bundle_out) in
+        loader_jsons.iter().zip(bundle_outs.iter())
+    {
         let modules_abc = module
             .src_path
             .join("build/default/intermediates/ets/modules.abc");
@@ -202,7 +221,11 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 Some((stem, record_name))
             })
             .collect();
-        let abc_modules: Vec<AbcModule> = collect_js_chunks(&chunk_dir, &record_name_map)?;
+        // Use the explicit chunk file list from bundle_out rather than scanning the
+        // output directory — this prevents stale files from prior runs from being
+        // picked up and producing incorrect ABC record entries.
+        let abc_modules: Vec<AbcModule> =
+            collect_js_chunks_from_output(&bundle_out.chunk_files, &record_name_map)?;
         if !abc_modules.is_empty() {
             abc_compiler
                 .compile(abc_modules, &modules_abc)
@@ -345,35 +368,31 @@ fn read_module_json5(path: &std::path::Path) -> Result<ModuleJson5> {
     json5::from_str(&content).context("Failed to parse module.json5")
 }
 
-fn collect_js_chunks(
-    chunk_dir: &std::path::Path,
+/// Build [`AbcModule`] entries from the explicit file list produced by the bundler.
+///
+/// Using `bundle_out.chunk_files` rather than scanning the output directory
+/// guarantees that stale `.js` files left over from previous builds never
+/// end up in the ABC compiler input.
+fn collect_js_chunks_from_output(
+    chunk_files: &[(String, std::path::PathBuf)],
     record_name_map: &std::collections::HashMap<String, String>,
 ) -> Result<Vec<AbcModule>> {
     let mut modules = Vec::new();
-    if !chunk_dir.exists() {
-        return Ok(modules);
-    }
-    for entry in walkdir::WalkDir::new(chunk_dir)
-        .max_depth(1)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        if entry.path().extension().and_then(|e| e.to_str()) == Some("js") {
-            let stem = entry
-                .path()
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("chunk")
-                .to_string();
-            // Use OHOS module path as record name if available; fall back to stem.
-            let record_name = record_name_map.get(&stem).cloned().unwrap_or(stem);
-            let source = fs_err::read_to_string(entry.path())?;
-            modules.push(AbcModule {
-                record_name,
-                source,
-                source_map: None,
-            });
+    for (chunk_name, path) in chunk_files {
+        if path.extension().and_then(|e| e.to_str()) != Some("js") {
+            continue;
         }
+        // Use OHOS module path as record name if available; fall back to chunk name.
+        let record_name = record_name_map
+            .get(chunk_name.as_str())
+            .cloned()
+            .unwrap_or_else(|| chunk_name.clone());
+        let source = fs_err::read_to_string(path)?;
+        modules.push(AbcModule {
+            record_name,
+            source,
+            source_map: None,
+        });
     }
     Ok(modules)
 }

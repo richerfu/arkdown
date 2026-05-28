@@ -93,9 +93,16 @@ impl Bundler {
                         .map(|p| p.to_string_lossy().to_string())
                         .unwrap_or_else(|_| candidate.to_string_lossy().to_string())
                 };
+                // Derive chunk name from the compile_entry file stem so rolldown
+                // writes "EntryAbility.js" instead of "entry_0.js".  This keeps
+                // the ABC record_name_map lookup (stem → OHM class path) working.
+                let chunk_name = std::path::Path::new(entry.as_str())
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("entry_{i}"));
                 InputItem {
-                    // Stable names drive the chunk file names rolldown produces.
-                    name: Some(format!("entry_{i}")),
+                    name: Some(chunk_name),
                     import: import_path,
                 }
             })

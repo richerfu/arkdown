@@ -96,13 +96,27 @@ fn run_build(fixture: &PathBuf) -> PathBuf {
         Arc::new(DuplicateCheckPlugin),
         Arc::new(ChunkWrapperPlugin::new(loader_json.support_chunks)),
     ];
+    // Clean stale .js files before bundling so the explicit chunk_files list
+    // from bundle_out is the single source of truth for ABC compilation.
+    let chunk_dir = PathBuf::from(&loader_json.ace_module_build);
+    if chunk_dir.exists() {
+        for entry in walkdir::WalkDir::new(&chunk_dir)
+            .max_depth(1)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            if entry.path().extension().and_then(|e| e.to_str()) == Some("js") {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+
     let bundler = Bundler::new((*config).clone(), plugins);
-    let _ = rt
+    let bundle_out = rt
         .block_on(bundler.bundle(&loader_json))
         .expect("bundle");
 
     // ABC compilation
-    let chunk_dir = PathBuf::from(&loader_json.ace_module_build);
     let modules_abc = module
         .src_path
         .join("build/default/intermediates/ets/modules.abc");
@@ -114,7 +128,9 @@ fn run_build(fixture: &PathBuf) -> PathBuf {
             let stripped = ep.trim_start_matches("./").trim_end_matches(".ets").trim_end_matches(".ts");
             Some((stem, format!("{}/src/main/{}", loader_json.module_name, stripped)))
         }).collect();
-    let abc_modules: Vec<AbcModule> = collect_js_chunks(&chunk_dir, &record_name_map);
+    // Use the explicit chunk file list from bundle_out instead of scanning the
+    // directory — prevents stale files from prior runs producing wrong record names.
+    let abc_modules: Vec<AbcModule> = collect_js_chunks_from_output(&bundle_out.chunk_files, &record_name_map);
     if !abc_modules.is_empty() {
         AbcCompiler::new(AbcCompileOptions {
             debug_info: true,
@@ -155,24 +171,21 @@ fn run_build(fixture: &PathBuf) -> PathBuf {
     output
 }
 
-fn collect_js_chunks(
-    dir: &PathBuf,
+fn collect_js_chunks_from_output(
+    chunk_files: &[(String, PathBuf)],
     record_name_map: &std::collections::HashMap<String, String>,
 ) -> Vec<arkdown_abc::AbcModule> {
-    if !dir.exists() {
-        return vec![];
-    }
-    walkdir::WalkDir::new(dir)
-        .max_depth(1)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("js"))
-        .map(|e| {
-            let stem = e.path().file_stem().and_then(|s| s.to_str()).unwrap_or("chunk").to_string();
-            let record_name = record_name_map.get(&stem).cloned().unwrap_or(stem);
+    chunk_files
+        .iter()
+        .filter(|(_, path)| path.extension().and_then(|x| x.to_str()) == Some("js"))
+        .map(|(chunk_name, path)| {
+            let record_name = record_name_map
+                .get(chunk_name.as_str())
+                .cloned()
+                .unwrap_or_else(|| chunk_name.clone());
             arkdown_abc::AbcModule {
                 record_name,
-                source: fs_err::read_to_string(e.path()).unwrap_or_default(),
+                source: fs_err::read_to_string(path).unwrap_or_default(),
                 source_map: None,
             }
         })
