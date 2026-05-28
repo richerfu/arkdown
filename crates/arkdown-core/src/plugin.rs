@@ -254,11 +254,7 @@ pub trait ArkdownPlugin: Send + Sync {
 
     /// Load the source content for a resolved module ID.
     /// Return `None` to defer to the default file loader.
-    async fn load(
-        &self,
-        _ctx: &PluginContext,
-        _id: &str,
-    ) -> PluginResult<Option<HookLoadOutput>> {
+    async fn load(&self, _ctx: &PluginContext, _id: &str) -> PluginResult<Option<HookLoadOutput>> {
         Ok(None)
     }
 
@@ -275,11 +271,7 @@ pub trait ArkdownPlugin: Send + Sync {
     }
 
     /// Called after a module is fully parsed and added to the graph.
-    async fn module_parsed(
-        &self,
-        _ctx: &PluginContext,
-        _module: &ModuleInfo,
-    ) -> PluginResult<()> {
+    async fn module_parsed(&self, _ctx: &PluginContext, _module: &ModuleInfo) -> PluginResult<()> {
         Ok(())
     }
 
@@ -353,11 +345,7 @@ pub trait ArkdownPlugin: Send + Sync {
     }
 
     /// Called after all chunks have been written to disk.
-    async fn write_bundle(
-        &self,
-        _ctx: &PluginContext,
-        _bundle: &ChunkGraph,
-    ) -> PluginResult<()> {
+    async fn write_bundle(&self, _ctx: &PluginContext, _bundle: &ChunkGraph) -> PluginResult<()> {
         Ok(())
     }
 
@@ -389,11 +377,7 @@ pub trait ArkdownPlugin: Send + Sync {
     ///
     /// This hook is intentionally synchronous — it runs on the hot path of
     /// an incremental build's cache lookup and must not block on I/O.
-    fn should_invalidate_cache(
-        &self,
-        _ctx: &CacheContext,
-        _cached: &CachedModule,
-    ) -> bool {
+    fn should_invalidate_cache(&self, _ctx: &CacheContext, _cached: &CachedModule) -> bool {
         false
     }
 }

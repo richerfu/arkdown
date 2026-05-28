@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
 use arkdown_core::{ArkdownPlugin, CacheContext, CachedModule};
+use async_trait::async_trait;
 
 /// Plugin that triggers cache invalidation when the router map JSON changes.
 ///
@@ -105,7 +105,9 @@ mod tests {
     #[test]
     fn test_invalidates_router_map_module_when_hash_set() {
         let plugin = RouterMapPlugin::new();
-        plugin.set_router_map_content(r#"{"routes":[{"name":"Index","pageSourceFile":"pages/Index.ets"}]}"#);
+        plugin.set_router_map_content(
+            r#"{"routes":[{"name":"Index","pageSourceFile":"pages/Index.ets"}]}"#,
+        );
         let cached = CachedModule {
             id: "build/default/cache/router_map.json".to_string(),
             source_hash: String::new(),

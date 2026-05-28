@@ -60,8 +60,11 @@ fn single_ability_json5(module_name: &str) -> ModuleJson5 {
                 src_entry: "./ets/entryability/EntryAbility.ets".to_string(),
                 exported: true,
                 skills: vec![],
-                icon: None, label: None, description: None,
-                start_window_icon: None, start_window_background: None,
+                icon: None,
+                label: None,
+                description: None,
+                start_window_icon: None,
+                start_window_background: None,
             }],
             extension_abilities: vec![],
             src_entry: None,
@@ -132,7 +135,11 @@ fn test_process_module_returns_ok() {
     let json5 = single_ability_json5("entry");
     let module_cfg = make_module_cfg("entry");
     let result = processor.process_module(&module_cfg, &json5);
-    assert!(result.is_ok(), "process_module must return Ok: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "process_module must return Ok: {:?}",
+        result.err()
+    );
 }
 
 #[test]
@@ -195,16 +202,22 @@ fn test_multiple_abilities_produce_multiple_compile_entries() {
                     src_entry: "./ets/main/MainAbility.ets".to_string(),
                     exported: true,
                     skills: vec![],
-                    icon: None, label: None, description: None,
-                    start_window_icon: None, start_window_background: None,
+                    icon: None,
+                    label: None,
+                    description: None,
+                    start_window_icon: None,
+                    start_window_background: None,
                 },
                 AbilityConfig {
                     name: "ShareAbility".to_string(),
                     src_entry: "./ets/share/ShareAbility.ets".to_string(),
                     exported: false,
                     skills: vec![],
-                    icon: None, label: None, description: None,
-                    start_window_icon: None, start_window_background: None,
+                    icon: None,
+                    label: None,
+                    description: None,
+                    start_window_icon: None,
+                    start_window_background: None,
                 },
             ],
             extension_abilities: vec![],
@@ -235,7 +248,10 @@ fn test_generate_loader_json_has_compile_entry() {
     let module_cfg = make_module_cfg("feature");
     let loader = generate_loader_json(&config, &module_cfg, &manifest);
 
-    assert!(!loader.compile_entry.is_empty(), "compile_entry must not be empty");
+    assert!(
+        !loader.compile_entry.is_empty(),
+        "compile_entry must not be empty"
+    );
 }
 
 #[test]

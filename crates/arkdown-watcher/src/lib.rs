@@ -60,7 +60,11 @@ impl FileWatcher {
         eprintln!(
             "arkdown: watching {} director{} for changes",
             self.watch_dirs.iter().filter(|d| d.exists()).count(),
-            if self.watch_dirs.len() == 1 { "y" } else { "ies" }
+            if self.watch_dirs.len() == 1 {
+                "y"
+            } else {
+                "ies"
+            }
         );
 
         loop {

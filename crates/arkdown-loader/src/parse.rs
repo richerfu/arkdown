@@ -102,8 +102,9 @@ pub fn parse_module(source: &ModuleSource) -> ParsedModule {
     let allocator = Allocator::default();
     let source_type = source_type_for(source);
 
-    let ParserReturn { program, errors, .. } =
-        Parser::new(&allocator, &source.content, source_type).parse();
+    let ParserReturn {
+        program, errors, ..
+    } = Parser::new(&allocator, &source.content, source_type).parse();
 
     let had_errors = !errors.is_empty();
 
@@ -115,8 +116,7 @@ pub fn parse_module(source: &ModuleSource) -> ParsedModule {
             // Static `import ... from 'specifier'`
             Statement::ImportDeclaration(decl) => {
                 let specifier = decl.source.value.as_ref().to_owned();
-                let (resolved_id, external) =
-                    resolve_import_specifier(&specifier, &source.id.id);
+                let (resolved_id, external) = resolve_import_specifier(&specifier, &source.id.id);
                 let module_type = if external {
                     ModuleType::Ts
                 } else {
@@ -137,8 +137,7 @@ pub fn parse_module(source: &ModuleSource) -> ParsedModule {
             // ArkUI lazy import: `import lazy { X } from 'specifier'`
             Statement::LazyImportDeclaration(decl) => {
                 let specifier = decl.source.value.as_ref().to_owned();
-                let (resolved_id, external) =
-                    resolve_import_specifier(&specifier, &source.id.id);
+                let (resolved_id, external) = resolve_import_specifier(&specifier, &source.id.id);
                 let module_type = if external {
                     ModuleType::Ts
                 } else {
@@ -186,8 +185,7 @@ pub fn parse_module(source: &ModuleSource) -> ParsedModule {
             // `export * from 'other'` — re-export, creates an import edge too
             Statement::ExportAllDeclaration(decl) => {
                 let specifier = decl.source.value.as_ref().to_owned();
-                let (resolved_id, external) =
-                    resolve_import_specifier(&specifier, &source.id.id);
+                let (resolved_id, external) = resolve_import_specifier(&specifier, &source.id.id);
                 let module_type = if external {
                     ModuleType::Ts
                 } else {

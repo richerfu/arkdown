@@ -45,7 +45,8 @@ pub fn split_chunks(graph: &ModuleGraph, support_chunks: bool) -> ChunkGraph {
                             continue;
                         }
                         // Skip excluded modules (tree-shaken out).
-                        if !graph.modules[dep].is_entry() && !graph.modules[dep].has_side_effects() {
+                        if !graph.modules[dep].is_entry() && !graph.modules[dep].has_side_effects()
+                        {
                             continue;
                         }
                         stack.push(dep);
@@ -216,9 +217,15 @@ mod tests {
 
     #[test]
     fn test_derive_chunk_name() {
-        assert_eq!(derive_chunk_name("/path/to/EntryAbility.ets"), "EntryAbility");
+        assert_eq!(
+            derive_chunk_name("/path/to/EntryAbility.ets"),
+            "EntryAbility"
+        );
         assert_eq!(derive_chunk_name("/path/to/index.ts"), "index");
-        assert_eq!(derive_chunk_name("@bundle:com.example/entry/ets/index"), "index");
+        assert_eq!(
+            derive_chunk_name("@bundle:com.example/entry/ets/index"),
+            "index"
+        );
     }
 
     #[test]
@@ -231,7 +238,12 @@ mod tests {
         let chunk_graph = split_chunks(&graph, true);
         assert_eq!(chunk_graph.chunks.len(), 1);
         // Entry chunk should contain entry + util
-        assert_eq!(chunk_graph.chunks[chunk_graph.chunks.indices().next().unwrap()].modules.len(), 2);
+        assert_eq!(
+            chunk_graph.chunks[chunk_graph.chunks.indices().next().unwrap()]
+                .modules
+                .len(),
+            2
+        );
     }
 
     #[test]

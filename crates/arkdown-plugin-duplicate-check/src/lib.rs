@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use async_trait::async_trait;
 use arkdown_core::{
     ArkdownError, ArkdownPlugin, ChunkGraph, HookUsage, PluginContext, PluginResult,
 };
+use async_trait::async_trait;
 
 pub struct DuplicateCheckPlugin;
 

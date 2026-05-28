@@ -116,11 +116,17 @@ mod tests {
         let files = scan_resources(&base.join("resources"));
         assert_eq!(files.len(), 2);
 
-        let elem = files.iter().find(|f| f.category == ResourceCategory::Element).unwrap();
+        let elem = files
+            .iter()
+            .find(|f| f.category == ResourceCategory::Element)
+            .unwrap();
         assert_eq!(elem.name, "string");
         assert_eq!(elem.qualifier, Qualifier(String::new()));
 
-        let media = files.iter().find(|f| f.category == ResourceCategory::Media).unwrap();
+        let media = files
+            .iter()
+            .find(|f| f.category == ResourceCategory::Media)
+            .unwrap();
         assert_eq!(media.name, "icon");
     }
 

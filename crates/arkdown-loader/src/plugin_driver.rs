@@ -1,8 +1,8 @@
-use std::sync::Arc;
 use arkdown_core::{
-    ArkdownPlugin, HookLoadOutput, HookResolveIdArgs, HookResolveIdOutput,
-    HookTransformOutput, HookUsage, ImportKind, ModuleInfo, PluginContext, PluginResult,
+    ArkdownPlugin, HookLoadOutput, HookResolveIdArgs, HookResolveIdOutput, HookTransformOutput,
+    HookUsage, ImportKind, ModuleInfo, PluginContext, PluginResult,
 };
+use std::sync::Arc;
 
 pub struct PluginDriver {
     pub plugins: Vec<Arc<dyn ArkdownPlugin>>,
@@ -77,7 +77,10 @@ impl PluginDriver {
     pub async fn module_parsed(&self, module_info: &ModuleInfo) -> PluginResult<()> {
         let ctx = PluginContext::default();
         for plugin in &self.plugins {
-            if !plugin.register_hook_usage().contains(HookUsage::ModuleParsed) {
+            if !plugin
+                .register_hook_usage()
+                .contains(HookUsage::ModuleParsed)
+            {
                 continue;
             }
             plugin.module_parsed(&ctx, module_info).await?;

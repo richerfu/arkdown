@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use arkdown_core::{
-    ArkdownError, ArkdownPlugin, BuildError, HookResolveIdArgs, HookResolveIdOutput,
-    HookUsage, ModuleInfo, ModuleType, PluginContext, PluginResult,
+    ArkdownError, ArkdownPlugin, BuildError, HookResolveIdArgs, HookResolveIdOutput, HookUsage,
+    ModuleInfo, ModuleType, PluginContext, PluginResult,
 };
 
 // ---------------------------------------------------------------------------
@@ -60,7 +60,9 @@ impl HarDeduplicatePlugin {
     pub fn real_build(collect_file_path: PathBuf) -> Result<Self, HarDedupError> {
         let excluded = read_collect_file(&collect_file_path)?;
         Ok(HarDeduplicatePlugin {
-            mode: HarDedupMode::RealBuild { excluded_files: excluded },
+            mode: HarDedupMode::RealBuild {
+                excluded_files: excluded,
+            },
             collect_file_path,
             collected: Arc::new(Mutex::new(Vec::new())),
         })
@@ -101,17 +103,10 @@ impl ArkdownPlugin for HarDeduplicatePlugin {
     ///
     /// A module is considered a HAR module when its ID contains `oh_modules`
     /// (ohpm install path).
-    async fn module_parsed(
-        &self,
-        _ctx: &PluginContext,
-        module: &ModuleInfo,
-    ) -> PluginResult<()> {
+    async fn module_parsed(&self, _ctx: &PluginContext, module: &ModuleInfo) -> PluginResult<()> {
         if matches!(self.mode, HarDedupMode::CollectPass) {
             if module.id.contains("oh_modules") {
-                self.collected
-                    .lock()
-                    .unwrap()
-                    .push(module.id.clone());
+                self.collected.lock().unwrap().push(module.id.clone());
             }
         }
         Ok(())
@@ -163,7 +158,11 @@ fn read_collect_file(path: &Path) -> Result<HashSet<PathBuf>, HarDedupError> {
     }
     let content = fs_err::read_to_string(path)?;
     let data: CollectFile = serde_json::from_str(&content)?;
-    Ok(data.source_har_files.into_iter().map(PathBuf::from).collect())
+    Ok(data
+        .source_har_files
+        .into_iter()
+        .map(PathBuf::from)
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -213,9 +212,10 @@ mod tests {
 
     #[test]
     fn test_empty_when_missing() {
-        let result =
-            read_collect_file(Path::new("/nonexistent/arkdown-test-path-that-never-exists.json"))
-                .unwrap();
+        let result = read_collect_file(Path::new(
+            "/nonexistent/arkdown-test-path-that-never-exists.json",
+        ))
+        .unwrap();
         assert!(result.is_empty());
     }
 
@@ -224,11 +224,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("collect.json");
 
-        write_collect_file(
-            &path,
-            &["/project/oh_modules/lib/index.ets".to_string()],
-        )
-        .unwrap();
+        write_collect_file(&path, &["/project/oh_modules/lib/index.ets".to_string()]).unwrap();
 
         let plugin = HarDeduplicatePlugin::real_build(path).unwrap();
         let result = plugin

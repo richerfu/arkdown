@@ -94,7 +94,9 @@ impl HapZip {
         let cd_start = eocd.cd_offset as usize;
         let cd_end = cd_start + eocd.cd_size as usize;
         if cd_end > bytes.len() {
-            return Err(SignError::InvalidZip("central directory extends beyond file"));
+            return Err(SignError::InvalidZip(
+                "central directory extends beyond file",
+            ));
         }
 
         let mut entries = Vec::with_capacity(eocd.total_entries as usize);
@@ -106,7 +108,9 @@ impl HapZip {
             }
             let sig = read_u32(bytes, pos)?;
             if sig != CENTRAL_DIR_SIG {
-                return Err(SignError::InvalidZip("central directory signature mismatch"));
+                return Err(SignError::InvalidZip(
+                    "central directory signature mismatch",
+                ));
             }
 
             let method = read_u16(bytes, pos + 10)?;
@@ -117,7 +121,9 @@ impl HapZip {
 
             let cd_entry_len = 46 + fn_len + ef_len + cm_len;
             if pos + cd_entry_len > bytes.len() {
-                return Err(SignError::InvalidZip("central directory entry data out of bounds"));
+                return Err(SignError::InvalidZip(
+                    "central directory entry data out of bounds",
+                ));
             }
 
             let cd_entry = bytes[pos..pos + cd_entry_len].to_vec();
@@ -133,7 +139,9 @@ impl HapZip {
             }
             let lh_sig = read_u32(bytes, lh_pos)?;
             if lh_sig != LOCAL_FILE_HEADER_SIG {
-                return Err(SignError::InvalidZip("local file header signature mismatch"));
+                return Err(SignError::InvalidZip(
+                    "local file header signature mismatch",
+                ));
             }
 
             let lh_fn_len = read_u16(bytes, lh_pos + 26)? as usize;
@@ -142,8 +150,8 @@ impl HapZip {
             let mut local_header_fixed = [0u8; LOCAL_HEADER_FIXED];
             local_header_fixed.copy_from_slice(&bytes[lh_pos..lh_pos + LOCAL_HEADER_FIXED]);
 
-            let filename_bytes = bytes[lh_pos + LOCAL_HEADER_FIXED
-                ..lh_pos + LOCAL_HEADER_FIXED + lh_fn_len]
+            let filename_bytes = bytes
+                [lh_pos + LOCAL_HEADER_FIXED..lh_pos + LOCAL_HEADER_FIXED + lh_fn_len]
                 .to_vec();
             let extra_bytes = bytes[lh_pos + LOCAL_HEADER_FIXED + lh_fn_len
                 ..lh_pos + LOCAL_HEADER_FIXED + lh_fn_len + lh_ef_len]
@@ -164,7 +172,11 @@ impl HapZip {
 
             // Recalculate from cd entry: bytes 20..24 of cd entry = compressed size
             let cd_comp_size = read_u32(&cd_entry, 20)? as usize;
-            let data_size = if cd_comp_size > 0 { cd_comp_size } else { actual_comp_size };
+            let data_size = if cd_comp_size > 0 {
+                cd_comp_size
+            } else {
+                actual_comp_size
+            };
 
             if data_start + data_size > bytes.len() {
                 return Err(SignError::InvalidZip("file data extends beyond file"));
@@ -232,7 +244,9 @@ impl HapZip {
 
             if needed_padding > 0 {
                 // Pad the extra field with zero bytes.
-                entry.extra.extend(std::iter::repeat(0u8).take(needed_padding));
+                entry
+                    .extra
+                    .extend(std::iter::repeat(0u8).take(needed_padding));
                 // Update ef_len in the fixed header (bytes 28..30 LE).
                 let new_ef_len = entry.extra.len() as u16;
                 let ef_len_bytes = new_ef_len.to_le_bytes();
@@ -467,7 +481,11 @@ mod tests {
     fn test_parse_minimal_zip_succeeds() {
         let bytes = make_zip_bytes(b"test.txt", b"hello");
         let result = HapZip::parse(&bytes);
-        assert!(result.is_ok(), "valid minimal ZIP must parse successfully: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "valid minimal ZIP must parse successfully: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -488,21 +506,30 @@ mod tests {
     fn test_parse_recognises_abc_as_runnable() {
         let bytes = make_zip_bytes(b"ets/modules.abc", b"PAND\x00\x00");
         let hap = HapZip::parse(&bytes).expect("parse must succeed");
-        assert!(hap.entries[0].is_runnable, ".abc file must be marked runnable");
+        assert!(
+            hap.entries[0].is_runnable,
+            ".abc file must be marked runnable"
+        );
     }
 
     #[test]
     fn test_parse_recognises_so_as_runnable() {
         let bytes = make_zip_bytes(b"libs/libfoo.so", b"\x7fELF");
         let hap = HapZip::parse(&bytes).expect("parse must succeed");
-        assert!(hap.entries[0].is_runnable, ".so file must be marked runnable");
+        assert!(
+            hap.entries[0].is_runnable,
+            ".so file must be marked runnable"
+        );
     }
 
     #[test]
     fn test_parse_json_file_not_runnable() {
         let bytes = make_zip_bytes(b"module.json", b"{}");
         let hap = HapZip::parse(&bytes).expect("parse must succeed");
-        assert!(!hap.entries[0].is_runnable, ".json file must not be marked runnable");
+        assert!(
+            !hap.entries[0].is_runnable,
+            ".json file must not be marked runnable"
+        );
     }
 
     // ── sort_entries ────────────────────────────────────────────────────
@@ -519,10 +546,7 @@ mod tests {
         let hap_json = HapZip::parse(&json_bytes).expect("json parse");
 
         // Manually combine entries: json first, abc second
-        hap_abc.entries = vec![
-            hap_json.entries[0].clone(),
-            hap_abc.entries[0].clone(),
-        ];
+        hap_abc.entries = vec![hap_json.entries[0].clone(), hap_abc.entries[0].clone()];
         hap_abc.sort_entries();
 
         assert!(
@@ -578,7 +602,10 @@ mod tests {
         hap.sort_entries();
         hap.align();
         let (entries_bytes, cd_bytes, eocd_zeroed) = hap.sections_for_signing();
-        assert!(!entries_bytes.is_empty(), "entries section must not be empty");
+        assert!(
+            !entries_bytes.is_empty(),
+            "entries section must not be empty"
+        );
         assert!(!cd_bytes.is_empty(), "CD section must not be empty");
         assert!(!eocd_zeroed.is_empty(), "EOCD section must not be empty");
     }
@@ -606,17 +633,18 @@ fn find_eocd(bytes: &[u8]) -> Result<EocdRecord, SignError> {
 
     let search_start = bytes.len().saturating_sub(22 + 65535);
     for i in (search_start..bytes.len() - 21).rev() {
-        if bytes[i] == 0x50
-            && bytes[i + 1] == 0x4b
-            && bytes[i + 2] == 0x05
-            && bytes[i + 3] == 0x06
+        if bytes[i] == 0x50 && bytes[i + 1] == 0x4b && bytes[i + 2] == 0x05 && bytes[i + 3] == 0x06
         {
             // Found potential EOCD.
             let comment_len = u16::from_le_bytes([bytes[i + 20], bytes[i + 21]]) as usize;
             if i + 22 + comment_len == bytes.len() {
                 let total_entries = u16::from_le_bytes([bytes[i + 8], bytes[i + 9]]);
-                let cd_size =
-                    u32::from_le_bytes([bytes[i + 12], bytes[i + 13], bytes[i + 14], bytes[i + 15]]);
+                let cd_size = u32::from_le_bytes([
+                    bytes[i + 12],
+                    bytes[i + 13],
+                    bytes[i + 14],
+                    bytes[i + 15],
+                ]);
                 let cd_offset = u32::from_le_bytes([
                     bytes[i + 16],
                     bytes[i + 17],

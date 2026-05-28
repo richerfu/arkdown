@@ -4,4 +4,4 @@
  */
 
 let a = "commonjsTest";
-exports = {a};
+exports = { a };

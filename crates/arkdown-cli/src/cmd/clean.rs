@@ -1,6 +1,6 @@
-use std::path::PathBuf;
-use clap::Args;
 use anyhow::Result;
+use clap::Args;
+use std::path::PathBuf;
 
 #[derive(Args)]
 pub struct CleanArgs {
@@ -9,9 +9,9 @@ pub struct CleanArgs {
 }
 
 pub fn run(args: CleanArgs) -> Result<()> {
-    let project = args.project.unwrap_or_else(|| {
-        std::env::current_dir().expect("failed to get current directory")
-    });
+    let project = args
+        .project
+        .unwrap_or_else(|| std::env::current_dir().expect("failed to get current directory"));
     let build_dir = project.join("build");
     if build_dir.exists() {
         std::fs::remove_dir_all(&build_dir)?;

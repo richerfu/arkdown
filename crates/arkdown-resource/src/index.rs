@@ -34,8 +34,8 @@
 //! - 0x09 = string, 0x0E = color, 0x06 = float, 0x05 = integer
 //! - 0x13 = media/image, 0x14 = profile
 
-use std::path::Path;
 use crate::compiler::CompiledEntry;
+use std::path::Path;
 
 /// Magic bytes at offset 0x00: `b"Restool 6.0.0.001\x00"` (18 bytes).
 pub const MAGIC: &[u8; 18] = b"Restool 6.0.0.001\x00";
@@ -138,7 +138,13 @@ mod tests {
     use super::*;
     use crate::compiler::CompiledEntry;
 
-    fn make_entry(id: u32, entry_type: u32, name: &str, value: &str, qualifier: &str) -> CompiledEntry {
+    fn make_entry(
+        id: u32,
+        entry_type: u32,
+        name: &str,
+        value: &str,
+        qualifier: &str,
+    ) -> CompiledEntry {
         CompiledEntry {
             id,
             entry_type,
@@ -188,7 +194,10 @@ mod tests {
         assert_eq!(id, 0x01000000);
         // offset should point into the record data area
         let offset = u32::from_le_bytes(bytes[0xA0..0xA4].try_into().unwrap()) as usize;
-        assert!(offset < bytes.len(), "record offset {offset:#x} must be within file");
+        assert!(
+            offset < bytes.len(),
+            "record offset {offset:#x} must be within file"
+        );
     }
 
     #[test]
@@ -209,7 +218,8 @@ mod tests {
         let id = u32::from_le_bytes(bytes[offset + 8..offset + 12].try_into().unwrap());
         assert_eq!(id, 0x01000001);
 
-        let val_len = u16::from_le_bytes(bytes[offset + 12..offset + 14].try_into().unwrap()) as usize;
+        let val_len =
+            u16::from_le_bytes(bytes[offset + 12..offset + 14].try_into().unwrap()) as usize;
         let val = std::str::from_utf8(&bytes[offset + 14..offset + 14 + val_len - 1]).unwrap();
         assert_eq!(val, "Hello");
 
@@ -226,7 +236,10 @@ mod tests {
         write_resources_index(&[], &out).unwrap();
         let bytes = std::fs::read(&out).unwrap();
         // Empty: header (0x80) + KVDB block (20) + IDSS header (8) + 0 entries = 156
-        assert_eq!(bytes.len(), HEADER_TOTAL + KVDB_BLOCK_SIZE + IDSS_HEADER_SIZE);
+        assert_eq!(
+            bytes.len(),
+            HEADER_TOTAL + KVDB_BLOCK_SIZE + IDSS_HEADER_SIZE
+        );
         // count in IDSS = 0
         let count = u32::from_le_bytes(bytes[0x98..0x9C].try_into().unwrap());
         assert_eq!(count, 0);

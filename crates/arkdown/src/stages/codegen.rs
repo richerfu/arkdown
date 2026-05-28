@@ -51,8 +51,11 @@ fn regenerate_module(
     let source_type = infer_source_type(file_path, &module_type);
     let path = std::path::Path::new(file_path);
 
-    let ParserReturn { mut program, errors, .. } =
-        Parser::new(&allocator, source, source_type).parse();
+    let ParserReturn {
+        mut program,
+        errors,
+        ..
+    } = Parser::new(&allocator, source, source_type).parse();
 
     if !errors.is_empty() {
         return Ok(source.to_owned());
@@ -60,18 +63,20 @@ fn regenerate_module(
 
     // Build semantic analysis — required by the transformer to resolve scopes
     // and symbol bindings.
-    let scoping = SemanticBuilder::new().build(&program).semantic.into_scoping();
+    let scoping = SemanticBuilder::new()
+        .build(&program)
+        .semantic
+        .into_scoping();
 
     // TransformOptions::default() enables TypeScript stripping (TypeScriptOptions
     // is the default preset, strips all type annotations and type-only constructs).
     let transform_options = TransformOptions::default();
 
     // Catch any transformer panic as a safety net (should not occur in 0.133.0).
-    let transform_result =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            Transformer::new(&allocator, path, &transform_options)
-                .build_with_scoping(scoping, &mut program)
-        }));
+    let transform_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        Transformer::new(&allocator, path, &transform_options)
+            .build_with_scoping(scoping, &mut program)
+    }));
 
     match transform_result {
         Ok(_) => {
@@ -93,7 +98,9 @@ fn infer_source_type(file_path: &str, module_type: &ModuleType) -> SourceType {
     // ETS files: use standard TypeScript+module (not the ohos-rs ArkTS parser mode
     // which has stricter rules for ArkUI struct syntax).
     if ext == "ets" || matches!(module_type, ModuleType::Ets) {
-        return SourceType::default().with_typescript(true).with_module(true);
+        return SourceType::default()
+            .with_typescript(true)
+            .with_module(true);
     }
 
     // TypeScript/JS files: try path inference first.
@@ -102,9 +109,9 @@ fn infer_source_type(file_path: &str, module_type: &ModuleType) -> SourceType {
     }
 
     match module_type {
-        ModuleType::Ts | ModuleType::Declaration => {
-            SourceType::default().with_typescript(true).with_module(true)
-        }
+        ModuleType::Ts | ModuleType::Declaration => SourceType::default()
+            .with_typescript(true)
+            .with_module(true),
         _ => SourceType::default(),
     }
 }
@@ -161,10 +168,22 @@ export default class EntryAbility extends UIAbility {
 }"#;
         let result = regenerate_module(src, "EntryAbility.ets", ModuleType::Ets).unwrap();
         // TypeScript annotations MUST be stripped.
-        assert!(!result.contains(": any"), "type annotations should be stripped: {result}");
-        assert!(!result.contains(": void"), "return type should be stripped: {result}");
+        assert!(
+            !result.contains(": any"),
+            "type annotations should be stripped: {result}"
+        );
+        assert!(
+            !result.contains(": void"),
+            "return type should be stripped: {result}"
+        );
         // Class structure must survive.
-        assert!(result.contains("class EntryAbility"), "class must survive stripping: {result}");
-        assert!(result.contains("onCreate"), "method must survive stripping: {result}");
+        assert!(
+            result.contains("class EntryAbility"),
+            "class must survive stripping: {result}"
+        );
+        assert!(
+            result.contains("onCreate"),
+            "method must survive stripping: {result}"
+        );
     }
 }

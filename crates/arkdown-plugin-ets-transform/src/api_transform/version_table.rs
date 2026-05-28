@@ -56,6 +56,9 @@ mod tests {
         let src = "import x from '@kit.BasicServicesKit';";
         let result = rewrite_imports_for_version(src, 8);
         // @kit.* is Stage-model only; FA model has no equivalent, so we leave it alone.
-        assert!(result.contains("@kit.BasicServicesKit"), "kit import must not be rewritten");
+        assert!(
+            result.contains("@kit.BasicServicesKit"),
+            "kit import must not be rewritten"
+        );
     }
 }

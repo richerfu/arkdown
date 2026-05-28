@@ -29,18 +29,21 @@ fn decorator_name<'a>(d: &'a Decorator<'a>) -> &'a str {
 pub fn check(source: &str, file: &str) -> Vec<EtsTransformError> {
     let allocator = Allocator::default();
     let source_type = SourceType::from_path(file).unwrap_or_else(|_| SourceType::ets());
-    let ParserReturn { program, .. } =
-        Parser::new(&allocator, source, source_type).parse();
+    let ParserReturn { program, .. } = Parser::new(&allocator, source, source_type).parse();
 
     let mut errors: Vec<EtsTransformError> = Vec::new();
     let mut seen_component_names: std::collections::HashSet<String> = Default::default();
 
     for stmt in &program.body {
         if let Statement::ClassDeclaration(class) = stmt {
-            let has_component =
-                class.decorators.iter().any(|d| decorator_name(d) == "Component");
-            let has_entry =
-                class.decorators.iter().any(|d| decorator_name(d) == "Entry");
+            let has_component = class
+                .decorators
+                .iter()
+                .any(|d| decorator_name(d) == "Component");
+            let has_entry = class
+                .decorators
+                .iter()
+                .any(|d| decorator_name(d) == "Entry");
 
             // Rule: @Entry without @Component
             if has_entry && !has_component {
@@ -63,10 +66,7 @@ pub fn check(source: &str, file: &str) -> Vec<EtsTransformError> {
                     if seen_component_names.contains(&class_name) {
                         errors.push(EtsTransformError::Diagnostic {
                             file: file.to_string(),
-                            message: format!(
-                                "Duplicate @Component name '{}' in file",
-                                class_name
-                            ),
+                            message: format!("Duplicate @Component name '{}' in file", class_name),
                             severity: DiagnosticSeverity::Error,
                         });
                     } else {
@@ -78,9 +78,7 @@ pub fn check(source: &str, file: &str) -> Vec<EtsTransformError> {
                 let has_build = class.body.body.iter().any(|m| {
                     if let ClassElement::MethodDefinition(method) = m {
                         match &method.key {
-                            PropertyKey::StaticIdentifier(id) => {
-                                id.name.as_str() == "build"
-                            }
+                            PropertyKey::StaticIdentifier(id) => id.name.as_str() == "build",
                             _ => false,
                         }
                     } else {
@@ -110,18 +108,15 @@ pub fn check(source: &str, file: &str) -> Vec<EtsTransformError> {
                         let is_build = matches!(&method.key,
                             PropertyKey::StaticIdentifier(id) if id.name.as_str() == "build");
                         if is_build {
-                            if let Some(ret_ty) = method
-                                .value
-                                .return_type
-                                .as_ref()
-                            {
+                            if let Some(ret_ty) = method.value.return_type.as_ref() {
                                 // Only void is allowed — check via span text is simpler
                                 // than deep-inspecting the TSTypeAnnotation tree.
                                 // We flag any explicit non-void annotation as an error.
                                 let ty_span = ret_ty.span;
                                 if ty_span.size() > 0 {
                                     // Accept "void" silently; anything else is an error.
-                                    let annotation_text = &source[ty_span.start as usize..ty_span.end as usize];
+                                    let annotation_text =
+                                        &source[ty_span.start as usize..ty_span.end as usize];
                                     if !annotation_text.contains("void") {
                                         errors.push(EtsTransformError::Diagnostic {
                                             file: file.to_string(),
@@ -140,8 +135,7 @@ pub fn check(source: &str, file: &str) -> Vec<EtsTransformError> {
                 if file.contains("workers/") || file.contains("/worker/") {
                     errors.push(EtsTransformError::Diagnostic {
                         file: file.to_string(),
-                        message:
-                            "@Component/@Entry must not be used in worker files".to_string(),
+                        message: "@Component/@Entry must not be used in worker files".to_string(),
                         severity: DiagnosticSeverity::Error,
                     });
                 }
@@ -176,10 +170,7 @@ pub fn check(source: &str, file: &str) -> Vec<EtsTransformError> {
                 // Here we also check for unsupported @State types (warning).
                 for elem in &class.body.body {
                     if let ClassElement::PropertyDefinition(prop) = elem {
-                        let is_state = prop
-                            .decorators
-                            .iter()
-                            .any(|d| decorator_name(d) == "State");
+                        let is_state = prop.decorators.iter().any(|d| decorator_name(d) == "State");
                         if is_state && prop.type_annotation.is_none() {
                             // No type annotation on @State — allowed but may produce
                             // unexpected observable behavior; emit a warning.
@@ -204,12 +195,10 @@ pub fn check(source: &str, file: &str) -> Vec<EtsTransformError> {
             if !has_component {
                 for elem in &class.body.body {
                     if let ClassElement::PropertyDefinition(prop) = elem {
-                        let has_state_dec = prop.decorators.iter().any(|d| {
-                            matches!(
-                                decorator_name(d),
-                                "State" | "Prop" | "Link"
-                            )
-                        });
+                        let has_state_dec = prop
+                            .decorators
+                            .iter()
+                            .any(|d| matches!(decorator_name(d), "State" | "Prop" | "Link"));
                         if has_state_dec {
                             let field_name = match &prop.key {
                                 PropertyKey::StaticIdentifier(id) => id.name.as_str().to_string(),

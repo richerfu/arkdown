@@ -177,6 +177,9 @@ mod tests {
         st.intern(name);
         let bytes = st.serialize();
         // count(4) + ULEB128(97=0x61)(1) + 48 bytes + null(1) = 54 bytes
-        assert_eq!(bytes[4], 0x61, "ULEB128 prefix must be 0x61 = 97 for 48-char ASCII");
+        assert_eq!(
+            bytes[4], 0x61,
+            "ULEB128 prefix must be 0x61 = 97 for 48-char ASCII"
+        );
     }
 }

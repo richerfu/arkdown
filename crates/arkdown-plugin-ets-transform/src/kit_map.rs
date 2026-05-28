@@ -24,9 +24,7 @@ pub fn resolve_kit_import(kit_specifier: &str, named_import: &str) -> Option<&'s
         ("@kit.AbilityKit", "AbilityLifecycleCallback") => {
             Some("@ohos:app.ability.AbilityLifecycleCallback")
         }
-        ("@kit.AbilityKit", "UIExtensionAbility") => {
-            Some("@ohos:app.ability.UIExtensionAbility")
-        }
+        ("@kit.AbilityKit", "UIExtensionAbility") => Some("@ohos:app.ability.UIExtensionAbility"),
         ("@kit.AbilityKit", "ExtensionAbility") => Some("@ohos:app.ability.ExtensionAbility"),
         ("@kit.AbilityKit", "ServiceExtensionAbility") => {
             Some("@ohos:app.ability.ServiceExtensionAbility")

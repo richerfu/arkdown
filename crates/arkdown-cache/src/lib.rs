@@ -111,10 +111,7 @@ impl BuildCache {
 
     /// Return `true` if the cached entry for `id` exists and its key matches `key`.
     pub fn is_valid(&self, id: &str, key: &CacheKey) -> bool {
-        self.memory
-            .get(id)
-            .map(|e| &e.key == key)
-            .unwrap_or(false)
+        self.memory.get(id).map(|e| &e.key == key).unwrap_or(false)
     }
 
     /// Insert or update a cache entry both in memory and on disk.
@@ -323,7 +320,10 @@ mod tests {
         let mut cache = BuildCache::new(tmp.clone());
         cache.insert(make_entry("a.ts", "h")).unwrap();
 
-        assert!(cache.get("b.ts").is_none(), "get must return None for an ID that was never inserted");
+        assert!(
+            cache.get("b.ts").is_none(),
+            "get must return None for an ID that was never inserted"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -368,8 +368,16 @@ mod tests {
 
     #[test]
     fn test_cache_key_inequality_on_dependency_hash() {
-        let k1 = CacheKey { content_hash: "x".to_string(), config_hash: 0, dependency_hash: 1 };
-        let k2 = CacheKey { content_hash: "x".to_string(), config_hash: 0, dependency_hash: 2 };
+        let k1 = CacheKey {
+            content_hash: "x".to_string(),
+            config_hash: 0,
+            dependency_hash: 1,
+        };
+        let k2 = CacheKey {
+            content_hash: "x".to_string(),
+            config_hash: 0,
+            dependency_hash: 2,
+        };
         assert_ne!(k1, k2, "differing dependency_hash must make keys unequal");
     }
 
@@ -378,14 +386,25 @@ mod tests {
     #[test]
     fn test_content_hash_is_16_hex_chars() {
         let h = compute_content_hash("some source code");
-        assert_eq!(h.len(), 16, "content hash must be a 16-char hex string (FNV-1a 64-bit)");
-        assert!(h.chars().all(|c| c.is_ascii_hexdigit()), "content hash must be hex digits only");
+        assert_eq!(
+            h.len(),
+            16,
+            "content hash must be a 16-char hex string (FNV-1a 64-bit)"
+        );
+        assert!(
+            h.chars().all(|c| c.is_ascii_hexdigit()),
+            "content hash must be hex digits only"
+        );
     }
 
     #[test]
     fn test_content_hash_empty_string() {
         let h = compute_content_hash("");
-        assert_eq!(h.len(), 16, "content hash for empty string must still be 16 chars");
+        assert_eq!(
+            h.len(),
+            16,
+            "content hash for empty string must still be 16 chars"
+        );
     }
 
     // ── Concurrency: two threads insert different keys ───────────────────
@@ -409,7 +428,11 @@ mod tests {
                     cache
                         .insert(CachedEntry {
                             id: id.clone(),
-                            key: CacheKey { content_hash: hash, config_hash: 0, dependency_hash: 0 },
+                            key: CacheKey {
+                                content_hash: hash,
+                                config_hash: 0,
+                                dependency_hash: 0,
+                            },
                             transformed_code: format!("// module {i}"),
                             source_map: None,
                         })
@@ -429,7 +452,11 @@ mod tests {
                     cache
                         .insert(CachedEntry {
                             id: id.clone(),
-                            key: CacheKey { content_hash: hash, config_hash: 1, dependency_hash: 0 },
+                            key: CacheKey {
+                                content_hash: hash,
+                                config_hash: 1,
+                                dependency_hash: 0,
+                            },
                             transformed_code: format!("// util {i}"),
                             source_map: None,
                         })

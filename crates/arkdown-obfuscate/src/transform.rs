@@ -199,8 +199,7 @@ fn find_identifier_occurrences(source: &str, name: &str) -> Vec<(usize, usize)> 
                 };
 
                 // Boundary check: character after must not be an ident char
-                let after_ok =
-                    abs_end >= source.len() || !is_ident_char(source_bytes[abs_end]);
+                let after_ok = abs_end >= source.len() || !is_ident_char(source_bytes[abs_end]);
 
                 if before_ok && after_ok {
                     result.push((abs_start, abs_end));

@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use arkdown_core::{ModuleType, OhosResolvedModule, PkgContext};
 
 use crate::error::ResolveError;
-use crate::oh_modules::{is_bytecode_har, read_declaration_entry, read_main_field, read_version_field};
+use crate::oh_modules::{
+    is_bytecode_har, read_declaration_entry, read_main_field, read_version_field,
+};
 
 /// Extensions tried in order during resolution.
 const EXTENSIONS: &[&str] = &[".ets", ".ts", ".js", ".d.ets", ".d.ts"];
@@ -314,12 +316,7 @@ mod tests {
         let decl_path = sdk_api_dir.join("@ohos.hilog.d.ts");
         fs::write(&decl_path, "// hilog decls").unwrap();
 
-        let resolver = make_resolver(
-            dir.path().to_path_buf(),
-            vec![sdk_api_dir],
-            vec![],
-            vec![],
-        );
+        let resolver = make_resolver(dir.path().to_path_buf(), vec![sdk_api_dir], vec![], vec![]);
         let importer = dir.path().join("src/main.ets");
         let result = resolver.resolve("@ohos/hilog", &importer).unwrap();
         match result {
@@ -340,12 +337,7 @@ mod tests {
         let decl_path = kits_dir.join("@kit.ArkUI.d.ts");
         fs::write(&decl_path, "// ArkUI decls").unwrap();
 
-        let resolver = make_resolver(
-            dir.path().to_path_buf(),
-            vec![],
-            vec![kits_dir],
-            vec![],
-        );
+        let resolver = make_resolver(dir.path().to_path_buf(), vec![], vec![kits_dir], vec![]);
         let importer = dir.path().join("src/main.ets");
         let result = resolver.resolve("@kit.ArkUI", &importer).unwrap();
         match result {
@@ -448,8 +440,12 @@ mod tests {
         // Write entry file
         fs::write(pkg_dir.join("index.ets"), "// mylib entry").unwrap();
 
-        let resolver =
-            make_resolver(dir.path().to_path_buf(), vec![], vec![], vec![oh_modules_dir]);
+        let resolver = make_resolver(
+            dir.path().to_path_buf(),
+            vec![],
+            vec![],
+            vec![oh_modules_dir],
+        );
         let importer = dir.path().join("src/main.ets");
         let result = resolver.resolve("mylib", &importer).unwrap();
         match result {

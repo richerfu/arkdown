@@ -1,12 +1,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use arkdown_core::{
     ArkdownPlugin, HookResolveIdArgs, HookResolveIdOutput, HookUsage, ModuleType,
     OhosResolvedModule, PluginContext, PluginResult,
 };
 use arkdown_resolver::{OhosResolver, ResolverConfig};
+use async_trait::async_trait;
 
 pub struct OhosResolvePlugin {
     resolver: Arc<OhosResolver>,
@@ -44,10 +44,7 @@ impl ArkdownPlugin for OhosResolvePlugin {
         _ctx: &PluginContext,
         args: &HookResolveIdArgs<'_>,
     ) -> PluginResult<Option<HookResolveIdOutput>> {
-        let importer_path = args
-            .importer
-            .map(Path::new)
-            .unwrap_or(&self.project_root);
+        let importer_path = args.importer.map(Path::new).unwrap_or(&self.project_root);
 
         let resolved = match self.resolver.resolve(args.specifier, importer_path) {
             Ok(r) => r,

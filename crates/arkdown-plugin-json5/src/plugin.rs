@@ -1,15 +1,17 @@
-use std::path::{Path, PathBuf};
-use async_trait::async_trait;
 use arkdown_core::{
-    ArkdownError, ArkdownPlugin, HookLoadOutput, HookResolveIdArgs, HookResolveIdOutput,
-    HookUsage, ModuleType, PluginContext, PluginResult,
+    ArkdownError, ArkdownPlugin, HookLoadOutput, HookResolveIdArgs, HookResolveIdOutput, HookUsage,
+    ModuleType, PluginContext, PluginResult,
 };
+use async_trait::async_trait;
+use std::path::{Path, PathBuf};
 
 pub struct Json5Plugin;
 
 #[async_trait]
 impl ArkdownPlugin for Json5Plugin {
-    fn name(&self) -> &str { "json5" }
+    fn name(&self) -> &str {
+        "json5"
+    }
 
     fn register_hook_usage(&self) -> HookUsage {
         HookUsage::ResolveId | HookUsage::Load
@@ -33,16 +35,11 @@ impl ArkdownPlugin for Json5Plugin {
         }))
     }
 
-    async fn load(
-        &self,
-        _ctx: &PluginContext,
-        id: &str,
-    ) -> PluginResult<Option<HookLoadOutput>> {
+    async fn load(&self, _ctx: &PluginContext, id: &str) -> PluginResult<Option<HookLoadOutput>> {
         if !id.ends_with(".json") && !id.ends_with(".json5") {
             return Ok(None);
         }
-        let raw = fs_err::read_to_string(id)
-            .map_err(|e| ArkdownError::Io(e.into()))?;
+        let raw = fs_err::read_to_string(id).map_err(|e| ArkdownError::Io(e.into()))?;
 
         let value: serde_json::Value = if id.ends_with(".json5") {
             json5::from_str(&raw).map_err(|e| ArkdownError::ParseError {
@@ -68,7 +65,10 @@ impl ArkdownPlugin for Json5Plugin {
 fn resolve_relative_path(specifier: &str, importer: Option<&str>) -> PluginResult<PathBuf> {
     if let Some(imp) = importer {
         let base = Path::new(imp).parent().unwrap_or(Path::new("."));
-        Ok(base.join(specifier).canonicalize().unwrap_or_else(|_| base.join(specifier)))
+        Ok(base
+            .join(specifier)
+            .canonicalize()
+            .unwrap_or_else(|_| base.join(specifier)))
     } else {
         Ok(PathBuf::from(specifier))
     }
@@ -101,15 +101,48 @@ pub fn generate_esm_from_json(value: &serde_json::Value) -> String {
 }
 
 fn is_valid_js_identifier(s: &str) -> bool {
-    if s.is_empty() { return false; }
+    if s.is_empty() {
+        return false;
+    }
     let mut chars = s.chars();
     let first = chars.next().unwrap();
-    if !first.is_alphabetic() && first != '_' && first != '$' { return false; }
+    if !first.is_alphabetic() && first != '_' && first != '$' {
+        return false;
+    }
     // Check no reserved words (basic check — keywords would cause a parse error downstream)
-    !matches!(s, "import" | "export" | "default" | "class" | "function" | "return" |
-                 "var" | "let" | "const" | "if" | "else" | "for" | "while" | "do" |
-                 "switch" | "case" | "break" | "continue" | "new" | "delete" | "typeof" |
-                 "void" | "in" | "of" | "this" | "super" | "null" | "undefined" | "true" | "false")
+    !matches!(
+        s,
+        "import"
+            | "export"
+            | "default"
+            | "class"
+            | "function"
+            | "return"
+            | "var"
+            | "let"
+            | "const"
+            | "if"
+            | "else"
+            | "for"
+            | "while"
+            | "do"
+            | "switch"
+            | "case"
+            | "break"
+            | "continue"
+            | "new"
+            | "delete"
+            | "typeof"
+            | "void"
+            | "in"
+            | "of"
+            | "this"
+            | "super"
+            | "null"
+            | "undefined"
+            | "true"
+            | "false"
+    )
 }
 
 #[cfg(test)]
@@ -183,7 +216,10 @@ mod tests {
 
         let plugin = Json5Plugin;
         let result = plugin.load(&PluginContext::default(), &path).await;
-        assert!(result.is_ok(), "JSON5 with comments/trailing commas must not error");
+        assert!(
+            result.is_ok(),
+            "JSON5 with comments/trailing commas must not error"
+        );
         let out = result.unwrap().unwrap();
         assert!(
             out.code.contains("export var name"),
@@ -226,6 +262,9 @@ mod tests {
             .resolve_id(&PluginContext::default(), &args)
             .await
             .unwrap();
-        assert!(result.is_none(), "resolve_id must return None for non-JSON specifiers");
+        assert!(
+            result.is_none(),
+            "resolve_id must return None for non-JSON specifiers"
+        );
     }
 }

@@ -85,16 +85,13 @@ impl Obfuscator {
         }
 
         // Parse and merge.
-        let merged = options
-            .rule_files
-            .iter()
-            .try_fold(
-                ObfuscationRules::default(),
-                |acc, path| -> Result<ObfuscationRules, ObfuscationError> {
-                    let r = parse_rules_file(path)?;
-                    Ok(merge_rules(acc, r))
-                },
-            )?;
+        let merged = options.rule_files.iter().try_fold(
+            ObfuscationRules::default(),
+            |acc, path| -> Result<ObfuscationRules, ObfuscationError> {
+                let r = parse_rules_file(path)?;
+                Ok(merge_rules(acc, r))
+            },
+        )?;
 
         let hash = compute_rule_hash(&options.rule_files);
 
@@ -120,11 +117,7 @@ impl Obfuscator {
     ///
     /// Reads `input`, writes the result to `output`, and returns the output
     /// path on success.
-    pub fn obfuscate_file(
-        &self,
-        input: &Path,
-        output: &Path,
-    ) -> Result<PathBuf, ObfuscationError> {
+    pub fn obfuscate_file(&self, input: &Path, output: &Path) -> Result<PathBuf, ObfuscationError> {
         let source = std::fs::read_to_string(input)?;
         let filename = input.to_string_lossy();
         let result = self.obfuscate_source(&source, &filename)?;
@@ -142,12 +135,7 @@ impl Obfuscator {
             .max_depth(2)
             .into_iter()
             .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.path()
-                    .extension()
-                    .and_then(|x| x.to_str())
-                    == Some("js")
-            })
+            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("js"))
         {
             let path = entry.path();
             let tmp = path.with_extension("js.obf_tmp");

@@ -1,5 +1,5 @@
-use std::path::Path;
 use serde_json::Value;
+use std::path::Path;
 
 /// A single resource entry parsed from an element JSON file.
 #[derive(Debug, Clone)]
@@ -55,10 +55,7 @@ pub fn parse_element_file(path: &Path) -> Vec<ResourceEntry> {
         Err(_) => return vec![],
     };
 
-    let type_name = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
+    let type_name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
 
     let entry_type = match type_name {
         "string" => EntryType::String,
@@ -76,7 +73,11 @@ pub fn parse_element_file(path: &Path) -> Vec<ResourceEntry> {
                 .filter_map(|item| {
                     let name = item.get("name")?.as_str()?.to_string();
                     let value = item.get("value")?.as_str()?.to_string();
-                    Some(ResourceEntry { name, entry_type, value })
+                    Some(ResourceEntry {
+                        name,
+                        entry_type,
+                        value,
+                    })
                 })
                 .collect()
         })

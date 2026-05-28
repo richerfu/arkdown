@@ -17,9 +17,18 @@ pub fn read_oh_package(dir: &Path) -> Option<OhPackageInfo> {
     let content = fs_err::read_to_string(&path).ok()?;
     let v: serde_json::Value = json5::from_str(&content).ok()?;
     Some(OhPackageInfo {
-        name: v.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()),
-        version: v.get("version").and_then(|v| v.as_str()).map(|s| s.to_string()),
-        main: v.get("main").and_then(|m| m.as_str()).map(|s| s.to_string()),
+        name: v
+            .get("name")
+            .and_then(|n| n.as_str())
+            .map(|s| s.to_string()),
+        version: v
+            .get("version")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        main: v
+            .get("main")
+            .and_then(|m| m.as_str())
+            .map(|s| s.to_string()),
         pkg_path: dir.to_path_buf(),
     })
 }

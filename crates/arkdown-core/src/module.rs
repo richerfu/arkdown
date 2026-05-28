@@ -132,7 +132,10 @@ mod tests {
             module_type: ModuleType::Ets,
             module_def_format: ModuleDefFormat::Esm,
         };
-        assert_eq!(r.id, "@bundle:com.example.app/entry/ets/entryability/EntryAbility");
+        assert_eq!(
+            r.id,
+            "@bundle:com.example.app/entry/ets/entryability/EntryAbility"
+        );
         assert!(r.external);
         assert_eq!(r.module_type, ModuleType::Ets);
         assert_eq!(r.module_def_format, ModuleDefFormat::Esm);

@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 use arkdown_core::{
-    ArkdownError, ArkdownPlugin, Module, ModuleMeta, ModuleSource, NormalModule,
-    ModuleIdx, ResolvedId,
+    ArkdownError, ArkdownPlugin, Module, ModuleIdx, ModuleMeta, ModuleSource, NormalModule,
+    ResolvedId,
 };
 
 use crate::parse::parse_module;
@@ -122,8 +122,8 @@ impl ModuleLoader {
     /// async; this synchronous fallback is used for the rayon parallel path.
     /// Plugin overrides are applied in the async pipeline owned by SPEC-005.
     fn load_single(resolved: &ResolvedId) -> Result<Module, ArkdownError> {
-        let content = fs_err::read_to_string(&resolved.id)
-            .map_err(|e| ArkdownError::Io(e.into()))?;
+        let content =
+            fs_err::read_to_string(&resolved.id).map_err(|e| ArkdownError::Io(e.into()))?;
 
         let source = ModuleSource {
             id: resolved.clone(),

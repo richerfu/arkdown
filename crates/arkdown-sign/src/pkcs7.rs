@@ -18,34 +18,42 @@ use x509_cert::Certificate;
 // ---------------------------------------------------------------------------
 
 /// `id-data` (1.2.840.113549.1.7.1)
-const OID_ID_DATA: &[u8] = &[0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x07, 0x01];
+const OID_ID_DATA: &[u8] = &[
+    0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x07, 0x01,
+];
 
 /// `id-signedData` (1.2.840.113549.1.7.2)
-const OID_ID_SIGNED_DATA: &[u8] =
-    &[0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x07, 0x02];
+const OID_ID_SIGNED_DATA: &[u8] = &[
+    0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x07, 0x02,
+];
 
 /// `id-sha256` (2.16.840.1.101.3.4.2.1)
-const OID_SHA256: &[u8] = &[0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01];
+const OID_SHA256: &[u8] = &[
+    0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01,
+];
 
 /// `id-ecdsaWithSHA256` (1.2.840.10045.4.3.2)
-const OID_ECDSA_WITH_SHA256: &[u8] =
-    &[0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02];
+const OID_ECDSA_WITH_SHA256: &[u8] = &[0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02];
 
 /// `id-RSASSA-PSS` (1.2.840.113549.1.1.10)
-const OID_RSASSA_PSS: &[u8] =
-    &[0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0a];
+const OID_RSASSA_PSS: &[u8] = &[
+    0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0a,
+];
 
 /// `id-contentType` (1.2.840.113549.1.9.3)
-const OID_CONTENT_TYPE: &[u8] =
-    &[0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x09, 0x03];
+const OID_CONTENT_TYPE: &[u8] = &[
+    0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x09, 0x03,
+];
 
 /// `id-signingTime` (1.2.840.113549.1.9.5)
-const OID_SIGNING_TIME: &[u8] =
-    &[0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x09, 0x05];
+const OID_SIGNING_TIME: &[u8] = &[
+    0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x09, 0x05,
+];
 
 /// `id-messageDigest` (1.2.840.113549.1.9.4)
-const OID_MESSAGE_DIGEST: &[u8] =
-    &[0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x09, 0x04];
+const OID_MESSAGE_DIGEST: &[u8] = &[
+    0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x09, 0x04,
+];
 
 // ---------------------------------------------------------------------------
 // DER primitive helpers
@@ -202,7 +210,11 @@ fn is_leap_year(y: u32) -> bool {
 }
 
 fn days_in_year(y: u32) -> u32 {
-    if is_leap_year(y) { 366 } else { 365 }
+    if is_leap_year(y) {
+        366
+    } else {
+        365
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -299,10 +311,7 @@ pub fn build_cms_signed_data(
     };
 
     // Attribute: contentType = id-data
-    let attr_content_type = sequence(&concat(&[
-        OID_CONTENT_TYPE,
-        &set(OID_ID_DATA),
-    ]));
+    let attr_content_type = sequence(&concat(&[OID_CONTENT_TYPE, &set(OID_ID_DATA)]));
 
     // Attribute: signingTime = UTCTime(now)
     let signing_time = current_utctime_der();
@@ -315,7 +324,8 @@ pub fn build_cms_signed_data(
     ]));
 
     // Concatenate signed attrs (order: contentType, signingTime, messageDigest)
-    let signed_attrs_inner = concat(&[&attr_content_type, &attr_signing_time, &attr_message_digest]);
+    let signed_attrs_inner =
+        concat(&[&attr_content_type, &attr_signing_time, &attr_message_digest]);
 
     // For signing: encode as SET (tag 0x31)
     let signed_attrs_for_signing = set(&signed_attrs_inner);
@@ -353,11 +363,11 @@ pub fn build_cms_signed_data(
     let digest_alg_for_signer = sequence(&concat(&[OID_SHA256, &[0x05, 0x00]]));
 
     let signer_info_inner = concat(&[
-        &integer_one(),             // version
-        &issuer_and_serial,         // sid: IssuerAndSerialNumber
-        &digest_alg_for_signer,     // digestAlgorithm
-        &signed_attrs_encoded,      // signedAttrs [0] IMPLICIT
-        &signature_algorithm,       // signatureAlgorithm
+        &integer_one(),                  // version
+        &issuer_and_serial,              // sid: IssuerAndSerialNumber
+        &digest_alg_for_signer,          // digestAlgorithm
+        &signed_attrs_encoded,           // signedAttrs [0] IMPLICIT
+        &signature_algorithm,            // signatureAlgorithm
         &octet_string(&signature_bytes), // signature
     ]);
     let signer_info = sequence(&signer_info_inner);
@@ -368,11 +378,11 @@ pub fn build_cms_signed_data(
     let signer_infos = set(&signer_info);
 
     let signed_data_inner = concat(&[
-        &integer_one(),        // version
-        &digest_algorithms,   // digestAlgorithms
-        &encap_content_info,  // encapContentInfo
-        &certificates,        // [0] IMPLICIT certs
-        &signer_infos,        // signerInfos
+        &integer_one(),      // version
+        &digest_algorithms,  // digestAlgorithms
+        &encap_content_info, // encapContentInfo
+        &certificates,       // [0] IMPLICIT certs
+        &signer_infos,       // signerInfos
     ]);
     let signed_data = sequence(&signed_data_inner);
 

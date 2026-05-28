@@ -62,8 +62,7 @@ impl SigningKey {
         use pkcs8::EncryptedPrivateKeyInfo;
 
         // CMS content-type OIDs (RFC 5652).
-        const ID_DATA: ObjectIdentifier =
-            ObjectIdentifier::new_unwrap("1.2.840.113549.1.7.1");
+        const ID_DATA: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.7.1");
         const ID_ENCRYPTED_DATA: ObjectIdentifier =
             ObjectIdentifier::new_unwrap("1.2.840.113549.1.7.6");
 
@@ -93,12 +92,9 @@ impl SigningKey {
 
             if content_info.content_type == ID_DATA {
                 // Plain safe bag — content is OCTET STRING(SafeContents)
-                let os_der = content_info
-                    .content
-                    .to_der()
-                    .map_err(|e| {
-                        SignError::KeystoreParseError(format!("plain safe to_der: {e}"))
-                    })?;
+                let os_der = content_info.content.to_der().map_err(|e| {
+                    SignError::KeystoreParseError(format!("plain safe to_der: {e}"))
+                })?;
                 let os = OctetString::from_der(&os_der).map_err(|e| {
                     SignError::KeystoreParseError(format!("plain safe OctetString: {e}"))
                 })?;
@@ -108,9 +104,7 @@ impl SigningKey {
                 let enc_der = content_info
                     .content
                     .to_der()
-                    .map_err(|e| {
-                        SignError::KeystoreParseError(format!("enc safe to_der: {e}"))
-                    })?;
+                    .map_err(|e| SignError::KeystoreParseError(format!("enc safe to_der: {e}")))?;
                 let enc_data = EncryptedData::from_der(&enc_der).map_err(|e| {
                     SignError::KeystoreParseError(format!("EncryptedData parse: {e}"))
                 })?;
@@ -128,20 +122,15 @@ impl SigningKey {
                         SignError::KeystoreParseError(format!("PBES2 params to_der: {e}"))
                     })?;
 
-                let enc_os = enc_data
-                    .enc_content_info
-                    .encrypted_content
-                    .ok_or_else(|| {
-                        SignError::KeystoreParseError("missing encrypted content".into())
-                    })?;
+                let enc_os = enc_data.enc_content_info.encrypted_content.ok_or_else(|| {
+                    SignError::KeystoreParseError("missing encrypted content".into())
+                })?;
 
                 let original_ct = enc_os.as_bytes().to_vec();
 
                 // Try store_password first; retry with key_password on failure.
                 let decrypted = Self::pbes2_decrypt(&params_der, store_password, &original_ct)
-                    .or_else(|_| {
-                        Self::pbes2_decrypt(&params_der, key_password, &original_ct)
-                    })
+                    .or_else(|_| Self::pbes2_decrypt(&params_der, key_password, &original_ct))
                     .map_err(|e| {
                         SignError::KeystoreParseError(format!("PBES2 decrypt (safe): {e}"))
                     })?;
@@ -153,9 +142,8 @@ impl SigningKey {
             }
 
             // ── 4. Parse SafeContents and collect key + certs ───────────────
-            let safe_bags = SafeContents::from_der(&safe_contents_bytes).map_err(|e| {
-                SignError::KeystoreParseError(format!("SafeContents parse: {e}"))
-            })?;
+            let safe_bags = SafeContents::from_der(&safe_contents_bytes)
+                .map_err(|e| SignError::KeystoreParseError(format!("SafeContents parse: {e}")))?;
 
             for bag in safe_bags {
                 match bag.bag_id {
@@ -188,9 +176,7 @@ impl SigningKey {
                             })?;
                         if private_key_der.is_none() {
                             let der = cs.value.to_der().map_err(|e| {
-                                SignError::KeystoreParseError(format!(
-                                    "PrivateKeyInfo to_der: {e}"
-                                ))
+                                SignError::KeystoreParseError(format!("PrivateKeyInfo to_der: {e}"))
                             })?;
                             private_key_der = Some(der);
                         }
@@ -342,8 +328,8 @@ mod tests {
 
     #[test]
     fn test_wrong_password_returns_err() {
-        let p12_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/test.p12");
+        let p12_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/test.p12");
         if !p12_path.exists() {
             eprintln!("SKIP: test P12 fixture not found at {:?}", p12_path);
             return;
@@ -365,8 +351,8 @@ mod tests {
     /// ```
     #[test]
     fn test_load_rsa_p12_fixture() {
-        let p12_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/test.p12");
+        let p12_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/test.p12");
         if !p12_path.exists() {
             eprintln!("SKIP: test P12 fixture not found at {:?}", p12_path);
             return;
@@ -379,8 +365,14 @@ mod tests {
             result.err()
         );
         let key = result.unwrap();
-        assert!(!key.private_key_der.is_empty(), "private key DER must not be empty");
-        assert!(!key.cert_chain.is_empty(), "certificate chain must not be empty");
+        assert!(
+            !key.private_key_der.is_empty(),
+            "private key DER must not be empty"
+        );
+        assert!(
+            !key.cert_chain.is_empty(),
+            "certificate chain must not be empty"
+        );
         assert!(
             !key.cert_chain[0].is_empty(),
             "leaf certificate DER must not be empty"
@@ -430,9 +422,7 @@ mod tests {
     #[test]
     fn test_base64_decode_known_vector() {
         let encoded = "aGVsbG8=";
-        let pem = format!(
-            "-----BEGIN PRIVATE KEY-----\n{encoded}\n-----END PRIVATE KEY-----"
-        );
+        let pem = format!("-----BEGIN PRIVATE KEY-----\n{encoded}\n-----END PRIVATE KEY-----");
         let cert_pem = "-----BEGIN CERTIFICATE-----\naGVsbG8=\n-----END CERTIFICATE-----";
         let result = SigningKey::from_pem(&pem, cert_pem);
         // Result will be Err(PemError) because "hello" is not valid PKCS#8,
@@ -451,8 +441,7 @@ mod tests {
 
 /// Minimal base64 decoder (standard alphabet).
 fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
-    const TABLE: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
     let mut lookup = [0xFFu8; 256];
     for (i, &c) in TABLE.iter().enumerate() {

@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use arkdown_core::{
-    ArkdownConfig, ArkOptions, BuildMode, BuildOption, ModuleConfig, ObfuscationConfig,
+    ArkOptions, ArkdownConfig, BuildMode, BuildOption, ModuleConfig, ObfuscationConfig,
     OutputTarget, ProductConfig, SigningConfig, StrictModeConfig,
 };
 
@@ -129,11 +129,7 @@ pub fn load_config(
         .and_then(|bo| bo.ark_options.as_ref())
         .map(|ao| {
             let obfuscation = ao.obfuscation.as_ref().map(|o| ObfuscationConfig {
-                enable_obfuscation: o
-                    .rule_options
-                    .as_ref()
-                    .map(|r| r.enable)
-                    .unwrap_or(false),
+                enable_obfuscation: o.rule_options.as_ref().map(|r| r.enable).unwrap_or(false),
                 rules_file: None,
             });
             ArkOptions {
@@ -264,13 +260,7 @@ mod tests {
         f.write_all(bp_content.as_bytes()).unwrap();
 
         // No module.json5 — should fall back to Entry type, and SDK may or may not be found.
-        let result = load_config(
-            &tmp,
-            BuildMode::Debug,
-            OutputTarget::Hap,
-            None,
-            None,
-        );
+        let result = load_config(&tmp, BuildMode::Debug, OutputTarget::Hap, None, None);
 
         match result {
             Ok(cfg) => {
@@ -348,20 +338,18 @@ mod tests {
         let mut f = std::fs::File::create(tmp.join("build-profile.json5")).unwrap();
         f.write_all(bp_content.as_bytes()).unwrap();
 
-        let result = load_config(
-            &tmp,
-            BuildMode::Debug,
-            OutputTarget::Hap,
-            None,
-            None,
-        );
+        let result = load_config(&tmp, BuildMode::Debug, OutputTarget::Hap, None, None);
 
         match result {
             Ok(cfg) => {
                 // bundleName comes from AppScope/app.json5
                 assert_eq!(cfg.product.bundle_name, "com.example.realapp");
                 // Signing config resolved by name
-                let sc = cfg.product.signing_config.as_ref().expect("signing config present");
+                let sc = cfg
+                    .product
+                    .signing_config
+                    .as_ref()
+                    .expect("signing config present");
                 assert_eq!(sc.key_alias, "testKey");
                 assert_eq!(sc.cert_path.to_str().unwrap(), "/test/cert.cer");
                 // targetSdkVersion used for compile_api_version

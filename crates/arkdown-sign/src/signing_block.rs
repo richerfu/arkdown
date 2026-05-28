@@ -51,10 +51,7 @@ pub const ALG_RSA_PSS_SHA256: u32 = 0x101;
 /// 16 bytes: magic
 /// u32: version
 /// ```
-pub fn build_signing_block(
-    blocks: &[(u32, Vec<u8>)],
-    compatible_sdk_version: u32,
-) -> Vec<u8> {
+pub fn build_signing_block(blocks: &[(u32, Vec<u8>)], compatible_sdk_version: u32) -> Vec<u8> {
     let header_size = blocks.len() * 12; // 12 bytes per TLV header
     let data_size: usize = blocks.iter().map(|(_, v)| v.len()).sum();
 
@@ -262,10 +259,7 @@ mod tests {
     fn test_encode_digest_pairs_multiple() {
         let d1 = [0x11u8; 32];
         let d2 = [0x22u8; 32];
-        let encoded = encode_digest_pairs(&[
-            (ALG_ECDSA_SHA256, &d1),
-            (ALG_RSA_PSS_SHA256, &d2),
-        ]);
+        let encoded = encode_digest_pairs(&[(ALG_ECDSA_SHA256, &d1), (ALG_RSA_PSS_SHA256, &d2)]);
         assert_eq!(encoded.len(), 2 * (4 + 4 + 32));
         // Second entry starts at offset 40
         assert_eq!(&encoded[40..44], &ALG_RSA_PSS_SHA256.to_le_bytes());

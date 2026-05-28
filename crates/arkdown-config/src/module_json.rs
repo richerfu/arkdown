@@ -91,10 +91,7 @@ mod tests {
         let m = parse_module_json(json, Path::new("module.json5")).unwrap();
         assert_eq!(m.module.name, "entry");
         assert_eq!(m.module.module_type, "entry");
-        assert_eq!(
-            m.module.src_entry,
-            "./ets/entryability/EntryAbility.ets"
-        );
+        assert_eq!(m.module.src_entry, "./ets/entryability/EntryAbility.ets");
         assert_eq!(m.module.device_types, vec!["phone", "tablet"]);
     }
 
@@ -118,10 +115,7 @@ mod tests {
         assert_eq!(m.module.abilities.len(), 1);
         let ability = &m.module.abilities[0];
         assert_eq!(ability["name"], "EntryAbility");
-        assert_eq!(
-            ability["srcEntry"],
-            "./ets/entryability/EntryAbility.ets"
-        );
+        assert_eq!(ability["srcEntry"], "./ets/entryability/EntryAbility.ets");
     }
 
     #[test]
@@ -136,7 +130,10 @@ mod tests {
         }"#;
         let m = parse_module_json(json, Path::new("module.json5")).unwrap();
         assert_eq!(m.module.module_type, "har");
-        assert_eq!(map_module_type(&m.module.module_type), arkdown_core::OhosModuleType::Har);
+        assert_eq!(
+            map_module_type(&m.module.module_type),
+            arkdown_core::OhosModuleType::Har
+        );
     }
 
     #[test]
@@ -163,10 +160,7 @@ mod tests {
             map_module_type("shared"),
             arkdown_core::OhosModuleType::Shared
         );
-        assert_eq!(
-            map_module_type("har"),
-            arkdown_core::OhosModuleType::Har
-        );
+        assert_eq!(map_module_type("har"), arkdown_core::OhosModuleType::Har);
         // Unknown falls back to Entry
         assert_eq!(
             map_module_type("unknown"),

@@ -68,7 +68,10 @@ mod tests {
 
     #[test]
     fn test_content_type_byte_is_0x5a() {
-        assert_eq!(CONTENT_TYPE_BYTE, 0x5a, "top-level prefix byte must be 0x5a");
+        assert_eq!(
+            CONTENT_TYPE_BYTE, 0x5a,
+            "top-level prefix byte must be 0x5a"
+        );
     }
 
     #[test]
@@ -93,7 +96,10 @@ mod tests {
         h.update(0u32.to_le_bytes());
         let expected: [u8; 32] = h.finalize().into();
 
-        assert_eq!(d, expected, "empty-sections digest must equal SHA-256(0x5a || u32_LE(0))");
+        assert_eq!(
+            d, expected,
+            "empty-sections digest must equal SHA-256(0x5a || u32_LE(0))"
+        );
     }
 
     #[test]

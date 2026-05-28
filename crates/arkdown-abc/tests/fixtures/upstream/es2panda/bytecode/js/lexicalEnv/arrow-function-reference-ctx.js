@@ -9,31 +9,31 @@ class AA {
     let cb = () => {
       this.a;
       new.target;
-      print('cb');
-    }
-    print('test');
+      print("cb");
+    };
+    print("test");
     return cb;
   }
 
   testVariableScopeRefrenceThis() {
     let cb = () => {
-      for(let a = 1; a < 10; a++) {
+      for (let a = 1; a < 10; a++) {
         this.a;
-        print('cb');
+        print("cb");
       }
-    }
-    print('test');
+    };
+    print("test");
     return cb;
   }
 
   testVariableScopeReferenceTarget() {
     let cb = () => {
-      for(let a = 1; a < 10; a++) {
+      for (let a = 1; a < 10; a++) {
         new.target;
-        print('cb');
+        print("cb");
       }
-    }
-    print('test');
+    };
+    print("test");
     return cb;
   }
 }

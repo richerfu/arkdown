@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
 use arkdown_core::{
-    ArkdownError, ArkdownPlugin, HostModuleInfo, HookUsage, ModuleInfo, ModuleMeta, PluginContext,
+    ArkdownError, ArkdownPlugin, HookUsage, HostModuleInfo, ModuleInfo, ModuleMeta, PluginContext,
     PluginResult,
 };
+use async_trait::async_trait;
 
 use crate::meta_compute;
 
@@ -64,27 +64,22 @@ impl ArkdownPlugin for ModuleMetaPlugin {
 
     /// After a module is parsed, record all of its import edges in the
     /// reverse map so that each imported module knows its consumers.
-    async fn module_parsed(
-        &self,
-        _ctx: &PluginContext,
-        module: &ModuleInfo,
-    ) -> PluginResult<()> {
+    async fn module_parsed(&self, _ctx: &PluginContext, module: &ModuleInfo) -> PluginResult<()> {
         // Derive the hosting package/module info from the module's own ID.
-        let meta = meta_compute::compute_meta(
-            &module.id,
-            &self.project_root,
-            &self.module_name,
-        );
+        let meta = meta_compute::compute_meta(&module.id, &self.project_root, &self.module_name);
         let host_dep = meta.pkg_name.unwrap_or_default();
         let host_mod = meta.module_name.unwrap_or_default();
 
-        let mut map = self.reverse_map.lock().map_err(|e| ArkdownError::PluginError {
-            plugin: self.name().to_string(),
-            source: Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            )),
-        })?;
+        let mut map = self
+            .reverse_map
+            .lock()
+            .map_err(|e| ArkdownError::PluginError {
+                plugin: self.name().to_string(),
+                source: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    e.to_string(),
+                )),
+            })?;
 
         let push_host = |map: &mut HashMap<String, Vec<HostModuleInfo>>, id: &str| {
             map.entry(id.to_string()).or_default().push(HostModuleInfo {
@@ -123,10 +118,6 @@ impl ArkdownPlugin for ModuleMetaPlugin {
 ///
 /// Called by the loader before constructing a module so that metadata is
 /// available as soon as the module enters the graph.
-pub fn compute_module_meta(
-    module_id: &str,
-    project_root: &Path,
-    module_name: &str,
-) -> ModuleMeta {
+pub fn compute_module_meta(module_id: &str, project_root: &Path, module_name: &str) -> ModuleMeta {
     meta_compute::compute_meta(module_id, project_root, module_name)
 }

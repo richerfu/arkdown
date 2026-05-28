@@ -8,16 +8,16 @@
 //! - BFS module graph traversal (transitive imports, circular import safety)
 
 use std::sync::{
-    atomic::{AtomicBool, AtomicUsize, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     Arc,
 };
 
-use async_trait::async_trait;
 use arkdown_core::{
     ArkdownPlugin, HookLoadOutput, HookResolveIdOutput, HookTransformOutput, HookUsage,
     ModuleDefFormat, ModuleType, PluginContext, PluginResult, ResolvedId,
 };
 use arkdown_loader::{ModuleLoader, PluginDriver};
+use async_trait::async_trait;
 
 // ---------------------------------------------------------------------------
 // Helpers / spy plugins
@@ -118,7 +118,9 @@ impl ArkdownPlugin for PanicOnResolvePlugin {
         _ctx: &PluginContext,
         _args: &arkdown_core::HookResolveIdArgs<'_>,
     ) -> PluginResult<Option<HookResolveIdOutput>> {
-        panic!("PanicOnResolvePlugin.resolve_id was called despite HookUsage not declaring ResolveId");
+        panic!(
+            "PanicOnResolvePlugin.resolve_id was called despite HookUsage not declaring ResolveId"
+        );
     }
 }
 
@@ -258,7 +260,7 @@ async fn test_resolve_id_hook_usage_filtering_skips_undeclared_plugin() {
     // PanicOnResolvePlugin does NOT declare HookUsage::ResolveId.
     // If the driver calls it, the test panics.
     let driver = PluginDriver::new(vec![
-        Arc::new(PanicOnResolvePlugin) as Arc<dyn ArkdownPlugin>,
+        Arc::new(PanicOnResolvePlugin) as Arc<dyn ArkdownPlugin>
     ]);
 
     // Should complete without panicking because the plugin is skipped.
@@ -266,7 +268,10 @@ async fn test_resolve_id_hook_usage_filtering_skips_undeclared_plugin() {
         .resolve_id("./module", Some("/importer.ts"))
         .await
         .unwrap();
-    assert!(result.is_none(), "no plugin should resolve when only HookUsage::empty() is declared");
+    assert!(
+        result.is_none(),
+        "no plugin should resolve when only HookUsage::empty() is declared"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -296,8 +301,12 @@ async fn test_transform_no_change_if_plugin_returns_none() {
     struct NoopTransformPlugin;
     #[async_trait]
     impl ArkdownPlugin for NoopTransformPlugin {
-        fn name(&self) -> &str { "noop-transform" }
-        fn register_hook_usage(&self) -> HookUsage { HookUsage::Transform }
+        fn name(&self) -> &str {
+            "noop-transform"
+        }
+        fn register_hook_usage(&self) -> HookUsage {
+            HookUsage::Transform
+        }
         async fn transform(
             &self,
             _ctx: &PluginContext,
@@ -310,7 +319,9 @@ async fn test_transform_no_change_if_plugin_returns_none() {
 
     let driver = PluginDriver::new(vec![
         Arc::new(NoopTransformPlugin) as Arc<dyn ArkdownPlugin>,
-        Arc::new(AppendPlugin { suffix: " APPENDED" }) as Arc<dyn ArkdownPlugin>,
+        Arc::new(AppendPlugin {
+            suffix: " APPENDED",
+        }) as Arc<dyn ArkdownPlugin>,
     ]);
 
     let result = driver
@@ -328,8 +339,12 @@ async fn test_transform_skips_plugin_without_hook_usage() {
     struct AlwaysPanicsTransform;
     #[async_trait]
     impl ArkdownPlugin for AlwaysPanicsTransform {
-        fn name(&self) -> &str { "panics-transform" }
-        fn register_hook_usage(&self) -> HookUsage { HookUsage::empty() }
+        fn name(&self) -> &str {
+            "panics-transform"
+        }
+        fn register_hook_usage(&self) -> HookUsage {
+            HookUsage::empty()
+        }
         async fn transform(
             &self,
             _ctx: &PluginContext,
@@ -341,7 +356,7 @@ async fn test_transform_skips_plugin_without_hook_usage() {
     }
 
     let driver = PluginDriver::new(vec![
-        Arc::new(AlwaysPanicsTransform) as Arc<dyn ArkdownPlugin>,
+        Arc::new(AlwaysPanicsTransform) as Arc<dyn ArkdownPlugin>
     ]);
 
     let result = driver
@@ -384,16 +399,18 @@ async fn test_load_all_none_returns_none() {
     struct NeverLoadsPlugin;
     #[async_trait]
     impl ArkdownPlugin for NeverLoadsPlugin {
-        fn name(&self) -> &str { "never-loads" }
-        fn register_hook_usage(&self) -> HookUsage { HookUsage::Load }
+        fn name(&self) -> &str {
+            "never-loads"
+        }
+        fn register_hook_usage(&self) -> HookUsage {
+            HookUsage::Load
+        }
         async fn load(&self, _: &PluginContext, _: &str) -> PluginResult<Option<HookLoadOutput>> {
             Ok(None)
         }
     }
 
-    let driver = PluginDriver::new(vec![
-        Arc::new(NeverLoadsPlugin) as Arc<dyn ArkdownPlugin>,
-    ]);
+    let driver = PluginDriver::new(vec![Arc::new(NeverLoadsPlugin) as Arc<dyn ArkdownPlugin>]);
 
     let result = driver.load("unhandled/module.ts").await.unwrap();
     assert!(result.is_none());
@@ -405,16 +422,18 @@ async fn test_load_hook_usage_filtering_skips_undeclared_plugin() {
     struct PanicOnLoadPlugin;
     #[async_trait]
     impl ArkdownPlugin for PanicOnLoadPlugin {
-        fn name(&self) -> &str { "panic-on-load" }
-        fn register_hook_usage(&self) -> HookUsage { HookUsage::empty() }
+        fn name(&self) -> &str {
+            "panic-on-load"
+        }
+        fn register_hook_usage(&self) -> HookUsage {
+            HookUsage::empty()
+        }
         async fn load(&self, _: &PluginContext, _: &str) -> PluginResult<Option<HookLoadOutput>> {
             panic!("PanicOnLoadPlugin.load was called despite HookUsage::Load not being declared");
         }
     }
 
-    let driver = PluginDriver::new(vec![
-        Arc::new(PanicOnLoadPlugin) as Arc<dyn ArkdownPlugin>,
-    ]);
+    let driver = PluginDriver::new(vec![Arc::new(PanicOnLoadPlugin) as Arc<dyn ArkdownPlugin>]);
 
     // Should complete without panicking.
     let result = driver.load("any/module.ts").await.unwrap();
@@ -521,13 +540,14 @@ fn test_load_all_circular_import_terminates() {
     let a_key = a.to_str().unwrap();
     let b_key = b.to_str().unwrap();
 
-    assert!(
-        modules.contains_key(a_key),
-        "a.ts must be in graph"
-    );
+    assert!(modules.contains_key(a_key), "a.ts must be in graph");
     assert!(
         modules.contains_key(b_key),
         "b.ts must be in graph even with circular reference"
     );
-    assert_eq!(modules.len(), 2, "exactly 2 modules expected (no duplicates from cycle)");
+    assert_eq!(
+        modules.len(),
+        2,
+        "exactly 2 modules expected (no duplicates from cycle)"
+    );
 }

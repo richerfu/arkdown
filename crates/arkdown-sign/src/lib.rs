@@ -88,8 +88,7 @@ impl HapSigner {
             digest::compute_hap_digest(&entries_bytes, &[], &cd_bytes, &eocd_zeroed);
 
         // 4. Encode (alg_id, digest) pairs
-        let digest_pairs =
-            signing_block::encode_digest_pairs(&[(self.alg_id, &content_digest)]);
+        let digest_pairs = signing_block::encode_digest_pairs(&[(self.alg_id, &content_digest)]);
 
         // 5. Build CMS SignedData
         let cms_data = pkcs7::build_cms_signed_data(
@@ -255,9 +254,9 @@ fn aes_gcm_decrypt(key: &[u8; 16], data: &[u8]) -> Result<Vec<u8>, SignError> {
         .map_err(|e| SignError::Config(format!("AES key error: {e}")))?;
     let nonce = Nonce::from_slice(iv);
 
-    cipher
-        .decrypt(nonce, ciphertext_and_tag)
-        .map_err(|_| SignError::Config("AES-GCM decryption failed: wrong key or corrupt data".into()))
+    cipher.decrypt(nonce, ciphertext_and_tag).map_err(|_| {
+        SignError::Config("AES-GCM decryption failed: wrong key or corrupt data".into())
+    })
 }
 
 // ---------------------------------------------------------------------------

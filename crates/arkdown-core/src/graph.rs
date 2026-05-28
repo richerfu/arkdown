@@ -200,13 +200,13 @@ pub struct ModuleGraph {
 
 #[cfg(test)]
 mod tests {
-    use index_vec::Idx as _;
+    use super::{
+        ExportBinding, ExternalModule, ImportEdge, ImportedName, Module, ModuleIdx, ModuleMeta,
+        NormalModule,
+    };
     use crate::module::{ModuleSource, ResolvedId};
     use crate::plugin::ImportKind;
-    use super::{
-        ExportBinding, ExternalModule, ImportEdge, ImportedName,
-        Module, ModuleIdx, ModuleMeta, NormalModule,
-    };
+    use index_vec::Idx as _;
 
     fn make_normal_module(idx: u32) -> NormalModule {
         NormalModule {

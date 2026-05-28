@@ -81,7 +81,8 @@ impl ArkdownPlugin for ChunkWrapperPlugin {
             body
         };
 
-        let mut output = String::with_capacity(imports.len() + iife_content.len() + registry.len() + 64);
+        let mut output =
+            String::with_capacity(imports.len() + iife_content.len() + registry.len() + 64);
 
         // 1. Hoisted import declarations (top-level, before IIFE).
         if !imports.is_empty() {
@@ -98,7 +99,10 @@ impl ArkdownPlugin for ChunkWrapperPlugin {
         }
         output.push_str("})();\n");
 
-        Ok(Some(HookTransformOutput { code: output, source_map: None }))
+        Ok(Some(HookTransformOutput {
+            code: output,
+            source_map: None,
+        }))
     }
 }
 
@@ -227,7 +231,6 @@ fn strip_export_keyword(text: &str) -> String {
     t.to_string()
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,7 +307,11 @@ const x = 1;"#;
         // Registry must come BEFORE the IIFE closing
         let reg_pos = result.code.find("globalThis[\"entry_deadbeef\"]").unwrap();
         let close_pos = result.code.find("})();").unwrap();
-        assert!(reg_pos < close_pos, "registry must be inside IIFE; code:\n{}", result.code);
+        assert!(
+            reg_pos < close_pos,
+            "registry must be inside IIFE; code:\n{}",
+            result.code
+        );
     }
 
     #[tokio::test]

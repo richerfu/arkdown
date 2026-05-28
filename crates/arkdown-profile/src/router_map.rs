@@ -36,9 +36,7 @@ mod tests {
             RouterMapEntry {
                 route_name: "Detail".to_string(),
                 src_path: "/project/entry/src/main/ets/pages/Detail.ets".to_string(),
-                ohm_url: Some(
-                    "@bundle:com.example.app/entry/ets/pages/Detail".to_string(),
-                ),
+                ohm_url: Some("@bundle:com.example.app/entry/ets/pages/Detail".to_string()),
             },
         ];
         let result = collect_router_entries(entries);

@@ -618,10 +618,7 @@ fn build_default_key(root: &Path, path: &Path) -> Option<String> {
     for index in 0..components.len().saturating_sub(2) {
         if components[index] == "build"
             && components[index + 1] == "default"
-            && matches!(
-                components[index + 2].as_str(),
-                "intermediates" | "outputs"
-            )
+            && matches!(components[index + 2].as_str(), "intermediates" | "outputs")
         {
             return Some(components[index..].join("/"));
         }
