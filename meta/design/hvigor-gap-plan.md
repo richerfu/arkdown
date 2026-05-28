@@ -41,14 +41,18 @@ and release-mode terser/minification when applicable.
 
 1. parse config;
 2. compile resources and process profiles;
-3. bundle each module through rolldown;
+3. bundle each module through rolldown (ESM output, SDK imports external, treeshake
+   disabled for debug);
 4. compile written `.js` chunks through `arkdown-abc`;
 5. package and sign HAP/HSP or package source HAR.
 
-The pipeline is functional for a narrow minimal fixture, but it is not yet a
-full hvigor replacement. Most missing behavior is not in task orchestration;
-it is in the code compilation contract between `loader.json`, rollup/rolldown,
-SDK ArkTS transforms, and `es2abc`.
+As of 2026-05-28: the pipeline produces correct ESM output for both entry files
+(`EntryAbility.ets` → clean ESM with `import UIAbility from "@ohos:..."` syntax,
+`Index.ets` → ViewPU class with `registerNamedRoute` side-effect call). Both are
+compiled to ABC. HAP zip structure matches hvigor exactly (11 entries).
+The remaining diff is only in `ets/modules.abc` (content mismatch) and
+`ets/sourceMaps.map` (different source positions from different transform output).
+The root cause is `arkdown-abc` generating incomplete/different bytecode vs `es2abc`.
 
 ## Major Missing Capabilities
 
@@ -56,7 +60,7 @@ SDK ArkTS transforms, and `es2abc`.
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `loader.json`            | Writes core fields, current module entry list, empty maps for many dependency fields.                                                                         | Must populate workers, router map, dynamic imports, ByteCode HAR metadata, HSP/HAR OHM maps, `otherCompileFiles`, dependency package brief info, and exact hvigor path layout.  |
 | ArkTS transform          | Text-based `struct` to `class` rewrite; `build()` bodies are stubbed with `return;`.                                                                          | Must implement real `ets-loader` semantics: ArkUI DSL lowering, state/property decorators, `@Builder`, `@Entry`, checker diagnostics, SDK API transforms, and source maps.      |
-| Rollup/rolldown options  | Uses CJS output and plugin adapter; source maps are dropped; release tree-shaking/minification is not explicitly aligned.                                     | Must match hvigor `generateConfig()`: plugin order, external rules, `manualChunks`, `treeshake`, sourcemap, cache, file names, custom compile plugins, and `supportChunks`.     |
+| Rollup/rolldown options  | **Fixed (2026-05-28)**: @ohos: / @ohos/ / @system. / @native: imports are now marked external so rolldown emits clean ESM `import` statements instead of CJS interop. Tree-shaking disabled for debug builds so side-effect-only `@Entry` pages (no exports) are included. Output is `OutputFormat::Esm` with hidden source maps. | Must still match hvigor `generateConfig()` for: `manualChunks`, release treeshake/minification, chunk filenames, custom compile plugins, `supportChunks`, and ByteCode HAR/HSP externals. |
 | ByteCode HAR importees   | `rewrite_bytecode_har_imports()` is a no-op.                                                                                                                  | Must implement `processImportees()` equivalent and write `nonEntryImportees`, `compiledImportees`, and direct importee caches.                                                  |
 | ABC compiler             | Emits Panda file skeleton plus partial bytecode for simple JS constructs. `debug_info`, `opt_level`, `cache_path`, and source maps are mostly metadata flags. | Must match `es2abc`: full JS bytecode semantics, module annotations, literal arrays, method records, debug info, source map chain, cache, optimization, and widget compilation. |
 | Obfuscation/minification | `arkdown-obfuscate` exists but is not wired into `arkdown-cli`; terser-equivalent release minification is not integrated.                                     | hvigor release builds run SDK obfuscation/consumer-rule generation and terser/minification under specific conditions before ABC generation.                                     |
