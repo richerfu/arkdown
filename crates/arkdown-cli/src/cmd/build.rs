@@ -8,7 +8,10 @@ use clap::Args;
 
 use arkdown::Bundler;
 use arkdown_config::load_config;
-use arkdown_core::{ArkdownPlugin, BuildMode, ModuleJson5, ModuleJson5Module, OutputTarget};
+use arkdown_core::{
+    ArkdownConfig, ArkdownPlugin, BuildMode, ModuleConfig, ModuleJson5, ModuleJson5Module,
+    OutputTarget,
+};
 use arkdown_pack::{HarPackInput, PackAbility, PackInput, Packager};
 use arkdown_plugin_chunk_wrapper::ChunkWrapperPlugin;
 use arkdown_plugin_duplicate_check::DuplicateCheckPlugin;
@@ -130,6 +133,8 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         processor
             .write_module_json(&manifest, &module_json_out, Some(&resource_ids))
             .map_err(|e| anyhow::anyhow!("write module.json failed: {}", e))?;
+        write_profile_intermediates(&module.src_path, &module_json_out)?;
+        write_resource_config_files(&project_root, module, &config_arc, &res_out)?;
 
         let loader_json_out = module
             .src_path
@@ -413,6 +418,13 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                     config_arc.sdk_config.compile_api_version,
                 )
                 .map_err(|e| anyhow::anyhow!("Sign failed: {}", e))?;
+                extract_zip_entry(
+                    &path,
+                    "module.json",
+                    &module
+                        .src_path
+                        .join("build/default/intermediates/package/default/module.json"),
+                )?;
                 write_hap_metadata(&module.src_path, &module.name, &manifest.device_types)?;
                 extract_zip_entry(&path, "pack.info", &output_dir.join("pack.info"))?;
                 if let Some(source_maps_path) = &bundle_out.source_maps_path {
@@ -464,6 +476,121 @@ fn read_module_json5(path: &std::path::Path) -> Result<ModuleJson5> {
     json5::from_str(&content).context("Failed to parse module.json5")
 }
 
+fn write_profile_intermediates(module_root: &Path, final_module_json: &Path) -> Result<()> {
+    let content = fs_err::read_to_string(final_module_json)?;
+    let final_value: serde_json::Value = serde_json::from_str(&content)?;
+
+    let process_value = profile_without_resource_ids(final_value.clone());
+    write_json_pretty(
+        &module_root.join("build/default/intermediates/process_profile/default/module.json"),
+        &process_value,
+    )?;
+    write_json_minified(
+        &module_root.join("build/default/intermediates/res/default/ark_module.json"),
+        &process_value,
+    )?;
+
+    let mut merge_value = process_value;
+    if let Some(module) = merge_value
+        .get_mut("module")
+        .and_then(|value| value.as_object_mut())
+    {
+        module.remove("virtualMachine");
+        module.remove("compileMode");
+        module.remove("dependencies");
+    }
+    write_json_pretty(
+        &module_root.join("build/default/intermediates/merge_profile/default/module.json"),
+        &merge_value,
+    )?;
+
+    Ok(())
+}
+
+fn profile_without_resource_ids(mut value: serde_json::Value) -> serde_json::Value {
+    if let Some(app) = value.get_mut("app").and_then(|value| value.as_object_mut()) {
+        app.remove("iconId");
+        app.remove("labelId");
+    }
+    if let Some(module) = value
+        .get_mut("module")
+        .and_then(|value| value.as_object_mut())
+    {
+        module.remove("descriptionId");
+        if let Some(abilities) = module
+            .get_mut("abilities")
+            .and_then(|value| value.as_array_mut())
+        {
+            for ability in abilities {
+                if let Some(ability) = ability.as_object_mut() {
+                    for field in [
+                        "descriptionId",
+                        "iconId",
+                        "labelId",
+                        "startWindowIconId",
+                        "startWindowBackgroundId",
+                    ] {
+                        ability.remove(field);
+                    }
+                }
+            }
+        }
+    }
+    value
+}
+
+fn write_resource_config_files(
+    project_root: &Path,
+    module: &ModuleConfig,
+    config: &ArkdownConfig,
+    res_out: &Path,
+) -> Result<()> {
+    let project_root = canonical_or_owned(project_root);
+    let module_root = canonical_or_owned(&module.src_path);
+    let res_out = canonical_or_owned(res_out);
+    let toolchains_dir = resource_toolchains_dir(&config.sdk_config.restool_path);
+
+    write_json_minified(
+        &res_out.join("opt-compression.json"),
+        &serde_json::json!({
+            "context": {
+                "extensionPath": path_string(&toolchains_dir.join("lib/libimage_transcoder_shared.dylib")),
+            },
+            "compression": {
+                "media": {
+                    "enable": false,
+                },
+                "filters": [],
+            },
+        }),
+    )?;
+
+    write_json_minified(
+        &res_out.join("resConfig.json"),
+        &serde_json::json!({
+            "configPath": path_string(&module_root.join("build/default/intermediates/process_profile/default/module.json")),
+            "packageName": config.product.bundle_name,
+            "output": path_string(&res_out),
+            "moduleNames": module.name,
+            "ResourceTable": [
+                path_string(&module_root.join("build/default/generated/r/default/ResourceTable.h")),
+            ],
+            "applicationResource": path_string(&project_root.join("AppScope/resources")),
+            "moduleResources": [
+                path_string(&module_root.join("src/main/resources")),
+            ],
+            "dependencies": [],
+            "iconCheck": true,
+            "compression": path_string(&res_out.join("opt-compression.json")),
+            "ids": path_string(&res_out.join("ids_map")),
+            "definedIds": path_string(&res_out.join("ids_map/id_defined.json")),
+            "definedSysIds": path_string(&toolchains_dir.join("id_defined.json")),
+        }),
+    )?;
+
+    Ok(())
+}
+
 fn write_static_intermediate_files(module_root: &Path) -> Result<()> {
     write_bytes(
         &module_root.join("build/default/intermediates/patch/default/base_native_libs.json"),
@@ -491,6 +618,42 @@ fn write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     }
     fs_err::write(path, bytes)?;
     Ok(())
+}
+
+fn write_json_pretty(path: &Path, value: &serde_json::Value) -> Result<()> {
+    let content = serde_json::to_string_pretty(value)?;
+    write_bytes(path, content.as_bytes())
+}
+
+fn write_json_minified(path: &Path, value: &serde_json::Value) -> Result<()> {
+    let content = serde_json::to_string(value)?;
+    write_bytes(path, content.as_bytes())
+}
+
+fn canonical_or_owned(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn resource_toolchains_dir(restool_path: &Path) -> PathBuf {
+    let Some(toolchains_dir) = restool_path.parent() else {
+        return PathBuf::new();
+    };
+    let Some(component_dir) = toolchains_dir.parent() else {
+        return toolchains_dir.to_path_buf();
+    };
+    if component_dir.file_name().and_then(|name| name.to_str()) == Some("openharmony") {
+        if let Some(sdk_default_dir) = component_dir.parent() {
+            let hms_toolchains = sdk_default_dir.join("hms/toolchains");
+            if hms_toolchains.exists() {
+                return hms_toolchains;
+            }
+        }
+    }
+    toolchains_dir.to_path_buf()
+}
+
+fn path_string(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
 }
 
 fn write_hap_metadata(
