@@ -78,7 +78,8 @@ pub fn build_record_with_debug(
     // Collect module import/export records before lowering so bytecode can use
     // hvigor/es2abc's module-variable opcodes instead of global lookups.
     let module_record = collect_module_record(&program);
-    let lowering = LoweringContext::from_module_record(&module_record);
+    let lexical_bindings = collect_module_lexical_bindings(&program);
+    let lowering = LoweringContext::from_module_record(&module_record, lexical_bindings);
 
     let mut methods: Vec<MethodRecord> = Vec::new();
 
@@ -233,10 +234,12 @@ fn module_u8_field(name: impl Into<String>) -> FieldRecord {
 struct LoweringContext {
     import_indices: HashMap<String, u8>,
     export_indices: HashMap<String, u8>,
+    lexical_indices: HashMap<String, u8>,
+    lexical_names: Vec<String>,
 }
 
 impl LoweringContext {
-    fn from_module_record(module_record: &ModuleRecordInfo) -> Self {
+    fn from_module_record(module_record: &ModuleRecordInfo, lexical_names: Vec<String>) -> Self {
         let import_indices = module_record
             .regular_imports
             .iter()
@@ -256,9 +259,16 @@ impl LoweringContext {
                     .map(|idx| (export.local_name.clone(), idx))
             })
             .collect();
+        let lexical_indices = lexical_names
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, name)| u8::try_from(idx).ok().map(|idx| (name.clone(), idx)))
+            .collect();
         Self {
             import_indices,
             export_indices,
+            lexical_indices,
+            lexical_names,
         }
     }
 
@@ -269,6 +279,20 @@ impl LoweringContext {
     fn export_index(&self, name: &str) -> Option<u8> {
         self.export_indices.get(name).copied()
     }
+
+    fn lexical_index(&self, name: &str) -> Option<u8> {
+        self.lexical_indices.get(name).copied()
+    }
+}
+
+fn lexical_names_literal_array(names: &[String]) -> LiteralArray {
+    let mut entries = Vec::with_capacity(names.len() * 3);
+    for (idx, name) in names.iter().enumerate() {
+        entries.push(LiteralEntry::TaggedInteger(1));
+        entries.push(LiteralEntry::TaggedString(name.clone()));
+        entries.push(LiteralEntry::TaggedInteger(idx as u32));
+    }
+    LiteralArray { entries }
 }
 
 fn module_record_literal_array(module_record: &ModuleRecordInfo) -> LiteralArray {
@@ -651,9 +675,9 @@ fn compile_program_body(
     lowering: &LoweringContext,
 ) -> Vec<u8> {
     if let Some(stmts) = extract_iife_stmts(program) {
-        return compile_body_stmts(stmts, strings, literal_arrays, lowering);
+        return compile_body_stmts(stmts, strings, literal_arrays, lowering, true);
     }
-    compile_body_stmts(&program.body, strings, literal_arrays, lowering)
+    compile_body_stmts(&program.body, strings, literal_arrays, lowering, true)
 }
 
 /// Compile a function body's statements, or emit `returnundefined` if absent.
@@ -664,7 +688,7 @@ fn compile_function_body(
     lowering: &LoweringContext,
 ) -> Vec<u8> {
     match body {
-        Some(fb) => compile_body_stmts(&fb.statements, strings, literal_arrays, lowering),
+        Some(fb) => compile_body_stmts(&fb.statements, strings, literal_arrays, lowering, false),
         None => {
             let mut st = StringTable::default();
             Insn::ReturnUndefined.encode(&mut st)
@@ -678,8 +702,12 @@ fn compile_body_stmts(
     strings: &mut StringTable,
     literal_arrays: &mut Vec<LiteralArray>,
     lowering: &LoweringContext,
+    module_body: bool,
 ) -> Vec<u8> {
     let mut cg = CodeGen::new(strings, literal_arrays, lowering);
+    if module_body {
+        cg.emit_module_lex_env_prologue();
+    }
     for stmt in stmts {
         cg.emit_stmt(stmt);
         if cg.returned {
@@ -722,6 +750,23 @@ impl<'a> CodeGen<'a> {
             next_reg: 0,
             returned: false,
         }
+    }
+
+    fn emit_module_lex_env_prologue(&mut self) {
+        if self.lowering.lexical_names.is_empty() {
+            return;
+        }
+        let literal_id = self.literal_arrays.len() as u16;
+        self.literal_arrays
+            .push(lexical_names_literal_array(&self.lowering.lexical_names));
+        self.push(Insn::NewLexEnvWithName(
+            self.lowering.lexical_names.len() as u8,
+            literal_id,
+        ));
+        self.push(Insn::MovV4(0, 8));
+        self.push(Insn::MovV4(1, 9));
+        self.push(Insn::MovV4(2, 10));
+        self.next_reg = self.next_reg.max(4);
     }
 
     /// Append the bytes for `insn`.
@@ -965,8 +1010,16 @@ impl<'a> CodeGen<'a> {
             }
 
             let reg = self.alloc_reg();
-            self.var_regs.insert(name, reg);
+            self.var_regs.insert(name.clone(), reg);
             self.push(Insn::Sta(reg));
+            if let Some(slot) = self.lowering.lexical_index(&name) {
+                self.push(Insn::Lda(reg));
+                self.push(Insn::StLexVar(0, slot));
+            }
+            if let Some(export_index) = self.lowering.export_index(&name) {
+                self.push(Insn::Lda(reg));
+                self.push(Insn::StModuleVar(export_index));
+            }
         }
     }
 
@@ -1008,6 +1061,10 @@ impl<'a> CodeGen<'a> {
                     _ => {
                         if let Some(&reg) = self.var_regs.get(name) {
                             self.push(Insn::Lda(reg));
+                        } else if let Some(slot) = self.lowering.lexical_index(name) {
+                            self.push(Insn::LdLexVar(0, slot));
+                            let name_id = self.intern(name);
+                            self.push(Insn::ThrowUndefinedIfHoleWithName(name_id));
                         } else if let Some(import_index) = self.lowering.import_index(name) {
                             self.push(Insn::LdExternalModuleVar(import_index));
                             let name_id = self.intern(name);
@@ -1455,6 +1512,29 @@ fn collect_module_record(program: &Program<'_>) -> ModuleRecordInfo {
         scan_stmt_for_module_record(stmt, &mut info);
     }
     info
+}
+
+fn collect_module_lexical_bindings(program: &Program<'_>) -> Vec<String> {
+    let stmts = extract_iife_stmts(program).unwrap_or(program.body.as_slice());
+    let mut names = Vec::new();
+    for stmt in stmts {
+        let Statement::VariableDeclaration(decl) = stmt else {
+            continue;
+        };
+        if !decl.kind.is_lexical() {
+            continue;
+        }
+        for declarator in &decl.declarations {
+            let BindingPattern::BindingIdentifier(id) = &declarator.id else {
+                continue;
+            };
+            let name = id.name.as_str();
+            if !names.iter().any(|known| known == name) {
+                names.push(name.to_string());
+            }
+        }
+    }
+    names
 }
 
 /// Scan a statement for module import/export patterns.

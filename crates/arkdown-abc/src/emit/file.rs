@@ -875,6 +875,14 @@ fn patch_bytecode_index_operands(
             pos += 9;
             continue;
         }
+        if opcode == 0xb6 && pos + 3 < patched.len() {
+            let literal_pos = pos + 2;
+            let old_literal = u16::from_le_bytes([patched[literal_pos], patched[literal_pos + 1]]);
+            let new_literal = old_literal.saturating_add(literal_pool_base);
+            patched[literal_pos..literal_pos + 2].copy_from_slice(&new_literal.to_le_bytes());
+            pos += 4;
+            continue;
+        }
         pos += instruction_len(opcode, patched.get(pos + 1).copied());
     }
     patched
@@ -886,7 +894,7 @@ fn instruction_len(opcode: u8, next: Option<u8>) -> usize {
         0x29 | 0x3c | 0x3d | 0x44 | 0x60 | 0x61 | 0x7c | 0x7e => 2,
         0x2a | 0x2d | 0x3e | 0x45 | 0x50 | 0x9b | 0x4e => 3,
         0x0a..=0x0d => 3,
-        0x2b | 0x2e | 0x31 | 0x3f | 0x40 | 0x42 | 0x73 => 4,
+        0x2b | 0x2e | 0x31 | 0x3f | 0x40 | 0x42 | 0x73 | 0xb6 => 4,
         0x08 | 0x2c | 0x33 | 0x43 | 0x62 | 0x8f | 0x98 | 0x9a | 0x9c => 5,
         0x2f => 5,
         0x30 => 6,

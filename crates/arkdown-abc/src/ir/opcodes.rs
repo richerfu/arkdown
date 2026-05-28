@@ -149,6 +149,9 @@ pub enum Insn {
     /// `0x3D` — store accumulator into a lexical environment binding.
     StLexVar(u8, u8),
 
+    /// `0xB6` — create a named lexical environment.
+    NewLexEnvWithName(u8, u16),
+
     /// `0xFE 0x09` — throw if accumulator is hole, using name string id.
     ThrowUndefinedIfHoleWithName(u16),
 
@@ -305,6 +308,11 @@ impl Insn {
             Insn::StModuleVar(index) => vec![0x7c, *index],
             Insn::LdLexVar(level, slot) => vec![0x3c, (level << 4) | slot],
             Insn::StLexVar(level, slot) => vec![0x3d, (level << 4) | slot],
+            Insn::NewLexEnvWithName(count, literal_id) => {
+                let mut v = vec![0xb6, *count];
+                v.extend_from_slice(&literal_id.to_le_bytes());
+                v
+            }
             Insn::ThrowUndefinedIfHoleWithName(name_id) => {
                 let mut v = vec![0xfe, 0x09];
                 v.extend_from_slice(&name_id.to_le_bytes());
@@ -411,6 +419,7 @@ impl Insn {
             | Insn::LdObjByName(_, _) => 4,
             Insn::LdExternalModuleVar(_) | Insn::StModuleVar(_) => 2,
             Insn::LdLexVar(_, _) | Insn::StLexVar(_, _) => 2,
+            Insn::NewLexEnvWithName(_, _) => 4,
             Insn::ThrowUndefinedIfHoleWithName(_) => 4,
             Insn::StObjByName(_, _, _) => 5,
             Insn::DefineFuncShort(_, _, _) => 5,
