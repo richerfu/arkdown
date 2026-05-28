@@ -66,22 +66,6 @@ fn generate_pack_info(config: &ArkdownConfig, input: &PackInput) -> String {
     .to_string()
 }
 
-fn generate_pkg_context_info(input: &PackInput) -> String {
-    let name = &input.module_name;
-    serde_json::json!({
-        name: {
-            "isSO": false,
-            "moduleName": "",
-            "bundleName": "",
-            "dependencyAlias": "",
-            "packageName": name,
-            "entryPath": "src/main/",
-            "version": ""
-        }
-    })
-    .to_string()
-}
-
 pub struct Packager {
     pub config: Arc<ArkdownConfig>,
 }
@@ -165,25 +149,12 @@ impl Packager {
         let pack_info = generate_pack_info(&self.config, &input);
         zip_writer::add_bytes_deflate(&mut writer, "pack.info", pack_info.as_bytes())?;
 
-        // pkgContextInfo.json — package context (deflated JSON)
-        let pkg_ctx = generate_pkg_context_info(&input);
-        zip_writer::add_bytes_deflate(&mut writer, "pkgContextInfo.json", pkg_ctx.as_bytes())?;
-
         // .pages.info — binary router-map page index (hvigorw format)
-        // 4-byte header [0x20, 0x22, 0x22, 0x22] (' """') followed by 532 null bytes (536 total)
-        {
-            let mut pages_info = vec![0x20u8, 0x22, 0x22, 0x22];
-            pages_info.extend(std::iter::repeat(0u8).take(532));
-            zip_writer::add_bytes_deflate(&mut writer, ".pages.info", &pages_info)?;
-        }
+        zip_writer::add_bytes_deflate(&mut writer, ".pages.info", &[0x20, 0x22, 0, 0, 0, 0, 0, 0])?;
 
         // resources.index — stored (binary resource table)
         if input.resources_index.exists() {
-            zip_writer::add_file_stored(
-                &mut writer,
-                "resources.index",
-                &input.resources_index,
-            )?;
+            zip_writer::add_file_stored(&mut writer, "resources.index", &input.resources_index)?;
         } else {
             return Err(PackError::MissingInput("resources.index".to_string()));
         }
@@ -273,11 +244,7 @@ impl Packager {
 
         // oh-package.json5 — deflate
         if input.oh_package_json.exists() {
-            zip_writer::add_file_deflate(
-                &mut writer,
-                "oh-package.json5",
-                &input.oh_package_json,
-            )?;
+            zip_writer::add_file_deflate(&mut writer, "oh-package.json5", &input.oh_package_json)?;
         }
 
         // Source .ets files from source_dir/
@@ -292,10 +259,7 @@ impl Packager {
                     .path()
                     .strip_prefix(&input.source_dir)
                     .unwrap_or(entry.path());
-                let dest = format!(
-                    "src/main/ets/{}",
-                    rel.to_string_lossy().replace('\\', "/")
-                );
+                let dest = format!("src/main/ets/{}", rel.to_string_lossy().replace('\\', "/"));
                 zip_writer::add_file_deflate(&mut writer, &dest, entry.path())?;
             }
         }
@@ -312,8 +276,7 @@ fn add_json_resource_deflate<W: std::io::Write + std::io::Seek>(
 ) -> Result<(), PackError> {
     let bytes = fs_err::read(file_path)?;
     if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-        let minified =
-            serde_json::to_vec(&value).expect("serializing parsed JSON should not fail");
+        let minified = serde_json::to_vec(&value).expect("serializing parsed JSON should not fail");
         zip_writer::add_bytes_deflate(writer, archive_path, &minified)
     } else {
         zip_writer::add_bytes_deflate(writer, archive_path, &bytes)

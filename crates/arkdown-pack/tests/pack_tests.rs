@@ -164,7 +164,7 @@ fn test_hap_contains_pack_info() {
 }
 
 #[test]
-fn test_hap_contains_pkg_context_info() {
+fn test_hap_does_not_package_pkg_context_info_for_hap() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (abc, res, modj) = write_minimal_inputs(tmp.path());
     let out = tmp.path().join("pkg_ctx.hap");
@@ -177,8 +177,8 @@ fn test_hap_contains_pkg_context_info() {
     let archive = zip::ZipArchive::new(file).expect("valid ZIP");
     let names: Vec<_> = archive.file_names().collect();
     assert!(
-        names.iter().any(|n| *n == "pkgContextInfo.json"),
-        "HAP must contain 'pkgContextInfo.json'; entries: {:?}",
+        !names.iter().any(|n| *n == "pkgContextInfo.json"),
+        "HAP must not package 'pkgContextInfo.json'; entries: {:?}",
         names
     );
 }

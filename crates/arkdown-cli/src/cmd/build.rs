@@ -273,6 +273,22 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 cache_file: None,
             })
             .map_err(|e| anyhow::anyhow!("ABC compile failed: {}", e))?;
+            for (_chunk_name, path) in &bundle_out.chunk_files {
+                if path.extension().and_then(|e| e.to_str()) == Some("js") && path.exists() {
+                    match fs_err::remove_file(path) {
+                        Ok(()) => {}
+                        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(err) => {
+                            return Err(err).with_context(|| {
+                                format!(
+                                    "failed to remove CompileArkTS temp chunk {}",
+                                    path.display()
+                                )
+                            });
+                        }
+                    }
+                }
+            }
         }
     }
     progress.done();

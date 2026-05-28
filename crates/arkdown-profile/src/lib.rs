@@ -19,19 +19,22 @@ pub mod loader_json;
 pub mod process_profile;
 pub mod router_map;
 
-pub use har_abilities::{HarAbility, collect_har_abilities};
-pub use loader_json::{ByteCodeHarEntry, LoaderJson, PkgBriefInfo, generate_loader_json};
+pub use har_abilities::{collect_har_abilities, HarAbility};
+pub use loader_json::{generate_loader_json, ByteCodeHarEntry, LoaderJson, PkgBriefInfo};
 pub use process_profile::{
     ark_virtual_machine_from_version, process_profile, process_profile_with_ark_vm_version,
 };
-pub use router_map::{RouterMapEntry, collect_router_entries};
+pub use router_map::{collect_router_entries, RouterMapEntry};
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
 use arkdown_config::sdk::discover_ark_vm_version;
-use arkdown_core::{ArkdownConfig, ArkdownError, CompileMode, HapManifest, ModuleConfig, ModuleJson5, OhosModuleType};
+use arkdown_core::{
+    ArkdownConfig, ArkdownError, CompileMode, HapManifest, ModuleConfig, ModuleJson5,
+    OhosModuleType,
+};
 
 /// Top-level driver for profile processing and loader.json generation.
 ///
@@ -84,11 +87,7 @@ impl ProfileProcessor {
     /// Serialize `loader` as indented JSON and write it to `path`.
     ///
     /// Creates parent directories if they do not exist.
-    pub fn write_loader_json(
-        &self,
-        loader: &LoaderJson,
-        path: &Path,
-    ) -> Result<(), ArkdownError> {
+    pub fn write_loader_json(&self, loader: &LoaderJson, path: &Path) -> Result<(), ArkdownError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -116,8 +115,8 @@ impl ProfileProcessor {
         // Read AppScope/app.json5 for the app section
         let app_json5_path = self.config.project_root.join("AppScope/app.json5");
         let mut app_section = if app_json5_path.exists() {
-            let content = fs_err::read_to_string(&app_json5_path)
-                .map_err(|e| ArkdownError::Io(e.into()))?;
+            let content =
+                fs_err::read_to_string(&app_json5_path).map_err(|e| ArkdownError::Io(e.into()))?;
             let raw: serde_json::Value = json5::from_str(&content)
                 .map_err(|e| ArkdownError::Io(std::io::Error::other(e.to_string())))?;
             raw.get("app")
@@ -134,9 +133,8 @@ impl ProfileProcessor {
         // Merge in required runtime fields that hvigorw adds during profile processing.
         // These are required by the device package manager (bm install).
         if let Some(obj) = app_section.as_object_mut() {
-            let numeric_api = compute_numeric_api_version(
-                &self.config.product.compatible_sdk_version,
-            );
+            let numeric_api =
+                compute_numeric_api_version(&self.config.product.compatible_sdk_version);
             let is_debug = matches!(self.config.build_mode, arkdown_core::BuildMode::Debug);
             obj.entry("bundleType").or_insert_with(|| "app".into());
             obj.entry("bundleName")
@@ -145,7 +143,10 @@ impl ProfileProcessor {
             obj.insert("minAPIVersion".into(), numeric_api.into());
             obj.insert("targetPatchAPIVersion".into(), 0.into());
             obj.insert("targetMinorAPIVersion".into(), 0.into());
-            obj.insert("buildMode".into(), if is_debug { "debug" } else { "release" }.into());
+            obj.insert(
+                "buildMode".into(),
+                if is_debug { "debug" } else { "release" }.into(),
+            );
             obj.insert("debug".into(), is_debug.into());
             obj.insert("compileSdkType".into(), "HarmonyOS".into());
             obj.insert(
@@ -153,17 +154,25 @@ impl ProfileProcessor {
                 self.config.sdk_config.compile_sdk_version.clone().into(),
             );
             obj.insert("apiReleaseType".into(), "Release".into());
-            obj.insert("asanEnabled".into(), is_debug.into());
-            obj.entry("appEnvironments").or_insert_with(|| serde_json::Value::Array(vec![]));
+            obj.entry("appEnvironments")
+                .or_insert_with(|| serde_json::Value::Array(vec![]));
 
             // Resolve $media:name / $string:name references to numeric IDs.
             if let Some(ids) = resource_ids {
-                if let Some(icon_ref) = obj.get("icon").and_then(|v| v.as_str()).map(|s| s.to_string()) {
+                if let Some(icon_ref) = obj
+                    .get("icon")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                {
                     if let Some(id) = resolve_res_ref(&icon_ref, ids) {
                         obj.insert("iconId".into(), (id as u64).into());
                     }
                 }
-                if let Some(label_ref) = obj.get("label").and_then(|v| v.as_str()).map(|s| s.to_string()) {
+                if let Some(label_ref) = obj
+                    .get("label")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                {
                     if let Some(id) = resolve_res_ref(&label_ref, ids) {
                         obj.insert("labelId".into(), (id as u64).into());
                     }
@@ -179,14 +188,12 @@ impl ProfileProcessor {
         });
 
         if let Some(parent) = output_path.parent() {
-            fs_err::create_dir_all(parent)
-                .map_err(|e| ArkdownError::Io(e.into()))?;
+            fs_err::create_dir_all(parent).map_err(|e| ArkdownError::Io(e.into()))?;
         }
 
         let json_str = serde_json::to_string_pretty(&combined)
             .map_err(|e| ArkdownError::Io(std::io::Error::other(e.to_string())))?;
-        fs_err::write(output_path, json_str.as_bytes())
-            .map_err(|e| ArkdownError::Io(e.into()))?;
+        fs_err::write(output_path, json_str.as_bytes()).map_err(|e| ArkdownError::Io(e.into()))?;
 
         Ok(())
     }
@@ -224,7 +231,10 @@ fn compile_mode_str(m: &CompileMode) -> &'static str {
 }
 
 /// Build the `module` JSON object from a processed [`HapManifest`].
-fn manifest_to_json(manifest: &HapManifest, resource_ids: Option<&HashMap<String, u32>>) -> serde_json::Value {
+fn manifest_to_json(
+    manifest: &HapManifest,
+    resource_ids: Option<&HashMap<String, u32>>,
+) -> serde_json::Value {
     let abilities: Vec<serde_json::Value> = manifest
         .abilities
         .iter()
@@ -235,11 +245,61 @@ fn manifest_to_json(manifest: &HapManifest, resource_ids: Option<&HashMap<String
                 "exported": a.exported
             });
             let obj = ability.as_object_mut().unwrap();
-            if let Some(v) = &a.icon { obj.insert("icon".into(), v.clone().into()); }
-            if let Some(v) = &a.label { obj.insert("label".into(), v.clone().into()); }
-            if let Some(v) = &a.description { obj.insert("description".into(), v.clone().into()); }
-            if let Some(v) = &a.start_window_icon { obj.insert("startWindowIcon".into(), v.clone().into()); }
-            if let Some(v) = &a.start_window_background { obj.insert("startWindowBackground".into(), v.clone().into()); }
+            if let Some(v) = &a.icon {
+                obj.insert("icon".into(), v.clone().into());
+            }
+            if let Some(v) = &a.label {
+                obj.insert("label".into(), v.clone().into());
+            }
+            if let Some(v) = &a.description {
+                obj.insert("description".into(), v.clone().into());
+            }
+            if let Some(v) = &a.start_window_icon {
+                obj.insert("startWindowIcon".into(), v.clone().into());
+            }
+            if let Some(v) = &a.start_window_background {
+                obj.insert("startWindowBackground".into(), v.clone().into());
+            }
+            if !a.skills.is_empty() {
+                obj.insert("skills".into(), serde_json::json!(a.skills));
+            }
+            if let Some(ids) = resource_ids {
+                if let Some(id) = a
+                    .description
+                    .as_deref()
+                    .and_then(|value| resolve_res_ref(value, ids))
+                {
+                    obj.insert("descriptionId".into(), (id as u64).into());
+                }
+                if let Some(id) = a
+                    .icon
+                    .as_deref()
+                    .and_then(|value| resolve_res_ref(value, ids))
+                {
+                    obj.insert("iconId".into(), (id as u64).into());
+                }
+                if let Some(id) = a
+                    .label
+                    .as_deref()
+                    .and_then(|value| resolve_res_ref(value, ids))
+                {
+                    obj.insert("labelId".into(), (id as u64).into());
+                }
+                if let Some(id) = a
+                    .start_window_icon
+                    .as_deref()
+                    .and_then(|value| resolve_res_ref(value, ids))
+                {
+                    obj.insert("startWindowIconId".into(), (id as u64).into());
+                }
+                if let Some(id) = a
+                    .start_window_background
+                    .as_deref()
+                    .and_then(|value| resolve_res_ref(value, ids))
+                {
+                    obj.insert("startWindowBackgroundId".into(), (id as u64).into());
+                }
+            }
             ability
         })
         .collect();
@@ -347,8 +407,11 @@ mod tests {
                     src_entry: "./ets/entryability/EntryAbility.ets".to_string(),
                     exported: true,
                     skills: vec![],
-                    icon: None, label: None, description: None,
-                    start_window_icon: None, start_window_background: None,
+                    icon: None,
+                    label: None,
+                    description: None,
+                    start_window_icon: None,
+                    start_window_background: None,
                 }],
                 extension_abilities: vec![],
                 src_entry: None,
@@ -482,7 +545,8 @@ fi
 
         // Read back and deserialize
         let content = std::fs::read_to_string(&out_path).unwrap();
-        let loaded: LoaderJson = serde_json::from_str(&content).expect("failed to parse written loader.json");
+        let loaded: LoaderJson =
+            serde_json::from_str(&content).expect("failed to parse written loader.json");
         assert_eq!(loaded.build_mode, "debug");
         assert_eq!(loaded.package_manager_type, "ohpm");
 
@@ -505,11 +569,12 @@ fn compute_numeric_api_version(version: &str) -> u64 {
     };
 
     // Extract major.minor.patch prefix, e.g. "5.0.5(17)" → [5, 0, 5]
-    let prefix = version.split('(').next().unwrap_or("").trim_end_matches('.');
-    let parts: Vec<u64> = prefix
-        .split('.')
-        .filter_map(|s| s.parse().ok())
-        .collect();
+    let prefix = version
+        .split('(')
+        .next()
+        .unwrap_or("")
+        .trim_end_matches('.');
+    let parts: Vec<u64> = prefix.split('.').filter_map(|s| s.parse().ok()).collect();
     let major = parts.first().copied().unwrap_or(0);
     let minor = parts.get(1).copied().unwrap_or(0);
     let patch = parts.get(2).copied().unwrap_or(0);

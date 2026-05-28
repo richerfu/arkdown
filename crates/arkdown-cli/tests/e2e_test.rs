@@ -11,7 +11,37 @@ fn fixture_root() -> PathBuf {
         .join("tests/fixtures/minimal-hap")
 }
 
+fn isolated_fixture(src: &PathBuf) -> PathBuf {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time before UNIX epoch")
+        .as_nanos();
+    let dst = std::env::temp_dir().join(format!("arkdown-cli-e2e-{}-{nonce}", std::process::id()));
+    copy_fixture_dir(src, &dst);
+    dst
+}
+
+fn copy_fixture_dir(src: &std::path::Path, dst: &std::path::Path) {
+    std::fs::create_dir_all(dst).expect("create isolated fixture dir");
+    for entry in std::fs::read_dir(src).expect("read fixture dir") {
+        let entry = entry.expect("read fixture entry");
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if matches!(name.as_ref(), "build" | ".hvigor") {
+            continue;
+        }
+        let from = entry.path();
+        let to = dst.join(name.as_ref());
+        if from.is_dir() {
+            copy_fixture_dir(&from, &to);
+        } else {
+            std::fs::copy(&from, &to).expect("copy fixture file");
+        }
+    }
+}
+
 fn run_build(fixture: &PathBuf) -> PathBuf {
+    let fixture = isolated_fixture(fixture);
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -33,8 +63,8 @@ fn run_build(fixture: &PathBuf) -> PathBuf {
     // Use tokio runtime for async bundler
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
 
-    let config =
-        load_config(fixture, BuildMode::Debug, OutputTarget::Hap, None, None).expect("load_config");
+    let config = load_config(&fixture, BuildMode::Debug, OutputTarget::Hap, None, None)
+        .expect("load_config");
     let config = Arc::new(config);
 
     let processor = ProfileProcessor::new(config.clone());
@@ -159,6 +189,15 @@ fn run_build(fixture: &PathBuf) -> PathBuf {
             commonjs: false,
         })
         .expect("abc compile");
+        for (_chunk_name, path) in &bundle_out.chunk_files {
+            if path.extension().and_then(|e| e.to_str()) == Some("js") && path.exists() {
+                match fs_err::remove_file(path) {
+                    Ok(()) => {}
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(err) => panic!("remove CompileArkTS temp chunk: {err}"),
+                }
+            }
+        }
     }
 
     // Packaging — ensure resources.index exists
@@ -256,8 +295,8 @@ fn test_hap_contains_required_entries() {
         names
     );
     assert!(
-        names.contains(&"pkgContextInfo.json".to_string()),
-        "missing pkgContextInfo.json; entries: {:?}",
+        !names.contains(&"pkgContextInfo.json".to_string()),
+        "pkgContextInfo.json should not be packaged for HAP; entries: {:?}",
         names
     );
     assert!(

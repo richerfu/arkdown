@@ -76,6 +76,8 @@ pub struct AbilityEntry {
     pub name: String,
     pub src_entry: String,
     pub exported: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<SkillConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -163,11 +165,11 @@ pub struct ExtensionAbilityConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillConfig {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub actions: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub entities: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub uris: Vec<SkillUri>,
 }
 

@@ -36,6 +36,7 @@ pub fn process_profile_with_ark_vm_version(
             name: a.name.clone(),
             src_entry: a.src_entry.clone(),
             exported: a.exported,
+            skills: a.skills.clone(),
             icon: a.icon.clone(),
             label: a.label.clone(),
             description: a.description.clone(),
