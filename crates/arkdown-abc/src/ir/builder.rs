@@ -1683,10 +1683,44 @@ impl<'a> CodeGen<'a> {
                 let length = func.params.items.len() as u8;
                 self.push(Insn::DefineFuncShort(0, 0, length));
             }
+            Expression::ObjectExpression(obj) => {
+                self.emit_object_expr(obj);
+            }
             _ => {
                 self.push(Insn::LdUndefined);
             }
         }
+    }
+
+    // ── Object literal: { key: value, … } ────────────────────────────────────
+
+    fn emit_object_expr(&mut self, obj: &oxc_ast::ast::ObjectExpression<'_>) {
+        use oxc_ast::ast::{ObjectProperty, ObjectPropertyKind, PropertyKey};
+        self.push(Insn::CreateEmptyObject);
+        if obj.properties.is_empty() {
+            return;
+        }
+        let obj_reg = self.alloc_reg();
+        self.push(Insn::Sta(obj_reg));
+        for prop in &obj.properties {
+            let ObjectPropertyKind::ObjectProperty(property) = prop else {
+                continue;
+            };
+            let ObjectProperty { key, value, .. } = property.as_ref();
+            // Get the string key name.
+            let key_name = match key {
+                PropertyKey::StaticIdentifier(id) => id.name.as_str().to_string(),
+                PropertyKey::StringLiteral(s) => s.value.as_str().to_string(),
+                _ => continue,
+            };
+            // Evaluate the property value into the accumulator.
+            self.emit_expr(value);
+            // Store accumulator → obj[key].
+            let name_id = self.intern(&key_name);
+            self.push(Insn::StObjByName(0, name_id, obj_reg));
+        }
+        // Leave the object in the accumulator.
+        self.push(Insn::Lda(obj_reg));
     }
 
     // ── Class definition ──────────────────────────────────────────────────────
@@ -1951,9 +1985,18 @@ impl<'a> CodeGen<'a> {
         self.emit_expr(&new_expr.callee);
         let ctor_reg = self.alloc_reg();
         self.push(Insn::Sta(ctor_reg));
-        let argc = new_expr.arguments.len() as u8;
-        // newobjrange: slot, argc+1 (ctor counts as arg), v_start=ctor_reg
-        self.push(Insn::NewObjRange(slot, argc + 1, ctor_reg));
+        let argc = new_expr.arguments.len();
+        // Allocate argument registers contiguous after ctor_reg and compile each arg.
+        let mut arg_regs = Vec::with_capacity(argc);
+        for _ in 0..argc {
+            arg_regs.push(self.alloc_reg());
+        }
+        for (i, arg) in new_expr.arguments.iter().enumerate() {
+            self.emit_argument(arg);
+            self.push(Insn::Sta(arg_regs[i]));
+        }
+        // newobjrange slot, (argc+1), ctor_reg — registers are [ctor, arg0, arg1, …].
+        self.push(Insn::NewObjRange(slot, argc as u8 + 1, ctor_reg));
     }
 
     // ── Argument helpers ──────────────────────────────────────────────────────

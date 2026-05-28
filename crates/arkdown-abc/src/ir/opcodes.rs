@@ -251,6 +251,9 @@ pub enum Insn {
     StOwnByIndex(u16, u8, u16),
 
     // ── Object construction ──────────────────────────────────────────────────
+    /// `0x04` `op_none` — create an empty object literal `{}` into accumulator.
+    CreateEmptyObject,
+
     /// `0x08` `op_imm1_8_imm2_8_v_8` — construct new object.
     /// `slot` = IC slot; `argc` = arg count (includes constructor arg in v_start);
     /// `v_start` = first register (holds the constructor function).
@@ -474,6 +477,7 @@ impl Insn {
             }
 
             // ── object construction ──────────────────────────────────────────
+            Insn::CreateEmptyObject => vec![0x04],
             Insn::NewObjRange(slot, argc, v_start) => vec![0x08, *slot, *argc, *v_start],
 
             // ── returns ──────────────────────────────────────────────────────
@@ -585,6 +589,7 @@ impl Insn {
                     6
                 }
             }
+            Insn::CreateEmptyObject => 1,
             Insn::NewObjRange(_, _, _) => 4,
             Insn::Return | Insn::ReturnUndefined => 1,
             Insn::Jmp(_) | Insn::Jeqz(_) | Insn::Jnez(_) => 3,
