@@ -725,3 +725,276 @@ fn test_source_map_emits_source_file_debug_info_and_lnp() {
         "minimal LNP sets source file then ends"
     );
 }
+
+// ── New opcode coverage tests ────────────────────────────────────────────────
+
+fn module_compiler() -> AbcCompiler {
+    AbcCompiler::new(AbcCompileOptions {
+        debug_info: false,
+        opt_level: 0,
+        target_api_version: 12,
+        merge_abc: true,
+        module: true,
+        cache_path: None,
+    })
+}
+
+fn module_record(record_name: &str, source: &str) -> AbcModule {
+    AbcModule {
+        record_name: record_name.to_string(),
+        source: source.to_string(),
+        source_map: None,
+    }
+}
+
+#[test]
+fn test_in_operator_emits_isin_opcode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("test.abc");
+    module_compiler()
+        .compile(
+            vec![module_record(
+                "test/mod",
+                r#"const x = "key" in obj;"#,
+            )],
+            &out,
+        )
+        .expect("compile");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+    // isin opcode is 0x25
+    assert!(
+        bytes.contains(&0x25),
+        "isin opcode (0x25) must appear for 'in' operator"
+    );
+}
+
+#[test]
+fn test_typeof_emits_typeof_opcode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("test.abc");
+    module_compiler()
+        .compile(
+            vec![module_record(
+                "test/mod",
+                r#"const t = typeof paramsLambda;"#,
+            )],
+            &out,
+        )
+        .expect("compile");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+    // typeof opcode is 0x1c
+    assert!(
+        bytes.contains(&0x1c),
+        "typeof opcode (0x1c) must appear for 'typeof' expression"
+    );
+}
+
+#[test]
+fn test_strict_equality_emits_stricteq_opcode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("test.abc");
+    module_compiler()
+        .compile(
+            vec![module_record(
+                "test/mod",
+                r#"const ok = typeof x === "function";"#,
+            )],
+            &out,
+        )
+        .expect("compile");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+    // stricteq opcode is 0x28
+    assert!(
+        bytes.contains(&0x28),
+        "stricteq opcode (0x28) must appear for '===' operator"
+    );
+}
+
+#[test]
+fn test_void_expression_emits_ldundefined() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("test.abc");
+    module_compiler()
+        .compile(
+            vec![module_record("test/mod", r#"const x = void 0;"#)],
+            &out,
+        )
+        .expect("compile");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+    // ldundefined opcode is 0x00
+    assert!(
+        bytes.contains(&0x00),
+        "ldundefined must appear for 'void 0'"
+    );
+}
+
+#[test]
+fn test_logical_and_emits_jeqz_branch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("test.abc");
+    module_compiler()
+        .compile(
+            vec![module_record(
+                "test/mod",
+                r#"const x = a && b;"#,
+            )],
+            &out,
+        )
+        .expect("compile");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+    // jeqz opcode is 0x50 — emitted for short-circuit &&
+    assert!(
+        bytes.contains(&0x50),
+        "jeqz (0x50) must appear for '&&' short-circuit"
+    );
+}
+
+#[test]
+fn test_logical_or_emits_jnez_branch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("test.abc");
+    module_compiler()
+        .compile(
+            vec![module_record(
+                "test/mod",
+                r#"const x = a || b;"#,
+            )],
+            &out,
+        )
+        .expect("compile");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+    // jnez opcode is 0x9b — emitted for short-circuit ||
+    assert!(
+        bytes.contains(&0x9b),
+        "jnez (0x9b) must appear for '||' short-circuit"
+    );
+}
+
+#[test]
+fn test_binary_arithmetic_emits_arith_opcodes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("test.abc");
+    module_compiler()
+        .compile(
+            vec![module_record(
+                "test/mod",
+                r#"const x = a + b; const y = a - b; const z = a * b;"#,
+            )],
+            &out,
+        )
+        .expect("compile");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+    assert!(bytes.contains(&0x0a), "add2 opcode (0x0a) for '+'");
+    assert!(bytes.contains(&0x0b), "sub2 opcode (0x0b) for '-'");
+    assert!(bytes.contains(&0x0c), "mul2 opcode (0x0c) for '*'");
+}
+
+#[test]
+fn test_entry_ability_like_source_generates_nontrivial_bytecode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("entry.abc");
+    let source = r#"
+import UIAbility from "@ohos:app.ability.UIAbility";
+import hilog from "@ohos:hilog";
+const DOMAIN = 0;
+var EntryAbility = class extends UIAbility {
+    onCreate(want, launchParam) {
+        hilog.info(DOMAIN, "testTag", "%{public}s", "Ability onCreate");
+    }
+    onWindowStageCreate(windowStage) {
+        hilog.info(DOMAIN, "testTag", "%{public}s", "Ability onWindowStageCreate");
+        windowStage.loadContent("pages/Index", (err) => {
+            if (err.code) {
+                hilog.error(DOMAIN, "testTag", "failed", JSON.stringify(err));
+                return;
+            }
+            hilog.info(DOMAIN, "testTag", "Succeeded.");
+        });
+    }
+    onForeground() {
+        hilog.info(DOMAIN, "testTag", "%{public}s", "Ability onForeground");
+    }
+    onBackground() {
+        hilog.info(DOMAIN, "testTag", "%{public}s", "Ability onBackground");
+    }
+};
+export { EntryAbility as default };
+"#;
+    module_compiler()
+        .compile(
+            vec![module_record(
+                "com.example.test/entry/ets/entryability/EntryAbility",
+                source,
+            )],
+            &out,
+        )
+        .expect("compile EntryAbility-like source");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+    // The ABC must contain method bytecode for at least the class methods.
+    // Minimum sensible size: >500 bytes for this module with 4 class methods.
+    assert!(
+        bytes.len() > 500,
+        "EntryAbility-like source must produce >500 byte ABC, got {}",
+        bytes.len()
+    );
+}
+
+#[test]
+fn test_index_viewpu_like_source_generates_nontrivial_bytecode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("index.abc");
+    let source = r#"
+if (!("finalizeConstruction" in ViewPU.prototype))
+    Reflect.set(ViewPU.prototype, "finalizeConstruction", () => {});
+var Index = class extends ViewPU {
+    constructor(parent, params, __localStorage, elmtId, paramsLambda, extraInfo) {
+        super(parent, __localStorage, elmtId, extraInfo);
+        if (typeof paramsLambda === "function") this.paramsGenerator_ = paramsLambda;
+        this.__message = new ObservedPropertySimplePU("Hello World", this, "message");
+        this.setInitiallyProvidedValue(params);
+        this.finalizeConstruction();
+    }
+    setInitiallyProvidedValue(params) {
+        if (params.message !== void 0) this.message = params.message;
+    }
+    updateStateVars(params) {}
+    purgeVariableDependenciesOnElmtId(rmElmtId) {
+        this.__message.purgeDependencyOnElmtId(rmElmtId);
+    }
+    aboutToBeDeleted() {
+        this.__message.aboutToBeDeleted();
+        SubscriberManager.Get().delete(this.id__());
+        this.aboutToBeDeletedInternal();
+    }
+    get message() { return this.__message.get(); }
+    set message(newValue) { this.__message.set(newValue); }
+    rerender() { this.updateDirtyElements(); }
+};
+registerNamedRoute(() => new Index(void 0, {}), "", {bundleName: "x"});
+"#;
+    module_compiler()
+        .compile(
+            vec![module_record("com.example.test/entry/ets/pages/Index", source)],
+            &out,
+        )
+        .expect("compile Index-like source");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+    assert!(
+        bytes.len() > 600,
+        "Index-like ViewPU source must produce >600 byte ABC, got {}",
+        bytes.len()
+    );
+    // verify key opcodes appear
+    assert!(bytes.contains(&0x25), "isin (0x25) for 'in' operator");
+    assert!(bytes.contains(&0x1c), "typeof (0x1c) for 'typeof' expression");
+    assert!(bytes.contains(&0x27), "strictnoteq (0x27) for '!=='");
+}

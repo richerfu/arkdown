@@ -82,6 +82,63 @@ pub enum Insn {
     Mul2(u8, u8),
     /// `0x0D` — `acc = acc / v[vreg]`.
     Div2(u8, u8),
+    /// `0x0E` — `acc = acc % v[vreg]`.
+    Mod2(u8, u8),
+
+    // ── Equality / comparison (accumulator op register) ───────────────────────
+    // Format: `op_imm_8_v_8` — opcode(1) + slot(1) + vreg(1) = 3 bytes.
+    // Semantics: `acc = acc OP v[vreg]`.
+    /// `0x0F` — `acc = acc == v[vreg]` (abstract equality).
+    Eq(u8, u8),
+    /// `0x10` — `acc = acc != v[vreg]` (abstract inequality).
+    NotEq(u8, u8),
+    /// `0x11` — `acc = acc < v[vreg]`.
+    Less(u8, u8),
+    /// `0x12` — `acc = acc <= v[vreg]`.
+    LessEq(u8, u8),
+    /// `0x13` — `acc = acc > v[vreg]`.
+    Greater(u8, u8),
+    /// `0x14` — `acc = acc >= v[vreg]`.
+    GreaterEq(u8, u8),
+
+    // ── Bitwise binary ops ────────────────────────────────────────────────────
+    /// `0x15` — `acc = acc << v[vreg]`.
+    Shl2(u8, u8),
+    /// `0x16` — `acc = acc >> v[vreg]`.
+    Shr2(u8, u8),
+    /// `0x17` — `acc = acc >>> v[vreg]`.
+    Ashr2(u8, u8),
+    /// `0x18` — `acc = acc & v[vreg]`.
+    And2(u8, u8),
+    /// `0x19` — `acc = acc | v[vreg]`.
+    Or2(u8, u8),
+    /// `0x1A` — `acc = acc ^ v[vreg]`.
+    Xor2(u8, u8),
+
+    // ── Unary operators ───────────────────────────────────────────────────────
+    // Format: `op_imm_8` — opcode(1) + slot(1) = 2 bytes. Operand is acc.
+    /// `0x1C` — `acc = typeof acc` (returns a string like `"function"`).
+    TypeOf(u8),
+    /// `0x1F` — `acc = -acc`.
+    Neg(u8),
+    /// `0x20` — `acc = ~acc` (bitwise NOT).
+    BitNot(u8),
+    /// `0x21` — `acc = acc + 1`.
+    Inc(u8),
+    /// `0x22` — `acc = acc - 1`.
+    Dec(u8),
+
+    // ── `in` operator ─────────────────────────────────────────────────────────
+    /// `0x25` `op_imm_8_v_8` — `acc = acc in v[vreg]`.
+    /// Semantics: acc holds the property key; v[vreg] holds the object.
+    /// Encoding: `[0x25] [slot: u8] [vreg: u8]` = 3 bytes.
+    IsIn(u8, u8),
+
+    // ── Strict equality / inequality ──────────────────────────────────────────
+    /// `0x27` — `acc = acc !== v[vreg]`.
+    StrictNotEq(u8, u8),
+    /// `0x28` — `acc = acc === v[vreg]`.
+    StrictEq(u8, u8),
 
     // ── Function calls (IC-slot first, then register operands) ───────────────
     /// `0x29` `op_imm_8` — call function in accumulator with 0 args.
@@ -288,6 +345,37 @@ impl Insn {
             Insn::Sub2(slot, vreg) => vec![0x0B, *slot, *vreg],
             Insn::Mul2(slot, vreg) => vec![0x0C, *slot, *vreg],
             Insn::Div2(slot, vreg) => vec![0x0D, *slot, *vreg],
+            Insn::Mod2(slot, vreg) => vec![0x0E, *slot, *vreg],
+
+            // ── equality / comparison ─────────────────────────────────────────
+            Insn::Eq(slot, vreg) => vec![0x0F, *slot, *vreg],
+            Insn::NotEq(slot, vreg) => vec![0x10, *slot, *vreg],
+            Insn::Less(slot, vreg) => vec![0x11, *slot, *vreg],
+            Insn::LessEq(slot, vreg) => vec![0x12, *slot, *vreg],
+            Insn::Greater(slot, vreg) => vec![0x13, *slot, *vreg],
+            Insn::GreaterEq(slot, vreg) => vec![0x14, *slot, *vreg],
+
+            // ── bitwise binary ops ────────────────────────────────────────────
+            Insn::Shl2(slot, vreg) => vec![0x15, *slot, *vreg],
+            Insn::Shr2(slot, vreg) => vec![0x16, *slot, *vreg],
+            Insn::Ashr2(slot, vreg) => vec![0x17, *slot, *vreg],
+            Insn::And2(slot, vreg) => vec![0x18, *slot, *vreg],
+            Insn::Or2(slot, vreg) => vec![0x19, *slot, *vreg],
+            Insn::Xor2(slot, vreg) => vec![0x1A, *slot, *vreg],
+
+            // ── unary operators ───────────────────────────────────────────────
+            Insn::TypeOf(slot) => vec![0x1C, *slot],
+            Insn::Neg(slot) => vec![0x1F, *slot],
+            Insn::BitNot(slot) => vec![0x20, *slot],
+            Insn::Inc(slot) => vec![0x21, *slot],
+            Insn::Dec(slot) => vec![0x22, *slot],
+
+            // ── in operator ───────────────────────────────────────────────────
+            Insn::IsIn(slot, vreg) => vec![0x25, *slot, *vreg],
+
+            // ── strict equality ───────────────────────────────────────────────
+            Insn::StrictNotEq(slot, vreg) => vec![0x27, *slot, *vreg],
+            Insn::StrictEq(slot, vreg) => vec![0x28, *slot, *vreg],
 
             // ── calls ────────────────────────────────────────────────────────
             Insn::CallArg0(slot) => vec![0x29, *slot],
@@ -431,7 +519,27 @@ impl Insn {
             Insn::MovV4(_, _) => 2,
             Insn::MovV8(_, _) => 3,
             Insn::MovV16(_, _) => 5,
-            Insn::Add2(_, _) | Insn::Sub2(_, _) | Insn::Mul2(_, _) | Insn::Div2(_, _) => 3,
+            Insn::Add2(_, _)
+            | Insn::Sub2(_, _)
+            | Insn::Mul2(_, _)
+            | Insn::Div2(_, _)
+            | Insn::Mod2(_, _)
+            | Insn::Eq(_, _)
+            | Insn::NotEq(_, _)
+            | Insn::Less(_, _)
+            | Insn::LessEq(_, _)
+            | Insn::Greater(_, _)
+            | Insn::GreaterEq(_, _)
+            | Insn::Shl2(_, _)
+            | Insn::Shr2(_, _)
+            | Insn::Ashr2(_, _)
+            | Insn::And2(_, _)
+            | Insn::Or2(_, _)
+            | Insn::Xor2(_, _)
+            | Insn::IsIn(_, _)
+            | Insn::StrictNotEq(_, _)
+            | Insn::StrictEq(_, _) => 3,
+            Insn::TypeOf(_) | Insn::Neg(_) | Insn::BitNot(_) | Insn::Inc(_) | Insn::Dec(_) => 2,
             Insn::CallArg0(_) => 2,
             Insn::CallArg1(_, _) => 3,
             Insn::CallArgs2(_, _, _) => 4,

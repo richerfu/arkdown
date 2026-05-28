@@ -1,0 +1,22 @@
+{
+  "modulePathMap": {
+    "entry": "/private/tmp/hvigor-golden-run/entry"
+  },
+  "compileMode": "esmodule",
+  "projectRootPath": "/private/tmp/hvigor-golden-run",
+  "nodeModulesPath": "/private/tmp/hvigor-golden-run/entry/build/default/intermediates/loader_out/default/node_modules",
+  "byteCodeHarInfo": {},
+  "declarationEntry": [],
+  "moduleName": "entry",
+  "hspNameOhmMap": {},
+  "harNameOhmMap": {},
+  "packageManagerType": "ohpm",
+  "compileEntry": [],
+  "otherCompileFiles": [],
+  "dynamicImportLibInfo": {},
+  "routerMap": [],
+  "hspResourcesMap": {},
+  "updateVersionInfo": {},
+  "anBuildOutPut": "/private/tmp/hvigor-golden-run/entry/build/default/intermediates/loader_out/default/an/arm64-v8a",
+  "anBuildMode": "type"
+}
