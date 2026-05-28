@@ -102,6 +102,15 @@ pub struct ClassRecord {
     /// Regular JS module classes use `1` (ACC_PUBLIC).
     /// Annotation stub classes (API 13+) use `0x2001` (ACC_PUBLIC | ACC_ANNOTATION).
     pub access_flags: u32,
+    /// Module specifiers referenced by `require("@ohos:xxx")` calls in this
+    /// module's code.
+    ///
+    /// These strings are emitted as standalone `StringItem`s in the file's
+    /// string section (using `inline_string()`) so that ArkRuntime can locate
+    /// each module import specifier by its file offset.  This is the first step
+    /// toward a fully annotated `ModuleRecord`; full `L_ESConcurrentModuleRequestsAnnotation`
+    /// field encoding is left as a follow-up.
+    pub module_requests: Vec<String>,
 }
 
 impl ClassRecord {
@@ -294,6 +303,7 @@ mod tests {
                 num_args: 3,
             }],
             access_flags: 1,
+            module_requests: vec![],
         };
         // inline_string("L_GLOBAL;") = 11 bytes
         // super_off = 4
@@ -317,6 +327,7 @@ mod tests {
                 num_args: 3,
             }],
             access_flags: 1,
+            module_requests: vec![],
         };
         let bytes = record.serialize_class_item(4, &[0x12a], &[0x1a1]);
         assert_eq!(bytes.len(), record.class_item_byte_size());

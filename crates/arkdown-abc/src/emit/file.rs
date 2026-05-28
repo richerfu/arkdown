@@ -153,16 +153,19 @@ impl AbcFile {
                 name: "L_ESConcurrentModuleRequestsAnnotation;".to_string(),
                 methods: vec![],
                 access_flags: 0x2001,
+                module_requests: vec![],
             },
             ClassRecord {
                 name: "L_ESExpectedPropertyCountAnnotation;".to_string(),
                 methods: vec![],
                 access_flags: 0x2001,
+                module_requests: vec![],
             },
             ClassRecord {
                 name: "L_ESSlotNumberAnnotation;".to_string(),
                 methods: vec![],
                 access_flags: 0x2001,
+                module_requests: vec![],
             },
         ];
 
@@ -200,6 +203,31 @@ impl AbcFile {
             method_string_offsets.push(class_offsets);
             all_method_strings.push(class_strings);
         }
+
+        // ── 1b. Compute module_request StringItem offsets ─────────────────────
+        //
+        // Module specifier strings (e.g. "@ohos:app.ability.UIAbility") are
+        // emitted as standalone StringItems immediately after the method name
+        // strings.  Their file offsets are tracked here for future use in the
+        // full ModuleRecord annotation encoding.
+        let mut module_req_string_offsets: Vec<Vec<u32>> = Vec::new();
+        let mut all_module_req_strings: Vec<Vec<Vec<u8>>> = Vec::new();
+
+        for class in &all_classes {
+            let mut req_offsets = Vec::new();
+            let mut req_strings = Vec::new();
+            for spec in &class.module_requests {
+                req_offsets.push(cur);
+                let s = inline_string(spec);
+                cur += s.len() as u32;
+                req_strings.push(s);
+            }
+            module_req_string_offsets.push(req_offsets);
+            all_module_req_strings.push(req_strings);
+        }
+        // Suppress unused-variable warnings; offsets will be used when full
+        // ModuleRecord annotation emission is implemented.
+        let _ = &module_req_string_offsets;
 
         // ── 2. Compute ClassItem sizes & start offsets ────────────────────────
         let class_section_start = cur;
@@ -398,6 +426,18 @@ impl AbcFile {
         // ── Method StringItems ────────────────────────────────────────────────
         for class_strings in &all_method_strings {
             for s in class_strings {
+                file.extend_from_slice(s);
+            }
+        }
+
+        // ── Module Request StringItems ────────────────────────────────────────
+        //
+        // Emit each module specifier (e.g. "@ohos:app.ability.UIAbility") as a
+        // standalone StringItem accessible by its file offset.  This lets
+        // ArkRuntime discover the imported module specifiers; the full
+        // ModuleRecord annotation encoding is a follow-up task.
+        for class_req_strings in &all_module_req_strings {
+            for s in class_req_strings {
                 file.extend_from_slice(s);
             }
         }

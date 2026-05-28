@@ -197,4 +197,47 @@ mod tests {
         assert_eq!(result.path, tmp);
         let _ = std::fs::remove_file(&tmp);
     }
+
+    /// Verify that `require("@ohos:xxx")` specifier strings appear as
+    /// standalone `StringItem`s in the compiled `.abc` binary.
+    ///
+    /// ArkRuntime needs to find these specifiers by file offset when resolving
+    /// module imports.  The minimum requirement is that the byte sequence
+    /// `@ohos:app.ability.UIAbility\0` (and the hilog one) is present somewhere
+    /// in the output file.
+    #[test]
+    fn test_module_requests_in_abc() {
+        let compiler = make_compiler();
+        let source = r#"(function () {
+            var UIAbility = require("@ohos:app.ability.UIAbility");
+            var hilog = require("@ohos:hilog");
+            globalThis["test"] = "hello";
+        })()"#;
+        let modules = vec![AbcModule {
+            record_name: "entry/src/main/ets/test".to_string(),
+            source: source.to_string(),
+            source_map: None,
+        }];
+        let tmp = std::env::temp_dir().join("test_abc_module_requests.abc");
+        compiler.compile(modules, &tmp).unwrap();
+        let bytes = std::fs::read(&tmp).unwrap();
+
+        // Search for the @ohos: specifier strings as raw ASCII in the file.
+        let ohos_ui = b"@ohos:app.ability.UIAbility";
+        let ohos_hilog = b"@ohos:hilog";
+
+        let has_ui_ability = bytes.windows(ohos_ui.len()).any(|w| w == ohos_ui);
+        let has_hilog = bytes.windows(ohos_hilog.len()).any(|w| w == ohos_hilog);
+
+        assert!(
+            has_ui_ability,
+            "@ohos:app.ability.UIAbility must appear as a StringItem in the ABC file"
+        );
+        assert!(
+            has_hilog,
+            "@ohos:hilog must appear as a StringItem in the ABC file"
+        );
+
+        let _ = std::fs::remove_file(&tmp);
+    }
 }

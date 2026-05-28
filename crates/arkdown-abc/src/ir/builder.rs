@@ -113,7 +113,14 @@ pub fn build_record(
         // Bare name (legacy / test path) — use OHOS global module class name
         format!("L_{};", record_name)
     };
-    Ok(ClassRecord { name: class_name, methods, access_flags: 1 })
+
+    // Collect module specifiers from require("@ohos:xxx") calls so that the
+    // ABC serializer can emit them as standalone StringItems.  This is the first
+    // step toward a proper ModuleRecord annotation; ArkRuntime can then locate
+    // each import specifier by its file offset.
+    let module_requests = collect_module_requests(&program);
+
+    Ok(ClassRecord { name: class_name, methods, access_flags: 1, module_requests })
 }
 
 // ── Byte-count heuristics ─────────────────────────────────────────────────────
@@ -848,4 +855,72 @@ impl<'a> CodeGen<'a> {
 /// Return `true` if `expr` is the `globalThis` identifier.
 fn is_global_this(expr: &Expression<'_>) -> bool {
     matches!(expr, Expression::Identifier(id) if id.name.as_str() == "globalThis")
+}
+
+// ── Module-request collection ─────────────────────────────────────────────────
+
+/// Collect all `require("@ohos:xxx")` specifiers from `program`.
+///
+/// The function unwraps a top-level IIFE wrapper (the same pattern handled by
+/// `compile_program_body`) before scanning, so that require() calls inside the
+/// IIFE body are found regardless of whether the source is bare or wrapped.
+///
+/// Returned specifiers are deduplicated and sorted for deterministic output.
+fn collect_module_requests(program: &Program<'_>) -> Vec<String> {
+    let stmts = extract_iife_stmts(program).unwrap_or(program.body.as_slice());
+    let mut requests: Vec<String> = Vec::new();
+    for stmt in stmts {
+        scan_stmt_for_requires(stmt, &mut requests);
+    }
+    requests.sort();
+    requests.dedup();
+    requests
+}
+
+/// Scan a statement for `require("@ohos:xxx")` call expressions.
+fn scan_stmt_for_requires(stmt: &Statement<'_>, out: &mut Vec<String>) {
+    match stmt {
+        Statement::ExpressionStatement(es) => {
+            scan_expr_for_requires(&es.expression, out);
+        }
+        Statement::VariableDeclaration(decl) => {
+            for declarator in &decl.declarations {
+                if let Some(init) = &declarator.init {
+                    scan_expr_for_requires(init, out);
+                }
+            }
+        }
+        Statement::BlockStatement(block) => {
+            for s in &block.body {
+                scan_stmt_for_requires(s, out);
+            }
+        }
+        Statement::ReturnStatement(ret) => {
+            if let Some(arg) = &ret.argument {
+                scan_expr_for_requires(arg, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Scan an expression for `require("@ohos:xxx")` patterns.
+///
+/// Only the direct `require("specifier")` call form is recognised; nested
+/// expressions (member chains, logical operators, etc.) are not traversed
+/// because the bundler always emits `require` at the top level of variable
+/// initialisers.
+fn scan_expr_for_requires(expr: &Expression<'_>, out: &mut Vec<String>) {
+    if let Expression::CallExpression(call) = expr {
+        if let Expression::Identifier(id) = &call.callee {
+            if id.name.as_str() == "require" && call.arguments.len() == 1 {
+                if let Some(Expression::StringLiteral(s)) = call.arguments[0].as_expression() {
+                    let spec = s.value.as_str();
+                    if spec.starts_with("@ohos:") && !out.iter().any(|r| r == spec) {
+                        out.push(spec.to_string());
+                    }
+                }
+            }
+        }
+    }
 }
