@@ -4,8 +4,8 @@ use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     Argument, AssignmentTarget, BindingPattern, ClassElement, Declaration,
     ExportDefaultDeclarationKind, Expression, FunctionBody, ImportDeclarationSpecifier,
-    ImportOrExportKind, LogicalOperator, MethodDefinition, MethodDefinitionKind,
-    ModuleExportName, Program, PropertyKey, Statement, UnaryOperator,
+    ImportOrExportKind, LogicalOperator, MethodDefinition, MethodDefinitionKind, ModuleExportName,
+    Program, PropertyKey, Statement, UnaryOperator,
 };
 use oxc_parser::{Parser, ParserReturn};
 use oxc_span::SourceType;
@@ -40,6 +40,13 @@ use crate::ir::opcodes::Insn;
 /// - Function calls with 0–3 positional args (`callarg0`–`callargs3`)
 /// - Method calls with 0–3 args (`callthis0`–`callthis3`)
 /// - `return` / `return expr`
+/// - Binary expressions: `+`, `-`, `*`, `/`, `%`, `==`, `!=`, `===`, `!==`,
+///   `<`, `<=`, `>`, `>=`, `<<`, `>>`, `>>>`, `&`, `|`, `^`, `in`
+/// - Unary expressions: `typeof`, `void`, `!`, `-`, `~`
+/// - Logical expressions: `&&`, `||`, `??` with short-circuit jump patching
+/// - `this` expression in class methods → `ldthis` (opcode `0x6F`)
+/// - Arrow functions with `this` / `new.target` captures → `newlexenv` + `ldthis`
+/// - Arrow functions as call arguments → separate `MethodRecord` per closure
 pub fn build_record(
     source: &str,
     record_name: &str,
@@ -642,6 +649,8 @@ fn compile_class_elements(
     }
 
     let mut seen_names = HashMap::<String, u16>::new();
+    // Shared counter for call-arg arrow closures across all methods in the class.
+    let mut closure_seen_names = HashMap::<String, u16>::new();
     for element in elements {
         if let ClassElement::MethodDefinition(method) = element {
             let Some(key_name) = class_method_record_name(method, class_name) else {
@@ -671,6 +680,17 @@ fn compile_class_elements(
                 literal_arrays,
                 lowering,
                 methods,
+            );
+
+            // Collect arrow functions passed as call arguments (e.g.
+            // observeComponentCreation2 callbacks) as separate MethodRecords.
+            collect_call_arg_arrow_records(
+                method.value.body.as_deref(),
+                strings,
+                literal_arrays,
+                lowering,
+                methods,
+                &mut closure_seen_names,
             );
         }
     }
@@ -745,6 +765,158 @@ fn collect_arrow_records_from_stmt(
                     methods,
                 );
             }
+        }
+        _ => {}
+    }
+}
+
+/// Scan a method body for arrow functions passed as call-expression arguments and
+/// emit a MethodRecord for each one.
+///
+/// hvigor names these `#~@0>@{pos}*#` (1-indexed arg position) with `^N` suffixes
+/// for subsequent occurrences.  `seen_names` is shared across all class methods so
+/// the counter is class-global.
+fn collect_call_arg_arrow_records(
+    body: Option<&FunctionBody<'_>>,
+    strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
+    lowering: &LoweringContext,
+    methods: &mut Vec<MethodRecord>,
+    seen_names: &mut HashMap<String, u16>,
+) {
+    let Some(body) = body else {
+        return;
+    };
+    for stmt in &body.statements {
+        collect_call_arg_arrows_stmt(stmt, strings, literal_arrays, lowering, methods, seen_names);
+    }
+}
+
+fn collect_call_arg_arrows_stmt(
+    stmt: &Statement<'_>,
+    strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
+    lowering: &LoweringContext,
+    methods: &mut Vec<MethodRecord>,
+    seen_names: &mut HashMap<String, u16>,
+) {
+    match stmt {
+        Statement::ExpressionStatement(es) => {
+            collect_call_arg_arrows_expr(
+                &es.expression,
+                strings,
+                literal_arrays,
+                lowering,
+                methods,
+                seen_names,
+            );
+        }
+        Statement::BlockStatement(block) => {
+            for s in &block.body {
+                collect_call_arg_arrows_stmt(
+                    s,
+                    strings,
+                    literal_arrays,
+                    lowering,
+                    methods,
+                    seen_names,
+                );
+            }
+        }
+        Statement::IfStatement(if_stmt) => {
+            collect_call_arg_arrows_stmt(
+                &if_stmt.consequent,
+                strings,
+                literal_arrays,
+                lowering,
+                methods,
+                seen_names,
+            );
+            if let Some(alt) = &if_stmt.alternate {
+                collect_call_arg_arrows_stmt(
+                    alt,
+                    strings,
+                    literal_arrays,
+                    lowering,
+                    methods,
+                    seen_names,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_call_arg_arrows_expr(
+    expr: &Expression<'_>,
+    strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
+    lowering: &LoweringContext,
+    methods: &mut Vec<MethodRecord>,
+    seen_names: &mut HashMap<String, u16>,
+) {
+    match expr {
+        Expression::CallExpression(call) => {
+            for (idx, arg) in call.arguments.iter().enumerate() {
+                let Some(arg_expr) = arg.as_expression() else {
+                    continue;
+                };
+                if let Expression::ArrowFunctionExpression(arrow) = arg_expr {
+                    // hvigor always uses "@1" as a fixed marker for call-argument
+                    // closures regardless of which argument position the arrow is at.
+                    let _ = idx;
+                    let base_name = "#~@0>@1*#".to_string();
+                    let record_name = suffix_duplicate_method_name(base_name, seen_names);
+                    let captures = arrow_captures_from_body(arrow.body.as_ref());
+                    let bytecode = compile_arrow_body(
+                        arrow.body.as_ref(),
+                        strings,
+                        literal_arrays,
+                        lowering,
+                        captures,
+                    );
+                    let num_vregs = estimate_vregs(&bytecode);
+                    methods.push(MethodRecord {
+                        name: record_name,
+                        bytecode,
+                        num_vregs,
+                        num_args: arrow.params.items.len() as u16 + 3,
+                        debug_info: None,
+                    });
+                    // Recurse into the arrow body for deeper nested closures.
+                    let body_ref = arrow.body.as_ref();
+                    for s in &body_ref.statements {
+                        collect_call_arg_arrows_stmt(
+                            s,
+                            strings,
+                            literal_arrays,
+                            lowering,
+                            methods,
+                            seen_names,
+                        );
+                    }
+                } else {
+                    // Recurse into non-arrow args (e.g. chained calls).
+                    collect_call_arg_arrows_expr(
+                        arg_expr,
+                        strings,
+                        literal_arrays,
+                        lowering,
+                        methods,
+                        seen_names,
+                    );
+                }
+            }
+        }
+        Expression::StaticMemberExpression(mem) => {
+            collect_call_arg_arrows_expr(
+                &mem.object,
+                strings,
+                literal_arrays,
+                lowering,
+                methods,
+                seen_names,
+            );
         }
         _ => {}
     }
@@ -1426,9 +1598,13 @@ impl<'a> CodeGen<'a> {
             }
             Expression::ThisExpression(_) => {
                 if let Some(slot) = self.arrow_captures.this_slot {
+                    // Arrow function: `this` was captured from the enclosing
+                    // scope into a lexical environment slot.
                     self.push(Insn::LdLexVar(0, slot));
                 } else {
-                    self.push(Insn::LdUndefined);
+                    // Regular function or class method: use ldthis to load the
+                    // receiver that ArkRuntime bound when the function was called.
+                    self.push(Insn::LdThis);
                 }
             }
             Expression::MetaProperty(meta) => {
@@ -1488,7 +1664,10 @@ impl<'a> CodeGen<'a> {
                 if !captures.is_empty() {
                     self.push(Insn::NewLexEnv(captures.len()));
                     if let Some(slot) = captures.this_slot {
-                        self.push(Insn::Lda(1));
+                        // Capture the enclosing function's `this` via ldthis.
+                        // Arrow functions do not have their own `this` binding
+                        // so they inherit from the lexical environment.
+                        self.push(Insn::LdThis);
                         self.push(Insn::StLexVar(0, slot));
                     }
                     if let Some(slot) = captures.new_target_slot {

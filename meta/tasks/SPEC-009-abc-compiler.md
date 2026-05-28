@@ -99,23 +99,78 @@ From the parsed JS/TS source:
 
 ### 2. Panda Instruction Set
 
-Key opcodes (from `arkcompiler_runtime_core/isa/isa.yaml`):
+Key opcodes (from `arkcompiler_runtime_core/isa/isa.yaml`, verified against real `modules.abc`):
 
 ```
-ldundefined          # load undefined
-ldnull               # load null
-ldtrue / ldfalse     # load boolean literals
-ldai <imm>           # load integer immediate
-fldai <imm>          # load float immediate
-lda.str <id>         # load string from string table
-lda <vreg>           # load from virtual register
-sta <vreg>           # store to virtual register
-add2 <vreg>          # add acc + vreg
-call.short <method>, <vreg...>   # call method (≤ 4 args)
-call <method>, <vreg...>         # call method (any args)
-callthis.short <method>, <this>, <vreg...>
-return               # return accumulator value
-returnundefined      # return undefined
+# Constant loaders (opcode / byte length)
+0x00  ldundefined             # load undefined (1 byte)
+0x01  ldnull                  # load null (1 byte)
+0x02  ldtrue / 0x03 ldfalse   # load boolean (1 byte)
+0x62  ldai <i32>              # load integer immediate (5 bytes)
+0x63  fldai <f64>             # load float immediate (9 bytes)
+0x3E  lda.str <id:u16>        # load string (3 bytes)
+0x6F  ldthis                  # load `this` receiver in method (1 byte)
+
+# Register moves
+0x60  lda <vreg:u8>           # load register → acc (2 bytes)
+0x61  sta <vreg:u8>           # store acc → register (2 bytes)
+
+# Arithmetic (format: op_imm_8_v_8 = opcode + slot + vreg = 3 bytes)
+0x0A  add2   slot, vreg       # acc = acc + v[vreg]
+0x0B  sub2   slot, vreg       # acc = acc - v[vreg]
+0x0C  mul2   slot, vreg       # acc = acc * v[vreg]
+0x0D  div2   slot, vreg       # acc = acc / v[vreg]
+0x0E  mod2   slot, vreg       # acc = acc % v[vreg]
+
+# Equality / comparison (op_imm_8_v_8, 3 bytes; acc = acc OP v[vreg])
+0x0F  eq           slot, vreg  # ==
+0x10  noteq        slot, vreg  # !=
+0x11  less         slot, vreg  # <
+0x12  lesseq       slot, vreg  # <=
+0x13  greater      slot, vreg  # >
+0x14  greatereq    slot, vreg  # >=
+0x27  strictnoteq  slot, vreg  # !==
+0x28  stricteq     slot, vreg  # ===
+0x25  isin         slot, vreg  # acc (key) in v[vreg] (object)
+
+# Bitwise binary (op_imm_8_v_8, 3 bytes)
+0x15  shl2  / 0x16 shr2  / 0x17 ashr2
+0x18  and2  / 0x19 or2   / 0x1A xor2
+
+# Unary (op_imm_8 = opcode + slot = 2 bytes; acc = OP acc)
+0x1C  typeof  slot   # acc = typeof acc (string)
+0x1F  neg     slot   # acc = -acc
+0x20  not     slot   # acc = ~acc (bitwise NOT)
+0x21  inc     slot   # acc = acc + 1
+0x22  dec     slot   # acc = acc - 1
+
+# Calls
+0x29–0x2C  callarg0–callarg3   slot [, v0..v2]
+0x2D–0x30  callthis0–callthis3 slot, this [, v0..v2]
+0x73  callrange   slot, argc, v_start
+0x31  callthisrange slot, argc, this_vreg
+
+# Object access
+0x42  ldobjbyname  slot, name_id         # acc = acc.name
+0x43  stobjbyname  slot, name_id, obj    # obj.name = acc
+
+# Class / function definition
+0x33  definefunc  slot, method_id, length
+0x35  defineclasswithbuffer slot, ctor_id, buf_id, proto_argc, proto_vreg
+
+# Module variables
+0x7E  ldexternalmodulevar index
+0x7C  stmodulevar index
+0x3C  ldlexvar level, slot
+0x3D  stlexvar level, slot
+
+# Branches
+0x4E  jmp   offset:i16
+0x50  jeqz  offset:i16  # branch if acc == 0 / falsy
+0x9B  jnez  offset:i16  # branch if acc != 0 / truthy
+
+# Exception
+0xFE 0x00  throw
 ```
 
 Full ISA in `arkcompiler_runtime_core/isa/`.

@@ -753,10 +753,7 @@ fn test_in_operator_emits_isin_opcode() {
     let out = tmp.path().join("test.abc");
     module_compiler()
         .compile(
-            vec![module_record(
-                "test/mod",
-                r#"const x = "key" in obj;"#,
-            )],
+            vec![module_record("test/mod", r#"const x = "key" in obj;"#)],
             &out,
         )
         .expect("compile");
@@ -838,10 +835,7 @@ fn test_logical_and_emits_jeqz_branch() {
     let out = tmp.path().join("test.abc");
     module_compiler()
         .compile(
-            vec![module_record(
-                "test/mod",
-                r#"const x = a && b;"#,
-            )],
+            vec![module_record("test/mod", r#"const x = a && b;"#)],
             &out,
         )
         .expect("compile");
@@ -860,10 +854,7 @@ fn test_logical_or_emits_jnez_branch() {
     let out = tmp.path().join("test.abc");
     module_compiler()
         .compile(
-            vec![module_record(
-                "test/mod",
-                r#"const x = a || b;"#,
-            )],
+            vec![module_record("test/mod", r#"const x = a || b;"#)],
             &out,
         )
         .expect("compile");
@@ -873,6 +864,120 @@ fn test_logical_or_emits_jnez_branch() {
     assert!(
         bytes.contains(&0x9b),
         "jnez (0x9b) must appear for '||' short-circuit"
+    );
+}
+
+#[test]
+fn test_two_module_compile_size_tracks_parity_goal() {
+    // Compile both EntryAbility-like and Index-like sources together (matching
+    // what the minimal-hap build does), and assert the combined ABC is at least
+    // as large as what we produce with current constructs.  This gives a
+    // regression baseline while we work toward the 9844-byte hvigor target.
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("modules.abc");
+    let entry_source = r#"
+import UIAbility from "@ohos:app.ability.UIAbility";
+import hilog from "@ohos:hilog";
+const DOMAIN = 0;
+var EntryAbility = class extends UIAbility {
+    onCreate(want, launchParam) {
+        hilog.info(DOMAIN, "testTag", "%{public}s", "Ability onCreate");
+    }
+    onWindowStageCreate(windowStage) {
+        hilog.info(DOMAIN, "testTag", "%{public}s", "Ability onWindowStageCreate");
+        windowStage.loadContent("pages/Index", (err) => {
+            if (err.code) {
+                hilog.error(DOMAIN, "testTag", "failed", JSON.stringify(err));
+                return;
+            }
+            hilog.info(DOMAIN, "testTag", "Succeeded.");
+        });
+    }
+    onForeground() {
+        hilog.info(DOMAIN, "testTag", "%{public}s", "Ability onForeground");
+    }
+    onBackground() {
+        hilog.info(DOMAIN, "testTag", "%{public}s", "Ability onBackground");
+    }
+};
+export { EntryAbility as default };
+"#;
+    let index_source = r#"
+if (!("finalizeConstruction" in ViewPU.prototype))
+    Reflect.set(ViewPU.prototype, "finalizeConstruction", () => {});
+var Index = class extends ViewPU {
+    constructor(parent, params, __localStorage, elmtId, paramsLambda, extraInfo) {
+        super(parent, __localStorage, elmtId, extraInfo);
+        if (typeof paramsLambda === "function") this.paramsGenerator_ = paramsLambda;
+        this.__message = new ObservedPropertySimplePU("Hello World", this, "message");
+        this.setInitiallyProvidedValue(params);
+        this.finalizeConstruction();
+    }
+    setInitiallyProvidedValue(params) {
+        if (params.message !== void 0) this.message = params.message;
+    }
+    updateStateVars(params) {}
+    purgeVariableDependenciesOnElmtId(rmElmtId) {
+        this.__message.purgeDependencyOnElmtId(rmElmtId);
+    }
+    aboutToBeDeleted() {
+        this.__message.aboutToBeDeleted();
+        SubscriberManager.Get().delete(this.id__());
+        this.aboutToBeDeletedInternal();
+    }
+    get message() { return this.__message.get(); }
+    set message(newValue) { this.__message.set(newValue); }
+    rerender() { this.updateDirtyElements(); }
+};
+registerNamedRoute(() => new Index(void 0, {}), "", {bundleName: "x"});
+"#;
+    module_compiler()
+        .compile(
+            vec![
+                module_record(
+                    "com.example.test/entry/ets/entryability/EntryAbility",
+                    entry_source,
+                ),
+                module_record("com.example.test/entry/ets/pages/Index", index_source),
+            ],
+            &out,
+        )
+        .expect("compile both modules");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+    // Two modules with class methods should produce meaningful bytecode.
+    // This is a regression baseline; the hvigor target is 9844 bytes.
+    assert!(
+        bytes.len() > 2000,
+        "two-module compile must produce >2000 byte ABC, got {} bytes",
+        bytes.len()
+    );
+}
+
+#[test]
+fn test_this_expression_emits_ldthis_opcode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("test.abc");
+    module_compiler()
+        .compile(
+            vec![module_record(
+                "test/mod",
+                r#"
+class Foo {
+    bar() { return this.x; }
+    baz() { this.y = 1; }
+}
+"#,
+            )],
+            &out,
+        )
+        .expect("compile");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+    // ldthis opcode is 0x6f
+    assert!(
+        bytes.contains(&0x6f),
+        "ldthis (0x6f) must appear for 'this' in a class method body"
     );
 }
 
@@ -982,7 +1087,10 @@ registerNamedRoute(() => new Index(void 0, {}), "", {bundleName: "x"});
 "#;
     module_compiler()
         .compile(
-            vec![module_record("com.example.test/entry/ets/pages/Index", source)],
+            vec![module_record(
+                "com.example.test/entry/ets/pages/Index",
+                source,
+            )],
             &out,
         )
         .expect("compile Index-like source");
@@ -995,6 +1103,9 @@ registerNamedRoute(() => new Index(void 0, {}), "", {bundleName: "x"});
     );
     // verify key opcodes appear
     assert!(bytes.contains(&0x25), "isin (0x25) for 'in' operator");
-    assert!(bytes.contains(&0x1c), "typeof (0x1c) for 'typeof' expression");
+    assert!(
+        bytes.contains(&0x1c),
+        "typeof (0x1c) for 'typeof' expression"
+    );
     assert!(bytes.contains(&0x27), "strictnoteq (0x27) for '!=='");
 }

@@ -128,6 +128,12 @@ pub enum Insn {
     /// `0x22` — `acc = acc - 1`.
     Dec(u8),
 
+    // ── `this` loader ─────────────────────────────────────────────────────────
+    /// `0x6F` `op_none` — load the current `this` value into accumulator.
+    /// Used in regular (non-arrow) function bodies to access the receiver.
+    /// Encoding: `[0x6F]` = 1 byte.
+    LdThis,
+
     // ── `in` operator ─────────────────────────────────────────────────────────
     /// `0x25` `op_imm_8_v_8` — `acc = acc in v[vreg]`.
     /// Semantics: acc holds the property key; v[vreg] holds the object.
@@ -370,6 +376,9 @@ impl Insn {
             Insn::Inc(slot) => vec![0x21, *slot],
             Insn::Dec(slot) => vec![0x22, *slot],
 
+            // ── this loader ──────────────────────────────────────────────────
+            Insn::LdThis => vec![0x6F],
+
             // ── in operator ───────────────────────────────────────────────────
             Insn::IsIn(slot, vreg) => vec![0x25, *slot, *vreg],
 
@@ -540,6 +549,7 @@ impl Insn {
             | Insn::StrictNotEq(_, _)
             | Insn::StrictEq(_, _) => 3,
             Insn::TypeOf(_) | Insn::Neg(_) | Insn::BitNot(_) | Insn::Inc(_) | Insn::Dec(_) => 2,
+            Insn::LdThis => 1,
             Insn::CallArg0(_) => 2,
             Insn::CallArg1(_, _) => 3,
             Insn::CallArgs2(_, _, _) => 4,
