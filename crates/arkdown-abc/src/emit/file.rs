@@ -151,6 +151,62 @@ impl AbcFile {
     /// depend on the offset values themselves, only on method counts), derive
     /// CodeItem start offsets, then serialize with correct absolute offsets.
     pub fn serialize(&self) -> Vec<u8> {
+        // ── SDK framework foreign class stubs ────────────────────────────────
+        //
+        // hvigorw always emits these 7 empty ClassItems as placeholder stubs for
+        // the OHOS SDK runtime namespaces.  They are NOT derived from the user's
+        // imports — they are a fixed set present in every merged ABC file.
+        //
+        // Class names start with 'L@' (0x40) so they sort before 'L_' annotation
+        // stubs (0x5F) and before user class names that start with 'L' followed by
+        // a bundle letter.
+        //
+        // access_flags = 0x0001 (ACC_PUBLIC): regular empty class, not an annotation.
+        let sdk_stubs = [
+            ClassRecord {
+                name: "L@ohos.app;".to_string(),
+                methods: vec![],
+                access_flags: 0x0001,
+                module_requests: vec![],
+            },
+            ClassRecord {
+                name: "L@ohos.curves;".to_string(),
+                methods: vec![],
+                access_flags: 0x0001,
+                module_requests: vec![],
+            },
+            ClassRecord {
+                name: "L@ohos.matrix4;".to_string(),
+                methods: vec![],
+                access_flags: 0x0001,
+                module_requests: vec![],
+            },
+            ClassRecord {
+                name: "L@system.app;".to_string(),
+                methods: vec![],
+                access_flags: 0x0001,
+                module_requests: vec![],
+            },
+            ClassRecord {
+                name: "L@system.curves;".to_string(),
+                methods: vec![],
+                access_flags: 0x0001,
+                module_requests: vec![],
+            },
+            ClassRecord {
+                name: "L@system.matrix4;".to_string(),
+                methods: vec![],
+                access_flags: 0x0001,
+                module_requests: vec![],
+            },
+            ClassRecord {
+                name: "L@system.router;".to_string(),
+                methods: vec![],
+                access_flags: 0x0001,
+                module_requests: vec![],
+            },
+        ];
+
         // ── Annotation stub classes (API 13+, acc=0x2001 = ACC_PUBLIC|ACC_ANNOTATION) ──
         let annotation_stubs = [
             ClassRecord {
@@ -173,11 +229,17 @@ impl AbcFile {
             },
         ];
 
-        // ── Sort ALL classes (user classes + annotation stubs) by name ────────
-        // User module names use '&' (0x26) which sorts before '_' (0x5F) used by
-        // annotation stubs, so user classes always appear first in the index.
-        let mut all_classes: Vec<&ClassRecord> =
-            self.records.iter().chain(annotation_stubs.iter()).collect();
+        // ── Sort ALL classes (user classes + sdk stubs + annotation stubs) by name ──
+        // Sort order by leading byte after 'L':
+        //   '@' (0x40) → SDK stubs   (L@ohos.*, L@system.*)
+        //   '_' (0x5F) → annotation stubs (L_ES*)
+        //   lowercase   → user bundle classes (Lcom.*, L&bundle&;)
+        let mut all_classes: Vec<&ClassRecord> = self
+            .records
+            .iter()
+            .chain(sdk_stubs.iter())
+            .chain(annotation_stubs.iter())
+            .collect();
         all_classes.sort_by(|a, b| a.name.cmp(&b.name));
 
         let total_classes = all_classes.len() as u32;
