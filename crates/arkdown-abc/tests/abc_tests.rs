@@ -497,15 +497,19 @@ fn test_module_record_scope_names_and_class_buffer_literals_are_linked() {
         "scopeNames entries are tagged strings"
     );
 
-    let has_minimal_class_buffer = literal_offsets.iter().any(|offset| {
+    let has_class_method_buffer = literal_offsets.iter().any(|offset| {
         let offset = *offset as usize;
-        read_u32(&bytes, offset) == 2
-            && bytes[offset + 4] == 0x02
-            && read_u32(&bytes, offset + 5) == 0
+        read_u32(&bytes, offset) == 8
+            && bytes[offset + 4] == 0x05
+            && inline_string_at(&bytes, read_u32(&bytes, offset + 5) as usize) == "onCreate"
+            && bytes[offset + 9] == 0x06
+            && bytes[offset + 14] == 0x09
+            && bytes[offset + 17] == 0x02
+            && read_u32(&bytes, offset + 18) == 1
     });
     assert!(
-        has_minimal_class_buffer,
-        "class buffer literal array carries tagged instancePropertyCount=0"
+        has_class_method_buffer,
+        "class buffer literal array links instance methods by MethodItem offset"
     );
 }
 

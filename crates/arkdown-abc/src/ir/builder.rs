@@ -4,7 +4,8 @@ use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     Argument, AssignmentTarget, BindingPattern, ClassElement, Declaration,
     ExportDefaultDeclarationKind, Expression, FunctionBody, ImportDeclarationSpecifier,
-    ImportOrExportKind, ModuleExportName, Program, PropertyKey, Statement,
+    ImportOrExportKind, MethodDefinition, MethodDefinitionKind, ModuleExportName, Program,
+    PropertyKey, Statement,
 };
 use oxc_parser::{Parser, ParserReturn};
 use oxc_span::SourceType;
@@ -317,18 +318,33 @@ fn compile_class_method_bodies(
     for stmt in stmts {
         // Handle `class Foo { ... }` (ClassDeclaration)
         if let Statement::ClassDeclaration(cls) = stmt {
-            compile_class_elements(&cls.body.body, strings, literal_arrays, methods);
+            let class_name = cls.id.as_ref().map(|id| id.name.as_str());
+            compile_class_elements(class_name, &cls.body.body, strings, literal_arrays, methods);
             continue;
         }
         if let Statement::ExportDefaultDeclaration(export) = stmt {
             if let ExportDefaultDeclarationKind::ClassDeclaration(cls) = &export.declaration {
-                compile_class_elements(&cls.body.body, strings, literal_arrays, methods);
+                let class_name = cls.id.as_ref().map(|id| id.name.as_str());
+                compile_class_elements(
+                    class_name,
+                    &cls.body.body,
+                    strings,
+                    literal_arrays,
+                    methods,
+                );
             }
             continue;
         }
         if let Statement::ExportNamedDeclaration(export) = stmt {
             if let Some(Declaration::ClassDeclaration(cls)) = &export.declaration {
-                compile_class_elements(&cls.body.body, strings, literal_arrays, methods);
+                let class_name = cls.id.as_ref().map(|id| id.name.as_str());
+                compile_class_elements(
+                    class_name,
+                    &cls.body.body,
+                    strings,
+                    literal_arrays,
+                    methods,
+                );
             }
             continue;
         }
@@ -345,7 +361,15 @@ fn compile_class_method_bodies(
 
                 if let Some(init) = &declarator.init {
                     if let Expression::ClassExpression(cls) = init {
-                        compile_class_elements(&cls.body.body, strings, literal_arrays, methods);
+                        let class_name =
+                            cls.id.as_ref().map_or(name.as_str(), |id| id.name.as_str());
+                        compile_class_elements(
+                            Some(class_name),
+                            &cls.body.body,
+                            strings,
+                            literal_arrays,
+                            methods,
+                        );
                         continue;
                     }
                 }
@@ -396,18 +420,37 @@ fn compile_class_method_bodies(
 
 /// Compile method bodies from a class element list and append MethodRecords.
 fn compile_class_elements(
+    class_name: Option<&str>,
     elements: &[ClassElement<'_>],
     strings: &mut StringTable,
     literal_arrays: &mut Vec<LiteralArray>,
     methods: &mut Vec<MethodRecord>,
 ) {
+    let class_name = class_name.unwrap_or("_");
+    let has_constructor = elements.iter().any(|element| {
+        matches!(
+            element,
+            ClassElement::MethodDefinition(method)
+                if method.kind == MethodDefinitionKind::Constructor
+        )
+    });
+    if !has_constructor {
+        methods.push(MethodRecord {
+            name: format!("#~@0=#{class_name}"),
+            bytecode: Insn::ReturnUndefined.encode(&mut StringTable::default()),
+            num_vregs: 0,
+            num_args: 0,
+            debug_info: None,
+        });
+    }
+
+    let mut seen_names = HashMap::<String, u16>::new();
     for element in elements {
         if let ClassElement::MethodDefinition(method) = element {
-            let key_name = match &method.key {
-                PropertyKey::StaticIdentifier(id) => id.name.as_str().to_string(),
-                PropertyKey::StringLiteral(s) => s.value.as_str().to_string(),
-                _ => continue,
+            let Some(key_name) = class_method_record_name(method, class_name) else {
+                continue;
             };
+            let key_name = suffix_duplicate_method_name(key_name, &mut seen_names);
             let bytecode =
                 compile_function_body(method.value.body.as_deref(), strings, literal_arrays);
             let num_vregs = estimate_vregs(&bytecode);
@@ -421,6 +464,81 @@ fn compile_class_elements(
             });
         }
     }
+}
+
+fn class_method_record_name(method: &MethodDefinition<'_>, class_name: &str) -> Option<String> {
+    let key = method_key_name(&method.key)?;
+    let name = match method.kind {
+        MethodDefinitionKind::Constructor => format!("#~@0=#{class_name}"),
+        _ if method.r#static => format!("#~@0<#{key}"),
+        _ => format!("#~@0>#{key}"),
+    };
+    Some(name)
+}
+
+fn method_key_name(key: &PropertyKey<'_>) -> Option<String> {
+    match key {
+        PropertyKey::StaticIdentifier(id) => Some(id.name.as_str().to_string()),
+        PropertyKey::StringLiteral(s) => Some(s.value.as_str().to_string()),
+        _ => None,
+    }
+}
+
+fn suffix_duplicate_method_name(name: String, seen_names: &mut HashMap<String, u16>) -> String {
+    let count = seen_names.entry(name.clone()).or_insert(0);
+    let suffixed = if *count == 0 {
+        name
+    } else {
+        format!("{name}^{count}")
+    };
+    *count += 1;
+    suffixed
+}
+
+fn class_buffer_literal_array(class_name: &str, elements: &[ClassElement<'_>]) -> LiteralArray {
+    let mut entries = Vec::new();
+    let mut seen_names = HashMap::<String, u16>::new();
+    let mut instance_method_count = 0u32;
+
+    for element in elements {
+        let ClassElement::MethodDefinition(method) = element else {
+            continue;
+        };
+        let Some(method_name) = class_method_record_name(method, class_name) else {
+            continue;
+        };
+        let method_name = suffix_duplicate_method_name(method_name, &mut seen_names);
+
+        if !is_class_buffer_method(method) {
+            continue;
+        }
+        let Some(public_name) = method_key_name(&method.key) else {
+            continue;
+        };
+
+        entries.push(LiteralEntry::TaggedString(public_name));
+        entries.push(LiteralEntry::TaggedMethodName(method_name));
+        entries.push(LiteralEntry::TaggedMethodAffiliate(
+            method.value.params.items.len() as u16,
+        ));
+        instance_method_count += 1;
+    }
+
+    entries.push(LiteralEntry::TaggedInteger(instance_method_count));
+    LiteralArray { entries }
+}
+
+fn is_class_buffer_method(method: &MethodDefinition<'_>) -> bool {
+    if method.kind == MethodDefinitionKind::Constructor || method.kind.is_accessor() {
+        return false;
+    }
+    if method.r#static {
+        return false;
+    }
+    let Some(key) = method_key_name(&method.key) else {
+        return false;
+    };
+    !matches!(key.as_str(), "initialRender" | "rerender")
 }
 
 /// Compile the top-level program body into bytecode for the `main` method.
@@ -557,7 +675,8 @@ impl<'a> CodeGen<'a> {
             Statement::ClassDeclaration(cls) => {
                 // Emit defineclasswithbuffer; result → accumulator.
                 let super_class = cls.super_class.as_ref();
-                self.emit_class_inner(super_class);
+                let class_name = cls.id.as_ref().map(|id| id.name.as_str());
+                self.emit_class_inner(class_name, &cls.body.body, super_class);
                 // Store the class constructor to a local register and,
                 // if the class has a name, expose it as a global.
                 if let Some(id) = &cls.id {
@@ -573,7 +692,8 @@ impl<'a> CodeGen<'a> {
             Statement::ExportDefaultDeclaration(export) => {
                 if let ExportDefaultDeclarationKind::ClassDeclaration(cls) = &export.declaration {
                     let super_class = cls.super_class.as_ref();
-                    self.emit_class_inner(super_class);
+                    let class_name = cls.id.as_ref().map(|id| id.name.as_str());
+                    self.emit_class_inner(class_name, &cls.body.body, super_class);
                     if let Some(id) = &cls.id {
                         let reg = self.alloc_reg();
                         self.push(Insn::Sta(reg));
@@ -588,7 +708,8 @@ impl<'a> CodeGen<'a> {
             Statement::ExportNamedDeclaration(export) => {
                 if let Some(Declaration::ClassDeclaration(cls)) = &export.declaration {
                     let super_class = cls.super_class.as_ref();
-                    self.emit_class_inner(super_class);
+                    let class_name = cls.id.as_ref().map(|id| id.name.as_str());
+                    self.emit_class_inner(class_name, &cls.body.body, super_class);
                     if let Some(id) = &cls.id {
                         let reg = self.alloc_reg();
                         self.push(Insn::Sta(reg));
@@ -710,7 +831,16 @@ impl<'a> CodeGen<'a> {
             };
 
             if let Some(init) = &declarator.init {
-                self.emit_expr(init);
+                if let Expression::ClassExpression(cls) = init {
+                    let class_name = cls.id.as_ref().map_or(name.as_str(), |id| id.name.as_str());
+                    self.emit_class_inner(
+                        Some(class_name),
+                        &cls.body.body,
+                        cls.super_class.as_ref(),
+                    );
+                } else {
+                    self.emit_expr(init);
+                }
             } else {
                 self.push(Insn::LdUndefined);
             }
@@ -800,7 +930,8 @@ impl<'a> CodeGen<'a> {
                 // Result (class constructor function) is left in the accumulator
                 // so the caller (e.g. emit_var_decl) can assign it as needed.
                 let super_class = cls.super_class.as_ref();
-                self.emit_class_inner(super_class);
+                let class_name = cls.id.as_ref().map(|id| id.name.as_str());
+                self.emit_class_inner(class_name, &cls.body.body, super_class);
             }
             Expression::ArrowFunctionExpression(arrow) => {
                 // Arrow function literal: `(params) => { body }`.
@@ -825,13 +956,18 @@ impl<'a> CodeGen<'a> {
 
     /// Emit `defineclasswithbuffer` for a class (declaration or expression).
     ///
-    /// A stub [`LiteralArray`] with 0 entries is registered in
-    /// `self.literal_arrays`; its index becomes the `buf_id` operand.  Method
-    /// bodies are already compiled as separate `MethodRecord`s at the
-    /// class-record level — the runtime resolves them there.
+    /// A class-buffer [`LiteralArray`] is registered in `self.literal_arrays`;
+    /// its index becomes the `buf_id` operand. Method bodies are already
+    /// compiled as separate `MethodRecord`s at the class-record level, and the
+    /// literal buffer points at those MethodItems by file offset.
     ///
     /// After this call the class constructor is in the accumulator.
-    fn emit_class_inner(&mut self, super_class: Option<&Expression<'_>>) {
+    fn emit_class_inner(
+        &mut self,
+        class_name: Option<&str>,
+        elements: &[ClassElement<'_>],
+        super_class: Option<&Expression<'_>>,
+    ) {
         // Load the prototype (parent class) if present.
         let (proto_argc, proto_vreg) = if let Some(sc) = super_class {
             self.emit_expr(sc);
@@ -842,11 +978,12 @@ impl<'a> CodeGen<'a> {
             (0u16, 0u8)
         };
 
-        // Register a stub literal array and use its index as buf_id.
+        // Register the class literal buffer and use its index as buf_id.
         let lit_arr_id = self.literal_arrays.len() as u16;
-        self.literal_arrays.push(LiteralArray {
-            entries: vec![LiteralEntry::TaggedInteger(0)],
-        });
+        self.literal_arrays.push(class_buffer_literal_array(
+            class_name.unwrap_or("_"),
+            elements,
+        ));
 
         // Emit defineclasswithbuffer:
         //   slot=0, ctor_id=lit_arr_id (stub), buf_id=lit_arr_id,

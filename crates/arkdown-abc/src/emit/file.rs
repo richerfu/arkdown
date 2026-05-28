@@ -17,6 +17,7 @@ pub enum LiteralEntry {
     TaggedInteger(u32),
     TaggedString(String),
     TaggedMethod(u32),
+    TaggedMethodName(String),
     TaggedMethodAffiliate(u16),
     TaggedNull,
     RawU32(u32),
@@ -40,6 +41,7 @@ impl LiteralEntry {
             LiteralEntry::TaggedInteger(_)
             | LiteralEntry::TaggedString(_)
             | LiteralEntry::TaggedMethod(_)
+            | LiteralEntry::TaggedMethodName(_)
             | LiteralEntry::TaggedMethodAffiliate(_)
             | LiteralEntry::TaggedNull => 2,
             LiteralEntry::RawU32(_) | LiteralEntry::RawU16(_) | LiteralEntry::RawString(_) => 1,
@@ -442,6 +444,17 @@ impl AbcFile {
             .map(|(c, &off)| (c.name.as_str(), off))
             .collect();
 
+        let mut method_name_offsets = std::collections::HashMap::new();
+        for (class, &class_off) in all_classes.iter().zip(class_item_offsets.iter()) {
+            for (method, method_off) in class
+                .methods
+                .iter()
+                .zip(class.method_item_offsets(class_off))
+            {
+                method_name_offsets.insert(method.name.as_str(), method_off);
+            }
+        }
+
         // Build the IndexHeader class table used by FieldItem/MethodItem
         // `class_idx` values. hvigor keeps two non-EntityId scalar entries at
         // the front, then `_ESSlotNumberAnnotation`, user records, and SDK
@@ -580,6 +593,14 @@ impl AbcFile {
                             buf.extend_from_slice(&offset.to_le_bytes());
                         }
                         LiteralEntry::TaggedMethod(off) => {
+                            buf.push(0x06);
+                            buf.extend_from_slice(&off.to_le_bytes());
+                        }
+                        LiteralEntry::TaggedMethodName(name) => {
+                            let off = method_name_offsets
+                                .get(name.as_str())
+                                .copied()
+                                .expect("tagged method literal offset must be resolved");
                             buf.push(0x06);
                             buf.extend_from_slice(&off.to_le_bytes());
                         }
