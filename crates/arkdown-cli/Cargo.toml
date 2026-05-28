@@ -29,9 +29,9 @@ tokio = { workspace = true }
 anyhow = { workspace = true }
 fs-err = { workspace = true }
 json5 = { workspace = true }
+serde_json = { workspace = true }
 walkdir = { workspace = true }
 
 [dev-dependencies]
-serde_json = { workspace = true }
 tempfile = "3"
 zip = { workspace = true }

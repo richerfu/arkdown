@@ -273,6 +273,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 cache_file: None,
             })
             .map_err(|e| anyhow::anyhow!("ABC compile failed: {}", e))?;
+            write_hvigor_source_maps(bundle_out, loader_json, &record_name_map)?;
             for (_chunk_name, path) in &bundle_out.chunk_files {
                 if path.extension().and_then(|e| e.to_str()) == Some("js") && path.exists() {
                     match fs_err::remove_file(path) {
@@ -473,4 +474,73 @@ fn collect_js_chunks_from_output(
         });
     }
     modules
+}
+
+fn write_hvigor_source_maps(
+    bundle_out: &arkdown::BundleOutput,
+    loader_json: &arkdown_profile::LoaderJson,
+    record_name_map: &HashMap<String, ChunkCompileMeta>,
+) -> Result<()> {
+    let Some(source_maps_path) = &bundle_out.source_maps_path else {
+        return Ok(());
+    };
+
+    let mut source_maps = serde_json::Map::new();
+    for chunk in bundle_out.chunk_graph.chunks.iter() {
+        let Some(meta) = record_name_map.get(chunk.name.as_str()) else {
+            continue;
+        };
+        let Some(source_file) = meta.source_file.as_deref() else {
+            continue;
+        };
+        let Some(raw_map) = chunk.source_map.as_deref() else {
+            continue;
+        };
+
+        let map: serde_json::Value = serde_json::from_str(raw_map)
+            .with_context(|| format!("failed to parse source map for chunk {}", chunk.name))?;
+        let mappings = map
+            .get("mappings")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        let source_file = source_file.trim_start_matches("./");
+        let key = format!(
+            "{}|{}|1.0.0|src/main/{}",
+            loader_json.module_name,
+            loader_json.module_name,
+            with_extension(source_file, "ts")
+        );
+        let file = std::path::Path::new(source_file)
+            .file_name()
+            .and_then(|file| file.to_str())
+            .unwrap_or(source_file);
+        let source = format!("{}/src/main/{}", loader_json.module_name, source_file);
+
+        source_maps.insert(
+            key,
+            serde_json::json!({
+                "version": 3,
+                "file": file,
+                "sourceRoot": "",
+                "sources": [source],
+                "names": [],
+                "mappings": mappings,
+                "entry-package-info": format!("{}|1.0.0", loader_json.module_name),
+            }),
+        );
+    }
+
+    if !source_maps.is_empty() {
+        let content = serde_json::to_string(&source_maps)
+            .context("failed to serialize hvigor sourceMaps.map")?;
+        fs_err::write(source_maps_path, content)?;
+    }
+
+    Ok(())
+}
+
+fn with_extension(path: &str, extension: &str) -> String {
+    path.rsplit_once('.')
+        .map(|(stem, _)| format!("{stem}.{extension}"))
+        .unwrap_or_else(|| format!("{path}.{extension}"))
 }
