@@ -4,29 +4,35 @@
 //! and name.  It is consumed by developer tools and by the compiler for symbol
 //! resolution; it is NOT included in the final HAP archive.
 
-use std::path::Path;
 use crate::compiler::CompiledEntry;
+use std::path::Path;
 
 /// Write a `ResourceTable.txt` file listing every entry in `entries`.
 pub fn write_resource_table(
     entries: &[CompiledEntry],
     output: &Path,
 ) -> Result<(), std::io::Error> {
-    let mut lines = Vec::with_capacity(entries.len() + 1);
-    lines.push("ResourceTable".to_string());
-    for e in entries {
+    let mut sorted = entries.iter().collect::<Vec<_>>();
+    sorted.sort_by(|a, b| {
+        type_sort_order(a.entry_type)
+            .cmp(&type_sort_order(b.entry_type))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+
+    let mut lines = Vec::with_capacity(sorted.len());
+    for e in sorted {
         lines.push(format!(
-            "  entry: 0x{:08X}  {}  {}",
-            e.id,
+            "{} {} 0x{:08x}",
             type_name(e.entry_type),
-            e.name
+            e.name,
+            e.id
         ));
     }
     fs_err::write(output, lines.join("\n"))?;
     Ok(())
 }
 
-fn type_name(t: u32) -> &'static str {
+pub(crate) fn type_name(t: u32) -> &'static str {
     match t {
         0x05 => "integer",
         0x06 => "float",
@@ -35,6 +41,18 @@ fn type_name(t: u32) -> &'static str {
         0x13 => "media",
         0x14 => "profile",
         _ => "unknown",
+    }
+}
+
+fn type_sort_order(t: u32) -> u8 {
+    match t {
+        0x09 => 0, // string
+        0x0E => 1, // color
+        0x06 => 2, // float
+        0x05 => 3, // integer
+        0x13 => 4, // media
+        0x14 => 5, // profile
+        _ => 9,
     }
 }
 
@@ -56,10 +74,7 @@ mod tests {
         }];
         write_resource_table(&entries, &out).unwrap();
         let content = std::fs::read_to_string(&out).unwrap();
-        assert!(content.starts_with("ResourceTable"));
-        assert!(content.contains("app_name"));
-        assert!(content.contains("0x01000001"));
-        assert!(content.contains("string"));
+        assert_eq!(content, "string app_name 0x01000001");
     }
 
     #[test]
@@ -68,6 +83,6 @@ mod tests {
         let out = tmp.path().join("ResourceTable.txt");
         write_resource_table(&[], &out).unwrap();
         let content = std::fs::read_to_string(&out).unwrap();
-        assert_eq!(content.trim(), "ResourceTable");
+        assert!(content.is_empty());
     }
 }

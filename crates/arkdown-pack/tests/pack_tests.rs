@@ -1,6 +1,7 @@
 //! Integration tests for `arkdown-pack` public API.
 
 use std::fs;
+use std::io::Read;
 use std::sync::Arc;
 
 use arkdown_core::{
@@ -45,7 +46,9 @@ fn make_config() -> Arc<ArkdownConfig> {
     })
 }
 
-fn write_minimal_inputs(tmp: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+fn write_minimal_inputs(
+    tmp: &std::path::Path,
+) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
     let abc = tmp.join("modules.abc");
     let res = tmp.join("resources.index");
     let modj = tmp.join("module.json");
@@ -222,15 +225,25 @@ fn test_hap_contains_resources_index() {
 }
 
 #[test]
-fn test_hap_resource_files_copied_from_src() {
+fn test_hap_resource_files_copied_from_processed_dir() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (abc, res, modj) = write_minimal_inputs(tmp.path());
     let out = tmp.path().join("res_copy.hap");
 
-    // Create a minimal resources/base/element/string.json under src/main/resources
-    let res_src = tmp.path().join("src/main/resources/base/element");
-    fs::create_dir_all(&res_src).unwrap();
-    fs::write(res_src.join("string.json"), br#"{"string":[]}"#).unwrap();
+    let media_dir = tmp.path().join("compiled/resources/base/media");
+    let profile_dir = tmp.path().join("compiled/resources/base/profile");
+    fs::create_dir_all(&media_dir).unwrap();
+    fs::create_dir_all(&profile_dir).unwrap();
+    fs::write(
+        media_dir.join("layered_image.json"),
+        b"{\n  \"layered-image\": {\n    \"background\": \"$media:16777217\"\n  }\n}",
+    )
+    .unwrap();
+    fs::write(
+        profile_dir.join("main_pages.json"),
+        b"{\n  \"src\": [\"pages/Index\"]\n}",
+    )
+    .unwrap();
 
     Packager::new(make_config())
         .pack_hap(PackInput {
@@ -240,7 +253,7 @@ fn test_hap_resource_files_copied_from_src() {
             module_json: modj,
             native_libs: vec![],
             output_path: out.clone(),
-            resources_src_dir: Some(tmp.path().join("src/main/resources")),
+            resources_src_dir: Some(tmp.path().join("compiled/resources")),
             bundle_version_code: 1000000,
             bundle_version_name: "1.0.0".to_string(),
             bundle_type: "app".to_string(),
@@ -250,12 +263,30 @@ fn test_hap_resource_files_copied_from_src() {
         .expect("pack_hap must succeed");
 
     let file = fs::File::open(&out).expect("open HAP");
-    let archive = zip::ZipArchive::new(file).expect("valid ZIP");
-    let names: Vec<_> = archive.file_names().collect();
+    let mut archive = zip::ZipArchive::new(file).expect("valid ZIP");
+    let names: Vec<_> = archive.file_names().map(ToOwned::to_owned).collect();
     assert!(
-        names.iter().any(|n| n.ends_with("string.json")),
-        "HAP must contain copied string.json; entries: {:?}",
         names
+            .iter()
+            .any(|n| n == "resources/base/media/layered_image.json"),
+        "HAP must contain processed layered image JSON; entries: {:?}",
+        names
+    );
+    assert!(
+        names.iter().all(|n| !n.contains("/element/")),
+        "HAP must not include raw element JSON files; entries: {:?}",
+        names
+    );
+
+    let mut layered = String::new();
+    archive
+        .by_name("resources/base/media/layered_image.json")
+        .unwrap()
+        .read_to_string(&mut layered)
+        .unwrap();
+    assert_eq!(
+        layered,
+        r#"{"layered-image":{"background":"$media:16777217"}}"#
     );
 }
 

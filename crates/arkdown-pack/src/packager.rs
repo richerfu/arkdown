@@ -104,7 +104,11 @@ pub struct PackInput {
     pub native_libs: Vec<PathBuf>,
     /// Destination archive path, e.g. `build/.../entry.hap`.
     pub output_path: PathBuf,
-    /// Source resources directory (`src/main/resources/`) — for copying resource files into HAP.
+    /// Directory whose contents are copied into HAP under `resources/`.
+    ///
+    /// The CLI passes the resource compiler's processed `.../res/default/resources`
+    /// directory so the archive contains restool-style resource files rather than
+    /// raw source `element/*.json` inputs.
     pub resources_src_dir: Option<PathBuf>,
     /// Bundle version code (from `AppScope/app.json5` `versionCode`).
     pub bundle_version_code: u64,
@@ -218,7 +222,9 @@ impl Packager {
                         .extension()
                         .and_then(|e| e.to_str())
                         .unwrap_or("");
-                    if matches!(ext, "json" | "json5" | "xml" | "txt" | "html") {
+                    if ext == "json" {
+                        add_json_resource_deflate(&mut writer, &dest, entry.path())?;
+                    } else if matches!(ext, "json5" | "xml" | "txt" | "html") {
                         zip_writer::add_file_deflate(&mut writer, &dest, entry.path())?;
                     } else {
                         zip_writer::add_file_stored(&mut writer, &dest, entry.path())?;
@@ -296,5 +302,20 @@ impl Packager {
 
         writer.finish()?;
         Ok(input.output_path)
+    }
+}
+
+fn add_json_resource_deflate<W: std::io::Write + std::io::Seek>(
+    writer: &mut zip::ZipWriter<W>,
+    archive_path: &str,
+    file_path: &std::path::Path,
+) -> Result<(), PackError> {
+    let bytes = fs_err::read(file_path)?;
+    if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+        let minified =
+            serde_json::to_vec(&value).expect("serializing parsed JSON should not fail");
+        zip_writer::add_bytes_deflate(writer, archive_path, &minified)
+    } else {
+        zip_writer::add_bytes_deflate(writer, archive_path, &bytes)
     }
 }

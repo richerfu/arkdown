@@ -4,11 +4,14 @@
 //! element JSON files, copies media and profile files, and writes
 //! `resources.index` and `ResourceTable.txt` to the output directory.
 
-use std::collections::HashMap;
-use std::path::PathBuf;
-use crate::{element, index, scan, table};
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+
+use serde_json::Value;
+
 use crate::error::ResourceError;
 use crate::scan::ResourceCategory;
+use crate::{element, index, scan, table};
 
 /// Build-time configuration for the resource compiler.
 #[derive(Debug, Clone)]
@@ -39,6 +42,10 @@ pub struct ResourceCompileOutput {
     pub resources_index: PathBuf,
     /// Path to the generated `ResourceTable.txt`.
     pub resource_table: PathBuf,
+    /// Path to the generated `ids_map/id_defined.json`.
+    pub ids_defined: PathBuf,
+    /// Directory whose contents should be packaged under `resources/` in HAP/HSP.
+    pub resources_dir: PathBuf,
     /// `(name, path)` pairs for every profile file that was copied.
     pub profiles: Vec<(String, PathBuf)>,
     /// Map of resource name → assigned numeric ID (e.g. `"app_name"` → `0x01000000`).
@@ -66,15 +73,22 @@ pub struct CompiledEntry {
     pub qualifier: String,
 }
 
+#[derive(Debug)]
+struct ResourceCopy {
+    source: PathBuf,
+    relative_path: PathBuf,
+    category: ResourceCategory,
+}
+
 /// Pure-Rust implementation of OpenHarmony's `restool` resource compiler.
 pub struct ResourceCompiler {
-    _config: ResourceCompileConfig,
+    config: ResourceCompileConfig,
 }
 
 impl ResourceCompiler {
     /// Create a new compiler with the given configuration.
     pub fn new(config: ResourceCompileConfig) -> Self {
-        ResourceCompiler { _config: config }
+        ResourceCompiler { config }
     }
 
     /// Compile all resources found in `input.resources_dirs` and write outputs
@@ -87,23 +101,35 @@ impl ResourceCompiler {
 
         let mut all_entries: Vec<CompiledEntry> = Vec::new();
         let mut profiles: Vec<(String, PathBuf)> = Vec::new();
+        let mut resource_copies: Vec<ResourceCopy> = Vec::new();
+        let mut seen_resources: HashSet<(String, u32, String)> = HashSet::new();
         // Resource IDs start at 0x01000000 and increment monotonically.
         let mut next_id: u32 = 0x0100_0000;
         // Tracks name → numeric ID for every resource that is assigned an ID.
         let mut resource_ids: HashMap<String, u32> = HashMap::new();
 
         for res_dir in &input.resources_dirs {
-            let files = scan::scan_resources(res_dir);
+            let mut files = scan::scan_resources(res_dir);
+            files.sort_by(resource_file_cmp);
 
             for file in &files {
                 match file.category {
                     ResourceCategory::Element => {
-                        let entries = element::parse_element_file(&file.path);
+                        let mut entries = element::parse_element_file(&file.path);
+                        entries.sort_by(|a, b| a.name.cmp(&b.name));
                         for e in entries {
-                            resource_ids.insert(e.name.clone(), next_id);
+                            let entry_type = e.entry_type.resource_type_id();
+                            if !seen_resources.insert((
+                                file.qualifier.0.clone(),
+                                entry_type,
+                                e.name.clone(),
+                            )) {
+                                continue;
+                            }
+                            resource_ids.entry(e.name.clone()).or_insert(next_id);
                             all_entries.push(CompiledEntry {
                                 id: next_id,
-                                entry_type: e.entry_type.resource_type_id(),
+                                entry_type,
                                 name: e.name,
                                 value: e.value,
                                 qualifier: file.qualifier.0.clone(),
@@ -113,37 +139,68 @@ impl ResourceCompiler {
                     }
 
                     ResourceCategory::Media => {
-                        let media_out_dir = input.output_dir.join("media");
-                        fs_err::create_dir_all(&media_out_dir)?;
                         let filename = file.path.file_name().expect("media file has no filename");
-                        let out_path = media_out_dir.join(filename);
-                        fs_err::copy(&file.path, &out_path)?;
-                        resource_ids.insert(file.name.clone(), next_id);
+                        let qualifier = qualifier_dir(&file.qualifier.0);
+                        let entry_type = 0x13; // MEDIA type (matches restool 6.0)
+                        if !seen_resources.insert((
+                            file.qualifier.0.clone(),
+                            entry_type,
+                            file.name.clone(),
+                        )) {
+                            continue;
+                        }
+                        resource_ids.entry(file.name.clone()).or_insert(next_id);
+                        let relative_path = PathBuf::from(qualifier).join("media").join(filename);
+                        resource_copies.push(ResourceCopy {
+                            source: file.path.clone(),
+                            relative_path: relative_path.clone(),
+                            category: file.category.clone(),
+                        });
                         all_entries.push(CompiledEntry {
                             id: next_id,
-                            entry_type: 0x13, // MEDIA type (matches restool 6.0)
+                            entry_type,
                             name: file.name.clone(),
-                            value: format!(
-                                "media/{}",
-                                filename.to_string_lossy()
-                            ),
+                            value: resource_value_path(&self.config.module_name, &relative_path),
                             qualifier: file.qualifier.0.clone(),
                         });
                         next_id += 1;
                     }
 
                     ResourceCategory::Profile => {
-                        let profile_out_dir =
-                            input.output_dir.join("base").join("profile");
-                        fs_err::create_dir_all(&profile_out_dir)?;
                         let filename = file.path.file_name().expect("profile file has no filename");
-                        let out_path = profile_out_dir.join(filename);
-                        fs_err::copy(&file.path, &out_path)?;
+                        let qualifier = qualifier_dir(&file.qualifier.0);
+                        let entry_type = 0x14; // PROFILE type (matches restool 6.0)
+                        if !seen_resources.insert((
+                            file.qualifier.0.clone(),
+                            entry_type,
+                            file.name.clone(),
+                        )) {
+                            continue;
+                        }
+                        resource_ids.entry(file.name.clone()).or_insert(next_id);
+                        let relative_path = PathBuf::from(qualifier).join("profile").join(filename);
+                        resource_copies.push(ResourceCopy {
+                            source: file.path.clone(),
+                            relative_path: relative_path.clone(),
+                            category: file.category.clone(),
+                        });
+                        let out_path = input.output_dir.join("resources").join(&relative_path);
                         profiles.push((file.name.clone(), out_path));
+                        all_entries.push(CompiledEntry {
+                            id: next_id,
+                            entry_type,
+                            name: file.name.clone(),
+                            value: resource_value_path(&self.config.module_name, &relative_path),
+                            qualifier: file.qualifier.0.clone(),
+                        });
+                        next_id += 1;
                     }
                 }
             }
         }
+
+        let resources_dir = input.output_dir.join("resources");
+        copy_resource_files(&resource_copies, &resources_dir, &resource_ids)?;
 
         // Write binary index.
         let index_path = input.output_dir.join("resources.index");
@@ -153,13 +210,126 @@ impl ResourceCompiler {
         let table_path = input.output_dir.join("ResourceTable.txt");
         table::write_resource_table(&all_entries, &table_path)?;
 
+        let ids_defined_path = input.output_dir.join("ids_map").join("id_defined.json");
+        write_id_defined(&all_entries, &ids_defined_path)?;
+
         Ok(ResourceCompileOutput {
             resources_index: index_path,
             resource_table: table_path,
+            ids_defined: ids_defined_path,
+            resources_dir,
             profiles,
             resource_ids,
         })
     }
+}
+
+fn resource_file_cmp(a: &scan::ResourceFile, b: &scan::ResourceFile) -> std::cmp::Ordering {
+    resource_file_sort_key(a).cmp(&resource_file_sort_key(b))
+}
+
+fn resource_file_sort_key(file: &scan::ResourceFile) -> (String, u8, String) {
+    let category_order = match file.category {
+        ResourceCategory::Element => match file.name.as_str() {
+            "string" => 0,
+            "color" => 1,
+            "float" => 2,
+            "integer" => 3,
+            _ => 9,
+        },
+        ResourceCategory::Media => 10,
+        ResourceCategory::Profile => 20,
+    };
+    (file.qualifier.0.clone(), category_order, file.name.clone())
+}
+
+fn qualifier_dir(qualifier: &str) -> &str {
+    if qualifier.is_empty() {
+        "base"
+    } else {
+        qualifier
+    }
+}
+
+fn resource_value_path(module_name: &str, relative_path: &Path) -> String {
+    format!(
+        "{}/resources/{}",
+        module_name,
+        relative_path.to_string_lossy().replace('\\', "/")
+    )
+}
+
+fn copy_resource_files(
+    copies: &[ResourceCopy],
+    resources_dir: &Path,
+    resource_ids: &HashMap<String, u32>,
+) -> Result<(), ResourceError> {
+    fs_err::create_dir_all(resources_dir)?;
+    for copy in copies {
+        let out_path = resources_dir.join(&copy.relative_path);
+        if let Some(parent) = out_path.parent() {
+            fs_err::create_dir_all(parent)?;
+        }
+
+        if copy.category == ResourceCategory::Media
+            && copy.source.extension().and_then(|e| e.to_str()) == Some("json")
+        {
+            let content = fs_err::read_to_string(&copy.source)?;
+            if let Ok(mut json) = serde_json::from_str::<Value>(&content) {
+                rewrite_media_refs(&mut json, resource_ids);
+                let bytes =
+                    serde_json::to_vec_pretty(&json).unwrap_or_else(|_| content.into_bytes());
+                fs_err::write(&out_path, bytes)?;
+                continue;
+            }
+        }
+
+        fs_err::copy(&copy.source, &out_path)?;
+    }
+    Ok(())
+}
+
+fn rewrite_media_refs(value: &mut Value, resource_ids: &HashMap<String, u32>) {
+    match value {
+        Value::String(s) => {
+            if let Some(name) = s.strip_prefix("$media:") {
+                if let Some(id) = resource_ids.get(name) {
+                    *s = format!("$media:{id}");
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                rewrite_media_refs(item, resource_ids);
+            }
+        }
+        Value::Object(map) => {
+            for item in map.values_mut() {
+                rewrite_media_refs(item, resource_ids);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn write_id_defined(entries: &[CompiledEntry], output: &Path) -> Result<(), ResourceError> {
+    if let Some(parent) = output.parent() {
+        fs_err::create_dir_all(parent)?;
+    }
+    let records = entries
+        .iter()
+        .map(|entry| {
+            serde_json::json!({
+                "type": table::type_name(entry.entry_type),
+                "name": entry.name,
+                "id": format!("0x{:08x}", entry.id),
+            })
+        })
+        .collect::<Vec<_>>();
+    let content = serde_json::to_vec_pretty(&serde_json::json!({ "record": records }))
+        .expect("serializing id_defined.json should not fail");
+    fs_err::write(output, content)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -197,6 +367,8 @@ mod tests {
 
         assert!(result.resources_index.exists());
         assert!(result.resource_table.exists());
+        assert!(result.ids_defined.exists());
+        assert!(result.resources_dir.exists());
 
         let table = fs::read_to_string(&result.resource_table).unwrap();
         assert!(table.contains("app_name"));
@@ -218,7 +390,7 @@ mod tests {
             })
             .unwrap();
 
-        assert!(out_dir.join("media/icon.png").exists());
+        assert!(out_dir.join("resources/base/media/icon.png").exists());
 
         let table = fs::read_to_string(&result.resource_table).unwrap();
         assert!(table.contains("icon"));
@@ -230,11 +402,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let profile_dir = tmp.path().join("resources/base/profile");
         fs::create_dir_all(&profile_dir).unwrap();
-        fs::write(
-            profile_dir.join("router_map.json"),
-            r#"{"routerMap":[]}"#,
-        )
-        .unwrap();
+        fs::write(profile_dir.join("router_map.json"), r#"{"routerMap":[]}"#).unwrap();
 
         let out_dir = tmp.path().join("out");
         let result = make_compiler()
@@ -244,7 +412,9 @@ mod tests {
             })
             .unwrap();
 
-        assert!(out_dir.join("base/profile/router_map.json").exists());
+        assert!(out_dir
+            .join("resources/base/profile/router_map.json")
+            .exists());
         assert_eq!(result.profiles.len(), 1);
         assert_eq!(result.profiles[0].0, "router_map");
     }
@@ -272,10 +442,7 @@ mod tests {
         let out_dir = tmp.path().join("out");
         let result = make_compiler()
             .compile(ResourceCompileInput {
-                resources_dirs: vec![
-                    tmp.path().join("res1"),
-                    tmp.path().join("res2"),
-                ],
+                resources_dirs: vec![tmp.path().join("res1"), tmp.path().join("res2")],
                 output_dir: out_dir.clone(),
             })
             .unwrap();

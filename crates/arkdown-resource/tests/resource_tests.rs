@@ -17,7 +17,10 @@ fn make_compiler() -> ResourceCompiler {
 }
 
 fn write_string_json(dir: &std::path::Path, name: &str, value: &str) {
-    let content = format!(r#"{{"string":[{{"name":"{}","value":"{}"}}]}}"#, name, value);
+    let content = format!(
+        r#"{{"string":[{{"name":"{}","value":"{}"}}]}}"#,
+        name, value
+    );
     fs::write(dir.join("string.json"), content).unwrap();
 }
 
@@ -36,9 +39,23 @@ fn test_empty_resources_dir_returns_ok() {
         resources_dirs: vec![res_dir],
         output_dir: out_dir.clone(),
     });
-    assert!(result.is_ok(), "empty resources dir must not error: {:?}", result.err());
-    assert!(out_dir.join("resources.index").exists(), "resources.index must be created");
-    assert!(out_dir.join("ResourceTable.txt").exists(), "ResourceTable.txt must be created");
+    assert!(
+        result.is_ok(),
+        "empty resources dir must not error: {:?}",
+        result.err()
+    );
+    assert!(
+        out_dir.join("resources.index").exists(),
+        "resources.index must be created"
+    );
+    assert!(
+        out_dir.join("ResourceTable.txt").exists(),
+        "ResourceTable.txt must be created"
+    );
+    assert!(
+        out_dir.join("ids_map/id_defined.json").exists(),
+        "id_defined.json must be created"
+    );
 }
 
 #[test]
@@ -101,7 +118,10 @@ fn test_resources_index_is_nonempty_with_entries() {
         .expect("compile must succeed");
 
     let meta = fs::metadata(&result.resources_index).expect("metadata");
-    assert!(meta.len() > 4, "resources.index must contain more than just the magic header");
+    assert!(
+        meta.len() > 4,
+        "resources.index must contain more than just the magic header"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -205,10 +225,16 @@ fn test_media_file_copied_to_output_dir() {
         })
         .expect("compile must succeed");
 
-    let copied = out_dir.join("media/logo.png");
-    assert!(copied.exists(), "logo.png must be copied to output/media/");
+    let copied = out_dir.join("resources/base/media/logo.png");
+    assert!(
+        copied.exists(),
+        "logo.png must be copied to output/resources/base/media/"
+    );
     let copied_bytes = fs::read(&copied).expect("read copied media file");
-    assert_eq!(copied_bytes, img_data, "copied media file content must match original");
+    assert_eq!(
+        copied_bytes, img_data,
+        "copied media file content must match original"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -220,7 +246,11 @@ fn test_profile_file_copied_and_returned() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let profile_dir = tmp.path().join("res/base/profile");
     fs::create_dir_all(&profile_dir).unwrap();
-    fs::write(profile_dir.join("main_pages.json"), r#"{"src":["pages/Index"]}"#).unwrap();
+    fs::write(
+        profile_dir.join("main_pages.json"),
+        r#"{"src":["pages/Index"]}"#,
+    )
+    .unwrap();
 
     let out_dir = tmp.path().join("out");
     let result = make_compiler()
@@ -231,11 +261,115 @@ fn test_profile_file_copied_and_returned() {
         .expect("compile must succeed");
 
     assert_eq!(result.profiles.len(), 1, "one profile should be reported");
-    assert_eq!(result.profiles[0].0, "main_pages", "profile name should be the file stem");
-    assert!(
-        out_dir.join("base/profile/main_pages.json").exists(),
-        "profile JSON must be copied to base/profile/"
+    assert_eq!(
+        result.profiles[0].0, "main_pages",
+        "profile name should be the file stem"
     );
+    assert!(
+        out_dir
+            .join("resources/base/profile/main_pages.json")
+            .exists(),
+        "profile JSON must be copied to resources/base/profile/"
+    );
+}
+
+#[test]
+fn test_hvigor_resource_layout_dedup_and_processed_media_json() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+
+    let app_media = tmp.path().join("app/base/media");
+    let app_element = tmp.path().join("app/base/element");
+    let module_media = tmp.path().join("module/base/media");
+    let module_element = tmp.path().join("module/base/element");
+    let module_profile = tmp.path().join("module/base/profile");
+    fs::create_dir_all(&app_media).unwrap();
+    fs::create_dir_all(&app_element).unwrap();
+    fs::create_dir_all(&module_media).unwrap();
+    fs::create_dir_all(&module_element).unwrap();
+    fs::create_dir_all(&module_profile).unwrap();
+
+    write_string_json(&app_element, "app_name", "ArkdownTest");
+    fs::write(app_media.join("background.png"), b"app-bg").unwrap();
+    fs::write(app_media.join("foreground.png"), b"app-fg").unwrap();
+    fs::write(
+        app_media.join("layered_image.json"),
+        r#"{"layered-image":{"background":"$media:background","foreground":"$media:foreground"}}"#,
+    )
+    .unwrap();
+
+    fs::write(module_media.join("background.png"), b"module-bg").unwrap();
+    fs::write(module_media.join("foreground.png"), b"module-fg").unwrap();
+    fs::write(module_media.join("startIcon.png"), b"start").unwrap();
+    fs::write(
+        module_element.join("string.json"),
+        r#"{"string":[{"name":"module_desc","value":"Test module"},{"name":"EntryAbility_desc","value":"description"},{"name":"EntryAbility_label","value":"Entry"}]}"#,
+    )
+    .unwrap();
+    fs::write(
+        module_element.join("color.json"),
+        r##"{"color":[{"name":"start_window_background","value":"#FFFFFF"}]}"##,
+    )
+    .unwrap();
+    fs::write(
+        module_profile.join("main_pages.json"),
+        r#"{"src":["pages/Index"]}"#,
+    )
+    .unwrap();
+
+    let out_dir = tmp.path().join("out/default");
+    let result = ResourceCompiler::new(ResourceCompileConfig {
+        package_name: "com.example.tests".into(),
+        module_name: "entry".into(),
+        device_types: vec!["phone".into()],
+        is_debug: false,
+    })
+    .compile(ResourceCompileInput {
+        resources_dirs: vec![tmp.path().join("app"), tmp.path().join("module")],
+        output_dir: out_dir.clone(),
+    })
+    .expect("compile must succeed");
+
+    assert_eq!(result.resource_ids["app_name"], 0x0100_0000);
+    assert_eq!(result.resource_ids["background"], 0x0100_0001);
+    assert_eq!(result.resource_ids["foreground"], 0x0100_0002);
+    assert_eq!(result.resource_ids["layered_image"], 0x0100_0003);
+    assert_eq!(result.resource_ids["startIcon"], 0x0100_0008);
+    assert_eq!(result.resource_ids["main_pages"], 0x0100_0009);
+
+    assert_eq!(
+        fs::read(out_dir.join("resources/base/media/background.png")).unwrap(),
+        b"app-bg"
+    );
+    assert_eq!(
+        fs::read(out_dir.join("resources/base/media/foreground.png")).unwrap(),
+        b"app-fg"
+    );
+    assert_eq!(
+        fs::read_to_string(out_dir.join("resources/base/media/layered_image.json")).unwrap(),
+        "{\n  \"layered-image\": {\n    \"background\": \"$media:16777217\",\n    \"foreground\": \"$media:16777218\"\n  }\n}"
+    );
+
+    let table = fs::read_to_string(result.resource_table).unwrap();
+    assert_eq!(
+        table,
+        "\
+string EntryAbility_desc 0x01000004\n\
+string EntryAbility_label 0x01000005\n\
+string app_name 0x01000000\n\
+string module_desc 0x01000006\n\
+color start_window_background 0x01000007\n\
+media background 0x01000001\n\
+media foreground 0x01000002\n\
+media layered_image 0x01000003\n\
+media startIcon 0x01000008\n\
+profile main_pages 0x01000009"
+    );
+
+    let ids: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(result.ids_defined).unwrap()).unwrap();
+    assert_eq!(ids["record"].as_array().unwrap().len(), 10);
+    assert_eq!(ids["record"][0]["id"], "0x01000000");
+    assert_eq!(ids["record"][9]["type"], "profile");
 }
 
 // ---------------------------------------------------------------------------
