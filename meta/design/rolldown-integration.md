@@ -1,202 +1,197 @@
 # Rolldown Integration Research
 
-This document records the research (conducted 2026-05-28) on whether and how
-to integrate the [rolldown](https://github.com/rolldown/rolldown) bundler into
-arkdown, and the conclusion reached.
+This document records research on integrating
+[rolldown](https://github.com/rolldown/rolldown) into arkdown.
+Updated after the ohos-rs/oxc fork was upgraded to 0.133.0 on 2026-05-28.
+
+---
+
+## Version History
+
+| Date | oxc (ohos-rs fork) | rolldown oxc req | Compatible? |
+|------|--------------------|------------------|-------------|
+| 2026-05-28 initial | 0.129.0 (`5caa6d54`) | 0.133.0 | ✗ Blocked |
+| 2026-05-28 revised | **0.133.0** (`c8d02452`) | 0.133.0 | ✅ **Aligned** |
+
+**Build status after upgrade:** 410/410 tests pass. `cargo build --workspace` clean.
 
 ---
 
 ## Background
 
-arkdown is a pure-Rust bundler for OpenHarmony OS that reimplements rolldown's
-architecture with OHOS-specific semantics (IIFE wrapping, globalThis registry,
-OHM URLs, ArkTS support).
+arkdown is a pure-Rust bundler for OpenHarmony OS that reimplements
+rolldown's architecture with OHOS-specific semantics (IIFE wrapping,
+`globalThis` registry, OHM URLs, ArkTS support).
 
-The project pins a custom oxc fork:
+The project pins a custom oxc fork that adds ArkTS (`.ets`) parser support:
 
 ```toml
+# Cargo.toml — after upgrade to 0.133.0
 oxc = { git = "https://github.com/ohos-rs/oxc",
-        rev = "5caa6d54ae977b8a76ed68b8aba06b38e1c6a614",
+        rev = "c8d02452469e159952f0181b022c1f304e77abee",
         features = ["full"] }
 ```
 
-This fork adds ArkTS (`.ets`) parser support not present in upstream
-`oxc-project/oxc`.
-
 ---
 
-## OXC Version Constraint (Critical Blocker)
+## Rolldown Workspace Structure (1.0.3)
 
-| Parameter | arkdown | rolldown | Compatible? |
-|-----------|---------|----------|-------------|
-| OXC source | ohos-rs/oxc fork (git) | oxc-project/oxc (crates.io) | ✗ |
-| OXC version | 0.129.0 (pinned rev `5caa6d54`) | 0.133.0+ | ✗ |
-| ArkTS `.ets` parser | ✓ (custom extension) | ✗ upstream only | ✗ |
+57 crates in four groups:
 
-The ohos-rs/oxc fork is **4 minor versions behind** upstream. The AST and
-parser API changes between 0.129 and 0.133 cause compilation failures when
-both are used in the same Cargo workspace.
+| Group | Count | Examples |
+|-------|-------|---------|
+| Core bundler | 13 | `rolldown`, `rolldown_common`, `rolldown_ecmascript`, `rolldown_resolver`, `rolldown_plugin`, `rolldown_sourcemap`, `string_wizard` |
+| General plugins | 11 | `asset_module`, `bundle_analyzer`, `replace`, `hmr`, `isolated_declaration` |
+| Vite-specific plugins | 20 | `vite_html`, `vite_css`, `vite_json`, `vite_alias`, … |
+| Dev / test / NAPI | 13 | `rolldown_binding`, `rolldown_testing`, `bench`, … |
+
+**Minimum subset for bundler core (no Vite, no NAPI):** ~24 crates.
+
+rolldown's oxc dependencies (all crates.io `0.133.0`):
+
+```toml
+oxc             = { version = "0.133.0", features = ["ast_visit", "transformer", …] }
+oxc_allocator   = { version = "0.133.0", features = ["pool"] }
+oxc_ecmascript  = { version = "0.133.0" }
+oxc_traverse    = { version = "0.133.0" }
+# … 7 more oxc_* crates
+oxc_resolver    = { version = "11.19.1" }  # separate project
+oxc_sourcemap   = { version = "6" }        # separate project
+oxc_index       = { version = "4" }        # separate project
+```
 
 ---
 
 ## Option (i): Add rolldown as crate dependency + `[patch]`
 
-### Approach
-```toml
-# Cargo.toml
-[dependencies]
-rolldown = { git = "https://github.com/rolldown/rolldown" }
+**Previous verdict (0.129 vs 0.133): ✗ NOT FEASIBLE**
+**Updated verdict (both 0.133.0): ✅ NOW FEASIBLE — RECOMMENDED**
 
+### Implementation
+
+**Root `Cargo.toml` — add `[patch.crates-io]`:**
+
+```toml
 [patch.crates-io]
-oxc = { git = "https://github.com/ohos-rs/oxc", rev = "5caa6d54..." }
-oxc_parser = { git = "https://github.com/ohos-rs/oxc", rev = "5caa6d54..." }
-# ... all oxc_* crates
+# Redirect oxc crates from crates.io → ohos-rs fork (same 0.133.0 API)
+oxc             = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
+oxc_allocator   = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
+oxc_ast         = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
+oxc_ecmascript  = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
+oxc_traverse    = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
+oxc_parser      = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
+oxc_codegen     = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
+oxc_transformer = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
+oxc_minifier    = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
+oxc_semantic    = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
+oxc_span        = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
+# Note: oxc_resolver, oxc_sourcemap, oxc_index are NOT in ohos-rs fork — use upstream
 ```
 
-### Verdict: ✗ NOT FEASIBLE
+**`crates/arkdown/Cargo.toml`:**
 
-**Reason**: rolldown requires oxc 0.133.0 from crates.io. Cargo's
-`[patch.crates-io]` redirects crate names but does **not** resolve API
-incompatibilities between 0.129.0 and 0.133.0. The workspace would fail to
-compile due to missing/changed AST node types.
+```toml
+[dependencies]
+rolldown = { version = "1.0.3", default-features = false }
+```
+
+**Key notes:**
+- `oxc_resolver`, `oxc_sourcemap`, `oxc_index` are separate projects not
+  in the ohos-rs fork — use their upstream crates.io versions (no ArkTS
+  customisation needed for these)
+- `default-features = false` excludes NAPI bindings and Vite plugins
+
+### Assessment
 
 | Metric | Value |
 |--------|-------|
-| Feasibility | ✗ Cannot compile |
-| Complexity | High |
-| Risk | Critical — API incompatibility |
+| **Feasibility** | ✅ Viable — versions fully aligned |
+| **Effort** | Small — ~30 lines Cargo.toml, < 1 day |
+| **Risk** | Medium-Low |
+| **Maintenance** | Low — rolldown updates via `Cargo.lock` |
+| **Workspace bloat** | None — rolldown stays external |
+
+### Likely issues & mitigations
+
+| Issue | Probability | Mitigation |
+|-------|------------|------------|
+| NAPI linker errors | Medium | `default-features = false` |
+| Transitive dep conflict | Medium | `cargo tree` + pin conflicting crate |
+| `oxc_resolver` API diff | Low | Independent project; no ohos-rs patch needed |
 
 ---
 
 ## Option (ii): Git submodule + Cargo patches
 
-### Approach
-```
-# .gitmodules
-[submodule "rolldown"]
-  path = rolldown
-  url = https://github.com/rolldown/rolldown.git
+**Verdict: ⚠️ Viable but superseded by Option (i)**
 
-# Root Cargo.toml
-[patch.crates-io]
-oxc         = { git = "https://github.com/ohos-rs/oxc", rev = "5caa6d54..." }
-oxc_parser  = { git = "https://github.com/ohos-rs/oxc", rev = "5caa6d54..." }
-oxc_ast     = { git = "https://github.com/ohos-rs/oxc", rev = "5caa6d54..." }
-oxc_span    = { git = "https://github.com/ohos-rs/oxc", rev = "5caa6d54..." }
-# ... ~12 more oxc_* crates
-```
-
-### Verdict: ⚠️ Technically possible but NOT recommended
-
-| Metric | Value |
-|--------|-------|
-| Feasibility | Partial — compiles but API breaks at runtime |
-| Crates affected | 57 rolldown crates |
-| Cargo.toml patches | ~100 lines |
-| Maintenance burden | Every rolldown bump needs re-testing |
-| Risk | High — AST API differences cause subtle bugs |
-
-**Why not**: rolldown has 57 crates. Patching all their oxc dependencies and
-keeping them in sync with the ohos-rs fork revision creates a high ongoing
-maintenance burden with no clear benefit.
+The patch complexity is identical to Option (i) (same 11 redirects), but
+adds 57 extra workspace members. Use only if:
+- Option (i) hits circular-dependency issues
+- You need to patch rolldown's core and contribute upstream
 
 ---
 
 ## Option (iii): Fork rolldown into `rolldown/` folder
 
-### Approach
-Copy all 57 rolldown crates into the arkdown workspace under a `rolldown/`
-directory, update all oxc dependencies to point to ohos-rs/oxc, and adapt
-as needed.
+**Verdict: ❌ Last resort only**
 
-```
-rolldown/
-  crates/
-    rolldown/          # Core bundler
-    rolldown_common/   # Shared types
-    rolldown_plugin/   # Plugin trait
-    rolldown_ecmascript/
-    ... (53 more crates)
-```
+Now that Option (i) is viable, forking 57 crates is unnecessary.
 
-### License requirement
-rolldown is MIT licensed:
-```
-Copyright 2024-present VoidZero Inc. & Contributors
-```
-Every forked file must retain this copyright notice in its header.
-
-### Verdict: ✗ NOT RECOMMENDED (last resort)
-
-| Metric | Value |
-|--------|-------|
-| Feasibility | Yes — but very high effort |
-| Crates to integrate | 57 |
-| Files to modify | 150–200+ |
-| oxc dependency lines to change | ~100+ across all crates |
-| Long-term maintenance | Very high — forking 57 crates freezes rolldown evolution |
-| Risk | Very high — diverges from upstream permanently |
+If ever needed:
+- Copy ~24 core crates (skip Vite plugins, NAPI, bench)
+- Redirect `oxc = "0.133.0"` lines to ohos-rs fork
+- Add `// Copyright 2024-present VoidZero Inc. & Contributors` (MIT) to every file
+- Estimated: 1–2 weeks + ongoing sync cost
 
 ---
 
-## Recommended Approach: Reference Architecture, Not Dependency
+## Priority Table
 
-**Decision: Do NOT integrate rolldown as a dependency or fork.**
-
-### Rationale
-
-1. **oxc version constraint is a hard blocker** — the ohos-rs/oxc fork must
-   stay at its current revision for ArkTS syntax support. All three options
-   break on this.
-
-2. **OHOS semantics differ from rolldown's target** — IIFE wrapping,
-   `globalThis` chunk registry, OHM URLs, and ArkTS transforms are
-   OHOS-specific requirements that rolldown does not support and likely
-   never will.
-
-3. **Maintenance cost > benefit** — copying 57 crates just to re-implement
-   what arkdown already does is wasteful.
-
-4. **Plugin ecosystem already mirrors rolldown** — arkdown's plugin trait
-   (`HookUsage` bitflags, async hooks, `register_hook_usage`) was designed
-   by studying rolldown. The existing 12+ `arkdown-plugin-*` crates already
-   cover all P0/P1 build capabilities.
-
-### What to do instead
-
-| Action | Rationale |
-|--------|-----------|
-| Use rolldown as design reference | Study its tree-shaking, source maps, and chunk-split algorithms |
-| Cherry-pick design patterns | Adapt rolldown's BitSet chunk-split and link-stage design |
-| Monitor oxc alignment | When ohos-rs/oxc catches up to upstream 0.133+, reconsider option (ii) |
-| Expand arkdown plugins | Fill gaps (ets-transform, TypeScript stripping, import records) |
+| Option | Feasibility | Effort | Risk | Recommended? |
+|--------|-------------|--------|------|--------------|
+| **(i) Direct dep + [patch]** | ✅ Yes | Small (1 day) | Med-Low | ✅ **DO THIS** |
+| **(ii) Submodule** | ✅ Yes | Medium (2 days) | Medium | ⚠️ Fallback |
+| **(iii) Fork 24+ crates** | ✅ Yes | Large (1–2 wks) | High | ❌ Last resort |
+| **Reference only** | ✅ Yes | None | None | ✓ Safe interim |
 
 ---
 
-## Plugin Coverage Comparison
+## What rolldown provides (value to arkdown)
 
-| Rolldown built-in plugin | arkdown equivalent | Status |
-|--------------------------|-------------------|--------|
-| CommonJS transform | rolldown built-in (use it) | — |
-| JSON import | `arkdown-plugin-json5` | ✅ Done |
-| (none) | `arkdown-plugin-ohos-resolve` | ✅ Done |
-| (none) | `arkdown-plugin-module-meta` | ✅ Done |
-| (none) | `arkdown-plugin-chunk-wrapper` | ✅ Done |
-| (none) | `arkdown-plugin-har-dedup` | ✅ Done |
-| (none) | `arkdown-plugin-ets-transform` | ⚠️ Partial |
-| Minification | via `oxc_minifier` | 🔲 Not wired |
+| Rolldown component | Benefit |
+|-------------------|---------|
+| `rolldown_sourcemap` | More mature source map merge/generation |
+| `rolldown_resolver` | Better edge-case coverage (monorepo, pnp, symlinks) |
+| `rolldown_plugin` framework | Richer async plugin hooks |
+| `string_wizard` | Magic-string equivalent for source mutations |
+| Minification wiring | Production-ready `oxc_minifier` integration (arkdown hasn't wired this yet) |
+
+**OHOS-specific features rolldown does NOT cover (arkdown still owns):**
+
+- IIFE wrapping + `globalThis` registry (`arkdown-plugin-chunk-wrapper`)
+- OHM URL resolution (`arkdown-plugin-ohos-resolve`)
+- ArkTS transform (`arkdown-plugin-ets-transform`)
+- HAR/HSP deduplication (`arkdown-plugin-har-dedup`)
+- ABC bytecode compiler (`arkdown-abc`)
+- HAP/HSP/HAR packager (`arkdown-pack`)
+- DevEco signing (`arkdown-sign`)
 
 ---
 
-## Oxc Upgrade Path
+## oxc Upgrade Path
 
-When the ohos-rs/oxc fork aligns with upstream (currently 4 versions behind):
+```
+ohos-rs/oxc history:
+  rev 5caa6d54  → 0.129.0  (initial; used until 2026-05-28)
+  rev c8d02452  → 0.133.0  (current — aligned with rolldown 1.0.3)
 
-1. Update `rev` in `Cargo.toml` to the new commit
-2. Fix any AST API changes in `arkdown-plugin-ets-transform`
-3. Re-evaluate option (ii) — at that point it becomes lower risk
+rolldown requirement:
+  oxc = "0.133.0"  (crates.io, stable)
+```
 
-Track progress at: https://github.com/ohos-rs/oxc/commits/main
+To stay current: monitor ohos-rs/oxc `main` branch; when new commits land,
+update `rev` in `Cargo.toml` and run `cargo test --workspace`.
 
 ---
 
@@ -204,6 +199,6 @@ Track progress at: https://github.com/ohos-rs/oxc/commits/main
 
 - rolldown repo: https://github.com/rolldown/rolldown
 - rolldown Cargo.toml: https://github.com/rolldown/rolldown/blob/main/Cargo.toml
-- ohos-rs/oxc fork: https://github.com/ohos-rs/oxc
-- rolldown plugin API: `crates/rolldown_plugin/src/plugin.rs`
+- ohos-rs/oxc fork: https://github.com/ohos-rs/oxc (current HEAD = `c8d02452`)
 - arkdown plugin API: `crates/arkdown-core/src/plugin.rs`
+- hvigorw pipeline: `meta/design/hvigorw-pipeline.md`

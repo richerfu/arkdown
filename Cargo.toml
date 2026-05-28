@@ -28,15 +28,15 @@ members = [
 
 [workspace.dependencies]
 # Parser — ohos-rs/oxc fork pinned rev (DO NOT use floating branch or crates.io oxc)
-oxc = { git = "https://github.com/ohos-rs/oxc", rev = "5caa6d54ae977b8a76ed68b8aba06b38e1c6a614", features = ["full"] }
-oxc_allocator = { git = "https://github.com/ohos-rs/oxc", rev = "5caa6d54ae977b8a76ed68b8aba06b38e1c6a614" }
-oxc_ast = { git = "https://github.com/ohos-rs/oxc", rev = "5caa6d54ae977b8a76ed68b8aba06b38e1c6a614" }
-oxc_parser = { git = "https://github.com/ohos-rs/oxc", rev = "5caa6d54ae977b8a76ed68b8aba06b38e1c6a614" }
-oxc_semantic = { git = "https://github.com/ohos-rs/oxc", rev = "5caa6d54ae977b8a76ed68b8aba06b38e1c6a614" }
-oxc_span = { git = "https://github.com/ohos-rs/oxc", rev = "5caa6d54ae977b8a76ed68b8aba06b38e1c6a614" }
-oxc_transformer = { git = "https://github.com/ohos-rs/oxc", rev = "5caa6d54ae977b8a76ed68b8aba06b38e1c6a614" }
-oxc_codegen = { git = "https://github.com/ohos-rs/oxc", rev = "5caa6d54ae977b8a76ed68b8aba06b38e1c6a614" }
-oxc_minifier = { git = "https://github.com/ohos-rs/oxc", rev = "5caa6d54ae977b8a76ed68b8aba06b38e1c6a614" }
+oxc = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee", features = ["full"] }
+oxc_allocator = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
+oxc_ast = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
+oxc_parser = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
+oxc_semantic = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
+oxc_span = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
+oxc_transformer = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
+oxc_codegen = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
+oxc_minifier = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
 
 # Async
 tokio = { version = "1", features = ["full"] }
