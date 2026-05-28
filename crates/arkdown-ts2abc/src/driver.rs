@@ -52,10 +52,16 @@ impl BytecodeBackend for ArkdownAbcBackend {
                 return Err(Ts2abcError::MissingSource(input.path.clone()));
             }
             let source = fs_err::read_to_string(&input.path)?;
+            let source_map = input.source_file.as_ref().map(|source_file| {
+                format!(
+                    r#"{{"version":3,"sources":["{}"],"mappings":""}}"#,
+                    json_escape(source_file)
+                )
+            });
             modules.push(AbcModule {
                 record_name: input.record_name.clone(),
                 source,
-                source_map: None,
+                source_map,
             });
         }
 
@@ -89,4 +95,18 @@ pub(crate) fn default_record_name(path: &Path) -> String {
         .and_then(|stem| stem.to_str())
         .unwrap_or("record")
         .to_string()
+}
+
+fn json_escape(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(|ch| match ch {
+            '"' => "\\\"".chars().collect::<Vec<_>>(),
+            '\\' => "\\\\".chars().collect::<Vec<_>>(),
+            '\n' => "\\n".chars().collect::<Vec<_>>(),
+            '\r' => "\\r".chars().collect::<Vec<_>>(),
+            '\t' => "\\t".chars().collect::<Vec<_>>(),
+            _ => vec![ch],
+        })
+        .collect()
 }
