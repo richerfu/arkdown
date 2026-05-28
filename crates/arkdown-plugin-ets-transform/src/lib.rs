@@ -28,11 +28,11 @@ pub mod transform;
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use arkdown_core::{
     ArkdownConfig, ArkdownError, ArkdownPlugin, HookTransformOutput, HookUsage, ModuleSource,
     ModuleType, PluginContext, PluginResult, ResolvedId,
 };
+use async_trait::async_trait;
 
 /// ArkTS transform plugin — desugars `.ets` files into TypeScript.
 ///
@@ -65,10 +65,8 @@ impl ArkdownPlugin for EtsTransformPlugin {
     /// 1. Bail out immediately for files that are neither `.ets` nor `.ts`.
     /// 2. **Kit import rewrite** — `@kit.XxxKit` → individual `@ohos:xxx` imports
     ///    (both `.ets` and `.ts`; matches hvigorw ets-loader behaviour).
-    /// 3. `.ets` only: **ArkUI build() stub** — replaces declarative DSL bodies with
-    ///    `return;` so the OXC parser can accept the file as TypeScript.
-    /// 4. `.ets` only: run `etsChecker` diagnostics and `etsTransform` struct/decorator
-    ///    desugaring.
+    /// 3. `.ets` only: run `etsChecker` diagnostics and `etsTransform`
+    ///    struct/decorator/ArkUI build DSL desugaring with the ohos-rs/oxc ArkUI AST.
     /// 5. Apply version-gated API import rewrites (`@ohos/* → @system.*` for API < 9).
     /// 6. Return a new `HookTransformOutput`.
     async fn transform(
@@ -100,13 +98,9 @@ impl ArkdownPlugin for EtsTransformPlugin {
             }));
         }
 
-        // Step 2: Stub ArkUI build() DSL bodies so the source is valid TypeScript
-        // for the downstream OXC parser.  The ArkUI declarative syntax
-        // (e.g. `Row() { Column() { } }.width()`) is not legal TypeScript; replace
-        // it with `return;` before struct desugaring.
-        let code = api_transform::stub_arkui_build_bodies(&code);
-
-        // Step 3: ArkTS struct/decorator desugaring (.ets only).
+        // Step 2: ArkTS struct/decorator and ArkUI build DSL desugaring (.ets only).
+        // The workspace-pinned ohos-rs/oxc fork parses `.ets` with ArkUI nodes,
+        // so the build body is lowered before downstream TypeScript parsing.
         let source = ModuleSource {
             id: ResolvedId {
                 id: id.to_string(),
@@ -118,12 +112,18 @@ impl ArkdownPlugin for EtsTransformPlugin {
             source_map: None,
         };
 
-        let transformed = transform::transform_ets(&source).map_err(|e| {
-            ArkdownError::PluginError {
-                plugin: "ets-transform".to_string(),
-                source: Box::new(e),
-            }
-        })?;
+        let options = transform::TransformOptions {
+            bundle_name: Some(self.config.product.bundle_name.clone()),
+            module_name: module_name_from_id(id),
+        };
+
+        let transformed =
+            transform::transform_ets_with_options(&source, &options).map_err(|e| {
+                ArkdownError::PluginError {
+                    plugin: "ets-transform".to_string(),
+                    source: Box::new(e),
+                }
+            })?;
 
         // Step 4: Apply version-gated API import rewrites.
         let final_source = api_transform::rewrite_imports_for_version(&transformed, api_version);
@@ -135,11 +135,21 @@ impl ArkdownPlugin for EtsTransformPlugin {
     }
 }
 
+fn module_name_from_id(id: &str) -> Option<String> {
+    id.split("/src/main/ets/").next().and_then(|prefix| {
+        if prefix == id || prefix.is_empty() {
+            None
+        } else {
+            prefix.rsplit('/').next().map(str::to_string)
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use arkdown_core::{
-        BuildMode, OutputTarget, ProductConfig, SdkConfig, StrictModeConfig, BuildOption,
+        BuildMode, BuildOption, OutputTarget, ProductConfig, SdkConfig, StrictModeConfig,
     };
     use std::path::PathBuf;
 
@@ -179,7 +189,10 @@ mod tests {
     #[test]
     fn test_api_rewrite_legacy() {
         let result = api_transform::apply("import x from '@ohos/hilog'", 8);
-        assert!(result.contains("@system.hilog"), "legacy FA rewrite must apply");
+        assert!(
+            result.contains("@system.hilog"),
+            "legacy FA rewrite must apply"
+        );
     }
 
     #[test]
@@ -199,7 +212,10 @@ mod tests {
             .transform(&PluginContext::default(), "const x = 1;", "test.js")
             .await
             .unwrap();
-        assert!(result.is_none(), "non-ETS/non-TS modules must pass through as None");
+        assert!(
+            result.is_none(),
+            "non-ETS/non-TS modules must pass through as None"
+        );
     }
 
     #[tokio::test]
@@ -263,7 +279,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_plugin_stubs_arkui_build_body() {
+    async fn test_plugin_lowers_minimal_arkui_build_body() {
         let plugin = EtsTransformPlugin::new(make_config(12));
         // Typical Index.ets page with ArkUI declarative DSL in build().
         let code = "\
@@ -296,13 +312,28 @@ struct Index {\n\
             out.code
         );
         assert!(
-            out.code.contains("build() { return; }"),
-            "ArkUI build() DSL must be stubbed; got:\n{}",
+            out.code.contains("this.observeComponentCreation2"),
+            "ArkUI build() DSL must be lowered; got:\n{}",
             out.code
         );
         assert!(
-            !out.code.contains("Row()"),
-            "ArkUI Row() DSL must be gone; got:\n{}",
+            out.code.contains("Row.create();"),
+            "Row.create missing; got:\n{}",
+            out.code
+        );
+        assert!(
+            out.code.contains("Column.create();"),
+            "Column.create missing; got:\n{}",
+            out.code
+        );
+        assert!(
+            out.code.contains("Text.create(this.message);"),
+            "Text.create missing; got:\n{}",
+            out.code
+        );
+        assert!(
+            !out.code.contains("build() { return; }"),
+            "build body must not be stubbed; got:\n{}",
             out.code
         );
     }
