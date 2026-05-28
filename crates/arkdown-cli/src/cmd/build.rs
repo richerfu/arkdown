@@ -7,7 +7,6 @@ use anyhow::{Context, Result};
 use clap::Args;
 
 use arkdown::Bundler;
-use arkdown_abc::{AbcCompileOptions, AbcCompiler, AbcModule};
 use arkdown_config::load_config;
 use arkdown_core::{ArkdownPlugin, BuildMode, ModuleJson5, ModuleJson5Module, OutputTarget};
 use arkdown_pack::{HarPackInput, PackAbility, PackInput, Packager};
@@ -21,6 +20,7 @@ use arkdown_profile::ProfileProcessor;
 use arkdown_resolver::ResolverConfig;
 use arkdown_resource::{ResourceCompileConfig, ResourceCompileInput, ResourceCompiler};
 use arkdown_sign::HapSigner;
+use arkdown_ts2abc::{compile_to_abc, Ts2abcInput, Ts2abcOptions};
 
 use crate::progress::Progress;
 
@@ -89,7 +89,9 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             device_types: vec!["phone".to_string()],
             is_debug: matches!(config_arc.build_mode, BuildMode::Debug),
         });
-        let res_out = module.src_path.join("build/default/intermediates/res/default");
+        let res_out = module
+            .src_path
+            .join("build/default/intermediates/res/default");
         // Include AppScope/resources so app-level icon/label IDs are assigned.
         let mut res_dirs: Vec<PathBuf> = vec![];
         let app_scope_res = project_root.join("AppScope/resources");
@@ -217,29 +219,15 @@ pub async fn run(args: BuildArgs) -> Result<()> {
 
     // Step 5: ABC compilation
     progress.step(5, 6, "Compiling ABC");
-    let abc_compiler = AbcCompiler::new(AbcCompileOptions {
-        debug_info: matches!(config_arc.build_mode, BuildMode::Debug),
-        opt_level: if matches!(config_arc.build_mode, BuildMode::Release) {
-            2
-        } else {
-            0
-        },
-        target_api_version: config_arc.sdk_config.compile_api_version,
-        merge_abc: true,
-        cache_path: None,
-    });
-    for ((module, _manifest, loader_json), bundle_out) in
+    for ((_module, _manifest, loader_json), bundle_out) in
         loader_jsons.iter().zip(bundle_outs.iter())
     {
-        let modules_abc = module
-            .src_path
-            .join("build/default/intermediates/ets/modules.abc");
-        // Build record name map: chunk_stem → OHM URL module path.
+        // Build record metadata map: chunk_stem → OHM URL module path.
         // Format matches es2abc/hvigorw: "{bundleName}/{moduleName}/{pathFromEts}"
         // e.g. "com.example.arkdown.test/entry/ets/entryability/EntryAbility"
         // The ABC class is "L{record_name};" (no src/main, no & wrappers).
         let bundle_name = &config_arc.product.bundle_name;
-        let record_name_map: std::collections::HashMap<String, String> = loader_json
+        let record_name_map: HashMap<String, ChunkCompileMeta> = loader_json
             .compile_entry
             .iter()
             .filter_map(|entry_path| {
@@ -253,18 +241,38 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                     .trim_end_matches(".js");
                 let record_name =
                     format!("{}/{}/{}", bundle_name, loader_json.module_name, stripped);
-                Some((stem, record_name))
+                Some((
+                    stem,
+                    ChunkCompileMeta {
+                        record_name,
+                        source_file: Some(entry_path.clone()),
+                    },
+                ))
             })
             .collect();
         // Use the explicit chunk file list from bundle_out rather than scanning the
         // output directory — this prevents stale files from prior runs from being
         // picked up and producing incorrect ABC record entries.
-        let abc_modules: Vec<AbcModule> =
-            collect_js_chunks_from_output(&bundle_out.chunk_files, &record_name_map)?;
-        if !abc_modules.is_empty() {
-            abc_compiler
-                .compile(abc_modules, &modules_abc)
-                .map_err(|e| anyhow::anyhow!("ABC compile failed: {}", e))?;
+        let ts2abc_inputs =
+            collect_js_chunks_from_output(&bundle_out.chunk_files, &record_name_map);
+        if !ts2abc_inputs.is_empty() {
+            compile_to_abc(Ts2abcOptions {
+                inputs: ts2abc_inputs,
+                output: bundle_out.modules_abc_path.clone(),
+                target_api_version: config_arc.sdk_config.compile_api_version,
+                target_api_sub_version: None,
+                debug_info: matches!(config_arc.build_mode, BuildMode::Debug),
+                opt_level: if matches!(config_arc.build_mode, BuildMode::Release) {
+                    2
+                } else {
+                    0
+                },
+                merge_abc: true,
+                module: true,
+                commonjs: false,
+                cache_file: None,
+            })
+            .map_err(|e| anyhow::anyhow!("ABC compile failed: {}", e))?;
         }
     }
     progress.done();
@@ -273,16 +281,16 @@ pub async fn run(args: BuildArgs) -> Result<()> {
     progress.step(6, 6, "Packaging");
     let packager = Packager::new(config_arc.clone());
     let mut output_paths = Vec::new();
-    for (module, manifest, _loader_json) in &loader_jsons {
+    for ((module, manifest, _loader_json), bundle_out) in
+        loader_jsons.iter().zip(bundle_outs.iter())
+    {
         let module_json = module
             .src_path
             .join("build/default/intermediates/res/default/module.json");
         let resources_index = module
             .src_path
             .join("build/default/intermediates/res/default/resources.index");
-        let modules_abc = module
-            .src_path
-            .join("build/default/intermediates/ets/modules.abc");
+        let modules_abc = bundle_out.modules_abc_path.clone();
         let ext = match &config_arc.output_target {
             OutputTarget::Hsp => "hsp",
             OutputTarget::Har => "har",
@@ -295,86 +303,75 @@ pub async fn run(args: BuildArgs) -> Result<()> {
 
         std::fs::create_dir_all(output.parent().expect("output path has no parent"))?;
 
-        let out = match &config_arc.output_target {
-            OutputTarget::Har => {
-                // HAR: package ETS sources rather than compiled ABC
-                let source_dir = module.src_path.join("src/main/ets");
-                let oh_package_json = module.src_path.join("oh-package.json5");
-                if source_dir.exists() {
-                    Some(
-                        packager
-                            .pack_har(HarPackInput {
-                                module_name: module.name.clone(),
-                                source_dir,
-                                resources_dir: module.src_path.join("src/main/resources"),
-                                oh_package_json,
-                                output_path: output.clone(),
-                            })
-                            .map_err(|e| anyhow::anyhow!("Pack failed: {}", e))?,
-                    )
-                } else {
-                    None
-                }
-            }
-            _ => {
-                // HAP / HSP: need module.json and modules.abc; resources.index is optional
-                if module_json.exists() && modules_abc.exists() {
-                    // Create an empty resources.index placeholder if resources were not compiled
-                    if !resources_index.exists() {
-                        if let Some(parent) = resources_index.parent() {
-                            std::fs::create_dir_all(parent)?;
-                        }
-                        std::fs::write(&resources_index, &[])?;
-                    }
-                    {
-                        // Source maps produced by the bundler (may not exist yet)
-                        let source_maps_path = {
-                            let p = module.src_path.join(
-                                "build/default/intermediates/loader_out/default/ets/sourceMaps.map",
-                            );
-                            if p.exists() {
-                                Some(p)
-                            } else {
-                                None
-                            }
-                        };
-                        // Abilities from the processed manifest
-                        let abilities: Vec<PackAbility> = manifest
-                            .abilities
-                            .iter()
-                            .map(|a| PackAbility {
-                                name: a.name.clone(),
-                                label: a.label.clone(),
-                            })
-                            .collect();
+        let out =
+            match &config_arc.output_target {
+                OutputTarget::Har => {
+                    // HAR: package ETS sources rather than compiled ABC
+                    let source_dir = module.src_path.join("src/main/ets");
+                    let oh_package_json = module.src_path.join("oh-package.json5");
+                    if source_dir.exists() {
                         Some(
                             packager
-                                .pack_hap(PackInput {
+                                .pack_har(HarPackInput {
                                     module_name: module.name.clone(),
-                                    abc_path: modules_abc,
-                                    resources_index,
-                                    module_json,
-                                    native_libs: vec![],
+                                    source_dir,
+                                    resources_dir: module.src_path.join("src/main/resources"),
+                                    oh_package_json,
                                     output_path: output.clone(),
-                                    resources_src_dir: Some(
-                                        module.src_path.join(
-                                            "build/default/intermediates/res/default/resources",
-                                        ),
-                                    ),
-                                    bundle_version_code: 1000000,
-                                    bundle_version_name: "1.0.0".to_string(),
-                                    bundle_type: "app".to_string(),
-                                    source_maps_path,
-                                    abilities,
                                 })
                                 .map_err(|e| anyhow::anyhow!("Pack failed: {}", e))?,
                         )
+                    } else {
+                        None
                     }
-                } else {
-                    None
                 }
-            }
-        };
+                _ => {
+                    // HAP / HSP: need module.json and modules.abc; resources.index is optional
+                    if module_json.exists() && modules_abc.exists() {
+                        // Create an empty resources.index placeholder if resources were not compiled
+                        if !resources_index.exists() {
+                            if let Some(parent) = resources_index.parent() {
+                                std::fs::create_dir_all(parent)?;
+                            }
+                            std::fs::write(&resources_index, &[])?;
+                        }
+                        {
+                            let source_maps_path = bundle_out.source_maps_path.clone();
+                            // Abilities from the processed manifest
+                            let abilities: Vec<PackAbility> = manifest
+                                .abilities
+                                .iter()
+                                .map(|a| PackAbility {
+                                    name: a.name.clone(),
+                                    label: a.label.clone(),
+                                })
+                                .collect();
+                            Some(
+                                packager
+                                    .pack_hap(PackInput {
+                                        module_name: module.name.clone(),
+                                        abc_path: modules_abc,
+                                        resources_index,
+                                        module_json,
+                                        native_libs: vec![],
+                                        output_path: output.clone(),
+                                        resources_src_dir: Some(module.src_path.join(
+                                            "build/default/intermediates/res/default/resources",
+                                        )),
+                                        bundle_version_code: 1000000,
+                                        bundle_version_name: "1.0.0".to_string(),
+                                        bundle_type: "app".to_string(),
+                                        source_maps_path,
+                                        abilities,
+                                    })
+                                    .map_err(|e| anyhow::anyhow!("Pack failed: {}", e))?,
+                            )
+                        }
+                    } else {
+                        None
+                    }
+                }
+            };
         if let Some(path) = out {
             // Sign the HAP/HSP in-place (skip for HAR targets or if no signing config)
             if !matches!(&config_arc.output_target, OutputTarget::Har) {
@@ -430,31 +427,34 @@ fn read_module_json5(path: &std::path::Path) -> Result<ModuleJson5> {
     json5::from_str(&content).context("Failed to parse module.json5")
 }
 
-/// Build [`AbcModule`] entries from the explicit file list produced by the bundler.
+#[derive(Debug, Clone)]
+struct ChunkCompileMeta {
+    record_name: String,
+    source_file: Option<String>,
+}
+
+/// Build [`Ts2abcInput`] entries from the explicit file list produced by the bundler.
 ///
 /// Using `bundle_out.chunk_files` rather than scanning the output directory
 /// guarantees that stale `.js` files left over from previous builds never
 /// end up in the ABC compiler input.
 fn collect_js_chunks_from_output(
     chunk_files: &[(String, std::path::PathBuf)],
-    record_name_map: &std::collections::HashMap<String, String>,
-) -> Result<Vec<AbcModule>> {
+    record_name_map: &HashMap<String, ChunkCompileMeta>,
+) -> Vec<Ts2abcInput> {
     let mut modules = Vec::new();
     for (chunk_name, path) in chunk_files {
         if path.extension().and_then(|e| e.to_str()) != Some("js") {
             continue;
         }
-        // Use OHOS module path as record name if available; fall back to chunk name.
-        let record_name = record_name_map
-            .get(chunk_name.as_str())
-            .cloned()
-            .unwrap_or_else(|| chunk_name.clone());
-        let source = fs_err::read_to_string(path)?;
-        modules.push(AbcModule {
-            record_name,
-            source,
-            source_map: None,
+        let meta = record_name_map.get(chunk_name.as_str());
+        modules.push(Ts2abcInput {
+            path: path.clone(),
+            record_name: meta
+                .map(|meta| meta.record_name.clone())
+                .unwrap_or_else(|| chunk_name.clone()),
+            source_file: meta.and_then(|meta| meta.source_file.clone()),
         });
     }
-    Ok(modules)
+    modules
 }

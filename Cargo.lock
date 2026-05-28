@@ -219,6 +219,7 @@ dependencies = [
  "arkdown-resolver",
  "arkdown-resource",
  "arkdown-sign",
+ "arkdown-ts2abc",
  "clap",
  "fs-err",
  "json5",

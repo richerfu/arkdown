@@ -14,6 +14,7 @@ arkdown-profile = { path = "../arkdown-profile" }
 arkdown-resource = { path = "../arkdown-resource" }
 arkdown = { path = "../arkdown" }
 arkdown-abc = { path = "../arkdown-abc" }
+arkdown-ts2abc = { path = "../arkdown-ts2abc" }
 arkdown-pack = { path = "../arkdown-pack" }
 arkdown-sign = { path = "../arkdown-sign" }
 arkdown-plugin-ets-transform = { path = "../arkdown-plugin-ets-transform" }

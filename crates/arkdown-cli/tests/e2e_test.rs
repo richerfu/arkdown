@@ -16,7 +16,6 @@ fn run_build(fixture: &PathBuf) -> PathBuf {
     use std::sync::Arc;
 
     use arkdown::Bundler;
-    use arkdown_abc::{AbcCompileOptions, AbcCompiler, AbcModule};
     use arkdown_config::load_config;
     use arkdown_core::{ArkdownPlugin, BuildMode, ModuleJson5, OutputTarget};
     use arkdown_pack::{PackInput, Packager};
@@ -29,12 +28,13 @@ fn run_build(fixture: &PathBuf) -> PathBuf {
     use arkdown_profile::ProfileProcessor;
     use arkdown_resolver::ResolverConfig;
     use arkdown_resource::{ResourceCompileConfig, ResourceCompileInput, ResourceCompiler};
+    use arkdown_ts2abc::{compile_to_abc, Ts2abcOptions};
 
     // Use tokio runtime for async bundler
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
 
-    let config = load_config(fixture, BuildMode::Debug, OutputTarget::Hap, None, None)
-        .expect("load_config");
+    let config =
+        load_config(fixture, BuildMode::Debug, OutputTarget::Hap, None, None).expect("load_config");
     let config = Arc::new(config);
 
     let processor = ProfileProcessor::new(config.clone());
@@ -53,14 +53,16 @@ fn run_build(fixture: &PathBuf) -> PathBuf {
     // Write module.json
     let module_json_out = module
         .src_path
-        .join("build/default/intermediates/res/module.json");
+        .join("build/default/intermediates/res/default/module.json");
     processor
         .write_module_json(&manifest, &module_json_out, None)
         .expect("write_module_json");
 
     // Resource compilation
     let res_dir = module.src_path.join("src/main/resources");
-    let res_out = module.src_path.join("build/default/intermediates/res");
+    let res_out = module
+        .src_path
+        .join("build/default/intermediates/res/default");
     if res_dir.exists() {
         let rc = ResourceCompiler::new(ResourceCompileConfig {
             package_name: config.product.bundle_name.clone(),
@@ -112,36 +114,50 @@ fn run_build(fixture: &PathBuf) -> PathBuf {
     }
 
     let bundler = Bundler::new((*config).clone(), plugins);
-    let bundle_out = rt
-        .block_on(bundler.bundle(&loader_json))
-        .expect("bundle");
+    let bundle_out = rt.block_on(bundler.bundle(&loader_json)).expect("bundle");
 
     // ABC compilation
-    let modules_abc = module
-        .src_path
-        .join("build/default/intermediates/ets/modules.abc");
+    let modules_abc = bundle_out.modules_abc_path.clone();
     // Compute OHM URL module paths: "{bundleName}/{moduleName}/{pathFromEts}"
     // Matches es2abc/hvigorw format: "com.example.app/entry/ets/entryability/EntryAbility"
     let bundle_name = &config.product.bundle_name;
-    let record_name_map: std::collections::HashMap<String, String> = loader_json
-        .compile_entry.iter()
+    let record_name_map: std::collections::HashMap<String, ChunkCompileMeta> = loader_json
+        .compile_entry
+        .iter()
         .filter_map(|ep| {
             let stem = std::path::Path::new(ep).file_stem()?.to_str()?.to_string();
-            let stripped = ep.trim_start_matches("./").trim_end_matches(".ets").trim_end_matches(".ts");
-            Some((stem, format!("{}/{}/{}", bundle_name, loader_json.module_name, stripped)))
-        }).collect();
+            let stripped = ep
+                .trim_start_matches("./")
+                .trim_end_matches(".ets")
+                .trim_end_matches(".ts");
+            Some((
+                stem,
+                ChunkCompileMeta {
+                    record_name: format!(
+                        "{}/{}/{}",
+                        bundle_name, loader_json.module_name, stripped
+                    ),
+                    source_file: Some(ep.clone()),
+                },
+            ))
+        })
+        .collect();
     // Use the explicit chunk file list from bundle_out instead of scanning the
     // directory — prevents stale files from prior runs producing wrong record names.
-    let abc_modules: Vec<AbcModule> = collect_js_chunks_from_output(&bundle_out.chunk_files, &record_name_map);
-    if !abc_modules.is_empty() {
-        AbcCompiler::new(AbcCompileOptions {
+    let ts2abc_inputs = collect_js_chunks_from_output(&bundle_out.chunk_files, &record_name_map);
+    if !ts2abc_inputs.is_empty() {
+        compile_to_abc(Ts2abcOptions {
+            inputs: ts2abc_inputs,
+            output: modules_abc.clone(),
+            target_api_sub_version: None,
             debug_info: true,
             opt_level: 0,
             target_api_version: config.sdk_config.compile_api_version,
             merge_abc: true,
-            cache_path: None,
+            cache_file: None,
+            module: true,
+            commonjs: false,
         })
-        .compile(abc_modules, &modules_abc)
         .expect("abc compile");
     }
 
@@ -163,11 +179,11 @@ fn run_build(fixture: &PathBuf) -> PathBuf {
             module_json: module_json_out,
             native_libs: vec![],
             output_path: output.clone(),
-            resources_src_dir: Some(module.src_path.join("src/main/resources")),
+            resources_src_dir: Some(res_out.join("resources")),
             bundle_version_code: 1000000,
             bundle_version_name: "1.0.0".to_string(),
             bundle_type: "app".to_string(),
-            source_maps_path: None,
+            source_maps_path: bundle_out.source_maps_path.clone(),
             abilities: vec![],
         })
         .expect("pack_hap");
@@ -175,22 +191,27 @@ fn run_build(fixture: &PathBuf) -> PathBuf {
     output
 }
 
+#[derive(Debug, Clone)]
+struct ChunkCompileMeta {
+    record_name: String,
+    source_file: Option<String>,
+}
+
 fn collect_js_chunks_from_output(
     chunk_files: &[(String, PathBuf)],
-    record_name_map: &std::collections::HashMap<String, String>,
-) -> Vec<arkdown_abc::AbcModule> {
+    record_name_map: &std::collections::HashMap<String, ChunkCompileMeta>,
+) -> Vec<arkdown_ts2abc::Ts2abcInput> {
     chunk_files
         .iter()
         .filter(|(_, path)| path.extension().and_then(|x| x.to_str()) == Some("js"))
         .map(|(chunk_name, path)| {
-            let record_name = record_name_map
-                .get(chunk_name.as_str())
-                .cloned()
-                .unwrap_or_else(|| chunk_name.clone());
-            arkdown_abc::AbcModule {
-                record_name,
-                source: fs_err::read_to_string(path).unwrap_or_default(),
-                source_map: None,
+            let meta = record_name_map.get(chunk_name.as_str());
+            arkdown_ts2abc::Ts2abcInput {
+                path: path.clone(),
+                record_name: meta
+                    .map(|meta| meta.record_name.clone())
+                    .unwrap_or_else(|| chunk_name.clone()),
+                source_file: meta.and_then(|meta| meta.source_file.clone()),
             }
         })
         .collect()
@@ -266,14 +287,15 @@ fn test_hap_abc_has_panda_magic() {
 
     let file = std::fs::File::open(&hap_path).expect("open HAP");
     let mut archive = zip::ZipArchive::new(file).expect("open ZIP");
-    let mut abc = archive.by_name("ets/modules.abc").expect("no ets/modules.abc");
+    let mut abc = archive
+        .by_name("ets/modules.abc")
+        .expect("no ets/modules.abc");
 
     use std::io::Read;
     let mut buf = [0u8; 8];
     abc.read_exact(&mut buf).expect("read ABC magic");
     assert_eq!(
-        &buf,
-        b"PANDA\x00\x00\x00",
+        &buf, b"PANDA\x00\x00\x00",
         "ABC must start with PANDA magic, got: {:02x?}",
         buf
     );
@@ -290,7 +312,9 @@ fn test_hap_module_json_has_app_and_module_sections() {
 
     use std::io::Read;
     let mut content = String::new();
-    entry.read_to_string(&mut content).expect("read module.json");
+    entry
+        .read_to_string(&mut content)
+        .expect("read module.json");
 
     let v: serde_json::Value = serde_json::from_str(&content).expect("parse module.json");
 
