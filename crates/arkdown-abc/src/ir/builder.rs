@@ -259,12 +259,36 @@ fn module_record_literal_array(module_record: &ModuleRecordInfo) -> LiteralArray
 }
 
 fn scope_names_literal_array(methods: &[MethodRecord]) -> LiteralArray {
-    let mut names: Vec<String> = methods.iter().map(|method| method.name.clone()).collect();
+    let mut names = Vec::new();
+    for method in methods {
+        if let Some(class_name) = constructor_scope_name(&method.name) {
+            names.push(class_name);
+        }
+        if method.bytecode.contains(&0x33) {
+            if let Some(method_name) = class_method_scope_name(&method.name) {
+                names.push(method_name);
+            }
+        }
+    }
     names.sort();
     names.dedup();
     LiteralArray {
         entries: names.into_iter().map(LiteralEntry::TaggedString).collect(),
     }
+}
+
+fn constructor_scope_name(method_name: &str) -> Option<String> {
+    method_name
+        .strip_prefix("#~@0=#")
+        .or_else(|| method_name.strip_prefix("#~@0="))
+        .map(str::to_string)
+}
+
+fn class_method_scope_name(method_name: &str) -> Option<String> {
+    let name = method_name
+        .strip_prefix("#~@0>#")
+        .or_else(|| method_name.strip_prefix("#~@0<#"))?;
+    Some(name.trim_end_matches("^1").to_string())
 }
 
 // ── Byte-count heuristics ─────────────────────────────────────────────────────
