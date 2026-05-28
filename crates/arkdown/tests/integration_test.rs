@@ -62,6 +62,7 @@ fn make_test_config(fixture: &PathBuf) -> ArkdownConfig {
             restool_path: PathBuf::from("/nonexistent/restool"),
             compile_api_version: 12,
             has_rollup_plugin: true,
+            compile_sdk_version: "6.0.0.47".to_string(),
         },
     }
 }

@@ -41,6 +41,7 @@ fn default_config() -> Arc<ArkdownConfig> {
             restool_path: PathBuf::from("/sdk/restool"),
             compile_api_version: 12,
             has_rollup_plugin: true,
+            compile_sdk_version: "6.0.0.47".to_string(),
         },
     })
 }

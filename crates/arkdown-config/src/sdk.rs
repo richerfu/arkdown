@@ -99,6 +99,7 @@ pub fn sdk_config_from_root(sdk_root: &Path, compile_api_version: u32) -> SdkCon
         ets_loader_path,
         compile_api_version,
         has_rollup_plugin,
+        compile_sdk_version: "6.0.0.47".to_string(),
     }
 }
 

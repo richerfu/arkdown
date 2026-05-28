@@ -126,7 +126,12 @@ impl ProfileProcessor {
             obj.insert("buildMode".into(), if is_debug { "debug" } else { "release" }.into());
             obj.insert("debug".into(), is_debug.into());
             obj.insert("compileSdkType".into(), "HarmonyOS".into());
+            obj.insert(
+                "compileSdkVersion".into(),
+                self.config.sdk_config.compile_sdk_version.clone().into(),
+            );
             obj.insert("apiReleaseType".into(), "Release".into());
+            obj.insert("asanEnabled".into(), is_debug.into());
             obj.entry("appEnvironments").or_insert_with(|| serde_json::Value::Array(vec![]));
         }
 
@@ -258,6 +263,7 @@ mod tests {
                 restool_path: PathBuf::from("/sdk/restool"),
                 compile_api_version: 12,
                 has_rollup_plugin: true,
+                compile_sdk_version: "6.0.0.47".to_string(),
             },
         }
     }

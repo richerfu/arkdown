@@ -40,6 +40,7 @@ fn make_config() -> Arc<ArkdownConfig> {
             restool_path: "/sdk/restool".into(),
             compile_api_version: 12,
             has_rollup_plugin: true,
+            compile_sdk_version: "6.0.0.47".to_string(),
         },
     })
 }

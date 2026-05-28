@@ -54,6 +54,9 @@ pub struct LoaderJson {
     /// HAR package name → OHM URL map.
     #[serde(rename = "harNameOhmMap")]
     pub har_name_ohm_map: HashMap<String, String>,
+    /// WebWorker source file paths.
+    #[serde(default)]
+    pub workers: Vec<String>,
 }
 
 /// Concise metadata about an OHOS package referenced in the bundle.
@@ -161,6 +164,7 @@ pub fn generate_loader_json(
         byte_code_har_info: HashMap::new(),
         hsp_name_ohm_map: HashMap::new(),
         har_name_ohm_map: HashMap::new(),
+        workers: vec![],
     }
 }
 
@@ -231,6 +235,7 @@ mod tests {
                 restool_path: PathBuf::from("/sdk/restool"),
                 compile_api_version: 12,
                 has_rollup_plugin: true,
+                compile_sdk_version: "6.0.0.47".to_string(),
             },
         }
     }
@@ -342,6 +347,7 @@ mod tests {
         assert!(json_str.contains("apiVersion"), "missing apiVersion");
         assert!(json_str.contains("modulePathMap"), "missing modulePathMap");
         assert!(json_str.contains("fallbackAnBuild"), "missing fallbackAnBuild");
+        assert!(json_str.contains("\"workers\""), "missing workers");
     }
 
     #[test]

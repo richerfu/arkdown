@@ -50,9 +50,12 @@ fn generate_pkg_context_info(input: &PackInput) -> String {
     let name = &input.module_name;
     serde_json::json!({
         name: {
+            "isSO": false,
+            "moduleName": "",
+            "bundleName": "",
+            "dependencyAlias": "",
             "packageName": name,
             "entryPath": "src/main/",
-            "isSO": false,
             "version": ""
         }
     })
@@ -131,6 +134,14 @@ impl Packager {
         // pkgContextInfo.json — package context (deflated JSON)
         let pkg_ctx = generate_pkg_context_info(&input);
         zip_writer::add_bytes_deflate(&mut writer, "pkgContextInfo.json", pkg_ctx.as_bytes())?;
+
+        // .pages.info — binary router-map page index (hvigorw format)
+        // 4-byte header [0x20, 0x22, 0x22, 0x22] (' """') followed by 532 null bytes (536 total)
+        {
+            let mut pages_info = vec![0x20u8, 0x22, 0x22, 0x22];
+            pages_info.extend(std::iter::repeat(0u8).take(532));
+            zip_writer::add_bytes_deflate(&mut writer, ".pages.info", &pages_info)?;
+        }
 
         // resources.index — stored (binary resource table)
         if input.resources_index.exists() {
