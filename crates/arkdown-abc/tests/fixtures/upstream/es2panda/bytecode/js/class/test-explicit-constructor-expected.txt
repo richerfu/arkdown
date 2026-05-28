@@ -1,0 +1,9 @@
+slotNum = 0x9
+.language ECMAScript
+.function any .func_main_0(any a0, any a1, any a2) {
+	ldhole
+	defineclasswithbuffer 0x0, .#~A=#A, _1, 0x0, v0
+	sttoglobalrecord 0x3, A
+	defineclasswithbuffer 0x5, .#~B=#B, _2, 0x0, v0
+	sttoglobalrecord 0x8, B
+}

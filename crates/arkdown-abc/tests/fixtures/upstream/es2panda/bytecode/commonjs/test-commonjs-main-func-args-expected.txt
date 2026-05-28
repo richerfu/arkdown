@@ -1,0 +1,10 @@
+slotNum = 0x11
+.language ECMAScript
+.function any .func_main_0(any a0, any a1, any a2, any a3, any a4, any a5, any a6, any a7) {
+	tryldglobalbyname 0x0, Reflect
+	ldobjbyname 0x1, apply
+	definefunc 0x3, .#*#, 0x5
+	createemptyarray 0x4
+	stownbyindex 0x5, v3, 0x0
+	callthis3 0xf, v0, v2, a3, v3
+}

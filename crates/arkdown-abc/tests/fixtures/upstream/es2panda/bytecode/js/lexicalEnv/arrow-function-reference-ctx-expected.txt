@@ -1,0 +1,18 @@
+slotNum = 0x4
+.language ECMAScript
+.function any .#~AA>#test(any a0, any a1, any a2) {
+	newlexenv 0x2
+	lda a1
+	stlexvar 0x0, 0x0
+	lda a2
+	stlexvar 0x0, 0x1
+	definefunc 0x0, .#~AA>@0*#cb, 0x0
+}
+
+slotNum = 0x5
+.language ECMAScript
+.function any .#~AA>@0*#cb(any a0, any a1, any a2) {
+	ldlexvar 0x0, 0x1
+	ldobjbyname 0x0, a
+	ldlexvar 0x0, 0x0
+}
