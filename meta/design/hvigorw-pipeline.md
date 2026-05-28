@@ -14,6 +14,7 @@ rollup@3.19.1-htrunk1.AllScenario.devecostudio.r6
 ```
 
 Located at:
+
 ```
 DevEco-Studio-6.0.0.858.app/Contents/tools/hvigor/
   hvigor-ohos-plugin/node_modules/@ohos/hvigor-arkts-base/
@@ -190,43 +191,43 @@ entry/build/default/intermediates/
 
 ### P0 — Required for any HAP build
 
-| hvigor Plugin | npm Package | arkdown Crate | Notes |
-|---------------|-------------|---------------|-------|
-| `resolve/index` + `import-resolver` | custom | `arkdown-plugin-ohos-resolve` | Most complex; handles OHM URLs, ByteCode HAR, SDK paths |
-| `module-meta-info-plugin` | custom | `arkdown-plugin-module-meta` | pkgName, isLocalDep, OHM identity |
-| `wrapper-chunk-plugin` | custom | `arkdown-plugin-chunk-wrapper` | IIFE wrap, globalThis registry |
-| `check-duplicate-filenames-plugin` | custom | `arkdown-plugin-duplicate-check` | Prevent ABC record name collisions |
-| `invalid-cache-plugin` | custom | `arkdown-cache` | Incremental build cache invalidation |
-| `@rollup/plugin-commonjs` | 24.1.0 | **rolldown built-in** | CJS→ESM; use rolldown's native support |
-| `@rollup/plugin-json` | 6.0.0 | `arkdown-plugin-json5` | JSON/JSON5 imports |
-| `common-plugin` | custom | absorbed into core | ProjectConfig context sharing |
+| hvigor Plugin                       | npm Package | arkdown Crate                    | Notes                                                   |
+| ----------------------------------- | ----------- | -------------------------------- | ------------------------------------------------------- |
+| `resolve/index` + `import-resolver` | custom      | `arkdown-plugin-ohos-resolve`    | Most complex; handles OHM URLs, ByteCode HAR, SDK paths |
+| `module-meta-info-plugin`           | custom      | `arkdown-plugin-module-meta`     | pkgName, isLocalDep, OHM identity                       |
+| `wrapper-chunk-plugin`              | custom      | `arkdown-plugin-chunk-wrapper`   | IIFE wrap, globalThis registry                          |
+| `check-duplicate-filenames-plugin`  | custom      | `arkdown-plugin-duplicate-check` | Prevent ABC record name collisions                      |
+| `invalid-cache-plugin`              | custom      | `arkdown-cache`                  | Incremental build cache invalidation                    |
+| `@rollup/plugin-commonjs`           | 24.1.0      | **rolldown built-in**            | CJS→ESM; use rolldown's native support                  |
+| `@rollup/plugin-json`               | 6.0.0       | `arkdown-plugin-json5`           | JSON/JSON5 imports                                      |
+| `common-plugin`                     | custom      | absorbed into core               | ProjectConfig context sharing                           |
 
 ### P1 — Required for production/release builds
 
-| hvigor Plugin | npm Package | arkdown Crate | Notes |
-|---------------|-------------|---------------|-------|
-| `router-map-plugin` | custom | `arkdown-plugin-router-map` | Router map cache invalidation |
-| `use-sensitive-check-plugin` | custom | `arkdown-plugin-sensitive-check` | Case-sensitive import validation |
-| `har-deduplicate/` + `hsp-collect-har-files` | custom | `arkdown-plugin-har-dedup` | Two-pass HSP: collect then exclude HAR |
-| `@rollup/plugin-terser` | 0.3.0 | via `oxc_minifier` | JS minification; not yet wired in arkdown |
-| `importCheckPlugin` | custom | `arkdown-plugin-import-check` (TODO) | Deprecated API warnings |
+| hvigor Plugin                                | npm Package | arkdown Crate                        | Notes                                     |
+| -------------------------------------------- | ----------- | ------------------------------------ | ----------------------------------------- |
+| `router-map-plugin`                          | custom      | `arkdown-plugin-router-map`          | Router map cache invalidation             |
+| `use-sensitive-check-plugin`                 | custom      | `arkdown-plugin-sensitive-check`     | Case-sensitive import validation          |
+| `har-deduplicate/` + `hsp-collect-har-files` | custom      | `arkdown-plugin-har-dedup`           | Two-pass HSP: collect then exclude HAR    |
+| `@rollup/plugin-terser`                      | 0.3.0       | via `oxc_minifier`                   | JS minification; not yet wired in arkdown |
+| `importCheckPlugin`                          | custom      | `arkdown-plugin-import-check` (TODO) | Deprecated API warnings                   |
 
 ### P2 — Watch mode, hot-reload, advanced features
 
-| hvigor Plugin | arkdown Crate | Priority |
-|---------------|---------------|----------|
-| `collect-importers-plugin` | `arkdown-plugin-importers` (TODO) | For hot-reload dependency tracking |
-| `preview-resource-watcher-plugin` | `arkdown-plugin-preview-watch` (TODO) | DevEco IDE integration |
-| `add-packagejson-meta-plugin` | absorbed | Runtime version tracking |
-| `build-steps/clean-ets-for-tgz` | `arkdown-plugin-ets-tgz-clean` (TODO) | HAR publishing cleanup |
+| hvigor Plugin                     | arkdown Crate                         | Priority                           |
+| --------------------------------- | ------------------------------------- | ---------------------------------- |
+| `collect-importers-plugin`        | `arkdown-plugin-importers` (TODO)     | For hot-reload dependency tracking |
+| `preview-resource-watcher-plugin` | `arkdown-plugin-preview-watch` (TODO) | DevEco IDE integration             |
+| `add-packagejson-meta-plugin`     | absorbed                              | Runtime version tracking           |
+| `build-steps/clean-ets-for-tgz`   | `arkdown-plugin-ets-tgz-clean` (TODO) | HAR publishing cleanup             |
 
 ### Absorbed by Rust (no plugin needed)
 
-| hvigor JS Plugin | Rust equivalent |
-|------------------|-----------------|
-| `gc-plugin` | Rust `Drop` trait (deterministic) |
-| `wait-async-plugin` | Tokio async runtime |
-| `copy-plugin` / `delete-plugin` | Rust `std::fs` |
+| hvigor JS Plugin                | Rust equivalent                   |
+| ------------------------------- | --------------------------------- |
+| `gc-plugin`                     | Rust `Drop` trait (deterministic) |
+| `wait-async-plugin`             | Tokio async runtime               |
+| `copy-plugin` / `delete-plugin` | Rust `std::fs`                    |
 
 ---
 
@@ -275,13 +276,14 @@ This is what `ExecuteModuleBufferSecure` uses to locate the module entry point.
 
 ## External Binary Dependencies
 
-| Tool | Location | Purpose | Output |
-|------|----------|---------|--------|
-| `restool` | `DevEco SDK/toolchains/restool` | Resource compilation | `resources.index` (RestoolV2 binary) |
-| `es2abc` | `DevEco SDK/toolchains/es2abc` | JS → Panda bytecode | `modules.abc` (PANDA magic) |
-| `hap-sign-tool` | `DevEco SDK/toolchains/` | HAP signing | signed `.hap` |
+| Tool            | Location                        | Purpose              | Output                               |
+| --------------- | ------------------------------- | -------------------- | ------------------------------------ |
+| `restool`       | `DevEco SDK/toolchains/restool` | Resource compilation | `resources.index` (RestoolV2 binary) |
+| `es2abc`        | `DevEco SDK/toolchains/es2abc`  | JS → Panda bytecode  | `modules.abc` (PANDA magic)          |
+| `hap-sign-tool` | `DevEco SDK/toolchains/`        | HAP signing          | signed `.hap`                        |
 
 arkdown replaces all three with pure-Rust implementations:
+
 - `restool` → `arkdown-resource`
 - `es2abc` → `arkdown-abc`
 - `hap-sign-tool` → `arkdown-sign`
@@ -290,19 +292,19 @@ arkdown replaces all three with pure-Rust implementations:
 
 ## Critical Compatibility Requirements
 
-| Requirement | Reason |
-|-------------|--------|
-| `loader.json` exact field names | `@ohos/hvigor-arkts-base` plugins parse exact keys |
-| `module.json` must have `app` + `module` sections | ArkRuntime module registry |
-| `module.json` must have `packageName` field | OHOS module OHM path resolution |
-| `pkgContextInfo.json` must have `moduleName`, `bundleName` fields | Runtime dependency lookup |
-| ABC class name `L&path&;` format | `ExecuteModuleBufferSecure` lookup |
-| ABC import records use `@ohos:xxx` not `@kit.xxx` | System module registry keys |
-| `resources.index` RestoolV2 magic | Binary format recognizer |
-| `ets/modules.abc` path in HAP | ArkRuntime path convention (API >= 9) |
-| ABC Panda magic `PANDA\x00\x00\x00` (8 bytes) | Bytecode validator |
-| Adler-32 checksum at offset 0x08 | File integrity check on load |
-| Annotation stubs in ABC | ArkRuntime requires L_ESModuleRecord etc. |
+| Requirement                                                       | Reason                                             |
+| ----------------------------------------------------------------- | -------------------------------------------------- |
+| `loader.json` exact field names                                   | `@ohos/hvigor-arkts-base` plugins parse exact keys |
+| `module.json` must have `app` + `module` sections                 | ArkRuntime module registry                         |
+| `module.json` must have `packageName` field                       | OHOS module OHM path resolution                    |
+| `pkgContextInfo.json` must have `moduleName`, `bundleName` fields | Runtime dependency lookup                          |
+| ABC class name `L&path&;` format                                  | `ExecuteModuleBufferSecure` lookup                 |
+| ABC import records use `@ohos:xxx` not `@kit.xxx`                 | System module registry keys                        |
+| `resources.index` RestoolV2 magic                                 | Binary format recognizer                           |
+| `ets/modules.abc` path in HAP                                     | ArkRuntime path convention (API >= 9)              |
+| ABC Panda magic `PANDA\x00\x00\x00` (8 bytes)                     | Bytecode validator                                 |
+| Adler-32 checksum at offset 0x08                                  | File integrity check on load                       |
+| Annotation stubs in ABC                                           | ArkRuntime requires L_ESModuleRecord etc.          |
 
 ---
 

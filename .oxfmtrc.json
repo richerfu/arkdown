@@ -1,0 +1,9 @@
+{
+  "ignorePatterns": [
+    ".worktrees/**",
+    "tests/fixtures/minimal-hap/build/**",
+    "tests/fixtures/minimal-hap/entry/build/**",
+    "tests/fixtures/minimal-hap/oh_modules/**",
+    "tests/fixtures/minimal-hap/.hvigor/**"
+  ]
+}

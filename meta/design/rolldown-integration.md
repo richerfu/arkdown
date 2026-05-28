@@ -8,10 +8,10 @@ Updated after the ohos-rs/oxc fork was upgraded to 0.133.0 on 2026-05-28.
 
 ## Version History
 
-| Date | oxc (ohos-rs fork) | rolldown oxc req | Compatible? |
-|------|--------------------|------------------|-------------|
-| 2026-05-28 initial | 0.129.0 (`5caa6d54`) | 0.133.0 | ✗ Blocked |
-| 2026-05-28 revised | **0.133.0** (`c8d02452`) | 0.133.0 | ✅ **Aligned** |
+| Date               | oxc (ohos-rs fork)       | rolldown oxc req | Compatible?    |
+| ------------------ | ------------------------ | ---------------- | -------------- |
+| 2026-05-28 initial | 0.129.0 (`5caa6d54`)     | 0.133.0          | ✗ Blocked      |
+| 2026-05-28 revised | **0.133.0** (`c8d02452`) | 0.133.0          | ✅ **Aligned** |
 
 **Build status after upgrade:** 410/410 tests pass. `cargo build --workspace` clean.
 
@@ -38,12 +38,12 @@ oxc = { git = "https://github.com/ohos-rs/oxc",
 
 57 crates in four groups:
 
-| Group | Count | Examples |
-|-------|-------|---------|
-| Core bundler | 13 | `rolldown`, `rolldown_common`, `rolldown_ecmascript`, `rolldown_resolver`, `rolldown_plugin`, `rolldown_sourcemap`, `string_wizard` |
-| General plugins | 11 | `asset_module`, `bundle_analyzer`, `replace`, `hmr`, `isolated_declaration` |
-| Vite-specific plugins | 20 | `vite_html`, `vite_css`, `vite_json`, `vite_alias`, … |
-| Dev / test / NAPI | 13 | `rolldown_binding`, `rolldown_testing`, `bench`, … |
+| Group                 | Count | Examples                                                                                                                            |
+| --------------------- | ----- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| Core bundler          | 13    | `rolldown`, `rolldown_common`, `rolldown_ecmascript`, `rolldown_resolver`, `rolldown_plugin`, `rolldown_sourcemap`, `string_wizard` |
+| General plugins       | 11    | `asset_module`, `bundle_analyzer`, `replace`, `hmr`, `isolated_declaration`                                                         |
+| Vite-specific plugins | 20    | `vite_html`, `vite_css`, `vite_json`, `vite_alias`, …                                                                               |
+| Dev / test / NAPI     | 13    | `rolldown_binding`, `rolldown_testing`, `bench`, …                                                                                  |
 
 **Minimum subset for bundler core (no Vite, no NAPI):** ~24 crates.
 
@@ -96,6 +96,7 @@ rolldown = { version = "1.0.3", default-features = false }
 ```
 
 **Key notes:**
+
 - `oxc_resolver`, `oxc_sourcemap`, `oxc_index` are separate projects not
   in the ohos-rs fork — use their upstream crates.io versions (no ArkTS
   customisation needed for these)
@@ -103,21 +104,21 @@ rolldown = { version = "1.0.3", default-features = false }
 
 ### Assessment
 
-| Metric | Value |
-|--------|-------|
-| **Feasibility** | ✅ Viable — versions fully aligned |
-| **Effort** | Small — ~30 lines Cargo.toml, < 1 day |
-| **Risk** | Medium-Low |
-| **Maintenance** | Low — rolldown updates via `Cargo.lock` |
-| **Workspace bloat** | None — rolldown stays external |
+| Metric              | Value                                   |
+| ------------------- | --------------------------------------- |
+| **Feasibility**     | ✅ Viable — versions fully aligned      |
+| **Effort**          | Small — ~30 lines Cargo.toml, < 1 day   |
+| **Risk**            | Medium-Low                              |
+| **Maintenance**     | Low — rolldown updates via `Cargo.lock` |
+| **Workspace bloat** | None — rolldown stays external          |
 
 ### Likely issues & mitigations
 
-| Issue | Probability | Mitigation |
-|-------|------------|------------|
-| NAPI linker errors | Medium | `default-features = false` |
-| Transitive dep conflict | Medium | `cargo tree` + pin conflicting crate |
-| `oxc_resolver` API diff | Low | Independent project; no ohos-rs patch needed |
+| Issue                   | Probability | Mitigation                                   |
+| ----------------------- | ----------- | -------------------------------------------- |
+| NAPI linker errors      | Medium      | `default-features = false`                   |
+| Transitive dep conflict | Medium      | `cargo tree` + pin conflicting crate         |
+| `oxc_resolver` API diff | Low         | Independent project; no ohos-rs patch needed |
 
 ---
 
@@ -127,6 +128,7 @@ rolldown = { version = "1.0.3", default-features = false }
 
 The patch complexity is identical to Option (i) (same 11 redirects), but
 adds 57 extra workspace members. Use only if:
+
 - Option (i) hits circular-dependency issues
 - You need to patch rolldown's core and contribute upstream
 
@@ -139,6 +141,7 @@ adds 57 extra workspace members. Use only if:
 Now that Option (i) is viable, forking 57 crates is unnecessary.
 
 If ever needed:
+
 - Copy ~24 core crates (skip Vite plugins, NAPI, bench)
 - Redirect `oxc = "0.133.0"` lines to ohos-rs fork
 - Add `// Copyright 2024-present VoidZero Inc. & Contributors` (MIT) to every file
@@ -148,24 +151,24 @@ If ever needed:
 
 ## Priority Table
 
-| Option | Feasibility | Effort | Risk | Recommended? |
-|--------|-------------|--------|------|--------------|
-| **(i) Direct dep + [patch]** | ✅ Yes | Small (1 day) | Med-Low | ✅ **DO THIS** |
-| **(ii) Submodule** | ✅ Yes | Medium (2 days) | Medium | ⚠️ Fallback |
-| **(iii) Fork 24+ crates** | ✅ Yes | Large (1–2 wks) | High | ❌ Last resort |
-| **Reference only** | ✅ Yes | None | None | ✓ Safe interim |
+| Option                       | Feasibility | Effort          | Risk    | Recommended?   |
+| ---------------------------- | ----------- | --------------- | ------- | -------------- |
+| **(i) Direct dep + [patch]** | ✅ Yes      | Small (1 day)   | Med-Low | ✅ **DO THIS** |
+| **(ii) Submodule**           | ✅ Yes      | Medium (2 days) | Medium  | ⚠️ Fallback    |
+| **(iii) Fork 24+ crates**    | ✅ Yes      | Large (1–2 wks) | High    | ❌ Last resort |
+| **Reference only**           | ✅ Yes      | None            | None    | ✓ Safe interim |
 
 ---
 
 ## What rolldown provides (value to arkdown)
 
-| Rolldown component | Benefit |
-|-------------------|---------|
-| `rolldown_sourcemap` | More mature source map merge/generation |
-| `rolldown_resolver` | Better edge-case coverage (monorepo, pnp, symlinks) |
-| `rolldown_plugin` framework | Richer async plugin hooks |
-| `string_wizard` | Magic-string equivalent for source mutations |
-| Minification wiring | Production-ready `oxc_minifier` integration (arkdown hasn't wired this yet) |
+| Rolldown component          | Benefit                                                                     |
+| --------------------------- | --------------------------------------------------------------------------- |
+| `rolldown_sourcemap`        | More mature source map merge/generation                                     |
+| `rolldown_resolver`         | Better edge-case coverage (monorepo, pnp, symlinks)                         |
+| `rolldown_plugin` framework | Richer async plugin hooks                                                   |
+| `string_wizard`             | Magic-string equivalent for source mutations                                |
+| Minification wiring         | Production-ready `oxc_minifier` integration (arkdown hasn't wired this yet) |
 
 **OHOS-specific features rolldown does NOT cover (arkdown still owns):**
 
