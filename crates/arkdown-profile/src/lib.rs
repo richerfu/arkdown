@@ -249,6 +249,11 @@ fn manifest_to_json(manifest: &HapManifest, resource_ids: Option<&HashMap<String
         obj["pages"] = serde_json::Value::String(pages.clone());
     }
 
+    // Emit the description string reference (e.g. "$string:module_desc") if present.
+    if let Some(desc) = &manifest.description {
+        obj["description"] = serde_json::Value::String(desc.clone());
+    }
+
     // Resolve module-level description resource reference to a numeric ID.
     if let (Some(desc_ref), Some(ids)) = (manifest.description.as_deref(), resource_ids) {
         if let Some(id) = resolve_res_ref(desc_ref, ids) {

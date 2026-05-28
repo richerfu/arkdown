@@ -241,4 +241,71 @@ mod tests {
 
         let _ = std::fs::remove_file(&tmp);
     }
+
+    /// Verify that rolldown CJS interop helpers (`var __xxx = ...`) inside an
+    /// IIFE body are compiled as separate [`MethodRecord`]s.
+    ///
+    /// es2abc produces 11 methods for a typical EntryAbility bundle; the 6 helpers
+    /// (`__create`, `__defProp`, `__getOwnPropDesc`, `__getOwnPropNames`,
+    /// `__getProtoOf`, `__hasOwnProp`) must each become their own method record so
+    /// the ABC class item matches es2abc output.
+    #[test]
+    fn test_cjs_helpers_become_method_records() {
+        use crate::emit::strings::StringTable;
+        use crate::emit::file::LiteralArray;
+        use crate::ir::builder::build_record;
+
+        let source = r#"(function () {
+            var __create = Object.create;
+            var __defProp = Object.defineProperty;
+            var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+            var __getOwnPropNames = Object.getOwnPropertyNames;
+            var __copyProps = (to, from, except, desc) => {
+                if (from && typeof from === "object") {
+                    for (var key of __getOwnPropNames(from)) {
+                        if (!__hasOwnProp.call(except, key)) {
+                            __defProp(to, key, { get: () => from[key], enumerable: true });
+                        }
+                    }
+                }
+                return to;
+            };
+            var __toESM = (mod, isNodeMode, target) => {
+                return mod;
+            };
+            class EntryAbility {
+                onCreate(want, launchParam) {}
+                onWindowStageCreate(windowStage) {}
+            }
+        })()"#;
+
+        let mut strings = StringTable::default();
+        let mut literal_arrays: Vec<LiteralArray> = Vec::new();
+        let record = build_record(source, "com.example.app/entry/ets/entryability/EntryAbility", &mut strings, &mut literal_arrays)
+            .expect("build_record failed");
+
+        // func_main_0 + 6 helpers + 2 class methods = 9 minimum; order may vary.
+        let method_names: Vec<&str> = record.methods.iter().map(|m| m.name.as_str()).collect();
+        assert!(
+            method_names.contains(&"__create"),
+            "Expected __create method; got: {:?}", method_names
+        );
+        assert!(
+            method_names.contains(&"__defProp"),
+            "Expected __defProp method; got: {:?}", method_names
+        );
+        assert!(
+            method_names.contains(&"__copyProps"),
+            "Expected __copyProps method; got: {:?}", method_names
+        );
+        assert!(
+            method_names.contains(&"__toESM"),
+            "Expected __toESM method; got: {:?}", method_names
+        );
+        // Should have at least 9 methods (func_main_0 + 6 helpers + 2 class methods).
+        assert!(
+            record.methods.len() >= 9,
+            "Expected >= 9 methods, got {} ({:?})", record.methods.len(), method_names
+        );
+    }
 }

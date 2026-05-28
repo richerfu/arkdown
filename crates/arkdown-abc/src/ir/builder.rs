@@ -193,13 +193,64 @@ fn compile_class_method_bodies(
         }
         // Handle `var Foo = class extends Bar { ... }` (VariableDeclaration with ClassExpression)
         // This is the pattern rolldown CJS output uses.
+        // Also handles rolldown CJS interop helpers: `var __create = Object.create` etc.
         if let Statement::VariableDeclaration(var_decl) = stmt {
             for declarator in &var_decl.declarations {
+                // Extract binding name (skip destructuring).
+                let name = match &declarator.id {
+                    BindingPattern::BindingIdentifier(id) => id.name.as_str().to_string(),
+                    _ => continue,
+                };
+
                 if let Some(init) = &declarator.init {
                     if let Expression::ClassExpression(cls) = init {
                         compile_class_elements(&cls.body.body, strings, literal_arrays, methods);
+                        continue;
                     }
                 }
+
+                // Rolldown CJS interop helpers: var __xxx = <arrow | fn | member>
+                // Only capture names that start with double-underscore.
+                if !name.starts_with("__") {
+                    continue;
+                }
+
+                let bytecode = if let Some(init) = &declarator.init {
+                    match init {
+                        Expression::ArrowFunctionExpression(arrow) => {
+                            // body is Box<FunctionBody> directly in the ohos-rs fork.
+                            compile_function_body(
+                                Some(arrow.body.as_ref()),
+                                strings,
+                                literal_arrays,
+                            )
+                        }
+                        Expression::FunctionExpression(func) => {
+                            compile_function_body(
+                                func.body.as_deref(),
+                                strings,
+                                literal_arrays,
+                            )
+                        }
+                        _ => {
+                            // Simple assignment (e.g. `var __create = Object.create`):
+                            // emit a stub method that immediately returns undefined.
+                            let mut st = StringTable::default();
+                            Insn::ReturnUndefined.encode(&mut st)
+                        }
+                    }
+                } else {
+                    let mut st = StringTable::default();
+                    Insn::ReturnUndefined.encode(&mut st)
+                };
+
+                let num_vregs = estimate_vregs(&bytecode);
+                methods.push(MethodRecord {
+                    name,
+                    bytecode,
+                    num_vregs,
+                    num_args: 0,
+                });
             }
         }
     }
