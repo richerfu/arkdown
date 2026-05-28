@@ -10,7 +10,7 @@ use arkdown::Bundler;
 use arkdown_abc::{AbcCompileOptions, AbcCompiler, AbcModule};
 use arkdown_config::load_config;
 use arkdown_core::{ArkdownPlugin, BuildMode, ModuleJson5, ModuleJson5Module, OutputTarget};
-use arkdown_pack::{HarPackInput, PackInput, Packager};
+use arkdown_pack::{HarPackInput, PackAbility, PackInput, Packager};
 use arkdown_sign::HapSigner;
 use arkdown_plugin_chunk_wrapper::ChunkWrapperPlugin;
 use arkdown_plugin_duplicate_check::DuplicateCheckPlugin;
@@ -257,7 +257,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
     progress.step(6, 6, "Packaging");
     let packager = Packager::new(config_arc.clone());
     let mut output_paths = Vec::new();
-    for (module, _manifest, _loader_json) in &loader_jsons {
+    for (module, manifest, _loader_json) in &loader_jsons {
         let module_json = module
             .src_path
             .join("build/default/intermediates/res/module.json");
@@ -310,24 +310,44 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                         }
                         std::fs::write(&resources_index, &[])?;
                     }
-                    Some(
-                        packager
-                            .pack_hap(PackInput {
-                                module_name: module.name.clone(),
-                                abc_path: modules_abc,
-                                resources_index,
-                                module_json,
-                                native_libs: vec![],
-                                output_path: output.clone(),
-                                resources_src_dir: Some(
-                                    module.src_path.join("src/main/resources"),
-                                ),
-                                bundle_version_code: 1000000,
-                                bundle_version_name: "1.0.0".to_string(),
-                                bundle_type: "app".to_string(),
+                    {
+                        // Source maps produced by the bundler (may not exist yet)
+                        let source_maps_path = {
+                            let p = module.src_path.join(
+                                "build/default/intermediates/loader_out/default/ets/sourceMaps.map",
+                            );
+                            if p.exists() { Some(p) } else { None }
+                        };
+                        // Abilities from the processed manifest
+                        let abilities: Vec<PackAbility> = manifest
+                            .abilities
+                            .iter()
+                            .map(|a| PackAbility {
+                                name: a.name.clone(),
+                                label: a.label.clone(),
                             })
-                            .map_err(|e| anyhow::anyhow!("Pack failed: {}", e))?,
-                    )
+                            .collect();
+                        Some(
+                            packager
+                                .pack_hap(PackInput {
+                                    module_name: module.name.clone(),
+                                    abc_path: modules_abc,
+                                    resources_index,
+                                    module_json,
+                                    native_libs: vec![],
+                                    output_path: output.clone(),
+                                    resources_src_dir: Some(
+                                        module.src_path.join("src/main/resources"),
+                                    ),
+                                    bundle_version_code: 1000000,
+                                    bundle_version_name: "1.0.0".to_string(),
+                                    bundle_type: "app".to_string(),
+                                    source_maps_path,
+                                    abilities,
+                                })
+                                .map_err(|e| anyhow::anyhow!("Pack failed: {}", e))?,
+                        )
+                    }
                 } else {
                     None
                 }

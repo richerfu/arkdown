@@ -28,11 +28,12 @@ pub fn write_resource_table(
 
 fn type_name(t: u32) -> &'static str {
     match t {
-        0x1 => "media",
-        0x4 => "string",
-        0x5 => "integer",
-        0x6 => "float",
-        0xA => "color",
+        0x05 => "integer",
+        0x06 => "float",
+        0x09 => "string",
+        0x0E => "color",
+        0x13 => "media",
+        0x14 => "profile",
         _ => "unknown",
     }
 }
@@ -48,7 +49,7 @@ mod tests {
         let out = tmp.path().join("ResourceTable.txt");
         let entries = vec![CompiledEntry {
             id: 0x01000001,
-            entry_type: 0x4,
+            entry_type: 0x09,
             name: "app_name".to_string(),
             value: "My App".to_string(),
             qualifier: String::new(),

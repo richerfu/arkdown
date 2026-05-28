@@ -72,6 +72,8 @@ fn minimal_pack_input(
         bundle_version_code: 1000000,
         bundle_version_name: "1.0.0".to_string(),
         bundle_type: "app".to_string(),
+        source_maps_path: None,
+        abilities: vec![],
     }
 }
 
@@ -242,6 +244,8 @@ fn test_hap_resource_files_copied_from_src() {
             bundle_version_code: 1000000,
             bundle_version_name: "1.0.0".to_string(),
             bundle_type: "app".to_string(),
+            source_maps_path: None,
+            abilities: vec![],
         })
         .expect("pack_hap must succeed");
 
@@ -278,6 +282,8 @@ fn test_missing_abc_returns_missing_input_error() {
         bundle_version_code: 1000000,
         bundle_version_name: "1.0.0".to_string(),
         bundle_type: "app".to_string(),
+        source_maps_path: None,
+        abilities: vec![],
     });
     assert!(result.is_err(), "missing ABC must return Err");
     assert!(
@@ -300,6 +306,8 @@ fn test_missing_module_json_returns_missing_input_error() {
         bundle_version_code: 1000000,
         bundle_version_name: "1.0.0".to_string(),
         bundle_type: "app".to_string(),
+        source_maps_path: None,
+        abilities: vec![],
     });
     assert!(result.is_err());
     assert!(matches!(result.unwrap_err(), PackError::MissingInput(_)));
@@ -329,6 +337,8 @@ fn test_hsp_output_is_valid_zip() {
             bundle_version_code: 1000000,
             bundle_version_name: "1.0.0".to_string(),
             bundle_type: "app".to_string(),
+            source_maps_path: None,
+            abilities: vec![],
         })
         .expect("pack_hsp must succeed");
 

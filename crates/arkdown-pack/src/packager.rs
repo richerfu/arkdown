@@ -7,6 +7,24 @@ use crate::error::PackError;
 use crate::zip_writer;
 
 fn generate_pack_info(config: &ArkdownConfig, input: &PackInput) -> String {
+    let abilities_json: Vec<serde_json::Value> = input
+        .abilities
+        .iter()
+        .map(|a| {
+            let mut obj = serde_json::json!({"name": a.name});
+            if let Some(label) = &a.label {
+                obj["label"] = serde_json::json!(label);
+            }
+            obj
+        })
+        .collect();
+
+    let main_ability = input
+        .abilities
+        .first()
+        .map(|a| a.name.as_str())
+        .unwrap_or("EntryAbility");
+
     serde_json::json!({
         "summary": {
             "app": {
@@ -19,8 +37,9 @@ fn generate_pack_info(config: &ArkdownConfig, input: &PackInput) -> String {
             },
             "modules": [
                 {
-                    "mainAbility": "EntryAbility",
+                    "mainAbility": main_ability,
                     "deviceType": ["phone"],
+                    "abilities": abilities_json,
                     "distro": {
                         "moduleType": "entry",
                         "moduleName": input.module_name,
@@ -29,6 +48,7 @@ fn generate_pack_info(config: &ArkdownConfig, input: &PackInput) -> String {
                     },
                     "apiVersion": {
                         "compatible": config.sdk_config.compile_api_version,
+                        "releaseType": "Release",
                         "target": config.sdk_config.compile_api_version
                     }
                 }
@@ -66,6 +86,12 @@ pub struct Packager {
     pub config: Arc<ArkdownConfig>,
 }
 
+/// A single ability entry included in `pack.info` under `modules[].abilities`.
+pub struct PackAbility {
+    pub name: String,
+    pub label: Option<String>,
+}
+
 pub struct PackInput {
     pub module_name: String,
     /// Path to `modules.abc` produced by arkdown-abc.
@@ -86,6 +112,10 @@ pub struct PackInput {
     pub bundle_version_name: String,
     /// Bundle type: `"app"` for HAP, `"shared"` for HSP.
     pub bundle_type: String,
+    /// Path to `sourceMaps.map` produced by the bundler; bundled as `ets/sourceMaps.map`.
+    pub source_maps_path: Option<PathBuf>,
+    /// Abilities list for inclusion in `pack.info` under `modules[].abilities`.
+    pub abilities: Vec<PackAbility>,
 }
 
 pub struct HarPackInput {
@@ -164,6 +194,13 @@ impl Packager {
             zip_writer::add_file_stored(&mut writer, abc_dest, &input.abc_path)?;
         } else {
             return Err(PackError::MissingInput("modules.abc".to_string()));
+        }
+
+        // ets/sourceMaps.map — deflated; only included if the bundler produced it
+        if let Some(ref sm_path) = input.source_maps_path {
+            if sm_path.exists() {
+                zip_writer::add_file_deflate(&mut writer, "ets/sourceMaps.map", sm_path)?;
+            }
         }
 
         // Resource files — copy from src/main/resources/ into resources/ in the HAP

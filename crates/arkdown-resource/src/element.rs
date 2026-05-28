@@ -21,14 +21,14 @@ pub enum EntryType {
 impl EntryType {
     /// Maps to the resource type ID used in `resources.index`.
     ///
-    /// Values mirror the constants in OpenHarmony's `restool`:
-    /// `STRING = 0x04`, `INTEGER = 0x05`, `FLOAT = 0x06`, `COLOR = 0x0A`.
+    /// Values match the constants observed in real `restool 6.0` output:
+    /// `STRING = 0x09`, `COLOR = 0x0E`, `FLOAT = 0x06`, `INTEGER = 0x05`.
     pub fn resource_type_id(self) -> u32 {
         match self {
-            EntryType::String => 0x4,
-            EntryType::Color => 0xA,
-            EntryType::Float => 0x6,
-            EntryType::Integer => 0x5,
+            EntryType::String => 0x09,
+            EntryType::Color => 0x0E,
+            EntryType::Float => 0x06,
+            EntryType::Integer => 0x05,
         }
     }
 }
@@ -102,7 +102,7 @@ mod tests {
         assert_eq!(entries[0].name, "app_name");
         assert_eq!(entries[0].value, "My App");
         assert_eq!(entries[0].entry_type, EntryType::String);
-        assert_eq!(entries[0].entry_type.resource_type_id(), 0x4);
+        assert_eq!(entries[0].entry_type.resource_type_id(), 0x09);
     }
 
     #[test]
@@ -117,7 +117,7 @@ mod tests {
         let entries = parse_element_file(&path);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].entry_type, EntryType::Color);
-        assert_eq!(entries[0].entry_type.resource_type_id(), 0xA);
+        assert_eq!(entries[0].entry_type.resource_type_id(), 0x0E);
     }
 
     #[test]

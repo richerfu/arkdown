@@ -121,7 +121,7 @@ impl ResourceCompiler {
                         resource_ids.insert(file.name.clone(), next_id);
                         all_entries.push(CompiledEntry {
                             id: next_id,
-                            entry_type: 0x1, // MEDIA type
+                            entry_type: 0x13, // MEDIA type (matches restool 6.0)
                             name: file.name.clone(),
                             value: format!(
                                 "media/{}",
@@ -305,7 +305,7 @@ mod tests {
             .unwrap();
 
         let bytes = fs::read(&result.resources_index).unwrap();
-        // RestoolV2 magic: ASCII "RestoolV2 " (10 bytes)
-        assert_eq!(&bytes[0..10], b"RestoolV2 ");
+        // Restool 6.0 magic: b"Restool 6.0.0.001\x00" (18 bytes)
+        assert_eq!(&bytes[0..18], b"Restool 6.0.0.001\x00");
     }
 }

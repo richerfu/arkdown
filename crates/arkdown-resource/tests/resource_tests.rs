@@ -77,11 +77,11 @@ fn test_resources_index_has_restool_magic() {
         .expect("compile must succeed");
 
     let bytes = fs::read(&result.resources_index).expect("read resources.index");
-    // RestoolV2 magic: ASCII "RestoolV2 " (10 bytes)
+    // Restool 6.0 magic: b"Restool 6.0.0.001\x00" (18 bytes)
     assert_eq!(
-        &bytes[0..10],
-        b"RestoolV2 ",
-        "resources.index must start with RestoolV2 magic"
+        &bytes[0..18],
+        b"Restool 6.0.0.001\x00",
+        "resources.index must start with restool 6.0 magic"
     );
 }
 

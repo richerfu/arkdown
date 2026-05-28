@@ -3,7 +3,7 @@ pub mod packager;
 pub mod zip_writer;
 
 pub use error::PackError;
-pub use packager::{HarPackInput, PackInput, Packager};
+pub use packager::{HarPackInput, PackAbility, PackInput, Packager};
 
 #[cfg(test)]
 mod tests {
@@ -74,6 +74,8 @@ mod tests {
             bundle_version_code: 1000000,
             bundle_version_name: "1.0.0".to_string(),
             bundle_type: "app".to_string(),
+            source_maps_path: None,
+            abilities: vec![],
         });
         assert!(result.is_ok(), "{:?}", result.err());
         assert!(out.exists());
@@ -119,6 +121,8 @@ mod tests {
                 bundle_version_code: 1000000,
                 bundle_version_name: "1.0.0".to_string(),
                 bundle_type: "app".to_string(),
+                source_maps_path: None,
+                abilities: vec![],
             })
             .unwrap();
 
@@ -147,6 +151,8 @@ mod tests {
             bundle_version_code: 1000000,
             bundle_version_name: "1.0.0".to_string(),
             bundle_type: "app".to_string(),
+            source_maps_path: None,
+            abilities: vec![],
         });
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -219,6 +225,8 @@ mod tests {
             bundle_version_code: 1000000,
             bundle_version_name: "1.0.0".to_string(),
             bundle_type: "app".to_string(),
+            source_maps_path: None,
+            abilities: vec![],
         });
         assert!(result.is_ok(), "{:?}", result.err());
         assert!(out.exists());

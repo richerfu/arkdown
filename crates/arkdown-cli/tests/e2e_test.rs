@@ -165,6 +165,8 @@ fn run_build(fixture: &PathBuf) -> PathBuf {
             bundle_version_code: 1000000,
             bundle_version_name: "1.0.0".to_string(),
             bundle_type: "app".to_string(),
+            source_maps_path: None,
+            abilities: vec![],
         })
         .expect("pack_hap");
 
