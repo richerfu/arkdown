@@ -166,6 +166,7 @@ dependencies = [
  "rolldown",
  "rolldown_common",
  "rolldown_plugin",
+ "rolldown_sourcemap",
  "rustc-hash",
  "serde",
  "serde_json",

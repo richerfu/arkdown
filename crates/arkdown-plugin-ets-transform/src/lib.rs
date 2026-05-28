@@ -33,6 +33,10 @@ use arkdown_core::{
     ModuleType, PluginContext, PluginResult, ResolvedId,
 };
 use async_trait::async_trait;
+use oxc_allocator::Allocator;
+use oxc_codegen::{Codegen, CodegenOptions};
+use oxc_parser::Parser;
+use oxc_span::SourceType;
 
 /// ArkTS transform plugin — desugars `.ets` files into TypeScript.
 ///
@@ -92,9 +96,16 @@ impl ArkdownPlugin for EtsTransformPlugin {
         if !is_ets {
             // .ts files: kit rewrite + version-gated rewrites only.
             let final_source = api_transform::rewrite_imports_for_version(&code, api_version);
+            // Generate a per-token source map from the final transformed
+            // TypeScript so rolldown can chain it when producing sourceMaps.map.
+            // Using final_source (not original_code) ensures the span offsets
+            // recorded in the map align with the code field we return.  The
+            // source file name is set to `id` (the .ets/.ts path) so the
+            // final sourceMaps.map correctly names the original source file.
+            let source_map = generate_source_map_json(&final_source, id);
             return Ok(Some(HookTransformOutput {
                 code: final_source,
-                source_map: None,
+                source_map,
             }));
         }
 
@@ -128,11 +139,49 @@ impl ArkdownPlugin for EtsTransformPlugin {
         // Step 4: Apply version-gated API import rewrites.
         let final_source = api_transform::rewrite_imports_for_version(&transformed, api_version);
 
+        // Generate a per-token source map from the final transformed
+        // TypeScript.  Using final_source ensures that the span offsets
+        // recorded in the map match the code field returned to rolldown, which
+        // is a requirement for rolldown to produce a coherent sourceMaps.map.
+        // The source_map_path is set to `id` (the original .ets path) so the
+        // source file entry in sourceMaps.map names the original .ets file.
+        let source_map = generate_source_map_json(&final_source, id);
+
         Ok(Some(HookTransformOutput {
             code: final_source,
-            source_map: None,
+            source_map,
         }))
     }
+}
+
+/// Generate a JSON source map string by parsing `original_code` and running
+/// oxc codegen with `source_map_path` set to `id`.
+///
+/// The resulting map records per-token mappings from the re-generated
+/// TypeScript back to positions in the original source.  It is returned as a
+/// serialized JSON string so that it can cross the plugin-adapter boundary
+/// without an oxc-version type mismatch (the adapter uses
+/// `rolldown_sourcemap::SourceMap::from_json_string` to decode it into the
+/// rolldown-internal type).
+///
+/// Returns `None` if parsing fails (in which case the caller should fall back
+/// to `HookTransformOutputMap::Null` in the adapter, suppressing rolldown's
+/// "possibly broken sourcemap" warning without providing a map).
+fn generate_source_map_json(original_code: &str, id: &str) -> Option<String> {
+    let allocator = Allocator::default();
+    let source_type =
+        SourceType::from_path(id).unwrap_or_else(|_| SourceType::ts().with_module(true));
+    let parsed = Parser::new(&allocator, original_code, source_type).parse();
+    if !parsed.errors.is_empty() {
+        return None;
+    }
+    let result = Codegen::new()
+        .with_options(CodegenOptions {
+            source_map_path: Some(std::path::PathBuf::from(id)),
+            ..CodegenOptions::default()
+        })
+        .build(&parsed.program);
+    result.map.map(|m| m.to_json_string())
 }
 
 fn module_name_from_id(id: &str) -> Option<String> {

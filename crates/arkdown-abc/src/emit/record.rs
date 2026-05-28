@@ -94,6 +94,11 @@ pub struct MethodRecord {
     /// Optional method debug metadata. hvigor/es2abc emits this in non-stripped
     /// output so ArkRuntime can link bytecode spans back to source files.
     pub debug_info: Option<DebugInfoRecord>,
+    /// Encoded Panda LineNumberProgram opcodes (ADVANCE_PC, ADVANCE_LINE,
+    /// SPECIAL_OPCODE, END_SEQUENCE).  Non-empty only when line tracking was
+    /// performed during compilation (i.e. when a source text was available).
+    /// Written verbatim into the LNP body after the SET_FILE preamble.
+    pub line_ops: Vec<u8>,
 }
 
 /// Minimal method debug info linked through a Panda LineNumberProgram.
@@ -499,6 +504,7 @@ mod tests {
                 num_vregs: 0,
                 num_args: 3,
                 debug_info: None,
+                line_ops: vec![],
             }],
             access_flags: 1,
             source_lang: 0,
@@ -527,6 +533,7 @@ mod tests {
                 num_vregs: 0,
                 num_args: 3,
                 debug_info: None,
+                line_ops: vec![],
             }],
             access_flags: 1,
             source_lang: 0,

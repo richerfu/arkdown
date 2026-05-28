@@ -8,7 +8,7 @@ use oxc_ast::ast::{
     Program, PropertyKey, Statement, UnaryOperator,
 };
 use oxc_parser::{Parser, ParserReturn};
-use oxc_span::SourceType;
+use oxc_span::{GetSpan, SourceType};
 
 use crate::emit::file::{LiteralArray, LiteralEntry};
 use crate::emit::record::{
@@ -17,6 +17,102 @@ use crate::emit::record::{
 use crate::emit::strings::StringTable;
 use crate::error::AbcError;
 use crate::ir::opcodes::Insn;
+
+// ── LNP helpers ───────────────────────────────────────────────────────────────
+
+/// Encode `value` as an unsigned LEB-128 byte sequence (appended to `buf`).
+fn encode_uleb128(mut value: u64, buf: &mut Vec<u8>) {
+    loop {
+        let byte = (value & 0x7F) as u8;
+        value >>= 7;
+        if value == 0 {
+            buf.push(byte);
+            break;
+        } else {
+            buf.push(byte | 0x80);
+        }
+    }
+}
+
+/// Encode `value` as a signed LEB-128 byte sequence (appended to `buf`).
+fn encode_sleb128(mut value: i32, buf: &mut Vec<u8>) {
+    let mut more = true;
+    while more {
+        let byte = (value & 0x7F) as u8;
+        value >>= 7;
+        more = !(((value == 0) && (byte & 0x40 == 0)) || ((value == -1) && (byte & 0x40 != 0)));
+        buf.push(if more { byte | 0x80 } else { byte });
+    }
+}
+
+/// Return the 1-based line number corresponding to `byte_offset` in `source`.
+fn line_at(source: &str, byte_offset: u32) -> u32 {
+    let end = (byte_offset as usize).min(source.len());
+    1 + source[..end].bytes().filter(|&b| b == b'\n').count() as u32
+}
+
+/// Accumulates Panda LineNumberProgram opcodes for a single method.
+///
+/// Opcodes emitted:
+/// - `SPECIAL_OPCODE` (opcode ≥ 8): encodes a small PC-delta + line-delta pair
+///   in a single byte using the formula `op = (line_delta * 16 + pc_delta) + 8`.
+/// - `ADVANCE_LINE` (0x02) + SLEB128: adjusts the current line without a PC step.
+/// - `ADVANCE_PC` (0x01) + ULEB128: adjusts the current PC without a line change.
+/// - `END_SEQUENCE` (0x00): terminates the program (appended by `finish`).
+struct LineTracker {
+    current_line: u32,
+    current_pc: u32,
+    ops: Vec<u8>,
+}
+
+impl LineTracker {
+    fn new(start_line: u32) -> Self {
+        Self {
+            current_line: start_line,
+            current_pc: 0,
+            ops: Vec::new(),
+        }
+    }
+
+    /// Record a `(new_pc, new_line)` pair and emit the minimal LNP opcode(s).
+    fn advance(&mut self, new_pc: u32, new_line: u32) {
+        let pc_delta = new_pc.saturating_sub(self.current_pc);
+        let line_delta = new_line as i32 - self.current_line as i32;
+        if pc_delta == 0 && line_delta == 0 {
+            return;
+        }
+
+        // Try SPECIAL_OPCODE: op = (line_delta * 16 + pc_delta) + 8
+        // Valid when 0 ≤ pc_delta ≤ 16 and 0 ≤ line_delta ≤ 15, result ≤ 255.
+        if pc_delta <= 16 && line_delta >= 0 && line_delta <= 15 {
+            let special = (line_delta as u32 * 16 + pc_delta) + 8;
+            if special <= 255 {
+                self.ops.push(special as u8);
+                self.current_pc = new_pc;
+                self.current_line = new_line;
+                return;
+            }
+        }
+
+        // Fall back to explicit ADVANCE_LINE + ADVANCE_PC.
+        if line_delta != 0 {
+            self.ops.push(0x02); // ADVANCE_LINE
+            encode_sleb128(line_delta, &mut self.ops);
+        }
+        if pc_delta > 0 {
+            self.ops.push(0x01); // ADVANCE_PC
+            encode_uleb128(pc_delta as u64, &mut self.ops);
+        }
+        self.current_pc = new_pc;
+        self.current_line = new_line;
+    }
+
+    /// Append `END_SEQUENCE` and return the finished byte sequence.
+    fn finish(mut self) -> Vec<u8> {
+        self.ops.push(0x00); // END_SEQUENCE
+        self.ops
+    }
+}
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
@@ -96,7 +192,17 @@ pub fn build_record_with_debug(
     // ArkRuntime always invokes `func_main_0` when executing a module buffer.
     // It passes exactly 3 arguments (JSThread*, this, args[]), so `num_args`
     // must be 3 regardless of the actual JS parameter list.
-    let bytecode = compile_program_body(&program, strings, literal_arrays, &lowering, is_module);
+    //
+    // When source-file debug info is requested, we also compute a Panda
+    // LineNumberProgram for func_main_0 using statement span offsets.
+    let (bytecode, func_main_line_ops) = if source_file.is_some() {
+        compile_program_body_tracked(&program, strings, literal_arrays, &lowering, is_module, source)
+    } else {
+        (
+            compile_program_body(&program, strings, literal_arrays, &lowering, is_module),
+            vec![],
+        )
+    };
     let num_vregs = estimate_vregs(&bytecode);
     methods.push(MethodRecord {
         name: "func_main_0".to_string(),
@@ -104,6 +210,7 @@ pub fn build_record_with_debug(
         num_vregs,
         num_args: 3,
         debug_info: None,
+        line_ops: func_main_line_ops,
     });
 
     // Determine which statement slice to scan for declarations. Upstream
@@ -125,6 +232,7 @@ pub fn build_record_with_debug(
                     num_vregs,
                     num_args: func.params.items.len() as u16,
                     debug_info: None,
+                    line_ops: vec![],
                 });
             }
         }
@@ -145,6 +253,7 @@ pub fn build_record_with_debug(
                         num_vregs,
                         num_args: func.params.items.len() as u16,
                         debug_info: None,
+            line_ops: vec![],
                     });
                 }
             }
@@ -191,7 +300,7 @@ pub fn build_record_with_debug(
     let module_record_idx = literal_arrays.len();
     literal_arrays.push(module_record_literal_array(&module_record));
     let scope_names_idx = literal_arrays.len();
-    literal_arrays.push(scope_names_literal_array(&methods));
+    literal_arrays.push(scope_names_literal_array(&methods, record_name));
 
     // The 6 module metadata fields that es2abc always writes into every user
     // class record.  ArkRuntime reads these to understand how to load the
@@ -356,16 +465,20 @@ fn module_record_literal_array(module_record: &ModuleRecordInfo) -> LiteralArray
     LiteralArray { entries }
 }
 
-fn scope_names_literal_array(methods: &[MethodRecord]) -> LiteralArray {
+fn scope_names_literal_array(methods: &[MethodRecord], record_name: &str) -> LiteralArray {
+    // hvigor stores full OHM URL paths: "<record_name>.<method_name>" for
+    // constructors and instance/static methods that contain nested function
+    // definitions (0x33 = definefunc). This matches the scopeNames format
+    // required by ArkTS source-level debugging.
     let mut names = Vec::new();
     for method in methods {
-        if let Some(class_name) = constructor_scope_name(&method.name) {
-            names.push(class_name);
-        }
-        if method.bytecode.contains(&0x33) {
-            if let Some(method_name) = class_method_scope_name(&method.name) {
-                names.push(method_name);
-            }
+        let short = &method.name;
+        if constructor_scope_name(short).is_some()
+            || class_method_scope_name(short).is_some()
+            || short.starts_with("#*#")
+            || short.starts_with("#~@0>@")
+        {
+            names.push(format!("{record_name}.{short}"));
         }
     }
     names.sort();
@@ -632,6 +745,7 @@ fn compile_class_method_bodies(
                     num_vregs,
                     num_args: 0,
                     debug_info: None,
+            line_ops: vec![],
                 });
             }
         }
@@ -715,6 +829,7 @@ fn collect_top_level_call_arg_arrows_expr(
                         num_vregs,
                         num_args: arrow.params.items.len() as u16 + 3,
                         debug_info: None,
+            line_ops: vec![],
                     });
                     // Recurse into body for deeper top-level closures.
                     let body_ref = arrow.body.as_ref();
@@ -778,6 +893,7 @@ fn compile_class_elements(
             num_vregs: 0,
             num_args: 4,
             debug_info: None,
+            line_ops: vec![],
         });
     }
 
@@ -804,6 +920,7 @@ fn compile_class_elements(
                 num_vregs,
                 num_args,
                 debug_info: None,
+            line_ops: vec![],
             });
 
             collect_class_method_arrow_records(
@@ -884,6 +1001,7 @@ fn collect_arrow_records_from_stmt(
                     num_vregs,
                     num_args: arrow.params.items.len() as u16 + 3,
                     debug_info: None,
+            line_ops: vec![],
                 });
             }
         }
@@ -1015,6 +1133,7 @@ fn collect_call_arg_arrows_expr(
                         num_vregs,
                         num_args: arrow.params.items.len() as u16 + 3,
                         debug_info: None,
+            line_ops: vec![],
                     });
                     // Recurse into the arrow body for deeper nested closures.
                     let body_ref = arrow.body.as_ref();
@@ -1234,6 +1353,63 @@ fn compile_body_stmts(
     cg.finish()
 }
 
+/// Compile a statement slice through `CodeGen` with line tracking enabled.
+///
+/// Returns `(bytecode, line_ops)` where `line_ops` contains the encoded Panda
+/// LineNumberProgram opcodes (including a trailing `END_SEQUENCE`).
+fn compile_body_stmts_tracked<'src>(
+    stmts: &[Statement<'_>],
+    strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
+    lowering: &LoweringContext,
+    module_body: bool,
+    source: &'src str,
+) -> (Vec<u8>, Vec<u8>) {
+    let mut cg = CodeGen::new_with_source(strings, literal_arrays, lowering, source);
+    if module_body {
+        cg.emit_module_lex_env_prologue();
+    }
+    for stmt in stmts {
+        cg.emit_stmt(stmt);
+        if cg.returned {
+            break;
+        }
+    }
+    cg.finish_with_line_ops()
+}
+
+/// Like `compile_program_body` but also returns LNP opcodes for the method.
+///
+/// The `source` parameter is the original source text used to compute line
+/// numbers from statement byte offsets.
+fn compile_program_body_tracked(
+    program: &Program<'_>,
+    strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
+    lowering: &LoweringContext,
+    is_module: bool,
+    source: &str,
+) -> (Vec<u8>, Vec<u8>) {
+    if !is_module {
+        if let Some(stmts) = extract_iife_stmts(program) {
+            return compile_body_stmts_tracked(
+                stmts,
+                strings,
+                literal_arrays,
+                lowering,
+                true,
+                source,
+            );
+        }
+        if program_uses_commonjs_wrapper(program, is_module) {
+            // CommonJS wrapper emits hand-crafted bytecode with no source mapping.
+            let bc = compile_commonjs_main_wrapper(strings);
+            return (bc, vec![]);
+        }
+    }
+    compile_body_stmts_tracked(&program.body, strings, literal_arrays, lowering, true, source)
+}
+
 fn arrow_captures_from_body(body: &FunctionBody<'_>) -> ArrowCaptures {
     let mut uses_this = false;
     let mut uses_new_target = false;
@@ -1374,6 +1550,11 @@ struct CodeGen<'a> {
     /// unreachable code is not generated.
     returned: bool,
     arrow_captures: ArrowCaptures,
+    /// Original source text used for line-number computation, or `None` when
+    /// debug line tracking is disabled for this compilation unit.
+    source: Option<&'a str>,
+    /// Line number program accumulator.  Present only when `source` is `Some`.
+    line_tracker: Option<LineTracker>,
 }
 
 impl<'a> CodeGen<'a> {
@@ -1391,7 +1572,25 @@ impl<'a> CodeGen<'a> {
             next_reg: 0,
             returned: false,
             arrow_captures: ArrowCaptures::default(),
+            source: None,
+            line_tracker: None,
         }
+    }
+
+    /// Create a `CodeGen` that also emits Panda LineNumberProgram opcodes.
+    ///
+    /// `source` is the original source text; statement byte offsets are used to
+    /// compute 1-based line numbers.
+    fn new_with_source(
+        strings: &'a mut StringTable,
+        literal_arrays: &'a mut Vec<LiteralArray>,
+        lowering: &'a LoweringContext,
+        source: &'a str,
+    ) -> Self {
+        let mut gen = Self::new(strings, literal_arrays, lowering);
+        gen.source = Some(source);
+        gen.line_tracker = Some(LineTracker::new(1));
+        gen
     }
 
     fn new_arrow(
@@ -1451,9 +1650,25 @@ impl<'a> CodeGen<'a> {
         self.insns
     }
 
+    /// Like `finish`, but also returns the encoded LNP opcodes (may be empty if
+    /// line tracking was not enabled for this `CodeGen`).
+    fn finish_with_line_ops(mut self) -> (Vec<u8>, Vec<u8>) {
+        if !self.returned {
+            self.push(Insn::ReturnUndefined);
+        }
+        let line_ops = self.line_tracker.map(|t| t.finish()).unwrap_or_default();
+        (self.insns, line_ops)
+    }
+
     // ── Statement dispatcher ──────────────────────────────────────────────────
 
     fn emit_stmt(&mut self, stmt: &Statement<'_>) {
+        // Record source position before emitting bytecode for this statement.
+        if let (Some(source), Some(tracker)) = (self.source, self.line_tracker.as_mut()) {
+            let pc = self.insns.len() as u32;
+            let new_line = line_at(source, stmt.span().start);
+            tracker.advance(pc, new_line);
+        }
         match stmt {
             Statement::VariableDeclaration(decl) => {
                 self.emit_var_decl(decl);

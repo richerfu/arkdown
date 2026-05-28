@@ -15,9 +15,12 @@
 //! | `transform`        | `transform`           |
 //! | `render_chunk`     | `render_chunk`        |
 //!
-//! Source maps are not converted in this initial implementation (they are set
-//! to `None` / `Null`).  All type conversions are explicit to keep the code
-//! easy to audit.
+//! Source maps returned by plugins as JSON strings (`Option<String>` in
+//! `HookTransformOutput`) are decoded via `rolldown_sourcemap::SourceMap::from_json_string`
+//! and forwarded as `HookTransformOutputMap::Sourcemap`.  If no map is
+//! provided, `HookTransformOutputMap::Null` is used to suppress rolldown's
+//! "possibly broken sourcemap" warning.  All type conversions are explicit to
+//! keep the code easy to audit.
 
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -34,6 +37,7 @@ use rolldown_plugin::{
     HookTransformOutputMap, HookTransformReturn, HookUsage, Plugin, PluginContext,
     SharedLoadPluginContext, SharedTransformPluginContext,
 };
+use rolldown_sourcemap::SourceMap as RolldownSourceMap;
 
 // ---------------------------------------------------------------------------
 // Adapter struct
@@ -212,12 +216,29 @@ impl Plugin for ArkdownPluginAdapter {
                 .await
                 .map_err(|e| anyhow::anyhow!("{e:?}"))?;
 
-            Ok(result.map(|out| HookTransformOutput {
-                code: Some(out.code),
-                // Explicit Null tells rolldown that no sourcemap is intended,
-                // preventing the "possibly broken sourcemap" warning.
-                map: HookTransformOutputMap::Null,
-                ..Default::default()
+            Ok(result.map(|out| {
+                // Convert the JSON source map string (if any) to rolldown's
+                // internal SourceMap type via JSON round-trip.  The ets-transform
+                // plugin uses oxc_sourcemap v7 (ohos-rs fork); rolldown uses
+                // oxc_sourcemap v6.  Crossing the boundary through JSON avoids
+                // any type mismatch while preserving all mapping data.
+                let map = match out.source_map {
+                    Some(ref json) => {
+                        match RolldownSourceMap::from_json_string(json) {
+                            Ok(sm) => HookTransformOutputMap::Sourcemap(Box::new(sm)),
+                            // Malformed JSON: suppress the "possibly broken
+                            // sourcemap" warning with an explicit Null.
+                            Err(_) => HookTransformOutputMap::Null,
+                        }
+                    }
+                    // No map provided: use Null to silence the rolldown warning.
+                    None => HookTransformOutputMap::Null,
+                };
+                HookTransformOutput {
+                    code: Some(out.code),
+                    map,
+                    ..Default::default()
+                }
             }))
         }
     }

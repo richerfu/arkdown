@@ -26,9 +26,10 @@ rustc-hash = { workspace = true }
 # rolldown 1.0.3 — core bundling engine replaces the custom link/tree-shake/chunk-split/codegen stages.
 # default-features = false skips NAPI bindings and Vite-specific plugins.
 # [patch.crates-io] in the workspace root redirects rolldown's oxc deps to the ohos-rs fork.
-rolldown        = { version = "1.0.3", default-features = false }
-rolldown_plugin = { version = "1.0.3" }
-rolldown_common = { version = "1.0.3" }
+rolldown           = { version = "1.0.3", default-features = false }
+rolldown_plugin    = { version = "1.0.3" }
+rolldown_common    = { version = "1.0.3" }
+rolldown_sourcemap = { version = "1.0.3" }
 
 [dev-dependencies]
 tokio = { workspace = true }
