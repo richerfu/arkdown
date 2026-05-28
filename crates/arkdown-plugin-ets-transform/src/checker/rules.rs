@@ -28,7 +28,7 @@ fn decorator_name<'a>(d: &'a Decorator<'a>) -> &'a str {
 /// downstream transforms can still attempt to proceed.
 pub fn check(source: &str, file: &str) -> Vec<EtsTransformError> {
     let allocator = Allocator::default();
-    let source_type = SourceType::default().with_typescript(true).with_module(true);
+    let source_type = SourceType::from_path(file).unwrap_or_else(|_| SourceType::ets());
     let ParserReturn { program, .. } =
         Parser::new(&allocator, source, source_type).parse();
 

@@ -1,8 +1,7 @@
-use crate::transform::build_fn::desugar_build_body;
 use crate::transform::decorator::{
     has_update_state_vars_slot, is_state_decorator, state_decorator_class,
 };
-use crate::transform::entry::generate_entry_registration;
+use crate::transform::entry::{generate_entry_registration, EntryRegistrationInfo};
 
 /// A state/prop/link field extracted from a `@Component` struct.
 #[derive(Debug, Clone)]
@@ -23,8 +22,9 @@ pub struct ComponentInfo {
     pub name: String,
     pub is_entry: bool,
     pub state_fields: Vec<StateField>,
-    /// Raw text of the `build()` method body (braces excluded).
-    pub build_body: String,
+    /// Lowered body for the hvigor-style `initialRender()` method.
+    pub initial_render_body: String,
+    pub entry_registration: Option<EntryRegistrationInfo>,
 }
 
 /// Generate the full ViewPU class text for a component.
@@ -33,6 +33,14 @@ pub struct ComponentInfo {
 /// can parse and bundle without any ArkTS grammar extensions.
 pub fn generate_view_pu_class(info: &ComponentInfo) -> String {
     let mut out = String::with_capacity(512);
+
+    if info.is_entry {
+        out.push_str(concat!(
+            "if (!(\"finalizeConstruction\" in ViewPU.prototype)) {\n",
+            "  Reflect.set(ViewPU.prototype, \"finalizeConstruction\", () => {});\n",
+            "}\n\n",
+        ));
+    }
 
     // ── Class header ─────────────────────────────────────────────────────────
     out.push_str(&format!("class {} extends ViewPU {{\n", info.name));
@@ -106,7 +114,18 @@ pub fn generate_view_pu_class(info: &ComponentInfo) -> String {
             init = init,
         ));
     }
+    out.push_str("    this.setInitiallyProvidedValue(params);\n");
     out.push_str("    this.finalizeConstruction();\n  }\n");
+
+    // ── setInitiallyProvidedValue ─────────────────────────────────────────────
+    out.push_str("  setInitiallyProvidedValue(params: object): void {\n");
+    for field in &info.state_fields {
+        out.push_str(&format!(
+            "    if (params.{name} !== undefined) {{ this.{name} = params.{name}; }}\n",
+            name = field.name,
+        ));
+    }
+    out.push_str("  }\n");
 
     // ── updateStateVars ───────────────────────────────────────────────────────
     let prop_fields: Vec<&StateField> = info
@@ -129,9 +148,7 @@ pub fn generate_view_pu_class(info: &ComponentInfo) -> String {
     out.push_str("  }\n");
 
     // ── purgeVariableDependenciesOnElmtId ─────────────────────────────────────
-    out.push_str(
-        "  purgeVariableDependenciesOnElmtId(rmElmtId: number): void {\n",
-    );
+    out.push_str("  purgeVariableDependenciesOnElmtId(rmElmtId: number): void {\n");
     for field in &info.state_fields {
         out.push_str(&format!(
             "    this.__{name}.purgeDependencyOnElmtId(rmElmtId);\n",
@@ -154,20 +171,30 @@ pub fn generate_view_pu_class(info: &ComponentInfo) -> String {
         "  }\n",
     ));
 
-    // ── initialRenderFunction ─────────────────────────────────────────────────
-    out.push_str("  initialRenderFunction(): void {\n");
-    out.push_str(&desugar_build_body(&info.build_body));
+    // ── initialRender ─────────────────────────────────────────────────────────
+    out.push_str("  initialRender(): void {\n");
+    out.push_str(&info.initial_render_body);
     out.push_str("  }\n");
 
     // ── rerender ──────────────────────────────────────────────────────────────
     out.push_str("  rerender(): void { this.updateDirtyElements(); }\n");
+
+    if info.is_entry {
+        out.push_str(&format!(
+            "  static getEntryName(): string {{ return \"{}\"; }}\n",
+            info.name
+        ));
+    }
 
     out.push_str("}\n");
 
     // ── @Entry registration ───────────────────────────────────────────────────
     if info.is_entry {
         out.push('\n');
-        out.push_str(&generate_entry_registration(&info.name));
+        out.push_str(&generate_entry_registration(
+            &info.name,
+            info.entry_registration.as_ref(),
+        ));
     }
 
     out
@@ -206,7 +233,14 @@ mod tests {
                 decorator: "State".to_string(),
                 initializer: Some("0".to_string()),
             }],
-            build_body: "Column() { Text(`${this.count}`) }".to_string(),
+            initial_render_body: concat!(
+                "    this.observeComponentCreation2((elmtId, isInitialRender) => {\n",
+                "      Text.create(`${this.count}`);\n",
+                "    }, Text);\n",
+                "    Text.pop();\n",
+            )
+            .to_string(),
+            entry_registration: None,
         }
     }
 
@@ -214,14 +248,41 @@ mod tests {
     fn test_generates_view_pu_class() {
         let info = make_counter_component();
         let out = generate_view_pu_class(&info);
-        assert!(out.contains("class Counter extends ViewPU"), "missing class header");
-        assert!(out.contains("private __count: ObservedPropertySimplePU<number>"), "missing backing field");
+        assert!(
+            out.contains("class Counter extends ViewPU"),
+            "missing class header"
+        );
+        assert!(
+            out.contains("private __count: ObservedPropertySimplePU<number>"),
+            "missing backing field"
+        );
         assert!(out.contains("get count(): number"), "missing getter");
         assert!(out.contains("set count(v: number)"), "missing setter");
-        assert!(out.contains("new ObservedPropertySimplePU<number>(0, this, \"count\")"), "missing ctor init");
-        assert!(out.contains("finalizeConstruction()"), "missing finalizeConstruction");
+        assert!(
+            out.contains("new ObservedPropertySimplePU<number>(0, this, \"count\")"),
+            "missing ctor init"
+        );
+        assert!(
+            out.contains("setInitiallyProvidedValue(params)"),
+            "missing initial param override"
+        );
+        assert!(
+            out.contains("finalizeConstruction()"),
+            "missing finalizeConstruction"
+        );
+        assert!(
+            out.contains("initialRender(): void"),
+            "missing initialRender"
+        );
+        assert!(
+            out.contains("this.observeComponentCreation2"),
+            "missing lowered build body"
+        );
         assert!(out.contains("rerender(): void"), "missing rerender");
-        assert!(!out.contains("ViewStackProcessor"), "@Entry registration must not appear for non-entry");
+        assert!(
+            !out.contains("registerNamedRoute"),
+            "@Entry registration must not appear for non-entry"
+        );
     }
 
     #[test]
@@ -229,8 +290,14 @@ mod tests {
         let mut info = make_counter_component();
         info.is_entry = true;
         let out = generate_view_pu_class(&info);
-        assert!(out.contains("ViewStackProcessor.StartGetAccessRecordingFor(Counter)"), "missing entry registration");
-        assert!(out.contains("ViewStackProcessor.StopGetAccessRecording()"), "missing stop recording");
+        assert!(
+            out.contains("registerNamedRoute(() => new Counter(undefined, {})"),
+            "missing entry registration"
+        );
+        assert!(
+            out.contains("static getEntryName(): string"),
+            "missing getEntryName"
+        );
     }
 
     #[test]
@@ -244,11 +311,15 @@ mod tests {
                 decorator: "Prop".to_string(),
                 initializer: None,
             }],
-            build_body: String::new(),
+            initial_render_body: String::new(),
+            entry_registration: None,
         };
         let out = generate_view_pu_class(&info);
         assert!(out.contains("private __value: SynchedPropertySimpleOneWayPU<string>"));
-        assert!(out.contains("params.__value") || out.contains("params.value"), "updateStateVars should reference prop field");
+        assert!(
+            out.contains("params.__value") || out.contains("params.value"),
+            "updateStateVars should reference prop field"
+        );
     }
 
     #[test]
@@ -257,7 +328,8 @@ mod tests {
             name: "Empty".to_string(),
             is_entry: false,
             state_fields: vec![],
-            build_body: String::new(),
+            initial_render_body: String::new(),
+            entry_registration: None,
         };
         let out = generate_view_pu_class(&info);
         assert!(out.contains("class Empty extends ViewPU"));
