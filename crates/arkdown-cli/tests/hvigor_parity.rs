@@ -286,6 +286,7 @@ struct BuildSnapshot {
     command: CommandReport,
     hap: Option<HapSnapshot>,
     artifacts: BTreeMap<String, ArtifactSnapshot>,
+    build_files: BTreeMap<String, ArtifactSnapshot>,
     loader_out_js: BTreeMap<String, ArtifactSnapshot>,
 }
 
@@ -301,6 +302,11 @@ impl BuildSnapshot {
             .iter()
             .map(|(name, artifact)| (name.clone(), artifact.to_json()))
             .collect::<serde_json::Map<_, _>>();
+        let build_files = self
+            .build_files
+            .iter()
+            .map(|(name, artifact)| (name.clone(), artifact.to_json()))
+            .collect::<serde_json::Map<_, _>>();
 
         json!({
             "tool": self.tool,
@@ -308,6 +314,7 @@ impl BuildSnapshot {
             "command": self.command.to_json(),
             "hap": self.hap.as_ref().map(HapSnapshot::to_json),
             "artifacts": artifacts,
+            "build_files": build_files,
             "loader_out_js": loader_out_js,
         })
     }
@@ -388,6 +395,7 @@ fn collect_build(
         command,
         hap,
         artifacts,
+        build_files: collect_build_default_files(root)?,
         loader_out_js: collect_loader_out_js(root)?,
     })
 }
@@ -565,6 +573,69 @@ fn preferred_path_score(root: &Path, path: &Path, fragments: &[&str]) -> usize {
         .unwrap_or(fragments.len())
 }
 
+fn collect_build_default_files(
+    root: &Path,
+) -> Result<BTreeMap<String, ArtifactSnapshot>, Box<dyn std::error::Error>> {
+    let mut files = BTreeMap::new();
+    for entry in WalkDir::new(root).into_iter().filter_map(Result::ok) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+
+        let Some(key) = build_default_key(root, entry.path()) else {
+            continue;
+        };
+        let bytes = fs::read(entry.path())?;
+        let mut unique_key = key.clone();
+        if files.contains_key(&unique_key) {
+            unique_key = rel_source(root, entry.path());
+        }
+        files.insert(
+            unique_key,
+            ArtifactSnapshot::from_bytes(
+                rel_source(root, entry.path()),
+                bytes,
+                root,
+                is_binary_build_file(entry.path()),
+            ),
+        );
+    }
+    Ok(files)
+}
+
+fn build_default_key(root: &Path, path: &Path) -> Option<String> {
+    let rel = path.strip_prefix(root).ok()?;
+    let components = rel
+        .components()
+        .filter_map(|component| {
+            let Component::Normal(name) = component else {
+                return None;
+            };
+            Some(name.to_string_lossy().into_owned())
+        })
+        .collect::<Vec<_>>();
+
+    for index in 0..components.len().saturating_sub(2) {
+        if components[index] == "build"
+            && components[index + 1] == "default"
+            && matches!(
+                components[index + 2].as_str(),
+                "intermediates" | "outputs"
+            )
+        {
+            return Some(components[index..].join("/"));
+        }
+    }
+    None
+}
+
+fn is_binary_build_file(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(OsStr::to_str),
+        Some("abc" | "hap" | "hsp" | "har" | "index" | "info" | "png" | "jpg" | "jpeg" | "webp")
+    )
+}
+
 fn collect_loader_out_js(
     root: &Path,
 ) -> Result<BTreeMap<String, ArtifactSnapshot>, Box<dyn std::error::Error>> {
@@ -727,6 +798,7 @@ fn path_spellings(path: &Path) -> Vec<String> {
             spellings.push(canonical);
         }
     }
+    spellings.sort_by_key(|spelling| std::cmp::Reverse(spelling.len()));
     spellings
 }
 
@@ -737,6 +809,12 @@ fn compare_builds(left: &BuildSnapshot, right: &BuildSnapshot) -> Vec<Value> {
     compare_command(&mut diffs, "arkdown", &right.command);
     compare_hap_entries(&mut diffs, left.hap.as_ref(), right.hap.as_ref());
     compare_artifact_maps(&mut diffs, "artifacts", &left.artifacts, &right.artifacts);
+    compare_artifact_maps(
+        &mut diffs,
+        "build_files",
+        &left.build_files,
+        &right.build_files,
+    );
     compare_artifact_maps(
         &mut diffs,
         "loader_out_js",
