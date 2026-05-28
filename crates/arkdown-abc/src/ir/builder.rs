@@ -439,7 +439,7 @@ fn compile_class_elements(
             name: format!("#~@0=#{class_name}"),
             bytecode: Insn::ReturnUndefined.encode(&mut StringTable::default()),
             num_vregs: 0,
-            num_args: 0,
+            num_args: 4,
             debug_info: None,
         });
     }
@@ -454,7 +454,7 @@ fn compile_class_elements(
             let bytecode =
                 compile_function_body(method.value.body.as_deref(), strings, literal_arrays);
             let num_vregs = estimate_vregs(&bytecode);
-            let num_args = method.value.params.items.len() as u16;
+            let num_args = class_method_num_args(method);
             methods.push(MethodRecord {
                 name: key_name,
                 bytecode,
@@ -474,6 +474,10 @@ fn class_method_record_name(method: &MethodDefinition<'_>, class_name: &str) -> 
         _ => format!("#~@0>#{key}"),
     };
     Some(name)
+}
+
+fn class_method_num_args(method: &MethodDefinition<'_>) -> u16 {
+    method.value.params.items.len() as u16 + 3
 }
 
 fn method_key_name(key: &PropertyKey<'_>) -> Option<String> {
