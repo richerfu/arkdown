@@ -137,6 +137,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         processor
             .write_loader_json(&loader_json, &loader_json_out)
             .map_err(|e| anyhow::anyhow!("write loader.json failed: {}", e))?;
+        write_static_intermediate_files(&module.src_path)?;
 
         loader_jsons.push((module.clone(), manifest, loader_json));
     }
@@ -219,7 +220,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
 
     // Step 5: ABC compilation
     progress.step(5, 6, "Compiling ABC");
-    for ((_module, _manifest, loader_json), bundle_out) in
+    for ((module, _manifest, loader_json), bundle_out) in
         loader_jsons.iter().zip(bundle_outs.iter())
     {
         // Build record metadata map: chunk_stem → OHM URL module path.
@@ -274,6 +275,14 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             })
             .map_err(|e| anyhow::anyhow!("ABC compile failed: {}", e))?;
             write_hvigor_source_maps(bundle_out, loader_json, &record_name_map)?;
+            if let Some(source_maps_path) = &bundle_out.source_maps_path {
+                copy_if_exists(
+                    source_maps_path,
+                    &module
+                        .src_path
+                        .join("build/default/intermediates/source_map/default/sourceMaps.map"),
+                )?;
+            }
             for (_chunk_name, path) in &bundle_out.chunk_files {
                 if path.extension().and_then(|e| e.to_str()) == Some("js") && path.exists() {
                     match fs_err::remove_file(path) {
@@ -453,6 +462,35 @@ fn read_module_json5(path: &std::path::Path) -> Result<ModuleJson5> {
     }
     let content = fs_err::read_to_string(path)?;
     json5::from_str(&content).context("Failed to parse module.json5")
+}
+
+fn write_static_intermediate_files(module_root: &Path) -> Result<()> {
+    write_bytes(
+        &module_root.join("build/default/intermediates/patch/default/base_native_libs.json"),
+        br#"{"libs":{},"stripped":{}}"#,
+    )?;
+    write_bytes(
+        &module_root.join("build/default/intermediates/router_map/default/loader-router-map.json"),
+        br#"{"routerMap":[]}"#,
+    )?;
+    write_bytes(
+        &module_root.join("build/default/intermediates/router_map/default/temp-router-map.json"),
+        br#"{"routerMap":[]}"#,
+    )?;
+    write_bytes(
+        &module_root
+            .join("build/default/intermediates/share_config/default/temp-share-config.json"),
+        br#"{"crossAppSharedConfig":[]}"#,
+    )?;
+    Ok(())
+}
+
+fn write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs_err::create_dir_all(parent)?;
+    }
+    fs_err::write(path, bytes)?;
+    Ok(())
 }
 
 fn write_hap_metadata(
