@@ -7,6 +7,7 @@ use oxc_ast::ast::{
 use oxc_parser::{Parser, ParserReturn};
 use oxc_span::SourceType;
 
+use crate::emit::file::LiteralArray;
 use crate::emit::record::{ClassRecord, MethodRecord};
 use crate::emit::strings::StringTable;
 use crate::error::AbcError;
@@ -38,6 +39,7 @@ pub fn build_record(
     source: &str,
     record_name: &str,
     strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
 ) -> Result<ClassRecord, AbcError> {
     let allocator = Allocator::default();
     let source_type = SourceType::tsx();
@@ -61,7 +63,7 @@ pub fn build_record(
     // ArkRuntime always invokes `func_main_0` when executing a module buffer.
     // It passes exactly 3 arguments (JSThread*, this, args[]), so `num_args`
     // must be 3 regardless of the actual JS parameter list.
-    let bytecode = compile_program_body(&program, strings);
+    let bytecode = compile_program_body(&program, strings, literal_arrays);
     let num_vregs = estimate_vregs(&bytecode);
     methods.push(MethodRecord {
         name: "func_main_0".to_string(),
@@ -76,7 +78,7 @@ pub fn build_record(
             if let Some(id) = &func.id {
                 let func_name = id.name.as_str().to_string();
                 let func_bytecode =
-                    compile_function_body(func.body.as_deref(), strings);
+                    compile_function_body(func.body.as_deref(), strings, literal_arrays);
                 let num_vregs = estimate_vregs(&func_bytecode);
                 methods.push(MethodRecord {
                     name: func_name,
@@ -117,7 +119,11 @@ fn estimate_vregs(bytecode: &[u8]) -> u16 {
 /// Detects the IIFE pattern `(function () { ... })()` and compiles the inner
 /// body directly; the IIFE wrapper is transparent at the bytecode level because
 /// ArkRuntime calls `main` directly.
-fn compile_program_body(program: &Program<'_>, strings: &mut StringTable) -> Vec<u8> {
+fn compile_program_body(
+    program: &Program<'_>,
+    strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
+) -> Vec<u8> {
     // Detect a single top-level IIFE.
     if let [Statement::ExpressionStatement(es)] = program.body.as_slice() {
         if let Expression::CallExpression(call) = &es.expression {
@@ -136,19 +142,23 @@ fn compile_program_body(program: &Program<'_>, strings: &mut StringTable) -> Vec
                     _ => None,
                 };
                 if let Some(stmts) = inner_stmts {
-                    return compile_body_stmts(stmts, strings);
+                    return compile_body_stmts(stmts, strings, literal_arrays);
                 }
             }
         }
     }
 
-    compile_body_stmts(&program.body, strings)
+    compile_body_stmts(&program.body, strings, literal_arrays)
 }
 
 /// Compile a function body's statements, or emit `returnundefined` if absent.
-fn compile_function_body(body: Option<&FunctionBody<'_>>, strings: &mut StringTable) -> Vec<u8> {
+fn compile_function_body(
+    body: Option<&FunctionBody<'_>>,
+    strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
+) -> Vec<u8> {
     match body {
-        Some(fb) => compile_body_stmts(&fb.statements, strings),
+        Some(fb) => compile_body_stmts(&fb.statements, strings, literal_arrays),
         None => {
             let mut st = StringTable::default();
             Insn::ReturnUndefined.encode(&mut st)
@@ -157,8 +167,12 @@ fn compile_function_body(body: Option<&FunctionBody<'_>>, strings: &mut StringTa
 }
 
 /// Compile a statement slice through `CodeGen` and return raw bytecode.
-fn compile_body_stmts(stmts: &[Statement<'_>], strings: &mut StringTable) -> Vec<u8> {
-    let mut cg = CodeGen::new(strings);
+fn compile_body_stmts(
+    stmts: &[Statement<'_>],
+    strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
+) -> Vec<u8> {
+    let mut cg = CodeGen::new(strings, literal_arrays);
     for stmt in stmts {
         cg.emit_stmt(stmt);
         if cg.returned {
@@ -172,6 +186,8 @@ fn compile_body_stmts(stmts: &[Statement<'_>], strings: &mut StringTable) -> Vec
 
 struct CodeGen<'a> {
     strings: &'a mut StringTable,
+    /// Literal arrays accumulated by class definitions.
+    literal_arrays: &'a mut Vec<LiteralArray>,
     /// Raw bytecode bytes accumulated so far.
     insns: Vec<u8>,
     /// Maps JS binding name → virtual register number.
@@ -184,9 +200,10 @@ struct CodeGen<'a> {
 }
 
 impl<'a> CodeGen<'a> {
-    fn new(strings: &'a mut StringTable) -> Self {
+    fn new(strings: &'a mut StringTable, literal_arrays: &'a mut Vec<LiteralArray>) -> Self {
         CodeGen {
             strings,
+            literal_arrays,
             insns: Vec::new(),
             var_regs: HashMap::new(),
             next_reg: 0,
@@ -250,13 +267,18 @@ impl<'a> CodeGen<'a> {
                 self.returned = true;
             }
             Statement::ClassDeclaration(cls) => {
-                // TODO: emit defineclasswithbuffer once method-literal-array
-                // generation is implemented (SPEC-009).
-                // For now, store undefined as a placeholder so the global name
-                // is at least registered.
+                // Emit defineclasswithbuffer; result → accumulator.
+                let super_class = cls.super_class.as_ref();
+                self.emit_class_inner(super_class);
+                // Store the class constructor to a local register and,
+                // if the class has a name, expose it as a global.
                 if let Some(id) = &cls.id {
-                    let name_id = self.intern(id.name.as_str());
-                    self.push(Insn::LdUndefined);
+                    let reg = self.alloc_reg();
+                    self.push(Insn::Sta(reg));
+                    let name = id.name.as_str().to_string();
+                    self.var_regs.insert(name.clone(), reg);
+                    let name_id = self.intern(&name);
+                    self.push(Insn::Lda(reg));
                     self.push(Insn::TryStGlobalByName(0, name_id));
                 }
             }
@@ -382,10 +404,48 @@ impl<'a> CodeGen<'a> {
                     self.emit_expr(e);
                 }
             }
+            Expression::ClassExpression(cls) => {
+                // `class [Name] [extends Super] { … }` as an expression.
+                // Result (class constructor function) is left in the accumulator
+                // so the caller (e.g. emit_var_decl) can assign it as needed.
+                let super_class = cls.super_class.as_ref();
+                self.emit_class_inner(super_class);
+            }
             _ => {
                 self.push(Insn::LdUndefined);
             }
         }
+    }
+
+    // ── Class definition ──────────────────────────────────────────────────────
+
+    /// Emit `defineclasswithbuffer` for a class (declaration or expression).
+    ///
+    /// A stub [`LiteralArray`] with 0 entries is registered in
+    /// `self.literal_arrays`; its index becomes the `buf_id` operand.  Method
+    /// bodies are already compiled as separate `MethodRecord`s at the
+    /// class-record level — the runtime resolves them there.
+    ///
+    /// After this call the class constructor is in the accumulator.
+    fn emit_class_inner(&mut self, super_class: Option<&Expression<'_>>) {
+        // Load the prototype (parent class) if present.
+        let (proto_argc, proto_vreg) = if let Some(sc) = super_class {
+            self.emit_expr(sc);
+            let reg = self.alloc_reg();
+            self.push(Insn::Sta(reg));
+            (1u16, reg)
+        } else {
+            (0u16, 0u8)
+        };
+
+        // Register a stub literal array and use its index as buf_id.
+        let lit_arr_id = self.literal_arrays.len() as u16;
+        self.literal_arrays.push(LiteralArray { entries: Vec::new() });
+
+        // Emit defineclasswithbuffer:
+        //   slot=0, ctor_id=lit_arr_id (stub), buf_id=lit_arr_id,
+        //   proto_argc, proto_vreg
+        self.push(Insn::DefineClassWithBuffer(0, lit_arr_id, lit_arr_id, proto_argc, proto_vreg));
     }
 
     // ── Computed member: obj[expr] ────────────────────────────────────────────
@@ -471,6 +531,20 @@ impl<'a> CodeGen<'a> {
 
     fn emit_call(&mut self, call: &oxc_ast::ast::CallExpression<'_>) {
         let slot = 0u8;
+
+        // ── require("module_specifier") → tryldglobalbyname ──────────────────
+        // ArkRuntime exposes module exports as globals through its `require`
+        // mechanism.  We lower `require("@ohos:foo.bar")` directly to a
+        // global lookup rather than emitting an actual function call.
+        if let Expression::Identifier(id) = &call.callee {
+            if id.name.as_str() == "require" && call.arguments.len() == 1 {
+                if let Some(Expression::StringLiteral(s)) = call.arguments[0].as_expression() {
+                    let name_id = self.intern(s.value.as_str());
+                    self.push(Insn::TryLdGlobalByName(0, name_id));
+                    return;
+                }
+            }
+        }
 
         let is_method = matches!(
             &call.callee,

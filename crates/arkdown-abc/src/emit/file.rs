@@ -1,6 +1,36 @@
 use crate::emit::record::{encode_code_item, inline_string, ClassRecord};
 use crate::emit::strings::StringTable;
 
+// ── LiteralArray types (Task 1) ───────────────────────────────────────────────
+
+/// A single entry in a Panda `LiteralArray`.
+///
+/// Wire format per entry: `[tag: u8] [value: variable]`
+///
+/// | Tag  | Type    | Value width |
+/// |------|---------|-------------|
+/// | 0x00 | integer | u32 LE      |
+/// | 0x02 | string  | u16 LE (string-table index) |
+/// | 0x05 | method  | u32 LE (file offset of CodeItem) |
+/// | 0x0F | null    | none (tag only) |
+#[derive(Debug)]
+pub enum LiteralEntry {
+    Integer(u32),
+    String(u16),
+    Method(u32),
+    Null,
+}
+
+/// A literal array referenced by `defineclasswithbuffer`.
+///
+/// The 0-based position of this value in `AbcFile::literal_arrays` is used as
+/// the `buf_id` operand in the `DefineClassWithBuffer` instruction.
+#[derive(Debug)]
+pub struct LiteralArray {
+    /// Entries serialised into the literal-array section.
+    pub entries: Vec<LiteralEntry>,
+}
+
 /// Magic bytes at offset 0x00 of every `.abc` file.
 ///
 /// Source: `arkcompiler_runtime_core/libpandafile/file_items.h` — the literal
@@ -26,6 +56,12 @@ pub struct AbcFile {
     pub strings: StringTable,
     /// Class records, one per compiled JavaScript chunk.
     pub records: Vec<ClassRecord>,
+    /// Literal arrays referenced by `defineclasswithbuffer`.
+    ///
+    /// Each entry's 0-based index in this vector is the `buf_id` operand
+    /// used in the `DefineClassWithBuffer` opcode.  The section is appended
+    /// to the file after all CodeItems.
+    pub literal_arrays: Vec<LiteralArray>,
 }
 
 impl AbcFile {
@@ -34,6 +70,7 @@ impl AbcFile {
         AbcFile {
             strings: StringTable::default(),
             records: Vec::new(),
+            literal_arrays: Vec::new(),
         }
     }
 
@@ -215,7 +252,39 @@ impl AbcFile {
             all_code_items.push(class_code_items);
         }
 
-        let total_size = code_cur; // = file_size (no trailing section)
+        // ── Pre-compute LiteralArray section bytes ────────────────────────────
+        // The section is appended after all CodeItems.
+        // Format per LiteralArray:
+        //   [num_entries: u32 LE]
+        //   Per entry: [tag: u8] [value: variable]
+        let lit_arr_section: Vec<u8> = {
+            let mut buf = Vec::new();
+            for lit_arr in &self.literal_arrays {
+                buf.extend_from_slice(&(lit_arr.entries.len() as u32).to_le_bytes());
+                for entry in &lit_arr.entries {
+                    match entry {
+                        LiteralEntry::Integer(v) => {
+                            buf.push(0x00);
+                            buf.extend_from_slice(&v.to_le_bytes());
+                        }
+                        LiteralEntry::String(idx) => {
+                            buf.push(0x02);
+                            buf.extend_from_slice(&idx.to_le_bytes());
+                        }
+                        LiteralEntry::Method(off) => {
+                            buf.push(0x05);
+                            buf.extend_from_slice(&off.to_le_bytes());
+                        }
+                        LiteralEntry::Null => {
+                            buf.push(0x0F);
+                        }
+                    }
+                }
+            }
+            buf
+        };
+
+        let total_size = code_cur + lit_arr_section.len() as u32;
 
         // ── IndexSection values (computed before emission) ────────────────────
         // class_item_offsets is sorted by class name (same order as all_classes).
@@ -346,6 +415,10 @@ impl AbcFile {
                 file.extend_from_slice(code);
             }
         }
+        debug_assert_eq!(file.len() as u32, code_cur);
+
+        // ── LiteralArray section (after all CodeItems) ────────────────────────
+        file.extend_from_slice(&lit_arr_section);
         debug_assert_eq!(file.len() as u32, total_size);
 
         // ── Patch file_size at offset 0x10 ────────────────────────────────────

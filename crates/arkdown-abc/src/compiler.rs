@@ -139,6 +139,7 @@ impl AbcCompiler {
                 &js_source,
                 &module.record_name,
                 &mut abc_file.strings,
+                &mut abc_file.literal_arrays,
             )?;
             abc_file.add_record(record);
         }
