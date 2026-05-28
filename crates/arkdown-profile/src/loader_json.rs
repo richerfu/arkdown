@@ -116,6 +116,11 @@ pub fn generate_loader_json(
         compile_entry.push(ext.src_entry.clone());
     }
 
+    // NOTE: hvigorw also bundles pages from $profile:main_pages, but our bundler
+    // cannot yet parse ArkUI DSL syntax (Row(){...}.width(), etc.) that appears
+    // in page components.  Pages are skipped here until full ArkUI desugaring is
+    // implemented in arkdown-plugin-ets-transform.
+
     // Deduplicate while preserving order.
     {
         let mut seen = std::collections::HashSet::new();
