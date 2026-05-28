@@ -42,9 +42,9 @@ fn generate_pack_info(config: &ArkdownConfig, input: &PackInput) -> String {
                     "abilities": abilities_json,
                     "distro": {
                         "moduleType": "entry",
-                        "moduleName": input.module_name,
                         "installationFree": false,
-                        "deliveryWithInstall": true
+                        "deliveryWithInstall": true,
+                        "moduleName": input.module_name
                     },
                     "apiVersion": {
                         "compatible": config.sdk_config.compile_api_version,
@@ -64,6 +64,167 @@ fn generate_pack_info(config: &ArkdownConfig, input: &PackInput) -> String {
         ]
     })
     .to_string()
+}
+
+fn minify_package_module_json(content: &str) -> Result<String, serde_json::Error> {
+    let value: serde_json::Value = serde_json::from_str(content)?;
+    serde_json::to_string(&order_package_module_json(value))
+}
+
+fn order_package_module_json(value: serde_json::Value) -> serde_json::Value {
+    let Some(root) = value.as_object() else {
+        return value;
+    };
+
+    let mut out = serde_json::Map::new();
+    if let Some(app) = root.get("app") {
+        out.insert(
+            "app".to_string(),
+            order_object(
+                app,
+                &[
+                    "iconId",
+                    "debug",
+                    "targetPatchAPIVersion",
+                    "minAPIVersion",
+                    "icon",
+                    "buildMode",
+                    "label",
+                    "bundleType",
+                    "versionName",
+                    "versionCode",
+                    "appEnvironments",
+                    "compileSdkType",
+                    "labelId",
+                    "compileSdkVersion",
+                    "targetAPIVersion",
+                    "vendor",
+                    "bundleName",
+                    "apiReleaseType",
+                    "targetMinorAPIVersion",
+                ],
+            ),
+        );
+    }
+    if let Some(module) = root.get("module") {
+        out.insert("module".to_string(), order_module(module));
+    }
+    for (key, value) in root {
+        if !out.contains_key(key) {
+            out.insert(key.clone(), value.clone());
+        }
+    }
+    serde_json::Value::Object(out)
+}
+
+fn order_module(module: &serde_json::Value) -> serde_json::Value {
+    let Some(object) = module.as_object() else {
+        return module.clone();
+    };
+    let mut out = serde_json::Map::new();
+    for key in [
+        "virtualMachine",
+        "mainElement",
+        "installationFree",
+        "deliveryWithInstall",
+        "description",
+        "compileMode",
+        "type",
+        "dependencies",
+    ] {
+        if let Some(value) = object.get(key) {
+            out.insert(key.to_string(), value.clone());
+        }
+    }
+    if let Some(abilities) = object.get("abilities") {
+        out.insert("abilities".to_string(), order_abilities(abilities));
+    }
+    for key in [
+        "deviceTypes",
+        "pages",
+        "descriptionId",
+        "name",
+        "packageName",
+    ] {
+        if let Some(value) = object.get(key) {
+            out.insert(key.to_string(), value.clone());
+        }
+    }
+    for (key, value) in object {
+        if !out.contains_key(key) {
+            out.insert(key.clone(), value.clone());
+        }
+    }
+    serde_json::Value::Object(out)
+}
+
+fn order_abilities(abilities: &serde_json::Value) -> serde_json::Value {
+    let Some(array) = abilities.as_array() else {
+        return abilities.clone();
+    };
+    serde_json::Value::Array(
+        array
+            .iter()
+            .map(|ability| {
+                let ordered = order_object(
+                    ability,
+                    &[
+                        "exported",
+                        "iconId",
+                        "startWindowIconId",
+                        "icon",
+                        "startWindowIcon",
+                        "startWindowBackgroundId",
+                        "description",
+                        "label",
+                        "skills",
+                        "srcEntry",
+                        "descriptionId",
+                        "labelId",
+                        "startWindowBackground",
+                        "name",
+                    ],
+                );
+                let serde_json::Value::Object(mut object) = ordered else {
+                    return ordered;
+                };
+                if let Some(skills) = object.get("skills").cloned() {
+                    object.insert("skills".to_string(), order_skills(&skills));
+                }
+                serde_json::Value::Object(object)
+            })
+            .collect(),
+    )
+}
+
+fn order_skills(skills: &serde_json::Value) -> serde_json::Value {
+    let Some(array) = skills.as_array() else {
+        return skills.clone();
+    };
+    serde_json::Value::Array(
+        array
+            .iter()
+            .map(|skill| order_object(skill, &["entities", "actions", "uris"]))
+            .collect(),
+    )
+}
+
+fn order_object(value: &serde_json::Value, fields: &[&str]) -> serde_json::Value {
+    let Some(object) = value.as_object() else {
+        return value.clone();
+    };
+    let mut out = serde_json::Map::new();
+    for key in fields {
+        if let Some(value) = object.get(*key) {
+            out.insert((*key).to_string(), value.clone());
+        }
+    }
+    for (key, value) in object {
+        if !out.contains_key(key) {
+            out.insert(key.clone(), value.clone());
+        }
+    }
+    serde_json::Value::Object(out)
 }
 
 pub struct Packager {
@@ -138,15 +299,18 @@ impl Packager {
         }
         let mut writer = zip_writer::create_zip(&input.output_path)?;
 
-        // module.json — deflate compressed
+        // module.json — deflate compressed, minified as in hvigor PackageHap output.
         if input.module_json.exists() {
-            zip_writer::add_file_deflate(&mut writer, "module.json", &input.module_json)?;
+            let module_json = fs_err::read_to_string(&input.module_json)?;
+            let module_json = minify_package_module_json(&module_json).unwrap_or(module_json);
+            zip_writer::add_bytes_deflate(&mut writer, "module.json", module_json.as_bytes())?;
         } else {
             return Err(PackError::MissingInput("module.json".to_string()));
         }
 
         // pack.info — bundle metadata (deflated JSON)
-        let pack_info = generate_pack_info(&self.config, &input);
+        let mut pack_info = generate_pack_info(&self.config, &input);
+        pack_info.push('\n');
         zip_writer::add_bytes_deflate(&mut writer, "pack.info", pack_info.as_bytes())?;
 
         // .pages.info — binary router-map page index (hvigorw format)

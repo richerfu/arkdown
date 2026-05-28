@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -313,12 +313,16 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             OutputTarget::Har => "har",
             _ => "hap",
         };
-        let output = project_root.join(format!(
-            "build/default/outputs/default/{}.{}",
-            module.name, ext
-        ));
+        let output_dir = module.src_path.join("build/default/outputs/default");
+        let unsigned_output = output_dir.join(format!("{}-default-unsigned.{}", module.name, ext));
+        let signed_output = output_dir.join(format!("{}-default-signed.{}", module.name, ext));
+        let output = if matches!(&config_arc.output_target, OutputTarget::Har) {
+            output_dir.join(format!("{}.{}", module.name, ext))
+        } else {
+            unsigned_output.clone()
+        };
 
-        std::fs::create_dir_all(output.parent().expect("output path has no parent"))?;
+        std::fs::create_dir_all(&output_dir)?;
 
         let out =
             match &config_arc.output_target {
@@ -390,17 +394,24 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 }
             };
         if let Some(path) = out {
-            // Sign the HAP/HSP in-place (skip for HAR targets or if no signing config)
-            if !matches!(&config_arc.output_target, OutputTarget::Har) {
+            let final_path = if matches!(&config_arc.output_target, OutputTarget::Har) {
+                path
+            } else {
                 HapSigner::sign_or_skip(
                     &path,
-                    &path,
+                    &signed_output,
                     config_arc.product.signing_config.as_ref(),
                     config_arc.sdk_config.compile_api_version,
                 )
                 .map_err(|e| anyhow::anyhow!("Sign failed: {}", e))?;
-            }
-            output_paths.push(path);
+                write_hap_metadata(&module.src_path, &module.name, &manifest.device_types)?;
+                extract_zip_entry(&path, "pack.info", &output_dir.join("pack.info"))?;
+                if let Some(source_maps_path) = &bundle_out.source_maps_path {
+                    copy_if_exists(source_maps_path, &output_dir.join("mapping/sourceMaps.map"))?;
+                }
+                signed_output.clone()
+            };
+            output_paths.push(final_path);
         }
     }
     progress.done();
@@ -442,6 +453,54 @@ fn read_module_json5(path: &std::path::Path) -> Result<ModuleJson5> {
     }
     let content = fs_err::read_to_string(path)?;
     json5::from_str(&content).context("Failed to parse module.json5")
+}
+
+fn write_hap_metadata(
+    module_root: &Path,
+    module_name: &str,
+    device_types: &[String],
+) -> Result<()> {
+    let metadata_path =
+        module_root.join("build/default/intermediates/hap_metadata/default/output_metadata.json");
+    if let Some(parent) = metadata_path.parent() {
+        fs_err::create_dir_all(parent)?;
+    }
+    let device_types = if device_types.is_empty() {
+        vec!["phone".to_string()]
+    } else {
+        device_types.to_vec()
+    };
+    let metadata = serde_json::json!([{
+        "hapName": format!("{module_name}-default-signed.hap"),
+        "deviceTypes": device_types,
+        "isSigned": true,
+        "dependRemoteHsps": [],
+    }]);
+    fs_err::write(metadata_path, serde_json::to_string(&metadata)?.as_bytes())?;
+    Ok(())
+}
+
+fn extract_zip_entry(archive_path: &Path, entry_name: &str, output_path: &Path) -> Result<()> {
+    if let Some(parent) = output_path.parent() {
+        fs_err::create_dir_all(parent)?;
+    }
+    let file = fs_err::File::open(archive_path)?;
+    let mut archive = zip::ZipArchive::new(file)?;
+    let mut entry = archive.by_name(entry_name)?;
+    let mut output = fs_err::File::create(output_path)?;
+    std::io::copy(&mut entry, &mut output)?;
+    Ok(())
+}
+
+fn copy_if_exists(from: &Path, to: &Path) -> Result<()> {
+    if !from.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = to.parent() {
+        fs_err::create_dir_all(parent)?;
+    }
+    fs_err::copy(from, to)?;
+    Ok(())
 }
 
 #[derive(Debug, Clone)]

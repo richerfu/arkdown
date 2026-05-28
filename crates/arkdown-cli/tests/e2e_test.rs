@@ -12,11 +12,16 @@ fn fixture_root() -> PathBuf {
 }
 
 fn isolated_fixture(src: &PathBuf) -> PathBuf {
+    static FIXTURE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let counter = FIXTURE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system time before UNIX epoch")
         .as_nanos();
-    let dst = std::env::temp_dir().join(format!("arkdown-cli-e2e-{}-{nonce}", std::process::id()));
+    let dst = std::env::temp_dir().join(format!(
+        "arkdown-cli-e2e-{}-{counter}-{nonce}",
+        std::process::id()
+    ));
     copy_fixture_dir(src, &dst);
     dst
 }
