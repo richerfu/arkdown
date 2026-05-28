@@ -60,7 +60,21 @@ No `MethodRecord` is created, and no real method index is computed.
 
 ---
 
-## Required Fix
+## Status
+
+**Implemented** in commit `6c8f3d4` (feat(abc): lower binary/unary/logical expressions and
+fix this receiver). The `collect_call_arg_arrow_records` / `collect_call_arg_arrows_stmt` /
+`collect_call_arg_arrows_expr` functions handle call-argument arrow collection. The 3
+expected closure records (`#~@0>@1*#`, `#~@0>@1*#^1`, `#~@0>@1*#^2`) now appear in the
+generated `modules.abc`.
+
+Remaining gap after this fix: 5310 bytes (ours) vs 9844 bytes (golden). The remaining
+~4534 bytes are attributable to shorter method body bytecode per method (some expression
+kinds still fall to `LdUndefined`) and potentially shorter LNP debug-info records.
+
+---
+
+## Required Fix (original prescription)
 
 ### 1. Extend `collect_arrow_records_from_stmt` to handle call arguments
 
