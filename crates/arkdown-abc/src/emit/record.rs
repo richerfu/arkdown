@@ -97,6 +97,11 @@ pub struct ClassRecord {
     pub name: String,
     /// All methods belonging to this record.
     pub methods: Vec<MethodRecord>,
+    /// Access flags for this class (ULEB128-encoded in the binary).
+    ///
+    /// Regular JS module classes use `1` (ACC_PUBLIC).
+    /// Annotation stub classes (API 13+) use `0x2001` (ACC_PUBLIC | ACC_ANNOTATION).
+    pub access_flags: u32,
 }
 
 impl ClassRecord {
@@ -109,8 +114,8 @@ impl ClassRecord {
         let name_bytes = inline_string(&self.name).len();
         // super_class_off: u32
         let super_off = 4;
-        // access_flags ULEB128(1) = 1 byte
-        let acc_flags = 1;
+        // access_flags ULEB128(self.access_flags) — size depends on value
+        let acc_flags = uleb128(self.access_flags as u64).len();
         // fields_count ULEB128(0) = 1 byte
         let fields_count = 1;
         // methods_count: ULEB128 (1 byte for counts < 128)
@@ -181,8 +186,8 @@ impl ClassRecord {
         // super_class_off: u32 LE = 0 (no superclass)
         buf.extend_from_slice(&0u32.to_le_bytes());
 
-        // access_flags: ULEB128 = 1 (ACC_PUBLIC)
-        buf.extend_from_slice(&uleb128(1));
+        // access_flags: ULEB128 (1 = ACC_PUBLIC for user classes; 0x2001 = ACC_PUBLIC|ACC_ANNOTATION for stubs)
+        buf.extend_from_slice(&uleb128(self.access_flags as u64));
 
         // fields_count: ULEB128 = 0
         buf.extend_from_slice(&uleb128(0));
@@ -288,6 +293,7 @@ mod tests {
                 num_vregs: 0,
                 num_args: 3,
             }],
+            access_flags: 1,
         };
         // inline_string("L_GLOBAL;") = 11 bytes
         // super_off = 4
@@ -310,6 +316,7 @@ mod tests {
                 num_vregs: 0,
                 num_args: 3,
             }],
+            access_flags: 1,
         };
         let bytes = record.serialize_class_item(4, &[0x12a], &[0x1a1]);
         assert_eq!(bytes.len(), record.class_item_byte_size());

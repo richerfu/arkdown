@@ -99,7 +99,7 @@ pub fn build_record(
         // Bare name (legacy / test path) — use OHOS global module class name
         format!("L_{};", record_name)
     };
-    Ok(ClassRecord { name: class_name, methods })
+    Ok(ClassRecord { name: class_name, methods, access_flags: 1 })
 }
 
 // ── Byte-count heuristics ─────────────────────────────────────────────────────

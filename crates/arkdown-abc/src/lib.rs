@@ -155,13 +155,13 @@ mod tests {
         assert!(result.is_ok(), "multi-module compile must succeed: {:?}", result.err());
         let bytes = std::fs::read(&tmp).unwrap();
         assert_eq!(&bytes[0..8], b"PANDA\x00\x00\x00");
-        // num_classes at 0x1C includes 2 user modules + 3 annotation stubs
-        // (L_ESModuleRecord, L_ESSlotNumberAnnotation, L_ESTypeInfoRecord) +
-        // 1 foreign class (L_ESTypeAnnotation) = 6 total.
+        // API 13+: num_classes = 2 user modules + 3 annotation stubs
+        // (L_ESConcurrentModuleRequestsAnnotation, L_ESExpectedPropertyCountAnnotation,
+        //  L_ESSlotNumberAnnotation) = 5 total.  No foreign section.
         let num_classes = u32::from_le_bytes(bytes[0x1C..0x20].try_into().unwrap());
         assert_eq!(
-            num_classes, 6,
-            "num_classes must be user_modules + 3 annotation stubs + 1 foreign = 6"
+            num_classes, 5,
+            "num_classes must be user_modules + 3 annotation stubs = 5 (API 13+, no foreign)"
         );
         let _ = std::fs::remove_file(&tmp);
     }
