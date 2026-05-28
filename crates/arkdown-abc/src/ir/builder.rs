@@ -156,6 +156,22 @@ pub fn build_record_with_debug(
     // inputs may scan the inner body of a single bundler IIFE.
     compile_class_method_bodies(scan_stmts, strings, literal_arrays, &lowering, &mut methods);
 
+    // Collect top-level call-argument arrow functions (e.g. registerNamedRoute callback
+    // and Reflect.set finalizeConstruction stub). hvigor names these #*# / #*#^1.
+    {
+        let mut seen = HashMap::<String, u16>::new();
+        for stmt in scan_stmts {
+            collect_top_level_call_arg_arrows(
+                stmt,
+                strings,
+                literal_arrays,
+                &lowering,
+                &mut methods,
+                &mut seen,
+            );
+        }
+    }
+
     // ArkRuntime finds modules by their OHM URL class name format:
     //   "L{bundleName}/{moduleName}/{pathFromEts};"
     // e.g. "Lcom.example.myapp/entry/ets/entryability/EntryAbility;"
@@ -618,6 +634,122 @@ fn compile_class_method_bodies(
                 });
             }
         }
+    }
+}
+
+/// Collect top-level call-argument arrow functions and emit MethodRecords named
+/// `#*#` / `#*#^1` / … — the hvigor naming for module-scope closures.
+fn collect_top_level_call_arg_arrows(
+    stmt: &Statement<'_>,
+    strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
+    lowering: &LoweringContext,
+    methods: &mut Vec<MethodRecord>,
+    seen_names: &mut HashMap<String, u16>,
+) {
+    match stmt {
+        Statement::ExpressionStatement(es) => {
+            collect_top_level_call_arg_arrows_expr(
+                &es.expression,
+                strings,
+                literal_arrays,
+                lowering,
+                methods,
+                seen_names,
+            );
+        }
+        Statement::IfStatement(if_stmt) => {
+            collect_top_level_call_arg_arrows(
+                &if_stmt.consequent,
+                strings,
+                literal_arrays,
+                lowering,
+                methods,
+                seen_names,
+            );
+            if let Some(alt) = &if_stmt.alternate {
+                collect_top_level_call_arg_arrows(
+                    alt,
+                    strings,
+                    literal_arrays,
+                    lowering,
+                    methods,
+                    seen_names,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_top_level_call_arg_arrows_expr(
+    expr: &Expression<'_>,
+    strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
+    lowering: &LoweringContext,
+    methods: &mut Vec<MethodRecord>,
+    seen_names: &mut HashMap<String, u16>,
+) {
+    match expr {
+        Expression::CallExpression(call) => {
+            for (_, arg) in call.arguments.iter().enumerate() {
+                let Some(arg_expr) = arg.as_expression() else {
+                    continue;
+                };
+                if let Expression::ArrowFunctionExpression(arrow) = arg_expr {
+                    let base_name = "#*#".to_string();
+                    let record_name = suffix_duplicate_method_name(base_name, seen_names);
+                    let captures = arrow_captures_from_body(arrow.body.as_ref());
+                    let bytecode = compile_arrow_body(
+                        arrow.body.as_ref(),
+                        strings,
+                        literal_arrays,
+                        lowering,
+                        captures,
+                    );
+                    let num_vregs = estimate_vregs(&bytecode);
+                    methods.push(MethodRecord {
+                        name: record_name,
+                        bytecode,
+                        num_vregs,
+                        num_args: arrow.params.items.len() as u16 + 3,
+                        debug_info: None,
+                    });
+                    // Recurse into body for deeper top-level closures.
+                    let body_ref = arrow.body.as_ref();
+                    for s in &body_ref.statements {
+                        collect_top_level_call_arg_arrows(
+                            s,
+                            strings,
+                            literal_arrays,
+                            lowering,
+                            methods,
+                            seen_names,
+                        );
+                    }
+                } else {
+                    collect_top_level_call_arg_arrows_expr(
+                        arg_expr,
+                        strings,
+                        literal_arrays,
+                        lowering,
+                        methods,
+                        seen_names,
+                    );
+                }
+            }
+        }
+        Expression::StaticMemberExpression(mem) => {
+            collect_top_level_call_arg_arrows_expr(
+                &mem.object,
+                strings,
+                literal_arrays,
+                lowering,
+                methods,
+                seen_names,
+            );
+        }
+        _ => {}
     }
 }
 
