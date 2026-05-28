@@ -125,6 +125,7 @@ pub fn rewrite_kit_imports(source: &str) -> String {
 
     let mut result = String::with_capacity(source.len());
     let mut last_end = 0;
+    let source_without_imports = kit_re.replace_all(source, "");
 
     for cap in kit_re.captures_iter(source) {
         let full_match = cap.get(0).unwrap();
@@ -152,12 +153,14 @@ pub fn rewrite_kit_imports(source: &str) -> String {
                 (name, name)
             };
 
-            if let Some(ohos_module) =
-                crate::kit_map::resolve_kit_import(kit_spec, original_name)
-            {
+            if let Some(ohos_module) = crate::kit_map::resolve_kit_import(kit_spec, original_name) {
+                let type_prefix = if binding_has_value_usage(&source_without_imports, binding) {
+                    ""
+                } else {
+                    "type "
+                };
                 fragment.push_str(&format!(
-                    "import {} from \"{}\";\n",
-                    binding, ohos_module
+                    "import {type_prefix}{binding} from \"{ohos_module}\";\n",
                 ));
                 any_mapped = true;
             }
@@ -178,6 +181,63 @@ pub fn rewrite_kit_imports(source: &str) -> String {
     result
 }
 
+fn binding_has_value_usage(source: &str, binding: &str) -> bool {
+    let mut seen = false;
+    for (start, _) in identifier_occurrences(source, binding) {
+        seen = true;
+        if !is_type_position(source, start) {
+            return true;
+        }
+    }
+    !seen
+}
+
+fn identifier_occurrences<'a>(
+    source: &'a str,
+    binding: &'a str,
+) -> impl Iterator<Item = (usize, usize)> + 'a {
+    source
+        .match_indices(binding)
+        .filter_map(move |(start, text)| {
+            let end = start + text.len();
+            let before = source[..start].chars().next_back();
+            let after = source[end..].chars().next();
+            let before_ok = before.is_none_or(|ch| !is_ident_continue(ch));
+            let after_ok = after.is_none_or(|ch| !is_ident_continue(ch));
+            (before_ok && after_ok).then_some((start, end))
+        })
+}
+
+fn is_ident_continue(ch: char) -> bool {
+    ch == '_' || ch == '$' || ch.is_ascii_alphanumeric()
+}
+
+fn is_type_position(source: &str, start: usize) -> bool {
+    let prefix = &source[..start];
+    let significant_start = prefix
+        .rfind(['\n', ';', '{', '}'])
+        .map(|idx| idx + 1)
+        .unwrap_or(0);
+    let segment = &prefix[significant_start..];
+
+    if segment.rfind(':').is_some_and(|colon| {
+        !segment[colon + 1..]
+            .chars()
+            .any(|ch| matches!(ch, '=' | ';' | '{' | '}'))
+    }) {
+        return true;
+    }
+
+    let trimmed = prefix.trim_end();
+    trimmed.ends_with(" as")
+        || trimmed.ends_with("type")
+        || trimmed.ends_with("interface")
+        || trimmed.ends_with("implements")
+        || trimmed.ends_with('|')
+        || trimmed.ends_with('&')
+        || trimmed.ends_with('<')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,15 +250,24 @@ mod tests {
             out.contains("import UIAbility from \"@ohos:app.ability.UIAbility\""),
             "got: {out}"
         );
-        assert!(!out.contains("@kit.AbilityKit"), "kit specifier must be gone; got: {out}");
+        assert!(
+            !out.contains("@kit.AbilityKit"),
+            "kit specifier must be gone; got: {out}"
+        );
     }
 
     #[test]
     fn test_rewrite_multiple_imports_same_kit() {
         let src = r#"import { UIAbility, Want } from "@kit.AbilityKit";"#;
         let out = rewrite_kit_imports(src);
-        assert!(out.contains("import UIAbility from \"@ohos:app.ability.UIAbility\""), "got: {out}");
-        assert!(out.contains("import Want from \"@ohos:app.ability.Want\""), "got: {out}");
+        assert!(
+            out.contains("import UIAbility from \"@ohos:app.ability.UIAbility\""),
+            "got: {out}"
+        );
+        assert!(
+            out.contains("import Want from \"@ohos:app.ability.Want\""),
+            "got: {out}"
+        );
     }
 
     #[test]
@@ -215,7 +284,10 @@ mod tests {
     fn test_rewrite_hilog() {
         let src = r#"import { hilog } from "@kit.PerformanceAnalysisKit";"#;
         let out = rewrite_kit_imports(src);
-        assert!(out.contains("import hilog from \"@ohos:hilog\""), "got: {out}");
+        assert!(
+            out.contains("import hilog from \"@ohos:hilog\""),
+            "got: {out}"
+        );
     }
 
     #[test]
@@ -236,7 +308,10 @@ mod tests {
     fn test_single_quoted_kit_import() {
         let src = "import { hilog } from '@kit.PerformanceAnalysisKit';";
         let out = rewrite_kit_imports(src);
-        assert!(out.contains("import hilog from \"@ohos:hilog\""), "got: {out}");
+        assert!(
+            out.contains("import hilog from \"@ohos:hilog\""),
+            "got: {out}"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -249,15 +324,24 @@ mod tests {
         let out = super::stub_arkui_build_bodies(src);
         // An already-empty body is replaced with the canonical stub.
         assert!(out.contains("build() { return; }"), "got: {out}");
-        assert!(!out.contains("build() build()"), "build() declaration must not be duplicated; got: {out}");
+        assert!(
+            !out.contains("build() build()"),
+            "build() declaration must not be duplicated; got: {out}"
+        );
     }
 
     #[test]
     fn test_stub_simple_arkui_build() {
         let src = "class Index extends ViewPU {\n  build() {\n    Row() {\n      Column() {\n        Text('hi')\n      }\n    }\n  }\n}";
         let out = super::stub_arkui_build_bodies(src);
-        assert!(out.contains("build() { return; }"), "body must be stubbed; got: {out}");
-        assert!(!out.contains("build() build()"), "build() declaration must not be duplicated; got: {out}");
+        assert!(
+            out.contains("build() { return; }"),
+            "body must be stubbed; got: {out}"
+        );
+        assert!(
+            !out.contains("build() build()"),
+            "build() declaration must not be duplicated; got: {out}"
+        );
         assert!(!out.contains("Row()"), "ArkUI DSL must be gone; got: {out}");
     }
 
@@ -266,8 +350,14 @@ mod tests {
         let src = "class Foo {\n  rebuild() {\n    doSomething();\n  }\n}";
         let out = super::stub_arkui_build_bodies(src);
         // "rebuild()" must not be touched.
-        assert!(out.contains("rebuild()"), "rebuild() must be preserved; got: {out}");
-        assert!(out.contains("doSomething()"), "body must be preserved; got: {out}");
+        assert!(
+            out.contains("rebuild()"),
+            "rebuild() must be preserved; got: {out}"
+        );
+        assert!(
+            out.contains("doSomething()"),
+            "body must be preserved; got: {out}"
+        );
     }
 
     #[test]
@@ -276,15 +366,24 @@ mod tests {
         let src = "class C extends ViewPU {\n  build() {\n    if (true) {\n      let x = { a: 1 };\n    }\n  }\n  other() { return 42; }\n}";
         let out = super::stub_arkui_build_bodies(src);
         assert!(out.contains("build() { return; }"), "got: {out}");
-        assert!(!out.contains("build() build()"), "build() declaration must not be duplicated; got: {out}");
+        assert!(
+            !out.contains("build() build()"),
+            "build() declaration must not be duplicated; got: {out}"
+        );
         // other() must remain untouched.
-        assert!(out.contains("other() { return 42; }"), "other() body must be unchanged; got: {out}");
+        assert!(
+            out.contains("other() { return 42; }"),
+            "other() body must be unchanged; got: {out}"
+        );
     }
 
     #[test]
     fn test_stub_no_build_passthrough() {
         let src = "class Foo {\n  render() {\n    return null;\n  }\n}";
         let out = super::stub_arkui_build_bodies(src);
-        assert_eq!(out, src, "source without build() must be returned unchanged");
+        assert_eq!(
+            out, src,
+            "source without build() must be returned unchanged"
+        );
     }
 }

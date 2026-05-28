@@ -32,7 +32,7 @@ pub fn lower_build_body(
         match statement {
             Statement::ExpressionStatement(statement) => match &statement.expression {
                 Expression::ArkUIComponentExpression(component) => {
-                    lower_component(component, source_text, "    ", &mut out)?;
+                    lower_component(component, source_text, "        ", &mut out)?;
                 }
                 _ => return Err(BuildLoweringError::UnsupportedStatement),
             },
@@ -55,11 +55,11 @@ fn lower_component(
     out.push_str(&format!(
         "{indent}this.observeComponentCreation2((elmtId, isInitialRender) => {{\n"
     ));
-    out.push_str(&format!("{indent}  {name}.create({args});\n"));
+    out.push_str(&format!("{indent}    {name}.create({args});\n"));
     for chain in &component.chain_expressions {
         let chain_name = chain_name(chain)?;
         let chain_args = arguments_text(&chain.arguments, source_text);
-        out.push_str(&format!("{indent}  {name}.{chain_name}({chain_args});\n"));
+        out.push_str(&format!("{indent}    {name}.{chain_name}({chain_args});\n"));
     }
     out.push_str(&format!("{indent}}}, {name});\n"));
 
@@ -168,22 +168,22 @@ struct Index {
 
         let out = lower_build_body(build.value.body.as_deref(), source).unwrap();
         let expected = concat!(
-            "    this.observeComponentCreation2((elmtId, isInitialRender) => {\n",
-            "      Row.create();\n",
-            "      Row.height(\"100%\");\n",
-            "    }, Row);\n",
-            "    this.observeComponentCreation2((elmtId, isInitialRender) => {\n",
-            "      Column.create();\n",
-            "      Column.width(\"100%\");\n",
-            "    }, Column);\n",
-            "    this.observeComponentCreation2((elmtId, isInitialRender) => {\n",
-            "      Text.create(this.message);\n",
-            "      Text.fontSize(50);\n",
-            "      Text.fontWeight(FontWeight.Bold);\n",
-            "    }, Text);\n",
-            "    Text.pop();\n",
-            "    Column.pop();\n",
-            "    Row.pop();\n",
+            "        this.observeComponentCreation2((elmtId, isInitialRender) => {\n",
+            "            Row.create();\n",
+            "            Row.height(\"100%\");\n",
+            "        }, Row);\n",
+            "        this.observeComponentCreation2((elmtId, isInitialRender) => {\n",
+            "            Column.create();\n",
+            "            Column.width(\"100%\");\n",
+            "        }, Column);\n",
+            "        this.observeComponentCreation2((elmtId, isInitialRender) => {\n",
+            "            Text.create(this.message);\n",
+            "            Text.fontSize(50);\n",
+            "            Text.fontWeight(FontWeight.Bold);\n",
+            "        }, Text);\n",
+            "        Text.pop();\n",
+            "        Column.pop();\n",
+            "        Row.pop();\n",
         );
         assert_eq!(out, expected);
     }

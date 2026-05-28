@@ -163,9 +163,9 @@ fn component_from_struct(
             {
                 initial_render_body = lower_build_body(method.value.body.as_deref(), source_text)
                     .map_err(|err| EtsTransformError::Fatal {
-                        file: id.to_string(),
-                        message: format!("unsupported ArkUI build() DSL: {err:?}"),
-                    })?;
+                    file: id.to_string(),
+                    message: format!("unsupported ArkUI build() DSL: {err:?}"),
+                })?;
             }
             _ => {}
         }
@@ -258,7 +258,7 @@ mod tests {
         let result =
             transform_ets(&make_source("entry/src/main/ets/pages/MyView.ets", src)).unwrap();
         assert!(result.contains("class MyView extends ViewPU"));
-        assert!(result.contains("initialRender(): void"));
+        assert!(result.contains("initialRender()"));
         assert!(!result.contains("struct MyView"));
     }
 

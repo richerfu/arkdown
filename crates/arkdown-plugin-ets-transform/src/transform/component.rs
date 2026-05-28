@@ -37,15 +37,93 @@ pub fn generate_view_pu_class(info: &ComponentInfo) -> String {
     if info.is_entry {
         out.push_str(concat!(
             "if (!(\"finalizeConstruction\" in ViewPU.prototype)) {\n",
-            "  Reflect.set(ViewPU.prototype, \"finalizeConstruction\", () => {});\n",
+            "    Reflect.set(ViewPU.prototype, \"finalizeConstruction\", () => { });\n",
             "}\n\n",
         ));
     }
 
-    // ── Class header ─────────────────────────────────────────────────────────
+    let params_type = format!("{}_Params", info.name);
+    out.push_str(&format!("interface {params_type} {{\n"));
+    for field in &info.state_fields {
+        let ty = if field.type_annotation.is_empty() {
+            "unknown"
+        } else {
+            field.type_annotation.as_str()
+        };
+        out.push_str(&format!("    {}?: {};\n", field.name, ty));
+    }
+    out.push_str("}\n");
+
     out.push_str(&format!("class {} extends ViewPU {{\n", info.name));
 
-    // ── Private backing fields ────────────────────────────────────────────────
+    out.push_str(concat!(
+        "    constructor(parent, params, __localStorage, elmtId = -1, paramsLambda = undefined, extraInfo) {\n",
+        "        super(parent, __localStorage, elmtId, extraInfo);\n",
+        "        if (typeof paramsLambda === \"function\") {\n",
+        "            this.paramsGenerator_ = paramsLambda;\n",
+        "        }\n",
+    ));
+    for field in &info.state_fields {
+        let backing = state_decorator_class(&field.decorator);
+        let init = field.initializer.as_deref().unwrap_or("undefined");
+        out.push_str(&format!(
+            "        this.__{name} = new {backing}({init}, this, \"{name}\");\n",
+            name = field.name,
+            backing = backing,
+            init = init,
+        ));
+    }
+    out.push_str("        this.setInitiallyProvidedValue(params);\n");
+    out.push_str("        this.finalizeConstruction();\n    }\n");
+
+    out.push_str(&format!(
+        "    setInitiallyProvidedValue(params: {params_type}) {{\n"
+    ));
+    for field in &info.state_fields {
+        out.push_str(&format!(
+            "        if (params.{name} !== undefined) {{\n            this.{name} = params.{name};\n        }}\n",
+            name = field.name,
+        ));
+    }
+    out.push_str("    }\n");
+
+    let prop_fields: Vec<&StateField> = info
+        .state_fields
+        .iter()
+        .filter(|f| has_update_state_vars_slot(&f.decorator))
+        .collect();
+
+    out.push_str(&format!("    updateStateVars(params: {params_type}) {{\n"));
+    for field in &prop_fields {
+        out.push_str(&format!(
+            "        if (params.{name} !== undefined) {{\n            this.__{name}.set(params.{name});\n        }}\n",
+            name = field.name,
+        ));
+    }
+    out.push_str("    }\n");
+
+    out.push_str("    purgeVariableDependenciesOnElmtId(rmElmtId) {\n");
+    for field in &info.state_fields {
+        out.push_str(&format!(
+            "        this.__{name}.purgeDependencyOnElmtId(rmElmtId);\n",
+            name = field.name,
+        ));
+    }
+    out.push_str("    }\n");
+
+    out.push_str("    aboutToBeDeleted() {\n");
+    for field in &info.state_fields {
+        out.push_str(&format!(
+            "        this.__{name}.aboutToBeDeleted();\n",
+            name = field.name,
+        ));
+    }
+    out.push_str(concat!(
+        "        SubscriberManager.Get().delete(this.id__());\n",
+        "        this.aboutToBeDeletedInternal();\n",
+        "    }\n",
+    ));
+
     for field in &info.state_fields {
         let backing = state_decorator_class(&field.decorator);
         let type_param = if field.type_annotation.is_empty() {
@@ -54,136 +132,42 @@ pub fn generate_view_pu_class(info: &ComponentInfo) -> String {
             format!("<{}>", field.type_annotation)
         };
         out.push_str(&format!(
-            "  private __{name}: {backing}{type_param};\n",
+            "    private __{name}: {backing}{type_param};\n",
             name = field.name,
             backing = backing,
             type_param = type_param,
         ));
     }
 
-    // ── Getter / setter pairs ─────────────────────────────────────────────────
     for field in &info.state_fields {
         if is_state_decorator(&field.decorator) {
-            let ty = &field.type_annotation;
-            let ret_ty = if ty.is_empty() {
-                "unknown".to_string()
+            let ty = if field.type_annotation.is_empty() {
+                "unknown"
             } else {
-                ty.clone()
+                field.type_annotation.as_str()
             };
             out.push_str(&format!(
-                "  get {name}(): {ret_ty} {{ return this.__{name}.get(); }}\n",
+                "    get {name}() {{\n        return this.__{name}.get();\n    }}\n",
                 name = field.name,
-                ret_ty = ret_ty,
             ));
             out.push_str(&format!(
-                "  set {name}(v: {ret_ty}) {{ this.__{name}.set(v); }}\n",
+                "    set {name}(newValue: {ty}) {{\n        this.__{name}.set(newValue);\n    }}\n",
                 name = field.name,
-                ret_ty = ret_ty,
+                ty = ty,
             ));
         }
     }
 
-    // ── Constructor ───────────────────────────────────────────────────────────
-    //
-    // Param names follow the ViewPU constructor signature from the OHOS SDK.
-    out.push_str(concat!(
-        "  constructor(\n",
-        "    parent: ViewPU,\n",
-        "    params: object,\n",
-        "    localStorage?: LocalStorage,\n",
-        "    elmtId: number = -1,\n",
-        "    paramsLambda?: () => object,\n",
-        "    extraInfo?: ExtraInfo,\n",
-        "  ) {\n",
-        "    super(parent, localStorage, elmtId, extraInfo);\n",
-    ));
-    for field in &info.state_fields {
-        let backing = state_decorator_class(&field.decorator);
-        let ty = &field.type_annotation;
-        let init = field.initializer.as_deref().unwrap_or("undefined");
-        let type_param = if ty.is_empty() {
-            String::new()
-        } else {
-            format!("<{}>", ty)
-        };
-        out.push_str(&format!(
-            "    this.__{name} = new {backing}{type_param}({init}, this, \"{name}\");\n",
-            name = field.name,
-            backing = backing,
-            type_param = type_param,
-            init = init,
-        ));
-    }
-    out.push_str("    this.setInitiallyProvidedValue(params);\n");
-    out.push_str("    this.finalizeConstruction();\n  }\n");
-
-    // ── setInitiallyProvidedValue ─────────────────────────────────────────────
-    out.push_str("  setInitiallyProvidedValue(params: object): void {\n");
-    for field in &info.state_fields {
-        out.push_str(&format!(
-            "    if (params.{name} !== undefined) {{ this.{name} = params.{name}; }}\n",
-            name = field.name,
-        ));
-    }
-    out.push_str("  }\n");
-
-    // ── updateStateVars ───────────────────────────────────────────────────────
-    let prop_fields: Vec<&StateField> = info
-        .state_fields
-        .iter()
-        .filter(|f| has_update_state_vars_slot(&f.decorator))
-        .collect();
-
-    let param_ty = build_params_type(&prop_fields);
-    out.push_str(&format!(
-        "  updateStateVars(params: Partial<{{{}}}>): void {{\n",
-        param_ty
-    ));
-    for field in &prop_fields {
-        out.push_str(&format!(
-            "    if (params.{name} !== undefined) {{ this.__{name}.set(params.{name}); }}\n",
-            name = field.name,
-        ));
-    }
-    out.push_str("  }\n");
-
-    // ── purgeVariableDependenciesOnElmtId ─────────────────────────────────────
-    out.push_str("  purgeVariableDependenciesOnElmtId(rmElmtId: number): void {\n");
-    for field in &info.state_fields {
-        out.push_str(&format!(
-            "    this.__{name}.purgeDependencyOnElmtId(rmElmtId);\n",
-            name = field.name,
-        ));
-    }
-    out.push_str("  }\n");
-
-    // ── aboutToBeDeleted ──────────────────────────────────────────────────────
-    out.push_str("  aboutToBeDeleted(): void {\n");
-    for field in &info.state_fields {
-        out.push_str(&format!(
-            "    this.__{name}.aboutToBeDeleted();\n",
-            name = field.name,
-        ));
-    }
-    out.push_str(concat!(
-        "    SubscriberManager.Get().delete(this.id__());\n",
-        "    this.aboutToBeDeletedInternal();\n",
-        "  }\n",
-    ));
-
-    // ── initialRender ─────────────────────────────────────────────────────────
-    out.push_str("  initialRender(): void {\n");
+    out.push_str("    initialRender() {\n");
     out.push_str(&info.initial_render_body);
-    out.push_str("  }\n");
+    out.push_str("    }\n");
 
-    // ── rerender ──────────────────────────────────────────────────────────────
-    out.push_str("  rerender(): void { this.updateDirtyElements(); }\n");
+    out.push_str("    rerender() {\n        this.updateDirtyElements();\n    }\n");
 
     if info.is_entry {
-        out.push_str(&format!(
-            "  static getEntryName(): string {{ return \"{}\"; }}\n",
-            info.name
-        ));
+        out.push_str("    static getEntryName(): string {\n");
+        out.push_str(&format!("        return \"{}\";\n", info.name));
+        out.push_str("    }\n");
     }
 
     out.push_str("}\n");
@@ -198,25 +182,6 @@ pub fn generate_view_pu_class(info: &ComponentInfo) -> String {
     }
 
     out
-}
-
-/// Build the `Partial<{ field: type; ... }>` parameter type text for the
-/// `updateStateVars` method.
-fn build_params_type(fields: &[&StateField]) -> String {
-    if fields.is_empty() {
-        return String::new();
-    }
-    fields
-        .iter()
-        .map(|f| {
-            if f.type_annotation.is_empty() {
-                format!("{}: unknown", f.name)
-            } else {
-                format!("{}: {}", f.name, f.type_annotation)
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("; ")
 }
 
 #[cfg(test)]
@@ -234,10 +199,10 @@ mod tests {
                 initializer: Some("0".to_string()),
             }],
             initial_render_body: concat!(
-                "    this.observeComponentCreation2((elmtId, isInitialRender) => {\n",
-                "      Text.create(`${this.count}`);\n",
-                "    }, Text);\n",
-                "    Text.pop();\n",
+                "        this.observeComponentCreation2((elmtId, isInitialRender) => {\n",
+                "            Text.create(`${this.count}`);\n",
+                "        }, Text);\n",
+                "        Text.pop();\n",
             )
             .to_string(),
             entry_registration: None,
@@ -256,10 +221,13 @@ mod tests {
             out.contains("private __count: ObservedPropertySimplePU<number>"),
             "missing backing field"
         );
-        assert!(out.contains("get count(): number"), "missing getter");
-        assert!(out.contains("set count(v: number)"), "missing setter");
+        assert!(out.contains("get count()"), "missing getter");
         assert!(
-            out.contains("new ObservedPropertySimplePU<number>(0, this, \"count\")"),
+            out.contains("set count(newValue: number)"),
+            "missing setter"
+        );
+        assert!(
+            out.contains("new ObservedPropertySimplePU(0, this, \"count\")"),
             "missing ctor init"
         );
         assert!(
@@ -270,15 +238,12 @@ mod tests {
             out.contains("finalizeConstruction()"),
             "missing finalizeConstruction"
         );
-        assert!(
-            out.contains("initialRender(): void"),
-            "missing initialRender"
-        );
+        assert!(out.contains("initialRender()"), "missing initialRender");
         assert!(
             out.contains("this.observeComponentCreation2"),
             "missing lowered build body"
         );
-        assert!(out.contains("rerender(): void"), "missing rerender");
+        assert!(out.contains("rerender()"), "missing rerender");
         assert!(
             !out.contains("registerNamedRoute"),
             "@Entry registration must not appear for non-entry"
@@ -333,6 +298,6 @@ mod tests {
         };
         let out = generate_view_pu_class(&info);
         assert!(out.contains("class Empty extends ViewPU"));
-        assert!(out.contains("rerender(): void"));
+        assert!(out.contains("rerender()"));
     }
 }
