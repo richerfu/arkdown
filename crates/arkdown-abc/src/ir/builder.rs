@@ -1834,37 +1834,96 @@ impl<'a> CodeGen<'a> {
 
     fn emit_var_decl(&mut self, decl: &oxc_ast::ast::VariableDeclaration<'_>) {
         for declarator in &decl.declarations {
-            // BindingPattern is directly the enum (no .kind wrapper in this OXC fork).
-            let name = match &declarator.id {
-                BindingPattern::BindingIdentifier(id) => id.name.as_str().to_string(),
-                _ => continue, // skip destructuring
-            };
-
-            if let Some(init) = &declarator.init {
-                if let Expression::ClassExpression(cls) = init {
-                    let class_name = cls.id.as_ref().map_or(name.as_str(), |id| id.name.as_str());
-                    self.emit_class_inner(
-                        Some(class_name),
-                        &cls.body.body,
-                        cls.super_class.as_ref(),
-                    );
-                } else {
-                    self.emit_expr(init);
+            match &declarator.id {
+                BindingPattern::BindingIdentifier(id) => {
+                    let name = id.name.as_str().to_string();
+                    if let Some(init) = &declarator.init {
+                        if let Expression::ClassExpression(cls) = init {
+                            let class_name =
+                                cls.id.as_ref().map_or(name.as_str(), |id| id.name.as_str());
+                            self.emit_class_inner(
+                                Some(class_name),
+                                &cls.body.body,
+                                cls.super_class.as_ref(),
+                            );
+                        } else {
+                            self.emit_expr(init);
+                        }
+                    } else {
+                        self.push(Insn::LdUndefined);
+                    }
+                    let reg = self.alloc_reg();
+                    self.var_regs.insert(name.clone(), reg);
+                    self.push(Insn::Sta(reg));
+                    if let Some(slot) = self.lowering.lexical_index(&name) {
+                        self.push(Insn::Lda(reg));
+                        self.push(Insn::StLexVar(0, slot));
+                    }
+                    if let Some(export_index) = self.lowering.export_index(&name) {
+                        self.push(Insn::Lda(reg));
+                        self.push(Insn::StModuleVar(export_index));
+                    }
                 }
-            } else {
-                self.push(Insn::LdUndefined);
-            }
-
-            let reg = self.alloc_reg();
-            self.var_regs.insert(name.clone(), reg);
-            self.push(Insn::Sta(reg));
-            if let Some(slot) = self.lowering.lexical_index(&name) {
-                self.push(Insn::Lda(reg));
-                self.push(Insn::StLexVar(0, slot));
-            }
-            if let Some(export_index) = self.lowering.export_index(&name) {
-                self.push(Insn::Lda(reg));
-                self.push(Insn::StModuleVar(export_index));
+                BindingPattern::ArrayPattern(arr_pat) => {
+                    if let Some(init) = &declarator.init {
+                        self.emit_expr(init);
+                    } else {
+                        self.push(Insn::LdUndefined);
+                    }
+                    let tmp_reg = self.alloc_reg();
+                    self.push(Insn::Sta(tmp_reg));
+                    for (i, elem) in arr_pat.elements.iter().enumerate() {
+                        let Some(pat) = elem else { continue };
+                        let BindingPattern::BindingIdentifier(bid) = pat else { continue };
+                        let vname = bid.name.as_str().to_string();
+                        let idx_str = i.to_string();
+                        let name_id = self.intern(&idx_str);
+                        self.push(Insn::Lda(tmp_reg));
+                        self.push(Insn::LdObjByName(0, name_id));
+                        let reg = self.alloc_reg();
+                        self.var_regs.insert(vname.clone(), reg);
+                        self.push(Insn::Sta(reg));
+                        if let Some(slot) = self.lowering.lexical_index(&vname) {
+                            self.push(Insn::Lda(reg));
+                            self.push(Insn::StLexVar(0, slot));
+                        }
+                    }
+                }
+                BindingPattern::ObjectPattern(obj_pat) => {
+                    if let Some(init) = &declarator.init {
+                        self.emit_expr(init);
+                    } else {
+                        self.push(Insn::LdUndefined);
+                    }
+                    let tmp_reg = self.alloc_reg();
+                    self.push(Insn::Sta(tmp_reg));
+                    for prop in &obj_pat.properties {
+                        let key_name = match &prop.key {
+                            PropertyKey::StaticIdentifier(id) => id.name.as_str().to_string(),
+                            PropertyKey::StringLiteral(s) => s.value.as_str().to_string(),
+                            _ => continue,
+                        };
+                        let BindingPattern::BindingIdentifier(bid) = &prop.value else {
+                            continue;
+                        };
+                        let vname = bid.name.as_str().to_string();
+                        let name_id = self.intern(&key_name);
+                        self.push(Insn::Lda(tmp_reg));
+                        self.push(Insn::LdObjByName(0, name_id));
+                        let reg = self.alloc_reg();
+                        self.var_regs.insert(vname.clone(), reg);
+                        self.push(Insn::Sta(reg));
+                        if let Some(slot) = self.lowering.lexical_index(&vname) {
+                            self.push(Insn::Lda(reg));
+                            self.push(Insn::StLexVar(0, slot));
+                        }
+                        if let Some(export_index) = self.lowering.export_index(&vname) {
+                            self.push(Insn::Lda(reg));
+                            self.push(Insn::StModuleVar(export_index));
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }
