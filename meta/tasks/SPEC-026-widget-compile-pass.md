@@ -1,195 +1,149 @@
-# SPEC-026: Widget Compilation Pass
+# SPEC-026: ArkTS Widget Compile Pass
 
-**Crate**: `arkdown-abc`, `arkdown-cli`
-**Priority**: P2 — card/widget apps
-**Blocked by**: SPEC-009 (ABC compiler, TASK-ABC-01 through TASK-ABC-04 for correctness)
-**Blocks**: —
-
----
-
-## Summary
-
-Implement a second ABC compilation pass for ArkTS widget (form extension) builds.
-When a module contains form extension entry points (`formJsonPaths` in `module.json5`),
-hvigor runs `initWidgetDefaultArkCompileConfig()` after the main compile and invokes
-`es2abc` a second time with `widgetCompile: "true"`, a separate cache directory, and
-the widget-specific `loader.json` path.
-
-This SPEC adds `compile_widget()` to `AbcCompiler` and wires the activation condition
-into the CLI build pipeline.
+**Crate**: `arkdown-abc` (extension) + `arkdown-cli` (wiring)
+**Priority**: P2
+**Blocked by**: SPEC-009
+**Status**: Implemented (2026-05-29)
 
 ---
 
-## Background: What hvigor Does
+## Overview
 
-From `ark-compile.js::doTaskAction()`:
+ArkTS widgets (form extension abilities) require a **second, independent ABC
+compilation pass** that runs after the main module compilation.  This mirrors
+`ArkCompile.doTaskAction()` in hvigor's `ark-compile.js`:
 
 ```javascript
-// Main compile
-const e = await this.initDefaultArkCompileConfig();
-let t = await submitArkCompileWork(this, pool, log, e, callback, slots);
-
-// Widget compile — second pass
 if (this.needSubmitArkTsWidget) {
-    const widgetConfig = await this.initWidgetDefaultArkCompileConfig();
-    widgetConfig.ignoreWarning = true;
-    let n = await submitArkCompileWork(this, pool, log, widgetConfig, callback, slots);
-}
-```
-
-`initWidgetDefaultArkCompileConfig()`:
-
-```javascript
-async initWidgetDefaultArkCompileConfig() {
-    const taskTempDir = this.getTaskTempDir(this.targetData, "_widget");
-    return {
-        ...await this.initDefaultArkCompileConfig(),
+    const widgetConfig = {
+        ...config,
         widgetCompile: "true",
-        cachePath: taskTempDir,
-        aceBuildJson: this.pathInfo.getWidgetLoaderJsonPath(),
+        cachePath:    taskTempDir + "_widget",
+        aceBuildJson: pathInfo.getWidgetLoaderJsonPath(),
         byteCodeHar2HspDep: this.service.getByteCodeHar2Hsp(),
-        // Separate obfuscation cache dir for widget
-        obfuscationOptions: {
-            ...obfuscationOptions,
-            obfuscationCacheDir: path.resolve(taskTempDir, "obfuscation"),
-        },
     };
+    widgetConfig.ignoreWarning = true;
+    await submitArkCompileWork(...widgetConfig...);
 }
-```
-
-Activation condition from hvigor:
-
-```javascript
-this.needSubmitArkTsWidget = shouldCompileArkTsWidget(
-    this.formJsonPathArr,
-    this.moduleModel.isFormExtensionModule(this.targetName)
-);
-// shouldCompileArkTsWidget returns true when formJsonPathArr.length > 0
-// and the module is not a HAR
-```
-
-The widget loader.json path is obtained from `pathInfo.getWidgetLoaderJsonPath()`, which
-resolves to `build/default/intermediates/ets/default/widget/loader_out/default/loader.json`.
-
----
-
-## Scope
-
-### 1. `AbcCompileOptions` Extension
-
-```rust
-pub struct AbcCompileOptions {
-    // ... existing fields ...
-    /// When true, this is a widget/form-extension compilation pass.
-    /// Affects: separate cache dir suffix "_widget", separate output path.
-    pub widget_compile: bool,
-    /// Path to the widget-specific loader.json (only used when widget_compile = true).
-    pub widget_loader_json: Option<PathBuf>,
-}
-```
-
-### 2. `AbcCompiler::compile_widget()`
-
-```rust
-impl AbcCompiler {
-    /// Run the widget compilation pass.
-    /// Called after the main compile() when need_widget_compile() returns true.
-    /// Uses a separate cache directory and the widget loader.json.
-    pub fn compile_widget(
-        &self,
-        modules: Vec<AbcModule>,
-        output: &Path,
-        widget_loader_json: &Path,
-    ) -> Result<AbcArtifact, AbcError>;
-}
-```
-
-Internally, `compile_widget()` delegates to the same compilation pipeline as `compile()`
-but with:
-- `options.widget_compile = true`
-- `options.cache_path` = `<main_cache_path>_widget`
-- Output path = widget-specific intermediates directory
-
-### 3. Activation Condition
-
-```rust
-/// Returns true when the module has form extension entry points and is not a HAR.
-pub fn need_widget_compile(
-    module_json: &ModuleJson5,
-    form_json_paths: &[PathBuf],
-) -> bool {
-    !form_json_paths.is_empty()
-        && module_json.module.type_ != "har"
-}
-```
-
-### 4. CLI Wiring
-
-In the build pipeline (after main ABC compile):
-
-```rust
-let form_json_paths = collect_form_json_paths(&module_config);
-if need_widget_compile(&module_json, &form_json_paths) {
-    let widget_loader_json = config.intermediates_dir
-        .join("ets/default/widget/loader_out/default/loader.json");
-    let widget_output = config.intermediates_dir
-        .join("ets/default/widget/loader_out/default/ets/modules.abc");
-
-    let widget_modules = load_widget_modules(&widget_loader_json)?;
-    compiler.compile_widget(widget_modules, &widget_output, &widget_loader_json)?;
-}
-```
-
-### 5. Widget loader.json Path
-
-The widget loader.json is generated by `arkdown-profile` during the profile processing
-stage. Its path follows the convention:
-
-```
-<module>/build/default/intermediates/ets/default/widget/loader_out/default/loader.json
-```
-
-`arkdown-profile` must be extended to write this file when form JSON paths are present
-(separate from the main loader.json). That extension is out of scope for this SPEC but
-must be tracked.
-
----
-
-## Files to Change
-
-```
-crates/arkdown-abc/src/
-├── compiler.rs       — add compile_widget(); extend AbcCompileOptions
-└── lib.rs            — re-export need_widget_compile
-
-crates/arkdown-cli/src/
-└── build.rs          — call compile_widget() when need_widget_compile() is true;
-                        collect form_json_paths from module.json5
 ```
 
 ---
 
-## Test Plan
+## Activation Condition
 
-- `need_widget_compile()` returns `false` for HAR modules regardless of form JSON paths.
-- `need_widget_compile()` returns `false` when `form_json_paths` is empty.
-- `need_widget_compile()` returns `true` for an entry module with at least one form JSON path.
-- `compile_widget()` produces a `.abc` at the widget output path, distinct from the main
-  `modules.abc`.
-- Widget cache directory has `_widget` suffix (does not collide with main cache).
-- Obfuscation cache dir for widget is `<widget_cache>_widget/obfuscation`.
-- `compile_widget()` is never called in a HAR build (verified via integration test on a
-  minimal HAR fixture).
-- When widget loader.json is absent, `compile_widget()` returns `Err` (not panic).
+The widget pass runs when **both** conditions hold:
+
+1. The module declares at least one extension ability whose `extensionType` is
+   `"form"` or `"formExtension"` (case-insensitive).
+2. The module type is **not** `"har"` — HAR modules cannot expose widgets.
+
+```rust
+let need = need_widget_compile(&form_json_paths, module_type);
+```
+
+This mirrors `shouldCompileArkTsWidget(formJsonPathArr, isFormExtensionModule)` in
+hvigor's `task-util.js`.
 
 ---
 
-## Upstream References
+## Implementation
 
-- `~/Downloads/command-line-tools/hvigor/hvigor-ohos-plugin/src/tasks/ark-compile.js`
-  — `initWidgetDefaultArkCompileConfig()`, `doTaskAction()` widget branch,
-  `needSubmitArkTsWidget`, `shouldCompileArkTsWidget()`
-- `meta/tasks/SPEC-009-abc-compiler.md` — `AbcCompiler` API
-- `meta/tasks/SPEC-023-027-p2-features.md` — SPEC-027 (original widget stub, now superseded
-  by this SPEC with full detail)
-- `https://gitcode.com/openharmony/arkcompiler_ets_frontend` — `es2abc` widget mode
+### `arkdown-abc::widget` module
+
+New public module at `crates/arkdown-abc/src/widget.rs`.
+
+Public API:
+
+| Symbol | Description |
+|--------|-------------|
+| `WidgetCompileConfig` | Input configuration for the widget pass |
+| `WidgetInput` | One widget source file to compile |
+| `need_widget_compile(paths, module_type)` | Activation predicate |
+| `collect_form_json_paths(src_main, ext_abilities)` | Collect `form.json` paths from extension abilities |
+| `ExtensionAbilityRef<'a>` | Lightweight borrow of an extension ability entry |
+
+### `AbcCompiler::compile_widget`
+
+New method on `AbcCompiler` in `crates/arkdown-abc/src/compiler.rs`:
+
+```rust
+pub fn compile_widget(
+    &self,
+    config: &WidgetCompileConfig,
+) -> Result<AbcArtifactResult, AbcError>
+```
+
+Behaviour:
+- Creates the widget cache directory (`config.cache_dir`) if it does not exist.
+- Builds a **fresh `AbcFile`** independent from the main module's `AbcFile`.
+- Skips missing source files (hvigor sets `ignoreWarning: true`).
+- Writes the compiled bytecode to `config.output` (typically `widgets.abc`).
+
+### CLI wiring (`arkdown-cli`)
+
+`compile_widget_pass()` is called from the ABC compilation step in
+`crates/arkdown-cli/src/cmd/build.rs` after the main `compile_to_abc()` call.
+
+```
+main ABC pass (modules.abc)
+    ↓
+need_widget_compile? ──yes──► compile_widget_pass() → widgets.abc
+                    └──no──►  (skip)
+```
+
+Key path decisions:
+
+| Item | Path |
+|------|------|
+| Widget cache dir | `<loader_json.cache_path>_widget/` |
+| Widget output | `<modules_abc_path_dir>/widgets.abc` |
+| Widget source | `.js` chunks whose stem matches a form extension `src_entry` stem |
+
+---
+
+## Rolldown Alignment
+
+| arkdown concept | rolldown equivalent | note |
+|-----------------|---------------------|------|
+| `AbcCompiler::compile_widget()` | rolldown multi-entry build with separate `output.dir` | Both run a separate compilation pass; rolldown uses separate output options; arkdown uses a separate cache dir and loader.json |
+
+---
+
+## File Locations
+
+| File | Change |
+|------|--------|
+| `crates/arkdown-abc/src/widget.rs` | New module — widget config, activation predicate, form path collection |
+| `crates/arkdown-abc/src/compiler.rs` | Added `compile_widget()` method to `AbcCompiler` |
+| `crates/arkdown-abc/src/lib.rs` | Re-exported `widget` module and public symbols |
+| `crates/arkdown-cli/src/cmd/build.rs` | Wired `compile_widget_pass()` into the ABC compilation step |
+
+---
+
+## Acceptance Criteria
+
+- `compile_widget()` is called when `need_widget_compile = true` (form extension
+  abilities present in `module.json5`).
+- Widget compilation uses a separate cache directory from the main module
+  compilation (suffix `_widget`).
+- Widget `.abc` output is placed at `widgets.abc` alongside `modules.abc`, not
+  overwriting the main `modules.abc`.
+- `compile_widget()` is never called for HAR modules (`module.type_ == "har"`).
+- Missing widget source files are silently skipped (hvigor `ignoreWarning: true`
+  parity).
+- All existing tests continue to pass.
+
+---
+
+## Tests
+
+Unit tests in `crates/arkdown-abc/src/widget.rs`:
+
+| Test | What it checks |
+|------|----------------|
+| `need_widget_compile_true_when_form_paths_present` | Returns `true` for entry/feature/shared with form paths |
+| `need_widget_compile_false_for_har_module` | Returns `false` for HAR even with form paths |
+| `need_widget_compile_false_when_no_form_paths` | Returns `false` when no form paths |
+| `need_widget_compile_false_for_har_with_no_paths` | Both conditions false |
+| `collect_form_json_paths_empty_when_no_form_extensions` | Non-form extensions produce no paths |
+| `collect_form_json_paths_case_insensitive` | `"Form"` (capitalised) matches |

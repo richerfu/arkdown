@@ -6,7 +6,11 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use clap::Args;
 
-use arkdown::{BundleOutput, Bundler};
+use arkdown::Bundler;
+use arkdown_abc::{
+    collect_form_json_paths, need_widget_compile, ExtensionAbilityRef, WidgetCompileConfig,
+    WidgetInput,
+};
 use arkdown_config::load_config;
 use arkdown_core::{
     ArkdownConfig, ArkdownPlugin, BuildMode, BuildOption, ModuleConfig, ModuleJson5,
@@ -425,7 +429,7 @@ async fn run_build_once(
 
     // Step 5: ABC compilation
     progress.step(5, 6, "Compiling ABC");
-    for ((module, _manifest, loader_json), (bundle_out, from_cache)) in
+    for ((module, manifest, loader_json), bundle_out) in
         loader_jsons.iter().zip(bundle_outs.iter())
     {
         if *from_cache {
@@ -574,6 +578,37 @@ async fn run_build_once(
                         )
                     })?;
             }
+        }
+
+        // Widget compile pass — mirrors ArkCompile.doTaskAction() widget branch.
+        //
+        // Only runs when:
+        //  1. The module declares at least one form extension ability (form_json_paths
+        //     is non-empty), AND
+        //  2. The module is not a HAR (HAR modules cannot expose widgets).
+        let module_src_main = module.src_path.join("src/main");
+        let ext_ability_refs: Vec<ExtensionAbilityRef<'_>> = manifest
+            .extension_abilities
+            .iter()
+            .map(|e| ExtensionAbilityRef {
+                extension_type: e.extension_type.as_str(),
+                src_entry: e.src_entry.as_str(),
+            })
+            .collect();
+        let form_json_paths = collect_form_json_paths(&module_src_main, &ext_ability_refs);
+        let module_type_str = match module.module_type {
+            arkdown_core::OhosModuleType::Har => "har",
+            _ => "entry",
+        };
+        if need_widget_compile(&form_json_paths, module_type_str) {
+            compile_widget_pass(
+                module,
+                manifest,
+                loader_json,
+                bundle_out,
+                &config_arc,
+                &bundle_name,
+            )?;
         }
     }
     progress.done();
@@ -1269,126 +1304,130 @@ fn with_extension(path: &str, extension: &str) -> String {
         .unwrap_or_else(|| format!("{path}.{extension}"))
 }
 
-/// Compute a deterministic FNV-1a hash over every compile-entry source file's
-/// contents plus its path.  Files are processed in sorted path order so the
-/// result is independent of directory iteration order.
-fn compute_bundle_source_hash(entries: &[String], module_root: &str) -> u64 {
-    let root = PathBuf::from(module_root);
-    let mut sorted = entries.to_vec();
-    sorted.sort();
-    let mut h: u64 = 0xcbf29ce484222325;
-    for entry in &sorted {
-        let path = root.join(entry.trim_start_matches("./"));
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            for b in content.bytes() {
-                h ^= b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-        }
-        for b in entry.bytes() {
-            h ^= b as u64;
-            h = h.wrapping_mul(0x100000001b3);
-        }
-    }
-    h
-}
+/// Run the widget ABC compilation pass for a module that declares form extension
+/// abilities.
+///
+/// Mirrors `ArkCompile.initWidgetDefaultArkCompileConfig()` and the widget
+/// branch of `doTaskAction()` in hvigor's `ark-compile.js`:
+///
+/// - Widget cache dir: `<module_cache>_widget/`
+/// - Widget output:   `<ace_module_build>/widgets.abc`
+/// - Widget source:   `.js` files whose record names map to form extension
+///   entry paths (identified by `./ets/widget/` prefix convention).
+///
+/// Warnings are suppressed (hvigor sets `ignoreWarning: true`); missing source
+/// files are silently skipped.
+fn compile_widget_pass(
+    _module: &ModuleConfig,
+    manifest: &arkdown_core::HapManifest,
+    loader_json: &arkdown_profile::LoaderJson,
+    bundle_out: &arkdown::BundleOutput,
+    config: &ArkdownConfig,
+    bundle_name: &str,
+) -> Result<()> {
+    use arkdown_abc::AbcCompiler;
 
-/// Compute a deterministic hash over all rolldown configuration fields that
-/// affect the bundle output: build mode, treeshake, support_chunks,
-/// use_normalized_ohm_url, bundle name, and module name.
-fn compute_bundle_config_hash(config: &ArkdownConfig, loader_json: &arkdown_profile::LoaderJson) -> u64 {
-    let mut h: u64 = 0xcbf29ce484222325;
-    let fingerprint = format!(
-        "{}:{}:{}:{}:{}:{}",
-        match &config.build_mode {
-            BuildMode::Debug => "debug",
-            BuildMode::Release => "release",
-        },
-        config.product.bundle_name,
-        config.sdk_config.compile_api_version,
-        config.product.build_option.strict_mode.use_normalized_ohm_url,
-        loader_json.support_chunks,
-        loader_json.module_name,
-    );
-    for b in fingerprint.bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    h
-}
+    // Widget cache dir: main cache dir with "_widget" appended.
+    let cache_dir = {
+        // Strip any trailing separator so the suffix is clean.
+        let main_str = loader_json
+            .cache_path
+            .trim_end_matches('/')
+            .trim_end_matches('\\');
+        PathBuf::from(format!("{}_widget", main_str))
+    };
 
-/// Build a [`BundleCacheManifest`] from a successful bundle output.
-fn build_bundle_cache_manifest(key: &BundleCacheKey, bundle_out: &BundleOutput) -> BundleCacheManifest {
-    let chunks: Vec<BundledChunkMeta> = bundle_out
-        .chunk_graph
-        .chunks
+    // Widget output: widgets.abc in the same directory as modules.abc.
+    let widgets_abc = bundle_out
+        .modules_abc_path
+        .parent()
+        .map(|p| p.join("widgets.abc"))
+        .unwrap_or_else(|| PathBuf::from("widgets.abc"));
+
+    // Collect widget source files: chunk files whose names suggest they come
+    // from a form extension entry (./ets/widget/ prefix is the hvigor convention,
+    // but we also accept any chunk whose record name maps to an extension ability
+    // src_entry).
+    let widget_entry_stems: std::collections::HashSet<String> = manifest
+        .extension_abilities
         .iter()
-        .map(|chunk| {
-            let path = bundle_out
-                .chunk_files
+        .filter(|e| {
+            let t = e.extension_type.to_ascii_lowercase();
+            t == "form" || t == "formextension"
+        })
+        .filter_map(|e| {
+            std::path::Path::new(e.src_entry.trim_start_matches("./"))
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+        })
+        .collect();
+
+    let widget_inputs: Vec<WidgetInput> = bundle_out
+        .chunk_files
+        .iter()
+        .filter(|(chunk_name, path)| {
+            path.extension().and_then(|e| e.to_str()) == Some("js")
+                && widget_entry_stems.contains(chunk_name.as_str())
+        })
+        .map(|(chunk_name, path)| {
+            // Build the record name for this widget chunk.
+            // entry_path like "./ets/widget/pages/WidgetCard.ets"
+            let record_name = manifest
+                .extension_abilities
                 .iter()
-                .find(|(name, _)| name == &chunk.name)
-                .map(|(_, p)| p.clone())
-                .unwrap_or_default();
-            BundledChunkMeta {
-                name: chunk.name.clone(),
-                path,
-                is_entry: chunk.is_entry,
-                is_dynamic_entry: chunk.is_dynamic_entry,
-                facade_module_id: chunk.facade_module_id.clone(),
-                exports: chunk.exports.clone(),
-                imports: chunk.imports.clone(),
-                dynamic_imports: chunk.dynamic_imports.clone(),
-                source_map: chunk.source_map.clone(),
+                .find(|e| {
+                    std::path::Path::new(e.src_entry.trim_start_matches("./"))
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        == Some(chunk_name.as_str())
+                })
+                .map(|e| {
+                    let stripped = e
+                        .src_entry
+                        .trim_start_matches("./")
+                        .trim_end_matches(".ets")
+                        .trim_end_matches(".ts")
+                        .trim_end_matches(".js");
+                    format!("{}/{}/{}", bundle_name, loader_json.module_name, stripped)
+                })
+                .unwrap_or_else(|| chunk_name.clone());
+
+            WidgetInput {
+                path: path.clone(),
+                record_name,
+                source_file: None,
             }
         })
         .collect();
-    BundleCacheManifest {
-        key: key.clone(),
-        chunks,
-        source_maps_path: bundle_out.source_maps_path.clone(),
-    }
-}
 
-/// Reconstruct a [`BundleOutput`] from a cached [`BundleCacheManifest`].
-///
-/// The `.js` chunk files must already exist on disk (the cache validity check
-/// in [`BundleCache::is_valid`] guarantees this before we call this function).
-fn bundle_output_from_manifest(
-    manifest: &BundleCacheManifest,
-    loader_json: &arkdown_profile::LoaderJson,
-) -> BundleOutput {
-    let mut chunks: IndexVec<ChunkIdx, ArkChunk> = IndexVec::new();
-    for meta in &manifest.chunks {
-        chunks.push(ArkChunk {
-            name: meta.name.clone(),
-            is_entry: meta.is_entry,
-            is_dynamic_entry: meta.is_dynamic_entry,
-            facade_module_id: meta.facade_module_id.clone(),
-            exports: meta.exports.clone(),
-            imports: meta.imports.clone(),
-            dynamic_imports: meta.dynamic_imports.clone(),
-            source_map: meta.source_map.clone(),
-            ..ArkChunk::default()
-        });
+    if widget_inputs.is_empty() {
+        // No widget chunks found — nothing to compile.  This can happen when
+        // the bundler did not emit a separate chunk for the form extension entry
+        // (e.g. it was inlined into the main chunk).  Log a debug note and skip.
+        return Ok(());
     }
-    let chunk_files: Vec<(String, PathBuf)> = manifest
-        .chunks
-        .iter()
-        .map(|c| (c.name.clone(), c.path.clone()))
-        .collect();
-    let output_dir = PathBuf::from(&loader_json.ace_module_build);
-    let modules_abc_path = arkdown::output::modules_abc_path(&output_dir);
-    BundleOutput {
-        chunk_graph: ChunkGraph {
-            chunks,
-            module_to_chunk: IndexVec::new(),
-            entry_module_to_entry_chunk: FxHashMap::default(),
-        },
-        output_dir,
-        chunk_files,
-        modules_abc_path,
-        source_maps_path: manifest.source_maps_path.clone(),
-    }
-}
 
+    let widget_config = WidgetCompileConfig {
+        inputs: widget_inputs,
+        output: widgets_abc,
+        cache_dir,
+        target_api_version: config.sdk_config.compile_api_version,
+        debug_info: matches!(config.build_mode, BuildMode::Debug),
+    };
+
+    let compiler = AbcCompiler::new(arkdown_abc::AbcCompileOptions {
+        debug_info: widget_config.debug_info,
+        opt_level: 0,
+        target_api_version: widget_config.target_api_version,
+        merge_abc: true,
+        module: true,
+        cache_path: Some(widget_config.cache_dir.clone()),
+    });
+
+    compiler
+        .compile_widget(&widget_config)
+        .map_err(|e| anyhow::anyhow!("Widget ABC compile failed: {}", e))?;
+
+    Ok(())
+}

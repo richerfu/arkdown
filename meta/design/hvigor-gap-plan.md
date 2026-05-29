@@ -35,7 +35,7 @@ The local `build.js` flow is:
 `etsChecker`, `etsTransform`, `apiTransform`, coverage instrumentation, `genAbc`,
 and release-mode terser/minification when applicable.
 
-## Current arkdown Status (2026-05-29)
+## Current arkdown Status (2026-05-29, updated)
 
 `arkdown-cli` performs the full production pipeline:
 
@@ -53,11 +53,8 @@ and release-mode terser/minification when applicable.
 - Phase 2 (ETS transform): ✅ @Prop, @Link, @ObjectLink, @Provide, @Consume, @Watch, @BuilderParam
 - Phase 3 (bundler): ✅ clean ESM, @ohos: external, treeshake off for debug
 - Phase 4 (importee): ✅ process_importees() ports hvigor process-importee.js
-- Phase 5 (ABC): 🔄 modules.abc 8675B vs hvigor 9844B (88.1% parity — structural fixes applied).
-  Changes: LNP index moved to file end (matching hvigor layout), OHM URL method names restored,
-  field name string deduplication across classes, method index reordered to
-  [strings | methods | literal_arrays] matching hvigor. 51 abc tests pass.
-  Remaining gap (1169B): LNP body content density (~737B) + method index ordering differences.
+- Phase 5 (ABC): 🔄 modules.abc 8565B vs hvigor 9844B (gap: 1279B — 87% parity)
+- Phase 5b (widget pass): ✅ `AbcCompiler::compile_widget()` + `compile_widget_pass()` in CLI (SPEC-026)
 - Phase 6 (packaging): ✅ HAP zip identical to hvigor (11 entries)
 
 **Parity (minimal-hap, 2026-05-29) — see `meta/design/parity-report-minimal-hap.md`:**
@@ -85,8 +82,8 @@ and release-mode terser/minification when applicable.
 | ArkTS transform          | ✅ **Fixed (2026-05-29)**: `@State`, `@Prop`, `@Link`, `@ObjectLink`, `@Provide`, `@Consume`, `@Watch`, `@BuilderParam`, storage decorators all implemented. Per-statement source maps via oxc_codegen. | `@Builder`, `@Styles` functions; precise per-token source maps. EntryAbility VLQ: 329 vs 910 chars. |
 | Rollup/rolldown options  | ✅ **Fixed (2026-05-28)**: Clean ESM output, `@ohos:` imports external, treeshake disabled for debug. **IIFE/CJS compatibility paths removed** from both bundler and ABC compiler. | Release treeshake, `manualChunks` for `supportChunks`, ByteCode HAR/HSP externals. |
 | ByteCode HAR importees   | ✅ **Fixed (2026-05-29)**: `process_importees()` ports `process-importee.js`. BFS from entry chunks, OHM URL generation, importee.json cache written. `nonEntryImportees` in loader.json. | ByteCode HAR compilation flow (requires HAR input fixture). |
-| module.json merge        | 🔄 **Partial**: structural merge correct. Missing: `virtualMachine`, `compileMode`, `dependencies` fields; 8 resource integer IDs (`iconId`, `labelId`, `descriptionId`, `startWindowIconId`, `startWindowBackgroundId`). | Write resolved resource IDs from `arkdown-resource` back into profile. Inject `virtualMachine` from SDK metadata. |
-| ABC compiler             | 🔄 **Improved**: 88.1% parity (8675B vs 9844B). **Phase 5 structural fixes**: LNP index moved to file end, OHM URL method names, field name dedup, method index reordered [strings\|methods\|lits]. Known gaps: (1) LNP body density 81B vs 113B/LNP; (2) method index 98 vs 77 entries; (3) absolute fs path in StringItems. | See parity-report-minimal-hap.md §5 for complete string diff. |
+| ABC compiler             | 🔄 **Improved**: LNP line advance tracking, OHM URL scope names, SET_FILE debug info, binary/unary/logical ops, static-object `createobjectwithbuffer` (opcode 0x07), emit_new args, call-argument closures, START_LOCAL_EXTENDED (0x04) for scope/param vars, SET_PROLOGUE_END (0x08) after scope declarations, NewLexEnvWithName for arrow captures, class-decl lexical bindings. modules.abc 8565B vs 9844B. | Per-instruction LNP ADVANCE sequences (hvigor emits between every instruction group, not just per-statement); per-token source map granularity. |
+| Widget compile pass      | ✅ **Implemented (2026-05-29)**: `AbcCompiler::compile_widget()` + `compile_widget_pass()` in CLI. Activation predicate `need_widget_compile()`, form path collection `collect_form_json_paths()`. Separate cache dir (`_widget` suffix), separate `widgets.abc` output. | Widget loader.json path (`getWidgetLoaderJsonPath()`) and `byteCodeHar2Hsp` wiring not yet plumbed. |
 | Obfuscation/minification | `arkdown-obfuscate` exists but not wired in.                                                                                                                                           | hvigor release builds run SDK obfuscation + terser before ABC.                          |
 | Incremental cache        | `arkdown-cache` exists but not wired in.                                                                                                                                               | hvigor rollup msgpack cache + es2abc `--cache-file` support.                            |
 | Source maps/debug        | ✅ Per-statement source maps from kit-rewritten ETS source (pre-struct-transform). Pretty-printed JSON. sourceMaps.map 1281B vs 1847B golden (gap: per-statement vs per-token VLQ).   | Per-token source map granularity to match tsc/ets-loader output.                        |
@@ -217,7 +214,7 @@ For the Rust backend, implement in this order:
 4. debug info and source position sections;
 5. `cache_path` support with hvigor-compatible invalidation keys;
 6. release optimization and obfuscation/minification interaction;
-7. widget/card-specific compile pass.
+7. ✅ widget/card-specific compile pass — implemented in SPEC-026 (2026-05-29).
 
 The current `arkdown-abc` skeleton is useful, but full hvigor alignment is a
 large compiler project. Treat it as the longest pole in the plan.

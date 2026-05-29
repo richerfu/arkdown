@@ -8,6 +8,7 @@ use oxc_span::SourceType;
 use crate::emit::file::AbcFile;
 use crate::error::AbcError;
 use crate::ir::builder;
+use crate::widget::WidgetCompileConfig;
 
 /// Options controlling how the [`AbcCompiler`] compiles JavaScript to Panda
 /// bytecode.
@@ -158,6 +159,76 @@ impl AbcCompiler {
     /// Create a new compiler with the given options.
     pub fn new(options: AbcCompileOptions) -> Self {
         AbcCompiler { options }
+    }
+
+    /// Run the widget compilation pass.
+    ///
+    /// This is a second, independent ABC compilation pass for ArkTS widgets
+    /// (form extension abilities).  It mirrors `initWidgetDefaultArkCompileConfig`
+    /// + `submitArkCompileWork` in hvigor's `ArkCompile.doTaskAction()`:
+    ///
+    /// - Uses a **separate cache directory** (`config.cache_dir`) so widget
+    ///   incremental state does not corrupt the main module cache.
+    /// - Writes the output to `config.output` (typically `widgets.abc`), not
+    ///   the main `modules.abc` path.
+    /// - Warnings are suppressed (`ignoreWarning: true` in hvigor).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AbcError::Io`] if the output directory cannot be created or
+    /// the file cannot be written.  Returns [`AbcError::Parse`] if any widget
+    /// source contains hard syntax errors.
+    pub fn compile_widget(&self, config: &WidgetCompileConfig) -> Result<AbcArtifactResult, AbcError> {
+        // Ensure the widget cache directory exists.
+        if !config.cache_dir.as_os_str().is_empty() {
+            fs_err::create_dir_all(&config.cache_dir).map_err(AbcError::Io)?;
+        }
+
+        // Build a fresh AbcFile for the widget pass — completely independent
+        // from the main module's AbcFile.
+        let mut abc_file = AbcFile::new();
+        let mut has_debug_info = false;
+
+        for input in &config.inputs {
+            if !input.path.exists() {
+                // Skip missing widget source files; hvigor sets ignoreWarning=true
+                // so we mirror that leniency here.
+                continue;
+            }
+            let source = fs_err::read_to_string(&input.path).map_err(AbcError::Io)?;
+            let js_source = strip_typescript_types(&source);
+            let source_file = input.source_file.as_deref().map(str::to_string).or_else(|| {
+                config
+                    .debug_info
+                    .then(|| source_file_from_record_name(&input.record_name))
+            });
+            has_debug_info |= source_file.is_some();
+            let record = builder::build_record_with_debug(
+                &js_source,
+                &input.record_name,
+                &mut abc_file.strings,
+                &mut abc_file.literal_arrays,
+                source_file.as_deref(),
+                // Widget source files are always compiled as ESM modules.
+                true,
+            )?;
+            abc_file.add_record(record);
+        }
+
+        let bytes = abc_file.serialize();
+
+        if let Some(parent) = config.output.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs_err::create_dir_all(parent).map_err(AbcError::Io)?;
+            }
+        }
+        std::fs::write(&config.output, &bytes).map_err(AbcError::Io)?;
+
+        Ok(AbcArtifactResult {
+            path: config.output.clone(),
+            api_version: config.target_api_version,
+            has_debug_info,
+        })
     }
 
     /// Compile `modules` and write the result to `output`.

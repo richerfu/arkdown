@@ -31,9 +31,14 @@ pub mod compiler;
 pub mod emit;
 pub mod error;
 pub mod ir;
+pub mod widget;
 
 pub use compiler::{AbcArtifactResult, AbcCompileOptions, AbcCompiler, AbcModule};
 pub use error::AbcError;
+pub use widget::{
+    collect_form_json_paths, need_widget_compile, ExtensionAbilityRef, WidgetCompileConfig,
+    WidgetInput,
+};
 
 #[cfg(test)]
 mod tests {
