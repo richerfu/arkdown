@@ -128,9 +128,30 @@ pub fn load_config(
         .as_ref()
         .and_then(|bo| bo.ark_options.as_ref())
         .map(|ao| {
-            let obfuscation = ao.obfuscation.as_ref().map(|o| ObfuscationConfig {
-                enable_obfuscation: o.rule_options.as_ref().map(|r| r.enable).unwrap_or(false),
-                rules_file: None,
+            let obfuscation = ao.obfuscation.as_ref().map(|o| {
+                let enable = o.rule_options.as_ref().map(|r| r.enable).unwrap_or(false);
+                // Resolve rule file paths relative to the project root.
+                let rule_files: Vec<std::path::PathBuf> = o
+                    .rule_options
+                    .as_ref()
+                    .map(|r| {
+                        r.rules
+                            .iter()
+                            .map(|p| {
+                                let p = std::path::Path::new(p);
+                                if p.is_absolute() {
+                                    p.to_path_buf()
+                                } else {
+                                    root.join(p)
+                                }
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                ObfuscationConfig {
+                    enable_obfuscation: enable,
+                    rule_files,
+                }
             });
             ArkOptions {
                 obfuscation,
@@ -361,6 +382,69 @@ mod tests {
                 assert_eq!(sc.cert_path.to_str().unwrap(), "/test/cert.cer");
                 // targetSdkVersion used for compile_api_version
                 assert_eq!(cfg.sdk_config.compile_api_version, 17);
+            }
+            Err(ConfigError::SdkNotFound) => {
+                // Acceptable on machines without DevEco Studio
+            }
+            Err(e) => panic!("unexpected error: {e}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Verify that `ruleOptions.rules` paths are resolved relative to the project
+    /// root and stored in `ObfuscationConfig.rule_files`.
+    #[test]
+    fn test_load_config_obfuscation_rule_files_resolved() {
+        use std::io::Write;
+
+        let tmp = std::env::temp_dir().join("arkdown_config_obf_rules_test");
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let bp_content = r#"{
+            app: {
+                products: [{
+                    name: "default",
+                    bundleName: "com.example.obftest",
+                    compatibleSdkVersion: "5.0.0(12)",
+                    runtimeOS: "HarmonyOS",
+                    buildOption: {
+                        arkOptions: {
+                            obfuscation: {
+                                ruleOptions: {
+                                    enable: true,
+                                    rules: ["./obfuscation-rules.txt", "./extra-rules.txt"]
+                                }
+                            }
+                        }
+                    }
+                }],
+            },
+            modules: []
+        }"#;
+        let mut f = std::fs::File::create(tmp.join("build-profile.json5")).unwrap();
+        f.write_all(bp_content.as_bytes()).unwrap();
+
+        let result = load_config(&tmp, BuildMode::Release, OutputTarget::Hap, None, None);
+
+        match result {
+            Ok(cfg) => {
+                let ark_opts = cfg
+                    .product
+                    .build_option
+                    .ark_options
+                    .as_ref()
+                    .expect("ark_options present");
+                let obf = ark_opts
+                    .obfuscation
+                    .as_ref()
+                    .expect("obfuscation present");
+                assert!(obf.enable_obfuscation);
+                assert_eq!(obf.rule_files.len(), 2);
+                // Paths must be absolute (resolved against project root).
+                assert!(obf.rule_files[0].is_absolute());
+                assert!(obf.rule_files[0].ends_with("obfuscation-rules.txt"));
+                assert!(obf.rule_files[1].ends_with("extra-rules.txt"));
             }
             Err(ConfigError::SdkNotFound) => {
                 // Acceptable on machines without DevEco Studio

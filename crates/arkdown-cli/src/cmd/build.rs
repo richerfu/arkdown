@@ -29,6 +29,7 @@ use arkdown_profile::{
 };
 use arkdown_resolver::ResolverConfig;
 use arkdown_resource::{ResourceCompileConfig, ResourceCompileInput, ResourceCompiler};
+use arkdown_obfuscate::{should_obfuscate, Obfuscator, ObfuscationOptions};
 use arkdown_sign::HapSigner;
 use arkdown_ts2abc::{compile_to_abc, Ts2abcInput, Ts2abcOptions};
 
@@ -73,7 +74,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
     let progress = Progress::new();
 
     // Step 1: Config
-    progress.step(1, 6, "Parsing config");
+    progress.step(1, 7, "Parsing config");
     let config = load_config(
         &project_root,
         mode,
@@ -89,7 +90,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
     // Step 2: Resource compilation + Profile processing.
     // Resources must be compiled first so their numeric IDs (iconId, labelId,
     // descriptionId) can be embedded in module.json by write_module_json.
-    progress.step(2, 6, "Processing profiles");
+    progress.step(2, 7, "Processing profiles");
     let processor = ProfileProcessor::new(config_arc.clone());
     let mut loader_jsons = Vec::new();
     // Parallel list of ByteCode HAR dependencies per module, indexed identically
@@ -557,7 +558,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
     progress.done();
 
     // Step 6: Packaging
-    progress.step(6, 6, "Packaging");
+    progress.step(6, 7, "Packaging");
     let packager = Packager::new(config_arc.clone());
     let mut output_paths = Vec::new();
     for ((module, manifest, _loader_json), (bundle_out, _from_cache)) in

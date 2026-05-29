@@ -103,11 +103,15 @@ pub struct ArkOptions {
     pub runtime_only: Option<RuntimeOnlyConfig>,
 }
 
-/// Obfuscation configuration (details TBD by SPEC-005).
+/// Obfuscation configuration (from `buildOption.arkOptions.obfuscation` in
+/// `build-profile.json5`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObfuscationConfig {
     pub enable_obfuscation: bool,
-    pub rules_file: Option<PathBuf>,
+    /// Resolved, absolute paths to every rule file listed in
+    /// `ruleOptions.rules`.  Empty when no rule files are configured.
+    #[serde(default)]
+    pub rule_files: Vec<PathBuf>,
 }
 
 /// Resource compiler options.

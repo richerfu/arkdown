@@ -205,7 +205,7 @@ mod tests {
     fn test_should_not_obfuscate_release_disabled() {
         let cfg = ObfuscationConfig {
             enable_obfuscation: false,
-            rules_file: None,
+            rule_files: vec![],
         };
         assert!(!should_obfuscate(&BuildMode::Release, Some(&cfg)));
     }
@@ -214,7 +214,7 @@ mod tests {
     fn test_should_obfuscate_release_enabled() {
         let cfg = ObfuscationConfig {
             enable_obfuscation: true,
-            rules_file: None,
+            rule_files: vec![],
         };
         assert!(should_obfuscate(&BuildMode::Release, Some(&cfg)));
     }

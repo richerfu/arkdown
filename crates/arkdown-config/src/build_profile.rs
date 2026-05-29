@@ -150,6 +150,10 @@ pub struct RawObfuscation {
 pub struct RawRuleOptions {
     #[serde(default)]
     pub enable: bool,
+    /// Paths to rule files (relative to the project root), e.g.
+    /// `["./obfuscation-rules.txt"]`.
+    #[serde(default)]
+    pub rules: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -380,6 +384,44 @@ mod tests {
         let strict = build_option.strict_mode.as_ref().unwrap();
         assert!(strict.case_sensitive_check);
         assert!(strict.use_normalized_ohm_url);
+    }
+
+    #[test]
+    fn test_parse_obfuscation_rule_files() {
+        let json = r#"{
+            app: {
+                products: [{
+                    name: "default",
+                    bundleName: "com.example.app",
+                    compatibleSdkVersion: "5.0.0(12)",
+                    runtimeOS: "HarmonyOS",
+                    buildOption: {
+                        arkOptions: {
+                            obfuscation: {
+                                ruleOptions: {
+                                    enable: true,
+                                    rules: [
+                                        "./obfuscation-rules.txt",
+                                        "./extra-rules.txt"
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                }],
+            },
+            modules: []
+        }"#;
+        let profile =
+            parse_build_profile(json, std::path::Path::new("build-profile.json5")).unwrap();
+        let build_option = profile.app.products[0].build_option.as_ref().unwrap();
+        let ark_options = build_option.ark_options.as_ref().unwrap();
+        let obfuscation = ark_options.obfuscation.as_ref().unwrap();
+        let rule_options = obfuscation.rule_options.as_ref().unwrap();
+        assert!(rule_options.enable);
+        assert_eq!(rule_options.rules.len(), 2);
+        assert_eq!(rule_options.rules[0], "./obfuscation-rules.txt");
+        assert_eq!(rule_options.rules[1], "./extra-rules.txt");
     }
 
     // -----------------------------------------------------------------------

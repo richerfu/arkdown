@@ -4,6 +4,7 @@
 **Priority**: P1 — required for release builds with obfuscation enabled
 **Blocked by**: SPEC-009 (abc driver)
 **Blocks**: —
+**Status**: Implemented (2026-05-29)
 
 ---
 
