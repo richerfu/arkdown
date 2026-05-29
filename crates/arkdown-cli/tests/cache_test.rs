@@ -12,9 +12,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arkdown::Bundler;
+use arkdown_cache::{
+    BundleCache, BundleCacheKey, BundleCacheManifest, BundledChunkMeta,
+    compute_content_hash, BuildCache, CacheKey, CachedEntry,
+};
 use arkdown_config::load_config;
-use arkdown_core::{BuildMode, ModuleJson5, OutputTarget};
+use arkdown_core::{ArkChunk, ArkdownConfig, BuildMode, ChunkIdx, ModuleConfig, ModuleJson5, OutputTarget};
+use index_vec::IndexVec;
 use rolldown_plugin::__inner::SharedPluginable;
+use rustc_hash::FxHashMap;
 use arkdown_pack::{PackInput, Packager};
 use arkdown_plugin_duplicate_check::DuplicateCheckPlugin;
 use arkdown_plugin_ets_transform::EtsTransformPlugin;
@@ -96,6 +102,88 @@ fn collect_js_chunks(
         .collect()
 }
 
+/// Bundle-cache miss path: clean stale .js files, run rolldown, save the cache
+/// manifest, and return the resulting `BundleOutput`.
+fn run_bundle_miss(
+    rt: &tokio::runtime::Runtime,
+    fixture: &Path,
+    module: &ModuleConfig,
+    config: Arc<ArkdownConfig>,
+    loader_json: &arkdown_profile::LoaderJson,
+    bundle_cache: &BundleCache,
+    bundle_key: &BundleCacheKey,
+) -> arkdown::BundleOutput {
+    let chunk_dir = PathBuf::from(&loader_json.ace_module_build);
+    if chunk_dir.exists() {
+        for entry in walkdir::WalkDir::new(&chunk_dir)
+            .max_depth(1)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            if entry.path().extension().and_then(|e| e.to_str()) == Some("js") {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+
+    let plugins: Vec<SharedPluginable> = vec![
+        Arc::new(EtsTransformPlugin::new(config.clone())),
+        Arc::new(OhosResolvePlugin::new(
+            ResolverConfig {
+                project_root: fixture.to_path_buf(),
+                sdk_api_dirs: vec![],
+                sdk_kits_dirs: vec![],
+                pkg_name_to_pkg_info: HashMap::new(),
+                use_normalized_ohm_url: false,
+                case_sensitive_check: false,
+                oh_modules_roots: vec![],
+                module_src_roots: vec![module.src_path.join("src/main/ets")],
+            },
+            fixture.to_path_buf(),
+            false,
+        )),
+        Arc::new(ModuleMetaPlugin::new(fixture.to_path_buf(), module.name.clone())),
+        Arc::new(Json5Plugin),
+        Arc::new(DuplicateCheckPlugin),
+    ];
+    let bundler = Bundler::new((*config).clone(), plugins);
+    let bundle_out = rt
+        .block_on(bundler.bundle(loader_json))
+        .expect("bundle (cache miss)");
+
+    let manifest = BundleCacheManifest {
+        key: bundle_key.clone(),
+        chunks: bundle_out
+            .chunk_graph
+            .chunks
+            .iter()
+            .map(|chunk| {
+                let path = bundle_out
+                    .chunk_files
+                    .iter()
+                    .find(|(name, _)| name == &chunk.name)
+                    .map(|(_, p)| p.clone())
+                    .unwrap_or_default();
+                BundledChunkMeta {
+                    name: chunk.name.clone(),
+                    path,
+                    is_entry: chunk.is_entry,
+                    is_dynamic_entry: chunk.is_dynamic_entry,
+                    facade_module_id: chunk.facade_module_id.clone(),
+                    exports: chunk.exports.clone(),
+                    imports: chunk.imports.clone(),
+                    dynamic_imports: chunk.dynamic_imports.clone(),
+                    source_map: chunk.source_map.clone(),
+                }
+            })
+            .collect(),
+        source_maps_path: bundle_out.source_maps_path.clone(),
+    };
+    let _ = bundle_cache.save(&manifest);
+
+    bundle_out
+}
+
 /// Run the full build pipeline inside `fixture` (which must already exist on
 /// disk).  Returns the path to the produced `modules.abc`.
 ///
@@ -143,43 +231,89 @@ fn run_pipeline(fixture: &Path) -> PathBuf {
         });
     }
 
-    // Clean stale .js from prior runs.
-    let chunk_dir = PathBuf::from(&loader_json.ace_module_build);
-    if chunk_dir.exists() {
-        for entry in walkdir::WalkDir::new(&chunk_dir)
-            .max_depth(1)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
-            if entry.path().extension().and_then(|e| e.to_str()) == Some("js") {
-                let _ = std::fs::remove_file(entry.path());
+    // Bundle — check bundle cache BEFORE cleaning stale .js files.
+    let bundle_cache_dir = module.src_path.join("build/default/cache/bundle");
+    let bundle_cache = BundleCache::new(bundle_cache_dir);
+    let bundle_key = {
+        let source_hash = {
+            let root = PathBuf::from(&loader_json.module_root_path);
+            let mut sorted = loader_json.compile_entry.clone();
+            sorted.sort();
+            let mut h: u64 = 0xcbf29ce484222325;
+            for entry in &sorted {
+                let path = root.join(entry.trim_start_matches("./"));
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    for b in content.bytes() {
+                        h ^= b as u64;
+                        h = h.wrapping_mul(0x100000001b3);
+                    }
+                }
+                for b in entry.bytes() {
+                    h ^= b as u64;
+                    h = h.wrapping_mul(0x100000001b3);
+                }
             }
-        }
-    }
+            h
+        };
+        let config_hash = {
+            let mut h: u64 = 0xcbf29ce484222325;
+            let fp = format!(
+                "debug:{}:{}:false:{}:{}",
+                config.product.bundle_name,
+                config.sdk_config.compile_api_version,
+                loader_json.support_chunks,
+                loader_json.module_name,
+            );
+            for b in fp.bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+            h
+        };
+        BundleCacheKey { source_hash, config_hash }
+    };
 
-    // Bundle.
-    let plugins: Vec<SharedPluginable> = vec![
-        Arc::new(EtsTransformPlugin::new(config.clone())),
-        Arc::new(OhosResolvePlugin::new(
-            ResolverConfig {
-                project_root: fixture.to_path_buf(),
-                sdk_api_dirs: vec![],
-                sdk_kits_dirs: vec![],
-                pkg_name_to_pkg_info: HashMap::new(),
-                use_normalized_ohm_url: false,
-                case_sensitive_check: false,
-                oh_modules_roots: vec![],
-                module_src_roots: vec![module.src_path.join("src/main/ets")],
-            },
-            fixture.to_path_buf(),
-            false,
-        )),
-        Arc::new(ModuleMetaPlugin::new(fixture.to_path_buf(), module.name.clone())),
-        Arc::new(Json5Plugin),
-        Arc::new(DuplicateCheckPlugin),
-    ];
-    let bundler = Bundler::new((*config).clone(), plugins);
-    let bundle_out = rt.block_on(bundler.bundle(&loader_json)).expect("bundle");
+    let bundle_out = if bundle_cache.is_valid(&bundle_key) {
+        if let Ok(Some(manifest)) = bundle_cache.load() {
+            // Cache hit: reconstruct BundleOutput from manifest, reuse .js files.
+            let mut chunks: IndexVec<ChunkIdx, ArkChunk> = IndexVec::new();
+            for meta in &manifest.chunks {
+                chunks.push(ArkChunk {
+                    name: meta.name.clone(),
+                    is_entry: meta.is_entry,
+                    is_dynamic_entry: meta.is_dynamic_entry,
+                    facade_module_id: meta.facade_module_id.clone(),
+                    exports: meta.exports.clone(),
+                    imports: meta.imports.clone(),
+                    dynamic_imports: meta.dynamic_imports.clone(),
+                    source_map: meta.source_map.clone(),
+                    ..ArkChunk::default()
+                });
+            }
+            let chunk_files: Vec<(String, PathBuf)> = manifest
+                .chunks
+                .iter()
+                .map(|c| (c.name.clone(), c.path.clone()))
+                .collect();
+            let output_dir = PathBuf::from(&loader_json.ace_module_build);
+            let modules_abc_path = arkdown::output::modules_abc_path(&output_dir);
+            arkdown::BundleOutput {
+                chunk_graph: arkdown_core::ChunkGraph {
+                    chunks,
+                    module_to_chunk: IndexVec::new(),
+                    entry_module_to_entry_chunk: FxHashMap::default(),
+                },
+                output_dir,
+                chunk_files,
+                modules_abc_path,
+                source_maps_path: manifest.source_maps_path.clone(),
+            }
+        } else {
+            run_bundle_miss(&rt, fixture, module, config.clone(), &loader_json, &bundle_cache, &bundle_key)
+        }
+    } else {
+        run_bundle_miss(&rt, fixture, module, config.clone(), &loader_json, &bundle_cache, &bundle_key)
+    };
 
     // ABC compilation — wire the incremental cache exactly as build.rs does.
     let bundle_name = &config.product.bundle_name;
@@ -218,7 +352,6 @@ fn run_pipeline(fixture: &Path) -> PathBuf {
         }
 
         // Load module build cache (mirrors build.rs logic).
-        use arkdown_cache::{compute_content_hash, BuildCache, CacheKey, CachedEntry};
         let cache_dir = module.src_path.join("build/default/cache/modules");
         let mut build_cache = BuildCache::new(cache_dir);
         let _ = build_cache.load_from_disk();
@@ -382,6 +515,61 @@ fn test_first_build_writes_abc_cache_file() {
     assert!(
         abc_cache.exists(),
         "ABC compiler cache file must exist after first build: {abc_cache:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&fixture);
+}
+
+// ── Bundle-level cache tests ───────────────────────────────────────────────
+
+/// After a first build the bundle cache manifest file exists at
+/// `build/default/cache/bundle/bundle.json`.
+#[test]
+fn test_bundle_cache_manifest_written_after_first_build() {
+    let fixture = fresh_fixture_copy(&fixture_root());
+    run_pipeline(&fixture);
+
+    let config =
+        load_config(&fixture, BuildMode::Debug, OutputTarget::Hap, None, None).expect("config");
+    let module = &config.modules[0];
+    let manifest_path = module
+        .src_path
+        .join("build/default/cache/bundle/bundle.json");
+    assert!(
+        manifest_path.exists(),
+        "bundle cache manifest must exist after first build: {manifest_path:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&fixture);
+}
+
+/// On a second build with unchanged sources the bundle cache is a hit:
+/// the manifest still exists and both builds produce byte-identical `modules.abc`.
+#[test]
+fn test_second_build_uses_bundle_cache_and_produces_identical_abc() {
+    let fixture = fresh_fixture_copy(&fixture_root());
+
+    let abc1 = run_pipeline(&fixture);
+    let bytes1 = std::fs::read(&abc1).expect("read modules.abc after build 1");
+
+    let config =
+        load_config(&fixture, BuildMode::Debug, OutputTarget::Hap, None, None).expect("config");
+    let module = &config.modules[0];
+    let manifest_path = module
+        .src_path
+        .join("build/default/cache/bundle/bundle.json");
+    assert!(
+        manifest_path.exists(),
+        "bundle cache manifest must exist before second build: {manifest_path:?}"
+    );
+
+    let abc2 = run_pipeline(&fixture);
+    let bytes2 = std::fs::read(&abc2).expect("read modules.abc after build 2");
+
+    assert_eq!(
+        bytes1,
+        bytes2,
+        "modules.abc must be identical across two consecutive builds (bundle cache correctness)"
     );
 
     let _ = std::fs::remove_dir_all(&fixture);

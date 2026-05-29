@@ -25,6 +25,10 @@ fn generate_pack_info(config: &ArkdownConfig, input: &PackInput) -> String {
         .map(|a| a.name.as_str())
         .unwrap_or("EntryAbility");
 
+    // HSP uses bundle_type "shared"; all other module types use "entry" as the
+    // distro moduleType (HAP entry modules) unless extended in future.
+    let module_type = if input.bundle_type == "shared" { "shared" } else { "entry" };
+
     serde_json::json!({
         "summary": {
             "app": {
@@ -41,7 +45,7 @@ fn generate_pack_info(config: &ArkdownConfig, input: &PackInput) -> String {
                     "deviceType": ["phone"],
                     "abilities": abilities_json,
                     "distro": {
-                        "moduleType": "entry",
+                        "moduleType": module_type,
                         "installationFree": false,
                         "deliveryWithInstall": true,
                         "moduleName": input.module_name
@@ -57,7 +61,7 @@ fn generate_pack_info(config: &ArkdownConfig, input: &PackInput) -> String {
         "packages": [
             {
                 "deviceType": ["phone"],
-                "moduleType": "entry",
+                "moduleType": module_type,
                 "deliveryWithInstall": true,
                 "name": format!("{}-default", input.module_name)
             }

@@ -3,6 +3,114 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+// ── Bundle-level output cache ────────────────────────────────────────────────
+
+/// Identifies a bundle output cache entry.
+///
+/// A cache hit requires both fields to match the values computed from the
+/// current source tree and bundler configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BundleCacheKey {
+    /// FNV-1a hash of every compile-entry source file's contents, combined in
+    /// entry-path sorted order.
+    pub source_hash: u64,
+    /// Hash of all rolldown configuration that affects output: build mode,
+    /// treeshake, `support_chunks`, `use_normalized_ohm_url`, bundle name, and
+    /// module name.
+    pub config_hash: u64,
+}
+
+/// Per-chunk metadata persisted by the bundle cache.
+///
+/// Contains everything the post-bundle pipeline needs (importees, source maps)
+/// except the raw JavaScript code, which lives on disk as `.js` files.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BundledChunkMeta {
+    pub name: String,
+    pub path: PathBuf,
+    pub is_entry: bool,
+    pub is_dynamic_entry: bool,
+    pub facade_module_id: Option<String>,
+    pub exports: Vec<String>,
+    pub imports: Vec<String>,
+    pub dynamic_imports: Vec<String>,
+    /// Per-chunk source map JSON (may be absent for synthetic / helper chunks).
+    pub source_map: Option<String>,
+}
+
+/// Serialised bundle-level cache manifest stored at
+/// `build/default/cache/bundle/bundle.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BundleCacheManifest {
+    pub key: BundleCacheKey,
+    pub chunks: Vec<BundledChunkMeta>,
+    pub source_maps_path: Option<PathBuf>,
+}
+
+/// Persistent bundle-output cache for one OHOS module.
+///
+/// Stores a single [`BundleCacheManifest`] JSON file.  On a cache hit the
+/// bundler (`rolldown`) is skipped entirely and the previous `.js` chunk files
+/// are reused.
+///
+/// # Storage layout
+///
+/// `<cache_dir>/bundle.json`
+pub struct BundleCache {
+    pub cache_dir: PathBuf,
+}
+
+impl BundleCache {
+    /// Create a new `BundleCache` rooted at `cache_dir`.
+    pub fn new(cache_dir: PathBuf) -> Self {
+        BundleCache { cache_dir }
+    }
+
+    fn manifest_path(&self) -> PathBuf {
+        self.cache_dir.join("bundle.json")
+    }
+
+    /// Load the manifest from disk.  Returns `None` if the file does not exist
+    /// or cannot be parsed (treated as a cold cache).
+    pub fn load(&self) -> Result<Option<BundleCacheManifest>, CacheError> {
+        let path = self.manifest_path();
+        if !path.exists() {
+            return Ok(None);
+        }
+        let content = fs_err::read_to_string(&path)?;
+        Ok(serde_json::from_str(&content).ok())
+    }
+
+    /// Return `true` if a valid manifest exists on disk whose key matches `key`
+    /// and whose every chunk `.js` file still exists on disk.
+    pub fn is_valid(&self, key: &BundleCacheKey) -> bool {
+        match self.load() {
+            Ok(Some(manifest)) => {
+                manifest.key == *key
+                    && manifest
+                        .chunks
+                        .iter()
+                        .filter(|c| {
+                            c.path
+                                .extension()
+                                .and_then(|e| e.to_str())
+                                .is_some_and(|e| e == "js")
+                        })
+                        .all(|c| c.path.exists())
+            }
+            _ => false,
+        }
+    }
+
+    /// Persist `manifest` to `<cache_dir>/bundle.json`.
+    pub fn save(&self, manifest: &BundleCacheManifest) -> Result<(), CacheError> {
+        fs_err::create_dir_all(&self.cache_dir)?;
+        let content = serde_json::to_string_pretty(manifest)?;
+        fs_err::write(self.manifest_path(), content)?;
+        Ok(())
+    }
+}
+
 /// Key that uniquely identifies a valid cache entry for a module.
 ///
 /// A cache entry is valid if and only if all three hash components match the
@@ -176,6 +284,148 @@ fn fnv1a_hash(s: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── BundleCache ──────────────────────────────────────────────────────────
+
+    fn make_bundle_manifest(source_hash: u64, config_hash: u64) -> BundleCacheManifest {
+        BundleCacheManifest {
+            key: BundleCacheKey { source_hash, config_hash },
+            chunks: vec![],
+            source_maps_path: None,
+        }
+    }
+
+    #[test]
+    fn test_bundle_cache_save_and_load_roundtrip() {
+        let tmp = std::env::temp_dir().join("arkdown_bundle_cache_roundtrip");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        let cache = BundleCache::new(tmp.clone());
+        let manifest = make_bundle_manifest(0xdeadbeef, 0xcafe1234);
+        cache.save(&manifest).expect("save");
+
+        let loaded = cache.load().expect("load").expect("Some");
+        assert_eq!(loaded.key, manifest.key);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_bundle_cache_is_valid_key_match() {
+        let tmp = std::env::temp_dir().join("arkdown_bundle_cache_valid");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        let cache = BundleCache::new(tmp.clone());
+        let key = BundleCacheKey { source_hash: 1, config_hash: 2 };
+        cache.save(&BundleCacheManifest { key: key.clone(), chunks: vec![], source_maps_path: None })
+            .expect("save");
+
+        assert!(cache.is_valid(&key), "must be valid when key matches and no chunk paths required");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_bundle_cache_is_valid_key_mismatch() {
+        let tmp = std::env::temp_dir().join("arkdown_bundle_cache_mismatch");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        let cache = BundleCache::new(tmp.clone());
+        cache.save(&make_bundle_manifest(1, 2)).expect("save");
+
+        let different_key = BundleCacheKey { source_hash: 99, config_hash: 2 };
+        assert!(!cache.is_valid(&different_key), "must be invalid when source_hash differs");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_bundle_cache_is_valid_missing_chunk_file() {
+        let tmp = std::env::temp_dir().join("arkdown_bundle_cache_missing_chunk");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        let cache = BundleCache::new(tmp.clone());
+        let key = BundleCacheKey { source_hash: 1, config_hash: 2 };
+        let manifest = BundleCacheManifest {
+            key: key.clone(),
+            chunks: vec![BundledChunkMeta {
+                name: "Index".to_string(),
+                path: tmp.join("nonexistent.js"),
+                is_entry: true,
+                is_dynamic_entry: false,
+                facade_module_id: None,
+                exports: vec![],
+                imports: vec![],
+                dynamic_imports: vec![],
+                source_map: None,
+            }],
+            source_maps_path: None,
+        };
+        cache.save(&manifest).expect("save");
+
+        assert!(
+            !cache.is_valid(&key),
+            "must be invalid when a chunk .js file is missing from disk"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_bundle_cache_load_nonexistent_returns_none() {
+        let tmp = std::env::temp_dir().join("arkdown_bundle_cache_none");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        let cache = BundleCache::new(tmp.clone());
+        let result = cache.load().expect("load must not error");
+        assert!(result.is_none(), "load must return None for a cold cache");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_bundle_cache_key_equality() {
+        let k1 = BundleCacheKey { source_hash: 42, config_hash: 7 };
+        let k2 = BundleCacheKey { source_hash: 42, config_hash: 7 };
+        assert_eq!(k1, k2);
+
+        let k3 = BundleCacheKey { source_hash: 42, config_hash: 8 };
+        assert_ne!(k1, k3);
+    }
+
+    #[test]
+    fn test_bundle_cache_is_valid_chunk_file_present() {
+        let tmp = std::env::temp_dir().join("arkdown_bundle_cache_present_chunk");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).expect("create tmp dir");
+
+        // Write a real .js file so is_valid passes the file-existence check.
+        let js_path = tmp.join("Index.js");
+        std::fs::write(&js_path, b"// cached chunk").expect("write js");
+
+        let cache = BundleCache::new(tmp.clone());
+        let key = BundleCacheKey { source_hash: 5, config_hash: 6 };
+        let manifest = BundleCacheManifest {
+            key: key.clone(),
+            chunks: vec![BundledChunkMeta {
+                name: "Index".to_string(),
+                path: js_path,
+                is_entry: true,
+                is_dynamic_entry: false,
+                facade_module_id: None,
+                exports: vec![],
+                imports: vec![],
+                dynamic_imports: vec![],
+                source_map: None,
+            }],
+            source_maps_path: None,
+        };
+        cache.save(&manifest).expect("save");
+
+        assert!(cache.is_valid(&key), "must be valid when key matches and chunk file exists");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     fn make_entry(id: &str, content_hash: &str) -> CachedEntry {
         CachedEntry {

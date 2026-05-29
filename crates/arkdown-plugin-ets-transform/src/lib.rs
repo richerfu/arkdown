@@ -232,8 +232,26 @@ fn generate_code_and_source_map(source: &str, id: &str) -> Option<(String, Optio
             ..CodegenOptions::default()
         })
         .build(&parsed.program);
-    let map_json = result.map.map(|m| m.to_json_string());
+    let map_json = result.map.map(|m| ensure_names_field(&m.to_json_string()));
     Some((result.code, map_json))
+}
+
+/// Ensure the Source Map v3 JSON object contains a `"names"` array.
+///
+/// hvigor always emits `"names":[]` even when no name mappings are present.
+/// oxc may omit the field when no names are tracked. This function parses the
+/// JSON and inserts an empty array if the field is absent, then re-serializes.
+/// If parsing fails the original string is returned unchanged.
+fn ensure_names_field(json: &str) -> String {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(json) else {
+        return json.to_string();
+    };
+    if let Some(obj) = value.as_object_mut() {
+        if !obj.contains_key("names") {
+            obj.insert("names".to_string(), serde_json::json!([]));
+        }
+    }
+    serde_json::to_string(&value).unwrap_or_else(|_| json.to_string())
 }
 
 fn module_name_from_id(id: &str) -> Option<String> {
@@ -285,6 +303,42 @@ mod tests {
                 compile_sdk_version: "6.0.0.47".to_string(),
             },
         })
+    }
+
+    #[test]
+    fn test_source_map_has_names_field() {
+        let json = generate_code_and_source_map("const x = 1;", "/tmp/test.ts")
+            .and_then(|(_, map)| map)
+            .expect("source map must be generated");
+        let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert!(
+            v.get("names").is_some(),
+            "source map must contain 'names' field; got: {}",
+            json
+        );
+        assert!(
+            v["names"].is_array(),
+            "'names' must be an array; got: {}",
+            json
+        );
+    }
+
+    #[test]
+    fn test_ensure_names_field_adds_when_missing() {
+        let input = r#"{"version":3,"mappings":"AAAA","sources":["test.ts"]}"#;
+        let output = ensure_names_field(input);
+        let v: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert!(v.get("names").is_some(), "names must be inserted");
+        assert!(v["names"].is_array(), "names must be array");
+    }
+
+    #[test]
+    fn test_ensure_names_field_preserves_existing() {
+        let input = r#"{"version":3,"mappings":"AAAA","names":["foo","bar"]}"#;
+        let output = ensure_names_field(input);
+        let v: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let names = v["names"].as_array().unwrap();
+        assert_eq!(names.len(), 2, "existing names must be preserved");
     }
 
     #[test]

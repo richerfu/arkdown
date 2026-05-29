@@ -21,9 +21,11 @@ rolldown_sourcemap = "1.0.3"
 anyhow    = { workspace = true }
 thiserror = { workspace = true }
 
+# Serialization (for source map JSON post-processing)
+serde_json = { workspace = true }
+
 # Regex (for @kit.* import rewriting)
 regex = { workspace = true }
 
 [dev-dependencies]
-serde_json = { workspace = true }
 tokio = { workspace = true }

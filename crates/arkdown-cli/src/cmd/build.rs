@@ -6,13 +6,18 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use clap::Args;
 
-use arkdown::Bundler;
-use arkdown_cache::{compute_content_hash, BuildCache, CacheKey, CachedEntry};
+use arkdown::{BundleOutput, Bundler};
+use arkdown_cache::{
+    BundleCache, BundleCacheKey, BundleCacheManifest, BundledChunkMeta,
+    compute_content_hash, BuildCache, CacheKey, CachedEntry,
+};
 use arkdown_config::load_config;
 use arkdown_core::{
-    ArkdownConfig, BuildMode, ModuleConfig, ModuleJson5, ModuleJson5Module,
-    OutputTarget,
+    ArkChunk, ArkdownConfig, BuildMode, ChunkGraph, ChunkIdx, ModuleConfig, ModuleJson5,
+    ModuleJson5Module, OutputTarget,
 };
+use index_vec::IndexVec;
+use rustc_hash::FxHashMap;
 use arkdown_obfuscate::{should_obfuscate, Obfuscator, ObfuscationOptions};
 use rolldown_plugin::__inner::SharedPluginable;
 use arkdown_pack::{HarPackInput, PackAbility, PackInput, Packager};
@@ -193,9 +198,29 @@ pub async fn run(args: BuildArgs) -> Result<()> {
     progress.step(3, 6, "Bundling");
     let mut bundle_outs = Vec::new();
     for (module, _manifest, loader_json) in &loader_jsons {
-        // Clean stale .js files from previous builds so that collect_js_chunks_from_output
-        // (which uses the explicit file list) is the authoritative source, and any leftover
-        // files from a prior run do not sneak into the ABC compiler.
+        // Check the bundle-level output cache BEFORE cleaning stale .js files.
+        // A cache hit means rolldown output is unchanged; reuse the existing .js
+        // chunks on disk instead of re-running the full bundler.
+        let bundle_cache_dir = module.src_path.join("build/default/cache/bundle");
+        let bundle_cache = BundleCache::new(bundle_cache_dir);
+        let bundle_key = BundleCacheKey {
+            source_hash: compute_bundle_source_hash(
+                &loader_json.compile_entry,
+                &loader_json.module_root_path,
+            ),
+            config_hash: compute_bundle_config_hash(&config_arc, loader_json),
+        };
+        if bundle_cache.is_valid(&bundle_key) {
+            if let Ok(Some(manifest)) = bundle_cache.load() {
+                bundle_outs.push(bundle_output_from_manifest(&manifest, loader_json));
+                continue;
+            }
+        }
+
+        // Cache miss: clean stale .js files from previous builds so that
+        // collect_js_chunks_from_output (which uses the explicit file list) is
+        // the authoritative source, and any leftover files from a prior run do
+        // not sneak into the ABC compiler.
         let chunk_dir_pre = PathBuf::from(loader_json.ace_module_build.as_str());
         if chunk_dir_pre.exists() {
             for entry in walkdir::WalkDir::new(&chunk_dir_pre)
@@ -269,6 +294,14 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             .bundle(loader_json)
             .await
             .map_err(|e| anyhow::anyhow!("Bundle failed: {}", e))?;
+
+        // Save bundle cache so the next build can skip rolldown when nothing
+        // has changed.
+        let manifest = build_bundle_cache_manifest(&bundle_key, &bundle_out);
+        if let Err(e) = bundle_cache.save(&manifest) {
+            eprintln!("[warn] failed to save bundle cache: {e}");
+        }
+
         bundle_outs.push(bundle_out);
     }
     progress.done();
@@ -1098,5 +1131,128 @@ fn with_extension(path: &str, extension: &str) -> String {
     path.rsplit_once('.')
         .map(|(stem, _)| format!("{stem}.{extension}"))
         .unwrap_or_else(|| format!("{path}.{extension}"))
+}
+
+/// Compute a deterministic FNV-1a hash over every compile-entry source file's
+/// contents plus its path.  Files are processed in sorted path order so the
+/// result is independent of directory iteration order.
+fn compute_bundle_source_hash(entries: &[String], module_root: &str) -> u64 {
+    let root = PathBuf::from(module_root);
+    let mut sorted = entries.to_vec();
+    sorted.sort();
+    let mut h: u64 = 0xcbf29ce484222325;
+    for entry in &sorted {
+        let path = root.join(entry.trim_start_matches("./"));
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            for b in content.bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+        }
+        for b in entry.bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+    }
+    h
+}
+
+/// Compute a deterministic hash over all rolldown configuration fields that
+/// affect the bundle output: build mode, treeshake, support_chunks,
+/// use_normalized_ohm_url, bundle name, and module name.
+fn compute_bundle_config_hash(config: &ArkdownConfig, loader_json: &arkdown_profile::LoaderJson) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    let fingerprint = format!(
+        "{}:{}:{}:{}:{}:{}",
+        match &config.build_mode {
+            BuildMode::Debug => "debug",
+            BuildMode::Release => "release",
+        },
+        config.product.bundle_name,
+        config.sdk_config.compile_api_version,
+        config.product.build_option.strict_mode.use_normalized_ohm_url,
+        loader_json.support_chunks,
+        loader_json.module_name,
+    );
+    for b in fingerprint.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+/// Build a [`BundleCacheManifest`] from a successful bundle output.
+fn build_bundle_cache_manifest(key: &BundleCacheKey, bundle_out: &BundleOutput) -> BundleCacheManifest {
+    let chunks: Vec<BundledChunkMeta> = bundle_out
+        .chunk_graph
+        .chunks
+        .iter()
+        .map(|chunk| {
+            let path = bundle_out
+                .chunk_files
+                .iter()
+                .find(|(name, _)| name == &chunk.name)
+                .map(|(_, p)| p.clone())
+                .unwrap_or_default();
+            BundledChunkMeta {
+                name: chunk.name.clone(),
+                path,
+                is_entry: chunk.is_entry,
+                is_dynamic_entry: chunk.is_dynamic_entry,
+                facade_module_id: chunk.facade_module_id.clone(),
+                exports: chunk.exports.clone(),
+                imports: chunk.imports.clone(),
+                dynamic_imports: chunk.dynamic_imports.clone(),
+                source_map: chunk.source_map.clone(),
+            }
+        })
+        .collect();
+    BundleCacheManifest {
+        key: key.clone(),
+        chunks,
+        source_maps_path: bundle_out.source_maps_path.clone(),
+    }
+}
+
+/// Reconstruct a [`BundleOutput`] from a cached [`BundleCacheManifest`].
+///
+/// The `.js` chunk files must already exist on disk (the cache validity check
+/// in [`BundleCache::is_valid`] guarantees this before we call this function).
+fn bundle_output_from_manifest(
+    manifest: &BundleCacheManifest,
+    loader_json: &arkdown_profile::LoaderJson,
+) -> BundleOutput {
+    let mut chunks: IndexVec<ChunkIdx, ArkChunk> = IndexVec::new();
+    for meta in &manifest.chunks {
+        chunks.push(ArkChunk {
+            name: meta.name.clone(),
+            is_entry: meta.is_entry,
+            is_dynamic_entry: meta.is_dynamic_entry,
+            facade_module_id: meta.facade_module_id.clone(),
+            exports: meta.exports.clone(),
+            imports: meta.imports.clone(),
+            dynamic_imports: meta.dynamic_imports.clone(),
+            source_map: meta.source_map.clone(),
+            ..ArkChunk::default()
+        });
+    }
+    let chunk_files: Vec<(String, PathBuf)> = manifest
+        .chunks
+        .iter()
+        .map(|c| (c.name.clone(), c.path.clone()))
+        .collect();
+    let output_dir = PathBuf::from(&loader_json.ace_module_build);
+    let modules_abc_path = arkdown::output::modules_abc_path(&output_dir);
+    BundleOutput {
+        chunk_graph: ChunkGraph {
+            chunks,
+            module_to_chunk: IndexVec::new(),
+            entry_module_to_entry_chunk: FxHashMap::default(),
+        },
+        output_dir,
+        chunk_files,
+        modules_abc_path,
+        source_maps_path: manifest.source_maps_path.clone(),
+    }
 }
 

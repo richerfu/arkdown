@@ -79,7 +79,7 @@ and release-mode terser/minification when applicable.
 | ByteCode HAR importees   | ✅ **Fixed (2026-05-29)**: `process_importees()`, `detect_bytecode_har()`, `scan_bytecode_har_deps()`, `compiledImportees`+`byteCodeHarInfo`, `merge_bytecode_har_abc()`. | Full Panda ClassIndex merge (append-only now); ByteCode HAR externals in rolldown. |
 | ABC compiler             | 🔄 **Improved**: per-instruction LNP, `SET_EPILOGUE_BEGIN/PROLOGUE_END`, `START_LOCAL_EXTENDED`, all common ops. ✅ **Phase 5a**: loops, break/continue, conditional, template literals, throw. ✅ **Phase 5b**: optional chaining (`?.`), array literals, array/object destructuring, `for-in`/`for-of` stubs. | 225B structural gap; `for-in`/`for-of` full iteration opcodes; try/catch/finally, async/await, generators. |
 | Obfuscation/minification | ✅ **Wired (2026-05-29)**: release-build obfuscation, rule hash in cache invalidation. | Terser minification parity pending. |
-| Incremental cache        | ✅ **Wired (2026-05-29)**: FNV-1a content hash + config hash, ABC cache skip on hit, `cache_file` path wired. | Rollup msgpack graph-level cache not yet wired. |
+| Incremental cache        | ✅ **Wired (2026-05-29)**: FNV-1a content hash + config hash, ABC cache skip on hit, `cache_file` path wired. ✅ **Bundle cache (2026-05-29)**: `BundleCache` + `BundleCacheManifest` skip rolldown on unchanged source; manifest at `build/default/cache/bundle/bundle.json`. | `dependency_hash` cross-module invalidation; ABC `cache_file` incremental data. |
 | Source maps/debug        | ✅ **Fixed (2026-05-29)**: per-token maps for non-struct .ets/ts; struct-aware ETS→ViewPU via `SpanHint` VLQ for @Component files. | `names` array; per-token ViewPU boilerplate coverage. |
 | Packaging metadata       | ✅ **Fixed (2026-05-28)**: HAP zip identical to hvigor — correct module.json merge, pack.info, pkgContextInfo.json (intermediate, not in HAP), resources.index. | None for minimal-hap. HAR/HSP-specific pack flows for complex projects.                 |
 
@@ -256,8 +256,11 @@ large compiler project. Treat it as the longest pole in the plan.
   with only archive extension changes.
 - TODO: Terser minification and compact/remove-log obfuscation rules inside
   `arkdown-obfuscate`.
-- TODO: Wire rollup-level module-graph cache (hvigor msgpack cache) to skip
-  re-bundling unchanged source trees.
+- ✅ Wire bundle-output cache (`BundleCache`) to skip rolldown when source files
+  and bundler config are unchanged.  Manifest at `build/default/cache/bundle/bundle.json`;
+  validity requires key match **and** all chunk `.js` files present on disk.
+  Two new integration tests: `test_bundle_cache_manifest_written_after_first_build`
+  and `test_second_build_uses_bundle_cache_and_produces_identical_abc`.
 
 ## Suggested Milestones
 

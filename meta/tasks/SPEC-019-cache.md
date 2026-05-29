@@ -2,7 +2,7 @@
 
 **Crate**: `arkdown-cache`
 **Priority**: P1
-**Status**: ✅ Wired into CLI (2026-05-29)
+**Status**: ✅ Wired into CLI (2026-05-29); bundle-level cache added (2026-05-29)
 **Blocked by**: SPEC-005 (bundler), SPEC-009 (ABC compiler)
 
 ---
@@ -43,6 +43,60 @@ Each JSON file is a serialised [`CachedEntry`]:
 | `content_hash`   | FNV-1a 64-bit hex of the source file content. Changes when source is edited.                                       |
 | `config_hash`    | FNV-1a of `build_mode:bundle_name:api_version:use_normalized_ohm_url` (+ obfuscation rule hash for release builds). Changes when build configuration changes. |
 | `dependency_hash`| Hash of direct import specifier IDs. Currently always `0` (not yet implemented). Extend when cross-module caching is required. |
+
+### `BundleCache` — bundle-output cache
+
+Stored at `<module>/build/default/cache/bundle/bundle.json`.
+
+Persists a single [`BundleCacheManifest`] JSON file containing the cache key
+and per-chunk metadata.  On a cache hit the entire rolldown bundling step is
+skipped and the previous `.js` chunk files on disk are reused directly.
+
+```json
+{
+  "key": { "source_hash": 12345678901234567890, "config_hash": 9876543210987654321 },
+  "chunks": [
+    {
+      "name": "EntryAbility",
+      "path": "/…/loader_out/default/ets/EntryAbility.js",
+      "is_entry": true,
+      "is_dynamic_entry": false,
+      "facade_module_id": "/…/src/main/ets/entryability/EntryAbility.ets",
+      "exports": [],
+      "imports": [],
+      "dynamic_imports": [],
+      "source_map": null
+    }
+  ],
+  "source_maps_path": null
+}
+```
+
+#### `BundleCacheKey`
+
+| Component      | Description                                                               |
+| -------------- | ------------------------------------------------------------------------- |
+| `source_hash`  | FNV-1a over all compile-entry file contents (sorted by path).            |
+| `config_hash`  | FNV-1a of `build_mode:bundle_name:api:use_normalized_ohm_url:support_chunks:module_name`. |
+
+#### Cache validity check
+
+`BundleCache::is_valid(&key)` returns `true` if all of:
+1. `bundle.json` exists and parses successfully.
+2. `manifest.key == key`.
+3. Every chunk whose `path` has extension `.js` still exists on disk.
+
+#### CLI integration
+
+The bundle cache is checked **before** the stale `.js` cleanup so a hit can
+reuse the existing files.  On a miss the manifest is saved after a successful
+rolldown run.
+
+```
+Check BundleCache::is_valid()
+  ├─ Hit  → reconstruct BundleOutput from manifest + disk .js files → continue
+  └─ Miss → clean stale .js → run rolldown → BundleCache::save() → continue
+```
 
 ### ABC compiler cache
 
@@ -140,25 +194,31 @@ pub fn compute_content_hash(content: &str) -> String;  // FNV-1a hex-16
 
 ## Test Coverage
 
-`crates/arkdown-cache/src/lib.rs` — unit tests (16 tests):
+`crates/arkdown-cache/src/lib.rs` — unit tests (22 tests):
 - roundtrip persist/reload
 - content hash determinism
 - cache miss on changed content/config/dependency hash
 - `invalidate_all` clears memory and disk
 - `get()` and `len()` semantics
 - concurrent inserts to separate directories
+- `BundleCache` save/load roundtrip
+- `BundleCache::is_valid()` key match, key mismatch, missing chunk file, chunk file present
+- `BundleCache::load()` returns `None` for cold cache
+- `BundleCacheKey` equality/inequality
 
-`crates/arkdown-cli/tests/cache_test.rs` — integration tests (3 tests):
+`crates/arkdown-cli/tests/cache_test.rs` — integration tests (5 tests):
 - `test_first_build_writes_cache_entries` — module cache dir populated after build
 - `test_first_build_writes_abc_cache_file` — ABC cache file created after build
 - `test_two_builds_produce_identical_abc` — byte-identical ABC on second build
+- `test_bundle_cache_manifest_written_after_first_build` — `bundle.json` written after first build
+- `test_second_build_uses_bundle_cache_and_produces_identical_abc` — second build uses bundle cache, produces identical `modules.abc`
 
 ---
 
 ## TODO / Future Work
 
 - Wire `dependency_hash` from rolldown module graph (cross-module change detection).
-- Wire rollup-level module-graph cache (hvigor msgpack) to skip re-bundling.
 - Implement incremental data writing in `arkdown-abc` compiler using `cache_file`.
 - Add cache pruning / TTL to prevent unbounded growth.
 - Consider SHA-256 content hash (faster on large files with hardware acceleration).
+- Store chunk code in `BundledChunkMeta` to avoid requiring `.js` files on disk for cache hit (currently the hit path assumes `.js` files are present).

@@ -231,4 +231,132 @@ mod tests {
         assert!(result.is_ok(), "{:?}", result.err());
         assert!(out.exists());
     }
+
+    #[test]
+    fn test_hsp_golden_entry_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        let abc = tmp.path().join("modules.abc");
+        let res = tmp.path().join("resources.index");
+        let modj = tmp.path().join("module.json");
+        let out = tmp.path().join("shared.hsp");
+
+        fs::write(&abc, b"PAND").unwrap();
+        fs::write(&res, b"\x00\x00").unwrap();
+        fs::write(&modj, r#"{"module":{"name":"shared","type":"shared"}}"#).unwrap();
+
+        let packager = Packager::new(make_config());
+        packager
+            .pack_hsp(PackInput {
+                module_name: "shared".to_string(),
+                abc_path: abc,
+                resources_index: res,
+                module_json: modj,
+                native_libs: vec![],
+                output_path: out.clone(),
+                resources_src_dir: None,
+                bundle_version_code: 1000000,
+                bundle_version_name: "1.0.0".to_string(),
+                bundle_type: "shared".to_string(),
+                source_maps_path: None,
+                abilities: vec![],
+            })
+            .unwrap();
+
+        let file = fs::File::open(&out).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let names: Vec<_> = archive.file_names().map(str::to_string).collect();
+
+        // HSP must contain the same required entries as HAP
+        assert!(
+            names.iter().any(|n| n == "module.json"),
+            "missing module.json; got: {:?}",
+            names
+        );
+        assert!(
+            names.iter().any(|n| n == "pack.info"),
+            "missing pack.info; got: {:?}",
+            names
+        );
+        assert!(
+            names.iter().any(|n| n.contains(".abc")),
+            "missing .abc; got: {:?}",
+            names
+        );
+
+        // pack.info must use moduleType "shared", not "entry"
+        let mut entry = archive.by_name("pack.info").unwrap();
+        use std::io::Read;
+        let mut content = String::new();
+        entry.read_to_string(&mut content).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(
+            v["summary"]["modules"][0]["distro"]["moduleType"].as_str().unwrap(),
+            "shared",
+            "pack.info distro.moduleType must be 'shared' for HSP; got: {}",
+            content
+        );
+        assert_eq!(
+            v["packages"][0]["moduleType"].as_str().unwrap(),
+            "shared",
+            "pack.info packages[0].moduleType must be 'shared' for HSP; got: {}",
+            content
+        );
+    }
+
+    #[test]
+    fn test_har_golden_entry_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src_dir = tmp.path().join("src/main/ets");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::write(src_dir.join("Index.ets"), b"export struct Index {}").unwrap();
+
+        let pkg_json = tmp.path().join("oh-package.json5");
+        fs::write(&pkg_json, r#"{"name":"mylib"}"#).unwrap();
+
+        let out = tmp.path().join("mylib.har");
+
+        let packager = Packager::new(make_config());
+        packager
+            .pack_har(HarPackInput {
+                module_name: "mylib".to_string(),
+                source_dir: src_dir.clone(),
+                resources_dir: tmp.path().join("src/main/resources"),
+                oh_package_json: pkg_json,
+                output_path: out.clone(),
+            })
+            .unwrap();
+
+        let file = fs::File::open(&out).unwrap();
+        let archive = zip::ZipArchive::new(file).unwrap();
+        let names: Vec<_> = archive.file_names().map(str::to_string).collect();
+
+        // HAR must contain source files and oh-package.json5
+        assert!(
+            names.iter().any(|n| n.ends_with("Index.ets")),
+            "missing Index.ets; got: {:?}",
+            names
+        );
+        assert!(
+            names.iter().any(|n| n == "oh-package.json5"),
+            "missing oh-package.json5; got: {:?}",
+            names
+        );
+
+        // HAR must NOT contain compiled binary or packaging metadata
+        assert!(
+            !names.iter().any(|n| n.contains("modules.abc")),
+            "HAR must not contain modules.abc; got: {:?}",
+            names
+        );
+        assert!(
+            !names.iter().any(|n| n == "pack.info"),
+            "HAR must not contain pack.info; got: {:?}",
+            names
+        );
+        assert!(
+            !names.iter().any(|n| n == "pkgContextInfo.json"),
+            "HAR must not contain pkgContextInfo.json; got: {:?}",
+            names
+        );
+    }
 }
