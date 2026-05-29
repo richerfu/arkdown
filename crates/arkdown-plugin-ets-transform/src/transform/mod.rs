@@ -151,11 +151,25 @@ fn component_from_struct(
                     .value
                     .as_ref()
                     .map(|value| span_text(value.span(), source_text).trim().to_string());
+                // Extract @Watch("handlerName") from co-decorators on this field.
+                let watch_handler = property
+                    .decorators
+                    .iter()
+                    .find(|d| decorator_name(d) == "Watch")
+                    .and_then(|d| decorator_string_arg(d, source_text));
+                // Extract alias from @Provide("alias") or @Consume("alias").
+                let alias = property
+                    .decorators
+                    .iter()
+                    .find(|d| matches!(decorator_name(d), "Provide" | "Consume"))
+                    .and_then(|d| decorator_string_arg(d, source_text));
                 state_fields.push(StateField {
                     name: name.into_owned(),
                     type_annotation,
                     decorator: decorator.to_string(),
                     initializer,
+                    watch_handler,
+                    alias,
                 });
             }
             StructElement::MethodDefinition(method)
@@ -213,6 +227,36 @@ fn decorator_name<'a>(decorator: &'a Decorator<'a>) -> &'a str {
         },
         _ => "",
     }
+}
+
+/// Extract the first string-literal argument from a decorator call expression.
+///
+/// Used to extract the handler name from `@Watch("handler")` and the alias
+/// from `@Provide("alias")` / `@Consume("alias")`.  Returns `None` if the
+/// decorator has no arguments or the first argument is not a string literal.
+fn decorator_string_arg(decorator: &Decorator<'_>, source_text: &str) -> Option<String> {
+    if let Expression::CallExpression(call) = &decorator.expression {
+        if let Some(arg) = call.arguments.first() {
+            // Use `as_expression()` — the oxc fork uses `inherit_variants!` so
+            // `Argument` does not have a direct `Expression` variant.
+            if let Some(expr) = arg.as_expression() {
+                if let Expression::StringLiteral(lit) = expr {
+                    return Some(lit.value.to_string());
+                }
+                // Fallback: slice the span text and strip surrounding quotes.
+                let raw = span_text(expr.span(), source_text).trim().to_string();
+                let unquoted = raw
+                    .trim_start_matches('"')
+                    .trim_end_matches('"')
+                    .trim_start_matches('\'')
+                    .trim_end_matches('\'');
+                if !unquoted.is_empty() {
+                    return Some(unquoted.to_string());
+                }
+            }
+        }
+    }
+    None
 }
 
 fn type_annotation_text(span: Span, source_text: &str) -> String {
@@ -315,6 +359,152 @@ mod tests {
             parsed.errors.is_empty(),
             "lowered output must be valid TypeScript: {:?}\n{}",
             parsed.errors,
+            result
+        );
+    }
+
+    // ── @Link integration ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_link_decorator_lowers_to_synched_property_two_way_pu() {
+        let src = r#"
+@Component
+struct ItemList {
+  @Link items: string[];
+  build() {}
+}
+"#;
+        let result = transform_ets(&make_source(
+            "entry/src/main/ets/components/ItemList.ets",
+            src,
+        ))
+        .unwrap();
+        assert!(
+            result.contains("private __items: SynchedPropertySimpleTwoWayPU<string[]>"),
+            "expected SynchedPropertySimpleTwoWayPU backing field, got:\n{}",
+            result
+        );
+        assert!(
+            result.contains("new SynchedPropertySimpleTwoWayPU(params.items, this, \"items\")"),
+            "expected params.items init for @Link, got:\n{}",
+            result
+        );
+        // @Link must NOT appear in updateStateVars
+        assert!(
+            !result.contains("this.__items.set(params.items)"),
+            "@Link must not have an updateStateVars entry, got:\n{}",
+            result
+        );
+    }
+
+    // ── @ObjectLink integration ───────────────────────────────────────────────
+
+    #[test]
+    fn test_object_link_decorator_lowers_to_synched_nesed_object_pu() {
+        let src = r#"
+@Component
+struct ItemRow {
+  @ObjectLink item: Item;
+  build() {}
+}
+"#;
+        let result = transform_ets(&make_source(
+            "entry/src/main/ets/components/ItemRow.ets",
+            src,
+        ))
+        .unwrap();
+        assert!(
+            result.contains("private __item: SynchedPropertyNesedObjectPU<Item>"),
+            "expected SynchedPropertyNesedObjectPU backing field, got:\n{}",
+            result
+        );
+        assert!(
+            result.contains("new SynchedPropertyNesedObjectPU(params.item, this, \"item\")"),
+            "expected params.item init for @ObjectLink, got:\n{}",
+            result
+        );
+    }
+
+    // ── @Provide / @Consume integration ───────────────────────────────────────
+
+    #[test]
+    fn test_provide_decorator_lowers_to_observed_property_simple_pu() {
+        let src = r#"
+@Component
+struct ThemeProvider {
+  @Provide theme: string = "dark";
+  build() {}
+}
+"#;
+        let result = transform_ets(&make_source(
+            "entry/src/main/ets/components/ThemeProvider.ets",
+            src,
+        ))
+        .unwrap();
+        assert!(
+            result.contains("private __theme: ObservedPropertySimplePU<string>"),
+            "expected ObservedPropertySimplePU for @Provide, got:\n{}",
+            result
+        );
+        assert!(
+            result.contains("new ObservedPropertySimplePU(\"dark\", this, \"theme\")"),
+            "expected local init for @Provide, got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_consume_decorator_lowers_to_initialize_consume() {
+        let src = r#"
+@Component
+struct ThemedChild {
+  @Consume theme: string;
+  build() {}
+}
+"#;
+        let result = transform_ets(&make_source(
+            "entry/src/main/ets/components/ThemedChild.ets",
+            src,
+        ))
+        .unwrap();
+        assert!(
+            result.contains("private __theme: ObservedPropertyAbstractPU<string>"),
+            "expected ObservedPropertyAbstractPU for @Consume, got:\n{}",
+            result
+        );
+        assert!(
+            result.contains("this.initializeConsume(\"theme\", \"theme\")"),
+            "expected initializeConsume for @Consume, got:\n{}",
+            result
+        );
+    }
+
+    // ── @Watch integration ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_watch_decorator_generates_declare_watch_in_constructor() {
+        let src = r#"
+@Component
+struct Counter {
+  @State @Watch("onCountChange") count: number = 0;
+  onCountChange() {}
+  build() {}
+}
+"#;
+        let result = transform_ets(&make_source(
+            "entry/src/main/ets/components/Counter.ets",
+            src,
+        ))
+        .unwrap();
+        assert!(
+            result.contains("this.declareWatch(\"count\", this.onCountChange)"),
+            "expected declareWatch for @Watch, got:\n{}",
+            result
+        );
+        // Backing field is still ObservedPropertySimplePU (from @State)
+        assert!(
+            result.contains("private __count: ObservedPropertySimplePU<number>"),
+            "expected ObservedPropertySimplePU backing field, got:\n{}",
             result
         );
     }

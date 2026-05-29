@@ -138,21 +138,32 @@ class Counter extends ViewPU {
 
 ### State property class mapping
 
-| Decorator           | Field backing class                         | `updateStateVars` slot? |
-| ------------------- | ------------------------------------------- | ----------------------- |
-| `@State`            | `ObservedPropertySimplePU<T>`               | No                      |
-| `@Prop`             | `SynchedPropertySimpleOneWayPU<T>`          | Yes                     |
-| `@Link`             | `SynchedPropertySimpleTwoWayPU<T>`          | No                      |
-| `@StorageLink`      | `AppStorageLinkedProperty<T>`               | No                      |
-| `@StorageProp`      | `AppStorageProperty<T>`                     | No                      |
-| `@LocalStorageLink` | `LocalStorageLinkedProperty<T>`             | No                      |
-| `@LocalStorageProp` | `LocalStorageProperty<T>`                   | Yes                     |
-| `@Provide`          | `ObservedPropertyObjectPU<T>`               | No                      |
-| `@Consume`          | `ObservedPropertyObjectPU<T>` (via context) | No                      |
-| `@ObjectLink`       | `SynchedPropertyNesedObjectPU<T>`           | No                      |
-| `@Watch`            | Adds `__watch_<field>` subscription call    | —                       |
-| `@Builder`          | Standalone function (struct method → fn)    | —                       |
-| `@BuilderParam`     | `WrappedBuilder<Parameters<T>>`             | Yes                     |
+Backing class names and constructor init patterns are derived from ets-loader
+`process_component_class.js` (`createTypeReferencePU`) and
+`process_component_member.js` (`updateObservedPropertyPU` etc.) for PU / partial-update
+mode (API >= 9).
+
+| Decorator           | Field backing class (`private __x: …`)  | Constructor init expression                                  | `updateStateVars` slot? |
+| ------------------- | ---------------------------------------- | ------------------------------------------------------------ | ----------------------- |
+| `@State`            | `ObservedPropertySimplePU<T>`            | `new ObservedPropertySimplePU(init, this, "x")`              | No                      |
+| `@Prop`             | `SynchedPropertySimpleOneWayPU<T>`       | `new SynchedPropertySimpleOneWayPU(params.x, this, "x")`     | Yes                     |
+| `@Link`             | `SynchedPropertySimpleTwoWayPU<T>`       | `new SynchedPropertySimpleTwoWayPU(params.x, this, "x")`     | No                      |
+| `@StorageLink`      | `ObservedPropertyAbstractPU<T>`          | `this.__x = undefined` (storage runtime wires it up)         | No                      |
+| `@StorageProp`      | `ObservedPropertyAbstractPU<T>`          | `this.__x = undefined` (storage runtime wires it up)         | No                      |
+| `@LocalStorageLink` | `ObservedPropertyAbstractPU<T>`          | `this.__x = undefined` (storage runtime wires it up)         | No                      |
+| `@LocalStorageProp` | `ObservedPropertyAbstractPU<T>`          | `this.__x = undefined` (storage runtime wires it up)         | Yes                     |
+| `@Provide`          | `ObservedPropertySimplePU<T>`            | `new ObservedPropertySimplePU(init, this, "x")`              | No                      |
+| `@Consume`          | `ObservedPropertyAbstractPU<T>`          | `this.initializeConsume("alias_or_x", "x")`                  | No                      |
+| `@ObjectLink`       | `SynchedPropertyNesedObjectPU<T>`        | `new SynchedPropertyNesedObjectPU(params.x, this, "x")`      | No                      |
+| `@Watch`            | (no backing field; adds `declareWatch`)  | `this.declareWatch("x", this.handlerName)` after field inits | —                       |
+| `@Builder`          | Struct method lowered like `build()` body | —                                                            | —                       |
+| `@BuilderParam`     | `WrappedBuilder<Parameters<T>>`          | `this.x = init` (direct, no `__` prefix in ctor)            | Yes                     |
+
+> **Note on simple vs object variants**: The ets-loader picks between `Simple` and `Object`
+> backing class variants based on an `isSimpleType` check (whether the declared type is
+> `string`, `number`, or `boolean`).  The pure-Rust transform defaults to the `Simple`
+> variants for all types as a conservative choice.  A future enhancement can add type
+> heuristics to select `Object` variants for non-primitive types.
 
 ### @Entry
 
