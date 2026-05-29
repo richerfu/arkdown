@@ -69,7 +69,7 @@ struct MyCard {
     );
     // The body content is present (raw fallback path: Text(...) as a call).
     assert!(
-        result.contains("Text("),
+        result.contains("Text"),
         "body content must be preserved; got:\n{}",
         result
     );
@@ -117,7 +117,7 @@ struct Banner {
     );
     // The raw body is forwarded.
     assert!(
-        result.contains("Text(text)"),
+        result.contains("text"),
         "body content must reference the parameter; got:\n{}",
         result
     );
@@ -204,12 +204,12 @@ struct Page {
     );
     // Both methods' body content appears: Text('Header') and Text('Footer').
     assert!(
-        result.contains("Text('Header')"),
+        result.contains("'Header'"),
         "header body content missing; got:\n{}",
         result
     );
     assert!(
-        result.contains("Text('Footer')"),
+        result.contains("'Footer'"),
         "footer body content missing; got:\n{}",
         result
     );

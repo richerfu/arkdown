@@ -21,6 +21,7 @@ pub struct SpanHint {
     pub body_line: usize,
     /// Byte span of the ArkUI component expression in the original `.ets` source.
     pub original_span: Span,
+}
 
 /// Extracted representation of a leaf component call and its attribute chain.
 struct LeafComponent {
@@ -312,12 +313,12 @@ mod tests {
                 _ => None,
             })
             .expect("expected build method");
-        lower_build_body(build.value.body.as_deref(), source)
+        lower_build_body(build.value.body.as_deref(), source).map(|(code, _)| code)
     }
 
     #[test]
     fn lowers_none_body_returns_empty_string() {
-        let out = lower_build_body(None, "").unwrap();
+        let (out, _) = lower_build_body(None, "").unwrap();
         assert_eq!(out, "");
     }
 
