@@ -424,24 +424,18 @@ impl ClassRecord {
 
         // ── MethodItem entries ────────────────────────────────────────────────
 
-        for (i, _method) in self.methods.iter().enumerate() {
+        for (i, method) in self.methods.iter().enumerate() {
             let name_off = method_name_offsets[i];
             let code_off = code_offsets[i];
 
             // class_idx: u16 LE
             buf.extend_from_slice(&class_idx.to_le_bytes());
             // proto_idx: u16 LE = 0xffff.
-            //
-            // hvigor/es2abc uses this sentinel for JS/ArkTS methods without an
-            // explicit ProtoItem.  Using 0 makes libpandafile resolve proto
-            // index 0, but API 17 output has no proto index table.
             buf.extend_from_slice(&0xFFFFu16.to_le_bytes());
             // name_off: u32 LE (file offset to method's StringItem)
             buf.extend_from_slice(&name_off.to_le_bytes());
-            // access_flags: ULEB128 = 0x108
-            //   header_idx = 0x00, function_kind = 0x01 (NC_FUNCTION), flags = 0x08 (STATIC)
-            //   0x108 = 264, encoded as [0x88, 0x02] in ULEB128
-            buf.extend_from_slice(&uleb128(0x108));
+            // access_flags: ULEB128 — per-method type (INSTANCE=0x008, MODULE_OR_CTOR=0x108, ANON=0x208)
+            buf.extend_from_slice(&uleb128(method_access_flags_for(&method.name) as u64));
             // MethodTag::CODE = 0x01
             buf.push(0x01);
             // code_off: u32 LE (file offset to CodeItem)
@@ -463,7 +457,10 @@ impl ClassRecord {
 
 impl MethodRecord {
     fn method_item_byte_size(&self) -> usize {
-        METHOD_ITEM_SIZE + self.debug_info.as_ref().map_or(0, |_| 1 + 4)
+        // class_idx(2) + proto_idx(2) + name_off(4) + access_flags(variable)
+        // + MethodTag::CODE(1) + code_off(4) + MethodTag::SOURCE_LANG(1) + lang(1) + NOTHING(1)
+        let access_flags_len = uleb128(method_access_flags_for(&self.name) as u64).len();
+        16 + access_flags_len + self.debug_info.as_ref().map_or(0, |_| 1 + 4)
     }
 }
 
