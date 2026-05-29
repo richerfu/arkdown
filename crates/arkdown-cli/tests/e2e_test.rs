@@ -971,6 +971,8 @@ fn test_non_entry_importees_populated_with_har_dep() {
             .any(|e| e.starts_with("@bundle:")),
         "nonEntryImportees entries should use @bundle: OHM URL format: {:?}",
         result.non_entry_importees
+    );
+}
 
 // ByteCode HAR e2e tests
 // ---------------------------------------------------------------------------
