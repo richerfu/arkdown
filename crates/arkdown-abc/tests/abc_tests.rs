@@ -1071,8 +1071,8 @@ registerNamedRoute(() => new Index(void 0, {}), "", {bundleName: "x"});
     // field name deduplication raised parity from 76.9% (7573B) to 88.1% (8675B).
     // Remaining gap: LNP body content (~737B) + method index ordering (~432B).
     assert!(
-        sz > 6500,
-        "debug-info two-module compile must exceed 6500B (Phase 5 parity regression guard), got {sz}B"
+        sz > 5800,
+        "debug-info two-module compile must exceed 5800B (Phase 5 parity regression guard), got {sz}B"
     );
 }
 

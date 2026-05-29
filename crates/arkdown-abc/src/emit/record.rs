@@ -17,6 +17,25 @@ pub(crate) fn uleb128(mut value: u64) -> Vec<u8> {
 const METHOD_ITEM_SIZE: usize = 18;
 pub const FIELD_OWNER_CLASS_IDX: u16 = u16::MAX;
 
+/// Method access flags constants for MethodItem `access_flags`.
+pub mod method_access {
+    pub const INSTANCE: u32 = 0x008;
+    pub const MODULE_OR_CTOR: u32 = 0x108;
+    pub const ANON: u32 = 0x208;
+}
+
+/// Return the correct `access_flags` value for a method based on its name pattern.
+pub(crate) fn method_access_flags_for(name: &str) -> u32 {
+    if name == "func_main_0" || name.contains("#~@0=#") {
+        method_access::MODULE_OR_CTOR
+    } else if name.contains('@') && name.contains("*#") {
+        method_access::ANON
+    } else {
+        method_access::INSTANCE
+    }
+}
+
+
 /// Encode a Panda `StringItem` as an inline ULEB128-prefixed null-terminated string.
 ///
 /// Panda wire format (from `libpandafile/file_items.h`):

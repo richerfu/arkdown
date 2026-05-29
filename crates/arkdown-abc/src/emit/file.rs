@@ -347,18 +347,13 @@ impl AbcFile {
         for (class_idx, class) in all_classes.iter().enumerate() {
             let mut class_offsets = Vec::new();
             let mut class_strings = Vec::new();
-            let ohm_url = &class_ohm_urls[class_idx];
+            let _ohm_url = &class_ohm_urls[class_idx];
             for method in &class.methods {
                 class_offsets.push(cur);
-                // Full path: "<OHM_URL>.<method_short_name>" for user classes (those
-                // whose OHM URL contains '/').  SDK stubs and annotation stubs use
-                // the bare short name so their MethodItems stay compact.
-                let full_name = if ohm_url.contains('/') {
-                    format!("{ohm_url}.{}", method.name)
-                } else {
-                    method.name.clone()
-                };
-                let s = inline_string(&full_name);
+                // Use the short method name only (no OHM URL prefix).
+                // The MethodItem name_off field uses bare names like "#~@0>#initialRender".
+                // Full OHM URLs belong only in bytecode string operands (lda.str), not here.
+                let s = inline_string(&method.name);
                 cur += s.len() as u32;
                 class_strings.push(s);
             }
