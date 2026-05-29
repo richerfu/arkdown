@@ -181,9 +181,35 @@ mod tests {
     }
 
     #[test]
+    fn test_watch_dirs_for_module_count() {
+        // Should return exactly 2 directories: ets + resources
+        let dirs = watch_dirs_for_module(Path::new("/project/entry"));
+        assert_eq!(dirs.len(), 2, "watch_dirs_for_module must return exactly 2 dirs");
+    }
+
+    #[test]
     fn test_watcher_creation() {
         let config = make_test_config();
         // Just verify construction doesn't panic
         let _watcher = FileWatcher::new(config, vec![]);
+    }
+
+    #[test]
+    fn test_debounce_is_100ms() {
+        let config = make_test_config();
+        let watcher = FileWatcher::new(config, vec![]);
+        // hvigor buildDelay is 100ms — verify our debounce matches
+        assert_eq!(
+            watcher.debounce,
+            Duration::from_millis(100),
+            "debounce must be 100ms to match hvigor buildDelay"
+        );
+    }
+
+    #[test]
+    fn test_watcher_config_accessor() {
+        let config = make_test_config();
+        let watcher = FileWatcher::new(config.clone(), vec![]);
+        assert_eq!(watcher.config().project_root, PathBuf::from("/tmp"));
     }
 }

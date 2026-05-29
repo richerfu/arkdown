@@ -225,6 +225,7 @@ dependencies = [
  "arkdown-resource",
  "arkdown-sign",
  "arkdown-ts2abc",
+ "arkdown-watcher",
  "clap",
  "fs-err",
  "index_vec",

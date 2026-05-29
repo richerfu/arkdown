@@ -9,8 +9,8 @@ use clap::Args;
 use arkdown::{BundleOutput, Bundler};
 use arkdown_config::load_config;
 use arkdown_core::{
-    ArkdownConfig, ArkdownPlugin, BuildMode, ChunkGraph, ModuleConfig, ModuleJson5,
-    ModuleJson5Module, OutputTarget,
+    ArkdownConfig, ArkdownPlugin, BuildMode, BuildOption, ModuleConfig, ModuleJson5,
+    ModuleJson5Module, OutputTarget, ProductConfig, SdkConfig, StrictModeConfig,
 };
 use index_vec::IndexVec;
 use rustc_hash::FxHashMap;
@@ -32,6 +32,7 @@ use arkdown_resource::{ResourceCompileConfig, ResourceCompileInput, ResourceComp
 use arkdown_obfuscate::{should_obfuscate, Obfuscator, ObfuscationOptions};
 use arkdown_sign::HapSigner;
 use arkdown_ts2abc::{compile_to_abc, Ts2abcInput, Ts2abcOptions};
+use arkdown_watcher::{watch_dirs_for_module, FileWatcher};
 
 use crate::progress::Progress;
 use crate::task_cache::TaskInputs;
@@ -53,20 +54,40 @@ pub struct BuildArgs {
     /// Project root (default: current directory)
     #[arg(long)]
     pub project: Option<PathBuf>,
+    /// Watch source files and rebuild on change (100ms debounce)
+    #[arg(long)]
+    pub watch: bool,
 }
 
 pub async fn run(args: BuildArgs) -> Result<()> {
     let project_root = args
         .project
         .unwrap_or_else(|| std::env::current_dir().expect("failed to get current directory"));
+
+    if args.watch {
+        return run_watch(project_root, &args.target, &args.mode, args.module.as_deref(), args.product.as_deref()).await;
+    }
+
+    run_build_once(project_root, &args.target, &args.mode, args.module.as_deref(), args.product.as_deref()).await
+}
+
+/// Run a single complete build pass.  Used by both the normal build command
+/// and watch mode (called on every debounced change batch).
+async fn run_build_once(
+    project_root: PathBuf,
+    target: &str,
+    mode: &str,
+    module: Option<&str>,
+    product: Option<&str>,
+) -> Result<()> {
     let start = Instant::now();
 
-    let target = match args.target.as_str() {
+    let target = match target {
         "hsp" => OutputTarget::Hsp,
         "har" => OutputTarget::Har,
         _ => OutputTarget::Hap,
     };
-    let mode = match args.mode.as_str() {
+    let mode = match mode {
         "release" => BuildMode::Release,
         _ => BuildMode::Debug,
     };
@@ -79,8 +100,8 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         &project_root,
         mode,
         target,
-        args.product.as_deref(),
-        args.module.as_deref(),
+        product,
+        module,
     )
     .context("Failed to parse project config")?;
     progress.done();
@@ -703,6 +724,136 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Watch mode: perform an initial build, then watch source directories and
+/// rebuild on every debounced change batch (100ms, matching hvigor buildDelay).
+async fn run_watch(
+    project_root: PathBuf,
+    target: &str,
+    mode: &str,
+    module: Option<&str>,
+    product: Option<&str>,
+) -> Result<()> {
+    // Perform the initial build.
+    eprintln!("arkdown: watch mode — performing initial build");
+    let initial_result = run_build_once(
+        project_root.clone(),
+        target,
+        mode,
+        module,
+        product,
+    )
+    .await;
+    if let Err(ref e) = initial_result {
+        eprintln!("arkdown: initial build failed: {}", e);
+    }
+
+    // Determine which directories to watch.  We need the config to enumerate
+    // modules, but we can fall back to watching the whole project root if
+    // config loading fails.
+    let target_enum = match target {
+        "hsp" => OutputTarget::Hsp,
+        "har" => OutputTarget::Har,
+        _ => OutputTarget::Hap,
+    };
+    let mode_enum = match mode {
+        "release" => BuildMode::Release,
+        _ => BuildMode::Debug,
+    };
+
+    let watch_dirs: Vec<PathBuf> = match load_config(
+        &project_root,
+        mode_enum.clone(),
+        target_enum.clone(),
+        product,
+        module,
+    ) {
+        Ok(config) => {
+            let mut dirs = Vec::new();
+            for m in &config.modules {
+                dirs.extend(watch_dirs_for_module(&m.src_path));
+            }
+            // Also watch AppScope resources (shared across modules).
+            let app_scope_res = project_root.join("AppScope/resources");
+            if app_scope_res.exists() {
+                dirs.push(app_scope_res);
+            }
+            if dirs.is_empty() {
+                vec![project_root.clone()]
+            } else {
+                dirs
+            }
+        }
+        Err(_) => vec![project_root.clone()],
+    };
+
+    let config_arc = Arc::new(ArkdownConfig {
+        project_root: project_root.clone(),
+        build_mode: mode_enum,
+        output_target: target_enum,
+        product: ProductConfig {
+            name: "default".to_string(),
+            bundle_name: String::new(),
+            compatible_sdk_version: String::new(),
+            runtime_os: "HarmonyOS".to_string(),
+            signing_config: None,
+            build_option: BuildOption {
+                strict_mode: StrictModeConfig {
+                    case_sensitive_check: false,
+                    use_normalized_ohm_url: false,
+                },
+                ark_options: None,
+                res_options: None,
+                source_option: None,
+            },
+        },
+        modules: vec![],
+        sdk_config: SdkConfig {
+            ets_loader_path: PathBuf::new(),
+            es2abc_path: PathBuf::new(),
+            restool_path: PathBuf::new(),
+            compile_api_version: 12,
+            has_rollup_plugin: true,
+            compile_sdk_version: "6.0.0.47".to_string(),
+        },
+    });
+
+    let watcher = FileWatcher::new(config_arc, watch_dirs);
+
+    // Clone the strings for the closure (which must be 'static-compatible for
+    // the synchronous callback API).
+    let target = target.to_string();
+    let mode = mode.to_string();
+    let module = module.map(str::to_string);
+    let product = product.map(str::to_string);
+    let project_root_clone = project_root.clone();
+
+    // `FileWatcher::watch` is synchronous and loops forever; run it on a
+    // dedicated OS thread so it does not block the tokio runtime.
+    let handle = std::thread::spawn(move || {
+        watcher.watch(|_changed_paths| {
+            // Build a new tokio runtime for each incremental rebuild so we can
+            // call the async pipeline from within this synchronous callback.
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| e.to_string())?;
+            rt.block_on(run_build_once(
+                project_root_clone.clone(),
+                &target,
+                &mode,
+                module.as_deref(),
+                product.as_deref(),
+            ))
+            .map_err(|e| e.to_string())
+        })
+    });
+
+    handle
+        .join()
+        .map_err(|_| anyhow::anyhow!("watcher thread panicked"))?
+        .map_err(|e| anyhow::anyhow!("watcher error: {}", e))
 }
 
 fn read_module_json5(path: &std::path::Path) -> Result<ModuleJson5> {
