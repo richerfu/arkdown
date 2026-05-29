@@ -50,37 +50,37 @@ and release-mode terser/minification when applicable.
 **Phase delivery (2026-05-29):**
 - Phase 0 (parity harness): ✅ minimal-hap + minimal-har + minimal-hsp fixtures
 - Phase 1 (loader.json): ✅ absolute paths, 18 fields match hvigor golden exactly
-- Phase 2 (ETS transform): ✅ @Prop, @Link, @ObjectLink, @Provide, @Consume, @Watch, @BuilderParam, @Builder, @Styles
-- Phase 3 (bundler): ✅ clean ESM, @ohos: external, treeshake off for debug / on for release, manualChunks for supportChunks (commons + vendors groups)
+- Phase 2 (ETS transform): ✅ @Prop, @Link, @ObjectLink, @Provide, @Consume, @Watch, @BuilderParam
+- Phase 3 (bundler): ✅ clean ESM, @ohos: external, treeshake off for debug
 - Phase 4 (importee): ✅ process_importees() ports hvigor process-importee.js
-- Phase 5 (ABC): 🔄 per-instruction LNP, loops, throw/break/continue, conditional/template, optional chaining, arrays, destructuring, for-in/for-of stubs; test fixture 6881B/9844B; real-app baseline 8565B vs 9844B
+- Phase 5 (ABC): 🔄 modules.abc 8607B vs hvigor 9844B (gap: 1237B — 87.4% parity)
 - Phase 6 (packaging): ✅ HAP zip identical to hvigor (11 entries)
-- Phase 7 (ByteCode HAR): ✅ detect_bytecode_har(), scan_bytecode_har_deps(), byteCodeHarInfo in loader.json, compiledImportees OHM URL, merge_bytecode_har_abc(); fixture + 2 e2e tests
 
 **Parity (minimal-hap, 2026-05-29):**
 - HAP zip: ✅ identical (11 entries, all content matches except 2 files below)
-- `ets/modules.abc`: hvigor 9844B. Per-instruction LNP ADVANCE sequences now implemented:
-  `push()` emits one LNP ADVANCE entry per bytecode instruction (SPECIAL_OPCODE 1 byte each);
-  `emit_expr()` updates `current_line` per sub-expression for accurate multi-line tracking;
-  `SET_EPILOGUE_BEGIN (0x09)` emitted before every `return`/`returnundefined` instruction.
-  Test fixture (simplified sources, debug_info=true): 6881B/9844B = 70% (+211B vs statement-only).
-  Real-app delta scales with instruction count (larger sources → larger LNP gain).
+- `ets/modules.abc`: hvigor 9844B, arkdown 8607B — gap 1237B (87.4% parity).
   ✅ Literal arrays=10=[4,4,6,6,6,6,16,24,26,26] match hvigor exactly. ✅ Method records=20 match.
-  Remaining gap: 225B non-LNP structural differences.
-- `ets/sourceMaps.map`: hvigor 1847B, arkdown 1281B (pre-struct-fix). 🔄 **Fix applied (2026-05-29)**: struct-aware ETS→ViewPU position mapping implemented. `lower_build_body` now returns `(String, Vec<SpanHint>)` where each `SpanHint` records the body-line offset and original `.ets` `Span` of the ArkUI component expression. `transform_ets_viewpu_with_source_map` converts span byte offsets to `(src_line, src_col)` via `offset_to_line_col` and emits a Source Map v3 JSON with one segment per `observeComponentCreation2` call. The map's generated-side positions reference the ViewPU output; the original-side positions reference the `.ets` component call lines. Non-struct .ets (EntryAbility) continues to get dense per-token maps via `generate_code_and_source_map`. Remaining gap: hvigor includes a `names` array and denser per-token coverage for the ViewPU boilerplate lines.
+  Remaining 1237B: 1012B LNP line-advance density (58B/LNP vs hvigor 105B/LNP) + 225B other structural.
+  Improvements made: START_LOCAL_EXTENDED (0x04, 12 bytes) replaces START_LOCAL (0x03, 10 bytes) for all
+  scope vars and params, SET_PROLOGUE_END (0x08) emitted after scope var declarations,
+  NewLexEnvWithName for arrow captures, class-declaration lexical bindings,
+  scope_names_literal_array hvigor format. Module request annotations added (8607B, up from 8565B).
+  Remaining gap: per-instruction ADVANCE sequences between every instruction group (hvigor emits
+  much denser LNP coverage than our per-statement approach).
+- `ets/sourceMaps.map`: hvigor 1847B, arkdown 1281B — gap is per-statement vs per-token maps
 
 ## Major Missing Capabilities
 
 | Area                     | Current implementation                                                                                                                                                                                                                                                                                                                      | Gap to hvigor                                                                                                                                                                             |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `loader.json`            | ✅ **Fixed (2026-05-29)**: absolute paths via `canonicalize()`, all 18 fields match hvigor golden exactly. `nonEntryImportees`/`compiledImportees` populated by Phase 4 importee pass. | ByteCode HAR metadata, workers, HSP/HAR OHM maps — not needed for minimal-hap fixture. |
-| ArkTS transform          | ✅ **Fixed (2026-05-29)**: all decorators + `@Builder`/`@Styles`. ✅ struct-aware ETS→ViewPU source maps via `SpanHint` + `source_map::build_ets_source_map`. | `@Builder` body full ArkUI desugaring; `names` array in source maps. |
-| Rollup/rolldown options  | ✅ **Fixed (2026-05-29)**: clean ESM, treeshake off/on, `manualChunks` commons+vendors, IIFE/CJS removed. | ByteCode HAR/HSP externals in rolldown. |
-| ByteCode HAR importees   | ✅ **Fixed (2026-05-29)**: `process_importees()`, `detect_bytecode_har()`, `scan_bytecode_har_deps()`, `compiledImportees`+`byteCodeHarInfo`, `merge_bytecode_har_abc()`. | Full Panda ClassIndex merge (append-only now); ByteCode HAR externals in rolldown. |
-| ABC compiler             | 🔄 **Improved**: per-instruction LNP, `SET_EPILOGUE_BEGIN/PROLOGUE_END`, `START_LOCAL_EXTENDED`, all common ops. ✅ **Phase 5a**: loops, break/continue, conditional, template literals, throw. ✅ **Phase 5b**: optional chaining (`?.`), array literals, array/object destructuring, `for-in`/`for-of` stubs. | 225B structural gap; `for-in`/`for-of` full iteration opcodes; try/catch/finally, async/await, generators. |
-| Obfuscation/minification | ✅ **Wired (2026-05-29)**: release-build obfuscation, rule hash in cache invalidation. | Terser minification parity pending. |
-| Incremental cache        | ✅ **Wired (2026-05-29)**: FNV-1a content hash + config hash, ABC cache skip on hit, `cache_file` path wired. ✅ **Bundle cache (2026-05-29)**: `BundleCache` + `BundleCacheManifest` skip rolldown on unchanged source; manifest at `build/default/cache/bundle/bundle.json`. | `dependency_hash` cross-module invalidation; ABC `cache_file` incremental data. |
-| Source maps/debug        | ✅ **Fixed (2026-05-29)**: per-token maps for non-struct .ets/ts; struct-aware ETS→ViewPU via `SpanHint` VLQ for @Component files. | `names` array; per-token ViewPU boilerplate coverage. |
+| ArkTS transform          | ✅ **Fixed (2026-05-29)**: `@State`, `@Prop`, `@Link`, `@ObjectLink`, `@Provide`, `@Consume`, `@Watch`, `@BuilderParam`, storage decorators all implemented. Per-statement source maps via oxc_codegen. | `@Builder`, `@Styles` functions; precise per-token source maps (gap: 566B vs hvigor). |
+| Rollup/rolldown options  | ✅ **Fixed (2026-05-28)**: Clean ESM output, `@ohos:` imports external, treeshake disabled for debug. **IIFE/CJS compatibility paths removed** from both bundler and ABC compiler. | Release treeshake, `manualChunks` for `supportChunks`, ByteCode HAR/HSP externals. |
+| ByteCode HAR importees   | ✅ **Fixed (2026-05-29)**: `process_importees()` ports `process-importee.js`. BFS from entry chunks, OHM URL generation, importee.json cache written. `nonEntryImportees` in loader.json. | ByteCode HAR compilation flow (requires HAR input fixture). |
+| ABC compiler             | 🔄 **Improved**: LNP line advance tracking, OHM URL scope names, SET_FILE debug info, binary/unary/logical ops, static-object `createobjectwithbuffer` (opcode 0x07), emit_new args, call-argument closures, START_LOCAL_EXTENDED (0x04) for scope/param vars, SET_PROLOGUE_END (0x08) after scope declarations, NewLexEnvWithName for arrow captures, class-decl lexical bindings, module request annotations. modules.abc 8607B vs 9844B (87.4% parity). YieldExpression + generator function prologue + PrivateFieldExpression lowering added. | Per-instruction LNP ADVANCE sequences (hvigor emits between every instruction group, not just per-statement); per-token source map granularity. |
+| Obfuscation/minification | `arkdown-obfuscate` exists but not wired in.                                                                                                                                           | hvigor release builds run SDK obfuscation + terser before ABC.                          |
+| Incremental cache        | `arkdown-cache` exists but not wired in.                                                                                                                                               | hvigor rollup msgpack cache + es2abc `--cache-file` support.                            |
+| Source maps/debug        | ✅ Per-statement source maps from kit-rewritten ETS source (pre-struct-transform). Pretty-printed JSON. sourceMaps.map 1281B vs 1847B golden (gap: per-statement vs per-token VLQ).   | Per-token source map granularity to match tsc/ets-loader output.                        |
 | Packaging metadata       | ✅ **Fixed (2026-05-28)**: HAP zip identical to hvigor — correct module.json merge, pack.info, pkgContextInfo.json (intermediate, not in HAP), resources.index. | None for minimal-hap. HAR/HSP-specific pack flows for complex projects.                 |
 
 ## Code Compilation Gap
@@ -117,34 +117,20 @@ runtime-equivalent replacement for hvigor for real ArkUI applications.
 
 ### Phase 0: Golden Parity Harness
 
-Status: ✅ complete — minimal-hap, minimal-har, minimal-hsp fixtures all covered.
+Status: implemented for the minimal HAP fixture as an ignored CLI integration
+test. It builds one clean fixture copy with hvigor and another with native
+`arkdown build`, then writes a structured diff report.
 
-Coverage added (2026-05-29):
-- `crates/arkdown-cli/tests/hvigor_parity.rs`: `minimal_hsp_hvigor_parity_report` added
-  alongside existing `minimal_hap` and `minimal_har` ignored tests; all three run with
-  local hvigorw and write structured diff JSON to `target/parity/`.
-- `crates/arkdown-cli/tests/e2e_test.rs`: non-ignored tests for HAR and HSP:
-  - HAR: `test_har_exists_and_is_valid_zip`, `test_har_contains_required_entries`,
-    `test_har_golden_entry_list` — verifies source HAR has `oh-package.json5` +
-    `src/main/ets/` entries and NO `module.json`, `pack.info`, or `.abc` files.
-  - HSP: `test_hsp_exists_and_is_valid_zip`, `test_hsp_contains_required_entries`,
-    `test_hsp_abc_has_panda_magic`, `test_hsp_golden_entry_list` — verifies HSP has
-    `module.json`, `pack.info`, `resources.index`, `ets/modules.abc` (PANDA magic).
-  - ByteCode HAR importee: `test_non_entry_importees_populated_with_har_dep` —
-    constructs a synthetic `ChunkGraph` with an entry chunk importing a utility
-    chunk (simulating a HAR dep), calls `process_importees()`, and asserts that
-    `nonEntryImportees` is populated with `@bundle:` OHM URL entries.
-- `tests/fixtures/golden/minimal-har/expected-zip-entries.json` — required/forbidden
-  entry lists for the HAR golden check.
-- `tests/fixtures/golden/minimal-hsp/expected-zip-entries.json` — required/forbidden
-  entry lists for the HSP golden check.
+Keep expanding the harness before broadening native implementation:
 
-The parity harness tests (hvigor_parity.rs) still require a local DevEco toolchain
-and are `#[ignore]`; run them with:
-  `cargo test -p arkdown-cli -- --ignored minimal_hsp_hvigor_parity_report`
-
-The e2e tests run without any external toolchain and are part of the default
-`cargo test -p arkdown-cli` run.
+- Build the same fixture with local hvigor:
+  `<command-line-tools>/bin/hvigorw assembleHap`.
+- Build it with `cargo run -p arkdown-cli -- build --project <fixture>`.
+- Compare intermediate files: `loader.json`, rollup output JS, importee cache
+  JSON, `sourceMaps.map`, `module.json`, `pkgContextInfo.json`, `pack.info`,
+  `resources.index`, and `ets/modules.abc`.
+- Add an artifact diff report that classifies differences as path/layout,
+  semantic JSON, bytecode header, bytecode records, or packaging.
 
 For the current fixture, native comparison is expected to report the remaining
 implementation gaps until the phases below land.
@@ -156,7 +142,7 @@ Implement the hvigor `generateConfig()` contract in Rust:
 - Fill all `loader.json` fields used by `arkts-pack.js` and SDK plugins.
 - Build dependency maps for local HAR, remote HAR, HSP, dynamic dependencies,
   ByteCode HAR, and package source roots.
-- ✅ Workers (`src/main/ets/workers/*.ets`) and router map page destinations are scanned and added to `compileEntry`.
+- Add workers and router map entries to `compileEntry`.
 - Preserve hvigor intermediate paths:
   `build/default/intermediates/loader/default/loader.json`,
   `ets/default/loader_out/default/`, and `cache/msgpack/`.
@@ -180,19 +166,15 @@ Until this is done, any real ArkUI UI page is only syntactically compiled.
 
 ### Phase 3: Align rolldown with hvigor rollup
 
-✅ **Completed (2026-05-29)**:
+Make rolldown output match hvigor's rollup contract:
 
-- Release treeshake (`TreeshakeOptions::Boolean(true)`) and debug no-treeshake.
-- `manualChunks` via `ManualCodeSplittingOptions` for `supportChunks=true`:
-  - Group `commons`: Regex `oh_modules|node_modules`
-  - Group `vendors`: dynamic name function — returns `"vendors"` for non-entry modules
-- Chunk filenames/stems preserved via `InputItem.name` from file stem.
-- Source maps enabled (`SourceMapType::Hidden`) with `sourceMaps.map` written.
-
-Remaining:
-- External handling for SDK modules, HSP, ByteCode HAR, declarations, native `.so`,
-  and deduplicated HAR modules.
-- Custom compile plugin compatibility path (after core parity).
+- Configure release `treeshake` and debug no-treeshake behavior.
+- Implement hvigor `manualChunks` for `supportChunks`.
+- Preserve chunk filenames/stems used by ABC record names.
+- Enable and serialize source maps.
+- Implement external handling for SDK modules, HSP, ByteCode HAR, declarations,
+  native `.so`, and deduplicated HAR modules.
+- Add a compatibility path for custom compile plugins only after core parity.
 
 ### Phase 4: Post-rollup importee processing
 
@@ -219,13 +201,9 @@ For the Rust backend, implement in this order:
 
 1. real method/literal-array layout for functions, classes, closures, imports,
    exports, and CommonJS helpers;
-2. full statement/expression lowering:
-   - ✅ `for...in` via `getpropiterator` (0x66) + `getnextpropname` (0x36);
-   - ✅ `for...of` via `getiterator` (0x67) + `callthis0 next` + `done`/`value` loads;
-   - ✅ `break`/`continue` inside loops via patch-list mechanism;
-   - remaining: `while`/`do-while`, `for` loop, `try`/`catch`/`finally`,
-     destructuring, optional chaining, spread, `async`/`await`, generators,
-     template literals, class fields, private fields, decorators output;
+2. full statement/expression lowering: loops, try/catch/finally, destructuring,
+   optional chaining, spread, async/await, generators, template literals,
+   object/array literals, class fields, private fields, decorators output;
 3. module request annotations and metadata exactly as `es2abc` emits them;
 4. debug info and source position sections;
 5. `cache_path` support with hvigor-compatible invalidation keys;
@@ -237,30 +215,12 @@ large compiler project. Treat it as the longest pole in the plan.
 
 ### Phase 6: Release features and packaging cleanup
 
-**Partially complete (2026-05-29):**
-
-- ✅ Wire `arkdown-obfuscate` into the CLI between bundling and ABC compilation.
-  Runs for Release builds when `obfuscation.enable_obfuscation=true`.
-- ✅ Invalidate ABC cache when obfuscation rules or SDK compile env change.
-  `compute_config_hash()` mixes build mode + bundle name + API version +
-  obfuscation rule FNV hash into a single `u64` config key.
-- ✅ Wire `arkdown-cache` incremental ABC skip: if all compile-entry content
-  hashes match and `modules.abc` exists, ABC compilation is skipped entirely.
-- ✅ Pass `cache_file` to `compile_to_abc` (`build/default/cache/abc/modules.abc.cache`).
-- ✅ Integration tests in `crates/arkdown-cli/tests/cache_test.rs`:
-  `test_first_build_writes_cache_entries`, `test_first_build_writes_abc_cache_file`,
-  `test_two_builds_produce_identical_abc`.
-- TODO: Fix `pkgContextInfo.json`, `pack.info`, source map packaging, native libs,
+- Wire `arkdown-obfuscate` into the CLI between bundling and ABC compilation.
+- Invalidate code/ABC caches when obfuscation rules or SDK compile env change.
+- Fix `pkgContextInfo.json`, `pack.info`, source map packaging, native libs,
   integrated HSP, privacy profile, startup/share config, and router map output.
-- TODO: Add HSP/HAR-specific flows instead of routing HSP through the same HAP path
+- Add HSP/HAR-specific flows instead of routing HSP through the same HAP path
   with only archive extension changes.
-- TODO: Terser minification and compact/remove-log obfuscation rules inside
-  `arkdown-obfuscate`.
-- ✅ Wire bundle-output cache (`BundleCache`) to skip rolldown when source files
-  and bundler config are unchanged.  Manifest at `build/default/cache/bundle/bundle.json`;
-  validity requires key match **and** all chunk `.js` files present on disk.
-  Two new integration tests: `test_bundle_cache_manifest_written_after_first_build`
-  and `test_second_build_uses_bundle_cache_and_produces_identical_abc`.
 
 ## Suggested Milestones
 
