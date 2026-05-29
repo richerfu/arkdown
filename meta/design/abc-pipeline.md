@@ -178,15 +178,20 @@ One entry is always emitted: the file offset of the source file `StringItem`.
 ### LineNumberProgramItem opcodes
 
 ```
-0x00  END_SEQUENCE                    # terminates the program
-0x01  ADVANCE_PC    (ULEB128 delta)   # advance pc without emitting a row
-0x02  ADVANCE_LINE  (SLEB128 delta)   # change line counter without emitting a row
-0x03  START_LOCAL   (str_u32, reg_u8, type_str_u32)  # begin variable scope
-0x04  END_LOCAL     (reg_u8)          # end variable scope
-0x05  SET_FILE      (str_u32)         # set current source file (4-byte LE file offset)
-0x07  SET_PROLOGUE_END               # mark end of function prologue
-0x08+ SPECIAL_OPCODE                 # combined PC+line advance (no operand)
+0x00  END_SEQUENCE                                           # terminates the program
+0x01  ADVANCE_PC    (ULEB128 delta)                         # advance pc without emitting a row
+0x02  ADVANCE_LINE  (SLEB128 delta)                         # change line counter without emitting a row
+0x03  START_LOCAL   (str_u32, reg_u8, type_str_u32)        # begin variable scope (10 bytes)
+0x04  START_LOCAL_EXTENDED (str_u32, reg_u8, type_str_u32, type_tag_u16)  # begin variable scope with type tag (12 bytes)
+0x05  SET_FILE      (str_u32)                               # set current source file (4-byte LE file offset)
+0x08  SET_PROLOGUE_END                                      # mark end of function prologue (1 byte, no operands)
+0x09  SET_EPILOGUE_BEGIN                                    # mark start of function epilogue (1 byte, no operands)
+0x08+ SPECIAL_OPCODE                                        # combined PC+line advance (no operand)
 ```
+
+Note: SET_PROLOGUE_END (0x08) shares the opcode space with SPECIAL_OPCODEs. The minimum
+SPECIAL_OPCODE is also 0x08 (zero-delta advance that "emits a row"). Parsers that understand
+the prologue-end marker use it as a source-level debug annotation.
 
 **SPECIAL_OPCODE formula**: `op = (line_delta * 16 + pc_delta) + 8`
 Valid when `0 ≤ pc_delta ≤ 16`, `0 ≤ line_delta ≤ 15`, and `op ≤ 255`.
@@ -200,8 +205,21 @@ When the range is exceeded, fall back to explicit `ADVANCE_LINE` + `ADVANCE_PC` 
   Nested function bodies default to a minimal `SET_FILE + END_SEQUENCE` LNP.
 - 1-based line numbers are computed from statement byte offsets via `line_at()`.
 
-Minimum valid LNP body: `[0x05, <4 bytes source file string offset LE>, 0x00]`
-(SET_FILE pointing at the class source file + END_SEQUENCE).
+**Current LNP body structure** emitted by `arkdown-abc` for each method with debug info:
+
+```
+SET_FILE (0x05)                        5 bytes  — 4-byte LE string file offset
+START_LOCAL_EXTENDED (0x04) × 3       36 bytes  — "this"(reg0), "newTarget"(reg1), "funcObj"(reg2)
+  each entry: [0x04][name_off:u32 LE][reg:u8][type_off:u32 LE=0][type_tag:u16 LE=0] = 12 bytes
+START_LOCAL_EXTENDED × N_params       12×N bytes — formal parameter names starting at reg3
+SET_PROLOGUE_END (0x08)                1 byte   — marks end of function prologue
+<line_ops: advance sequences>         variable  — ADVANCE_PC, ADVANCE_LINE, SPECIAL_OPCODEs
+END_SEQUENCE (0x00)                    1 byte   — terminates program
+```
+
+Minimum valid LNP body: `[0x05, <4 bytes source file string offset LE>]` +
+`[0x04 × 3 scope vars × 12 bytes each]` + `[0x08]` + `[0x00]`
+= 5 + 36 + 1 + 1 = 43 bytes for a zero-parameter, zero-line-op method.
 
 ---
 
