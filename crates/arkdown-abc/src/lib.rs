@@ -238,20 +238,22 @@ globalThis["test"] = "hello";"#;
         compiler.compile(modules, &tmp).unwrap();
         let bytes = std::fs::read(&tmp).unwrap();
 
-        // Search for the @ohos: specifier strings as raw ASCII in the file.
-        let ohos_ui = b"@ohos:app.ability.UIAbility";
-        let ohos_hilog = b"@ohos:hilog";
+        // hvigor stores @ohos: imports using class-descriptor notation.
+        // "@ohos:app.ability.UIAbility" → "L@ohos.app.ability.UIAbility;"
+        // "@ohos:hilog"                 → "L@ohos.hilog;"
+        let ohos_ui = b"L@ohos.app.ability.UIAbility;";
+        let ohos_hilog = b"L@ohos.hilog;";
 
         let has_ui_ability = bytes.windows(ohos_ui.len()).any(|w| w == ohos_ui);
         let has_hilog = bytes.windows(ohos_hilog.len()).any(|w| w == ohos_hilog);
 
         assert!(
             has_ui_ability,
-            "@ohos:app.ability.UIAbility must appear as a StringItem in the ABC file"
+            "L@ohos.app.ability.UIAbility; must appear as a StringItem in the ABC file"
         );
         assert!(
             has_hilog,
-            "@ohos:hilog must appear as a StringItem in the ABC file"
+            "L@ohos.hilog; must appear as a StringItem in the ABC file"
         );
 
         let _ = std::fs::remove_file(&tmp);

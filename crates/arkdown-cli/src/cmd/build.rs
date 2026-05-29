@@ -484,8 +484,12 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         // Use the explicit chunk file list from bundle_out rather than scanning the
         // output directory — this prevents stale files from prior runs from being
         // picked up and producing incorrect ABC record entries.
-        let ts2abc_inputs =
-            collect_js_chunks_from_output(&bundle_out.chunk_files, &record_name_map);
+        let ts2abc_inputs = collect_js_chunks_from_output(
+            &bundle_out.chunk_files,
+            &record_name_map,
+            bundle_name,
+            &loader_json.module_name,
+        );
         if !ts2abc_inputs.is_empty() {
             // ABC incremental compiler cache: hvigor uses es2abc --cache-file to
             // avoid re-parsing unchanged modules inside the ABC backend.
@@ -997,9 +1001,15 @@ struct ChunkCompileMeta {
 /// Using `bundle_out.chunk_files` rather than scanning the output directory
 /// guarantees that stale `.js` files left over from previous builds never
 /// end up in the ABC compiler input.
+///
+/// When a chunk is not found in `record_name_map` (e.g. a shared chunk emitted
+/// by rolldown that is not listed in `compile_entry`), the record name is derived
+/// from the chunk file's stem to avoid storing absolute filesystem paths.
 fn collect_js_chunks_from_output(
     chunk_files: &[(String, std::path::PathBuf)],
     record_name_map: &HashMap<String, ChunkCompileMeta>,
+    bundle_name: &str,
+    module_name: &str,
 ) -> Vec<Ts2abcInput> {
     let mut modules = Vec::new();
     for (chunk_name, path) in chunk_files {
@@ -1007,11 +1017,20 @@ fn collect_js_chunks_from_output(
             continue;
         }
         let meta = record_name_map.get(chunk_name.as_str());
+        let derived_record_name = || {
+            // Derive record name from the JS file stem so we never embed an
+            // absolute filesystem path in the ABC StringItems table.
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(chunk_name.as_str());
+            format!("{bundle_name}/{module_name}/{stem}")
+        };
         modules.push(Ts2abcInput {
             path: path.clone(),
             record_name: meta
                 .map(|meta| meta.record_name.clone())
-                .unwrap_or_else(|| chunk_name.clone()),
+                .unwrap_or_else(derived_record_name),
             source_file: meta.and_then(|meta| meta.source_file.clone()),
         });
     }

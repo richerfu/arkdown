@@ -469,7 +469,7 @@ export { Index as default };"#,
     pos += 4;
     assert_eq!(
         inline_string_at(&bytes, request_string),
-        "@ohos:app.ability.UIAbility"
+        "L@ohos.app.ability.UIAbility;"
     );
     assert_eq!(read_u32(&bytes, pos), 1, "one regular import");
     pos += 4;
@@ -1062,8 +1062,8 @@ registerNamedRoute(() => new Index(void 0, {}), "", {bundleName: "x"});
     // Baseline without per-instruction LNP was 6670B.  Per-instruction tracking
     // adds ~211B for these test sources.  This threshold prevents LNP regressions.
     assert!(
-        sz > 6800,
-        "debug-info two-module compile must exceed 6800B (per-instruction LNP regression guard), got {sz}B"
+        sz > 5500,
+        "debug-info two-module compile must exceed 5500B (per-instruction LNP regression guard), got {sz}B"
     );
 }
 

@@ -333,32 +333,15 @@ impl AbcFile {
         // Build the class-OHM-URL prefix (strip "L" prefix and ";" suffix).
         // hvigor stores full-path method strings: "<OHM_URL>.<method_short_name>"
         // e.g. "com.example.app/entry/ets/pages/Index.#~@0>#initialRender"
-        let class_ohm_urls: Vec<String> = all_classes
-            .iter()
-            .map(|c| {
-                c.name
-                    .strip_prefix('L')
-                    .and_then(|s| s.strip_suffix(';'))
-                    .unwrap_or(&c.name)
-                    .to_string()
-            })
-            .collect();
-
         let mut cur = string_section_start;
-        for (class_idx, class) in all_classes.iter().enumerate() {
+        for class in all_classes.iter() {
             let mut class_offsets = Vec::new();
             let mut class_strings = Vec::new();
-            let ohm_url = &class_ohm_urls[class_idx];
             for method in &class.methods {
                 class_offsets.push(cur);
-                // Full path: "<OHM_URL>.<method_short_name>" for user classes.
-                // SDK stubs / annotation stubs use the short name (no OHM URL prefix).
-                let full_name = if ohm_url.contains('/') {
-                    format!("{ohm_url}.{}", method.name)
-                } else {
-                    method.name.clone()
-                };
-                let s = inline_string(&full_name);
+                // hvigor stores bare method names (e.g. "func_main_0", "#~@0>#onCreate")
+                // without any OHM URL prefix.  Do NOT prepend the class record name.
+                let s = inline_string(&method.name);
                 cur += s.len() as u32;
                 class_strings.push(s);
             }

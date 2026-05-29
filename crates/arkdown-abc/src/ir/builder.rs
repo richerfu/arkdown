@@ -3708,15 +3708,16 @@ struct StarExportEntry {
 
 impl ModuleRecordInfo {
     fn request_index(&mut self, specifier: &str) -> u16 {
+        let normalized = normalize_module_specifier(specifier);
         if let Some(index) = self
             .module_requests
             .iter()
-            .position(|request| request == specifier)
+            .position(|request| *request == normalized)
         {
             return index as u16;
         }
         let index = self.module_requests.len() as u16;
-        self.module_requests.push(specifier.to_string());
+        self.module_requests.push(normalized);
         index
     }
 
@@ -4219,5 +4220,13 @@ fn module_export_name(name: &ModuleExportName<'_>) -> String {
         ModuleExportName::IdentifierName(ident) => ident.name.as_str().to_string(),
         ModuleExportName::IdentifierReference(ident) => ident.name.as_str().to_string(),
         ModuleExportName::StringLiteral(lit) => lit.value.as_str().to_string(),
+    }
+}
+
+fn normalize_module_specifier(specifier: &str) -> String {
+    if let Some(rest) = specifier.strip_prefix("@ohos:") {
+        format!("L@ohos.{};", rest)
+    } else {
+        specifier.to_string()
     }
 }
