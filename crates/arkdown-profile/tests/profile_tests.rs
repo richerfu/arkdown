@@ -328,6 +328,7 @@ fn test_write_module_json_emits_virtual_machine_and_compile_mode() {
         device_types: vec!["phone".to_string()],
         virtual_machine: "ark12.0.6.0".to_string(),
         compile_mode: CompileMode::EsModule,
+        src_entry: None,
         abilities: vec![AbilityEntry {
             name: "EntryAbility".to_string(),
             src_entry: "./ets/entryability/EntryAbility.ets".to_string(),
@@ -389,6 +390,7 @@ fn test_write_module_json_resolves_resource_ids_into_abilities() {
         device_types: vec!["phone".to_string()],
         virtual_machine: "ark12.0.6.0".to_string(),
         compile_mode: CompileMode::EsModule,
+        src_entry: None,
         abilities: vec![AbilityEntry {
             name: "EntryAbility".to_string(),
             src_entry: "./ets/entryability/EntryAbility.ets".to_string(),
