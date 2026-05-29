@@ -73,9 +73,9 @@ struct LineTracker {
     ops: Vec<u8>,
 }
 
-const LNP_OPCODE_BASE: u32 = 0x0A;
-const LNP_LINE_BASE: i32 = -5;
-const LNP_LINE_RANGE: u32 = 14;
+const LNP_OPCODE_BASE: u32 = 0x0C;
+const LNP_LINE_BASE: i32 = -4;
+const LNP_LINE_RANGE: u32 = 15;
 
 impl LineTracker {
     fn new(start_line: u32) -> Self {
@@ -99,7 +99,7 @@ impl LineTracker {
         // Valid when pc_delta is in [0, LINE_RANGE-1] and line_delta is in [LINE_BASE, LINE_BASE+LINE_RANGE-1].
         let adjusted = line_delta - LNP_LINE_BASE;
         if pc_delta < LNP_LINE_RANGE && adjusted >= 0 && (adjusted as u32) < LNP_LINE_RANGE {
-            let special = adjusted as u32 * LNP_LINE_RANGE + pc_delta + LNP_OPCODE_BASE;
+            let special = pc_delta * LNP_LINE_RANGE + adjusted as u32 + LNP_OPCODE_BASE;
             if special <= 255 {
                 self.ops.push(special as u8);
                 self.current_pc = new_pc;
