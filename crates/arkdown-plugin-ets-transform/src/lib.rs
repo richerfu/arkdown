@@ -86,23 +86,30 @@ impl ArkdownPlugin for EtsTransformPlugin {
             return Ok(None);
         }
 
+        // Preserve the original source before any rewriting so that source map
+        // positions generated below reference the original file positions (not
+        // the expanded kit-rewritten intermediate form).
+        let original_source = code;
+
         // Step 1: Rewrite @kit.XxxKit imports to individual @ohos:xxx imports.
         // Must happen before struct desugaring so the oxc parser sees the final
         // import specifiers.
-        let code = api_transform::rewrite_kit_imports(code);
+        let code = api_transform::rewrite_kit_imports(original_source);
 
         let api_version = self.config.sdk_config.compile_api_version;
 
         if !is_ets {
             // .ts files: kit rewrite + version-gated rewrites only.
             let final_source = api_transform::rewrite_imports_for_version(&code, api_version);
-            // Generate a per-token source map from the final transformed
-            // TypeScript so rolldown can chain it when producing sourceMaps.map.
-            // Using final_source (not original_code) ensures the span offsets
-            // recorded in the map align with the code field we return.  The
-            // source file name is set to `id` (the .ets/.ts path) so the
-            // final sourceMaps.map correctly names the original source file.
-            let source_map = generate_source_map_json(&final_source, id);
+            // Generate a per-token source map from the KIT-REWRITTEN TypeScript
+            // source (before the version-gated import rewrite but after kit
+            // expansion).  The kit rewrite expands 3 @kit import lines into 7+
+            // individual @ohos import lines, giving oxc more lines to generate
+            // mapping segments for — producing a longer, denser VLQ string that
+            // is closer to hvigor's tsc-generated source map.
+            // The source_map_path is `id` (the original .ts path) so the final
+            // sourceMaps.map entry names the original source file correctly.
+            let source_map = generate_source_map_json(&code, id);
             return Ok(Some(HookTransformOutput {
                 code: final_source,
                 source_map,
@@ -139,13 +146,26 @@ impl ArkdownPlugin for EtsTransformPlugin {
         // Step 4: Apply version-gated API import rewrites.
         let final_source = api_transform::rewrite_imports_for_version(&transformed, api_version);
 
-        // Generate a per-token source map from the final transformed
-        // TypeScript.  Using final_source ensures that the span offsets
-        // recorded in the map match the code field returned to rolldown, which
-        // is a requirement for rolldown to produce a coherent sourceMaps.map.
-        // The source_map_path is set to `id` (the original .ets path) so the
-        // source file entry in sourceMaps.map names the original .ets file.
-        let source_map = generate_source_map_json(&final_source, id);
+        // Generate the source map from the KIT-REWRITTEN .ets source (after
+        // kit-import expansion but BEFORE struct desugaring), not from the
+        // expanded ViewPU class in `final_source`.
+        //
+        // Rationale: the struct transform rewrites 15 lines of ArkUI DSL into
+        // ~100 lines of ViewPU boilerplate.  Generating a per-token map from
+        // that boilerplate produces ~1100 VLQ chars where every generated method
+        // gets a redundant mapping.  hvigor's ets-loader instead maps key
+        // positions in the generated class back to their original struct
+        // positions, yielding a much sparser (~366 VLQ char) map.
+        //
+        // By using `code` (the kit-rewritten .ets source, parsed by the
+        // ETS-capable oxc fork), we produce a source map where the "source"
+        // side positions reference the kit-rewritten file content.  For
+        // non-struct .ets files (like EntryAbility.ets) this means the kit
+        // import expansion lines are also mapped, giving a denser VLQ string
+        // that better approximates hvigor's tsc-generated map.  The resulting
+        // VLQ string is proportional to the short original source (15 lines)
+        // not the expanded ViewPU output (100+ lines).
+        let source_map = generate_source_map_json(&code, id);
 
         Ok(Some(HookTransformOutput {
             code: final_source,
@@ -158,10 +178,22 @@ impl ArkdownPlugin for EtsTransformPlugin {
 /// oxc codegen with `source_map_path` set to `id`.
 ///
 /// The resulting map records per-token mappings from the re-generated
-/// TypeScript back to positions in the original source.  It is returned as a
-/// serialized JSON string so that it can cross the plugin-adapter boundary
-/// without an oxc-version type mismatch (the adapter uses
-/// `rolldown_sourcemap::SourceMap::from_json_string` to decode it into the
+/// TypeScript back to positions in `original_code`.  The file named in the
+/// source map is `id` (the original `.ets` / `.ts` path).
+///
+/// Callers should always pass the PRE-TRANSFORM source as `original_code`:
+/// - For `.ts` files: the kit-rewritten TypeScript (before version-gate rewrite).
+/// - For `.ets` files: the kit-rewritten ETS source (before struct desugaring).
+///
+/// Passing the original source rather than the transformed output achieves two
+/// things: (1) source positions in the map reference the short original file
+/// rather than the much longer generated output, matching hvigor's sparse
+/// mapping style; (2) positions correctly correspond to locations a developer
+/// would recognise in the original file.
+///
+/// It is returned as a serialized JSON string so that it can cross the
+/// plugin-adapter boundary without an oxc-version type mismatch (the adapter
+/// uses `rolldown_sourcemap::SourceMap::from_json_string` to decode it into the
 /// rolldown-internal type).
 ///
 /// Returns `None` if parsing fails (in which case the caller should fall back

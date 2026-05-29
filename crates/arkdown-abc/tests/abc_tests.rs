@@ -414,14 +414,14 @@ fn test_user_records_are_marked_arkts_and_sdk_stubs_have_native_fields() {
 fn test_module_record_scope_names_and_class_buffer_literals_are_linked() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = tmp.path().join("module-record.abc");
-    make_compiler()
+    // Uses ESM format — IIFE/CJS unwrapping is removed from the compiler.
+    module_compiler()
         .compile(
-            vec![iife_module(
+            vec![module_record(
                 "com.example.app/entry/ets/pages/Index",
-                r#"(function(){
-                    var ability = require("@ohos:app.ability.UIAbility");
-                    var Index = class { onCreate(){} };
-                })();"#,
+                r#"import UIAbility from "@ohos:app.ability.UIAbility";
+var Index = class extends UIAbility { onCreate(){} };
+export { Index as default };"#,
             )],
             &out,
         )

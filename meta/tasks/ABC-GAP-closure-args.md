@@ -97,8 +97,8 @@ self.push(Insn::DefineFuncShort(method_idx, 0, length));
 
 Hvigor names call-argument closures inside a method using ordinal suffixes:
 
-| Occurrence | Name           |
-|-----------|----------------|
+| Occurrence | Name          |
+| ---------- | ------------- |
 | 1st arrow  | `#~@0>@1*#`   |
 | 2nd arrow  | `#~@0>@1*#^1` |
 | 3rd arrow  | `#~@0>@1*#^2` |
@@ -110,11 +110,11 @@ starting at 1) for subsequent arrows in the same method body.
 
 ## Relevant Code Locations
 
-| File | Lines | Notes |
-|------|-------|-------|
-| `crates/arkdown-abc/src/ir/builder.rs` | 679–750 | `collect_class_method_arrow_records` / `collect_arrow_records_from_stmt` — add ExpressionStatement arm here |
-| `crates/arkdown-abc/src/ir/builder.rs` | 1486–1501 | `emit_expr` ArrowFunctionExpression arm — fix placeholder index |
-| `crates/arkdown-abc/src/ir/builder.rs` | 1502–1506 | `FunctionExpression` arm has same placeholder bug — fix together |
+| File                                   | Lines     | Notes                                                                                                       |
+| -------------------------------------- | --------- | ----------------------------------------------------------------------------------------------------------- |
+| `crates/arkdown-abc/src/ir/builder.rs` | 679–750   | `collect_class_method_arrow_records` / `collect_arrow_records_from_stmt` — add ExpressionStatement arm here |
+| `crates/arkdown-abc/src/ir/builder.rs` | 1486–1501 | `emit_expr` ArrowFunctionExpression arm — fix placeholder index                                             |
+| `crates/arkdown-abc/src/ir/builder.rs` | 1502–1506 | `FunctionExpression` arm has same placeholder bug — fix together                                            |
 
 ---
 

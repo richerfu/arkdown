@@ -217,12 +217,18 @@ mod tests {
     /// in the output file.
     #[test]
     fn test_module_requests_in_abc() {
-        let compiler = make_compiler();
-        let source = r#"(function () {
-            var UIAbility = require("@ohos:app.ability.UIAbility");
-            var hilog = require("@ohos:hilog");
-            globalThis["test"] = "hello";
-        })()"#;
+        // Uses ESM imports — the bundler now always emits ESM, not IIFE+require.
+        let compiler = AbcCompiler::new(AbcCompileOptions {
+            debug_info: false,
+            opt_level: 0,
+            target_api_version: 12,
+            merge_abc: true,
+            module: true,
+            cache_path: None,
+        });
+        let source = r#"import UIAbility from "@ohos:app.ability.UIAbility";
+import hilog from "@ohos:hilog";
+globalThis["test"] = "hello";"#;
         let modules = vec![AbcModule {
             record_name: "entry/src/main/ets/test".to_string(),
             source: source.to_string(),
@@ -251,80 +257,58 @@ mod tests {
         let _ = std::fs::remove_file(&tmp);
     }
 
-    /// Verify that rolldown CJS interop helpers (`var __xxx = ...`) inside an
-    /// IIFE body are compiled as separate [`MethodRecord`]s.
+    /// Verify that an ESM class compiles to the expected method records.
     ///
-    /// es2abc produces 11 methods for a typical EntryAbility bundle; the 6 helpers
-    /// (`__create`, `__defProp`, `__getOwnPropDesc`, `__getOwnPropNames`,
-    /// `__getProtoOf`, `__hasOwnProp`) must each become their own method record so
-    /// the ABC class item matches es2abc output.
+    /// The bundler now always emits clean ESM (no IIFE wrapper, no CJS interop
+    /// helpers). The `var __xxx = ...` helper variables are no longer present in
+    /// rolldown ESM output, so this test uses the modern ESM pattern.
     #[test]
-    fn test_cjs_helpers_become_method_records() {
+    fn test_esm_class_compiles_method_records() {
         use crate::emit::file::LiteralArray;
         use crate::emit::strings::StringTable;
-        use crate::ir::builder::build_record;
+        use crate::ir::builder::build_record_with_debug;
 
-        let source = r#"(function () {
-            var __create = Object.create;
-            var __defProp = Object.defineProperty;
-            var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
-            var __getOwnPropNames = Object.getOwnPropertyNames;
-            var __copyProps = (to, from, except, desc) => {
-                if (from && typeof from === "object") {
-                    for (var key of __getOwnPropNames(from)) {
-                        if (!__hasOwnProp.call(except, key)) {
-                            __defProp(to, key, { get: () => from[key], enumerable: true });
-                        }
-                    }
-                }
-                return to;
-            };
-            var __toESM = (mod, isNodeMode, target) => {
-                return mod;
-            };
-            class EntryAbility {
-                onCreate(want, launchParam) {}
-                onWindowStageCreate(windowStage) {}
-            }
-        })()"#;
+        // ESM class (the shape rolldown now emits for EntryAbility.ets)
+        let source = r#"import UIAbility from "@ohos:app.ability.UIAbility";
+var EntryAbility = class extends UIAbility {
+    onCreate(want, launchParam) {}
+    onWindowStageCreate(windowStage) {}
+};
+export { EntryAbility as default };"#;
 
         let mut strings = StringTable::default();
         let mut literal_arrays: Vec<LiteralArray> = Vec::new();
-        let record = build_record(
+        let record = build_record_with_debug(
             source,
             "com.example.app/entry/ets/entryability/EntryAbility",
             &mut strings,
             &mut literal_arrays,
+            None,
+            true, // module mode
         )
-        .expect("build_record failed");
+        .expect("build_record_with_debug failed");
 
-        // func_main_0 + 6 helpers + 2 class methods = 9 minimum; order may vary.
         let method_names: Vec<&str> = record.methods.iter().map(|m| m.name.as_str()).collect();
+        // func_main_0 + constructor + 2 class methods = 4 minimum
         assert!(
-            method_names.contains(&"__create"),
-            "Expected __create method; got: {:?}",
+            method_names.contains(&"func_main_0"),
+            "must have func_main_0; got: {:?}",
             method_names
         );
         assert!(
-            method_names.contains(&"__defProp"),
-            "Expected __defProp method; got: {:?}",
+            method_names.iter().any(|n| n.contains("onCreate")),
+            "must have onCreate method; got: {:?}",
             method_names
         );
         assert!(
-            method_names.contains(&"__copyProps"),
-            "Expected __copyProps method; got: {:?}",
+            method_names.iter().any(|n| n.contains("onWindowStageCreate")),
+            "must have onWindowStageCreate; got: {:?}",
             method_names
         );
+        // No CJS interop helpers in ESM output
         assert!(
-            method_names.contains(&"__toESM"),
-            "Expected __toESM method; got: {:?}",
-            method_names
-        );
-        // Should have at least 9 methods (func_main_0 + 6 helpers + 2 class methods).
-        assert!(
-            record.methods.len() >= 9,
-            "Expected >= 9 methods, got {} ({:?})",
-            record.methods.len(),
+            !method_names.iter().any(|n| n.starts_with("__")),
+            "ESM output must not have __ CJS helpers; got: {:?}",
             method_names
         );
     }

@@ -57,16 +57,16 @@ pub struct LoaderJson {
     /// Non-entry importees in OHM URL format, populated after bundling by
     /// `process_importees`.  Empty until the post-bundle pass runs.
     ///
-    /// Absent from the initial `loader.json` (matches 18-field hvigor golden
-    /// output); only written when the post-bundle pass populates this field.
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    /// Not serialized to `loader.json`: hvigor does not write these fields and
+    /// the importee data is persisted separately in `importee/default/.../importee.json`.
+    #[serde(skip)]
     pub non_entry_importees: Vec<String>,
     /// Compiled importee source paths (relative to `src/main`), populated
     /// after bundling by `process_importees`.  Empty until that pass runs.
     ///
-    /// Absent from the initial `loader.json` (matches 18-field hvigor golden
-    /// output); only written when the post-bundle pass populates this field.
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    /// Not serialized to `loader.json`: hvigor does not write these fields and
+    /// the importee data is persisted separately in `importee/default/.../importee.json`.
+    #[serde(skip)]
     pub compiled_importees: Vec<String>,
 
     /// Ordered list of entry-point source paths used by arkdown's bundler.

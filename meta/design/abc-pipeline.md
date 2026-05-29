@@ -193,6 +193,7 @@ Valid when `0 ≤ pc_delta ≤ 16`, `0 ≤ line_delta ≤ 15`, and `op ≤ 255`.
 When the range is exceeded, fall back to explicit `ADVANCE_LINE` + `ADVANCE_PC` opcodes.
 
 **Current implementation** (`arkdown-abc` `LineTracker`):
+
 - `MethodRecord::line_ops: Vec<u8>` stores the pre-encoded LNP body
   (advance sequences + END_SEQUENCE) for each method.
 - Line tracking is active for `func_main_0` when a source file is provided.

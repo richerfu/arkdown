@@ -152,6 +152,19 @@ Field notes:
 | `modulePathMap`   | `{ "entry": "/abs/path/to/entry" }` | Added field; name → absolute path map     |
 | `fallbackAnBuild` | `false`                             | Added field; AN build fallback flag       |
 
+### Path Canonicalization
+
+All path-valued fields in the serialized `loader.json` (`projectRootPath`, `nodeModulesPath`,
+`anBuildOutPut`, `modulePathMap` values, `pkgRoot` in `pkgNameToPkgBriefInfo`) **must be
+absolute paths**. hvigor always writes absolute paths; TS bundlers rely on them being
+absolute to resolve imports without needing the CWD.
+
+Implementation rule: use `std::fs::canonicalize` for paths that already exist on disk
+(project root, module source root). For constructed intermediates paths that may not yet
+exist (e.g. `intermediates/loader_out/...`), derive them from the already-canonicalized
+base and keep them absolute. Fall back to CWD-join for any relative path that
+`canonicalize` cannot resolve.
+
 ### Entry Point Collection
 
 Collect `compileEntry` from:

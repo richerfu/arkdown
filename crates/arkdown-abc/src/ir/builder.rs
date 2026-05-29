@@ -513,112 +513,9 @@ fn estimate_vregs(bytecode: &[u8]) -> u16 {
 
 // ── Program-level compilation ─────────────────────────────────────────────────
 
-/// Return the inner statement slice if `program` consists of a single IIFE,
-/// i.e. `(function () { … })()`.  Otherwise return `None`.
-fn extract_iife_stmts<'a>(program: &'a Program<'_>) -> Option<&'a [Statement<'a>]> {
-    if let [Statement::ExpressionStatement(es)] = program.body.as_slice() {
-        if let Expression::CallExpression(call) = &es.expression {
-            if call.arguments.is_empty() {
-                return match &call.callee {
-                    Expression::FunctionExpression(fe) => {
-                        fe.body.as_deref().map(|b| b.statements.as_slice())
-                    }
-                    Expression::ParenthesizedExpression(p) => {
-                        if let Expression::FunctionExpression(fe) = &p.expression {
-                            fe.body.as_deref().map(|b| b.statements.as_slice())
-                        } else {
-                            None
-                        }
-                    }
-                    _ => None,
-                };
-            }
-        }
-    }
-    None
-}
-
-fn statement_scan_body<'a>(program: &'a Program<'_>, is_module: bool) -> &'a [Statement<'a>] {
-    if is_module {
-        program.body.as_slice()
-    } else {
-        extract_iife_stmts(program).unwrap_or(program.body.as_slice())
-    }
-}
-
-fn program_uses_commonjs_wrapper(program: &Program<'_>, is_module: bool) -> bool {
-    if is_module {
-        return false;
-    }
-    statement_scan_body(program, is_module)
-        .iter()
-        .any(stmt_uses_commonjs_binding)
-}
-
-fn stmt_uses_commonjs_binding(stmt: &Statement<'_>) -> bool {
-    match stmt {
-        Statement::VariableDeclaration(decl) => decl.declarations.iter().any(|declarator| {
-            declarator
-                .init
-                .as_ref()
-                .is_some_and(expr_uses_commonjs_binding)
-        }),
-        Statement::ExpressionStatement(expr) => expr_uses_commonjs_binding(&expr.expression),
-        Statement::ReturnStatement(ret) => ret
-            .argument
-            .as_ref()
-            .is_some_and(expr_uses_commonjs_binding),
-        Statement::BlockStatement(block) => block.body.iter().any(stmt_uses_commonjs_binding),
-        _ => false,
-    }
-}
-
-fn expr_uses_commonjs_binding(expr: &Expression<'_>) -> bool {
-    match expr {
-        Expression::Identifier(id) => {
-            matches!(id.name.as_str(), "exports" | "module" | "require")
-        }
-        Expression::AssignmentExpression(assign) => {
-            assignment_target_uses_commonjs_binding(&assign.left)
-                || expr_uses_commonjs_binding(&assign.right)
-        }
-        Expression::CallExpression(call) => {
-            expr_uses_commonjs_binding(&call.callee)
-                || call
-                    .arguments
-                    .iter()
-                    .filter_map(Argument::as_expression)
-                    .any(expr_uses_commonjs_binding)
-        }
-        Expression::ParenthesizedExpression(expr) => expr_uses_commonjs_binding(&expr.expression),
-        Expression::SequenceExpression(seq) => {
-            seq.expressions.iter().any(expr_uses_commonjs_binding)
-        }
-        Expression::StaticMemberExpression(mem) => expr_uses_commonjs_binding(&mem.object),
-        Expression::ComputedMemberExpression(mem) => {
-            expr_uses_commonjs_binding(&mem.object) || expr_uses_commonjs_binding(&mem.expression)
-        }
-        Expression::ObjectExpression(obj) => obj.properties.iter().any(|prop| match prop {
-            oxc_ast::ast::ObjectPropertyKind::ObjectProperty(prop) => {
-                expr_uses_commonjs_binding(&prop.value)
-            }
-            _ => false,
-        }),
-        _ => false,
-    }
-}
-
-fn assignment_target_uses_commonjs_binding(target: &AssignmentTarget<'_>) -> bool {
-    match target {
-        AssignmentTarget::AssignmentTargetIdentifier(id) => {
-            matches!(id.name.as_str(), "exports" | "module" | "require")
-        }
-        AssignmentTarget::StaticMemberExpression(mem) => expr_uses_commonjs_binding(&mem.object),
-        AssignmentTarget::ComputedMemberExpression(mem) => {
-            expr_uses_commonjs_binding(&mem.object) || expr_uses_commonjs_binding(&mem.expression)
-        }
-        _ => false,
-    }
+/// Always returns the top-level statement slice — IIFE/CJS unwrapping removed.
+fn statement_scan_body<'a>(program: &'a Program<'_>, _is_module: bool) -> &'a [Statement<'a>] {
+    program.body.as_slice()
 }
 
 /// Walk `stmts` for `ClassDeclaration`s and compile each method body into a
@@ -708,51 +605,6 @@ fn compile_class_method_bodies(
                         continue;
                     }
                 }
-
-                // Rolldown CJS interop helpers: var __xxx = <arrow | fn | member>
-                // Only capture names that start with double-underscore.
-                if !name.starts_with("__") {
-                    continue;
-                }
-
-                let bytecode = if let Some(init) = &declarator.init {
-                    match init {
-                        Expression::ArrowFunctionExpression(arrow) => {
-                            // body is Box<FunctionBody> directly in the ohos-rs fork.
-                            compile_function_body(
-                                Some(arrow.body.as_ref()),
-                                strings,
-                                literal_arrays,
-                                lowering,
-                            )
-                        }
-                        Expression::FunctionExpression(func) => compile_function_body(
-                            func.body.as_deref(),
-                            strings,
-                            literal_arrays,
-                            lowering,
-                        ),
-                        _ => {
-                            // Simple assignment (e.g. `var __create = Object.create`):
-                            // emit a stub method that immediately returns undefined.
-                            let mut st = StringTable::default();
-                            Insn::ReturnUndefined.encode(&mut st)
-                        }
-                    }
-                } else {
-                    let mut st = StringTable::default();
-                    Insn::ReturnUndefined.encode(&mut st)
-                };
-
-                let num_vregs = estimate_vregs(&bytecode);
-                methods.push(MethodRecord {
-                    name,
-                    bytecode,
-                    num_vregs,
-                    num_args: 0,
-                    debug_info: None,
-            line_ops: vec![],
-                });
             }
         }
     }
@@ -1280,39 +1132,9 @@ fn compile_program_body(
     lowering: &LoweringContext,
     is_module: bool,
 ) -> Vec<u8> {
-    if !is_module {
-        if let Some(stmts) = extract_iife_stmts(program) {
-            return compile_body_stmts(stmts, strings, literal_arrays, lowering, true);
-        }
-        if program_uses_commonjs_wrapper(program, is_module) {
-            return compile_commonjs_main_wrapper(strings);
-        }
-    }
     compile_body_stmts(&program.body, strings, literal_arrays, lowering, true)
 }
 
-fn compile_commonjs_main_wrapper(strings: &mut StringTable) -> Vec<u8> {
-    let mut literal_arrays = Vec::new();
-    let lowering = LoweringContext::default();
-    let mut gen = CodeGen::new(strings, &mut literal_arrays, &lowering);
-    let reflect_id = gen.intern("Reflect");
-    gen.push(Insn::TryLdGlobalByName(0, reflect_id));
-    gen.push(Insn::Sta(0));
-    let apply_id = gen.intern("apply");
-    gen.push(Insn::LdObjByName(1, apply_id));
-    gen.push(Insn::Sta(1));
-    gen.push(Insn::DefineFuncShort(3, 0, 5));
-    gen.push(Insn::Sta(2));
-    gen.push(Insn::CreateEmptyArray(4));
-    gen.push(Insn::Sta(3));
-    for index in 0..5u16 {
-        gen.push(Insn::Lda(3 + index as u8));
-        gen.push(Insn::StOwnByIndex(5 + index * 2, 3, index));
-    }
-    gen.push(Insn::Lda(1));
-    gen.push(Insn::CallThis3(0x0f, 0, 2, 3, 3));
-    gen.finish()
-}
 
 /// Compile a function body's statements, or emit `returnundefined` if absent.
 fn compile_function_body(
@@ -1429,26 +1251,8 @@ fn compile_program_body_tracked(
     is_module: bool,
     source: &str,
 ) -> (Vec<u8>, Vec<u8>) {
-    if !is_module {
-        if let Some(stmts) = extract_iife_stmts(program) {
-            return compile_body_stmts_tracked(
-                stmts,
-                strings,
-                literal_arrays,
-                lowering,
-                true,
-                source,
-            );
-        }
-        if program_uses_commonjs_wrapper(program, is_module) {
-            // CommonJS wrapper emits hand-crafted bytecode with no source mapping.
-            let bc = compile_commonjs_main_wrapper(strings);
-            return (bc, vec![]);
-        }
-    }
     compile_body_stmts_tracked(&program.body, strings, literal_arrays, lowering, true, source)
 }
-
 fn arrow_captures_from_body(body: &FunctionBody<'_>) -> ArrowCaptures {
     let mut uses_this = false;
     let mut uses_new_target = false;

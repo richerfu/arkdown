@@ -6,8 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Project Is
 
-**arkdown** is a Rust bundler for OpenHarmony OS (OHOS) projects. It reimplements the
-rolldown design and replaces Huawei's `hvigorw`/hvigor build tool. It takes `.ets`/`.ts`
+**arkdown** is a Rust bundler for OpenHarmony OS (OHOS) projects. It reimplements Huawei's `hvigorw`/hvigor build tool by oxc and rolldown. It takes `.ets`/`.ts`
 source files and produces installable `.hap`/`.hsp`/`.har` artifacts.
 
 **Parser**: Uses `ohos-rs/oxc` (`https://github.com/ohos-rs/oxc`) — a fork of OXC pinned
@@ -21,8 +20,7 @@ CLI tool (`oxk`). It is NOT used as a library dependency here; it is only a refe
 
 **Key design constraint**: the final artifact must contain ArkCompiler bytecode, not raw
 JavaScript. The upstream `es2abc` entry accepts normal JS/TS source files; `--module`
-selects ECMAScript module parsing. IIFE-wrapped CommonJS remains a compatibility shape
-for legacy chunk-wrapper paths, not the required bytecode compiler input.
+selects ECMAScript module parsing.
 
 ---
 
@@ -108,11 +106,11 @@ or CommonJS wrapper just to satisfy the bytecode compiler; use `--module` semant
 stage-model ESM output.
 
 **3. `arkdown-abc` is a pure Rust ArkCompiler bytecode compiler.** It ports `es2abc` from
-`https://gitcode.com/openharmony/arkcompiler_ets_frontend`. No subprocess, no SDK binary
+`https://github.com/openharmony/arkcompiler_ets_frontend`. No subprocess, no SDK binary
 dependency. All `.abc` compilation logic is in this crate.
 
 **4. `arkdown-resource` is a pure Rust resource compiler.** It ports `restool` from
-`https://gitcode.com/openharmony/developtools_restool`. No subprocess invocation.
+`https://github.com/openharmony/developtools_restool`. No subprocess invocation.
 
 **5. Use ohos-rs/oxc (pinned rev), not oxc-project/oxc crates.io.** The ohos-rs fork (pinned at
 `rev = "5caa6d54ae977b8a76ed68b8aba06b38e1c6a614"`) supports `.ets` parsing. The upstream
