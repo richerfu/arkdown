@@ -426,3 +426,283 @@ fn test_hap_resource_files_present() {
         names
     );
 }
+
+// ---------------------------------------------------------------------------
+// ByteCode HAR e2e tests
+// ---------------------------------------------------------------------------
+
+fn bc_har_fixture_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap() // crates/
+        .parent()
+        .unwrap() // repo root
+        .join("tests/fixtures/minimal-hap-with-bc-har")
+}
+
+/// Build the minimal-hap-with-bc-har fixture through the full pipeline
+/// including ByteCode HAR detection, importee processing, ABC compilation,
+/// and BC HAR abc merge.
+///
+/// Returns `(modules_abc_path, importee_json_path)`.
+fn run_build_bc_har(fixture_src: &PathBuf) -> (PathBuf, PathBuf) {
+    let fixture = isolated_fixture(fixture_src);
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use arkdown::Bundler;
+    use arkdown_config::load_config;
+    use arkdown_core::{ArkdownPlugin, BuildMode, ModuleJson5, OutputTarget};
+    use arkdown_plugin_duplicate_check::DuplicateCheckPlugin;
+    use arkdown_plugin_ets_transform::EtsTransformPlugin;
+    use arkdown_plugin_json5::Json5Plugin;
+    use arkdown_plugin_module_meta::ModuleMetaPlugin;
+    use arkdown_plugin_ohos_resolve::{process_importees, OhosResolvePlugin, ProcessImporteeConfig};
+    use arkdown_profile::{merge_bytecode_har_abc, scan_bytecode_har_deps, ProfileProcessor};
+    use arkdown_resolver::ResolverConfig;
+    use arkdown_resource::{ResourceCompileConfig, ResourceCompileInput, ResourceCompiler};
+    use arkdown_ts2abc::{compile_to_abc, Ts2abcOptions};
+
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+
+    let config = load_config(&fixture, BuildMode::Debug, OutputTarget::Hap, None, None)
+        .expect("load_config");
+    let config = Arc::new(config);
+
+    let processor = ProfileProcessor::new(config.clone());
+    let module = &config.modules[0];
+
+    let module_json5_path = module.src_path.join("src/main/module.json5");
+    let module_json5_content =
+        fs_err::read_to_string(&module_json5_path).expect("read module.json5");
+    let module_json5: ModuleJson5 =
+        json5::from_str(&module_json5_content).expect("parse module.json5");
+
+    let (manifest, mut loader_json) = processor
+        .process_module(module, &module_json5)
+        .expect("process_module");
+
+    // Write module.json
+    let module_json_out = module
+        .src_path
+        .join("build/default/intermediates/res/default/module.json");
+    processor
+        .write_module_json(&manifest, &module_json_out, None)
+        .expect("write_module_json");
+
+    // Resource compilation
+    let res_dir = module.src_path.join("src/main/resources");
+    let res_out = module
+        .src_path
+        .join("build/default/intermediates/res/default");
+    if res_dir.exists() {
+        let rc = ResourceCompiler::new(ResourceCompileConfig {
+            package_name: config.product.bundle_name.clone(),
+            module_name: module.name.clone(),
+            device_types: vec!["phone".to_string()],
+            is_debug: true,
+        });
+        let _ = rc.compile(ResourceCompileInput {
+            resources_dirs: vec![res_dir],
+            output_dir: res_out.clone(),
+        });
+    }
+
+    // Detect ByteCode HAR dependencies
+    let oh_modules_dirs = vec![
+        module.src_path.join("oh_modules"),
+        fixture.join("oh_modules"),
+    ];
+    let oh_modules_refs: Vec<&std::path::Path> =
+        oh_modules_dirs.iter().map(|p| p.as_path()).collect();
+    let bc_har_deps = scan_bytecode_har_deps(&oh_modules_refs, &config.product.bundle_name);
+
+    // Bundling
+    let plugins: Vec<Arc<dyn ArkdownPlugin>> = vec![
+        Arc::new(EtsTransformPlugin::new(config.clone())),
+        Arc::new(OhosResolvePlugin::new(
+            ResolverConfig {
+                project_root: fixture.clone(),
+                sdk_api_dirs: vec![],
+                sdk_kits_dirs: vec![],
+                pkg_name_to_pkg_info: HashMap::new(),
+                use_normalized_ohm_url: false,
+                case_sensitive_check: false,
+                oh_modules_roots: vec![],
+                module_src_roots: vec![module.src_path.join("src/main/ets")],
+            },
+            fixture.clone(),
+            false,
+        )),
+        Arc::new(ModuleMetaPlugin::new(fixture.clone(), module.name.clone())),
+        Arc::new(Json5Plugin),
+        Arc::new(DuplicateCheckPlugin),
+    ];
+
+    let chunk_dir = PathBuf::from(&loader_json.ace_module_build);
+    if chunk_dir.exists() {
+        for entry in walkdir::WalkDir::new(&chunk_dir)
+            .max_depth(1)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            if entry.path().extension().and_then(|e| e.to_str()) == Some("js") {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+
+    let bundler = Bundler::new((*config).clone(), plugins);
+    let bundle_out = rt.block_on(bundler.bundle(&loader_json)).expect("bundle");
+
+    // process_importees pass
+    let intermediates_dir = module.src_path.join("build/default/intermediates");
+    let importee_cfg = ProcessImporteeConfig {
+        bundle_name: config.product.bundle_name.clone(),
+        module_name: loader_json.module_name.clone(),
+        module_version: String::new(),
+        project_root: fixture.clone(),
+        module_src_main: PathBuf::from(&loader_json.module_root_path),
+        output_dir: intermediates_dir.clone(),
+    };
+    let importee_result =
+        process_importees(&bundle_out.chunk_graph, &importee_cfg).expect("process_importees");
+    loader_json.compiled_importees = importee_result.compiled_importees;
+
+    // Add ByteCode HAR OHM URLs to compiledImportees
+    for dep in &bc_har_deps {
+        if !loader_json.compiled_importees.contains(&dep.ohm_url) {
+            loader_json.compiled_importees.push(dep.ohm_url.clone());
+        }
+    }
+
+    // Write importee.json cache so the test can read it back
+    let importee_json_path = intermediates_dir
+        .join("importee/default")
+        .join(&loader_json.module_name)
+        .join("importee.json");
+    // Write the updated list that includes BC HAR OHM URLs
+    {
+        let cache = serde_json::json!({
+            "nonEntryImportees": importee_result.non_entry_importees,
+            "compiledImportees": loader_json.compiled_importees,
+        });
+        if let Some(parent) = importee_json_path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        std::fs::write(&importee_json_path, serde_json::to_string_pretty(&cache).unwrap())
+            .expect("write importee.json");
+    }
+
+    // ABC compilation
+    let modules_abc = bundle_out.modules_abc_path.clone();
+    let bundle_name = &config.product.bundle_name;
+    let record_name_map: std::collections::HashMap<String, ChunkCompileMeta> = loader_json
+        .compile_entry
+        .iter()
+        .filter_map(|ep| {
+            let stem = std::path::Path::new(ep).file_stem()?.to_str()?.to_string();
+            let stripped = ep
+                .trim_start_matches("./")
+                .trim_end_matches(".ets")
+                .trim_end_matches(".ts");
+            Some((
+                stem,
+                ChunkCompileMeta {
+                    record_name: format!("{}/{}/{}", bundle_name, loader_json.module_name, stripped),
+                    source_file: Some(ep.clone()),
+                },
+            ))
+        })
+        .collect();
+    let ts2abc_inputs = collect_js_chunks_from_output(&bundle_out.chunk_files, &record_name_map);
+    if !ts2abc_inputs.is_empty() {
+        compile_to_abc(Ts2abcOptions {
+            inputs: ts2abc_inputs,
+            output: modules_abc.clone(),
+            target_api_sub_version: None,
+            debug_info: true,
+            opt_level: 0,
+            target_api_version: config.sdk_config.compile_api_version,
+            merge_abc: true,
+            cache_file: None,
+            module: true,
+            commonjs: false,
+        })
+        .expect("abc compile");
+        for (_chunk_name, path) in &bundle_out.chunk_files {
+            if path.extension().and_then(|e| e.to_str()) == Some("js") && path.exists() {
+                let _ = fs_err::remove_file(path);
+            }
+        }
+    }
+
+    // Merge ByteCode HAR .abc files
+    for dep in &bc_har_deps {
+        merge_bytecode_har_abc(&dep.abc_path, &modules_abc).expect("merge_bytecode_har_abc");
+    }
+
+    (modules_abc, importee_json_path)
+}
+
+#[test]
+fn test_bc_har_compiled_importees_contains_ohm_url() {
+    let fixture = bc_har_fixture_root();
+    let (_modules_abc, importee_json_path) = run_build_bc_har(&fixture);
+
+    assert!(
+        importee_json_path.exists(),
+        "importee.json not found at {:?}",
+        importee_json_path
+    );
+
+    let content = std::fs::read_to_string(&importee_json_path).expect("read importee.json");
+    let parsed: serde_json::Value = serde_json::from_str(&content).expect("parse importee.json");
+
+    let compiled = parsed["compiledImportees"]
+        .as_array()
+        .expect("compiledImportees must be array");
+    let ohm_urls: Vec<&str> = compiled
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+
+    assert!(
+        ohm_urls.contains(&"@bundle:com.example.arkdown.test/bc-har-dep/index"),
+        "compiledImportees must contain BC HAR OHM URL; got: {:?}",
+        ohm_urls
+    );
+}
+
+#[test]
+fn test_bc_har_modules_abc_contains_har_bytes() {
+    let fixture = bc_har_fixture_root();
+    let (modules_abc, _importee_json) = run_build_bc_har(&fixture);
+
+    assert!(
+        modules_abc.exists(),
+        "modules.abc not found at {:?}",
+        modules_abc
+    );
+
+    let data = std::fs::read(&modules_abc).expect("read modules.abc");
+
+    // File must start with the PANDA magic from the main compiled module.
+    assert_eq!(
+        &data[..8],
+        b"PANDA\x00\x00\x00",
+        "modules.abc must start with PANDA magic; got: {:02x?}",
+        &data[..8]
+    );
+
+    // The BC HAR fixture's marker bytes (0xBC 0x4D) must appear somewhere after
+    // the main module bytecode — this confirms the HAR's .abc was merged in.
+    let marker = b"\xbc\x4d";
+    let found = data.windows(marker.len()).any(|window| window == marker);
+    assert!(
+        found,
+        "modules.abc must contain BC HAR marker bytes 0xBC 0x4D; file size={}, first 32 bytes={:02x?}",
+        data.len(),
+        &data[..data.len().min(32)]
+    );
+}

@@ -14,11 +14,15 @@
 //! processor.write_loader_json(&loader, Path::new("/module/build/loader.json"))?;
 //! ```
 
+pub mod bytecode_har;
 pub mod har_abilities;
 pub mod loader_json;
 pub mod process_profile;
 pub mod router_map;
 
+pub use bytecode_har::{
+    detect_bytecode_har, merge_bytecode_har_abc, scan_bytecode_har_deps, ByteCodeHarDep,
+};
 pub use har_abilities::{collect_har_abilities, HarAbility};
 pub use loader_json::{generate_loader_json, ByteCodeHarEntry, LoaderJson, PkgBriefInfo};
 pub use process_profile::{
