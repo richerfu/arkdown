@@ -53,22 +53,31 @@ and release-mode terser/minification when applicable.
 - Phase 2 (ETS transform): ✅ @Prop, @Link, @ObjectLink, @Provide, @Consume, @Watch, @BuilderParam
 - Phase 3 (bundler): ✅ clean ESM, @ohos: external, treeshake off for debug
 - Phase 4 (importee): ✅ process_importees() ports hvigor process-importee.js
-- Phase 5 (ABC): 🔄 modules.abc 8838B vs hvigor 9844B (gap: 1006B — 89.8% parity)
+- Phase 5 (ABC): 🔄 modules.abc 8358B vs hvigor 9844B (gap: 1486B — 85% parity)
 - Phase 6 (packaging): ✅ HAP zip identical to hvigor (11 entries)
 
 **Parity (minimal-hap, 2026-05-29):**
 - HAP zip: ✅ identical (11 entries, all content matches except 2 files below)
-- `ets/modules.abc`: hvigor 9844B, arkdown 8838B — gap 1006B (89.8% parity).
+- `ets/modules.abc`: hvigor 9844B, arkdown 8358B — gap 1486B (85% parity).
   ✅ Literal arrays=10=[4,4,6,6,6,6,16,24,26,26] match hvigor exactly. ✅ Method records=20 match.
-  Remaining 1006B: LNP density gap (82.7B/LNP vs hvigor 113.2B/LNP, total 1903B vs 2604B) + other.
-  Improvements in Task #44: Fixed SPECIAL_OPCODE encoding to use correct Panda constants
-  (opcode_base=0x0A, line_base=-5, line_range=14); added per-instruction LNP tracking via
-  push() calling tracker.advance() before each instruction; emit_expr() updates current_line
-  for sub-expression granularity. 8 of 23 LNPs still have no advance opcodes (auto-generated
-  constructors and arrow functions compiled without source tracking).
-  Remaining gap: arrow functions and call-arg closures need source tracking; golden LNP format
-  also includes SET_EPILOGUE_BEGIN + START_LOCAL/START_LOCAL_EXTENDED preamble patterns not
-  yet matched.
+  ✅ IndexSection method_index_count: hvigor 77, arkdown 69 (reduced from 98).
+    - Breakdown: 55 strings + 6 lit-arrays + 8 methods = 69
+    - hvigor: 58 strings + 6 lit-arrays + 13 methods = 77
+    - Gap: 3 fewer strings (hvigor has initialRender/rerender/getEntryName from ArkTS transform)
+      + 5 fewer methods (hvigor adds ArkTS-transform methods not in our implementation).
+  Remaining gap vs hvigor: 1486B — mainly LNP line-advance density (hvigor emits per-instruction
+  ADVANCE sequences; we emit per-statement) + ArkTS-transform methods not yet implemented.
+  Improvements made in this session (Task #45):
+  - `LiteralArray.in_method_index`: moduleRecordIdx and scopeNames excluded from method index
+    (they are field-only references, not bytecode operands) — saves 4 entries.
+  - `MethodRecord.in_method_index`: func_main_0 and regular class instance methods excluded
+    (only constructors and arrow functions are bytecode-referenced) — saves 15 entries.
+  - Global string deduplication: function/method parameters pre-allocated to virtual registers
+    (v3+) so they are loaded via `lda v<n>` rather than `tryldglobalbyname`, eliminating
+    unnecessary string table entries — saves 10 entries.
+  - Total reduction: 98 → 69 (−29 entries).
+  Remaining gap: per-instruction ADVANCE sequences between every instruction group (hvigor emits
+  much denser LNP coverage than our per-statement approach).
 - `ets/sourceMaps.map`: hvigor 1847B, arkdown 1281B — gap is per-statement vs per-token maps
 
 ## Major Missing Capabilities
@@ -79,7 +88,7 @@ and release-mode terser/minification when applicable.
 | ArkTS transform          | ✅ **Fixed (2026-05-29)**: `@State`, `@Prop`, `@Link`, `@ObjectLink`, `@Provide`, `@Consume`, `@Watch`, `@BuilderParam`, storage decorators all implemented. Per-statement source maps via oxc_codegen. | `@Builder`, `@Styles` functions; precise per-token source maps. EntryAbility VLQ: 329 vs 910 chars. |
 | Rollup/rolldown options  | ✅ **Fixed (2026-05-28)**: Clean ESM output, `@ohos:` imports external, treeshake disabled for debug. **IIFE/CJS compatibility paths removed** from both bundler and ABC compiler. | Release treeshake, `manualChunks` for `supportChunks`, ByteCode HAR/HSP externals. |
 | ByteCode HAR importees   | ✅ **Fixed (2026-05-29)**: `process_importees()` ports `process-importee.js`. BFS from entry chunks, OHM URL generation, importee.json cache written. `nonEntryImportees` in loader.json. | ByteCode HAR compilation flow (requires HAR input fixture). |
-| ABC compiler             | 🔄 **Improved**: LNP line advance tracking, OHM URL scope names, SET_FILE debug info, binary/unary/logical ops, static-object `createobjectwithbuffer` (opcode 0x07), emit_new args, call-argument closures, START_LOCAL_EXTENDED (0x04) for scope/param vars, SET_PROLOGUE_END (0x08) after scope declarations, NewLexEnvWithName for arrow captures, class-decl lexical bindings, correct SPECIAL_OPCODE encoding (opcode_base=0x0A, line_base=-5, line_range=14), per-instruction LNP tracking via push(). modules.abc 8838B vs 9844B (89.8%). | Arrow functions and call-arg closures need source tracking; SET_EPILOGUE_BEGIN + additional preamble patterns; per-token source map granularity. |
+| ABC compiler             | 🔄 **Improved**: LNP line advance tracking, OHM URL scope names, SET_FILE debug info, binary/unary/logical ops, static-object `createobjectwithbuffer` (opcode 0x07), emit_new args, call-argument closures, START_LOCAL_EXTENDED (0x04) for scope/param vars, SET_PROLOGUE_END (0x08) after scope declarations, NewLexEnvWithName for arrow captures, class-decl lexical bindings. **Task #45**: global string dedup — method/lit-array `in_method_index` flags, param register pre-allocation. method_index_count 98→69. modules.abc 8358B vs 9844B. | Per-instruction LNP ADVANCE sequences (hvigor emits between every instruction group, not just per-statement); per-token source map granularity; ArkTS-transform methods (initialRender, rerender, getEntryName). |
 | Obfuscation/minification | `arkdown-obfuscate` exists but not wired in.                                                                                                                                           | hvigor release builds run SDK obfuscation + terser before ABC.                          |
 | Incremental cache        | `arkdown-cache` exists but not wired in.                                                                                                                                               | hvigor rollup msgpack cache + es2abc `--cache-file` support.                            |
 | Source maps/debug        | 🔄 **Improved (2026-05-29)**: Per-token maps regenerated from kit-rewritten ETS source via `generate_source_map_for_file` in `write_hvigor_source_maps`. EntryAbility: 566 VLQ chars (was 329, hvigor 910). sourceMaps.map ~1400B vs 1847B golden. | Full per-identifier granularity (tsc maps every token; oxc codegen maps per-expression). |

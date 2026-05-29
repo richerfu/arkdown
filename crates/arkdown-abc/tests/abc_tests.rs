@@ -280,11 +280,16 @@ fn test_output_has_nonzero_length() {
 fn test_literal_array_index_header_is_valid_when_classes_emit_literals() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = tmp.path().join("literal-index.abc");
-    make_compiler()
+    // Use a module-mode source with a class definition so that the class-buffer
+    // literal array (in_method_index=true) and the constructor method
+    // (in_method_index=true) appear in the IndexSection method index.
+    // The string "hello" ensures at least one bytecode string is interned.
+    let compiler = module_compiler();
+    compiler
         .compile(
-            vec![iife_module(
+            vec![module_record(
                 "com.example.app/entry/ets/pages/Index",
-                "(function(){ var Index = class {}; })();",
+                r#"var x = "hello"; var Index = class {};"#,
             )],
             &out,
         )
@@ -339,9 +344,12 @@ fn test_literal_array_index_header_is_valid_when_classes_emit_literals() {
         index_class_off + index_class_size * 4,
         "method/constant index follows class index array"
     );
+    // The method index must contain at least the "hello" string (1 bytecode
+    // string) + the class-buffer literal array (1 indexed lit array) + the
+    // constructor method (1 indexed method) = at least 3 entries.
     assert!(
-        index_method_size > 0,
-        "bytecode strings and methods are indexed for id operands"
+        index_method_size >= 3,
+        "method index must contain bytecode strings, class-buffer lit array, and constructor; got {index_method_size}"
     );
     assert_eq!(read_u32(&bytes, index_class_off as usize), 2);
     assert_eq!(read_u32(&bytes, index_class_off as usize + 4), 6);

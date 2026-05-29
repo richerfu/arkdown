@@ -132,10 +132,17 @@ pub struct MethodRecord {
     /// performed during compilation (i.e. when a source text was available).
     /// Written verbatim into the LNP body after the SET_FILE preamble.
     pub line_ops: Vec<u8>,
-    /// Exception handler table for this method.  Each entry maps a try region
-    /// (by bytecode byte offset) to its catch handler entry point.  Empty for
-    /// methods with no `try`/`catch` blocks.
-    pub catch_entries: Vec<CatchEntry>,
+    /// Whether this method is referenced by a bytecode operand (`definefunc`,
+    /// `defineclasswithbuffer`) and should appear in the IndexSection
+    /// method/constant index.
+    ///
+    /// - `func_main_0` is the module entry point called directly by ArkRuntime,
+    ///   not by bytecode, so it is NOT in the method index.
+    /// - Regular class instance methods that are only referenced via class-buffer
+    ///   literal arrays (by file offset) are NOT in the method index.
+    /// - Constructors (referenced by `defineclasswithbuffer`) ARE in the index.
+    /// - Arrow functions / closures (referenced by `definefunc`) ARE in the index.
+    pub in_method_index: bool,
 }
 
 /// Minimal method debug info linked through a Panda LineNumberProgram.
@@ -542,7 +549,7 @@ mod tests {
                 num_args: 3,
                 debug_info: None,
                 line_ops: vec![],
-                catch_entries: vec![],
+                in_method_index: false,
             }],
             access_flags: 1,
             source_lang: 0,
@@ -572,7 +579,7 @@ mod tests {
                 num_args: 3,
                 debug_info: None,
                 line_ops: vec![],
-                catch_entries: vec![],
+                in_method_index: false,
             }],
             access_flags: 1,
             source_lang: 0,
