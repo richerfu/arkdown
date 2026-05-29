@@ -729,7 +729,7 @@ fn test_source_map_emits_source_file_debug_info_and_lnp() {
     );
 
     let lnp_offset = read_u32(&bytes, lnp_idx_off) as usize;
-    assert_eq!(bytes[lnp_offset], 0x05, "LNP starts with SET_FILE opcode");
+    assert_eq!(bytes[lnp_offset], 0x03, "LNP starts with SET_FILE opcode (0x03)");
     assert_eq!(
         read_u32(&bytes, lnp_offset + 1),
         class_source_file,

@@ -652,14 +652,14 @@ impl AbcFile {
             for (i, &src_off) in lnp_source_file_offs.iter().enumerate() {
                 lnp_offsets.push(lnp_cur);
                 // Panda LNP body:
-                //   SET_FILE (0x05) + 4-byte LE string offset
+                //   SET_FILE (0x03) + 4-byte LE string offset
                 //   START_LOCAL entries for scope variables and params
                 //   <advance opcodes — may be empty>
                 //   END_SEQUENCE (0x00, already included in line_ops when non-empty)
-                lnp_buf.push(0x05);
+                lnp_buf.push(0x03); // SET_FILE
                 lnp_buf.extend_from_slice(&src_off.to_le_bytes());
 
-                // START_LOCAL_EXTENDED (0x04) entries that hvigor always emits:
+                // START_LOCAL_EXTENDED (0x08) entries that hvigor always emits:
                 //   "this"      reg 0  type_off 0  type_tag 0
                 //   "newTarget" reg 1  type_off 0  type_tag 0
                 //   "funcObj"   reg 2  type_off 0  type_tag 0
@@ -667,7 +667,7 @@ impl AbcFile {
                 // Format: [0x04][name_off: u32 LE][reg: u8][type_off: u32 LE][type_tag: u16 LE]
                 // = 12 bytes per entry.
                 for (reg, &name_off) in scope_name_offsets.iter().enumerate() {
-                    lnp_buf.push(0x04); // START_LOCAL_EXTENDED
+                    lnp_buf.push(0x08); // START_LOCAL_EXTENDED
                     lnp_buf.extend_from_slice(&name_off.to_le_bytes());
                     lnp_buf.push(reg as u8);
                     lnp_buf.extend_from_slice(&0u32.to_le_bytes()); // type_off = 0
@@ -677,7 +677,7 @@ impl AbcFile {
                 // START_LOCAL_EXTENDED entries for formal parameters, starting at reg 3.
                 let param_offs = &per_lnp_param_name_offsets[i];
                 for (param_idx, &param_off) in param_offs.iter().enumerate() {
-                    lnp_buf.push(0x04); // START_LOCAL_EXTENDED
+                    lnp_buf.push(0x08); // START_LOCAL_EXTENDED
                     lnp_buf.extend_from_slice(&param_off.to_le_bytes());
                     lnp_buf.push(3 + param_idx as u8);
                     lnp_buf.extend_from_slice(&0u32.to_le_bytes()); // type_off = 0
@@ -687,9 +687,9 @@ impl AbcFile {
                 // Each START_LOCAL_EXTENDED entry is 12 bytes (1 + 4 + 1 + 4 + 2).
                 let start_local_bytes = (3 + param_offs.len()) as u32 * 12;
 
-                // SET_PROLOGUE_END (0x08): marks the end of the method prologue.
+                // SET_PROLOGUE_END (0x05): marks the end of the method prologue.
                 // hvigor emits this opcode after all START_LOCAL_EXTENDED entries.
-                lnp_buf.push(0x08);
+                lnp_buf.push(0x05); // SET_PROLOGUE_END
 
                 let method_ops = lnp_method_line_ops[i];
                 if !method_ops.is_empty() {
