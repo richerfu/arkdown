@@ -1,68 +1,80 @@
-use arkdown_core::{
-    ArkdownError, ArkdownPlugin, HookLoadOutput, HookResolveIdArgs, HookResolveIdOutput, HookUsage,
-    ModuleType, PluginContext, PluginResult,
-};
-use async_trait::async_trait;
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
+
+use rolldown_plugin::{
+    HookLoadArgs, HookLoadOutput, HookLoadReturn, HookResolveIdArgs, HookResolveIdOutput,
+    HookResolveIdReturn, HookUsage, Plugin, SharedLoadPluginContext,
+};
 
 pub struct Json5Plugin;
 
-#[async_trait]
-impl ArkdownPlugin for Json5Plugin {
-    fn name(&self) -> &str {
-        "json5"
+impl std::fmt::Debug for Json5Plugin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Json5Plugin").finish()
+    }
+}
+
+impl Plugin for Json5Plugin {
+    fn name(&self) -> Cow<'static, str> {
+        Cow::Borrowed("json5")
     }
 
     fn register_hook_usage(&self) -> HookUsage {
         HookUsage::ResolveId | HookUsage::Load
     }
 
-    async fn resolve_id(
+    fn resolve_id(
         &self,
-        _ctx: &PluginContext,
+        _ctx: &rolldown_plugin::PluginContext,
         args: &HookResolveIdArgs<'_>,
-    ) -> PluginResult<Option<HookResolveIdOutput>> {
-        let specifier = args.specifier;
-        if !specifier.ends_with(".json") && !specifier.ends_with(".json5") {
-            return Ok(None);
+    ) -> impl std::future::Future<Output = HookResolveIdReturn> + Send {
+        let specifier = args.specifier.to_owned();
+        let importer = args.importer.map(str::to_owned);
+        async move {
+            if !specifier.ends_with(".json") && !specifier.ends_with(".json5") {
+                return Ok(None);
+            }
+            let resolved = resolve_relative_path(&specifier, importer.as_deref())
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            Ok(Some(HookResolveIdOutput {
+                id: resolved.to_string_lossy().as_ref().into(),
+                external: None,
+                ..Default::default()
+            }))
         }
-        let resolved_path = resolve_relative_path(specifier, args.importer)?;
-        Ok(Some(HookResolveIdOutput {
-            id: resolved_path.to_string_lossy().to_string(),
-            external: false,
-            module_type: ModuleType::Json5,
-            side_effects: None,
-        }))
     }
 
-    async fn load(&self, _ctx: &PluginContext, id: &str) -> PluginResult<Option<HookLoadOutput>> {
-        if !id.ends_with(".json") && !id.ends_with(".json5") {
-            return Ok(None);
-        }
-        let raw = fs_err::read_to_string(id).map_err(|e| ArkdownError::Io(e.into()))?;
-
-        let value: serde_json::Value = if id.ends_with(".json5") {
-            json5::from_str(&raw).map_err(|e| ArkdownError::ParseError {
-                file: id.to_string(),
-                message: e.to_string(),
-            })?
-        } else {
-            serde_json::from_str(&raw).map_err(|e| ArkdownError::ParseError {
-                file: id.to_string(),
-                message: e.to_string(),
-            })?
-        };
-
-        let code = generate_esm_from_json(&value);
-        Ok(Some(HookLoadOutput {
-            code,
-            source_map: None,
-            module_type: Some(ModuleType::Json5),
-        }))
+    fn load(
+        &self,
+        _ctx: SharedLoadPluginContext,
+        args: &HookLoadArgs<'_>,
+    ) -> impl std::future::Future<Output = HookLoadReturn> + Send {
+        let id = args.id.to_owned();
+        async move { load_json_file(&id) }
     }
 }
 
-fn resolve_relative_path(specifier: &str, importer: Option<&str>) -> PluginResult<PathBuf> {
+pub(crate) fn load_json_file(id: &str) -> HookLoadReturn {
+    if !id.ends_with(".json") && !id.ends_with(".json5") {
+        return Ok(None);
+    }
+    let raw = fs_err::read_to_string(id)
+        .map_err(|e| anyhow::anyhow!("json5 plugin: failed to read {id}: {e}"))?;
+    let value: serde_json::Value = if id.ends_with(".json5") {
+        json5::from_str(&raw)
+            .map_err(|e| anyhow::anyhow!("json5 plugin: parse error in {id}: {e}"))?
+    } else {
+        serde_json::from_str(&raw)
+            .map_err(|e| anyhow::anyhow!("json5 plugin: parse error in {id}: {e}"))?
+    };
+    let code = generate_esm_from_json(&value);
+    Ok(Some(HookLoadOutput {
+        code: code.into(),
+        ..Default::default()
+    }))
+}
+
+fn resolve_relative_path(specifier: &str, importer: Option<&str>) -> anyhow::Result<PathBuf> {
     if let Some(imp) = importer {
         let base = Path::new(imp).parent().unwrap_or(Path::new("."));
         Ok(base
@@ -81,7 +93,6 @@ pub fn generate_esm_from_json(value: &serde_json::Value) -> String {
     let default_json = serde_json::to_string(value).unwrap_or_else(|_| "null".to_string());
     let mut code = String::new();
 
-    // Named exports for top-level object keys
     if let serde_json::Value::Object(map) = value {
         code.push_str(&format!("var __json_default = {};\n", default_json));
         for key in map.keys() {
@@ -109,7 +120,6 @@ fn is_valid_js_identifier(s: &str) -> bool {
     if !first.is_alphabetic() && first != '_' && first != '$' {
         return false;
     }
-    // Check no reserved words (basic check — keywords would cause a parse error downstream)
     !matches!(
         s,
         "import"
@@ -162,7 +172,6 @@ mod tests {
     fn test_generate_esm_array() {
         let val: serde_json::Value = serde_json::json!([1, 2, 3]);
         let code = generate_esm_from_json(&val);
-        // Arrays get only default export
         assert!(code.contains("export default"));
         assert!(!code.contains("export var"));
     }
@@ -184,25 +193,22 @@ mod tests {
         assert!(!is_valid_js_identifier("class"));
     }
 
-    #[tokio::test]
-    async fn test_load_json_from_tempfile() {
+    #[test]
+    fn test_load_json_from_tempfile() {
         use std::io::Write;
         let mut tmp = tempfile::NamedTempFile::with_suffix(".json").unwrap();
         writeln!(tmp, r#"{{"hello": "world"}}"#).unwrap();
         let path = tmp.path().to_string_lossy().to_string();
 
-        let plugin = Json5Plugin;
-        let result = plugin.load(&PluginContext::default(), &path).await.unwrap();
+        let result = load_json_file(&path).unwrap();
         let out = result.unwrap();
         assert!(out.code.contains("export var hello"));
     }
 
-    /// JSON5 files with comments and trailing commas must be parsed without error.
-    #[tokio::test]
-    async fn test_load_json5_with_comments_and_trailing_commas() {
+    #[test]
+    fn test_load_json5_with_comments_and_trailing_commas() {
         use std::io::Write;
         let mut tmp = tempfile::NamedTempFile::with_suffix(".json5").unwrap();
-        // JSON5 allows single-line comments and trailing commas.
         writeln!(
             tmp,
             r#"{{
@@ -214,57 +220,16 @@ mod tests {
         .unwrap();
         let path = tmp.path().to_string_lossy().to_string();
 
-        let plugin = Json5Plugin;
-        let result = plugin.load(&PluginContext::default(), &path).await;
-        assert!(
-            result.is_ok(),
-            "JSON5 with comments/trailing commas must not error"
-        );
+        let result = load_json_file(&path);
+        assert!(result.is_ok(), "JSON5 with comments/trailing commas must not error");
         let out = result.unwrap().unwrap();
-        assert!(
-            out.code.contains("export var name"),
-            "named export for 'name' key must be generated"
-        );
-        assert!(
-            out.code.contains("export default"),
-            "default export must always be generated"
-        );
+        assert!(out.code.contains("export var name"), "named export for 'name' key must be generated");
+        assert!(out.code.contains("export default"), "default export must always be generated");
     }
 
-    /// The `load` hook returns `None` for files that are not `.json` or `.json5`.
-    #[tokio::test]
-    async fn test_load_returns_none_for_non_json_id() {
-        let plugin = Json5Plugin;
-        // A TypeScript file should not be handled by this plugin.
-        let result = plugin
-            .load(&PluginContext::default(), "/some/path/module.ts")
-            .await
-            .unwrap();
-        assert!(
-            result.is_none(),
-            "load must return None for non-JSON/JSON5 files"
-        );
-    }
-
-    /// `resolve_id` returns `None` for non-JSON specifiers.
-    #[tokio::test]
-    async fn test_resolve_id_returns_none_for_non_json() {
-        use arkdown_core::{HookResolveIdArgs, ImportKind};
-
-        let plugin = Json5Plugin;
-        let args = HookResolveIdArgs {
-            specifier: "./utils/helper.ts",
-            importer: Some("/project/src/index.ts"),
-            is_entry: false,
-            kind: ImportKind::Import,
-        };
-        let result = plugin
-            .resolve_id(&PluginContext::default(), &args)
-            .await
-            .unwrap();
-        assert!(
-            result.is_none(),
-            "resolve_id must return None for non-JSON specifiers"
-        );
+    #[test]
+    fn test_load_returns_none_for_non_json_id() {
+        let result = load_json_file("/some/path/module.ts").unwrap();
+        assert!(result.is_none(), "load must return None for non-JSON/JSON5 files");
     }
 }

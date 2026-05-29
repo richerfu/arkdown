@@ -13,7 +13,8 @@ use std::sync::Arc;
 
 use arkdown::Bundler;
 use arkdown_config::load_config;
-use arkdown_core::{ArkdownPlugin, BuildMode, ModuleJson5, OutputTarget};
+use arkdown_core::{BuildMode, ModuleJson5, OutputTarget};
+use rolldown_plugin::__inner::SharedPluginable;
 use arkdown_pack::{PackInput, Packager};
 use arkdown_plugin_duplicate_check::DuplicateCheckPlugin;
 use arkdown_plugin_ets_transform::EtsTransformPlugin;
@@ -157,7 +158,7 @@ fn run_pipeline(fixture: &Path) -> PathBuf {
     }
 
     // Bundle.
-    let plugins: Vec<Arc<dyn ArkdownPlugin>> = vec![
+    let plugins: Vec<SharedPluginable> = vec![
         Arc::new(EtsTransformPlugin::new(config.clone())),
         Arc::new(OhosResolvePlugin::new(
             ResolverConfig {

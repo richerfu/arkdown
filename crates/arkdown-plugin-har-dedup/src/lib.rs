@@ -1,50 +1,36 @@
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
+use rolldown_common::{ModuleInfo, NormalModule, ResolvedExternal};
+use rolldown_plugin::{
+    HookBuildEndArgs, HookNoopReturn, HookResolveIdArgs, HookResolveIdOutput, HookResolveIdReturn,
+    HookUsage, Plugin, PluginContext,
+};
 use serde::{Deserialize, Serialize};
 
-use arkdown_core::{
-    ArkdownError, ArkdownPlugin, BuildError, HookResolveIdArgs, HookResolveIdOutput, HookUsage,
-    ModuleInfo, ModuleType, PluginContext, PluginResult,
-};
-
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
-/// Controls whether the plugin is in the first (collect) or second (exclude) pass.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HarDedupMode {
-    /// First pass: collect all HAR module IDs compiled into the HSP.
     CollectPass,
-    /// Second pass: exclude the collected HAR modules from the HAP build.
     RealBuild { excluded_files: HashSet<PathBuf> },
 }
 
-/// Plugin that deduplicates HAR files for HSP builds.
-///
-/// When an HSP and a HAP both depend on the same HAR, the HAR is compiled
-/// into the HSP only. The HAP build marks those modules as external so they
-/// are not bundled again.
-///
-/// # Two-pass workflow
-///
-/// 1. Run `HarDeduplicatePlugin::collect_pass(path)` during the **HSP** build.
-///    At `build_end` it serialises the set of collected HAR module IDs to `path`.
-///
-/// 2. Run `HarDeduplicatePlugin::real_build(path)` during the **HAP** build.
-///    It reads the file written in step 1 and marks those module IDs as external
-///    in `resolve_id`, so the bundler skips bundling them.
 pub struct HarDeduplicatePlugin {
     mode: HarDedupMode,
     collect_file_path: PathBuf,
     collected: Arc<Mutex<Vec<String>>>,
 }
 
+impl std::fmt::Debug for HarDeduplicatePlugin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HarDeduplicatePlugin")
+            .field("mode", &self.mode)
+            .finish_non_exhaustive()
+    }
+}
+
 impl HarDeduplicatePlugin {
-    /// Create a collect-pass instance (used for the HSP build).
     pub fn collect_pass(collect_file_path: PathBuf) -> Self {
         HarDeduplicatePlugin {
             mode: HarDedupMode::CollectPass,
@@ -53,10 +39,6 @@ impl HarDeduplicatePlugin {
         }
     }
 
-    /// Create a real-build instance (used for the HAP build).
-    ///
-    /// Reads the collect file produced by a prior `collect_pass` build.
-    /// If the file does not exist, no modules are excluded.
     pub fn real_build(collect_file_path: PathBuf) -> Result<Self, HarDedupError> {
         let excluded = read_collect_file(&collect_file_path)?;
         Ok(HarDeduplicatePlugin {
@@ -67,73 +49,84 @@ impl HarDeduplicatePlugin {
             collected: Arc::new(Mutex::new(Vec::new())),
         })
     }
-}
 
-#[async_trait]
-impl ArkdownPlugin for HarDeduplicatePlugin {
-    fn name(&self) -> &str {
-        "har-dedup"
-    }
-
-    fn register_hook_usage(&self) -> HookUsage {
-        HookUsage::ResolveId | HookUsage::ModuleParsed | HookUsage::BuildEnd
-    }
-
-    /// In `RealBuild` mode, mark excluded HAR modules as external.
-    async fn resolve_id(
+    pub(crate) fn resolve_path(
         &self,
-        _ctx: &PluginContext,
-        args: &HookResolveIdArgs<'_>,
-    ) -> PluginResult<Option<HookResolveIdOutput>> {
+        specifier: &str,
+    ) -> anyhow::Result<Option<HookResolveIdOutput>> {
         if let HarDedupMode::RealBuild { ref excluded_files } = self.mode {
-            let path = PathBuf::from(args.specifier);
+            let path = PathBuf::from(specifier);
             if excluded_files.contains(&path) {
                 return Ok(Some(HookResolveIdOutput {
-                    id: args.specifier.to_string(),
-                    external: true,
-                    module_type: ModuleType::Ts,
-                    side_effects: None,
+                    id: specifier.into(),
+                    external: Some(ResolvedExternal::Bool(true)),
+                    ..Default::default()
                 }));
             }
         }
         Ok(None)
     }
 
-    /// In `CollectPass` mode, record every HAR module that is parsed.
-    ///
-    /// A module is considered a HAR module when its ID contains `oh_modules`
-    /// (ohpm install path).
-    async fn module_parsed(&self, _ctx: &PluginContext, module: &ModuleInfo) -> PluginResult<()> {
-        if matches!(self.mode, HarDedupMode::CollectPass) {
-            if module.id.contains("oh_modules") {
-                self.collected.lock().unwrap().push(module.id.clone());
-            }
+    pub(crate) fn record_module(&self, module_id: &str) {
+        if matches!(self.mode, HarDedupMode::CollectPass) && module_id.contains("oh_modules") {
+            self.collected.lock().unwrap().push(module_id.to_owned());
         }
-        Ok(())
     }
 
-    /// In `CollectPass` mode, flush collected IDs to disk when the build finishes.
-    async fn build_end(
-        &self,
-        _ctx: &PluginContext,
-        _error: Option<&BuildError>,
-    ) -> PluginResult<()> {
+    pub(crate) fn flush_collect(&self) -> Result<(), HarDedupError> {
         if matches!(self.mode, HarDedupMode::CollectPass) {
             let files = self.collected.lock().unwrap().clone();
-            write_collect_file(&self.collect_file_path, &files).map_err(|e| {
-                ArkdownError::PluginError {
-                    plugin: "har-dedup".to_string(),
-                    source: Box::new(e),
-                }
-            })?;
+            write_collect_file(&self.collect_file_path, &files)?;
         }
         Ok(())
     }
 }
 
-// ---------------------------------------------------------------------------
-// Collect-file serialisation
-// ---------------------------------------------------------------------------
+impl Plugin for HarDeduplicatePlugin {
+    fn name(&self) -> Cow<'static, str> {
+        Cow::Borrowed("har-dedup")
+    }
+
+    fn register_hook_usage(&self) -> HookUsage {
+        HookUsage::ResolveId | HookUsage::ModuleParsed | HookUsage::BuildEnd
+    }
+
+    fn resolve_id(
+        &self,
+        _ctx: &PluginContext,
+        args: &HookResolveIdArgs<'_>,
+    ) -> impl std::future::Future<Output = HookResolveIdReturn> + Send {
+        let specifier = args.specifier.to_owned();
+        let result = self.resolve_path(&specifier);
+        async move { result }
+    }
+
+    fn module_parsed(
+        &self,
+        _ctx: &PluginContext,
+        module_info: Arc<ModuleInfo>,
+        _normal_module: &NormalModule,
+    ) -> impl std::future::Future<Output = HookNoopReturn> + Send {
+        let id = module_info.id.as_str().to_owned();
+        let collected = Arc::clone(&self.collected);
+        let is_collect_pass = matches!(self.mode, HarDedupMode::CollectPass);
+        async move {
+            if is_collect_pass && id.contains("oh_modules") {
+                collected.lock().unwrap().push(id);
+            }
+            Ok(())
+        }
+    }
+
+    fn build_end(
+        &self,
+        _ctx: &PluginContext,
+        _args: Option<&HookBuildEndArgs<'_>>,
+    ) -> impl std::future::Future<Output = HookNoopReturn> + Send {
+        let result = self.flush_collect();
+        async move { result.map_err(|e| anyhow::anyhow!("har-dedup: {e}")) }
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct CollectFile {
@@ -165,10 +158,6 @@ fn read_collect_file(path: &Path) -> Result<HashSet<PathBuf>, HarDedupError> {
         .collect())
 }
 
-// ---------------------------------------------------------------------------
-// Error type
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, thiserror::Error)]
 pub enum HarDedupError {
     #[error("IO error: {0}")]
@@ -177,29 +166,14 @@ pub enum HarDedupError {
     Json(#[from] serde_json::Error),
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arkdown_core::ImportKind;
-
-    fn make_args<'a>(specifier: &'a str) -> HookResolveIdArgs<'a> {
-        HookResolveIdArgs {
-            specifier,
-            importer: None,
-            is_entry: true,
-            kind: ImportKind::Import,
-        }
-    }
 
     #[test]
     fn test_collect_file_roundtrip() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let path = tmp.path().to_path_buf();
-        // Drop the guard so write_collect_file can overwrite it.
         drop(tmp);
 
         let files = vec!["a.ts".to_string(), "b.ets".to_string()];
@@ -219,8 +193,8 @@ mod tests {
         assert!(result.is_empty());
     }
 
-    #[tokio::test]
-    async fn test_real_build_excludes_file() {
+    #[test]
+    fn test_real_build_excludes_file() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("collect.json");
 
@@ -228,18 +202,15 @@ mod tests {
 
         let plugin = HarDeduplicatePlugin::real_build(path).unwrap();
         let result = plugin
-            .resolve_id(
-                &PluginContext::default(),
-                &make_args("/project/oh_modules/lib/index.ets"),
-            )
-            .await
+            .resolve_path("/project/oh_modules/lib/index.ets")
             .unwrap();
 
-        assert!(result.unwrap().external);
+        let output = result.unwrap();
+        assert!(matches!(output.external, Some(ResolvedExternal::Bool(true))));
     }
 
-    #[tokio::test]
-    async fn test_non_excluded_passes_through() {
+    #[test]
+    fn test_non_excluded_passes_through() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("collect.json");
 
@@ -247,11 +218,7 @@ mod tests {
 
         let plugin = HarDeduplicatePlugin::real_build(path).unwrap();
         let result = plugin
-            .resolve_id(
-                &PluginContext::default(),
-                &make_args("/project/entry/src/main/ets/Index.ets"),
-            )
-            .await
+            .resolve_path("/project/entry/src/main/ets/Index.ets")
             .unwrap();
 
         assert!(result.is_none());

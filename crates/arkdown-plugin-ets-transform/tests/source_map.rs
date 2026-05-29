@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use arkdown_core::{
-    ArkdownPlugin, BuildMode, BuildOption, OutputTarget, ProductConfig, SdkConfig, StrictModeConfig,
+    BuildMode, BuildOption, OutputTarget, ProductConfig, SdkConfig, StrictModeConfig,
 };
 use arkdown_plugin_ets_transform::EtsTransformPlugin;
 use std::path::PathBuf;
@@ -97,28 +97,26 @@ async fn test_component_source_map_references_ets_lines() {
     );
     let id = "entry/src/main/ets/pages/Hello.ets";
 
-    let result = plugin
-        .transform(&arkdown_core::PluginContext::default(), ets_source, id)
-        .await
-        .unwrap()
+    let result = plugin.do_transform(ets_source, id).unwrap()
         .expect("@Component transform must return Some");
 
     // Confirm the transform ran (ViewPU class emitted).
     assert!(
-        result.code.contains("class Hello extends ViewPU"),
+        result.code.as_deref().unwrap_or("").contains("class Hello extends ViewPU"),
         "must emit ViewPU class; got:\n{}",
-        result.code
+        result.code.as_deref().unwrap_or("")
     );
     assert!(
-        result.code.contains("observeComponentCreation2"),
+        result.code.as_deref().unwrap_or("").contains("observeComponentCreation2"),
         "must lower Row()/Text() calls; got:\n{}",
-        result.code
+        result.code.as_deref().unwrap_or("")
     );
 
     // Source map must be present for struct-transformed files.
-    let map_json_str = result
-        .source_map
-        .expect("source_map must be Some for @Component files");
+    let map_json_str = match &result.map {
+        rolldown_plugin::HookTransformOutputMap::Sourcemap(sm) => sm.to_json_string(),
+        _ => panic!("source_map must be Some for @Component files"),
+    };
 
     let map: serde_json::Value =
         serde_json::from_str(&map_json_str).expect("source_map must be valid JSON");
@@ -169,15 +167,13 @@ async fn test_non_component_ets_still_returns_source_map() {
     let code = "const greeting: string = 'hello';";
     let id = "entry/src/main/ets/util/helpers.ets";
 
-    let result = plugin
-        .transform(&arkdown_core::PluginContext::default(), code, id)
-        .await
-        .unwrap()
+    let result = plugin.do_transform(code, id).unwrap()
         .expect("non-component .ets must return Some");
 
-    let map_json_str = result
-        .source_map
-        .expect("source_map must be Some for non-struct .ets files");
+    let map_json_str = match &result.map {
+        rolldown_plugin::HookTransformOutputMap::Sourcemap(sm) => sm.to_json_string(),
+        _ => panic!("source_map must be Some for non-struct .ets files"),
+    };
     let map: serde_json::Value = serde_json::from_str(&map_json_str).unwrap();
     let mappings = map["mappings"].as_str().unwrap();
     // For the non-struct path (Case A) the oxc codegen emits per-token mappings
@@ -214,13 +210,10 @@ async fn test_multi_component_build_has_multiple_mapping_entries() {
     );
     let id = "entry/src/main/ets/pages/Page.ets";
 
-    let result = plugin
-        .transform(&arkdown_core::PluginContext::default(), ets_source, id)
-        .await
-        .unwrap()
+    let result = plugin.do_transform(ets_source, id).unwrap()
         .expect("@Component transform must return Some");
 
-    let map_json_str = result.source_map.expect("source_map must be Some");
+    let map_json_str = match &result.map { rolldown_plugin::HookTransformOutputMap::Sourcemap(sm) => sm.to_json_string(), _ => panic!("source_map must be Some") };
     let map: serde_json::Value = serde_json::from_str(&map_json_str).unwrap();
     let mappings = map["mappings"].as_str().unwrap();
     let groups: Vec<&str> = mappings.split(';').collect();

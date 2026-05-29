@@ -3,7 +3,7 @@
 //! ## Pipeline (new)
 //!
 //! 1. Convert [`LoaderJson`] entry points → rolldown [`InputItem`] list.
-//! 2. Wrap each `Arc<dyn ArkdownPlugin>` in [`ArkdownPluginAdapter`].
+//! 2. Pass [`SharedPluginable`] list to rolldown directly (no adapter).
 //! 3. Construct a rolldown [`Bundler`] with ESM output format.
 //! 4. Call [`Bundler::generate()`] — in-memory bundle, no disk writes.
 //!    During this step rolldown invokes the standard plugin hook sequence:
@@ -25,7 +25,7 @@ use std::sync::Arc;
 use index_vec::IndexVec;
 use rustc_hash::FxHashMap;
 
-use arkdown_core::{ArkChunk, ArkdownConfig, ArkdownError, ArkdownPlugin, BuildMode, ChunkGraph};
+use arkdown_core::{ArkChunk, ArkdownConfig, ArkdownError, BuildMode, ChunkGraph};
 use arkdown_profile::LoaderJson;
 use rolldown::{BundlerOptions, InputItem, OutputFormat};
 use rolldown_common::{
@@ -36,14 +36,13 @@ use rolldown_plugin::__inner::SharedPluginable;
 use rolldown_utils::js_regex::HybridRegex;
 
 use crate::output;
-use crate::plugin_adapter::ArkdownPluginAdapter;
 
 /// The top-level bundler for one OHOS module build.
 ///
 /// Orchestrates the full pipeline via rolldown with OHOS-specific plugins.
 pub struct Bundler {
     pub config: Arc<ArkdownConfig>,
-    pub plugins: Vec<Arc<dyn ArkdownPlugin>>,
+    pub plugins: Vec<SharedPluginable>,
 }
 
 /// The output produced by a successful [`Bundler::bundle`] call.
@@ -61,7 +60,7 @@ pub struct BundleOutput {
 
 impl Bundler {
     /// Create a new `Bundler` with the given configuration and plugin list.
-    pub fn new(config: ArkdownConfig, plugins: Vec<Arc<dyn ArkdownPlugin>>) -> Self {
+    pub fn new(config: ArkdownConfig, plugins: Vec<SharedPluginable>) -> Self {
         Bundler {
             config: Arc::new(config),
             plugins,
@@ -117,12 +116,8 @@ impl Bundler {
             })
             .collect();
 
-        // ── 2. Adapt OHOS plugins to rolldown's Plugin trait ─────────────────
-        let rd_plugins: Vec<SharedPluginable> = self
-            .plugins
-            .iter()
-            .map(|p| Arc::new(ArkdownPluginAdapter(Arc::clone(p))) as SharedPluginable)
-            .collect();
+        // ── 2. Pass plugins directly to rolldown ─────────────────────────────
+        let rd_plugins: Vec<SharedPluginable> = self.plugins.clone();
 
         // ── 3. Build rolldown BundlerOptions ─────────────────────────────────
         //

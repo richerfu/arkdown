@@ -1,72 +1,43 @@
-use std::sync::{Arc, Mutex};
+use std::path::Path;
 
-use arkdown_core::{ArkdownPlugin, CacheContext, CachedModule};
-use async_trait::async_trait;
-
-/// Plugin that triggers cache invalidation when the router map JSON changes.
+/// Check whether the router map cache should be invalidated.
 ///
-/// The router map is a JSON file listing named routes and their source files,
-/// enabling type-safe navigation in ArkTS. When its content changes, any
-/// cached module entry for the router map file itself must be invalidated.
-pub struct RouterMapPlugin {
-    /// FNV-1a hash of the current router map JSON content.
-    /// `None` means no router map has been observed yet — never invalidate.
-    current_hash: Arc<Mutex<Option<u64>>>,
+/// Returns `true` (invalidate) when:
+/// - The router map file exists AND its FNV-1a hash differs from the one
+///   stored in `cache_path`, OR the cache file does not exist yet.
+///
+/// Returns `false` (keep cache) when:
+/// - The router map does not exist (nothing to invalidate), OR
+/// - The stored hash matches the current router map hash.
+pub fn should_invalidate(router_map_path: &Path, cache_path: &Path) -> bool {
+    let content = match std::fs::read_to_string(router_map_path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    let current_hash = fnv1a_hash(&content);
+
+    let cached: u64 = match std::fs::read_to_string(cache_path) {
+        Ok(s) => s.trim().parse().unwrap_or(0),
+        Err(_) => return true,
+    };
+
+    current_hash != cached
 }
 
-impl RouterMapPlugin {
-    pub fn new() -> Self {
-        RouterMapPlugin {
-            current_hash: Arc::new(Mutex::new(None)),
-        }
+/// Persist the current router map hash to the cache file.
+///
+/// Call this after a successful build to mark the cache as up-to-date.
+pub fn update_cache(router_map_path: &Path, cache_path: &Path) -> std::io::Result<()> {
+    let content = std::fs::read_to_string(router_map_path)?;
+    let hash = fnv1a_hash(&content);
+    if let Some(parent) = cache_path.parent() {
+        std::fs::create_dir_all(parent)?;
     }
-
-    /// Update the stored router map hash from its raw JSON content.
-    /// Call this whenever the router map file is written by `arkdown-profile`.
-    pub fn set_router_map_content(&self, content: &str) {
-        let hash = fnv1a_hash(content);
-        *self.current_hash.lock().unwrap() = Some(hash);
-    }
-
-    /// Update the stored hash directly (e.g. from a pre-computed value).
-    pub fn set_router_map_hash(&self, hash: u64) {
-        *self.current_hash.lock().unwrap() = Some(hash);
-    }
+    std::fs::write(cache_path, hash.to_string())?;
+    Ok(())
 }
 
-impl Default for RouterMapPlugin {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait]
-impl ArkdownPlugin for RouterMapPlugin {
-    fn name(&self) -> &str {
-        "router-map"
-    }
-
-    /// Returns `true` when:
-    /// - A router map hash has been set (i.e., a router map exists), AND
-    /// - The cached module ID refers to the router map file itself.
-    ///
-    /// This ensures that `router_map.json` is re-processed whenever its
-    /// content changes, which in turn re-invalidates any modules that depend on it.
-    fn should_invalidate_cache(&self, _ctx: &CacheContext, cached: &CachedModule) -> bool {
-        let current = *self.current_hash.lock().unwrap();
-        match current {
-            // No router map observed yet — nothing to invalidate.
-            None => false,
-            Some(_hash) => {
-                // Invalidate the router map entry itself so it gets re-loaded.
-                // Callers that index dependents can then propagate transitively.
-                cached.id.ends_with("router_map.json")
-            }
-        }
-    }
-}
-
-/// FNV-1a 64-bit hash.
 fn fnv1a_hash(s: &str) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
     for b in s.bytes() {
@@ -79,45 +50,71 @@ fn fnv1a_hash(s: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
-    fn test_no_invalidation_without_hash() {
-        let plugin = RouterMapPlugin::new();
-        let cached = CachedModule {
-            id: "index.ets".to_string(),
-            source_hash: String::new(),
-        };
-        assert!(!plugin.should_invalidate_cache(&CacheContext::default(), &cached));
-    }
-
-    #[test]
-    fn test_no_invalidation_for_non_router_map_module() {
-        let plugin = RouterMapPlugin::new();
-        plugin.set_router_map_content(r#"{"routes":[]}"#);
-        let cached = CachedModule {
-            id: "src/pages/Index.ets".to_string(),
-            source_hash: String::new(),
-        };
-        // Non-router-map modules are not invalidated by this plugin.
-        assert!(!plugin.should_invalidate_cache(&CacheContext::default(), &cached));
-    }
-
-    #[test]
-    fn test_invalidates_router_map_module_when_hash_set() {
-        let plugin = RouterMapPlugin::new();
-        plugin.set_router_map_content(
-            r#"{"routes":[{"name":"Index","pageSourceFile":"pages/Index.ets"}]}"#,
+    fn test_no_invalidation_when_router_map_missing() {
+        let cache = tempfile::NamedTempFile::new().unwrap();
+        let result = should_invalidate(
+            Path::new("/nonexistent_router_map_path.json"),
+            cache.path(),
         );
-        let cached = CachedModule {
-            id: "build/default/cache/router_map.json".to_string(),
-            source_hash: String::new(),
-        };
-        assert!(plugin.should_invalidate_cache(&CacheContext::default(), &cached));
+        assert!(!result, "missing router map must not trigger invalidation");
+    }
+
+    #[test]
+    fn test_invalidate_when_cache_missing() {
+        let mut router_map = tempfile::NamedTempFile::new().unwrap();
+        writeln!(router_map, r#"{{"routerMap":[]}}"#).unwrap();
+        let cache_path = std::env::temp_dir().join("arkdown_test_no_such_cache_xyz.txt");
+        let _ = std::fs::remove_file(&cache_path);
+        let result = should_invalidate(router_map.path(), &cache_path);
+        assert!(result, "missing cache must trigger invalidation");
+    }
+
+    #[test]
+    fn test_no_invalidation_when_hash_matches() {
+        let mut router_map = tempfile::NamedTempFile::new().unwrap();
+        writeln!(router_map, r#"{{"routerMap":[]}}"#).unwrap();
+        let content = std::fs::read_to_string(router_map.path()).unwrap();
+        let hash = fnv1a_hash(&content);
+
+        let mut cache = tempfile::NamedTempFile::new().unwrap();
+        write!(cache, "{}", hash).unwrap();
+        cache.flush().unwrap();
+
+        let result = should_invalidate(router_map.path(), cache.path());
+        assert!(!result, "matching hash must not trigger invalidation");
+    }
+
+    #[test]
+    fn test_invalidate_when_content_changed() {
+        let mut router_map = tempfile::NamedTempFile::new().unwrap();
+        writeln!(router_map, r#"{{"routerMap":[]}}"#).unwrap();
+
+        let mut cache = tempfile::NamedTempFile::new().unwrap();
+        write!(cache, "12345678").unwrap();
+        cache.flush().unwrap();
+
+        let result = should_invalidate(router_map.path(), cache.path());
+        assert!(result, "changed content must trigger invalidation");
     }
 
     #[test]
     fn test_fnv1a_hash_deterministic() {
         assert_eq!(fnv1a_hash("hello"), fnv1a_hash("hello"));
         assert_ne!(fnv1a_hash("hello"), fnv1a_hash("world"));
+    }
+
+    #[test]
+    fn test_update_cache_roundtrip() {
+        let mut router_map = tempfile::NamedTempFile::new().unwrap();
+        write!(router_map, "{}", r#"{"routerMap":[{"name":"Index"}]}"#).unwrap();
+        let cache = tempfile::NamedTempFile::new().unwrap();
+
+        update_cache(router_map.path(), cache.path()).unwrap();
+
+        let result = should_invalidate(router_map.path(), cache.path());
+        assert!(!result, "after update_cache, should not invalidate");
     }
 }

@@ -2,23 +2,13 @@
 //!
 //! This crate replaces the `ets-loader` subprocess invocation described in SPEC-004
 //! with a fully in-process Rust implementation. It implements three components as
-//! a single [`ArkdownPlugin`][arkdown_core::ArkdownPlugin]:
+//! a single [`rolldown_plugin::Plugin`]:
 //!
 //! | Component      | SDK equivalent        | What it does                                      |
 //! | -------------- | --------------------- | ------------------------------------------------- |
 //! | `etsChecker`   | `etsChecker` plugin   | Validates decorator usage rules (diagnostics)     |
 //! | `etsTransform` | `etsTransform` plugin | Desugars ArkUI decorators and struct components   |
 //! | `apiTransform` | `apiTransform` plugin | Rewrites OHOS API imports by target SDK version   |
-//!
-//! # Usage
-//!
-//! ```rust,ignore
-//! use std::sync::Arc;
-//! use arkdown_plugin_ets_transform::EtsTransformPlugin;
-//!
-//! let plugin = EtsTransformPlugin::new(Arc::clone(&config));
-//! loader.register_plugin(Box::new(plugin));
-//! ```
 
 pub mod api_transform;
 pub mod checker;
@@ -27,59 +17,44 @@ pub mod kit_map;
 pub mod source_map;
 pub mod transform;
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
-use arkdown_core::{
-    ArkdownConfig, ArkdownError, ArkdownPlugin, HookTransformOutput, HookUsage, ModuleSource,
-    ModuleType, PluginContext, PluginResult, ResolvedId,
-};
-use async_trait::async_trait;
+use arkdown_core::{ArkdownConfig, ModuleSource, ModuleType, ResolvedId};
 use oxc_allocator::Allocator;
 use oxc_codegen::{Codegen, CodegenOptions};
 use oxc_parser::Parser;
 use oxc_span::SourceType;
+use rolldown_plugin::{
+    HookTransformArgs, HookTransformOutput, HookTransformOutputMap, HookTransformReturn, HookUsage,
+    Plugin, SharedTransformPluginContext,
+};
+use rolldown_sourcemap::SourceMap as RolldownSourceMap;
 
 /// ArkTS transform plugin — desugars `.ets` files into TypeScript.
 ///
-/// Register this plugin in the `arkdown-loader` plugin list before any
-/// TypeScript-only plugins so that `.ets` modules are converted to `.ts`
-/// before downstream processing begins.
+/// Register this plugin in the plugin list before any TypeScript-only plugins
+/// so that `.ets` modules are converted to `.ts` before downstream processing begins.
 pub struct EtsTransformPlugin {
     pub config: Arc<ArkdownConfig>,
+}
+
+impl std::fmt::Debug for EtsTransformPlugin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EtsTransformPlugin").finish_non_exhaustive()
+    }
 }
 
 impl EtsTransformPlugin {
     pub fn new(config: Arc<ArkdownConfig>) -> Self {
         EtsTransformPlugin { config }
     }
-}
 
-#[async_trait]
-impl ArkdownPlugin for EtsTransformPlugin {
-    fn name(&self) -> &str {
-        "ets-transform"
-    }
-
-    fn register_hook_usage(&self) -> HookUsage {
-        HookUsage::Transform
-    }
-
-    /// Transform an ArkTS `.ets` or `.ts` module.
-    ///
-    /// The pipeline:
-    /// 1. Bail out immediately for files that are neither `.ets` nor `.ts`.
-    /// 2. **Kit import rewrite** — `@kit.XxxKit` → individual `@ohos:xxx` imports
-    ///    (both `.ets` and `.ts`; matches hvigorw ets-loader behaviour).
-    /// 3. `.ets` only: run `etsChecker` diagnostics and `etsTransform`
-    ///    struct/decorator/ArkUI build DSL desugaring with the ohos-rs/oxc ArkUI AST.
-    /// 5. Apply version-gated API import rewrites (`@ohos/* → @system.*` for API < 9).
-    /// 6. Return a new `HookTransformOutput`.
-    async fn transform(
+    pub fn do_transform(
         &self,
-        _ctx: &PluginContext,
         code: &str,
         id: &str,
-    ) -> PluginResult<Option<HookTransformOutput>> {
+    ) -> anyhow::Result<Option<HookTransformOutput>> {
         let is_ets = id.ends_with(".ets");
         let is_ts = !is_ets && id.ends_with(".ts");
 
@@ -87,16 +62,8 @@ impl ArkdownPlugin for EtsTransformPlugin {
             return Ok(None);
         }
 
-        // Preserve the original source before any rewriting so that source map
-        // positions generated below reference the original file positions (not
-        // the expanded kit-rewritten intermediate form).
         let original_source = code;
-
-        // Step 1: Rewrite @kit.XxxKit imports to individual @ohos:xxx imports.
-        // Must happen before struct desugaring so the oxc parser sees the final
-        // import specifiers.
         let code = api_transform::rewrite_kit_imports(original_source);
-
         let api_version = self.config.sdk_config.compile_api_version;
 
         if !is_ets {
@@ -107,18 +74,21 @@ impl ArkdownPlugin for EtsTransformPlugin {
             // we hand to rolldown.  rolldown can then chain:
             //   bundled-output → regenerated-code → kit-rewritten source
             // producing a per-token map in the final chunk.source_map.
-            let (gen_code, source_map) =
+            let (gen_code, source_map_json) =
                 generate_code_and_source_map(&code, id).unwrap_or((code, None));
             let final_code = api_transform::rewrite_imports_for_version(&gen_code, api_version);
+            let map = source_map_json
+                .as_deref()
+                .and_then(|j| RolldownSourceMap::from_json_string(j).ok())
+                .map(|sm| HookTransformOutputMap::Sourcemap(Box::new(sm)))
+                .unwrap_or(HookTransformOutputMap::Null);
             return Ok(Some(HookTransformOutput {
-                code: final_code,
-                source_map,
+                code: Some(final_code),
+                map,
+                ..Default::default()
             }));
         }
 
-        // Step 2: ArkTS struct/decorator and ArkUI build DSL desugaring (.ets only).
-        // The workspace-pinned ohos-rs/oxc fork parses `.ets` with ArkUI nodes,
-        // so the build body is lowered before downstream TypeScript parsing.
         let source = ModuleSource {
             id: ResolvedId {
                 id: id.to_string(),
@@ -137,13 +107,9 @@ impl ArkdownPlugin for EtsTransformPlugin {
 
         let transformed =
             transform::transform_ets_with_options(&source, &options).map_err(|e| {
-                ArkdownError::PluginError {
-                    plugin: "ets-transform".to_string(),
-                    source: Box::new(e),
-                }
+                anyhow::anyhow!("ets-transform: {e}")
             })?;
 
-        // Step 4: Apply version-gated API import rewrites.
         let final_source = api_transform::rewrite_imports_for_version(&transformed, api_version);
 
         // For .ets files the struct transform may rewrite the entire file
@@ -166,12 +132,18 @@ impl ArkdownPlugin for EtsTransformPlugin {
         // coordinate spaces and prevented any chaining.
         if transformed == code {
             // Case A: no struct transform — use per-token regenerated code.
-            let (gen_code, source_map) =
+            let (gen_code, source_map_json) =
                 generate_code_and_source_map(&code, id).unwrap_or((final_source, None));
             let final_code = api_transform::rewrite_imports_for_version(&gen_code, api_version);
+            let map = source_map_json
+                .as_deref()
+                .and_then(|j| RolldownSourceMap::from_json_string(j).ok())
+                .map(|sm| HookTransformOutputMap::Sourcemap(Box::new(sm)))
+                .unwrap_or(HookTransformOutputMap::Null);
             Ok(Some(HookTransformOutput {
-                code: final_code,
-                source_map,
+                code: Some(final_code),
+                map,
+                ..Default::default()
             }))
         } else {
             // Case B: struct transform applied.  Re-run the transform via the
@@ -191,11 +163,38 @@ impl ArkdownPlugin for EtsTransformPlugin {
                 (final_code, map)
             })
             .unwrap_or_else(|_| (final_source, None));
+            let map = source_map
+                .as_deref()
+                .and_then(|j| RolldownSourceMap::from_json_string(j).ok())
+                .map(|sm| HookTransformOutputMap::Sourcemap(Box::new(sm)))
+                .unwrap_or(HookTransformOutputMap::Null);
             Ok(Some(HookTransformOutput {
-                code: gen_code,
-                source_map,
+                code: Some(gen_code),
+                map,
+                ..Default::default()
             }))
         }
+    }
+}
+
+impl Plugin for EtsTransformPlugin {
+    fn name(&self) -> Cow<'static, str> {
+        Cow::Borrowed("ets-transform")
+    }
+
+    fn register_hook_usage(&self) -> HookUsage {
+        HookUsage::Transform
+    }
+
+    fn transform(
+        &self,
+        _ctx: SharedTransformPluginContext,
+        args: &HookTransformArgs<'_>,
+    ) -> impl std::future::Future<Output = HookTransformReturn> + Send {
+        let code = args.code.as_str().to_owned();
+        let id = args.id.to_owned();
+        let config = Arc::clone(&self.config);
+        async move { EtsTransformPlugin::new(config).do_transform(&code, &id) }
     }
 }
 
@@ -306,14 +305,10 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_plugin_passthrough_non_ets_non_ts() {
+    #[test]
+    fn test_plugin_passthrough_non_ets_non_ts() {
         let plugin = EtsTransformPlugin::new(make_config(12));
-        // .js files are not handled by this plugin
-        let result = plugin
-            .transform(&PluginContext::default(), "const x = 1;", "test.js")
-            .await
-            .unwrap();
+        let result = plugin.do_transform("const x = 1;", "test.js").unwrap();
         assert!(
             result.is_none(),
             "non-ETS/non-TS modules must pass through as None"
@@ -325,19 +320,19 @@ mod tests {
         let plugin = EtsTransformPlugin::new(make_config(12));
         let code = r#"import { hilog } from "@kit.PerformanceAnalysisKit";"#;
         let result = plugin
-            .transform(&PluginContext::default(), code, "app/src/main/ets/util.ts")
-            .await
+            .do_transform(code, "app/src/main/ets/util.ts")
             .unwrap();
-        let out = result.expect("TS file with kit import must return Some");
+        let output = result.expect("TS file with kit import must return Some");
+        let code = output.code.unwrap_or_default();
         assert!(
-            out.code.contains("@ohos:hilog"),
+            code.contains("@ohos:hilog"),
             "@kit.PerformanceAnalysisKit/hilog must be rewritten to @ohos:hilog; got:\n{}",
-            out.code
+            code
         );
         assert!(
-            !out.code.contains("@kit."),
+            !code.contains("@kit."),
             "@kit.* specifier must be gone; got:\n{}",
-            out.code
+            code
         );
     }
 
@@ -346,20 +341,18 @@ mod tests {
         let plugin = EtsTransformPlugin::new(make_config(12));
         let code = "import { UIAbility } from \"@kit.AbilityKit\";\n@Entry\n@Component\nstruct Index {\n  build() {}\n}";
         let id = "entry/src/main/ets/entryability/EntryAbility.ets";
-        let result = plugin
-            .transform(&PluginContext::default(), code, id)
-            .await
-            .unwrap();
-        let out = result.expect("ETS transform must return Some");
+        let result = plugin.do_transform(code, id).unwrap();
+        let output = result.expect("ETS transform must return Some");
+        let code = output.code.unwrap_or_default();
         assert!(
-            out.code.contains("@ohos:app.ability.UIAbility"),
+            code.contains("@ohos:app.ability.UIAbility"),
             "UIAbility must be rewritten to @ohos:app.ability.UIAbility; got:\n{}",
-            out.code
+            code
         );
         assert!(
-            !out.code.contains("@kit.AbilityKit"),
+            !code.contains("@kit.AbilityKit"),
             "@kit.AbilityKit must be gone; got:\n{}",
-            out.code
+            code
         );
     }
 
@@ -368,22 +361,19 @@ mod tests {
         let plugin = EtsTransformPlugin::new(make_config(12));
         let code = "@Entry\n@Component\nstruct Index {\n  build() {}\n}";
         let id = "entry/src/main/ets/pages/Index.ets";
-        let result = plugin
-            .transform(&PluginContext::default(), code, id)
-            .await
-            .unwrap();
-        let out = result.expect("ETS transform must return Some(HookTransformOutput)");
+        let result = plugin.do_transform(code, id).unwrap();
+        let output = result.expect("ETS transform must return Some");
+        let code = output.code.unwrap_or_default();
         assert!(
-            out.code.contains("class Index extends ViewPU"),
+            code.contains("class Index extends ViewPU"),
             "struct must be desugared to ViewPU class; got:\n{}",
-            out.code
+            code
         );
     }
 
     #[tokio::test]
     async fn test_plugin_lowers_minimal_arkui_build_body() {
         let plugin = EtsTransformPlugin::new(make_config(12));
-        // Typical Index.ets page with ArkUI declarative DSL in build().
         let code = "\
 @Entry\n\
 @Component\n\
@@ -403,40 +393,38 @@ struct Index {\n\
   }\n\
 }";
         let id = "entry/src/main/ets/pages/Index.ets";
-        let result = plugin
-            .transform(&PluginContext::default(), code, id)
-            .await
-            .unwrap();
-        let out = result.expect("ETS transform must return Some(HookTransformOutput)");
+        let result = plugin.do_transform(code, id).unwrap();
+        let output = result.expect("ETS transform must return Some");
+        let code = output.code.unwrap_or_default();
         assert!(
-            out.code.contains("class Index extends ViewPU"),
+            code.contains("class Index extends ViewPU"),
             "struct must be desugared to ViewPU class; got:\n{}",
-            out.code
+            code
         );
         assert!(
-            out.code.contains("this.observeComponentCreation2"),
+            code.contains("this.observeComponentCreation2"),
             "ArkUI build() DSL must be lowered; got:\n{}",
-            out.code
+            code
         );
         assert!(
-            out.code.contains("Row.create();"),
+            code.contains("Row.create();"),
             "Row.create missing; got:\n{}",
-            out.code
+            code
         );
         assert!(
-            out.code.contains("Column.create();"),
+            code.contains("Column.create();"),
             "Column.create missing; got:\n{}",
-            out.code
+            code
         );
         assert!(
-            out.code.contains("Text.create(this.message);"),
+            code.contains("Text.create(this.message);"),
             "Text.create missing; got:\n{}",
-            out.code
+            code
         );
         assert!(
-            !out.code.contains("build() { return; }"),
+            !code.contains("build() { return; }"),
             "build body must not be stubbed; got:\n{}",
-            out.code
+            code
         );
     }
 
@@ -445,17 +433,17 @@ struct Index {\n\
     /// one comma-separated segment within a single source line (i.e. more than
     /// one mapping per line), proving that the codegen emits per-token entries
     /// rather than per-statement entries.
-    #[tokio::test]
-    async fn test_ts_file_emits_per_token_source_map() {
+    #[test]
+    fn test_ts_file_emits_per_token_source_map() {
         let plugin = EtsTransformPlugin::new(make_config(12));
         let code = "const x: number = 1;\nconst y: string = 'hi';";
         let id = "entry/src/main/ets/util.ts";
-        let result = plugin
-            .transform(&PluginContext::default(), code, id)
-            .await
-            .unwrap();
-        let out = result.expect("TS transform must return Some");
-        let map_json = out.source_map.expect("source_map must be Some for .ts files");
+        let out = plugin.do_transform(code, id).unwrap()
+            .expect("TS transform must return Some");
+        let map_json = match &out.map {
+            rolldown_plugin::HookTransformOutputMap::Sourcemap(sm) => sm.to_json_string(),
+            _ => panic!("source_map must be Some for .ts files"),
+        };
         let map: serde_json::Value =
             serde_json::from_str(&map_json).expect("source_map must be valid JSON");
         let mappings = map
@@ -472,19 +460,17 @@ struct Index {\n\
     /// For a non-struct .ets file (no @Component/@Entry) the source map must
     /// be per-token (generated coordinates match the returned code) so that
     /// rolldown can chain it into a dense final chunk source map.
-    #[tokio::test]
-    async fn test_non_struct_ets_emits_per_token_source_map() {
+    #[test]
+    fn test_non_struct_ets_emits_per_token_source_map() {
         let plugin = EtsTransformPlugin::new(make_config(12));
         let code = "import { UIAbility } from \"@ohos:app.ability.UIAbility\";\nconst TAG = 'test';";
         let id = "entry/src/main/ets/entryability/EntryAbility.ets";
-        let result = plugin
-            .transform(&PluginContext::default(), code, id)
-            .await
-            .unwrap();
-        let out = result.expect("ETS non-struct transform must return Some");
-        let map_json = out
-            .source_map
-            .expect("source_map must be Some for non-struct .ets files");
+        let out = plugin.do_transform(code, id).unwrap()
+            .expect("ETS non-struct transform must return Some");
+        let map_json = match &out.map {
+            rolldown_plugin::HookTransformOutputMap::Sourcemap(sm) => sm.to_json_string(),
+            _ => panic!("source_map must be Some for non-struct .ets files"),
+        };
         let map: serde_json::Value =
             serde_json::from_str(&map_json).expect("source_map must be valid JSON");
         let mappings = map
