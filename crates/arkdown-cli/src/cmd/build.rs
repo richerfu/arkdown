@@ -21,6 +21,7 @@ use arkdown_plugin_ohos_resolve::{process_importees, OhosResolvePlugin, ProcessI
 use arkdown_profile::ProfileProcessor;
 use arkdown_resolver::ResolverConfig;
 use arkdown_resource::{ResourceCompileConfig, ResourceCompileInput, ResourceCompiler};
+use arkdown_obfuscate::{should_obfuscate, ObfuscationOptions, Obfuscator};
 use arkdown_sign::HapSigner;
 use arkdown_ts2abc::{compile_to_abc, Ts2abcInput, Ts2abcOptions};
 
@@ -259,6 +260,51 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             .write_loader_json(loader_json, &loader_json_out)
             .map_err(|e| anyhow::anyhow!("update loader.json with importees failed: {}", e))?;
     }
+
+    // Step 4: Obfuscation (release builds with obfuscation configured)
+    progress.step(4, 6, "Obfuscating");
+    let obf_config = config_arc
+        .product
+        .build_option
+        .ark_options
+        .as_ref()
+        .and_then(|ao| ao.obfuscation.as_ref());
+    if should_obfuscate(&config_arc.build_mode, obf_config) {
+        let rule_files: Vec<PathBuf> = obf_config
+            .and_then(|o| o.rules_file.as_ref())
+            .map(|f| vec![f.clone()])
+            .unwrap_or_default();
+        let cache_dir = project_root.join("build/default/intermediates/obf-cache");
+        let obfuscator = Obfuscator::new(ObfuscationOptions {
+            rule_files,
+            cache_dir,
+            export_rule_path: None,
+        })
+        .map_err(|e| anyhow::anyhow!("Failed to create obfuscator: {}", e))?;
+        for bundle_out in &bundle_outs {
+            for (_chunk_name, path) in &bundle_out.chunk_files {
+                if path.extension().and_then(|e| e.to_str()) == Some("js") && path.exists() {
+                    let tmp_path = path.with_extension("js.obf_tmp");
+                    obfuscator
+                        .obfuscate_file(path, &tmp_path)
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "Obfuscation failed for {}: {}",
+                                path.display(),
+                                e
+                            )
+                        })?;
+                    std::fs::rename(&tmp_path, path).with_context(|| {
+                        format!(
+                            "Failed to replace obfuscated chunk {}",
+                            path.display()
+                        )
+                    })?;
+                }
+            }
+        }
+    }
+    progress.done();
 
     // Step 5: ABC compilation
     progress.step(5, 6, "Compiling ABC");

@@ -21,6 +21,7 @@
 //! assert!(!out.code.contains("longName"));
 //! ```
 
+pub(crate) mod minifier;
 mod rename;
 mod rules;
 mod transform;

@@ -17,6 +17,7 @@ arkdown-abc = { path = "../arkdown-abc" }
 arkdown-ts2abc = { path = "../arkdown-ts2abc" }
 arkdown-pack = { path = "../arkdown-pack" }
 arkdown-sign = { path = "../arkdown-sign" }
+arkdown-obfuscate = { path = "../arkdown-obfuscate" }
 arkdown-plugin-ets-transform = { path = "../arkdown-plugin-ets-transform" }
 arkdown-plugin-chunk-wrapper = { path = "../arkdown-plugin-chunk-wrapper" }
 arkdown-plugin-ohos-resolve = { path = "../arkdown-plugin-ohos-resolve" }

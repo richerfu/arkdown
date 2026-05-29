@@ -9,15 +9,22 @@
 
 ## Summary
 
-Pure Rust JS obfuscation using `oxc_parser` + span-based identifier renaming.
+Pure Rust JS obfuscation and minification using `oxc_parser` + `oxc_minifier`.
 Replaces the previous approach of invoking a closed-source SDK binary as a subprocess.
 
-The crate is inserted between bundler output and `arkdown-abc` compilation. It parses
-each bundled JS file with `oxc_parser`, collects top-level binding names
-(`var`/`let`/`const`, `function`, `class`), generates short replacement names
-(a, b, …, z, aa, …), and rewrites all whole-word occurrences in the source text using
-descending-offset splice (so earlier offsets are not invalidated by shorter replacements).
-Property accesses (`.name`) are excluded from renaming.
+The crate is inserted between bundler output and `arkdown-abc` compilation. Two passes run:
+
+1. **Identifier renaming** (when `-enable-obfuscation` is set): parses each bundled JS
+   file with `oxc_parser`, collects top-level binding names (`var`/`let`/`const`,
+   `function`, `class`), generates short replacement names (a, b, …, z, aa, …), and
+   rewrites all whole-word occurrences in the source text using descending-offset splice
+   (so earlier offsets are not invalidated by shorter replacements).  Property accesses
+   (`.name`) are excluded from renaming.
+
+2. **Minification** (when `-compact` is set): runs `oxc_minifier` with full compress
+   (`CompressOptions::smallest()`: dead-code elimination, constant folding, variable
+   joining) and `MangleOptions` for identifier compression, then re-emits via
+   `CodegenOptions::minify()` (whitespace/comment removal).
 
 OHOS rule files (the same `.txt` format used by hvigor) are parsed natively and control
 which names are kept, which categories are obfuscated, and whether `console.log` calls

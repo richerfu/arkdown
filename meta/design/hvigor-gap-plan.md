@@ -78,7 +78,7 @@ and release-mode terser/minification when applicable.
 | Rollup/rolldown options  | ✅ **Fixed (2026-05-28)**: Clean ESM output, `@ohos:` imports external, treeshake disabled for debug. **IIFE/CJS compatibility paths removed** from both bundler and ABC compiler. | Release treeshake, `manualChunks` for `supportChunks`, ByteCode HAR/HSP externals. |
 | ByteCode HAR importees   | ✅ **Fixed (2026-05-29)**: `process_importees()` ports `process-importee.js`. BFS from entry chunks, OHM URL generation, importee.json cache written. `nonEntryImportees` in loader.json. | ByteCode HAR compilation flow (requires HAR input fixture). |
 | ABC compiler             | 🔄 **Improved**: LNP line advance tracking, OHM URL scope names, SET_FILE debug info, binary/unary/logical ops, static-object `createobjectwithbuffer` (opcode 0x07), emit_new args, call-argument closures, START_LOCAL_EXTENDED (0x04) for scope/param vars, SET_PROLOGUE_END (0x08) after scope declarations, NewLexEnvWithName for arrow captures, class-decl lexical bindings. modules.abc 8565B vs 9844B. | Per-instruction LNP ADVANCE sequences (hvigor emits between every instruction group, not just per-statement); per-token source map granularity. |
-| Obfuscation/minification | `arkdown-obfuscate` exists but not wired in.                                                                                                                                           | hvigor release builds run SDK obfuscation + terser before ABC.                          |
+| Obfuscation/minification | ✅ **Fixed (2026-05-29)**: `arkdown-obfuscate` wired into CLI step 4. Identifier renaming via OHOS rule files. `-compact` triggers `oxc_minifier` (dead-code elimination, constant folding, whitespace removal, identifier mangling). | SDK obfuscation uses closed-source binary; our implementation covers the open-spec rules. Property-access obfuscation (`-enable-property-obfuscation`) not yet implemented. |
 | Incremental cache        | `arkdown-cache` exists but not wired in.                                                                                                                                               | hvigor rollup msgpack cache + es2abc `--cache-file` support.                            |
 | Source maps/debug        | ✅ Per-statement source maps from kit-rewritten ETS source (pre-struct-transform). Pretty-printed JSON. sourceMaps.map 1281B vs 1847B golden (gap: per-statement vs per-token VLQ).   | Per-token source map granularity to match tsc/ets-loader output.                        |
 | Packaging metadata       | ✅ **Fixed (2026-05-28)**: HAP zip identical to hvigor — correct module.json merge, pack.info, pkgContextInfo.json (intermediate, not in HAP), resources.index. | None for minimal-hap. HAR/HSP-specific pack flows for complex projects.                 |
@@ -215,7 +215,7 @@ large compiler project. Treat it as the longest pole in the plan.
 
 ### Phase 6: Release features and packaging cleanup
 
-- Wire `arkdown-obfuscate` into the CLI between bundling and ABC compilation.
+- ✅ Wire `arkdown-obfuscate` into the CLI between bundling and ABC compilation (2026-05-29).
 - Invalidate code/ABC caches when obfuscation rules or SDK compile env change.
 - Fix `pkgContextInfo.json`, `pack.info`, source map packaging, native libs,
   integrated HSP, privacy profile, startup/share config, and router map output.
