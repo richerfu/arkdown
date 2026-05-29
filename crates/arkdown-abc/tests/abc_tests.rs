@@ -1163,6 +1163,31 @@ fn test_static_object_uses_createobjectwithbuffer() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn test_await_expression_compiles() {
+    // An `async` function with `await` must compile to valid Panda ABC without
+    // panicking.  Simplified lowering: the awaited expression is evaluated and
+    // left in the accumulator; ArkRuntime's Promise machinery handles the rest.
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("await.abc");
+    let source = r#"
+        async function loadData() {
+            const result = await fetchData();
+            return result;
+        }
+    "#;
+    module_compiler()
+        .compile(vec![module_record("test/await_test", source)], &out)
+        .expect("compile async/await source");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+    assert!(
+        bytes.len() > 32,
+        "async/await bytecode must be non-trivial, got {} bytes",
+        bytes.len()
+    );
+}
+
+#[test]
 fn test_throw_statement_emits_throw_opcode() {
     // `throw new Error("oops")` must produce the Panda `throw` opcode,
     // which is a two-byte prefixed instruction: [0xFE, 0x00].
