@@ -200,10 +200,13 @@ When the range is exceeded, fall back to explicit `ADVANCE_LINE` + `ADVANCE_PC` 
 **Current implementation** (`arkdown-abc` `LineTracker`):
 
 - `MethodRecord::line_ops: Vec<u8>` stores the pre-encoded LNP body
-  (advance sequences + END_SEQUENCE) for each method.
-- Line tracking is active for `func_main_0` when a source file is provided.
-  Nested function bodies default to a minimal `SET_FILE + END_SEQUENCE` LNP.
-- 1-based line numbers are computed from statement byte offsets via `line_at()`.
+  (advance sequences + `END_SEQUENCE`) for each method.
+- Line tracking is active for all methods that have a source file.
+  `CodeGen::push()` emits one `LineTracker::advance()` call per bytecode instruction
+  (per-instruction ADVANCE density, matching hvigor/es2abc).
+- `CodeGen::current_line: u32` is updated at the start of each `emit_stmt()` and
+  `emit_expr()` call, giving accurate per-sub-expression line attribution.
+- 1-based line numbers are computed from span byte offsets via `line_at()`.
 
 **Current LNP body structure** emitted by `arkdown-abc` for each method with debug info:
 
@@ -213,13 +216,16 @@ START_LOCAL_EXTENDED (0x04) × 3       36 bytes  — "this"(reg0), "newTarget"(r
   each entry: [0x04][name_off:u32 LE][reg:u8][type_off:u32 LE=0][type_tag:u16 LE=0] = 12 bytes
 START_LOCAL_EXTENDED × N_params       12×N bytes — formal parameter names starting at reg3
 SET_PROLOGUE_END (0x08)                1 byte   — marks end of function prologue
-<line_ops: advance sequences>         variable  — ADVANCE_PC, ADVANCE_LINE, SPECIAL_OPCODEs
+<line_ops>                            variable  — one SPECIAL_OPCODE (1B) per instruction;
+                                                   ADVANCE_LINE for line jumps; ADVANCE_PC for
+                                                   large PC deltas
+SET_EPILOGUE_BEGIN (0x09)              1 byte   — emitted immediately before return instruction
 END_SEQUENCE (0x00)                    1 byte   — terminates program
 ```
 
 Minimum valid LNP body: `[0x05, <4 bytes source file string offset LE>]` +
-`[0x04 × 3 scope vars × 12 bytes each]` + `[0x08]` + `[0x00]`
-= 5 + 36 + 1 + 1 = 43 bytes for a zero-parameter, zero-line-op method.
+`[0x04 × 3 scope vars × 12 bytes each]` + `[0x08]` + `[0x09]` + `[0x00]`
+= 5 + 36 + 1 + 1 + 1 = 44 bytes for a zero-parameter, single-`returnundefined` method.
 
 ---
 

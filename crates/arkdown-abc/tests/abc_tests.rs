@@ -960,12 +960,110 @@ registerNamedRoute(() => new Index(void 0, {}), "", {bundleName: "x"});
         .expect("compile both modules");
     let bytes = std::fs::read(&out).unwrap();
     assert!(bytes.starts_with(b"PANDA\0\0\0"));
-    // Two modules with class methods should produce meaningful bytecode.
-    // This is a regression baseline; the hvigor target is 9844 bytes.
+    // This test uses debug_info:false; it is a structural regression baseline only.
+    // For byte-parity against hvigor (9844 bytes) see test_two_module_debug_parity below.
     assert!(
         bytes.len() > 2000,
         "two-module compile must produce >2000 byte ABC, got {} bytes",
         bytes.len()
+    );
+}
+
+#[test]
+fn test_two_module_debug_parity() {
+    // Compile with debug_info:true (LNP enabled) to measure parity against hvigor.
+    // Hvigor produces 9844 bytes for the same source.  We track progress here.
+    let entry_source = r#"
+import UIAbility from "@ohos:app.ability.UIAbility";
+import hilog from "@ohos:hilog";
+const DOMAIN = 0;
+var EntryAbility = class extends UIAbility {
+    onCreate(want, launchParam) {
+        hilog.info(DOMAIN, "testTag", "%{public}s", "Ability onCreate");
+    }
+    onWindowStageCreate(windowStage) {
+        hilog.info(DOMAIN, "testTag", "%{public}s", "Ability onWindowStageCreate");
+        windowStage.loadContent("pages/Index", (err) => {
+            if (err.code) {
+                hilog.error(DOMAIN, "testTag", "failed", JSON.stringify(err));
+                return;
+            }
+            hilog.info(DOMAIN, "testTag", "Succeeded.");
+        });
+    }
+    onForeground() {
+        hilog.info(DOMAIN, "testTag", "%{public}s", "Ability onForeground");
+    }
+    onBackground() {
+        hilog.info(DOMAIN, "testTag", "%{public}s", "Ability onBackground");
+    }
+};
+export { EntryAbility as default };
+"#;
+    let index_source = r#"
+if (!("finalizeConstruction" in ViewPU.prototype))
+    Reflect.set(ViewPU.prototype, "finalizeConstruction", () => {});
+var Index = class extends ViewPU {
+    constructor(parent, params, __localStorage, elmtId, paramsLambda, extraInfo) {
+        super(parent, __localStorage, elmtId, extraInfo);
+        if (typeof paramsLambda === "function") this.paramsGenerator_ = paramsLambda;
+        this.__message = new ObservedPropertySimplePU("Hello World", this, "message");
+        this.setInitiallyProvidedValue(params);
+        this.finalizeConstruction();
+    }
+    setInitiallyProvidedValue(params) {
+        if (params.message !== void 0) this.message = params.message;
+    }
+    updateStateVars(params) {}
+    purgeVariableDependenciesOnElmtId(rmElmtId) {
+        this.__message.purgeDependencyOnElmtId(rmElmtId);
+    }
+    aboutToBeDeleted() {
+        this.__message.aboutToBeDeleted();
+        SubscriberManager.Get().delete(this.id__());
+        this.aboutToBeDeletedInternal();
+    }
+    get message() { return this.__message.get(); }
+    set message(newValue) { this.__message.set(newValue); }
+    rerender() { this.updateDirtyElements(); }
+};
+registerNamedRoute(() => new Index(void 0, {}), "", {bundleName: "x"});
+"#;
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("modules_debug.abc");
+    AbcCompiler::new(AbcCompileOptions {
+        debug_info: true,
+        opt_level: 0,
+        target_api_version: 12,
+        merge_abc: true,
+        module: true,
+        cache_path: None,
+    })
+    .compile(
+        vec![
+            AbcModule {
+                record_name: "com.example.test/entry/ets/entryability/EntryAbility".to_string(),
+                source: entry_source.to_string(),
+                source_map: None,
+            },
+            AbcModule {
+                record_name: "com.example.test/entry/ets/pages/Index".to_string(),
+                source: index_source.to_string(),
+                source_map: None,
+            },
+        ],
+        &out,
+    )
+    .expect("compile both modules with debug info");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+    let sz = bytes.len();
+    eprintln!("[parity] debug two-module ABC = {sz}B / 9844B hvigor ({:.0}%)", sz as f64 / 9844.0 * 100.0);
+    // Baseline without per-instruction LNP was 6670B.  Per-instruction tracking
+    // adds ~211B for these test sources.  This threshold prevents LNP regressions.
+    assert!(
+        sz > 6800,
+        "debug-info two-module compile must exceed 6800B (per-instruction LNP regression guard), got {sz}B"
     );
 }
 

@@ -540,20 +540,6 @@ fn scope_names_literal_array(methods: &[MethodRecord], record_name: &str) -> Lit
     }
 }
 
-fn constructor_scope_name(method_name: &str) -> Option<String> {
-    method_name
-        .strip_prefix("#~@0=#")
-        .or_else(|| method_name.strip_prefix("#~@0="))
-        .map(str::to_string)
-}
-
-fn class_method_scope_name(method_name: &str) -> Option<String> {
-    let name = method_name
-        .strip_prefix("#~@0>#")
-        .or_else(|| method_name.strip_prefix("#~@0<#"))?;
-    Some(name.trim_end_matches("^1").to_string())
-}
-
 // ── Byte-count heuristics ─────────────────────────────────────────────────────
 
 /// Conservatively estimate the vreg count from bytecode length.
@@ -1252,7 +1238,7 @@ fn compile_program_body(
     strings: &mut StringTable,
     literal_arrays: &mut Vec<LiteralArray>,
     lowering: &LoweringContext,
-    is_module: bool,
+    _is_module: bool,
 ) -> Vec<u8> {
     compile_body_stmts(&program.body, strings, literal_arrays, lowering, true)
 }
@@ -1369,7 +1355,7 @@ fn compile_program_body_tracked(
     strings: &mut StringTable,
     literal_arrays: &mut Vec<LiteralArray>,
     lowering: &LoweringContext,
-    is_module: bool,
+    _is_module: bool,
     source: &str,
 ) -> (Vec<u8>, Vec<u8>) {
     compile_body_stmts_tracked(
@@ -1526,6 +1512,9 @@ struct CodeGen<'a> {
     source: Option<&'a str>,
     /// Line number program accumulator.  Present only when `source` is `Some`.
     line_tracker: Option<LineTracker>,
+    /// Current source line (1-based) for the instruction about to be emitted.
+    /// Updated by `emit_stmt` and `emit_expr` before each instruction batch.
+    current_line: u32,
 }
 
 impl<'a> CodeGen<'a> {
@@ -1545,6 +1534,7 @@ impl<'a> CodeGen<'a> {
             arrow_captures: ArrowCaptures::default(),
             source: None,
             line_tracker: None,
+            current_line: 1,
         }
     }
 
@@ -1592,10 +1582,26 @@ impl<'a> CodeGen<'a> {
         self.next_reg = self.next_reg.max(4);
     }
 
-    /// Append the bytes for `insn`.
+    /// Append the bytes for `insn`, recording an LNP advance entry beforehand.
     fn push(&mut self, insn: Insn) {
+        if let Some(tracker) = self.line_tracker.as_mut() {
+            let pc = self.insns.len() as u32;
+            tracker.advance(pc, self.current_line);
+        }
         let bytes = insn.encode(self.strings);
         self.insns.extend_from_slice(&bytes);
+    }
+
+    /// Emit `SET_EPILOGUE_BEGIN` (0x09) into the LNP stream then push `insn`.
+    ///
+    /// hvigor emits this LNP opcode immediately before the final `return` /
+    /// `returnundefined` instruction so the debugger can distinguish the
+    /// method epilogue from the last user statement.
+    fn push_with_epilogue(&mut self, insn: Insn) {
+        if let Some(tracker) = self.line_tracker.as_mut() {
+            tracker.ops.push(0x09); // SET_EPILOGUE_BEGIN
+        }
+        self.push(insn);
     }
 
     /// Allocate the next virtual register (capped at 254 to leave one spare).
@@ -1616,7 +1622,7 @@ impl<'a> CodeGen<'a> {
     /// the accumulated bytecode bytes.
     fn finish(mut self) -> Vec<u8> {
         if !self.returned {
-            self.push(Insn::ReturnUndefined);
+            self.push_with_epilogue(Insn::ReturnUndefined);
         }
         self.insns
     }
@@ -1625,7 +1631,7 @@ impl<'a> CodeGen<'a> {
     /// line tracking was not enabled for this `CodeGen`).
     fn finish_with_line_ops(mut self) -> (Vec<u8>, Vec<u8>) {
         if !self.returned {
-            self.push(Insn::ReturnUndefined);
+            self.push_with_epilogue(Insn::ReturnUndefined);
         }
         let line_ops = self.line_tracker.map(|t| t.finish()).unwrap_or_default();
         (self.insns, line_ops)
@@ -1634,11 +1640,10 @@ impl<'a> CodeGen<'a> {
     // ── Statement dispatcher ──────────────────────────────────────────────────
 
     fn emit_stmt(&mut self, stmt: &Statement<'_>) {
-        // Record source position before emitting bytecode for this statement.
-        if let (Some(source), Some(tracker)) = (self.source, self.line_tracker.as_mut()) {
-            let pc = self.insns.len() as u32;
-            let new_line = line_at(source, stmt.span().start);
-            tracker.advance(pc, new_line);
+        // Update the current source line so that `push()` records it for every
+        // instruction emitted within this statement.
+        if let Some(source) = self.source {
+            self.current_line = line_at(source, stmt.span().start);
         }
         match stmt {
             Statement::VariableDeclaration(decl) => {
@@ -1657,9 +1662,9 @@ impl<'a> CodeGen<'a> {
             Statement::ReturnStatement(ret) => {
                 if let Some(arg) = &ret.argument {
                     self.emit_expr(arg);
-                    self.push(Insn::Return);
+                    self.push_with_epilogue(Insn::Return);
                 } else {
-                    self.push(Insn::ReturnUndefined);
+                    self.push_with_epilogue(Insn::ReturnUndefined);
                 }
                 self.returned = true;
             }
@@ -1872,6 +1877,9 @@ impl<'a> CodeGen<'a> {
     // ── Expression compiler — result always in accumulator ────────────────────
 
     fn emit_expr(&mut self, expr: &Expression<'_>) {
+        if let Some(source) = self.source {
+            self.current_line = line_at(source, expr.span().start);
+        }
         match expr {
             Expression::NumericLiteral(n) => {
                 if n.value.fract() == 0.0
