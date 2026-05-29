@@ -354,6 +354,16 @@ pub enum Insn {
     /// Source: `isa.yaml` — `closeiterator imm:u16, v:in:top`, format `op_imm_8_v_8`,
     /// `opcode_idx: [0x68, 0xac]`.
     CloseIterator(u8, u8),
+
+    /// `0xC0` `op_v_8` — create generator object; operand is the vreg to store it.
+    /// Encoding: `[0xC0] [vreg: u8]` = 2 bytes.
+    CreateGeneratorObj(u8),
+    /// `0xC1` `op_imm_8_v_8` — suspend generator; yield value in accumulator.
+    /// Encoding: `[0xC1] [slot: u8] [gen_reg: u8]` = 3 bytes.
+    SuspendGenerator(u8, u8),
+    /// `0xC2` `op_v_8` — resume generator; loads the value passed to `next()`.
+    /// Encoding: `[0xC2] [gen_reg: u8]` = 2 bytes.
+    ResumeGenerator(u8),
 }
 
 impl Insn {
@@ -590,6 +600,9 @@ impl Insn {
             // ── for-of iteration ─────────────────────────────────────────────
             Insn::GetIterator(slot) => vec![0x67, *slot],
             Insn::CloseIterator(slot, vreg) => vec![0x68, *slot, *vreg],
+            Insn::CreateGeneratorObj(vreg) => vec![0xC0, *vreg],
+            Insn::SuspendGenerator(slot, gen_reg) => vec![0xC1, *slot, *gen_reg],
+            Insn::ResumeGenerator(gen_reg) => vec![0xC2, *gen_reg],
         }
     }
 
@@ -672,6 +685,9 @@ impl Insn {
             Insn::GetNextPropName(_) => 2,
             Insn::GetIterator(_) => 2,
             Insn::CloseIterator(_, _) => 3,
+            Insn::CreateGeneratorObj(_) => 2,
+            Insn::SuspendGenerator(_, _) => 3,
+            Insn::ResumeGenerator(_) => 2,
         }
     }
 }

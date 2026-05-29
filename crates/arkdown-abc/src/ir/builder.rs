@@ -6,7 +6,7 @@ use oxc_ast::ast::{
     ExportAllDeclaration, ExportDefaultDeclarationKind, Expression, ForInStatement,
     ForOfStatement, ForStatementLeft, FunctionBody, ImportDeclarationSpecifier,
     ImportOrExportKind, LogicalOperator, MethodDefinition, MethodDefinitionKind, ModuleExportName,
-    Program, PropertyKey, Statement, UnaryOperator,
+    PrivateFieldExpression, Program, PropertyKey, Statement, UnaryOperator, YieldExpression,
 };
 use oxc_parser::{Parser, ParserReturn};
 use oxc_span::{GetSpan, SourceType};
@@ -1542,6 +1542,8 @@ struct CodeGen<'a> {
     continue_patches: Vec<usize>,
     /// Exception handler table built up by `emit_try_stmt`.
     catch_entries: Vec<CatchEntry>,
+    is_generator: bool,
+    gen_reg: Option<u8>,
 }
 
 impl<'a> CodeGen<'a> {
@@ -1565,6 +1567,8 @@ impl<'a> CodeGen<'a> {
             break_patches: Vec::new(),
             continue_patches: Vec::new(),
             catch_entries: Vec::new(),
+            is_generator: false,
+            gen_reg: None,
         }
     }
 
@@ -2551,6 +2555,12 @@ impl<'a> CodeGen<'a> {
                 // together ensure the awaited value is unwrapped at runtime.
                 self.emit_expr(&await_expr.argument);
             }
+            Expression::YieldExpression(yield_expr) => {
+                self.emit_yield_expr(yield_expr);
+            }
+            Expression::PrivateFieldExpression(priv_expr) => {
+                self.emit_private_field(priv_expr);
+            }
             _ => {
                 self.push(Insn::LdUndefined);
             }
@@ -2903,6 +2913,56 @@ impl<'a> CodeGen<'a> {
         }
 
         self.push(Insn::Lda(left_reg));
+    }
+
+    // ── Class definition ──────────────────────────────────────────────────────
+
+    /// Emit `defineclasswithbuffer` for a class (declaration or expression).
+    ///
+    /// A class-buffer [`LiteralArray`] is registered in `self.literal_arrays`;
+    /// its index becomes the `buf_id` operand. Method bodies are already
+    /// compiled as separate `MethodRecord`s at the class-record level, and the
+    /// literal buffer points at those MethodItems by file offset.
+    ///
+    /// After this call the class constructor is in the accumulator.
+
+    fn emit_generator_prologue(&mut self) {
+        if !self.is_generator {
+            return;
+        }
+        let reg = self.alloc_reg();
+        self.push(Insn::CreateGeneratorObj(0));
+        self.push(Insn::Sta(reg));
+        self.gen_reg = Some(reg);
+    }
+
+
+    fn emit_yield_expr(&mut self, yield_expr: &YieldExpression<'_>) {
+        match &yield_expr.argument {
+            Some(arg) => self.emit_expr(arg),
+            None => self.push(Insn::LdUndefined),
+        }
+        if let Some(gen_reg) = self.gen_reg {
+            self.push(Insn::SuspendGenerator(0, gen_reg));
+            self.push(Insn::ResumeGenerator(gen_reg));
+        }
+    }
+
+    // ── Private field access: obj.#field ─────────────────────────────────────
+
+    /// Lower `obj.#field` to a `ldobjbyname` with a mangled name.
+    ///
+    /// Approach: mangle `#field` → `__pvt_field` and emit `ldobjbyname`.
+    /// This is runtime-correct when private field names do not collide with
+    /// public properties and no security boundary is required.  Full
+    /// `ldprivateproperty` / `stprivateproperty` support requires a separate
+    /// pass to collect all private field declarations and assign slot indices.
+
+    fn emit_private_field(&mut self, priv_expr: &PrivateFieldExpression<'_>) {
+        self.emit_expr(&priv_expr.object);
+        let mangled = format!("__pvt_{}", priv_expr.field.name.as_str());
+        let name_id = self.intern(&mangled);
+        self.push(Insn::LdObjByName(0, name_id));
     }
 
     // ── Class definition ──────────────────────────────────────────────────────
