@@ -1660,3 +1660,156 @@ fn test_star_export_tracked_in_module_record() {
         "star export specifier './shared' must appear in the binary"
     );
 }
+
+#[test]
+fn test_spread_call_emits_callrange_opcode() {
+    // `foo(...args)` must compile to a `callrange` (0x73) instruction rather
+    // than the shorter fixed-arity forms, since the spread element forces the
+    // range path in emit_call.
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("spread_call.abc");
+    let source = r#"
+        function applyAll(fn, args) {
+            return fn(...args);
+        }
+    "#;
+    module_compiler()
+        .compile(vec![module_record("test/spread_call", source)], &out)
+        .expect("compile spread call");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+    // callrange opcode is 0x73
+    assert!(
+        bytes.contains(&0x73),
+        "callrange opcode (0x73) must appear for spread-argument call foo(...args)"
+    );
+}
+
+#[test]
+fn test_spread_method_call_emits_callthisrange_opcode() {
+    // `obj.method(...args)` must use `callthisrange` (0x31) when spread args are present.
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("spread_method.abc");
+    let source = r#"
+        function callMethod(obj, args) {
+            return obj.run(...args);
+        }
+    "#;
+    module_compiler()
+        .compile(vec![module_record("test/spread_method", source)], &out)
+        .expect("compile spread method call");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+    // callthisrange opcode is 0x31
+    assert!(
+        bytes.contains(&0x31),
+        "callthisrange opcode (0x31) must appear for spread-argument method call obj.run(...args)"
+    );
+}
+
+#[test]
+fn test_rest_parameter_emits_copyrestargs_opcode() {
+    // A function with a rest parameter `...args` must emit `copyrestargs`
+    // (0xA1) at the start of the function body to collect trailing arguments
+    // into an array.
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("rest_param.abc");
+    let source = r#"
+        function sum(...nums) {
+            let total = 0;
+            for (const n of nums) {
+                total = total + n;
+            }
+            return total;
+        }
+    "#;
+    module_compiler()
+        .compile(vec![module_record("test/rest_param", source)], &out)
+        .expect("compile rest parameter function");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+    // copyrestargs opcode is 0xA1
+    assert!(
+        bytes.contains(&0xA1),
+        "copyrestargs opcode (0xA1) must appear for rest parameter ...nums"
+    );
+}
+
+#[test]
+fn test_rest_param_with_fixed_params_uses_correct_count() {
+    // `function foo(a, b, ...rest)` should emit `copyrestargs 2` (fixed=2).
+    // We verify the 0xA1 opcode is present and is followed by the byte 0x02.
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("rest_fixed.abc");
+    let source = r#"
+        function merge(target, source, ...extras) {
+            return [target, source, extras];
+        }
+    "#;
+    module_compiler()
+        .compile(vec![module_record("test/rest_fixed", source)], &out)
+        .expect("compile rest param with fixed args");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+    // copyrestargs 2: [0xA1, 0x02]
+    assert!(
+        bytes.windows(2).any(|w| w == [0xA1, 0x02]),
+        "copyrestargs 2 ([0xA1, 0x02]) must appear for function(a, b, ...rest)"
+    );
+}
+
+#[test]
+fn test_class_instance_field_emits_stobjbyname() {
+    // Class instance fields (`x = 1`) must emit `stobjbyname` (0x43) in the
+    // constructor so the field is initialised on each new instance.
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("class_field.abc");
+    let source = r#"
+        class Counter {
+            count = 0;
+            step = 1;
+            increment() {
+                this.count = this.count + this.step;
+            }
+        }
+    "#;
+    module_compiler()
+        .compile(vec![module_record("test/class_field", source)], &out)
+        .expect("compile class with instance fields");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+    // stobjbyname opcode is 0x43
+    assert!(
+        bytes.contains(&0x43),
+        "stobjbyname opcode (0x43) must appear for class instance field initializers"
+    );
+}
+
+#[test]
+fn test_async_function_emits_asyncfunctionenter_opcode() {
+    // An `async function` must emit `asyncfunctionenter` (0xBB) as a prologue
+    // so ArkRuntime can set up the async execution context.
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("async_fn.abc");
+    let source = r#"
+        async function fetchUser(id) {
+            const data = await getUser(id);
+            return data;
+        }
+    "#;
+    module_compiler()
+        .compile(vec![module_record("test/async_fn", source)], &out)
+        .expect("compile async function");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+    // asyncfunctionenter opcode is 0xBB
+    assert!(
+        bytes.contains(&0xBB),
+        "asyncfunctionenter opcode (0xBB) must appear for async function declaration"
+    );
+    // asyncfunctionresolve opcode is 0xBC (emitted before return)
+    assert!(
+        bytes.contains(&0xBC),
+        "asyncfunctionresolve opcode (0xBC) must appear before return in async function"
+    );
+}

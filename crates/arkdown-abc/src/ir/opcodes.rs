@@ -364,6 +364,55 @@ pub enum Insn {
     /// `0xC2` `op_v_8` — resume generator; loads the value passed to `next()`.
     /// Encoding: `[0xC2] [gen_reg: u8]` = 2 bytes.
     ResumeGenerator(u8),
+
+    // ── Rest parameters ───────────────────────────────────────────────────────
+    /// `0xA1` `op_imm_8` — copy rest arguments into an array in the accumulator.
+    ///
+    /// `n` = number of fixed (non-rest) parameters.  The runtime collects all
+    /// actual arguments starting at index `n` into a new Array and places it
+    /// in the accumulator.
+    ///
+    /// Encoding: `[0xA1] [n: u8]` = 2 bytes.
+    ///
+    /// Source: `isa.yaml` — `copyrestargs imm:u8`, format `op_imm_8`,
+    /// `opcode_idx: [0xa1]`.
+    CopyRestArgs(u8),
+
+    // ── Async function ────────────────────────────────────────────────────────
+    /// `0xBB` `op_none` — enter an async function; creates the async object.
+    ///
+    /// Result (the async generator object) is placed in the accumulator.
+    /// Store it to a vreg immediately so it can be referenced by
+    /// `AsyncFunctionResolve`/`AsyncFunctionReject` at return sites.
+    ///
+    /// Encoding: `[0xBB]` = 1 byte.
+    ///
+    /// Source: `isa.yaml` — `asyncfunctionenter`, format `op_none`,
+    /// `opcode_idx: [0xbb]`.
+    AsyncFunctionEnter,
+
+    /// `0xBC` `op_imm_8_v_8` — resolve (return) from an async function.
+    ///
+    /// `slot` = IC slot (pass 0); `async_reg` = vreg holding the async object
+    /// created by `AsyncFunctionEnter`.  The accumulator holds the resolved
+    /// value.
+    ///
+    /// Encoding: `[0xBC] [slot: u8] [async_reg: u8]` = 3 bytes.
+    ///
+    /// Source: `isa.yaml` — `asyncfunctionresolve imm:u8, v:in:top`, format
+    /// `op_imm_8_v_8`, `opcode_idx: [0xbc]`.
+    AsyncFunctionResolve(u8, u8),
+
+    /// `0xBD` `op_imm_8_v_8` — reject (throw) from an async function.
+    ///
+    /// `slot` = IC slot (pass 0); `async_reg` = vreg holding the async object.
+    /// The accumulator holds the rejection reason.
+    ///
+    /// Encoding: `[0xBD] [slot: u8] [async_reg: u8]` = 3 bytes.
+    ///
+    /// Source: `isa.yaml` — `asyncfunctionreject imm:u8, v:in:top`, format
+    /// `op_imm_8_v_8`, `opcode_idx: [0xbd]`.
+    AsyncFunctionReject(u8, u8),
 }
 
 impl Insn {
@@ -603,6 +652,12 @@ impl Insn {
             Insn::CreateGeneratorObj(vreg) => vec![0xC0, *vreg],
             Insn::SuspendGenerator(slot, gen_reg) => vec![0xC1, *slot, *gen_reg],
             Insn::ResumeGenerator(gen_reg) => vec![0xC2, *gen_reg],
+
+            // ── rest parameters / async ───────────────────────────────────────
+            Insn::CopyRestArgs(n) => vec![0xA1, *n],
+            Insn::AsyncFunctionEnter => vec![0xBB],
+            Insn::AsyncFunctionResolve(slot, async_reg) => vec![0xBC, *slot, *async_reg],
+            Insn::AsyncFunctionReject(slot, async_reg) => vec![0xBD, *slot, *async_reg],
         }
     }
 
@@ -688,6 +743,9 @@ impl Insn {
             Insn::CreateGeneratorObj(_) => 2,
             Insn::SuspendGenerator(_, _) => 3,
             Insn::ResumeGenerator(_) => 2,
+            Insn::CopyRestArgs(_) => 2,
+            Insn::AsyncFunctionEnter => 1,
+            Insn::AsyncFunctionResolve(_, _) | Insn::AsyncFunctionReject(_, _) => 3,
         }
     }
 }

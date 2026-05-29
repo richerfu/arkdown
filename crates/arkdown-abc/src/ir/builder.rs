@@ -235,8 +235,30 @@ pub fn build_record_with_debug(
         if let Statement::FunctionDeclaration(func) = stmt {
             if let Some(id) = &func.id {
                 let func_name = id.name.as_str().to_string();
-                let (func_bytecode, func_catches) =
-                    compile_function_body(func.body.as_deref(), strings, literal_arrays, &lowering);
+                let rest_info: Option<(String, u8)> =
+                    func.params.rest.as_ref().and_then(|rp| {
+                        if let BindingPattern::BindingIdentifier(bid) = &rp.rest.argument {
+                            Some((
+                                bid.name.as_str().to_string(),
+                                func.params.items.len() as u8,
+                            ))
+                        } else {
+                            None
+                        }
+                    });
+                let is_async = func.r#async;
+                let (func_bytecode, func_catches) = if rest_info.is_some() || is_async {
+                    compile_function_body_ext(
+                        func.body.as_deref(),
+                        rest_info,
+                        is_async,
+                        strings,
+                        literal_arrays,
+                        &lowering,
+                    )
+                } else {
+                    compile_function_body(func.body.as_deref(), strings, literal_arrays, &lowering)
+                };
                 let num_vregs = estimate_vregs(&func_bytecode);
                 methods.push(MethodRecord {
                     name: func_name,
@@ -253,12 +275,35 @@ pub fn build_record_with_debug(
             if let Some(Declaration::FunctionDeclaration(func)) = &export.declaration {
                 if let Some(id) = &func.id {
                     let func_name = id.name.as_str().to_string();
-                    let (func_bytecode, func_catches) = compile_function_body(
-                        func.body.as_deref(),
-                        strings,
-                        literal_arrays,
-                        &lowering,
-                    );
+                    let rest_info: Option<(String, u8)> =
+                        func.params.rest.as_ref().and_then(|rp| {
+                            if let BindingPattern::BindingIdentifier(bid) = &rp.rest.argument {
+                                Some((
+                                    bid.name.as_str().to_string(),
+                                    func.params.items.len() as u8,
+                                ))
+                            } else {
+                                None
+                            }
+                        });
+                    let is_async = func.r#async;
+                    let (func_bytecode, func_catches) = if rest_info.is_some() || is_async {
+                        compile_function_body_ext(
+                            func.body.as_deref(),
+                            rest_info,
+                            is_async,
+                            strings,
+                            literal_arrays,
+                            &lowering,
+                        )
+                    } else {
+                        compile_function_body(
+                            func.body.as_deref(),
+                            strings,
+                            literal_arrays,
+                            &lowering,
+                        )
+                    };
                     let num_vregs = estimate_vregs(&func_bytecode);
                     methods.push(MethodRecord {
                         name: func_name,
@@ -821,6 +866,23 @@ fn compile_class_elements(
     source_file_path: Option<&str>,
 ) {
     let class_name = class_name.unwrap_or("_");
+
+    // Collect non-static instance field initializers for injection into the constructor.
+    let instance_fields: Vec<(String, &Expression<'_>)> = elements
+        .iter()
+        .filter_map(|e| {
+            let ClassElement::PropertyDefinition(prop) = e else {
+                return None;
+            };
+            if prop.r#static || prop.computed {
+                return None;
+            }
+            let name = method_key_name(&prop.key)?;
+            let value = prop.value.as_ref()?;
+            Some((name, value))
+        })
+        .collect();
+
     let has_constructor = elements.iter().any(|element| {
         matches!(
             element,
@@ -829,14 +891,23 @@ fn compile_class_elements(
         )
     });
     if !has_constructor {
+        // Synthesize a default constructor that still runs field initializers.
+        let (bytecode, catches) = compile_constructor_with_fields(
+            None,
+            &instance_fields,
+            strings,
+            literal_arrays,
+            lowering,
+        );
+        let num_vregs = estimate_vregs(&bytecode);
         methods.push(MethodRecord {
             name: format!("#~@0=#{class_name}"),
-            bytecode: Insn::ReturnUndefined.encode(&mut StringTable::default()),
-            num_vregs: 0,
+            bytecode,
+            num_vregs,
             num_args: 4,
             debug_info: None,
             line_ops: vec![],
-            catch_entries: vec![],
+            catch_entries: catches,
         });
     }
 
@@ -849,7 +920,42 @@ fn compile_class_elements(
                 continue;
             };
             let key_name = suffix_duplicate_method_name(key_name, &mut seen_names);
-            let (bytecode, method_line_ops, method_catches) = if let Some(src) = source {
+
+            // Detect rest parameter and async flag for this method.
+            let rest_info: Option<(String, u8)> = method.value.params.rest.as_ref().and_then(
+                |rest_param| {
+                    if let BindingPattern::BindingIdentifier(id) = &rest_param.rest.argument {
+                        let count = method.value.params.items.len() as u8;
+                        Some((id.name.as_str().to_string(), count))
+                    } else {
+                        None
+                    }
+                },
+            );
+            let is_method_async = method.value.r#async;
+            let is_constructor = method.kind == MethodDefinitionKind::Constructor;
+
+            let (bytecode, method_line_ops, method_catches) = if is_constructor {
+                // Constructor: inject instance field initializers as prologue.
+                let (bc, catches) = compile_constructor_with_fields(
+                    method.value.body.as_deref(),
+                    &instance_fields,
+                    strings,
+                    literal_arrays,
+                    lowering,
+                );
+                (bc, vec![], catches)
+            } else if rest_info.is_some() || is_method_async {
+                let (bc, catches) = compile_function_body_ext(
+                    method.value.body.as_deref(),
+                    rest_info,
+                    is_method_async,
+                    strings,
+                    literal_arrays,
+                    lowering,
+                );
+                (bc, vec![], catches)
+            } else if let Some(src) = source {
                 compile_function_body_tracked(
                     method.value.body.as_deref(),
                     strings,
@@ -1333,6 +1439,84 @@ fn compile_arrow_body(
     gen.finish_with_catches()
 }
 
+/// Compile a function body with optional rest-parameter and async-function support.
+///
+/// When `rest_param` is `Some((name, n))`:
+/// - Emits `copyrestargs n` at the start of the body.
+/// - Stores the result to a fresh register named `name`.
+///
+/// When `is_async` is `true`:
+/// - Emits `asyncfunctionenter; sta async_reg` as a prologue.
+/// - Emits `asyncfunctionresolve 0, async_reg` before every return.
+fn compile_function_body_ext(
+    body: Option<&FunctionBody<'_>>,
+    rest_param: Option<(String, u8)>,
+    is_async: bool,
+    strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
+    lowering: &LoweringContext,
+) -> (Vec<u8>, Vec<CatchEntry>) {
+    let stmts: &[_] = match body {
+        Some(fb) => fb.statements.as_slice(),
+        None => {
+            let mut st = StringTable::default();
+            return (Insn::ReturnUndefined.encode(&mut st), vec![]);
+        }
+    };
+    let mut cg = CodeGen::new(strings, literal_arrays, lowering);
+    cg.is_async = is_async;
+    cg.emit_async_function_prologue();
+    if let Some((name, count)) = rest_param {
+        let reg = cg.alloc_reg();
+        cg.push(Insn::CopyRestArgs(count));
+        cg.push(Insn::Sta(reg));
+        cg.var_regs.insert(name, reg);
+    }
+    for stmt in stmts {
+        cg.emit_stmt(stmt);
+        if cg.returned {
+            break;
+        }
+    }
+    cg.finish_with_catches()
+}
+
+/// Compile a constructor body, prepending instance field initializer code.
+///
+/// For each `(field_name, init_expr)` in `fields`, emits:
+///   `ldthis; sta this_reg; emit_expr(init); stobjbyname(name, this_reg)`
+/// before the normal constructor statements.
+fn compile_constructor_with_fields<'src>(
+    body: Option<&FunctionBody<'src>>,
+    fields: &[(String, &Expression<'src>)],
+    strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
+    lowering: &LoweringContext,
+) -> (Vec<u8>, Vec<CatchEntry>) {
+    let stmts: &[_] = match body {
+        Some(fb) => fb.statements.as_slice(),
+        None => &[],
+    };
+    let mut cg = CodeGen::new(strings, literal_arrays, lowering);
+    if !fields.is_empty() {
+        cg.push(Insn::LdThis);
+        let this_reg = cg.alloc_reg();
+        cg.push(Insn::Sta(this_reg));
+        for (name, init_expr) in fields {
+            cg.emit_expr(init_expr);
+            let name_id = cg.intern(name);
+            cg.push(Insn::StObjByName(0, name_id, this_reg));
+        }
+    }
+    for stmt in stmts {
+        cg.emit_stmt(stmt);
+        if cg.returned {
+            break;
+        }
+    }
+    cg.finish_with_catches()
+}
+
 /// Compile a statement slice through `CodeGen` and return `(bytecode, catch_entries)`.
 fn compile_body_stmts(
     stmts: &[Statement<'_>],
@@ -1544,6 +1728,11 @@ struct CodeGen<'a> {
     catch_entries: Vec<CatchEntry>,
     is_generator: bool,
     gen_reg: Option<u8>,
+    /// Whether the current function is `async`.  When `true`, a prologue emits
+    /// `asyncfunctionenter` and return sites emit `asyncfunctionresolve`.
+    is_async: bool,
+    /// Register holding the async function object (set by async prologue).
+    async_reg: Option<u8>,
 }
 
 impl<'a> CodeGen<'a> {
@@ -1569,6 +1758,8 @@ impl<'a> CodeGen<'a> {
             catch_entries: Vec::new(),
             is_generator: false,
             gen_reg: None,
+            is_async: false,
+            async_reg: None,
         }
     }
 
@@ -1654,6 +1845,10 @@ impl<'a> CodeGen<'a> {
 
     fn finish_with_catches(mut self) -> (Vec<u8>, Vec<CatchEntry>) {
         if !self.returned {
+            if let Some(areg) = self.async_reg {
+                self.push(Insn::LdUndefined);
+                self.push(Insn::AsyncFunctionResolve(0, areg));
+            }
             self.push_with_epilogue(Insn::ReturnUndefined);
         }
         (self.insns, self.catch_entries)
@@ -1661,6 +1856,10 @@ impl<'a> CodeGen<'a> {
 
     fn finish_with_line_ops_and_catches(mut self) -> (Vec<u8>, Vec<u8>, Vec<CatchEntry>) {
         if !self.returned {
+            if let Some(areg) = self.async_reg {
+                self.push(Insn::LdUndefined);
+                self.push(Insn::AsyncFunctionResolve(0, areg));
+            }
             self.push_with_epilogue(Insn::ReturnUndefined);
         }
         let line_ops = self.line_tracker.map(|t| t.finish()).unwrap_or_default();
@@ -1692,8 +1891,15 @@ impl<'a> CodeGen<'a> {
             Statement::ReturnStatement(ret) => {
                 if let Some(arg) = &ret.argument {
                     self.emit_expr(arg);
+                    if let Some(areg) = self.async_reg {
+                        self.push(Insn::AsyncFunctionResolve(0, areg));
+                    }
                     self.push_with_epilogue(Insn::Return);
                 } else {
+                    self.push_with_epilogue(Insn::LdUndefined);
+                    if let Some(areg) = self.async_reg {
+                        self.push(Insn::AsyncFunctionResolve(0, areg));
+                    }
                     self.push_with_epilogue(Insn::ReturnUndefined);
                 }
                 self.returned = true;
@@ -2936,6 +3142,20 @@ impl<'a> CodeGen<'a> {
         self.gen_reg = Some(reg);
     }
 
+    /// Emit the async function prologue: `asyncfunctionenter; sta async_reg`.
+    ///
+    /// Must be called before the function body statements are emitted.  Sets
+    /// `self.async_reg` so that return sites can emit `asyncfunctionresolve`.
+    fn emit_async_function_prologue(&mut self) {
+        if !self.is_async {
+            return;
+        }
+        let reg = self.alloc_reg();
+        self.push(Insn::AsyncFunctionEnter);
+        self.push(Insn::Sta(reg));
+        self.async_reg = Some(reg);
+    }
+
 
     fn emit_yield_expr(&mut self, yield_expr: &YieldExpression<'_>) {
         match &yield_expr.argument {
@@ -3118,6 +3338,23 @@ impl<'a> CodeGen<'a> {
         self.emit_expr(&call.callee);
         let argc = call.arguments.len();
 
+        // When any argument is a spread element, force the range form so that
+        // the spread array is forwarded as a regular positional argument
+        // (`foo(...args)` → `callrange 1, args_reg`).
+        if Self::args_have_spread(&call.arguments) {
+            let v_start = self.next_reg;
+            let mut regs = Vec::with_capacity(argc);
+            for _ in 0..argc {
+                regs.push(self.alloc_reg());
+            }
+            for (i, arg) in call.arguments.iter().enumerate() {
+                self.emit_argument(arg);
+                self.push(Insn::Sta(regs[i]));
+            }
+            self.push(Insn::CallRange(slot, argc as u8, v_start));
+            return;
+        }
+
         match argc {
             0 => self.push(Insn::CallArg0(slot)),
             1 => {
@@ -3136,7 +3373,6 @@ impl<'a> CodeGen<'a> {
                 self.push(Insn::CallArgs3(slot, v0, v1, v2));
             }
             n => {
-                // Allocate contiguous registers for all arguments.
                 let v_start = self.next_reg;
                 let mut regs = Vec::with_capacity(n);
                 for _ in 0..n {
@@ -3187,6 +3423,22 @@ impl<'a> CodeGen<'a> {
         }
 
         let argc = call.arguments.len();
+
+        // When any argument is a spread element, force callthisrange so spread
+        // arrays are forwarded as regular positional arguments.
+        if Self::args_have_spread(&call.arguments) {
+            let mut arg_regs = Vec::with_capacity(argc);
+            for _ in 0..argc {
+                arg_regs.push(self.alloc_reg());
+            }
+            for (i, arg) in call.arguments.iter().enumerate() {
+                self.emit_argument(arg);
+                self.push(Insn::Sta(arg_regs[i]));
+            }
+            self.push(Insn::CallThisRange(slot, argc as u8, this_reg));
+            return;
+        }
+
         match argc {
             0 => self.push(Insn::CallThis0(slot, this_reg)),
             1 => {
@@ -3205,8 +3457,6 @@ impl<'a> CodeGen<'a> {
                 self.push(Insn::CallThis3(slot, this_reg, v0, v1, v2));
             }
             n => {
-                // callthisrange: registers are [this, arg0, arg1, ...] contiguous.
-                // this_reg is already allocated; allocate arg registers after it.
                 let mut arg_regs = Vec::with_capacity(n);
                 for _ in 0..n {
                     arg_regs.push(self.alloc_reg());
@@ -3251,18 +3501,26 @@ impl<'a> CodeGen<'a> {
         reg
     }
 
-    /// Compile an `Argument` (spread args emit `ldundefined` as a placeholder).
+    /// Compile an `Argument`.
     ///
-    /// `Argument` in this OXC fork uses `@inherit Expression`, so all
-    /// Expression variants are available on `Argument`. The `as_expression()`
-    /// method returns `Some(&Expression)` for non-spread arguments.
+    /// For plain expressions the result is left in the accumulator.
+    /// For `...spread` elements the inner expression is compiled directly —
+    /// i.e. `...args` emits `args` and the array is passed as a single value.
+    /// This matches the simple approach for `foo(...args)` where the spread is
+    /// the only argument: the array itself is forwarded via `CallRange`.
     fn emit_argument(&mut self, arg: &Argument<'_>) {
         if let Some(expr) = arg.as_expression() {
             self.emit_expr(expr);
+        } else if let Argument::SpreadElement(spread) = arg {
+            self.emit_expr(&spread.argument);
         } else {
-            // SpreadElement — not yet supported; emit undefined as placeholder.
             self.push(Insn::LdUndefined);
         }
+    }
+
+    /// Return `true` when at least one argument in `args` is a `SpreadElement`.
+    fn args_have_spread(args: &[Argument<'_>]) -> bool {
+        args.iter().any(|a| matches!(a, Argument::SpreadElement(_)))
     }
 
     // ── Binary expression: left OP right ──────────────────────────────────────
