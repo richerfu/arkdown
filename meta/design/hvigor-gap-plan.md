@@ -250,7 +250,7 @@ Priority order based on 2026-05-29 parity report:
 
 1. **[BUG] Fix absolute path in modules.abc** — `pages/Index` absolute filesystem path
    leaks into StringItems in `arkdown-abc`. Locate the source file path derivation and
-   replace with the OHM URL or relative path.
+   replace with the OHM URL or relative path. → **SPEC-028 Bug 1**
 
 2. **[module.json] Add `virtualMachine`, `compileMode`, `dependencies`** — In
    `arkdown-profile`'s `process_profile` step, inject `virtualMachine: "ark12.0.6.0"` from
@@ -263,12 +263,42 @@ Priority order based on 2026-05-29 parity report:
 
 4. **[modules.abc] Fix `func_main_0` OHM prefix** — Strip the module OHM path from
    function NameItems. Only the module record NameItem should carry the OHM path.
+   → **SPEC-028 Bug 1**
 
 5. **[modules.abc] Deduplicate annotation strings** — `pkgName@entry`, `isCommonjs`,
    `hasTopLevelAwait`, `isSharedModule`, `scopeNames`, `moduleRecordIdx` are being
    emitted once per chunk; consolidate into a single string table entry shared across records.
+   → **SPEC-028 Bug 2**
 
 6. Extend the golden parity harness from minimal-hap to minimal-hsp, minimal-har,
    and dependency fixtures.
-7. Wire `cache_path` and source map plumbing through CLI -> bundler -> ABC.
+7. Wire `cache_path` and source map plumbing through CLI -> bundler -> ABC. → **SPEC-033**
 8. Close remaining `arkdown-abc` LNP density gap (per-instruction ADVANCE sequences).
+   → **SPEC-028 Bug 4**
+
+## SPEC Coverage Map
+
+The following SPECs directly address gaps identified in this document:
+
+| Gap area | SPEC |
+|---|---|
+| ABC structural bugs (func_main_0, annotation dedup, external refs, LNP density) | SPEC-028 |
+| ViewPU ArkUI build() lowering | SPEC-029 |
+| @Builder / @Styles decorator transform | SPEC-030 |
+| apiTransform @kit.* expansion | SPEC-027 |
+| Obfuscation pipeline wiring | SPEC-038 |
+| Rolldown compileEnv-keyed msgpack cache | SPEC-039 |
+| ABC per-function incremental cache | SPEC-025 |
+| Release tree-shake + manualChunks | SPEC-034 |
+| ByteCode HAR dependency map in loader.json | SPEC-041 |
+| Dynamic import library info in loader.json | SPEC-042 |
+| Preloaded SO file list | SPEC-043 |
+| Integrated HSP processing | SPEC-044 |
+| Privacy profile embedding | SPEC-045 |
+| CrossAppSharedConfig + StartupTask merging | SPEC-046 |
+| ArkData compile + ETS standalone checker | SPEC-037 |
+| Task-level incremental skip | SPEC-040 |
+| Watch mode with incremental rebuild | SPEC-047 |
+| Watch mode | SPEC-023 |
+| Hot-reload importer graph | SPEC-024 |
+| Widget compilation | SPEC-026 |

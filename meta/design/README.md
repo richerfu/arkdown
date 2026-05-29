@@ -19,6 +19,7 @@ Read these documents before working in a covered area. Keep them in sync with im
 | [types.md](types.md)                         | Canonical shared type definitions: ResolvedId, Module, ModuleGraph, ArkChunk, ChunkGraph, IifeChunk, AbcArtifact, HapManifest, OhPackageJson5, ArkdownPlugin trait, enums                              |
 | [compat.md](compat.md)                       | hvigorw compatibility layer: command mapping, hvigorw wrapper script, build-profile.json5 field mapping, plugin API differences, unsupported features, migration guide                                 |
 | [plugins.md](plugins.md)                     | Complete plugin inventory: all JS plugins from hvigor-arkts-compose and hvigor-arkts-base, what each does, P0/P1/P2 priority, arkdown Rust crate replacement, complexity estimate                      |
+| [hvigor-full-gap-analysis.md](hvigor-full-gap-analysis.md) | Comprehensive mapping of all 95 hvigor pipeline steps against current arkdown status; implementation tasks TASK-ABC-01 through TASK-WATCH-01 with priority ordering and upstream refs |
 
 ---
 
@@ -28,7 +29,7 @@ Read these documents before working in a covered area. Keep them in sync with im
 
 **The compilation chain**: `.ets` source → ArkTS transform/bundle output → `es2abc --module` semantics → `.abc` bytecode → HAP zip. There is no way to ship a HAP without going through es2abc-equivalent bytecode generation. See [abc-pipeline.md](abc-pipeline.md).
 
-**Current gap to hvigor**: The largest remaining mismatch is the compile stage: real SDK `ets-loader` semantics, post-rollup importee processing, source maps, caches, release obfuscation/minification, and full `es2abc` parity. See [hvigor-gap-plan.md](hvigor-gap-plan.md).
+**Current gap to hvigor**: The largest remaining mismatch is the compile stage: real SDK `ets-loader` semantics, post-rollup importee processing, source maps, caches, release obfuscation/minification, and full `es2abc` parity. See [hvigor-gap-plan.md](hvigor-gap-plan.md) and [hvigor-full-gap-analysis.md](hvigor-full-gap-analysis.md). Implementation tasks are tracked as SPEC-028 through SPEC-037 in `meta/tasks/`.
 
 **Module identity**: With `useNormalizedOHMUrl: true` (the production setting), all module identifiers are OHM URLs in the format `@bundle:bundleName/moduleName/filePath`. This affects the resolver, the chunk registry keys, and the HAR/HSP dependency maps. See [module-resolution.md](module-resolution.md).
 

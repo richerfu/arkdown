@@ -49,13 +49,45 @@ Each SPEC file contains three standard sections:
 
 ## P2 — Advanced Features
 
+### IDE Integration (watch, hot-reload, preview)
+
 | ID       | Title                            | Crate                          | Blocked By |
 | -------- | -------------------------------- | ------------------------------ | ---------- |
 | SPEC-023 | Watch Mode                       | `arkdown-watcher`              | SPEC-013   |
 | SPEC-024 | Hot-Reload Importer Graph Plugin | `arkdown-plugin-importers`     | SPEC-005   |
-| SPEC-025 | Preview Mode Resource Watcher    | `arkdown-plugin-preview-watch` | SPEC-023   |
-| SPEC-026 | HAR TGZ Clean Plugin             | `arkdown-plugin-ets-tgz-clean` | SPEC-005   |
-| SPEC-027 | ArkTS Widget Compilation         | `arkdown-abc` (extension)      | SPEC-009   |
+
+### ArkTS Compiler Correctness
+
+| ID       | Title                              | Crate                          | Blocked By        |
+| -------- | ---------------------------------- | ------------------------------ | ----------------- |
+| SPEC-025 | ABC Incremental Cache (per-fn SHA) | `arkdown-abc`, `arkdown-cache` | SPEC-009, SPEC-039 |
+| SPEC-026 | Widget Compilation Pass            | `arkdown-abc`, `arkdown-cli`   | SPEC-009          |
+| SPEC-027 | API Transform Pass (apiTransform)  | `arkdown-plugin-ets-transform` | SPEC-004a         |
+| SPEC-028 | ABC Structural Parity Fixes        | `arkdown-abc`                  | SPEC-009          |
+| SPEC-029 | ViewPU Build() Body Lowering       | `arkdown-plugin-ets-transform` | SPEC-004a         |
+| SPEC-030 | @Builder and @Styles Decorators    | `arkdown-plugin-ets-transform` | SPEC-004a         |
+
+### Release Build Quality
+
+| ID       | Title                               | Crate                                  | Blocked By          |
+| -------- | ----------------------------------- | -------------------------------------- | ------------------- |
+| SPEC-034 | Release Tree-shake and ManualChunks | `arkdown`, `arkdown-cli`               | SPEC-005            |
+| SPEC-038 | Obfuscation Pipeline Wiring         | `arkdown-obfuscate`, `arkdown-cli`     | SPEC-020, SPEC-009  |
+| SPEC-039 | Rolldown compileEnv-Keyed Cache     | `arkdown-cache`, `arkdown`             | SPEC-005, SPEC-019  |
+
+### Multi-Module and Advanced Packaging
+
+| ID       | Title                              | Crate                                     | Blocked By          |
+| -------- | ---------------------------------- | ----------------------------------------- | ------------------- |
+| SPEC-040 | Task-Level Incremental Skip        | `arkdown-cli`                             | SPEC-039, SPEC-038  |
+| SPEC-041 | ByteCode HAR Dependency Map        | `arkdown-profile`, `arkdown-resolver`     | SPEC-003, SPEC-010  |
+| SPEC-042 | Dynamic Import Library Info        | `arkdown-profile`, `arkdown`              | SPEC-041, SPEC-005  |
+| SPEC-043 | Preloaded SO File List             | `arkdown-pack`, `arkdown-cli`             | SPEC-012            |
+| SPEC-044 | Integrated HSP Processing          | `arkdown-pack`                            | SPEC-012            |
+| SPEC-045 | Privacy Profile Embedding          | `arkdown-pack`                            | SPEC-012            |
+| SPEC-046 | CrossAppSharedConfig + StartupTask | `arkdown-profile`, `arkdown-resolver`     | SPEC-010, SPEC-003  |
+| SPEC-047 | Watch Mode with Incremental Rebuild | `arkdown-watcher`, `arkdown-cli`         | SPEC-039, SPEC-040  |
+| SPEC-037 | ArkData Compile and ETS Checker    | `arkdown-abc`, `arkdown-cli`              | SPEC-009, SPEC-004a |
 
 ---
 
