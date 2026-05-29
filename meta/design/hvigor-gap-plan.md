@@ -78,8 +78,8 @@ and release-mode terser/minification when applicable.
 | Rollup/rolldown options  | ✅ **Fixed (2026-05-28)**: Clean ESM output, `@ohos:` imports external, treeshake disabled for debug. **IIFE/CJS compatibility paths removed** from both bundler and ABC compiler. | Release treeshake, `manualChunks` for `supportChunks`, ByteCode HAR/HSP externals. |
 | ByteCode HAR importees   | ✅ **Fixed (2026-05-29)**: `process_importees()` ports `process-importee.js`. BFS from entry chunks, OHM URL generation, importee.json cache written. `nonEntryImportees` in loader.json. | ByteCode HAR compilation flow (requires HAR input fixture). |
 | ABC compiler             | 🔄 **Improved**: LNP line advance tracking, OHM URL scope names, SET_FILE debug info, binary/unary/logical ops, static-object `createobjectwithbuffer` (opcode 0x07), emit_new args, call-argument closures, START_LOCAL_EXTENDED (0x04) for scope/param vars, SET_PROLOGUE_END (0x08) after scope declarations, NewLexEnvWithName for arrow captures, class-decl lexical bindings. modules.abc 8565B vs 9844B. | Per-instruction LNP ADVANCE sequences (hvigor emits between every instruction group, not just per-statement); per-token source map granularity. |
-| Obfuscation/minification | `arkdown-obfuscate` exists but not wired in.                                                                                                                                           | hvigor release builds run SDK obfuscation + terser before ABC.                          |
-| Incremental cache        | `arkdown-cache` exists but not wired in.                                                                                                                                               | hvigor rollup msgpack cache + es2abc `--cache-file` support.                            |
+| Obfuscation/minification | ✅ **Wired (2026-05-29)**: `arkdown-obfuscate` runs on `.js` chunks in-place between bundling and ABC for release builds when `config.ark_options.obfuscation.enable_obfuscation=true`. Obfuscation rule hash is mixed into the ABC cache config hash for correct invalidation. Terser minification and `compact`/`remove-log` rules remain TODO inside the obfuscator. | hvigor also runs terser minification; full terser parity pending. |
+| Incremental cache        | ✅ **Wired (2026-05-29)**: `arkdown-cache` stores per-entry FNV-1a content hash + config hash; ABC compilation is skipped when all compile-entry hashes match AND `modules.abc` exists. `cache_file` path passed to `compile_to_abc` (`build/default/cache/abc/modules.abc.cache`). Cache invalidated on build-mode / bundle-name / API-version / obfuscation-rule change. | hvigor rollup msgpack cache covers module-graph-level rollup skipping; that layer is not yet wired. |
 | Source maps/debug        | ✅ Per-statement source maps from kit-rewritten ETS source (pre-struct-transform). Pretty-printed JSON. sourceMaps.map 1281B vs 1847B golden (gap: per-statement vs per-token VLQ).   | Per-token source map granularity to match tsc/ets-loader output.                        |
 | Packaging metadata       | ✅ **Fixed (2026-05-28)**: HAP zip identical to hvigor — correct module.json merge, pack.info, pkgContextInfo.json (intermediate, not in HAP), resources.index. | None for minimal-hap. HAR/HSP-specific pack flows for complex projects.                 |
 
@@ -215,12 +215,27 @@ large compiler project. Treat it as the longest pole in the plan.
 
 ### Phase 6: Release features and packaging cleanup
 
-- Wire `arkdown-obfuscate` into the CLI between bundling and ABC compilation.
-- Invalidate code/ABC caches when obfuscation rules or SDK compile env change.
-- Fix `pkgContextInfo.json`, `pack.info`, source map packaging, native libs,
+**Partially complete (2026-05-29):**
+
+- ✅ Wire `arkdown-obfuscate` into the CLI between bundling and ABC compilation.
+  Runs for Release builds when `obfuscation.enable_obfuscation=true`.
+- ✅ Invalidate ABC cache when obfuscation rules or SDK compile env change.
+  `compute_config_hash()` mixes build mode + bundle name + API version +
+  obfuscation rule FNV hash into a single `u64` config key.
+- ✅ Wire `arkdown-cache` incremental ABC skip: if all compile-entry content
+  hashes match and `modules.abc` exists, ABC compilation is skipped entirely.
+- ✅ Pass `cache_file` to `compile_to_abc` (`build/default/cache/abc/modules.abc.cache`).
+- ✅ Integration tests in `crates/arkdown-cli/tests/cache_test.rs`:
+  `test_first_build_writes_cache_entries`, `test_first_build_writes_abc_cache_file`,
+  `test_two_builds_produce_identical_abc`.
+- TODO: Fix `pkgContextInfo.json`, `pack.info`, source map packaging, native libs,
   integrated HSP, privacy profile, startup/share config, and router map output.
-- Add HSP/HAR-specific flows instead of routing HSP through the same HAP path
+- TODO: Add HSP/HAR-specific flows instead of routing HSP through the same HAP path
   with only archive extension changes.
+- TODO: Terser minification and compact/remove-log obfuscation rules inside
+  `arkdown-obfuscate`.
+- TODO: Wire rollup-level module-graph cache (hvigor msgpack cache) to skip
+  re-bundling unchanged source trees.
 
 ## Suggested Milestones
 
