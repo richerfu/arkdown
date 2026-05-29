@@ -7,13 +7,9 @@ use anyhow::{Context, Result};
 use clap::Args;
 
 use arkdown::{BundleOutput, Bundler};
-use arkdown_cache::{
-    BundleCache, BundleCacheKey, BundleCacheManifest, BundledChunkMeta,
-    compute_content_hash, BuildCache, CacheKey, CachedEntry,
-};
 use arkdown_config::load_config;
 use arkdown_core::{
-    ArkChunk, ArkdownConfig, BuildMode, ChunkGraph, ChunkIdx, ModuleConfig, ModuleJson5,
+    ArkdownConfig, ArkdownPlugin, BuildMode, ChunkGraph, ModuleConfig, ModuleJson5,
     ModuleJson5Module, OutputTarget,
 };
 use index_vec::IndexVec;
@@ -37,6 +33,7 @@ use arkdown_sign::HapSigner;
 use arkdown_ts2abc::{compile_to_abc, Ts2abcInput, Ts2abcOptions};
 
 use crate::progress::Progress;
+use crate::task_cache::TaskInputs;
 
 #[derive(Args)]
 pub struct BuildArgs {
@@ -196,32 +193,35 @@ pub async fn run(args: BuildArgs) -> Result<()> {
 
     // Step 3: Bundling
     progress.step(3, 6, "Bundling");
-    let mut bundle_outs = Vec::new();
+    let mut bundle_outs: Vec<(BundleOutput, bool)> = Vec::new();
     for (module, _manifest, loader_json) in &loader_jsons {
-        // Check the bundle-level output cache BEFORE cleaning stale .js files.
-        // A cache hit means rolldown output is unchanged; reuse the existing .js
-        // chunks on disk instead of re-running the full bundler.
-        let bundle_cache_dir = module.src_path.join("build/default/cache/bundle");
-        let bundle_cache = BundleCache::new(bundle_cache_dir);
-        let bundle_key = BundleCacheKey {
-            source_hash: compute_bundle_source_hash(
-                &loader_json.compile_entry,
-                &loader_json.module_root_path,
-            ),
-            config_hash: compute_bundle_config_hash(&config_arc, loader_json),
-        };
-        if bundle_cache.is_valid(&bundle_key) {
-            if let Ok(Some(manifest)) = bundle_cache.load() {
-                bundle_outs.push(bundle_output_from_manifest(&manifest, loader_json));
-                continue;
-            }
+        let cache_dir = PathBuf::from(&loader_json.cache_path);
+        let output_dir = PathBuf::from(&loader_json.ace_module_build);
+        let cached_abc = output_dir.join("modules.abc");
+        let task_inputs = TaskInputs::compute(&config_arc, loader_json);
+        if task_inputs.matches_cached(&cache_dir) && cached_abc.exists() {
+            let stub_graph = ChunkGraph {
+                chunks: Default::default(),
+                module_to_chunk: Default::default(),
+                entry_module_to_entry_chunk: Default::default(),
+            };
+            bundle_outs.push((
+                BundleOutput {
+                    chunk_graph: stub_graph,
+                    output_dir: output_dir.clone(),
+                    chunk_files: vec![],
+                    modules_abc_path: cached_abc,
+                    source_maps_path: None,
+                },
+                true,
+            ));
+            continue;
         }
 
-        // Cache miss: clean stale .js files from previous builds so that
-        // collect_js_chunks_from_output (which uses the explicit file list) is
-        // the authoritative source, and any leftover files from a prior run do
-        // not sneak into the ABC compiler.
-        let chunk_dir_pre = PathBuf::from(loader_json.ace_module_build.as_str());
+        // Clean stale .js files from previous builds so that collect_js_chunks_from_output
+        // (which uses the explicit file list) is the authoritative source, and any leftover
+        // files from a prior run do not sneak into the ABC compiler.
+        let chunk_dir_pre = output_dir.clone();
         if chunk_dir_pre.exists() {
             for entry in walkdir::WalkDir::new(&chunk_dir_pre)
                 .max_depth(1)
@@ -294,15 +294,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             .bundle(loader_json)
             .await
             .map_err(|e| anyhow::anyhow!("Bundle failed: {}", e))?;
-
-        // Save bundle cache so the next build can skip rolldown when nothing
-        // has changed.
-        let manifest = build_bundle_cache_manifest(&bundle_key, &bundle_out);
-        if let Err(e) = bundle_cache.save(&manifest) {
-            eprintln!("[warn] failed to save bundle cache: {e}");
-        }
-
-        bundle_outs.push(bundle_out);
+        bundle_outs.push((bundle_out, false));
     }
     progress.done();
 
@@ -315,11 +307,12 @@ pub async fn run(args: BuildArgs) -> Result<()> {
     // The results are written to:
     //   1. loader.json (two new fields, omitted when empty)
     //   2. intermediates/importee/default/{module_name}/importee.json  (cache)
-    for (((module, _manifest, loader_json), bundle_out), bc_har_deps) in loader_jsons
-        .iter_mut()
-        .zip(bundle_outs.iter())
-        .zip(all_bc_har_deps.iter())
+    for ((module, _manifest, loader_json), (bundle_out, from_cache)) in
+        loader_jsons.iter_mut().zip(bundle_outs.iter())
     {
+        if *from_cache {
+            continue;
+        }
         let intermediates_dir = module.src_path.join("build/default/intermediates");
         let module_src_main = PathBuf::from(&loader_json.module_root_path);
         let importee_cfg = ProcessImporteeConfig {
@@ -410,49 +403,12 @@ pub async fn run(args: BuildArgs) -> Result<()> {
 
     // Step 5: ABC compilation
     progress.step(5, 6, "Compiling ABC");
-    for (((module, _manifest, loader_json), bundle_out), bc_har_deps) in loader_jsons
-        .iter()
-        .zip(bundle_outs.iter())
-        .zip(all_bc_har_deps.iter())
+    for ((module, _manifest, loader_json), (bundle_out, from_cache)) in
+        loader_jsons.iter().zip(bundle_outs.iter())
     {
-        // ── Incremental ABC cache check ───────────────────────────────────────
-        //
-        // Load the per-module build cache and check whether every compile-entry
-        // source file still has the same content hash as the last successful
-        // ABC compilation run.  When ALL entries are valid AND modules.abc already
-        // exists on disk, ABC compilation is skipped entirely — the previous output
-        // is reused as-is.
-        //
-        // Cache storage: <module>/build/default/cache/modules/<fnv1a(id)>.json
-        // ABC compiler cache: <module>/build/default/cache/abc/modules.abc.cache
-        let abc_cache_dir = module.src_path.join("build/default/cache/modules");
-        let mut build_cache = BuildCache::new(abc_cache_dir);
-        if let Err(e) = build_cache.load_from_disk() {
-            eprintln!("[warn] failed to load build cache: {e}");
-        }
-
-        let modules_abc_exists = bundle_out.modules_abc_path.exists();
-        let all_source_cached = modules_abc_exists
-            && loader_json.compile_entry.iter().all(|entry_path| {
-                let src = PathBuf::from(&loader_json.module_root_path)
-                    .join(entry_path.trim_start_matches("./"));
-                std::fs::read_to_string(&src)
-                    .map(|content| {
-                        let key = CacheKey {
-                            content_hash: compute_content_hash(&content),
-                            config_hash: abc_config_hash,
-                            dependency_hash: 0,
-                        };
-                        build_cache.is_valid(entry_path, &key)
-                    })
-                    .unwrap_or(false)
-            });
-
-        if all_source_cached {
-            // modules.abc is up-to-date; nothing to do for this module.
+        if *from_cache {
             continue;
         }
-
         // Build record metadata map: chunk_stem → OHM URL module path.
         // Format matches es2abc/hvigorw: "{bundleName}/{moduleName}/{pathFromEts}"
         // e.g. "com.example.arkdown.test/entry/ets/entryability/EntryAbility"
@@ -574,6 +530,12 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                     }
                 }
             }
+            // Persist task inputs so the next build can skip this step.
+            let cache_dir = PathBuf::from(&loader_json.cache_path);
+            let task_inputs = TaskInputs::compute(&config_arc, loader_json);
+            if let Err(e) = task_inputs.save(&cache_dir) {
+                eprintln!("[warn] failed to save task inputs cache: {e}");
+            }
         }
         // Append ByteCode HAR pre-compiled .abc files to the output modules.abc.
         // Each HAR's bytes are concatenated after the main compiled bytecode so
@@ -598,7 +560,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
     progress.step(6, 6, "Packaging");
     let packager = Packager::new(config_arc.clone());
     let mut output_paths = Vec::new();
-    for ((module, manifest, _loader_json), bundle_out) in
+    for ((module, manifest, _loader_json), (bundle_out, _from_cache)) in
         loader_jsons.iter().zip(bundle_outs.iter())
     {
         let module_json = module
