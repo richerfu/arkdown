@@ -259,6 +259,50 @@ globalThis["test"] = "hello";"#;
         let _ = std::fs::remove_file(&tmp);
     }
 
+    /// Verify that LNP density is per-instruction, not just per-statement.
+    ///
+    /// es2abc emits one LNP row per bytecode instruction.  With a 4-statement
+    /// module body that compiles to many instructions, the `line_ops` byte count
+    /// must exceed what per-statement tracking alone would produce.
+    #[test]
+    fn test_lnp_per_instruction_density() {
+        use crate::emit::file::LiteralArray;
+        use crate::emit::strings::StringTable;
+        use crate::ir::builder::build_record_with_debug;
+
+        // Four statements — each compiles to multiple bytecode instructions.
+        let source = "const x = 1;\nconst y = 2;\nconst z = x + y;\nglobalThis[\"r\"] = z;\n";
+
+        let mut strings = StringTable::default();
+        let mut literal_arrays: Vec<LiteralArray> = Vec::new();
+        let record = build_record_with_debug(
+            source,
+            "test/density",
+            &mut strings,
+            &mut literal_arrays,
+            Some("test.ts"),
+            true,
+        )
+        .expect("build_record_with_debug must succeed");
+
+        let main = record
+            .methods
+            .iter()
+            .find(|m| m.name == "func_main_0")
+            .expect("func_main_0 must exist");
+
+        // Per-statement tracking would yield at most 4 advance opcodes (one per
+        // statement) + END_SEQUENCE = 5 bytes.  Per-instruction tracking emits
+        // one SPECIAL_OPCODE byte per instruction, so line_ops.len() must be
+        // significantly larger.  The source compiles to at least 8 instructions.
+        assert!(
+            main.line_ops.len() > 5,
+            "per-instruction LNP must exceed 5 bytes; got {} bytes (bytecode {} bytes)",
+            main.line_ops.len(),
+            main.bytecode.len(),
+        );
+    }
+
     /// Verify that an ESM class compiles to the expected method records.
     ///
     /// The bundler now always emits clean ESM (no IIFE wrapper, no CJS interop
