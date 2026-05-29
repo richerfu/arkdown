@@ -111,7 +111,7 @@ fn compute_obfuscation_hash(config: &ArkdownConfig) -> u64 {
     if !obf.enable_obfuscation {
         return 0;
     }
-    let Some(rules_path) = obf.rules_file.as_ref() else {
+    let Some(rules_path) = obf.rule_files.first() else {
         return 0;
     };
     let Ok(content) = std::fs::read(rules_path) else {

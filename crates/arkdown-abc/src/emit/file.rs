@@ -33,16 +33,6 @@ pub enum LiteralEntry {
 pub struct LiteralArray {
     /// Entries serialised into the literal-array section.
     pub entries: Vec<LiteralEntry>,
-    /// Whether this literal array is referenced by a bytecode operand and
-    /// should appear in the IndexSection method/constant index.
-    ///
-    /// Literal arrays that are only referenced by field values
-    /// (`FieldValue::LiteralArray`) — such as `moduleRecordIdx` and
-    /// `scopeNames` — are NOT included in the method index, matching
-    /// hvigor/es2abc behaviour.  Arrays referenced by bytecode instructions
-    /// (`createobjectwithbuffer`, `defineclasswithbuffer`,
-    /// `newlexenvwithname`) ARE included.
-    pub in_method_index: bool,
 }
 
 impl LiteralEntry {
@@ -300,25 +290,12 @@ impl AbcFile {
 
         let total_classes = all_classes.len() as u32;
         let class_idx_off = HEADER_SIZE as u32; // 0x3C
-        // Only count literal arrays and methods that are referenced by bytecode
-        // operands (i.e. those with in_method_index = true).  Literal arrays
-        // referenced only by field values (moduleRecordIdx, scopeNames) and
-        // methods that are only defined but not referenced by definefunc /
-        // defineclasswithbuffer (e.g. func_main_0, regular class instance
-        // methods) are excluded from the IndexSection method/constant index,
-        // matching hvigor/es2abc behaviour.
-        let indexed_lit_count = self
-            .literal_arrays
+        let total_methods = all_classes
             .iter()
-            .filter(|la| la.in_method_index)
-            .count() as u32;
-        let indexed_method_count = all_classes
-            .iter()
-            .flat_map(|class| class.methods.iter())
-            .filter(|m| m.in_method_index)
-            .count() as u32;
+            .map(|class| class.methods.len() as u32)
+            .sum::<u32>();
         let method_index_count =
-            self.strings.len() as u32 + indexed_lit_count + indexed_method_count;
+            self.strings.len() as u32 + self.literal_arrays.len() as u32 + total_methods;
 
         let num_lnp = all_classes
             .iter()
@@ -576,54 +553,25 @@ impl AbcFile {
         let code_section_start: u32 =
             class_section_start + class_item_sizes.iter().sum::<usize>() as u32;
 
-        // Build a remapping table from original literal-array index (0-based
-        // into self.literal_arrays) to method-index position.  Literal arrays
-        // that are not in the method index get u16::MAX as a sentinel.
-        let lit_index_remap: Vec<u16> = {
-            let strings_base = self.strings.len() as u16;
-            let mut indexed_so_far = 0u16;
-            self.literal_arrays
-                .iter()
-                .map(|la| {
-                    if la.in_method_index {
-                        let pos = strings_base + indexed_so_far;
-                        indexed_so_far += 1;
-                        pos
-                    } else {
-                        u16::MAX
-                    }
-                })
-                .collect()
-        };
-
         let mut code_offsets: Vec<Vec<u32>> = Vec::new();
         let mut all_code_items: Vec<Vec<Vec<u8>>> = Vec::new();
 
         let mut code_cur = code_section_start;
-        // The method pool base starts after the string entries and indexed
-        // literal-array entries in the IndexSection method/constant index.
-        let mut method_pool_cursor = self.strings.len() as u16 + indexed_lit_count as u16;
+        // Method index ordering: [bytecode_strings | methods | literal_arrays].
+        // Methods therefore start at index strings.len() in the method pool.
+        let mut method_pool_cursor = self.strings.len() as u16;
         for class in &all_classes {
             let mut class_code_offs = Vec::new();
             let mut class_code_items = Vec::new();
             let class_method_pool_start = method_pool_cursor;
-            // Only count methods that are in the method index when computing
-            // the pool range for this class.
-            let class_indexed_method_count =
-                class.methods.iter().filter(|m| m.in_method_index).count() as u16;
             let class_method_pool_end =
-                class_method_pool_start.saturating_add(class_indexed_method_count);
-            // The constructor is the first indexed method in the class (it has
-            // in_method_index=true and name contains "#~@0=").
+                class_method_pool_start.saturating_add(class.methods.len() as u16);
             let ctor_pool_index = class
                 .methods
                 .iter()
-                .filter(|m| m.in_method_index)
                 .position(|method| method.name.contains("#~@0="))
                 .map(|index| class_method_pool_start.saturating_add(index as u16))
                 .unwrap_or(class_method_pool_start);
-            // definefunc pool cursor starts at the second indexed method (after
-            // the constructor).
             let mut definefunc_pool_cursor = class_method_pool_start.saturating_add(1);
             for method in &class.methods {
                 class_code_offs.push(code_cur);
@@ -632,7 +580,7 @@ impl AbcFile {
                     (self.strings.len() as u16).saturating_add(total_methods as u16);
                 let bytecode = patch_bytecode_index_operands(
                     &method.bytecode,
-                    &lit_index_remap,
+                    literal_pool_base,
                     ctor_pool_index,
                     class_method_pool_end,
                     &mut definefunc_pool_cursor,
@@ -645,10 +593,7 @@ impl AbcFile {
                 );
                 code_cur += ci.len() as u32;
                 class_code_items.push(ci);
-                // Only advance the pool cursor for indexed methods.
-                if method.in_method_index {
-                    method_pool_cursor = method_pool_cursor.saturating_add(1);
-                }
+                method_pool_cursor = method_pool_cursor.saturating_add(1);
             }
             code_offsets.push(class_code_offs);
             all_code_items.push(class_code_items);
@@ -839,24 +784,8 @@ impl AbcFile {
         // Method index ordering matches hvigor: [bytecode_strings | methods | literal_arrays].
         // Bytecode imm16 operands use: strings 0..N-1, methods N..N+M-1, lit_arrays N+M..end.
         method_index_offsets.extend(bytecode_string_offsets.iter().copied());
-        // Only include literal arrays that are referenced by bytecode operands.
-        for (la, &off) in self
-            .literal_arrays
-            .iter()
-            .zip(literal_array_offsets.iter())
-        {
-            if la.in_method_index {
-                method_index_offsets.push(off);
-            }
-        }
-        // Only include methods that are referenced by bytecode operands.
         for (class, &class_off) in all_classes.iter().zip(class_item_offsets.iter()) {
-            let all_method_offs = class.method_item_offsets(class_off);
-            for (method, &method_off) in class.methods.iter().zip(all_method_offs.iter()) {
-                if method.in_method_index {
-                    method_index_offsets.push(method_off);
-                }
-            }
+            method_index_offsets.extend(class.method_item_offsets(class_off));
         }
         method_index_offsets.extend(literal_array_offsets.iter().copied());
         debug_assert_eq!(method_index_offsets.len() as u32, method_index_count);
@@ -1065,15 +994,9 @@ impl AbcFile {
     }
 }
 
-/// Patch bytecode index operands using the provided literal-array remap table.
-///
-/// `lit_index_remap[i]` is the method-index position for the literal array at
-/// position `i` in `AbcFile::literal_arrays`.  Entries with value `u16::MAX`
-/// are not in the method index (field-only literal arrays such as
-/// `moduleRecordIdx` and `scopeNames`).
 fn patch_bytecode_index_operands(
     bytecode: &[u8],
-    lit_index_remap: &[u16],
+    literal_pool_base: u16,
     ctor_pool_index: u16,
     method_pool_end: u16,
     definefunc_pool_cursor: &mut u16,
@@ -1101,36 +1024,16 @@ fn patch_bytecode_index_operands(
             let ctor_pos = pos + 2;
             patched[ctor_pos..ctor_pos + 2].copy_from_slice(&ctor_pool_index.to_le_bytes());
             let buf_pos = pos + 4;
-            let old_buf = u16::from_le_bytes([patched[buf_pos], patched[buf_pos + 1]]) as usize;
-            let new_buf = lit_index_remap
-                .get(old_buf)
-                .copied()
-                .unwrap_or(old_buf as u16);
+            let old_buf = u16::from_le_bytes([patched[buf_pos], patched[buf_pos + 1]]);
+            let new_buf = old_buf.saturating_add(literal_pool_base);
             patched[buf_pos..buf_pos + 2].copy_from_slice(&new_buf.to_le_bytes());
             pos += 9;
             continue;
         }
         if opcode == 0xb6 && pos + 3 < patched.len() {
             let literal_pos = pos + 2;
-            let old_literal =
-                u16::from_le_bytes([patched[literal_pos], patched[literal_pos + 1]]) as usize;
-            let new_literal = lit_index_remap
-                .get(old_literal)
-                .copied()
-                .unwrap_or(old_literal as u16);
-            patched[literal_pos..literal_pos + 2].copy_from_slice(&new_literal.to_le_bytes());
-            pos += 4;
-            continue;
-        }
-        // createobjectwithbuffer (0x07): slot(1) + lit_id(2) = 4 bytes total
-        if opcode == 0x07 && pos + 3 < patched.len() {
-            let literal_pos = pos + 2;
-            let old_literal =
-                u16::from_le_bytes([patched[literal_pos], patched[literal_pos + 1]]) as usize;
-            let new_literal = lit_index_remap
-                .get(old_literal)
-                .copied()
-                .unwrap_or(old_literal as u16);
+            let old_literal = u16::from_le_bytes([patched[literal_pos], patched[literal_pos + 1]]);
+            let new_literal = old_literal.saturating_add(literal_pool_base);
             patched[literal_pos..literal_pos + 2].copy_from_slice(&new_literal.to_le_bytes());
             pos += 4;
             continue;

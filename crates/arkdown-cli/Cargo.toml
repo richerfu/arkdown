@@ -31,6 +31,7 @@ arkdown-plugin-json5 = { path = "../arkdown-plugin-json5" }
 arkdown-plugin-router-map = { path = "../arkdown-plugin-router-map" }
 arkdown-resolver = { path = "../arkdown-resolver" }
 arkdown-watcher = { path = "../arkdown-watcher" }
+rolldown_plugin = "1.0.3"
 clap = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }

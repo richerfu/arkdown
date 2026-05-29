@@ -235,9 +235,7 @@ pub fn build_record_with_debug(
         num_args: 3,
         debug_info: None,
         line_ops: func_main_line_ops,
-        // func_main_0 is the module entry point called directly by ArkRuntime,
-        // not by any bytecode definefunc operand.  Exclude from method index.
-        in_method_index: false,
+        catch_entries: func_main_catches,
     });
 
     // Determine which statement slice to scan for declarations. Upstream
@@ -249,22 +247,30 @@ pub fn build_record_with_debug(
         if let Statement::FunctionDeclaration(func) = stmt {
             if let Some(id) = &func.id {
                 let func_name = id.name.as_str().to_string();
-                let param_names: Vec<&str> = func
-                    .params
-                    .items
-                    .iter()
-                    .filter_map(|p| match &p.pattern {
-                        BindingPattern::BindingIdentifier(id) => Some(id.name.as_str()),
-                        _ => None,
-                    })
-                    .collect();
-                let func_bytecode = compile_function_body(
-                    func.body.as_deref(),
-                    strings,
-                    literal_arrays,
-                    &lowering,
-                    &param_names,
-                );
+                let rest_info: Option<(String, u8)> =
+                    func.params.rest.as_ref().and_then(|rp| {
+                        if let BindingPattern::BindingIdentifier(bid) = &rp.rest.argument {
+                            Some((
+                                bid.name.as_str().to_string(),
+                                func.params.items.len() as u8,
+                            ))
+                        } else {
+                            None
+                        }
+                    });
+                let is_async = func.r#async;
+                let (func_bytecode, func_catches) = if rest_info.is_some() || is_async {
+                    compile_function_body_ext(
+                        func.body.as_deref(),
+                        rest_info,
+                        is_async,
+                        strings,
+                        literal_arrays,
+                        &lowering,
+                    )
+                } else {
+                    compile_function_body(func.body.as_deref(), strings, literal_arrays, &lowering)
+                };
                 let num_vregs = estimate_vregs(&func_bytecode);
                 methods.push(MethodRecord {
                     name: func_name,
@@ -273,9 +279,7 @@ pub fn build_record_with_debug(
                     num_args: func.params.items.len() as u16,
                     debug_info: None,
                     line_ops: vec![],
-                    // Top-level function declarations are referenced by
-                    // `definefunc` in the module body.
-                    in_method_index: true,
+                    catch_entries: func_catches,
                 });
             }
         }
@@ -283,22 +287,35 @@ pub fn build_record_with_debug(
             if let Some(Declaration::FunctionDeclaration(func)) = &export.declaration {
                 if let Some(id) = &func.id {
                     let func_name = id.name.as_str().to_string();
-                    let param_names: Vec<&str> = func
-                        .params
-                        .items
-                        .iter()
-                        .filter_map(|p| match &p.pattern {
-                            BindingPattern::BindingIdentifier(id) => Some(id.name.as_str()),
-                            _ => None,
-                        })
-                        .collect();
-                    let func_bytecode = compile_function_body(
-                        func.body.as_deref(),
-                        strings,
-                        literal_arrays,
-                        &lowering,
-                        &param_names,
-                    );
+                    let rest_info: Option<(String, u8)> =
+                        func.params.rest.as_ref().and_then(|rp| {
+                            if let BindingPattern::BindingIdentifier(bid) = &rp.rest.argument {
+                                Some((
+                                    bid.name.as_str().to_string(),
+                                    func.params.items.len() as u8,
+                                ))
+                            } else {
+                                None
+                            }
+                        });
+                    let is_async = func.r#async;
+                    let (func_bytecode, func_catches) = if rest_info.is_some() || is_async {
+                        compile_function_body_ext(
+                            func.body.as_deref(),
+                            rest_info,
+                            is_async,
+                            strings,
+                            literal_arrays,
+                            &lowering,
+                        )
+                    } else {
+                        compile_function_body(
+                            func.body.as_deref(),
+                            strings,
+                            literal_arrays,
+                            &lowering,
+                        )
+                    };
                     let num_vregs = estimate_vregs(&func_bytecode);
                     methods.push(MethodRecord {
                         name: func_name,
@@ -307,9 +324,7 @@ pub fn build_record_with_debug(
                         num_args: func.params.items.len() as u16,
                         debug_info: None,
                         line_ops: vec![],
-                        // Exported function declarations are referenced by
-                        // `definefunc` in the module body.
-                        in_method_index: true,
+                        catch_entries: func_catches,
                     });
                 }
             }
@@ -500,12 +515,7 @@ fn lexical_names_literal_array(names: &[String]) -> LiteralArray {
         entries.push(LiteralEntry::TaggedString(name.clone()));
         entries.push(LiteralEntry::TaggedInteger(idx as u32));
     }
-    // Lexical-names arrays are referenced by `newlexenvwithname` bytecode
-    // operands, so they belong in the method index.
-    LiteralArray {
-        entries,
-        in_method_index: true,
-    }
+    LiteralArray { entries }
 }
 
 fn module_record_literal_array(module_record: &ModuleRecordInfo) -> LiteralArray {
@@ -542,17 +552,22 @@ fn module_record_literal_array(module_record: &ModuleRecordInfo) -> LiteralArray
         entries.push(LiteralEntry::RawString(export.local_name.clone()));
         entries.push(LiteralEntry::RawString(export.export_name.clone()));
     }
-    entries.extend([
-        LiteralEntry::RawU32(0), // indirect exports
-        LiteralEntry::RawU32(0), // star exports
-    ]);
-    // Module record arrays are referenced only by the `moduleRecordIdx` field
-    // value, not by any bytecode operand.  Exclude from the method index,
-    // matching hvigor/es2abc behaviour.
-    LiteralArray {
-        entries,
-        in_method_index: false,
+
+    // 5. Indirect exports: [{module_request_idx, import_name, export_name}]
+    entries.push(LiteralEntry::RawU32(module_record.indirect_exports.len() as u32));
+    for export in &module_record.indirect_exports {
+        entries.push(LiteralEntry::RawU16(export.module_request_idx));
+        entries.push(LiteralEntry::RawString(export.import_name.clone()));
+        entries.push(LiteralEntry::RawString(export.export_name.clone()));
     }
+
+    // 6. Star exports: [{module_request_idx}]
+    entries.push(LiteralEntry::RawU32(module_record.star_exports.len() as u32));
+    for export in &module_record.star_exports {
+        entries.push(LiteralEntry::RawU16(export.module_request_idx));
+    }
+
+    LiteralArray { entries }
 }
 
 fn scope_names_literal_array(methods: &[MethodRecord], record_name: &str) -> LiteralArray {
@@ -593,12 +608,8 @@ fn scope_names_literal_array(methods: &[MethodRecord], record_name: &str) -> Lit
     }
 
     let Some(owner_method) = first_closure_owner else {
-        // No call-arg closures in this class → empty scopeNames payload.
-        // Empty scopeNames arrays are field-only (not in method index).
-        return LiteralArray {
-            entries: vec![],
-            in_method_index: false,
-        };
+        // No call-arg closures in this class → no scopeNames payload.
+        return LiteralArray { entries: vec![] };
     };
 
     let class_short = record_name
@@ -607,15 +618,11 @@ fn scope_names_literal_array(methods: &[MethodRecord], record_name: &str) -> Lit
         .unwrap_or(record_name)
         .to_string();
 
-    // Non-empty scopeNames arrays are referenced only by the `scopeNames`
-    // field value, not by any bytecode operand.  Exclude from the method
-    // index, matching hvigor/es2abc behaviour.
     LiteralArray {
         entries: vec![
             LiteralEntry::TaggedString(class_short),
             LiteralEntry::TaggedString(owner_method),
         ],
-        in_method_index: false,
     }
 }
 
@@ -791,34 +798,35 @@ fn collect_top_level_call_arg_arrows_expr(
                     let base_name = "#*#".to_string();
                     let record_name = suffix_duplicate_method_name(base_name, seen_names);
                     let captures = arrow_captures_from_body(arrow.body.as_ref());
-                    let arrow_params: Vec<&str> = arrow
-                        .params
-                        .items
-                        .iter()
-                        .filter_map(|p| match &p.pattern {
-                            BindingPattern::BindingIdentifier(id) => Some(id.name.as_str()),
-                            _ => None,
-                        })
-                        .collect();
-                    let bytecode = compile_arrow_body(
+                    let (bytecode, arrow_catches) = compile_arrow_body(
                         arrow.body.as_ref(),
                         strings,
                         literal_arrays,
                         lowering,
                         captures,
-                        &arrow_params,
                     );
                     let num_vregs = estimate_vregs(&bytecode);
+                    let param_names: Vec<String> = arrow
+                        .params
+                        .items
+                        .iter()
+                        .filter_map(|p| match &p.pattern {
+                            BindingPattern::BindingIdentifier(id) => {
+                                Some(id.name.as_str().to_string())
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    let closure_debug: Option<DebugInfoRecord> = None;
+                    let _ = param_names; // top-level closures don't track param debug info
                     methods.push(MethodRecord {
                         name: record_name,
                         bytecode,
                         num_vregs,
                         num_args: arrow.params.items.len() as u16 + 3,
-                        debug_info: None,
+                        debug_info: closure_debug,
                         line_ops: vec![],
-                        // Top-level call-arg arrow functions are referenced by
-                        // `definefunc` in the module body.
-                        in_method_index: true,
+                        catch_entries: arrow_catches,
                     });
                     // Recurse into body for deeper top-level closures.
                     let body_ref = arrow.body.as_ref();
@@ -911,8 +919,7 @@ fn compile_class_elements(
             num_args: 4,
             debug_info: None,
             line_ops: vec![],
-            // Synthetic constructors are referenced by `defineclasswithbuffer`.
-            in_method_index: true,
+            catch_entries: catches,
         });
     }
 
@@ -925,51 +932,75 @@ fn compile_class_elements(
                 continue;
             };
             let key_name = suffix_duplicate_method_name(key_name, &mut seen_names);
-            // Collect formal parameter names for register pre-allocation.
-            let method_param_names: Vec<&str> = method
-                .value
-                .params
-                .items
-                .iter()
-                .filter_map(|p| match &p.pattern {
-                    BindingPattern::BindingIdentifier(id) => Some(id.name.as_str()),
-                    _ => None,
-                })
-                .collect();
-            let (bytecode, method_line_ops) = if let Some(src) = source {
+
+            // Detect rest parameter and async flag for this method.
+            let rest_info: Option<(String, u8)> = method.value.params.rest.as_ref().and_then(
+                |rest_param| {
+                    if let BindingPattern::BindingIdentifier(id) = &rest_param.rest.argument {
+                        let count = method.value.params.items.len() as u8;
+                        Some((id.name.as_str().to_string(), count))
+                    } else {
+                        None
+                    }
+                },
+            );
+            let is_method_async = method.value.r#async;
+            let is_constructor = method.kind == MethodDefinitionKind::Constructor;
+
+            let (bytecode, method_line_ops, method_catches) = if is_constructor {
+                // Constructor: inject instance field initializers as prologue.
+                let (bc, catches) = compile_constructor_with_fields(
+                    method.value.body.as_deref(),
+                    &instance_fields,
+                    strings,
+                    literal_arrays,
+                    lowering,
+                );
+                (bc, vec![], catches)
+            } else if rest_info.is_some() || is_method_async {
+                let (bc, catches) = compile_function_body_ext(
+                    method.value.body.as_deref(),
+                    rest_info,
+                    is_method_async,
+                    strings,
+                    literal_arrays,
+                    lowering,
+                );
+                (bc, vec![], catches)
+            } else if let Some(src) = source {
                 compile_function_body_tracked(
                     method.value.body.as_deref(),
                     strings,
                     literal_arrays,
                     lowering,
                     src,
-                    &method_param_names,
                 )
             } else {
-                (
-                    compile_function_body(
-                        method.value.body.as_deref(),
-                        strings,
-                        literal_arrays,
-                        lowering,
-                        &method_param_names,
-                    ),
-                    vec![],
-                )
+                let (bc, catches) = compile_function_body(
+                    method.value.body.as_deref(),
+                    strings,
+                    literal_arrays,
+                    lowering,
+                );
+                (bc, vec![], catches)
             };
             let num_vregs = estimate_vregs(&bytecode);
             let num_args = class_method_num_args(method);
-            let param_names_owned: Vec<String> =
-                method_param_names.iter().map(|s| s.to_string()).collect();
+            let param_names: Vec<String> = method
+                .value
+                .params
+                .items
+                .iter()
+                .filter_map(|p| match &p.pattern {
+                    BindingPattern::BindingIdentifier(id) => Some(id.name.as_str().to_string()),
+                    _ => None,
+                })
+                .collect();
             let debug_info = source_file_path.map(|path| DebugInfoRecord {
                 line_start: 1,
                 source_file: path.to_string(),
-                param_names: param_names_owned,
+                param_names,
             });
-            // Constructors are referenced by `defineclasswithbuffer`; regular
-            // instance/static methods are referenced only via the class-buffer
-            // literal array by file offset and do not need a method-index entry.
-            let is_ctor = method.kind == MethodDefinitionKind::Constructor;
             methods.push(MethodRecord {
                 name: key_name,
                 bytecode,
@@ -977,7 +1008,7 @@ fn compile_class_elements(
                 num_args,
                 debug_info,
                 line_ops: method_line_ops,
-                in_method_index: is_ctor,
+                catch_entries: method_catches,
             });
 
             collect_class_method_arrow_records(
@@ -1045,22 +1076,12 @@ fn collect_arrow_records_from_stmt(
                     continue;
                 };
                 let captures = arrow_captures_from_body(arrow.body.as_ref());
-                let arrow_params: Vec<&str> = arrow
-                    .params
-                    .items
-                    .iter()
-                    .filter_map(|p| match &p.pattern {
-                        BindingPattern::BindingIdentifier(id) => Some(id.name.as_str()),
-                        _ => None,
-                    })
-                    .collect();
-                let bytecode = compile_arrow_body(
+                let (bytecode, arrow_catches) = compile_arrow_body(
                     arrow.body.as_ref(),
                     strings,
                     literal_arrays,
                     lowering,
                     captures,
-                    &arrow_params,
                 );
                 let num_vregs = estimate_vregs(&bytecode);
                 methods.push(MethodRecord {
@@ -1070,9 +1091,7 @@ fn collect_arrow_records_from_stmt(
                     num_args: arrow.params.items.len() as u16 + 3,
                     debug_info: None,
                     line_ops: vec![],
-                    // Arrow functions stored in class fields are referenced by
-                    // `definefunc` in the class body.
-                    in_method_index: true,
+                    catch_entries: arrow_catches,
                 });
             }
         }
@@ -1205,30 +1224,29 @@ fn collect_call_arg_arrows_expr(
                     let base_name = "#~@0>@1*#".to_string();
                     let record_name = suffix_duplicate_method_name(base_name, seen_names);
                     let captures = arrow_captures_from_body(arrow.body.as_ref());
-                    let arrow_params: Vec<&str> = arrow
-                        .params
-                        .items
-                        .iter()
-                        .filter_map(|p| match &p.pattern {
-                            BindingPattern::BindingIdentifier(id) => Some(id.name.as_str()),
-                            _ => None,
-                        })
-                        .collect();
-                    let bytecode = compile_arrow_body(
+                    let (bytecode, arrow_catches) = compile_arrow_body(
                         arrow.body.as_ref(),
                         strings,
                         literal_arrays,
                         lowering,
                         captures,
-                        &arrow_params,
                     );
                     let num_vregs = estimate_vregs(&bytecode);
-                    let arrow_param_names_owned: Vec<String> =
-                        arrow_params.iter().map(|s| s.to_string()).collect();
+                    let arrow_param_names: Vec<String> = arrow
+                        .params
+                        .items
+                        .iter()
+                        .filter_map(|p| match &p.pattern {
+                            BindingPattern::BindingIdentifier(id) => {
+                                Some(id.name.as_str().to_string())
+                            }
+                            _ => None,
+                        })
+                        .collect();
                     let arrow_debug = source_file_path.map(|path| DebugInfoRecord {
                         line_start: 1,
                         source_file: path.to_string(),
-                        param_names: arrow_param_names_owned,
+                        param_names: arrow_param_names,
                     });
                     methods.push(MethodRecord {
                         name: record_name,
@@ -1237,9 +1255,7 @@ fn collect_call_arg_arrows_expr(
                         num_args: arrow.params.items.len() as u16 + 3,
                         debug_info: arrow_debug,
                         line_ops: vec![],
-                        // Call-arg arrow functions are referenced by `definefunc`
-                        // in the enclosing method body.
-                        in_method_index: true,
+                        catch_entries: arrow_catches,
                     });
                     // Recurse into the arrow body for deeper nested closures.
                     let body_ref = arrow.body.as_ref();
@@ -1346,12 +1362,7 @@ fn class_buffer_literal_array(class_name: &str, elements: &[ClassElement<'_>]) -
     }
 
     entries.push(LiteralEntry::TaggedInteger(instance_method_count));
-    // Class-buffer arrays are referenced by `defineclasswithbuffer` bytecode
-    // operands, so they belong in the method index.
-    LiteralArray {
-        entries,
-        in_method_index: true,
-    }
+    LiteralArray { entries }
 }
 
 fn is_class_buffer_method(method: &MethodDefinition<'_>) -> bool {
@@ -1378,27 +1389,19 @@ fn compile_program_body(
     literal_arrays: &mut Vec<LiteralArray>,
     lowering: &LoweringContext,
     _is_module: bool,
-) -> Vec<u8> {
-    // Module body has no formal parameters.
-    compile_body_stmts(&program.body, strings, literal_arrays, lowering, true, &[])
+) -> (Vec<u8>, Vec<CatchEntry>) {
+    compile_body_stmts(&program.body, strings, literal_arrays, lowering, true)
 }
 
-/// Compile a function body's statements, or emit `returnundefined` if absent.
-///
-/// `params` is the list of formal parameter names; they are pre-allocated to
-/// virtual registers so that body references to them emit `lda v<n>` rather
-/// than `tryldglobalbyname`.
+/// Compile a function body's statements; returns `(bytecode, catch_entries)`.
 fn compile_function_body(
     body: Option<&FunctionBody<'_>>,
     strings: &mut StringTable,
     literal_arrays: &mut Vec<LiteralArray>,
     lowering: &LoweringContext,
-    params: &[&str],
-) -> Vec<u8> {
+) -> (Vec<u8>, Vec<CatchEntry>) {
     match body {
-        Some(fb) => {
-            compile_body_stmts(&fb.statements, strings, literal_arrays, lowering, false, params)
-        }
+        Some(fb) => compile_body_stmts(&fb.statements, strings, literal_arrays, lowering, false),
         None => {
             let mut st = StringTable::default();
             (Insn::ReturnUndefined.encode(&mut st), vec![])
@@ -1414,8 +1417,7 @@ fn compile_function_body_tracked(
     literal_arrays: &mut Vec<LiteralArray>,
     lowering: &LoweringContext,
     source: &str,
-    params: &[&str],
-) -> (Vec<u8>, Vec<u8>) {
+) -> (Vec<u8>, Vec<u8>, Vec<CatchEntry>) {
     match body {
         Some(fb) => compile_body_stmts_tracked(
             &fb.statements,
@@ -1424,7 +1426,6 @@ fn compile_function_body_tracked(
             lowering,
             false,
             source,
-            params,
         ),
         None => {
             let mut st = StringTable::default();
@@ -1439,17 +1440,8 @@ fn compile_arrow_body(
     literal_arrays: &mut Vec<LiteralArray>,
     lowering: &LoweringContext,
     captures: ArrowCaptures,
-    params: &[&str],
-) -> Vec<u8> {
-    let base = CodeGen::new_arrow(strings, literal_arrays, lowering, captures);
-    let mut gen = if params.is_empty() {
-        base
-    } else {
-        // Arrow function parameters start at v3 (after the hidden ArkRuntime
-        // args), same as regular methods.  The captures (this / new.target)
-        // are stored in lexical slots, not in the hidden arg registers.
-        base.with_params(params)
-    };
+) -> (Vec<u8>, Vec<CatchEntry>) {
+    let mut gen = CodeGen::new_arrow(strings, literal_arrays, lowering, captures);
     for stmt in &body.statements {
         gen.emit_stmt(stmt);
         if gen.returned {
@@ -1501,26 +1493,51 @@ fn compile_function_body_ext(
     cg.finish_with_catches()
 }
 
-/// Compile a statement slice through `CodeGen` and return raw bytecode.
+/// Compile a constructor body, prepending instance field initializer code.
 ///
-/// `params` is the list of formal parameter names for the enclosing function.
-/// When non-empty, those names are pre-allocated to virtual registers so that
-/// references to them inside the body are emitted as `lda v<n>` rather than
-/// `tryldglobalbyname`, avoiding unnecessary string table entries.
+/// For each `(field_name, init_expr)` in `fields`, emits:
+///   `ldthis; sta this_reg; emit_expr(init); stobjbyname(name, this_reg)`
+/// before the normal constructor statements.
+fn compile_constructor_with_fields<'src>(
+    body: Option<&FunctionBody<'src>>,
+    fields: &[(String, &Expression<'src>)],
+    strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
+    lowering: &LoweringContext,
+) -> (Vec<u8>, Vec<CatchEntry>) {
+    let stmts: &[_] = match body {
+        Some(fb) => fb.statements.as_slice(),
+        None => &[],
+    };
+    let mut cg = CodeGen::new(strings, literal_arrays, lowering);
+    if !fields.is_empty() {
+        cg.push(Insn::LdThis);
+        let this_reg = cg.alloc_reg();
+        cg.push(Insn::Sta(this_reg));
+        for (name, init_expr) in fields {
+            cg.emit_expr(init_expr);
+            let name_id = cg.intern(name);
+            cg.push(Insn::StObjByName(0, name_id, this_reg));
+        }
+    }
+    for stmt in stmts {
+        cg.emit_stmt(stmt);
+        if cg.returned {
+            break;
+        }
+    }
+    cg.finish_with_catches()
+}
+
+/// Compile a statement slice through `CodeGen` and return `(bytecode, catch_entries)`.
 fn compile_body_stmts(
     stmts: &[Statement<'_>],
     strings: &mut StringTable,
     literal_arrays: &mut Vec<LiteralArray>,
     lowering: &LoweringContext,
     module_body: bool,
-    params: &[&str],
-) -> Vec<u8> {
-    let base = CodeGen::new(strings, literal_arrays, lowering);
-    let mut cg = if params.is_empty() {
-        base
-    } else {
-        base.with_params(params)
-    };
+) -> (Vec<u8>, Vec<CatchEntry>) {
+    let mut cg = CodeGen::new(strings, literal_arrays, lowering);
     if module_body {
         cg.emit_module_lex_env_prologue();
     }
@@ -1543,14 +1560,8 @@ fn compile_body_stmts_tracked(
     lowering: &LoweringContext,
     module_body: bool,
     source: &str,
-    params: &[&str],
-) -> (Vec<u8>, Vec<u8>) {
-    let base = CodeGen::new_with_source(strings, literal_arrays, lowering, source);
-    let mut cg = if params.is_empty() {
-        base
-    } else {
-        base.with_params(params)
-    };
+) -> (Vec<u8>, Vec<u8>, Vec<CatchEntry>) {
+    let mut cg = CodeGen::new_with_source(strings, literal_arrays, lowering, source);
     if module_body {
         cg.emit_module_lex_env_prologue();
     }
@@ -1574,9 +1585,8 @@ fn compile_program_body_tracked(
     lowering: &LoweringContext,
     _is_module: bool,
     source: &str,
-) -> (Vec<u8>, Vec<u8>) {
-    // Module body has no formal parameters.
-    compile_body_stmts_tracked(&program.body, strings, literal_arrays, lowering, true, source, &[])
+) -> (Vec<u8>, Vec<u8>, Vec<CatchEntry>) {
+    compile_body_stmts_tracked(&program.body, strings, literal_arrays, lowering, true, source)
 }
 fn arrow_captures_from_body(body: &FunctionBody<'_>) -> ArrowCaptures {
     let mut uses_this = false;
@@ -1789,31 +1799,6 @@ impl<'a> CodeGen<'a> {
         let mut gen = Self::new(strings, literal_arrays, lowering);
         gen.arrow_captures = arrow_captures;
         gen
-    }
-
-    /// Pre-populate `var_regs` with formal parameter names so that parameter
-    /// references inside the function body are emitted as register loads
-    /// (`lda v<n>`) rather than global lookups (`tryldglobalbyname`).
-    ///
-    /// ArkRuntime places function arguments in registers starting at index 0
-    /// (for the receiver / `this`) through `num_args - 1`.  For a regular
-    /// method the first three hidden args are `this` (v0), `newTarget` (v1),
-    /// and `funcObj` (v2); user-visible parameters start at v3.
-    ///
-    /// We allocate a register for each named parameter so that the identifier
-    /// lookup in `emit_expr` finds it in `var_regs` and emits `lda v<n>`
-    /// instead of interning the name and emitting `tryldglobalbyname`.
-    fn with_params(mut self, params: &[&str]) -> Self {
-        // Reserve v0..v2 for the hidden ArkRuntime args (this, newTarget,
-        // funcObj) so user params start at v3.
-        self.next_reg = 3;
-        for &name in params {
-            if !name.is_empty() {
-                let reg = self.alloc_reg();
-                self.var_regs.insert(name.to_string(), reg);
-            }
-        }
-        self
     }
 
     fn emit_module_lex_env_prologue(&mut self) {
@@ -3043,12 +3028,7 @@ impl<'a> CodeGen<'a> {
                 entries.push(LiteralEntry::TaggedString(val_str));
             }
             let lit_id = self.literal_arrays.len() as u16;
-            // Object-buffer arrays are referenced by `createobjectwithbuffer`
-            // bytecode operands, so they belong in the method index.
-            self.literal_arrays.push(LiteralArray {
-                entries,
-                in_method_index: true,
-            });
+            self.literal_arrays.push(LiteralArray { entries });
             self.push(Insn::CreateObjectWithBuffer(0, lit_id));
             return;
         }

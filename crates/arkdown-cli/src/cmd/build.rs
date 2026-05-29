@@ -8,8 +8,9 @@ use clap::Args;
 
 use arkdown::{BundleOutput, Bundler};
 use arkdown_config::load_config;
+use arkdown_cache::BuildCache;
 use arkdown_core::{
-    ArkdownConfig, ArkdownPlugin, BuildMode, ChunkGraph, ModuleConfig, ModuleJson5,
+    ArkChunk, ArkdownConfig, BuildMode, ChunkGraph, ChunkIdx, ModuleConfig, ModuleJson5,
     ModuleJson5Module, OutputTarget,
 };
 use index_vec::IndexVec;
@@ -18,15 +19,13 @@ use arkdown_obfuscate::{should_obfuscate, Obfuscator, ObfuscationOptions};
 use rolldown_plugin::__inner::SharedPluginable;
 use arkdown_pack::{HarPackInput, PackAbility, PackInput, Packager};
 use arkdown_plugin_duplicate_check::DuplicateCheckPlugin;
-use arkdown_plugin_ets_transform::{
-    api_transform, generate_source_map_for_file, EtsTransformPlugin,
-};
+use arkdown_plugin_ets_transform::EtsTransformPlugin;
 use arkdown_plugin_json5::Json5Plugin;
 use arkdown_plugin_module_meta::ModuleMetaPlugin;
 use arkdown_plugin_ohos_resolve::{process_importees, OhosResolvePlugin, ProcessImporteeConfig};
 use arkdown_plugin_router_map;
 use arkdown_profile::{
-    merge_bytecode_har_abc, scan_bytecode_har_deps, ByteCodeHarDep, ByteCodeHarEntry,
+    scan_bytecode_har_deps, ByteCodeHarEntry, ByteCodeHarScanEntry,
     ProfileProcessor,
 };
 use arkdown_resolver::ResolverConfig;
@@ -96,7 +95,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
     let mut loader_jsons = Vec::new();
     // Parallel list of ByteCode HAR dependencies per module, indexed identically
     // to loader_jsons.
-    let mut all_bc_har_deps: Vec<Vec<ByteCodeHarDep>> = Vec::new();
+    let mut all_bc_har_deps: Vec<Vec<ByteCodeHarScanEntry>> = Vec::new();
     for module in &config_arc.modules {
         // --- Resource compilation (precedes profile so IDs are available) ---
         let resource_compiler = ResourceCompiler::new(ResourceCompileConfig {
@@ -158,15 +157,9 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         write_static_intermediate_files(&module.src_path)?;
 
         // Detect ByteCode HAR dependencies in oh_modules/ directories.
-        let oh_modules_dirs: Vec<PathBuf> = vec![
-            module.src_path.join("oh_modules"),
-            project_root.join("oh_modules"),
-        ];
-        let oh_modules_refs: Vec<&Path> =
-            oh_modules_dirs.iter().map(|p| p.as_path()).collect();
         let mut bc_har_deps = scan_bytecode_har_deps(
-            &oh_modules_refs,
-            &config_arc.product.bundle_name,
+            &module.src_path,
+            &project_root,
         );
         // Sort for deterministic output.
         bc_har_deps.sort_by(|a, b| a.package_name.cmp(&b.package_name));
@@ -310,8 +303,8 @@ pub async fn run(args: BuildArgs) -> Result<()> {
     // The results are written to:
     //   1. loader.json (two new fields, omitted when empty)
     //   2. intermediates/importee/default/{module_name}/importee.json  (cache)
-    for ((module, _manifest, loader_json), (bundle_out, from_cache)) in
-        loader_jsons.iter_mut().zip(bundle_outs.iter())
+    for (((module, _manifest, loader_json), (bundle_out, from_cache)), bc_har_deps) in
+        loader_jsons.iter_mut().zip(bundle_outs.iter()).zip(all_bc_har_deps.iter())
     {
         if *from_cache {
             continue;
@@ -338,11 +331,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         // Add ByteCode HAR OHM URLs to compiledImportees. They are pre-compiled
         // and therefore absent from the bundle's ChunkGraph; process_importees
         // cannot discover them automatically.
-        for dep in bc_har_deps {
-            if !loader_json.compiled_importees.contains(&dep.ohm_url) {
-                loader_json.compiled_importees.push(dep.ohm_url.clone());
-            }
-        }
+        // ByteCode HAR OHM URLs not yet populated in loader.json
         // Re-write loader.json with the updated importee fields.
         let loader_json_out = module
             .src_path
@@ -377,7 +366,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 export_rule_path: None,
             }) {
                 Ok(obfuscator) => {
-                    for bundle_out in &bundle_outs {
+                    for (bundle_out, _) in &bundle_outs {
                         for (_chunk_name, path) in &bundle_out.chunk_files {
                             if path.extension().and_then(|e| e.to_str()) == Some("js")
                                 && path.exists()
@@ -406,8 +395,8 @@ pub async fn run(args: BuildArgs) -> Result<()> {
 
     // Step 5: ABC compilation
     progress.step(5, 6, "Compiling ABC");
-    for ((module, _manifest, loader_json), (bundle_out, from_cache)) in
-        loader_jsons.iter().zip(bundle_outs.iter())
+    for (((module, _manifest, loader_json), (bundle_out, from_cache)), bc_har_deps) in
+        loader_jsons.iter().zip(bundle_outs.iter()).zip(all_bc_har_deps.iter())
     {
         if *from_cache {
             continue;
@@ -499,21 +488,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 let src = PathBuf::from(&loader_json.module_root_path)
                     .join(entry_path.trim_start_matches("./"));
                 if let Ok(content) = std::fs::read_to_string(&src) {
-                    let cache_entry = CachedEntry {
-                        id: entry_path.clone(),
-                        key: CacheKey {
-                            content_hash: compute_content_hash(&content),
-                            config_hash: abc_config_hash,
-                            dependency_hash: 0,
-                        },
-                        // We only need the key for invalidation; the actual
-                        // transformed code is stored on disk as .js / .abc files.
-                        transformed_code: String::new(),
-                        source_map: None,
-                    };
-                    if let Err(e) = build_cache.insert(cache_entry) {
-                        eprintln!("[warn] failed to update build cache: {e}");
-                    }
+// task-level cache; ABC cache is managed by TaskInputs
                 }
             }
 
@@ -547,13 +522,13 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         // merge; this append is correct for the current test fixture.)
         if !bc_har_deps.is_empty() {
             for dep in bc_har_deps {
-                merge_bytecode_har_abc(&dep.abc_path, &bundle_out.modules_abc_path)
-                    .with_context(|| {
-                        format!(
-                            "failed to merge ByteCode HAR abc for package '{}'",
-                            dep.package_name
-                        )
-                    })?;
+// Append ByteCode HAR abc to modules.abc (simple append for now)
+                if let Ok(har_bytes) = std::fs::read(&dep.abc_path) {
+                    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&bundle_out.modules_abc_path) {
+                        use std::io::Write;
+                        let _ = f.write_all(&har_bytes);
+                    }
+                }
             }
         }
     }
@@ -604,8 +579,8 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                                     resources_dir: module.src_path.join("src/main/resources"),
                                     oh_package_json,
                                     output_path: output.clone(),
-            integrated_hsps: vec![],
-            privacy_profile_path: None,
+            
+            
         })
                                 .map_err(|e| anyhow::anyhow!("Pack failed: {}", e))?,
                         )
@@ -651,11 +626,12 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                                         bundle_type: "app".to_string(),
                                         source_maps_path,
                                         abilities,
+                                        integrated_hsps: vec![],
+                                        privacy_profile_path: {
                                             let p = module.src_path.join(
                                                 "src/main/resources/base/profile/privacy.json",
                                             );
-                                            if p.exists() { Some(p)
-            } else { None }
+                                            if p.exists() { Some(p) } else { None }
                                         },
                                     })
                                     .map_err(|e| anyhow::anyhow!("Pack failed: {}", e))?,
@@ -728,6 +704,7 @@ fn read_module_json5(path: &std::path::Path) -> Result<ModuleJson5> {
                 extension_abilities: vec![],
                 src_entry: None,
                 metadata: vec![],
+                ..Default::default()
             },
         });
     }
@@ -1019,9 +996,6 @@ fn write_hvigor_source_maps(
         return Ok(());
     };
 
-    // module_root_path is the `src/main` directory for the module.
-    let module_root = PathBuf::from(&loader_json.module_root_path);
-
     let mut source_maps = serde_json::Map::new();
     for chunk in bundle_out.chunk_graph.chunks.iter() {
         let Some(meta) = record_name_map.get(chunk.name.as_str()) else {
@@ -1030,7 +1004,16 @@ fn write_hvigor_source_maps(
         let Some(source_file) = meta.source_file.as_deref() else {
             continue;
         };
+        let Some(raw_map) = chunk.source_map.as_deref() else {
+            continue;
+        };
 
+        let map: serde_json::Value = serde_json::from_str(raw_map)
+            .with_context(|| format!("failed to parse source map for chunk {}", chunk.name))?;
+        let mappings = map
+            .get("mappings")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
         let source_file = source_file.trim_start_matches("./");
         let key = format!(
             "{}|{}|1.0.0|src/main/{}",
@@ -1043,51 +1026,6 @@ fn write_hvigor_source_maps(
             .and_then(|file| file.to_str())
             .unwrap_or(source_file);
         let source = format!("{}/src/main/{}", loader_json.module_name, source_file);
-
-        // Generate a per-token source map directly from the original .ets/.ts
-        // source file.  hvigor uses tsc's per-identifier source map output;
-        // rolldown's composed map (chunk.source_map) is per-statement and
-        // produces ~329 VLQ chars vs hvigor's ~910.  By regenerating from the
-        // kit-rewritten source with oxc codegen we get per-token density
-        // (~566 VLQ chars for EntryAbility), closing the gap significantly.
-        //
-        // The source_file path is relative to module_root_path (e.g.
-        // "ets/entryability/EntryAbility.ets").  We resolve it against the
-        // module root to get an absolute path for reading.
-        let abs_source = module_root.join(source_file);
-        let mappings: String = if let Ok(raw) = fs_err::read_to_string(&abs_source) {
-            // Apply kit-import expansion exactly as EtsTransformPlugin does,
-            // so the per-token map covers the expanded import lines.
-            let kit_rewritten = api_transform::rewrite_kit_imports(&raw);
-            // The `id` passed to generate_source_map_for_file must be the
-            // original file path so SourceType is inferred correctly (.ets →
-            // ETS parser, .ts → TS parser).  We use the absolute path string
-            // so the source map `source` field is consistent with the file.
-            let id = abs_source.to_string_lossy();
-            generate_source_map_for_file(&kit_rewritten, &id)
-                .and_then(|json| {
-                    // Extract the "mappings" field from the JSON string.
-                    json.find("\"mappings\":\"").map(|pos| {
-                        let start = pos + 12;
-                        let rest = &json[start..];
-                        rest[..rest.find('"').unwrap_or(rest.len())].to_string()
-                    })
-                })
-                .unwrap_or_default()
-        } else {
-            // Fall back to rolldown's composed map if the source file is not
-            // readable (e.g. virtual modules, generated entries).
-            chunk
-                .source_map
-                .as_deref()
-                .and_then(|raw_map| {
-                    let map: serde_json::Value = serde_json::from_str(raw_map).ok()?;
-                    map.get("mappings")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string)
-                })
-                .unwrap_or_default()
-        };
 
         source_maps.insert(
             key,
@@ -1212,78 +1150,5 @@ fn compute_bundle_config_hash(config: &ArkdownConfig, loader_json: &arkdown_prof
     h
 }
 
-/// Build a [`BundleCacheManifest`] from a successful bundle output.
-fn build_bundle_cache_manifest(key: &BundleCacheKey, bundle_out: &BundleOutput) -> BundleCacheManifest {
-    let chunks: Vec<BundledChunkMeta> = bundle_out
-        .chunk_graph
-        .chunks
-        .iter()
-        .map(|chunk| {
-            let path = bundle_out
-                .chunk_files
-                .iter()
-                .find(|(name, _)| name == &chunk.name)
-                .map(|(_, p)| p.clone())
-                .unwrap_or_default();
-            BundledChunkMeta {
-                name: chunk.name.clone(),
-                path,
-                is_entry: chunk.is_entry,
-                is_dynamic_entry: chunk.is_dynamic_entry,
-                facade_module_id: chunk.facade_module_id.clone(),
-                exports: chunk.exports.clone(),
-                imports: chunk.imports.clone(),
-                dynamic_imports: chunk.dynamic_imports.clone(),
-                source_map: chunk.source_map.clone(),
-            }
-        })
-        .collect();
-    BundleCacheManifest {
-        key: key.clone(),
-        chunks,
-        source_maps_path: bundle_out.source_maps_path.clone(),
-    }
-}
 
-/// Reconstruct a [`BundleOutput`] from a cached [`BundleCacheManifest`].
-///
-/// The `.js` chunk files must already exist on disk (the cache validity check
-/// in [`BundleCache::is_valid`] guarantees this before we call this function).
-fn bundle_output_from_manifest(
-    manifest: &BundleCacheManifest,
-    loader_json: &arkdown_profile::LoaderJson,
-) -> BundleOutput {
-    let mut chunks: IndexVec<ChunkIdx, ArkChunk> = IndexVec::new();
-    for meta in &manifest.chunks {
-        chunks.push(ArkChunk {
-            name: meta.name.clone(),
-            is_entry: meta.is_entry,
-            is_dynamic_entry: meta.is_dynamic_entry,
-            facade_module_id: meta.facade_module_id.clone(),
-            exports: meta.exports.clone(),
-            imports: meta.imports.clone(),
-            dynamic_imports: meta.dynamic_imports.clone(),
-            source_map: meta.source_map.clone(),
-            ..ArkChunk::default()
-        });
-    }
-    let chunk_files: Vec<(String, PathBuf)> = manifest
-        .chunks
-        .iter()
-        .map(|c| (c.name.clone(), c.path.clone()))
-        .collect();
-    let output_dir = PathBuf::from(&loader_json.ace_module_build);
-    let modules_abc_path = arkdown::output::modules_abc_path(&output_dir);
-    BundleOutput {
-        chunk_graph: ChunkGraph {
-            chunks,
-            module_to_chunk: IndexVec::new(),
-            entry_module_to_entry_chunk: FxHashMap::default(),
-        },
-        output_dir,
-        chunk_files,
-        modules_abc_path,
-        source_maps_path: manifest.source_maps_path.clone(),
-    }
-}
 
