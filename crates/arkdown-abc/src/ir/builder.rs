@@ -1737,6 +1737,13 @@ struct CodeGen<'a> {
     /// Updated by `emit_stmt()` and `emit_expr()` before calling `push()`.
     /// Used by `push()` to emit per-instruction LNP entries.
     current_line: u32,
+    break_patches: Vec<usize>,
+    continue_patches: Vec<usize>,
+    catch_entries: Vec<CatchEntry>,
+    is_generator: bool,
+    gen_reg: Option<u8>,
+    is_async: bool,
+    async_reg: Option<u8>,
 }
 
 impl<'a> CodeGen<'a> {
@@ -1757,6 +1764,13 @@ impl<'a> CodeGen<'a> {
             source: None,
             line_tracker: None,
             current_line: 1,
+            break_patches: Vec::new(),
+            continue_patches: Vec::new(),
+            catch_entries: Vec::new(),
+            is_generator: false,
+            gen_reg: None,
+            is_async: false,
+            async_reg: None,
         }
     }
 
