@@ -113,7 +113,7 @@ pub struct ModuleJson5 {
     pub module: ModuleJson5Module,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ModuleJson5Module {
     #[serde(default)]
@@ -135,6 +135,14 @@ pub struct ModuleJson5Module {
     pub src_entry: Option<String>,
     #[serde(default)]
     pub metadata: Vec<MetadataEntry>,
+    /// `$profile:` reference to the app startup config JSON, e.g. `"$profile:startup_config"`.
+    /// Used by `ProcessStartupConfig` to locate the startup task list for this module.
+    #[serde(default)]
+    pub app_startup: Option<String>,
+    /// Cross-app shared component config entries exported by this HSP module.
+    /// Populated by `ProcessShareConfig` when merging HSP dep manifests.
+    #[serde(default)]
+    pub cross_app_shared_config: Vec<CrossAppSharedConfigEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -189,6 +197,84 @@ pub struct MetadataEntry {
     pub name: String,
     pub value: Option<String>,
     pub resource: Option<String>,
+}
+
+/// One entry in the `crossAppSharedConfig` array from an HSP dep's `module.json5`.
+///
+/// Hvigor merges these from all HSP dependencies into the consuming module's
+/// `temp-share-config.json` intermediate.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CrossAppSharedConfigEntry {
+    /// Package name of the HSP that exports this shared component.
+    #[serde(default)]
+    pub package_name: String,
+    /// URI identifying the shared component (must be unique across all deps).
+    pub uri: String,
+    /// Source entry path for the shared component, e.g. `"./ets/components/Foo.ets"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub src_entry: Option<String>,
+}
+
+/// Startup task entry from a module's `appStartup` profile JSON.
+///
+/// Written to `temp-startup-config.json` after merging all HAR/HSP dep startup tasks.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct StartupTask {
+    /// Unique name for this startup task within the bundle.
+    pub name: String,
+    /// Relative source entry path, e.g. `"./ets/startup/MyTask.ets"`.
+    pub src_entry: String,
+    /// Whether this task runs before the ability window is ready.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_on_thread: Option<String>,
+    /// Whether this task waits for all preceding tasks to finish.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_on_main_thread: Option<bool>,
+    /// Explicit dependencies on other startup task names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<String>,
+    /// Module name populated during merging (not in the source JSON).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module_name: Option<String>,
+    /// OHM URL for the task src entry, populated during merging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ohmurl: Option<String>,
+    /// Absolute path to the task source file, populated during merging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub src_entry_absolute_path: Option<String>,
+    /// Path to the startup config JSON that declared this task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_config_path: Option<String>,
+}
+
+/// Merged startup config written to `temp-startup-config.json`.
+///
+/// Aggregates `startupTasks` and `appPreloadHintStartupTasks` from the current
+/// module and all its HAR/HSP dependencies.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MergedStartupConfig {
+    /// Regular startup tasks (run at app startup).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub startup_tasks: Vec<StartupTask>,
+    /// App preload hint tasks (run before the first ability is created).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub app_preload_hint_startup_tasks: Vec<StartupTask>,
+}
+
+/// Raw parsed app startup profile JSON (`resources/base/profile/<name>.json`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AppStartupProfile {
+    #[serde(default)]
+    pub startup_tasks: Vec<StartupTask>,
+    #[serde(default)]
+    pub app_preload_hint_startup_tasks: Vec<StartupTask>,
+    /// Optional config entry path referenced by the startup config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_entry: Option<String>,
 }
 
 /// Raw parsed `oh-package.json5`.

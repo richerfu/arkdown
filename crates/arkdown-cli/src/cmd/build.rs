@@ -870,6 +870,8 @@ fn read_module_json5(path: &std::path::Path) -> Result<ModuleJson5> {
                 extension_abilities: vec![],
                 src_entry: None,
                 metadata: vec![],
+                app_startup: None,
+                cross_app_shared_config: vec![],
             },
         });
     }

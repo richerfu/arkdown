@@ -70,6 +70,8 @@ fn single_ability_json5(module_name: &str) -> ModuleJson5 {
             extension_abilities: vec![],
             src_entry: None,
             metadata: vec![],
+            app_startup: None,
+            cross_app_shared_config: vec![],
         },
     }
 }
@@ -224,6 +226,8 @@ fn test_multiple_abilities_produce_multiple_compile_entries() {
             extension_abilities: vec![],
             src_entry: None,
             metadata: vec![],
+            app_startup: None,
+            cross_app_shared_config: vec![],
         },
     };
 

@@ -18,6 +18,8 @@ pub mod bytecode_har;
 pub mod har_abilities;
 pub mod loader_json;
 pub mod process_profile;
+pub mod process_share_config;
+pub mod process_startup_config;
 pub mod router_map;
 
 pub use bytecode_har::{
@@ -28,6 +30,10 @@ pub use har_abilities::{collect_har_abilities, HarAbility};
 pub use loader_json::{generate_loader_json, ByteCodeHarEntry, LoaderJson, PkgBriefInfo};
 pub use process_profile::{
     ark_virtual_machine_from_version, process_profile, process_profile_with_ark_vm_version,
+};
+pub use process_share_config::{merge_share_config, write_share_config, ShareConfigInput, ShareConfigOutput};
+pub use process_startup_config::{
+    merge_startup_config, write_startup_config, StartupConfigInput, StartupConfigOutput,
 };
 pub use router_map::{collect_router_entries, RouterMapEntry};
 
@@ -422,6 +428,8 @@ mod tests {
                 extension_abilities: vec![],
                 src_entry: None,
                 metadata: vec![],
+                app_startup: None,
+                cross_app_shared_config: vec![],
             },
         }
     }

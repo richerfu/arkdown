@@ -107,8 +107,8 @@ AssembleHsp → SignHsp → PackageHsp
 | `MergeProfile`             | `MergeProfile`             | Merge base `module.json5` with product overlays and HAR/HSP dependency metadata     |
 | `ProcessProfile`           | `ProcessProfile`           | Set `virtualMachine`, `compileMode`, `deviceTypes`; collect HAR abilities           |
 | `ProcessRouterMap`         | `ProcessRouterMap`         | Collect router map entries from rollup output, write `intermediates/routerMap.json` |
-| `ProcessShareConfig`       | `ProcessShareConfig`       | Process `crossAppSharedConfig` from HSP dependencies                                |
-| `ProcessStartupConfig`     | `ProcessStartupConfig`     | Merge startup config from all HAR/HSP deps, validate task dependencies              |
+| `ProcessShareConfig`       | `ProcessShareConfig`       | Process `crossAppSharedConfig` from HSP dependencies — **implemented**: `arkdown-profile::process_share_config` (SPEC-046) |
+| `ProcessStartupConfig`     | `ProcessStartupConfig`     | Merge startup config from all HAR/HSP deps, validate task dependencies — **implemented**: `arkdown-profile::process_startup_config` (SPEC-046) |
 | `CreateModuleInfo`         | `CreateModuleInfo`         | Generate module metadata JSON for HAP/HSP                                           |
 | `CreateHarModuleInfo`      | `CreateHarModuleInfo`      | Generate module metadata JSON for HAR                                               |
 | `GenerateLoaderJson`       | `GenerateLoaderJson`       | Write `loader.json` — the entry manifest consumed by rollup                         |

@@ -1,354 +1,202 @@
-# SPEC-046: CrossAppSharedConfig + StartupTask Config Merging
+# SPEC-046: Share Config and Startup Config Merging
 
-**Crate**: `arkdown-profile`, `arkdown-resolver`
-**Priority**: P2 — projects using cross-app HSP sharing or startup tasks
-**Blocked by**: SPEC-010 (profile processor), SPEC-003 (resolver)
-**Blocks**: —
+**Crate**: `arkdown-profile`
+**Priority**: P1
+**Blocked by**: SPEC-010
+**Status**: Implemented
 
 ---
 
 ## Summary
 
-Implement two related profile processing tasks:
+Implements two hvigor tasks in `arkdown-profile`:
 
-1. **ProcessShareConfig**: Read `crossAppSharedConfig` from HSP dependency
-   `module.json5` and write the merged config to the HAP intermediates.
+1. **ProcessShareConfig** — scans `oh_modules/` for installed HSP packages, collects their
+   `crossAppSharedConfig` entries, and writes a merged `temp-share-config.json`.
 
-2. **ProcessStartupConfig**: Merge `startupTasks` configs from all HAR/HSP
-   dependencies and validate task dependency ordering. Write the merged startup config
-   for embedding in the HAP.
-
-Both tasks mirror hvigor's `ProcessShareConfig` (`process-share-config.js`) and
-`ProcessStartupConfig` (`process-startup-config.js`).
+2. **ProcessStartupConfig** — scans `oh_modules/` for installed HAR/HSP packages that
+   declare `appStartup` in their `module.json5`, reads each package's startup profile JSON,
+   and writes a merged `temp-startup-config.json`.
 
 ---
 
-## Background: What hvigor Does
+## Reference Implementation
 
-### ProcessShareConfig
+Both tasks are ported from:
 
-From `process-share-config.js`:
-
-```javascript
-class ProcessShareConfig extends AbstractTask {
-    async doTaskAction() {
-        const hspDeps = this.dependencyManager.getHspDependencies();
-
-        const sharedConfigs = [];
-        for (const dep of hspDeps) {
-            const moduleJson = dep.getModuleJsonObj();
-            const crossAppConfig = moduleJson?.module?.crossAppSharedConfig;
-            if (crossAppConfig) {
-                sharedConfigs.push({
-                    bundleName: dep.getBundleName(),
-                    moduleName: dep.getModuleName(),
-                    ...crossAppConfig,
-                });
-            }
-        }
-
-        if (sharedConfigs.length > 0) {
-            const outputPath = path.resolve(this.intermediatesDir, "crossAppSharedConfig.json");
-            fse.writeJsonSync(outputPath, { crossAppSharedConfig: sharedConfigs });
-        }
-    }
-}
-```
-
-`crossAppSharedConfig` in `module.json5`:
-
-```json5
-{
-  module: {
-    name: "remoteHsp",
-    type: "shared",
-    crossAppSharedConfig: {
-      // Configuration for cross-app HSP sharing
-      proxyData: [
-        { uri: "datashareproxy://com.example/data", requiredReadPermission: "..." }
-      ]
-    }
-  }
-}
-```
-
-### ProcessStartupConfig
-
-From `process-startup-config.js`:
-
-```javascript
-class ProcessStartupConfig extends AbstractTask {
-    async doTaskAction() {
-        const allDeps = [
-            ...this.dependencyManager.getHarDependencies(),
-            ...this.dependencyManager.getHspDependencies(),
-        ];
-
-        const startupTasks = [];
-        const seen = new Map(); // taskName → dep for duplicate detection
-
-        for (const dep of allDeps) {
-            const moduleJson = dep.getModuleJsonObj();
-            const tasks = moduleJson?.module?.appStartup?.startupTasks ?? [];
-            for (const task of tasks) {
-                if (seen.has(task.name)) {
-                    throw new Error(`Duplicate startup task: ${task.name}`);
-                }
-                seen.set(task.name, dep.getPackageName());
-                startupTasks.push(task);
-            }
-        }
-
-        // Validate dependency ordering: task.dependencies must all be defined
-        for (const task of startupTasks) {
-            for (const dep of task.dependencies ?? []) {
-                if (!seen.has(dep)) {
-                    throw new Error(
-                        `Startup task '${task.name}' depends on unknown task '${dep}'`
-                    );
-                }
-            }
-        }
-
-        if (startupTasks.length > 0) {
-            const outputPath = path.resolve(this.intermediatesDir, "startupConfig.json");
-            fse.writeJsonSync(outputPath, { startupTasks });
-        }
-    }
-}
-```
-
-`appStartup.startupTasks` in `module.json5`:
-
-```json5
-{
-  module: {
-    appStartup: {
-      startupTasks: [
-        {
-          name: "MyStartupTask",
-          srcEntry: "./ets/startup/MyStartupTask.ets",
-          runOnThread: "taskPool",
-          dependencies: ["OtherTask"],
-          waitOnMainThread: false,
-          excludeFromAutoStart: false,
-        }
-      ]
-    }
-  }
-}
-```
+- `hvigor-ohos-plugin/src/tasks/process-share-config.js`
+- `hvigor-ohos-plugin/src/tasks/process-startup-config.js`
 
 ---
 
-## Scope
+## Part A: ProcessShareConfig
 
-### 1. Data Types
+### Input
+
+- `oh_modules/<pkg>/src/main/module.json5` (or `module.json5` / `module.json` at pkg root)
+  for each installed package
+- Module's own `crossAppSharedConfig` entries (for HSP modules that export shared components)
+
+### Processing
+
+1. Walk `oh_modules/` under the module root.
+2. For each package directory, read `module.json5` (or `module.json`).
+3. Only process packages where `module.type == "shared"` (HSP packages).
+4. Extract `module.crossAppSharedConfig` array.
+5. Fill in `packageName` from the directory name when absent.
+6. Merge all entries including the module's own `self_entries`.
+7. Warn (non-fatal) on duplicate URIs across packages.
+
+### Output
+
+```json
+{
+  "crossAppSharedConfig": [
+    { "packageName": "my-hsp", "uri": "myapp://shared/Foo", "srcEntry": "./ets/Foo.ets" }
+  ]
+}
+```
+
+Written to:
+```
+<module_root>/build/default/intermediates/share_config/default/temp-share-config.json
+```
+
+### New Types (arkdown-core)
 
 ```rust
-/// A single cross-app shared config entry from an HSP dependency.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CrossAppSharedEntry {
-    pub bundle_name: String,
-    pub module_name: String,
-    #[serde(flatten)]
-    pub config: serde_json::Value,  // passthrough of crossAppSharedConfig contents
+pub struct CrossAppSharedConfigEntry {
+    pub package_name: String,
+    pub uri: String,
+    pub src_entry: Option<String>,
 }
+```
 
-/// Merged cross-app shared config output.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CrossAppSharedConfig {
-    pub cross_app_shared_config: Vec<CrossAppSharedEntry>,
+Also added to `ModuleJson5Module`:
+```rust
+pub app_startup: Option<String>,
+pub cross_app_shared_config: Vec<CrossAppSharedConfigEntry>,
+```
+
+---
+
+## Part B: ProcessStartupConfig
+
+### Input
+
+- Module's own `module.json5` `module.appStartup` reference (e.g. `"$profile:startup_config"`)
+- `oh_modules/<pkg>/src/main/module.json5` for each installed package
+- Startup profile JSONs at `resources/base/profile/<name>.json`
+
+### Processing
+
+1. If the module itself declares `appStartup`, read its startup profile from
+   `src/main/resources/base/profile/<name>.json`.
+2. Walk `oh_modules/` and for each package with `module.appStartup` declared,
+   find and read its startup profile JSON.
+3. Merge `startupTasks` and `appPreloadHintStartupTasks` arrays, annotating each
+   task with `moduleName` and `startupConfigPath`.
+4. Validate: warn (non-fatal) on duplicate task names within each category.
+5. When no tasks are found anywhere, remove any stale output file.
+
+### Output
+
+```json
+{
+  "startupTasks": [
+    {
+      "name": "MyTask",
+      "srcEntry": "./ets/startup/MyTask.ets",
+      "moduleName": "entry",
+      "startupConfigPath": "/abs/path/to/startup_config.json"
+    }
+  ],
+  "appPreloadHintStartupTasks": []
 }
+```
 
-/// A single startup task definition.
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
+Written to:
+```
+<module_root>/build/default/intermediates/startup_config/default/temp-startup-config.json
+```
+
+When no startup tasks are found, the file is removed (or never created).
+
+### New Types (arkdown-core)
+
+```rust
 pub struct StartupTask {
     pub name: String,
     pub src_entry: String,
-    #[serde(default)]
     pub run_on_thread: Option<String>,
-    #[serde(default)]
+    pub wait_on_main_thread: Option<bool>,
     pub dependencies: Vec<String>,
-    #[serde(default)]
-    pub wait_on_main_thread: bool,
-    #[serde(default)]
-    pub exclude_from_auto_start: bool,
+    pub module_name: Option<String>,
+    pub ohmurl: Option<String>,
+    pub src_entry_absolute_path: Option<String>,
+    pub startup_config_path: Option<String>,
 }
 
-/// Merged startup config output.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct StartupConfig {
+pub struct MergedStartupConfig {
     pub startup_tasks: Vec<StartupTask>,
+    pub app_preload_hint_startup_tasks: Vec<StartupTask>,
 }
-```
 
-### 2. `process_share_config()` Function
-
-```rust
-/// Collect crossAppSharedConfig from HSP dependencies and write to intermediates.
-/// Returns Ok(true) if any shared configs were found, Ok(false) otherwise.
-pub fn process_share_config(
-    hsp_deps: &[HspDependency],
-    intermediates_dir: &Path,
-) -> Result<bool, ProfileError> {
-    let shared_configs: Vec<CrossAppSharedEntry> = hsp_deps
-        .iter()
-        .filter_map(|dep| {
-            let module_json = dep.module_json.as_ref()?;
-            let config = module_json.module.cross_app_shared_config.as_ref()?;
-            Some(CrossAppSharedEntry {
-                bundle_name: dep.bundle_name.clone(),
-                module_name: dep.module_name.clone(),
-                config: config.clone(),
-            })
-        })
-        .collect();
-
-    if shared_configs.is_empty() {
-        return Ok(false);
-    }
-
-    let output = CrossAppSharedConfig { cross_app_shared_config: shared_configs };
-    let output_path = intermediates_dir.join("crossAppSharedConfig.json");
-    let json = serde_json::to_string_pretty(&output)?;
-    std::fs::write(&output_path, json)?;
-    Ok(true)
+pub struct AppStartupProfile {
+    pub startup_tasks: Vec<StartupTask>,
+    pub app_preload_hint_startup_tasks: Vec<StartupTask>,
+    pub config_entry: Option<String>,
 }
-```
-
-### 3. `process_startup_config()` Function
-
-```rust
-/// Merge startup tasks from all HAR/HSP deps, validate dep ordering, write to intermediates.
-/// Returns Err if duplicate task names or missing task dependencies are found.
-pub fn process_startup_config(
-    all_deps: &[DependencyModuleJson],
-    intermediates_dir: &Path,
-) -> Result<bool, ProfileError> {
-    let mut startup_tasks: Vec<StartupTask> = Vec::new();
-    let mut seen: HashMap<String, String> = HashMap::new(); // task_name → pkg_name
-
-    for dep in all_deps {
-        let tasks = dep.module_json.module.app_startup
-            .as_ref()
-            .map(|s| s.startup_tasks.as_slice())
-            .unwrap_or(&[]);
-
-        for task in tasks {
-            if let Some(existing_pkg) = seen.get(&task.name) {
-                return Err(ProfileError::DuplicateStartupTask {
-                    task_name: task.name.clone(),
-                    pkg1: existing_pkg.clone(),
-                    pkg2: dep.package_name.clone(),
-                });
-            }
-            seen.insert(task.name.clone(), dep.package_name.clone());
-            startup_tasks.push(task.clone());
-        }
-    }
-
-    // Validate dependencies
-    for task in &startup_tasks {
-        for dep_name in &task.dependencies {
-            if !seen.contains_key(dep_name) {
-                return Err(ProfileError::UnknownStartupTaskDep {
-                    task_name: task.name.clone(),
-                    dep_name: dep_name.clone(),
-                });
-            }
-        }
-    }
-
-    if startup_tasks.is_empty() {
-        return Ok(false);
-    }
-
-    let output = StartupConfig { startup_tasks };
-    let output_path = intermediates_dir.join("startupConfig.json");
-    let json = serde_json::to_string_pretty(&output)?;
-    std::fs::write(&output_path, json)?;
-    Ok(true)
-}
-```
-
-### 4. Error Types
-
-```rust
-#[derive(Debug, thiserror::Error)]
-pub enum ProfileError {
-    // ... existing variants ...
-    #[error("duplicate startup task '{task_name}' defined in both '{pkg1}' and '{pkg2}'")]
-    DuplicateStartupTask { task_name: String, pkg1: String, pkg2: String },
-
-    #[error("startup task '{task_name}' depends on unknown task '{dep_name}'")]
-    UnknownStartupTaskDep { task_name: String, dep_name: String },
-}
-```
-
-### 5. CLI Integration
-
-In the build pipeline, after profile processing and dependency resolution:
-
-```rust
-// Process share config (HSP deps only)
-process_share_config(&hsp_deps, &config.intermediates_dir)?;
-
-// Process startup config (all HAR + HSP deps)
-let all_deps: Vec<_> = har_deps.iter().chain(hsp_deps.iter())
-    .map(|d| d.as_dep_module_json())
-    .collect();
-process_startup_config(&all_deps, &config.intermediates_dir)?;
 ```
 
 ---
 
-## Files to Change
+## API
 
-```
-crates/arkdown-profile/src/
-├── share_config.rs      — NEW: CrossAppSharedEntry, CrossAppSharedConfig,
-│                          process_share_config()
-├── startup_config.rs    — NEW: StartupTask, StartupConfig, process_startup_config()
-└── lib.rs               — re-export; add DuplicateStartupTask/UnknownStartupTaskDep
-                           to ProfileError
+```rust
+// crates/arkdown-profile/src/process_share_config.rs
+pub fn merge_share_config(input: ShareConfigInput<'_>) -> ShareConfigOutput;
+pub fn write_share_config(output: &ShareConfigOutput, output_path: &Path) -> Result<(), std::io::Error>;
 
-crates/arkdown-cli/src/
-└── build.rs             — call process_share_config() and process_startup_config()
-                           in the build pipeline
+// crates/arkdown-profile/src/process_startup_config.rs
+pub fn merge_startup_config(input: StartupConfigInput<'_>) -> StartupConfigOutput;
+pub fn write_startup_config(output: &StartupConfigOutput, output_path: &Path) -> Result<(), std::io::Error>;
 ```
 
 ---
 
-## Test Plan
+## Files Modified / Created
 
-**ProcessShareConfig:**
-- No HSP deps: `process_share_config()` returns `Ok(false)`; no output file written.
-- HSP dep without `crossAppSharedConfig`: skipped; output file not written.
-- HSP dep with `crossAppSharedConfig`: `crossAppSharedConfig.json` is written to
-  intermediates with correct `bundleName` and `moduleName`.
-- Multiple HSP deps with shared configs: all entries appear in the output array.
-
-**ProcessStartupConfig:**
-- No deps with startup tasks: `process_startup_config()` returns `Ok(false)`.
-- Single dep with one startup task: `startupConfig.json` written with that task.
-- Two deps with non-overlapping tasks: both tasks appear in the merged output.
-- Duplicate task name across deps: returns `Err(DuplicateStartupTask)`.
-- Task depends on unknown task name: returns `Err(UnknownStartupTaskDep)`.
-- Task depends on task defined in another dep: valid; no error.
-- Output JSON round-trips through `serde_json::from_str::<StartupConfig>`.
+```
+crates/arkdown-core/src/manifest.rs           — added CrossAppSharedConfigEntry, StartupTask,
+                                                 MergedStartupConfig, AppStartupProfile;
+                                                 extended ModuleJson5Module with app_startup
+                                                 and cross_app_shared_config fields
+crates/arkdown-profile/src/lib.rs             — added module declarations and pub re-exports
+crates/arkdown-profile/src/process_share_config.rs   — new: ProcessShareConfig implementation
+crates/arkdown-profile/src/process_startup_config.rs — new: ProcessStartupConfig implementation
+crates/arkdown-profile/src/process_profile.rs — updated test fixture for new fields
+crates/arkdown-profile/tests/profile_tests.rs — updated test fixtures for new fields
+crates/arkdown-cli/src/cmd/build.rs           — updated fallback ModuleJson5Module initializer
+```
 
 ---
 
-## Upstream References
+## Acceptance Criteria
 
-- `~/Downloads/command-line-tools/hvigor/hvigor-ohos-plugin/src/tasks/process-share-config.js`
-  — `doTaskAction()`, `crossAppSharedConfig` collection
-- `~/Downloads/command-line-tools/hvigor/hvigor-ohos-plugin/src/tasks/process-startup-config.js`
-  — `doTaskAction()`, duplicate/missing dependency validation
-- `meta/tasks/SPEC-010-profile-processor.md` — `ProfileProcessor`, `ModuleJson5`
-- `meta/design/hvigorw-analysis.md` §B4, §B5 — gap analysis entries
+- `merge_share_config` returns empty when `oh_modules/` does not exist
+- `merge_share_config` collects entries only from HSP packages (`type == "shared"`)
+- `merge_share_config` fills `packageName` from directory name when absent
+- `write_share_config` produces `{"crossAppSharedConfig":[...]}` JSON
+- `merge_startup_config` returns `None` when no `appStartup` is declared anywhere
+- `merge_startup_config` merges tasks from both self and dep profiles
+- `merge_startup_config` annotates tasks with `moduleName` and `startupConfigPath`
+- `write_startup_config` removes stale file when config is `None`
+- All existing tests continue to pass (`cargo test`)
+
+---
+
+## Design References
+
+- `meta/design/hvigorw-analysis.md` — ProcessShareConfig, ProcessStartupConfig task descriptions
+- `meta/tasks/SPEC-010-profile-processor.md` — profile processor architecture

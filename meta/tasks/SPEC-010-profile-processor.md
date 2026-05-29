@@ -214,10 +214,12 @@ crates/arkdown-profile/
 ├── Cargo.toml
 └── src/
     ├── lib.rs
-    ├── process_profile.rs   (MergeProfile + ProcessProfile logic)
-    ├── loader_json.rs       (GenerateLoaderJson: collect entries, write JSON)
-    ├── router_map.rs        (router map entry collection)
-    └── har_abilities.rs     (collectHarAbilities from HAR dependencies)
+    ├── process_profile.rs        (MergeProfile + ProcessProfile logic)
+    ├── loader_json.rs            (GenerateLoaderJson: collect entries, write JSON)
+    ├── router_map.rs             (router map entry collection)
+    ├── har_abilities.rs          (collectHarAbilities from HAR dependencies)
+    ├── process_share_config.rs   (ProcessShareConfig: crossAppSharedConfig merge — SPEC-046)
+    └── process_startup_config.rs (ProcessStartupConfig: startup task merge — SPEC-046)
 ```
 
 ---
