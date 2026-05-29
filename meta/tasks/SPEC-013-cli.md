@@ -40,8 +40,17 @@ Full build pipeline for the specified target:
 3. Resource compilation (SPEC-011)     ┐ parallel
 4. Bundling (SPEC-005)                 ┘
    └─ 6 plugins wired in order (see below)
-5. ABC compilation (SPEC-009)
-   └─ TypeScript stripping via oxc_codegen before IR lowering
+   └─ Post-bundle: process_importees() updates nonEntryImportees/compiledImportees
+4a. Obfuscation (release builds, SPEC-019 / arkdown-obfuscate)
+   └─ Runs when build_mode=Release AND ark_options.obfuscation.enable_obfuscation=true
+   └─ Obfuscates each .js chunk in-place before ABC compilation
+   └─ Obfuscation rule hash mixed into the ABC cache config_hash for invalidation
+5. ABC compilation (SPEC-009 / arkdown-cache for incremental skip)
+   └─ Load BuildCache from build/default/cache/modules/
+   └─ Compute config_hash (build mode + bundle name + API version + rule hash)
+   └─ If all compile-entry content hashes match AND modules.abc exists → skip ABC
+   └─ Otherwise: compile ABC with cache_file=build/default/cache/abc/modules.abc.cache
+   └─ After ABC: update BuildCache entries for all compile-entry source files
 6. Packaging (SPEC-012)
    └─ HAP: calls pack_hap() — includes pack.info, pkgContextInfo.json, resource files
    └─ HAR: calls pack_har() (not pack_hap())

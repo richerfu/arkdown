@@ -24,6 +24,8 @@ arkdown-plugin-module-meta = { path = "../arkdown-plugin-module-meta" }
 arkdown-plugin-duplicate-check = { path = "../arkdown-plugin-duplicate-check" }
 arkdown-plugin-json5 = { path = "../arkdown-plugin-json5" }
 arkdown-resolver = { path = "../arkdown-resolver" }
+arkdown-cache = { path = "../arkdown-cache" }
+arkdown-obfuscate = { path = "../arkdown-obfuscate" }
 clap = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }

@@ -7,11 +7,13 @@ use anyhow::{Context, Result};
 use clap::Args;
 
 use arkdown::Bundler;
+use arkdown_cache::{compute_content_hash, BuildCache, CacheKey, CachedEntry};
 use arkdown_config::load_config;
 use arkdown_core::{
     ArkdownConfig, ArkdownPlugin, BuildMode, ModuleConfig, ModuleJson5, ModuleJson5Module,
     OutputTarget,
 };
+use arkdown_obfuscate::{should_obfuscate, Obfuscator, ObfuscationOptions};
 use arkdown_pack::{HarPackInput, PackAbility, PackInput, Packager};
 use arkdown_plugin_duplicate_check::DuplicateCheckPlugin;
 use arkdown_plugin_ets_transform::EtsTransformPlugin;
@@ -260,11 +262,101 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             .map_err(|e| anyhow::anyhow!("update loader.json with importees failed: {}", e))?;
     }
 
+    // ── Obfuscation (release builds only) ────────────────────────────────────
+    //
+    // hvigor runs SDK obfuscation + terser between bundling and ABC compilation.
+    // We run the pure-Rust obfuscator on the .js chunks in-place so the ABC
+    // compiler receives already-obfuscated source.
+    //
+    // The step is skipped unless:
+    //   1. Build mode is Release, AND
+    //   2. config.product.build_option.ark_options.obfuscation.enable_obfuscation is true
+    if let Some(obf_config) = config_arc
+        .product
+        .build_option
+        .ark_options
+        .as_ref()
+        .and_then(|a| a.obfuscation.as_ref())
+    {
+        if should_obfuscate(&config_arc.build_mode, Some(obf_config)) {
+            let rule_files: Vec<PathBuf> = obf_config.rules_file.iter().cloned().collect();
+            let obf_cache_dir = project_root.join("build/default/cache/obfuscate");
+            match Obfuscator::new(ObfuscationOptions {
+                rule_files,
+                cache_dir: obf_cache_dir,
+                export_rule_path: None,
+            }) {
+                Ok(obfuscator) => {
+                    for bundle_out in &bundle_outs {
+                        for (_chunk_name, path) in &bundle_out.chunk_files {
+                            if path.extension().and_then(|e| e.to_str()) == Some("js")
+                                && path.exists()
+                            {
+                                let tmp = path.with_extension("js.obf_tmp");
+                                obfuscator
+                                    .obfuscate_file(path, &tmp)
+                                    .map_err(|e| anyhow::anyhow!("Obfuscation failed: {}", e))?;
+                                std::fs::rename(&tmp, path)?;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[warn] could not initialize obfuscator, skipping: {e}");
+                }
+            }
+        }
+    }
+
+    // ── Config hash for ABC cache invalidation ────────────────────────────────
+    //
+    // Captures build-mode, bundle identity, API version, and obfuscation rule
+    // state.  Any change to these values invalidates all cached ABC outputs.
+    let abc_config_hash = compute_config_hash(&config_arc);
+
     // Step 5: ABC compilation
     progress.step(5, 6, "Compiling ABC");
     for ((module, _manifest, loader_json), bundle_out) in
         loader_jsons.iter().zip(bundle_outs.iter())
     {
+        // ── Incremental ABC cache check ───────────────────────────────────────
+        //
+        // Load the per-module build cache and check whether every compile-entry
+        // source file still has the same content hash as the last successful
+        // ABC compilation run.  When ALL entries are valid AND modules.abc already
+        // exists on disk, ABC compilation is skipped entirely — the previous output
+        // is reused as-is.
+        //
+        // Cache storage: <module>/build/default/cache/modules/<fnv1a(id)>.json
+        // ABC compiler cache: <module>/build/default/cache/abc/modules.abc.cache
+        let abc_cache_dir = module.src_path.join("build/default/cache/modules");
+        let mut build_cache = BuildCache::new(abc_cache_dir);
+        if let Err(e) = build_cache.load_from_disk() {
+            eprintln!("[warn] failed to load build cache: {e}");
+        }
+
+        let modules_abc_exists = bundle_out.modules_abc_path.exists();
+        let all_source_cached = modules_abc_exists
+            && loader_json.compile_entry.iter().all(|entry_path| {
+                let src = PathBuf::from(&loader_json.module_root_path)
+                    .join(entry_path.trim_start_matches("./"));
+                std::fs::read_to_string(&src)
+                    .map(|content| {
+                        let key = CacheKey {
+                            content_hash: compute_content_hash(&content),
+                            config_hash: abc_config_hash,
+                            dependency_hash: 0,
+                        };
+                        build_cache.is_valid(entry_path, &key)
+                    })
+                    .unwrap_or(false)
+            });
+
+        if all_source_cached {
+            // modules.abc is up-to-date; nothing to do for this module.
+            continue;
+        }
+
         // Build record metadata map: chunk_stem → OHM URL module path.
         // Format matches es2abc/hvigorw: "{bundleName}/{moduleName}/{pathFromEts}"
         // e.g. "com.example.arkdown.test/entry/ets/entryability/EntryAbility"
@@ -299,6 +391,20 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         let ts2abc_inputs =
             collect_js_chunks_from_output(&bundle_out.chunk_files, &record_name_map);
         if !ts2abc_inputs.is_empty() {
+            // ABC incremental compiler cache: hvigor uses es2abc --cache-file to
+            // avoid re-parsing unchanged modules inside the ABC backend.
+            let abc_compiler_cache_path =
+                module.src_path.join("build/default/cache/abc/modules.abc.cache");
+            if let Some(parent) = abc_compiler_cache_path.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            // Create the cache file marker if it does not yet exist.
+            // The ABC compiler will write its incremental data here when that
+            // feature is implemented; touching the file now lets callers check
+            // for cache existence without special-casing the unimplemented path.
+            if !abc_compiler_cache_path.exists() {
+                let _ = std::fs::write(&abc_compiler_cache_path, &[]);
+            }
             compile_to_abc(Ts2abcOptions {
                 inputs: ts2abc_inputs,
                 output: bundle_out.modules_abc_path.clone(),
@@ -313,7 +419,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 merge_abc: true,
                 module: true,
                 commonjs: false,
-                cache_file: None,
+                cache_file: Some(abc_compiler_cache_path),
             })
             .map_err(|e| anyhow::anyhow!("ABC compile failed: {}", e))?;
             write_hvigor_source_maps(bundle_out, loader_json, &record_name_map)?;
@@ -325,6 +431,33 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                         .join("build/default/intermediates/source_map/default/sourceMaps.map"),
                 )?;
             }
+
+            // ── Update incremental build cache ────────────────────────────────
+            //
+            // Record the content hash of every compile-entry source file so
+            // future builds can skip re-running ABC when nothing has changed.
+            for entry_path in &loader_json.compile_entry {
+                let src = PathBuf::from(&loader_json.module_root_path)
+                    .join(entry_path.trim_start_matches("./"));
+                if let Ok(content) = std::fs::read_to_string(&src) {
+                    let cache_entry = CachedEntry {
+                        id: entry_path.clone(),
+                        key: CacheKey {
+                            content_hash: compute_content_hash(&content),
+                            config_hash: abc_config_hash,
+                            dependency_hash: 0,
+                        },
+                        // We only need the key for invalidation; the actual
+                        // transformed code is stored on disk as .js / .abc files.
+                        transformed_code: String::new(),
+                        source_map: None,
+                    };
+                    if let Err(e) = build_cache.insert(cache_entry) {
+                        eprintln!("[warn] failed to update build cache: {e}");
+                    }
+                }
+            }
+
             for (_chunk_name, path) in &bundle_out.chunk_files {
                 if path.extension().and_then(|e| e.to_str()) == Some("js") && path.exists() {
                     match fs_err::remove_file(path) {
@@ -837,6 +970,49 @@ fn write_hvigor_source_maps(
     }
 
     Ok(())
+}
+
+/// Derive a deterministic 64-bit hash from the build configuration fields that
+/// affect ABC compilation output.
+///
+/// A change to any of these fields (build mode, bundle name, API version,
+/// module URL normalisation, or obfuscation rules) must produce a different
+/// hash so that the incremental ABC cache is correctly invalidated.
+fn compute_config_hash(config: &ArkdownConfig) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    let fingerprint = format!(
+        "{}:{}:{}:{}",
+        match &config.build_mode {
+            BuildMode::Debug => "debug",
+            BuildMode::Release => "release",
+        },
+        config.product.bundle_name,
+        config.sdk_config.compile_api_version,
+        config.product.build_option.strict_mode.use_normalized_ohm_url,
+    );
+    for b in fingerprint.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+
+    // Mix in the obfuscation rule hash for release builds so that editing
+    // obfuscation rules invalidates all cached ABC outputs.
+    if let Some(obf_config) = config
+        .product
+        .build_option
+        .ark_options
+        .as_ref()
+        .and_then(|a| a.obfuscation.as_ref())
+    {
+        if obf_config.enable_obfuscation {
+            let rule_files: Vec<PathBuf> = obf_config.rules_file.iter().cloned().collect();
+            let rule_hash = arkdown_obfuscate::compute_rule_hash(&rule_files);
+            h ^= rule_hash;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+    }
+
+    h
 }
 
 fn with_extension(path: &str, extension: &str) -> String {
