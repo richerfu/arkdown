@@ -263,7 +263,8 @@ pub fn build_record_with_debug(
     // Compile class method bodies found in the selected statement body.
     // Module mode scans top-level statements directly; non-module compatibility
     // inputs may scan the inner body of a single bundler IIFE.
-    compile_class_method_bodies(scan_stmts, strings, literal_arrays, &lowering, &mut methods);
+    let tracked_source = source_file.as_ref().map(|_| source);
+    compile_class_method_bodies(scan_stmts, strings, literal_arrays, &lowering, &mut methods, tracked_source);
 
     // Collect top-level call-argument arrow functions (e.g. registerNamedRoute callback
     // and Reflect.set finalizeConstruction stub). hvigor names these #*# / #*#^1.
@@ -633,6 +634,7 @@ fn compile_class_method_bodies(
     literal_arrays: &mut Vec<LiteralArray>,
     lowering: &LoweringContext,
     methods: &mut Vec<MethodRecord>,
+    source: Option<&str>,
 ) {
     for stmt in stmts {
         // Handle `class Foo { ... }` (ClassDeclaration)
@@ -645,6 +647,7 @@ fn compile_class_method_bodies(
                 literal_arrays,
                 lowering,
                 methods,
+                source,
             );
             continue;
         }
@@ -658,6 +661,7 @@ fn compile_class_method_bodies(
                     literal_arrays,
                     lowering,
                     methods,
+                    source,
                 );
             }
             continue;
@@ -672,6 +676,7 @@ fn compile_class_method_bodies(
                     literal_arrays,
                     lowering,
                     methods,
+                    source,
                 );
             }
             continue;
@@ -698,6 +703,7 @@ fn compile_class_method_bodies(
                             literal_arrays,
                             lowering,
                             methods,
+                            source,
                         );
                         continue;
                     }
@@ -877,6 +883,7 @@ fn compile_class_elements(
     literal_arrays: &mut Vec<LiteralArray>,
     lowering: &LoweringContext,
     methods: &mut Vec<MethodRecord>,
+    source: Option<&str>,
 ) {
     let class_name = class_name.unwrap_or("_");
     let has_constructor = elements.iter().any(|element| {
@@ -906,12 +913,20 @@ fn compile_class_elements(
                 continue;
             };
             let key_name = suffix_duplicate_method_name(key_name, &mut seen_names);
-            let bytecode = compile_function_body(
-                method.value.body.as_deref(),
-                strings,
-                literal_arrays,
-                lowering,
-            );
+            let (bytecode, method_line_ops) = if let Some(src) = source {
+                compile_function_body_tracked(
+                    method.value.body.as_deref(),
+                    strings,
+                    literal_arrays,
+                    lowering,
+                    src,
+                )
+            } else {
+                (
+                    compile_function_body(method.value.body.as_deref(), strings, literal_arrays, lowering),
+                    vec![],
+                )
+            };
             let num_vregs = estimate_vregs(&bytecode);
             let num_args = class_method_num_args(method);
             methods.push(MethodRecord {
@@ -920,7 +935,7 @@ fn compile_class_elements(
                 num_vregs,
                 num_args,
                 debug_info: None,
-            line_ops: vec![],
+                line_ops: method_line_ops,
             });
 
             collect_class_method_arrow_records(
@@ -1311,6 +1326,30 @@ fn compile_function_body(
         None => {
             let mut st = StringTable::default();
             Insn::ReturnUndefined.encode(&mut st)
+        }
+    }
+}
+
+/// Like `compile_function_body` but also returns LNP line-advance opcodes.
+fn compile_function_body_tracked(
+    body: Option<&FunctionBody<'_>>,
+    strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
+    lowering: &LoweringContext,
+    source: &str,
+) -> (Vec<u8>, Vec<u8>) {
+    match body {
+        Some(fb) => compile_body_stmts_tracked(
+            &fb.statements,
+            strings,
+            literal_arrays,
+            lowering,
+            false,
+            source,
+        ),
+        None => {
+            let mut st = StringTable::default();
+            (Insn::ReturnUndefined.encode(&mut st), vec![])
         }
     }
 }
