@@ -958,15 +958,28 @@ fn compile_class_elements(
                 );
                 (bc, vec![], catches)
             } else if rest_info.is_some() || is_method_async {
-                let (bc, catches) = compile_function_body_ext(
-                    method.value.body.as_deref(),
-                    rest_info,
-                    is_method_async,
-                    strings,
-                    literal_arrays,
-                    lowering,
-                );
-                (bc, vec![], catches)
+                if let Some(src) = source {
+                    compile_function_body_ext_tracked(
+                        method.value.body.as_deref(),
+                        rest_info,
+                        is_method_async,
+                        strings,
+                        literal_arrays,
+                        lowering,
+                        Some(src),
+                    ).map(|(bc, lops, catches)| (bc, lops, catches))
+                    .unwrap_or_else(|| (vec![], vec![], vec![]))
+                } else {
+                    let (bc, catches) = compile_function_body_ext(
+                        method.value.body.as_deref(),
+                        rest_info,
+                        is_method_async,
+                        strings,
+                        literal_arrays,
+                        lowering,
+                    );
+                    (bc, vec![], catches)
+                }
             } else if let Some(src) = source {
                 compile_function_body_tracked(
                     method.value.body.as_deref(),
@@ -1468,14 +1481,31 @@ fn compile_function_body_ext(
     literal_arrays: &mut Vec<LiteralArray>,
     lowering: &LoweringContext,
 ) -> (Vec<u8>, Vec<CatchEntry>) {
+    compile_function_body_ext_tracked(body, rest_param, is_async, strings, literal_arrays, lowering, None).map(|(bc, _, catches)| (bc, catches)).unwrap_or_else(|| (vec![], vec![]))
+}
+
+fn compile_function_body_ext_tracked(
+    body: Option<&FunctionBody<'_>>,
+    rest_param: Option<(String, u8)>,
+    is_async: bool,
+    strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
+    lowering: &LoweringContext,
+    source: Option<&str>,
+) -> Option<(Vec<u8>, Vec<u8>, Vec<CatchEntry>)> {
     let stmts: &[_] = match body {
         Some(fb) => fb.statements.as_slice(),
         None => {
             let mut st = StringTable::default();
-            return (Insn::ReturnUndefined.encode(&mut st), vec![]);
+            let bc = Insn::ReturnUndefined.encode(&mut st);
+            return Some((bc, vec![], vec![]));
         }
     };
-    let mut cg = CodeGen::new(strings, literal_arrays, lowering);
+    let mut cg = if let Some(src) = source {
+        CodeGen::new_with_source(strings, literal_arrays, lowering, src)
+    } else {
+        CodeGen::new(strings, literal_arrays, lowering)
+    };
     cg.is_async = is_async;
     cg.emit_async_function_prologue();
     if let Some((name, count)) = rest_param {
@@ -1490,7 +1520,8 @@ fn compile_function_body_ext(
             break;
         }
     }
-    cg.finish_with_catches()
+    let (bc, line_ops, catches) = cg.finish_with_line_ops_and_catches();
+    Some((bc, line_ops, catches))
 }
 
 /// Compile a constructor body, prepending instance field initializer code.
