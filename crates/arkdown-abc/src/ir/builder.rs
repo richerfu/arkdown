@@ -120,8 +120,7 @@ impl LineTracker {
 ///
 /// Steps:
 /// 1. Parse as TSX (accepts TypeScript annotations and `.ets` syntax).
-/// 2. Compile top-level module statements as the `main` method. In non-module
-///    compatibility mode, a single top-level IIFE may be unwrapped.
+/// 2. Compile top-level module statements as the `main` method.
 /// 3. Emit stub methods for each top-level `FunctionDeclaration`.
 ///
 /// ## Code generation coverage
@@ -214,8 +213,7 @@ pub fn build_record_with_debug(
     });
 
     // Determine which statement slice to scan for declarations. Upstream
-    // module mode scans normal top-level statements. The IIFE unwrap path is
-    // retained only for non-module CommonJS compatibility cases.
+    // module mode scans normal top-level statements.
     let scan_stmts: &[Statement<'_>] = statement_scan_body(&program, is_module);
 
     // Emit a method entry for each named top-level FunctionDeclaration.
@@ -262,7 +260,7 @@ pub fn build_record_with_debug(
 
     // Compile class method bodies found in the selected statement body.
     // Module mode scans top-level statements directly; non-module compatibility
-    // inputs may scan the inner body of a single bundler IIFE.
+    // inputs are always the top-level program body.
     let tracked_source = source_file.as_ref().map(|_| source);
     compile_class_method_bodies(scan_stmts, strings, literal_arrays, &lowering, &mut methods, tracked_source);
 
@@ -521,10 +519,8 @@ fn statement_scan_body<'a>(program: &'a Program<'_>, _is_module: bool) -> &'a [S
 /// Walk `stmts` for `ClassDeclaration`s and compile each method body into a
 /// separate [`MethodRecord`], appending them to `methods`.
 ///
-/// This covers the common OHOS bundle pattern where EntryAbility and other
-/// classes are declared inside the top-level IIFE: each lifecycle method
-/// (`onCreate`, `onWindowStageCreate`, etc.) gets its own bytecode record so
-/// ArkRuntime can dispatch to the real implementation.
+/// Each class lifecycle method (`onCreate`, `onWindowStageCreate`, etc.) gets
+/// its own bytecode record so ArkRuntime can dispatch to the real implementation.
 fn compile_class_method_bodies(
     stmts: &[Statement<'_>],
     strings: &mut StringTable,
@@ -579,8 +575,7 @@ fn compile_class_method_bodies(
             continue;
         }
         // Handle `var Foo = class extends Bar { ... }` (VariableDeclaration with ClassExpression)
-        // This is the pattern rolldown CJS output uses.
-        // Also handles rolldown CJS interop helpers: `var __create = Object.create` etc.
+        // Handles `var Foo = class extends Bar { ... }` (rolldown ESM output pattern).
         if let Statement::VariableDeclaration(var_decl) = stmt {
             for declarator in &var_decl.declarations {
                 // Extract binding name (skip destructuring).

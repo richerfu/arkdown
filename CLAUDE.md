@@ -99,11 +99,12 @@ arkdown/
 JavaScript. `arkdown-abc` must match upstream `es2abc` on both final bytecode and
 intermediate output files under the loader output tree.
 
-**2. es2abc/ts2abc module inputs are normal source files.** Upstream
+**2. es2abc/ts2abc module inputs are normal ESM source files.** Upstream
 `arkcompiler_ets_frontend` builds `SourceFile(..., options->IsModule(), ...)` and the
-`ts2abc.js` wrapper only forwards bytecode-version flags to `es2abc`. Do not add an IIFE
-or CommonJS wrapper just to satisfy the bytecode compiler; use `--module` semantics for
-stage-model ESM output.
+`ts2abc.js` wrapper only forwards bytecode-version flags to `es2abc`. The bundler outputs
+clean ESM (`import`/`export` statements, no IIFE wrapper, no CJS interop helpers). The
+IIFE-unwrap and CJS-wrapper compatibility paths have been removed from `arkdown-abc`; the
+compiler always compiles the top-level program body directly in `--module` mode.
 
 **3. `arkdown-abc` is a pure Rust ArkCompiler bytecode compiler.** It ports `es2abc` from
 `https://github.com/openharmony/arkcompiler_ets_frontend`. No subprocess, no SDK binary

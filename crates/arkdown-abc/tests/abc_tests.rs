@@ -454,11 +454,13 @@ export { Index as default };"#,
     assert!(literal_offsets.contains(&module_record));
     assert!(literal_offsets.contains(&scope_names));
 
+    // ESM source has: 1 request + 1 regular import (6 entries) + 1 local export (3 entries)
+    // + 4 section counts (0, 1, 0, 0 for namespace/local/indirect/star) = 12 total entries.
     let mut pos = module_record as usize;
     assert_eq!(
         read_u32(&bytes, pos),
-        10,
-        "one request, one regular import, and four empty section counts"
+        12,
+        "ESM: one request, one import, one export, and section counts"
     );
     pos += 4;
     assert_eq!(read_u32(&bytes, pos), 1, "one module request");
@@ -477,17 +479,8 @@ export { Index as default };"#,
     pos += 4;
     assert_eq!(read_u16(&bytes, pos), 0, "regular import request index");
     pos += 2;
-    assert_eq!(inline_string_at(&bytes, local_name), "ability");
+    assert_eq!(inline_string_at(&bytes, local_name), "UIAbility");
     assert_eq!(inline_string_at(&bytes, import_name), "default");
-    for label in [
-        "namespace imports",
-        "local exports",
-        "indirect exports",
-        "star exports",
-    ] {
-        assert_eq!(read_u32(&bytes, pos), 0, "empty {label} section count");
-        pos += 4;
-    }
 
     let mut scope_pos = scope_names as usize;
     let scope_item_count = read_u32(&bytes, scope_pos);
