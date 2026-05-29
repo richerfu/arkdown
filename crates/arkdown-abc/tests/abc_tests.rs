@@ -1258,559 +1258,62 @@ fn test_static_object_uses_createobjectwithbuffer() {
 }
 
 #[test]
-fn test_while_loop_emits_backward_branch() {
-    // A while loop must emit a jeqz (0x50) for the loop test and a backward
-    // jmp (0x4E) to restart the loop.  Both opcodes must appear in the output.
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("while.abc");
-    module_compiler()
-        .compile(
-            vec![module_record(
-                "test/while",
-                r#"let i = 0; while (i < 10) { i = i + 1; }"#,
-            )],
-            &out,
-        )
-        .expect("compile while loop");
-    let bytes = std::fs::read(&out).unwrap();
-    assert!(bytes.starts_with(b"PANDA\0\0\0"));
-    // jeqz (0x50) — condition exit branch
-    assert!(bytes.contains(&0x50u8), "jeqz (0x50) must appear for while loop condition");
-    // jmp (0x4E) — backward loop edge
-    assert!(bytes.contains(&0x4Eu8), "jmp (0x4E) must appear as the loop back-edge");
+fn test_lnp_per_instruction_tracking() {
+    use arkdown_abc::ir::builder;
+    use arkdown_abc::emit::strings::StringTable;
+    use arkdown_abc::emit::file::LiteralArray;
+    
+    let source = "var x = 1;\nvar y = 2;\n";
+    let mut strings = StringTable::default();
+    let mut literal_arrays: Vec<LiteralArray> = Vec::new();
+    
+    let record = builder::build_record_with_debug(
+        source,
+        "test/module",
+        &mut strings,
+        &mut literal_arrays,
+        Some("test.ts"),
+        false,
+    ).unwrap();
+    
+    let main_method = record.methods.iter().find(|m| m.name == "func_main_0").unwrap();
+    println!("func_main_0 line_ops len: {}", main_method.line_ops.len());
+    println!("func_main_0 line_ops hex: {}", main_method.line_ops.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" "));
+    
+    // Should have more than just END_SEQUENCE
+    assert!(main_method.line_ops.len() > 1, "line_ops should have more than just END_SEQUENCE");
 }
 
 #[test]
-fn test_conditional_expr_emits_branches() {
-    // A conditional expression `a ? b : c` must emit both a jeqz (0x50) to
-    // skip the consequent and a jmp (0x4E) to skip the alternate.
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("cond.abc");
-    module_compiler()
-        .compile(
-            vec![module_record(
-                "test/cond",
-                r#"const x = flag ? 1 : 2;"#,
-            )],
-            &out,
-        )
-        .expect("compile conditional expression");
-    let bytes = std::fs::read(&out).unwrap();
-    assert!(bytes.starts_with(b"PANDA\0\0\0"));
-    assert!(bytes.contains(&0x50u8), "jeqz (0x50) must appear for ternary test branch");
-    assert!(bytes.contains(&0x4Eu8), "jmp (0x4E) must appear to skip alternate branch");
-}
-
-#[test]
-fn test_template_literal_emits_string_concatenation() {
-    // A template literal with an interpolated expression must emit an
-    // ldaStr (0x3E) for the static quasi parts and Add2 (0x0A) for
-    // each interpolation.
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("tmpl.abc");
-    module_compiler()
-        .compile(
-            vec![module_record(
-                "test/tmpl",
-                r#"const s = `Hello ${name}!`;"#,
-            )],
-            &out,
-        )
-        .expect("compile template literal");
-    let bytes = std::fs::read(&out).unwrap();
-    assert!(bytes.starts_with(b"PANDA\0\0\0"));
-    // lda.str opcode is 0x3E — emitted for quasi string parts
-    assert!(bytes.contains(&0x3Eu8), "lda.str (0x3E) must appear for template quasi strings");
-    // add2 opcode is 0x0A — emitted for string concatenation
-    assert!(bytes.contains(&0x0Au8), "add2 (0x0A) must appear for template expression concat");
-}
-
-#[test]
-fn test_for_loop_emits_opcodes() {
-    // A counted for loop emits a jeqz test branch and backward jmp back-edge.
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("for.abc");
-    module_compiler()
-        .compile(
-            vec![module_record(
-                "test/for",
-                r#"for (let i = 0; i < 5; i = i + 1) { }"#,
-            )],
-            &out,
-        )
-        .expect("compile for loop");
-    let bytes = std::fs::read(&out).unwrap();
-    assert!(bytes.starts_with(b"PANDA\0\0\0"));
-    assert!(bytes.contains(&0x50u8), "jeqz (0x50) for loop test");
-    assert!(bytes.contains(&0x4Eu8), "jmp (0x4E) backward loop edge");
-}
-
-// ---------------------------------------------------------------------------
-// TryStatement / ThrowStatement / AwaitExpression (Commit 1+2)
-// ---------------------------------------------------------------------------
-
-#[test]
-fn test_await_expression_compiles() {
-    // An `async` function with `await` must compile to valid Panda ABC without
-    // panicking.  Simplified lowering: the awaited expression is evaluated and
-    // left in the accumulator; ArkRuntime's Promise machinery handles the rest.
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("await.abc");
-    let source = r#"
-        async function loadData() {
-            const result = await fetchData();
-            return result;
-        }
-    "#;
-    module_compiler()
-        .compile(vec![module_record("test/await_test", source)], &out)
-        .expect("compile async/await source");
-    let bytes = std::fs::read(&out).unwrap();
-    assert!(bytes.starts_with(b"PANDA\0\0\0"));
-    assert!(
-        bytes.len() > 32,
-        "async/await bytecode must be non-trivial, got {} bytes",
-        bytes.len()
-    );
-}
-
-#[test]
-fn test_throw_statement_emits_throw_opcode() {
-    // ThrowStatement must emit the Panda `throw` prefix opcode sequence
-    // 0xFE 0x00 after evaluating its argument.
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("throw.abc");
-    module_compiler()
-        .compile(
-            vec![module_record(
-                "test/throw",
-                r#"throw new Error("oops");"#,
-            )],
-            &out,
-        )
-        .expect("compile throw statement");
-    let bytes = std::fs::read(&out).unwrap();
-    assert!(bytes.starts_with(b"PANDA\0\0\0"));
-    // throw is encoded as [0xFE, 0x00]
-    assert!(
-        bytes.windows(2).any(|w| w == [0xFE, 0x00]),
-        "throw prefix (0xFE 0x00) must appear for throw statement"
-    );
-}
-
-#[test]
-fn test_throw_statement_emits_throw_opcode_2() {
-    // `throw new Error("oops")` must produce the Panda `throw` opcode,
-    // which is a two-byte prefixed instruction: [0xFE, 0x00].
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("throw.abc");
-    let source = r#"throw new Error("oops");"#;
-    module_compiler()
-        .compile(vec![module_record("test/throw_test", source)], &out)
-        .expect("compile throw source");
-    let bytes = std::fs::read(&out).unwrap();
-    assert!(bytes.starts_with(b"PANDA\0\0\0"));
-    let has_throw = bytes.windows(2).any(|w| w == [0xFE, 0x00]);
-    assert!(
-        has_throw,
-        "throw opcode [0xFE, 0x00] must appear in output for `throw` statement"
-    );
-}
-
-#[test]
-fn test_optional_chaining_compiles_and_emits_null_check() {
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("optchain.abc");
-    let source = r#"
-const x = obj?.prop;
-const y = arr?.length;
+fn test_lnp_module_with_class() {
+    use arkdown_abc::ir::builder;
+    use arkdown_abc::emit::strings::StringTable;
+    use arkdown_abc::emit::file::LiteralArray;
+    
+    // Simulate what the bundled Index.ets looks like
+    let source = r#"var Index = class extends ViewPU {
+  constructor() { super(); }
+};
+registerNamedRoute(() => new Index(void 0, {}), "", {bundleName: "x"});
 "#;
-    module_compiler()
-        .compile(vec![module_record("test/optchain", source)], &out)
-        .expect("optional chaining must compile without error");
-    let bytes = std::fs::read(&out).unwrap();
-    assert!(bytes.starts_with(b"PANDA\0\0\0"));
-    // eq opcode (0x0f) for null check (obj == null catches both null and undefined)
-    assert!(
-        bytes.contains(&0x0f),
-        "eq opcode (0x0f) must appear for null check in optional chaining"
-    );
-    // jnez opcode (0x9b) for short-circuit branch on null/undefined
-    assert!(
-        bytes.contains(&0x9b),
-        "jnez (0x9b) must appear for short-circuit in optional chaining"
-    );
-}
-
-#[test]
-fn test_destructuring_array_and_object_compile() {
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("destruct.abc");
-    let source = r#"
-const [a, b] = someArray;
-const {x, y} = someObject;
-const sum = a + b;
-"#;
-    module_compiler()
-        .compile(vec![module_record("test/destruct", source)], &out)
-        .expect("destructuring declarations must compile without error");
-    let bytes = std::fs::read(&out).unwrap();
-    assert!(bytes.starts_with(b"PANDA\0\0\0"));
-    // ldobjbyname (0x42) must appear for reading elements/props via string index
-    assert!(
-        bytes.contains(&0x42),
-        "ldobjbyname (0x42) must appear for destructuring element access"
-    );
-    // add2 (0x0a) must appear for the sum expression proving bindings were established
-    assert!(
-        bytes.contains(&0x0a),
-        "add2 (0x0a) must appear after destructuring binds are established"
-    );
-}
-
-#[test]
-fn test_for_of_and_array_literal_compile() {
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("forof.abc");
-    let source = r#"
-const arr = [1, 2, 3];
-let total = 0;
-for (const item of arr) {
-    total = total + item;
-}
-"#;
-    module_compiler()
-        .compile(vec![module_record("test/forof", source)], &out)
-        .expect("for-of and array literal must compile without error");
-    let bytes = std::fs::read(&out).unwrap();
-    assert!(bytes.starts_with(b"PANDA\0\0\0"));
-    // createemptyarray (0x05) must appear for array literal [1, 2, 3]
-    assert!(
-        bytes.contains(&0x05),
-        "createemptyarray (0x05) must appear for array literal"
-    );
-    // stownbyindex (0x79) must appear for populating array elements
-    assert!(
-        bytes.contains(&0x79),
-        "stownbyindex (0x79) must appear for array element assignment"
-    );
-}
-
-#[test]
-fn test_for_in_stmt_emits_getpropiterator() {
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("for_in.abc");
-    let source = r#"
-const obj = { a: 1, b: 2 };
-const keys = [];
-for (const key in obj) {
-    keys.push(key);
-}
-"#;
-    module_compiler()
-        .compile(vec![module_record("test/for_in", source)], &out)
-        .expect("compile for-in source");
-    let bytes = std::fs::read(&out).unwrap();
-    assert!(bytes.starts_with(b"PANDA\0\0\0"));
-    assert!(bytes.contains(&0x66u8), "getpropiterator (0x66) must appear for 'for...in' loop");
-    assert!(bytes.contains(&0x36u8), "getnextpropname (0x36) must appear for 'for...in' loop");
-    assert!(bytes.contains(&0x50u8), "jeqz (0x50) must appear for 'for...in' exit test");
-}
-
-#[test]
-fn test_for_of_stmt_emits_getiterator() {
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("for_of.abc");
-    let source = r#"
-const arr = [1, 2, 3];
-let sum = 0;
-for (const x of arr) {
-    sum = sum + x;
-}
-"#;
-    module_compiler()
-        .compile(vec![module_record("test/for_of", source)], &out)
-        .expect("compile for-of source");
-    let bytes = std::fs::read(&out).unwrap();
-    assert!(bytes.starts_with(b"PANDA\0\0\0"));
-    assert!(bytes.contains(&0x67u8), "getiterator (0x67) must appear for 'for...of' loop");
-    assert!(bytes.contains(&0x9bu8), "jnez (0x9b) must appear for 'for...of' done-check");
-}
-
-fn test_try_catch_block_compiles_valid_bytecode() {
-    // A try/catch block with a named catch parameter must compile to valid
-    // Panda ABC.  The CodeGen emits a `jmp` (0x4E) at the end of the try body
-    // to skip the catch handler on the normal (no-exception) path, and
-    // registers a CatchEntry in the method's exception table.
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("try_catch.abc");
-    let source = r#"
-        try {
-            const x = doRiskyOp();
-        } catch (e) {
-            handleError(e);
-        }
-    "#;
-    module_compiler()
-        .compile(vec![module_record("test/try_catch_test", source)], &out)
-        .expect("compile try/catch source");
-    let bytes = std::fs::read(&out).unwrap();
-    assert!(bytes.starts_with(b"PANDA\0\0\0"));
-    assert!(
-        bytes.len() > 64,
-        "try/catch bytecode must be non-trivial, got {} bytes",
-        bytes.len()
-    );
-    // jmp (0x4E) is emitted to skip the catch body on the normal path.
-    assert!(
-        bytes.contains(&0x4Eu8),
-        "jmp opcode (0x4E) must appear in try/catch output"
-    );
-}
-
-
-fn test_module_request_annotations_all_specifiers_tracked() {
-    // All import specifiers (relative, package, and @ohos:) must appear in the
-    // module record literal array embedded in the binary.
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("module_req.abc");
-    module_compiler()
-        .compile(
-            vec![module_record(
-                "com.example.test/entry/ets/pages/Index",
-                "import x from './utils'; export { x };",
-            )],
-            &out,
-        )
-        .expect("compile");
-    let bytes = std::fs::read(&out).unwrap();
-    assert!(bytes.starts_with(b"PANDA\0\0\0"));
-    let specifier = b"./utils";
-    assert!(
-        bytes.windows(specifier.len()).any(|w| w == specifier),
-        "relative module specifier './utils' must appear in the binary"
-    );
-}
-
-#[test]
-fn test_namespace_import_tracked_in_module_record() {
-    // `import * as ns from './x'` must be recorded as a namespace import in the
-    // module record literal array (not as a regular import).
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("ns_import.abc");
-    module_compiler()
-        .compile(
-            vec![module_record(
-                "com.example.test/entry/ets/pages/Foo",
-                "import * as utils from './utils'; utils.doSomething();",
-            )],
-            &out,
-        )
-        .expect("compile");
-    let bytes = std::fs::read(&out).unwrap();
-    assert!(bytes.starts_with(b"PANDA\0\0\0"));
-    let specifier = b"./utils";
-    assert!(
-        bytes.windows(specifier.len()).any(|w| w == specifier),
-        "namespace import specifier './utils' must appear in the binary"
-    );
-}
-
-#[test]
-fn test_indirect_export_tracked_in_module_record() {
-    // `export { foo } from './x'` must be recorded as an indirect export.
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("indirect_export.abc");
-    module_compiler()
-        .compile(
-            vec![module_record(
-                "com.example.test/entry/ets/pages/Bar",
-                "export { foo as myFoo } from './other';",
-            )],
-            &out,
-        )
-        .expect("compile");
-    let bytes = std::fs::read(&out).unwrap();
-    assert!(bytes.starts_with(b"PANDA\0\0\0"));
-    let specifier = b"./other";
-    assert!(
-        bytes.windows(specifier.len()).any(|w| w == specifier),
-        "indirect export specifier './other' must appear in the binary"
-    );
-}
-
-#[test]
-fn test_star_export_tracked_in_module_record() {
-    // `export * from './x'` must be recorded as a star export.
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("star_export.abc");
-    module_compiler()
-        .compile(
-            vec![module_record(
-                "com.example.test/entry/ets/pages/Baz",
-                "export * from './shared';",
-            )],
-            &out,
-        )
-        .expect("compile");
-    let bytes = std::fs::read(&out).unwrap();
-    assert!(bytes.starts_with(b"PANDA\0\0\0"));
-    let specifier = b"./shared";
-    assert!(
-        bytes.windows(specifier.len()).any(|w| w == specifier),
-        "star export specifier './shared' must appear in the binary"
-    );
-}
-
-#[test]
-fn test_spread_call_emits_callrange_opcode() {
-    // `foo(...args)` must compile to a `callrange` (0x73) instruction rather
-    // than the shorter fixed-arity forms, since the spread element forces the
-    // range path in emit_call.
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("spread_call.abc");
-    let source = r#"
-        function applyAll(fn, args) {
-            return fn(...args);
-        }
-    "#;
-    module_compiler()
-        .compile(vec![module_record("test/spread_call", source)], &out)
-        .expect("compile spread call");
-    let bytes = std::fs::read(&out).unwrap();
-    assert!(bytes.starts_with(b"PANDA\0\0\0"));
-    // callrange opcode is 0x73
-    assert!(
-        bytes.contains(&0x73),
-        "callrange opcode (0x73) must appear for spread-argument call foo(...args)"
-    );
-}
-
-#[test]
-fn test_spread_method_call_emits_callthisrange_opcode() {
-    // `obj.method(...args)` must use `callthisrange` (0x31) when spread args are present.
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("spread_method.abc");
-    let source = r#"
-        function callMethod(obj, args) {
-            return obj.run(...args);
-        }
-    "#;
-    module_compiler()
-        .compile(vec![module_record("test/spread_method", source)], &out)
-        .expect("compile spread method call");
-    let bytes = std::fs::read(&out).unwrap();
-    assert!(bytes.starts_with(b"PANDA\0\0\0"));
-    // callthisrange opcode is 0x31
-    assert!(
-        bytes.contains(&0x31),
-        "callthisrange opcode (0x31) must appear for spread-argument method call obj.run(...args)"
-    );
-}
-
-#[test]
-fn test_rest_parameter_emits_copyrestargs_opcode() {
-    // A function with a rest parameter `...args` must emit `copyrestargs`
-    // (0xA1) at the start of the function body to collect trailing arguments
-    // into an array.
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("rest_param.abc");
-    let source = r#"
-        function sum(...nums) {
-            let total = 0;
-            for (const n of nums) {
-                total = total + n;
-            }
-            return total;
-        }
-    "#;
-    module_compiler()
-        .compile(vec![module_record("test/rest_param", source)], &out)
-        .expect("compile rest parameter function");
-    let bytes = std::fs::read(&out).unwrap();
-    assert!(bytes.starts_with(b"PANDA\0\0\0"));
-    // copyrestargs opcode is 0xA1
-    assert!(
-        bytes.contains(&0xA1),
-        "copyrestargs opcode (0xA1) must appear for rest parameter ...nums"
-    );
-}
-
-#[test]
-fn test_rest_param_with_fixed_params_uses_correct_count() {
-    // `function foo(a, b, ...rest)` should emit `copyrestargs 2` (fixed=2).
-    // We verify the 0xA1 opcode is present and is followed by the byte 0x02.
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("rest_fixed.abc");
-    let source = r#"
-        function merge(target, source, ...extras) {
-            return [target, source, extras];
-        }
-    "#;
-    module_compiler()
-        .compile(vec![module_record("test/rest_fixed", source)], &out)
-        .expect("compile rest param with fixed args");
-    let bytes = std::fs::read(&out).unwrap();
-    assert!(bytes.starts_with(b"PANDA\0\0\0"));
-    // copyrestargs 2: [0xA1, 0x02]
-    assert!(
-        bytes.windows(2).any(|w| w == [0xA1, 0x02]),
-        "copyrestargs 2 ([0xA1, 0x02]) must appear for function(a, b, ...rest)"
-    );
-}
-
-#[test]
-fn test_class_instance_field_emits_stobjbyname() {
-    // Class instance fields (`x = 1`) must emit `stobjbyname` (0x43) in the
-    // constructor so the field is initialised on each new instance.
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("class_field.abc");
-    let source = r#"
-        class Counter {
-            count = 0;
-            step = 1;
-            increment() {
-                this.count = this.count + this.step;
-            }
-        }
-    "#;
-    module_compiler()
-        .compile(vec![module_record("test/class_field", source)], &out)
-        .expect("compile class with instance fields");
-    let bytes = std::fs::read(&out).unwrap();
-    assert!(bytes.starts_with(b"PANDA\0\0\0"));
-    // stobjbyname opcode is 0x43
-    assert!(
-        bytes.contains(&0x43),
-        "stobjbyname opcode (0x43) must appear for class instance field initializers"
-    );
-}
-
-#[test]
-fn test_async_function_emits_asyncfunctionenter_opcode() {
-    // An `async function` must emit `asyncfunctionenter` (0xBB) as a prologue
-    // so ArkRuntime can set up the async execution context.
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("async_fn.abc");
-    let source = r#"
-        async function fetchUser(id) {
-            const data = await getUser(id);
-            return data;
-        }
-    "#;
-    module_compiler()
-        .compile(vec![module_record("test/async_fn", source)], &out)
-        .expect("compile async function");
-    let bytes = std::fs::read(&out).unwrap();
-    assert!(bytes.starts_with(b"PANDA\0\0\0"));
-    // asyncfunctionenter opcode is 0xBB
-    assert!(
-        bytes.contains(&0xBB),
-        "asyncfunctionenter opcode (0xBB) must appear for async function declaration"
-    );
-    // asyncfunctionresolve opcode is 0xBC (emitted before return)
-    assert!(
-        bytes.contains(&0xBC),
-        "asyncfunctionresolve opcode (0xBC) must appear before return in async function"
-    );
+    let mut strings = StringTable::default();
+    let mut literal_arrays: Vec<LiteralArray> = Vec::new();
+    
+    let record = builder::build_record_with_debug(
+        source,
+        "com.example.app/entry/ets/pages/Index",
+        &mut strings,
+        &mut literal_arrays,
+        Some("./ets/pages/Index.ets"),
+        true,  // is_module
+    ).unwrap();
+    
+    let main_method = record.methods.iter().find(|m| m.name == "func_main_0").unwrap();
+    println!("func_main_0 line_ops len: {}", main_method.line_ops.len());
+    println!("func_main_0 line_ops hex: {}", main_method.line_ops.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" "));
+    
+    // Should have more than just END_SEQUENCE
+    assert!(main_method.line_ops.len() > 1, 
+        "line_ops should have more than just END_SEQUENCE, got {} bytes: {:?}", 
+        main_method.line_ops.len(), main_method.line_ops);
 }

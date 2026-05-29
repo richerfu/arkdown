@@ -55,9 +55,15 @@ fn line_at(source: &str, byte_offset: u32) -> u32 {
 
 /// Accumulates Panda LineNumberProgram opcodes for a single method.
 ///
+/// Panda LNP encoding constants (matching es2abc / libpandafile):
+/// - `OPCODE_BASE = 0x0A` (10): first SPECIAL_OPCODE value
+/// - `LINE_BASE = -5`: minimum line delta encodable in a SPECIAL opcode
+/// - `LINE_RANGE = 14`: number of line-delta values per SPECIAL row
+///
 /// Opcodes emitted:
-/// - `SPECIAL_OPCODE` (opcode ≥ 8): encodes a small PC-delta + line-delta pair
-///   in a single byte using the formula `op = (line_delta * 16 + pc_delta) + 8`.
+/// - `SPECIAL_OPCODE` (opcode ≥ 0x0A): encodes a (pc_delta, line_delta) pair
+///   in a single byte: `op = (line_delta - LINE_BASE) * LINE_RANGE + pc_delta + OPCODE_BASE`.
+///   Valid when `0 ≤ pc_delta ≤ LINE_RANGE-1` and `LINE_BASE ≤ line_delta ≤ LINE_BASE+LINE_RANGE-1`.
 /// - `ADVANCE_LINE` (0x02) + SLEB128: adjusts the current line without a PC step.
 /// - `ADVANCE_PC` (0x01) + ULEB128: adjusts the current PC without a line change.
 /// - `END_SEQUENCE` (0x00): terminates the program (appended by `finish`).
@@ -66,6 +72,10 @@ struct LineTracker {
     current_pc: u32,
     ops: Vec<u8>,
 }
+
+const LNP_OPCODE_BASE: u32 = 0x0A;
+const LNP_LINE_BASE: i32 = -5;
+const LNP_LINE_RANGE: u32 = 14;
 
 impl LineTracker {
     fn new(start_line: u32) -> Self {
@@ -84,10 +94,12 @@ impl LineTracker {
             return;
         }
 
-        // Try SPECIAL_OPCODE: op = (line_delta * 16 + pc_delta) + 8
-        // Valid when 0 ≤ pc_delta ≤ 16 and 0 ≤ line_delta ≤ 15, result ≤ 255.
-        if pc_delta <= 16 && line_delta >= 0 && line_delta <= 15 {
-            let special = (line_delta as u32 * 16 + pc_delta) + 8;
+        // Try SPECIAL_OPCODE (single byte):
+        //   op = (line_delta - LINE_BASE) * LINE_RANGE + pc_delta + OPCODE_BASE
+        // Valid when pc_delta is in [0, LINE_RANGE-1] and line_delta is in [LINE_BASE, LINE_BASE+LINE_RANGE-1].
+        let adjusted = line_delta - LNP_LINE_BASE;
+        if pc_delta < LNP_LINE_RANGE && adjusted >= 0 && (adjusted as u32) < LNP_LINE_RANGE {
+            let special = adjusted as u32 * LNP_LINE_RANGE + pc_delta + LNP_OPCODE_BASE;
             if special <= 255 {
                 self.ops.push(special as u8);
                 self.current_pc = new_pc;
@@ -1721,18 +1733,10 @@ struct CodeGen<'a> {
     source: Option<&'a str>,
     /// Line number program accumulator.  Present only when `source` is `Some`.
     line_tracker: Option<LineTracker>,
+    /// Current source line number for the instruction being emitted.
+    /// Updated by `emit_stmt()` and `emit_expr()` before calling `push()`.
+    /// Used by `push()` to emit per-instruction LNP entries.
     current_line: u32,
-    break_patches: Vec<usize>,
-    continue_patches: Vec<usize>,
-    /// Exception handler table built up by `emit_try_stmt`.
-    catch_entries: Vec<CatchEntry>,
-    is_generator: bool,
-    gen_reg: Option<u8>,
-    /// Whether the current function is `async`.  When `true`, a prologue emits
-    /// `asyncfunctionenter` and return sites emit `asyncfunctionresolve`.
-    is_async: bool,
-    /// Register holding the async function object (set by async prologue).
-    async_reg: Option<u8>,
 }
 
 impl<'a> CodeGen<'a> {
@@ -1753,13 +1757,6 @@ impl<'a> CodeGen<'a> {
             source: None,
             line_tracker: None,
             current_line: 1,
-            break_patches: Vec::new(),
-            continue_patches: Vec::new(),
-            catch_entries: Vec::new(),
-            is_generator: false,
-            gen_reg: None,
-            is_async: false,
-            async_reg: None,
         }
     }
 
@@ -1807,7 +1804,7 @@ impl<'a> CodeGen<'a> {
         self.next_reg = self.next_reg.max(4);
     }
 
-    /// Append the bytes for `insn`, recording an LNP advance entry beforehand.
+    /// Append the bytes for `insn`, emitting an LNP advance entry if tracking is active.
     fn push(&mut self, insn: Insn) {
         if let Some(tracker) = self.line_tracker.as_mut() {
             let pc = self.insns.len() as u32;
@@ -1869,8 +1866,9 @@ impl<'a> CodeGen<'a> {
     // ── Statement dispatcher ──────────────────────────────────────────────────
 
     fn emit_stmt(&mut self, stmt: &Statement<'_>) {
-        // Update the current source line so that `push()` records it for every
-        // instruction emitted within this statement.
+        // Update current_line from the statement's source position so that
+        // subsequent push() calls emit per-instruction LNP entries with the
+        // correct line number.
         if let Some(source) = self.source {
             self.current_line = line_at(source, stmt.span().start);
         }
@@ -2579,6 +2577,8 @@ impl<'a> CodeGen<'a> {
     // ── Expression compiler — result always in accumulator ────────────────────
 
     fn emit_expr(&mut self, expr: &Expression<'_>) {
+        // Update current_line from the expression's source position for
+        // sub-expression granularity in LNP tracking.
         if let Some(source) = self.source {
             self.current_line = line_at(source, expr.span().start);
         }
