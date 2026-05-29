@@ -3,112 +3,82 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-// ── Bundle-level output cache ────────────────────────────────────────────────
+use arkdown_core::ArkdownConfig;
 
-/// Identifies a bundle output cache entry.
+/// Fields that uniquely identify the compiler environment for a build.
 ///
-/// A cache hit requires both fields to match the values computed from the
-/// current source tree and bundler configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Mirrors hvigor's `getCompileEnv()` which joins these fields with `"#"` to
+/// produce a cache-invalidation key.  When any field changes between builds,
+/// ALL per-module cache entries must be discarded.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CompileEnv {
+    pub compile_sdk_version: String,
+    pub compatible_sdk_version: String,
+    pub runtime_os: String,
+    pub ets_loader_path: String,
+    pub obfuscation_enabled: bool,
+    pub module_type: String,
+    pub cache_path: String,
+}
+
+/// Compute the `compileEnv` string from an [`ArkdownConfig`] and a cache path.
+///
+/// The returned string is the `#`-joined representation used as the cache
+/// discriminator, matching hvigor's `getCompileEnv()` implementation.
+pub fn compute_compile_env(config: &ArkdownConfig, cache_path: &str) -> String {
+    let obfuscation_enabled = config
+        .product
+        .build_option
+        .ark_options
+        .as_ref()
+        .and_then(|o| o.obfuscation.as_ref())
+        .map(|o| o.enable_obfuscation)
+        .unwrap_or(false);
+    let module_type = config
+        .modules
+        .first()
+        .map(|m| format!("{:?}", m.module_type))
+        .unwrap_or_default();
+    CompileEnv {
+        compile_sdk_version: config.sdk_config.compile_sdk_version.clone(),
+        compatible_sdk_version: config.product.compatible_sdk_version.clone(),
+        runtime_os: config.product.runtime_os.clone(),
+        ets_loader_path: config
+            .sdk_config
+            .ets_loader_path
+            .to_string_lossy()
+            .into_owned(),
+        obfuscation_enabled,
+        module_type,
+        cache_path: cache_path.to_string(),
+    }
+    .to_key_string()
+}
+
+impl CompileEnv {
+    /// Produce the `#`-joined key string used for cache invalidation.
+    pub fn to_key_string(&self) -> String {
+        format!(
+            "{}#{}#{}#{}#{}#{}#{}",
+            self.compile_sdk_version,
+            self.compatible_sdk_version,
+            self.runtime_os,
+            self.ets_loader_path,
+            self.obfuscation_enabled,
+            self.module_type,
+            self.cache_path,
+        )
+    }
+}
+
+/// Extended cache key that includes the compile-environment discriminator.
+///
+/// A [`BundleCacheKey`] is valid only when both the per-module [`CacheKey`]
+/// fields AND the `compile_env` string match the stored values.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BundleCacheKey {
-    /// FNV-1a hash of every compile-entry source file's contents, combined in
-    /// entry-path sorted order.
-    pub source_hash: u64,
-    /// Hash of all rolldown configuration that affects output: build mode,
-    /// treeshake, `support_chunks`, `use_normalized_ohm_url`, bundle name, and
-    /// module name.
-    pub config_hash: u64,
-}
-
-/// Per-chunk metadata persisted by the bundle cache.
-///
-/// Contains everything the post-bundle pipeline needs (importees, source maps)
-/// except the raw JavaScript code, which lives on disk as `.js` files.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BundledChunkMeta {
-    pub name: String,
-    pub path: PathBuf,
-    pub is_entry: bool,
-    pub is_dynamic_entry: bool,
-    pub facade_module_id: Option<String>,
-    pub exports: Vec<String>,
-    pub imports: Vec<String>,
-    pub dynamic_imports: Vec<String>,
-    /// Per-chunk source map JSON (may be absent for synthetic / helper chunks).
-    pub source_map: Option<String>,
-}
-
-/// Serialised bundle-level cache manifest stored at
-/// `build/default/cache/bundle/bundle.json`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BundleCacheManifest {
-    pub key: BundleCacheKey,
-    pub chunks: Vec<BundledChunkMeta>,
-    pub source_maps_path: Option<PathBuf>,
-}
-
-/// Persistent bundle-output cache for one OHOS module.
-///
-/// Stores a single [`BundleCacheManifest`] JSON file.  On a cache hit the
-/// bundler (`rolldown`) is skipped entirely and the previous `.js` chunk files
-/// are reused.
-///
-/// # Storage layout
-///
-/// `<cache_dir>/bundle.json`
-pub struct BundleCache {
-    pub cache_dir: PathBuf,
-}
-
-impl BundleCache {
-    /// Create a new `BundleCache` rooted at `cache_dir`.
-    pub fn new(cache_dir: PathBuf) -> Self {
-        BundleCache { cache_dir }
-    }
-
-    fn manifest_path(&self) -> PathBuf {
-        self.cache_dir.join("bundle.json")
-    }
-
-    /// Load the manifest from disk.  Returns `None` if the file does not exist
-    /// or cannot be parsed (treated as a cold cache).
-    pub fn load(&self) -> Result<Option<BundleCacheManifest>, CacheError> {
-        let path = self.manifest_path();
-        if !path.exists() {
-            return Ok(None);
-        }
-        let content = fs_err::read_to_string(&path)?;
-        Ok(serde_json::from_str(&content).ok())
-    }
-
-    /// Return `true` if a valid manifest exists on disk whose key matches `key`
-    /// and whose every chunk `.js` file still exists on disk.
-    pub fn is_valid(&self, key: &BundleCacheKey) -> bool {
-        match self.load() {
-            Ok(Some(manifest)) => {
-                manifest.key == *key
-                    && manifest
-                        .chunks
-                        .iter()
-                        .filter(|c| {
-                            c.path
-                                .extension()
-                                .and_then(|e| e.to_str())
-                                .is_some_and(|e| e == "js")
-                        })
-                        .all(|c| c.path.exists())
-            }
-            _ => false,
-        }
-    }
-
-    /// Persist `manifest` to `<cache_dir>/bundle.json`.
-    pub fn save(&self, manifest: &BundleCacheManifest) -> Result<(), CacheError> {
-        fs_err::create_dir_all(&self.cache_dir)?;
-        let content = serde_json::to_string_pretty(manifest)?;
-        fs_err::write(self.manifest_path(), content)?;
-        Ok(())
-    }
+    pub inner: CacheKey,
+    pub compile_env: String,
 }
 
 /// Key that uniquely identifies a valid cache entry for a module.
@@ -149,6 +119,9 @@ pub enum CacheError {
     Serde(#[from] serde_json::Error),
 }
 
+/// Name of the file that persists the last-known `compileEnv` string.
+const COMPILE_ENV_FILE: &str = ".compile_env";
+
 /// Persistent incremental build cache.
 ///
 /// Stores per-module [`CachedEntry`] snapshots on disk so that unchanged
@@ -159,6 +132,8 @@ pub enum CacheError {
 ///
 /// Each module gets its own JSON file under `cache_dir`:
 /// `<fnv1a_hex_of_id>.json`
+///
+/// The compile-environment discriminator is stored in `.compile_env`.
 ///
 /// # Usage
 ///
@@ -248,6 +223,30 @@ impl BuildCache {
         Ok(())
     }
 
+    /// Compare `current_env` against the persisted compile-environment string.
+    ///
+    /// If they differ (or no stored value exists), ALL cache entries are
+    /// invalidated and the new value is written to disk.  Returns `true` when
+    /// the environment changed and a full rebuild is required.
+    pub fn check_and_invalidate_compile_env(
+        &mut self,
+        current_env: &str,
+    ) -> Result<bool, CacheError> {
+        let env_file = self.cache_dir.join(COMPILE_ENV_FILE);
+        let stored = if env_file.exists() {
+            fs_err::read_to_string(&env_file).unwrap_or_default()
+        } else {
+            String::new()
+        };
+        if stored == current_env {
+            return Ok(false);
+        }
+        self.invalidate_all()?;
+        fs_err::create_dir_all(&self.cache_dir)?;
+        fs_err::write(&env_file, current_env)?;
+        Ok(true)
+    }
+
     /// Number of entries currently loaded in memory.
     pub fn len(&self) -> usize {
         self.memory.len()
@@ -287,6 +286,86 @@ pub fn fnv1a_hash_bytes(data: &[u8]) -> u64 {
         h ^= b as u64;
         h = h.wrapping_mul(0x100000001b3);
     }
-    h
+
+    // ── compile_env invalidation ─────────────────────────────────────────────
+
+    #[test]
+    fn test_compile_env_same_env_no_invalidation() {
+        let tmp = std::env::temp_dir().join("arkdown_cache_compile_env_same");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        let env = "sdk12#12#OpenHarmony#/sdk/ets-loader#false#Entry#/tmp/cache";
+
+        // First call: no stored env → reports changed and writes env file.
+        let mut cache = BuildCache::new(tmp.clone());
+        let changed_first = cache.check_and_invalidate_compile_env(env).unwrap();
+        assert!(changed_first, "first call with no stored env must report changed");
+
+        // Now insert an entry (cache is empty after invalidation above).
+        cache.insert(make_entry("a.ts", "h1")).unwrap();
+        assert_eq!(cache.len(), 1);
+
+        // Second call with the same env: no invalidation.
+        let changed = cache.check_and_invalidate_compile_env(env).unwrap();
+        assert!(!changed, "same env must not invalidate");
+        assert_eq!(cache.len(), 1, "entries must survive same-env check");
+
+        // Third call with the same env: still no invalidation.
+        let changed2 = cache.check_and_invalidate_compile_env(env).unwrap();
+        assert!(!changed2, "repeated same env must not invalidate");
+        assert_eq!(cache.len(), 1, "entries must still survive");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_compile_env_different_env_invalidates_all() {
+        let tmp = std::env::temp_dir().join("arkdown_cache_compile_env_diff");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        let mut cache = BuildCache::new(tmp.clone());
+        cache.insert(make_entry("a.ts", "h1")).unwrap();
+        cache.insert(make_entry("b.ts", "h2")).unwrap();
+        assert_eq!(cache.len(), 2);
+
+        let changed = cache
+            .check_and_invalidate_compile_env("sdk12#12#OpenHarmony#/sdk/ets-loader#false#Entry#/tmp/cache")
+            .unwrap();
+        assert!(changed, "first call with no stored env must report changed");
+        assert_eq!(cache.len(), 0, "all entries must be invalidated on env change");
+
+        // Reloading from disk must also show empty.
+        let mut cache2 = BuildCache::new(tmp.clone());
+        cache2.load_from_disk().unwrap();
+        assert_eq!(cache2.len(), 0, "disk must be cleared after env invalidation");
+
+        // Changing the env again must also invalidate.
+        cache2.insert(make_entry("c.ts", "h3")).unwrap();
+        let changed2 = cache2
+            .check_and_invalidate_compile_env("sdk13#13#OpenHarmony#/sdk/ets-loader#true#Entry#/tmp/cache")
+            .unwrap();
+        assert!(changed2, "different env string must invalidate");
+        assert_eq!(cache2.len(), 0);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_compile_env_key_string_format() {
+        let env = CompileEnv {
+            compile_sdk_version: "6.0.0.47".to_string(),
+            compatible_sdk_version: "12".to_string(),
+            runtime_os: "OpenHarmony".to_string(),
+            ets_loader_path: "/sdk/ets-loader".to_string(),
+            obfuscation_enabled: false,
+            module_type: "Entry".to_string(),
+            cache_path: "/tmp/cache".to_string(),
+        };
+        let key = env.to_key_string();
+        assert_eq!(
+            key,
+            "6.0.0.47#12#OpenHarmony#/sdk/ets-loader#false#Entry#/tmp/cache"
+        );
+    }
 }
 
