@@ -485,11 +485,20 @@ export { Index as default };"#,
     let mut scope_pos = scope_names as usize;
     let scope_item_count = read_u32(&bytes, scope_pos);
     scope_pos += 4;
-    assert!(scope_item_count >= 2 && scope_item_count % 2 == 0);
-    assert_eq!(
-        bytes[scope_pos], 0x05,
-        "scopeNames entries are tagged strings"
+    // hvigor format: scopeNames contains (class_name, method_with_closures)
+    // pairs — two tagged strings per class method that has call-arg arrow
+    // functions.  For a source without any call-arg closures the array is
+    // empty (item_count == 0).  Either way the item count must be even.
+    assert!(
+        scope_item_count % 2 == 0,
+        "scopeNames item count must be even, got {scope_item_count}"
     );
+    if scope_item_count > 0 {
+        assert_eq!(
+            bytes[scope_pos], 0x05,
+            "non-empty scopeNames entries are tagged strings"
+        );
+    }
 
     let has_class_method_buffer = literal_offsets.iter().any(|offset| {
         let offset = *offset as usize;

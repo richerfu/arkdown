@@ -1673,6 +1673,13 @@ impl<'a> CodeGen<'a> {
                     let name_id = self.intern(&name);
                     self.push(Insn::Lda(reg));
                     self.push(Insn::TryStGlobalByName(0, name_id));
+                    // Class declarations are lexical bindings: also populate the
+                    // named lexical slot so inner arrow functions can access the
+                    // class via `ldlexvar` (hvigor / es2abc behaviour).
+                    if let Some(lex_idx) = self.lowering.lexical_index(&name) {
+                        self.push(Insn::Lda(reg));
+                        self.push(Insn::StLexVar(0, lex_idx));
+                    }
                     if let Some(export_index) = self.lowering.export_index(&name) {
                         self.push(Insn::Lda(reg));
                         self.push(Insn::StModuleVar(export_index));
@@ -2644,9 +2651,16 @@ fn collect_module_record(program: &Program<'_>, is_module: bool) -> ModuleRecord
 }
 
 fn collect_module_lexical_bindings(program: &Program<'_>, is_module: bool) -> Vec<String> {
-    // Collect `let`/`const` variable declarators and `class` declarations at
-    // module scope.  Both create lexical bindings that es2abc tracks via
+    // Collect `let`/`const` variable declarators, `class` declarations, and
+    // `var X = class { … }` assignments at module scope.
+    //
+    // All three create lexical bindings that es2abc tracks via
     // `NewLexEnvWithName` + `stlexvar` / `ldlexvar` opcodes.
+    //
+    // The rolldown bundler often rewrites `class Foo extends Base { … }`
+    // (ClassDeclaration) into `var Foo = class extends Base { … }`
+    // (VariableDeclaration with ClassExpression init).  We treat either form
+    // as a lexical binding so the generated ABC matches hvigor's output.
     let stmts = statement_scan_body(program, is_module);
     let mut names = Vec::new();
 
@@ -2659,18 +2673,27 @@ fn collect_module_lexical_bindings(program: &Program<'_>, is_module: bool) -> Ve
     for stmt in stmts {
         match stmt {
             Statement::VariableDeclaration(decl) => {
-                if !decl.kind.is_lexical() {
-                    continue;
-                }
                 for declarator in &decl.declarations {
                     let BindingPattern::BindingIdentifier(id) = &declarator.id else {
                         continue;
                     };
-                    push_unique(&mut names, id.name.as_str());
+                    // `let`/`const` bindings are always lexical.
+                    if decl.kind.is_lexical() {
+                        push_unique(&mut names, id.name.as_str());
+                        continue;
+                    }
+                    // `var X = class { … }` — rolldown output pattern for
+                    // class declarations.  Treated as a lexical class binding
+                    // to match hvigor's es2abc scope analysis.
+                    if matches!(
+                        declarator.init.as_ref(),
+                        Some(Expression::ClassExpression(_))
+                    ) {
+                        push_unique(&mut names, id.name.as_str());
+                    }
                 }
             }
-            // `class Foo extends Base { … }` — class declarations are lexical
-            // bindings in the enclosing module scope (ES2020 §15.7.2).
+            // `class Foo extends Base { … }` (native ClassDeclaration).
             // hvigor emits `NewLexEnvWithName(['Foo'])` at the start of the
             // module body and `stlexvar 0, N` after `defineclasswithbuffer`.
             Statement::ClassDeclaration(cls) => {
