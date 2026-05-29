@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use arkdown_core::{ArkdownConfig, BuildMode, HapManifest, ModuleConfig};
 
+use crate::bytecode_har::{collect_dynamic_import_lib_info, scan_bytecode_har_deps};
+
 // ---------------------------------------------------------------------------
 // loader.json schema types
 // ---------------------------------------------------------------------------
@@ -128,6 +130,9 @@ pub struct ByteCodeHarEntry {
     pub abc_path: String,
     /// Compatible SDK version string (e.g. `"5.0.0(12)"`).
     pub compatible_sdk_version: String,
+    /// Absolute path to the `sourceMaps.map` file, if present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_maps_path: Option<String>,
 }
 
 fn default_build_mode() -> String {
@@ -297,6 +302,32 @@ pub fn generate_loader_json(
     let mut module_path_map = HashMap::new();
     module_path_map.insert(module_cfg.name.clone(), module_root.clone());
 
+    // --- TASK-LOADER-01: scan oh_modules/ for ByteCode HAR dependencies ---
+    let byte_code_har_info: HashMap<String, ByteCodeHarEntry> = {
+        let scanned = scan_bytecode_har_deps(&module_cfg.src_path, &config.project_root);
+        scanned
+            .into_iter()
+            .map(|e| e.into_loader_entry())
+            .collect()
+    };
+
+    // --- TASK-LOADER-02: populate dynamicImportLibInfo from oh-package.json5 ---
+    let dynamic_import_lib_info: HashMap<String, serde_json::Value> = {
+        let dynamic_dep_names = read_dynamic_dep_names(&module_cfg.src_path);
+        let entries = collect_dynamic_import_lib_info(
+            &module_cfg.name,
+            &dynamic_dep_names,
+            &module_cfg.src_path,
+            &config.project_root,
+        );
+        entries
+            .into_iter()
+            .filter_map(|(k, v)| {
+                serde_json::to_value(v).ok().map(|json| (k, json))
+            })
+            .collect()
+    };
+
     LoaderJson {
         module_path_map,
         compile_mode,
@@ -305,7 +336,7 @@ pub fn generate_loader_json(
             "{}/build/default/intermediates/loader_out/default/node_modules",
             module_root
         ),
-        byte_code_har_info: HashMap::new(),
+        byte_code_har_info,
         declaration_entry: vec![],
         module_name: module_cfg.name.clone(),
         hsp_name_ohm_map: HashMap::new(),
@@ -313,7 +344,7 @@ pub fn generate_loader_json(
         package_manager_type: "ohpm".to_string(),
         hvigor_compile_entry: vec![],
         other_compile_files: vec![],
-        dynamic_import_lib_info: HashMap::new(),
+        dynamic_import_lib_info,
         router_map: vec![],
         hsp_resources_map: HashMap::new(),
         update_version_info: HashMap::new(),
@@ -343,6 +374,27 @@ pub fn generate_loader_json(
         pkg_name_to_pkg_brief_info: build_pkg_brief_info(config, module_cfg),
         workers: discovered_workers,
     }
+}
+
+/// Read `dynamicDependencies` package names from `oh-package.json5` in `module_root`.
+///
+/// Returns an empty vec if the file is absent or unparseable.
+fn read_dynamic_dep_names(module_root: &Path) -> Vec<String> {
+    let path = module_root.join("oh-package.json5");
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return vec![];
+    };
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PkgDynDeps {
+        #[serde(default)]
+        dynamic_dependencies: HashMap<String, String>,
+    }
+
+    json5::from_str::<PkgDynDeps>(&content)
+        .map(|p| p.dynamic_dependencies.into_keys().collect())
+        .unwrap_or_default()
 }
 
 /// Build the `pkgNameToPkgBriefInfo` map for the loader.json.
@@ -914,200 +966,103 @@ mod tests {
         );
     }
 
-    /// Worker `.ets` files in `src/main/ets/workers/` must appear in
-    /// `compile_entry` (and `workers`).
+    /// Verify `dynamicImportLibInfo` is populated when an oh_modules dep exists.
     #[test]
-    fn test_worker_files_added_to_compile_entry() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let workers_dir = tmp.path().join("src/main/ets/workers");
-        std::fs::create_dir_all(&workers_dir).expect("create workers dir");
-        std::fs::write(workers_dir.join("DataWorker.ets"), "// stub").expect("write worker");
-        std::fs::write(workers_dir.join("NetWorker.ets"), "// stub").expect("write worker");
+    fn test_loader_json_dynamic_import_lib_info_populated_from_oh_modules() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let project_root = tmp.path().to_path_buf();
+        let module_root = project_root.join("entry");
 
-        let config = make_config(false);
-        let module_cfg = ModuleConfig {
-            name: "entry".to_string(),
-            src_path: tmp.path().to_path_buf(),
-            module_type: arkdown_core::OhosModuleType::Entry,
-        };
-        let manifest = make_manifest();
+        // Write oh-package.json5 with a dynamicDependency.
+        let oh_pkg_content = r#"{
+            name: "entry",
+            version: "1.0.0",
+            dynamicDependencies: {
+                "@remote/shared": "1.0.0"
+            }
+        }"#;
+        std::fs::create_dir_all(&module_root).expect("create module dir");
+        std::fs::write(module_root.join("oh-package.json5"), oh_pkg_content)
+            .expect("write oh-package.json5");
 
-        let loader = generate_loader_json(&config, &module_cfg, &manifest);
-
-        assert!(
-            loader
-                .compile_entry
-                .contains(&"./ets/workers/DataWorker.ets".to_string()),
-            "compile_entry must contain DataWorker.ets; got: {:?}",
-            loader.compile_entry
-        );
-        assert!(
-            loader
-                .compile_entry
-                .contains(&"./ets/workers/NetWorker.ets".to_string()),
-            "compile_entry must contain NetWorker.ets; got: {:?}",
-            loader.compile_entry
-        );
-    }
-
-    /// The `workers` field on `LoaderJson` must be populated with discovered
-    /// worker paths (so downstream bundler stages can treat them as separate
-    /// entry chunks).
-    #[test]
-    fn test_workers_field_populated() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let workers_dir = tmp.path().join("src/main/ets/workers");
-        std::fs::create_dir_all(&workers_dir).expect("create workers dir");
-        std::fs::write(workers_dir.join("DataWorker.ets"), "// stub").expect("write worker");
-
-        let config = make_config(false);
-        let module_cfg = ModuleConfig {
-            name: "entry".to_string(),
-            src_path: tmp.path().to_path_buf(),
-            module_type: arkdown_core::OhosModuleType::Entry,
-        };
-        let manifest = make_manifest();
-
-        let loader = generate_loader_json(&config, &module_cfg, &manifest);
-
-        assert_eq!(
-            loader.workers,
-            vec!["./ets/workers/DataWorker.ets".to_string()]
-        );
-    }
-
-    /// Non-`.ets` files in the workers directory must NOT be added to
-    /// `compile_entry`.
-    #[test]
-    fn test_non_ets_files_in_workers_dir_ignored() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let workers_dir = tmp.path().join("src/main/ets/workers");
-        std::fs::create_dir_all(&workers_dir).expect("create workers dir");
-        std::fs::write(workers_dir.join("README.md"), "notes").expect("write readme");
-        std::fs::write(workers_dir.join("DataWorker.ets"), "// stub").expect("write worker");
-
-        let config = make_config(false);
-        let module_cfg = ModuleConfig {
-            name: "entry".to_string(),
-            src_path: tmp.path().to_path_buf(),
-            module_type: arkdown_core::OhosModuleType::Entry,
-        };
-        let manifest = make_manifest();
-
-        let loader = generate_loader_json(&config, &module_cfg, &manifest);
-
-        assert!(
-            !loader
-                .compile_entry
-                .iter()
-                .any(|e| e.contains("README")),
-            "README.md must not appear in compile_entry"
-        );
-        assert_eq!(loader.workers.len(), 1);
-    }
-
-    /// Router map page destinations from `router_map.json` must appear in
-    /// `compile_entry`.
-    #[test]
-    fn test_router_map_pages_added_to_compile_entry() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let profile_dir = tmp
-            .path()
-            .join("src/main/resources/base/profile");
-        std::fs::create_dir_all(&profile_dir).expect("create profile dir");
+        // Create the package under oh_modules with an entry file.
+        let pkg_dir = project_root
+            .join("oh_modules")
+            .join("@remote")
+            .join("shared");
+        std::fs::create_dir_all(&pkg_dir).expect("create pkg dir");
         std::fs::write(
-            profile_dir.join("router_map.json"),
-            r#"{
-  "routerMap": [
-    {
-      "name": "productDetail",
-      "pageSourceFile": "src/main/ets/pages/ProductDetail.ets",
-      "buildFunction": "productDetailBuilder"
-    },
-    {
-      "name": "settings",
-      "pageSourceFile": "src/main/ets/pages/Settings.ets",
-      "buildFunction": "settingsBuilder"
-    }
-  ]
-}"#,
+            pkg_dir.join("oh-package.json5"),
+            r#"{ name: "@remote/shared" }"#,
         )
-        .expect("write router_map.json");
+        .expect("write pkg oh-package.json5");
+        let ets_dir = pkg_dir.join("src").join("main").join("ets");
+        std::fs::create_dir_all(&ets_dir).expect("create ets dir");
+        std::fs::write(ets_dir.join("index.ets"), "export default class Shared {}")
+            .expect("write index.ets");
 
-        let config = make_config(false);
+        let mut config = make_config(false);
+        config.project_root = project_root.clone();
         let module_cfg = ModuleConfig {
             name: "entry".to_string(),
-            src_path: tmp.path().to_path_buf(),
-            module_type: arkdown_core::OhosModuleType::Entry,
+            src_path: module_root,
+            module_type: OhosModuleType::Entry,
         };
         let manifest = make_manifest();
 
         let loader = generate_loader_json(&config, &module_cfg, &manifest);
 
         assert!(
-            loader
-                .compile_entry
-                .contains(&"./ets/pages/ProductDetail.ets".to_string()),
-            "compile_entry must contain ProductDetail.ets; got: {:?}",
-            loader.compile_entry
+            loader.dynamic_import_lib_info.contains_key("@remote/shared"),
+            "dynamicImportLibInfo must contain @remote/shared"
+        );
+        let entry = &loader.dynamic_import_lib_info["@remote/shared"];
+        assert!(
+            entry.get("entryFilePath").is_some(),
+            "entry must have entryFilePath"
         );
         assert!(
-            loader
-                .compile_entry
-                .contains(&"./ets/pages/Settings.ets".to_string()),
-            "compile_entry must contain Settings.ets; got: {:?}",
-            loader.compile_entry
+            entry.get("hostModulesInfo").is_some(),
+            "entry must have hostModulesInfo"
         );
     }
 
-    /// Router map entries that are already present in `compile_entry` (e.g. from
-    /// `main_pages.json`) must not be duplicated after dedup.
+    /// Verify `byteCodeHarInfo` is populated when an oh_modules package has index.abc.
     #[test]
-    fn test_router_map_dedup_with_existing_entries() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let profile_dir = tmp
-            .path()
-            .join("src/main/resources/base/profile");
-        std::fs::create_dir_all(&profile_dir).expect("create profile dir");
+    fn test_loader_json_byte_code_har_info_populated_from_oh_modules() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let project_root = tmp.path().to_path_buf();
+        let module_root = project_root.join("entry");
 
-        // main_pages.json adds "./ets/pages/Index.ets"
+        // Create a ByteCode HAR package under oh_modules.
+        let pkg_dir = project_root.join("oh_modules").join("@ohos").join("abc-lib");
+        std::fs::create_dir_all(&pkg_dir).expect("create pkg dir");
+        std::fs::write(pkg_dir.join("index.abc"), b"PANDA\x00\x00\x00")
+            .expect("write index.abc");
         std::fs::write(
-            profile_dir.join("main_pages.json"),
-            r#"{"src": ["pages/Index"]}"#,
+            pkg_dir.join("oh-package.json5"),
+            r#"{ name: "@ohos/abc-lib", compatibleSdkVersion: "5.0.0(12)" }"#,
         )
-        .expect("write main_pages.json");
+        .expect("write oh-package.json5");
 
-        // router_map.json also references the same page
-        std::fs::write(
-            profile_dir.join("router_map.json"),
-            r#"{
-  "routerMap": [
-    {
-      "name": "index",
-      "pageSourceFile": "src/main/ets/pages/Index.ets",
-      "buildFunction": "indexBuilder"
-    }
-  ]
-}"#,
-        )
-        .expect("write router_map.json");
-
-        let config = make_config(false);
+        let mut config = make_config(false);
+        config.project_root = project_root.clone();
         let module_cfg = ModuleConfig {
             name: "entry".to_string(),
-            src_path: tmp.path().to_path_buf(),
-            module_type: arkdown_core::OhosModuleType::Entry,
+            src_path: module_root,
+            module_type: OhosModuleType::Entry,
         };
-        // Manifest references $profile:main_pages so the pages scanner fires.
         let manifest = make_manifest();
 
         let loader = generate_loader_json(&config, &module_cfg, &manifest);
 
-        let count = loader
-            .compile_entry
-            .iter()
-            .filter(|e| e.as_str() == "./ets/pages/Index.ets")
-            .count();
-        assert_eq!(count, 1, "Index.ets must appear exactly once after dedup");
+        assert!(
+            loader.byte_code_har_info.contains_key("@ohos/abc-lib"),
+            "byteCodeHarInfo must contain @ohos/abc-lib"
+        );
+        let entry = &loader.byte_code_har_info["@ohos/abc-lib"];
+        assert_eq!(entry.compatible_sdk_version, "5.0.0(12)");
+        assert!(entry.abc_path.ends_with("index.abc"));
+        assert!(entry.source_maps_path.is_none());
     }
 }

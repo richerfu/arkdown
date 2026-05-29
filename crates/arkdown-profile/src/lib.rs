@@ -21,7 +21,8 @@ pub mod process_profile;
 pub mod router_map;
 
 pub use bytecode_har::{
-    detect_bytecode_har, merge_bytecode_har_abc, scan_bytecode_har_deps, ByteCodeHarDep,
+    collect_dynamic_import_lib_info, scan_bytecode_har_deps, ByteCodeHarScanEntry,
+    DynamicImportLibEntry, HostModuleInfo,
 };
 pub use har_abilities::{collect_har_abilities, HarAbility};
 pub use loader_json::{generate_loader_json, ByteCodeHarEntry, LoaderJson, PkgBriefInfo};

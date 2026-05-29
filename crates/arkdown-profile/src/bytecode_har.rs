@@ -1,127 +1,368 @@
-// ByteCode HAR detection and dependency scanning.
-//
-// A ByteCode HAR is an `.har` package whose source has already been compiled to
-// ArkCompiler bytecode (`.abc`). hvigor detects these by checking for
-// `"byteCodeHar": true` in `oh-package.json5` or by the presence of
-// `ets/modules.abc` inside the package directory.
-//
-// When a ByteCode HAR is found its pre-compiled `.abc` is merged directly into
-// the output `modules.abc` rather than re-compiling any source.
-
 use std::path::{Path, PathBuf};
 
-/// A ByteCode HAR package found inside an `oh_modules/` directory.
-pub struct ByteCodeHarDep {
-    /// Package name (directory name under `oh_modules/`).
-    pub package_name: String,
-    /// Absolute path to the pre-compiled `ets/modules.abc` file.
-    pub abc_path: PathBuf,
-    /// OHM URL identifying this package in the bundle graph.
-    /// Format: `@bundle:{bundle_name}/{package_name}/index`
-    pub ohm_url: String,
-    /// Optional compatible SDK version from `oh-package.json5`.
-    pub compatible_sdk_version: String,
+use serde::{Deserialize, Serialize};
+
+use crate::loader_json::ByteCodeHarEntry;
+
+// ---------------------------------------------------------------------------
+// oh-package.json5 subset for ByteCode HAR detection
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OhPkgMinimal {
+    #[serde(default)]
+    compatible_sdk_version: Option<CompatibleSdkVersionField>,
 }
 
-/// Return `true` when `har_dir` is a ByteCode HAR package.
+/// `compatibleSdkVersion` can be a plain integer (`12`) or a string (`"5.0.0(12)"`).
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum CompatibleSdkVersionField {
+    Int(u32),
+    Str(String),
+}
+
+impl CompatibleSdkVersionField {
+    fn as_string(&self) -> String {
+        match self {
+            CompatibleSdkVersionField::Int(n) => n.to_string(),
+            CompatibleSdkVersionField::Str(s) => s.clone(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Scan result
+// ---------------------------------------------------------------------------
+
+/// Metadata collected for one ByteCode HAR dependency found under `oh_modules/`.
+#[derive(Debug, Clone)]
+pub struct ByteCodeHarScanEntry {
+    /// Package name from `oh-package.json5`.
+    pub package_name: String,
+    /// Absolute path to the pre-compiled `.abc` file.
+    pub abc_path: PathBuf,
+    /// Compatible SDK version string, e.g. `"5.0.0(12)"` or `"12"`.
+    pub compatible_sdk_version: String,
+    /// Optional path to the `sourceMaps.map` file alongside the `.abc`.
+    pub source_maps_path: Option<PathBuf>,
+}
+
+impl ByteCodeHarScanEntry {
+    /// Convert into the [`ByteCodeHarEntry`] written to `loader.json`.
+    pub fn into_loader_entry(self) -> (String, ByteCodeHarEntry) {
+        let entry = ByteCodeHarEntry {
+            package_name: self.package_name.clone(),
+            abc_path: self.abc_path.to_string_lossy().into_owned(),
+            compatible_sdk_version: self.compatible_sdk_version,
+            source_maps_path: self.source_maps_path.map(|p| p.to_string_lossy().into_owned()),
+        };
+        (self.package_name, entry)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/// Scan `oh_modules/` directories for ByteCode HAR packages.
 ///
-/// Checks, in order:
-/// 1. `oh-package.json5` contains `"byteCodeHar": true`
-/// 2. `ets/modules.abc` exists in the directory (fallback)
-pub fn detect_bytecode_har(har_dir: &Path) -> bool {
-    let pkg_path = har_dir.join("oh-package.json5");
-    if pkg_path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&pkg_path) {
-            if let Ok(value) = json5::from_str::<serde_json::Value>(&content) {
-                if value
-                    .get("byteCodeHar")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false)
-                {
-                    return true;
+/// A package is a ByteCode HAR when it contains a pre-compiled `index.abc`
+/// (or `src/sourceMaps.map` alongside it) rather than raw ETS/TS source.
+///
+/// Searches in order:
+/// 1. `<module_root>/oh_modules/`
+/// 2. `<project_root>/oh_modules/`
+///
+/// Returns one entry per discovered ByteCode HAR, keyed by package name.
+pub fn scan_bytecode_har_deps(
+    module_root: &Path,
+    project_root: &Path,
+) -> Vec<ByteCodeHarScanEntry> {
+    let mut results = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for base in &[
+        module_root.join("oh_modules"),
+        project_root.join("oh_modules"),
+    ] {
+        if !base.exists() {
+            continue;
+        }
+        scan_oh_modules_dir(base, &mut seen, &mut results);
+    }
+
+    results
+}
+
+fn scan_oh_modules_dir(
+    oh_modules: &Path,
+    seen: &mut std::collections::HashSet<String>,
+    out: &mut Vec<ByteCodeHarScanEntry>,
+) {
+    let Ok(entries) = std::fs::read_dir(oh_modules) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let pkg_dir = entry.path();
+        if !pkg_dir.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+
+        // Handle scoped packages: `@scope/pkg` lives as `oh_modules/@scope/pkg`.
+        if name_str.starts_with('@') {
+            // Recurse one level for scoped packages.
+            let Ok(scoped) = std::fs::read_dir(&pkg_dir) else {
+                continue;
+            };
+            for scoped_entry in scoped.flatten() {
+                let scoped_dir = scoped_entry.path();
+                if !scoped_dir.is_dir() {
+                    continue;
+                }
+                let pkg_name =
+                    format!("{}/{}", name_str, scoped_entry.file_name().to_string_lossy());
+                try_collect_bytecode_har(&scoped_dir, &pkg_name, seen, out);
+            }
+        } else {
+            try_collect_bytecode_har(&pkg_dir, &name_str, seen, out);
+        }
+    }
+}
+
+fn try_collect_bytecode_har(
+    pkg_dir: &Path,
+    pkg_name: &str,
+    seen: &mut std::collections::HashSet<String>,
+    out: &mut Vec<ByteCodeHarScanEntry>,
+) {
+    if !seen.insert(pkg_name.to_string()) {
+        return;
+    }
+
+    // A ByteCode HAR has a pre-compiled `index.abc` at the package root.
+    let abc_path = pkg_dir.join("index.abc");
+    if !abc_path.exists() {
+        return;
+    }
+
+    let compatible_sdk_version = read_compatible_sdk_version(pkg_dir);
+    let source_maps_path = {
+        let candidate = pkg_dir.join("src").join("sourceMaps.map");
+        if candidate.exists() {
+            Some(candidate)
+        } else {
+            None
+        }
+    };
+
+    out.push(ByteCodeHarScanEntry {
+        package_name: pkg_name.to_string(),
+        abc_path,
+        compatible_sdk_version,
+        source_maps_path,
+    });
+}
+
+fn read_compatible_sdk_version(pkg_dir: &Path) -> String {
+    let pkg_json = pkg_dir.join("oh-package.json5");
+    if !pkg_json.exists() {
+        return String::new();
+    }
+    let Ok(content) = std::fs::read_to_string(&pkg_json) else {
+        return String::new();
+    };
+    let Ok(parsed) = json5::from_str::<OhPkgMinimal>(&content) else {
+        return String::new();
+    };
+    parsed
+        .compatible_sdk_version
+        .map(|v| v.as_string())
+        .unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic import lib info
+// ---------------------------------------------------------------------------
+
+/// Entry written to `loader.json` `dynamicImportLibInfo`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DynamicImportLibEntry {
+    /// Absolute path to the package's main entry file.
+    pub entry_file_path: String,
+    /// Module name from the package's `module.json` (or package name fallback).
+    pub module_name: String,
+    /// Whether this is a local (file:) dependency.
+    pub is_local_dependency: bool,
+    /// Absolute path to the package root directory.
+    pub pkg_path: String,
+    /// Host module info (which module declares this dynamic import).
+    pub host_modules_info: Vec<HostModuleInfo>,
+}
+
+/// Identifies the host module that declares a dynamic import.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostModuleInfo {
+    pub host_dependency_name: String,
+    pub host_module_name: String,
+}
+
+/// Scan `dynamicDependencies` from `oh-package.json5` and resolve each dep
+/// under `oh_modules/` to produce `dynamicImportLibInfo` entries.
+///
+/// For each package name in `dynamic_dep_names` that resolves to a directory
+/// under `<module_root>/oh_modules/` or `<project_root>/oh_modules/`, one
+/// [`DynamicImportLibEntry`] is produced.
+pub fn collect_dynamic_import_lib_info(
+    module_name: &str,
+    dynamic_dep_names: &[String],
+    module_root: &Path,
+    project_root: &Path,
+) -> Vec<(String, DynamicImportLibEntry)> {
+    let mut results = Vec::new();
+
+    for dep_name in dynamic_dep_names {
+        // Resolve the package directory under oh_modules.
+        let pkg_dir = resolve_oh_module_dir(dep_name, module_root, project_root);
+        let Some(pkg_dir) = pkg_dir else {
+            continue;
+        };
+
+        let is_local = is_local_dependency(dep_name, module_root);
+        let entry_file = find_entry_file(&pkg_dir);
+        let pkg_module_name = read_module_name_from_pkg(&pkg_dir, dep_name);
+
+        let entry = DynamicImportLibEntry {
+            entry_file_path: entry_file,
+            module_name: pkg_module_name,
+            is_local_dependency: is_local,
+            pkg_path: pkg_dir.to_string_lossy().into_owned(),
+            host_modules_info: vec![HostModuleInfo {
+                host_dependency_name: dep_name.clone(),
+                host_module_name: module_name.to_string(),
+            }],
+        };
+        results.push((dep_name.clone(), entry));
+    }
+
+    results
+}
+
+fn resolve_oh_module_dir(
+    dep_name: &str,
+    module_root: &Path,
+    project_root: &Path,
+) -> Option<PathBuf> {
+    for base in &[
+        module_root.join("oh_modules"),
+        project_root.join("oh_modules"),
+    ] {
+        let candidate = base.join(dep_name);
+        if candidate.exists() && candidate.is_dir() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn is_local_dependency(dep_name: &str, module_root: &Path) -> bool {
+    let pkg_json = module_root.join("oh-package.json5");
+    let Ok(content) = std::fs::read_to_string(&pkg_json) else {
+        return false;
+    };
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PkgDeps {
+        #[serde(default)]
+        dynamic_dependencies: std::collections::HashMap<String, String>,
+    }
+
+    let Ok(parsed) = json5::from_str::<PkgDeps>(&content) else {
+        return false;
+    };
+
+    parsed
+        .dynamic_dependencies
+        .get(dep_name)
+        .map(|v| v.starts_with("file:"))
+        .unwrap_or(false)
+}
+
+fn find_entry_file(pkg_dir: &Path) -> String {
+    let pkg_json = pkg_dir.join("oh-package.json5");
+    if let Ok(content) = std::fs::read_to_string(&pkg_json) {
+        #[derive(Deserialize)]
+        struct PkgEntry {
+            #[serde(default)]
+            main: Option<String>,
+            #[serde(default)]
+            types: Option<String>,
+        }
+        if let Ok(parsed) = json5::from_str::<PkgEntry>(&content) {
+            if let Some(main) = parsed.main.filter(|s| !s.is_empty()) {
+                let candidate = pkg_dir.join(&main);
+                if candidate.exists() {
+                    return candidate.to_string_lossy().into_owned();
+                }
+            }
+            if let Some(types) = parsed.types.filter(|s| !s.is_empty()) {
+                let candidate = pkg_dir.join(&types);
+                if candidate.exists() {
+                    return candidate.to_string_lossy().into_owned();
                 }
             }
         }
     }
-    // Fallback: presence of ets/modules.abc signals a pre-compiled HAR.
-    har_dir.join("ets/modules.abc").exists()
-        && !har_dir.join("src").exists()
-        && !har_dir.join("ets/Index.ets").exists()
-}
 
-/// Scan one or more `oh_modules/` directories for ByteCode HAR packages.
-///
-/// `bundle_name` is the application bundle name used to construct OHM URLs.
-pub fn scan_bytecode_har_deps(oh_modules_dirs: &[&Path], bundle_name: &str) -> Vec<ByteCodeHarDep> {
-    let mut deps = Vec::new();
-    for dir in oh_modules_dirs {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let pkg_dir = entry.path();
-            if !pkg_dir.is_dir() {
-                continue;
-            }
-            if !detect_bytecode_har(&pkg_dir) {
-                continue;
-            }
-            let abc_path = pkg_dir.join("ets/modules.abc");
-            if !abc_path.exists() {
-                continue;
-            }
-            let package_name = entry.file_name().to_string_lossy().into_owned();
-            let compatible_sdk_version =
-                read_compatible_sdk_version(&pkg_dir).unwrap_or_default();
-            let ohm_url = format!("@bundle:{}/{}/index", bundle_name, package_name);
-            deps.push(ByteCodeHarDep {
-                package_name,
-                abc_path,
-                ohm_url,
-                compatible_sdk_version,
-            });
+    // Fall back to conventional entry points.
+    for candidate_name in &["index.ets", "index.ts", "index.js"] {
+        let candidate = pkg_dir.join("src/main/ets").join(candidate_name);
+        if candidate.exists() {
+            return candidate.to_string_lossy().into_owned();
+        }
+        let candidate = pkg_dir.join(candidate_name);
+        if candidate.exists() {
+            return candidate.to_string_lossy().into_owned();
         }
     }
-    // Stable order for deterministic output.
-    deps.sort_by(|a, b| a.package_name.cmp(&b.package_name));
-    deps
+
+    String::new()
 }
 
-/// Append a ByteCode HAR's pre-compiled `.abc` file onto `target_abc`.
-///
-/// If `target_abc` does not yet exist the HAR bytes are written as the sole
-/// content. When it already exists the bytes are appended so the ArkRuntime
-/// can locate all class records in one binary file.
-///
-/// A full Panda ClassIndex merge is required for production correctness; this
-/// append is sufficient for test fixture validation.
-pub fn merge_bytecode_har_abc(
-    har_abc: &Path,
-    target_abc: &Path,
-) -> std::io::Result<()> {
-    let har_bytes = std::fs::read(har_abc)?;
-    if har_bytes.is_empty() {
-        return Ok(());
+fn read_module_name_from_pkg(pkg_dir: &Path, fallback: &str) -> String {
+    // Try module.json first (compiled HAR), then module.json5 (source HAR).
+    for json_name in &["src/main/module.json", "src/main/module.json5"] {
+        let path = pkg_dir.join(json_name);
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            #[derive(Deserialize)]
+            struct ModuleJson {
+                module: ModuleSection,
+            }
+            #[derive(Deserialize)]
+            struct ModuleSection {
+                name: Option<String>,
+            }
+            if let Ok(parsed) = json5::from_str::<ModuleJson>(&content) {
+                if let Some(name) = parsed.module.name.filter(|s| !s.is_empty()) {
+                    return name;
+                }
+            }
+        }
     }
-    if let Some(parent) = target_abc.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    use std::io::Write;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(target_abc)?;
-    file.write_all(&har_bytes)?;
-    Ok(())
-}
 
-fn read_compatible_sdk_version(har_dir: &Path) -> Option<String> {
-    let content = std::fs::read_to_string(har_dir.join("oh-package.json5")).ok()?;
-    let value: serde_json::Value = json5::from_str(&content).ok()?;
-    value
-        .get("compatibleSdkVersion")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+    // Fallback: use the last path segment of the package name.
+    fallback
+        .rsplit('/')
+        .next()
+        .unwrap_or(fallback)
+        .to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -131,92 +372,171 @@ fn read_compatible_sdk_version(har_dir: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
-    #[test]
-    fn test_detect_bytecode_har_by_flag() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path();
-        std::fs::create_dir_all(dir.join("ets")).unwrap();
-        std::fs::write(
-            dir.join("oh-package.json5"),
-            r#"{ "name": "test", "byteCodeHar": true }"#,
-        )
-        .unwrap();
-        std::fs::write(dir.join("ets/modules.abc"), b"PANDA\x00\x00\x00").unwrap();
-        assert!(detect_bytecode_har(dir));
+    fn make_temp_dir() -> tempfile::TempDir {
+        tempfile::tempdir().expect("create temp dir")
+    }
+
+    fn write_file(path: &Path, content: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create parent dirs");
+        }
+        fs::write(path, content).expect("write file");
+    }
+
+    fn write_abc(path: &Path) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create parent dirs");
+        }
+        fs::write(path, b"PANDA\x00\x00\x00").expect("write abc");
     }
 
     #[test]
-    fn test_detect_bytecode_har_by_abc_presence() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path();
-        std::fs::create_dir_all(dir.join("ets")).unwrap();
-        // No oh-package.json5 with byteCodeHar flag, but ets/modules.abc exists
-        // and no src/ dir (not a source HAR).
-        std::fs::write(dir.join("ets/modules.abc"), b"PANDA\x00\x00\x00").unwrap();
-        assert!(detect_bytecode_har(dir));
+    fn test_scan_bytecode_har_empty_oh_modules() {
+        let tmp = make_temp_dir();
+        let results = scan_bytecode_har_deps(tmp.path(), tmp.path());
+        assert!(results.is_empty());
     }
 
     #[test]
-    fn test_detect_bytecode_har_source_har_excluded() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path();
-        // Has ets/modules.abc BUT also has src/ — this is a source HAR, not BC HAR.
-        std::fs::create_dir_all(dir.join("ets")).unwrap();
-        std::fs::create_dir_all(dir.join("src")).unwrap();
-        std::fs::write(dir.join("ets/modules.abc"), b"PANDA\x00\x00\x00").unwrap();
-        assert!(!detect_bytecode_har(dir));
-    }
-
-    #[test]
-    fn test_detect_bytecode_har_missing_abc() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path();
-        std::fs::write(
-            dir.join("oh-package.json5"),
-            r#"{ "name": "test", "byteCodeHar": false }"#,
-        )
-        .unwrap();
-        assert!(!detect_bytecode_har(dir));
-    }
-
-    #[test]
-    fn test_scan_bytecode_har_deps_finds_deps() {
-        let tmp = tempfile::tempdir().unwrap();
+    fn test_scan_bytecode_har_finds_abc_package() {
+        let tmp = make_temp_dir();
         let oh_modules = tmp.path().join("oh_modules");
-        std::fs::create_dir_all(oh_modules.join("bc-lib/ets")).unwrap();
-        std::fs::write(
-            oh_modules.join("bc-lib/oh-package.json5"),
-            r#"{ "name": "bc-lib", "byteCodeHar": true }"#,
-        )
-        .unwrap();
-        std::fs::write(
-            oh_modules.join("bc-lib/ets/modules.abc"),
-            b"PANDA\x00\x00\x00",
-        )
-        .unwrap();
+        let pkg_dir = oh_modules.join("@ohos").join("test-har");
 
-        // Also add a regular (non-BC) package that should be ignored.
-        std::fs::create_dir_all(oh_modules.join("regular-lib/src")).unwrap();
-        std::fs::write(
-            oh_modules.join("regular-lib/oh-package.json5"),
-            r#"{ "name": "regular-lib" }"#,
-        )
-        .unwrap();
-
-        let deps = scan_bytecode_har_deps(&[oh_modules.as_path()], "com.example.app");
-        assert_eq!(deps.len(), 1);
-        assert_eq!(deps[0].package_name, "bc-lib");
-        assert_eq!(
-            deps[0].ohm_url,
-            "@bundle:com.example.app/bc-lib/index".to_string()
+        write_abc(&pkg_dir.join("index.abc"));
+        write_file(
+            &pkg_dir.join("oh-package.json5"),
+            r#"{ name: "@ohos/test-har", compatibleSdkVersion: "5.0.0(12)" }"#,
         );
+
+        let results = scan_bytecode_har_deps(tmp.path(), tmp.path());
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].package_name, "@ohos/test-har");
+        assert_eq!(results[0].compatible_sdk_version, "5.0.0(12)");
+        assert!(results[0].source_maps_path.is_none());
     }
 
     #[test]
-    fn test_scan_bytecode_har_deps_empty_dir() {
-        let tmp = tempfile::tempdir().unwrap();
-        let deps = scan_bytecode_har_deps(&[tmp.path()], "com.example.app");
-        assert!(deps.is_empty());
+    fn test_scan_bytecode_har_finds_source_maps() {
+        let tmp = make_temp_dir();
+        let oh_modules = tmp.path().join("oh_modules");
+        let pkg_dir = oh_modules.join("my-har");
+
+        write_abc(&pkg_dir.join("index.abc"));
+        write_file(&pkg_dir.join("src").join("sourceMaps.map"), "{}");
+        write_file(
+            &pkg_dir.join("oh-package.json5"),
+            r#"{ name: "my-har", compatibleSdkVersion: 12 }"#,
+        );
+
+        let results = scan_bytecode_har_deps(tmp.path(), tmp.path());
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].compatible_sdk_version, "12");
+        assert!(results[0].source_maps_path.is_some());
+    }
+
+    #[test]
+    fn test_scan_bytecode_har_skips_non_abc_packages() {
+        let tmp = make_temp_dir();
+        let oh_modules = tmp.path().join("oh_modules");
+        let pkg_dir = oh_modules.join("source-har");
+
+        // No index.abc — this is a source HAR, not a ByteCode HAR.
+        write_file(
+            &pkg_dir.join("oh-package.json5"),
+            r#"{ name: "source-har" }"#,
+        );
+        write_file(
+            &pkg_dir.join("src/main/ets/index.ets"),
+            "export default class Foo {}",
+        );
+
+        let results = scan_bytecode_har_deps(tmp.path(), tmp.path());
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_scan_bytecode_har_deduplicates_module_and_project() {
+        let tmp = make_temp_dir();
+        let module_dir = tmp.path().join("entry");
+        let project_dir = tmp.path();
+
+        // Same package in both module oh_modules and project oh_modules.
+        for base in &[module_dir.join("oh_modules"), project_dir.join("oh_modules")] {
+            let pkg = base.join("shared-har");
+            write_abc(&pkg.join("index.abc"));
+            write_file(&pkg.join("oh-package.json5"), r#"{ name: "shared-har" }"#);
+        }
+
+        let results = scan_bytecode_har_deps(&module_dir, project_dir);
+        assert_eq!(results.len(), 1, "same package must not appear twice");
+    }
+
+    #[test]
+    fn test_into_loader_entry() {
+        let entry = ByteCodeHarScanEntry {
+            package_name: "@scope/pkg".to_string(),
+            abc_path: PathBuf::from("/project/oh_modules/@scope/pkg/index.abc"),
+            compatible_sdk_version: "5.0.0(12)".to_string(),
+            source_maps_path: Some(PathBuf::from(
+                "/project/oh_modules/@scope/pkg/src/sourceMaps.map",
+            )),
+        };
+        let (key, loader_entry) = entry.into_loader_entry();
+        assert_eq!(key, "@scope/pkg");
+        assert_eq!(loader_entry.package_name, "@scope/pkg");
+        assert_eq!(
+            loader_entry.abc_path,
+            "/project/oh_modules/@scope/pkg/index.abc"
+        );
+        assert_eq!(loader_entry.compatible_sdk_version, "5.0.0(12)");
+        assert!(loader_entry.source_maps_path.is_some());
+    }
+
+    #[test]
+    fn test_collect_dynamic_import_lib_info_empty() {
+        let tmp = make_temp_dir();
+        let results =
+            collect_dynamic_import_lib_info("entry", &[], tmp.path(), tmp.path());
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_collect_dynamic_import_lib_info_finds_oh_module() {
+        let tmp = make_temp_dir();
+        let oh_modules = tmp.path().join("oh_modules");
+        let pkg_dir = oh_modules.join("@remote").join("shared");
+
+        // Create package with an entry file.
+        write_file(
+            &pkg_dir.join("src/main/ets/index.ets"),
+            "export default class Shared {}",
+        );
+        write_file(
+            &pkg_dir.join("oh-package.json5"),
+            r#"{ name: "@remote/shared" }"#,
+        );
+
+        let deps = vec!["@remote/shared".to_string()];
+        let results =
+            collect_dynamic_import_lib_info("entry", &deps, tmp.path(), tmp.path());
+
+        assert_eq!(results.len(), 1);
+        let (key, entry) = &results[0];
+        assert_eq!(key, "@remote/shared");
+        assert!(!entry.entry_file_path.is_empty());
+        assert_eq!(entry.host_modules_info[0].host_module_name, "entry");
+        assert_eq!(entry.host_modules_info[0].host_dependency_name, "@remote/shared");
+    }
+
+    #[test]
+    fn test_collect_dynamic_import_lib_info_missing_package_skipped() {
+        let tmp = make_temp_dir();
+        let deps = vec!["@missing/pkg".to_string()];
+        let results =
+            collect_dynamic_import_lib_info("entry", &deps, tmp.path(), tmp.path());
+        assert!(results.is_empty());
     }
 }
