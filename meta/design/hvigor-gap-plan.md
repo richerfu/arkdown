@@ -56,31 +56,37 @@ and release-mode terser/minification when applicable.
 - Phase 5 (ABC): 🔄 modules.abc 8607B vs hvigor 9844B (gap: 1237B — 87.4% parity)
 - Phase 6 (packaging): ✅ HAP zip identical to hvigor (11 entries)
 
-**Parity (minimal-hap, 2026-05-29):**
-- HAP zip: ✅ identical (11 entries, all content matches except 2 files below)
-- `ets/modules.abc`: hvigor 9844B, arkdown 8607B — gap 1237B (87.4% parity).
-  ✅ Literal arrays=10=[4,4,6,6,6,6,16,24,26,26] match hvigor exactly. ✅ Method records=20 match.
-  Remaining 1237B: 1012B LNP line-advance density (58B/LNP vs hvigor 105B/LNP) + 225B other structural.
-  Improvements made: START_LOCAL_EXTENDED (0x04, 12 bytes) replaces START_LOCAL (0x03, 10 bytes) for all
-  scope vars and params, SET_PROLOGUE_END (0x08) emitted after scope var declarations,
-  NewLexEnvWithName for arrow captures, class-declaration lexical bindings,
-  scope_names_literal_array hvigor format. Module request annotations added (8607B, up from 8565B).
-  Remaining gap: per-instruction ADVANCE sequences between every instruction group (hvigor emits
-  much denser LNP coverage than our per-statement approach).
-- `ets/sourceMaps.map`: hvigor 1847B, arkdown 1281B — gap is per-statement vs per-token maps
+**Parity (minimal-hap, 2026-05-29) — see `meta/design/parity-report-minimal-hap.md`:**
+- `loader.json`: ✅ 100% match (all 18 fields identical; absolute paths differ by machine).
+- `module.json`: 🔄 ~75% — 3 schema fields missing (`virtualMachine`, `compileMode`,
+  `dependencies`) and 8 resource integer IDs missing (`iconId`, `labelId`, `descriptionId`,
+  `startWindowIconId`, `startWindowBackgroundId` in abilities/app). Root cause: `arkdown-resource`
+  does not yet write resolved IDs back into merged module.json; `virtualMachine` not injected
+  from SDK metadata.
+- `ets/modules.abc`: 🔄 87.4% by size (8607B vs 9844B; gap 1237B). ✅ Literal arrays,
+  method records, class method OHM names match hvigor. Known gaps:
+  1. **BUG**: absolute filesystem path (`/Users/.../pages/Index`) leaks into StringItems.
+  2. **func_main_0 naming**: stored as full OHM-prefixed name instead of bare `func_main_0`.
+  3. **LNP density**: 58B/LNP vs hvigor 105B/LNP (per-statement vs per-instruction ADVANCE).
+  4. **Duplicate annotation strings**: `pkgName@entry` etc. appear twice vs once in golden.
+  5. **External module ref format**: `@native.ohos.app` vs golden `L@ohos.app;` descriptor.
+- `ets/sourceMaps.map`: 🔄 ~80% structural match. Keys and sources arrays identical.
+  EntryAbility VLQ density: 329 chars vs 910 in golden (per-statement vs per-token maps).
+  Index.ts VLQ: 381 chars vs 366 (close match).
 
 ## Major Missing Capabilities
 
 | Area                     | Current implementation                                                                                                                                                                                                                                                                                                                      | Gap to hvigor                                                                                                                                                                             |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `loader.json`            | ✅ **Fixed (2026-05-29)**: absolute paths via `canonicalize()`, all 18 fields match hvigor golden exactly. `nonEntryImportees`/`compiledImportees` populated by Phase 4 importee pass. | ByteCode HAR metadata, workers, HSP/HAR OHM maps — not needed for minimal-hap fixture. |
-| ArkTS transform          | ✅ **Fixed (2026-05-29)**: `@State`, `@Prop`, `@Link`, `@ObjectLink`, `@Provide`, `@Consume`, `@Watch`, `@BuilderParam`, storage decorators all implemented. Per-statement source maps via oxc_codegen. | `@Builder`, `@Styles` functions; precise per-token source maps (gap: 566B vs hvigor). |
+| ArkTS transform          | ✅ **Fixed (2026-05-29)**: `@State`, `@Prop`, `@Link`, `@ObjectLink`, `@Provide`, `@Consume`, `@Watch`, `@BuilderParam`, storage decorators all implemented. Per-statement source maps via oxc_codegen. | `@Builder`, `@Styles` functions; precise per-token source maps. EntryAbility VLQ: 329 vs 910 chars. |
 | Rollup/rolldown options  | ✅ **Fixed (2026-05-28)**: Clean ESM output, `@ohos:` imports external, treeshake disabled for debug. **IIFE/CJS compatibility paths removed** from both bundler and ABC compiler. | Release treeshake, `manualChunks` for `supportChunks`, ByteCode HAR/HSP externals. |
 | ByteCode HAR importees   | ✅ **Fixed (2026-05-29)**: `process_importees()` ports `process-importee.js`. BFS from entry chunks, OHM URL generation, importee.json cache written. `nonEntryImportees` in loader.json. | ByteCode HAR compilation flow (requires HAR input fixture). |
-| ABC compiler             | 🔄 **Improved**: LNP line advance tracking, OHM URL scope names, SET_FILE debug info, binary/unary/logical ops, static-object `createobjectwithbuffer` (opcode 0x07), emit_new args, call-argument closures, START_LOCAL_EXTENDED (0x04) for scope/param vars, SET_PROLOGUE_END (0x08) after scope declarations, NewLexEnvWithName for arrow captures, class-decl lexical bindings, module request annotations. modules.abc 8607B vs 9844B (87.4% parity). YieldExpression + generator function prologue + PrivateFieldExpression lowering added. | Per-instruction LNP ADVANCE sequences (hvigor emits between every instruction group, not just per-statement); per-token source map granularity. |
+| module.json merge        | 🔄 **Partial**: structural merge correct. Missing: `virtualMachine`, `compileMode`, `dependencies` fields; 8 resource integer IDs (`iconId`, `labelId`, `descriptionId`, `startWindowIconId`, `startWindowBackgroundId`). | Write resolved resource IDs from `arkdown-resource` back into profile. Inject `virtualMachine` from SDK metadata. |
+| ABC compiler             | 🔄 **Improved**: 87.4% parity (8607B vs 9844B). Known remaining gaps: (1) absolute fs path leaks into StringItems [BUG]; (2) `func_main_0` stored with full OHM prefix instead of bare name; (3) per-instruction LNP ADVANCE density (58B vs 105B/LNP); (4) duplicate annotation strings; (5) external module ref format (`@native.ohos.app` vs `L@ohos.app;`). | See parity-report-minimal-hap.md §5 for complete string diff. |
 | Obfuscation/minification | `arkdown-obfuscate` exists but not wired in.                                                                                                                                           | hvigor release builds run SDK obfuscation + terser before ABC.                          |
 | Incremental cache        | `arkdown-cache` exists but not wired in.                                                                                                                                               | hvigor rollup msgpack cache + es2abc `--cache-file` support.                            |
-| Source maps/debug        | ✅ Per-statement source maps from kit-rewritten ETS source (pre-struct-transform). Pretty-printed JSON. sourceMaps.map 1281B vs 1847B golden (gap: per-statement vs per-token VLQ).   | Per-token source map granularity to match tsc/ets-loader output.                        |
+| Source maps/debug        | 🔄 Per-statement source maps. sourceMaps.map 1281B vs 1847B golden. Keys and sources arrays match 100%. Index.ts mapping close (381 vs 366 chars). EntryAbility 2.8× short (329 vs 910). | Per-token source map granularity to match tsc/ets-loader output. Low priority until Phase 2 complete. |
 | Packaging metadata       | ✅ **Fixed (2026-05-28)**: HAP zip identical to hvigor — correct module.json merge, pack.info, pkgContextInfo.json (intermediate, not in HAP), resources.index. | None for minimal-hap. HAR/HSP-specific pack flows for complex projects.                 |
 
 ## Code Compilation Gap
@@ -237,10 +243,29 @@ large compiler project. Treat it as the longest pole in the plan.
 
 ## Immediate Next Tasks
 
-1. Extend the golden parity harness from the minimal HAP to native implementation,
-   HSP, HAR, dependency, and release fixtures.
-2. Fix `pkgContextInfo.json` and output path layout; these are high-impact and
-   low-risk.
-3. Populate missing `loader.json` dependency fields.
-4. Wire `cache_path` and source map plumbing through CLI -> bundler -> ABC.
-5. Close `arkdown-abc` bytecode differences using the golden bytecode reports.
+Priority order based on 2026-05-29 parity report:
+
+1. **[BUG] Fix absolute path in modules.abc** — `pages/Index` absolute filesystem path
+   leaks into StringItems in `arkdown-abc`. Locate the source file path derivation and
+   replace with the OHM URL or relative path.
+
+2. **[module.json] Add `virtualMachine`, `compileMode`, `dependencies`** — In
+   `arkdown-profile`'s `process_profile` step, inject `virtualMachine: "ark12.0.6.0"` from
+   SDK version metadata, always write `compileMode: "esmodule"` for debug HAP, and add
+   `dependencies: []` for modules with no explicit deps.
+
+3. **[module.json] Write resource IDs from restool into profile** — `arkdown-resource`
+   needs to pass resolved integer IDs (`iconId`, `labelId`, `descriptionId`, etc.) back to
+   `arkdown-profile` so they appear in the merged module.json.
+
+4. **[modules.abc] Fix `func_main_0` OHM prefix** — Strip the module OHM path from
+   function NameItems. Only the module record NameItem should carry the OHM path.
+
+5. **[modules.abc] Deduplicate annotation strings** — `pkgName@entry`, `isCommonjs`,
+   `hasTopLevelAwait`, `isSharedModule`, `scopeNames`, `moduleRecordIdx` are being
+   emitted once per chunk; consolidate into a single string table entry shared across records.
+
+6. Extend the golden parity harness from minimal-hap to minimal-hsp, minimal-har,
+   and dependency fixtures.
+7. Wire `cache_path` and source map plumbing through CLI -> bundler -> ABC.
+8. Close remaining `arkdown-abc` LNP density gap (per-instruction ADVANCE sequences).
