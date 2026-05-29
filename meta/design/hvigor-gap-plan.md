@@ -53,14 +53,15 @@ and release-mode terser/minification when applicable.
 - Phase 2 (ETS transform): ✅ @Prop, @Link, @ObjectLink, @Provide, @Consume, @Watch, @BuilderParam
 - Phase 3 (bundler): ✅ clean ESM, @ohos: external, treeshake off for debug
 - Phase 4 (importee): ✅ process_importees() ports hvigor process-importee.js
-- Phase 5 (ABC): 🔄 modules.abc 8434B vs hvigor 9844B (gap: 1410B)
+- Phase 5 (ABC): 🔄 modules.abc 8584B vs hvigor 9844B (gap: 1260B — 87% parity)
 - Phase 6 (packaging): ✅ HAP zip identical to hvigor (11 entries)
 
-**Parity (minimal-hap):**
+**Parity (minimal-hap, 2026-05-29):**
 - HAP zip: ✅ identical (11 entries, all content matches except 2 files below)
-- `ets/modules.abc`: hvigor 9844B, arkdown 8434B — gap is LNP parameter scope entries
-  and 2 missing literal arrays vs hvigor's 10 (was 3 missing; added `createobjectwithbuffer`
-  24-entry literal array for `registerNamedRoute` metadata object 2026-05-29)
+- `ets/modules.abc`: hvigor 9844B, arkdown 8584B — gap 1260B, entirely in LNP content
+  (avg 49B/LNP vs hvigor 105B/LNP). Improvements made: START_LOCAL for params in all
+  class methods and call-arg closures, createobjectwithbuffer for static objects,
+  full OHM URL scope names. Remaining: START_LOCAL_EXTENDED, prologue/epilogue markers.
 - `ets/sourceMaps.map`: hvigor 1847B, arkdown 1281B — gap is per-statement vs per-token maps
 
 ## Major Missing Capabilities

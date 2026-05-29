@@ -621,38 +621,47 @@ impl AbcFile {
                 lnp_buf.push(0x05);
                 lnp_buf.extend_from_slice(&src_off.to_le_bytes());
 
-                // START_LOCAL (0x03) entries that hvigor always emits:
-                //   "this"      reg 0  type_off 0
-                //   "newTarget" reg 1  type_off 0
-                //   "funcObj"   reg 2  type_off 0
+                // START_LOCAL_EXTENDED (0x04) entries that hvigor always emits:
+                //   "this"      reg 0  type_off 0  type_tag 0
+                //   "newTarget" reg 1  type_off 0  type_tag 0
+                //   "funcObj"   reg 2  type_off 0  type_tag 0
+                //
+                // Format: [0x04][name_off: u32 LE][reg: u8][type_off: u32 LE][type_tag: u16 LE]
+                // = 12 bytes per entry.
                 for (reg, &name_off) in scope_name_offsets.iter().enumerate() {
-                    lnp_buf.push(0x03);
+                    lnp_buf.push(0x04); // START_LOCAL_EXTENDED
                     lnp_buf.extend_from_slice(&name_off.to_le_bytes());
                     lnp_buf.push(reg as u8);
-                    lnp_buf.extend_from_slice(&0u32.to_le_bytes());
+                    lnp_buf.extend_from_slice(&0u32.to_le_bytes()); // type_off = 0
+                    lnp_buf.extend_from_slice(&0u16.to_le_bytes()); // type_tag = 0
                 }
 
-                // START_LOCAL entries for formal parameters, starting at reg 3.
+                // START_LOCAL_EXTENDED entries for formal parameters, starting at reg 3.
                 let param_offs = &per_lnp_param_name_offsets[i];
                 for (param_idx, &param_off) in param_offs.iter().enumerate() {
-                    lnp_buf.push(0x03);
+                    lnp_buf.push(0x04); // START_LOCAL_EXTENDED
                     lnp_buf.extend_from_slice(&param_off.to_le_bytes());
                     lnp_buf.push(3 + param_idx as u8);
-                    lnp_buf.extend_from_slice(&0u32.to_le_bytes());
+                    lnp_buf.extend_from_slice(&0u32.to_le_bytes()); // type_off = 0
+                    lnp_buf.extend_from_slice(&0u16.to_le_bytes()); // type_tag = 0
                 }
 
-                // Each START_LOCAL entry is 10 bytes (1 + 4 + 1 + 4).
-                let start_local_bytes = (3 + param_offs.len()) as u32 * 10;
+                // Each START_LOCAL_EXTENDED entry is 12 bytes (1 + 4 + 1 + 4 + 2).
+                let start_local_bytes = (3 + param_offs.len()) as u32 * 12;
+
+                // SET_PROLOGUE_END (0x08): marks the end of the method prologue.
+                // hvigor emits this opcode after all START_LOCAL_EXTENDED entries.
+                lnp_buf.push(0x08);
 
                 let method_ops = lnp_method_line_ops[i];
                 if !method_ops.is_empty() {
                     // line_ops already ends with END_SEQUENCE (0x00).
                     lnp_buf.extend_from_slice(method_ops);
-                    lnp_cur += 5 + start_local_bytes + method_ops.len() as u32;
+                    lnp_cur += 5 + start_local_bytes + 1 + method_ops.len() as u32;
                 } else {
-                    // Minimal LNP: just SET_FILE + START_LOCALs + END_SEQUENCE.
+                    // Minimal LNP: SET_FILE + START_LOCAL_EXTENDEDs + SET_PROLOGUE_END + END_SEQUENCE.
                     lnp_buf.push(0x00);
-                    lnp_cur += 6 + start_local_bytes;
+                    lnp_cur += 5 + start_local_bytes + 1 + 1;
                 }
             }
 

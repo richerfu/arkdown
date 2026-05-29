@@ -485,25 +485,58 @@ fn module_record_literal_array(module_record: &ModuleRecordInfo) -> LiteralArray
 }
 
 fn scope_names_literal_array(methods: &[MethodRecord], record_name: &str) -> LiteralArray {
-    // hvigor stores full OHM URL paths: "<record_name>.<method_name>" for
-    // constructors and instance/static methods that contain nested function
-    // definitions (0x33 = definefunc). This matches the scopeNames format
-    // required by ArkTS source-level debugging.
-    let mut names = Vec::new();
+    // hvigor format: [class_short_name, first_method_with_call_arg_closures]
+    //
+    // es2abc emits this two-element array for the `scopeNames` class field so
+    // ArkRuntime / the source debugger can locate the closure scope chain.
+    // The array is only present when at least one class method contains call-arg
+    // arrow functions (i.e. there are `#~@0>@*` records in the method list).
+    //
+    // Class short name: last `/`-separated component of `record_name`
+    // (e.g. "EntryAbility" from "…/entryability/EntryAbility").
+    // Method name: the instance/static method name immediately preceding the
+    // first `#~@0>@` closure record.
+
+    // Scan methods in order: when we see a #~@0>@* record, the preceding class
+    // method (instance or static, not constructor) is the one with closures.
+    let mut last_class_method_short: Option<String> = None;
+    let mut first_closure_owner: Option<String> = None;
+
     for method in methods {
-        let short = &method.name;
-        if constructor_scope_name(short).is_some()
-            || class_method_scope_name(short).is_some()
-            || short.starts_with("#*#")
-            || short.starts_with("#~@0>@")
-        {
-            names.push(format!("{record_name}.{short}"));
+        let name = &method.name;
+        if name.starts_with("#~@0>#") || name.starts_with("#~@0<#") {
+            // Instance or static method — strip prefix to get short name.
+            let short = name
+                .strip_prefix("#~@0>#")
+                .or_else(|| name.strip_prefix("#~@0<#"))
+                .unwrap_or(name.as_str());
+            // Strip any `^N` duplicate suffix (e.g. "foo^1" → "foo").
+            let short = short.split('^').next().unwrap_or(short);
+            last_class_method_short = Some(short.to_string());
+        } else if name.starts_with("#~@0>@") {
+            // Call-arg closure record — its "owner" is the preceding class method.
+            if first_closure_owner.is_none() {
+                first_closure_owner = last_class_method_short.take();
+            }
         }
     }
-    names.sort();
-    names.dedup();
+
+    let Some(owner_method) = first_closure_owner else {
+        // No call-arg closures in this class → no scopeNames payload.
+        return LiteralArray { entries: vec![] };
+    };
+
+    let class_short = record_name
+        .rsplit('/')
+        .next()
+        .unwrap_or(record_name)
+        .to_string();
+
     LiteralArray {
-        entries: names.into_iter().map(LiteralEntry::TaggedString).collect(),
+        entries: vec![
+            LiteralEntry::TaggedString(class_short),
+            LiteralEntry::TaggedString(owner_method),
+        ],
     }
 }
 
@@ -1943,7 +1976,22 @@ impl<'a> CodeGen<'a> {
             Expression::ArrowFunctionExpression(arrow) => {
                 let captures = arrow_captures_from_body(arrow.body.as_ref());
                 if !captures.is_empty() {
-                    self.push(Insn::NewLexEnv(captures.len()));
+                    // hvigor uses `newlexenvwithname` (0xb6) instead of plain
+                    // `newlexenv` (0x09) so that ArkRuntime / debugger can map
+                    // each lexical slot back to its source identifier.
+                    // Build a lexical-names literal array: slot-0 = "this" when
+                    // the arrow captures `this`, slot-1 = "new.target" if present.
+                    let mut lex_names: Vec<String> = Vec::new();
+                    if captures.this_slot.is_some() {
+                        lex_names.push("this".to_string());
+                    }
+                    if captures.new_target_slot.is_some() {
+                        lex_names.push("new.target".to_string());
+                    }
+                    let lit_id = self.literal_arrays.len() as u16;
+                    self.literal_arrays
+                        .push(lexical_names_literal_array(&lex_names));
+                    self.push(Insn::NewLexEnvWithName(captures.len(), lit_id));
                     if let Some(slot) = captures.this_slot {
                         // Capture the enclosing function's `this` via ldthis.
                         // Arrow functions do not have their own `this` binding
@@ -2596,23 +2644,41 @@ fn collect_module_record(program: &Program<'_>, is_module: bool) -> ModuleRecord
 }
 
 fn collect_module_lexical_bindings(program: &Program<'_>, is_module: bool) -> Vec<String> {
+    // Collect `let`/`const` variable declarators and `class` declarations at
+    // module scope.  Both create lexical bindings that es2abc tracks via
+    // `NewLexEnvWithName` + `stlexvar` / `ldlexvar` opcodes.
     let stmts = statement_scan_body(program, is_module);
     let mut names = Vec::new();
-    for stmt in stmts {
-        let Statement::VariableDeclaration(decl) = stmt else {
-            continue;
-        };
-        if !decl.kind.is_lexical() {
-            continue;
+
+    let mut push_unique = |names: &mut Vec<String>, name: &str| {
+        if !names.iter().any(|k: &String| k == name) {
+            names.push(name.to_string());
         }
-        for declarator in &decl.declarations {
-            let BindingPattern::BindingIdentifier(id) = &declarator.id else {
-                continue;
-            };
-            let name = id.name.as_str();
-            if !names.iter().any(|known| known == name) {
-                names.push(name.to_string());
+    };
+
+    for stmt in stmts {
+        match stmt {
+            Statement::VariableDeclaration(decl) => {
+                if !decl.kind.is_lexical() {
+                    continue;
+                }
+                for declarator in &decl.declarations {
+                    let BindingPattern::BindingIdentifier(id) = &declarator.id else {
+                        continue;
+                    };
+                    push_unique(&mut names, id.name.as_str());
+                }
             }
+            // `class Foo extends Base { … }` — class declarations are lexical
+            // bindings in the enclosing module scope (ES2020 §15.7.2).
+            // hvigor emits `NewLexEnvWithName(['Foo'])` at the start of the
+            // module body and `stlexvar 0, N` after `defineclasswithbuffer`.
+            Statement::ClassDeclaration(cls) => {
+                if let Some(id) = &cls.id {
+                    push_unique(&mut names, id.name.as_str());
+                }
+            }
+            _ => {}
         }
     }
     names
