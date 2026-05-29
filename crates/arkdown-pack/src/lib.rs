@@ -1,8 +1,10 @@
 pub mod error;
+pub mod integrated_hsp;
 pub mod packager;
 pub mod zip_writer;
 
 pub use error::PackError;
+pub use integrated_hsp::{normalize_integrated_hsps, IntegratedHspEntry};
 pub use packager::{HarPackInput, PackAbility, PackInput, Packager};
 
 #[cfg(test)]
@@ -77,7 +79,7 @@ mod tests {
             bundle_type: "app".to_string(),
             source_maps_path: None,
             abilities: vec![],
-            privacy_profile_path: None,
+            integrated_hsps: vec![],
         });
         assert!(result.is_ok(), "{:?}", result.err());
         assert!(out.exists());
@@ -125,7 +127,7 @@ mod tests {
                 bundle_type: "app".to_string(),
                 source_maps_path: None,
                 abilities: vec![],
-                privacy_profile_path: None,
+                integrated_hsps: vec![],
             })
             .unwrap();
 
@@ -156,7 +158,7 @@ mod tests {
             bundle_type: "app".to_string(),
             source_maps_path: None,
             abilities: vec![],
-            privacy_profile_path: None,
+            integrated_hsps: vec![],
         });
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -231,7 +233,7 @@ mod tests {
             bundle_type: "app".to_string(),
             source_maps_path: None,
             abilities: vec![],
-            privacy_profile_path: None,
+            integrated_hsps: vec![],
         });
         assert!(result.is_ok(), "{:?}", result.err());
         assert!(out.exists());

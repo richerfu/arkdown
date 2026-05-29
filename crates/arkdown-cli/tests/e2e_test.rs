@@ -256,6 +256,7 @@ fn run_build(fixture: &PathBuf) -> PathBuf {
             bundle_type: "app".to_string(),
             source_maps_path: bundle_out.source_maps_path.clone(),
             abilities: vec![],
+            integrated_hsps: vec![],
         })
         .expect("pack_hap");
 

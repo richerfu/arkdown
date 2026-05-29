@@ -47,6 +47,12 @@ Each SPEC file contains three standard sections:
 | SPEC-021 | HAP Signing                   | `arkdown-sign`                   | SPEC-012      |
 | SPEC-022 | hvigorw Compatibility Wrapper | `arkdown-cli` (extension)        | SPEC-013      |
 
+## P1 — Production Builds (continued)
+
+| ID       | Title                         | Crate           | Blocked By |
+| -------- | ----------------------------- | --------------- | ---------- |
+| SPEC-044 | Integrated HSP Processing     | `arkdown-pack`  | SPEC-012   |
+
 ## P2 — Advanced Features
 
 ### IDE Integration (watch, hot-reload, preview)

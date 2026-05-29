@@ -4,6 +4,7 @@ use std::sync::Arc;
 use arkdown_core::ArkdownConfig;
 
 use crate::error::PackError;
+use crate::integrated_hsp::IntegratedHspEntry;
 use crate::zip_writer;
 
 fn generate_pack_info(config: &ArkdownConfig, input: &PackInput) -> String {
@@ -269,9 +270,11 @@ pub struct PackInput {
     pub source_maps_path: Option<PathBuf>,
     /// Abilities list for inclusion in `pack.info` under `modules[].abilities`.
     pub abilities: Vec<PackAbility>,
-    /// Path to `src/main/resources/base/profile/privacy.json` in the module source tree.
-    /// When present the file is embedded in the HAP as `module.privacy.json`.
-    pub privacy_profile_path: Option<PathBuf>,
+    /// Remote HSPs to embed inside this HAP (integrated HSP feature, API >= 11).
+    ///
+    /// Each entry is stored at `libs/<hsp_dir_name>/<hsp_file_name>` inside the archive.
+    /// Pass an empty vec for HAPs without integrated HSPs (the common case).
+    pub integrated_hsps: Vec<IntegratedHspEntry>,
 }
 
 pub struct HarPackInput {
@@ -388,32 +391,12 @@ impl Packager {
             }
         }
 
-        // Preloaded SO files from buildOption.preloadSo — stored under libs/arm64-v8a/
-        for so_path in &self.config.product.build_option.preload_so {
-            let resolved = if so_path.is_absolute() {
-                so_path.clone()
-            } else {
-                self.config.project_root.join(so_path)
-            };
-            if resolved.exists() {
-                let filename = resolved
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("unknown.so");
-                let dest = format!("libs/arm64-v8a/{}", filename);
-                zip_writer::add_file_stored(&mut writer, &dest, &resolved)?;
-            } else {
-                eprintln!(
-                    "arkdown-pack: preloadSo file not found, skipping: {}",
-                    resolved.display()
-                );
-            }
-        }
-
-        // module.privacy.json — deflated; only included when privacy.json exists in source
-        if let Some(ref privacy_path) = input.privacy_profile_path {
-            if privacy_path.exists() {
-                zip_writer::add_file_deflate(&mut writer, "module.privacy.json", privacy_path)?;
+        // Integrated (embedded) remote HSPs — stored at libs/<hsp_dir_name>/<hsp_file_name>.
+        // Each HSP must have been normalized via `normalize_integrated_hsps()` before packing.
+        for hsp in &input.integrated_hsps {
+            if hsp.hsp_path.exists() {
+                let dest = format!("libs/{}/{}", hsp.hsp_dir_name, hsp.hsp_file_name);
+                zip_writer::add_file_stored(&mut writer, &dest, &hsp.hsp_path)?;
             }
         }
 

@@ -6,4 +6,6 @@ pub enum PackError {
     Zip(#[from] zip::result::ZipError),
     #[error("Missing required input: {0}")]
     MissingInput(String),
+    #[error("Malformed pack.info: {0}")]
+    MalformedPackInfo(String),
 }

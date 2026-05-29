@@ -7,7 +7,9 @@ use std::sync::Arc;
 use arkdown_core::{
     ArkdownConfig, BuildMode, BuildOption, OutputTarget, ProductConfig, SdkConfig, StrictModeConfig,
 };
-use arkdown_pack::{HarPackInput, PackError, PackInput, Packager};
+use arkdown_pack::{
+    normalize_integrated_hsps, HarPackInput, IntegratedHspEntry, PackError, PackInput, Packager,
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -78,7 +80,7 @@ fn minimal_pack_input(
         bundle_type: "app".to_string(),
         source_maps_path: None,
         abilities: vec![],
-        privacy_profile_path: None,
+        integrated_hsps: vec![],
     }
 }
 
@@ -261,7 +263,7 @@ fn test_hap_resource_files_copied_from_processed_dir() {
             bundle_type: "app".to_string(),
             source_maps_path: None,
             abilities: vec![],
-            privacy_profile_path: None,
+            integrated_hsps: vec![],
         })
         .expect("pack_hap must succeed");
 
@@ -318,7 +320,7 @@ fn test_missing_abc_returns_missing_input_error() {
         bundle_type: "app".to_string(),
         source_maps_path: None,
         abilities: vec![],
-        privacy_profile_path: None,
+        integrated_hsps: vec![],
     });
     assert!(result.is_err(), "missing ABC must return Err");
     assert!(
@@ -343,7 +345,7 @@ fn test_missing_module_json_returns_missing_input_error() {
         bundle_type: "app".to_string(),
         source_maps_path: None,
         abilities: vec![],
-        privacy_profile_path: None,
+        integrated_hsps: vec![],
     });
     assert!(result.is_err());
     assert!(matches!(result.unwrap_err(), PackError::MissingInput(_)));
@@ -375,7 +377,7 @@ fn test_hsp_output_is_valid_zip() {
             bundle_type: "app".to_string(),
             source_maps_path: None,
             abilities: vec![],
-            privacy_profile_path: None,
+            integrated_hsps: vec![],
         })
         .expect("pack_hsp must succeed");
 
@@ -451,6 +453,165 @@ fn test_har_contains_oh_package_json5() {
     assert!(
         names.iter().any(|n| *n == "oh-package.json5"),
         "HAR must contain oh-package.json5; entries: {:?}",
+        names
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Integrated HSP (SPEC-044)
+// ---------------------------------------------------------------------------
+
+/// Build a minimal `.hsp` zip in memory and write it to `path`.
+fn write_minimal_hsp(path: &std::path::Path, bundle_name: &str, version_code: u64) {
+    use std::io::Write as _;
+    use zip::write::SimpleFileOptions;
+    use zip::CompressionMethod;
+
+    let pack_info = serde_json::json!({
+        "summary": {
+            "app": {
+                "bundleName": bundle_name,
+                "bundleType": "shared",
+                "version": { "code": version_code, "name": "1.0.0" }
+            },
+            "modules": []
+        },
+        "packages": []
+    })
+    .to_string();
+
+    let buf = Vec::new();
+    let cursor = std::io::Cursor::new(buf);
+    let mut zw = zip::ZipWriter::new(cursor);
+
+    let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+    zw.start_file("pack.info", opts).unwrap();
+    zw.write_all(pack_info.as_bytes()).unwrap();
+
+    let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+    zw.start_file("ets/modules.abc", opts).unwrap();
+    zw.write_all(b"PAND").unwrap();
+
+    let bytes = zw.finish().unwrap().into_inner();
+    fs::write(path, bytes).unwrap();
+}
+
+#[test]
+fn test_normalize_integrated_hsps_patches_pack_info() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let hsp_path = tmp.path().join("mylib.hsp");
+    write_minimal_hsp(&hsp_path, "com.remote.hsp", 1);
+
+    let entry = IntegratedHspEntry {
+        hsp_dir_name: "mylib@1.0.0".to_string(),
+        hsp_file_name: "mylib.hsp".to_string(),
+        hsp_path,
+    };
+
+    let out_dir = tmp.path().join("integrated");
+    let paths =
+        normalize_integrated_hsps(&[entry], "com.host.app", 2000000, &out_dir).unwrap();
+
+    assert_eq!(paths.len(), 1);
+    let out_path = &paths[0];
+    assert_eq!(out_path, &out_dir.join("mylib@1.0.0").join("mylib.hsp"));
+
+    let out_file = fs::File::open(out_path).unwrap();
+    let mut archive = zip::ZipArchive::new(out_file).unwrap();
+    let mut entry = archive.by_name("pack.info").unwrap();
+    let mut content = String::new();
+    entry.read_to_string(&mut content).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+    assert_eq!(
+        v["summary"]["app"]["bundleName"].as_str().unwrap(),
+        "com.host.app",
+        "bundleName must be patched to host value"
+    );
+    assert_eq!(
+        v["summary"]["app"]["version"]["code"].as_u64().unwrap(),
+        2000000,
+        "version.code must be patched to host value"
+    );
+}
+
+#[test]
+fn test_pack_hap_embeds_integrated_hsp() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (abc, res, modj) = write_minimal_inputs(tmp.path());
+    let out = tmp.path().join("entry.hap");
+
+    // Build and normalize the remote HSP.
+    let hsp_src = tmp.path().join("remote.hsp");
+    write_minimal_hsp(&hsp_src, "com.remote.hsp", 1);
+    let integrated_dir = tmp.path().join("integrated");
+    let normalized = normalize_integrated_hsps(
+        &[IntegratedHspEntry {
+            hsp_dir_name: "remote@1.0.0".to_string(),
+            hsp_file_name: "remote.hsp".to_string(),
+            hsp_path: hsp_src,
+        }],
+        "com.test.packtest",
+        1000000,
+        &integrated_dir,
+    )
+    .unwrap();
+
+    let integrated_entry = IntegratedHspEntry {
+        hsp_dir_name: "remote@1.0.0".to_string(),
+        hsp_file_name: "remote.hsp".to_string(),
+        hsp_path: normalized[0].clone(),
+    };
+
+    Packager::new(make_config())
+        .pack_hap(PackInput {
+            module_name: "entry".into(),
+            abc_path: abc,
+            resources_index: res,
+            module_json: modj,
+            native_libs: vec![],
+            output_path: out.clone(),
+            resources_src_dir: None,
+            bundle_version_code: 1000000,
+            bundle_version_name: "1.0.0".to_string(),
+            bundle_type: "app".to_string(),
+            source_maps_path: None,
+            abilities: vec![],
+            integrated_hsps: vec![integrated_entry],
+        })
+        .expect("pack_hap must succeed");
+
+    let file = fs::File::open(&out).expect("open HAP");
+    let archive = zip::ZipArchive::new(file).expect("valid ZIP");
+    let names: Vec<_> = archive.file_names().collect();
+
+    assert!(
+        names.iter().any(|n| *n == "libs/remote@1.0.0/remote.hsp"),
+        "HAP must contain embedded HSP at libs/<hsp_dir_name>/<hsp_file_name>; entries: {:?}",
+        names
+    );
+    // Standard HAP entries must still be present.
+    assert!(names.iter().any(|n| *n == "module.json"), "module.json missing");
+    assert!(names.iter().any(|n| *n == "ets/modules.abc"), "ets/modules.abc missing");
+}
+
+#[test]
+fn test_pack_hap_empty_integrated_hsps_no_libs_entry() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (abc, res, modj) = write_minimal_inputs(tmp.path());
+    let out = tmp.path().join("entry.hap");
+
+    Packager::new(make_config())
+        .pack_hap(minimal_pack_input(abc, res, modj, out.clone()))
+        .expect("pack_hap must succeed");
+
+    let file = fs::File::open(&out).expect("open HAP");
+    let archive = zip::ZipArchive::new(file).expect("valid ZIP");
+    let names: Vec<_> = archive.file_names().collect();
+
+    assert!(
+        !names.iter().any(|n| n.starts_with("libs/") && n.ends_with(".hsp")),
+        "HAP with no integrated_hsps must not contain any .hsp under libs/; entries: {:?}",
         names
     );
 }

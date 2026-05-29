@@ -89,8 +89,8 @@ and release-mode terser/minification when applicable.
 | ABC compiler             | 🔄 **Improved**: 88.1% parity (8675B vs 9844B). **Phase 5 structural fixes**: LNP index moved to file end, OHM URL method names, field name dedup, method index reordered [strings\|methods\|lits]. Known gaps: (1) LNP body density 81B vs 113B/LNP; (2) method index 98 vs 77 entries; (3) absolute fs path in StringItems. | See parity-report-minimal-hap.md §5 for complete string diff. |
 | Obfuscation/minification | `arkdown-obfuscate` exists but not wired in.                                                                                                                                           | hvigor release builds run SDK obfuscation + terser before ABC.                          |
 | Incremental cache        | `arkdown-cache` exists but not wired in.                                                                                                                                               | hvigor rollup msgpack cache + es2abc `--cache-file` support.                            |
-| Source maps/debug        | 🔄 Per-statement source maps. sourceMaps.map 1281B vs 1847B golden. Keys and sources arrays match 100%. Index.ts mapping close (381 vs 366 chars). EntryAbility 2.8× short (329 vs 910). | Per-token source map granularity to match tsc/ets-loader output. Low priority until Phase 2 complete. |
-| Packaging metadata       | ✅ **Fixed (2026-05-28)**: HAP zip identical to hvigor — correct module.json merge, pack.info, pkgContextInfo.json (intermediate, not in HAP), resources.index. | None for minimal-hap. HAR/HSP-specific pack flows for complex projects.                 |
+| Source maps/debug        | ✅ Per-statement source maps from kit-rewritten ETS source (pre-struct-transform). Pretty-printed JSON. sourceMaps.map 1281B vs 1847B golden (gap: per-statement vs per-token VLQ).   | Per-token source map granularity to match tsc/ets-loader output.                        |
+| Packaging metadata       | ✅ **Fixed (2026-05-28)**: HAP zip identical to hvigor — correct module.json merge, pack.info, pkgContextInfo.json (intermediate, not in HAP), resources.index. ✅ **Integrated HSP (SPEC-044, 2026-05-29)**: `normalize_integrated_hsps()` patches remote HSP `pack.info` and `PackInput::integrated_hsps` embeds normalized HSPs at `libs/<dir>/<file>`. | HAR/HSP-specific pack flows for complex projects; privacy profile; startup/share config. |
 
 ## Code Compilation Gap
 
@@ -227,7 +227,13 @@ large compiler project. Treat it as the longest pole in the plan.
 - Wire `arkdown-obfuscate` into the CLI between bundling and ABC compilation.
 - Invalidate code/ABC caches when obfuscation rules or SDK compile env change.
 - Fix `pkgContextInfo.json`, `pack.info`, source map packaging, native libs,
-  integrated HSP, privacy profile, startup/share config, and router map output.
+  privacy profile, startup/share config, and router map output.
+- ✅ **Integrated HSP (SPEC-044, 2026-05-29)**: `normalize_integrated_hsps()` and
+  `PackInput::integrated_hsps` implemented in `arkdown-pack`. Ports
+  `ProcessIntegratedHsp` / `generateIntegratedHspCommand` from hvigor. Patches
+  `pack.info` `bundleName`/`versionCode` and embeds normalized HSP at
+  `libs/<hsp_dir_name>/<hsp_file_name>` inside the HAP. CLI passes `integrated_hsps: vec![]`
+  (no remote HSPs in the minimal-hap fixture).
 - Add HSP/HAR-specific flows instead of routing HSP through the same HAP path
   with only archive extension changes.
 

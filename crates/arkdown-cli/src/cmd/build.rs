@@ -647,12 +647,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                                         bundle_type: "app".to_string(),
                                         source_maps_path,
                                         abilities,
-                                        privacy_profile_path: {
-                                            let p = module.src_path.join(
-                                                "src/main/resources/base/profile/privacy.json",
-                                            );
-                                            if p.exists() { Some(p) } else { None }
-                                        },
+                                        integrated_hsps: vec![],
                                     })
                                     .map_err(|e| anyhow::anyhow!("Pack failed: {}", e))?,
                             )
