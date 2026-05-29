@@ -496,9 +496,8 @@ fn test_first_build_writes_cache_entries() {
         json_count > 0,
         "at least one JSON cache entry must be written; cache_dir={cache_dir:?}"
     );
-
-    let _ = std::fs::remove_dir_all(&fixture);
 }
+
 
 /// After a first build the ABC compiler cache file exists.
 #[test]

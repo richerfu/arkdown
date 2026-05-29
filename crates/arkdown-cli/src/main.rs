@@ -1,5 +1,4 @@
-mod cmd;
-mod progress;
+use arkdown_cli::cmd;
 
 use clap::{Parser, Subcommand};
 

@@ -3,6 +3,10 @@ name = "arkdown-cli"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "arkdown_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "arkdown"
 path = "src/main.rs"
