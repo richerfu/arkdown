@@ -219,9 +219,13 @@ For the Rust backend, implement in this order:
 
 1. real method/literal-array layout for functions, classes, closures, imports,
    exports, and CommonJS helpers;
-2. full statement/expression lowering: loops, try/catch/finally, destructuring,
-   optional chaining, spread, async/await, generators, template literals,
-   object/array literals, class fields, private fields, decorators output;
+2. full statement/expression lowering:
+   - ✅ `for...in` via `getpropiterator` (0x66) + `getnextpropname` (0x36);
+   - ✅ `for...of` via `getiterator` (0x67) + `callthis0 next` + `done`/`value` loads;
+   - ✅ `break`/`continue` inside loops via patch-list mechanism;
+   - remaining: `while`/`do-while`, `for` loop, `try`/`catch`/`finally`,
+     destructuring, optional chaining, spread, `async`/`await`, generators,
+     template literals, class fields, private fields, decorators output;
 3. module request annotations and metadata exactly as `es2abc` emits them;
 4. debug info and source position sections;
 5. `cache_path` support with hvigor-compatible invalidation keys;

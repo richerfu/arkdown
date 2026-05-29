@@ -3,9 +3,10 @@ use std::collections::HashMap;
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     Argument, AssignmentTarget, BindingPattern, ClassElement, Declaration,
-    ExportDefaultDeclarationKind, Expression, FunctionBody, ImportDeclarationSpecifier,
-    ImportOrExportKind, LogicalOperator, MethodDefinition, MethodDefinitionKind, ModuleExportName,
-    Program, PropertyKey, Statement, UnaryOperator,
+    ExportDefaultDeclarationKind, Expression, ForInStatement, ForOfStatement, ForStatementLeft,
+    FunctionBody, ImportDeclarationSpecifier, ImportOrExportKind, LogicalOperator,
+    MethodDefinition, MethodDefinitionKind, ModuleExportName, Program, PropertyKey, Statement,
+    UnaryOperator,
 };
 use oxc_parser::{Parser, ParserReturn};
 use oxc_span::{GetSpan, SourceType};
@@ -1799,44 +1800,151 @@ impl<'a> CodeGen<'a> {
 
     // ── While loop ────────────────────────────────────────────────────────────
 
-    fn emit_for_in_stmt(&mut self, for_in: &oxc_ast::ast::ForInStatement<'_>) {
-        self.emit_expr(&for_in.right);
-        if let oxc_ast::ast::ForStatementLeft::VariableDeclaration(decl) = &for_in.left {
-            for declarator in &decl.declarations {
-                if let BindingPattern::BindingIdentifier(id) = &declarator.id {
-                    let name = id.name.as_str().to_string();
-                    self.push(Insn::LdUndefined);
-                    let reg = self.alloc_reg();
-                    self.var_regs.insert(name, reg);
-                    self.push(Insn::Sta(reg));
-                }
-            }
-        }
+    fn emit_for_in_stmt(&mut self, stmt: &ForInStatement<'_>) {
+        self.emit_expr(&stmt.right);
+        self.push(Insn::GetPropIterator);
+        let iter_reg = self.alloc_reg();
+        self.push(Insn::Sta(iter_reg));
+
+        let outer_break = std::mem::take(&mut self.break_patches);
+        let outer_continue = std::mem::take(&mut self.continue_patches);
+
+        let loop_start = self.insns.len();
+        self.push(Insn::GetNextPropName(iter_reg));
+        let jeqz_pos = self.insns.len();
+        self.push(Insn::Jeqz(0));
+
+        let key_reg = self.alloc_reg();
+        self.push(Insn::Sta(key_reg));
+        self.bind_for_left(&stmt.left, key_reg);
+
         let outer_returned = self.returned;
         self.returned = false;
-        self.emit_stmt(&for_in.body);
+        self.emit_stmt(&stmt.body);
         self.returned = outer_returned;
+
+        for patch in std::mem::take(&mut self.continue_patches) {
+            let off = (loop_start as i32 - patch as i32) as i16;
+            let [lo, hi] = off.to_le_bytes();
+            self.insns[patch + 1] = lo;
+            self.insns[patch + 2] = hi;
+        }
+
+        let jmp_pos = self.insns.len();
+        let back_off = (loop_start as i32 - jmp_pos as i32) as i16;
+        self.push(Insn::Jmp(back_off));
+
+        let exit_byte = self.insns.len();
+        let jeqz_off = (exit_byte as i32 - jeqz_pos as i32) as i16;
+        let [lo, hi] = jeqz_off.to_le_bytes();
+        self.insns[jeqz_pos + 1] = lo;
+        self.insns[jeqz_pos + 2] = hi;
+
+        for patch in std::mem::take(&mut self.break_patches) {
+            let off = (exit_byte as i32 - patch as i32) as i16;
+            let [lo, hi] = off.to_le_bytes();
+            self.insns[patch + 1] = lo;
+            self.insns[patch + 2] = hi;
+        }
+
+        self.break_patches = outer_break;
+        self.continue_patches = outer_continue;
     }
 
-    // ── For-of loop (stub: binds value=undefined, emits body once) ───────────
 
-    fn emit_for_of_stmt(&mut self, for_of: &oxc_ast::ast::ForOfStatement<'_>) {
-        self.emit_expr(&for_of.right);
-        if let oxc_ast::ast::ForStatementLeft::VariableDeclaration(decl) = &for_of.left {
-            for declarator in &decl.declarations {
-                if let BindingPattern::BindingIdentifier(id) = &declarator.id {
-                    let name = id.name.as_str().to_string();
-                    self.push(Insn::LdUndefined);
-                    let reg = self.alloc_reg();
-                    self.var_regs.insert(name, reg);
-                    self.push(Insn::Sta(reg));
-                }
-            }
-        }
+    fn emit_for_of_stmt(&mut self, stmt: &ForOfStatement<'_>) {
+        self.emit_expr(&stmt.right);
+        self.push(Insn::GetIterator(0));
+        let iter_reg = self.alloc_reg();
+        self.push(Insn::Sta(iter_reg));
+
+        let next_id = self.intern("next");
+        let done_id = self.intern("done");
+        let value_id = self.intern("value");
+        let result_reg = self.alloc_reg();
+
+        let outer_break = std::mem::take(&mut self.break_patches);
+        let outer_continue = std::mem::take(&mut self.continue_patches);
+
+        let loop_start = self.insns.len();
+
+        self.push(Insn::Lda(iter_reg));
+        self.push(Insn::LdObjByName(0, next_id));
+        self.push(Insn::CallThis0(0, iter_reg));
+        self.push(Insn::Sta(result_reg));
+        self.push(Insn::Lda(result_reg));
+        self.push(Insn::LdObjByName(0, done_id));
+        let jnez_pos = self.insns.len();
+        self.push(Insn::Jnez(0));
+
+        self.push(Insn::Lda(result_reg));
+        self.push(Insn::LdObjByName(0, value_id));
+        let val_reg = self.alloc_reg();
+        self.push(Insn::Sta(val_reg));
+        self.bind_for_left(&stmt.left, val_reg);
+
         let outer_returned = self.returned;
         self.returned = false;
-        self.emit_stmt(&for_of.body);
+        self.emit_stmt(&stmt.body);
         self.returned = outer_returned;
+
+        for patch in std::mem::take(&mut self.continue_patches) {
+            let off = (loop_start as i32 - patch as i32) as i16;
+            let [lo, hi] = off.to_le_bytes();
+            self.insns[patch + 1] = lo;
+            self.insns[patch + 2] = hi;
+        }
+
+        let jmp_pos = self.insns.len();
+        let back_off = (loop_start as i32 - jmp_pos as i32) as i16;
+        self.push(Insn::Jmp(back_off));
+
+        let exit_byte = self.insns.len();
+        let jnez_off = (exit_byte as i32 - jnez_pos as i32) as i16;
+        let [lo, hi] = jnez_off.to_le_bytes();
+        self.insns[jnez_pos + 1] = lo;
+        self.insns[jnez_pos + 2] = hi;
+
+        for patch in std::mem::take(&mut self.break_patches) {
+            let off = (exit_byte as i32 - patch as i32) as i16;
+            let [lo, hi] = off.to_le_bytes();
+            self.insns[patch + 1] = lo;
+            self.insns[patch + 2] = hi;
+        }
+
+        self.break_patches = outer_break;
+        self.continue_patches = outer_continue;
+    }
+
+    fn bind_for_left(&mut self, left: &ForStatementLeft<'_>, value_reg: u8) {
+        match left {
+            ForStatementLeft::VariableDeclaration(decl) => {
+                if let Some(declarator) = decl.declarations.first() {
+                    if let BindingPattern::BindingIdentifier(id) = &declarator.id {
+                        let name = id.name.as_str().to_string();
+                        self.var_regs.insert(name.clone(), value_reg);
+                        if let Some(slot) = self.lowering.lexical_index(&name) {
+                            self.push(Insn::Lda(value_reg));
+                            self.push(Insn::StLexVar(0, slot));
+                        }
+                    }
+                }
+            }
+            ForStatementLeft::AssignmentTargetIdentifier(id) => {
+                let name = id.name.as_str();
+                if let Some(&reg) = self.var_regs.get(name) {
+                    if reg != value_reg {
+                        self.push(Insn::Lda(value_reg));
+                        self.push(Insn::Sta(reg));
+                    }
+                } else {
+                    let name_id = self.intern(name);
+                    self.push(Insn::Lda(value_reg));
+                    self.push(Insn::TryStGlobalByName(0, name_id));
+                }
+            }
+            _ => {}
+        }
     }
 
     // ── If statement with jump patching ──────────────────────────────────────

@@ -309,6 +309,51 @@ pub enum Insn {
     /// `0xFE 0x00` — throw the value in the accumulator.
     /// Encoding: `[0xFE] [0x00]` = 2 bytes (prefixed instruction).
     Throw,
+
+    // ── For-in iteration ─────────────────────────────────────────────────────
+    /// `0x66` `op_none` — create a property-iterator for the object in acc.
+    ///
+    /// Effect: `acc = getpropiterator(acc)`.  The result is an opaque iterator
+    /// object over the object's enumerable string-keyed properties.
+    ///
+    /// Encoding: `[0x66]` = 1 byte.
+    ///
+    /// Source: `isa.yaml` — `getpropiterator`, format `op_none`, `opcode_idx: [0x66]`.
+    GetPropIterator,
+
+    /// `0x36` `op_v_8` — advance a property-iterator and return the next key.
+    ///
+    /// `iter_vreg` must hold the iterator produced by `GetPropIterator`.
+    /// Result is placed in acc.  When the iterator is exhausted the
+    /// accumulator holds a falsy sentinel (hole / undefined), so `Jeqz`
+    /// can be used to detect termination.
+    ///
+    /// Encoding: `[0x36] [iter_vreg: u8]` = 2 bytes.
+    ///
+    /// Source: `isa.yaml` — `getnextpropname v:in:top`, format `op_v_8`, `opcode_idx: [0x36]`.
+    GetNextPropName(u8),
+
+    // ── For-of iteration ─────────────────────────────────────────────────────
+    /// `0x67` `op_imm_8` — call `[Symbol.iterator]()` on the object in acc.
+    ///
+    /// Effect: `acc = acc[Symbol.iterator]()`.  `slot` is the IC slot (pass 0).
+    ///
+    /// Encoding: `[0x67] [slot: u8]` = 2 bytes.
+    ///
+    /// Source: `isa.yaml` — `getiterator imm:u16`, format `op_imm_8` (8-bit slot form),
+    /// `opcode_idx: [0x67, 0xab]`.
+    GetIterator(u8),
+
+    /// `0x68` `op_imm_8_v_8` — close an iterator on early exit (calls `return()`).
+    ///
+    /// `slot` = IC slot (pass 0); `iter_vreg` = register holding the iterator.
+    /// Result in acc.
+    ///
+    /// Encoding: `[0x68] [slot: u8] [iter_vreg: u8]` = 3 bytes.
+    ///
+    /// Source: `isa.yaml` — `closeiterator imm:u16, v:in:top`, format `op_imm_8_v_8`,
+    /// `opcode_idx: [0x68, 0xac]`.
+    CloseIterator(u8, u8),
 }
 
 impl Insn {
@@ -537,6 +582,14 @@ impl Insn {
 
             // ── exception ────────────────────────────────────────────────────
             Insn::Throw => vec![0xFE, 0x00],
+
+            // ── for-in iteration ─────────────────────────────────────────────
+            Insn::GetPropIterator => vec![0x66],
+            Insn::GetNextPropName(vreg) => vec![0x36, *vreg],
+
+            // ── for-of iteration ─────────────────────────────────────────────
+            Insn::GetIterator(slot) => vec![0x67, *slot],
+            Insn::CloseIterator(slot, vreg) => vec![0x68, *slot, *vreg],
         }
     }
 
@@ -615,6 +668,10 @@ impl Insn {
             Insn::Jmp(_) | Insn::Jeqz(_) | Insn::Jnez(_) => 3,
             Insn::JmpWide(_) | Insn::JeqzWide(_) | Insn::JnezWide(_) => 5,
             Insn::Throw => 2,
+            Insn::GetPropIterator => 1,
+            Insn::GetNextPropName(_) => 2,
+            Insn::GetIterator(_) => 2,
+            Insn::CloseIterator(_, _) => 3,
         }
     }
 }

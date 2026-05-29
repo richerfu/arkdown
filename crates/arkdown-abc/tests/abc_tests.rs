@@ -1365,7 +1365,10 @@ fn test_throw_statement_emits_throw_opcode() {
     assert!(
         bytes.windows(2).any(|w| w == [0xFE, 0x00]),
         "throw prefix (0xFE 0x00) must appear for throw statement"
+    );
+}
 
+#[test]
 fn test_optional_chaining_compiles_and_emits_null_check() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("optchain.abc");
@@ -1442,4 +1445,45 @@ for (const item of arr) {
         bytes.contains(&0x79),
         "stownbyindex (0x79) must appear for array element assignment"
     );
+}
+
+#[test]
+fn test_for_in_stmt_emits_getpropiterator() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("for_in.abc");
+    let source = r#"
+const obj = { a: 1, b: 2 };
+const keys = [];
+for (const key in obj) {
+    keys.push(key);
+}
+"#;
+    module_compiler()
+        .compile(vec![module_record("test/for_in", source)], &out)
+        .expect("compile for-in source");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+    assert!(bytes.contains(&0x66u8), "getpropiterator (0x66) must appear for 'for...in' loop");
+    assert!(bytes.contains(&0x36u8), "getnextpropname (0x36) must appear for 'for...in' loop");
+    assert!(bytes.contains(&0x50u8), "jeqz (0x50) must appear for 'for...in' exit test");
+}
+
+#[test]
+fn test_for_of_stmt_emits_getiterator() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("for_of.abc");
+    let source = r#"
+const arr = [1, 2, 3];
+let sum = 0;
+for (const x of arr) {
+    sum = sum + x;
+}
+"#;
+    module_compiler()
+        .compile(vec![module_record("test/for_of", source)], &out)
+        .expect("compile for-of source");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+    assert!(bytes.contains(&0x67u8), "getiterator (0x67) must appear for 'for...of' loop");
+    assert!(bytes.contains(&0x9bu8), "jnez (0x9b) must appear for 'for...of' done-check");
 }
