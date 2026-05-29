@@ -3,9 +3,10 @@ use std::collections::HashMap;
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     Argument, AssignmentTarget, BindingPattern, ClassElement, Declaration,
-    ExportDefaultDeclarationKind, Expression, FunctionBody, ImportDeclarationSpecifier,
-    ImportOrExportKind, LogicalOperator, MethodDefinition, MethodDefinitionKind, ModuleExportName,
-    Program, PropertyKey, Statement, UnaryOperator,
+    ExportDefaultDeclarationKind, Expression, ForInStatement, ForOfStatement, ForStatementLeft,
+    FunctionBody, ImportDeclarationSpecifier, ImportOrExportKind, LogicalOperator,
+    MethodDefinition, MethodDefinitionKind, ModuleExportName, Program, PropertyKey, Statement,
+    UnaryOperator,
 };
 use oxc_parser::{Parser, ParserReturn};
 use oxc_span::{GetSpan, SourceType};
@@ -1430,6 +1431,14 @@ fn collect_capture_from_stmt(
             }
             collect_capture_from_stmt(&for_stmt.body, uses_this, uses_new_target);
         }
+        Statement::ForInStatement(for_in) => {
+            collect_capture_from_expr(&for_in.right, uses_this, uses_new_target);
+            collect_capture_from_stmt(&for_in.body, uses_this, uses_new_target);
+        }
+        Statement::ForOfStatement(for_of) => {
+            collect_capture_from_expr(&for_of.right, uses_this, uses_new_target);
+            collect_capture_from_stmt(&for_of.body, uses_this, uses_new_target);
+        }
         _ => {}
     }
 }
@@ -1526,6 +1535,14 @@ struct CodeGen<'a> {
     source: Option<&'a str>,
     /// Line number program accumulator.  Present only when `source` is `Some`.
     line_tracker: Option<LineTracker>,
+    /// Byte positions of placeholder `Jmp(0)` instructions emitted by
+    /// unlabeled `break` statements inside the current loop.  Patched to
+    /// the loop exit when the loop is fully emitted.
+    break_patches: Vec<usize>,
+    /// Byte positions of placeholder `Jmp(0)` instructions emitted by
+    /// unlabeled `continue` statements inside the current loop.  Patched
+    /// to the loop header when the loop is fully emitted.
+    continue_patches: Vec<usize>,
 }
 
 impl<'a> CodeGen<'a> {
@@ -1545,6 +1562,8 @@ impl<'a> CodeGen<'a> {
             arrow_captures: ArrowCaptures::default(),
             source: None,
             line_tracker: None,
+            break_patches: Vec::new(),
+            continue_patches: Vec::new(),
         }
     }
 
@@ -1751,7 +1770,22 @@ impl<'a> CodeGen<'a> {
                     }
                 }
             }
-            // Everything else: no bytecode emitted.
+            Statement::ForInStatement(for_in) => {
+                self.emit_for_in_stmt(for_in);
+            }
+            Statement::ForOfStatement(for_of) => {
+                self.emit_for_of_stmt(for_of);
+            }
+            Statement::BreakStatement(_) => {
+                let pos = self.insns.len();
+                self.push(Insn::Jmp(0));
+                self.break_patches.push(pos);
+            }
+            Statement::ContinueStatement(_) => {
+                let pos = self.insns.len();
+                self.push(Insn::Jmp(0));
+                self.continue_patches.push(pos);
+            }
             _ => {}
         }
     }
@@ -1829,6 +1863,216 @@ impl<'a> CodeGen<'a> {
             let [lo, hi] = jeqz_offset.to_le_bytes();
             self.insns[jeqz_pos + 1] = lo;
             self.insns[jeqz_pos + 2] = hi;
+        }
+    }
+
+    // ── For-in statement ──────────────────────────────────────────────────────
+
+    /// Emit a `for (left in right) { body }` loop using Panda's property-iterator
+    /// opcodes.
+    ///
+    /// Layout:
+    /// ```text
+    ///   <right>                         — evaluate object expression
+    ///   getpropiterator                 — acc = propiterator(obj)
+    ///   sta      iter_reg               — save iterator
+    /// loop_start:
+    ///   getnextpropname iter_reg        — acc = next key (falsy when done)
+    ///   jeqz     exit                   — done? jump past loop
+    ///   sta      key_reg                — materialise key
+    ///   <bind left variable>
+    ///   <body>
+    ///   [continue patches → loop_start]
+    ///   jmp      loop_start
+    /// exit:
+    ///   [break patches → here]
+    /// ```
+    fn emit_for_in_stmt(&mut self, stmt: &ForInStatement<'_>) {
+        self.emit_expr(&stmt.right);
+        self.push(Insn::GetPropIterator);
+        let iter_reg = self.alloc_reg();
+        self.push(Insn::Sta(iter_reg));
+
+        let outer_break = std::mem::take(&mut self.break_patches);
+        let outer_continue = std::mem::take(&mut self.continue_patches);
+
+        let loop_start = self.insns.len();
+        self.push(Insn::GetNextPropName(iter_reg));
+        let jeqz_pos = self.insns.len();
+        self.push(Insn::Jeqz(0));
+
+        let key_reg = self.alloc_reg();
+        self.push(Insn::Sta(key_reg));
+        self.bind_for_left(&stmt.left, key_reg);
+
+        let outer_returned = self.returned;
+        self.returned = false;
+        self.emit_stmt(&stmt.body);
+        self.returned = outer_returned;
+
+        for patch in std::mem::take(&mut self.continue_patches) {
+            let off = (loop_start as i32 - patch as i32) as i16;
+            let [lo, hi] = off.to_le_bytes();
+            self.insns[patch + 1] = lo;
+            self.insns[patch + 2] = hi;
+        }
+
+        let jmp_pos = self.insns.len();
+        let back_off = (loop_start as i32 - jmp_pos as i32) as i16;
+        self.push(Insn::Jmp(back_off));
+
+        let exit_byte = self.insns.len();
+        let jeqz_off = (exit_byte as i32 - jeqz_pos as i32) as i16;
+        let [lo, hi] = jeqz_off.to_le_bytes();
+        self.insns[jeqz_pos + 1] = lo;
+        self.insns[jeqz_pos + 2] = hi;
+
+        for patch in std::mem::take(&mut self.break_patches) {
+            let off = (exit_byte as i32 - patch as i32) as i16;
+            let [lo, hi] = off.to_le_bytes();
+            self.insns[patch + 1] = lo;
+            self.insns[patch + 2] = hi;
+        }
+
+        self.break_patches = outer_break;
+        self.continue_patches = outer_continue;
+    }
+
+    // ── For-of statement ──────────────────────────────────────────────────────
+
+    /// Emit a `for (left of right) { body }` loop using the Symbol.iterator
+    /// protocol.
+    ///
+    /// Layout:
+    /// ```text
+    ///   <right>                              — evaluate iterable
+    ///   getiterator    0                     — acc = iterable[Symbol.iterator]()
+    ///   sta            iter_reg
+    /// loop_start:
+    ///   lda            iter_reg
+    ///   ldobjbyname    "next"                — acc = iter.next method
+    ///   callthis0      0, iter_reg           — acc = iter.next()
+    ///   sta            result_reg
+    ///   lda            result_reg
+    ///   ldobjbyname    "done"                — acc = result.done
+    ///   jnez           exit                  — if done, exit
+    ///   lda            result_reg
+    ///   ldobjbyname    "value"               — acc = result.value
+    ///   sta            val_reg
+    ///   <bind left variable>
+    ///   <body>
+    ///   [continue patches → loop_start]
+    ///   jmp            loop_start
+    /// exit:
+    ///   [break patches → here]
+    /// ```
+    fn emit_for_of_stmt(&mut self, stmt: &ForOfStatement<'_>) {
+        self.emit_expr(&stmt.right);
+        self.push(Insn::GetIterator(0));
+        let iter_reg = self.alloc_reg();
+        self.push(Insn::Sta(iter_reg));
+
+        let next_id = self.intern("next");
+        let done_id = self.intern("done");
+        let value_id = self.intern("value");
+        let result_reg = self.alloc_reg();
+
+        let outer_break = std::mem::take(&mut self.break_patches);
+        let outer_continue = std::mem::take(&mut self.continue_patches);
+
+        let loop_start = self.insns.len();
+
+        self.push(Insn::Lda(iter_reg));
+        self.push(Insn::LdObjByName(0, next_id));
+        self.push(Insn::CallThis0(0, iter_reg));
+        self.push(Insn::Sta(result_reg));
+        self.push(Insn::Lda(result_reg));
+        self.push(Insn::LdObjByName(0, done_id));
+        let jnez_pos = self.insns.len();
+        self.push(Insn::Jnez(0));
+
+        self.push(Insn::Lda(result_reg));
+        self.push(Insn::LdObjByName(0, value_id));
+        let val_reg = self.alloc_reg();
+        self.push(Insn::Sta(val_reg));
+        self.bind_for_left(&stmt.left, val_reg);
+
+        let outer_returned = self.returned;
+        self.returned = false;
+        self.emit_stmt(&stmt.body);
+        self.returned = outer_returned;
+
+        for patch in std::mem::take(&mut self.continue_patches) {
+            let off = (loop_start as i32 - patch as i32) as i16;
+            let [lo, hi] = off.to_le_bytes();
+            self.insns[patch + 1] = lo;
+            self.insns[patch + 2] = hi;
+        }
+
+        let jmp_pos = self.insns.len();
+        let back_off = (loop_start as i32 - jmp_pos as i32) as i16;
+        self.push(Insn::Jmp(back_off));
+
+        let exit_byte = self.insns.len();
+        let jnez_off = (exit_byte as i32 - jnez_pos as i32) as i16;
+        let [lo, hi] = jnez_off.to_le_bytes();
+        self.insns[jnez_pos + 1] = lo;
+        self.insns[jnez_pos + 2] = hi;
+
+        for patch in std::mem::take(&mut self.break_patches) {
+            let off = (exit_byte as i32 - patch as i32) as i16;
+            let [lo, hi] = off.to_le_bytes();
+            self.insns[patch + 1] = lo;
+            self.insns[patch + 2] = hi;
+        }
+
+        self.break_patches = outer_break;
+        self.continue_patches = outer_continue;
+    }
+
+    // ── For-loop left-side variable binding ───────────────────────────────────
+
+    /// Bind `value_reg` (which already holds the iteration value) to the loop
+    /// variable declared in `left`.
+    ///
+    /// Handles:
+    /// - `VariableDeclaration` — `for (const/let/var x of/in …)`: registers
+    ///   the new binding in `var_regs` and, when the name is a lexical slot,
+    ///   emits `stlexvar` too.
+    /// - `AssignmentTargetIdentifier` — `for (x of/in …)`: stores into the
+    ///   existing register or global binding for `x`.
+    ///
+    /// All other left-side forms (member expressions, destructuring) are
+    /// silently skipped — the value is already in `value_reg` but the binding
+    /// is not performed.
+    fn bind_for_left(&mut self, left: &ForStatementLeft<'_>, value_reg: u8) {
+        match left {
+            ForStatementLeft::VariableDeclaration(decl) => {
+                if let Some(declarator) = decl.declarations.first() {
+                    if let BindingPattern::BindingIdentifier(id) = &declarator.id {
+                        let name = id.name.as_str().to_string();
+                        self.var_regs.insert(name.clone(), value_reg);
+                        if let Some(slot) = self.lowering.lexical_index(&name) {
+                            self.push(Insn::Lda(value_reg));
+                            self.push(Insn::StLexVar(0, slot));
+                        }
+                    }
+                }
+            }
+            ForStatementLeft::AssignmentTargetIdentifier(id) => {
+                let name = id.name.as_str();
+                if let Some(&reg) = self.var_regs.get(name) {
+                    if reg != value_reg {
+                        self.push(Insn::Lda(value_reg));
+                        self.push(Insn::Sta(reg));
+                    }
+                } else {
+                    let name_id = self.intern(name);
+                    self.push(Insn::Lda(value_reg));
+                    self.push(Insn::TryStGlobalByName(0, name_id));
+                }
+            }
+            _ => {}
         }
     }
 

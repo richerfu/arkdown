@@ -1157,3 +1157,69 @@ fn test_static_object_uses_createobjectwithbuffer() {
         "at least 3 literal arrays expected (obj + module-record + scope-names); got {num_lits}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// For-in / For-of iteration
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_for_in_stmt_emits_getpropiterator() {
+    // `for (const key in obj)` must produce a `getpropiterator` (0x66) and a
+    // `getnextpropname` (0x36) opcode in the output bytecode.
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("for_in.abc");
+    let source = r#"
+const obj = { a: 1, b: 2 };
+const keys = [];
+for (const key in obj) {
+    keys.push(key);
+}
+"#;
+    module_compiler()
+        .compile(vec![module_record("test/for_in", source)], &out)
+        .expect("compile for-in source");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+    assert!(
+        bytes.contains(&0x66u8),
+        "getpropiterator (0x66) must appear for 'for...in' loop"
+    );
+    assert!(
+        bytes.contains(&0x36u8),
+        "getnextpropname (0x36) must appear for 'for...in' loop"
+    );
+    // jeqz (0x50) is used to detect iterator exhaustion.
+    assert!(
+        bytes.contains(&0x50u8),
+        "jeqz (0x50) must appear for 'for...in' exit test"
+    );
+}
+
+#[test]
+fn test_for_of_stmt_emits_getiterator() {
+    // `for (const x of arr)` must produce a `getiterator` (0x67) opcode plus
+    // the standard `jnez` (0x9b) used to detect the `done` flag.
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("for_of.abc");
+    let source = r#"
+const arr = [1, 2, 3];
+let sum = 0;
+for (const x of arr) {
+    sum = sum + x;
+}
+"#;
+    module_compiler()
+        .compile(vec![module_record("test/for_of", source)], &out)
+        .expect("compile for-of source");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+    assert!(
+        bytes.contains(&0x67u8),
+        "getiterator (0x67) must appear for 'for...of' loop"
+    );
+    // jnez (0x9b) is used to branch on result.done being truthy.
+    assert!(
+        bytes.contains(&0x9bu8),
+        "jnez (0x9b) must appear for 'for...of' done-check"
+    );
+}

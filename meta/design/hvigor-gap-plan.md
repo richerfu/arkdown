@@ -77,7 +77,7 @@ and release-mode terser/minification when applicable.
 | ArkTS transform          | ✅ **Fixed (2026-05-29)**: `@State`, `@Prop`, `@Link`, `@ObjectLink`, `@Provide`, `@Consume`, `@Watch`, `@BuilderParam`, storage decorators all implemented. Per-statement source maps via oxc_codegen. | `@Builder`, `@Styles` functions; precise per-token source maps (gap: 566B vs hvigor). |
 | Rollup/rolldown options  | ✅ **Fixed (2026-05-28)**: Clean ESM output, `@ohos:` imports external, treeshake disabled for debug. **IIFE/CJS compatibility paths removed** from both bundler and ABC compiler. | Release treeshake, `manualChunks` for `supportChunks`, ByteCode HAR/HSP externals. |
 | ByteCode HAR importees   | ✅ **Fixed (2026-05-29)**: `process_importees()` ports `process-importee.js`. BFS from entry chunks, OHM URL generation, importee.json cache written. `nonEntryImportees` in loader.json. | ByteCode HAR compilation flow (requires HAR input fixture). |
-| ABC compiler             | 🔄 **Improved**: LNP line advance tracking, OHM URL scope names, SET_FILE debug info, binary/unary/logical ops, static-object `createobjectwithbuffer` (opcode 0x07), emit_new args, call-argument closures, START_LOCAL_EXTENDED (0x04) for scope/param vars, SET_PROLOGUE_END (0x08) after scope declarations, NewLexEnvWithName for arrow captures, class-decl lexical bindings. modules.abc 8565B vs 9844B. | Per-instruction LNP ADVANCE sequences (hvigor emits between every instruction group, not just per-statement); per-token source map granularity. |
+| ABC compiler             | 🔄 **Improved**: LNP line advance tracking, OHM URL scope names, SET_FILE debug info, binary/unary/logical ops, static-object `createobjectwithbuffer` (opcode 0x07), emit_new args, call-argument closures, START_LOCAL_EXTENDED (0x04) for scope/param vars, SET_PROLOGUE_END (0x08) after scope declarations, NewLexEnvWithName for arrow captures, class-decl lexical bindings. `for...in` (`getpropiterator` 0x66 + `getnextpropname` 0x36) and `for...of` (`getiterator` 0x67 + `callthis0 next`) real iteration. `break`/`continue` inside loops via patch-list mechanism. modules.abc 8565B vs 9844B. | Per-instruction LNP ADVANCE sequences (hvigor emits between every instruction group, not just per-statement); per-token source map granularity; `for...await`/generators/destructuring left-side in loops. |
 | Obfuscation/minification | `arkdown-obfuscate` exists but not wired in.                                                                                                                                           | hvigor release builds run SDK obfuscation + terser before ABC.                          |
 | Incremental cache        | `arkdown-cache` exists but not wired in.                                                                                                                                               | hvigor rollup msgpack cache + es2abc `--cache-file` support.                            |
 | Source maps/debug        | ✅ Per-statement source maps from kit-rewritten ETS source (pre-struct-transform). Pretty-printed JSON. sourceMaps.map 1281B vs 1847B golden (gap: per-statement vs per-token VLQ).   | Per-token source map granularity to match tsc/ets-loader output.                        |
@@ -201,9 +201,13 @@ For the Rust backend, implement in this order:
 
 1. real method/literal-array layout for functions, classes, closures, imports,
    exports, and CommonJS helpers;
-2. full statement/expression lowering: loops, try/catch/finally, destructuring,
-   optional chaining, spread, async/await, generators, template literals,
-   object/array literals, class fields, private fields, decorators output;
+2. full statement/expression lowering:
+   - ✅ `for...in` via `getpropiterator` (0x66) + `getnextpropname` (0x36);
+   - ✅ `for...of` via `getiterator` (0x67) + `callthis0 next` + `done`/`value` loads;
+   - ✅ `break`/`continue` inside loops via patch-list mechanism;
+   - remaining: `while`/`do-while`, `for` loop, `try`/`catch`/`finally`,
+     destructuring, optional chaining, spread, `async`/`await`, generators,
+     template literals, class fields, private fields, decorators output;
 3. module request annotations and metadata exactly as `es2abc` emits them;
 4. debug info and source position sections;
 5. `cache_path` support with hvigor-compatible invalidation keys;
