@@ -2027,6 +2027,150 @@ impl<'a> CodeGen<'a> {
             Expression::ObjectExpression(obj) => {
                 self.emit_object_expr(obj);
             }
+            Expression::ChainExpression(chain) => {
+                self.emit_chain_expr(chain);
+            }
+            _ => {
+                self.push(Insn::LdUndefined);
+            }
+        }
+    }
+
+    // ── Optional chaining: obj?.prop / obj?.method() ─────────────────────────
+
+    fn emit_chain_expr(&mut self, chain: &oxc_ast::ast::ChainExpression<'_>) {
+        match &chain.expression {
+            oxc_ast::ast::ChainElement::StaticMemberExpression(mem) => {
+                self.emit_expr(&mem.object);
+                let obj_reg = self.alloc_reg();
+                self.push(Insn::Sta(obj_reg));
+                let null_reg = self.alloc_reg();
+                self.push(Insn::LdNull);
+                self.push(Insn::Sta(null_reg));
+                self.push(Insn::Lda(obj_reg));
+                self.push(Insn::Eq(0, null_reg));
+                let jnez_pos = self.insns.len();
+                self.push(Insn::Jnez(0));
+                self.push(Insn::Lda(obj_reg));
+                let name_id = self.intern(mem.property.name.as_str());
+                self.push(Insn::LdObjByName(0, name_id));
+                let jmp_pos = self.insns.len();
+                self.push(Insn::Jmp(0));
+                let null_start = self.insns.len();
+                let [lo, hi] = ((null_start as i32 - jnez_pos as i32) as i16).to_le_bytes();
+                self.insns[jnez_pos + 1] = lo;
+                self.insns[jnez_pos + 2] = hi;
+                self.push(Insn::LdUndefined);
+                let end = self.insns.len();
+                let [lo2, hi2] = ((end as i32 - jmp_pos as i32) as i16).to_le_bytes();
+                self.insns[jmp_pos + 1] = lo2;
+                self.insns[jmp_pos + 2] = hi2;
+            }
+            oxc_ast::ast::ChainElement::ComputedMemberExpression(mem) => {
+                self.emit_expr(&mem.object);
+                let obj_reg = self.alloc_reg();
+                self.push(Insn::Sta(obj_reg));
+                let null_reg = self.alloc_reg();
+                self.push(Insn::LdNull);
+                self.push(Insn::Sta(null_reg));
+                self.push(Insn::Lda(obj_reg));
+                self.push(Insn::Eq(0, null_reg));
+                let jnez_pos = self.insns.len();
+                self.push(Insn::Jnez(0));
+                self.push(Insn::Lda(obj_reg));
+                if let Expression::StringLiteral(key) = &mem.expression {
+                    let name_id = self.intern(key.value.as_str());
+                    self.push(Insn::LdObjByName(0, name_id));
+                } else {
+                    self.push(Insn::LdUndefined);
+                }
+                let jmp_pos = self.insns.len();
+                self.push(Insn::Jmp(0));
+                let null_start = self.insns.len();
+                let [lo, hi] = ((null_start as i32 - jnez_pos as i32) as i16).to_le_bytes();
+                self.insns[jnez_pos + 1] = lo;
+                self.insns[jnez_pos + 2] = hi;
+                self.push(Insn::LdUndefined);
+                let end = self.insns.len();
+                let [lo2, hi2] = ((end as i32 - jmp_pos as i32) as i16).to_le_bytes();
+                self.insns[jmp_pos + 1] = lo2;
+                self.insns[jmp_pos + 2] = hi2;
+            }
+            oxc_ast::ast::ChainElement::CallExpression(call) => {
+                let is_method = matches!(
+                    &call.callee,
+                    Expression::StaticMemberExpression(_)
+                        | Expression::ComputedMemberExpression(_)
+                );
+                if is_method {
+                    let (recv_expr, method_name): (&Expression<'_>, Option<String>) =
+                        match &call.callee {
+                            Expression::StaticMemberExpression(m) => {
+                                (&m.object, Some(m.property.name.as_str().to_string()))
+                            }
+                            Expression::ComputedMemberExpression(m) => {
+                                let n = if let Expression::StringLiteral(s) = &m.expression {
+                                    Some(s.value.as_str().to_string())
+                                } else {
+                                    None
+                                };
+                                (&m.object, n)
+                            }
+                            other => {
+                                self.emit_expr(other);
+                                self.push(Insn::CallArg0(0));
+                                return;
+                            }
+                        };
+                    self.emit_expr(recv_expr);
+                    let this_reg = self.alloc_reg();
+                    self.push(Insn::Sta(this_reg));
+                    let null_reg = self.alloc_reg();
+                    self.push(Insn::LdNull);
+                    self.push(Insn::Sta(null_reg));
+                    self.push(Insn::Lda(this_reg));
+                    self.push(Insn::Eq(0, null_reg));
+                    let jnez_pos = self.insns.len();
+                    self.push(Insn::Jnez(0));
+                    if let Some(ref mname) = method_name {
+                        let name_id = self.intern(mname);
+                        self.push(Insn::Lda(this_reg));
+                        self.push(Insn::LdObjByName(0, name_id));
+                    } else {
+                        self.push(Insn::LdUndefined);
+                    }
+                    let argc = call.arguments.len();
+                    match argc {
+                        0 => self.push(Insn::CallThis0(0, this_reg)),
+                        1 => {
+                            let v0 = self.compile_arg_to_reg(&call.arguments[0]);
+                            self.push(Insn::CallThis1(0, this_reg, v0));
+                        }
+                        2 => {
+                            let v0 = self.compile_arg_to_reg(&call.arguments[0]);
+                            let v1 = self.compile_arg_to_reg(&call.arguments[1]);
+                            self.push(Insn::CallThis2(0, this_reg, v0, v1));
+                        }
+                        _ => {
+                            let v0 = self.compile_arg_to_reg(&call.arguments[0]);
+                            self.push(Insn::CallThis1(0, this_reg, v0));
+                        }
+                    }
+                    let jmp_pos = self.insns.len();
+                    self.push(Insn::Jmp(0));
+                    let null_start = self.insns.len();
+                    let [lo, hi] = ((null_start as i32 - jnez_pos as i32) as i16).to_le_bytes();
+                    self.insns[jnez_pos + 1] = lo;
+                    self.insns[jnez_pos + 2] = hi;
+                    self.push(Insn::LdUndefined);
+                    let end = self.insns.len();
+                    let [lo2, hi2] = ((end as i32 - jmp_pos as i32) as i16).to_le_bytes();
+                    self.insns[jmp_pos + 1] = lo2;
+                    self.insns[jmp_pos + 2] = hi2;
+                } else {
+                    self.emit_call(call);
+                }
+            }
             _ => {
                 self.push(Insn::LdUndefined);
             }
