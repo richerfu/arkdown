@@ -182,4 +182,17 @@ mod tests {
             "ULEB128 prefix must be 0x61 = 97 for 48-char ASCII"
         );
     }
+
+    #[test]
+    fn test_intern_deduplicates_same_string() {
+        let mut st = StringTable::default();
+        let id0 = st.intern("pkgName@entry");
+        let id1 = st.intern("pkgName@entry");
+        let id2 = st.intern("other");
+        let id3 = st.intern("pkgName@entry");
+        assert_eq!(id0, id1, "second intern of same string must return same index");
+        assert_eq!(id0, id3, "third intern of same string must return same index");
+        assert_ne!(id0, id2, "distinct strings must have distinct indices");
+        assert_eq!(st.len(), 2, "only two unique strings should be stored");
+    }
 }
