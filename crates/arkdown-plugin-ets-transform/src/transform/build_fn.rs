@@ -2,7 +2,7 @@ use oxc_ast::ast::{
     Argument, ArkUIChild, ArkUIComponentExpression, CallExpression, Expression, FunctionBody,
     Statement,
 };
-use oxc_span::GetSpan;
+use oxc_span::{GetSpan, Span};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuildLoweringError {
@@ -12,6 +12,17 @@ pub enum BuildLoweringError {
     UnsupportedChain,
 }
 
+/// Records the position where an ArkUI component call was emitted in the
+/// lowered body text, along with the original `.ets` span of the component
+/// expression.  Used to build a cross-transform source map.
+#[derive(Debug, Clone)]
+pub struct SpanHint {
+    /// 0-based line index within the `initialRender()` body text.
+    pub body_line: usize,
+    /// Byte span of the ArkUI component expression in the original `.ets` source.
+    pub original_span: Span,
+}
+
 /// Lower an ArkUI `build()` body using the ohos-rs/oxc ArkUI AST.
 ///
 /// This intentionally covers only the minimal fixture shape confirmed from
@@ -19,20 +30,25 @@ pub enum BuildLoweringError {
 /// `Component(args) { children }.attr(args)` lowers to an
 /// `observeComponentCreation2` callback containing `create` and chained
 /// attribute calls, followed by child lowering and a post-order `pop`.
+///
+/// Returns the lowered text together with span hints that map each emitted
+/// `observeComponentCreation2` call back to the original `.ets` component
+/// expression.  The caller uses these to build a cross-transform source map.
 pub fn lower_build_body(
     body: Option<&FunctionBody<'_>>,
     source_text: &str,
-) -> Result<String, BuildLoweringError> {
+) -> Result<(String, Vec<SpanHint>), BuildLoweringError> {
     let Some(body) = body else {
-        return Ok(String::new());
+        return Ok((String::new(), vec![]));
     };
 
     let mut out = String::new();
+    let mut span_hints: Vec<SpanHint> = Vec::new();
     for statement in &body.statements {
         match statement {
             Statement::ExpressionStatement(statement) => match &statement.expression {
                 Expression::ArkUIComponentExpression(component) => {
-                    lower_component(component, source_text, "        ", &mut out)?;
+                    lower_component(component, source_text, "        ", &mut out, &mut span_hints)?;
                 }
                 _ => return Err(BuildLoweringError::UnsupportedStatement),
             },
@@ -40,7 +56,7 @@ pub fn lower_build_body(
         }
     }
 
-    Ok(out)
+    Ok((out, span_hints))
 }
 
 fn lower_component(
@@ -48,9 +64,14 @@ fn lower_component(
     source_text: &str,
     indent: &str,
     out: &mut String,
+    span_hints: &mut Vec<SpanHint>,
 ) -> Result<(), BuildLoweringError> {
     let name = component_name(&component.callee)?;
     let args = arguments_text(&component.arguments, source_text);
+
+    // Record span hint before emitting — current newline count is the body line.
+    let body_line = out.bytes().filter(|&b| b == b'\n').count();
+    span_hints.push(SpanHint { body_line, original_span: component.span() });
 
     out.push_str(&format!(
         "{indent}this.observeComponentCreation2((elmtId, isInitialRender) => {{\n"
@@ -65,7 +86,9 @@ fn lower_component(
 
     for child in &component.children {
         match child {
-            ArkUIChild::Component(child) => lower_component(child, source_text, indent, out)?,
+            ArkUIChild::Component(child) => {
+                lower_component(child, source_text, indent, out, span_hints)?;
+            }
             ArkUIChild::Expression(_) | ArkUIChild::Statement(_) => {
                 return Err(BuildLoweringError::UnsupportedChild);
             }
@@ -113,22 +136,29 @@ fn span_text(node: &impl GetSpan, source_text: &str) -> String {
 /// On failure this function extracts the inner body text from the source span
 /// and re-indents it for a class method body.  The raw TypeScript is valid
 /// (e.g. `Text('hi')` is a regular function call) even if not fully desugared.
-pub fn lower_build_body_or_raw(body: Option<&FunctionBody<'_>>, source_text: &str) -> String {
+///
+/// Returns `(lowered_text, span_hints)`.  Span hints are empty on the raw
+/// fallback path because the OXC parser did not produce ArkUI AST nodes.
+pub fn lower_build_body_or_raw(
+    body: Option<&FunctionBody<'_>>,
+    source_text: &str,
+) -> (String, Vec<SpanHint>) {
     match lower_build_body(body, source_text) {
-        Ok(lowered) => lowered,
+        Ok(result) => result,
         Err(_) => {
             // Fall back to raw inner body text, re-indented for a class method.
             let Some(body) = body else {
-                return String::new();
+                return (String::new(), vec![]);
             };
             let raw = span_text(body, source_text);
             // Strip the surrounding `{` / `}` and re-indent each non-empty line.
             let inner = raw.trim().trim_start_matches('{').trim_end_matches('}').trim();
-            inner
+            let text = inner
                 .lines()
                 .filter(|line| !line.trim().is_empty())
                 .map(|line| format!("        {}\n", line.trim()))
-                .collect()
+                .collect();
+            (text, vec![])
         }
     }
 }
@@ -240,7 +270,8 @@ struct Index {
             })
             .expect("expected build method");
 
-        let out = lower_build_body(build.value.body.as_deref(), source).unwrap();
+        let (out, span_hints) = lower_build_body(build.value.body.as_deref(), source).unwrap();
+        assert_eq!(span_hints.len(), 3, "expected 3 span hints (Row, Column, Text)");
         let expected = concat!(
             "        this.observeComponentCreation2((elmtId, isInitialRender) => {\n",
             "            Row.create();\n",

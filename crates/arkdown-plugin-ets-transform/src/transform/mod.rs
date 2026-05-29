@@ -11,6 +11,7 @@ use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType, Span};
 
 use crate::error::EtsTransformError;
+use crate::source_map::{build_ets_source_map, offset_to_line_col, MapEntry};
 use crate::transform::build_fn::{lower_build_body, lower_build_body_or_raw, lower_styles_body};
 use crate::transform::component::{
     generate_view_pu_class, BuilderMethodInfo, ComponentInfo, StateField, StylesMethodInfo,
@@ -129,6 +130,7 @@ fn component_from_struct(
         .any(|decorator| decorator_name(decorator) == "Entry");
     let mut state_fields = Vec::new();
     let mut initial_render_body = String::new();
+    let mut initial_render_span_hints = Vec::new();
     let mut builder_methods: Vec<BuilderMethodInfo> = Vec::new();
     let mut styles_methods: Vec<StylesMethodInfo> = Vec::new();
 
@@ -179,11 +181,15 @@ fn component_from_struct(
             StructElement::MethodDefinition(method)
                 if method.key.static_name().is_some_and(|name| name == "build") =>
             {
-                initial_render_body = lower_build_body(method.value.body.as_deref(), source_text)
-                    .map_err(|err| EtsTransformError::Fatal {
-                    file: id.to_string(),
-                    message: format!("unsupported ArkUI build() DSL: {err:?}"),
-                })?;
+                let (body, hints) =
+                    lower_build_body(method.value.body.as_deref(), source_text).map_err(
+                        |err| EtsTransformError::Fatal {
+                            file: id.to_string(),
+                            message: format!("unsupported ArkUI build() DSL: {err:?}"),
+                        },
+                    )?;
+                initial_render_body = body;
+                initial_render_span_hints = hints;
             }
             StructElement::MethodDefinition(method)
                 if method
@@ -200,7 +206,7 @@ fn component_from_struct(
                 // OXC ETS parser did not produce ArkUIComponentExpression nodes
                 // (which happens for @Builder bodies — the parser only applies
                 // ArkUI expression rules to the canonical build() method).
-                let lowered_body =
+                let (lowered_body, _) =
                     lower_build_body_or_raw(method.value.body.as_deref(), source_text);
                 builder_methods.push(BuilderMethodInfo {
                     name: name.into_owned(),
@@ -235,10 +241,118 @@ fn component_from_struct(
         is_entry,
         state_fields,
         initial_render_body,
+        initial_render_span_hints,
         entry_registration: is_entry.then(|| entry_registration(id, options)),
         builder_methods,
         styles_methods,
     }))
+}
+
+/// Transform a struct-annotated `.ets` file to ViewPU TypeScript and produce a
+/// cross-transform source map.
+///
+/// Unlike `transform_ets_with_options`, which returns only the ViewPU code, this
+/// variant also builds a Source Map v3 JSON string that maps generated ViewPU
+/// line positions back to the original `.ets` source positions.  It is used by
+/// the plugin for Case B (struct-transformed) files so the `sourceMaps.map`
+/// rolldown writes references the original `.ets` lines instead of self-referencing
+/// the ViewPU output.
+///
+/// Returns `(viewpu_code, Some(source_map_json))` when at least one component was
+/// transformed, `(original_code, None)` when the file contains no `@Component`
+/// struct.
+pub fn transform_ets_viewpu_with_source_map(
+    source: &ModuleSource,
+    options: &TransformOptions,
+    ets_source: &str,
+) -> Result<(String, Option<String>), EtsTransformError> {
+    let content = &source.content;
+
+    if !content.contains("@Component") && !content.contains("@Entry") {
+        return Ok((content.clone(), None));
+    }
+
+    let allocator = Allocator::default();
+    let source_type = SourceType::from_path(&source.id.id).unwrap_or_else(|_| SourceType::ets());
+    let parsed = Parser::new(&allocator, content, source_type).parse();
+    if !parsed.errors.is_empty() {
+        return Err(EtsTransformError::Fatal {
+            file: source.id.id.clone(),
+            message: format!("ArkUI parse failed: {:?}", parsed.errors),
+        });
+    }
+
+    // Collect (viewpu_code, span_hints) per transformed struct so we can
+    // compute absolute line numbers after the full output is assembled.
+    struct StructResult {
+        viewpu_code: String,
+        span_hints: Vec<crate::transform::build_fn::SpanHint>,
+        /// Byte range in the `out` string where this struct's ViewPU code starts.
+        out_offset: usize,
+    }
+
+    let mut out = String::with_capacity(content.len() + 512);
+    let mut last_end = 0usize;
+    let mut struct_results: Vec<StructResult> = Vec::new();
+
+    for statement in &parsed.program.body {
+        let span = statement.span();
+        out.push_str(&content[last_end..span.start as usize]);
+
+        if let Some(component) =
+            component_from_statement(statement, content, &source.id.id, options)?
+        {
+            let out_offset = out.len();
+            let span_hints = component.initial_render_span_hints.clone();
+            let viewpu_code = generate_view_pu_class(&component);
+            out.push_str(&viewpu_code);
+            struct_results.push(StructResult { viewpu_code, span_hints, out_offset });
+        } else {
+            out.push_str(span_text(span, content));
+        }
+
+        last_end = span.end as usize;
+    }
+    out.push_str(&content[last_end..]);
+
+    if struct_results.is_empty() {
+        return Ok((content.clone(), None));
+    }
+
+    // Build cross-transform source map entries.  For each struct's span hints,
+    // compute the absolute ViewPU line number of the `initialRender()` body and
+    // translate the relative body-line offsets to absolute output lines.
+    let mut entries: Vec<MapEntry> = Vec::new();
+
+    for sr in &struct_results {
+        // Line offset of this struct's ViewPU code within the full output.
+        let struct_line_start = out[..sr.out_offset].bytes().filter(|&b| b == b'\n').count();
+
+        // Find the `initialRender()` method declaration line within the ViewPU code
+        // so we can locate the body start.
+        let initial_render_line_in_struct = sr
+            .viewpu_code
+            .lines()
+            .enumerate()
+            .find(|(_, line)| line.trim_start().starts_with("initialRender()"))
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+
+        // Body starts on the line after the declaration.
+        let body_start_line = struct_line_start + initial_render_line_in_struct + 1;
+
+        for hint in &sr.span_hints {
+            let abs_gen_line = body_start_line + hint.body_line;
+            let (src_line, src_col) = offset_to_line_col(ets_source, hint.original_span.start);
+            entries.push(MapEntry { generated_line: abs_gen_line, src_line, src_col });
+        }
+    }
+
+    let total_lines = out.lines().count();
+    let source_map =
+        build_ets_source_map(&source.id.id, total_lines.max(1), &entries);
+
+    Ok((out, Some(source_map)))
 }
 
 fn entry_registration(id: &str, options: &TransformOptions) -> EntryRegistrationInfo {

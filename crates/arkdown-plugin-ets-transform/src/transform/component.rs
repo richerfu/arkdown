@@ -1,3 +1,4 @@
+use crate::transform::build_fn::SpanHint;
 use crate::transform::decorator::{
     constructor_init_kind, has_update_state_vars_slot, is_state_decorator, state_decorator_class,
     ConstructorInitKind,
@@ -64,6 +65,11 @@ pub struct ComponentInfo {
     pub state_fields: Vec<StateField>,
     /// Lowered body for the hvigor-style `initialRender()` method.
     pub initial_render_body: String,
+    /// Span hints collected during ArkUI DSL lowering.  Each hint records a
+    /// 0-based line index within `initial_render_body` and the original `.ets`
+    /// span of the component expression that produced that line.  Used to
+    /// build a cross-transform source map in the plugin layer.
+    pub initial_render_span_hints: Vec<SpanHint>,
     pub entry_registration: Option<EntryRegistrationInfo>,
     /// `@Builder` methods: desugared ArkUI DSL, emitted as regular class methods.
     pub builder_methods: Vec<BuilderMethodInfo>,
@@ -327,6 +333,7 @@ mod tests {
                 "        Text.pop();\n",
             )
             .to_string(),
+            initial_render_span_hints: vec![],
             builder_methods: vec![],
             styles_methods: vec![],
             entry_registration: None,
@@ -403,6 +410,7 @@ mod tests {
                 alias: None,
             }],
             initial_render_body: String::new(),
+            initial_render_span_hints: vec![],
             builder_methods: vec![],
             styles_methods: vec![],
             entry_registration: None,
@@ -422,6 +430,7 @@ mod tests {
             is_entry: false,
             state_fields: vec![],
             initial_render_body: String::new(),
+            initial_render_span_hints: vec![],
             builder_methods: vec![],
             styles_methods: vec![],
             entry_registration: None,
@@ -447,6 +456,7 @@ mod tests {
                 alias: None,
             }],
             initial_render_body: String::new(),
+            initial_render_span_hints: vec![],
             builder_methods: vec![],
             styles_methods: vec![],
             entry_registration: None,
@@ -483,6 +493,7 @@ mod tests {
                 alias: None,
             }],
             initial_render_body: String::new(),
+            initial_render_span_hints: vec![],
             builder_methods: vec![],
             styles_methods: vec![],
             entry_registration: None,
@@ -514,6 +525,7 @@ mod tests {
                 alias: None,
             }],
             initial_render_body: String::new(),
+            initial_render_span_hints: vec![],
             builder_methods: vec![],
             styles_methods: vec![],
             entry_registration: None,
@@ -545,6 +557,7 @@ mod tests {
                 alias: None,
             }],
             initial_render_body: String::new(),
+            initial_render_span_hints: vec![],
             builder_methods: vec![],
             styles_methods: vec![],
             entry_registration: None,
@@ -574,6 +587,7 @@ mod tests {
                 alias: Some("theme".to_string()),
             }],
             initial_render_body: String::new(),
+            initial_render_span_hints: vec![],
             builder_methods: vec![],
             styles_methods: vec![],
             entry_registration: None,
@@ -601,6 +615,7 @@ mod tests {
                 alias: None,
             }],
             initial_render_body: String::new(),
+            initial_render_span_hints: vec![],
             builder_methods: vec![],
             styles_methods: vec![],
             entry_registration: None,
@@ -653,6 +668,7 @@ mod tests {
                 alias: None,
             }],
             initial_render_body: String::new(),
+            initial_render_span_hints: vec![],
             builder_methods: vec![],
             styles_methods: vec![],
             entry_registration: None,
@@ -690,6 +706,7 @@ mod tests {
                 alias: None,
             }],
             initial_render_body: String::new(),
+            initial_render_span_hints: vec![],
             builder_methods: vec![],
             styles_methods: vec![],
             entry_registration: None,
@@ -727,7 +744,8 @@ mod tests {
                     alias: None,
                 }],
                 initial_render_body: String::new(),
-                builder_methods: vec![],
+                initial_render_span_hints: vec![],
+            builder_methods: vec![],
             styles_methods: vec![],
             entry_registration: None,
             };

@@ -24,6 +24,7 @@ pub mod api_transform;
 pub mod checker;
 pub mod error;
 pub mod kit_map;
+pub mod source_map;
 pub mod transform;
 
 use std::sync::Arc;
@@ -173,13 +174,23 @@ impl ArkdownPlugin for EtsTransformPlugin {
                 source_map,
             }))
         } else {
-            // Case B: struct transform applied — map from the transformed TS
-            // output so coordinates are at least self-consistent for rolldown.
-            // Two statements: the borrow of `final_source` in the function call
-            // ends after the first statement so the second can move it into the
-            // fallback tuple when needed.
-            let gen_result = generate_code_and_source_map(&final_source, id);
-            let (gen_code, source_map) = gen_result.unwrap_or((final_source, None));
+            // Case B: struct transform applied.  Re-run the transform via the
+            // span-aware variant to obtain a source map that maps ViewPU output
+            // lines back to the original `.ets` source positions.  The oxc
+            // parser operates on `source.content` (kit-rewritten), so span byte
+            // offsets reference positions in that string — pass it as `ets_source`
+            // so `offset_to_line_col` converts them correctly.
+            let (gen_code, source_map) = transform::transform_ets_viewpu_with_source_map(
+                &source,
+                &options,
+                &source.content,
+            )
+            .map(|(code, map)| {
+                let final_code =
+                    api_transform::rewrite_imports_for_version(&code, api_version);
+                (final_code, map)
+            })
+            .unwrap_or_else(|_| (final_source, None));
             Ok(Some(HookTransformOutput {
                 code: gen_code,
                 source_map,
