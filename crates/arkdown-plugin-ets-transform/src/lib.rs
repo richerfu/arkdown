@@ -100,18 +100,17 @@ impl ArkdownPlugin for EtsTransformPlugin {
 
         if !is_ets {
             // .ts files: kit rewrite + version-gated rewrites only.
-            let final_source = api_transform::rewrite_imports_for_version(&code, api_version);
-            // Generate a per-token source map from the KIT-REWRITTEN TypeScript
-            // source (before the version-gated import rewrite but after kit
-            // expansion).  The kit rewrite expands 3 @kit import lines into 7+
-            // individual @ohos import lines, giving oxc more lines to generate
-            // mapping segments for — producing a longer, denser VLQ string that
-            // is closer to hvigor's tsc-generated source map.
-            // The source_map_path is `id` (the original .ts path) so the final
-            // sourceMaps.map entry names the original source file correctly.
-            let source_map = generate_source_map_json(&code, id);
+            //
+            // Return the oxc-regenerated code together with its source map so
+            // that the map's generated-side coordinates exactly match the code
+            // we hand to rolldown.  rolldown can then chain:
+            //   bundled-output → regenerated-code → kit-rewritten source
+            // producing a per-token map in the final chunk.source_map.
+            let (gen_code, source_map) =
+                generate_code_and_source_map(&code, id).unwrap_or((code, None));
+            let final_code = api_transform::rewrite_imports_for_version(&gen_code, api_version);
             return Ok(Some(HookTransformOutput {
-                code: final_source,
+                code: final_code,
                 source_map,
             }));
         }
@@ -146,64 +145,74 @@ impl ArkdownPlugin for EtsTransformPlugin {
         // Step 4: Apply version-gated API import rewrites.
         let final_source = api_transform::rewrite_imports_for_version(&transformed, api_version);
 
-        // Generate the source map from the KIT-REWRITTEN .ets source (after
-        // kit-import expansion but BEFORE struct desugaring), not from the
-        // expanded ViewPU class in `final_source`.
+        // For .ets files the struct transform may rewrite the entire file
+        // (e.g. Index.ets → ViewPU TypeScript).  Split into two cases:
         //
-        // Rationale: the struct transform rewrites 15 lines of ArkUI DSL into
-        // ~100 lines of ViewPU boilerplate.  Generating a per-token map from
-        // that boilerplate produces ~1100 VLQ chars where every generated method
-        // gets a redundant mapping.  hvigor's ets-loader instead maps key
-        // positions in the generated class back to their original struct
-        // positions, yielding a much sparser (~366 VLQ char) map.
+        // Case A — no struct transform (EntryAbility-style files with no
+        // @Component / @Entry):  `transformed` is identical to `code`.  Use
+        // the same per-token approach as .ts files: return the oxc-regenerated
+        // code so the source map coordinates match the code handed to rolldown.
         //
-        // By using `code` (the kit-rewritten .ets source, parsed by the
-        // ETS-capable oxc fork), we produce a source map where the "source"
-        // side positions reference the kit-rewritten file content.  For
-        // non-struct .ets files (like EntryAbility.ets) this means the kit
-        // import expansion lines are also mapped, giving a denser VLQ string
-        // that better approximates hvigor's tsc-generated map.  The resulting
-        // VLQ string is proportional to the short original source (15 lines)
-        // not the expanded ViewPU output (100+ lines).
-        let source_map = generate_source_map_json(&code, id);
-
-        Ok(Some(HookTransformOutput {
-            code: final_source,
-            source_map,
-        }))
+        // Case B — struct-transformed files (Index.ets etc.): the generated
+        // ViewPU TypeScript has no structural relationship to the kit-rewritten
+        // ETS source, so a position-accurate cross-file source map is not
+        // feasible here.  Fall back to a source map generated from the
+        // TRANSFORMED TypeScript output so the generated-side positions at
+        // least match the code rolldown receives, giving rolldown a valid chain
+        // even if the "original" side of the map references ViewPU positions
+        // rather than ETS positions.  This is still more useful than the
+        // previous kit-rewritten-ETS map which had completely mismatched
+        // coordinate spaces and prevented any chaining.
+        if transformed == code {
+            // Case A: no struct transform — use per-token regenerated code.
+            let (gen_code, source_map) =
+                generate_code_and_source_map(&code, id).unwrap_or((final_source, None));
+            let final_code = api_transform::rewrite_imports_for_version(&gen_code, api_version);
+            Ok(Some(HookTransformOutput {
+                code: final_code,
+                source_map,
+            }))
+        } else {
+            // Case B: struct transform applied — map from the transformed TS
+            // output so coordinates are at least self-consistent for rolldown.
+            // Two statements: the borrow of `final_source` in the function call
+            // ends after the first statement so the second can move it into the
+            // fallback tuple when needed.
+            let gen_result = generate_code_and_source_map(&final_source, id);
+            let (gen_code, source_map) = gen_result.unwrap_or((final_source, None));
+            Ok(Some(HookTransformOutput {
+                code: gen_code,
+                source_map,
+            }))
+        }
     }
 }
 
-/// Generate a JSON source map string by parsing `original_code` and running
-/// oxc codegen with `source_map_path` set to `id`.
+/// Parse `source` and re-emit it with oxc codegen, returning both the
+/// regenerated source text and a per-token VLQ source map.
 ///
-/// The resulting map records per-token mappings from the re-generated
-/// TypeScript back to positions in `original_code`.  The file named in the
-/// source map is `id` (the original `.ets` / `.ts` path).
+/// The source map maps generated-side positions (in the returned code string)
+/// back to original positions in `source`.  The `sources[0]` entry in the map
+/// is set to `id` so the final `sourceMaps.map` names the right source file.
 ///
-/// Callers should always pass the PRE-TRANSFORM source as `original_code`:
-/// - For `.ts` files: the kit-rewritten TypeScript (before version-gate rewrite).
-/// - For `.ets` files: the kit-rewritten ETS source (before struct desugaring).
+/// Callers **must** return the first element of the tuple as the `code` field
+/// of `HookTransformOutput`.  Using the regenerated code (rather than the
+/// original text) ensures the map's generated-side coordinates exactly match
+/// the code rolldown receives, which in turn allows rolldown to chain:
 ///
-/// Passing the original source rather than the transformed output achieves two
-/// things: (1) source positions in the map reference the short original file
-/// rather than the much longer generated output, matching hvigor's sparse
-/// mapping style; (2) positions correctly correspond to locations a developer
-/// would recognise in the original file.
+/// ```text
+/// bundled-output positions
+///   → regenerated-code positions  (rolldown's own codegen map)
+///   → original source positions   (this function's per-token map)
+/// ```
 ///
-/// It is returned as a serialized JSON string so that it can cross the
-/// plugin-adapter boundary without an oxc-version type mismatch (the adapter
-/// uses `rolldown_sourcemap::SourceMap::from_json_string` to decode it into the
-/// rolldown-internal type).
-///
-/// Returns `None` if parsing fails (in which case the caller should fall back
-/// to `HookTransformOutputMap::Null` in the adapter, suppressing rolldown's
-/// "possibly broken sourcemap" warning without providing a map).
-fn generate_source_map_json(original_code: &str, id: &str) -> Option<String> {
+/// Returns `None` if parsing fails; callers should fall back to the raw source
+/// text with no source map in that case.
+fn generate_code_and_source_map(source: &str, id: &str) -> Option<(String, Option<String>)> {
     let allocator = Allocator::default();
     let source_type =
         SourceType::from_path(id).unwrap_or_else(|_| SourceType::ts().with_module(true));
-    let parsed = Parser::new(&allocator, original_code, source_type).parse();
+    let parsed = Parser::new(&allocator, source, source_type).parse();
     if !parsed.errors.is_empty() {
         return None;
     }
@@ -213,7 +222,8 @@ fn generate_source_map_json(original_code: &str, id: &str) -> Option<String> {
             ..CodegenOptions::default()
         })
         .build(&parsed.program);
-    result.map.map(|m| m.to_json_string())
+    let map_json = result.map.map(|m| m.to_json_string());
+    Some((result.code, map_json))
 }
 
 fn module_name_from_id(id: &str) -> Option<String> {
@@ -416,6 +426,74 @@ struct Index {\n\
             !out.code.contains("build() { return; }"),
             "build body must not be stubbed; got:\n{}",
             out.code
+        );
+    }
+
+    /// Verify per-token VLQ source maps: for a .ts file the plugin must return
+    /// `source_map = Some(...)` and the `mappings` field must contain at least
+    /// one comma-separated segment within a single source line (i.e. more than
+    /// one mapping per line), proving that the codegen emits per-token entries
+    /// rather than per-statement entries.
+    #[tokio::test]
+    async fn test_ts_file_emits_per_token_source_map() {
+        let plugin = EtsTransformPlugin::new(make_config(12));
+        let code = "const x: number = 1;\nconst y: string = 'hi';";
+        let id = "entry/src/main/ets/util.ts";
+        let result = plugin
+            .transform(&PluginContext::default(), code, id)
+            .await
+            .unwrap();
+        let out = result.expect("TS transform must return Some");
+        let map_json = out.source_map.expect("source_map must be Some for .ts files");
+        let map: serde_json::Value =
+            serde_json::from_str(&map_json).expect("source_map must be valid JSON");
+        let mappings = map
+            .get("mappings")
+            .and_then(|v| v.as_str())
+            .expect("source_map must have a mappings field");
+        let has_per_token = mappings.lines().any(|line| line.contains(','));
+        assert!(
+            has_per_token,
+            "mappings must have comma-separated (per-token) segments; got: {mappings}"
+        );
+    }
+
+    /// For a non-struct .ets file (no @Component/@Entry) the source map must
+    /// be per-token (generated coordinates match the returned code) so that
+    /// rolldown can chain it into a dense final chunk source map.
+    #[tokio::test]
+    async fn test_non_struct_ets_emits_per_token_source_map() {
+        let plugin = EtsTransformPlugin::new(make_config(12));
+        let code = "import { UIAbility } from \"@ohos:app.ability.UIAbility\";\nconst TAG = 'test';";
+        let id = "entry/src/main/ets/entryability/EntryAbility.ets";
+        let result = plugin
+            .transform(&PluginContext::default(), code, id)
+            .await
+            .unwrap();
+        let out = result.expect("ETS non-struct transform must return Some");
+        let map_json = out
+            .source_map
+            .expect("source_map must be Some for non-struct .ets files");
+        let map: serde_json::Value =
+            serde_json::from_str(&map_json).expect("source_map must be valid JSON");
+        let mappings = map
+            .get("mappings")
+            .and_then(|v| v.as_str())
+            .expect("source_map must have a mappings field");
+        let has_per_token = mappings.lines().any(|line| line.contains(','));
+        assert!(
+            has_per_token,
+            "mappings must have comma-separated (per-token) segments; got: {mappings}"
+        );
+        let sources = map
+            .get("sources")
+            .and_then(|v| v.as_array())
+            .expect("source_map must have sources");
+        assert!(
+            sources
+                .iter()
+                .any(|s| s.as_str().is_some_and(|p| p.contains("EntryAbility"))),
+            "sources must reference the original .ets file; got: {sources:?}"
         );
     }
 }

@@ -22,3 +22,6 @@ thiserror = { workspace = true }
 
 # Regex (for @kit.* import rewriting)
 regex = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
