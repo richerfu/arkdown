@@ -54,6 +54,20 @@ pub struct LoaderJson {
     pub an_build_out_put: String,
     /// Ark Native build mode emitted by hvigor.
     pub an_build_mode: String,
+    /// Non-entry importees in OHM URL format, populated after bundling by
+    /// `process_importees`.  Empty until the post-bundle pass runs.
+    ///
+    /// Absent from the initial `loader.json` (matches 18-field hvigor golden
+    /// output); only written when the post-bundle pass populates this field.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub non_entry_importees: Vec<String>,
+    /// Compiled importee source paths (relative to `src/main`), populated
+    /// after bundling by `process_importees`.  Empty until that pass runs.
+    ///
+    /// Absent from the initial `loader.json` (matches 18-field hvigor golden
+    /// output); only written when the post-bundle pass populates this field.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub compiled_importees: Vec<String>,
 
     /// Ordered list of entry-point source paths used by arkdown's bundler.
     #[serde(skip)]
@@ -186,8 +200,8 @@ pub fn generate_loader_json(
         compile_entry.retain(|e| seen.insert(e.clone()));
     }
 
-    let module_root = normalize_path_string(&module_cfg.src_path);
-    let project_root = normalize_path_string(&config.project_root);
+    let module_root = to_absolute_path_string(&module_cfg.src_path);
+    let project_root = to_absolute_path_string(&config.project_root);
     let src_main = format!("{}/src/main", module_root);
 
     let build_mode_str = match config.build_mode {
@@ -235,6 +249,8 @@ pub fn generate_loader_json(
             module_root
         ),
         an_build_mode: "type".to_string(),
+        non_entry_importees: vec![],
+        compiled_importees: vec![],
 
         compile_entry,
         module_root_path: src_main.clone(),
@@ -265,7 +281,7 @@ fn build_pkg_brief_info(
     module_cfg: &ModuleConfig,
 ) -> HashMap<String, PkgBriefInfo> {
     let mut map = HashMap::new();
-    let module_root = normalize_path_string(&module_cfg.src_path);
+    let module_root = to_absolute_path_string(&module_cfg.src_path);
     let ets_src = format!("{}/src/main/ets", module_root);
 
     map.insert(
@@ -298,6 +314,33 @@ fn normalize_path_string(path: &Path) -> String {
     } else {
         normalized.to_string_lossy().to_string()
     }
+}
+
+/// Return an absolute, normalized path string for `path`.
+///
+/// Strategy (matches hvigor's behavior of always writing absolute paths):
+/// 1. Try `std::fs::canonicalize` — works perfectly when the path already exists
+///    on disk (project root, module source root).
+/// 2. If canonicalize fails (path not yet on disk, or a hypothetical path used in
+///    tests), fall back to:
+///    - If `path` is already absolute: normalize `.`/`..` segments in place.
+///    - If `path` is relative: join it onto the current working directory, then
+///      normalize.
+fn to_absolute_path_string(path: &Path) -> String {
+    // Fast path: canonicalize works for real, existing paths.
+    if let Ok(abs) = std::fs::canonicalize(path) {
+        return abs.to_string_lossy().into_owned();
+    }
+
+    // Fallback for non-existent or constructed paths.
+    let base = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+    normalize_path_string(&base)
 }
 
 // ---------------------------------------------------------------------------
@@ -433,39 +476,40 @@ mod tests {
 
         let loader = generate_loader_json(&config, &module_cfg, &manifest);
         let value = serde_json::to_value(&loader).expect("serialization failed");
-        let keys = value
+        // serde_json::to_value produces a BTreeMap (alphabetical) without the
+        // preserve_order feature, so compare key *sets* rather than ordered vecs.
+        let keys: std::collections::BTreeSet<String> = value
             .as_object()
             .expect("loader.json must serialize as object")
             .keys()
             .cloned()
-            .collect::<Vec<_>>();
+            .collect();
 
-        assert_eq!(
-            keys,
-            vec![
-                "modulePathMap",
-                "compileMode",
-                "projectRootPath",
-                "nodeModulesPath",
-                "byteCodeHarInfo",
-                "declarationEntry",
-                "moduleName",
-                "hspNameOhmMap",
-                "harNameOhmMap",
-                "packageManagerType",
-                "compileEntry",
-                "otherCompileFiles",
-                "dynamicImportLibInfo",
-                "routerMap",
-                "hspResourcesMap",
-                "updateVersionInfo",
-                "anBuildOutPut",
-                "anBuildMode",
-            ]
-            .into_iter()
-            .map(String::from)
-            .collect::<Vec<_>>()
-        );
+        let expected_keys: std::collections::BTreeSet<String> = vec![
+            "modulePathMap",
+            "compileMode",
+            "projectRootPath",
+            "nodeModulesPath",
+            "byteCodeHarInfo",
+            "declarationEntry",
+            "moduleName",
+            "hspNameOhmMap",
+            "harNameOhmMap",
+            "packageManagerType",
+            "compileEntry",
+            "otherCompileFiles",
+            "dynamicImportLibInfo",
+            "routerMap",
+            "hspResourcesMap",
+            "updateVersionInfo",
+            "anBuildOutPut",
+            "anBuildMode",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+
+        assert_eq!(keys, expected_keys);
         assert!(value.get("apiVersion").is_none());
         assert!(value.get("buildMode").is_none());
         assert!(value.get("supportChunks").is_none());
@@ -630,6 +674,146 @@ mod tests {
 
         let loader = generate_loader_json(&config, &module_cfg, &manifest);
         assert!(!loader.fallback_an_build);
+    }
+
+    /// Verify that relative src_path / project_root inputs produce absolute paths in the
+    /// serialized loader.json fields.  hvigor always writes absolute paths; arkdown must
+    /// match that behaviour regardless of how the CLI was invoked.
+    #[test]
+    fn test_loader_json_relative_paths_become_absolute() {
+        let cwd = std::env::current_dir().expect("cwd");
+        let config = ArkdownConfig {
+            project_root: PathBuf::from("relative_proj_root_test"),
+            ..make_config(false)
+        };
+        let module_cfg = ModuleConfig {
+            src_path: PathBuf::from("relative_proj_root_test/entry"),
+            ..make_module_cfg()
+        };
+        let manifest = make_manifest();
+
+        let loader = generate_loader_json(&config, &module_cfg, &manifest);
+
+        let expected_project = cwd.join("relative_proj_root_test");
+        let expected_module = cwd.join("relative_proj_root_test/entry");
+
+        assert!(
+            std::path::Path::new(&loader.project_root_path).is_absolute(),
+            "projectRootPath must be absolute: {}",
+            loader.project_root_path
+        );
+        assert_eq!(
+            loader.project_root_path,
+            expected_project.to_string_lossy().as_ref()
+        );
+
+        assert!(
+            std::path::Path::new(&loader.node_modules_path).is_absolute(),
+            "nodeModulesPath must be absolute: {}",
+            loader.node_modules_path
+        );
+        assert!(
+            loader
+                .node_modules_path
+                .starts_with(expected_module.to_string_lossy().as_ref()),
+            "nodeModulesPath must be under module root"
+        );
+
+        assert!(
+            std::path::Path::new(&loader.an_build_out_put).is_absolute(),
+            "anBuildOutPut must be absolute: {}",
+            loader.an_build_out_put
+        );
+
+        for (_, path) in &loader.module_path_map {
+            assert!(
+                std::path::Path::new(path).is_absolute(),
+                "modulePathMap value must be absolute: {path}"
+            );
+        }
+    }
+
+    /// Verify the serialized key set exactly matches the golden hvigor output (18 fields).
+    #[test]
+    fn test_loader_json_golden_hvigor_key_set() {
+        let expected_keys: std::collections::BTreeSet<&str> = [
+            "modulePathMap",
+            "compileMode",
+            "projectRootPath",
+            "nodeModulesPath",
+            "byteCodeHarInfo",
+            "declarationEntry",
+            "moduleName",
+            "hspNameOhmMap",
+            "harNameOhmMap",
+            "packageManagerType",
+            "compileEntry",
+            "otherCompileFiles",
+            "dynamicImportLibInfo",
+            "routerMap",
+            "hspResourcesMap",
+            "updateVersionInfo",
+            "anBuildOutPut",
+            "anBuildMode",
+        ]
+        .iter()
+        .copied()
+        .collect();
+
+        let config = make_config(false);
+        let module_cfg = make_module_cfg();
+        let manifest = make_manifest();
+
+        let loader = generate_loader_json(&config, &module_cfg, &manifest);
+        let value = serde_json::to_value(&loader).expect("serialization failed");
+        let actual_keys: std::collections::BTreeSet<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+
+        assert_eq!(
+            actual_keys, expected_keys,
+            "serialized key set must match golden hvigor output"
+        );
+    }
+
+    /// Verify all path-valued fields in the serialized loader.json are absolute.
+    #[test]
+    fn test_loader_json_serialized_paths_are_absolute() {
+        let config = make_config(false); // project_root = /project
+        let module_cfg = make_module_cfg(); // src_path = /project/entry
+        let manifest = make_manifest();
+
+        let loader = generate_loader_json(&config, &module_cfg, &manifest);
+        let value = serde_json::to_value(&loader).expect("serialization failed");
+
+        let project_root = value["projectRootPath"].as_str().unwrap();
+        assert!(
+            std::path::Path::new(project_root).is_absolute(),
+            "projectRootPath must be absolute: {project_root}"
+        );
+
+        for (_, path) in value["modulePathMap"].as_object().unwrap() {
+            let p = path.as_str().unwrap();
+            assert!(
+                std::path::Path::new(p).is_absolute(),
+                "modulePathMap value must be absolute: {p}"
+            );
+        }
+
+        let npm = value["nodeModulesPath"].as_str().unwrap();
+        assert!(
+            std::path::Path::new(npm).is_absolute(),
+            "nodeModulesPath must be absolute: {npm}"
+        );
+
+        let an = value["anBuildOutPut"].as_str().unwrap();
+        assert!(
+            std::path::Path::new(an).is_absolute(),
+            "anBuildOutPut must be absolute: {an}"
+        );
     }
 
     #[test]

@@ -17,7 +17,7 @@ use arkdown_plugin_duplicate_check::DuplicateCheckPlugin;
 use arkdown_plugin_ets_transform::EtsTransformPlugin;
 use arkdown_plugin_json5::Json5Plugin;
 use arkdown_plugin_module_meta::ModuleMetaPlugin;
-use arkdown_plugin_ohos_resolve::OhosResolvePlugin;
+use arkdown_plugin_ohos_resolve::{process_importees, OhosResolvePlugin, ProcessImporteeConfig};
 use arkdown_profile::ProfileProcessor;
 use arkdown_resolver::ResolverConfig;
 use arkdown_resource::{ResourceCompileConfig, ResourceCompileInput, ResourceCompiler};
@@ -219,6 +219,46 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         bundle_outs.push(bundle_out);
     }
     progress.done();
+
+    // Post-bundle: process importees and update loader.json with the results.
+    //
+    // Walks each bundle's ChunkGraph to categorize imports into:
+    //   • nonEntryImportees  — OHM URL refs for non-entry imported chunks
+    //   • compiledImportees  — relative source paths of compiled source files
+    //
+    // The results are written to:
+    //   1. loader.json (two new fields, omitted when empty)
+    //   2. intermediates/importee/default/{module_name}/importee.json  (cache)
+    for ((module, _manifest, loader_json), bundle_out) in
+        loader_jsons.iter_mut().zip(bundle_outs.iter())
+    {
+        let intermediates_dir = module.src_path.join("build/default/intermediates");
+        let module_src_main = PathBuf::from(&loader_json.module_root_path);
+        let importee_cfg = ProcessImporteeConfig {
+            bundle_name: config_arc.product.bundle_name.clone(),
+            module_name: loader_json.module_name.clone(),
+            module_version: String::new(),
+            project_root: project_root.clone(),
+            module_src_main,
+            output_dir: intermediates_dir,
+        };
+        match process_importees(&bundle_out.chunk_graph, &importee_cfg) {
+            Ok(result) => {
+                loader_json.non_entry_importees = result.non_entry_importees;
+                loader_json.compiled_importees = result.compiled_importees;
+            }
+            Err(e) => {
+                eprintln!("[warn] process_importees failed: {e}");
+            }
+        }
+        // Re-write loader.json with the updated importee fields.
+        let loader_json_out = module
+            .src_path
+            .join("build/default/intermediates/loader/default/loader.json");
+        processor
+            .write_loader_json(loader_json, &loader_json_out)
+            .map_err(|e| anyhow::anyhow!("update loader.json with importees failed: {}", e))?;
+    }
 
     // Step 5: ABC compilation
     progress.step(5, 6, "Compiling ABC");
@@ -788,7 +828,10 @@ fn write_hvigor_source_maps(
     }
 
     if !source_maps.is_empty() {
-        let content = serde_json::to_string(&source_maps)
+        // hvigor emits sourceMaps.map as pretty-printed JSON with 2-space
+        // indentation.  Matching this format keeps the file size close to the
+        // golden reference and makes the file human-readable for debugging.
+        let content = serde_json::to_string_pretty(&source_maps)
             .context("failed to serialize hvigor sourceMaps.map")?;
         fs_err::write(source_maps_path, content)?;
     }

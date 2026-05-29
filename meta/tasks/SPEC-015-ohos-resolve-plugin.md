@@ -65,6 +65,59 @@ async fn generate_bundle(&self, ctx: &mut GenerateBundleContext, bundle: &mut Ch
 }
 ```
 
+## Post-Bundle Importee Processing (`importee.rs`)
+
+The `process_importees` function is a standalone post-bundle pass (not a plugin hook) that
+ports hvigor's `build-steps/process-importee.js`. It is called from `arkdown-cli` after
+bundling completes.
+
+### `ProcessImporteeConfig`
+
+```rust
+pub struct ProcessImporteeConfig {
+    pub bundle_name: String,       // e.g. "com.example.app"
+    pub module_name: String,       // e.g. "entry"
+    pub module_version: String,    // version string (may be empty)
+    pub project_root: PathBuf,
+    pub module_src_main: PathBuf,  // absolute path to {module}/src/main
+    pub output_dir: PathBuf,       // absolute path to {module}/build/default/intermediates
+}
+```
+
+### `ProcessImporteeResult`
+
+```rust
+pub struct ProcessImporteeResult {
+    pub non_entry_importees: Vec<String>,  // OHM URL format
+    pub compiled_importees: Vec<String>,   // relative paths from src/main
+}
+```
+
+### Algorithm
+
+1. Build a `name → &ArkChunk` map from the `ChunkGraph`.
+2. Identify entry chunks (`is_entry || is_dynamic_entry`).
+3. BFS from entry chunks through `imports`/`dynamic_imports` to collect all reachable chunks.
+4. **Non-entry importees**: reachable chunks that are NOT entry chunks, each mapped to an OHM URL
+   `@bundle:{bundle_name}/{module_name}/{path_without_ext}` via their `facade_module_id`.
+5. **Compiled importees**: all `facade_module_id` values that are local source files (not
+   external specifiers), each converted to a path relative to `module_src_main`.
+6. Write the cache file: `{output_dir}/importee/default/{module_name}/importee.json`.
+
+### External specifier filtering
+
+Modules with IDs starting with `@ohos:`, `@ohos/`, `@kit.`, `@shared:`, `@bundle:`,
+`@system.`, or `@hms.` are excluded from both importee lists.
+
+### loader.json integration
+
+Two new fields are added to `LoaderJson` (in `arkdown-profile`):
+- `nonEntryImportees: Vec<String>` — OHM URL list, serialized only when non-empty
+- `compiledImportees: Vec<String>` — source path list, serialized only when non-empty
+
+These are populated by the CLI build command after calling `process_importees` and the
+loader.json is re-written with the updated values.
+
 ## Case-Sensitive Check
 
 When `config.case_sensitive_check` is true, validate that the resolved path matches the
