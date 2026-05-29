@@ -1255,3 +1255,115 @@ fn test_static_object_uses_createobjectwithbuffer() {
         "at least 3 literal arrays expected (obj + module-record + scope-names); got {num_lits}"
     );
 }
+
+#[test]
+fn test_while_loop_emits_backward_branch() {
+    // A while loop must emit a jeqz (0x50) for the loop test and a backward
+    // jmp (0x4E) to restart the loop.  Both opcodes must appear in the output.
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("while.abc");
+    module_compiler()
+        .compile(
+            vec![module_record(
+                "test/while",
+                r#"let i = 0; while (i < 10) { i = i + 1; }"#,
+            )],
+            &out,
+        )
+        .expect("compile while loop");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+    // jeqz (0x50) — condition exit branch
+    assert!(bytes.contains(&0x50u8), "jeqz (0x50) must appear for while loop condition");
+    // jmp (0x4E) — backward loop edge
+    assert!(bytes.contains(&0x4Eu8), "jmp (0x4E) must appear as the loop back-edge");
+}
+
+#[test]
+fn test_conditional_expr_emits_branches() {
+    // A conditional expression `a ? b : c` must emit both a jeqz (0x50) to
+    // skip the consequent and a jmp (0x4E) to skip the alternate.
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("cond.abc");
+    module_compiler()
+        .compile(
+            vec![module_record(
+                "test/cond",
+                r#"const x = flag ? 1 : 2;"#,
+            )],
+            &out,
+        )
+        .expect("compile conditional expression");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+    assert!(bytes.contains(&0x50u8), "jeqz (0x50) must appear for ternary test branch");
+    assert!(bytes.contains(&0x4Eu8), "jmp (0x4E) must appear to skip alternate branch");
+}
+
+#[test]
+fn test_template_literal_emits_string_concatenation() {
+    // A template literal with an interpolated expression must emit an
+    // ldaStr (0x3E) for the static quasi parts and Add2 (0x0A) for
+    // each interpolation.
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("tmpl.abc");
+    module_compiler()
+        .compile(
+            vec![module_record(
+                "test/tmpl",
+                r#"const s = `Hello ${name}!`;"#,
+            )],
+            &out,
+        )
+        .expect("compile template literal");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+    // lda.str opcode is 0x3E — emitted for quasi string parts
+    assert!(bytes.contains(&0x3Eu8), "lda.str (0x3E) must appear for template quasi strings");
+    // add2 opcode is 0x0A — emitted for string concatenation
+    assert!(bytes.contains(&0x0Au8), "add2 (0x0A) must appear for template expression concat");
+}
+
+#[test]
+fn test_for_loop_emits_opcodes() {
+    // A counted for loop emits a jeqz test branch and backward jmp back-edge.
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("for.abc");
+    module_compiler()
+        .compile(
+            vec![module_record(
+                "test/for",
+                r#"for (let i = 0; i < 5; i = i + 1) { }"#,
+            )],
+            &out,
+        )
+        .expect("compile for loop");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+    assert!(bytes.contains(&0x50u8), "jeqz (0x50) for loop test");
+    assert!(bytes.contains(&0x4Eu8), "jmp (0x4E) backward loop edge");
+}
+
+#[test]
+fn test_throw_statement_emits_throw_opcode() {
+    // ThrowStatement must emit the Panda `throw` prefix opcode sequence
+    // 0xFE 0x00 after evaluating its argument.
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("throw.abc");
+    module_compiler()
+        .compile(
+            vec![module_record(
+                "test/throw",
+                r#"throw new Error("oops");"#,
+            )],
+            &out,
+        )
+        .expect("compile throw statement");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+    // throw is encoded as [0xFE, 0x00]
+    assert!(
+        bytes.windows(2).any(|w| w == [0xFE, 0x00]),
+        "throw prefix (0xFE 0x00) must appear for throw statement"
+    );
+}

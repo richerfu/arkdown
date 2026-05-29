@@ -139,6 +139,11 @@ impl LineTracker {
 ///   `<`, `<=`, `>`, `>=`, `<<`, `>>`, `>>>`, `&`, `|`, `^`, `in`
 /// - Unary expressions: `typeof`, `void`, `!`, `-`, `~`
 /// - Logical expressions: `&&`, `||`, `??` with short-circuit jump patching
+/// - Conditional expression: `test ? consequent : alternate`
+/// - Template literals: `` `q0${e0}q1` `` → `lda.str` + `add2` chain
+/// - `while` / `do…while` / `for` loops with correct backward branch offsets
+/// - `break` / `continue` (unlabelled) with forward-jump patch lists
+/// - `throw expr` → `throw` opcode (`0xFE 0x00`)
 /// - `this` expression in class methods → `ldthis` (opcode `0x6F`)
 /// - Arrow functions with `this` / `new.target` captures → `newlexenv` + `ldthis`
 /// - Arrow functions as call arguments → separate `MethodRecord` per closure
@@ -1512,9 +1517,9 @@ struct CodeGen<'a> {
     source: Option<&'a str>,
     /// Line number program accumulator.  Present only when `source` is `Some`.
     line_tracker: Option<LineTracker>,
-    /// Current source line (1-based) for the instruction about to be emitted.
-    /// Updated by `emit_stmt` and `emit_expr` before each instruction batch.
     current_line: u32,
+    break_patches: Vec<usize>,
+    continue_patches: Vec<usize>,
 }
 
 impl<'a> CodeGen<'a> {
@@ -1535,6 +1540,8 @@ impl<'a> CodeGen<'a> {
             source: None,
             line_tracker: None,
             current_line: 1,
+            break_patches: Vec::new(),
+            continue_patches: Vec::new(),
         }
     }
 
@@ -1756,6 +1763,29 @@ impl<'a> CodeGen<'a> {
                     }
                 }
             }
+            Statement::WhileStatement(while_stmt) => {
+                self.emit_while_stmt(while_stmt);
+            }
+            Statement::DoWhileStatement(do_while) => {
+                self.emit_do_while_stmt(do_while);
+            }
+            Statement::ForStatement(for_stmt) => {
+                self.emit_for_stmt(for_stmt);
+            }
+            Statement::BreakStatement(brk) if brk.label.is_none() => {
+                let jmp_pos = self.insns.len();
+                self.push(Insn::Jmp(0));
+                self.break_patches.push(jmp_pos);
+            }
+            Statement::ContinueStatement(cont) if cont.label.is_none() => {
+                let jmp_pos = self.insns.len();
+                self.push(Insn::Jmp(0));
+                self.continue_patches.push(jmp_pos);
+            }
+            Statement::ThrowStatement(throw) => {
+                self.emit_expr(&throw.argument);
+                self.push(Insn::Throw);
+            }
             // Everything else: no bytecode emitted.
             _ => {}
         }
@@ -1834,6 +1864,145 @@ impl<'a> CodeGen<'a> {
             let [lo, hi] = jeqz_offset.to_le_bytes();
             self.insns[jeqz_pos + 1] = lo;
             self.insns[jeqz_pos + 2] = hi;
+        }
+    }
+
+    // ── Loop helpers ──────────────────────────────────────────────────────────
+
+    /// Patch a list of `jmp(0)` placeholders to the current byte position.
+    fn patch_jumps_to_here(&mut self, positions: Vec<usize>) {
+        let here = self.insns.len();
+        for pos in positions {
+            let off = (here as i32 - pos as i32) as i16;
+            let [lo, hi] = off.to_le_bytes();
+            self.insns[pos + 1] = lo;
+            self.insns[pos + 2] = hi;
+        }
+    }
+
+    /// Patch a list of `jmp(0)` placeholders to a specific byte position.
+    fn patch_jumps_to(&mut self, positions: Vec<usize>, target: usize) {
+        for pos in positions {
+            let off = (target as i32 - pos as i32) as i16;
+            let [lo, hi] = off.to_le_bytes();
+            self.insns[pos + 1] = lo;
+            self.insns[pos + 2] = hi;
+        }
+    }
+
+    fn emit_while_stmt(&mut self, while_stmt: &oxc_ast::ast::WhileStatement<'_>) {
+        let loop_start = self.insns.len();
+        self.emit_expr(&while_stmt.test);
+        let jeqz_pos = self.insns.len();
+        self.push(Insn::Jeqz(0));
+
+        let outer_break = std::mem::take(&mut self.break_patches);
+        let outer_continue = std::mem::take(&mut self.continue_patches);
+
+        self.emit_stmt(&while_stmt.body);
+
+        let jmp_pos = self.insns.len();
+        self.push(Insn::Jmp(0));
+        let loop_exit = self.insns.len();
+
+        let back_off = (loop_start as i32 - jmp_pos as i32) as i16;
+        let [lo, hi] = back_off.to_le_bytes();
+        self.insns[jmp_pos + 1] = lo;
+        self.insns[jmp_pos + 2] = hi;
+
+        let jeqz_off = (loop_exit as i32 - jeqz_pos as i32) as i16;
+        let [lo2, hi2] = jeqz_off.to_le_bytes();
+        self.insns[jeqz_pos + 1] = lo2;
+        self.insns[jeqz_pos + 2] = hi2;
+
+        let breaks = std::mem::replace(&mut self.break_patches, outer_break);
+        let continues = std::mem::replace(&mut self.continue_patches, outer_continue);
+        self.patch_jumps_to_here(breaks);
+        self.patch_jumps_to(continues, loop_start);
+    }
+
+    fn emit_do_while_stmt(&mut self, do_while: &oxc_ast::ast::DoWhileStatement<'_>) {
+        let loop_start = self.insns.len();
+
+        let outer_break = std::mem::take(&mut self.break_patches);
+        let outer_continue = std::mem::take(&mut self.continue_patches);
+
+        self.emit_stmt(&do_while.body);
+
+        let continue_target = self.insns.len();
+        self.emit_expr(&do_while.test);
+        let jnez_pos = self.insns.len();
+        self.push(Insn::Jnez(0));
+        let loop_exit = self.insns.len();
+
+        let back_off = (loop_start as i32 - jnez_pos as i32) as i16;
+        let [lo, hi] = back_off.to_le_bytes();
+        self.insns[jnez_pos + 1] = lo;
+        self.insns[jnez_pos + 2] = hi;
+
+        let breaks = std::mem::replace(&mut self.break_patches, outer_break);
+        let continues = std::mem::replace(&mut self.continue_patches, outer_continue);
+        self.patch_jumps_to_here(breaks);
+        self.patch_jumps_to(continues, continue_target);
+        let _ = loop_exit;
+    }
+
+    fn emit_for_stmt(&mut self, for_stmt: &oxc_ast::ast::ForStatement<'_>) {
+        if let Some(init) = &for_stmt.init {
+            self.emit_for_init(init);
+        }
+
+        let loop_start = self.insns.len();
+        let mut jeqz_pos: Option<usize> = None;
+        if let Some(test) = &for_stmt.test {
+            self.emit_expr(test);
+            jeqz_pos = Some(self.insns.len());
+            self.push(Insn::Jeqz(0));
+        }
+
+        let outer_break = std::mem::take(&mut self.break_patches);
+        let outer_continue = std::mem::take(&mut self.continue_patches);
+
+        self.emit_stmt(&for_stmt.body);
+
+        let continue_target = self.insns.len();
+        if let Some(update) = &for_stmt.update {
+            self.emit_expr(update);
+        }
+
+        let jmp_pos = self.insns.len();
+        self.push(Insn::Jmp(0));
+        let loop_exit = self.insns.len();
+
+        let back_off = (loop_start as i32 - jmp_pos as i32) as i16;
+        let [lo, hi] = back_off.to_le_bytes();
+        self.insns[jmp_pos + 1] = lo;
+        self.insns[jmp_pos + 2] = hi;
+
+        if let Some(jpos) = jeqz_pos {
+            let off = (loop_exit as i32 - jpos as i32) as i16;
+            let [lo2, hi2] = off.to_le_bytes();
+            self.insns[jpos + 1] = lo2;
+            self.insns[jpos + 2] = hi2;
+        }
+
+        let breaks = std::mem::replace(&mut self.break_patches, outer_break);
+        let continues = std::mem::replace(&mut self.continue_patches, outer_continue);
+        self.patch_jumps_to_here(breaks);
+        self.patch_jumps_to(continues, continue_target);
+    }
+
+    fn emit_for_init(&mut self, init: &oxc_ast::ast::ForStatementInit<'_>) {
+        use oxc_ast::ast::ForStatementInit;
+        match init {
+            ForStatementInit::VariableDeclaration(decl) => self.emit_var_decl(decl),
+            ForStatementInit::AssignmentExpression(e) => self.emit_assignment(e),
+            ForStatementInit::SequenceExpression(seq) => {
+                for e in &seq.expressions {
+                    self.emit_expr(e);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -2035,6 +2204,12 @@ impl<'a> CodeGen<'a> {
             Expression::ObjectExpression(obj) => {
                 self.emit_object_expr(obj);
             }
+            Expression::ConditionalExpression(cond) => {
+                self.emit_conditional_expr(cond);
+            }
+            Expression::TemplateLiteral(tmpl) => {
+                self.emit_template_literal(tmpl);
+            }
             _ => {
                 self.push(Insn::LdUndefined);
             }
@@ -2138,6 +2313,80 @@ impl<'a> CodeGen<'a> {
         }
         // Leave the object in the accumulator.
         self.push(Insn::Lda(obj_reg));
+    }
+
+    // ── Conditional expression: test ? consequent : alternate ─────────────────
+
+    fn emit_conditional_expr(&mut self, cond: &oxc_ast::ast::ConditionalExpression<'_>) {
+        self.emit_expr(&cond.test);
+        let jeqz_pos = self.insns.len();
+        self.push(Insn::Jeqz(0));
+
+        self.emit_expr(&cond.consequent);
+        let jmp_pos = self.insns.len();
+        self.push(Insn::Jmp(0));
+
+        let alt_start = self.insns.len();
+        let jeqz_off = (alt_start as i32 - jeqz_pos as i32) as i16;
+        let [lo, hi] = jeqz_off.to_le_bytes();
+        self.insns[jeqz_pos + 1] = lo;
+        self.insns[jeqz_pos + 2] = hi;
+
+        self.emit_expr(&cond.alternate);
+
+        let end_pos = self.insns.len();
+        let jmp_off = (end_pos as i32 - jmp_pos as i32) as i16;
+        let [lo2, hi2] = jmp_off.to_le_bytes();
+        self.insns[jmp_pos + 1] = lo2;
+        self.insns[jmp_pos + 2] = hi2;
+    }
+
+    // ── Template literal: `q0${e0}q1…` ──────────────────────────────────────
+
+    fn emit_template_literal(&mut self, tmpl: &oxc_ast::ast::TemplateLiteral<'_>) {
+        let first = &tmpl.quasis[0];
+        let first_str = first
+            .value
+            .cooked
+            .as_ref()
+            .map(|s| s.as_str().to_string())
+            .unwrap_or_else(|| first.value.raw.as_str().to_string());
+        let first_id = self.intern(&first_str);
+        self.push(Insn::LdaStr(first_id));
+
+        if tmpl.expressions.is_empty() {
+            return;
+        }
+
+        let left_reg = self.alloc_reg();
+        self.push(Insn::Sta(left_reg));
+        let tmp_reg = self.alloc_reg();
+
+        for (i, expr) in tmpl.expressions.iter().enumerate() {
+            // acc = expr_i; left = left + acc
+            self.emit_expr(expr);
+            self.push(Insn::Sta(tmp_reg));
+            self.push(Insn::Lda(left_reg));
+            self.push(Insn::Add2(0, tmp_reg));
+            self.push(Insn::Sta(left_reg));
+
+            // acc = quasi[i+1]; left = left + acc
+            let q = &tmpl.quasis[i + 1];
+            let q_str = q
+                .value
+                .cooked
+                .as_ref()
+                .map(|s| s.as_str().to_string())
+                .unwrap_or_else(|| q.value.raw.as_str().to_string());
+            let q_id = self.intern(&q_str);
+            self.push(Insn::LdaStr(q_id));
+            self.push(Insn::Sta(tmp_reg));
+            self.push(Insn::Lda(left_reg));
+            self.push(Insn::Add2(0, tmp_reg));
+            self.push(Insn::Sta(left_reg));
+        }
+
+        self.push(Insn::Lda(left_reg));
     }
 
     // ── Class definition ──────────────────────────────────────────────────────

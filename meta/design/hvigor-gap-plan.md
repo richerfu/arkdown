@@ -53,7 +53,7 @@ and release-mode terser/minification when applicable.
 - Phase 2 (ETS transform): ✅ @Prop, @Link, @ObjectLink, @Provide, @Consume, @Watch, @BuilderParam, @Builder, @Styles
 - Phase 3 (bundler): ✅ clean ESM, @ohos: external, treeshake off for debug / on for release, manualChunks for supportChunks (commons + vendors groups)
 - Phase 4 (importee): ✅ process_importees() ports hvigor process-importee.js
-- Phase 5 (ABC): 🔄 modules.abc (per-instruction LNP implemented; test fixture 6881B/9844B with debug_info=true; real-app parity improving from 87% baseline)
+- Phase 5 (ABC): 🔄 per-instruction LNP, loop/break/continue/throw/conditional/template lowering added; test fixture 6881B/9844B; real-app baseline 8565B vs 9844B
 - Phase 6 (packaging): ✅ HAP zip identical to hvigor (11 entries)
 - Phase 7 (ByteCode HAR): ✅ detect_bytecode_har(), scan_bytecode_har_deps(), byteCodeHarInfo in loader.json, compiledImportees OHM URL, merge_bytecode_har_abc(); fixture + 2 e2e tests
 
