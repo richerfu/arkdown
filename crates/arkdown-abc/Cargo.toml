@@ -15,3 +15,7 @@ oxc_span      = { workspace = true }
 thiserror     = { workspace = true }
 rayon         = { workspace = true }
 fs-err        = { workspace = true }
+sha2          = { workspace = true }
+serde         = { workspace = true }
+serde_json    = { workspace = true }
+hex           = { workspace = true }

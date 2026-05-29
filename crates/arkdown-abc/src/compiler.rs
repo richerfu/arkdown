@@ -5,6 +5,7 @@ use oxc_codegen::Codegen;
 use oxc_parser::Parser;
 use oxc_span::SourceType;
 
+use crate::cache::{derive_key, CacheFile};
 use crate::emit::file::AbcFile;
 use crate::error::AbcError;
 use crate::ir::builder;
@@ -238,6 +239,12 @@ impl AbcCompiler {
     /// all records are combined into a single file at `output`; otherwise a
     /// per-record layout could be used (TODO for SPEC-009 v2).
     ///
+    /// When `options.cache_path` is set the compiler checks an on-disk cache
+    /// keyed by `SHA-256(all_sources + options)` before running the IR lowering
+    /// pass.  A cache hit skips `build_record` entirely and writes the cached
+    /// bytecode to `output`.  A cache miss compiles normally and stores the
+    /// result for future runs.
+    ///
     /// Returns [`AbcError::Io`] if the output directory cannot be created or
     /// the file cannot be written.  Returns [`AbcError::Parse`] if any module
     /// source contains hard syntax errors.
@@ -246,6 +253,37 @@ impl AbcCompiler {
         modules: Vec<AbcModule>,
         output: &Path,
     ) -> Result<AbcArtifactResult, AbcError> {
+        // ── Incremental cache check (SPEC-025) ────────────────────────────────
+        //
+        // Derive a cache key from all module sources and the relevant compile
+        // options.  If we find a matching entry in the cache file, write the
+        // cached bytecode directly to `output` and return early — skipping all
+        // IR lowering.
+        if let Some(ref cache_dir) = self.options.cache_path {
+            let key_inputs: Vec<(&str, &str)> = modules
+                .iter()
+                .map(|m| (m.record_name.as_str(), m.source.as_str()))
+                .collect();
+            let key = derive_key(&key_inputs, self.options.module, self.options.debug_info);
+
+            let cache = CacheFile::load(cache_dir);
+            if let Some(cached_bytes) = cache.lookup(&key) {
+                // Cache hit — write cached bytecode and return.
+                if let Some(parent) = output.parent() {
+                    if !parent.as_os_str().is_empty() {
+                        fs_err::create_dir_all(parent).map_err(AbcError::Io)?;
+                    }
+                }
+                std::fs::write(output, &cached_bytes).map_err(AbcError::Io)?;
+                return Ok(AbcArtifactResult {
+                    path: output.to_path_buf(),
+                    api_version: self.options.target_api_version,
+                    has_debug_info: self.options.debug_info,
+                });
+            }
+        }
+
+        // ── Full compilation ──────────────────────────────────────────────────
         let mut abc_file = AbcFile::new();
         let mut has_debug_info = false;
 
@@ -281,6 +319,19 @@ impl AbcCompiler {
             }
         }
         std::fs::write(output, &bytes).map_err(AbcError::Io)?;
+
+        // ── Write result to cache (SPEC-025) ──────────────────────────────────
+        if let Some(ref cache_dir) = self.options.cache_path {
+            let key_inputs: Vec<(&str, &str)> = modules
+                .iter()
+                .map(|m| (m.record_name.as_str(), m.source.as_str()))
+                .collect();
+            let key = derive_key(&key_inputs, self.options.module, self.options.debug_info);
+            let mut cache = CacheFile::load(cache_dir);
+            cache.upsert(key, &bytes);
+            // Ignore cache write errors — they are non-fatal.
+            let _ = cache.save(cache_dir);
+        }
 
         Ok(AbcArtifactResult {
             path: output.to_path_buf(),
