@@ -309,6 +309,154 @@ fn test_write_and_read_loader_json_roundtrip() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// write_module_json
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_write_module_json_emits_virtual_machine_and_compile_mode() {
+    use arkdown_core::{AbilityEntry, CompileMode, HapManifest, OhosModuleType};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut config = (*default_config()).clone();
+    config.project_root = tmp.path().to_path_buf();
+    let processor = ProfileProcessor::new(Arc::new(config));
+
+    let manifest = HapManifest {
+        module_name: "entry".to_string(),
+        module_type: OhosModuleType::Entry,
+        device_types: vec!["phone".to_string()],
+        virtual_machine: "ark12.0.6.0".to_string(),
+        compile_mode: CompileMode::EsModule,
+        abilities: vec![AbilityEntry {
+            name: "EntryAbility".to_string(),
+            src_entry: "./ets/entryability/EntryAbility.ets".to_string(),
+            exported: true,
+            skills: vec![],
+            icon: None,
+            label: None,
+            description: None,
+            start_window_icon: None,
+            start_window_background: None,
+        }],
+        extension_abilities: vec![],
+        dependencies: vec![],
+        router_map: None,
+        pages: Some("$profile:main_pages".to_string()),
+        main_element: Some("EntryAbility".to_string()),
+        description: None,
+    };
+
+    let out_path = tmp.path().join("module.json");
+    processor
+        .write_module_json(&manifest, &out_path, None)
+        .expect("write_module_json must succeed");
+
+    assert!(out_path.exists(), "module.json must be written to disk");
+
+    let content = std::fs::read_to_string(&out_path).expect("read module.json");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&content).expect("module.json must be valid JSON");
+
+    let module = &parsed["module"];
+    assert_eq!(
+        module["virtualMachine"].as_str(),
+        Some("ark12.0.6.0"),
+        "module.virtualMachine must be 'ark12.0.6.0'; got: {}",
+        module["virtualMachine"]
+    );
+    assert_eq!(
+        module["compileMode"].as_str(),
+        Some("esmodule"),
+        "module.compileMode must be 'esmodule'; got: {}",
+        module["compileMode"]
+    );
+}
+
+#[test]
+fn test_write_module_json_resolves_resource_ids_into_abilities() {
+    use arkdown_core::{AbilityEntry, CompileMode, HapManifest, OhosModuleType};
+    use std::collections::HashMap;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut config = (*default_config()).clone();
+    config.project_root = tmp.path().to_path_buf();
+    let processor = ProfileProcessor::new(Arc::new(config));
+
+    let manifest = HapManifest {
+        module_name: "entry".to_string(),
+        module_type: OhosModuleType::Entry,
+        device_types: vec!["phone".to_string()],
+        virtual_machine: "ark12.0.6.0".to_string(),
+        compile_mode: CompileMode::EsModule,
+        abilities: vec![AbilityEntry {
+            name: "EntryAbility".to_string(),
+            src_entry: "./ets/entryability/EntryAbility.ets".to_string(),
+            exported: true,
+            skills: vec![],
+            icon: Some("$media:icon".to_string()),
+            label: Some("$string:EntryAbility_label".to_string()),
+            description: Some("$string:EntryAbility_desc".to_string()),
+            start_window_icon: Some("$media:startIcon".to_string()),
+            start_window_background: Some("$color:start_window_background".to_string()),
+        }],
+        extension_abilities: vec![],
+        dependencies: vec![],
+        router_map: None,
+        pages: None,
+        main_element: None,
+        description: None,
+    };
+
+    let mut resource_ids: HashMap<String, u32> = HashMap::new();
+    resource_ids.insert("icon".to_string(), 16777219);
+    resource_ids.insert("EntryAbility_label".to_string(), 16777216);
+    resource_ids.insert("EntryAbility_desc".to_string(), 16777217);
+    resource_ids.insert("startIcon".to_string(), 16777220);
+    resource_ids.insert("start_window_background".to_string(), 16777218);
+
+    let out_path = tmp.path().join("module.json");
+    processor
+        .write_module_json(&manifest, &out_path, Some(&resource_ids))
+        .expect("write_module_json must succeed");
+
+    let content = std::fs::read_to_string(&out_path).expect("read module.json");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&content).expect("module.json must be valid JSON");
+
+    let ability = &parsed["module"]["abilities"][0];
+    assert_eq!(
+        ability["iconId"].as_u64(),
+        Some(16777219),
+        "iconId must be resolved; got: {}",
+        ability["iconId"]
+    );
+    assert_eq!(
+        ability["labelId"].as_u64(),
+        Some(16777216),
+        "labelId must be resolved; got: {}",
+        ability["labelId"]
+    );
+    assert_eq!(
+        ability["descriptionId"].as_u64(),
+        Some(16777217),
+        "descriptionId must be resolved; got: {}",
+        ability["descriptionId"]
+    );
+    assert_eq!(
+        ability["startWindowIconId"].as_u64(),
+        Some(16777220),
+        "startWindowIconId must be resolved; got: {}",
+        ability["startWindowIconId"]
+    );
+    assert_eq!(
+        ability["startWindowBackgroundId"].as_u64(),
+        Some(16777218),
+        "startWindowBackgroundId must be resolved; got: {}",
+        ability["startWindowBackgroundId"]
+    );
+}
+
 #[test]
 fn test_write_loader_json_creates_parent_dirs() {
     let processor = ProfileProcessor::new(default_config());
