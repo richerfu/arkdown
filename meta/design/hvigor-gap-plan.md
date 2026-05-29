@@ -156,7 +156,7 @@ Implement the hvigor `generateConfig()` contract in Rust:
 - Fill all `loader.json` fields used by `arkts-pack.js` and SDK plugins.
 - Build dependency maps for local HAR, remote HAR, HSP, dynamic dependencies,
   ByteCode HAR, and package source roots.
-- Add workers and router map entries to `compileEntry`.
+- ✅ Workers (`src/main/ets/workers/*.ets`) and router map page destinations are scanned and added to `compileEntry`.
 - Preserve hvigor intermediate paths:
   `build/default/intermediates/loader/default/loader.json`,
   `ets/default/loader_out/default/`, and `cache/msgpack/`.
