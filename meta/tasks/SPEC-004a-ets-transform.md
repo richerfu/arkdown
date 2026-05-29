@@ -157,7 +157,8 @@ mode (API >= 9).
 | `@Consume`          | `ObservedPropertyAbstractPU<T>`          | `this.initializeConsume("alias_or_x", "x")`                  | No                      |
 | `@ObjectLink`       | `SynchedPropertyNesedObjectPU<T>`        | `new SynchedPropertyNesedObjectPU(params.x, this, "x")`      | No                      |
 | `@Watch`            | (no backing field; adds `declareWatch`)  | `this.declareWatch("x", this.handlerName)` after field inits | —                       |
-| `@Builder`          | Struct method lowered like `build()` body | —                                                            | —                       |
+| `@Builder`          | ✅ Class method, body lowered via `lower_build_body_or_raw` | —                                         | —                       |
+| `@Styles`           | ✅ `private` class method, `.attr(x)` → `this.attr(x)` in body | —                                     | —                       |
 | `@BuilderParam`     | `WrappedBuilder<Parameters<T>>`          | `this.x = init` (direct, no `__` prefix in ctor)            | Yes                     |
 
 > **Note on simple vs object variants**: The ets-loader picks between `Simple` and `Object`
@@ -212,13 +213,35 @@ Leaf components (no closing brace children) still get `.pop()` but emit no neste
 
 ### @Builder functions
 
-Struct methods decorated with `@Builder` are lifted out to standalone functions bound to `this`:
+✅ **Implemented** (`crates/arkdown-plugin-ets-transform/src/transform/`, 2026-05-29)
+
+Struct methods decorated with `@Builder` remain as class methods with the same
+name (they are NOT renamed to `__method__`). The decorator is stripped.
+
+The body is lowered via `lower_build_body_or_raw`:
+
+1. **If the OXC ETS parser emits `ArkUIComponentExpression` nodes** (expected
+   in future parser versions that apply ArkUI rules to `@Builder` bodies as
+   well as `build()`): the body is fully desugared into
+   `observeComponentCreation2` + `.pop()` pairs — identical to `build()`.
+
+2. **Current OXC ETS behaviour**: the parser applies ArkUI expression rules
+   only to the canonical `build()` method. `@Builder` bodies are parsed as
+   regular TypeScript, so `lower_build_body` returns `Err(UnsupportedStatement)`
+   and the fallback emits the raw source body text re-indented for a class
+   method. The output is syntactically valid TypeScript (e.g. `Text('hi')` is
+   a regular call expression).
 
 ```typescript
 // Input:
 @Builder myBuilder() { Text('hi') }
 
-// Output (outside class, generated as class method):
+// Output (current — raw body fallback):
+myBuilder(): void {
+  Text('hi')
+}
+
+// Output (future — full ArkUI desugaring when parser supports it):
 myBuilder(): void {
   this.observeComponentCreation2((elmtId, isInitialRender) => {
     Text.create('hi');
@@ -228,6 +251,31 @@ myBuilder(): void {
 ```
 
 When a `@Builder` is called from `build()`, it is called as `this.myBuilder()`.
+
+### @Styles functions
+
+✅ **Implemented** (`crates/arkdown-plugin-ets-transform/src/transform/`, 2026-05-29)
+
+Struct methods decorated with `@Styles` become `private` class methods with
+the decorator stripped.  The attribute chain body is lowered: lines starting
+with `.` are rewritten to `this.attr(x)` calls (the implicit receiver is made
+explicit).
+
+```typescript
+// Input:
+@Styles myStyle() { .width(100).height(50) }
+
+// Output:
+private myStyle(): void {
+  this.width(100);
+  this.height(50);
+}
+```
+
+The `lower_styles_body` function is text-based: it reads the raw source span
+of the method body, strips the surrounding `{}`/`}`, and rewrites each
+`.attr(x)` line.  This works regardless of whether the OXC ETS parser produces
+special ArkUI attribute expression nodes for `@Styles` bodies.
 
 ---
 
@@ -412,7 +460,7 @@ No other public types are exported. `EtsTransformer`, `EtsChecker`, and `ApiTran
 - `@Component struct Counter` with `@State count: number` round-trip: transform output contains `class Counter extends ViewPU` with `__count: ObservedPropertySimplePU<number>`
 - `@Entry` on a component generates `ViewStackProcessor.StartGetAccessRecordingFor` after the class definition
 - `@Prop` field appears in `updateStateVars` method; `@State` field does not
-- `@Builder myBuilder()` method is preserved as a class method (not lifted to standalone function) and its `build()`-style body is desugared
+- ✅ `@Builder myBuilder()` method is preserved as a class method (not lifted to standalone function); decorator stripped; body lowered via `lower_build_body_or_raw` (ArkUI desugaring or raw fallback); output is valid TypeScript
 - `build()` with `Column { Text("hi") }` → two `observeComponentCreation2` calls with `Column.pop()` and `Text.pop()`
 - Method chains in `build()` (`.onClick(...)`) appear inside the `observeComponentCreation2` callback
 - `etsChecker` rule `missing-build-method`: `@Component struct Foo {}` (no build) → `Err(ArkdownError::EtsCheck)` with rule ID `missing-build-method`

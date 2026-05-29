@@ -4,6 +4,36 @@ use crate::transform::decorator::{
 };
 use crate::transform::entry::{generate_entry_registration, EntryRegistrationInfo};
 
+/// A `@Builder` method extracted from a `@Component` struct.
+///
+/// In ArkTS, `@Builder` methods contain the same ArkUI component DSL as `build()`.
+/// They remain as class methods on the ViewPU subclass but their bodies are desugared
+/// to `observeComponentCreation2` calls (identical to `build()` desugaring).
+#[derive(Debug, Clone)]
+pub struct BuilderMethodInfo {
+    /// Method name as declared (not renamed).
+    pub name: String,
+    /// Parameter list text (without outer parens), e.g. `"text: string"`.
+    pub params: String,
+    /// ArkUI DSL body already lowered via `lower_build_body`.
+    pub lowered_body: String,
+}
+
+/// A `@Styles` method extracted from a `@Component` struct.
+///
+/// In ArkTS, `@Styles` methods declare reusable attribute chains (`.width()`, `.height()`,
+/// etc.).  The decorator is stripped and the method becomes `private`.  The attribute chain
+/// body is lowered: `.attr(x)` → `this.attr(x)`.
+#[derive(Debug, Clone)]
+pub struct StylesMethodInfo {
+    /// Method name as declared.
+    pub name: String,
+    /// Parameter list text (without outer parens), typically empty `""`.
+    pub params: String,
+    /// Lowered body: `.attr(x)` chains rewritten to `this.attr(x)` statements.
+    pub lowered_body: String,
+}
+
 /// A state/prop/link field extracted from a `@Component` struct.
 #[derive(Debug, Clone)]
 pub struct StateField {
@@ -27,7 +57,7 @@ pub struct StateField {
 }
 
 /// Structural description of a parsed `@Component` struct, ready for code generation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ComponentInfo {
     pub name: String,
     pub is_entry: bool,
@@ -35,6 +65,10 @@ pub struct ComponentInfo {
     /// Lowered body for the hvigor-style `initialRender()` method.
     pub initial_render_body: String,
     pub entry_registration: Option<EntryRegistrationInfo>,
+    /// `@Builder` methods: desugared ArkUI DSL, emitted as regular class methods.
+    pub builder_methods: Vec<BuilderMethodInfo>,
+    /// `@Styles` methods: emitted as `private` class methods with lowered body.
+    pub styles_methods: Vec<StylesMethodInfo>,
 }
 
 /// Generate the full ViewPU class text for a component.
@@ -220,6 +254,34 @@ pub fn generate_view_pu_class(info: &ComponentInfo) -> String {
     out.push_str(&info.initial_render_body);
     out.push_str("    }\n");
 
+    // ── @Builder methods ─────────────────────────────────────────────────────
+    // Each @Builder method stays as a class method with the same name and its
+    // ArkUI build() DSL body desugared to observeComponentCreation2 calls.
+    for method in &info.builder_methods {
+        let params = if method.params.is_empty() {
+            String::new()
+        } else {
+            method.params.clone()
+        };
+        out.push_str(&format!("    {}({}): void {{\n", method.name, params));
+        out.push_str(&method.lowered_body);
+        out.push_str("    }\n");
+    }
+
+    // ── @Styles methods ──────────────────────────────────────────────────────
+    // Each @Styles method becomes a private class method with the decorator
+    // stripped.  The attribute chain body is lowered: `.attr(x)` → `this.attr(x)`.
+    for method in &info.styles_methods {
+        let params = if method.params.is_empty() {
+            String::new()
+        } else {
+            method.params.clone()
+        };
+        out.push_str(&format!("    private {}({}): void {{\n", method.name, params));
+        out.push_str(&method.lowered_body);
+        out.push_str("    }\n");
+    }
+
     out.push_str("    rerender() {\n        this.updateDirtyElements();\n    }\n");
 
     if info.is_entry {
@@ -265,6 +327,8 @@ mod tests {
                 "        Text.pop();\n",
             )
             .to_string(),
+            builder_methods: vec![],
+            styles_methods: vec![],
             entry_registration: None,
         }
     }
@@ -339,6 +403,8 @@ mod tests {
                 alias: None,
             }],
             initial_render_body: String::new(),
+            builder_methods: vec![],
+            styles_methods: vec![],
             entry_registration: None,
         };
         let out = generate_view_pu_class(&info);
@@ -356,6 +422,8 @@ mod tests {
             is_entry: false,
             state_fields: vec![],
             initial_render_body: String::new(),
+            builder_methods: vec![],
+            styles_methods: vec![],
             entry_registration: None,
         };
         let out = generate_view_pu_class(&info);
@@ -379,6 +447,8 @@ mod tests {
                 alias: None,
             }],
             initial_render_body: String::new(),
+            builder_methods: vec![],
+            styles_methods: vec![],
             entry_registration: None,
         };
         let out = generate_view_pu_class(&info);
@@ -413,6 +483,8 @@ mod tests {
                 alias: None,
             }],
             initial_render_body: String::new(),
+            builder_methods: vec![],
+            styles_methods: vec![],
             entry_registration: None,
         };
         let out = generate_view_pu_class(&info);
@@ -442,6 +514,8 @@ mod tests {
                 alias: None,
             }],
             initial_render_body: String::new(),
+            builder_methods: vec![],
+            styles_methods: vec![],
             entry_registration: None,
         };
         let out = generate_view_pu_class(&info);
@@ -471,6 +545,8 @@ mod tests {
                 alias: None,
             }],
             initial_render_body: String::new(),
+            builder_methods: vec![],
+            styles_methods: vec![],
             entry_registration: None,
         };
         let out = generate_view_pu_class(&info);
@@ -498,6 +574,8 @@ mod tests {
                 alias: Some("theme".to_string()),
             }],
             initial_render_body: String::new(),
+            builder_methods: vec![],
+            styles_methods: vec![],
             entry_registration: None,
         };
         let out = generate_view_pu_class(&info);
@@ -523,6 +601,8 @@ mod tests {
                 alias: None,
             }],
             initial_render_body: String::new(),
+            builder_methods: vec![],
+            styles_methods: vec![],
             entry_registration: None,
         };
         let out = generate_view_pu_class(&info);
@@ -573,6 +653,8 @@ mod tests {
                 alias: None,
             }],
             initial_render_body: String::new(),
+            builder_methods: vec![],
+            styles_methods: vec![],
             entry_registration: None,
         };
         let out = generate_view_pu_class(&info);
@@ -608,6 +690,8 @@ mod tests {
                 alias: None,
             }],
             initial_render_body: String::new(),
+            builder_methods: vec![],
+            styles_methods: vec![],
             entry_registration: None,
         };
         let out = generate_view_pu_class(&info);
@@ -643,7 +727,9 @@ mod tests {
                     alias: None,
                 }],
                 initial_render_body: String::new(),
-                entry_registration: None,
+                builder_methods: vec![],
+            styles_methods: vec![],
+            entry_registration: None,
             };
             let out = generate_view_pu_class(&info);
             assert!(

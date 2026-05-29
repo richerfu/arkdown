@@ -11,8 +11,10 @@ use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType, Span};
 
 use crate::error::EtsTransformError;
-use crate::transform::build_fn::lower_build_body;
-use crate::transform::component::{generate_view_pu_class, ComponentInfo, StateField};
+use crate::transform::build_fn::{lower_build_body, lower_build_body_or_raw, lower_styles_body};
+use crate::transform::component::{
+    generate_view_pu_class, BuilderMethodInfo, ComponentInfo, StateField, StylesMethodInfo,
+};
 use crate::transform::decorator::is_state_decorator;
 use crate::transform::entry::EntryRegistrationInfo;
 
@@ -127,6 +129,8 @@ fn component_from_struct(
         .any(|decorator| decorator_name(decorator) == "Entry");
     let mut state_fields = Vec::new();
     let mut initial_render_body = String::new();
+    let mut builder_methods: Vec<BuilderMethodInfo> = Vec::new();
+    let mut styles_methods: Vec<StylesMethodInfo> = Vec::new();
 
     for element in &statement.body.body {
         match element {
@@ -181,6 +185,47 @@ fn component_from_struct(
                     message: format!("unsupported ArkUI build() DSL: {err:?}"),
                 })?;
             }
+            StructElement::MethodDefinition(method)
+                if method
+                    .decorators
+                    .iter()
+                    .any(|d| decorator_name(d) == "Builder") =>
+            {
+                // @Builder method: keep same name, desugar body like build().
+                let Some(name) = method.key.static_name() else {
+                    continue;
+                };
+                let params = extract_params_text(method.value.params.span(), source_text);
+                // Lower the ArkUI DSL body; fall back to raw TS text when the
+                // OXC ETS parser did not produce ArkUIComponentExpression nodes
+                // (which happens for @Builder bodies — the parser only applies
+                // ArkUI expression rules to the canonical build() method).
+                let lowered_body =
+                    lower_build_body_or_raw(method.value.body.as_deref(), source_text);
+                builder_methods.push(BuilderMethodInfo {
+                    name: name.into_owned(),
+                    params,
+                    lowered_body,
+                });
+            }
+            StructElement::MethodDefinition(method)
+                if method
+                    .decorators
+                    .iter()
+                    .any(|d| decorator_name(d) == "Styles") =>
+            {
+                // @Styles method: strip decorator, emit as private, lower body.
+                let Some(name) = method.key.static_name() else {
+                    continue;
+                };
+                let params = extract_params_text(method.value.params.span(), source_text);
+                let lowered_body = lower_styles_body(method.value.body.as_deref(), source_text);
+                styles_methods.push(StylesMethodInfo {
+                    name: name.into_owned(),
+                    params,
+                    lowered_body,
+                });
+            }
             _ => {}
         }
     }
@@ -191,6 +236,8 @@ fn component_from_struct(
         state_fields,
         initial_render_body,
         entry_registration: is_entry.then(|| entry_registration(id, options)),
+        builder_methods,
+        styles_methods,
     }))
 }
 
@@ -269,6 +316,20 @@ fn type_annotation_text(span: Span, source_text: &str) -> String {
 
 fn span_text(span: Span, source_text: &str) -> &str {
     &source_text[span]
+}
+
+/// Extract the parameter list text from a `FormalParameters` span, stripped of
+/// the surrounding parentheses.
+///
+/// For `(text: string, count: number)`, returns `"text: string, count: number"`.
+/// For `()`, returns `""`.
+fn extract_params_text(params_span: Span, source_text: &str) -> String {
+    span_text(params_span, source_text)
+        .trim()
+        .trim_start_matches('(')
+        .trim_end_matches(')')
+        .trim()
+        .to_string()
 }
 
 #[cfg(test)]

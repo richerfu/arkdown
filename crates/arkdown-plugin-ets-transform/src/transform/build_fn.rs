@@ -103,6 +103,80 @@ fn span_text(node: &impl GetSpan, source_text: &str) -> String {
     source_text[span].to_string()
 }
 
+/// Lower an ArkUI `build()` body, falling back to the raw source text on failure.
+///
+/// The OXC ETS parser applies `ArkUIComponentExpression` parsing only to
+/// the canonical `build()` method.  `@Builder` method bodies are parsed as
+/// regular TypeScript, so `lower_build_body` returns
+/// `Err(UnsupportedStatement)` for them.
+///
+/// On failure this function extracts the inner body text from the source span
+/// and re-indents it for a class method body.  The raw TypeScript is valid
+/// (e.g. `Text('hi')` is a regular function call) even if not fully desugared.
+pub fn lower_build_body_or_raw(body: Option<&FunctionBody<'_>>, source_text: &str) -> String {
+    match lower_build_body(body, source_text) {
+        Ok(lowered) => lowered,
+        Err(_) => {
+            // Fall back to raw inner body text, re-indented for a class method.
+            let Some(body) = body else {
+                return String::new();
+            };
+            let raw = span_text(body, source_text);
+            // Strip the surrounding `{` / `}` and re-indent each non-empty line.
+            let inner = raw.trim().trim_start_matches('{').trim_end_matches('}').trim();
+            inner
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(|line| format!("        {}\n", line.trim()))
+                .collect()
+        }
+    }
+}
+
+/// Lower a `@Styles` method body into valid TypeScript.
+///
+/// ArkUI `@Styles` bodies consist of attribute chains starting with `.`:
+/// ```text
+/// { .width(100).height(100) }
+/// ```
+/// These are transformed to `this.attr(x)` calls so the generated TypeScript
+/// is valid. Lines that do not start with `.` are preserved as-is.
+///
+/// Returns the indented statements for insertion inside a `private methodName()` body.
+pub fn lower_styles_body(body: Option<&FunctionBody<'_>>, source_text: &str) -> String {
+    let Some(body) = body else {
+        return String::new();
+    };
+    let body_text = span_text(body, source_text);
+    // Strip the surrounding braces and process each line.
+    let inner = body_text.trim().trim_start_matches('{').trim_end_matches('}').trim();
+    let mut out = String::new();
+    for line in inner.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with('.') {
+            // @Styles attribute chain: .attr(x) → this.attr(x);
+            out.push_str("        this");
+            out.push_str(trimmed);
+            if !trimmed.ends_with(';') {
+                out.push(';');
+            }
+            out.push('\n');
+        } else {
+            // Regular statement — emit as-is with indentation.
+            out.push_str("        ");
+            out.push_str(trimmed);
+            if !trimmed.ends_with(';') && !trimmed.ends_with('{') && !trimmed.ends_with('}') {
+                out.push(';');
+            }
+            out.push('\n');
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
