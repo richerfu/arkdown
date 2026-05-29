@@ -1,0 +1,13 @@
+{
+  module: {
+    name: "entry",
+    type: "shared",
+    description: "$string:module_desc",
+    deviceTypes: [
+      "phone"
+    ],
+    deliveryWithInstall: true,
+    installationFree: false,
+    pages: "$profile:main_pages"
+  }
+}

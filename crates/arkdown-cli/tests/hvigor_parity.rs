@@ -1,4 +1,4 @@
-//! hvigor/arkdown artifact parity harness for the minimal HAP fixture.
+//! hvigor/arkdown artifact parity harness for HAP, HAR, and HSP fixtures.
 //!
 //! This is intentionally ignored: local hvigor availability, signing material,
 //! and current arkdown parity are machine-dependent while the implementation is
@@ -21,10 +21,84 @@ const ENV_ARKDOWN_BIN: &str = "ARKDOWN_PARITY_ARKDOWN_BIN";
 const ENV_REPORT: &str = "ARKDOWN_PARITY_REPORT";
 const ENV_STRICT: &str = "ARKDOWN_PARITY_STRICT";
 
+// ---------------------------------------------------------------------------
+// Artifact type — determines hvigor task, arkdown target, and archive format
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArtifactType {
+    Hap,
+    Har,
+    Hsp,
+}
+
+impl ArtifactType {
+    fn ext(self) -> &'static str {
+        match self {
+            ArtifactType::Hap => "hap",
+            ArtifactType::Har => "har",
+            ArtifactType::Hsp => "hsp",
+        }
+    }
+
+    fn hvigor_task(self) -> &'static str {
+        match self {
+            ArtifactType::Hap => "assembleHap",
+            ArtifactType::Har => "assembleHar",
+            ArtifactType::Hsp => "assembleHsp",
+        }
+    }
+
+    fn arkdown_target(self) -> &'static str {
+        match self {
+            ArtifactType::Hap => "hap",
+            ArtifactType::Har => "har",
+            ArtifactType::Hsp => "hsp",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Top-level test functions
+// ---------------------------------------------------------------------------
+
 #[test]
 #[ignore = "requires local hvigorw/DevEco toolchain; run explicitly for artifact parity"]
 fn minimal_hap_hvigor_parity_report() {
-    let report = run_parity_harness().expect("parity harness failed before report generation");
+    let repo_root = repo_root();
+    let fixture = "tests/fixtures/minimal-hap";
+    let report_path = report_path_for(&repo_root, "minimal-hap");
+    let report = parity_for_fixture(fixture, ArtifactType::Hap, report_path)
+        .expect("parity harness failed before report generation");
+    print_report_summary(&report);
+
+    if env_truthy(ENV_STRICT) && !report["equal"].as_bool().unwrap_or(false) {
+        panic!(
+            "strict parity failed; see {}",
+            report["report_path"].as_str().unwrap_or("<unknown>")
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires local hvigorw/DevEco toolchain; run explicitly for artifact parity"]
+fn minimal_har_hvigor_parity_report() {
+    let repo_root = repo_root();
+    let fixture = "tests/fixtures/minimal-har";
+    let report_path = report_path_for(&repo_root, "minimal-har");
+    let report = parity_for_fixture(fixture, ArtifactType::Har, report_path)
+        .expect("parity harness failed before report generation");
+    print_report_summary(&report);
+
+    if env_truthy(ENV_STRICT) && !report["equal"].as_bool().unwrap_or(false) {
+        panic!(
+            "strict parity failed; see {}",
+            report["report_path"].as_str().unwrap_or("<unknown>")
+        );
+    }
+}
+
+fn print_report_summary(report: &Value) {
     let report_path = report["report_path"]
         .as_str()
         .unwrap_or("<unknown report path>");
@@ -33,42 +107,62 @@ fn minimal_hap_hvigor_parity_report() {
         .as_array()
         .map(|diffs| diffs.len())
         .unwrap_or(0);
+    let fixture = report["fixture"].as_str().unwrap_or("<unknown fixture>");
 
     println!(
-        "hvigor parity report written to {report_path}; equal={equal}; diff_count={diff_count}"
+        "hvigor parity report [{fixture}] written to {report_path}; equal={equal}; diff_count={diff_count}"
     );
-
-    if env_truthy(ENV_STRICT) && !equal {
-        panic!("strict parity failed; see {report_path}");
-    }
 }
 
-fn run_parity_harness() -> Result<Value, Box<dyn std::error::Error>> {
+// ---------------------------------------------------------------------------
+// Core parity harness — generic over fixture path and artifact type
+// ---------------------------------------------------------------------------
+
+fn parity_for_fixture(
+    fixture: &str,
+    artifact_type: ArtifactType,
+    report_path: PathBuf,
+) -> Result<Value, Box<dyn std::error::Error>> {
     let repo_root = repo_root();
-    let fixture = repo_root.join("tests/fixtures/minimal-hap");
-    let report_path = report_path(&repo_root);
+    let fixture_abs = repo_root.join(fixture);
+    let fixture_name = fixture_abs
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| fixture.to_string());
+
     fs::create_dir_all(report_path.parent().expect("report path has parent"))?;
 
     let temp = tempfile::Builder::new()
         .prefix("arkdown-hvigor-parity-")
         .tempdir()?;
-    let hvigor_root = temp.path().join("hvigor/minimal-hap");
-    let arkdown_root = temp.path().join("arkdown/minimal-hap");
-    copy_clean_fixture(&fixture, &hvigor_root)?;
-    copy_clean_fixture(&fixture, &arkdown_root)?;
+    let hvigor_root = temp.path().join(format!("hvigor/{fixture_name}"));
+    let arkdown_root = temp.path().join(format!("arkdown/{fixture_name}"));
+    copy_clean_fixture(&fixture_abs, &hvigor_root)?;
+    copy_clean_fixture(&fixture_abs, &arkdown_root)?;
 
     let hvigorw = hvigorw_program(&hvigor_root);
     let arkdown_bin = arkdown_program();
 
-    let hvigor_command = run_command("hvigor", &hvigorw, &["assembleHap"], &hvigor_root);
+    let hvigor_command = run_command(
+        "hvigor",
+        &hvigorw,
+        &[artifact_type.hvigor_task()],
+        &hvigor_root,
+    );
     let arkdown_project_arg = arkdown_root.to_string_lossy().into_owned();
-    let mut arkdown_args = vec!["build", "--target", "hap", "--mode", "debug"];
+    let mut arkdown_args = vec![
+        "build",
+        "--target",
+        artifact_type.arkdown_target(),
+        "--mode",
+        "debug",
+    ];
     arkdown_args.push("--project");
     arkdown_args.push(arkdown_project_arg.as_str());
     let arkdown_command = run_command("arkdown", &arkdown_bin, &arkdown_args, &arkdown_root);
 
-    let hvigor = collect_build("hvigor", &hvigor_root, hvigor_command)?;
-    let arkdown = collect_build("arkdown", &arkdown_root, arkdown_command)?;
+    let hvigor = collect_build("hvigor", &hvigor_root, hvigor_command, artifact_type)?;
+    let arkdown = collect_build("arkdown", &arkdown_root, arkdown_command, artifact_type)?;
     let diffs = compare_builds(&hvigor, &arkdown);
 
     let equal = diffs.is_empty()
@@ -78,7 +172,8 @@ fn run_parity_harness() -> Result<Value, Box<dyn std::error::Error>> {
         && arkdown.command.status == "ran";
 
     let mut report = json!({
-        "fixture": "tests/fixtures/minimal-hap",
+        "fixture": fixture,
+        "artifact_type": artifact_type.ext(),
         "report_path": report_path.to_string_lossy(),
         "equal": equal,
         "strict": env_truthy(ENV_STRICT),
@@ -109,10 +204,10 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn report_path(repo_root: &Path) -> PathBuf {
+fn report_path_for(repo_root: &Path, fixture_name: &str) -> PathBuf {
     std::env::var_os(ENV_REPORT)
         .map(PathBuf::from)
-        .unwrap_or_else(|| repo_root.join("target/parity/minimal-hap-hvigor-diff.json"))
+        .unwrap_or_else(|| repo_root.join(format!("target/parity/{fixture_name}-hvigor-diff.json")))
 }
 
 fn hvigorw_program(project_root: &Path) -> OsString {
@@ -284,7 +379,7 @@ struct BuildSnapshot {
     tool: String,
     root: PathBuf,
     command: CommandReport,
-    hap: Option<HapSnapshot>,
+    archive: Option<ArchiveSnapshot>,
     artifacts: BTreeMap<String, ArtifactSnapshot>,
     build_files: BTreeMap<String, ArtifactSnapshot>,
     loader_out_js: BTreeMap<String, ArtifactSnapshot>,
@@ -312,7 +407,7 @@ impl BuildSnapshot {
             "tool": self.tool,
             "root": self.root.to_string_lossy(),
             "command": self.command.to_json(),
-            "hap": self.hap.as_ref().map(HapSnapshot::to_json),
+            "archive": self.archive.as_ref().map(ArchiveSnapshot::to_json),
             "artifacts": artifacts,
             "build_files": build_files,
             "loader_out_js": loader_out_js,
@@ -324,108 +419,159 @@ fn collect_build(
     tool: &str,
     root: &Path,
     command: CommandReport,
+    artifact_type: ArtifactType,
 ) -> Result<BuildSnapshot, Box<dyn std::error::Error>> {
-    let hap = find_hap(root, tool)
-        .map(|path| read_hap_snapshot(&path, root))
+    let archive = find_archive(root, artifact_type.ext(), tool)
+        .map(|path| read_archive_snapshot(&path, root))
         .transpose()?;
     let mut artifacts = BTreeMap::new();
 
-    collect_named_artifact(
-        &mut artifacts,
-        root,
-        hap.as_ref(),
-        "module.json",
-        Some("module.json"),
-        &[
-            "intermediates/package",
-            "intermediates/res",
-            "intermediates/process_profile",
-        ],
-        false,
-    )?;
-    collect_named_artifact(
-        &mut artifacts,
-        root,
-        hap.as_ref(),
-        "pack.info",
-        Some("pack.info"),
-        &["outputs", "build/default"],
-        false,
-    )?;
-    collect_named_artifact(
-        &mut artifacts,
-        root,
-        hap.as_ref(),
-        "pkgContextInfo.json",
-        Some("pkgContextInfo.json"),
-        &["pkgContextInfo", "outputs", "build/default"],
-        false,
-    )?;
-    collect_named_artifact(
-        &mut artifacts,
-        root,
-        hap.as_ref(),
-        "loader.json",
-        None,
-        &["intermediates/loader"],
-        false,
-    )?;
-    collect_named_artifact(
-        &mut artifacts,
-        root,
-        hap.as_ref(),
-        "modules.abc",
-        Some("ets/modules.abc"),
-        &["intermediates/ets", "intermediates/loader_out"],
-        true,
-    )?;
-    collect_named_artifact(
-        &mut artifacts,
-        root,
-        hap.as_ref(),
-        "sourceMaps.map",
-        Some("ets/sourceMaps.map"),
-        &["intermediates/source_map", "intermediates/loader_out"],
-        false,
-    )?;
+    match artifact_type {
+        ArtifactType::Hap | ArtifactType::Hsp => {
+            collect_named_artifact(
+                &mut artifacts,
+                root,
+                archive.as_ref(),
+                "module.json",
+                Some("module.json"),
+                &[
+                    "intermediates/package",
+                    "intermediates/res",
+                    "intermediates/process_profile",
+                ],
+                false,
+            )?;
+            collect_named_artifact(
+                &mut artifacts,
+                root,
+                archive.as_ref(),
+                "pack.info",
+                Some("pack.info"),
+                &["outputs", "build/default"],
+                false,
+            )?;
+            collect_named_artifact(
+                &mut artifacts,
+                root,
+                archive.as_ref(),
+                "pkgContextInfo.json",
+                Some("pkgContextInfo.json"),
+                &["pkgContextInfo", "outputs", "build/default"],
+                false,
+            )?;
+            collect_named_artifact(
+                &mut artifacts,
+                root,
+                archive.as_ref(),
+                "loader.json",
+                None,
+                &["intermediates/loader"],
+                false,
+            )?;
+            collect_named_artifact(
+                &mut artifacts,
+                root,
+                archive.as_ref(),
+                "modules.abc",
+                Some("ets/modules.abc"),
+                &["intermediates/ets", "intermediates/loader_out"],
+                true,
+            )?;
+            collect_named_artifact(
+                &mut artifacts,
+                root,
+                archive.as_ref(),
+                "sourceMaps.map",
+                Some("ets/sourceMaps.map"),
+                &["intermediates/source_map", "intermediates/loader_out"],
+                false,
+            )?;
+        }
+        ArtifactType::Har => {
+            // HAR archives contain oh-package.json5, source ETS files, and optionally index.abc
+            collect_named_artifact(
+                &mut artifacts,
+                root,
+                archive.as_ref(),
+                "oh-package.json5",
+                Some("oh-package.json5"),
+                &["outputs/har", "build/default/outputs"],
+                false,
+            )?;
+            collect_named_artifact(
+                &mut artifacts,
+                root,
+                archive.as_ref(),
+                "loader.json",
+                None,
+                &["intermediates/loader"],
+                false,
+            )?;
+            // Bytecode HAR: index.abc at archive root; source HAR may omit it
+            collect_named_artifact(
+                &mut artifacts,
+                root,
+                archive.as_ref(),
+                "index.abc",
+                Some("index.abc"),
+                &["intermediates/ets", "intermediates/loader_out"],
+                true,
+            )?;
+            collect_named_artifact(
+                &mut artifacts,
+                root,
+                archive.as_ref(),
+                "sourceMaps.map",
+                Some("sourceMaps.map"),
+                &["intermediates/source_map", "intermediates/loader_out"],
+                false,
+            )?;
+        }
+    }
 
     Ok(BuildSnapshot {
         tool: tool.to_string(),
         root: root.to_path_buf(),
         command,
-        hap,
+        archive,
         artifacts,
         build_files: collect_build_default_files(root)?,
         loader_out_js: collect_loader_out_js(root)?,
     })
 }
 
-fn find_hap(root: &Path, tool: &str) -> Option<PathBuf> {
-    let mut haps = WalkDir::new(root)
+fn find_archive(root: &Path, ext: &str, tool: &str) -> Option<PathBuf> {
+    let mut archives = WalkDir::new(root)
         .into_iter()
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_file())
-        .filter(|entry| entry.path().extension().and_then(OsStr::to_str) == Some("hap"))
+        .filter(|entry| entry.path().extension().and_then(OsStr::to_str) == Some(ext))
         .map(|entry| entry.path().to_path_buf())
         .collect::<Vec<_>>();
 
-    haps.sort_by(|a, b| {
-        let a_score = hap_priority(root, a, tool);
-        let b_score = hap_priority(root, b, tool);
+    archives.sort_by(|a, b| {
+        let a_score = archive_priority(root, a, tool, ext);
+        let b_score = archive_priority(root, b, tool, ext);
         a_score.cmp(&b_score).then_with(|| a.cmp(b))
     });
-    haps.into_iter().next()
+    archives.into_iter().next()
 }
 
-fn hap_priority(root: &Path, path: &Path, tool: &str) -> u8 {
+fn archive_priority(root: &Path, path: &Path, tool: &str, ext: &str) -> u8 {
     let rel = path.strip_prefix(root).unwrap_or(path).to_string_lossy();
-    if tool == "arkdown" && rel == "build/default/outputs/default/entry.hap" {
+    let canonical = format!("build/default/outputs/default/entry.{ext}");
+    if tool == "arkdown" && rel == canonical {
         return 0;
     }
-    if rel.contains("-signed.") || rel.ends_with("signed.hap") {
+    if rel.contains("-signed.") || rel.ends_with("signed.hap") || rel.ends_with("signed.hsp") {
         return 1;
     }
-    if rel == "build/default/outputs/default/entry.hap" {
+    if rel == canonical {
+        return 2;
+    }
+    // HAR is typically in outputs/har/
+    let har_canonical = format!("build/default/outputs/har/entry.{ext}");
+    if rel == har_canonical {
         return 2;
     }
     if rel.contains("unsigned") {
@@ -435,7 +581,7 @@ fn hap_priority(root: &Path, path: &Path, tool: &str) -> u8 {
 }
 
 #[derive(Clone)]
-struct HapSnapshot {
+struct ArchiveSnapshot {
     path: PathBuf,
     entries: BTreeMap<String, ZipEntrySnapshot>,
     contents: BTreeMap<String, Vec<u8>>,
@@ -448,7 +594,7 @@ struct ZipEntrySnapshot {
     content_hash: String,
 }
 
-impl HapSnapshot {
+impl ArchiveSnapshot {
     fn to_json(&self) -> Value {
         let entries = self
             .entries
@@ -473,7 +619,10 @@ impl HapSnapshot {
     }
 }
 
-fn read_hap_snapshot(path: &Path, root: &Path) -> Result<HapSnapshot, Box<dyn std::error::Error>> {
+fn read_archive_snapshot(
+    path: &Path,
+    root: &Path,
+) -> Result<ArchiveSnapshot, Box<dyn std::error::Error>> {
     let file = fs::File::open(path)?;
     let mut archive = ZipArchive::new(file)?;
     let mut entries = BTreeMap::new();
@@ -507,7 +656,7 @@ fn read_hap_snapshot(path: &Path, root: &Path) -> Result<HapSnapshot, Box<dyn st
         contents.insert(file.name().to_string(), bytes);
     }
 
-    Ok(HapSnapshot {
+    Ok(ArchiveSnapshot {
         path: path.to_path_buf(),
         entries,
         contents,
@@ -517,18 +666,18 @@ fn read_hap_snapshot(path: &Path, root: &Path) -> Result<HapSnapshot, Box<dyn st
 fn collect_named_artifact(
     artifacts: &mut BTreeMap<String, ArtifactSnapshot>,
     root: &Path,
-    hap: Option<&HapSnapshot>,
+    archive: Option<&ArchiveSnapshot>,
     artifact_name: &str,
-    hap_entry: Option<&str>,
+    archive_entry: Option<&str>,
     preferred_path_fragments: &[&str],
     binary: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if let (Some(hap), Some(entry_name)) = (hap, hap_entry) {
-        if let Some(bytes) = hap.contents.get(entry_name) {
+    if let (Some(archive), Some(entry_name)) = (archive, archive_entry) {
+        if let Some(bytes) = archive.contents.get(entry_name) {
             artifacts.insert(
                 artifact_name.to_string(),
                 ArtifactSnapshot::from_bytes(
-                    format!("hap:{entry_name}"),
+                    format!("archive:{entry_name}"),
                     bytes.clone(),
                     root,
                     binary,
@@ -804,7 +953,7 @@ fn compare_builds(left: &BuildSnapshot, right: &BuildSnapshot) -> Vec<Value> {
 
     compare_command(&mut diffs, "hvigor", &left.command);
     compare_command(&mut diffs, "arkdown", &right.command);
-    compare_hap_entries(&mut diffs, left.hap.as_ref(), right.hap.as_ref());
+    compare_archive_entries(&mut diffs, left.archive.as_ref(), right.archive.as_ref());
     compare_artifact_maps(&mut diffs, "artifacts", &left.artifacts, &right.artifacts);
     compare_artifact_maps(
         &mut diffs,
@@ -836,10 +985,10 @@ fn compare_command(diffs: &mut Vec<Value>, tool: &str, command: &CommandReport) 
     }
 }
 
-fn compare_hap_entries(
+fn compare_archive_entries(
     diffs: &mut Vec<Value>,
-    left: Option<&HapSnapshot>,
-    right: Option<&HapSnapshot>,
+    left: Option<&ArchiveSnapshot>,
+    right: Option<&ArchiveSnapshot>,
 ) {
     match (left, right) {
         (Some(left), Some(right)) => {
@@ -876,7 +1025,7 @@ fn compare_hap_entries(
 
             if !left_only.is_empty() || !right_only.is_empty() || !changed.is_empty() {
                 diffs.push(json!({
-                    "scope": "hap_entries",
+                    "scope": "archive_entries",
                     "equal": false,
                     "left_only": left_only,
                     "right_only": right_only,
@@ -885,17 +1034,17 @@ fn compare_hap_entries(
             }
         }
         (None, Some(_)) => diffs.push(json!({
-            "scope": "hap_entries",
+            "scope": "archive_entries",
             "equal": false,
             "left_missing": true,
         })),
         (Some(_), None) => diffs.push(json!({
-            "scope": "hap_entries",
+            "scope": "archive_entries",
             "equal": false,
             "right_missing": true,
         })),
         (None, None) => diffs.push(json!({
-            "scope": "hap_entries",
+            "scope": "archive_entries",
             "equal": false,
             "left_missing": true,
             "right_missing": true,
