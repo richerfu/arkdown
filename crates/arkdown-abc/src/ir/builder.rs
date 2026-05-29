@@ -2030,6 +2030,9 @@ impl<'a> CodeGen<'a> {
             Expression::ChainExpression(chain) => {
                 self.emit_chain_expr(chain);
             }
+            Expression::ArrayExpression(arr) => {
+                self.emit_array_expr(arr);
+            }
             _ => {
                 self.push(Insn::LdUndefined);
             }
@@ -2175,6 +2178,40 @@ impl<'a> CodeGen<'a> {
                 self.push(Insn::LdUndefined);
             }
         }
+    }
+
+    // ── Array literal: [a, ...b, c] ───────────────────────────────────────────
+
+    fn emit_array_expr(&mut self, arr: &oxc_ast::ast::ArrayExpression<'_>) {
+        self.push(Insn::CreateEmptyArray(0));
+        if arr.elements.is_empty() {
+            return;
+        }
+        let arr_reg = self.alloc_reg();
+        self.push(Insn::Sta(arr_reg));
+        let mut idx: u16 = 0;
+        for elem in &arr.elements {
+            match elem {
+                oxc_ast::ast::ArrayExpressionElement::SpreadElement(spread) => {
+                    self.emit_expr(&spread.argument);
+                    self.push(Insn::StOwnByIndex(0, arr_reg, idx));
+                    idx += 1;
+                }
+                oxc_ast::ast::ArrayExpressionElement::Elision(_) => {
+                    idx += 1;
+                }
+                _ => {
+                    if let Some(expr) = elem.as_expression() {
+                        self.emit_expr(expr);
+                    } else {
+                        self.push(Insn::LdUndefined);
+                    }
+                    self.push(Insn::StOwnByIndex(0, arr_reg, idx));
+                    idx += 1;
+                }
+            }
+        }
+        self.push(Insn::Lda(arr_reg));
     }
 
     // ── Object literal: { key: value, … } ────────────────────────────────────
