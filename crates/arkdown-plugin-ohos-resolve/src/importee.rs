@@ -316,7 +316,9 @@ mod tests {
         assert!(is_external_specifier("@ohos/hyperium"));
         assert!(is_external_specifier("@kit.AbilityKit"));
         assert!(is_external_specifier("@bundle:com.foo/bar/index"));
-        assert!(!is_external_specifier("/project/entry/src/main/ets/utils.ets"));
+        assert!(!is_external_specifier(
+            "/project/entry/src/main/ets/utils.ets"
+        ));
         assert!(!is_external_specifier("./utils.ets"));
     }
 
@@ -356,9 +358,7 @@ mod tests {
         assert!(result.compiled_importees.is_empty());
 
         // Cache file should still be written.
-        let cache_path = tmp
-            .path()
-            .join("importee/default/entry/importee.json");
+        let cache_path = tmp.path().join("importee/default/entry/importee.json");
         assert!(cache_path.exists());
         let content = std::fs::read_to_string(&cache_path).unwrap();
         let parsed: ImporteeCache = serde_json::from_str(&content).unwrap();
@@ -436,8 +436,7 @@ mod tests {
         entry_chunk.is_entry = true;
         // facade_module_id is an external OHM URL — must be excluded from
         // compiled_importees.
-        entry_chunk.facade_module_id =
-            Some("@bundle:com.example.har/lib/index".to_string());
+        entry_chunk.facade_module_id = Some("@bundle:com.example.har/lib/index".to_string());
 
         let graph = make_chunk_graph(vec![entry_chunk]);
         let result = process_importees(&graph, &config).unwrap();
@@ -494,9 +493,7 @@ mod tests {
         let graph = make_chunk_graph(vec![entry_chunk, utils_chunk]);
         process_importees(&graph, &config).unwrap();
 
-        let cache_path = tmp
-            .path()
-            .join("importee/default/entry/importee.json");
+        let cache_path = tmp.path().join("importee/default/entry/importee.json");
         let content = std::fs::read_to_string(&cache_path).unwrap();
         let parsed: ImporteeCache = serde_json::from_str(&content).unwrap();
         assert_eq!(

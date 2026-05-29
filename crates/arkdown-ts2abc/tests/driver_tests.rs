@@ -79,7 +79,8 @@ fn check_minimal_hap_num_lit() {
         inputs: vec![
             Ts2abcInput {
                 path: ea_js,
-                record_name: "com.example.arkdown.test/entry/ets/entryability/EntryAbility".to_string(),
+                record_name: "com.example.arkdown.test/entry/ets/entryability/EntryAbility"
+                    .to_string(),
                 source_file: Some("entry/src/main/ets/entryability/EntryAbility.ts".to_string()),
             },
             Ts2abcInput {
@@ -97,17 +98,26 @@ fn check_minimal_hap_num_lit() {
         module: true,
         commonjs: false,
         cache_file: None,
-    }).unwrap();
+    })
+    .unwrap();
     let data = std::fs::read(&out).unwrap();
     let num_lit = u32::from_le_bytes(data[0x2C..0x30].try_into().unwrap());
     let lit_idx = u32::from_le_bytes(data[0x30..0x34].try_into().unwrap()) as usize;
     eprintln!("num_lit={num_lit} size={}", data.len());
     let mut counts = vec![];
     for i in 0..num_lit as usize {
-        let off = u32::from_le_bytes(data[lit_idx+i*4..lit_idx+i*4+4].try_into().unwrap()) as usize;
-        let count = u32::from_le_bytes(data[off..off+4].try_into().unwrap());
+        let off = u32::from_le_bytes(
+            data[lit_idx + i * 4..lit_idx + i * 4 + 4]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        let count = u32::from_le_bytes(data[off..off + 4].try_into().unwrap());
         counts.push(count);
         eprintln!("  LIT[{i}] count={count}");
     }
-    assert_eq!(num_lit, 10, "expected 10 literal arrays (target: {}, got {})", 10, num_lit);
+    assert_eq!(
+        num_lit, 10,
+        "expected 10 literal arrays (target: {}, got {})",
+        10, num_lit
+    );
 }
