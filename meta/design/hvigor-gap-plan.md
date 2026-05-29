@@ -53,10 +53,11 @@ and release-mode terser/minification when applicable.
 - Phase 2 (ETS transform): ✅ @Prop, @Link, @ObjectLink, @Provide, @Consume, @Watch, @BuilderParam
 - Phase 3 (bundler): ✅ clean ESM, @ohos: external, treeshake off for debug
 - Phase 4 (importee): ✅ process_importees() ports hvigor process-importee.js
-- Phase 5 (ABC): 🔄 modules.abc 7573B vs hvigor 9844B (76.9% parity — bug fixes removed spurious bytes; structural gap now clear).
-  New: spread-call lowering (callrange/callthisrange), rest params (copyrestargs 0xA1),
-  class instance field initializers (stobjbyname in constructor), async function prologue
-  (asyncfunctionenter 0xBB + asyncfunctionresolve 0xBC). 6 new tests added (51 total pass).
+- Phase 5 (ABC): 🔄 modules.abc 8675B vs hvigor 9844B (88.1% parity — structural fixes applied).
+  Changes: LNP index moved to file end (matching hvigor layout), OHM URL method names restored,
+  field name string deduplication across classes, method index reordered to
+  [strings | methods | literal_arrays] matching hvigor. 51 abc tests pass.
+  Remaining gap (1169B): LNP body content density (~737B) + method index ordering differences.
 - Phase 6 (packaging): ✅ HAP zip identical to hvigor (11 entries)
 
 **Parity (minimal-hap, 2026-05-29) — see `meta/design/parity-report-minimal-hap.md`:**
@@ -66,13 +67,12 @@ and release-mode terser/minification when applicable.
   `startWindowIconId`, `startWindowBackgroundId` in abilities/app). Root cause: `arkdown-resource`
   does not yet write resolved IDs back into merged module.json; `virtualMachine` not injected
   from SDK metadata.
-- `ets/modules.abc`: 🔄 76.9% by size (7573B vs 9844B; gap 2271B — spurious bytes removed). ✅ Literal arrays,
-  method records, class method OHM names match hvigor. Known gaps:
-  1. **BUG**: absolute filesystem path (`/Users/.../pages/Index`) leaks into StringItems.
-  2. **func_main_0 naming**: stored as full OHM-prefixed name instead of bare `func_main_0`.
-  3. **LNP density**: 58B/LNP vs hvigor 105B/LNP (per-statement vs per-instruction ADVANCE).
-  4. **Duplicate annotation strings**: `pkgName@entry` etc. appear twice vs once in golden.
-  5. **External module ref format**: `@native.ohos.app` vs golden `L@ohos.app;` descriptor.
+- `ets/modules.abc`: 🔄 88.1% by size (8675B vs 9844B; gap 1169B). ✅ Literal arrays,
+  method records, class method OHM names match hvigor. ✅ LNP index at file end. ✅ Field name
+  string deduplication. ✅ Method index ordering [strings | methods | lits]. Known gaps:
+  1. **LNP body density**: 81B/LNP vs hvigor 113B/LNP (per-statement vs per-instruction ADVANCE).
+  2. **Method index count**: 98 vs 77 (we have extra entries due to per-class string dedup).
+  3. **BUG**: absolute filesystem path (`/Users/.../pages/Index`) leaks into StringItems.
 - `ets/sourceMaps.map`: 🔄 ~80% structural match. Keys and sources arrays identical.
   EntryAbility VLQ density: 329 chars vs 910 in golden (per-statement vs per-token maps).
   Index.ts VLQ: 381 chars vs 366 (close match).
@@ -86,7 +86,7 @@ and release-mode terser/minification when applicable.
 | Rollup/rolldown options  | ✅ **Fixed (2026-05-28)**: Clean ESM output, `@ohos:` imports external, treeshake disabled for debug. **IIFE/CJS compatibility paths removed** from both bundler and ABC compiler. | Release treeshake, `manualChunks` for `supportChunks`, ByteCode HAR/HSP externals. |
 | ByteCode HAR importees   | ✅ **Fixed (2026-05-29)**: `process_importees()` ports `process-importee.js`. BFS from entry chunks, OHM URL generation, importee.json cache written. `nonEntryImportees` in loader.json. | ByteCode HAR compilation flow (requires HAR input fixture). |
 | module.json merge        | 🔄 **Partial**: structural merge correct. Missing: `virtualMachine`, `compileMode`, `dependencies` fields; 8 resource integer IDs (`iconId`, `labelId`, `descriptionId`, `startWindowIconId`, `startWindowBackgroundId`). | Write resolved resource IDs from `arkdown-resource` back into profile. Inject `virtualMachine` from SDK metadata. |
-| ABC compiler             | 🔄 **Improved**: 76.9% parity (7573B vs 9844B after bug fixes — spurious bytes removed). Known remaining gaps: (1) absolute fs path leaks into StringItems [BUG]; (2) `func_main_0` stored with full OHM prefix instead of bare name; (3) per-instruction LNP ADVANCE density (58B vs 105B/LNP); (4) duplicate annotation strings; (5) external module ref format (`@native.ohos.app` vs `L@ohos.app;`). **New (2026-05-29)**: spread args → callrange/callthisrange; rest params → copyrestargs (0xA1); class instance field initializers → stobjbyname in constructor; async function → asyncfunctionenter (0xBB) + asyncfunctionresolve (0xBC). | See parity-report-minimal-hap.md §5 for complete string diff. |
+| ABC compiler             | 🔄 **Improved**: 88.1% parity (8675B vs 9844B). **Phase 5 structural fixes**: LNP index moved to file end, OHM URL method names, field name dedup, method index reordered [strings\|methods\|lits]. Known gaps: (1) LNP body density 81B vs 113B/LNP; (2) method index 98 vs 77 entries; (3) absolute fs path in StringItems. | See parity-report-minimal-hap.md §5 for complete string diff. |
 | Obfuscation/minification | `arkdown-obfuscate` exists but not wired in.                                                                                                                                           | hvigor release builds run SDK obfuscation + terser before ABC.                          |
 | Incremental cache        | `arkdown-cache` exists but not wired in.                                                                                                                                               | hvigor rollup msgpack cache + es2abc `--cache-file` support.                            |
 | Source maps/debug        | 🔄 Per-statement source maps. sourceMaps.map 1281B vs 1847B golden. Keys and sources arrays match 100%. Index.ts mapping close (381 vs 366 chars). EntryAbility 2.8× short (329 vs 910). | Per-token source map granularity to match tsc/ets-loader output. Low priority until Phase 2 complete. |

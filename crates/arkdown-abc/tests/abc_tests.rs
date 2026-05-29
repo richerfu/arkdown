@@ -1059,11 +1059,12 @@ registerNamedRoute(() => new Index(void 0, {}), "", {bundleName: "x"});
     assert!(bytes.starts_with(b"PANDA\0\0\0"));
     let sz = bytes.len();
     eprintln!("[parity] debug two-module ABC = {sz}B / 9844B hvigor ({:.0}%)", sz as f64 / 9844.0 * 100.0);
-    // Baseline without per-instruction LNP was 6670B.  Per-instruction tracking
-    // adds ~211B for these test sources.  This threshold prevents LNP regressions.
+    // Phase 5 parity baseline: LNP index moved to file end + OHM URL method names +
+    // field name deduplication raised parity from 76.9% (7573B) to 88.1% (8675B).
+    // Remaining gap: LNP body content (~737B) + method index ordering (~432B).
     assert!(
-        sz > 5500,
-        "debug-info two-module compile must exceed 5500B (per-instruction LNP regression guard), got {sz}B"
+        sz > 6500,
+        "debug-info two-module compile must exceed 6500B (Phase 5 parity regression guard), got {sz}B"
     );
 }
 

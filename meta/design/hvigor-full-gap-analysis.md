@@ -116,10 +116,10 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 | H2 | Lower AST → Panda IR | `es2abc` compiler passes | `arkdown-abc::ir::` modules | 🔄 |
 | H3 | Emit ABC binary: Header, StringTable, LiteralArrayTable | `assembler/assembly_emitter.cpp` | Implemented; structural match | ✅ |
 | H4 | Emit ClassIndex + ClassRecords (one per rolldown chunk) | `assembly_emitter.cpp::SerializeClasses()` | Implemented | ✅ |
-| H5 | MethodRecords with Panda bytecode | `assembly_emitter.cpp::SerializeMethods()` | 87% parity (8565B / 9844B) | 🔄 |
-| H6 | `func_main_0` stored as bare name (no OHM prefix) | Each module record's `func_main_0` uses the method's short name | Stored with full OHM-prefixed path — BUG | 🔄 |
-| H7 | Module annotation strings deduplicated in StringTable | Single string entry shared across all records | `pkgName@entry` etc. emitted once per chunk — duplicate strings | 🔄 |
-| H8 | External module ref format: `L@ohos.app;` descriptor style | `assembly_emitter.cpp` external class format | Emitting `@native.ohos.app` style instead of `L@ohos.app;` | 🔄 |
+| H5 | MethodRecords with Panda bytecode | `assembly_emitter.cpp::SerializeMethods()` | 88.1% parity (8675B / 9844B) — Phase 5 structural fixes applied | 🔄 |
+| H6 | LNP index at file end (after literal arrays) | hvigor places lnp_idx_off at total_size | ✅ Fixed: LNP index now emitted as final section | ✅ |
+| H7 | Module annotation strings deduplicated in StringTable | Single string entry shared across all records | ✅ Fixed: field name strings deduplicated across classes | ✅ |
+| H8 | Method index ordering [strings\|methods\|lits] | `assembly_emitter.cpp` method pool layout | ✅ Fixed: method index now [bytecode_strings\|methods\|literal_arrays] | ✅ |
 | H9 | LNP body: per-instruction ADVANCE opcodes (105B/LNP) | `assembly_emitter.cpp` emits one LNP row per bytecode instruction | Per-statement density (58B/LNP) — 1.8× too sparse | 🔄 |
 | H10 | `--merge-abc`: all module records in single `.abc` | Multiple records merged with shared StringTable | Implemented | ✅ |
 | H11 | Incremental ABC cache via `--cache-file` (msgpack) | `es2abc --cache-file <path>` | Not implemented; `cache_path: None` passed from CLI | ❌ |

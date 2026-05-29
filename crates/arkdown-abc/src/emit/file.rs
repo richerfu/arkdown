@@ -302,21 +302,20 @@ impl AbcFile {
             .flat_map(|class| class.methods.iter())
             .filter(|method| method.debug_info.is_some())
             .count() as u32;
-        let lnp_idx_off = if num_lnp == 0 {
-            0
-        } else {
-            class_idx_off + total_classes * 4
-        };
 
+        // hvigor places the LNP index at the very end of the file (after the literal-array
+        // section), not between the class index and literal-array index.  We match that layout
+        // so `lnp_idx_off` is patched into the header after `total_size` is known.
         let num_literal_arrays = self.literal_arrays.len() as u32;
         let literalarray_idx_off = if num_literal_arrays == 0 {
             0
         } else {
-            class_idx_off + total_classes * 4 + num_lnp * 4
+            // Literal-array index follows the class index immediately.
+            class_idx_off + total_classes * 4
         };
 
-        // IndexSection is placed after the class index and literal-array index.
-        let idx_sect_off = class_idx_off + total_classes * 4 + num_lnp * 4 + num_literal_arrays * 4;
+        // IndexSection is placed after the class index and literal-array index (no LNP gap).
+        let idx_sect_off = class_idx_off + total_classes * 4 + num_literal_arrays * 4;
         let index_class_count = 2 + 1 + self.records.len() as u32 + sdk_stubs.len() as u32;
         let index_header_size: u32 = 40;
         let index_class_idx_off = idx_sect_off + index_header_size;
@@ -333,15 +332,33 @@ impl AbcFile {
         // Build the class-OHM-URL prefix (strip "L" prefix and ";" suffix).
         // hvigor stores full-path method strings: "<OHM_URL>.<method_short_name>"
         // e.g. "com.example.app/entry/ets/pages/Index.#~@0>#initialRender"
+        let class_ohm_urls: Vec<String> = all_classes
+            .iter()
+            .map(|c| {
+                c.name
+                    .strip_prefix('L')
+                    .and_then(|s| s.strip_suffix(';'))
+                    .unwrap_or(&c.name)
+                    .to_string()
+            })
+            .collect();
+
         let mut cur = string_section_start;
-        for class in all_classes.iter() {
+        for (class_idx, class) in all_classes.iter().enumerate() {
             let mut class_offsets = Vec::new();
             let mut class_strings = Vec::new();
+            let ohm_url = &class_ohm_urls[class_idx];
             for method in &class.methods {
                 class_offsets.push(cur);
-                // hvigor stores bare method names (e.g. "func_main_0", "#~@0>#onCreate")
-                // without any OHM URL prefix.  Do NOT prepend the class record name.
-                let s = inline_string(&method.name);
+                // Full path: "<OHM_URL>.<method_short_name>" for user classes (those
+                // whose OHM URL contains '/').  SDK stubs and annotation stubs use
+                // the bare short name so their MethodItems stay compact.
+                let full_name = if ohm_url.contains('/') {
+                    format!("{ohm_url}.{}", method.name)
+                } else {
+                    method.name.clone()
+                };
+                let s = inline_string(&full_name);
                 cur += s.len() as u32;
                 class_strings.push(s);
             }
@@ -352,23 +369,29 @@ impl AbcFile {
         // ── 1b. Compute field StringItem offsets ──────────────────────────────
         //
         // Field name strings (e.g. "pkgName@", "isCommonjs", …) are emitted as
-        // standalone StringItems immediately after the method-name strings.
-        // Their file offsets are passed to `serialize_class_item()` so the
-        // FieldItem `name_off` fields point to the correct bytes.
+        // standalone StringItems referenced by FieldItem `name_off`.  Multiple
+        // classes share the same field names (both user classes have the same 6
+        // module-metadata fields), so we deduplicate them to avoid emitting
+        // duplicate StringItems for identical names.
         let mut field_name_string_offsets: Vec<Vec<u32>> = Vec::new();
-        let mut all_field_name_strings: Vec<Vec<Vec<u8>>> = Vec::new();
+        let mut field_name_dedup: std::collections::HashMap<String, u32> =
+            std::collections::HashMap::new();
+        let mut all_field_name_strings: Vec<Vec<u8>> = Vec::new();
 
         for class in &all_classes {
             let mut f_offsets = Vec::new();
-            let mut f_strings = Vec::new();
             for field in &class.fields {
-                f_offsets.push(cur);
-                let s = inline_string(&field.name);
-                cur += s.len() as u32;
-                f_strings.push(s);
+                if let Some(&existing_off) = field_name_dedup.get(&field.name) {
+                    f_offsets.push(existing_off);
+                } else {
+                    let s = inline_string(&field.name);
+                    field_name_dedup.insert(field.name.clone(), cur);
+                    f_offsets.push(cur);
+                    cur += s.len() as u32;
+                    all_field_name_strings.push(s);
+                }
             }
             field_name_string_offsets.push(f_offsets);
-            all_field_name_strings.push(f_strings);
         }
 
         // ── 1c. Compute source-file StringItem offsets ───────────────────────
@@ -534,7 +557,9 @@ impl AbcFile {
         let mut all_code_items: Vec<Vec<Vec<u8>>> = Vec::new();
 
         let mut code_cur = code_section_start;
-        let mut method_pool_cursor = self.strings.len() as u16 + self.literal_arrays.len() as u16;
+        // Method index ordering: [bytecode_strings | methods | literal_arrays].
+        // Methods therefore start at index strings.len() in the method pool.
+        let mut method_pool_cursor = self.strings.len() as u16;
         for class in &all_classes {
             let mut class_code_offs = Vec::new();
             let mut class_code_items = Vec::new();
@@ -550,9 +575,12 @@ impl AbcFile {
             let mut definefunc_pool_cursor = class_method_pool_start.saturating_add(1);
             for method in &class.methods {
                 class_code_offs.push(code_cur);
+                // Literal-arrays follow all methods in the index: base = strings + total_methods.
+                let literal_pool_base =
+                    (self.strings.len() as u16).saturating_add(total_methods as u16);
                 let bytecode = patch_bytecode_index_operands(
                     &method.bytecode,
-                    self.strings.len() as u16,
+                    literal_pool_base,
                     ctor_pool_index,
                     class_method_pool_end,
                     &mut definefunc_pool_cursor,
@@ -753,11 +781,13 @@ impl AbcFile {
         let total_size = post_lnp_offset + lit_arr_section.len() as u32;
 
         let mut method_index_offsets = Vec::with_capacity(method_index_count as usize);
+        // Method index ordering matches hvigor: [bytecode_strings | methods | literal_arrays].
+        // Bytecode imm16 operands use: strings 0..N-1, methods N..N+M-1, lit_arrays N+M..end.
         method_index_offsets.extend(bytecode_string_offsets.iter().copied());
-        method_index_offsets.extend(literal_array_offsets.iter().copied());
         for (class, &class_off) in all_classes.iter().zip(class_item_offsets.iter()) {
             method_index_offsets.extend(class.method_item_offsets(class_off));
         }
+        method_index_offsets.extend(literal_array_offsets.iter().copied());
         debug_assert_eq!(method_index_offsets.len() as u32, method_index_count);
 
         // ── IndexSection values (computed before emission) ────────────────────
@@ -799,7 +829,12 @@ impl AbcFile {
         }
 
         // ── 5. Assemble the file ──────────────────────────────────────────────
-        let mut file: Vec<u8> = Vec::with_capacity(total_size as usize + 4);
+        // LNP index is placed at the end of the file (after literal arrays), so the actual
+        // file size is total_size + num_lnp * 4.  `total_size` == `lnp_idx_off`.
+        let lnp_idx_off = if num_lnp == 0 { 0 } else { total_size };
+        let final_size = total_size + num_lnp * 4;
+
+        let mut file: Vec<u8> = Vec::with_capacity(final_size as usize + 4);
 
         // ── Header (60 bytes = 0x3C) ──────────────────────────────────────────
         file.extend_from_slice(&MAGIC); // 0x00 magic[8]
@@ -811,7 +846,7 @@ impl AbcFile {
         file.extend_from_slice(&total_classes.to_le_bytes()); // 0x1C num_classes
         file.extend_from_slice(&class_idx_off.to_le_bytes()); // 0x20 class_idx_off = 0x3C
         file.extend_from_slice(&num_lnp.to_le_bytes()); // 0x24 num_lnp
-        file.extend_from_slice(&lnp_idx_off.to_le_bytes()); // 0x28 lnp_idx_off
+        file.extend_from_slice(&lnp_idx_off.to_le_bytes()); // 0x28 lnp_idx_off (at file end)
         file.extend_from_slice(&num_literal_arrays.to_le_bytes()); // 0x2C num_literalarrays
         file.extend_from_slice(&literalarray_idx_off.to_le_bytes()); // 0x30 literalarray_idx_off
         file.extend_from_slice(&1u32.to_le_bytes()); // 0x34 num_idx_regions = 1
@@ -828,24 +863,13 @@ impl AbcFile {
         debug_assert_eq!(
             file.len() as u32,
             class_idx_off + total_classes * 4,
-            "class index must end exactly before the optional LNP index"
-        );
-
-        // ── LineNumberProgram index ─────────────────────────────────────────
-        for offset in &lnp_offsets {
-            file.extend_from_slice(&offset.to_le_bytes());
-        }
-        debug_assert_eq!(
-            file.len() as u32,
-            class_idx_off + total_classes * 4 + num_lnp * 4,
-            "LNP index must end exactly before the optional literal-array index"
+            "class index must end exactly before the literal-array index"
         );
 
         // ── LiteralArray index ───────────────────────────────────────────────
         //
-        // API 17 hvigor output stores a u32 file offset for each LiteralArray
-        // between the class index and IndexSection.  Leaving the old
-        // 0xFFFF_FFFF markers makes SDK ark_disasm reject the file.
+        // hvigor places the literal-array index immediately after the class index
+        // (no LNP index in between).  API 17 output stores one u32 file offset per array.
         for offset in &literal_array_offsets {
             file.extend_from_slice(&offset.to_le_bytes());
         }
@@ -858,10 +882,10 @@ impl AbcFile {
         // ── IndexSection ─────────────────────────────────────────────────────
         //
         // libpandafile expects a 40-byte IndexHeader followed by EntityId
-        // arrays.  The old 60-byte placeholder made class_idx/proto_idx
-        // resolution read into arbitrary bytes after the header.
+        // arrays.  The entity region spans from the first ClassItem to the end
+        // of the complete file (including the trailing LNP index).
         file.extend_from_slice(&first_class_off.to_le_bytes()); // start
-        file.extend_from_slice(&total_size.to_le_bytes()); // end
+        file.extend_from_slice(&final_size.to_le_bytes()); // end (full file including LNP idx)
         file.extend_from_slice(&index_class_count.to_le_bytes()); // class_idx_size
         file.extend_from_slice(&index_class_idx_off.to_le_bytes()); // class_idx_off
         file.extend_from_slice(&method_index_count.to_le_bytes()); // method_idx_size
@@ -892,13 +916,11 @@ impl AbcFile {
 
         // ── Field Name StringItems ────────────────────────────────────────────
         //
-        // Emit the field name string for each FieldRecord (e.g. "pkgName@",
-        // "isCommonjs", etc.) so that each FieldItem's `name_off` field can
-        // point to the correct byte offset in the file.
-        for class_field_strings in &all_field_name_strings {
-            for s in class_field_strings {
-                file.extend_from_slice(s);
-            }
+        // Emit deduplicated field name strings.  Multiple classes may share the
+        // same field names (e.g. all user classes have the same 6 module-metadata
+        // fields); we emit each unique name exactly once.
+        for s in &all_field_name_strings {
+            file.extend_from_slice(s);
         }
 
         // ── Source File StringItems ─────────────────────────────────────────
@@ -950,6 +972,15 @@ impl AbcFile {
         // ── LiteralArray section (after all CodeItems) ────────────────────────
         file.extend_from_slice(&lit_arr_section);
         debug_assert_eq!(file.len() as u32, total_size);
+
+        // ── LineNumberProgram index (at file end, after literal arrays) ────────
+        //
+        // hvigor places the LNP index as the final section of the file.  The
+        // `lnp_idx_off` header field points here (= `total_size`).
+        for offset in &lnp_offsets {
+            file.extend_from_slice(&offset.to_le_bytes());
+        }
+        debug_assert_eq!(file.len() as u32, final_size);
 
         // ── Patch file_size at offset 0x10 ────────────────────────────────────
         let file_size = file.len() as u32;
