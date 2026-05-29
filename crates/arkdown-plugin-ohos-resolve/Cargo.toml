@@ -6,9 +6,9 @@ edition = "2021"
 [dependencies]
 arkdown-core = { path = "../arkdown-core" }
 arkdown-resolver = { path = "../arkdown-resolver" }
-async-trait = { workspace = true }
-tokio = { workspace = true }
-thiserror = { workspace = true }
+rolldown_plugin = "1.0.3"
+rolldown_common = "1.0.3"
+anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

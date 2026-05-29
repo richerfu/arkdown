@@ -5,9 +5,10 @@ use std::sync::Arc;
 use arkdown::Bundler;
 use arkdown_config::{load_config, ConfigError};
 use arkdown_core::{
-    ArkdownConfig, ArkdownPlugin, BuildMode, BuildOption, ModuleConfig, ModuleJson5,
+    ArkdownConfig, BuildMode, BuildOption, ModuleConfig, ModuleJson5,
     OhosModuleType, OutputTarget, ProductConfig, SdkConfig, StrictModeConfig,
 };
+use rolldown_plugin::__inner::SharedPluginable;
 use arkdown_plugin_duplicate_check::DuplicateCheckPlugin;
 use arkdown_plugin_ets_transform::EtsTransformPlugin;
 use arkdown_plugin_json5::Json5Plugin;
@@ -130,9 +131,9 @@ async fn test_build_minimal_hap_fixture() {
 
     // ── 4. Plugins (same order as CLI build.rs) ──────────────────────────────
     let project_root = fixture.clone();
-    let plugins: Vec<Arc<dyn ArkdownPlugin>> = vec![
+    let plugins: Vec<SharedPluginable> = vec![
         // Must be first — desugars .ets decorators before any other plugin sees source.
-        Arc::new(EtsTransformPlugin::new(config_arc.clone())),
+        Arc::new(EtsTransformPlugin::new(config_arc.clone())) as SharedPluginable,
         // Maps specifiers to OHM URLs / local paths.
         Arc::new(OhosResolvePlugin::new(
             ResolverConfig {
@@ -150,16 +151,16 @@ async fn test_build_minimal_hap_fixture() {
             },
             project_root.clone(),
             false,
-        )),
+        )) as SharedPluginable,
         // Annotates each module with OHOS package metadata.
         Arc::new(ModuleMetaPlugin::new(
             project_root.clone(),
             module.name.clone(),
-        )),
+        )) as SharedPluginable,
         // JSON5 import support.
-        Arc::new(Json5Plugin),
+        Arc::new(Json5Plugin) as SharedPluginable,
         // Duplicate filename check.
-        Arc::new(DuplicateCheckPlugin),
+        Arc::new(DuplicateCheckPlugin) as SharedPluginable,
     ];
 
     // ── 5. Bundle ────────────────────────────────────────────────────────────

@@ -9,15 +9,17 @@ use clap::Args;
 use arkdown::Bundler;
 use arkdown_config::load_config;
 use arkdown_core::{
-    ArkdownConfig, ArkdownPlugin, BuildMode, ModuleConfig, ModuleJson5, ModuleJson5Module,
+    ArkdownConfig, BuildMode, ModuleConfig, ModuleJson5, ModuleJson5Module,
     OutputTarget,
 };
+use rolldown_plugin::__inner::SharedPluginable;
 use arkdown_pack::{HarPackInput, PackAbility, PackInput, Packager};
 use arkdown_plugin_duplicate_check::DuplicateCheckPlugin;
 use arkdown_plugin_ets_transform::EtsTransformPlugin;
 use arkdown_plugin_json5::Json5Plugin;
 use arkdown_plugin_module_meta::ModuleMetaPlugin;
 use arkdown_plugin_ohos_resolve::{process_importees, OhosResolvePlugin, ProcessImporteeConfig};
+use arkdown_plugin_router_map;
 use arkdown_profile::ProfileProcessor;
 use arkdown_resolver::ResolverConfig;
 use arkdown_resource::{ResourceCompileConfig, ResourceCompileInput, ResourceCompiler};
@@ -167,10 +169,21 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             }
         }
 
+        // Router-map cache invalidation check (before bundle).
+        let router_map_path = module
+            .src_path
+            .join("build/default/intermediates/router_map/default/loader-router-map.json");
+        let router_map_cache = module
+            .src_path
+            .join("build/default/intermediates/cache/router_map_hash.txt");
+        if arkdown_plugin_router_map::should_invalidate(&router_map_path, &router_map_cache) {
+            let _ = arkdown_plugin_router_map::update_cache(&router_map_path, &router_map_cache);
+        }
+
         // Bundling
-        let plugins: Vec<Arc<dyn ArkdownPlugin>> = vec![
+        let plugins: Vec<SharedPluginable> = vec![
             // 1. ETS transform — must be first, desugars .ets before any other plugin sees it
-            Arc::new(EtsTransformPlugin::new(config_arc.clone())),
+            Arc::new(EtsTransformPlugin::new(config_arc.clone())) as SharedPluginable,
             // 2. OHOS module resolver — maps specifiers to OHM URLs / local paths
             Arc::new(OhosResolvePlugin::new(
                 ResolverConfig {
@@ -200,16 +213,16 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                     .build_option
                     .strict_mode
                     .case_sensitive_check,
-            )),
+            )) as SharedPluginable,
             // 3. Module metadata — annotates each module with OHOS package context
             Arc::new(ModuleMetaPlugin::new(
                 project_root.clone(),
                 module.name.clone(),
-            )),
+            )) as SharedPluginable,
             // 4. JSON5 import support
-            Arc::new(Json5Plugin),
+            Arc::new(Json5Plugin) as SharedPluginable,
             // 5. Duplicate filename check
-            Arc::new(DuplicateCheckPlugin),
+            Arc::new(DuplicateCheckPlugin) as SharedPluginable,
         ];
         let bundler = Bundler::new((*config_arc).clone(), plugins);
         let bundle_out = bundler

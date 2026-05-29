@@ -152,7 +152,6 @@ dependencies = [
  "arkdown-plugin-ohos-resolve",
  "arkdown-profile",
  "arkdown-resolver",
- "async-trait",
  "fs-err",
  "index_vec",
  "json5",
@@ -216,6 +215,7 @@ dependencies = [
  "arkdown-plugin-json5",
  "arkdown-plugin-module-meta",
  "arkdown-plugin-ohos-resolve",
+ "arkdown-plugin-router-map",
  "arkdown-profile",
  "arkdown-resolver",
  "arkdown-resource",
@@ -224,6 +224,7 @@ dependencies = [
  "clap",
  "fs-err",
  "json5",
+ "rolldown_plugin",
  "serde_json",
  "tempfile",
  "tokio",
@@ -306,40 +307,37 @@ dependencies = [
 name = "arkdown-plugin-chunk-wrapper"
 version = "0.1.0"
 dependencies = [
- "arkdown-core",
- "async-trait",
+ "anyhow",
  "oxc_allocator 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
  "oxc_ast 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
  "oxc_parser 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
  "oxc_span 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
- "thiserror 2.0.18",
- "tokio",
+ "rolldown_plugin",
 ]
 
 [[package]]
 name = "arkdown-plugin-duplicate-check"
 version = "0.1.0"
 dependencies = [
- "arkdown-core",
- "async-trait",
- "index_vec",
- "rustc-hash",
- "thiserror 2.0.18",
- "tokio",
+ "anyhow",
+ "rolldown_common",
+ "rolldown_plugin",
 ]
 
 [[package]]
 name = "arkdown-plugin-ets-transform"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "arkdown-core",
- "async-trait",
  "oxc_allocator 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
  "oxc_ast 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
  "oxc_codegen 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
  "oxc_parser 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
  "oxc_span 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
  "regex",
+ "rolldown_plugin",
+ "rolldown_sourcemap",
  "thiserror 2.0.18",
  "tokio",
 ]
@@ -348,78 +346,74 @@ dependencies = [
 name = "arkdown-plugin-har-dedup"
 version = "0.1.0"
 dependencies = [
- "arkdown-core",
- "async-trait",
+ "anyhow",
  "fs-err",
+ "rolldown_common",
+ "rolldown_plugin",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
- "tokio",
 ]
 
 [[package]]
 name = "arkdown-plugin-json5"
 version = "0.1.0"
 dependencies = [
- "arkdown-core",
- "async-trait",
+ "anyhow",
  "fs-err",
  "json5",
+ "rolldown_common",
+ "rolldown_plugin",
  "serde_json",
  "tempfile",
- "thiserror 2.0.18",
- "tokio",
 ]
 
 [[package]]
 name = "arkdown-plugin-module-meta"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "arkdown-core",
- "async-trait",
  "fs-err",
  "json5",
+ "rolldown_common",
+ "rolldown_plugin",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
- "tokio",
 ]
 
 [[package]]
 name = "arkdown-plugin-ohos-resolve"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "arkdown-core",
  "arkdown-resolver",
- "async-trait",
  "index_vec",
+ "rolldown_common",
+ "rolldown_plugin",
  "rustc-hash",
  "serde",
  "serde_json",
  "tempfile",
- "thiserror 2.0.18",
- "tokio",
 ]
 
 [[package]]
 name = "arkdown-plugin-router-map"
 version = "0.1.0"
 dependencies = [
- "arkdown-core",
- "async-trait",
- "tokio",
+ "tempfile",
 ]
 
 [[package]]
 name = "arkdown-plugin-sensitive-check"
 version = "0.1.0"
 dependencies = [
- "arkdown-core",
- "async-trait",
- "thiserror 2.0.18",
- "tokio",
+ "anyhow",
+ "rolldown_plugin",
 ]
 
 [[package]]

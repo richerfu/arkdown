@@ -1,18 +1,27 @@
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arkdown_core::{
-    ArkdownPlugin, HookResolveIdArgs, HookResolveIdOutput, HookUsage, ModuleType,
-    OhosResolvedModule, PluginContext, PluginResult,
-};
+use arkdown_core::OhosResolvedModule;
 use arkdown_resolver::{OhosResolver, ResolverConfig};
-use async_trait::async_trait;
+use rolldown_common::ResolvedExternal;
+use rolldown_plugin::{
+    HookResolveIdArgs, HookResolveIdOutput, HookResolveIdReturn, HookUsage, Plugin, PluginContext,
+};
 
 pub struct OhosResolvePlugin {
     resolver: Arc<OhosResolver>,
     project_root: PathBuf,
     #[allow(dead_code)]
     case_sensitive: bool,
+}
+
+impl std::fmt::Debug for OhosResolvePlugin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OhosResolvePlugin")
+            .field("project_root", &self.project_root)
+            .finish_non_exhaustive()
+    }
 }
 
 impl OhosResolvePlugin {
@@ -27,97 +36,163 @@ impl OhosResolvePlugin {
             case_sensitive,
         }
     }
-}
 
-#[async_trait]
-impl ArkdownPlugin for OhosResolvePlugin {
-    fn name(&self) -> &str {
-        "ohos-resolve"
-    }
-
-    fn register_hook_usage(&self) -> HookUsage {
-        HookUsage::ResolveId
-    }
-
-    async fn resolve_id(
+    pub(crate) fn resolve_sync(
         &self,
-        _ctx: &PluginContext,
-        args: &HookResolveIdArgs<'_>,
-    ) -> PluginResult<Option<HookResolveIdOutput>> {
-        // SDK built-in modules that ArkRuntime provides natively must stay as
-        // ESM imports in the bundler output so es2abc sees normal import
-        // statements rather than CJS require() + interop helpers.
-        // The ETS kit-rewrite produces "@ohos:xxx" specifiers (colon); the
-        // resolver uses "@ohos/xxx" (slash).  Handle both forms here.
-        let s = args.specifier;
+        specifier: &str,
+        importer: Option<&str>,
+    ) -> anyhow::Result<Option<HookResolveIdOutput>> {
+        let s = specifier;
         if s.starts_with("@ohos:")
             || s.starts_with("@ohos/")
             || s.starts_with("@system.")
             || s.starts_with("@native:")
         {
             return Ok(Some(HookResolveIdOutput {
-                id: s.to_string(),
-                external: true,
-                module_type: ModuleType::Ts,
-                side_effects: None,
+                id: s.into(),
+                external: Some(ResolvedExternal::Bool(true)),
+                ..Default::default()
             }));
         }
 
-        let importer_path = args.importer.map(Path::new).unwrap_or(&self.project_root);
-
-        let resolved = match self.resolver.resolve(args.specifier, importer_path) {
-            Ok(r) => r,
-            Err(_) => return Ok(None), // let next plugin try
+        let importer_path_buf: PathBuf;
+        let importer_path: &Path = if let Some(imp) = importer {
+            importer_path_buf = PathBuf::from(imp);
+            &importer_path_buf
+        } else {
+            self.project_root.as_path()
         };
 
-        let result = match resolved {
+        let resolved = match self.resolver.resolve(specifier, importer_path) {
+            Ok(r) => r,
+            Err(_) => return Ok(None),
+        };
+
+        let output = match resolved {
             OhosResolvedModule::ExternalBundle { ohm_url } => HookResolveIdOutput {
-                id: ohm_url,
-                external: true,
-                module_type: ModuleType::Ts,
-                side_effects: None,
+                id: ohm_url.into(),
+                external: Some(ResolvedExternal::Bool(true)),
+                ..Default::default()
             },
             OhosResolvedModule::ExternalHsp {
                 bundle_name,
                 module_name,
                 entry_path,
             } => HookResolveIdOutput {
-                id: format!("@shared:{}/{}/{}", bundle_name, module_name, entry_path),
-                external: true,
-                module_type: ModuleType::Ts,
-                side_effects: None,
+                id: format!("@shared:{}/{}/{}", bundle_name, module_name, entry_path).into(),
+                external: Some(ResolvedExternal::Bool(true)),
+                ..Default::default()
             },
             OhosResolvedModule::SdkDeclaration { path, .. } => HookResolveIdOutput {
-                id: path.to_string_lossy().to_string(),
-                external: true,
-                module_type: ModuleType::Declaration,
-                side_effects: None,
+                id: path.to_string_lossy().as_ref().into(),
+                external: Some(ResolvedExternal::Bool(true)),
+                ..Default::default()
             },
             OhosResolvedModule::BytecodeHar { ohm_url, .. } => HookResolveIdOutput {
-                id: ohm_url,
-                external: true,
-                module_type: ModuleType::BytecodeHar,
-                side_effects: None,
+                id: ohm_url.into(),
+                external: Some(ResolvedExternal::Bool(true)),
+                ..Default::default()
             },
-            OhosResolvedModule::LocalSource {
-                path, module_type, ..
-            } => HookResolveIdOutput {
-                id: path.to_string_lossy().to_string(),
-                external: false,
-                module_type,
-                side_effects: None,
+            OhosResolvedModule::LocalSource { path, .. } => HookResolveIdOutput {
+                id: path.to_string_lossy().as_ref().into(),
+                external: None,
+                ..Default::default()
             },
-            OhosResolvedModule::RemotePackage {
-                path, module_type, ..
-            } => HookResolveIdOutput {
-                id: path.to_string_lossy().to_string(),
-                external: false,
-                module_type,
-                side_effects: None,
+            OhosResolvedModule::RemotePackage { path, .. } => HookResolveIdOutput {
+                id: path.to_string_lossy().as_ref().into(),
+                external: None,
+                ..Default::default()
             },
         };
 
-        Ok(Some(result))
+        Ok(Some(output))
+    }
+}
+
+impl Plugin for OhosResolvePlugin {
+    fn name(&self) -> Cow<'static, str> {
+        Cow::Borrowed("ohos-resolve")
+    }
+
+    fn register_hook_usage(&self) -> HookUsage {
+        HookUsage::ResolveId
+    }
+
+    fn resolve_id(
+        &self,
+        _ctx: &PluginContext,
+        args: &HookResolveIdArgs<'_>,
+    ) -> impl std::future::Future<Output = HookResolveIdReturn> + Send {
+        let specifier = args.specifier.to_owned();
+        let importer = args.importer.map(str::to_owned);
+        let resolver = Arc::clone(&self.resolver);
+        let project_root = self.project_root.clone();
+        async move {
+            let s = specifier.as_str();
+            if s.starts_with("@ohos:")
+                || s.starts_with("@ohos/")
+                || s.starts_with("@system.")
+                || s.starts_with("@native:")
+            {
+                return Ok(Some(HookResolveIdOutput {
+                    id: s.into(),
+                    external: Some(ResolvedExternal::Bool(true)),
+                    ..Default::default()
+                }));
+            }
+
+            let importer_path_buf: PathBuf;
+            let importer_path: &Path = if let Some(ref imp) = importer {
+                importer_path_buf = PathBuf::from(imp);
+                &importer_path_buf
+            } else {
+                project_root.as_path()
+            };
+
+            let resolved = match resolver.resolve(s, importer_path) {
+                Ok(r) => r,
+                Err(_) => return Ok(None),
+            };
+
+            let output = match resolved {
+                OhosResolvedModule::ExternalBundle { ohm_url } => HookResolveIdOutput {
+                    id: ohm_url.into(),
+                    external: Some(ResolvedExternal::Bool(true)),
+                    ..Default::default()
+                },
+                OhosResolvedModule::ExternalHsp {
+                    bundle_name,
+                    module_name,
+                    entry_path,
+                } => HookResolveIdOutput {
+                    id: format!("@shared:{}/{}/{}", bundle_name, module_name, entry_path).into(),
+                    external: Some(ResolvedExternal::Bool(true)),
+                    ..Default::default()
+                },
+                OhosResolvedModule::SdkDeclaration { path, .. } => HookResolveIdOutput {
+                    id: path.to_string_lossy().as_ref().into(),
+                    external: Some(ResolvedExternal::Bool(true)),
+                    ..Default::default()
+                },
+                OhosResolvedModule::BytecodeHar { ohm_url, .. } => HookResolveIdOutput {
+                    id: ohm_url.into(),
+                    external: Some(ResolvedExternal::Bool(true)),
+                    ..Default::default()
+                },
+                OhosResolvedModule::LocalSource { path, .. } => HookResolveIdOutput {
+                    id: path.to_string_lossy().as_ref().into(),
+                    external: None,
+                    ..Default::default()
+                },
+                OhosResolvedModule::RemotePackage { path, .. } => HookResolveIdOutput {
+                    id: path.to_string_lossy().as_ref().into(),
+                    external: None,
+                    ..Default::default()
+                },
+            };
+
+            Ok(Some(output))
+        }
     }
 }
 
@@ -143,56 +218,34 @@ mod tests {
         )
     }
 
-    fn make_args<'a>(specifier: &'a str, importer: Option<&'a str>) -> HookResolveIdArgs<'a> {
-        use arkdown_core::ImportKind;
-        HookResolveIdArgs {
-            specifier,
-            importer,
-            is_entry: importer.is_none(),
-            kind: ImportKind::Import,
-        }
-    }
-
-    #[tokio::test]
-    async fn test_bundle_ref_is_external() {
+    #[test]
+    fn test_bundle_ref_is_external() {
         let plugin = make_plugin();
         let result = plugin
-            .resolve_id(
-                &PluginContext::default(),
-                &make_args("@bundle:com.foo/entry/ets/Index", None),
-            )
-            .await
+            .resolve_sync("@bundle:com.foo/entry/ets/Index", None)
             .unwrap();
         let id = result.unwrap();
-        assert!(id.external);
+        assert!(matches!(id.external, Some(ResolvedExternal::Bool(true))));
         assert!(id.id.contains("com.foo"));
     }
 
-    #[tokio::test]
-    async fn test_unknown_specifier_returns_none() {
+    #[test]
+    fn test_unknown_specifier_returns_none() {
         let plugin = make_plugin();
         let result = plugin
-            .resolve_id(
-                &PluginContext::default(),
-                &make_args("some-unknown-package", Some("/tmp/main.ets")),
-            )
-            .await
+            .resolve_sync("some-unknown-package", Some("/tmp/main.ets"))
             .unwrap();
         assert!(result.is_none());
     }
 
-    #[tokio::test]
-    async fn test_shared_ref_is_external() {
+    #[test]
+    fn test_shared_ref_is_external() {
         let plugin = make_plugin();
         let result = plugin
-            .resolve_id(
-                &PluginContext::default(),
-                &make_args("@shared:com.example/sharedlib", None),
-            )
-            .await
+            .resolve_sync("@shared:com.example/sharedlib", None)
             .unwrap();
         let id = result.unwrap();
-        assert!(id.external);
+        assert!(matches!(id.external, Some(ResolvedExternal::Bool(true))));
         assert!(id.id.starts_with("@shared:"));
     }
 }

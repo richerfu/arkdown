@@ -52,7 +52,8 @@ fn run_build(fixture: &PathBuf) -> PathBuf {
 
     use arkdown::Bundler;
     use arkdown_config::load_config;
-    use arkdown_core::{ArkdownPlugin, BuildMode, ModuleJson5, OutputTarget};
+    use arkdown_core::{BuildMode, ModuleJson5, OutputTarget};
+    use rolldown_plugin::__inner::SharedPluginable;
     use arkdown_pack::{PackInput, Packager};
     use arkdown_plugin_duplicate_check::DuplicateCheckPlugin;
     use arkdown_plugin_ets_transform::EtsTransformPlugin;
@@ -111,8 +112,8 @@ fn run_build(fixture: &PathBuf) -> PathBuf {
     }
 
     // Bundling
-    let plugins: Vec<Arc<dyn ArkdownPlugin>> = vec![
-        Arc::new(EtsTransformPlugin::new(config.clone())),
+    let plugins: Vec<SharedPluginable> = vec![
+        Arc::new(EtsTransformPlugin::new(config.clone())) as SharedPluginable,
         Arc::new(OhosResolvePlugin::new(
             ResolverConfig {
                 project_root: fixture.clone(),
@@ -126,10 +127,10 @@ fn run_build(fixture: &PathBuf) -> PathBuf {
             },
             fixture.clone(),
             false,
-        )),
-        Arc::new(ModuleMetaPlugin::new(fixture.clone(), module.name.clone())),
-        Arc::new(Json5Plugin),
-        Arc::new(DuplicateCheckPlugin),
+        )) as SharedPluginable,
+        Arc::new(ModuleMetaPlugin::new(fixture.clone(), module.name.clone())) as SharedPluginable,
+        Arc::new(Json5Plugin) as SharedPluginable,
+        Arc::new(DuplicateCheckPlugin) as SharedPluginable,
     ];
     // Clean stale .js files before bundling so the explicit chunk_files list
     // from bundle_out is the single source of truth for ABC compilation.

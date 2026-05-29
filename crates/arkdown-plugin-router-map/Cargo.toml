@@ -3,7 +3,5 @@ name = "arkdown-plugin-router-map"
 version = "0.1.0"
 edition = "2021"
 
-[dependencies]
-arkdown-core = { path = "../arkdown-core" }
-async-trait = { workspace = true }
-tokio = { workspace = true }
+[dev-dependencies]
+tempfile = "3"

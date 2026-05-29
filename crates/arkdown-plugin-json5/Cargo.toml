@@ -4,12 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-arkdown-core = { path = "../arkdown-core" }
+rolldown_plugin = "1.0.3"
+rolldown_common = "1.0.3"
 serde_json = { workspace = true }
 json5 = { workspace = true }
-async-trait = { workspace = true }
-tokio = { workspace = true }
-thiserror = { workspace = true }
+anyhow = { workspace = true }
 fs-err = { workspace = true }
 
 [dev-dependencies]

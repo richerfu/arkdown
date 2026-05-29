@@ -4,11 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-arkdown-core = { path = "../arkdown-core" }
+rolldown_plugin = "1.0.3"
 oxc_allocator = { workspace = true }
 oxc_parser = { workspace = true }
 oxc_ast = { workspace = true }
 oxc_span = { workspace = true }
-async-trait = { workspace = true }
-tokio = { workspace = true }
-thiserror = { workspace = true }
+anyhow = { workspace = true }
