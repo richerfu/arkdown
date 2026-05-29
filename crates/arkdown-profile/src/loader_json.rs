@@ -165,6 +165,12 @@ pub fn generate_loader_json(
         compile_entry.push(ext.src_entry.clone());
     }
 
+    // Module-level srcEntry (used by HSP shared packages that export a single file
+    // without declaring abilities).
+    if let Some(src_entry) = &manifest.src_entry {
+        compile_entry.push(src_entry.clone());
+    }
+
     // Include pages from $profile:main_pages so that page components are
     // compiled alongside ability entry points.  The EtsTransformPlugin stubs
     // out ArkUI build() DSL bodies before the bundler parses the TypeScript,
@@ -423,6 +429,7 @@ mod tests {
             pages: Some("$profile:main_pages".to_string()),
             main_element: Some("EntryAbility".to_string()),
             description: None,
+            src_entry: None,
         }
     }
 

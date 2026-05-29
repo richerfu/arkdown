@@ -69,6 +69,10 @@ pub struct HapManifest {
     /// Module-level description resource reference, e.g. `"$string:module_desc"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Module-level `srcEntry` for shared packages (HSP) that export a single
+    /// entry file without declaring abilities.  e.g. `"./ets/Index.ets"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub src_entry: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

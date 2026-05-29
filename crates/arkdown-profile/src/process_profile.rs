@@ -69,6 +69,7 @@ pub fn process_profile_with_ark_vm_version(
         pages: module_json5.module.pages.clone(),
         main_element: module_json5.module.main_element.clone(),
         description: module_json5.module.description.clone(),
+        src_entry: module_json5.module.src_entry.clone(),
     }
 }
 

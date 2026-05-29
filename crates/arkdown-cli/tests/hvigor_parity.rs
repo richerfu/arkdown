@@ -98,6 +98,24 @@ fn minimal_har_hvigor_parity_report() {
     }
 }
 
+#[test]
+#[ignore = "requires local hvigorw/DevEco toolchain; run explicitly for artifact parity"]
+fn minimal_hsp_hvigor_parity_report() {
+    let repo_root = repo_root();
+    let fixture = "tests/fixtures/minimal-hsp";
+    let report_path = report_path_for(&repo_root, "minimal-hsp");
+    let report = parity_for_fixture(fixture, ArtifactType::Hsp, report_path)
+        .expect("parity harness failed before report generation");
+    print_report_summary(&report);
+
+    if env_truthy(ENV_STRICT) && !report["equal"].as_bool().unwrap_or(false) {
+        panic!(
+            "strict parity failed; see {}",
+            report["report_path"].as_str().unwrap_or("<unknown>")
+        );
+    }
+}
+
 fn print_report_summary(report: &Value) {
     let report_path = report["report_path"]
         .as_str()

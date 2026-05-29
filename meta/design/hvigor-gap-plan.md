@@ -117,20 +117,34 @@ runtime-equivalent replacement for hvigor for real ArkUI applications.
 
 ### Phase 0: Golden Parity Harness
 
-Status: implemented for the minimal HAP fixture as an ignored CLI integration
-test. It builds one clean fixture copy with hvigor and another with native
-`arkdown build`, then writes a structured diff report.
+Status: ✅ complete — minimal-hap, minimal-har, minimal-hsp fixtures all covered.
 
-Keep expanding the harness before broadening native implementation:
+Coverage added (2026-05-29):
+- `crates/arkdown-cli/tests/hvigor_parity.rs`: `minimal_hsp_hvigor_parity_report` added
+  alongside existing `minimal_hap` and `minimal_har` ignored tests; all three run with
+  local hvigorw and write structured diff JSON to `target/parity/`.
+- `crates/arkdown-cli/tests/e2e_test.rs`: non-ignored tests for HAR and HSP:
+  - HAR: `test_har_exists_and_is_valid_zip`, `test_har_contains_required_entries`,
+    `test_har_golden_entry_list` — verifies source HAR has `oh-package.json5` +
+    `src/main/ets/` entries and NO `module.json`, `pack.info`, or `.abc` files.
+  - HSP: `test_hsp_exists_and_is_valid_zip`, `test_hsp_contains_required_entries`,
+    `test_hsp_abc_has_panda_magic`, `test_hsp_golden_entry_list` — verifies HSP has
+    `module.json`, `pack.info`, `resources.index`, `ets/modules.abc` (PANDA magic).
+  - ByteCode HAR importee: `test_non_entry_importees_populated_with_har_dep` —
+    constructs a synthetic `ChunkGraph` with an entry chunk importing a utility
+    chunk (simulating a HAR dep), calls `process_importees()`, and asserts that
+    `nonEntryImportees` is populated with `@bundle:` OHM URL entries.
+- `tests/fixtures/golden/minimal-har/expected-zip-entries.json` — required/forbidden
+  entry lists for the HAR golden check.
+- `tests/fixtures/golden/minimal-hsp/expected-zip-entries.json` — required/forbidden
+  entry lists for the HSP golden check.
 
-- Build the same fixture with local hvigor:
-  `<command-line-tools>/bin/hvigorw assembleHap`.
-- Build it with `cargo run -p arkdown-cli -- build --project <fixture>`.
-- Compare intermediate files: `loader.json`, rollup output JS, importee cache
-  JSON, `sourceMaps.map`, `module.json`, `pkgContextInfo.json`, `pack.info`,
-  `resources.index`, and `ets/modules.abc`.
-- Add an artifact diff report that classifies differences as path/layout,
-  semantic JSON, bytecode header, bytecode records, or packaging.
+The parity harness tests (hvigor_parity.rs) still require a local DevEco toolchain
+and are `#[ignore]`; run them with:
+  `cargo test -p arkdown-cli -- --ignored minimal_hsp_hvigor_parity_report`
+
+The e2e tests run without any external toolchain and are part of the default
+`cargo test -p arkdown-cli` run.
 
 For the current fixture, native comparison is expected to report the remaining
 implementation gaps until the phases below land.
