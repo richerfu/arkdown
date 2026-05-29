@@ -54,25 +54,24 @@ and release-mode terser/minification when applicable.
 - Phase 3 (bundler): ✅ clean ESM, @ohos: external, treeshake off for debug
 - Phase 4 (importee): ✅ process_importees() ports hvigor process-importee.js
 - Phase 5 (ABC): 🔄 modules.abc 8565B vs hvigor 9844B (gap: 1279B — 87% parity)
-- Phase 5b (widget pass): ✅ `AbcCompiler::compile_widget()` + `compile_widget_pass()` in CLI (SPEC-026)
+- Phase 5b (sourceMaps.map): 🔄 EntryAbility 566 VLQ chars vs hvigor 910 (62% parity, up from 329/36%)
 - Phase 6 (packaging): ✅ HAP zip identical to hvigor (11 entries)
 
-**Parity (minimal-hap, 2026-05-29) — see `meta/design/parity-report-minimal-hap.md`:**
-- `loader.json`: ✅ 100% match (all 18 fields identical; absolute paths differ by machine).
-- `module.json`: 🔄 ~75% — 3 schema fields missing (`virtualMachine`, `compileMode`,
-  `dependencies`) and 8 resource integer IDs missing (`iconId`, `labelId`, `descriptionId`,
-  `startWindowIconId`, `startWindowBackgroundId` in abilities/app). Root cause: `arkdown-resource`
-  does not yet write resolved IDs back into merged module.json; `virtualMachine` not injected
-  from SDK metadata.
-- `ets/modules.abc`: 🔄 88.1% by size (8675B vs 9844B; gap 1169B). ✅ Literal arrays,
-  method records, class method OHM names match hvigor. ✅ LNP index at file end. ✅ Field name
-  string deduplication. ✅ Method index ordering [strings | methods | lits]. Known gaps:
-  1. **LNP body density**: 81B/LNP vs hvigor 113B/LNP (per-statement vs per-instruction ADVANCE).
-  2. **Method index count**: 98 vs 77 (we have extra entries due to per-class string dedup).
-  3. **BUG**: absolute filesystem path (`/Users/.../pages/Index`) leaks into StringItems.
-- `ets/sourceMaps.map`: 🔄 ~80% structural match. Keys and sources arrays identical.
-  EntryAbility VLQ density: 329 chars vs 910 in golden (per-statement vs per-token maps).
-  Index.ts VLQ: 381 chars vs 366 (close match).
+**Parity (minimal-hap, 2026-05-29):**
+- HAP zip: ✅ identical (11 entries, all content matches except 2 files below)
+- `ets/modules.abc`: hvigor 9844B, arkdown 8565B — gap 1279B (87% parity).
+  ✅ Literal arrays=10=[4,4,6,6,6,6,16,24,26,26] match hvigor exactly. ✅ Method records=20 match.
+  Remaining 1279B: 1054B LNP line-advance density (58B/LNP vs hvigor 105B/LNP) + 225B other
+  (avg 58B/LNP vs hvigor 105B/LNP). Improvements made: START_LOCAL_EXTENDED (0x04, 12 bytes)
+  replaces START_LOCAL (0x03, 10 bytes) for all scope vars and params, SET_PROLOGUE_END (0x08)
+  emitted after scope var declarations, NewLexEnvWithName for arrow captures, class-declaration
+  lexical bindings, scope_names_literal_array hvigor format.
+  Remaining gap: per-instruction ADVANCE sequences between every instruction group (hvigor emits
+  much denser LNP coverage than our per-statement approach).
+- `ets/sourceMaps.map`: hvigor 1847B, arkdown ~1400B — EntryAbility 566 VLQ chars (was 329, hvigor 910).
+  Fix (2026-05-29): `write_hvigor_source_maps` now regenerates per-token maps from the kit-rewritten
+  source via `generate_source_map_for_file` instead of using rolldown's sparse composed map.
+  Remaining gap: oxc codegen emits per-expression mappings; tsc emits per-identifier mappings.
 
 ## Major Missing Capabilities
 
@@ -86,8 +85,8 @@ and release-mode terser/minification when applicable.
 | Widget compile pass      | ✅ **Implemented (2026-05-29)**: `AbcCompiler::compile_widget()` + `compile_widget_pass()` in CLI. Activation predicate `need_widget_compile()`, form path collection `collect_form_json_paths()`. Separate cache dir (`_widget` suffix), separate `widgets.abc` output. | Widget loader.json path (`getWidgetLoaderJsonPath()`) and `byteCodeHar2Hsp` wiring not yet plumbed. |
 | Obfuscation/minification | `arkdown-obfuscate` exists but not wired in.                                                                                                                                           | hvigor release builds run SDK obfuscation + terser before ABC.                          |
 | Incremental cache        | `arkdown-cache` exists but not wired in.                                                                                                                                               | hvigor rollup msgpack cache + es2abc `--cache-file` support.                            |
-| Source maps/debug        | ✅ Per-statement source maps from kit-rewritten ETS source (pre-struct-transform). Pretty-printed JSON. sourceMaps.map 1281B vs 1847B golden (gap: per-statement vs per-token VLQ).   | Per-token source map granularity to match tsc/ets-loader output.                        |
-| Packaging metadata       | ✅ **Fixed (2026-05-28)**: HAP zip identical to hvigor — correct module.json merge, pack.info, pkgContextInfo.json (intermediate, not in HAP), resources.index. ✅ **Integrated HSP (SPEC-044, 2026-05-29)**: `normalize_integrated_hsps()` patches remote HSP `pack.info` and `PackInput::integrated_hsps` embeds normalized HSPs at `libs/<dir>/<file>`. | HAR/HSP-specific pack flows for complex projects; privacy profile; startup/share config. |
+| Source maps/debug        | 🔄 **Improved (2026-05-29)**: Per-token maps regenerated from kit-rewritten ETS source via `generate_source_map_for_file` in `write_hvigor_source_maps`. EntryAbility: 566 VLQ chars (was 329, hvigor 910). sourceMaps.map ~1400B vs 1847B golden. | Full per-identifier granularity (tsc maps every token; oxc codegen maps per-expression). |
+| Packaging metadata       | ✅ **Fixed (2026-05-28)**: HAP zip identical to hvigor — correct module.json merge, pack.info, pkgContextInfo.json (intermediate, not in HAP), resources.index. | None for minimal-hap. HAR/HSP-specific pack flows for complex projects.                 |
 
 ## Code Compilation Gap
 

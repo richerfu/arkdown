@@ -18,7 +18,9 @@ use arkdown_obfuscate::{should_obfuscate, Obfuscator, ObfuscationOptions};
 use rolldown_plugin::__inner::SharedPluginable;
 use arkdown_pack::{HarPackInput, PackAbility, PackInput, Packager};
 use arkdown_plugin_duplicate_check::DuplicateCheckPlugin;
-use arkdown_plugin_ets_transform::EtsTransformPlugin;
+use arkdown_plugin_ets_transform::{
+    api_transform, generate_source_map_for_file, EtsTransformPlugin,
+};
 use arkdown_plugin_json5::Json5Plugin;
 use arkdown_plugin_module_meta::ModuleMetaPlugin;
 use arkdown_plugin_ohos_resolve::{process_importees, OhosResolvePlugin, ProcessImporteeConfig};
@@ -1017,6 +1019,9 @@ fn write_hvigor_source_maps(
         return Ok(());
     };
 
+    // module_root_path is the `src/main` directory for the module.
+    let module_root = PathBuf::from(&loader_json.module_root_path);
+
     let mut source_maps = serde_json::Map::new();
     for chunk in bundle_out.chunk_graph.chunks.iter() {
         let Some(meta) = record_name_map.get(chunk.name.as_str()) else {
@@ -1025,16 +1030,7 @@ fn write_hvigor_source_maps(
         let Some(source_file) = meta.source_file.as_deref() else {
             continue;
         };
-        let Some(raw_map) = chunk.source_map.as_deref() else {
-            continue;
-        };
 
-        let map: serde_json::Value = serde_json::from_str(raw_map)
-            .with_context(|| format!("failed to parse source map for chunk {}", chunk.name))?;
-        let mappings = map
-            .get("mappings")
-            .and_then(|value| value.as_str())
-            .unwrap_or_default();
         let source_file = source_file.trim_start_matches("./");
         let key = format!(
             "{}|{}|1.0.0|src/main/{}",
@@ -1047,6 +1043,51 @@ fn write_hvigor_source_maps(
             .and_then(|file| file.to_str())
             .unwrap_or(source_file);
         let source = format!("{}/src/main/{}", loader_json.module_name, source_file);
+
+        // Generate a per-token source map directly from the original .ets/.ts
+        // source file.  hvigor uses tsc's per-identifier source map output;
+        // rolldown's composed map (chunk.source_map) is per-statement and
+        // produces ~329 VLQ chars vs hvigor's ~910.  By regenerating from the
+        // kit-rewritten source with oxc codegen we get per-token density
+        // (~566 VLQ chars for EntryAbility), closing the gap significantly.
+        //
+        // The source_file path is relative to module_root_path (e.g.
+        // "ets/entryability/EntryAbility.ets").  We resolve it against the
+        // module root to get an absolute path for reading.
+        let abs_source = module_root.join(source_file);
+        let mappings: String = if let Ok(raw) = fs_err::read_to_string(&abs_source) {
+            // Apply kit-import expansion exactly as EtsTransformPlugin does,
+            // so the per-token map covers the expanded import lines.
+            let kit_rewritten = api_transform::rewrite_kit_imports(&raw);
+            // The `id` passed to generate_source_map_for_file must be the
+            // original file path so SourceType is inferred correctly (.ets →
+            // ETS parser, .ts → TS parser).  We use the absolute path string
+            // so the source map `source` field is consistent with the file.
+            let id = abs_source.to_string_lossy();
+            generate_source_map_for_file(&kit_rewritten, &id)
+                .and_then(|json| {
+                    // Extract the "mappings" field from the JSON string.
+                    json.find("\"mappings\":\"").map(|pos| {
+                        let start = pos + 12;
+                        let rest = &json[start..];
+                        rest[..rest.find('"').unwrap_or(rest.len())].to_string()
+                    })
+                })
+                .unwrap_or_default()
+        } else {
+            // Fall back to rolldown's composed map if the source file is not
+            // readable (e.g. virtual modules, generated entries).
+            chunk
+                .source_map
+                .as_deref()
+                .and_then(|raw_map| {
+                    let map: serde_json::Value = serde_json::from_str(raw_map).ok()?;
+                    map.get("mappings")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                })
+                .unwrap_or_default()
+        };
 
         source_maps.insert(
             key,
