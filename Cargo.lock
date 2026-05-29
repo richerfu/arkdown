@@ -230,7 +230,6 @@ dependencies = [
  "fs-err",
  "index_vec",
  "json5",
- "rolldown_plugin",
  "rustc-hash",
  "serde",
  "serde_json",

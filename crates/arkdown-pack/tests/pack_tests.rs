@@ -27,6 +27,7 @@ fn make_config() -> Arc<ArkdownConfig> {
             runtime_os: "HarmonyOS".to_string(),
             signing_config: None,
             build_option: BuildOption {
+                preload_so: vec![],
                 strict_mode: StrictModeConfig {
                     case_sensitive_check: false,
                     use_normalized_ohm_url: true,
@@ -34,8 +35,7 @@ fn make_config() -> Arc<ArkdownConfig> {
                 ark_options: None,
                 res_options: None,
                 source_option: None,
-                preload_so: vec![],
-            },
+                },
         },
         modules: vec![],
         sdk_config: SdkConfig {
@@ -81,7 +81,8 @@ fn minimal_pack_input(
         source_maps_path: None,
         abilities: vec![],
         integrated_hsps: vec![],
-    }
+            privacy_profile_path: None,
+        }
 }
 
 // ---------------------------------------------------------------------------
@@ -264,6 +265,7 @@ fn test_hap_resource_files_copied_from_processed_dir() {
             source_maps_path: None,
             abilities: vec![],
             integrated_hsps: vec![],
+            privacy_profile_path: None,
         })
         .expect("pack_hap must succeed");
 
@@ -321,7 +323,8 @@ fn test_missing_abc_returns_missing_input_error() {
         source_maps_path: None,
         abilities: vec![],
         integrated_hsps: vec![],
-    });
+            privacy_profile_path: None,
+        });
     assert!(result.is_err(), "missing ABC must return Err");
     assert!(
         matches!(result.unwrap_err(), PackError::MissingInput(_)),
@@ -345,8 +348,9 @@ fn test_missing_module_json_returns_missing_input_error() {
         bundle_type: "app".to_string(),
         source_maps_path: None,
         abilities: vec![],
-        integrated_hsps: vec![],
-    });
+            integrated_hsps: vec![],
+            privacy_profile_path: None,
+        });
     assert!(result.is_err());
     assert!(matches!(result.unwrap_err(), PackError::MissingInput(_)));
 }
@@ -378,6 +382,7 @@ fn test_hsp_output_is_valid_zip() {
             source_maps_path: None,
             abilities: vec![],
             integrated_hsps: vec![],
+            privacy_profile_path: None,
         })
         .expect("pack_hsp must succeed");
 
@@ -578,6 +583,7 @@ fn test_pack_hap_embeds_integrated_hsp() {
             source_maps_path: None,
             abilities: vec![],
             integrated_hsps: vec![integrated_entry],
+            privacy_profile_path: None,
         })
         .expect("pack_hap must succeed");
 

@@ -451,6 +451,8 @@ fn run_pipeline(fixture: &Path) -> PathBuf {
             bundle_version_code: 1000000,
             bundle_version_name: "1.0.0".to_string(),
             bundle_type: "app".to_string(),
+            integrated_hsps: vec![],
+            privacy_profile_path: None,
             source_maps_path: bundle_out.source_maps_path,
             abilities: vec![],
         })

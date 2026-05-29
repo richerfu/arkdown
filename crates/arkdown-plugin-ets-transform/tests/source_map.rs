@@ -28,9 +28,9 @@ fn make_plugin() -> EtsTransformPlugin {
             runtime_os: "OpenHarmony".to_string(),
             signing_config: None,
             build_option: BuildOption {
+                preload_so: vec![],
                 strict_mode: StrictModeConfig {
-                    case_sensitive_check: false,
-                    use_normalized_ohm_url: true,
+                    case_sensitive_check: false,use_normalized_ohm_url: true,
                 },
                 ark_options: None,
                 res_options: None,

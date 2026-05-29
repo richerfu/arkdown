@@ -41,15 +41,14 @@ fn make_test_config(fixture: &PathBuf) -> ArkdownConfig {
             runtime_os: "HarmonyOS".to_string(),
             signing_config: None,
             build_option: BuildOption {
+                preload_so: vec![],
                 strict_mode: StrictModeConfig {
-                    case_sensitive_check: false,
-                    use_normalized_ohm_url: false,
+                    case_sensitive_check: false,use_normalized_ohm_url: false,
                 },
                 ark_options: None,
                 res_options: None,
                 source_option: None,
-                preload_so: vec![],
-            },
+                },
         },
         modules: vec![ModuleConfig {
             name: "entry".to_string(),
@@ -295,9 +294,9 @@ fn make_minimal_config(project_root: &PathBuf, build_mode: BuildMode) -> Arkdown
             runtime_os: "HarmonyOS".to_string(),
             signing_config: None,
             build_option: BuildOption {
+                preload_so: vec![],
                 strict_mode: StrictModeConfig {
-                    case_sensitive_check: false,
-                    use_normalized_ohm_url: false,
+                    case_sensitive_check: false,use_normalized_ohm_url: false,
                 },
                 ark_options: None,
                 res_options: None,

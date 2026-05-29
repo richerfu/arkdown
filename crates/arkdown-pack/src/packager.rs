@@ -275,6 +275,7 @@ pub struct PackInput {
     /// Each entry is stored at `libs/<hsp_dir_name>/<hsp_file_name>` inside the archive.
     /// Pass an empty vec for HAPs without integrated HSPs (the common case).
     pub integrated_hsps: Vec<IntegratedHspEntry>,
+    pub privacy_profile_path: Option<std::path::PathBuf>,
 }
 
 pub struct HarPackInput {

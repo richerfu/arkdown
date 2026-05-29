@@ -179,7 +179,8 @@ mod tests {
                 runtime_os: "OpenHarmony".to_string(),
                 signing_config: None,
                 build_option: BuildOption {
-                    strict_mode: StrictModeConfig {
+                    preload_so: vec![],
+                strict_mode: StrictModeConfig {
                         case_sensitive_check: false,
                         use_normalized_ohm_url: true,
                     },

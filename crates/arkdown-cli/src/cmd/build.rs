@@ -6,15 +6,11 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use clap::Args;
 
-use arkdown::Bundler;
-use arkdown_abc::{
-    collect_form_json_paths, need_widget_compile, ExtensionAbilityRef, WidgetCompileConfig,
-    WidgetInput,
-};
+use arkdown::{BundleOutput, Bundler};
 use arkdown_config::load_config;
 use arkdown_core::{
-    ArkdownConfig, ArkdownPlugin, BuildMode, BuildOption, ModuleConfig, ModuleJson5,
-    ModuleJson5Module, OutputTarget, ProductConfig, SdkConfig, StrictModeConfig,
+    ArkdownConfig, ArkdownPlugin, BuildMode, ChunkGraph, ModuleConfig, ModuleJson5,
+    ModuleJson5Module, OutputTarget,
 };
 use index_vec::IndexVec;
 use rustc_hash::FxHashMap;
@@ -33,10 +29,8 @@ use arkdown_profile::{
 };
 use arkdown_resolver::ResolverConfig;
 use arkdown_resource::{ResourceCompileConfig, ResourceCompileInput, ResourceCompiler};
-use arkdown_obfuscate::{should_obfuscate, Obfuscator, ObfuscationOptions};
 use arkdown_sign::HapSigner;
 use arkdown_ts2abc::{compile_to_abc, Ts2abcInput, Ts2abcOptions};
-use arkdown_watcher::{watch_dirs_for_module, FileWatcher};
 
 use crate::progress::Progress;
 use crate::task_cache::TaskInputs;
@@ -58,40 +52,20 @@ pub struct BuildArgs {
     /// Project root (default: current directory)
     #[arg(long)]
     pub project: Option<PathBuf>,
-    /// Watch source files and rebuild on change (100ms debounce)
-    #[arg(long)]
-    pub watch: bool,
 }
 
 pub async fn run(args: BuildArgs) -> Result<()> {
     let project_root = args
         .project
         .unwrap_or_else(|| std::env::current_dir().expect("failed to get current directory"));
-
-    if args.watch {
-        return run_watch(project_root, &args.target, &args.mode, args.module.as_deref(), args.product.as_deref()).await;
-    }
-
-    run_build_once(project_root, &args.target, &args.mode, args.module.as_deref(), args.product.as_deref()).await
-}
-
-/// Run a single complete build pass.  Used by both the normal build command
-/// and watch mode (called on every debounced change batch).
-async fn run_build_once(
-    project_root: PathBuf,
-    target: &str,
-    mode: &str,
-    module: Option<&str>,
-    product: Option<&str>,
-) -> Result<()> {
     let start = Instant::now();
 
-    let target = match target {
+    let target = match args.target.as_str() {
         "hsp" => OutputTarget::Hsp,
         "har" => OutputTarget::Har,
         _ => OutputTarget::Hap,
     };
-    let mode = match mode {
+    let mode = match args.mode.as_str() {
         "release" => BuildMode::Release,
         _ => BuildMode::Debug,
     };
@@ -99,13 +73,13 @@ async fn run_build_once(
     let progress = Progress::new();
 
     // Step 1: Config
-    progress.step(1, 7, "Parsing config");
+    progress.step(1, 6, "Parsing config");
     let config = load_config(
         &project_root,
         mode,
         target,
-        product,
-        module,
+        args.product.as_deref(),
+        args.module.as_deref(),
     )
     .context("Failed to parse project config")?;
     progress.done();
@@ -115,7 +89,7 @@ async fn run_build_once(
     // Step 2: Resource compilation + Profile processing.
     // Resources must be compiled first so their numeric IDs (iconId, labelId,
     // descriptionId) can be embedded in module.json by write_module_json.
-    progress.step(2, 7, "Processing profiles");
+    progress.step(2, 6, "Processing profiles");
     let processor = ProfileProcessor::new(config_arc.clone());
     let mut loader_jsons = Vec::new();
     // Parallel list of ByteCode HAR dependencies per module, indexed identically
@@ -203,6 +177,7 @@ async fn run_build_once(
                     package_name: dep.package_name.clone(),
                     abc_path: dep.abc_path.to_string_lossy().into_owned(),
                     compatible_sdk_version: dep.compatible_sdk_version.clone(),
+                    source_maps_path: dep.source_maps_path.as_ref().map(|p| p.to_string_lossy().into_owned()),
                 },
             );
         }
@@ -392,7 +367,7 @@ async fn run_build_once(
         .and_then(|a| a.obfuscation.as_ref())
     {
         if should_obfuscate(&config_arc.build_mode, Some(obf_config)) {
-            let rule_files: Vec<PathBuf> = obf_config.rules_file.iter().cloned().collect();
+            let rule_files: Vec<PathBuf> = obf_config.rule_files.iter().cloned().collect();
             let obf_cache_dir = project_root.join("build/default/cache/obfuscate");
             match Obfuscator::new(ObfuscationOptions {
                 rule_files,
@@ -429,7 +404,7 @@ async fn run_build_once(
 
     // Step 5: ABC compilation
     progress.step(5, 6, "Compiling ABC");
-    for ((module, manifest, loader_json), bundle_out) in
+    for ((module, _manifest, loader_json), (bundle_out, from_cache)) in
         loader_jsons.iter().zip(bundle_outs.iter())
     {
         if *from_cache {
@@ -579,42 +554,11 @@ async fn run_build_once(
                     })?;
             }
         }
-
-        // Widget compile pass — mirrors ArkCompile.doTaskAction() widget branch.
-        //
-        // Only runs when:
-        //  1. The module declares at least one form extension ability (form_json_paths
-        //     is non-empty), AND
-        //  2. The module is not a HAR (HAR modules cannot expose widgets).
-        let module_src_main = module.src_path.join("src/main");
-        let ext_ability_refs: Vec<ExtensionAbilityRef<'_>> = manifest
-            .extension_abilities
-            .iter()
-            .map(|e| ExtensionAbilityRef {
-                extension_type: e.extension_type.as_str(),
-                src_entry: e.src_entry.as_str(),
-            })
-            .collect();
-        let form_json_paths = collect_form_json_paths(&module_src_main, &ext_ability_refs);
-        let module_type_str = match module.module_type {
-            arkdown_core::OhosModuleType::Har => "har",
-            _ => "entry",
-        };
-        if need_widget_compile(&form_json_paths, module_type_str) {
-            compile_widget_pass(
-                module,
-                manifest,
-                loader_json,
-                bundle_out,
-                &config_arc,
-                &bundle_name,
-            )?;
-        }
     }
     progress.done();
 
     // Step 6: Packaging
-    progress.step(6, 7, "Packaging");
+    progress.step(6, 6, "Packaging");
     let packager = Packager::new(config_arc.clone());
     let mut output_paths = Vec::new();
     for ((module, manifest, _loader_json), (bundle_out, _from_cache)) in
@@ -658,7 +602,9 @@ async fn run_build_once(
                                     resources_dir: module.src_path.join("src/main/resources"),
                                     oh_package_json,
                                     output_path: output.clone(),
-                                })
+            integrated_hsps: vec![],
+            privacy_profile_path: None,
+        })
                                 .map_err(|e| anyhow::anyhow!("Pack failed: {}", e))?,
                         )
                     } else {
@@ -703,7 +649,12 @@ async fn run_build_once(
                                         bundle_type: "app".to_string(),
                                         source_maps_path,
                                         abilities,
-                                        integrated_hsps: vec![],
+                                            let p = module.src_path.join(
+                                                "src/main/resources/base/profile/privacy.json",
+                                            );
+                                            if p.exists() { Some(p)
+            } else { None }
+                                        },
                                     })
                                     .map_err(|e| anyhow::anyhow!("Pack failed: {}", e))?,
                             )
@@ -761,136 +712,6 @@ async fn run_build_once(
     Ok(())
 }
 
-/// Watch mode: perform an initial build, then watch source directories and
-/// rebuild on every debounced change batch (100ms, matching hvigor buildDelay).
-async fn run_watch(
-    project_root: PathBuf,
-    target: &str,
-    mode: &str,
-    module: Option<&str>,
-    product: Option<&str>,
-) -> Result<()> {
-    // Perform the initial build.
-    eprintln!("arkdown: watch mode — performing initial build");
-    let initial_result = run_build_once(
-        project_root.clone(),
-        target,
-        mode,
-        module,
-        product,
-    )
-    .await;
-    if let Err(ref e) = initial_result {
-        eprintln!("arkdown: initial build failed: {}", e);
-    }
-
-    // Determine which directories to watch.  We need the config to enumerate
-    // modules, but we can fall back to watching the whole project root if
-    // config loading fails.
-    let target_enum = match target {
-        "hsp" => OutputTarget::Hsp,
-        "har" => OutputTarget::Har,
-        _ => OutputTarget::Hap,
-    };
-    let mode_enum = match mode {
-        "release" => BuildMode::Release,
-        _ => BuildMode::Debug,
-    };
-
-    let watch_dirs: Vec<PathBuf> = match load_config(
-        &project_root,
-        mode_enum.clone(),
-        target_enum.clone(),
-        product,
-        module,
-    ) {
-        Ok(config) => {
-            let mut dirs = Vec::new();
-            for m in &config.modules {
-                dirs.extend(watch_dirs_for_module(&m.src_path));
-            }
-            // Also watch AppScope resources (shared across modules).
-            let app_scope_res = project_root.join("AppScope/resources");
-            if app_scope_res.exists() {
-                dirs.push(app_scope_res);
-            }
-            if dirs.is_empty() {
-                vec![project_root.clone()]
-            } else {
-                dirs
-            }
-        }
-        Err(_) => vec![project_root.clone()],
-    };
-
-    let config_arc = Arc::new(ArkdownConfig {
-        project_root: project_root.clone(),
-        build_mode: mode_enum,
-        output_target: target_enum,
-        product: ProductConfig {
-            name: "default".to_string(),
-            bundle_name: String::new(),
-            compatible_sdk_version: String::new(),
-            runtime_os: "HarmonyOS".to_string(),
-            signing_config: None,
-            build_option: BuildOption {
-                strict_mode: StrictModeConfig {
-                    case_sensitive_check: false,
-                    use_normalized_ohm_url: false,
-                },
-                ark_options: None,
-                res_options: None,
-                source_option: None,
-            },
-        },
-        modules: vec![],
-        sdk_config: SdkConfig {
-            ets_loader_path: PathBuf::new(),
-            es2abc_path: PathBuf::new(),
-            restool_path: PathBuf::new(),
-            compile_api_version: 12,
-            has_rollup_plugin: true,
-            compile_sdk_version: "6.0.0.47".to_string(),
-        },
-    });
-
-    let watcher = FileWatcher::new(config_arc, watch_dirs);
-
-    // Clone the strings for the closure (which must be 'static-compatible for
-    // the synchronous callback API).
-    let target = target.to_string();
-    let mode = mode.to_string();
-    let module = module.map(str::to_string);
-    let product = product.map(str::to_string);
-    let project_root_clone = project_root.clone();
-
-    // `FileWatcher::watch` is synchronous and loops forever; run it on a
-    // dedicated OS thread so it does not block the tokio runtime.
-    let handle = std::thread::spawn(move || {
-        watcher.watch(|_changed_paths| {
-            // Build a new tokio runtime for each incremental rebuild so we can
-            // call the async pipeline from within this synchronous callback.
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| e.to_string())?;
-            rt.block_on(run_build_once(
-                project_root_clone.clone(),
-                &target,
-                &mode,
-                module.as_deref(),
-                product.as_deref(),
-            ))
-            .map_err(|e| e.to_string())
-        })
-    });
-
-    handle
-        .join()
-        .map_err(|_| anyhow::anyhow!("watcher thread panicked"))?
-        .map_err(|e| anyhow::anyhow!("watcher error: {}", e))
-}
-
 fn read_module_json5(path: &std::path::Path) -> Result<ModuleJson5> {
     if !path.exists() {
         return Ok(ModuleJson5 {
@@ -905,8 +726,6 @@ fn read_module_json5(path: &std::path::Path) -> Result<ModuleJson5> {
                 extension_abilities: vec![],
                 src_entry: None,
                 metadata: vec![],
-                app_startup: None,
-                cross_app_shared_config: vec![],
             },
         });
     }
@@ -1288,7 +1107,7 @@ fn compute_config_hash(config: &ArkdownConfig) -> u64 {
         .and_then(|a| a.obfuscation.as_ref())
     {
         if obf_config.enable_obfuscation {
-            let rule_files: Vec<PathBuf> = obf_config.rules_file.iter().cloned().collect();
+            let rule_files: Vec<PathBuf> = obf_config.rule_files.iter().cloned().collect();
             let rule_hash = arkdown_obfuscate::compute_rule_hash(&rule_files);
             h ^= rule_hash;
             h = h.wrapping_mul(0x100000001b3);
@@ -1304,130 +1123,126 @@ fn with_extension(path: &str, extension: &str) -> String {
         .unwrap_or_else(|| format!("{path}.{extension}"))
 }
 
-/// Run the widget ABC compilation pass for a module that declares form extension
-/// abilities.
-///
-/// Mirrors `ArkCompile.initWidgetDefaultArkCompileConfig()` and the widget
-/// branch of `doTaskAction()` in hvigor's `ark-compile.js`:
-///
-/// - Widget cache dir: `<module_cache>_widget/`
-/// - Widget output:   `<ace_module_build>/widgets.abc`
-/// - Widget source:   `.js` files whose record names map to form extension
-///   entry paths (identified by `./ets/widget/` prefix convention).
-///
-/// Warnings are suppressed (hvigor sets `ignoreWarning: true`); missing source
-/// files are silently skipped.
-fn compile_widget_pass(
-    _module: &ModuleConfig,
-    manifest: &arkdown_core::HapManifest,
-    loader_json: &arkdown_profile::LoaderJson,
-    bundle_out: &arkdown::BundleOutput,
-    config: &ArkdownConfig,
-    bundle_name: &str,
-) -> Result<()> {
-    use arkdown_abc::AbcCompiler;
+/// Compute a deterministic FNV-1a hash over every compile-entry source file's
+/// contents plus its path.  Files are processed in sorted path order so the
+/// result is independent of directory iteration order.
+fn compute_bundle_source_hash(entries: &[String], module_root: &str) -> u64 {
+    let root = PathBuf::from(module_root);
+    let mut sorted = entries.to_vec();
+    sorted.sort();
+    let mut h: u64 = 0xcbf29ce484222325;
+    for entry in &sorted {
+        let path = root.join(entry.trim_start_matches("./"));
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            for b in content.bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+        }
+        for b in entry.bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+    }
+    h
+}
 
-    // Widget cache dir: main cache dir with "_widget" appended.
-    let cache_dir = {
-        // Strip any trailing separator so the suffix is clean.
-        let main_str = loader_json
-            .cache_path
-            .trim_end_matches('/')
-            .trim_end_matches('\\');
-        PathBuf::from(format!("{}_widget", main_str))
-    };
+/// Compute a deterministic hash over all rolldown configuration fields that
+/// affect the bundle output: build mode, treeshake, support_chunks,
+/// use_normalized_ohm_url, bundle name, and module name.
+fn compute_bundle_config_hash(config: &ArkdownConfig, loader_json: &arkdown_profile::LoaderJson) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    let fingerprint = format!(
+        "{}:{}:{}:{}:{}:{}",
+        match &config.build_mode {
+            BuildMode::Debug => "debug",
+            BuildMode::Release => "release",
+        },
+        config.product.bundle_name,
+        config.sdk_config.compile_api_version,
+        config.product.build_option.strict_mode.use_normalized_ohm_url,
+        loader_json.support_chunks,
+        loader_json.module_name,
+    );
+    for b in fingerprint.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
 
-    // Widget output: widgets.abc in the same directory as modules.abc.
-    let widgets_abc = bundle_out
-        .modules_abc_path
-        .parent()
-        .map(|p| p.join("widgets.abc"))
-        .unwrap_or_else(|| PathBuf::from("widgets.abc"));
-
-    // Collect widget source files: chunk files whose names suggest they come
-    // from a form extension entry (./ets/widget/ prefix is the hvigor convention,
-    // but we also accept any chunk whose record name maps to an extension ability
-    // src_entry).
-    let widget_entry_stems: std::collections::HashSet<String> = manifest
-        .extension_abilities
+/// Build a [`BundleCacheManifest`] from a successful bundle output.
+fn build_bundle_cache_manifest(key: &BundleCacheKey, bundle_out: &BundleOutput) -> BundleCacheManifest {
+    let chunks: Vec<BundledChunkMeta> = bundle_out
+        .chunk_graph
+        .chunks
         .iter()
-        .filter(|e| {
-            let t = e.extension_type.to_ascii_lowercase();
-            t == "form" || t == "formextension"
-        })
-        .filter_map(|e| {
-            std::path::Path::new(e.src_entry.trim_start_matches("./"))
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .map(str::to_string)
-        })
-        .collect();
-
-    let widget_inputs: Vec<WidgetInput> = bundle_out
-        .chunk_files
-        .iter()
-        .filter(|(chunk_name, path)| {
-            path.extension().and_then(|e| e.to_str()) == Some("js")
-                && widget_entry_stems.contains(chunk_name.as_str())
-        })
-        .map(|(chunk_name, path)| {
-            // Build the record name for this widget chunk.
-            // entry_path like "./ets/widget/pages/WidgetCard.ets"
-            let record_name = manifest
-                .extension_abilities
+        .map(|chunk| {
+            let path = bundle_out
+                .chunk_files
                 .iter()
-                .find(|e| {
-                    std::path::Path::new(e.src_entry.trim_start_matches("./"))
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        == Some(chunk_name.as_str())
-                })
-                .map(|e| {
-                    let stripped = e
-                        .src_entry
-                        .trim_start_matches("./")
-                        .trim_end_matches(".ets")
-                        .trim_end_matches(".ts")
-                        .trim_end_matches(".js");
-                    format!("{}/{}/{}", bundle_name, loader_json.module_name, stripped)
-                })
-                .unwrap_or_else(|| chunk_name.clone());
-
-            WidgetInput {
-                path: path.clone(),
-                record_name,
-                source_file: None,
+                .find(|(name, _)| name == &chunk.name)
+                .map(|(_, p)| p.clone())
+                .unwrap_or_default();
+            BundledChunkMeta {
+                name: chunk.name.clone(),
+                path,
+                is_entry: chunk.is_entry,
+                is_dynamic_entry: chunk.is_dynamic_entry,
+                facade_module_id: chunk.facade_module_id.clone(),
+                exports: chunk.exports.clone(),
+                imports: chunk.imports.clone(),
+                dynamic_imports: chunk.dynamic_imports.clone(),
+                source_map: chunk.source_map.clone(),
             }
         })
         .collect();
-
-    if widget_inputs.is_empty() {
-        // No widget chunks found — nothing to compile.  This can happen when
-        // the bundler did not emit a separate chunk for the form extension entry
-        // (e.g. it was inlined into the main chunk).  Log a debug note and skip.
-        return Ok(());
+    BundleCacheManifest {
+        key: key.clone(),
+        chunks,
+        source_maps_path: bundle_out.source_maps_path.clone(),
     }
-
-    let widget_config = WidgetCompileConfig {
-        inputs: widget_inputs,
-        output: widgets_abc,
-        cache_dir,
-        target_api_version: config.sdk_config.compile_api_version,
-        debug_info: matches!(config.build_mode, BuildMode::Debug),
-    };
-
-    let compiler = AbcCompiler::new(arkdown_abc::AbcCompileOptions {
-        debug_info: widget_config.debug_info,
-        opt_level: 0,
-        target_api_version: widget_config.target_api_version,
-        merge_abc: true,
-        module: true,
-        cache_path: Some(widget_config.cache_dir.clone()),
-    });
-
-    compiler
-        .compile_widget(&widget_config)
-        .map_err(|e| anyhow::anyhow!("Widget ABC compile failed: {}", e))?;
-
-    Ok(())
 }
+
+/// Reconstruct a [`BundleOutput`] from a cached [`BundleCacheManifest`].
+///
+/// The `.js` chunk files must already exist on disk (the cache validity check
+/// in [`BundleCache::is_valid`] guarantees this before we call this function).
+fn bundle_output_from_manifest(
+    manifest: &BundleCacheManifest,
+    loader_json: &arkdown_profile::LoaderJson,
+) -> BundleOutput {
+    let mut chunks: IndexVec<ChunkIdx, ArkChunk> = IndexVec::new();
+    for meta in &manifest.chunks {
+        chunks.push(ArkChunk {
+            name: meta.name.clone(),
+            is_entry: meta.is_entry,
+            is_dynamic_entry: meta.is_dynamic_entry,
+            facade_module_id: meta.facade_module_id.clone(),
+            exports: meta.exports.clone(),
+            imports: meta.imports.clone(),
+            dynamic_imports: meta.dynamic_imports.clone(),
+            source_map: meta.source_map.clone(),
+            ..ArkChunk::default()
+        });
+    }
+    let chunk_files: Vec<(String, PathBuf)> = manifest
+        .chunks
+        .iter()
+        .map(|c| (c.name.clone(), c.path.clone()))
+        .collect();
+    let output_dir = PathBuf::from(&loader_json.ace_module_build);
+    let modules_abc_path = arkdown::output::modules_abc_path(&output_dir);
+    BundleOutput {
+        chunk_graph: ChunkGraph {
+            chunks,
+            module_to_chunk: IndexVec::new(),
+            entry_module_to_entry_chunk: FxHashMap::default(),
+        },
+        output_dir,
+        chunk_files,
+        modules_abc_path,
+        source_maps_path: manifest.source_maps_path.clone(),
+    }
+}
+
