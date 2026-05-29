@@ -1365,5 +1365,81 @@ fn test_throw_statement_emits_throw_opcode() {
     assert!(
         bytes.windows(2).any(|w| w == [0xFE, 0x00]),
         "throw prefix (0xFE 0x00) must appear for throw statement"
+
+fn test_optional_chaining_compiles_and_emits_null_check() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("optchain.abc");
+    let source = r#"
+const x = obj?.prop;
+const y = arr?.length;
+"#;
+    module_compiler()
+        .compile(vec![module_record("test/optchain", source)], &out)
+        .expect("optional chaining must compile without error");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+    // eq opcode (0x0f) for null check (obj == null catches both null and undefined)
+    assert!(
+        bytes.contains(&0x0f),
+        "eq opcode (0x0f) must appear for null check in optional chaining"
+    );
+    // jnez opcode (0x9b) for short-circuit branch on null/undefined
+    assert!(
+        bytes.contains(&0x9b),
+        "jnez (0x9b) must appear for short-circuit in optional chaining"
+    );
+}
+
+#[test]
+fn test_destructuring_array_and_object_compile() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("destruct.abc");
+    let source = r#"
+const [a, b] = someArray;
+const {x, y} = someObject;
+const sum = a + b;
+"#;
+    module_compiler()
+        .compile(vec![module_record("test/destruct", source)], &out)
+        .expect("destructuring declarations must compile without error");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+    // ldobjbyname (0x42) must appear for reading elements/props via string index
+    assert!(
+        bytes.contains(&0x42),
+        "ldobjbyname (0x42) must appear for destructuring element access"
+    );
+    // add2 (0x0a) must appear for the sum expression proving bindings were established
+    assert!(
+        bytes.contains(&0x0a),
+        "add2 (0x0a) must appear after destructuring binds are established"
+    );
+}
+
+#[test]
+fn test_for_of_and_array_literal_compile() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("forof.abc");
+    let source = r#"
+const arr = [1, 2, 3];
+let total = 0;
+for (const item of arr) {
+    total = total + item;
+}
+"#;
+    module_compiler()
+        .compile(vec![module_record("test/forof", source)], &out)
+        .expect("for-of and array literal must compile without error");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+    // createemptyarray (0x05) must appear for array literal [1, 2, 3]
+    assert!(
+        bytes.contains(&0x05),
+        "createemptyarray (0x05) must appear for array literal"
+    );
+    // stownbyindex (0x79) must appear for populating array elements
+    assert!(
+        bytes.contains(&0x79),
+        "stownbyindex (0x79) must appear for array element assignment"
     );
 }

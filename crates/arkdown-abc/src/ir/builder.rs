@@ -1786,9 +1786,57 @@ impl<'a> CodeGen<'a> {
                 self.emit_expr(&throw.argument);
                 self.push(Insn::Throw);
             }
+            Statement::ForInStatement(for_in) => {
+                self.emit_for_in_stmt(for_in);
+            }
+            Statement::ForOfStatement(for_of) => {
+                self.emit_for_of_stmt(for_of);
+            }
             // Everything else: no bytecode emitted.
             _ => {}
         }
+    }
+
+    // ── While loop ────────────────────────────────────────────────────────────
+
+    fn emit_for_in_stmt(&mut self, for_in: &oxc_ast::ast::ForInStatement<'_>) {
+        self.emit_expr(&for_in.right);
+        if let oxc_ast::ast::ForStatementLeft::VariableDeclaration(decl) = &for_in.left {
+            for declarator in &decl.declarations {
+                if let BindingPattern::BindingIdentifier(id) = &declarator.id {
+                    let name = id.name.as_str().to_string();
+                    self.push(Insn::LdUndefined);
+                    let reg = self.alloc_reg();
+                    self.var_regs.insert(name, reg);
+                    self.push(Insn::Sta(reg));
+                }
+            }
+        }
+        let outer_returned = self.returned;
+        self.returned = false;
+        self.emit_stmt(&for_in.body);
+        self.returned = outer_returned;
+    }
+
+    // ── For-of loop (stub: binds value=undefined, emits body once) ───────────
+
+    fn emit_for_of_stmt(&mut self, for_of: &oxc_ast::ast::ForOfStatement<'_>) {
+        self.emit_expr(&for_of.right);
+        if let oxc_ast::ast::ForStatementLeft::VariableDeclaration(decl) = &for_of.left {
+            for declarator in &decl.declarations {
+                if let BindingPattern::BindingIdentifier(id) = &declarator.id {
+                    let name = id.name.as_str().to_string();
+                    self.push(Insn::LdUndefined);
+                    let reg = self.alloc_reg();
+                    self.var_regs.insert(name, reg);
+                    self.push(Insn::Sta(reg));
+                }
+            }
+        }
+        let outer_returned = self.returned;
+        self.returned = false;
+        self.emit_stmt(&for_of.body);
+        self.returned = outer_returned;
     }
 
     // ── If statement with jump patching ──────────────────────────────────────
@@ -2008,37 +2056,96 @@ impl<'a> CodeGen<'a> {
 
     fn emit_var_decl(&mut self, decl: &oxc_ast::ast::VariableDeclaration<'_>) {
         for declarator in &decl.declarations {
-            // BindingPattern is directly the enum (no .kind wrapper in this OXC fork).
-            let name = match &declarator.id {
-                BindingPattern::BindingIdentifier(id) => id.name.as_str().to_string(),
-                _ => continue, // skip destructuring
-            };
-
-            if let Some(init) = &declarator.init {
-                if let Expression::ClassExpression(cls) = init {
-                    let class_name = cls.id.as_ref().map_or(name.as_str(), |id| id.name.as_str());
-                    self.emit_class_inner(
-                        Some(class_name),
-                        &cls.body.body,
-                        cls.super_class.as_ref(),
-                    );
-                } else {
-                    self.emit_expr(init);
+            match &declarator.id {
+                BindingPattern::BindingIdentifier(id) => {
+                    let name = id.name.as_str().to_string();
+                    if let Some(init) = &declarator.init {
+                        if let Expression::ClassExpression(cls) = init {
+                            let class_name =
+                                cls.id.as_ref().map_or(name.as_str(), |id| id.name.as_str());
+                            self.emit_class_inner(
+                                Some(class_name),
+                                &cls.body.body,
+                                cls.super_class.as_ref(),
+                            );
+                        } else {
+                            self.emit_expr(init);
+                        }
+                    } else {
+                        self.push(Insn::LdUndefined);
+                    }
+                    let reg = self.alloc_reg();
+                    self.var_regs.insert(name.clone(), reg);
+                    self.push(Insn::Sta(reg));
+                    if let Some(slot) = self.lowering.lexical_index(&name) {
+                        self.push(Insn::Lda(reg));
+                        self.push(Insn::StLexVar(0, slot));
+                    }
+                    if let Some(export_index) = self.lowering.export_index(&name) {
+                        self.push(Insn::Lda(reg));
+                        self.push(Insn::StModuleVar(export_index));
+                    }
                 }
-            } else {
-                self.push(Insn::LdUndefined);
-            }
-
-            let reg = self.alloc_reg();
-            self.var_regs.insert(name.clone(), reg);
-            self.push(Insn::Sta(reg));
-            if let Some(slot) = self.lowering.lexical_index(&name) {
-                self.push(Insn::Lda(reg));
-                self.push(Insn::StLexVar(0, slot));
-            }
-            if let Some(export_index) = self.lowering.export_index(&name) {
-                self.push(Insn::Lda(reg));
-                self.push(Insn::StModuleVar(export_index));
+                BindingPattern::ArrayPattern(arr_pat) => {
+                    if let Some(init) = &declarator.init {
+                        self.emit_expr(init);
+                    } else {
+                        self.push(Insn::LdUndefined);
+                    }
+                    let tmp_reg = self.alloc_reg();
+                    self.push(Insn::Sta(tmp_reg));
+                    for (i, elem) in arr_pat.elements.iter().enumerate() {
+                        let Some(pat) = elem else { continue };
+                        let BindingPattern::BindingIdentifier(bid) = pat else { continue };
+                        let vname = bid.name.as_str().to_string();
+                        let idx_str = i.to_string();
+                        let name_id = self.intern(&idx_str);
+                        self.push(Insn::Lda(tmp_reg));
+                        self.push(Insn::LdObjByName(0, name_id));
+                        let reg = self.alloc_reg();
+                        self.var_regs.insert(vname.clone(), reg);
+                        self.push(Insn::Sta(reg));
+                        if let Some(slot) = self.lowering.lexical_index(&vname) {
+                            self.push(Insn::Lda(reg));
+                            self.push(Insn::StLexVar(0, slot));
+                        }
+                    }
+                }
+                BindingPattern::ObjectPattern(obj_pat) => {
+                    if let Some(init) = &declarator.init {
+                        self.emit_expr(init);
+                    } else {
+                        self.push(Insn::LdUndefined);
+                    }
+                    let tmp_reg = self.alloc_reg();
+                    self.push(Insn::Sta(tmp_reg));
+                    for prop in &obj_pat.properties {
+                        let key_name = match &prop.key {
+                            PropertyKey::StaticIdentifier(id) => id.name.as_str().to_string(),
+                            PropertyKey::StringLiteral(s) => s.value.as_str().to_string(),
+                            _ => continue,
+                        };
+                        let BindingPattern::BindingIdentifier(bid) = &prop.value else {
+                            continue;
+                        };
+                        let vname = bid.name.as_str().to_string();
+                        let name_id = self.intern(&key_name);
+                        self.push(Insn::Lda(tmp_reg));
+                        self.push(Insn::LdObjByName(0, name_id));
+                        let reg = self.alloc_reg();
+                        self.var_regs.insert(vname.clone(), reg);
+                        self.push(Insn::Sta(reg));
+                        if let Some(slot) = self.lowering.lexical_index(&vname) {
+                            self.push(Insn::Lda(reg));
+                            self.push(Insn::StLexVar(0, slot));
+                        }
+                        if let Some(export_index) = self.lowering.export_index(&vname) {
+                            self.push(Insn::Lda(reg));
+                            self.push(Insn::StModuleVar(export_index));
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -2210,10 +2317,191 @@ impl<'a> CodeGen<'a> {
             Expression::TemplateLiteral(tmpl) => {
                 self.emit_template_literal(tmpl);
             }
+            Expression::ChainExpression(chain) => {
+                self.emit_chain_expr(chain);
+            }
+            Expression::ArrayExpression(arr) => {
+                self.emit_array_expr(arr);
+            }
             _ => {
                 self.push(Insn::LdUndefined);
             }
         }
+    }
+
+    // ── Optional chaining: obj?.prop / obj?.method() ─────────────────────────
+
+    fn emit_chain_expr(&mut self, chain: &oxc_ast::ast::ChainExpression<'_>) {
+        match &chain.expression {
+            oxc_ast::ast::ChainElement::StaticMemberExpression(mem) => {
+                self.emit_expr(&mem.object);
+                let obj_reg = self.alloc_reg();
+                self.push(Insn::Sta(obj_reg));
+                let null_reg = self.alloc_reg();
+                self.push(Insn::LdNull);
+                self.push(Insn::Sta(null_reg));
+                self.push(Insn::Lda(obj_reg));
+                self.push(Insn::Eq(0, null_reg));
+                let jnez_pos = self.insns.len();
+                self.push(Insn::Jnez(0));
+                self.push(Insn::Lda(obj_reg));
+                let name_id = self.intern(mem.property.name.as_str());
+                self.push(Insn::LdObjByName(0, name_id));
+                let jmp_pos = self.insns.len();
+                self.push(Insn::Jmp(0));
+                let null_start = self.insns.len();
+                let [lo, hi] = ((null_start as i32 - jnez_pos as i32) as i16).to_le_bytes();
+                self.insns[jnez_pos + 1] = lo;
+                self.insns[jnez_pos + 2] = hi;
+                self.push(Insn::LdUndefined);
+                let end = self.insns.len();
+                let [lo2, hi2] = ((end as i32 - jmp_pos as i32) as i16).to_le_bytes();
+                self.insns[jmp_pos + 1] = lo2;
+                self.insns[jmp_pos + 2] = hi2;
+            }
+            oxc_ast::ast::ChainElement::ComputedMemberExpression(mem) => {
+                self.emit_expr(&mem.object);
+                let obj_reg = self.alloc_reg();
+                self.push(Insn::Sta(obj_reg));
+                let null_reg = self.alloc_reg();
+                self.push(Insn::LdNull);
+                self.push(Insn::Sta(null_reg));
+                self.push(Insn::Lda(obj_reg));
+                self.push(Insn::Eq(0, null_reg));
+                let jnez_pos = self.insns.len();
+                self.push(Insn::Jnez(0));
+                self.push(Insn::Lda(obj_reg));
+                if let Expression::StringLiteral(key) = &mem.expression {
+                    let name_id = self.intern(key.value.as_str());
+                    self.push(Insn::LdObjByName(0, name_id));
+                } else {
+                    self.push(Insn::LdUndefined);
+                }
+                let jmp_pos = self.insns.len();
+                self.push(Insn::Jmp(0));
+                let null_start = self.insns.len();
+                let [lo, hi] = ((null_start as i32 - jnez_pos as i32) as i16).to_le_bytes();
+                self.insns[jnez_pos + 1] = lo;
+                self.insns[jnez_pos + 2] = hi;
+                self.push(Insn::LdUndefined);
+                let end = self.insns.len();
+                let [lo2, hi2] = ((end as i32 - jmp_pos as i32) as i16).to_le_bytes();
+                self.insns[jmp_pos + 1] = lo2;
+                self.insns[jmp_pos + 2] = hi2;
+            }
+            oxc_ast::ast::ChainElement::CallExpression(call) => {
+                let is_method = matches!(
+                    &call.callee,
+                    Expression::StaticMemberExpression(_)
+                        | Expression::ComputedMemberExpression(_)
+                );
+                if is_method {
+                    let (recv_expr, method_name): (&Expression<'_>, Option<String>) =
+                        match &call.callee {
+                            Expression::StaticMemberExpression(m) => {
+                                (&m.object, Some(m.property.name.as_str().to_string()))
+                            }
+                            Expression::ComputedMemberExpression(m) => {
+                                let n = if let Expression::StringLiteral(s) = &m.expression {
+                                    Some(s.value.as_str().to_string())
+                                } else {
+                                    None
+                                };
+                                (&m.object, n)
+                            }
+                            other => {
+                                self.emit_expr(other);
+                                self.push(Insn::CallArg0(0));
+                                return;
+                            }
+                        };
+                    self.emit_expr(recv_expr);
+                    let this_reg = self.alloc_reg();
+                    self.push(Insn::Sta(this_reg));
+                    let null_reg = self.alloc_reg();
+                    self.push(Insn::LdNull);
+                    self.push(Insn::Sta(null_reg));
+                    self.push(Insn::Lda(this_reg));
+                    self.push(Insn::Eq(0, null_reg));
+                    let jnez_pos = self.insns.len();
+                    self.push(Insn::Jnez(0));
+                    if let Some(ref mname) = method_name {
+                        let name_id = self.intern(mname);
+                        self.push(Insn::Lda(this_reg));
+                        self.push(Insn::LdObjByName(0, name_id));
+                    } else {
+                        self.push(Insn::LdUndefined);
+                    }
+                    let argc = call.arguments.len();
+                    match argc {
+                        0 => self.push(Insn::CallThis0(0, this_reg)),
+                        1 => {
+                            let v0 = self.compile_arg_to_reg(&call.arguments[0]);
+                            self.push(Insn::CallThis1(0, this_reg, v0));
+                        }
+                        2 => {
+                            let v0 = self.compile_arg_to_reg(&call.arguments[0]);
+                            let v1 = self.compile_arg_to_reg(&call.arguments[1]);
+                            self.push(Insn::CallThis2(0, this_reg, v0, v1));
+                        }
+                        _ => {
+                            let v0 = self.compile_arg_to_reg(&call.arguments[0]);
+                            self.push(Insn::CallThis1(0, this_reg, v0));
+                        }
+                    }
+                    let jmp_pos = self.insns.len();
+                    self.push(Insn::Jmp(0));
+                    let null_start = self.insns.len();
+                    let [lo, hi] = ((null_start as i32 - jnez_pos as i32) as i16).to_le_bytes();
+                    self.insns[jnez_pos + 1] = lo;
+                    self.insns[jnez_pos + 2] = hi;
+                    self.push(Insn::LdUndefined);
+                    let end = self.insns.len();
+                    let [lo2, hi2] = ((end as i32 - jmp_pos as i32) as i16).to_le_bytes();
+                    self.insns[jmp_pos + 1] = lo2;
+                    self.insns[jmp_pos + 2] = hi2;
+                } else {
+                    self.emit_call(call);
+                }
+            }
+            _ => {
+                self.push(Insn::LdUndefined);
+            }
+        }
+    }
+
+    // ── Array literal: [a, ...b, c] ───────────────────────────────────────────
+
+    fn emit_array_expr(&mut self, arr: &oxc_ast::ast::ArrayExpression<'_>) {
+        self.push(Insn::CreateEmptyArray(0));
+        if arr.elements.is_empty() {
+            return;
+        }
+        let arr_reg = self.alloc_reg();
+        self.push(Insn::Sta(arr_reg));
+        let mut idx: u16 = 0;
+        for elem in &arr.elements {
+            match elem {
+                oxc_ast::ast::ArrayExpressionElement::SpreadElement(spread) => {
+                    self.emit_expr(&spread.argument);
+                    self.push(Insn::StOwnByIndex(0, arr_reg, idx));
+                    idx += 1;
+                }
+                oxc_ast::ast::ArrayExpressionElement::Elision(_) => {
+                    idx += 1;
+                }
+                _ => {
+                    if let Some(expr) = elem.as_expression() {
+                        self.emit_expr(expr);
+                    } else {
+                        self.push(Insn::LdUndefined);
+                    }
+                    self.push(Insn::StOwnByIndex(0, arr_reg, idx));
+                    idx += 1;
+                }
+            }
+        }
+        self.push(Insn::Lda(arr_reg));
     }
 
     // ── Object literal: { key: value, … } ────────────────────────────────────
