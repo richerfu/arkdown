@@ -262,7 +262,7 @@ pub fn build_record_with_debug(
     // Module mode scans top-level statements directly; non-module compatibility
     // inputs are always the top-level program body.
     let tracked_source = source_file.as_ref().map(|_| source);
-    compile_class_method_bodies(scan_stmts, strings, literal_arrays, &lowering, &mut methods, tracked_source);
+    compile_class_method_bodies(scan_stmts, strings, literal_arrays, &lowering, &mut methods, tracked_source, source_file);
 
     // Collect top-level call-argument arrow functions (e.g. registerNamedRoute callback
     // and Reflect.set finalizeConstruction stub). hvigor names these #*# / #*#^1.
@@ -329,11 +329,16 @@ pub fn build_record_with_debug(
     let source_file = source_file.map(str::to_string);
     if let Some(file) = &source_file {
         for method in &mut methods {
-            method.debug_info = Some(DebugInfoRecord {
-                line_start: 1,
-                source_file: file.clone(),
-                param_names: vec![],
-            });
+            // Only set debug_info for methods that don't have it yet.
+            // Class methods compiled by compile_class_elements already have
+            // debug_info populated with param_names; preserve those.
+            if method.debug_info.is_none() {
+                method.debug_info = Some(DebugInfoRecord {
+                    line_start: 1,
+                    source_file: file.clone(),
+                    param_names: vec![],
+                });
+            }
         }
     }
 
@@ -528,6 +533,7 @@ fn compile_class_method_bodies(
     lowering: &LoweringContext,
     methods: &mut Vec<MethodRecord>,
     source: Option<&str>,
+    source_file_path: Option<&str>,
 ) {
     for stmt in stmts {
         // Handle `class Foo { ... }` (ClassDeclaration)
@@ -541,6 +547,7 @@ fn compile_class_method_bodies(
                 lowering,
                 methods,
                 source,
+                source_file_path,
             );
             continue;
         }
@@ -555,6 +562,7 @@ fn compile_class_method_bodies(
                     lowering,
                     methods,
                     source,
+                    source_file_path,
                 );
             }
             continue;
@@ -570,6 +578,7 @@ fn compile_class_method_bodies(
                     lowering,
                     methods,
                     source,
+                    source_file_path,
                 );
             }
             continue;
@@ -596,6 +605,7 @@ fn compile_class_method_bodies(
                             lowering,
                             methods,
                             source,
+                            source_file_path,
                         );
                         continue;
                     }
@@ -731,6 +741,7 @@ fn compile_class_elements(
     lowering: &LoweringContext,
     methods: &mut Vec<MethodRecord>,
     source: Option<&str>,
+    source_file_path: Option<&str>,
 ) {
     let class_name = class_name.unwrap_or("_");
     let has_constructor = elements.iter().any(|element| {
@@ -776,12 +787,29 @@ fn compile_class_elements(
             };
             let num_vregs = estimate_vregs(&bytecode);
             let num_args = class_method_num_args(method);
+            let param_names: Vec<String> = method
+                .value
+                .params
+                .items
+                .iter()
+                .filter_map(|p| match &p.pattern {
+                    BindingPattern::BindingIdentifier(id) => {
+                        Some(id.name.as_str().to_string())
+                    }
+                    _ => None,
+                })
+                .collect();
+            let debug_info = source_file_path.map(|path| DebugInfoRecord {
+                line_start: 1,
+                source_file: path.to_string(),
+                param_names,
+            });
             methods.push(MethodRecord {
                 name: key_name,
                 bytecode,
                 num_vregs,
                 num_args,
-                debug_info: None,
+                debug_info,
                 line_ops: method_line_ops,
             });
 

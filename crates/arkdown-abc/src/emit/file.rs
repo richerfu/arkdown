@@ -419,6 +419,50 @@ impl AbcFile {
             }
         }
 
+        // ── 1f. Scope-name StringItems (emitted once per file) ───────────────
+        //
+        // hvigor always emits START_LOCAL entries for three fixed scope
+        // variables in every method's LNP: "this" (reg 0), "newTarget" (reg 1),
+        // "funcObj" (reg 2).  We allocate one StringItem per name.
+        let scope_name_strs: [Vec<u8>; 3] = [
+            inline_string("this"),
+            inline_string("newTarget"),
+            inline_string("funcObj"),
+        ];
+        let scope_name_offsets: [u32; 3] = {
+            let mut offsets = [0u32; 3];
+            for (i, s) in scope_name_strs.iter().enumerate() {
+                offsets[i] = cur;
+                cur += s.len() as u32;
+            }
+            offsets
+        };
+
+        // ── 1g. Per-LNP param-name StringItems ───────────────────────────────
+        //
+        // For each method that will receive an LNP (debug_info && source_file),
+        // allocate a StringItem for each of its formal parameter names.
+        // Iteration order must exactly match the LNP emission loop.
+        let mut per_lnp_param_name_offsets: Vec<Vec<u32>> = Vec::new();
+        let mut all_param_name_strings: Vec<Vec<u8>> = Vec::new();
+        for (class_idx, class) in all_classes.iter().enumerate() {
+            if source_file_string_offsets[class_idx].is_none() {
+                continue;
+            }
+            for method in &class.methods {
+                if let Some(debug) = &method.debug_info {
+                    let mut offs = Vec::new();
+                    for param_name in &debug.param_names {
+                        offs.push(cur);
+                        let s = inline_string(param_name);
+                        cur += s.len() as u32;
+                        all_param_name_strings.push(s);
+                    }
+                    per_lnp_param_name_offsets.push(offs);
+                }
+            }
+        }
+
         // ── 2. Compute ClassItem sizes & start offsets ────────────────────────
         let class_section_start = cur;
 
@@ -571,19 +615,44 @@ impl AbcFile {
                 lnp_offsets.push(lnp_cur);
                 // Panda LNP body:
                 //   SET_FILE (0x05) + 4-byte LE string offset
+                //   START_LOCAL entries for scope variables and params
                 //   <advance opcodes — may be empty>
                 //   END_SEQUENCE (0x00, already included in line_ops when non-empty)
                 lnp_buf.push(0x05);
                 lnp_buf.extend_from_slice(&src_off.to_le_bytes());
+
+                // START_LOCAL (0x03) entries that hvigor always emits:
+                //   "this"      reg 0  type_off 0
+                //   "newTarget" reg 1  type_off 0
+                //   "funcObj"   reg 2  type_off 0
+                for (reg, &name_off) in scope_name_offsets.iter().enumerate() {
+                    lnp_buf.push(0x03);
+                    lnp_buf.extend_from_slice(&name_off.to_le_bytes());
+                    lnp_buf.push(reg as u8);
+                    lnp_buf.extend_from_slice(&0u32.to_le_bytes());
+                }
+
+                // START_LOCAL entries for formal parameters, starting at reg 3.
+                let param_offs = &per_lnp_param_name_offsets[i];
+                for (param_idx, &param_off) in param_offs.iter().enumerate() {
+                    lnp_buf.push(0x03);
+                    lnp_buf.extend_from_slice(&param_off.to_le_bytes());
+                    lnp_buf.push(3 + param_idx as u8);
+                    lnp_buf.extend_from_slice(&0u32.to_le_bytes());
+                }
+
+                // Each START_LOCAL entry is 10 bytes (1 + 4 + 1 + 4).
+                let start_local_bytes = (3 + param_offs.len()) as u32 * 10;
+
                 let method_ops = lnp_method_line_ops[i];
                 if !method_ops.is_empty() {
                     // line_ops already ends with END_SEQUENCE (0x00).
                     lnp_buf.extend_from_slice(method_ops);
-                    lnp_cur += 5 + method_ops.len() as u32;
+                    lnp_cur += 5 + start_local_bytes + method_ops.len() as u32;
                 } else {
-                    // Minimal LNP: just SET_FILE + END_SEQUENCE.
+                    // Minimal LNP: just SET_FILE + START_LOCALs + END_SEQUENCE.
                     lnp_buf.push(0x00);
-                    lnp_cur += 6;
+                    lnp_cur += 6 + start_local_bytes;
                 }
             }
 
@@ -825,6 +894,16 @@ impl AbcFile {
 
         // ── LiteralArray StringItems ────────────────────────────────────────
         for s in &all_literal_strings {
+            file.extend_from_slice(s);
+        }
+
+        // ── Scope-name StringItems (this / newTarget / funcObj) ──────────────
+        for s in &scope_name_strs {
+            file.extend_from_slice(s);
+        }
+
+        // ── Param-name StringItems (per-LNP formal parameter names) ──────────
+        for s in &all_param_name_strings {
             file.extend_from_slice(s);
         }
 
