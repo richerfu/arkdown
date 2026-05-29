@@ -165,6 +165,35 @@ if let Some(cached) = cache.get(&id) {
 - Modifying one source file only re-processes that file and its dependents
 - Config change (e.g., `useNormalizedOHMUrl` toggle) invalidates all cached entries
 
+### BundleCache (bundle-level output cache) — implemented 2026-05-29
+
+A coarser, bundle-level cache that skips the entire rolldown bundling step when
+all compile-entry source files and the build configuration are unchanged.
+
+**Types** (in `arkdown-cache`):
+- `BundleCacheKey { source_hash: u64, config_hash: u64 }` — FNV-1a hash of all
+  compile-entry source file contents (`source_hash`) and a hash of build mode +
+  bundle name + API version + `useNormalizedOHMUrl` + `supportChunks`
+  (`config_hash`).
+- `BundledChunkMeta { name, path, is_entry, source_map }` — one chunk written
+  to disk.
+- `BundleCacheManifest { key, chunks }` — persisted to
+  `<module>/build/default/cache/bundle/bundle.json`.
+- `BundleCache { cache_dir }` — `is_valid(key)` checks key equality AND that
+  all chunk `.js` files still exist; `save` / `load` for round-trips.
+
+**CLI wiring** (in `arkdown-cli::cmd::build`):
+- `compute_bundle_source_hash` — hashes all compile-entry file contents via
+  `arkdown_cache::fnv1a_hash_bytes`.
+- `compute_bundle_config_hash` — hashes the build-mode byte, bundle name,
+  api_version, `use_normalized_ohm_url`, `support_chunks`.
+- `build_bundle_cache_manifest` — builds manifest from a live `BundleOutput`.
+- `bundle_output_from_manifest` — reconstructs `BundleOutput` (reads chunk
+  `.js` code back from disk) so the ABC and packaging steps receive the same
+  interface whether or not the cache was hit.
+- Cache check runs **before** stale `.js` cleanup; a cache hit skips cleanup
+  and bundling entirely via `continue` in the module loop.
+
 ---
 
 ## Rolldown Alignment

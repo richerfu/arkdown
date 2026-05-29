@@ -7,11 +7,13 @@ use anyhow::{Context, Result};
 use clap::Args;
 
 use arkdown::Bundler;
+use arkdown_cache::{BundleCache, BundleCacheKey, BundleCacheManifest, BundledChunkMeta};
 use arkdown_config::load_config;
 use arkdown_core::{
-    ArkdownConfig, ArkdownPlugin, BuildMode, ModuleConfig, ModuleJson5, ModuleJson5Module,
-    OutputTarget,
+    ArkChunk, ArkdownConfig, ArkdownPlugin, BuildMode, ChunkGraph, ChunkIdx, ModuleConfig,
+    ModuleJson5, ModuleJson5Module, OutputTarget,
 };
+use index_vec::IndexVec;
 use arkdown_pack::{HarPackInput, PackAbility, PackInput, Packager};
 use arkdown_plugin_duplicate_check::DuplicateCheckPlugin;
 use arkdown_plugin_ets_transform::EtsTransformPlugin;
@@ -151,6 +153,25 @@ pub async fn run(args: BuildArgs) -> Result<()> {
     progress.step(3, 6, "Bundling");
     let mut bundle_outs = Vec::new();
     for (module, _manifest, loader_json) in &loader_jsons {
+        // Compute bundle cache key before any disk cleanup.
+        let source_hash =
+            compute_bundle_source_hash(&loader_json.compile_entry, &module.src_path);
+        let config_hash = compute_bundle_config_hash(&config_arc, loader_json);
+        let bundle_key = BundleCacheKey {
+            source_hash,
+            config_hash,
+        };
+        let bundle_cache =
+            BundleCache::new(module.src_path.join("build/default/cache/bundle"));
+
+        // Cache hit: chunk .js files still exist and key matches — skip bundling.
+        if bundle_cache.is_valid(&bundle_key) {
+            if let Some(manifest) = bundle_cache.load() {
+                bundle_outs.push(bundle_output_from_manifest(&manifest, loader_json));
+                continue;
+            }
+        }
+
         // Clean stale .js files from previous builds so that collect_js_chunks_from_output
         // (which uses the explicit file list) is the authoritative source, and any leftover
         // files from a prior run do not sneak into the ABC compiler.
@@ -216,6 +237,13 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             .bundle(loader_json)
             .await
             .map_err(|e| anyhow::anyhow!("Bundle failed: {}", e))?;
+
+        // Persist bundle manifest so the next build can skip rolldown when nothing changed.
+        let cache_manifest = build_bundle_cache_manifest(&bundle_key, &bundle_out);
+        if let Err(e) = bundle_cache.save(&cache_manifest) {
+            eprintln!("[warn] bundle cache save failed: {e}");
+        }
+
         bundle_outs.push(bundle_out);
     }
     progress.done();
@@ -843,4 +871,131 @@ fn with_extension(path: &str, extension: &str) -> String {
     path.rsplit_once('.')
         .map(|(stem, _)| format!("{stem}.{extension}"))
         .unwrap_or_else(|| format!("{path}.{extension}"))
+}
+
+// ---------------------------------------------------------------------------
+// Bundle cache helpers
+// ---------------------------------------------------------------------------
+
+/// FNV-1a 64-bit hash over a byte slice, used for deterministic cache keys.
+fn fnv1a(data: &[u8]) -> u64 {
+    arkdown_cache::fnv1a_hash_bytes(data)
+}
+
+/// Hash the contents of every compile-entry source file.
+///
+/// Entries are relative to `<module_src_path>/src/main` (same normalization as
+/// the bundler). Files that cannot be read are silently skipped so a missing
+/// file does not prevent the build from running; the changed hash will simply
+/// invalidate any prior cache entry.
+pub fn compute_bundle_source_hash(compile_entry: &[String], module_src_path: &Path) -> u64 {
+    let src_main = module_src_path.join("src/main");
+    let mut h: u64 = 0xcbf29ce484222325;
+    for entry in compile_entry {
+        let abs = if entry.starts_with('/') || entry.starts_with('@') {
+            PathBuf::from(entry)
+        } else {
+            src_main.join(entry.trim_start_matches("./"))
+        };
+        if let Ok(contents) = std::fs::read(&abs) {
+            // Mix the file path into the hash so renames are detected.
+            h ^= fnv1a(entry.as_bytes());
+            h = h.wrapping_mul(0x100000001b3);
+            h ^= fnv1a(&contents);
+            h = h.wrapping_mul(0x100000001b3);
+        }
+    }
+    h
+}
+
+/// Hash the build configuration fields that affect bundle output.
+pub fn compute_bundle_config_hash(config: &ArkdownConfig, loader: &arkdown_profile::LoaderJson) -> u64 {
+    let mode_byte: u8 = if matches!(config.build_mode, BuildMode::Debug) {
+        0
+    } else {
+        1
+    };
+    let mut h = fnv1a(&[mode_byte]);
+    h ^= fnv1a(config.product.bundle_name.as_bytes());
+    h = h.wrapping_mul(0x100000001b3);
+    h ^= fnv1a(&loader.api_version.to_le_bytes());
+    h = h.wrapping_mul(0x100000001b3);
+    h ^= fnv1a(&[loader.use_normalized_ohm_url as u8]);
+    h = h.wrapping_mul(0x100000001b3);
+    h ^= fnv1a(&[loader.support_chunks as u8]);
+    h = h.wrapping_mul(0x100000001b3);
+    h
+}
+
+/// Build a [`BundleCacheManifest`] from the result of a successful bundle pass.
+pub fn build_bundle_cache_manifest(
+    key: &BundleCacheKey,
+    bundle_out: &arkdown::BundleOutput,
+) -> BundleCacheManifest {
+    let chunks: Vec<BundledChunkMeta> = bundle_out
+        .chunk_files
+        .iter()
+        .filter_map(|(name, path)| {
+            let ark_chunk = bundle_out
+                .chunk_graph
+                .chunks
+                .iter()
+                .find(|c| &c.name == name)?;
+            Some(BundledChunkMeta {
+                name: name.clone(),
+                path: path.to_string_lossy().into_owned(),
+                is_entry: ark_chunk.is_entry,
+                source_map: ark_chunk.source_map.clone(),
+            })
+        })
+        .collect();
+    BundleCacheManifest {
+        key: key.clone(),
+        chunks,
+    }
+}
+
+/// Reconstruct a [`arkdown::BundleOutput`] from a persisted [`BundleCacheManifest`].
+///
+/// The chunk `.js` files are already on disk from the previous build, so this
+/// just reads them back and re-populates the in-memory chunk graph.
+pub fn bundle_output_from_manifest(
+    manifest: &BundleCacheManifest,
+    loader_json: &arkdown_profile::LoaderJson,
+) -> arkdown::BundleOutput {
+    let mut chunks: IndexVec<ChunkIdx, ArkChunk> = IndexVec::new();
+    let mut chunk_files: Vec<(String, PathBuf)> = Vec::new();
+
+    for meta in &manifest.chunks {
+        let code = std::fs::read_to_string(&meta.path).unwrap_or_default();
+        chunks.push(ArkChunk {
+            name: meta.name.clone(),
+            code,
+            source_map: meta.source_map.clone(),
+            is_entry: meta.is_entry,
+            ..ArkChunk::default()
+        });
+        chunk_files.push((meta.name.clone(), PathBuf::from(&meta.path)));
+    }
+
+    let chunk_graph = ChunkGraph {
+        chunks,
+        module_to_chunk: IndexVec::new(),
+        entry_module_to_entry_chunk: Default::default(),
+    };
+
+    let output_dir = PathBuf::from(&loader_json.ace_module_build);
+    let modules_abc_path = arkdown::output::modules_abc_path(&output_dir);
+    let source_maps_path = {
+        let p = arkdown::output::source_maps_path(&output_dir);
+        if p.exists() { Some(p) } else { None }
+    };
+
+    arkdown::BundleOutput {
+        chunk_graph,
+        output_dir,
+        chunk_files,
+        modules_abc_path,
+        source_maps_path,
+    }
 }

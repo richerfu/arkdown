@@ -3,6 +3,10 @@ name = "arkdown-cli"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "arkdown_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "arkdown"
 path = "src/main.rs"
@@ -17,6 +21,8 @@ arkdown-abc = { path = "../arkdown-abc" }
 arkdown-ts2abc = { path = "../arkdown-ts2abc" }
 arkdown-pack = { path = "../arkdown-pack" }
 arkdown-sign = { path = "../arkdown-sign" }
+arkdown-cache = { path = "../arkdown-cache" }
+index_vec = { workspace = true }
 arkdown-plugin-ets-transform = { path = "../arkdown-plugin-ets-transform" }
 arkdown-plugin-chunk-wrapper = { path = "../arkdown-plugin-chunk-wrapper" }
 arkdown-plugin-ohos-resolve = { path = "../arkdown-plugin-ohos-resolve" }
