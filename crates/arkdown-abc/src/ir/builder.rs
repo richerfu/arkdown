@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     Argument, AssignmentTarget, BindingPattern, ClassElement, Declaration,
-    ExportDefaultDeclarationKind, Expression, FunctionBody, ImportDeclarationSpecifier,
-    ImportOrExportKind, LogicalOperator, MethodDefinition, MethodDefinitionKind, ModuleExportName,
-    Program, PropertyKey, Statement, UnaryOperator,
+    ExportAllDeclaration, ExportDefaultDeclarationKind, Expression, FunctionBody,
+    ImportDeclarationSpecifier, ImportOrExportKind, LogicalOperator, MethodDefinition,
+    MethodDefinitionKind, ModuleExportName, Program, PropertyKey, Statement, UnaryOperator,
 };
 use oxc_parser::{Parser, ParserReturn};
 use oxc_span::{GetSpan, SourceType};
@@ -392,7 +392,7 @@ struct LoweringContext {
 
 impl LoweringContext {
     fn from_module_record(module_record: &ModuleRecordInfo, lexical_names: Vec<String>) -> Self {
-        let import_indices = module_record
+        let mut import_indices: HashMap<String, u8> = module_record
             .regular_imports
             .iter()
             .filter_map(|import| {
@@ -401,6 +401,11 @@ impl LoweringContext {
                     .map(|idx| (import.local_name.clone(), idx))
             })
             .collect();
+        for ns in &module_record.namespace_imports {
+            if let Ok(idx) = u8::try_from(ns.module_request_idx) {
+                import_indices.entry(ns.local_name.clone()).or_insert(idx);
+            }
+        }
         let export_indices = module_record
             .local_exports
             .iter()
@@ -449,9 +454,9 @@ fn lexical_names_literal_array(names: &[String]) -> LiteralArray {
 
 fn module_record_literal_array(module_record: &ModuleRecordInfo) -> LiteralArray {
     let mut entries = Vec::new();
-    entries.push(LiteralEntry::RawU32(
-        module_record.module_requests.len() as u32
-    ));
+
+    // 1. Module request table.
+    entries.push(LiteralEntry::RawU32(module_record.module_requests.len() as u32));
     entries.extend(
         module_record
             .module_requests
@@ -460,27 +465,42 @@ fn module_record_literal_array(module_record: &ModuleRecordInfo) -> LiteralArray
             .map(LiteralEntry::RawString),
     );
 
-    entries.push(LiteralEntry::RawU32(
-        module_record.regular_imports.len() as u32
-    ));
+    // 2. Regular imports: [{local_name, import_name, module_request_idx}]
+    entries.push(LiteralEntry::RawU32(module_record.regular_imports.len() as u32));
     for import in &module_record.regular_imports {
         entries.push(LiteralEntry::RawString(import.local_name.clone()));
         entries.push(LiteralEntry::RawString(import.import_name.clone()));
         entries.push(LiteralEntry::RawU16(import.module_request_idx));
     }
 
-    entries.push(LiteralEntry::RawU32(0)); // namespace imports
-    entries.push(LiteralEntry::RawU32(
-        module_record.local_exports.len() as u32
-    ));
+    // 3. Namespace imports: [{module_request_idx, local_name}]
+    entries.push(LiteralEntry::RawU32(module_record.namespace_imports.len() as u32));
+    for ns in &module_record.namespace_imports {
+        entries.push(LiteralEntry::RawU16(ns.module_request_idx));
+        entries.push(LiteralEntry::RawString(ns.local_name.clone()));
+    }
+
+    // 4. Local exports: [{local_name, export_name}]
+    entries.push(LiteralEntry::RawU32(module_record.local_exports.len() as u32));
     for export in &module_record.local_exports {
         entries.push(LiteralEntry::RawString(export.local_name.clone()));
         entries.push(LiteralEntry::RawString(export.export_name.clone()));
     }
-    entries.extend([
-        LiteralEntry::RawU32(0), // indirect exports
-        LiteralEntry::RawU32(0), // star exports
-    ]);
+
+    // 5. Indirect exports: [{module_request_idx, import_name, export_name}]
+    entries.push(LiteralEntry::RawU32(module_record.indirect_exports.len() as u32));
+    for export in &module_record.indirect_exports {
+        entries.push(LiteralEntry::RawU16(export.module_request_idx));
+        entries.push(LiteralEntry::RawString(export.import_name.clone()));
+        entries.push(LiteralEntry::RawString(export.export_name.clone()));
+    }
+
+    // 6. Star exports: [{module_request_idx}]
+    entries.push(LiteralEntry::RawU32(module_record.star_exports.len() as u32));
+    for export in &module_record.star_exports {
+        entries.push(LiteralEntry::RawU16(export.module_request_idx));
+    }
+
     LiteralArray { entries }
 }
 
@@ -2578,7 +2598,10 @@ fn is_global_this(expr: &Expression<'_>) -> bool {
 struct ModuleRecordInfo {
     module_requests: Vec<String>,
     regular_imports: Vec<RegularImportEntry>,
+    namespace_imports: Vec<NamespaceImportEntry>,
     local_exports: Vec<LocalExportEntry>,
+    indirect_exports: Vec<IndirectExportEntry>,
+    star_exports: Vec<StarExportEntry>,
 }
 
 #[derive(Debug, Clone)]
@@ -2589,9 +2612,27 @@ struct RegularImportEntry {
 }
 
 #[derive(Debug, Clone)]
+struct NamespaceImportEntry {
+    local_name: String,
+    module_request_idx: u16,
+}
+
+#[derive(Debug, Clone)]
 struct LocalExportEntry {
     local_name: String,
     export_name: String,
+}
+
+#[derive(Debug, Clone)]
+struct IndirectExportEntry {
+    export_name: String,
+    import_name: String,
+    module_request_idx: u16,
+}
+
+#[derive(Debug, Clone)]
+struct StarExportEntry {
+    module_request_idx: u16,
 }
 
 impl ModuleRecordInfo {
@@ -2626,6 +2667,17 @@ impl ModuleRecordInfo {
         });
     }
 
+    fn add_namespace_import(&mut self, local_name: String, specifier: &str) {
+        let module_request_idx = self.request_index(specifier);
+        if self.namespace_imports.iter().any(|i| {
+            i.local_name == local_name && i.module_request_idx == module_request_idx
+        }) {
+            return;
+        }
+        self.namespace_imports
+            .push(NamespaceImportEntry { local_name, module_request_idx });
+    }
+
     fn add_local_export(&mut self, local_name: String, export_name: &str) {
         if self
             .local_exports
@@ -2638,6 +2690,37 @@ impl ModuleRecordInfo {
             local_name,
             export_name: export_name.to_string(),
         });
+    }
+
+    fn add_indirect_export(
+        &mut self,
+        export_name: String,
+        import_name: String,
+        specifier: &str,
+    ) {
+        let module_request_idx = self.request_index(specifier);
+        if self.indirect_exports.iter().any(|e| {
+            e.export_name == export_name && e.module_request_idx == module_request_idx
+        }) {
+            return;
+        }
+        self.indirect_exports.push(IndirectExportEntry {
+            export_name,
+            import_name,
+            module_request_idx,
+        });
+    }
+
+    fn add_star_export(&mut self, specifier: &str) {
+        let module_request_idx = self.request_index(specifier);
+        if self
+            .star_exports
+            .iter()
+            .any(|e| e.module_request_idx == module_request_idx)
+        {
+            return;
+        }
+        self.star_exports.push(StarExportEntry { module_request_idx });
     }
 }
 
@@ -2851,9 +2934,6 @@ fn scan_stmt_for_module_record(stmt: &Statement<'_>, info: &mut ModuleRecordInfo
                 return;
             }
             let specifier = import.source.value.as_str();
-            if !specifier.starts_with("@ohos:") {
-                return;
-            }
             if let Some(specifiers) = &import.specifiers {
                 for spec in specifiers {
                     match spec {
@@ -2874,7 +2954,10 @@ fn scan_stmt_for_module_record(stmt: &Statement<'_>, info: &mut ModuleRecordInfo
                             );
                         }
                         ImportDeclarationSpecifier::ImportNamespaceSpecifier(ns) => {
-                            info.add_regular_import(ns.local.name.as_str().to_string(), specifier);
+                            info.add_namespace_import(
+                                ns.local.name.as_str().to_string(),
+                                specifier,
+                            );
                         }
                     }
                 }
@@ -2899,7 +2982,18 @@ fn scan_stmt_for_module_record(stmt: &Statement<'_>, info: &mut ModuleRecordInfo
             if export.export_kind == ImportOrExportKind::Type {
                 return;
             }
-            if export.source.is_none() {
+            if let Some(source) = &export.source {
+                // Re-exports with a source: `export { foo as bar } from './x'`
+                let specifier = source.value.as_str();
+                for spec in &export.specifiers {
+                    if spec.export_kind == ImportOrExportKind::Type {
+                        continue;
+                    }
+                    let import_name = module_export_name(&spec.local);
+                    let export_name = module_export_name(&spec.exported);
+                    info.add_indirect_export(export_name, import_name, specifier);
+                }
+            } else {
                 for spec in &export.specifiers {
                     if spec.export_kind == ImportOrExportKind::Type {
                         continue;
@@ -2932,7 +3026,32 @@ fn scan_stmt_for_module_record(stmt: &Statement<'_>, info: &mut ModuleRecordInfo
                 }
             }
         }
+        Statement::ExportAllDeclaration(export) => {
+            scan_export_all_for_module_record(export, info);
+        }
         _ => {}
+    }
+}
+
+fn scan_export_all_for_module_record(
+    export: &ExportAllDeclaration<'_>,
+    info: &mut ModuleRecordInfo,
+) {
+    if export.export_kind == ImportOrExportKind::Type {
+        return;
+    }
+    let specifier = export.source.value.as_str();
+    match &export.exported {
+        None => {
+            // `export * from './x'` — plain star re-export.
+            info.add_star_export(specifier);
+        }
+        Some(exported_name) => {
+            // `export * as Foo from './x'` — namespace re-export.
+            // Encoded as an indirect export with import_name "*" per es2abc convention.
+            let export_name = module_export_name(exported_name);
+            info.add_indirect_export(export_name, "*".to_string(), specifier);
+        }
     }
 }
 

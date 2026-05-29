@@ -1157,3 +1157,97 @@ fn test_static_object_uses_createobjectwithbuffer() {
         "at least 3 literal arrays expected (obj + module-record + scope-names); got {num_lits}"
     );
 }
+
+#[test]
+fn test_module_request_annotations_all_specifiers_tracked() {
+    // All import specifiers (relative, package, and @ohos:) must appear in the
+    // module record literal array embedded in the binary.
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("module_req.abc");
+    module_compiler()
+        .compile(
+            vec![module_record(
+                "com.example.test/entry/ets/pages/Index",
+                "import x from './utils'; export { x };",
+            )],
+            &out,
+        )
+        .expect("compile");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+    let specifier = b"./utils";
+    assert!(
+        bytes.windows(specifier.len()).any(|w| w == specifier),
+        "relative module specifier './utils' must appear in the binary"
+    );
+}
+
+#[test]
+fn test_namespace_import_tracked_in_module_record() {
+    // `import * as ns from './x'` must be recorded as a namespace import in the
+    // module record literal array (not as a regular import).
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("ns_import.abc");
+    module_compiler()
+        .compile(
+            vec![module_record(
+                "com.example.test/entry/ets/pages/Foo",
+                "import * as utils from './utils'; utils.doSomething();",
+            )],
+            &out,
+        )
+        .expect("compile");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+    let specifier = b"./utils";
+    assert!(
+        bytes.windows(specifier.len()).any(|w| w == specifier),
+        "namespace import specifier './utils' must appear in the binary"
+    );
+}
+
+#[test]
+fn test_indirect_export_tracked_in_module_record() {
+    // `export { foo } from './x'` must be recorded as an indirect export.
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("indirect_export.abc");
+    module_compiler()
+        .compile(
+            vec![module_record(
+                "com.example.test/entry/ets/pages/Bar",
+                "export { foo as myFoo } from './other';",
+            )],
+            &out,
+        )
+        .expect("compile");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+    let specifier = b"./other";
+    assert!(
+        bytes.windows(specifier.len()).any(|w| w == specifier),
+        "indirect export specifier './other' must appear in the binary"
+    );
+}
+
+#[test]
+fn test_star_export_tracked_in_module_record() {
+    // `export * from './x'` must be recorded as a star export.
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("star_export.abc");
+    module_compiler()
+        .compile(
+            vec![module_record(
+                "com.example.test/entry/ets/pages/Baz",
+                "export * from './shared';",
+            )],
+            &out,
+        )
+        .expect("compile");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+    let specifier = b"./shared";
+    assert!(
+        bytes.windows(specifier.len()).any(|w| w == specifier),
+        "star export specifier './shared' must appear in the binary"
+    );
+}
