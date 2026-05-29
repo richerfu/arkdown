@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "arkdown_cli"
 path = "src/lib.rs"
 
 [[bin]]
@@ -31,7 +30,6 @@ arkdown-plugin-duplicate-check = { path = "../arkdown-plugin-duplicate-check" }
 arkdown-plugin-json5 = { path = "../arkdown-plugin-json5" }
 arkdown-plugin-router-map = { path = "../arkdown-plugin-router-map" }
 arkdown-resolver = { path = "../arkdown-resolver" }
-arkdown-cache = { path = "../arkdown-cache" }
 rolldown_plugin = "1.0.3"
 clap = { workspace = true }
 tokio = { workspace = true }
