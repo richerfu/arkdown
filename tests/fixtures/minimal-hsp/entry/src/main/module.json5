@@ -2,6 +2,7 @@
   module: {
     name: "entry",
     type: "shared",
+    srcEntry: "./ets/Index.ets",
     description: "$string:module_desc",
     deviceTypes: [
       "phone"

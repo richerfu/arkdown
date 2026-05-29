@@ -1,0 +1,10 @@
+{
+  "description": "Expected zip entry structure for an HSP built from minimal-hsp fixture.",
+  "required": [
+    "module.json",
+    "pack.info",
+    "resources.index",
+    "ets/modules.abc"
+  ],
+  "forbidden": []
+}
