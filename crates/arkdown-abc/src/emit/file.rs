@@ -574,7 +574,12 @@ impl AbcFile {
                     class_method_pool_end,
                     &mut definefunc_pool_cursor,
                 );
-                let ci = encode_code_item(method.num_vregs, method.num_args, &bytecode);
+                let ci = encode_code_item(
+                    method.num_vregs,
+                    method.num_args,
+                    &bytecode,
+                    &method.catch_entries,
+                );
                 code_cur += ci.len() as u32;
                 class_code_items.push(ci);
                 method_pool_cursor = method_pool_cursor.saturating_add(1);

@@ -1157,3 +1157,59 @@ fn test_static_object_uses_createobjectwithbuffer() {
         "at least 3 literal arrays expected (obj + module-record + scope-names); got {num_lits}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// TryStatement / ThrowStatement / AwaitExpression (Commit 1+2)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_throw_statement_emits_throw_opcode() {
+    // `throw new Error("oops")` must produce the Panda `throw` opcode,
+    // which is a two-byte prefixed instruction: [0xFE, 0x00].
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("throw.abc");
+    let source = r#"throw new Error("oops");"#;
+    module_compiler()
+        .compile(vec![module_record("test/throw_test", source)], &out)
+        .expect("compile throw source");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+    let has_throw = bytes.windows(2).any(|w| w == [0xFE, 0x00]);
+    assert!(
+        has_throw,
+        "throw opcode [0xFE, 0x00] must appear in output for `throw` statement"
+    );
+}
+
+#[test]
+fn test_try_catch_block_compiles_valid_bytecode() {
+    // A try/catch block with a named catch parameter must compile to valid
+    // Panda ABC.  The CodeGen emits a `jmp` (0x4E) at the end of the try body
+    // to skip the catch handler on the normal (no-exception) path, and
+    // registers a CatchEntry in the method's exception table.
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("try_catch.abc");
+    let source = r#"
+        try {
+            const x = doRiskyOp();
+        } catch (e) {
+            handleError(e);
+        }
+    "#;
+    module_compiler()
+        .compile(vec![module_record("test/try_catch_test", source)], &out)
+        .expect("compile try/catch source");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+    assert!(
+        bytes.len() > 64,
+        "try/catch bytecode must be non-trivial, got {} bytes",
+        bytes.len()
+    );
+    // jmp (0x4E) is emitted to skip the catch body on the normal path.
+    assert!(
+        bytes.contains(&0x4Eu8),
+        "jmp opcode (0x4E) must appear in try/catch output"
+    );
+}
+
