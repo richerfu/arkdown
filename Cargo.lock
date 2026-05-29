@@ -340,6 +340,7 @@ dependencies = [
  "oxc_parser 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
  "oxc_span 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
  "regex",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
 ]
