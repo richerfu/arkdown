@@ -194,6 +194,73 @@ pub fn generate_loader_json(
         }
     }
 
+    // Discover WebWorker files from src/main/ets/workers/*.ets.
+    // hvigor emits these as top-level `workers` entries AND includes them in
+    // the bundler's compile entry list so they are compiled as separate chunks.
+    let workers_dir = module_cfg.src_path.join("src/main/ets/workers");
+    let mut discovered_workers: Vec<String> = vec![];
+    if workers_dir.is_dir() {
+        let mut worker_files: Vec<_> = std::fs::read_dir(&workers_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| {
+                e.path().extension().and_then(|x| x.to_str()) == Some("ets")
+            })
+            .collect();
+        // Sort for deterministic ordering across platforms.
+        worker_files.sort_by_key(|e| e.file_name());
+        for entry in worker_files {
+            if let Some(name) = entry.file_name().to_str() {
+                let rel = format!("./ets/workers/{}", name);
+                compile_entry.push(rel.clone());
+                discovered_workers.push(rel);
+            }
+        }
+    }
+
+    // Discover router map page entries from router_map.json.
+    // hvigor reads this profile and adds each destination page to compileEntry
+    // so the router pages are compiled even if not imported by any ability.
+    let router_map_path = module_cfg
+        .src_path
+        .join("src/main/resources/base/profile/router_map.json");
+    if router_map_path.is_file() {
+        if let Ok(content) = std::fs::read_to_string(&router_map_path) {
+            #[derive(serde::Deserialize)]
+            struct RouterMapFile {
+                #[serde(rename = "routerMap")]
+                router_map: Vec<RouterMapPage>,
+            }
+            #[derive(serde::Deserialize)]
+            struct RouterMapPage {
+                #[serde(rename = "pageSourceFile")]
+                page_source_file: String,
+            }
+            // Attempt top-level `{ "routerMap": [...] }` format first, then
+            // fall back to a bare array `[...]`.
+            let pages_opt: Option<Vec<RouterMapPage>> =
+                serde_json::from_str::<RouterMapFile>(&content)
+                    .map(|f| f.router_map)
+                    .ok()
+                    .or_else(|| serde_json::from_str::<Vec<RouterMapPage>>(&content).ok());
+            if let Some(pages) = pages_opt {
+                for page in &pages {
+                    // pageSourceFile is typically "src/main/ets/pages/Foo.ets";
+                    // strip the "src/main/" prefix so it matches the ./ets/... format.
+                    let rel = if let Some(stripped) =
+                        page.page_source_file.strip_prefix("src/main/")
+                    {
+                        format!("./{}", stripped)
+                    } else {
+                        page.page_source_file.clone()
+                    };
+                    compile_entry.push(rel);
+                }
+            }
+        }
+    }
+
     // Deduplicate while preserving order.
     {
         let mut seen = std::collections::HashSet::new();
@@ -268,7 +335,7 @@ pub fn generate_loader_json(
         api_version: config.sdk_config.compile_api_version,
         fallback_an_build: false,
         pkg_name_to_pkg_brief_info: build_pkg_brief_info(config, module_cfg),
-        workers: vec![],
+        workers: discovered_workers,
     }
 }
 
@@ -838,5 +905,202 @@ mod tests {
                 .len(),
             0
         );
+    }
+
+    /// Worker `.ets` files in `src/main/ets/workers/` must appear in
+    /// `compile_entry` (and `workers`).
+    #[test]
+    fn test_worker_files_added_to_compile_entry() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workers_dir = tmp.path().join("src/main/ets/workers");
+        std::fs::create_dir_all(&workers_dir).expect("create workers dir");
+        std::fs::write(workers_dir.join("DataWorker.ets"), "// stub").expect("write worker");
+        std::fs::write(workers_dir.join("NetWorker.ets"), "// stub").expect("write worker");
+
+        let config = make_config(false);
+        let module_cfg = ModuleConfig {
+            name: "entry".to_string(),
+            src_path: tmp.path().to_path_buf(),
+            module_type: arkdown_core::OhosModuleType::Entry,
+        };
+        let manifest = make_manifest();
+
+        let loader = generate_loader_json(&config, &module_cfg, &manifest);
+
+        assert!(
+            loader
+                .compile_entry
+                .contains(&"./ets/workers/DataWorker.ets".to_string()),
+            "compile_entry must contain DataWorker.ets; got: {:?}",
+            loader.compile_entry
+        );
+        assert!(
+            loader
+                .compile_entry
+                .contains(&"./ets/workers/NetWorker.ets".to_string()),
+            "compile_entry must contain NetWorker.ets; got: {:?}",
+            loader.compile_entry
+        );
+    }
+
+    /// The `workers` field on `LoaderJson` must be populated with discovered
+    /// worker paths (so downstream bundler stages can treat them as separate
+    /// entry chunks).
+    #[test]
+    fn test_workers_field_populated() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workers_dir = tmp.path().join("src/main/ets/workers");
+        std::fs::create_dir_all(&workers_dir).expect("create workers dir");
+        std::fs::write(workers_dir.join("DataWorker.ets"), "// stub").expect("write worker");
+
+        let config = make_config(false);
+        let module_cfg = ModuleConfig {
+            name: "entry".to_string(),
+            src_path: tmp.path().to_path_buf(),
+            module_type: arkdown_core::OhosModuleType::Entry,
+        };
+        let manifest = make_manifest();
+
+        let loader = generate_loader_json(&config, &module_cfg, &manifest);
+
+        assert_eq!(
+            loader.workers,
+            vec!["./ets/workers/DataWorker.ets".to_string()]
+        );
+    }
+
+    /// Non-`.ets` files in the workers directory must NOT be added to
+    /// `compile_entry`.
+    #[test]
+    fn test_non_ets_files_in_workers_dir_ignored() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workers_dir = tmp.path().join("src/main/ets/workers");
+        std::fs::create_dir_all(&workers_dir).expect("create workers dir");
+        std::fs::write(workers_dir.join("README.md"), "notes").expect("write readme");
+        std::fs::write(workers_dir.join("DataWorker.ets"), "// stub").expect("write worker");
+
+        let config = make_config(false);
+        let module_cfg = ModuleConfig {
+            name: "entry".to_string(),
+            src_path: tmp.path().to_path_buf(),
+            module_type: arkdown_core::OhosModuleType::Entry,
+        };
+        let manifest = make_manifest();
+
+        let loader = generate_loader_json(&config, &module_cfg, &manifest);
+
+        assert!(
+            !loader
+                .compile_entry
+                .iter()
+                .any(|e| e.contains("README")),
+            "README.md must not appear in compile_entry"
+        );
+        assert_eq!(loader.workers.len(), 1);
+    }
+
+    /// Router map page destinations from `router_map.json` must appear in
+    /// `compile_entry`.
+    #[test]
+    fn test_router_map_pages_added_to_compile_entry() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let profile_dir = tmp
+            .path()
+            .join("src/main/resources/base/profile");
+        std::fs::create_dir_all(&profile_dir).expect("create profile dir");
+        std::fs::write(
+            profile_dir.join("router_map.json"),
+            r#"{
+  "routerMap": [
+    {
+      "name": "productDetail",
+      "pageSourceFile": "src/main/ets/pages/ProductDetail.ets",
+      "buildFunction": "productDetailBuilder"
+    },
+    {
+      "name": "settings",
+      "pageSourceFile": "src/main/ets/pages/Settings.ets",
+      "buildFunction": "settingsBuilder"
+    }
+  ]
+}"#,
+        )
+        .expect("write router_map.json");
+
+        let config = make_config(false);
+        let module_cfg = ModuleConfig {
+            name: "entry".to_string(),
+            src_path: tmp.path().to_path_buf(),
+            module_type: arkdown_core::OhosModuleType::Entry,
+        };
+        let manifest = make_manifest();
+
+        let loader = generate_loader_json(&config, &module_cfg, &manifest);
+
+        assert!(
+            loader
+                .compile_entry
+                .contains(&"./ets/pages/ProductDetail.ets".to_string()),
+            "compile_entry must contain ProductDetail.ets; got: {:?}",
+            loader.compile_entry
+        );
+        assert!(
+            loader
+                .compile_entry
+                .contains(&"./ets/pages/Settings.ets".to_string()),
+            "compile_entry must contain Settings.ets; got: {:?}",
+            loader.compile_entry
+        );
+    }
+
+    /// Router map entries that are already present in `compile_entry` (e.g. from
+    /// `main_pages.json`) must not be duplicated after dedup.
+    #[test]
+    fn test_router_map_dedup_with_existing_entries() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let profile_dir = tmp
+            .path()
+            .join("src/main/resources/base/profile");
+        std::fs::create_dir_all(&profile_dir).expect("create profile dir");
+
+        // main_pages.json adds "./ets/pages/Index.ets"
+        std::fs::write(
+            profile_dir.join("main_pages.json"),
+            r#"{"src": ["pages/Index"]}"#,
+        )
+        .expect("write main_pages.json");
+
+        // router_map.json also references the same page
+        std::fs::write(
+            profile_dir.join("router_map.json"),
+            r#"{
+  "routerMap": [
+    {
+      "name": "index",
+      "pageSourceFile": "src/main/ets/pages/Index.ets",
+      "buildFunction": "indexBuilder"
+    }
+  ]
+}"#,
+        )
+        .expect("write router_map.json");
+
+        let config = make_config(false);
+        let module_cfg = ModuleConfig {
+            name: "entry".to_string(),
+            src_path: tmp.path().to_path_buf(),
+            module_type: arkdown_core::OhosModuleType::Entry,
+        };
+        // Manifest references $profile:main_pages so the pages scanner fires.
+        let manifest = make_manifest();
+
+        let loader = generate_loader_json(&config, &module_cfg, &manifest);
+
+        let count = loader
+            .compile_entry
+            .iter()
+            .filter(|e| e.as_str() == "./ets/pages/Index.ets")
+            .count();
+        assert_eq!(count, 1, "Index.ets must appear exactly once after dedup");
     }
 }

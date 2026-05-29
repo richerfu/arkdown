@@ -73,7 +73,7 @@ and release-mode terser/minification when applicable.
 
 | Area                     | Current implementation                                                                                                                                                                                                                                                                                                                      | Gap to hvigor                                                                                                                                                                             |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `loader.json`            | ✅ **Fixed (2026-05-29)**: absolute paths via `canonicalize()`, all 18 fields match hvigor golden exactly. `nonEntryImportees`/`compiledImportees` populated by Phase 4 importee pass. | ByteCode HAR metadata, workers, HSP/HAR OHM maps — not needed for minimal-hap fixture. |
+| `loader.json`            | ✅ **Fixed (2026-05-29)**: absolute paths via `canonicalize()`, all 18 fields match hvigor golden exactly. `nonEntryImportees`/`compiledImportees` populated by Phase 4 importee pass. Workers (`src/main/ets/workers/*.ets`) and router map page destinations (`router_map.json`) are now discovered and added to `compile_entry`. | ByteCode HAR metadata, HSP/HAR OHM maps — not needed for minimal-hap fixture. |
 | ArkTS transform          | ✅ **Fixed (2026-05-29)**: `@State`, `@Prop`, `@Link`, `@ObjectLink`, `@Provide`, `@Consume`, `@Watch`, `@BuilderParam`, storage decorators all implemented. Per-statement source maps via oxc_codegen. | `@Builder`, `@Styles` functions; precise per-token source maps (gap: 566B vs hvigor). |
 | Rollup/rolldown options  | ✅ **Fixed (2026-05-28)**: Clean ESM output, `@ohos:` imports external, treeshake disabled for debug. **IIFE/CJS compatibility paths removed** from both bundler and ABC compiler. | Release treeshake, `manualChunks` for `supportChunks`, ByteCode HAR/HSP externals. |
 | ByteCode HAR importees   | ✅ **Fixed (2026-05-29)**: `process_importees()` ports `process-importee.js`. BFS from entry chunks, OHM URL generation, importee.json cache written. `nonEntryImportees` in loader.json. | ByteCode HAR compilation flow (requires HAR input fixture). |
@@ -142,7 +142,7 @@ Implement the hvigor `generateConfig()` contract in Rust:
 - Fill all `loader.json` fields used by `arkts-pack.js` and SDK plugins.
 - Build dependency maps for local HAR, remote HAR, HSP, dynamic dependencies,
   ByteCode HAR, and package source roots.
-- Add workers and router map entries to `compileEntry`.
+- ✅ Workers (`src/main/ets/workers/*.ets`) and router map page destinations are scanned and added to `compileEntry`.
 - Preserve hvigor intermediate paths:
   `build/default/intermediates/loader/default/loader.json`,
   `ets/default/loader_out/default/`, and `cache/msgpack/`.

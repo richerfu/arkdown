@@ -432,6 +432,27 @@ The `loader.json` file is the primary interface between `GenerateLoaderJson` (ta
 
 arkdown must write this exact format (or a superset that the SDK plugins can consume).
 
+### `compileEntry` population (arkdown)
+
+`generate_loader_json` builds the internal `compile_entry` list from four sources in order:
+
+1. **Ability `srcEntry` paths** — from each `HapManifest.abilities[].src_entry`.
+2. **ExtensionAbility `srcEntry` paths** — from each `HapManifest.extension_abilities[].src_entry`.
+3. **`$profile:main_pages` page files** — resolved from `src/main/resources/base/profile/<name>.json`;
+   each page entry `"pages/Index"` maps to `"./ets/pages/Index.ets"`.
+4. **Worker files** — every `*.ets` file found in `src/main/ets/workers/` is added as
+   `"./ets/workers/<filename>.ets"` and also recorded in `LoaderJson.workers`.
+5. **Router map page destinations** — if `src/main/resources/base/profile/router_map.json`
+   exists, each entry's `pageSourceFile` is converted from `"src/main/ets/..."` to
+   `"./ets/..."` and appended to `compile_entry`.
+
+After all sources are collected, `compile_entry` is deduplicated (preserving order) so that
+a page listed in both `main_pages.json` and `router_map.json` appears only once.
+
+The serialized `compileEntry` field (`hvigor_compile_entry`) remains empty for the minimal-hap
+fixture, matching the golden hvigor output exactly. The internal `compile_entry` is used by
+the arkdown bundler and is not written to disk.
+
 ---
 
 ## 10. Real HAP Structure (ground truth from MyApplication1)
