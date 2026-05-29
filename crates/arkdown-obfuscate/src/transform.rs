@@ -45,89 +45,93 @@ pub fn obfuscate_source(
     filename: &str,
     rules: &ObfuscationRules,
 ) -> Result<ObfuscationOutput, ObfuscationError> {
-    if !rules.enable_obfuscation {
+    if !rules.enable_obfuscation && !rules.compact {
         return Ok(ObfuscationOutput {
             code: source.to_string(),
             source_map: None,
         });
     }
 
-    // --- Parse ---------------------------------------------------------------
-    let alloc = Allocator::default();
-    let source_type = SourceType::default().with_module(true);
-    let ParserReturn {
-        program, errors, ..
-    } = Parser::new(&alloc, source, source_type).parse();
+    // --- Identifier renaming (only when -enable-obfuscation is set) ----------
+    let code = if rules.enable_obfuscation {
+        let alloc = Allocator::default();
+        let source_type = SourceType::default().with_module(true);
+        let ParserReturn {
+            program, errors, ..
+        } = Parser::new(&alloc, source, source_type).parse();
 
-    if !errors.is_empty() {
-        return Err(ObfuscationError::ParseError {
-            file: filename.to_string(),
-            message: errors[0].message.to_string(),
-        });
-    }
+        if !errors.is_empty() {
+            return Err(ObfuscationError::ParseError {
+                file: filename.to_string(),
+                message: errors[0].message.to_string(),
+            });
+        }
 
-    // --- Collect top-level binding names ------------------------------------
-    let reserved: FxHashSet<String> = rules
-        .keep_global_names
-        .iter()
-        .chain(rules.keep_property_names.iter())
-        .cloned()
-        .collect();
+        let reserved: FxHashSet<String> = rules
+            .keep_global_names
+            .iter()
+            .chain(rules.keep_property_names.iter())
+            .cloned()
+            .collect();
 
-    let mut binding_names: Vec<String> = Vec::new();
+        let mut binding_names: Vec<String> = Vec::new();
 
-    for stmt in &program.body {
-        match stmt {
-            // var / let / const declarations
-            Statement::VariableDeclaration(decl) => {
-                for declarator in &decl.declarations {
-                    if let BindingPattern::BindingIdentifier(bi) = &declarator.id {
-                        let name = bi.name.as_str().to_string();
+        for stmt in &program.body {
+            match stmt {
+                Statement::VariableDeclaration(decl) => {
+                    for declarator in &decl.declarations {
+                        if let BindingPattern::BindingIdentifier(bi) = &declarator.id {
+                            let name = bi.name.as_str().to_string();
+                            if !reserved.contains(&name) && !binding_names.contains(&name) {
+                                binding_names.push(name);
+                            }
+                        }
+                    }
+                }
+                Statement::FunctionDeclaration(func) => {
+                    if let Some(id) = &func.id {
+                        let name = id.name.as_str().to_string();
                         if !reserved.contains(&name) && !binding_names.contains(&name) {
                             binding_names.push(name);
                         }
                     }
                 }
-            }
-            // function declarations
-            Statement::FunctionDeclaration(func) => {
-                if let Some(id) = &func.id {
-                    let name = id.name.as_str().to_string();
-                    if !reserved.contains(&name) && !binding_names.contains(&name) {
-                        binding_names.push(name);
+                Statement::ClassDeclaration(class) => {
+                    if let Some(id) = &class.id {
+                        let name = id.name.as_str().to_string();
+                        if !reserved.contains(&name) && !binding_names.contains(&name) {
+                            binding_names.push(name);
+                        }
                     }
                 }
+                _ => {}
             }
-            // class declarations
-            Statement::ClassDeclaration(class) => {
-                if let Some(id) = &class.id {
-                    let name = id.name.as_str().to_string();
-                    if !reserved.contains(&name) && !binding_names.contains(&name) {
-                        binding_names.push(name);
-                    }
-                }
-            }
-            _ => {}
         }
-    }
 
-    // --- Build rename map ----------------------------------------------------
-    let mut name_alloc = NameAllocator::new(reserved);
-    let mut rename_map: FxHashMap<String, String> = FxHashMap::default();
-    for name in binding_names {
-        rename_map.insert(name, name_alloc.next());
-    }
+        let mut name_alloc = NameAllocator::new(reserved);
+        let mut rename_map: FxHashMap<String, String> = FxHashMap::default();
+        for name in binding_names {
+            rename_map.insert(name, name_alloc.next());
+        }
 
-    // --- Apply renames -------------------------------------------------------
-    let code = if rename_map.is_empty() {
-        source.to_string()
+        let renamed = if rename_map.is_empty() {
+            source.to_string()
+        } else {
+            apply_renames(source, &rename_map)
+        };
+
+        if rules.remove_log {
+            remove_console_log(&renamed)
+        } else {
+            renamed
+        }
     } else {
-        apply_renames(source, &rename_map)
+        source.to_string()
     };
 
-    // --- Strip console.log if requested -------------------------------------
-    let code = if rules.remove_log {
-        remove_console_log(&code)
+    // --- Minify if -compact is requested ------------------------------------
+    let code = if rules.compact {
+        crate::minifier::minify_source(&code, filename)?
     } else {
         code
     };

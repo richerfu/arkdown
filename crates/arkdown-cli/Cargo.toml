@@ -17,6 +17,7 @@ arkdown-abc = { path = "../arkdown-abc" }
 arkdown-ts2abc = { path = "../arkdown-ts2abc" }
 arkdown-pack = { path = "../arkdown-pack" }
 arkdown-sign = { path = "../arkdown-sign" }
+arkdown-obfuscate = { path = "../arkdown-obfuscate" }
 arkdown-plugin-ets-transform = { path = "../arkdown-plugin-ets-transform" }
 arkdown-plugin-chunk-wrapper = { path = "../arkdown-plugin-chunk-wrapper" }
 arkdown-plugin-ohos-resolve = { path = "../arkdown-plugin-ohos-resolve" }
@@ -26,7 +27,6 @@ arkdown-plugin-json5 = { path = "../arkdown-plugin-json5" }
 arkdown-plugin-router-map = { path = "../arkdown-plugin-router-map" }
 arkdown-resolver = { path = "../arkdown-resolver" }
 arkdown-cache = { path = "../arkdown-cache" }
-arkdown-obfuscate = { path = "../arkdown-obfuscate" }
 rolldown_plugin = "1.0.3"
 clap = { workspace = true }
 tokio = { workspace = true }
