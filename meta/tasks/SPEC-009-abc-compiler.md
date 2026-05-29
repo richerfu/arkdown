@@ -150,6 +150,13 @@ Key opcodes (from `arkcompiler_runtime_core/isa/isa.yaml`, verified against real
 0x73  callrange   slot, argc, v_start
 0x31  callthisrange slot, argc, this_vreg
 
+# Object construction
+0x04  createemptyobject                         # acc = {} (1 byte)
+0x07  createobjectwithbuffer  slot, lit_id      # acc = object from literal array (4 bytes)
+                                                # lit_id = 0-based index in LiteralArray table
+                                                # literal array: alternating TaggedString key/value
+                                                # entries; count = 2 × 2N for N properties
+
 # Object access
 0x42  ldobjbyname  slot, name_id         # acc = acc.name
 0x43  stobjbyname  slot, name_id, obj    # obj.name = acc

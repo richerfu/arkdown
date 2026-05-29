@@ -53,13 +53,14 @@ and release-mode terser/minification when applicable.
 - Phase 2 (ETS transform): ✅ @Prop, @Link, @ObjectLink, @Provide, @Consume, @Watch, @BuilderParam
 - Phase 3 (bundler): ✅ clean ESM, @ohos: external, treeshake off for debug
 - Phase 4 (importee): ✅ process_importees() ports hvigor process-importee.js
-- Phase 5 (ABC): 🔄 modules.abc 7497B vs hvigor 9844B (gap: 2347B)
+- Phase 5 (ABC): 🔄 modules.abc 8434B vs hvigor 9844B (gap: 1410B)
 - Phase 6 (packaging): ✅ HAP zip identical to hvigor (11 entries)
 
 **Parity (minimal-hap):**
 - HAP zip: ✅ identical (11 entries, all content matches except 2 files below)
-- `ets/modules.abc`: hvigor 9844B, arkdown 7497B — gap is LNP parameter scope entries
-  and 3 missing literal arrays vs hvigor's 10
+- `ets/modules.abc`: hvigor 9844B, arkdown 8434B — gap is LNP parameter scope entries
+  and 2 missing literal arrays vs hvigor's 10 (was 3 missing; added `createobjectwithbuffer`
+  24-entry literal array for `registerNamedRoute` metadata object 2026-05-29)
 - `ets/sourceMaps.map`: hvigor 1847B, arkdown 1281B — gap is per-statement vs per-token maps
 
 ## Major Missing Capabilities
@@ -70,7 +71,7 @@ and release-mode terser/minification when applicable.
 | ArkTS transform          | ✅ **Fixed (2026-05-29)**: `@State`, `@Prop`, `@Link`, `@ObjectLink`, `@Provide`, `@Consume`, `@Watch`, `@BuilderParam`, storage decorators all implemented. Per-statement source maps via oxc_codegen. | `@Builder`, `@Styles` functions; precise per-token source maps (gap: 566B vs hvigor). |
 | Rollup/rolldown options  | ✅ **Fixed (2026-05-28)**: Clean ESM output, `@ohos:` imports external, treeshake disabled for debug. **IIFE/CJS compatibility paths removed** from both bundler and ABC compiler. | Release treeshake, `manualChunks` for `supportChunks`, ByteCode HAR/HSP externals. |
 | ByteCode HAR importees   | ✅ **Fixed (2026-05-29)**: `process_importees()` ports `process-importee.js`. BFS from entry chunks, OHM URL generation, importee.json cache written. `nonEntryImportees` in loader.json. | ByteCode HAR compilation flow (requires HAR input fixture). |
-| ABC compiler             | 🔄 **Improved**: LNP line advance tracking, OHM URL scope names, SET_FILE debug info, binary/unary/logical ops, ObjectExpression, emit_new args, call-argument closures. modules.abc 7497B vs 9844B. | START_LOCAL param scope entries, 3 missing literal arrays, per-token LNP coverage. |
+| ABC compiler             | 🔄 **Improved**: LNP line advance tracking, OHM URL scope names, SET_FILE debug info, binary/unary/logical ops, static-object `createobjectwithbuffer` (opcode 0x07), emit_new args, call-argument closures. modules.abc 8434B vs 9844B. | START_LOCAL param scope entries, 2 missing literal arrays (`createarraywithbuffer` for class method/name arrays), per-token LNP coverage. |
 | Obfuscation/minification | `arkdown-obfuscate` exists but not wired in.                                                                                                                                           | hvigor release builds run SDK obfuscation + terser before ABC.                          |
 | Incremental cache        | `arkdown-cache` exists but not wired in.                                                                                                                                               | hvigor rollup msgpack cache + es2abc `--cache-file` support.                            |
 | Source maps/debug        | ✅ Per-statement source maps from kit-rewritten ETS source (pre-struct-transform). Pretty-printed JSON. sourceMaps.map 1281B vs 1847B golden (gap: per-statement vs per-token VLQ).   | Per-token source map granularity to match tsc/ets-loader output.                        |

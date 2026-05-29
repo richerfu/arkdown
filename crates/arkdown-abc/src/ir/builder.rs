@@ -195,7 +195,14 @@ pub fn build_record_with_debug(
     // When source-file debug info is requested, we also compute a Panda
     // LineNumberProgram for func_main_0 using statement span offsets.
     let (bytecode, func_main_line_ops) = if source_file.is_some() {
-        compile_program_body_tracked(&program, strings, literal_arrays, &lowering, is_module, source)
+        compile_program_body_tracked(
+            &program,
+            strings,
+            literal_arrays,
+            &lowering,
+            is_module,
+            source,
+        )
     } else {
         (
             compile_program_body(&program, strings, literal_arrays, &lowering, is_module),
@@ -251,7 +258,7 @@ pub fn build_record_with_debug(
                         num_vregs,
                         num_args: func.params.items.len() as u16,
                         debug_info: None,
-            line_ops: vec![],
+                        line_ops: vec![],
                     });
                 }
             }
@@ -262,7 +269,15 @@ pub fn build_record_with_debug(
     // Module mode scans top-level statements directly; non-module compatibility
     // inputs are always the top-level program body.
     let tracked_source = source_file.as_ref().map(|_| source);
-    compile_class_method_bodies(scan_stmts, strings, literal_arrays, &lowering, &mut methods, tracked_source, source_file);
+    compile_class_method_bodies(
+        scan_stmts,
+        strings,
+        literal_arrays,
+        &lowering,
+        &mut methods,
+        tracked_source,
+        source_file,
+    );
 
     // Collect top-level call-argument arrow functions (e.g. registerNamedRoute callback
     // and Reflect.set finalizeConstruction stub). hvigor names these #*# / #*#^1.
@@ -686,13 +701,26 @@ fn collect_top_level_call_arg_arrows_expr(
                         captures,
                     );
                     let num_vregs = estimate_vregs(&bytecode);
+                    let param_names: Vec<String> = arrow
+                        .params
+                        .items
+                        .iter()
+                        .filter_map(|p| match &p.pattern {
+                            BindingPattern::BindingIdentifier(id) => {
+                                Some(id.name.as_str().to_string())
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    let closure_debug: Option<DebugInfoRecord> = None;
+                    let _ = param_names; // top-level closures don't track param debug info
                     methods.push(MethodRecord {
                         name: record_name,
                         bytecode,
                         num_vregs,
                         num_args: arrow.params.items.len() as u16 + 3,
-                        debug_info: None,
-            line_ops: vec![],
+                        debug_info: closure_debug,
+                        line_ops: vec![],
                     });
                     // Recurse into body for deeper top-level closures.
                     let body_ref = arrow.body.as_ref();
@@ -781,7 +809,12 @@ fn compile_class_elements(
                 )
             } else {
                 (
-                    compile_function_body(method.value.body.as_deref(), strings, literal_arrays, lowering),
+                    compile_function_body(
+                        method.value.body.as_deref(),
+                        strings,
+                        literal_arrays,
+                        lowering,
+                    ),
                     vec![],
                 )
             };
@@ -793,9 +826,7 @@ fn compile_class_elements(
                 .items
                 .iter()
                 .filter_map(|p| match &p.pattern {
-                    BindingPattern::BindingIdentifier(id) => {
-                        Some(id.name.as_str().to_string())
-                    }
+                    BindingPattern::BindingIdentifier(id) => Some(id.name.as_str().to_string()),
                     _ => None,
                 })
                 .collect();
@@ -831,6 +862,7 @@ fn compile_class_elements(
                 lowering,
                 methods,
                 &mut closure_seen_names,
+                source_file_path,
             );
         }
     }
@@ -891,7 +923,7 @@ fn collect_arrow_records_from_stmt(
                     num_vregs,
                     num_args: arrow.params.items.len() as u16 + 3,
                     debug_info: None,
-            line_ops: vec![],
+                    line_ops: vec![],
                 });
             }
         }
@@ -924,12 +956,21 @@ fn collect_call_arg_arrow_records(
     lowering: &LoweringContext,
     methods: &mut Vec<MethodRecord>,
     seen_names: &mut HashMap<String, u16>,
+    source_file_path: Option<&str>,
 ) {
     let Some(body) = body else {
         return;
     };
     for stmt in &body.statements {
-        collect_call_arg_arrows_stmt(stmt, strings, literal_arrays, lowering, methods, seen_names);
+        collect_call_arg_arrows_stmt(
+            stmt,
+            strings,
+            literal_arrays,
+            lowering,
+            methods,
+            seen_names,
+            source_file_path,
+        );
     }
 }
 
@@ -940,6 +981,7 @@ fn collect_call_arg_arrows_stmt(
     lowering: &LoweringContext,
     methods: &mut Vec<MethodRecord>,
     seen_names: &mut HashMap<String, u16>,
+    source_file_path: Option<&str>,
 ) {
     match stmt {
         Statement::ExpressionStatement(es) => {
@@ -950,6 +992,7 @@ fn collect_call_arg_arrows_stmt(
                 lowering,
                 methods,
                 seen_names,
+                source_file_path,
             );
         }
         Statement::BlockStatement(block) => {
@@ -961,6 +1004,7 @@ fn collect_call_arg_arrows_stmt(
                     lowering,
                     methods,
                     seen_names,
+                    source_file_path,
                 );
             }
         }
@@ -972,6 +1016,7 @@ fn collect_call_arg_arrows_stmt(
                 lowering,
                 methods,
                 seen_names,
+                source_file_path,
             );
             if let Some(alt) = &if_stmt.alternate {
                 collect_call_arg_arrows_stmt(
@@ -981,6 +1026,7 @@ fn collect_call_arg_arrows_stmt(
                     lowering,
                     methods,
                     seen_names,
+                    source_file_path,
                 );
             }
         }
@@ -995,6 +1041,7 @@ fn collect_call_arg_arrows_expr(
     lowering: &LoweringContext,
     methods: &mut Vec<MethodRecord>,
     seen_names: &mut HashMap<String, u16>,
+    source_file_path: Option<&str>,
 ) {
     match expr {
         Expression::CallExpression(call) => {
@@ -1017,13 +1064,24 @@ fn collect_call_arg_arrows_expr(
                         captures,
                     );
                     let num_vregs = estimate_vregs(&bytecode);
+                    let arrow_param_names: Vec<String> = arrow.params.items.iter()
+                        .filter_map(|p| match &p.pattern {
+                            BindingPattern::BindingIdentifier(id) => Some(id.name.as_str().to_string()),
+                            _ => None,
+                        })
+                        .collect();
+                    let arrow_debug = source_file_path.map(|path| DebugInfoRecord {
+                        line_start: 1,
+                        source_file: path.to_string(),
+                        param_names: arrow_param_names,
+                    });
                     methods.push(MethodRecord {
                         name: record_name,
                         bytecode,
                         num_vregs,
                         num_args: arrow.params.items.len() as u16 + 3,
-                        debug_info: None,
-            line_ops: vec![],
+                        debug_info: arrow_debug,
+                        line_ops: vec![],
                     });
                     // Recurse into the arrow body for deeper nested closures.
                     let body_ref = arrow.body.as_ref();
@@ -1035,6 +1093,7 @@ fn collect_call_arg_arrows_expr(
                             lowering,
                             methods,
                             seen_names,
+                            source_file_path,
                         );
                     }
                 } else {
@@ -1046,6 +1105,7 @@ fn collect_call_arg_arrows_expr(
                         lowering,
                         methods,
                         seen_names,
+                        source_file_path,
                     );
                 }
             }
@@ -1058,6 +1118,7 @@ fn collect_call_arg_arrows_expr(
                 lowering,
                 methods,
                 seen_names,
+                source_file_path,
             );
         }
         _ => {}
@@ -1157,7 +1218,6 @@ fn compile_program_body(
 ) -> Vec<u8> {
     compile_body_stmts(&program.body, strings, literal_arrays, lowering, true)
 }
-
 
 /// Compile a function body's statements, or emit `returnundefined` if absent.
 fn compile_function_body(
@@ -1274,7 +1334,14 @@ fn compile_program_body_tracked(
     is_module: bool,
     source: &str,
 ) -> (Vec<u8>, Vec<u8>) {
-    compile_body_stmts_tracked(&program.body, strings, literal_arrays, lowering, true, source)
+    compile_body_stmts_tracked(
+        &program.body,
+        strings,
+        literal_arrays,
+        lowering,
+        true,
+        source,
+    )
 }
 fn arrow_captures_from_body(body: &FunctionBody<'_>) -> ArrowCaptures {
     let mut uses_this = false;
@@ -1908,8 +1975,76 @@ impl<'a> CodeGen<'a> {
 
     // ── Object literal: { key: value, … } ────────────────────────────────────
 
+    /// Return `true` when every property of `obj` has a string-convertible key
+    /// and a compile-time-constant value (currently: string literal only).
+    ///
+    /// Such "static" objects can be pre-built as a `LiteralArray` and loaded via
+    /// `createobjectwithbuffer` (opcode `0x07`) instead of the slower
+    /// `createemptyobject` + `stobjbyname` sequence.  This matches how hvigor /
+    /// es2abc compiles constant object literals in stage-model code (e.g. the
+    /// metadata argument of `registerNamedRoute`).
+    fn is_static_object(obj: &oxc_ast::ast::ObjectExpression<'_>) -> bool {
+        use oxc_ast::ast::{Expression, ObjectPropertyKind, PropertyKey};
+        if obj.properties.is_empty() {
+            // Empty object literals stay on the createemptyobject path.
+            return false;
+        }
+        for prop in &obj.properties {
+            let ObjectPropertyKind::ObjectProperty(property) = prop else {
+                return false;
+            };
+            // Key must be an identifier or a string literal.
+            match &property.key {
+                PropertyKey::StaticIdentifier(_) | PropertyKey::StringLiteral(_) => {}
+                _ => return false,
+            }
+            // Value must be a string literal.  Numeric, boolean, and null
+            // literals could also be encoded, but they require additional
+            // LiteralEntry tag variants; fall through to the dynamic path for
+            // those cases until they are implemented.
+            match &property.value {
+                Expression::StringLiteral(_) => {}
+                _ => return false,
+            }
+        }
+        true
+    }
+
     fn emit_object_expr(&mut self, obj: &oxc_ast::ast::ObjectExpression<'_>) {
-        use oxc_ast::ast::{ObjectProperty, ObjectPropertyKind, PropertyKey};
+        use oxc_ast::ast::{Expression, ObjectProperty, ObjectPropertyKind, PropertyKey};
+
+        // Fast path: all-string static object → createobjectwithbuffer.
+        //
+        // Build a LiteralArray with alternating TaggedString(key) /
+        // TaggedString(value) entries and emit a single
+        // createobjectwithbuffer instruction.  The literal-array ID is the
+        // 0-based index of the newly appended array.
+        if Self::is_static_object(obj) {
+            let mut entries = Vec::with_capacity(obj.properties.len() * 2);
+            for prop in &obj.properties {
+                let ObjectPropertyKind::ObjectProperty(property) = prop else {
+                    continue;
+                };
+                let ObjectProperty { key, value, .. } = property.as_ref();
+                let key_name = match key {
+                    PropertyKey::StaticIdentifier(id) => id.name.as_str().to_string(),
+                    PropertyKey::StringLiteral(s) => s.value.as_str().to_string(),
+                    _ => continue,
+                };
+                let val_str = match value {
+                    Expression::StringLiteral(s) => s.value.as_str().to_string(),
+                    _ => continue,
+                };
+                entries.push(LiteralEntry::TaggedString(key_name));
+                entries.push(LiteralEntry::TaggedString(val_str));
+            }
+            let lit_id = self.literal_arrays.len() as u16;
+            self.literal_arrays.push(LiteralArray { entries });
+            self.push(Insn::CreateObjectWithBuffer(0, lit_id));
+            return;
+        }
+
+        // Slow path: dynamic properties — createemptyobject + stobjbyname.
         self.push(Insn::CreateEmptyObject);
         if obj.properties.is_empty() {
             return;

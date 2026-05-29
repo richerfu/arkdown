@@ -696,7 +696,10 @@ fn test_source_map_emits_source_file_debug_info_and_lnp() {
     assert_eq!(read_uleb(&bytes, &mut pos), 1, "line_start is 1");
     assert_eq!(read_uleb(&bytes, &mut pos), 0, "no parameter names emitted");
     let cp_count = read_uleb(&bytes, &mut pos) as usize;
-    assert_eq!(cp_count, 1, "constant pool has exactly one entry: the source file offset");
+    assert_eq!(
+        cp_count, 1,
+        "constant pool has exactly one entry: the source file offset"
+    );
     assert_eq!(
         read_uleb(&bytes, &mut pos),
         class_source_file as u64,
@@ -1111,4 +1114,37 @@ registerNamedRoute(() => new Index(void 0, {}), "", {bundleName: "x"});
         "typeof (0x1c) for 'typeof' expression"
     );
     assert!(bytes.contains(&0x27), "strictnoteq (0x27) for '!=='");
+}
+
+#[test]
+fn test_static_object_uses_createobjectwithbuffer() {
+    // A static object literal (all string keys, all string values) must be
+    // compiled via `createobjectwithbuffer` (opcode 0x07) rather than the
+    // slower `createemptyobject` (0x04) + `stobjbyname` sequence.
+    //
+    // This mirrors how hvigor/es2abc compiles the `registerNamedRoute` metadata
+    // argument: a 6-property all-string object is emitted as a 24-entry literal
+    // array (12 tagged-string entries × 2 items each = count 24).
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("static_obj.abc");
+    let source = r#"const meta = { bundleName: "test", moduleName: "entry" };"#;
+    module_compiler()
+        .compile(vec![module_record("test/static_obj", source)], &out)
+        .expect("compile static object source");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+
+    // opcode 0x07 = createobjectwithbuffer must appear in the output.
+    assert!(
+        bytes.contains(&0x07u8),
+        "createobjectwithbuffer (0x07) must be emitted for static object literal"
+    );
+
+    // The literal-array table must include the object-literal array plus the
+    // standard module-record and scope-names arrays.
+    let num_lits = read_u32(&bytes, 0x2c);
+    assert!(
+        num_lits >= 3,
+        "at least 3 literal arrays expected (obj + module-record + scope-names); got {num_lits}"
+    );
 }

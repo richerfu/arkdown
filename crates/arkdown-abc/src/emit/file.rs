@@ -1029,8 +1029,8 @@ fn encode_debug_info(line_start: u32, source_file_offset: u32, lnp_index: u32) -
     let mut out = Vec::with_capacity(8 + source_file_entry.len());
     out.extend_from_slice(&uleb128(line_start as u64));
     out.extend_from_slice(&uleb128(0)); // num_parameters
-    // constant_pool_count = 1: one entry — the source file string offset.
-    // Use count (1), not byte length, to match libpandafile DebugInfoItem layout.
+                                        // constant_pool_count = 1: one entry — the source file string offset.
+                                        // Use count (1), not byte length, to match libpandafile DebugInfoItem layout.
     out.extend_from_slice(&uleb128(1));
     out.extend_from_slice(&source_file_entry);
     out.extend_from_slice(&uleb128(lnp_index as u64));

@@ -301,7 +301,9 @@ export { EntryAbility as default };"#;
             method_names
         );
         assert!(
-            method_names.iter().any(|n| n.contains("onWindowStageCreate")),
+            method_names
+                .iter()
+                .any(|n| n.contains("onWindowStageCreate")),
             "must have onWindowStageCreate; got: {:?}",
             method_names
         );

@@ -254,6 +254,20 @@ pub enum Insn {
     /// `0x04` `op_none` — create an empty object literal `{}` into accumulator.
     CreateEmptyObject,
 
+    /// `0x07` `op_imm_8_id_16` — create an object from a pre-built literal-array
+    /// buffer.  The literal array stores alternating key/value tagged entries for
+    /// all constant properties.
+    ///
+    /// `slot` = IC slot (pass 0); `lit_id` = 16-bit 0-based index into the
+    /// literal-array table.
+    ///
+    /// Encoding: `[0x07] [slot: u8] [lit_id: u16 LE]` = 4 bytes.
+    ///
+    /// Source: `arkcompiler_runtime_core/isa/isa.yaml` —
+    /// `createobjectwithbuffer imm:u8, literalarray_id` with
+    /// `opcode_idx: [0x07, 0x82]`, format `op_imm_8_id_16`.
+    CreateObjectWithBuffer(u8, u16),
+
     /// `0x08` `op_imm1_8_imm2_8_v_8` — construct new object.
     /// `slot` = IC slot; `argc` = arg count (includes constructor arg in v_start);
     /// `v_start` = first register (holds the constructor function).
@@ -478,6 +492,11 @@ impl Insn {
 
             // ── object construction ──────────────────────────────────────────
             Insn::CreateEmptyObject => vec![0x04],
+            Insn::CreateObjectWithBuffer(slot, lit_id) => {
+                let mut v = vec![0x07, *slot];
+                v.extend_from_slice(&lit_id.to_le_bytes());
+                v
+            }
             Insn::NewObjRange(slot, argc, v_start) => vec![0x08, *slot, *argc, *v_start],
 
             // ── returns ──────────────────────────────────────────────────────
@@ -590,6 +609,7 @@ impl Insn {
                 }
             }
             Insn::CreateEmptyObject => 1,
+            Insn::CreateObjectWithBuffer(_, _) => 4,
             Insn::NewObjRange(_, _, _) => 4,
             Insn::Return | Insn::ReturnUndefined => 1,
             Insn::Jmp(_) | Insn::Jeqz(_) | Insn::Jnez(_) => 3,
