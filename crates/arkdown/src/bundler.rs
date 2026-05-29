@@ -17,7 +17,9 @@
 //! and are no longer called from here.  They are retained in the codebase as
 //! reference implementations.
 
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use index_vec::IndexVec;
@@ -26,8 +28,12 @@ use rustc_hash::FxHashMap;
 use arkdown_core::{ArkChunk, ArkdownConfig, ArkdownError, ArkdownPlugin, BuildMode, ChunkGraph};
 use arkdown_profile::LoaderJson;
 use rolldown::{BundlerOptions, InputItem, OutputFormat};
-use rolldown_common::{ModuleType as RdModuleType, Output, SourceMapType, TreeshakeOptions};
+use rolldown_common::{
+    ChunkingContext, ManualCodeSplittingOptions, MatchGroup, MatchGroupName, MatchGroupTest,
+    ModuleType as RdModuleType, Output, SourceMapType, TreeshakeOptions,
+};
 use rolldown_plugin::__inner::SharedPluginable;
+use rolldown_utils::js_regex::HybridRegex;
 
 use crate::output;
 use crate::plugin_adapter::ArkdownPluginAdapter;
@@ -158,6 +164,14 @@ impl Bundler {
             TreeshakeOptions::Boolean(true)
         };
 
+        // manualChunks for supportChunks=true: mirrors hvigor's arkts-pack.js logic.
+        // oh_modules/node_modules → "commons"; non-entry local modules → "vendors".
+        let manual_code_splitting = if loader_json.support_chunks {
+            Some(build_manual_code_splitting_options()?)
+        } else {
+            None
+        };
+
         let options = BundlerOptions {
             input: Some(input),
             cwd: Some(cwd),
@@ -165,6 +179,7 @@ impl Bundler {
             module_types: Some(module_types),
             sourcemap: Some(SourceMapType::Hidden),
             treeshake,
+            manual_code_splitting,
             ..Default::default()
         };
 
@@ -241,6 +256,62 @@ fn build_chunk_graph(rd_output: rolldown::BundleOutput) -> Result<ChunkGraph, Ar
         // ArkChunk.facade_module_id / ArkChunk.module_ids instead.
         module_to_chunk: IndexVec::new(),
         entry_module_to_entry_chunk: FxHashMap::default(),
+    })
+}
+
+/// Build `ManualCodeSplittingOptions` that mirrors hvigor's `manualChunks` callback.
+///
+/// Group 1 (`commons`): modules whose path contains `oh_modules` or `node_modules`.
+/// Group 2 (`vendors`): all remaining non-entry modules.
+///
+/// This matches the hvigor `arkts-pack.js` logic:
+/// ```js
+/// function manualChunks(id, { getModuleInfo }) {
+///   if (id.includes(NODE_MODULES) || id.includes(OH_NODE_MODULES)) return "commons";
+///   const info = getModuleInfo(id);
+///   return info && !info.isEntry ? "vendors" : undefined;
+/// }
+/// ```
+fn build_manual_code_splitting_options() -> Result<ManualCodeSplittingOptions, ArkdownError> {
+    let commons_regex = HybridRegex::new("oh_modules|node_modules")
+        .map_err(|e| ArkdownError::Bundler(format!("invalid manualChunks regex: {e}")))?;
+
+    let commons_group = MatchGroup {
+        name: MatchGroupName::Static("commons".to_string()),
+        test: Some(MatchGroupTest::Regex(commons_regex)),
+        ..Default::default()
+    };
+
+    // Dynamic name function: returns "vendors" for non-entry modules, None for entries.
+    // The function captures no state; it queries `is_entry` via ChunkingContext.
+    let vendors_name_fn: Arc<
+        dyn Fn(
+                &str,
+                &ChunkingContext,
+            ) -> Pin<
+                Box<dyn Future<Output = anyhow::Result<Option<String>>> + Send + 'static>,
+            > + Send
+            + Sync,
+    > = Arc::new(|module_id: &str, ctx: &ChunkingContext| {
+        let result = ctx.get_module_info(module_id).and_then(|info| {
+            if !info.is_entry {
+                Some("vendors".to_string())
+            } else {
+                None
+            }
+        });
+        Box::pin(async move { Ok(result) })
+    });
+
+    let vendors_group = MatchGroup {
+        name: MatchGroupName::Dynamic(vendors_name_fn),
+        test: None,
+        ..Default::default()
+    };
+
+    Ok(ManualCodeSplittingOptions {
+        groups: Some(vec![commons_group, vendors_group]),
+        ..Default::default()
     })
 }
 

@@ -51,7 +51,7 @@ and release-mode terser/minification when applicable.
 - Phase 0 (parity harness): ✅ minimal-hap + minimal-har + minimal-hsp fixtures
 - Phase 1 (loader.json): ✅ absolute paths, 18 fields match hvigor golden exactly
 - Phase 2 (ETS transform): ✅ @Prop, @Link, @ObjectLink, @Provide, @Consume, @Watch, @BuilderParam, @Builder, @Styles
-- Phase 3 (bundler): ✅ clean ESM, @ohos: external, treeshake off for debug
+- Phase 3 (bundler): ✅ clean ESM, @ohos: external, treeshake off for debug / on for release, manualChunks for supportChunks (commons + vendors groups)
 - Phase 4 (importee): ✅ process_importees() ports hvigor process-importee.js
 - Phase 5 (ABC): 🔄 modules.abc (per-instruction LNP implemented; test fixture 6881B/9844B with debug_info=true; real-app parity improving from 87% baseline)
 - Phase 6 (packaging): ✅ HAP zip identical to hvigor (11 entries)
@@ -74,13 +74,13 @@ and release-mode terser/minification when applicable.
 | Area                     | Current implementation                                                                                                                                                                                                                                                                                                                      | Gap to hvigor                                                                                                                                                                             |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `loader.json`            | ✅ **Fixed (2026-05-29)**: absolute paths via `canonicalize()`, all 18 fields match hvigor golden exactly. `nonEntryImportees`/`compiledImportees` populated by Phase 4 importee pass. | ByteCode HAR metadata, workers, HSP/HAR OHM maps — not needed for minimal-hap fixture. |
-| ArkTS transform          | ✅ **Fixed (2026-05-29)**: `@State`, `@Prop`, `@Link`, `@ObjectLink`, `@Provide`, `@Consume`, `@Watch`, `@BuilderParam`, storage decorators. ✅ `@Builder`/`@Styles` lowering. 🔄 Per-token source maps via `generate_code_and_source_map` — returns oxc-regenerated code so map coordinates match what rolldown receives; struct-aware ETS→ViewPU position mapping remains a gap. | Full ArkUI desugaring in `@Builder` bodies (OXC ETS parser only applies ArkUI rules to `build()`); struct-aware cross-file source maps for @Component files. |
-| Rollup/rolldown options  | ✅ **Fixed (2026-05-28)**: Clean ESM output, `@ohos:` imports external, treeshake disabled for debug. **IIFE/CJS compatibility paths removed** from both bundler and ABC compiler. | Release treeshake, `manualChunks` for `supportChunks`, ByteCode HAR/HSP externals. |
-| ByteCode HAR importees   | ✅ **Fixed (2026-05-29)**: `process_importees()` ports `process-importee.js`. BFS from entry chunks, OHM URL generation, importee.json cache written. `nonEntryImportees` in loader.json. ✅ **Fixed (2026-05-29)**: `detect_bytecode_har()` + `scan_bytecode_har_deps()` in `arkdown-profile/src/bytecode_har.rs`; BC HAR OHM URLs → `compiledImportees` + `byteCodeHarInfo` in loader.json; pre-compiled `.abc` appended via `merge_bytecode_har_abc()`. | Full Panda ClassIndex merge (currently append-only); ByteCode HAR externals in rolldown bundle. |
-| ABC compiler             | 🔄 **Improved**: Per-instruction LNP ADVANCE via `push()` hook, `emit_expr()` per-sub-expression line update, `SET_EPILOGUE_BEGIN (0x09)` before returns, `SET_PROLOGUE_END (0x08)`, `START_LOCAL_EXTENDED (0x04)`, START_LOCAL scope/param vars, SET_FILE debug info, OHM URL scope names, binary/unary/logical ops, static-object `createobjectwithbuffer`, call-argument closures, NewLexEnvWithName arrow captures, class-decl lexical bindings. | 225B structural gap (non-LNP); remaining opcode coverage (loops, destructuring, optional chaining, spread, template literals). |
-| Obfuscation/minification | ✅ **Wired (2026-05-29)**: `arkdown-obfuscate` runs on `.js` chunks in-place between bundling and ABC for release builds when `config.ark_options.obfuscation.enable_obfuscation=true`. Obfuscation rule hash is mixed into the ABC cache config hash for correct invalidation. Terser minification and `compact`/`remove-log` rules remain TODO inside the obfuscator. | hvigor also runs terser minification; full terser parity pending. |
-| Incremental cache        | ✅ **Wired (2026-05-29)**: `arkdown-cache` stores per-entry FNV-1a content hash + config hash; ABC compilation is skipped when all compile-entry hashes match AND `modules.abc` exists. `cache_file` path passed to `compile_to_abc` (`build/default/cache/abc/modules.abc.cache`). Cache invalidated on build-mode / bundle-name / API-version / obfuscation-rule change. | hvigor rollup msgpack cache covers module-graph-level rollup skipping; that layer is not yet wired. |
-| Source maps/debug        | 🔄 **Improved (2026-05-29)**: `generate_code_and_source_map` returns oxc-regenerated code + per-token map together; rolldown can now chain per-token maps correctly. Non-struct .ets (EntryAbility) gets dense per-token coverage. @Component .ets gets self-consistent ViewPU per-token map. | Struct-aware cross-file ETS→ViewPU position mapping; `names` array population. |
+| ArkTS transform          | ✅ **Fixed (2026-05-29)**: `@State`, `@Prop`, `@Link`, `@ObjectLink`, `@Provide`, `@Consume`, `@Watch`, `@BuilderParam`, storage decorators. ✅ `@Builder`/`@Styles` lowering. 🔄 Per-token source maps via `generate_code_and_source_map`. | Full ArkUI desugaring in `@Builder` bodies; struct-aware cross-file source maps for @Component files. |
+| Rollup/rolldown options  | ✅ **Fixed (2026-05-29)**: Clean ESM output, `@ohos:` imports external, treeshake off for debug / on for release. `manualChunks` via `ManualCodeSplittingOptions`: `oh_modules\|node_modules → commons`, non-entry modules → `vendors`. **IIFE/CJS paths removed.** | ByteCode HAR/HSP externals in rolldown. |
+| ByteCode HAR importees   | ✅ **Fixed (2026-05-29)**: `process_importees()` ports `process-importee.js`. ✅ `detect_bytecode_har()` + `scan_bytecode_har_deps()` in `arkdown-profile/src/bytecode_har.rs`; BC HAR OHM URLs → `compiledImportees` + `byteCodeHarInfo`; `.abc` appended via `merge_bytecode_har_abc()`. | Full Panda ClassIndex merge (append-only now); ByteCode HAR externals in rolldown. |
+| ABC compiler             | 🔄 **Improved**: Per-instruction LNP ADVANCE, `SET_EPILOGUE_BEGIN`, `SET_PROLOGUE_END`, `START_LOCAL_EXTENDED`, SET_FILE, OHM URL scope names, binary/unary/logical/call ops, class lowering. ✅ **New (2026-05-29)**: while/do-while/for loops, break/continue, conditional expr, template literals, throw. | 225B structural gap (non-LNP); destructuring, optional chaining, spread, for-in/for-of. |
+| Obfuscation/minification | ✅ **Wired (2026-05-29)**: `arkdown-obfuscate` runs on `.js` chunks for release builds; rule hash wired into cache invalidation. | Terser minification parity pending. |
+| Incremental cache        | ✅ **Wired (2026-05-29)**: `arkdown-cache` FNV-1a content hash + config hash; skips ABC recompile on hit; `cache_file` path wired. | Rollup msgpack graph-level cache not yet wired. |
+| Source maps/debug        | 🔄 **Improved (2026-05-29)**: `generate_code_and_source_map` returns oxc-regenerated code + per-token map for rolldown chaining. Non-struct .ets gets dense per-token coverage. | Struct-aware ETS→ViewPU position mapping; `names` array. |
 | Packaging metadata       | ✅ **Fixed (2026-05-28)**: HAP zip identical to hvigor — correct module.json merge, pack.info, pkgContextInfo.json (intermediate, not in HAP), resources.index. | None for minimal-hap. HAR/HSP-specific pack flows for complex projects.                 |
 
 ## Code Compilation Gap
@@ -180,15 +180,19 @@ Until this is done, any real ArkUI UI page is only syntactically compiled.
 
 ### Phase 3: Align rolldown with hvigor rollup
 
-Make rolldown output match hvigor's rollup contract:
+✅ **Completed (2026-05-29)**:
 
-- Configure release `treeshake` and debug no-treeshake behavior.
-- Implement hvigor `manualChunks` for `supportChunks`.
-- Preserve chunk filenames/stems used by ABC record names.
-- Enable and serialize source maps.
-- Implement external handling for SDK modules, HSP, ByteCode HAR, declarations,
-  native `.so`, and deduplicated HAR modules.
-- Add a compatibility path for custom compile plugins only after core parity.
+- Release treeshake (`TreeshakeOptions::Boolean(true)`) and debug no-treeshake.
+- `manualChunks` via `ManualCodeSplittingOptions` for `supportChunks=true`:
+  - Group `commons`: Regex `oh_modules|node_modules`
+  - Group `vendors`: dynamic name function — returns `"vendors"` for non-entry modules
+- Chunk filenames/stems preserved via `InputItem.name` from file stem.
+- Source maps enabled (`SourceMapType::Hidden`) with `sourceMaps.map` written.
+
+Remaining:
+- External handling for SDK modules, HSP, ByteCode HAR, declarations, native `.so`,
+  and deduplicated HAR modules.
+- Custom compile plugin compatibility path (after core parity).
 
 ### Phase 4: Post-rollup importee processing
 
