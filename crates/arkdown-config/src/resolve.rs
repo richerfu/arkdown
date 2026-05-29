@@ -139,11 +139,18 @@ pub fn load_config(
             }
         });
 
+    let preload_so = raw_product
+        .build_option
+        .as_ref()
+        .map(|bo| bo.preload_so.clone())
+        .unwrap_or_default();
+
     let build_option = BuildOption {
         strict_mode,
         ark_options,
         res_options: None,
         source_option: None,
+        preload_so,
     };
 
     let product = ProductConfig {

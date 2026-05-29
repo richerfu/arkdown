@@ -83,6 +83,11 @@ pub struct BuildOption {
     pub ark_options: Option<ArkOptions>,
     pub res_options: Option<ResOptions>,
     pub source_option: Option<SourceOption>,
+    /// SO file paths listed under `buildOption.preloadSo` in `build-profile.json5`.
+    /// Each path is resolved relative to the project root; files are embedded in the
+    /// HAP under `libs/arm64-v8a/`.
+    #[serde(default)]
+    pub preload_so: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

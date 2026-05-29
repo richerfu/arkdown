@@ -48,6 +48,7 @@ fn make_test_config(fixture: &PathBuf) -> ArkdownConfig {
                 ark_options: None,
                 res_options: None,
                 source_option: None,
+                preload_so: vec![],
             },
         },
         modules: vec![ModuleConfig {

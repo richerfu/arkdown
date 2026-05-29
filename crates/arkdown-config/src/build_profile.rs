@@ -121,6 +121,9 @@ pub struct RawBuildOption {
     pub strict_mode: Option<RawStrictMode>,
     #[serde(default)]
     pub ark_options: Option<RawArkOptions>,
+    /// SO file paths listed under `buildOption.preloadSo` in `build-profile.json5`.
+    #[serde(default)]
+    pub preload_so: Vec<std::path::PathBuf>,
 }
 
 #[derive(Debug, Deserialize, Default)]

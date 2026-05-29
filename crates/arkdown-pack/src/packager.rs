@@ -269,6 +269,9 @@ pub struct PackInput {
     pub source_maps_path: Option<PathBuf>,
     /// Abilities list for inclusion in `pack.info` under `modules[].abilities`.
     pub abilities: Vec<PackAbility>,
+    /// Path to `src/main/resources/base/profile/privacy.json` in the module source tree.
+    /// When present the file is embedded in the HAP as `module.privacy.json`.
+    pub privacy_profile_path: Option<PathBuf>,
 }
 
 pub struct HarPackInput {
@@ -382,6 +385,35 @@ impl Packager {
                     .unwrap_or("unknown.so");
                 let dest = format!("{}/{}", arch_dir, filename);
                 zip_writer::add_file_stored(&mut writer, &dest, so_path)?;
+            }
+        }
+
+        // Preloaded SO files from buildOption.preloadSo — stored under libs/arm64-v8a/
+        for so_path in &self.config.product.build_option.preload_so {
+            let resolved = if so_path.is_absolute() {
+                so_path.clone()
+            } else {
+                self.config.project_root.join(so_path)
+            };
+            if resolved.exists() {
+                let filename = resolved
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown.so");
+                let dest = format!("libs/arm64-v8a/{}", filename);
+                zip_writer::add_file_stored(&mut writer, &dest, &resolved)?;
+            } else {
+                eprintln!(
+                    "arkdown-pack: preloadSo file not found, skipping: {}",
+                    resolved.display()
+                );
+            }
+        }
+
+        // module.privacy.json — deflated; only included when privacy.json exists in source
+        if let Some(ref privacy_path) = input.privacy_profile_path {
+            if privacy_path.exists() {
+                zip_writer::add_file_deflate(&mut writer, "module.privacy.json", privacy_path)?;
             }
         }
 

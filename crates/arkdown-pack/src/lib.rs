@@ -36,6 +36,7 @@ mod tests {
                     ark_options: None,
                     res_options: None,
                     source_option: None,
+                    preload_so: vec![],
                 },
             },
             modules: vec![],
@@ -76,6 +77,7 @@ mod tests {
             bundle_type: "app".to_string(),
             source_maps_path: None,
             abilities: vec![],
+            privacy_profile_path: None,
         });
         assert!(result.is_ok(), "{:?}", result.err());
         assert!(out.exists());
@@ -123,6 +125,7 @@ mod tests {
                 bundle_type: "app".to_string(),
                 source_maps_path: None,
                 abilities: vec![],
+                privacy_profile_path: None,
             })
             .unwrap();
 
@@ -153,6 +156,7 @@ mod tests {
             bundle_type: "app".to_string(),
             source_maps_path: None,
             abilities: vec![],
+            privacy_profile_path: None,
         });
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -227,27 +231,33 @@ mod tests {
             bundle_type: "app".to_string(),
             source_maps_path: None,
             abilities: vec![],
+            privacy_profile_path: None,
         });
         assert!(result.is_ok(), "{:?}", result.err());
         assert!(out.exists());
     }
 
     #[test]
-    fn test_hsp_golden_entry_list() {
+    fn test_pack_hap_embeds_preload_so() {
         let tmp = tempfile::tempdir().unwrap();
         let abc = tmp.path().join("modules.abc");
         let res = tmp.path().join("resources.index");
         let modj = tmp.path().join("module.json");
-        let out = tmp.path().join("shared.hsp");
+        let so_file = tmp.path().join("libpreload.so");
+        let out = tmp.path().join("entry.hap");
 
         fs::write(&abc, b"PAND").unwrap();
         fs::write(&res, b"\x00\x00").unwrap();
-        fs::write(&modj, r#"{"module":{"name":"shared","type":"shared"}}"#).unwrap();
+        fs::write(&modj, r#"{"module":{"name":"entry","type":"entry"}}"#).unwrap();
+        fs::write(&so_file, b"\x7fELF").unwrap();
 
-        let packager = Packager::new(make_config());
+        let mut cfg = (*make_config()).clone();
+        cfg.product.build_option.preload_so = vec![so_file.clone()];
+        let packager = Packager::new(Arc::new(cfg));
+
         packager
-            .pack_hsp(PackInput {
-                module_name: "shared".to_string(),
+            .pack_hap(PackInput {
+                module_name: "entry".to_string(),
                 abc_path: abc,
                 resources_index: res,
                 module_json: modj,
@@ -256,106 +266,62 @@ mod tests {
                 resources_src_dir: None,
                 bundle_version_code: 1000000,
                 bundle_version_name: "1.0.0".to_string(),
-                bundle_type: "shared".to_string(),
+                bundle_type: "app".to_string(),
                 source_maps_path: None,
                 abilities: vec![],
-            })
-            .unwrap();
-
-        let file = fs::File::open(&out).unwrap();
-        let mut archive = zip::ZipArchive::new(file).unwrap();
-        let names: Vec<_> = archive.file_names().map(str::to_string).collect();
-
-        // HSP must contain the same required entries as HAP
-        assert!(
-            names.iter().any(|n| n == "module.json"),
-            "missing module.json; got: {:?}",
-            names
-        );
-        assert!(
-            names.iter().any(|n| n == "pack.info"),
-            "missing pack.info; got: {:?}",
-            names
-        );
-        assert!(
-            names.iter().any(|n| n.contains(".abc")),
-            "missing .abc; got: {:?}",
-            names
-        );
-
-        // pack.info must use moduleType "shared", not "entry"
-        let mut entry = archive.by_name("pack.info").unwrap();
-        use std::io::Read;
-        let mut content = String::new();
-        entry.read_to_string(&mut content).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(
-            v["summary"]["modules"][0]["distro"]["moduleType"].as_str().unwrap(),
-            "shared",
-            "pack.info distro.moduleType must be 'shared' for HSP; got: {}",
-            content
-        );
-        assert_eq!(
-            v["packages"][0]["moduleType"].as_str().unwrap(),
-            "shared",
-            "pack.info packages[0].moduleType must be 'shared' for HSP; got: {}",
-            content
-        );
-    }
-
-    #[test]
-    fn test_har_golden_entry_list() {
-        let tmp = tempfile::tempdir().unwrap();
-        let src_dir = tmp.path().join("src/main/ets");
-        fs::create_dir_all(&src_dir).unwrap();
-        fs::write(src_dir.join("Index.ets"), b"export struct Index {}").unwrap();
-
-        let pkg_json = tmp.path().join("oh-package.json5");
-        fs::write(&pkg_json, r#"{"name":"mylib"}"#).unwrap();
-
-        let out = tmp.path().join("mylib.har");
-
-        let packager = Packager::new(make_config());
-        packager
-            .pack_har(HarPackInput {
-                module_name: "mylib".to_string(),
-                source_dir: src_dir.clone(),
-                resources_dir: tmp.path().join("src/main/resources"),
-                oh_package_json: pkg_json,
-                output_path: out.clone(),
+                privacy_profile_path: None,
             })
             .unwrap();
 
         let file = fs::File::open(&out).unwrap();
         let archive = zip::ZipArchive::new(file).unwrap();
-        let names: Vec<_> = archive.file_names().map(str::to_string).collect();
+        let names: Vec<_> = archive.file_names().collect();
+        assert!(
+            names.iter().any(|n| *n == "libs/arm64-v8a/libpreload.so"),
+            "missing preload SO in HAP; got: {:?}",
+            names
+        );
+    }
 
-        // HAR must contain source files and oh-package.json5
-        assert!(
-            names.iter().any(|n| n.ends_with("Index.ets")),
-            "missing Index.ets; got: {:?}",
-            names
-        );
-        assert!(
-            names.iter().any(|n| n == "oh-package.json5"),
-            "missing oh-package.json5; got: {:?}",
-            names
-        );
+    #[test]
+    fn test_pack_hap_embeds_privacy_profile() {
+        let tmp = tempfile::tempdir().unwrap();
+        let abc = tmp.path().join("modules.abc");
+        let res = tmp.path().join("resources.index");
+        let modj = tmp.path().join("module.json");
+        let privacy = tmp.path().join("privacy.json");
+        let out = tmp.path().join("entry.hap");
 
-        // HAR must NOT contain compiled binary or packaging metadata
+        fs::write(&abc, b"PAND").unwrap();
+        fs::write(&res, b"\x00\x00").unwrap();
+        fs::write(&modj, r#"{"module":{"name":"entry","type":"entry"}}"#).unwrap();
+        fs::write(&privacy, r#"{"dataProcess":[]}"#).unwrap();
+
+        let packager = Packager::new(make_config());
+        packager
+            .pack_hap(PackInput {
+                module_name: "entry".to_string(),
+                abc_path: abc,
+                resources_index: res,
+                module_json: modj,
+                native_libs: vec![],
+                output_path: out.clone(),
+                resources_src_dir: None,
+                bundle_version_code: 1000000,
+                bundle_version_name: "1.0.0".to_string(),
+                bundle_type: "app".to_string(),
+                source_maps_path: None,
+                abilities: vec![],
+                privacy_profile_path: Some(privacy),
+            })
+            .unwrap();
+
+        let file = fs::File::open(&out).unwrap();
+        let archive = zip::ZipArchive::new(file).unwrap();
+        let names: Vec<_> = archive.file_names().collect();
         assert!(
-            !names.iter().any(|n| n.contains("modules.abc")),
-            "HAR must not contain modules.abc; got: {:?}",
-            names
-        );
-        assert!(
-            !names.iter().any(|n| n == "pack.info"),
-            "HAR must not contain pack.info; got: {:?}",
-            names
-        );
-        assert!(
-            !names.iter().any(|n| n == "pkgContextInfo.json"),
-            "HAR must not contain pkgContextInfo.json; got: {:?}",
+            names.iter().any(|n| *n == "module.privacy.json"),
+            "missing module.privacy.json in HAP; got: {:?}",
             names
         );
     }

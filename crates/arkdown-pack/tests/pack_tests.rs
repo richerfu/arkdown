@@ -32,6 +32,7 @@ fn make_config() -> Arc<ArkdownConfig> {
                 ark_options: None,
                 res_options: None,
                 source_option: None,
+                preload_so: vec![],
             },
         },
         modules: vec![],
@@ -77,6 +78,7 @@ fn minimal_pack_input(
         bundle_type: "app".to_string(),
         source_maps_path: None,
         abilities: vec![],
+        privacy_profile_path: None,
     }
 }
 
@@ -259,6 +261,7 @@ fn test_hap_resource_files_copied_from_processed_dir() {
             bundle_type: "app".to_string(),
             source_maps_path: None,
             abilities: vec![],
+            privacy_profile_path: None,
         })
         .expect("pack_hap must succeed");
 
@@ -315,6 +318,7 @@ fn test_missing_abc_returns_missing_input_error() {
         bundle_type: "app".to_string(),
         source_maps_path: None,
         abilities: vec![],
+        privacy_profile_path: None,
     });
     assert!(result.is_err(), "missing ABC must return Err");
     assert!(
@@ -339,6 +343,7 @@ fn test_missing_module_json_returns_missing_input_error() {
         bundle_type: "app".to_string(),
         source_maps_path: None,
         abilities: vec![],
+        privacy_profile_path: None,
     });
     assert!(result.is_err());
     assert!(matches!(result.unwrap_err(), PackError::MissingInput(_)));
@@ -370,6 +375,7 @@ fn test_hsp_output_is_valid_zip() {
             bundle_type: "app".to_string(),
             source_maps_path: None,
             abilities: vec![],
+            privacy_profile_path: None,
         })
         .expect("pack_hsp must succeed");
 
