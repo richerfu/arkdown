@@ -51,7 +51,7 @@ and release-mode terser/minification when applicable.
 - Phase 0 (parity harness): ✅ minimal-hap + minimal-har + minimal-hsp fixtures
 - Phase 1 (loader.json): ✅ absolute paths, 18 fields match hvigor golden exactly
 - Phase 2 (ETS transform): ✅ @Prop, @Link, @ObjectLink, @Provide, @Consume, @Watch, @BuilderParam
-- Phase 3 (bundler): ✅ clean ESM, @ohos: external, treeshake off for debug
+- Phase 3 (bundler): ✅ clean ESM, @ohos: external, treeshake off for debug / on for release, manualChunks for supportChunks (commons + vendors groups)
 - Phase 4 (importee): ✅ process_importees() ports hvigor process-importee.js
 - Phase 5 (ABC): 🔄 modules.abc 8565B vs hvigor 9844B (gap: 1279B — 87% parity)
 - Phase 6 (packaging): ✅ HAP zip identical to hvigor (11 entries)
@@ -75,7 +75,7 @@ and release-mode terser/minification when applicable.
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `loader.json`            | ✅ **Fixed (2026-05-29)**: absolute paths via `canonicalize()`, all 18 fields match hvigor golden exactly. `nonEntryImportees`/`compiledImportees` populated by Phase 4 importee pass. | ByteCode HAR metadata, workers, HSP/HAR OHM maps — not needed for minimal-hap fixture. |
 | ArkTS transform          | ✅ **Fixed (2026-05-29)**: `@State`, `@Prop`, `@Link`, `@ObjectLink`, `@Provide`, `@Consume`, `@Watch`, `@BuilderParam`, storage decorators all implemented. Per-statement source maps via oxc_codegen. | `@Builder`, `@Styles` functions; precise per-token source maps (gap: 566B vs hvigor). |
-| Rollup/rolldown options  | ✅ **Fixed (2026-05-28)**: Clean ESM output, `@ohos:` imports external, treeshake disabled for debug. **IIFE/CJS compatibility paths removed** from both bundler and ABC compiler. | Release treeshake, `manualChunks` for `supportChunks`, ByteCode HAR/HSP externals. |
+| Rollup/rolldown options  | ✅ **Fixed (2026-05-29)**: Clean ESM output, `@ohos:` imports external, treeshake disabled for debug / enabled for release. `manualChunks` via `ManualCodeSplittingOptions`: `oh_modules\|node_modules → commons`, non-entry modules → `vendors`. **IIFE/CJS compatibility paths removed** from both bundler and ABC compiler. | ByteCode HAR/HSP externals. |
 | ByteCode HAR importees   | ✅ **Fixed (2026-05-29)**: `process_importees()` ports `process-importee.js`. BFS from entry chunks, OHM URL generation, importee.json cache written. `nonEntryImportees` in loader.json. | ByteCode HAR compilation flow (requires HAR input fixture). |
 | ABC compiler             | 🔄 **Improved**: LNP line advance tracking, OHM URL scope names, SET_FILE debug info, binary/unary/logical ops, static-object `createobjectwithbuffer` (opcode 0x07), emit_new args, call-argument closures, START_LOCAL_EXTENDED (0x04) for scope/param vars, SET_PROLOGUE_END (0x08) after scope declarations, NewLexEnvWithName for arrow captures, class-decl lexical bindings. modules.abc 8565B vs 9844B. | Per-instruction LNP ADVANCE sequences (hvigor emits between every instruction group, not just per-statement); per-token source map granularity. |
 | Obfuscation/minification | `arkdown-obfuscate` exists but not wired in.                                                                                                                                           | hvigor release builds run SDK obfuscation + terser before ABC.                          |
@@ -166,15 +166,19 @@ Until this is done, any real ArkUI UI page is only syntactically compiled.
 
 ### Phase 3: Align rolldown with hvigor rollup
 
-Make rolldown output match hvigor's rollup contract:
+✅ **Completed (2026-05-29)**:
 
-- Configure release `treeshake` and debug no-treeshake behavior.
-- Implement hvigor `manualChunks` for `supportChunks`.
-- Preserve chunk filenames/stems used by ABC record names.
-- Enable and serialize source maps.
-- Implement external handling for SDK modules, HSP, ByteCode HAR, declarations,
-  native `.so`, and deduplicated HAR modules.
-- Add a compatibility path for custom compile plugins only after core parity.
+- Release treeshake (`TreeshakeOptions::Boolean(true)`) and debug no-treeshake.
+- `manualChunks` via `ManualCodeSplittingOptions` for `supportChunks=true`:
+  - Group `commons`: Regex `oh_modules|node_modules`
+  - Group `vendors`: dynamic name function — returns `"vendors"` for non-entry modules
+- Chunk filenames/stems preserved via `InputItem.name` from file stem.
+- Source maps enabled (`SourceMapType::Hidden`) with `sourceMaps.map` written.
+
+Remaining:
+- External handling for SDK modules, HSP, ByteCode HAR, declarations, native `.so`,
+  and deduplicated HAR modules.
+- Custom compile plugin compatibility path (after core parity).
 
 ### Phase 4: Post-rollup importee processing
 

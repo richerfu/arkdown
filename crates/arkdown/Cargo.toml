@@ -30,6 +30,7 @@ rolldown           = { version = "1.0.3", default-features = false }
 rolldown_plugin    = { version = "1.0.3" }
 rolldown_common    = { version = "1.0.3" }
 rolldown_sourcemap = { version = "1.0.3" }
+rolldown_utils     = { version = "1.0.3" }
 
 [dev-dependencies]
 tokio = { workspace = true }
@@ -44,3 +45,4 @@ arkdown-plugin-json5         = { path = "../arkdown-plugin-json5" }
 arkdown-resolver             = { path = "../arkdown-resolver" }
 json5 = { workspace = true }
 fs-err = { workspace = true }
+tempfile = "3"
