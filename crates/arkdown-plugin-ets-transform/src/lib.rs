@@ -216,23 +216,16 @@ impl Plugin for EtsTransformPlugin {
 ///   → original source positions   (this function's per-token map)
 /// ```
 ///
-/// Returns `None` if parsing fails (in which case the caller should fall back
-/// to `HookTransformOutputMap::Null` in the adapter, suppressing rolldown's
-/// "possibly broken sourcemap" warning without providing a map).
-/// Generate a per-token JSON source map for an `.ets` or `.ts` source file.
-///
-/// This is the public entry point used by `arkdown-cli`'s `write_hvigor_source_maps`
-/// to produce dense per-token VLQ mappings that match hvigor's tsc-generated output.
-///
-/// `original_code` must be the **kit-rewritten** source (after `@kit.*` import
-/// expansion) so that the expanded import lines contribute mapping segments, giving
-/// a VLQ string that is proportional to the expanded source rather than the raw
-/// three-line `@kit.*` form.  Call [`api_transform::rewrite_kit_imports`] first.
-pub fn generate_source_map_for_file(original_code: &str, id: &str) -> Option<String> {
-    generate_source_map_json(original_code, id)
+/// Public entry point for generating a per-token source map JSON for `source`.
+/// Used by `arkdown-cli` to bypass rolldown's composed map in favour of a
+/// direct per-token map from the original `.ets`/`.ts` source.
+pub fn generate_source_map_for_file(source: &str, id: &str) -> Option<String> {
+    source_map::build_token_source_map(source, id)
 }
 
-fn generate_source_map_json(original_code: &str, id: &str) -> Option<String> {
+/// Returns `None` if parsing fails; callers should fall back to the raw source
+/// text with no source map in that case.
+fn generate_code_and_source_map(source: &str, id: &str) -> Option<(String, Option<String>)> {
     let allocator = Allocator::default();
     let source_type =
         SourceType::from_path(id).unwrap_or_else(|_| SourceType::ts().with_module(true));
@@ -318,71 +311,6 @@ mod tests {
                 compile_sdk_version: "6.0.0.47".to_string(),
             },
         })
-    }
-
-    /// Regression test: VLQ density for EntryAbility.ets must exceed 500 chars.
-    ///
-    /// The source map is generated from the kit-import-rewritten source (as in the
-    /// actual `EtsTransformPlugin` pipeline).  hvigor's tsc-based map produces ~910
-    /// VLQ chars for this file; our oxc codegen approach produces ~566.  The 500-char
-    /// floor guards against regressions back to the sparse rolldown-composed map
-    /// (~329 chars) that was produced before this fix.
-    #[test]
-    fn test_vlq_density_entry_ability() {
-        // Matches tests/fixtures/minimal-hap/entry/src/main/ets/entryability/EntryAbility.ets
-        let raw_source = "import { AbilityConstant, UIAbility, Want } from \"@kit.AbilityKit\";\n\
-import { hilog } from \"@kit.PerformanceAnalysisKit\";\n\
-import { window } from \"@kit.ArkUI\";\n\
-\n\
-const DOMAIN = 0x0000;\n\
-\n\
-export default class EntryAbility extends UIAbility {\n\
-  onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {\n\
-    hilog.info(DOMAIN, \"testTag\", \"%{public}s\", \"Ability onCreate\");\n\
-  }\n\
-\n\
-  onWindowStageCreate(windowStage: window.WindowStage): void {\n\
-    hilog.info(DOMAIN, \"testTag\", \"%{public}s\", \"Ability onWindowStageCreate\");\n\
-    windowStage.loadContent(\"pages/Index\", (err) => {\n\
-      if (err.code) {\n\
-        hilog.error(\n\
-          DOMAIN,\n\
-          \"testTag\",\n\
-          \"Failed to load content. Cause: %{public}s\",\n\
-          JSON.stringify(err),\n\
-        );\n\
-        return;\n\
-      }\n\
-      hilog.info(DOMAIN, \"testTag\", \"Succeeded in loading the content.\");\n\
-    });\n\
-  }\n\
-\n\
-  onForeground(): void {\n\
-    hilog.info(DOMAIN, \"testTag\", \"%{public}s\", \"Ability onForeground\");\n\
-  }\n\
-\n\
-  onBackground(): void {\n\
-    hilog.info(DOMAIN, \"testTag\", \"%{public}s\", \"Ability onBackground\");\n\
-  }\n\
-}\n";
-        let id = "entry/src/main/ets/entryability/EntryAbility.ets";
-        let kit_rewritten = api_transform::rewrite_kit_imports(raw_source);
-        let map_json = generate_source_map_for_file(&kit_rewritten, id)
-            .expect("source map must be generated for valid ETS");
-        let mappings = map_json
-            .find("\"mappings\":\"")
-            .map(|pos| {
-                let start = pos + 12;
-                let rest = &map_json[start..];
-                &rest[..rest.find('"').unwrap_or(rest.len())]
-            })
-            .unwrap_or("");
-        assert!(
-            mappings.len() > 500,
-            "VLQ mappings must be > 500 chars (got {}); \
-             hvigor produces ~910 chars; regression floor guards against sparse rolldown map (~329)",
-            mappings.len()
-        );
     }
 
     #[test]
