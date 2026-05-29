@@ -1751,9 +1751,153 @@ impl<'a> CodeGen<'a> {
                     }
                 }
             }
+            Statement::ThrowStatement(throw_stmt) => {
+                self.emit_expr(&throw_stmt.argument);
+                self.push(Insn::Throw);
+                self.returned = true;
+            }
+            Statement::BreakStatement(_) | Statement::ContinueStatement(_) => {
+                // No label tracking: emit a self-targeting jmp (no-op).
+                self.push(Insn::Jmp(3));
+            }
+            Statement::WhileStatement(while_stmt) => {
+                self.emit_while_stmt(while_stmt);
+            }
+            Statement::DoWhileStatement(do_while) => {
+                self.emit_do_while_stmt(do_while);
+            }
+            Statement::ForStatement(for_stmt) => {
+                self.emit_for_stmt(for_stmt);
+            }
+            Statement::ForInStatement(for_in) => {
+                self.emit_for_in_stmt(for_in);
+            }
+            Statement::ForOfStatement(for_of) => {
+                self.emit_for_of_stmt(for_of);
+            }
             // Everything else: no bytecode emitted.
             _ => {}
         }
+    }
+
+    // ── While loop ────────────────────────────────────────────────────────────
+
+    fn emit_while_stmt(&mut self, while_stmt: &oxc_ast::ast::WhileStatement<'_>) {
+        let header_pos = self.insns.len();
+        self.emit_expr(&while_stmt.test);
+        let jeqz_pos = self.insns.len();
+        self.push(Insn::Jeqz(0));
+        let outer_returned = self.returned;
+        self.returned = false;
+        self.emit_stmt(&while_stmt.body);
+        self.returned = outer_returned;
+        let back_pos = self.insns.len();
+        let back_offset = (header_pos as i32 - back_pos as i32 - 3) as i16;
+        self.push(Insn::Jmp(back_offset));
+        let end_pos = self.insns.len();
+        let [lo, hi] = ((end_pos as i32 - jeqz_pos as i32) as i16).to_le_bytes();
+        self.insns[jeqz_pos + 1] = lo;
+        self.insns[jeqz_pos + 2] = hi;
+    }
+
+    // ── Do-while loop ─────────────────────────────────────────────────────────
+
+    fn emit_do_while_stmt(&mut self, do_while: &oxc_ast::ast::DoWhileStatement<'_>) {
+        let body_start = self.insns.len();
+        let outer_returned = self.returned;
+        self.returned = false;
+        self.emit_stmt(&do_while.body);
+        self.returned = outer_returned;
+        self.emit_expr(&do_while.test);
+        let jnez_pos = self.insns.len();
+        self.push(Insn::Jnez(0));
+        let [lo, hi] = ((body_start as i32 - jnez_pos as i32) as i16).to_le_bytes();
+        self.insns[jnez_pos + 1] = lo;
+        self.insns[jnez_pos + 2] = hi;
+    }
+
+    // ── For loop ──────────────────────────────────────────────────────────────
+
+    fn emit_for_stmt(&mut self, for_stmt: &oxc_ast::ast::ForStatement<'_>) {
+        if let Some(init) = &for_stmt.init {
+            match init {
+                oxc_ast::ast::ForStatementInit::VariableDeclaration(decl) => {
+                    self.emit_var_decl(decl);
+                }
+                _ => {
+                    if let Some(expr) = init.as_expression() {
+                        self.emit_expr(expr);
+                    }
+                }
+            }
+        }
+        let header_pos = self.insns.len();
+        let jeqz_pos = if let Some(test) = &for_stmt.test {
+            self.emit_expr(test);
+            let jp = self.insns.len();
+            self.push(Insn::Jeqz(0));
+            Some(jp)
+        } else {
+            None
+        };
+        let outer_returned = self.returned;
+        self.returned = false;
+        self.emit_stmt(&for_stmt.body);
+        self.returned = outer_returned;
+        if let Some(update) = &for_stmt.update {
+            self.emit_expr(update);
+        }
+        let back_pos = self.insns.len();
+        let back_offset = (header_pos as i32 - back_pos as i32 - 3) as i16;
+        self.push(Insn::Jmp(back_offset));
+        if let Some(jp) = jeqz_pos {
+            let end_pos = self.insns.len();
+            let [lo, hi] = ((end_pos as i32 - jp as i32) as i16).to_le_bytes();
+            self.insns[jp + 1] = lo;
+            self.insns[jp + 2] = hi;
+        }
+    }
+
+    // ── For-in loop (stub: binds key=undefined, emits body once) ─────────────
+
+    fn emit_for_in_stmt(&mut self, for_in: &oxc_ast::ast::ForInStatement<'_>) {
+        self.emit_expr(&for_in.right);
+        if let oxc_ast::ast::ForStatementLeft::VariableDeclaration(decl) = &for_in.left {
+            for declarator in &decl.declarations {
+                if let BindingPattern::BindingIdentifier(id) = &declarator.id {
+                    let name = id.name.as_str().to_string();
+                    self.push(Insn::LdUndefined);
+                    let reg = self.alloc_reg();
+                    self.var_regs.insert(name, reg);
+                    self.push(Insn::Sta(reg));
+                }
+            }
+        }
+        let outer_returned = self.returned;
+        self.returned = false;
+        self.emit_stmt(&for_in.body);
+        self.returned = outer_returned;
+    }
+
+    // ── For-of loop (stub: binds value=undefined, emits body once) ───────────
+
+    fn emit_for_of_stmt(&mut self, for_of: &oxc_ast::ast::ForOfStatement<'_>) {
+        self.emit_expr(&for_of.right);
+        if let oxc_ast::ast::ForStatementLeft::VariableDeclaration(decl) = &for_of.left {
+            for declarator in &decl.declarations {
+                if let BindingPattern::BindingIdentifier(id) = &declarator.id {
+                    let name = id.name.as_str().to_string();
+                    self.push(Insn::LdUndefined);
+                    let reg = self.alloc_reg();
+                    self.var_regs.insert(name, reg);
+                    self.push(Insn::Sta(reg));
+                }
+            }
+        }
+        let outer_returned = self.returned;
+        self.returned = false;
+        self.emit_stmt(&for_of.body);
+        self.returned = outer_returned;
     }
 
     // ── If statement with jump patching ──────────────────────────────────────
