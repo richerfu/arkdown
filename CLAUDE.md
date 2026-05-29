@@ -55,7 +55,7 @@ arkdown/
 │   ├── arkdown-resolver/     ← OHOS module resolution library (SPEC-003)
 │   ├── arkdown-loader/       ← parallel module loading + plugin pipeline (SPEC-004)
 │   ├── arkdown/              ← bundler core: link, tree-shake, chunk-split (SPEC-005)
-│   ├── arkdown-plugin-chunk-wrapper/  ← IIFE wrapping, globalThis registry (SPEC-006)
+│   ├── arkdown-plugin-chunk-wrapper/  ← legacy IIFE/globalThis registry (SPEC-006, not used in ESM pipeline)
 │   ├── arkdown-plugin-json5/          ← JSON/JSON5 import (SPEC-007)
 │   ├── arkdown-plugin-duplicate-check/ ← filename uniqueness check (SPEC-008)
 │   ├── arkdown-plugin-module-meta/    ← per-module OHOS metadata (SPEC-014)
@@ -82,7 +82,7 @@ arkdown/
 | Any crate                    | `meta/design/README.md` (key discoveries summary)                                  |
 | Type definitions             | `meta/design/types.md`                                                             |
 | Module loading, resolution   | `meta/design/module-resolution.md`                                                 |
-| Chunk output format          | `meta/design/chunk-model.md` — legacy IIFE/globalThis chunk behavior               |
+| Chunk output format          | `meta/design/chunk-model.md` — ESM output format; IIFE/globalThis legacy removed    |
 | ABC compiler (arkdown-abc)   | `meta/design/abc-pipeline.md` — Panda bytecode format, IR pipeline                 |
 | hvigorw replacement          | `meta/design/compat.md`                                                            |
 | Plugin work                  | `meta/design/plugins.md` — which JS plugins we're replacing and why                |

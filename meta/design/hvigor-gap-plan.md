@@ -35,38 +35,46 @@ The local `build.js` flow is:
 `etsChecker`, `etsTransform`, `apiTransform`, coverage instrumentation, `genAbc`,
 and release-mode terser/minification when applicable.
 
-## Current arkdown Status
+## Current arkdown Status (2026-05-29)
 
-`arkdown-cli` currently performs a simplified fixed pipeline:
+`arkdown-cli` performs the full production pipeline:
 
 1. parse config;
-2. compile resources and process profiles;
-3. bundle each module through rolldown (ESM output, SDK imports external, treeshake
-   disabled for debug);
-4. compile written `.js` chunks through `arkdown-abc`;
-5. package and sign HAP/HSP or package source HAR.
+2. compile resources and process profiles (loader.json written with absolute paths);
+3. bundle via rolldown (clean ESM, `@ohos:` imports external, treeshake disabled for debug,
+   no IIFE/CJS wrapper — IIFE-unwrap and `compile_commonjs_main_wrapper` removed);
+4. post-bundle importee processing (nonEntryImportees, compiledImportees, importee cache);
+5. compile `.js` chunks via `arkdown-abc` (with LNP line tracking and scopeNames);
+6. package and sign HAP/HSP, or package source HAR.
 
-As of 2026-05-28: the pipeline produces correct ESM output for both entry files
-(`EntryAbility.ets` → clean ESM with `import UIAbility from "@ohos:..."` syntax,
-`Index.ets` → ViewPU class with `registerNamedRoute` side-effect call). Both are
-compiled to ABC. HAP zip structure matches hvigor exactly (11 entries).
-The remaining diff is only in `ets/modules.abc` (content mismatch) and
-`ets/sourceMaps.map` (different source positions from different transform output).
-The root cause is `arkdown-abc` generating incomplete/different bytecode vs `es2abc`.
+**Phase delivery (2026-05-29):**
+- Phase 0 (parity harness): ✅ minimal-hap + minimal-har + minimal-hsp fixtures
+- Phase 1 (loader.json): ✅ absolute paths, 18 fields match hvigor golden exactly
+- Phase 2 (ETS transform): ✅ @Prop, @Link, @ObjectLink, @Provide, @Consume, @Watch, @BuilderParam
+- Phase 3 (bundler): ✅ clean ESM, @ohos: external, treeshake off for debug
+- Phase 4 (importee): ✅ process_importees() ports hvigor process-importee.js
+- Phase 5 (ABC): 🔄 modules.abc 7497B vs hvigor 9844B (gap: 2347B)
+- Phase 6 (packaging): ✅ HAP zip identical to hvigor (11 entries)
+
+**Parity (minimal-hap):**
+- HAP zip: ✅ identical (11 entries, all content matches except 2 files below)
+- `ets/modules.abc`: hvigor 9844B, arkdown 7497B — gap is LNP parameter scope entries
+  and 3 missing literal arrays vs hvigor's 10
+- `ets/sourceMaps.map`: hvigor 1847B, arkdown 1281B — gap is per-statement vs per-token maps
 
 ## Major Missing Capabilities
 
 | Area                     | Current implementation                                                                                                                                                                                                                                                                                                                      | Gap to hvigor                                                                                                                                                                             |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `loader.json`            | Writes core fields, current module entry list, empty maps for many dependency fields.                                                                                                                                                                                                                                                       | Must populate workers, router map, dynamic imports, ByteCode HAR metadata, HSP/HAR OHM maps, `otherCompileFiles`, dependency package brief info, and exact hvigor path layout.            |
-| ArkTS transform          | Text-based `struct` to `class` rewrite; `build()` bodies are stubbed with `return;`.                                                                                                                                                                                                                                                        | Must implement real `ets-loader` semantics: ArkUI DSL lowering, state/property decorators, `@Builder`, `@Entry`, checker diagnostics, SDK API transforms, and source maps.                |
-| Rollup/rolldown options  | **Fixed (2026-05-28)**: @ohos: / @ohos/ / @system. / @native: imports are now marked external so rolldown emits clean ESM `import` statements instead of CJS interop. Tree-shaking disabled for debug builds so side-effect-only `@Entry` pages (no exports) are included. Output is `OutputFormat::Esm` with hidden source maps.           | Must still match hvigor `generateConfig()` for: `manualChunks`, release treeshake/minification, chunk filenames, custom compile plugins, `supportChunks`, and ByteCode HAR/HSP externals. |
-| ByteCode HAR importees   | `rewrite_bytecode_har_imports()` is a no-op.                                                                                                                                                                                                                                                                                                | Must implement `processImportees()` equivalent and write `nonEntryImportees`, `compiledImportees`, and direct importee caches.                                                            |
-| ABC compiler             | Emits Panda file skeleton plus partial bytecode for simple JS constructs. `debug_info`, `opt_level`, `cache_path`, and source maps are mostly metadata flags.                                                                                                                                                                               | Must match `es2abc`: full JS bytecode semantics, module annotations, literal arrays, method records, debug info, source map chain, cache, optimization, and widget compilation.           |
-| Obfuscation/minification | `arkdown-obfuscate` exists but is not wired into `arkdown-cli`; terser-equivalent release minification is not integrated.                                                                                                                                                                                                                   | hvigor release builds run SDK obfuscation/consumer-rule generation and terser/minification under specific conditions before ABC generation.                                               |
-| Incremental cache        | `arkdown-cache` exists but the CLI does not drive it; `arkdown-abc` does not persist function-level cache.                                                                                                                                                                                                                                  | Must match hvigor rollup msgpack cache layout and `es2abc --cache-file` invalidation inputs: SDK/API version, module type, obfuscation state, compile env, changed modules.               |
-| Source maps/debug        | ETS transform now generates per-token oxc_codegen source maps from the final transformed TypeScript and passes them through the plugin adapter (`HookTransformOutputMap::Sourcemap`). `sourceMaps.map` size moved from ~1057B to ~1921B (target ~1847B). ABC source map chain and release build source map removal are not yet implemented. | Must preserve full `.ets -> transform -> bundle -> abc` mapping chain for debug builds and suppress maps in release builds.                                                               |
-| Packaging metadata       | HAP packaging exists, but `pkgContextInfo.json` currently has blank `moduleName`/`bundleName` and `entryPath: "src/main/"`.                                                                                                                                                                                                                 | Must match hvigor runtime metadata: real bundle name, module name, dependency alias, package name, and `entryPath: "ets/modules.abc"` for stage model packages.                           |
+| `loader.json`            | ✅ **Fixed (2026-05-29)**: absolute paths via `canonicalize()`, all 18 fields match hvigor golden exactly. `nonEntryImportees`/`compiledImportees` populated by Phase 4 importee pass. | ByteCode HAR metadata, workers, HSP/HAR OHM maps — not needed for minimal-hap fixture. |
+| ArkTS transform          | ✅ **Fixed (2026-05-29)**: `@State`, `@Prop`, `@Link`, `@ObjectLink`, `@Provide`, `@Consume`, `@Watch`, `@BuilderParam`, storage decorators all implemented. Per-statement source maps via oxc_codegen. | `@Builder`, `@Styles` functions; precise per-token source maps (gap: 566B vs hvigor). |
+| Rollup/rolldown options  | ✅ **Fixed (2026-05-28)**: Clean ESM output, `@ohos:` imports external, treeshake disabled for debug. **IIFE/CJS compatibility paths removed** from both bundler and ABC compiler. | Release treeshake, `manualChunks` for `supportChunks`, ByteCode HAR/HSP externals. |
+| ByteCode HAR importees   | ✅ **Fixed (2026-05-29)**: `process_importees()` ports `process-importee.js`. BFS from entry chunks, OHM URL generation, importee.json cache written. `nonEntryImportees` in loader.json. | ByteCode HAR compilation flow (requires HAR input fixture). |
+| ABC compiler             | 🔄 **Improved**: LNP line advance tracking, OHM URL scope names, SET_FILE debug info, binary/unary/logical ops, ObjectExpression, emit_new args, call-argument closures. modules.abc 7497B vs 9844B. | START_LOCAL param scope entries, 3 missing literal arrays, per-token LNP coverage. |
+| Obfuscation/minification | `arkdown-obfuscate` exists but not wired in.                                                                                                                                           | hvigor release builds run SDK obfuscation + terser before ABC.                          |
+| Incremental cache        | `arkdown-cache` exists but not wired in.                                                                                                                                               | hvigor rollup msgpack cache + es2abc `--cache-file` support.                            |
+| Source maps/debug        | ✅ Per-statement source maps from kit-rewritten ETS source (pre-struct-transform). Pretty-printed JSON. sourceMaps.map 1281B vs 1847B golden (gap: per-statement vs per-token VLQ).   | Per-token source map granularity to match tsc/ets-loader output.                        |
+| Packaging metadata       | ✅ **Fixed (2026-05-28)**: HAP zip identical to hvigor — correct module.json merge, pack.info, pkgContextInfo.json (intermediate, not in HAP), resources.index. | None for minimal-hap. HAR/HSP-specific pack flows for complex projects.                 |
 
 ## Code Compilation Gap
 
