@@ -629,7 +629,13 @@ impl AbcFile {
                         (&method.debug_info, source_file_off)
                     {
                         class_offsets.push(Some(debug_cur));
-                        let bytes = encode_debug_info(debug.line_start, source_file_off, lnp_index);
+                        let param_offs = &per_lnp_param_name_offsets[lnp_index as usize];
+                        let bytes = encode_debug_info(
+                            debug.line_start,
+                            param_offs,
+                            source_file_off,
+                            lnp_index,
+                        );
                         debug_cur += bytes.len() as u32;
                         debug_buf.extend_from_slice(&bytes);
                         lnp_source_file_offs.push(source_file_off);
@@ -1069,13 +1075,21 @@ fn adler32(data: &[u8]) -> u32 {
     (b << 16) | a
 }
 
-fn encode_debug_info(line_start: u32, source_file_offset: u32, lnp_index: u32) -> Vec<u8> {
+fn encode_debug_info(
+    line_start: u32,
+    param_name_offsets: &[u32],
+    source_file_offset: u32,
+    lnp_index: u32,
+) -> Vec<u8> {
     let source_file_entry = uleb128(source_file_offset as u64);
     let mut out = Vec::with_capacity(8 + source_file_entry.len());
     out.extend_from_slice(&uleb128(line_start as u64));
-    out.extend_from_slice(&uleb128(0)); // num_parameters
-                                        // constant_pool_count = 1: one entry — the source file string offset.
-                                        // Use count (1), not byte length, to match libpandafile DebugInfoItem layout.
+    out.extend_from_slice(&uleb128(param_name_offsets.len() as u64));
+    for &off in param_name_offsets {
+        out.extend_from_slice(&uleb128(off as u64));
+    }
+    // constant_pool_count = 1: one entry — the source file string offset.
+    // Use count (1), not byte length, to match libpandafile DebugInfoItem layout.
     out.extend_from_slice(&uleb128(1));
     out.extend_from_slice(&source_file_entry);
     out.extend_from_slice(&uleb128(lnp_index as u64));
