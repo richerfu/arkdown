@@ -51,6 +51,24 @@ pub fn inline_string(s: &str) -> Vec<u8> {
     out
 }
 
+/// A single try/catch region in a method's exception table.
+///
+/// Panda `TryBlock` format (serialized after bytecode in `CodeItem`):
+/// ```text
+/// start_pc: u32 LE   – byte offset of first try instruction
+/// length:   u32 LE   – byte count of the try region
+/// num_catches: u16 LE – number of catch handlers (always 1 here)
+/// CatchBlock:
+///   type_idx:   u16 LE – exception type (0 = catch-all)
+///   handler_pc: u32 LE – byte offset of the catch handler entry
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct CatchEntry {
+    pub try_begin: u32,
+    pub try_end: u32,
+    pub catch_begin: u32,
+}
+
 /// Encode a Panda `CodeItem`.
 ///
 /// Binary layout:
@@ -60,17 +78,32 @@ pub fn inline_string(s: &str) -> Vec<u8> {
 /// ULEB128(num_insns)   – byte length of the bytecode that follows
 /// ULEB128(tries_size)  – number of try-block records that follow bytecode
 /// [bytecode: u8 * num_insns]
+/// [TryBlock * tries_size]
 /// ```
 ///
-/// No try-catch block footer is emitted (empty try-block list).  ArkRuntime
-/// accepts this for functions without exception handlers.
-pub fn encode_code_item(num_vregs: u16, num_args: u16, bytecode: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(7 + bytecode.len());
+/// Each `TryBlock` is: `start_pc(u32) + length(u32) + num_catches(u16) +
+/// [type_idx(u16) + handler_pc(u32)] * num_catches`.
+pub fn encode_code_item(
+    num_vregs: u16,
+    num_args: u16,
+    bytecode: &[u8],
+    catch_entries: &[CatchEntry],
+) -> Vec<u8> {
+    let try_table_len = catch_entries.len() * 14;
+    let mut out = Vec::with_capacity(7 + bytecode.len() + try_table_len);
     out.extend_from_slice(&uleb128(num_vregs as u64));
     out.extend_from_slice(&uleb128(num_args as u64));
     out.extend_from_slice(&uleb128(bytecode.len() as u64));
-    out.extend_from_slice(&uleb128(0));
+    out.extend_from_slice(&uleb128(catch_entries.len() as u64));
     out.extend_from_slice(bytecode);
+    for entry in catch_entries {
+        let length = entry.try_end.saturating_sub(entry.try_begin);
+        out.extend_from_slice(&entry.try_begin.to_le_bytes());
+        out.extend_from_slice(&length.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&entry.catch_begin.to_le_bytes());
+    }
     out
 }
 
@@ -99,6 +132,10 @@ pub struct MethodRecord {
     /// performed during compilation (i.e. when a source text was available).
     /// Written verbatim into the LNP body after the SET_FILE preamble.
     pub line_ops: Vec<u8>,
+    /// Exception handler table for this method.  Each entry maps a try region
+    /// (by bytecode byte offset) to its catch handler entry point.  Empty for
+    /// methods with no `try`/`catch` blocks.
+    pub catch_entries: Vec<CatchEntry>,
 }
 
 /// Minimal method debug info linked through a Panda LineNumberProgram.
@@ -470,14 +507,14 @@ mod tests {
     #[test]
     fn test_encode_code_item_empty() {
         // Empty bytecode: four ULEB128 headers (vregs/args/code_size/tries_size).
-        let ci = encode_code_item(0, 0, &[]);
+        let ci = encode_code_item(0, 0, &[], &[]);
         assert_eq!(ci, vec![0x00, 0x00, 0x00, 0x00]);
     }
 
     #[test]
     fn test_encode_code_item_with_bytecode() {
         // num_vregs=0, num_args=3, bytecode=[0x65] (ReturnUndefined)
-        let ci = encode_code_item(0, 3, &[0x65]);
+        let ci = encode_code_item(0, 3, &[0x65], &[]);
         assert_eq!(ci, vec![0x00, 0x03, 0x01, 0x00, 0x65]);
     }
 
@@ -505,6 +542,7 @@ mod tests {
                 num_args: 3,
                 debug_info: None,
                 line_ops: vec![],
+                catch_entries: vec![],
             }],
             access_flags: 1,
             source_lang: 0,
@@ -534,6 +572,7 @@ mod tests {
                 num_args: 3,
                 debug_info: None,
                 line_ops: vec![],
+                catch_entries: vec![],
             }],
             access_flags: 1,
             source_lang: 0,

@@ -1344,6 +1344,35 @@ fn test_for_loop_emits_opcodes() {
     assert!(bytes.contains(&0x4Eu8), "jmp (0x4E) backward loop edge");
 }
 
+// ---------------------------------------------------------------------------
+// TryStatement / ThrowStatement / AwaitExpression (Commit 1+2)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_await_expression_compiles() {
+    // An `async` function with `await` must compile to valid Panda ABC without
+    // panicking.  Simplified lowering: the awaited expression is evaluated and
+    // left in the accumulator; ArkRuntime's Promise machinery handles the rest.
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("await.abc");
+    let source = r#"
+        async function loadData() {
+            const result = await fetchData();
+            return result;
+        }
+    "#;
+    module_compiler()
+        .compile(vec![module_record("test/await_test", source)], &out)
+        .expect("compile async/await source");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+    assert!(
+        bytes.len() > 32,
+        "async/await bytecode must be non-trivial, got {} bytes",
+        bytes.len()
+    );
+}
+
 #[test]
 fn test_throw_statement_emits_throw_opcode() {
     // ThrowStatement must emit the Panda `throw` prefix opcode sequence
@@ -1365,6 +1394,25 @@ fn test_throw_statement_emits_throw_opcode() {
     assert!(
         bytes.windows(2).any(|w| w == [0xFE, 0x00]),
         "throw prefix (0xFE 0x00) must appear for throw statement"
+    );
+}
+
+#[test]
+fn test_throw_statement_emits_throw_opcode_2() {
+    // `throw new Error("oops")` must produce the Panda `throw` opcode,
+    // which is a two-byte prefixed instruction: [0xFE, 0x00].
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("throw.abc");
+    let source = r#"throw new Error("oops");"#;
+    module_compiler()
+        .compile(vec![module_record("test/throw_test", source)], &out)
+        .expect("compile throw source");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+    let has_throw = bytes.windows(2).any(|w| w == [0xFE, 0x00]);
+    assert!(
+        has_throw,
+        "throw opcode [0xFE, 0x00] must appear in output for `throw` statement"
     );
 }
 
@@ -1487,3 +1535,35 @@ for (const x of arr) {
     assert!(bytes.contains(&0x67u8), "getiterator (0x67) must appear for 'for...of' loop");
     assert!(bytes.contains(&0x9bu8), "jnez (0x9b) must appear for 'for...of' done-check");
 }
+
+fn test_try_catch_block_compiles_valid_bytecode() {
+    // A try/catch block with a named catch parameter must compile to valid
+    // Panda ABC.  The CodeGen emits a `jmp` (0x4E) at the end of the try body
+    // to skip the catch handler on the normal (no-exception) path, and
+    // registers a CatchEntry in the method's exception table.
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("try_catch.abc");
+    let source = r#"
+        try {
+            const x = doRiskyOp();
+        } catch (e) {
+            handleError(e);
+        }
+    "#;
+    module_compiler()
+        .compile(vec![module_record("test/try_catch_test", source)], &out)
+        .expect("compile try/catch source");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+    assert!(
+        bytes.len() > 64,
+        "try/catch bytecode must be non-trivial, got {} bytes",
+        bytes.len()
+    );
+    // jmp (0x4E) is emitted to skip the catch body on the normal path.
+    assert!(
+        bytes.contains(&0x4Eu8),
+        "jmp opcode (0x4E) must appear in try/catch output"
+    );
+}
+

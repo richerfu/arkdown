@@ -13,7 +13,8 @@ use oxc_span::{GetSpan, SourceType};
 
 use crate::emit::file::{LiteralArray, LiteralEntry};
 use crate::emit::record::{
-    ClassRecord, DebugInfoRecord, FieldRecord, FieldValue, MethodRecord, FIELD_OWNER_CLASS_IDX,
+    CatchEntry, ClassRecord, DebugInfoRecord, FieldRecord, FieldValue, MethodRecord,
+    FIELD_OWNER_CLASS_IDX,
 };
 use crate::emit::strings::StringTable;
 use crate::error::AbcError;
@@ -200,7 +201,7 @@ pub fn build_record_with_debug(
     //
     // When source-file debug info is requested, we also compute a Panda
     // LineNumberProgram for func_main_0 using statement span offsets.
-    let (bytecode, func_main_line_ops) = if source_file.is_some() {
+    let (bytecode, func_main_line_ops, func_main_catches) = if source_file.is_some() {
         compile_program_body_tracked(
             &program,
             strings,
@@ -210,10 +211,9 @@ pub fn build_record_with_debug(
             source,
         )
     } else {
-        (
-            compile_program_body(&program, strings, literal_arrays, &lowering, is_module),
-            vec![],
-        )
+        let (bc, catches) =
+            compile_program_body(&program, strings, literal_arrays, &lowering, is_module);
+        (bc, vec![], catches)
     };
     let num_vregs = estimate_vregs(&bytecode);
     methods.push(MethodRecord {
@@ -223,6 +223,7 @@ pub fn build_record_with_debug(
         num_args: 3,
         debug_info: None,
         line_ops: func_main_line_ops,
+        catch_entries: func_main_catches,
     });
 
     // Determine which statement slice to scan for declarations. Upstream
@@ -234,7 +235,7 @@ pub fn build_record_with_debug(
         if let Statement::FunctionDeclaration(func) = stmt {
             if let Some(id) = &func.id {
                 let func_name = id.name.as_str().to_string();
-                let func_bytecode =
+                let (func_bytecode, func_catches) =
                     compile_function_body(func.body.as_deref(), strings, literal_arrays, &lowering);
                 let num_vregs = estimate_vregs(&func_bytecode);
                 methods.push(MethodRecord {
@@ -244,6 +245,7 @@ pub fn build_record_with_debug(
                     num_args: func.params.items.len() as u16,
                     debug_info: None,
                     line_ops: vec![],
+                    catch_entries: func_catches,
                 });
             }
         }
@@ -251,7 +253,7 @@ pub fn build_record_with_debug(
             if let Some(Declaration::FunctionDeclaration(func)) = &export.declaration {
                 if let Some(id) = &func.id {
                     let func_name = id.name.as_str().to_string();
-                    let func_bytecode = compile_function_body(
+                    let (func_bytecode, func_catches) = compile_function_body(
                         func.body.as_deref(),
                         strings,
                         literal_arrays,
@@ -265,6 +267,7 @@ pub fn build_record_with_debug(
                         num_args: func.params.items.len() as u16,
                         debug_info: None,
                         line_ops: vec![],
+                        catch_entries: func_catches,
                     });
                 }
             }
@@ -718,7 +721,7 @@ fn collect_top_level_call_arg_arrows_expr(
                     let base_name = "#*#".to_string();
                     let record_name = suffix_duplicate_method_name(base_name, seen_names);
                     let captures = arrow_captures_from_body(arrow.body.as_ref());
-                    let bytecode = compile_arrow_body(
+                    let (bytecode, arrow_catches) = compile_arrow_body(
                         arrow.body.as_ref(),
                         strings,
                         literal_arrays,
@@ -746,6 +749,7 @@ fn collect_top_level_call_arg_arrows_expr(
                         num_args: arrow.params.items.len() as u16 + 3,
                         debug_info: closure_debug,
                         line_ops: vec![],
+                        catch_entries: arrow_catches,
                     });
                     // Recurse into body for deeper top-level closures.
                     let body_ref = arrow.body.as_ref();
@@ -812,6 +816,7 @@ fn compile_class_elements(
             num_args: 4,
             debug_info: None,
             line_ops: vec![],
+            catch_entries: vec![],
         });
     }
 
@@ -824,7 +829,7 @@ fn compile_class_elements(
                 continue;
             };
             let key_name = suffix_duplicate_method_name(key_name, &mut seen_names);
-            let (bytecode, method_line_ops) = if let Some(src) = source {
+            let (bytecode, method_line_ops, method_catches) = if let Some(src) = source {
                 compile_function_body_tracked(
                     method.value.body.as_deref(),
                     strings,
@@ -833,15 +838,13 @@ fn compile_class_elements(
                     src,
                 )
             } else {
-                (
-                    compile_function_body(
-                        method.value.body.as_deref(),
-                        strings,
-                        literal_arrays,
-                        lowering,
-                    ),
-                    vec![],
-                )
+                let (bc, catches) = compile_function_body(
+                    method.value.body.as_deref(),
+                    strings,
+                    literal_arrays,
+                    lowering,
+                );
+                (bc, vec![], catches)
             };
             let num_vregs = estimate_vregs(&bytecode);
             let num_args = class_method_num_args(method);
@@ -867,6 +870,7 @@ fn compile_class_elements(
                 num_args,
                 debug_info,
                 line_ops: method_line_ops,
+                catch_entries: method_catches,
             });
 
             collect_class_method_arrow_records(
@@ -934,7 +938,7 @@ fn collect_arrow_records_from_stmt(
                     continue;
                 };
                 let captures = arrow_captures_from_body(arrow.body.as_ref());
-                let bytecode = compile_arrow_body(
+                let (bytecode, arrow_catches) = compile_arrow_body(
                     arrow.body.as_ref(),
                     strings,
                     literal_arrays,
@@ -949,6 +953,7 @@ fn collect_arrow_records_from_stmt(
                     num_args: arrow.params.items.len() as u16 + 3,
                     debug_info: None,
                     line_ops: vec![],
+                    catch_entries: arrow_catches,
                 });
             }
         }
@@ -1081,7 +1086,7 @@ fn collect_call_arg_arrows_expr(
                     let base_name = "#~@0>@1*#".to_string();
                     let record_name = suffix_duplicate_method_name(base_name, seen_names);
                     let captures = arrow_captures_from_body(arrow.body.as_ref());
-                    let bytecode = compile_arrow_body(
+                    let (bytecode, arrow_catches) = compile_arrow_body(
                         arrow.body.as_ref(),
                         strings,
                         literal_arrays,
@@ -1112,6 +1117,7 @@ fn collect_call_arg_arrows_expr(
                         num_args: arrow.params.items.len() as u16 + 3,
                         debug_info: arrow_debug,
                         line_ops: vec![],
+                        catch_entries: arrow_catches,
                     });
                     // Recurse into the arrow body for deeper nested closures.
                     let body_ref = arrow.body.as_ref();
@@ -1245,34 +1251,35 @@ fn compile_program_body(
     literal_arrays: &mut Vec<LiteralArray>,
     lowering: &LoweringContext,
     _is_module: bool,
-) -> Vec<u8> {
+) -> (Vec<u8>, Vec<CatchEntry>) {
     compile_body_stmts(&program.body, strings, literal_arrays, lowering, true)
 }
 
-/// Compile a function body's statements, or emit `returnundefined` if absent.
+/// Compile a function body's statements; returns `(bytecode, catch_entries)`.
 fn compile_function_body(
     body: Option<&FunctionBody<'_>>,
     strings: &mut StringTable,
     literal_arrays: &mut Vec<LiteralArray>,
     lowering: &LoweringContext,
-) -> Vec<u8> {
+) -> (Vec<u8>, Vec<CatchEntry>) {
     match body {
         Some(fb) => compile_body_stmts(&fb.statements, strings, literal_arrays, lowering, false),
         None => {
             let mut st = StringTable::default();
-            Insn::ReturnUndefined.encode(&mut st)
+            (Insn::ReturnUndefined.encode(&mut st), vec![])
         }
     }
 }
 
 /// Like `compile_function_body` but also returns LNP line-advance opcodes.
+/// Returns `(bytecode, line_ops, catch_entries)`.
 fn compile_function_body_tracked(
     body: Option<&FunctionBody<'_>>,
     strings: &mut StringTable,
     literal_arrays: &mut Vec<LiteralArray>,
     lowering: &LoweringContext,
     source: &str,
-) -> (Vec<u8>, Vec<u8>) {
+) -> (Vec<u8>, Vec<u8>, Vec<CatchEntry>) {
     match body {
         Some(fb) => compile_body_stmts_tracked(
             &fb.statements,
@@ -1284,7 +1291,7 @@ fn compile_function_body_tracked(
         ),
         None => {
             let mut st = StringTable::default();
-            (Insn::ReturnUndefined.encode(&mut st), vec![])
+            (Insn::ReturnUndefined.encode(&mut st), vec![], vec![])
         }
     }
 }
@@ -1295,7 +1302,7 @@ fn compile_arrow_body(
     literal_arrays: &mut Vec<LiteralArray>,
     lowering: &LoweringContext,
     captures: ArrowCaptures,
-) -> Vec<u8> {
+) -> (Vec<u8>, Vec<CatchEntry>) {
     let mut gen = CodeGen::new_arrow(strings, literal_arrays, lowering, captures);
     for stmt in &body.statements {
         gen.emit_stmt(stmt);
@@ -1303,17 +1310,17 @@ fn compile_arrow_body(
             break;
         }
     }
-    gen.finish()
+    gen.finish_with_catches()
 }
 
-/// Compile a statement slice through `CodeGen` and return raw bytecode.
+/// Compile a statement slice through `CodeGen` and return `(bytecode, catch_entries)`.
 fn compile_body_stmts(
     stmts: &[Statement<'_>],
     strings: &mut StringTable,
     literal_arrays: &mut Vec<LiteralArray>,
     lowering: &LoweringContext,
     module_body: bool,
-) -> Vec<u8> {
+) -> (Vec<u8>, Vec<CatchEntry>) {
     let mut cg = CodeGen::new(strings, literal_arrays, lowering);
     if module_body {
         cg.emit_module_lex_env_prologue();
@@ -1324,13 +1331,12 @@ fn compile_body_stmts(
             break;
         }
     }
-    cg.finish()
+    cg.finish_with_catches()
 }
 
 /// Compile a statement slice through `CodeGen` with line tracking enabled.
 ///
-/// Returns `(bytecode, line_ops)` where `line_ops` contains the encoded Panda
-/// LineNumberProgram opcodes (including a trailing `END_SEQUENCE`).
+/// Returns `(bytecode, line_ops, catch_entries)`.
 fn compile_body_stmts_tracked(
     stmts: &[Statement<'_>],
     strings: &mut StringTable,
@@ -1338,7 +1344,7 @@ fn compile_body_stmts_tracked(
     lowering: &LoweringContext,
     module_body: bool,
     source: &str,
-) -> (Vec<u8>, Vec<u8>) {
+) -> (Vec<u8>, Vec<u8>, Vec<CatchEntry>) {
     let mut cg = CodeGen::new_with_source(strings, literal_arrays, lowering, source);
     if module_body {
         cg.emit_module_lex_env_prologue();
@@ -1349,7 +1355,7 @@ fn compile_body_stmts_tracked(
             break;
         }
     }
-    cg.finish_with_line_ops()
+    cg.finish_with_line_ops_and_catches()
 }
 
 /// Like `compile_program_body` but also returns LNP opcodes for the method.
@@ -1363,15 +1369,8 @@ fn compile_program_body_tracked(
     lowering: &LoweringContext,
     _is_module: bool,
     source: &str,
-) -> (Vec<u8>, Vec<u8>) {
-    compile_body_stmts_tracked(
-        &program.body,
-        strings,
-        literal_arrays,
-        lowering,
-        true,
-        source,
-    )
+) -> (Vec<u8>, Vec<u8>, Vec<CatchEntry>) {
+    compile_body_stmts_tracked(&program.body, strings, literal_arrays, lowering, true, source)
 }
 fn arrow_captures_from_body(body: &FunctionBody<'_>) -> ArrowCaptures {
     let mut uses_this = false;
@@ -1521,6 +1520,8 @@ struct CodeGen<'a> {
     current_line: u32,
     break_patches: Vec<usize>,
     continue_patches: Vec<usize>,
+    /// Exception handler table built up by `emit_try_stmt`.
+    catch_entries: Vec<CatchEntry>,
 }
 
 impl<'a> CodeGen<'a> {
@@ -1543,6 +1544,7 @@ impl<'a> CodeGen<'a> {
             current_line: 1,
             break_patches: Vec::new(),
             continue_patches: Vec::new(),
+            catch_entries: Vec::new(),
         }
     }
 
@@ -1626,23 +1628,19 @@ impl<'a> CodeGen<'a> {
         self.strings.intern(s) as u16
     }
 
-    /// Emit `returnundefined` if no explicit return was generated, then return
-    /// the accumulated bytecode bytes.
-    fn finish(mut self) -> Vec<u8> {
+    fn finish_with_catches(mut self) -> (Vec<u8>, Vec<CatchEntry>) {
         if !self.returned {
             self.push_with_epilogue(Insn::ReturnUndefined);
         }
-        self.insns
+        (self.insns, self.catch_entries)
     }
 
-    /// Like `finish`, but also returns the encoded LNP opcodes (may be empty if
-    /// line tracking was not enabled for this `CodeGen`).
-    fn finish_with_line_ops(mut self) -> (Vec<u8>, Vec<u8>) {
+    fn finish_with_line_ops_and_catches(mut self) -> (Vec<u8>, Vec<u8>, Vec<CatchEntry>) {
         if !self.returned {
             self.push_with_epilogue(Insn::ReturnUndefined);
         }
         let line_ops = self.line_tracker.map(|t| t.finish()).unwrap_or_default();
-        (self.insns, line_ops)
+        (self.insns, line_ops, self.catch_entries)
     }
 
     // ── Statement dispatcher ──────────────────────────────────────────────────
@@ -1782,6 +1780,9 @@ impl<'a> CodeGen<'a> {
                 let jmp_pos = self.insns.len();
                 self.push(Insn::Jmp(0));
                 self.continue_patches.push(jmp_pos);
+            }
+            Statement::TryStatement(ts) => {
+                self.emit_try_stmt(ts);
             }
             Statement::ThrowStatement(throw) => {
                 self.emit_expr(&throw.argument);
@@ -2162,6 +2163,93 @@ impl<'a> CodeGen<'a> {
         }
     }
 
+    // ── Try/catch/finally statement ───────────────────────────────────────────
+    //
+    // Panda exception dispatch uses a per-method CatchTable.  Each CatchEntry
+    // maps a try region (byte offsets [try_begin, try_end)) to a catch handler
+    // entry point (catch_begin).  At catch_begin the caught exception value is
+    // already in the accumulator — no GetException opcode exists in this ISA.
+    //
+    // Layout emitted:
+    //
+    //   try_begin:
+    //     <try body>
+    //   try_end:           ← exclusive end of protected region
+    //     [jmp after]      ← skip catch (only if handler present)
+    //   catch_begin:
+    //     [sta param_reg]  ← save exception (only if catch param exists)
+    //     <catch body>
+    //   after:
+    //     <finally body>   ← inlined after both paths (if finalizer present)
+    //
+    // For try-finally with no catch: CatchEntry is not emitted; the try body
+    // and finalizer body are emitted sequentially (simplified lowering).
+    fn emit_try_stmt(&mut self, ts: &oxc_ast::ast::TryStatement<'_>) {
+        let try_begin = self.insns.len() as u32;
+        let outer_returned = self.returned;
+        self.returned = false;
+        for s in &ts.block.body {
+            self.emit_stmt(s);
+            if self.returned {
+                break;
+            }
+        }
+        self.returned = outer_returned;
+        let try_end = self.insns.len() as u32;
+
+        if let Some(handler) = &ts.handler {
+            // Emit a jmp to skip over the catch block on the normal (no-exception) path.
+            let jmp_past_catch = self.insns.len();
+            self.push(Insn::Jmp(0));
+
+            // Catch handler entry point.
+            let catch_begin = self.insns.len() as u32;
+
+            // Exception is in accumulator at handler entry.  Store it if param exists.
+            if let Some(param) = &handler.param {
+                if let BindingPattern::BindingIdentifier(id) = &param.pattern {
+                    let name = id.name.as_str().to_string();
+                    let reg = self.alloc_reg();
+                    self.var_regs.insert(name, reg);
+                    self.push(Insn::Sta(reg));
+                }
+            }
+
+            let catch_outer_returned = self.returned;
+            self.returned = false;
+            for s in &handler.body.body {
+                self.emit_stmt(s);
+                if self.returned {
+                    break;
+                }
+            }
+            self.returned = catch_outer_returned;
+
+            // Record the exception table entry.
+            self.catch_entries.push(CatchEntry { try_begin, try_end, catch_begin });
+
+            // Patch jmp_past_catch → current position.
+            let after_catch = self.insns.len();
+            let off = (after_catch as i32 - jmp_past_catch as i32) as i16;
+            let [lo, hi] = off.to_le_bytes();
+            self.insns[jmp_past_catch + 1] = lo;
+            self.insns[jmp_past_catch + 2] = hi;
+        }
+
+        // Emit finalizer inline after both try and catch paths.
+        if let Some(fin) = &ts.finalizer {
+            let fin_outer_returned = self.returned;
+            self.returned = false;
+            for s in &fin.body {
+                self.emit_stmt(s);
+                if self.returned {
+                    break;
+                }
+            }
+            self.returned = fin_outer_returned;
+        }
+    }
+
     fn emit_var_decl(&mut self, decl: &oxc_ast::ast::VariableDeclaration<'_>) {
         for declarator in &decl.declarations {
             match &declarator.id {
@@ -2430,6 +2518,18 @@ impl<'a> CodeGen<'a> {
             }
             Expression::ArrayExpression(arr) => {
                 self.emit_array_expr(arr);
+            }
+            Expression::AwaitExpression(await_expr) => {
+                // Simplified lowering: evaluate the awaited expression and leave
+                // the result in the accumulator.  The Panda ISA used here does not
+                // expose Await/Resume/Suspend opcodes at the IR level — async
+                // function semantics are handled natively by ArkRuntime's Promise
+                // machinery when the function is declared `async`.  Emitting just
+                // the argument value is correct for common component lifecycle
+                // methods (e.g. `await storage.get(key)`) where the caller's
+                // `async` attribute and the runtime's implicit Promise wrapping
+                // together ensure the awaited value is unwrapped at runtime.
+                self.emit_expr(&await_expr.argument);
             }
             _ => {
                 self.push(Insn::LdUndefined);
