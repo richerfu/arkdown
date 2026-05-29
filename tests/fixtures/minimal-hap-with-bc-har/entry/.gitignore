@@ -1,0 +1,7 @@
+/node_modules
+/oh_modules/*
+!/oh_modules/bc-har-dep
+/.preview
+/build
+/.cxx
+/.test
