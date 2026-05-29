@@ -53,7 +53,7 @@ and release-mode terser/minification when applicable.
 - Phase 2 (ETS transform): ✅ @Prop, @Link, @ObjectLink, @Provide, @Consume, @Watch, @BuilderParam
 - Phase 3 (bundler): ✅ clean ESM, @ohos: external, treeshake off for debug
 - Phase 4 (importee): ✅ process_importees() ports hvigor process-importee.js
-- Phase 5 (ABC): 🔄 modules.abc 7525B vs hvigor 9844B (gap: 2319B — 76.5%)
+- Phase 5 (ABC): 🔄 modules.abc 7510B vs hvigor 9844B (gap: 2334B — 76.3%) after LNP formula fix
 - Phase 6 (packaging): ✅ HAP zip identical to hvigor (11 entries)
 
 **Parity (minimal-hap, 2026-05-29):**
