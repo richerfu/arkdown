@@ -185,8 +185,19 @@ One entry is always emitted: the file offset of the source file `StringItem`.
 0x04  END_LOCAL     (reg_u8)          # end variable scope
 0x05  SET_FILE      (str_u32)         # set current source file (4-byte LE file offset)
 0x07  SET_PROLOGUE_END               # mark end of function prologue
-0x08+ SPECIAL_OPCODE                 # combined PC+line advance: op = (pc/15)*15 + (line%15) + 0x08
+0x08+ SPECIAL_OPCODE                 # combined PC+line advance (no operand)
 ```
+
+**SPECIAL_OPCODE formula**: `op = (line_delta * 16 + pc_delta) + 8`
+Valid when `0 ≤ pc_delta ≤ 16`, `0 ≤ line_delta ≤ 15`, and `op ≤ 255`.
+When the range is exceeded, fall back to explicit `ADVANCE_LINE` + `ADVANCE_PC` opcodes.
+
+**Current implementation** (`arkdown-abc` `LineTracker`):
+- `MethodRecord::line_ops: Vec<u8>` stores the pre-encoded LNP body
+  (advance sequences + END_SEQUENCE) for each method.
+- Line tracking is active for `func_main_0` when a source file is provided.
+  Nested function bodies default to a minimal `SET_FILE + END_SEQUENCE` LNP.
+- 1-based line numbers are computed from statement byte offsets via `line_at()`.
 
 Minimum valid LNP body: `[0x05, <4 bytes source file string offset LE>, 0x00]`
 (SET_FILE pointing at the class source file + END_SEQUENCE).

@@ -518,9 +518,14 @@ impl AbcFile {
         }
 
         // ── Pre-compute DebugInfo and LineNumberProgram sections ─────────────
-        // Each debug method gets a minimal LNP: SET_FILE, END_SEQUENCE. The
-        // source-file offset is stored in the DebugInfo constant pool, matching
-        // libpandafile's LineNumberProgramItem::EmitSetFile convention.
+        // Each debug method gets an LNP: SET_FILE + optional advance sequences +
+        // END_SEQUENCE.  The source-file offset is stored in the DebugInfo
+        // constant pool, matching libpandafile's EmitSetFile convention.
+        //
+        // When the method carries pre-computed `line_ops` (ADVANCE_PC,
+        // ADVANCE_LINE, SPECIAL_OPCODE, END_SEQUENCE) from the IR builder, those
+        // are embedded verbatim after the SET_FILE preamble.  Otherwise, a bare
+        // END_SEQUENCE is appended for a minimal but valid LNP.
         let (debug_info_offsets, debug_info_section, lnp_offsets, lnp_section): (
             Vec<Vec<Option<u32>>>,
             Vec<u8>,
@@ -532,9 +537,12 @@ impl AbcFile {
             let mut lnp_buf = Vec::new();
             let mut debug_cur = code_cur;
             let mut lnp_index = 0u32;
-            // Collect the source-file string offset for each LNP in emission order
-            // so the LNP body can embed the correct SET_FILE operand.
+            // Collect the source-file string offset AND the pre-encoded LNP
+            // opcodes for each LNP in emission order.
             let mut lnp_source_file_offs: Vec<u32> = Vec::with_capacity(num_lnp as usize);
+            // References into each method's `line_ops` field (empty slice = no
+            // advance sequences; serializer will append a bare END_SEQUENCE).
+            let mut lnp_method_line_ops: Vec<&[u8]> = Vec::with_capacity(num_lnp as usize);
 
             for (class_idx, class) in all_classes.iter().enumerate() {
                 let mut class_offsets = Vec::with_capacity(class.methods.len());
@@ -548,6 +556,7 @@ impl AbcFile {
                         debug_cur += bytes.len() as u32;
                         debug_buf.extend_from_slice(&bytes);
                         lnp_source_file_offs.push(source_file_off);
+                        lnp_method_line_ops.push(method.line_ops.as_slice());
                         lnp_index += 1;
                     } else {
                         class_offsets.push(None);
@@ -558,13 +567,24 @@ impl AbcFile {
 
             let mut lnp_offsets = Vec::with_capacity(num_lnp as usize);
             let mut lnp_cur = debug_cur;
-            for &src_off in &lnp_source_file_offs {
+            for (i, &src_off) in lnp_source_file_offs.iter().enumerate() {
                 lnp_offsets.push(lnp_cur);
-                // SET_FILE (0x05) + 4-byte string offset LE + END_SEQUENCE (0x00).
+                // Panda LNP body:
+                //   SET_FILE (0x05) + 4-byte LE string offset
+                //   <advance opcodes — may be empty>
+                //   END_SEQUENCE (0x00, already included in line_ops when non-empty)
                 lnp_buf.push(0x05);
                 lnp_buf.extend_from_slice(&src_off.to_le_bytes());
-                lnp_buf.push(0x00);
-                lnp_cur += 6;
+                let method_ops = lnp_method_line_ops[i];
+                if !method_ops.is_empty() {
+                    // line_ops already ends with END_SEQUENCE (0x00).
+                    lnp_buf.extend_from_slice(method_ops);
+                    lnp_cur += 5 + method_ops.len() as u32;
+                } else {
+                    // Minimal LNP: just SET_FILE + END_SEQUENCE.
+                    lnp_buf.push(0x00);
+                    lnp_cur += 6;
+                }
             }
 
             debug_assert_eq!(lnp_index, num_lnp);

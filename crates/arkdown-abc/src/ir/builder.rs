@@ -1357,13 +1357,13 @@ fn compile_body_stmts(
 ///
 /// Returns `(bytecode, line_ops)` where `line_ops` contains the encoded Panda
 /// LineNumberProgram opcodes (including a trailing `END_SEQUENCE`).
-fn compile_body_stmts_tracked<'src>(
+fn compile_body_stmts_tracked(
     stmts: &[Statement<'_>],
     strings: &mut StringTable,
     literal_arrays: &mut Vec<LiteralArray>,
     lowering: &LoweringContext,
     module_body: bool,
-    source: &'src str,
+    source: &str,
 ) -> (Vec<u8>, Vec<u8>) {
     let mut cg = CodeGen::new_with_source(strings, literal_arrays, lowering, source);
     if module_body {

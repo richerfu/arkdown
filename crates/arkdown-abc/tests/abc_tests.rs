@@ -722,7 +722,18 @@ fn test_source_map_emits_source_file_debug_info_and_lnp() {
         class_source_file,
         "SET_FILE operand is the source file string offset"
     );
-    assert_eq!(bytes[lnp_offset + 5], 0x00, "LNP ends with END_SEQUENCE");
+    // After SET_FILE (5 bytes), the LNP may contain advance sequences
+    // (ADVANCE_PC, ADVANCE_LINE, SPECIAL_OPCODE) followed by END_SEQUENCE.
+    // Scan past the advance opcodes to find the terminating 0x00.
+    let lnp_body = &bytes[lnp_offset + 5..];
+    let end_seq_pos = lnp_body
+        .iter()
+        .position(|&b| b == 0x00)
+        .expect("LNP must contain END_SEQUENCE (0x00)");
+    assert_eq!(
+        lnp_body[end_seq_pos], 0x00,
+        "LNP body terminates with END_SEQUENCE"
+    );
 }
 
 // ── New opcode coverage tests ────────────────────────────────────────────────
