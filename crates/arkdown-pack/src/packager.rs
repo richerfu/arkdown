@@ -323,14 +323,6 @@ impl Packager {
             return Err(PackError::MissingInput("module.json".to_string()));
         }
 
-        // pack.info — bundle metadata (deflated JSON)
-        let mut pack_info = generate_pack_info(&self.config, &input);
-        pack_info.push('\n');
-        zip_writer::add_bytes_deflate(&mut writer, "pack.info", pack_info.as_bytes())?;
-
-        // .pages.info — binary router-map page index (hvigorw format)
-        zip_writer::add_bytes_deflate(&mut writer, ".pages.info", &[0x20, 0x22, 0, 0, 0, 0, 0, 0])?;
-
         // resources.index — stored (binary resource table)
         if input.resources_index.exists() {
             zip_writer::add_file_stored(&mut writer, "resources.index", &input.resources_index)?;
@@ -338,26 +330,8 @@ impl Packager {
             return Err(PackError::MissingInput("resources.index".to_string()));
         }
 
-        // modules.abc — stored at ets/modules.abc for API >= 9, else modules.abc
-        if input.abc_path.exists() {
-            let abc_dest = if self.config.sdk_config.compile_api_version >= 9 {
-                "ets/modules.abc"
-            } else {
-                "modules.abc"
-            };
-            zip_writer::add_file_stored(&mut writer, abc_dest, &input.abc_path)?;
-        } else {
-            return Err(PackError::MissingInput("modules.abc".to_string()));
-        }
-
-        // ets/sourceMaps.map — deflated; only included if the bundler produced it
-        if let Some(ref sm_path) = input.source_maps_path {
-            if sm_path.exists() {
-                zip_writer::add_file_deflate(&mut writer, "ets/sourceMaps.map", sm_path)?;
-            }
-        }
-
-        // Resource files — copy from src/main/resources/ into resources/ in the HAP
+        // Resource files — copy from src/main/resources/ into resources/ in the HAP.
+        // hvigor writes them before ets/modules.abc and pack.info.
         if let Some(res_src) = &input.resources_src_dir {
             if res_src.exists() {
                 for entry in walkdir::WalkDir::new(res_src)
@@ -383,6 +357,25 @@ impl Packager {
             }
         }
 
+        // modules.abc — stored at ets/modules.abc for API >= 9, else modules.abc
+        if input.abc_path.exists() {
+            let abc_dest = if self.config.sdk_config.compile_api_version >= 9 {
+                "ets/modules.abc"
+            } else {
+                "modules.abc"
+            };
+            zip_writer::add_file_stored(&mut writer, abc_dest, &input.abc_path)?;
+        } else {
+            return Err(PackError::MissingInput("modules.abc".to_string()));
+        }
+
+        // ets/sourceMaps.map — deflated; only included if the bundler produced it
+        if let Some(ref sm_path) = input.source_maps_path {
+            if sm_path.exists() {
+                zip_writer::add_file_deflate(&mut writer, "ets/sourceMaps.map", sm_path)?;
+            }
+        }
+
         // Native .so libraries — stored, placed under libs/arm64-v8a/
         for so_path in &input.native_libs {
             if so_path.exists() {
@@ -404,6 +397,12 @@ impl Packager {
                 zip_writer::add_file_stored(&mut writer, &dest, &hsp.hsp_path)?;
             }
         }
+
+        // pack.info — bundle metadata (deflated JSON), written last by hvigor
+        // for a normal HAP.
+        let mut pack_info = generate_pack_info(&self.config, &input);
+        pack_info.push('\n');
+        zip_writer::add_bytes_deflate(&mut writer, "pack.info", pack_info.as_bytes())?;
 
         writer.finish()?;
         Ok(input.output_path)
