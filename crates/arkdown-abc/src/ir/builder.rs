@@ -1523,7 +1523,18 @@ fn compile_arrow_body(
     lowering: &LoweringContext,
     captures: ArrowCaptures,
 ) -> (Vec<u8>, Vec<CatchEntry>) {
-    let mut gen = CodeGen::new_arrow(strings, literal_arrays, lowering, captures);
+    compile_arrow_body_tracked(body, strings, literal_arrays, lowering, captures, None)
+}
+
+fn compile_arrow_body_tracked<'src>(
+    body: &FunctionBody<'src>,
+    strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
+    lowering: &LoweringContext,
+    captures: ArrowCaptures,
+    source: Option<&'src str>,
+) -> (Vec<u8>, Vec<CatchEntry>) {
+    let mut gen = CodeGen::new_arrow_with_source(strings, literal_arrays, lowering, captures, source);
     for stmt in &body.statements {
         gen.emit_stmt(stmt);
         if gen.returned {
@@ -1892,6 +1903,7 @@ impl<'a> CodeGen<'a> {
         gen
     }
 
+    #[allow(dead_code)]
     fn new_arrow(
         strings: &'a mut StringTable,
         literal_arrays: &'a mut Vec<LiteralArray>,
@@ -1900,6 +1912,22 @@ impl<'a> CodeGen<'a> {
     ) -> Self {
         let mut gen = Self::new(strings, literal_arrays, lowering);
         gen.arrow_captures = arrow_captures;
+        gen
+    }
+
+    fn new_arrow_with_source(
+        strings: &'a mut StringTable,
+        literal_arrays: &'a mut Vec<LiteralArray>,
+        lowering: &'a LoweringContext,
+        arrow_captures: ArrowCaptures,
+        source: Option<&'a str>,
+    ) -> Self {
+        let mut gen = Self::new(strings, literal_arrays, lowering);
+        gen.arrow_captures = arrow_captures;
+        if let Some(src) = source {
+            gen.source = Some(src);
+            gen.line_tracker = Some(LineTracker::new(1));
+        }
         gen
     }
 
