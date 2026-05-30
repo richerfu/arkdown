@@ -1054,33 +1054,52 @@ fn read_compile_arkts_source_maps(
     module: &ModuleConfig,
     config: &Arc<ArkdownConfig>,
 ) -> Result<Option<String>> {
-    let source_maps = read_compile_arkts_source_map_values(module, config)?;
-    if source_maps.is_empty() {
+    let source_maps_json = compile_arkts_source_maps_json_path(module, config);
+    if !source_maps_json.exists() {
         return Ok(None);
     }
 
+    let content = fs_err::read_to_string(&source_maps_json)?;
     let mut output = serde_json::Map::new();
-    for (key, value) in source_maps {
-        let parsed: serde_json::Value = serde_json::from_str(&value)?;
-        output.insert(key, parsed);
+    for line in content.lines().filter(|line| !line.trim().is_empty()) {
+        let entry: serde_json::Value = serde_json::from_str(line)
+            .with_context(|| format!("failed to parse {}", source_maps_json.display()))?;
+        let Some(key) = entry.get("key").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let Some(val) = entry.get("val") else {
+            continue;
+        };
+        output.insert(key.to_string(), val.clone());
+    }
+
+    if output.is_empty() {
+        return Ok(None);
     }
 
     Ok(Some(serde_json::to_string_pretty(&output)?))
+}
+
+fn compile_arkts_source_maps_json_path(
+    module: &ModuleConfig,
+    config: &Arc<ArkdownConfig>,
+) -> PathBuf {
+    let mode_dir = match config.build_mode {
+        BuildMode::Debug => "debug",
+        BuildMode::Release => "release",
+    };
+    module
+        .src_path
+        .join("build/default/cache/default/default@CompileArkTS/esmodule")
+        .join(mode_dir)
+        .join("sourceMaps.json")
 }
 
 fn read_compile_arkts_source_map_values(
     module: &ModuleConfig,
     config: &Arc<ArkdownConfig>,
 ) -> Result<HashMap<String, String>> {
-    let mode_dir = match config.build_mode {
-        BuildMode::Debug => "debug",
-        BuildMode::Release => "release",
-    };
-    let source_maps_json = module
-        .src_path
-        .join("build/default/cache/default/default@CompileArkTS/esmodule")
-        .join(mode_dir)
-        .join("sourceMaps.json");
+    let source_maps_json = compile_arkts_source_maps_json_path(module, config);
     if !source_maps_json.exists() {
         return Ok(HashMap::new());
     }
