@@ -92,25 +92,25 @@ fn order_package_module_json(value: serde_json::Value) -> serde_json::Value {
             order_object(
                 app,
                 &[
-                    "iconId",
-                    "debug",
-                    "targetPatchAPIVersion",
-                    "minAPIVersion",
-                    "icon",
-                    "buildMode",
-                    "label",
-                    "bundleType",
-                    "versionName",
+                    "bundleName",
+                    "vendor",
                     "versionCode",
-                    "appEnvironments",
-                    "compileSdkType",
-                    "labelId",
+                    "versionName",
+                    "icon",
+                    "label",
+                    "apiReleaseType",
                     "compileSdkVersion",
                     "targetAPIVersion",
-                    "vendor",
-                    "bundleName",
-                    "apiReleaseType",
+                    "minAPIVersion",
+                    "compileSdkType",
                     "targetMinorAPIVersion",
+                    "targetPatchAPIVersion",
+                    "appEnvironments",
+                    "bundleType",
+                    "buildMode",
+                    "debug",
+                    "iconId",
+                    "labelId",
                 ],
             ),
         );
@@ -132,14 +132,14 @@ fn order_module(module: &serde_json::Value) -> serde_json::Value {
     };
     let mut out = serde_json::Map::new();
     for key in [
-        "virtualMachine",
-        "mainElement",
-        "installationFree",
-        "deliveryWithInstall",
-        "description",
-        "compileMode",
+        "name",
         "type",
-        "dependencies",
+        "description",
+        "mainElement",
+        "deviceTypes",
+        "deliveryWithInstall",
+        "installationFree",
+        "pages",
     ] {
         if let Some(value) = object.get(key) {
             out.insert(key.to_string(), value.clone());
@@ -149,11 +149,11 @@ fn order_module(module: &serde_json::Value) -> serde_json::Value {
         out.insert("abilities".to_string(), order_abilities(abilities));
     }
     for key in [
-        "deviceTypes",
-        "pages",
-        "descriptionId",
-        "name",
         "packageName",
+        "virtualMachine",
+        "compileMode",
+        "dependencies",
+        "descriptionId",
     ] {
         if let Some(value) = object.get(key) {
             out.insert(key.to_string(), value.clone());
@@ -178,20 +178,20 @@ fn order_abilities(abilities: &serde_json::Value) -> serde_json::Value {
                 let ordered = order_object(
                     ability,
                     &[
-                        "exported",
-                        "iconId",
-                        "startWindowIconId",
-                        "icon",
-                        "startWindowIcon",
-                        "startWindowBackgroundId",
-                        "description",
-                        "label",
-                        "skills",
-                        "srcEntry",
-                        "descriptionId",
-                        "labelId",
-                        "startWindowBackground",
                         "name",
+                        "srcEntry",
+                        "description",
+                        "icon",
+                        "label",
+                        "exported",
+                        "startWindowIcon",
+                        "startWindowBackground",
+                        "skills",
+                        "descriptionId",
+                        "iconId",
+                        "labelId",
+                        "startWindowIconId",
+                        "startWindowBackgroundId",
                     ],
                 );
                 let serde_json::Value::Object(mut object) = ordered else {

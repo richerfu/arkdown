@@ -805,7 +805,7 @@ fn write_resource_config_files(
     let res_out = canonical_or_owned(res_out);
     let toolchains_dir = resource_toolchains_dir(&config.sdk_config.restool_path);
 
-    write_json_minified(
+    write_json_minified_newline(
         &res_out.join("opt-compression.json"),
         &serde_json::json!({
             "context": {
@@ -820,7 +820,7 @@ fn write_resource_config_files(
         }),
     )?;
 
-    write_json_minified(
+    write_json_minified_newline(
         &res_out.join("resConfig.json"),
         &serde_json::json!({
             "configPath": path_string(&module_root.join("build/default/intermediates/process_profile/default/module.json")),
@@ -885,6 +885,12 @@ fn write_json_minified(path: &Path, value: &serde_json::Value) -> Result<()> {
     write_bytes(path, content.as_bytes())
 }
 
+fn write_json_minified_newline(path: &Path, value: &serde_json::Value) -> Result<()> {
+    let mut content = serde_json::to_string(value)?;
+    content.push('\n');
+    write_bytes(path, content.as_bytes())
+}
+
 fn canonical_or_owned(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
@@ -932,7 +938,9 @@ fn write_hap_metadata(
         "isSigned": true,
         "dependRemoteHsps": [],
     }]);
-    fs_err::write(metadata_path, serde_json::to_string(&metadata)?.as_bytes())?;
+    let mut content = serde_json::to_string(&metadata)?;
+    content.push('\n');
+    fs_err::write(metadata_path, content.as_bytes())?;
     Ok(())
 }
 
