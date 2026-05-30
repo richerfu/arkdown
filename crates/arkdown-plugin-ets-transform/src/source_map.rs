@@ -246,6 +246,329 @@ pub fn build_token_source_map(source: &str, id: &str) -> Option<String> {
     ))
 }
 
+/// Build a source map for standard non-`@Component` ETS files after hvigor-style
+/// formatting and `@kit` import expansion.
+///
+/// Upstream hvigor rewrites `@kit.*` imports before printing the source file with
+/// TypeScript's printer. The emitted source map keeps the generated default
+/// import binding mapped to the original named import binding, while the rest of
+/// the file follows TypeScript printer token emission points. This mirrors that
+/// behavior for our already-formatted Rust output.
+pub fn build_hvigor_standard_source_map(
+    generated: &str,
+    original: &str,
+    id: &str,
+) -> Option<String> {
+    let generated_tokens = collect_tokens(generated, id)?;
+    let original_tokens = collect_tokens(original, id)?;
+    let generated_import_end = generated_import_prefix_end(generated);
+    let original_import_end = original_import_prefix_end(original);
+    let original_bindings = collect_original_kit_bindings(original);
+    let mut entries = Vec::new();
+
+    for token in generated_tokens
+        .iter()
+        .filter(|token| token.start < generated_import_end)
+    {
+        if let Some((source_start, source_end)) = original_bindings.get(token.text.as_str()) {
+            let (src_line, src_col) = offset_to_line_col(original, *source_start);
+            push_entry(&mut entries, token.line, token.col, src_line, src_col);
+            let (src_line, src_col) = offset_to_line_col(original, *source_end);
+            push_entry(
+                &mut entries,
+                token.end_line,
+                token.end_col,
+                src_line,
+                src_col,
+            );
+        }
+    }
+
+    let body_tokens: Vec<&TokenInfo> = generated_tokens
+        .iter()
+        .filter(|token| token.start >= generated_import_end)
+        .collect();
+    let mut original_index = original_tokens
+        .iter()
+        .position(|token| token.start >= original_import_end)
+        .unwrap_or(original_tokens.len());
+    let generated_lines: Vec<&str> = generated.lines().collect();
+    let final_generated_line = generated_lines.len().saturating_sub(1) as u32;
+
+    for (index, token) in body_tokens.iter().enumerate() {
+        while original_index < original_tokens.len()
+            && original_tokens[original_index].text != token.text
+        {
+            let original_text = original_tokens[original_index].text.as_str();
+            if original_text == "," && token.text == ")" {
+                break;
+            }
+            if matches!(original_text, "," | ";" | ")") {
+                original_index += 1;
+                continue;
+            }
+            return None;
+        }
+        if original_index >= original_tokens.len() {
+            return None;
+        }
+
+        let original_token = &original_tokens[original_index];
+        original_index += 1;
+        let line = generated_lines
+            .get(token.line as usize)
+            .copied()
+            .unwrap_or("");
+        let previous = previous_token_on_line(&body_tokens, index);
+        let next = next_token_on_line(&body_tokens, index);
+        let is_final_line = token.line == final_generated_line;
+
+        if should_map_standard_token_start(token, previous, next, line, is_final_line) {
+            push_entry(
+                &mut entries,
+                token.line,
+                token.col,
+                original_token.line,
+                original_token.col,
+            );
+        }
+
+        if should_map_standard_token_end(token, previous, line) {
+            let source_col_adjust = if previous.is_some_and(|previous| previous.text == "class") {
+                1
+            } else {
+                0
+            };
+            push_entry(
+                &mut entries,
+                token.end_line,
+                token.end_col,
+                original_token.end_line,
+                original_token.end_col + source_col_adjust,
+            );
+        }
+    }
+
+    Some(build_ets_source_map(
+        id,
+        generated.lines().count().max(1),
+        &entries,
+    ))
+}
+
+#[derive(Debug)]
+struct TokenInfo {
+    text: String,
+    start: u32,
+    line: u32,
+    col: u32,
+    end_line: u32,
+    end_col: u32,
+}
+
+fn collect_tokens(source: &str, id: &str) -> Option<Vec<TokenInfo>> {
+    let allocator = Allocator::default();
+    let source_type =
+        SourceType::from_path(id).unwrap_or_else(|_| SourceType::ts().with_module(true));
+    let parsed = Parser::new(&allocator, source, source_type)
+        .with_config(TokensParserConfig)
+        .parse();
+    if !parsed.errors.is_empty() {
+        return None;
+    }
+    let line_offsets = build_line_offsets_table(source);
+    let mut tokens = Vec::new();
+    for tok in &parsed.tokens {
+        use oxc_parser::Kind;
+        if matches!(
+            tok.kind(),
+            Kind::Eof | Kind::Undetermined | Kind::Skip | Kind::HashbangComment
+        ) {
+            continue;
+        }
+        let start = tok.start();
+        let end = tok.end();
+        let (line, col) = offset_to_line_col_table(&line_offsets, start);
+        let (end_line, end_col) = offset_to_line_col_table(&line_offsets, end);
+        tokens.push(TokenInfo {
+            text: source[start as usize..end as usize].to_string(),
+            start,
+            line,
+            col,
+            end_line,
+            end_col,
+        });
+    }
+    Some(tokens)
+}
+
+fn generated_import_prefix_end(source: &str) -> u32 {
+    let mut offset = 0usize;
+    for line in source.split_inclusive('\n') {
+        if line.trim_start().starts_with("import ") {
+            offset += line.len();
+        } else {
+            break;
+        }
+    }
+    offset as u32
+}
+
+fn original_import_prefix_end(source: &str) -> u32 {
+    let mut offset = 0usize;
+    for line in source.split_inclusive('\n') {
+        if line.trim_start().starts_with("import ") || line.trim().is_empty() {
+            offset += line.len();
+        } else {
+            break;
+        }
+    }
+    offset as u32
+}
+
+fn collect_original_kit_bindings(source: &str) -> std::collections::HashMap<String, (u32, u32)> {
+    use regex::Regex;
+    use std::sync::OnceLock;
+
+    static KIT_RE: OnceLock<Regex> = OnceLock::new();
+    let kit_re = KIT_RE.get_or_init(|| {
+        Regex::new(r#"import\s*\{([^}]+)\}\s*from\s*["']@kit\.[^"']+["']\s*;?"#)
+            .expect("kit import regex must compile")
+    });
+
+    let mut bindings = std::collections::HashMap::new();
+    for cap in kit_re.captures_iter(source) {
+        let Some(names_match) = cap.get(1) else {
+            continue;
+        };
+        let names = names_match.as_str();
+        let mut search_offset = 0usize;
+        for part in names.split(',') {
+            let part_start = names[search_offset..]
+                .find(part)
+                .map(|idx| search_offset + idx)
+                .unwrap_or(search_offset);
+            search_offset = part_start + part.len() + 1;
+
+            let trimmed = part.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let binding = trimmed
+                .split_once(" as ")
+                .map(|(_, alias)| alias.trim())
+                .unwrap_or(trimmed);
+            let binding_start_in_part = part.find(binding).unwrap_or(0);
+            let start = names_match.start() + part_start + binding_start_in_part;
+            bindings.insert(
+                binding.to_string(),
+                (start as u32, (start + binding.len()) as u32),
+            );
+        }
+    }
+    bindings
+}
+
+fn previous_token_on_line<'a>(tokens: &[&'a TokenInfo], index: usize) -> Option<&'a TokenInfo> {
+    index
+        .checked_sub(1)
+        .and_then(|prev| tokens.get(prev).copied())
+        .filter(|prev| prev.line == tokens[index].line)
+}
+
+fn next_token_on_line<'a>(tokens: &[&'a TokenInfo], index: usize) -> Option<&'a TokenInfo> {
+    tokens
+        .get(index + 1)
+        .copied()
+        .filter(|next| next.line == tokens[index].line)
+}
+
+fn should_map_standard_token_start(
+    token: &TokenInfo,
+    previous: Option<&TokenInfo>,
+    next: Option<&TokenInfo>,
+    line: &str,
+    is_final_line: bool,
+) -> bool {
+    if is_final_line && token.text == "}" {
+        return false;
+    }
+    if matches!(token.text.as_str(), "class" | "extends" | "=") {
+        return false;
+    }
+    if token.text == "(" && previous.is_some_and(|previous| previous.text == "if") {
+        return false;
+    }
+    if token.text == ")" && previous.is_some_and(|previous| previous.text == "(") {
+        return false;
+    }
+    if token.text == ":" && next.is_some_and(|next| next.text == "void") {
+        return false;
+    }
+    if token.text == "{"
+        && !(previous.is_some_and(|previous| previous.text == ")") && line.contains("if "))
+    {
+        return false;
+    }
+    if token.text == ";" && previous.is_some_and(|previous| previous.text == "return") {
+        return false;
+    }
+    if token.text == "}" && line.starts_with("            }") && line.trim() == "}" {
+        return false;
+    }
+    true
+}
+
+fn should_map_standard_token_end(
+    token: &TokenInfo,
+    previous: Option<&TokenInfo>,
+    line: &str,
+) -> bool {
+    if matches!(token.text.as_str(), "export" | "default" | "void" | "=>") {
+        return true;
+    }
+    if token.text == ";" {
+        return true;
+    }
+    if token.text == "}" && line.trim() == "}" {
+        return true;
+    }
+    if line.trim_start().starts_with("const ")
+        && (previous.is_some_and(|previous| previous.text == "const" || previous.text == "="))
+    {
+        return true;
+    }
+    if previous.is_some_and(|previous| previous.text == "class" || previous.text == "extends")
+        && is_identifier_like(&token.text)
+    {
+        return true;
+    }
+    false
+}
+
+fn is_identifier_like(text: &str) -> bool {
+    text.as_bytes()
+        .first()
+        .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_' || *byte == b'$')
+}
+
+fn push_entry(entries: &mut Vec<MapEntry>, line: u32, col: u32, src_line: u32, src_col: u32) {
+    if entries.last().is_some_and(|entry| {
+        entry.generated_line == line as usize
+            && entry.generated_col == col
+            && entry.src_line == src_line
+            && entry.src_col == src_col
+    }) {
+        return;
+    }
+    entries.push(MapEntry {
+        generated_line: line as usize,
+        generated_col: col,
+        src_line,
+        src_col,
+    });
+}
+
 fn build_line_offsets_table(source: &str) -> Vec<u32> {
     let mut v = vec![0u32];
     for (i, b) in source.bytes().enumerate() {

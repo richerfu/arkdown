@@ -134,7 +134,9 @@ impl EtsTransformPlugin {
             // through a general TS code generator, so keep literals, type
             // annotations, and indentation intact here.
             let final_source = format_hvigor_standard_ts(&final_source);
-            let source_map_json = source_map::build_token_source_map(&final_source, id);
+            let source_map_json =
+                source_map::build_hvigor_standard_source_map(&final_source, original_source, id)
+                    .or_else(|| source_map::build_token_source_map(&final_source, id));
             let map = source_map_json
                 .as_deref()
                 .and_then(|j| RolldownSourceMap::from_json_string(j).ok())
