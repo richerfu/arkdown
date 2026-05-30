@@ -657,32 +657,119 @@ impl AbcFile {
             // DebugInfo section starts after CodeItems + AnnotationItems.
             let mut debug_cur = code_and_ann_end;
             let mut lnp_index = 0u32;
-            // Collect the source-file string offset AND the pre-encoded LNP
-            // opcodes for each LNP in emission order.
-            let mut lnp_source_file_offs: Vec<u32> = Vec::with_capacity(num_lnp as usize);
-            // References into each method's `line_ops` field (empty slice = no
-            // advance sequences; serializer will append a bare END_SEQUENCE).
-            let mut lnp_method_line_ops: Vec<&[u8]> = Vec::with_capacity(num_lnp as usize);
+
+            // ── Correct LNP format (libpandafile architecture) ─────────────────
+            //
+            // The LNP `data_` stream contains opcode bytes + inline SLEB128 register
+            // numbers (for START_LOCAL*, END_LOCAL). All other operands (string offsets,
+            // pc/line deltas) go in the DebugInfo `constant_pool`.
+            //
+            // We collect all per-method (lnp_data, constant_pool) pairs first, then
+            // emit DebugInfo items with the correct constant_pool, then emit LNP entries.
+            let epilogue_pc_delta: u32 = 4;
+
+            // Per-LNP: (lnp_data, constant_pool, debug_line_start, param_offs)
+            struct LnpEntry {
+                data: Vec<u8>,
+                cp: Vec<u8>,
+                line_start: u32,
+                param_offs: Vec<u32>,
+            }
+            let mut lnp_entries: Vec<LnpEntry> = Vec::with_capacity(num_lnp as usize);
 
             for (class_idx, class) in all_classes.iter().enumerate() {
                 let mut class_offsets = Vec::with_capacity(class.methods.len());
                 let source_file_off = source_file_string_offsets[class_idx];
                 for method in &class.methods {
-                    if let (Some(debug), Some(source_file_off)) =
+                    if let (Some(debug), Some(src_off)) =
                         (&method.debug_info, source_file_off)
                     {
-                        class_offsets.push(Some(debug_cur));
-                        let param_offs = &per_lnp_param_name_offsets[lnp_index as usize];
-                        let bytes = encode_debug_info(
-                            debug.line_start,
+                        let param_offs = per_lnp_param_name_offsets
+                            .get(lnp_index as usize)
+                            .cloned()
+                            .unwrap_or_default();
+                        let method_ops = method.line_ops.as_slice();
+
+                        // ── Build LNP data_ (opcode bytes + inline register SLEB128s)
+                        let mut lnp_data: Vec<u8> = Vec::new();
+                        lnp_data.push(0x09); // SET_FILE (operand → cp)
+                        // START_LOCAL_EXTENDED for "this"(0), "newTarget"(1), "funcObj"(2)
+                        for reg in 0i32..3 {
+                            lnp_data.push(0x04);
+                            lnp_data.extend_from_slice(&encode_sleb128_bytes(reg));
+                        }
+                        // START_LOCAL_EXTENDED for formal params (reg 3..)
+                        for param_idx in 0..param_offs.len() {
+                            lnp_data.push(0x04);
+                            lnp_data.extend_from_slice(&encode_sleb128_bytes(3 + param_idx as i32));
+                        }
+                        lnp_data.push(0x07); // SET_PROLOGUE_END (no operand)
+                        // Body opcodes from line_ops (SPECIAL self-contained; ADVANCE_PC/LINE opcode only)
+                        {
+                            let mut lop = 0;
+                            while lop < method_ops.len() {
+                                let op = method_ops[lop];
+                                if op == 0x00 { break; }
+                                else if op == 0x01 || op == 0x02 {
+                                    lnp_data.push(op); lop += 1;
+                                    // Skip the inline operand (LEB128)
+                                    while lop < method_ops.len() && (method_ops[lop] & 0x80) != 0 { lop += 1; }
+                                    if lop < method_ops.len() { lop += 1; }
+                                } else if op >= 0x0c {
+                                    lnp_data.push(op); lop += 1;
+                                } else { lop += 1; }
+                            }
+                        }
+                        lnp_data.push(0x08); // SET_EPILOGUE_BEGIN
+                        lnp_data.push(0x01); // ADVANCE_PC (operand → cp)
+                        lnp_data.push(0x00); // END_SEQUENCE
+
+                        // ── Build DebugInfo constant_pool (operands only) ─────────
+                        let mut cp: Vec<u8> = Vec::new();
+                        cp.extend_from_slice(&uleb128(src_off as u64)); // SET_FILE operand
+                        // START_LOCAL_EXTENDED operands: name_off, type=0, typesig=0
+                        for &name_off in &scope_name_offsets {
+                            cp.extend_from_slice(&uleb128(name_off as u64));
+                            cp.extend_from_slice(&uleb128(0)); // type
+                            cp.extend_from_slice(&uleb128(0)); // type_signature
+                        }
+                        for &param_off in &param_offs {
+                            cp.extend_from_slice(&uleb128(param_off as u64));
+                            cp.extend_from_slice(&uleb128(0));
+                            cp.extend_from_slice(&uleb128(0));
+                        }
+                        // Body operands from line_ops (ADVANCE_PC/LINE operands → cp)
+                        {
+                            let mut lop2 = 0;
+                            while lop2 < method_ops.len() {
+                                let op = method_ops[lop2];
+                                if op == 0x00 { break; }
+                                else if op == 0x01 || op == 0x02 {
+                                    lop2 += 1;
+                                    let start = lop2;
+                                    while lop2 < method_ops.len() && (method_ops[lop2] & 0x80) != 0 { lop2 += 1; }
+                                    if lop2 < method_ops.len() { lop2 += 1; }
+                                    cp.extend_from_slice(&method_ops[start..lop2]);
+                                } else { lop2 += 1; } // SPECIAL or unknown — no operand
+                            }
+                        }
+                        cp.extend_from_slice(&uleb128(epilogue_pc_delta as u64)); // epilogue ADVANCE_PC
+
+                        lnp_entries.push(LnpEntry {
+                            data: lnp_data,
+                            cp,
+                            line_start: debug.line_start,
                             param_offs,
-                            source_file_off,
+                        });
+                        class_offsets.push(Some(debug_cur));
+                        let di_bytes = encode_debug_info_with_cp(
+                            lnp_entries.last().unwrap().line_start,
+                            &lnp_entries.last().unwrap().param_offs,
+                            &lnp_entries.last().unwrap().cp,
                             lnp_index,
                         );
-                        debug_cur += bytes.len() as u32;
-                        debug_buf.extend_from_slice(&bytes);
-                        lnp_source_file_offs.push(source_file_off);
-                        lnp_method_line_ops.push(method.line_ops.as_slice());
+                        debug_cur += di_bytes.len() as u32;
+                        debug_buf.extend_from_slice(&di_bytes);
                         lnp_index += 1;
                     } else {
                         class_offsets.push(None);
@@ -693,74 +780,10 @@ impl AbcFile {
 
             let mut lnp_offsets = Vec::with_capacity(num_lnp as usize);
             let mut lnp_cur = debug_cur;
-            for (i, &src_off) in lnp_source_file_offs.iter().enumerate() {
+            for entry in &lnp_entries {
                 lnp_offsets.push(lnp_cur);
-                // Panda LNP body (correct opcodes from libpandafile/file_items.h):
-                //   SET_FILE (0x09) + 4-byte LE string offset
-                //   START_LOCAL_EXTENDED (0x04) entries for scope variables and params
-                //   SET_PROLOGUE_END (0x07)
-                //   <advance opcodes — may be empty>
-                //   END_SEQUENCE (0x00)
-                //
-                // Correct LNP opcode values from LineNumberProgramItem::Opcode enum:
-                //   END_SEQUENCE       = 0x00
-                //   ADVANCE_PC         = 0x01
-                //   ADVANCE_LINE       = 0x02
-                //   START_LOCAL        = 0x03
-                //   START_LOCAL_EXTENDED = 0x04
-                //   END_LOCAL          = 0x05
-                //   RESTART_LOCAL      = 0x06
-                //   SET_PROLOGUE_END   = 0x07
-                //   SET_EPILOGUE_BEGIN = 0x08
-                //   SET_FILE           = 0x09
-                //   SET_SOURCE_CODE    = 0x0a
-                //   SET_COLUMN         = 0x0b
-                //   OPCODE_BASE        = 0x0c  (first SPECIAL opcode)
-                lnp_buf.push(0x09); // SET_FILE
-                lnp_buf.extend_from_slice(&src_off.to_le_bytes());
-
-                // START_LOCAL_EXTENDED (0x04) entries that hvigor always emits:
-                //   "this"      reg 0  type_off 0  type_tag 0
-                //   "newTarget" reg 1  type_off 0  type_tag 0
-                //   "funcObj"   reg 2  type_off 0  type_tag 0
-                //
-                // Format: [0x04][name_off: u32 LE][reg: u8][type_off: u32 LE][type_tag: u16 LE]
-                // = 12 bytes per entry.
-                for (reg, &name_off) in scope_name_offsets.iter().enumerate() {
-                    lnp_buf.push(0x04); // START_LOCAL_EXTENDED
-                    lnp_buf.extend_from_slice(&name_off.to_le_bytes());
-                    lnp_buf.push(reg as u8);
-                    lnp_buf.extend_from_slice(&0u32.to_le_bytes()); // type_off = 0
-                    lnp_buf.extend_from_slice(&0u16.to_le_bytes()); // type_tag = 0
-                }
-
-                // START_LOCAL_EXTENDED entries for formal parameters, starting at reg 3.
-                let param_offs = &per_lnp_param_name_offsets[i];
-                for (param_idx, &param_off) in param_offs.iter().enumerate() {
-                    lnp_buf.push(0x04); // START_LOCAL_EXTENDED
-                    lnp_buf.extend_from_slice(&param_off.to_le_bytes());
-                    lnp_buf.push(3 + param_idx as u8);
-                    lnp_buf.extend_from_slice(&0u32.to_le_bytes()); // type_off = 0
-                    lnp_buf.extend_from_slice(&0u16.to_le_bytes()); // type_tag = 0
-                }
-
-                // Each START_LOCAL_EXTENDED entry is 12 bytes (1 + 4 + 1 + 4 + 2).
-                let start_local_bytes = (3 + param_offs.len()) as u32 * 12;
-
-                // SET_PROLOGUE_END (0x07): marks the end of the method prologue.
-                // hvigor emits this opcode after all START_LOCAL_EXTENDED entries.
-                lnp_buf.push(0x07); // SET_PROLOGUE_END
-
-                let method_ops = lnp_method_line_ops[i];
-                if !method_ops.is_empty() {
-                    // line_ops already ends with END_SEQUENCE (0x00).
-                    lnp_buf.extend_from_slice(method_ops);
-                    lnp_cur += 5 + start_local_bytes + 1 + method_ops.len() as u32;
-                } else {
-                    // Minimal LNP: SET_FILE + START_LOCAL_EXTENDEDs + SET_PROLOGUE_END + END_SEQUENCE.
-                    lnp_buf.push(0x00);
-                    lnp_cur += 5 + start_local_bytes + 1 + 1;
-                }
+                lnp_buf.extend_from_slice(&entry.data);
+                lnp_cur += entry.data.len() as u32;
             }
 
             debug_assert_eq!(lnp_index, num_lnp);
@@ -1161,45 +1184,65 @@ fn adler32(data: &[u8]) -> u32 {
     (b << 16) | a
 }
 
-/// Encode a Panda `DebugInfoItem`.
+/// Encode a SLEB128 value as a byte vector.
+fn encode_sleb128_bytes(mut value: i32) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut more = true;
+    while more {
+        let byte = (value & 0x7F) as u8;
+        value >>= 7;
+        more = !(((value == 0) && (byte & 0x40 == 0)) || ((value == -1) && (byte & 0x40 != 0)));
+        out.push(if more { byte | 0x80 } else { byte });
+    }
+    out
+}
+
+/// Encode a Panda `DebugInfoItem` with a pre-built constant_pool.
 ///
 /// libpandafile `DebugInfoItem::Write` format:
 /// ```text
-/// line_num:           ULEB128        (1-based source line of the method start)
+/// line_num:           ULEB128        (1-based source line, or 0xFFFFFFFF sentinel)
 /// num_parameters:     ULEB128        (number of formal parameters)
 /// [param_off: ULEB128] * num_params  (file offset of each parameter name StringItem)
-/// constant_pool_size: ULEB128        (byte count of the constant pool that follows)
-/// constant_pool:      raw bytes      (LNP opcodes for the body, or empty)
+/// constant_pool_size: ULEB128        (byte count of the constant pool)
+/// constant_pool:      raw bytes      (operands for LNP opcodes in the LNP data_ stream)
 /// lnp_index:          ULEB128        (index into the LNP index table)
 /// ```
 ///
-/// The `constant_pool` is raw bytes containing LNP opcodes for the method body.
-/// For our simplified implementation, the constant pool contains a single
-/// `SET_FILE (0x09) + 4-byte source_file_offset` entry so that debuggers can
-/// link the method back to its source file.
-fn encode_debug_info(
+/// The `constant_pool` contains ULEB128-encoded operands for opcodes in the LNP
+/// data_ stream that need them (SET_FILE src_off, START_LOCAL_EXTENDED operands,
+/// ADVANCE_PC delta, ADVANCE_LINE delta, etc.).
+fn encode_debug_info_with_cp(
     line_start: u32,
     param_name_offsets: &[u32],
-    source_file_offset: u32,
+    constant_pool: &[u8],
     lnp_index: u32,
 ) -> Vec<u8> {
-    // Constant pool: SET_FILE (0x09) + 4-byte LE source file string offset.
-    // This is the minimal body LNP that links the method to its source file.
-    let mut constant_pool = Vec::with_capacity(5);
-    constant_pool.push(0x09); // SET_FILE opcode
-    constant_pool.extend_from_slice(&source_file_offset.to_le_bytes());
-
     let mut out = Vec::with_capacity(8 + constant_pool.len());
     out.extend_from_slice(&uleb128(line_start as u64));
     out.extend_from_slice(&uleb128(param_name_offsets.len() as u64));
     for &off in param_name_offsets {
         out.extend_from_slice(&uleb128(off as u64));
     }
-    // constant_pool_size = byte count (not item count) of the constant pool.
+    // constant_pool_size = byte count (not item count).
     out.extend_from_slice(&uleb128(constant_pool.len() as u64));
-    out.extend_from_slice(&constant_pool);
+    out.extend_from_slice(constant_pool);
     out.extend_from_slice(&uleb128(lnp_index as u64));
     out
+}
+
+/// Encode a Panda `DebugInfoItem` with a minimal constant_pool containing only
+/// the SET_FILE operand. Used as a fallback when no LNP tracking is available.
+#[allow(dead_code)]
+fn encode_debug_info(
+    line_start: u32,
+    param_name_offsets: &[u32],
+    source_file_offset: u32,
+    lnp_index: u32,
+) -> Vec<u8> {
+    // Minimal constant_pool: just the SET_FILE operand (ULEB128 source file offset).
+    let cp = uleb128(source_file_offset as u64);
+    encode_debug_info_with_cp(line_start, param_name_offsets, &cp, lnp_index)
 }
 
 impl Default for AbcFile {

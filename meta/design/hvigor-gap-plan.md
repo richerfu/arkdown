@@ -53,28 +53,29 @@ and release-mode terser/minification when applicable.
 - Phase 2 (ETS transform): ✅ @Prop, @Link, @ObjectLink, @Provide, @Consume, @Watch, @BuilderParam
 - Phase 3 (bundler): ✅ clean ESM, @ohos: external, treeshake off for debug
 - Phase 4 (importee): ✅ process_importees() ports hvigor process-importee.js
-- Phase 5 (ABC): 🔄 unit-test parity 6344B/9844B (64%) — see below
+- Phase 5 (ABC): 🔄 unit-test parity 7174B/9844B (73%) — see below
 - Phase 6 (packaging): ✅ HAP zip identical to hvigor (11 entries)
 
 **Parity (two-module debug parity test, 2026-05-30):**
-- `test_two_module_debug_parity`: 6344B / 9844B hvigor (64%)
+- `test_two_module_debug_parity`: 7174B / 9844B hvigor (73%)
   Improvements in this session:
-  - ✅ Fixed LNP opcode values from libpandafile source:
+  - ✅ Merged main branch (4780aa7) with method access_flags, catch_entries, LNP tracking
+  - ✅ Fixed LNP opcode values from libpandafile/file_items.h:
     - `SET_FILE = 0x09` (was 0x03)
     - `START_LOCAL_EXTENDED = 0x04` (was 0x08)
     - `SET_PROLOGUE_END = 0x07` (was 0x05)
-  - ✅ Fixed DebugInfo constant_pool format: `constant_pool_size` is now byte count
-    (was item count); constant_pool now contains `SET_FILE(0x09) + src_off` body LNP.
-  - ✅ Added `L_ESSlotNumberAnnotation` per-method annotations:
-    - `MethodTag::ANNOTATION = 0x06` in every MethodItem
-    - Annotation section: `class_idx(u16) + count(u16) + name_off(u32) + value(u32) + tag(u8)` = 13B/method
-    - "SlotNumber" StringItem shared across all annotations
-  - ✅ Method access_flags already correct from main branch (0x008/0x108/0x208)
-  Remaining gap vs hvigor (9844B):
-  - Per-instruction ADVANCE sequences in DebugInfo constant_pool (hvigor emits SPECIAL opcodes
-    for every instruction group; we emit minimal SET_FILE + END_SEQ)
-  - Missing ViewPU/ArkTS-transform methods (#~@0>#initialRender, #~@0<#getEntryName, etc.)
-  - LNP index placement (ours at file end; hvigor interleaves LNP entries with DebugInfo)
+  - ✅ Fixed DebugInfo format: `constant_pool_size` is byte count (not item count)
+  - ✅ Fixed LNP architecture: opcodes in `data_` stream, operands in `constant_pool`
+    - LNP data_: `SET_FILE + SLE×(3+params) + PROL_END + body_opcodes + EPIL + ADV_PC + END`
+    - DebugInfo cp: `src_off_uleb + scope_var_operands + body_operands + epilogue_delta`
+  - ✅ Added `L_ESSlotNumberAnnotation` per-method annotations (13B × methods)
+  - ✅ Added `initialRender`, `getEntryName` methods to parity test source
+  - ✅ Added `observeComponentCreation2` call-arg closures (#~@0>@1*#^1, #~@0>@1*#^2)
+  Remaining gap vs hvigor (9844B = 2670B gap):
+  - Per-instruction SPECIAL opcodes in LNP (~1894B): hvigor tracks every bytecode instruction,
+    we track per-statement only
+  - DebugInfo cp per-instruction operands (~949B): same root cause
+  - 1 missing literal array entry (count=24 metadata object with non-string values)
 - `ets/sourceMaps.map`: hvigor 1847B, arkdown 1281B — gap is per-statement vs per-token maps
 
 ## Major Missing Capabilities

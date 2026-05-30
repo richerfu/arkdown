@@ -58,6 +58,28 @@ fn skip_inline_string(bytes: &[u8], offset: &mut usize) {
     *offset += if is_ascii { len + 1 } else { len * 2 + 2 };
 }
 
+/// Find the end of an LNP data_ stream (opcode-only format, inline reg SLEB128s).
+/// Returns the position AFTER the END_SEQUENCE byte.
+fn lnp_body_end(bytes: &[u8], start: usize) -> usize {
+    let mut pos = start;
+    while pos < bytes.len() {
+        let op = bytes[pos];
+        match op {
+            0x00 => return pos + 1, // END_SEQUENCE
+            0x01 | 0x02 | 0x07 | 0x08 | 0x09 | 0x0a => pos += 1, // no inline operand
+            0x03 | 0x04 | 0x05 | 0x06 => {
+                // START_LOCAL*, END_LOCAL, RESTART_LOCAL: skip opcode + reg SLEB128
+                pos += 1;
+                while pos < bytes.len() && (bytes[pos] & 0x80) != 0 { pos += 1; }
+                pos += 1; // last SLEB128 byte
+            }
+            0x0b => pos += 1, // SET_COLUMN (operand in cp, not inline)
+            _ => pos += 1,    // SPECIAL opcode (self-contained)
+        }
+    }
+    pos
+}
+
 fn class_offsets(bytes: &[u8]) -> Vec<u32> {
     let num_classes = read_u32(bytes, 0x1c) as usize;
     let class_idx_off = read_u32(bytes, 0x20) as usize;
@@ -710,57 +732,52 @@ fn test_source_map_emits_source_file_debug_info_and_lnp() {
         "source_map.sources[0] drives the emitted source file StringItem"
     );
 
-    // DebugInfo format (libpandafile DebugInfoItem::Write):
-    //   line_num:           ULEB128(1)     1-based source line
-    //   num_params:         ULEB128(0)     no parameters tracked
-    //   constant_pool_size: ULEB128(5)     byte count: SET_FILE(1) + offset(4)
-    //   constant_pool:      [0x09, src_off_le_4bytes]  body LNP
-    //   lnp_index:          ULEB128(0)     index into LNP table
+    // DebugInfo format (libpandafile DebugInfoItem::Write, corrected architecture):
+    //   line_num:           ULEB128(1)
+    //   num_params:         ULEB128(0)
+    //   constant_pool_size: ULEB128(N)   byte count of operand pool
+    //   constant_pool:      [src_file_off_uleb, scope_var_operands..., epilogue_delta_uleb]
+    //   lnp_index:          ULEB128(0)
+    //
+    // The constant_pool contains ULEB128-encoded OPERANDS for LNP opcodes
+    // (not the opcodes themselves). The opcodes are in the separate LNP entry.
     let mut pos = debug_info as usize;
     assert_eq!(read_uleb(&bytes, &mut pos), 1, "line_start is 1");
     assert_eq!(read_uleb(&bytes, &mut pos), 0, "no parameter names emitted");
     let cp_size = read_uleb(&bytes, &mut pos) as usize;
-    assert_eq!(
-        cp_size, 5,
-        "constant pool is 5 bytes: SET_FILE(1) + source_file_offset(4)"
+    assert!(
+        cp_size > 0,
+        "constant pool must be non-empty (contains SET_FILE operand + scope var operands)"
     );
-    // The constant pool starts with SET_FILE (0x09) + 4-byte source file offset.
+    // The constant pool starts with the SET_FILE operand: ULEB128(source_file_offset).
+    // This is the operand for the SET_FILE (0x09) opcode in the LNP data_ stream.
+    let sf_from_cp = read_uleb(&bytes, &mut pos);
     assert_eq!(
-        bytes[pos], 0x09,
-        "constant pool starts with SET_FILE opcode (0x09)"
+        sf_from_cp,
+        class_source_file as u64,
+        "constant pool first operand is the source file string offset (for SET_FILE)"
     );
-    assert_eq!(
-        read_u32(&bytes, pos + 1),
-        class_source_file,
-        "SET_FILE operand is the source file string offset"
-    );
-    pos += cp_size;
+    // Skip the rest of the constant pool (scope var operands, epilogue delta)
+    pos = debug_info as usize;
+    read_uleb(&bytes, &mut pos); // line_start
+    read_uleb(&bytes, &mut pos); // num_params
+    let cp_size2 = read_uleb(&bytes, &mut pos) as usize;
+    pos += cp_size2;
     assert_eq!(
         read_uleb(&bytes, &mut pos),
         0,
         "debug info references LNP index 0"
     );
 
-    // The LNP starts with SET_FILE (0x09) — correct opcode from libpandafile.
+    // The LNP entry (in the separate LNP data_ stream) starts with SET_FILE (0x09).
+    // The LNP data_ contains opcodes + inline register SLEB128s (no other inline operands).
     let lnp_offset = read_u32(&bytes, lnp_idx_off) as usize;
-    assert_eq!(bytes[lnp_offset], 0x09, "LNP starts with SET_FILE opcode (0x09)");
-    assert_eq!(
-        read_u32(&bytes, lnp_offset + 1),
-        class_source_file,
-        "SET_FILE operand is the source file string offset"
-    );
-    // After SET_FILE (5 bytes), the LNP may contain START_LOCAL_EXTENDED entries,
-    // SET_PROLOGUE_END, advance sequences (ADVANCE_PC, ADVANCE_LINE, SPECIAL_OPCODE)
-    // followed by END_SEQUENCE (0x00).
-    let lnp_body = &bytes[lnp_offset + 5..];
-    let end_seq_pos = lnp_body
-        .iter()
-        .position(|&b| b == 0x00)
-        .expect("LNP must contain END_SEQUENCE (0x00)");
-    assert_eq!(
-        lnp_body[end_seq_pos], 0x00,
-        "LNP body terminates with END_SEQUENCE"
-    );
+    assert_eq!(bytes[lnp_offset], 0x09, "LNP data_ starts with SET_FILE opcode (0x09)");
+    // After SET_FILE, the LNP contains START_LOCAL_EXTENDED entries (opcode + reg),
+    // SET_PROLOGUE_END, body opcodes, SET_EPILOGUE_BEGIN, ADVANCE_PC, END_SEQUENCE.
+    let lnp_end = lnp_body_end(&bytes, lnp_offset);
+    assert!(lnp_end > lnp_offset, "LNP must have content");
+    assert_eq!(bytes[lnp_end - 1], 0x00, "LNP terminates with END_SEQUENCE");
 }
 
 // ── New opcode coverage tests ────────────────────────────────────────────────
@@ -1047,9 +1064,26 @@ var Index = class extends ViewPU {
     }
     get message() { return this.__message.get(); }
     set message(newValue) { this.__message.set(newValue); }
+    initialRender() {
+        this.observeComponentCreation2((elmtId, isInitialRender) => {
+            Row.create();
+        }, Row);
+        this.observeComponentCreation2((elmtId, isInitialRender) => {
+            Column.create();
+        }, Column);
+        this.observeComponentCreation2((elmtId, isInitialRender) => {
+            Text.create(this.message);
+            Text.fontSize(50);
+            Text.fontWeight(FontWeight.Bold);
+        }, Text);
+        Text.pop();
+        Column.pop();
+        Row.pop();
+    }
     rerender() { this.updateDirtyElements(); }
+    static getEntryName() { return "Index"; }
 };
-registerNamedRoute(() => new Index(void 0, {}), "", {bundleName: "x"});
+registerNamedRoute(() => new Index(void 0, {}), "", {bundleName: "com.example.arkdown.test", moduleName: "entry", pagePath: "pages/Index", pageFullPath: "entry/src/main/ets/pages/Index", integratedHsp: "false", moduleType: "followWithHap"});
 "#;
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("modules_debug.abc");
@@ -1081,12 +1115,13 @@ registerNamedRoute(() => new Index(void 0, {}), "", {bundleName: "x"});
     assert!(bytes.starts_with(b"PANDA\0\0\0"));
     let sz = bytes.len();
     eprintln!("[parity] debug two-module ABC = {sz}B / 9844B hvigor ({:.0}%)", sz as f64 / 9844.0 * 100.0);
-    // Phase 5 parity baseline: LNP index moved to file end + OHM URL method names +
-    // field name deduplication raised parity from 76.9% (7573B) to 88.1% (8675B).
-    // Remaining gap: LNP body content (~737B) + method index ordering (~432B).
+    // Phase 5 parity (2026-05-30): Correct LNP opcode values + DebugInfo cp format +
+    // L_ESSlotNumberAnnotation per-method + correct LNP architecture (opcodes in data_,
+    // operands in cp) + added initialRender/getEntryName/closure methods = 73% (7174B).
+    // Remaining gap: per-instruction SPECIAL opcodes (~2843B) vs per-statement.
     assert!(
-        sz > 5800,
-        "debug-info two-module compile must exceed 5800B (Phase 5 parity regression guard), got {sz}B"
+        sz > 7000,
+        "debug-info two-module compile must exceed 7000B (Phase 5 parity regression guard), got {sz}B"
     );
 }
 
