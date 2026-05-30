@@ -442,24 +442,45 @@ impl AbcFile {
             }
         }
 
-        // ── 1f. Scope-name StringItems (emitted once per file) ───────────────
+        // ── 1f. Scope-name StringItems ───────────────────────────────────────
         //
-        // hvigor always emits START_LOCAL entries for three fixed scope
-        // variables in every method's LNP: "this" (reg 0), "newTarget" (reg 1),
-        // "funcObj" (reg 2).  We allocate one StringItem per name.
-        let scope_name_strs: [Vec<u8>; 3] = [
+        // hvigor emits START_LOCAL_EXTENDED for scope variables with type-prefixed
+        // names matching es2panda's variable debug info format (from GenScopeVariableInfo):
+        //   Regular methods: r0="4funcObj", r1="4newTarget", r2="this"
+        //   Arrow closures:  r1="0newTarget", r2="0this",    r0="4funcObj"
+        // Type "any" is used for both signature and signature_type.
+        let scope_strs_regular: [Vec<u8>; 3] = [
+            inline_string("4funcObj"),
+            inline_string("4newTarget"),
             inline_string("this"),
-            inline_string("newTarget"),
-            inline_string("funcObj"),
         ];
-        let scope_name_offsets: [u32; 3] = {
-            let mut offsets = [0u32; 3];
-            for (i, s) in scope_name_strs.iter().enumerate() {
-                offsets[i] = cur;
+        let scope_strs_arrow: [Vec<u8>; 3] = [
+            inline_string("0newTarget"),
+            inline_string("0this"),
+            inline_string("4funcObj"),
+        ];
+        let any_type_str = inline_string("any");
+        let scope_offs_regular: [u32; 3] = {
+            let mut offs = [0u32; 3];
+            for (i, s) in scope_strs_regular.iter().enumerate() {
+                offs[i] = cur;
                 cur += s.len() as u32;
             }
-            offsets
+            offs
         };
+        let scope_offs_arrow: [u32; 3] = {
+            let mut offs = [0u32; 3];
+            for (i, s) in scope_strs_arrow.iter().enumerate() {
+                offs[i] = cur;
+                cur += s.len() as u32;
+            }
+            offs
+        };
+        let any_type_off = cur;
+        cur += any_type_str.len() as u32;
+        // Backward-compat alias used in the LNP loop below.
+        let scope_name_strs = &scope_strs_regular;
+        let _ = scope_name_strs;
 
         // ── 1g. Per-LNP param-name StringItems ───────────────────────────────
         //
@@ -690,21 +711,65 @@ impl AbcFile {
                             .unwrap_or_default();
                         let method_ops = method.line_ops.as_slice();
 
-                        // ── Build LNP data_ (opcode bytes + inline register SLEB128s)
+                        // ── Build LNP data_ + constant_pool matching BuildLineNumberProgram ──
+                        //
+                        // Per libpandafile/assembly-emitter.cpp BuildLineNumberProgram:
+                        //   SET_FILE → cp: src_off
+                        //   ADV_PC(initial) → cp: initial_pc_delta
+                        //   SLE(reg, name, type, typesig) for each scope var
+                        //   [body: per-instruction ADV_LINE/SP + SET_COL + ADV_PC]
+                        //   EPIL_BEGIN
+                        //   ADV_PC(1) → cp: 1
+                        //   END_L(reg) for each scope var → cp: closing_pc_offset
+                        //   END
+                        //
+                        // Scope var register layout (from es2panda GenScopeVariableInfo):
+                        //   Regular: r0=funcObj, r1=newTarget, r2=this
+                        //   Arrow:   r1=newTarget, r2=this, r0=funcObj
+                        let is_arrow = method.name.contains("@1*#")
+                            || method.name == "#*#"
+                            || method.name.starts_with("#*#^");
+                        let (scope_offs, scope_regs): (&[u32; 3], &[i32; 3]) = if is_arrow {
+                            (&scope_offs_arrow, &[1, 2, 0])
+                        } else {
+                            (&scope_offs_regular, &[0, 1, 2])
+                        };
+
                         let mut lnp_data: Vec<u8> = Vec::new();
-                        lnp_data.push(0x09); // SET_FILE (operand → cp)
-                        // START_LOCAL_EXTENDED for "this"(0), "newTarget"(1), "funcObj"(2)
-                        for reg in 0i32..3 {
+                        let mut cp: Vec<u8> = Vec::new();
+
+                        // SET_FILE
+                        lnp_data.push(0x09);
+                        cp.extend_from_slice(&uleb128(src_off as u64));
+
+                        // ADV_PC(initial) — initial pc offset before first instruction
+                        // We approximate as 0 (no initial advance) since we don't know
+                        // the exact bytecode layout.  This matches our per-statement tracking.
+                        // Note: golden emits ADV_PC(N) here where N = bytecode offset of
+                        // first instruction after prologue. We use 0 as approximation.
+                        // (This is why our LNP is slightly smaller than golden.)
+
+                        // START_LOCAL_EXTENDED for scope vars
+                        for (i, &reg) in scope_regs.iter().enumerate() {
                             lnp_data.push(0x04);
                             lnp_data.extend_from_slice(&encode_sleb128_bytes(reg));
+                            cp.extend_from_slice(&uleb128(scope_offs[i] as u64)); // name
+                            cp.extend_from_slice(&uleb128(any_type_off as u64));  // type="any"
+                            cp.extend_from_slice(&uleb128(any_type_off as u64));  // typesig="any"
                         }
                         // START_LOCAL_EXTENDED for formal params (reg 3..)
-                        for param_idx in 0..param_offs.len() {
+                        for (param_idx, &param_off) in param_offs.iter().enumerate() {
                             lnp_data.push(0x04);
                             lnp_data.extend_from_slice(&encode_sleb128_bytes(3 + param_idx as i32));
+                            cp.extend_from_slice(&uleb128(param_off as u64));
+                            cp.extend_from_slice(&uleb128(any_type_off as u64));
+                            cp.extend_from_slice(&uleb128(any_type_off as u64));
                         }
-                        lnp_data.push(0x07); // SET_PROLOGUE_END (no operand)
-                        // Body opcodes from line_ops (SPECIAL self-contained; ADVANCE_PC/LINE opcode only)
+
+                        // Body opcodes from line_ops (per-statement tracking).
+                        // line_ops format: opcodes + inline LEB128 operands (old format).
+                        // We split them: SPECIAL opcodes go to lnp_data; ADV_PC/LINE opcodes
+                        // go to lnp_data with their operands going to cp.
                         {
                             let mut lop = 0;
                             while lop < method_ops.len() {
@@ -712,48 +777,34 @@ impl AbcFile {
                                 if op == 0x00 { break; }
                                 else if op == 0x01 || op == 0x02 {
                                     lnp_data.push(op); lop += 1;
-                                    // Skip the inline operand (LEB128)
+                                    let start = lop;
                                     while lop < method_ops.len() && (method_ops[lop] & 0x80) != 0 { lop += 1; }
                                     if lop < method_ops.len() { lop += 1; }
+                                    cp.extend_from_slice(&method_ops[start..lop]);
                                 } else if op >= 0x0c {
                                     lnp_data.push(op); lop += 1;
                                 } else { lop += 1; }
                             }
                         }
-                        lnp_data.push(0x08); // SET_EPILOGUE_BEGIN
-                        lnp_data.push(0x01); // ADVANCE_PC (operand → cp)
-                        lnp_data.push(0x00); // END_SEQUENCE
 
-                        // ── Build DebugInfo constant_pool (operands only) ─────────
-                        let mut cp: Vec<u8> = Vec::new();
-                        cp.extend_from_slice(&uleb128(src_off as u64)); // SET_FILE operand
-                        // START_LOCAL_EXTENDED operands: name_off, type=0, typesig=0
-                        for &name_off in &scope_name_offsets {
-                            cp.extend_from_slice(&uleb128(name_off as u64));
-                            cp.extend_from_slice(&uleb128(0)); // type
-                            cp.extend_from_slice(&uleb128(0)); // type_signature
+                        // ADV_PC(1) epilogue (no SET_EPILOGUE_BEGIN — golden doesn't emit it)
+                        lnp_data.push(0x01); // ADV_PC
+                        cp.extend_from_slice(&uleb128(epilogue_pc_delta as u64));
+
+                        // END_LOCAL for each scope var (closing the scope)
+                        // END_LOCAL operand (closing pc) goes to cp
+                        for &reg in scope_regs.iter() {
+                            lnp_data.push(0x05); // END_LOCAL
+                            lnp_data.extend_from_slice(&encode_sleb128_bytes(reg));
+                            cp.extend_from_slice(&uleb128(0)); // closing pc offset (approx)
                         }
-                        for &param_off in &param_offs {
-                            cp.extend_from_slice(&uleb128(param_off as u64));
+                        for param_idx in 0..param_offs.len() {
+                            lnp_data.push(0x05); // END_LOCAL
+                            lnp_data.extend_from_slice(&encode_sleb128_bytes(3 + param_idx as i32));
                             cp.extend_from_slice(&uleb128(0));
-                            cp.extend_from_slice(&uleb128(0));
                         }
-                        // Body operands from line_ops (ADVANCE_PC/LINE operands → cp)
-                        {
-                            let mut lop2 = 0;
-                            while lop2 < method_ops.len() {
-                                let op = method_ops[lop2];
-                                if op == 0x00 { break; }
-                                else if op == 0x01 || op == 0x02 {
-                                    lop2 += 1;
-                                    let start = lop2;
-                                    while lop2 < method_ops.len() && (method_ops[lop2] & 0x80) != 0 { lop2 += 1; }
-                                    if lop2 < method_ops.len() { lop2 += 1; }
-                                    cp.extend_from_slice(&method_ops[start..lop2]);
-                                } else { lop2 += 1; } // SPECIAL or unknown — no operand
-                            }
-                        }
-                        cp.extend_from_slice(&uleb128(epilogue_pc_delta as u64)); // epilogue ADVANCE_PC
+
+                        lnp_data.push(0x00); // END_SEQUENCE
 
                         lnp_entries.push(LnpEntry {
                             data: lnp_data,
@@ -1023,10 +1074,14 @@ impl AbcFile {
             file.extend_from_slice(s);
         }
 
-        // ── Scope-name StringItems (this / newTarget / funcObj) ──────────────
-        for s in &scope_name_strs {
+        // ── Scope-name StringItems (type-prefixed names + "any" type) ────────
+        for s in &scope_strs_regular {
             file.extend_from_slice(s);
         }
+        for s in &scope_strs_arrow {
+            file.extend_from_slice(s);
+        }
+        file.extend_from_slice(&any_type_str);
 
         // ── Param-name StringItems (per-LNP formal parameter names) ──────────
         for s in &all_param_name_strings {
