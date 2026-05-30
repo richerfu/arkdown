@@ -184,7 +184,11 @@ mod tests {
     fn test_watch_dirs_for_module_count() {
         // Should return exactly 2 directories: ets + resources
         let dirs = watch_dirs_for_module(Path::new("/project/entry"));
-        assert_eq!(dirs.len(), 2, "watch_dirs_for_module must return exactly 2 dirs");
+        assert_eq!(
+            dirs.len(),
+            2,
+            "watch_dirs_for_module must return exactly 2 dirs"
+        );
     }
 
     #[test]

@@ -81,17 +81,17 @@ fn run_build(fixture: &PathBuf) -> PathBuf {
     use arkdown::Bundler;
     use arkdown_config::load_config;
     use arkdown_core::{BuildMode, ModuleJson5, OutputTarget};
-    use rolldown_plugin::__inner::SharedPluginable;
     use arkdown_pack::{PackInput, Packager};
     use arkdown_plugin_duplicate_check::DuplicateCheckPlugin;
     use arkdown_plugin_ets_transform::EtsTransformPlugin;
     use arkdown_plugin_json5::Json5Plugin;
     use arkdown_plugin_module_meta::ModuleMetaPlugin;
     use arkdown_plugin_ohos_resolve::OhosResolvePlugin;
-    use arkdown_profile::{ProfileProcessor, scan_bytecode_har_deps};
+    use arkdown_profile::{scan_bytecode_har_deps, ProfileProcessor};
     use arkdown_resolver::ResolverConfig;
     use arkdown_resource::{ResourceCompileConfig, ResourceCompileInput, ResourceCompiler};
     use arkdown_ts2abc::{compile_to_abc, Ts2abcOptions};
+    use rolldown_plugin::__inner::SharedPluginable;
 
     // Use tokio runtime for async bundler
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
@@ -258,7 +258,6 @@ fn run_build(fixture: &PathBuf) -> PathBuf {
             privacy_profile_path: None,
             source_maps_path: bundle_out.source_maps_path.clone(),
             abilities: vec![],
-            
         })
         .expect("pack_hap");
 
@@ -286,6 +285,7 @@ fn collect_js_chunks_from_output(
                     .map(|meta| meta.record_name.clone())
                     .unwrap_or_else(|| chunk_name.clone()),
                 source_file: meta.and_then(|meta| meta.source_file.clone()),
+                source_map: None,
             }
         })
         .collect()
@@ -304,10 +304,7 @@ fn run_build_har(fixture: &PathBuf) -> PathBuf {
     let config = Arc::new(config);
     let module = &config.modules[0];
 
-    let output = fixture.join(format!(
-        "build/default/outputs/default/{}.har",
-        module.name
-    ));
+    let output = fixture.join(format!("build/default/outputs/default/{}.har", module.name));
     std::fs::create_dir_all(output.parent().unwrap()).ok();
 
     let module_name = module.name.clone();
@@ -322,7 +319,7 @@ fn run_build_har(fixture: &PathBuf) -> PathBuf {
             resources_dir,
             oh_package_json,
             output_path: output.clone(),
-            })
+        })
         .expect("pack_har");
     output
 }
@@ -335,17 +332,17 @@ fn run_build_hsp(fixture: &PathBuf) -> PathBuf {
     use arkdown::Bundler;
     use arkdown_config::load_config;
     use arkdown_core::{BuildMode, ModuleJson5, OutputTarget};
-    use rolldown_plugin::__inner::SharedPluginable;
     use arkdown_pack::{PackInput, Packager};
     use arkdown_plugin_duplicate_check::DuplicateCheckPlugin;
     use arkdown_plugin_ets_transform::EtsTransformPlugin;
     use arkdown_plugin_json5::Json5Plugin;
     use arkdown_plugin_module_meta::ModuleMetaPlugin;
     use arkdown_plugin_ohos_resolve::OhosResolvePlugin;
-    use arkdown_profile::{ProfileProcessor, scan_bytecode_har_deps};
+    use arkdown_profile::{scan_bytecode_har_deps, ProfileProcessor};
     use arkdown_resolver::ResolverConfig;
     use arkdown_resource::{ResourceCompileConfig, ResourceCompileInput, ResourceCompiler};
     use arkdown_ts2abc::{compile_to_abc, Ts2abcOptions};
+    use rolldown_plugin::__inner::SharedPluginable;
 
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
 
@@ -752,7 +749,9 @@ fn test_har_golden_entry_list() {
     for entry in required {
         let entry = entry.as_str().expect("entry is string");
         assert!(
-            names.iter().any(|n| n == entry || n.ends_with(&format!("/{entry}"))),
+            names
+                .iter()
+                .any(|n| n == entry || n.ends_with(&format!("/{entry}"))),
             "HAR missing required golden entry '{}'; actual entries: {:?}",
             entry,
             names
@@ -1006,16 +1005,18 @@ fn run_build_bc_har(fixture_src: &PathBuf) -> (PathBuf, PathBuf) {
     use arkdown::Bundler;
     use arkdown_config::load_config;
     use arkdown_core::{BuildMode, ModuleJson5, OutputTarget};
-    use rolldown_plugin::__inner::SharedPluginable;
     use arkdown_plugin_duplicate_check::DuplicateCheckPlugin;
     use arkdown_plugin_ets_transform::EtsTransformPlugin;
     use arkdown_plugin_json5::Json5Plugin;
     use arkdown_plugin_module_meta::ModuleMetaPlugin;
-    use arkdown_plugin_ohos_resolve::{process_importees, OhosResolvePlugin, ProcessImporteeConfig};
-    use arkdown_profile::{ProfileProcessor, scan_bytecode_har_deps};
+    use arkdown_plugin_ohos_resolve::{
+        process_importees, OhosResolvePlugin, ProcessImporteeConfig,
+    };
+    use arkdown_profile::{scan_bytecode_har_deps, ProfileProcessor};
     use arkdown_resolver::ResolverConfig;
     use arkdown_resource::{ResourceCompileConfig, ResourceCompileInput, ResourceCompiler};
     use arkdown_ts2abc::{compile_to_abc, Ts2abcOptions};
+    use rolldown_plugin::__inner::SharedPluginable;
 
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
 
@@ -1133,8 +1134,11 @@ fn run_build_bc_har(fixture_src: &PathBuf) -> (PathBuf, PathBuf) {
         if let Some(parent) = importee_json_path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
-        std::fs::write(&importee_json_path, serde_json::to_string_pretty(&cache).unwrap())
-            .expect("write importee.json");
+        std::fs::write(
+            &importee_json_path,
+            serde_json::to_string_pretty(&cache).unwrap(),
+        )
+        .expect("write importee.json");
     }
 
     // ABC compilation
@@ -1152,7 +1156,10 @@ fn run_build_bc_har(fixture_src: &PathBuf) -> (PathBuf, PathBuf) {
             Some((
                 stem,
                 ChunkCompileMeta {
-                    record_name: format!("{}/{}/{}", bundle_name, loader_json.module_name, stripped),
+                    record_name: format!(
+                        "{}/{}/{}",
+                        bundle_name, loader_json.module_name, stripped
+                    ),
                     source_file: Some(ep.clone()),
                 },
             ))
@@ -1181,8 +1188,7 @@ fn run_build_bc_har(fixture_src: &PathBuf) -> (PathBuf, PathBuf) {
     }
 
     // Merge ByteCode HAR .abc files
-    for dep in &bc_har_deps {
-    }
+    for dep in &bc_har_deps {}
 
     (modules_abc, importee_json_path)
 }
@@ -1205,10 +1211,7 @@ fn test_bc_har_compiled_importees_contains_ohm_url() {
     let compiled = parsed["compiledImportees"]
         .as_array()
         .expect("compiledImportees must be array");
-    let ohm_urls: Vec<&str> = compiled
-        .iter()
-        .filter_map(|v| v.as_str())
-        .collect();
+    let ohm_urls: Vec<&str> = compiled.iter().filter_map(|v| v.as_str()).collect();
 
     assert!(
         ohm_urls.contains(&"@bundle:com.example.arkdown.test/bc-har-dep/index"),

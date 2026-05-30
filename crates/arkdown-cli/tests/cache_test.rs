@@ -12,12 +12,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arkdown::Bundler;
-use arkdown_cache::{BuildCache, BundleCacheKey, CacheKey, CachedEntry, compute_content_hash};
+use arkdown_cache::{compute_content_hash, BuildCache, BundleCacheKey, CacheKey, CachedEntry};
 use arkdown_config::load_config;
-use arkdown_core::{ArkChunk, ArkdownConfig, BuildMode, ChunkIdx, ModuleConfig, ModuleJson5, OutputTarget};
-use index_vec::IndexVec;
-use rolldown_plugin::__inner::SharedPluginable;
-use rustc_hash::FxHashMap;
+use arkdown_core::{
+    ArkChunk, ArkdownConfig, BuildMode, ChunkIdx, ModuleConfig, ModuleJson5, OutputTarget,
+};
 use arkdown_pack::{PackInput, Packager};
 use arkdown_plugin_duplicate_check::DuplicateCheckPlugin;
 use arkdown_plugin_ets_transform::EtsTransformPlugin;
@@ -28,6 +27,9 @@ use arkdown_profile::ProfileProcessor;
 use arkdown_resolver::ResolverConfig;
 use arkdown_resource::{ResourceCompileConfig, ResourceCompileInput, ResourceCompiler};
 use arkdown_ts2abc::{compile_to_abc, Ts2abcInput, Ts2abcOptions};
+use index_vec::IndexVec;
+use rolldown_plugin::__inner::SharedPluginable;
+use rustc_hash::FxHashMap;
 
 fn fixture_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -47,8 +49,10 @@ fn fresh_fixture_copy(src: &Path) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let dst = std::env::temp_dir()
-        .join(format!("arkdown-cache-e2e-{}-{n}-{nonce}", std::process::id()));
+    let dst = std::env::temp_dir().join(format!(
+        "arkdown-cache-e2e-{}-{n}-{nonce}",
+        std::process::id()
+    ));
     copy_dir_no_build(src, &dst);
     dst
 }
@@ -94,6 +98,7 @@ fn collect_js_chunks(
                     .map(|m| m.record_name.clone())
                     .unwrap_or_else(|| name.clone()),
                 source_file: meta.and_then(|m| m.source_file.clone()),
+                source_map: None,
             }
         })
         .collect()
@@ -139,7 +144,10 @@ fn run_bundle_miss(
             fixture.to_path_buf(),
             false,
         )),
-        Arc::new(ModuleMetaPlugin::new(fixture.to_path_buf(), module.name.clone())),
+        Arc::new(ModuleMetaPlugin::new(
+            fixture.to_path_buf(),
+            module.name.clone(),
+        )),
         Arc::new(Json5Plugin),
         Arc::new(DuplicateCheckPlugin),
     ];
@@ -239,10 +247,25 @@ fn run_pipeline(fixture: &Path) -> PathBuf {
             }
             h
         };
-        BundleCacheKey { inner: CacheKey { content_hash: format!("{source_hash:x}"), config_hash: 0, dependency_hash: 0 }, compile_env: String::new() }
+        BundleCacheKey {
+            inner: CacheKey {
+                content_hash: format!("{source_hash:x}"),
+                config_hash: 0,
+                dependency_hash: 0,
+            },
+            compile_env: String::new(),
+        }
     };
 
-    let bundle_out = run_bundle_miss(&rt, fixture, module, config.clone(), &loader_json, &bundle_cache, &bundle_key);
+    let bundle_out = run_bundle_miss(
+        &rt,
+        fixture,
+        module,
+        config.clone(),
+        &loader_json,
+        &bundle_cache,
+        &bundle_key,
+    );
 
     // ABC compilation — wire the incremental cache exactly as build.rs does.
     let bundle_name = &config.product.bundle_name;
@@ -258,7 +281,10 @@ fn run_pipeline(fixture: &Path) -> PathBuf {
             Some((
                 stem,
                 ChunkCompileMeta {
-                    record_name: format!("{}/{}/{}", bundle_name, loader_json.module_name, stripped),
+                    record_name: format!(
+                        "{}/{}/{}",
+                        bundle_name, loader_json.module_name, stripped
+                    ),
                     source_file: Some(ep.clone()),
                 },
             ))
@@ -302,8 +328,8 @@ fn run_pipeline(fixture: &Path) -> PathBuf {
         // Check skip condition (same as build.rs).
         let can_skip = modules_abc.exists()
             && loader_json.compile_entry.iter().all(|ep| {
-                let src = Path::new(&loader_json.module_root_path)
-                    .join(ep.trim_start_matches("./"));
+                let src =
+                    Path::new(&loader_json.module_root_path).join(ep.trim_start_matches("./"));
                 std::fs::read_to_string(&src)
                     .map(|c| {
                         build_cache.is_valid(
@@ -335,8 +361,8 @@ fn run_pipeline(fixture: &Path) -> PathBuf {
 
             // Update module cache entries.
             for ep in &loader_json.compile_entry {
-                let src = Path::new(&loader_json.module_root_path)
-                    .join(ep.trim_start_matches("./"));
+                let src =
+                    Path::new(&loader_json.module_root_path).join(ep.trim_start_matches("./"));
                 if let Ok(content) = std::fs::read_to_string(&src) {
                     let _ = build_cache.insert(CachedEntry {
                         id: ep.clone(),
@@ -429,7 +455,6 @@ fn test_first_build_writes_cache_entries() {
     );
 }
 
-
 /// After a first build the ABC compiler cache file exists.
 #[test]
 fn test_first_build_writes_abc_cache_file() {
@@ -499,8 +524,7 @@ fn test_second_build_uses_bundle_cache_and_produces_identical_abc() {
     let bytes2 = std::fs::read(&abc2).expect("read modules.abc after build 2");
 
     assert_eq!(
-        bytes1,
-        bytes2,
+        bytes1, bytes2,
         "modules.abc must be identical across two consecutive builds (bundle cache correctness)"
     );
 

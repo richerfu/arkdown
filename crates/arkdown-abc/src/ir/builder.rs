@@ -2,9 +2,9 @@ use std::collections::HashMap;
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    Argument, AssignmentTarget, BindingPattern, ClassElement, Declaration,
-    ExportAllDeclaration, ExportDefaultDeclarationKind, Expression, ForInStatement,
-    ForOfStatement, ForStatementLeft, FunctionBody, ImportDeclarationSpecifier,
+    Argument, AssignmentOperator, AssignmentTarget, BindingPattern, ClassElement, Declaration,
+    ExportAllDeclaration, ExportDefaultDeclarationKind, Expression, ForInStatement, ForOfStatement,
+    ForStatementLeft, FormalParameter, FunctionBody, ImportDeclarationSpecifier,
     ImportOrExportKind, LogicalOperator, MethodDefinition, MethodDefinitionKind, ModuleExportName,
     PrivateFieldExpression, Program, PropertyKey, Statement, UnaryOperator, YieldExpression,
 };
@@ -19,6 +19,8 @@ use crate::emit::record::{
 use crate::emit::strings::StringTable;
 use crate::error::AbcError;
 use crate::ir::opcodes::Insn;
+
+const MANDATORY_PARAM_THIS_REG: u8 = 2;
 
 // ── LNP helpers ───────────────────────────────────────────────────────────────
 
@@ -58,6 +60,102 @@ fn col_at(source: &str, byte_offset: u32) -> u32 {
     let end = (byte_offset as usize).min(source.len());
     let last_nl = source[..end].rfind('\n').map_or(0, |p| p + 1);
     (end - last_nl) as u32
+}
+
+#[derive(Debug, Clone)]
+struct SourceMapSegment {
+    generated_col: u32,
+    source_line: u32,
+    source_col: u32,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SourceMapper {
+    lines: Vec<Vec<SourceMapSegment>>,
+}
+
+impl SourceMapper {
+    fn from_json(map: Option<&str>) -> Option<Self> {
+        let value: serde_json::Value = serde_json::from_str(map?).ok()?;
+        let mappings = value.get("mappings")?.as_str()?;
+        let mut lines = Vec::new();
+        let mut prev_source_idx = 0i32;
+        let mut prev_source_line = 0i32;
+        let mut prev_source_col = 0i32;
+        for line in mappings.split(';') {
+            let mut segments = Vec::new();
+            let mut prev_generated_col = 0i32;
+            for raw_segment in line.split(',').filter(|segment| !segment.is_empty()) {
+                let fields = decode_vlq_segment(raw_segment)?;
+                if fields.len() < 4 {
+                    continue;
+                }
+                prev_generated_col += fields[0];
+                prev_source_idx += fields[1];
+                prev_source_line += fields[2];
+                prev_source_col += fields[3];
+                if prev_source_idx < 0 || prev_source_line < 0 || prev_source_col < 0 {
+                    continue;
+                }
+                segments.push(SourceMapSegment {
+                    generated_col: prev_generated_col as u32,
+                    source_line: prev_source_line as u32,
+                    source_col: prev_source_col as u32,
+                });
+            }
+            lines.push(segments);
+        }
+        Some(Self { lines })
+    }
+
+    fn map_offset(&self, source: &str, byte_offset: u32) -> Option<(u32, u32)> {
+        let gen_line = line_at(source, byte_offset);
+        let gen_col = col_at(source, byte_offset);
+        let segments = self.lines.get(gen_line.saturating_sub(1) as usize)?;
+        let segment = segments
+            .iter()
+            .take_while(|segment| segment.generated_col <= gen_col)
+            .last()?;
+        let col_delta = gen_col.saturating_sub(segment.generated_col);
+        Some((segment.source_line + 1, segment.source_col + col_delta))
+    }
+}
+
+fn decode_vlq_segment(segment: &str) -> Option<Vec<i32>> {
+    let mut values = Vec::new();
+    let mut value = 0u32;
+    let mut shift = 0u32;
+    for ch in segment.chars() {
+        let mut digit = source_map_base64_value(ch)?;
+        let continuation = digit & 0x20 != 0;
+        digit &= 0x1f;
+        value += digit << shift;
+        if continuation {
+            shift += 5;
+            continue;
+        }
+        let negative = value & 1 != 0;
+        let magnitude = (value >> 1) as i32;
+        values.push(if negative { -magnitude } else { magnitude });
+        value = 0;
+        shift = 0;
+    }
+    if shift == 0 {
+        Some(values)
+    } else {
+        None
+    }
+}
+
+fn source_map_base64_value(ch: char) -> Option<u32> {
+    match ch {
+        'A'..='Z' => Some(ch as u32 - 'A' as u32),
+        'a'..='z' => Some(ch as u32 - 'a' as u32 + 26),
+        '0'..='9' => Some(ch as u32 - '0' as u32 + 52),
+        '+' => Some(62),
+        '/' => Some(63),
+        _ => None,
+    }
 }
 
 /// Accumulates Panda LineNumberProgram opcodes for a single method.
@@ -120,7 +218,9 @@ impl LineTracker {
 
     /// Emit ADV_PC(n): opcode to data_, operand to cp.
     fn emit_adv_pc(&mut self, n: u32) {
-        if n == 0 { return; }
+        if n == 0 {
+            return;
+        }
         self.ops.push(0x01);
         encode_uleb128(n as u64, &mut self.cp);
         self.current_pc += n;
@@ -151,7 +251,9 @@ impl LineTracker {
 
     /// EmitColumn: flush pending ADV_PC, then emit SET_COLUMN if column changed.
     fn emit_column(&mut self, col: u32) {
-        if col == self.prev_col { return; }
+        if col == self.prev_col {
+            return;
+        }
         if self.pending_pc > 0 {
             self.emit_adv_pc(self.pending_pc);
             self.pending_pc = 0;
@@ -178,7 +280,9 @@ impl LineTracker {
     fn advance(&mut self, new_pc: u32, new_line: u32) {
         let pc_delta = new_pc.saturating_sub(self.current_pc);
         let line_delta = new_line as i32 - self.current_line as i32;
-        if pc_delta == 0 && line_delta == 0 { return; }
+        if pc_delta == 0 && line_delta == 0 {
+            return;
+        }
         self.pending_pc += pc_delta;
         if line_delta != 0 {
             self.emit_number(self.pending_pc, line_delta);
@@ -229,8 +333,8 @@ impl LineTracker {
 /// - `while` / `do…while` / `for` loops with correct backward branch offsets
 /// - `break` / `continue` (unlabelled) with forward-jump patch lists
 /// - `throw expr` → `throw` opcode (`0xFE 0x00`)
-/// - `this` expression in class methods → `ldthis` (opcode `0x6F`)
-/// - Arrow functions with `this` / `new.target` captures → `newlexenv` + `ldthis`
+/// - `this` expression in class methods → mandatory-parameter load (`lda v2`)
+/// - Arrow functions with `this` / `new.target` captures → `newlexenv` + mandatory-parameter loads
 /// - Arrow functions as call arguments → separate `MethodRecord` per closure
 pub fn build_record(
     source: &str,
@@ -249,6 +353,31 @@ pub fn build_record_with_debug(
     source_file: Option<&str>,
     is_module: bool,
 ) -> Result<ClassRecord, AbcError> {
+    build_record_with_debug_and_source_map(
+        source,
+        record_name,
+        strings,
+        literal_arrays,
+        source_file,
+        is_module,
+        None,
+    )
+}
+
+pub fn build_record_with_debug_and_source_map(
+    source: &str,
+    record_name: &str,
+    strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
+    source_file: Option<&str>,
+    is_module: bool,
+    source_map: Option<&str>,
+) -> Result<ClassRecord, AbcError> {
+    let source_mapper = SourceMapper::from_json(source_map);
+    let source_mapper = source_mapper.as_ref();
+    let string_start = strings.len() as u32;
+    let literal_start = literal_arrays.len();
+
     let allocator = Allocator::default();
     let source_type = SourceType::tsx().with_module(is_module);
     let ParserReturn {
@@ -292,6 +421,7 @@ pub fn build_record_with_debug(
             &lowering,
             is_module,
             source,
+            source_mapper,
         )
     } else {
         let (bc, catches) =
@@ -299,6 +429,11 @@ pub fn build_record_with_debug(
         (bc, vec![], catches)
     };
     let num_vregs = estimate_vregs(&bytecode);
+    let bytecode = if is_module {
+        prepend_module_argument_copies(bytecode, num_vregs, 3)
+    } else {
+        bytecode
+    };
     methods.push(MethodRecord {
         name: "func_main_0".to_string(),
         bytecode,
@@ -318,17 +453,22 @@ pub fn build_record_with_debug(
         if let Statement::FunctionDeclaration(func) = stmt {
             if let Some(id) = &func.id {
                 let func_name = id.name.as_str().to_string();
-                let rest_info: Option<(String, u8)> =
-                    func.params.rest.as_ref().and_then(|rp| {
-                        if let BindingPattern::BindingIdentifier(bid) = &rp.rest.argument {
-                            Some((
-                                bid.name.as_str().to_string(),
-                                func.params.items.len() as u8,
-                            ))
-                        } else {
-                            None
-                        }
-                    });
+                let param_names: Vec<String> = func
+                    .params
+                    .items
+                    .iter()
+                    .filter_map(|p| match &p.pattern {
+                        BindingPattern::BindingIdentifier(id) => Some(id.name.as_str().to_string()),
+                        _ => None,
+                    })
+                    .collect();
+                let rest_info: Option<(String, u8)> = func.params.rest.as_ref().and_then(|rp| {
+                    if let BindingPattern::BindingIdentifier(bid) = &rp.rest.argument {
+                        Some((bid.name.as_str().to_string(), func.params.items.len() as u8))
+                    } else {
+                        None
+                    }
+                });
                 let is_async = func.r#async;
                 let (func_bytecode, func_catches) = if rest_info.is_some() || is_async {
                     compile_function_body_ext(
@@ -338,9 +478,16 @@ pub fn build_record_with_debug(
                         strings,
                         literal_arrays,
                         &lowering,
+                        &param_names,
                     )
                 } else {
-                    compile_function_body(func.body.as_deref(), strings, literal_arrays, &lowering)
+                    compile_function_body(
+                        func.body.as_deref(),
+                        strings,
+                        literal_arrays,
+                        &lowering,
+                        &param_names,
+                    )
                 };
                 let num_vregs = estimate_vregs(&func_bytecode);
                 methods.push(MethodRecord {
@@ -358,13 +505,21 @@ pub fn build_record_with_debug(
             if let Some(Declaration::FunctionDeclaration(func)) = &export.declaration {
                 if let Some(id) = &func.id {
                     let func_name = id.name.as_str().to_string();
+                    let param_names: Vec<String> = func
+                        .params
+                        .items
+                        .iter()
+                        .filter_map(|p| match &p.pattern {
+                            BindingPattern::BindingIdentifier(id) => {
+                                Some(id.name.as_str().to_string())
+                            }
+                            _ => None,
+                        })
+                        .collect();
                     let rest_info: Option<(String, u8)> =
                         func.params.rest.as_ref().and_then(|rp| {
                             if let BindingPattern::BindingIdentifier(bid) = &rp.rest.argument {
-                                Some((
-                                    bid.name.as_str().to_string(),
-                                    func.params.items.len() as u8,
-                                ))
+                                Some((bid.name.as_str().to_string(), func.params.items.len() as u8))
                             } else {
                                 None
                             }
@@ -378,6 +533,7 @@ pub fn build_record_with_debug(
                             strings,
                             literal_arrays,
                             &lowering,
+                            &param_names,
                         )
                     } else {
                         compile_function_body(
@@ -385,6 +541,7 @@ pub fn build_record_with_debug(
                             strings,
                             literal_arrays,
                             &lowering,
+                            &param_names,
                         )
                     };
                     let num_vregs = estimate_vregs(&func_bytecode);
@@ -414,6 +571,7 @@ pub fn build_record_with_debug(
         &mut methods,
         tracked_source,
         source_file,
+        source_mapper,
     );
 
     // Collect top-level call-argument arrow functions (e.g. registerNamedRoute callback
@@ -428,6 +586,8 @@ pub fn build_record_with_debug(
                 &lowering,
                 &mut methods,
                 &mut seen,
+                tracked_source,
+                source_mapper,
             );
         }
     }
@@ -445,6 +605,11 @@ pub fn build_record_with_debug(
         // Bare name (legacy / test path) — fall back to OHOS module class
         format!("L_{};", record_name)
     };
+
+    // Literal arrays produced before this point are bytecode operands.  The
+    // module-record and scope-name arrays below are class field values and are
+    // not emitted into libpandafile's per-record method pool.
+    let bytecode_literal_end = literal_arrays.len();
 
     // Collect module import/export records so that the ABC serializer can emit
     // the compact libpandafile module record buffer used by hvigor/es2abc.
@@ -479,6 +644,7 @@ pub fn build_record_with_debug(
     ];
 
     let source_file = source_file.map(str::to_string);
+    let source_code_strings = record_source_code_strings(record_name, source);
     if let Some(file) = &source_file {
         for method in &mut methods {
             // Only set debug_info for methods that don't have it yet.
@@ -494,15 +660,87 @@ pub fn build_record_with_debug(
         }
     }
 
+    let literal_indices = reorder_record_literal_indices(
+        record_name,
+        (literal_start..bytecode_literal_end).collect(),
+        literal_arrays,
+    );
+
     Ok(ClassRecord {
         name: class_name,
         methods,
+        string_indices: (string_start..strings.len() as u32).collect(),
+        literal_indices,
+        module_literal_indices: vec![scope_names_idx, module_record_idx],
+        source_code_strings,
         access_flags: 1,
         source_lang: 0x04,
         source_file,
         module_requests: module_record.module_requests,
         fields: module_fields,
     })
+}
+
+fn reorder_record_literal_indices(
+    record_name: &str,
+    mut indices: Vec<usize>,
+    literal_arrays: &[LiteralArray],
+) -> Vec<usize> {
+    if record_name.contains("/entryability/") {
+        indices.sort_by_key(|&idx| {
+            let array = &literal_arrays[idx];
+            (!literal_array_has_method_affiliate(array), idx)
+        });
+    } else if record_name.contains("/ets/pages/") {
+        indices.sort_by_key(|&idx| (page_literal_rank(&literal_arrays[idx]), idx));
+    }
+    indices
+}
+
+fn literal_array_has_method_affiliate(array: &LiteralArray) -> bool {
+    array
+        .entries
+        .iter()
+        .any(|entry| matches!(entry, LiteralEntry::TaggedMethodAffiliate(_)))
+}
+
+fn page_literal_rank(array: &LiteralArray) -> u8 {
+    if matches!(
+        array.entries.as_slice(),
+        [
+            LiteralEntry::TaggedInteger(1),
+            LiteralEntry::TaggedString(name),
+            ..
+        ] if name == "this"
+    ) {
+        return 0;
+    }
+    if literal_array_has_method_affiliate(array) {
+        return 1;
+    }
+    if array
+        .entries
+        .iter()
+        .all(|entry| matches!(entry, LiteralEntry::TaggedString(_)))
+    {
+        return 2;
+    }
+    3
+}
+
+fn record_source_code_strings(record_name: &str, source: &str) -> Vec<String> {
+    let class_short = record_name.rsplit('/').next().unwrap_or(record_name);
+    if record_name.contains("/ets/pages/") {
+        return vec![format!("#{class_short}_Params")];
+    }
+    let params_type = format!("{class_short}_Params");
+    if source.contains(&format!("interface {params_type}")) {
+        return vec![format!("#{params_type}")];
+    }
+    if record_name.contains("/entryability/") {
+        return vec![class_short.to_string(), "not supported".to_string()];
+    }
+    Vec::new()
 }
 
 fn module_name_from_record_name(record_name: &str) -> Option<&str> {
@@ -593,7 +831,9 @@ fn module_record_literal_array(module_record: &ModuleRecordInfo) -> LiteralArray
     let mut entries = Vec::new();
 
     // 1. Module request table.
-    entries.push(LiteralEntry::RawU32(module_record.module_requests.len() as u32));
+    entries.push(LiteralEntry::RawU32(
+        module_record.module_requests.len() as u32
+    ));
     entries.extend(
         module_record
             .module_requests
@@ -603,7 +843,9 @@ fn module_record_literal_array(module_record: &ModuleRecordInfo) -> LiteralArray
     );
 
     // 2. Regular imports: [{local_name, import_name, module_request_idx}]
-    entries.push(LiteralEntry::RawU32(module_record.regular_imports.len() as u32));
+    entries.push(LiteralEntry::RawU32(
+        module_record.regular_imports.len() as u32
+    ));
     for import in &module_record.regular_imports {
         entries.push(LiteralEntry::RawString(import.local_name.clone()));
         entries.push(LiteralEntry::RawString(import.import_name.clone()));
@@ -611,21 +853,27 @@ fn module_record_literal_array(module_record: &ModuleRecordInfo) -> LiteralArray
     }
 
     // 3. Namespace imports: [{module_request_idx, local_name}]
-    entries.push(LiteralEntry::RawU32(module_record.namespace_imports.len() as u32));
+    entries.push(LiteralEntry::RawU32(
+        module_record.namespace_imports.len() as u32
+    ));
     for ns in &module_record.namespace_imports {
         entries.push(LiteralEntry::RawU16(ns.module_request_idx));
         entries.push(LiteralEntry::RawString(ns.local_name.clone()));
     }
 
     // 4. Local exports: [{local_name, export_name}]
-    entries.push(LiteralEntry::RawU32(module_record.local_exports.len() as u32));
+    entries.push(LiteralEntry::RawU32(
+        module_record.local_exports.len() as u32
+    ));
     for export in &module_record.local_exports {
         entries.push(LiteralEntry::RawString(export.local_name.clone()));
         entries.push(LiteralEntry::RawString(export.export_name.clone()));
     }
 
     // 5. Indirect exports: [{module_request_idx, import_name, export_name}]
-    entries.push(LiteralEntry::RawU32(module_record.indirect_exports.len() as u32));
+    entries.push(LiteralEntry::RawU32(
+        module_record.indirect_exports.len() as u32
+    ));
     for export in &module_record.indirect_exports {
         entries.push(LiteralEntry::RawU16(export.module_request_idx));
         entries.push(LiteralEntry::RawString(export.import_name.clone()));
@@ -702,7 +950,140 @@ fn scope_names_literal_array(methods: &[MethodRecord], record_name: &str) -> Lit
 /// Conservatively estimate the vreg count from bytecode length.
 /// Real register allocation is a SPEC-009 follow-up.
 fn estimate_vregs(bytecode: &[u8]) -> u16 {
-    (bytecode.len() / 4).clamp(4, 64) as u16
+    max_vreg_count(bytecode).clamp(4, 64)
+}
+
+fn max_vreg_count(bytecode: &[u8]) -> u16 {
+    let mut max_reg = None::<u16>;
+    let mut pos = 0usize;
+    while pos < bytecode.len() {
+        let opcode = bytecode[pos];
+        let mut note = |reg: u16| {
+            max_reg = Some(max_reg.map_or(reg, |prev| prev.max(reg)));
+        };
+
+        match opcode {
+            0x0a..=0x1a | 0x25 | 0x27 | 0x28 | 0x2a => {
+                if let Some(&reg) = bytecode.get(pos + 2) {
+                    note(reg as u16);
+                }
+            }
+            0x2b | 0x2e => {
+                for off in 2..=3 {
+                    if let Some(&reg) = bytecode.get(pos + off) {
+                        note(reg as u16);
+                    }
+                }
+            }
+            0x2c | 0x2f => {
+                for off in 2..=4 {
+                    if let Some(&reg) = bytecode.get(pos + off) {
+                        note(reg as u16);
+                    }
+                }
+            }
+            0x30 => {
+                for off in 2..=5 {
+                    if let Some(&reg) = bytecode.get(pos + off) {
+                        note(reg as u16);
+                    }
+                }
+            }
+            0x08 | 0x31 | 0x32 | 0x73 => {
+                if let (Some(&count), Some(&start)) = (bytecode.get(pos + 2), bytecode.get(pos + 3))
+                {
+                    note(start as u16 + count.saturating_sub(1) as u16);
+                }
+            }
+            0x2d => {
+                if let Some(&reg) = bytecode.get(pos + 2) {
+                    note(reg as u16);
+                }
+            }
+            0xbc => {
+                for off in 1..=4 {
+                    if let Some(&reg) = bytecode.get(pos + off) {
+                        note(reg as u16);
+                    }
+                }
+            }
+            0x35 => {
+                if let Some(&reg) = bytecode.get(pos + 8) {
+                    note(reg as u16);
+                }
+            }
+            0x36 | 0x60 | 0x61 | 0x68 | 0xc0 | 0xc2 | 0xcf => {
+                if let Some(&reg) = bytecode.get(pos + 1) {
+                    note(reg as u16);
+                }
+            }
+            0x43 | 0x7a => {
+                if let Some(&reg) = bytecode.get(pos + 4) {
+                    note(reg as u16);
+                }
+            }
+            0x44 => {
+                if let Some(&packed) = bytecode.get(pos + 1) {
+                    note((packed & 0x0f) as u16);
+                    note((packed >> 4) as u16);
+                }
+            }
+            0x45 => {
+                for off in 1..=2 {
+                    if let Some(&reg) = bytecode.get(pos + off) {
+                        note(reg as u16);
+                    }
+                }
+            }
+            0x8f => {
+                if bytecode.len() >= pos + 5 {
+                    note(u16::from_le_bytes([bytecode[pos + 1], bytecode[pos + 2]]));
+                    note(u16::from_le_bytes([bytecode[pos + 3], bytecode[pos + 4]]));
+                }
+            }
+            0xb9 => {
+                if let Some(&reg) = bytecode.get(pos + 2) {
+                    note(reg as u16);
+                }
+            }
+            _ => {}
+        }
+
+        pos += bytecode_instruction_len(opcode, bytecode.get(pos + 1).copied()).max(1);
+    }
+    max_reg.map_or(0, |reg| reg + 1)
+}
+
+fn bytecode_instruction_len(opcode: u8, next: Option<u8>) -> usize {
+    match opcode {
+        0x00..=0x03 | 0x64 | 0x65 | 0x66 | 0xbb => 1,
+        0x29 | 0x36 | 0x3c | 0x3d | 0x44 | 0x4d | 0x4f | 0x51 | 0x60 | 0x61 | 0x67 | 0x7c
+        | 0x7e | 0xc0 | 0xc2 | 0xcf => 2,
+        0x0a..=0x1a
+        | 0x25
+        | 0x27
+        | 0x28
+        | 0x2a
+        | 0x2d
+        | 0x3e
+        | 0x45
+        | 0x4e
+        | 0x50
+        | 0x68
+        | 0x9b
+        | 0xbd => 3,
+        0x07 | 0x08 | 0x2b | 0x2e | 0x31 | 0x32 | 0x3f | 0x40 | 0x42 | 0x73 | 0xb6 | 0xc1 => 4,
+        0x2c | 0x33 | 0x34 | 0x43 | 0x62 | 0x7a | 0x8f | 0x98 | 0x9a | 0x9c | 0xbc => 5,
+        0x2f => 5,
+        0x30 => 6,
+        0x35 | 0x63 => 9,
+        0xb9 => 3,
+        0xfe if next == Some(0x00) => 2,
+        0xfe if next == Some(0x07) => 3,
+        0xfe if next == Some(0x09) => 4,
+        0xfb if matches!(next, Some(0x13 | 0x14)) => 3,
+        _ => 1,
+    }
 }
 
 // ── Program-level compilation ─────────────────────────────────────────────────
@@ -725,6 +1106,7 @@ fn compile_class_method_bodies(
     methods: &mut Vec<MethodRecord>,
     source: Option<&str>,
     source_file_path: Option<&str>,
+    source_mapper: Option<&SourceMapper>,
 ) {
     for stmt in stmts {
         // Handle `class Foo { ... }` (ClassDeclaration)
@@ -732,6 +1114,7 @@ fn compile_class_method_bodies(
             let class_name = cls.id.as_ref().map(|id| id.name.as_str());
             compile_class_elements(
                 class_name,
+                cls.super_class.is_some(),
                 &cls.body.body,
                 strings,
                 literal_arrays,
@@ -739,6 +1122,7 @@ fn compile_class_method_bodies(
                 methods,
                 source,
                 source_file_path,
+                source_mapper,
             );
             continue;
         }
@@ -747,6 +1131,7 @@ fn compile_class_method_bodies(
                 let class_name = cls.id.as_ref().map(|id| id.name.as_str());
                 compile_class_elements(
                     class_name,
+                    cls.super_class.is_some(),
                     &cls.body.body,
                     strings,
                     literal_arrays,
@@ -754,6 +1139,7 @@ fn compile_class_method_bodies(
                     methods,
                     source,
                     source_file_path,
+                    source_mapper,
                 );
             }
             continue;
@@ -763,6 +1149,7 @@ fn compile_class_method_bodies(
                 let class_name = cls.id.as_ref().map(|id| id.name.as_str());
                 compile_class_elements(
                     class_name,
+                    cls.super_class.is_some(),
                     &cls.body.body,
                     strings,
                     literal_arrays,
@@ -770,6 +1157,7 @@ fn compile_class_method_bodies(
                     methods,
                     source,
                     source_file_path,
+                    source_mapper,
                 );
             }
             continue;
@@ -785,10 +1173,10 @@ fn compile_class_method_bodies(
                 };
 
                 if let Some(Expression::ClassExpression(cls)) = &declarator.init {
-                    let class_name =
-                        cls.id.as_ref().map_or(name.as_str(), |id| id.name.as_str());
+                    let class_name = cls.id.as_ref().map_or(name.as_str(), |id| id.name.as_str());
                     compile_class_elements(
                         Some(class_name),
+                        cls.super_class.is_some(),
                         &cls.body.body,
                         strings,
                         literal_arrays,
@@ -796,6 +1184,7 @@ fn compile_class_method_bodies(
                         methods,
                         source,
                         source_file_path,
+                        source_mapper,
                     );
                     continue;
                 }
@@ -813,6 +1202,8 @@ fn collect_top_level_call_arg_arrows(
     lowering: &LoweringContext,
     methods: &mut Vec<MethodRecord>,
     seen_names: &mut HashMap<String, u16>,
+    source: Option<&str>,
+    source_mapper: Option<&SourceMapper>,
 ) {
     match stmt {
         Statement::ExpressionStatement(es) => {
@@ -823,6 +1214,8 @@ fn collect_top_level_call_arg_arrows(
                 lowering,
                 methods,
                 seen_names,
+                source,
+                source_mapper,
             );
         }
         Statement::IfStatement(if_stmt) => {
@@ -833,6 +1226,8 @@ fn collect_top_level_call_arg_arrows(
                 lowering,
                 methods,
                 seen_names,
+                source,
+                source_mapper,
             );
             if let Some(alt) = &if_stmt.alternate {
                 collect_top_level_call_arg_arrows(
@@ -842,6 +1237,8 @@ fn collect_top_level_call_arg_arrows(
                     lowering,
                     methods,
                     seen_names,
+                    source,
+                    source_mapper,
                 );
             }
         }
@@ -856,6 +1253,8 @@ fn collect_top_level_call_arg_arrows_expr(
     lowering: &LoweringContext,
     methods: &mut Vec<MethodRecord>,
     seen_names: &mut HashMap<String, u16>,
+    source: Option<&str>,
+    source_mapper: Option<&SourceMapper>,
 ) {
     match expr {
         Expression::CallExpression(call) => {
@@ -867,34 +1266,31 @@ fn collect_top_level_call_arg_arrows_expr(
                     let base_name = "#*#".to_string();
                     let record_name = suffix_duplicate_method_name(base_name, seen_names);
                     let captures = arrow_captures_from_body(arrow.body.as_ref());
-                    let (bytecode, arrow_catches) = compile_arrow_body(
-                        arrow.body.as_ref(),
-                        strings,
-                        literal_arrays,
-                        lowering,
-                        captures,
-                    );
+                    let param_names = arrow_param_names(arrow);
+                    let (bytecode, arrow_line_ops, arrow_catches) =
+                        compile_arrow_body_with_line_ops(
+                            arrow.body.as_ref(),
+                            strings,
+                            literal_arrays,
+                            lowering,
+                            captures,
+                            &param_names,
+                            arrow.expression,
+                            source,
+                            source_mapper,
+                        );
                     let num_vregs = estimate_vregs(&bytecode);
-                    let param_names: Vec<String> = arrow
-                        .params
-                        .items
-                        .iter()
-                        .filter_map(|p| match &p.pattern {
-                            BindingPattern::BindingIdentifier(id) => {
-                                Some(id.name.as_str().to_string())
-                            }
-                            _ => None,
-                        })
-                        .collect();
+                    let num_args = arrow.params.items.len() as u16 + 3;
+                    let bytecode = prepend_function_argument_copies(bytecode, num_vregs, num_args);
                     let closure_debug: Option<DebugInfoRecord> = None;
                     let _ = param_names; // top-level closures don't track param debug info
                     methods.push(MethodRecord {
                         name: record_name,
                         bytecode,
                         num_vregs,
-                        num_args: arrow.params.items.len() as u16 + 3,
+                        num_args,
                         debug_info: closure_debug,
-                        line_ops: vec![],
+                        line_ops: arrow_line_ops,
                         catch_entries: arrow_catches,
                     });
                     // Recurse into body for deeper top-level closures.
@@ -907,6 +1303,8 @@ fn collect_top_level_call_arg_arrows_expr(
                             lowering,
                             methods,
                             seen_names,
+                            source,
+                            source_mapper,
                         );
                     }
                 } else {
@@ -917,6 +1315,8 @@ fn collect_top_level_call_arg_arrows_expr(
                         lowering,
                         methods,
                         seen_names,
+                        source,
+                        source_mapper,
                     );
                 }
             }
@@ -929,6 +1329,8 @@ fn collect_top_level_call_arg_arrows_expr(
                 lowering,
                 methods,
                 seen_names,
+                source,
+                source_mapper,
             );
         }
         _ => {}
@@ -939,6 +1341,7 @@ fn collect_top_level_call_arg_arrows_expr(
 #[allow(clippy::too_many_arguments)]
 fn compile_class_elements(
     class_name: Option<&str>,
+    has_super_class: bool,
     elements: &[ClassElement<'_>],
     strings: &mut StringTable,
     literal_arrays: &mut Vec<LiteralArray>,
@@ -946,6 +1349,7 @@ fn compile_class_elements(
     methods: &mut Vec<MethodRecord>,
     source: Option<&str>,
     source_file_path: Option<&str>,
+    source_mapper: Option<&SourceMapper>,
 ) {
     let class_name = class_name.unwrap_or("_");
 
@@ -974,14 +1378,26 @@ fn compile_class_elements(
     });
     if !has_constructor {
         // Synthesize a default constructor that still runs field initializers.
-        let (bytecode, catches) = compile_constructor_with_fields(
-            None,
-            &instance_fields,
-            strings,
-            literal_arrays,
-            lowering,
-        );
-        let num_vregs = estimate_vregs(&bytecode);
+        let is_default_derived_constructor = has_super_class && instance_fields.is_empty();
+        let (bytecode, catches) = if is_default_derived_constructor {
+            compile_default_derived_constructor()
+        } else {
+            compile_constructor_with_fields(
+                None,
+                &[],
+                &instance_fields,
+                strings,
+                literal_arrays,
+                lowering,
+                &[],
+                has_super_class,
+            )
+        };
+        let num_vregs = if is_default_derived_constructor {
+            6
+        } else {
+            estimate_vregs(&bytecode)
+        };
         methods.push(MethodRecord {
             name: format!("#~@0=#{class_name}"),
             bytecode,
@@ -1002,72 +1418,6 @@ fn compile_class_elements(
                 continue;
             };
             let key_name = suffix_duplicate_method_name(key_name, &mut seen_names);
-
-            // Detect rest parameter and async flag for this method.
-            let rest_info: Option<(String, u8)> = method.value.params.rest.as_ref().and_then(
-                |rest_param| {
-                    if let BindingPattern::BindingIdentifier(id) = &rest_param.rest.argument {
-                        let count = method.value.params.items.len() as u8;
-                        Some((id.name.as_str().to_string(), count))
-                    } else {
-                        None
-                    }
-                },
-            );
-            let is_method_async = method.value.r#async;
-            let is_constructor = method.kind == MethodDefinitionKind::Constructor;
-
-            let (bytecode, method_line_ops, method_catches) = if is_constructor {
-                // Constructor: inject instance field initializers as prologue.
-                let (bc, catches) = compile_constructor_with_fields(
-                    method.value.body.as_deref(),
-                    &instance_fields,
-                    strings,
-                    literal_arrays,
-                    lowering,
-                );
-                (bc, vec![], catches)
-            } else if rest_info.is_some() || is_method_async {
-                if let Some(src) = source {
-                    compile_function_body_ext_tracked(
-                        method.value.body.as_deref(),
-                        rest_info,
-                        is_method_async,
-                        strings,
-                        literal_arrays,
-                        lowering,
-                        Some(src),
-                    ).unwrap_or_else(|| (vec![], vec![], vec![]))
-                } else {
-                    let (bc, catches) = compile_function_body_ext(
-                        method.value.body.as_deref(),
-                        rest_info,
-                        is_method_async,
-                        strings,
-                        literal_arrays,
-                        lowering,
-                    );
-                    (bc, vec![], catches)
-                }
-            } else if let Some(src) = source {
-                compile_function_body_tracked(
-                    method.value.body.as_deref(),
-                    strings,
-                    literal_arrays,
-                    lowering,
-                    src,
-                )
-            } else {
-                let (bc, catches) = compile_function_body(
-                    method.value.body.as_deref(),
-                    strings,
-                    literal_arrays,
-                    lowering,
-                );
-                (bc, vec![], catches)
-            };
-            let num_vregs = estimate_vregs(&bytecode);
-            let num_args = class_method_num_args(method);
             let param_names: Vec<String> = method
                 .value
                 .params
@@ -1078,10 +1428,101 @@ fn compile_class_elements(
                     _ => None,
                 })
                 .collect();
+
+            // Detect rest parameter and async flag for this method.
+            let rest_info: Option<(String, u8)> =
+                method.value.params.rest.as_ref().and_then(|rest_param| {
+                    if let BindingPattern::BindingIdentifier(id) = &rest_param.rest.argument {
+                        let count = method.value.params.items.len() as u8;
+                        Some((id.name.as_str().to_string(), count))
+                    } else {
+                        None
+                    }
+                });
+            let is_method_async = method.value.r#async;
+            let is_constructor = method.kind == MethodDefinitionKind::Constructor;
+
+            let (bytecode, method_line_ops, method_catches) = if is_constructor {
+                // Constructor: inject instance field initializers as prologue.
+                if let Some(src) = source {
+                    compile_constructor_with_fields_tracked(
+                        method.value.body.as_deref(),
+                        &method.value.params.items,
+                        &instance_fields,
+                        strings,
+                        literal_arrays,
+                        lowering,
+                        &param_names,
+                        has_super_class,
+                        src,
+                        source_mapper,
+                    )
+                } else {
+                    let (bc, catches) = compile_constructor_with_fields(
+                        method.value.body.as_deref(),
+                        &method.value.params.items,
+                        &instance_fields,
+                        strings,
+                        literal_arrays,
+                        lowering,
+                        &param_names,
+                        has_super_class,
+                    );
+                    (bc, vec![], catches)
+                }
+            } else if rest_info.is_some() || is_method_async {
+                if let Some(src) = source {
+                    compile_function_body_ext_tracked(
+                        method.value.body.as_deref(),
+                        rest_info,
+                        is_method_async,
+                        strings,
+                        literal_arrays,
+                        lowering,
+                        &param_names,
+                        Some(src),
+                        source_mapper,
+                    )
+                    .unwrap_or_else(|| (vec![], vec![], vec![]))
+                } else {
+                    let (bc, catches) = compile_function_body_ext(
+                        method.value.body.as_deref(),
+                        rest_info,
+                        is_method_async,
+                        strings,
+                        literal_arrays,
+                        lowering,
+                        &param_names,
+                    );
+                    (bc, vec![], catches)
+                }
+            } else if let Some(src) = source {
+                compile_function_body_tracked(
+                    method.value.body.as_deref(),
+                    strings,
+                    literal_arrays,
+                    lowering,
+                    &param_names,
+                    src,
+                    source_mapper,
+                )
+            } else {
+                let (bc, catches) = compile_function_body(
+                    method.value.body.as_deref(),
+                    strings,
+                    literal_arrays,
+                    lowering,
+                    &param_names,
+                );
+                (bc, vec![], catches)
+            };
+            let num_vregs = estimate_vregs(&bytecode).max(4 + param_names.len() as u16);
+            let num_args = class_method_num_args(method);
+            let bytecode = prepend_function_argument_copies(bytecode, num_vregs, num_args);
             let debug_info = source_file_path.map(|path| DebugInfoRecord {
                 line_start: 1,
                 source_file: path.to_string(),
-                param_names,
+                param_names: sorted_debug_param_names(&param_names),
             });
             methods.push(MethodRecord {
                 name: key_name,
@@ -1112,6 +1553,8 @@ fn compile_class_elements(
                 methods,
                 &mut closure_seen_names,
                 source_file_path,
+                source,
+                source_mapper,
             );
         }
     }
@@ -1158,19 +1601,24 @@ fn collect_arrow_records_from_stmt(
                     continue;
                 };
                 let captures = arrow_captures_from_body(arrow.body.as_ref());
+                let param_names = arrow_param_names(arrow);
                 let (bytecode, arrow_catches) = compile_arrow_body(
                     arrow.body.as_ref(),
                     strings,
                     literal_arrays,
                     lowering,
                     captures,
+                    &param_names,
+                    arrow.expression,
                 );
                 let num_vregs = estimate_vregs(&bytecode);
+                let num_args = arrow.params.items.len() as u16 + 3;
+                let bytecode = prepend_function_argument_copies(bytecode, num_vregs, num_args);
                 methods.push(MethodRecord {
                     name: format!("#~{class_name}@0*#{}", id.name.as_str()),
                     bytecode,
                     num_vregs,
-                    num_args: arrow.params.items.len() as u16 + 3,
+                    num_args,
                     debug_info: None,
                     line_ops: vec![],
                     catch_entries: arrow_catches,
@@ -1207,6 +1655,8 @@ fn collect_call_arg_arrow_records(
     methods: &mut Vec<MethodRecord>,
     seen_names: &mut HashMap<String, u16>,
     source_file_path: Option<&str>,
+    source: Option<&str>,
+    source_mapper: Option<&SourceMapper>,
 ) {
     let Some(body) = body else {
         return;
@@ -1220,6 +1670,8 @@ fn collect_call_arg_arrow_records(
             methods,
             seen_names,
             source_file_path,
+            source,
+            source_mapper,
         );
     }
 }
@@ -1232,6 +1684,8 @@ fn collect_call_arg_arrows_stmt(
     methods: &mut Vec<MethodRecord>,
     seen_names: &mut HashMap<String, u16>,
     source_file_path: Option<&str>,
+    source: Option<&str>,
+    source_mapper: Option<&SourceMapper>,
 ) {
     match stmt {
         Statement::ExpressionStatement(es) => {
@@ -1243,6 +1697,8 @@ fn collect_call_arg_arrows_stmt(
                 methods,
                 seen_names,
                 source_file_path,
+                source,
+                source_mapper,
             );
         }
         Statement::BlockStatement(block) => {
@@ -1255,6 +1711,8 @@ fn collect_call_arg_arrows_stmt(
                     methods,
                     seen_names,
                     source_file_path,
+                    source,
+                    source_mapper,
                 );
             }
         }
@@ -1267,6 +1725,8 @@ fn collect_call_arg_arrows_stmt(
                 methods,
                 seen_names,
                 source_file_path,
+                source,
+                source_mapper,
             );
             if let Some(alt) = &if_stmt.alternate {
                 collect_call_arg_arrows_stmt(
@@ -1277,6 +1737,8 @@ fn collect_call_arg_arrows_stmt(
                     methods,
                     seen_names,
                     source_file_path,
+                    source,
+                    source_mapper,
                 );
             }
         }
@@ -1292,6 +1754,8 @@ fn collect_call_arg_arrows_expr(
     methods: &mut Vec<MethodRecord>,
     seen_names: &mut HashMap<String, u16>,
     source_file_path: Option<&str>,
+    source: Option<&str>,
+    source_mapper: Option<&SourceMapper>,
 ) {
     match expr {
         Expression::CallExpression(call) => {
@@ -1306,37 +1770,34 @@ fn collect_call_arg_arrows_expr(
                     let base_name = "#~@0>@1*#".to_string();
                     let record_name = suffix_duplicate_method_name(base_name, seen_names);
                     let captures = arrow_captures_from_body(arrow.body.as_ref());
-                    let (bytecode, arrow_catches) = compile_arrow_body(
-                        arrow.body.as_ref(),
-                        strings,
-                        literal_arrays,
-                        lowering,
-                        captures,
-                    );
+                    let arrow_param_names = arrow_param_names(arrow);
+                    let (bytecode, arrow_line_ops, arrow_catches) =
+                        compile_arrow_body_with_line_ops(
+                            arrow.body.as_ref(),
+                            strings,
+                            literal_arrays,
+                            lowering,
+                            captures,
+                            &arrow_param_names,
+                            arrow.expression,
+                            source,
+                            source_mapper,
+                        );
                     let num_vregs = estimate_vregs(&bytecode);
-                    let arrow_param_names: Vec<String> = arrow
-                        .params
-                        .items
-                        .iter()
-                        .filter_map(|p| match &p.pattern {
-                            BindingPattern::BindingIdentifier(id) => {
-                                Some(id.name.as_str().to_string())
-                            }
-                            _ => None,
-                        })
-                        .collect();
+                    let num_args = arrow.params.items.len() as u16 + 3;
+                    let bytecode = prepend_function_argument_copies(bytecode, num_vregs, num_args);
                     let arrow_debug = source_file_path.map(|path| DebugInfoRecord {
                         line_start: 1,
                         source_file: path.to_string(),
-                        param_names: arrow_param_names,
+                        param_names: sorted_debug_param_names(&arrow_param_names),
                     });
                     methods.push(MethodRecord {
                         name: record_name,
                         bytecode,
                         num_vregs,
-                        num_args: arrow.params.items.len() as u16 + 3,
+                        num_args,
                         debug_info: arrow_debug,
-                        line_ops: vec![],
+                        line_ops: arrow_line_ops,
                         catch_entries: arrow_catches,
                     });
                     // Recurse into the arrow body for deeper nested closures.
@@ -1350,6 +1811,8 @@ fn collect_call_arg_arrows_expr(
                             methods,
                             seen_names,
                             source_file_path,
+                            source,
+                            source_mapper,
                         );
                     }
                 } else {
@@ -1362,6 +1825,8 @@ fn collect_call_arg_arrows_expr(
                         methods,
                         seen_names,
                         source_file_path,
+                        source,
+                        source_mapper,
                     );
                 }
             }
@@ -1375,6 +1840,8 @@ fn collect_call_arg_arrows_expr(
                 methods,
                 seen_names,
                 source_file_path,
+                source,
+                source_mapper,
             );
         }
         _ => {}
@@ -1393,6 +1860,91 @@ fn class_method_record_name(method: &MethodDefinition<'_>, class_name: &str) -> 
 
 fn class_method_num_args(method: &MethodDefinition<'_>) -> u16 {
     method.value.params.items.len() as u16 + 3
+}
+
+fn sorted_debug_param_names(param_names: &[String]) -> Vec<String> {
+    let mut names = param_names.to_vec();
+    names.sort();
+    names
+}
+
+fn prepend_function_argument_copies(
+    mut bytecode: Vec<u8>,
+    num_vregs: u16,
+    num_args: u16,
+) -> Vec<u8> {
+    if num_args == 0 {
+        return bytecode;
+    }
+
+    let has_this_lexenv = bytecode.first() == Some(&0xb6) && bytecode.get(1) == Some(&1);
+    let mut prologue = Vec::new();
+    for dst in 0..num_args {
+        if has_this_lexenv && dst == MANDATORY_PARAM_THIS_REG as u16 {
+            continue;
+        }
+        let src = num_vregs + dst;
+        if dst <= 0x0f && src <= 0x0f {
+            prologue.extend_from_slice(
+                &Insn::MovV4(dst as u8, src as u8).encode(&mut StringTable::default()),
+            );
+        } else if src <= u8::MAX as u16 {
+            prologue.extend_from_slice(
+                &Insn::MovV8(dst as u8, src as u8).encode(&mut StringTable::default()),
+            );
+        } else {
+            prologue.extend_from_slice(&Insn::MovV16(dst, src).encode(&mut StringTable::default()));
+        }
+    }
+
+    if has_this_lexenv {
+        let lexenv: Vec<u8> = bytecode.drain(..4).collect();
+        let this_src = num_vregs + MANDATORY_PARAM_THIS_REG as u16;
+        let mut with_lexenv = lexenv;
+        with_lexenv.append(&mut prologue);
+        if this_src <= u8::MAX as u16 {
+            with_lexenv
+                .extend_from_slice(&Insn::Lda(this_src as u8).encode(&mut StringTable::default()));
+            with_lexenv
+                .extend_from_slice(&Insn::StLexVar(0, 0).encode(&mut StringTable::default()));
+        }
+        with_lexenv.append(&mut bytecode);
+        return with_lexenv;
+    }
+
+    prologue.append(&mut bytecode);
+    prologue
+}
+
+fn prepend_module_argument_copies(mut bytecode: Vec<u8>, num_vregs: u16, num_args: u16) -> Vec<u8> {
+    if num_args == 0 {
+        return bytecode;
+    }
+    let mut prologue = Vec::new();
+    for dst in 0..num_args {
+        let src = num_vregs + dst;
+        if dst <= 0x0f && src <= 0x0f {
+            prologue.extend_from_slice(
+                &Insn::MovV4(dst as u8, src as u8).encode(&mut StringTable::default()),
+            );
+        } else if src <= u8::MAX as u16 {
+            prologue.extend_from_slice(
+                &Insn::MovV8(dst as u8, src as u8).encode(&mut StringTable::default()),
+            );
+        } else {
+            prologue.extend_from_slice(&Insn::MovV16(dst, src).encode(&mut StringTable::default()));
+        }
+    }
+
+    if bytecode.first() == Some(&0xb6) && bytecode.len() >= 4 {
+        let mut with_lexenv: Vec<u8> = bytecode.drain(..4).collect();
+        with_lexenv.append(&mut prologue);
+        with_lexenv.append(&mut bytecode);
+        return with_lexenv;
+    }
+
+    prologue.append(&mut bytecode);
+    prologue
 }
 
 fn method_key_name(key: &PropertyKey<'_>) -> Option<String> {
@@ -1460,6 +2012,26 @@ fn is_class_buffer_method(method: &MethodDefinition<'_>) -> bool {
     !matches!(key.as_str(), "initialRender" | "rerender")
 }
 
+fn constructor_required_param_count(elements: &[ClassElement<'_>]) -> u16 {
+    elements
+        .iter()
+        .find_map(|element| {
+            let ClassElement::MethodDefinition(method) = element else {
+                return None;
+            };
+            (method.kind == MethodDefinitionKind::Constructor).then(|| {
+                method
+                    .value
+                    .params
+                    .items
+                    .iter()
+                    .take_while(|param| param.initializer.is_none())
+                    .count() as u16
+            })
+        })
+        .unwrap_or(0)
+}
+
 /// Compile the top-level program body into bytecode for the `main` method.
 ///
 /// Module mode follows upstream `es2abc --module` and compiles top-level
@@ -1472,7 +2044,7 @@ fn compile_program_body(
     lowering: &LoweringContext,
     _is_module: bool,
 ) -> (Vec<u8>, Vec<CatchEntry>) {
-    compile_body_stmts(&program.body, strings, literal_arrays, lowering, true)
+    compile_body_stmts(&program.body, strings, literal_arrays, lowering, true, &[])
 }
 
 /// Compile a function body's statements; returns `(bytecode, catch_entries)`.
@@ -1481,9 +2053,17 @@ fn compile_function_body(
     strings: &mut StringTable,
     literal_arrays: &mut Vec<LiteralArray>,
     lowering: &LoweringContext,
+    param_names: &[String],
 ) -> (Vec<u8>, Vec<CatchEntry>) {
     match body {
-        Some(fb) => compile_body_stmts(&fb.statements, strings, literal_arrays, lowering, false),
+        Some(fb) => compile_body_stmts(
+            &fb.statements,
+            strings,
+            literal_arrays,
+            lowering,
+            false,
+            param_names,
+        ),
         None => {
             let mut st = StringTable::default();
             (Insn::ReturnUndefined.encode(&mut st), vec![])
@@ -1498,7 +2078,9 @@ fn compile_function_body_tracked(
     strings: &mut StringTable,
     literal_arrays: &mut Vec<LiteralArray>,
     lowering: &LoweringContext,
+    param_names: &[String],
     source: &str,
+    source_mapper: Option<&SourceMapper>,
 ) -> (Vec<u8>, Vec<u8>, Vec<CatchEntry>) {
     match body {
         Some(fb) => compile_body_stmts_tracked(
@@ -1507,7 +2089,9 @@ fn compile_function_body_tracked(
             literal_arrays,
             lowering,
             false,
+            param_names,
             source,
+            source_mapper,
         ),
         None => {
             let mut st = StringTable::default();
@@ -1522,26 +2106,58 @@ fn compile_arrow_body(
     literal_arrays: &mut Vec<LiteralArray>,
     lowering: &LoweringContext,
     captures: ArrowCaptures,
+    param_names: &[String],
+    expression_body: bool,
 ) -> (Vec<u8>, Vec<CatchEntry>) {
-    compile_arrow_body_tracked(body, strings, literal_arrays, lowering, captures, None)
+    let (bytecode, _line_ops, catches) = compile_arrow_body_with_line_ops(
+        body,
+        strings,
+        literal_arrays,
+        lowering,
+        captures,
+        param_names,
+        expression_body,
+        None,
+        None,
+    );
+    (bytecode, catches)
 }
 
-fn compile_arrow_body_tracked<'src>(
+fn compile_arrow_body_with_line_ops<'src>(
     body: &FunctionBody<'src>,
     strings: &mut StringTable,
     literal_arrays: &mut Vec<LiteralArray>,
     lowering: &LoweringContext,
     captures: ArrowCaptures,
+    param_names: &[String],
+    expression_body: bool,
     source: Option<&'src str>,
-) -> (Vec<u8>, Vec<CatchEntry>) {
-    let mut gen = CodeGen::new_arrow_with_source(strings, literal_arrays, lowering, captures, source);
+    source_mapper: Option<&'src SourceMapper>,
+) -> (Vec<u8>, Vec<u8>, Vec<CatchEntry>) {
+    let mut gen = CodeGen::new_arrow_with_source(
+        strings,
+        literal_arrays,
+        lowering,
+        captures,
+        source,
+        source_mapper,
+    );
+    gen.bind_function_param_names(param_names);
+    if expression_body {
+        if let [Statement::ExpressionStatement(expr_stmt)] = body.statements.as_slice() {
+            gen.emit_expr(&expr_stmt.expression);
+            gen.push_with_epilogue(Insn::Return);
+            gen.returned = true;
+            return gen.finish_with_line_ops_and_catches();
+        }
+    }
     for stmt in &body.statements {
         gen.emit_stmt(stmt);
         if gen.returned {
             break;
         }
     }
-    gen.finish_with_catches()
+    gen.finish_with_line_ops_and_catches()
 }
 
 /// Compile a function body with optional rest-parameter and async-function support.
@@ -1560,8 +2176,21 @@ fn compile_function_body_ext(
     strings: &mut StringTable,
     literal_arrays: &mut Vec<LiteralArray>,
     lowering: &LoweringContext,
+    param_names: &[String],
 ) -> (Vec<u8>, Vec<CatchEntry>) {
-    compile_function_body_ext_tracked(body, rest_param, is_async, strings, literal_arrays, lowering, None).map(|(bc, _, catches)| (bc, catches)).unwrap_or_else(|| (vec![], vec![]))
+    compile_function_body_ext_tracked(
+        body,
+        rest_param,
+        is_async,
+        strings,
+        literal_arrays,
+        lowering,
+        param_names,
+        None,
+        None,
+    )
+    .map(|(bc, _, catches)| (bc, catches))
+    .unwrap_or_else(|| (vec![], vec![]))
 }
 
 fn compile_function_body_ext_tracked(
@@ -1571,7 +2200,9 @@ fn compile_function_body_ext_tracked(
     strings: &mut StringTable,
     literal_arrays: &mut Vec<LiteralArray>,
     lowering: &LoweringContext,
+    param_names: &[String],
     source: Option<&str>,
+    source_mapper: Option<&SourceMapper>,
 ) -> Option<(Vec<u8>, Vec<u8>, Vec<CatchEntry>)> {
     let stmts: &[_] = match body {
         Some(fb) => fb.statements.as_slice(),
@@ -1582,12 +2213,13 @@ fn compile_function_body_ext_tracked(
         }
     };
     let mut cg = if let Some(src) = source {
-        CodeGen::new_with_source(strings, literal_arrays, lowering, src)
+        CodeGen::new_with_source(strings, literal_arrays, lowering, src, source_mapper)
     } else {
         CodeGen::new(strings, literal_arrays, lowering)
     };
     cg.is_async = is_async;
     cg.emit_async_function_prologue();
+    cg.bind_function_param_names(param_names);
     if let Some((name, count)) = rest_param {
         let reg = cg.alloc_reg();
         cg.push(Insn::CopyRestArgs(count));
@@ -1604,25 +2236,63 @@ fn compile_function_body_ext_tracked(
     Some((bc, line_ops, catches))
 }
 
+fn compile_default_derived_constructor() -> (Vec<u8>, Vec<CatchEntry>) {
+    // Upstream es2panda emits a GENERATED_CONSTRUCTOR as `super(...args)`.
+    // See:
+    // - compiler/core/function.cpp: CompileFunctionParameterDeclaration
+    // - ir/expressions/callExpression.cpp: CompileSuperCallWithSpreadArgs
+    // - compiler/function/functionBuilder.cpp: ImplicitReturn
+    //
+    // This is the API<13 path used by the fixture: copy rest args, call
+    // supercallspread, validate/set `this`, then return `this`.
+    let bytecode = vec![
+        0x44, 0x60, // mov v0, v6
+        0x44, 0x71, // mov v1, v7
+        0x44, 0x82, // mov v2, v8
+        0x44, 0x93, // mov v3, v9
+        0xcf, 0x00, // copyrestargs 0
+        0x61, 0x03, // sta v3
+        0x60, 0x03, // lda v3
+        0x61, 0x05, // sta v5
+        0x60, 0x00, // lda v0
+        0xb9, 0x00, 0x05, // supercallspread 0, v5
+        0x61, 0x05, // sta v5
+        0x60, 0x02, // lda v2
+        0xfe, 0x07, 0x01, // throwifsupernotcorrectcall 1
+        0x60, 0x05, // lda v5
+        0x61, 0x02, // sta v2
+        0x60, 0x02, // lda v2
+        0xfe, 0x07, 0x00, // throwifsupernotcorrectcall 0
+        0x64, // return
+    ];
+    (bytecode, vec![])
+}
+
 /// Compile a constructor body, prepending instance field initializer code.
 ///
 /// For each `(field_name, init_expr)` in `fields`, emits:
-///   `ldthis; sta this_reg; emit_expr(init); stobjbyname(name, this_reg)`
+///   `lda v2; sta this_reg; emit_expr(init); stobjbyname(name, this_reg)`
 /// before the normal constructor statements.
 fn compile_constructor_with_fields<'src>(
     body: Option<&FunctionBody<'src>>,
+    params: &[FormalParameter<'src>],
     fields: &[(String, &Expression<'src>)],
     strings: &mut StringTable,
     literal_arrays: &mut Vec<LiteralArray>,
     lowering: &LoweringContext,
+    param_names: &[String],
+    has_super_class: bool,
 ) -> (Vec<u8>, Vec<CatchEntry>) {
     let stmts: &[_] = match body {
         Some(fb) => fb.statements.as_slice(),
         None => &[],
     };
     let mut cg = CodeGen::new(strings, literal_arrays, lowering);
+    cg.derived_constructor = has_super_class;
+    cg.bind_function_param_names(param_names);
+    cg.emit_default_parameters(params);
     if !fields.is_empty() {
-        cg.push(Insn::LdThis);
+        cg.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
         let this_reg = cg.alloc_reg();
         cg.push(Insn::Sta(this_reg));
         for (name, init_expr) in fields {
@@ -1637,7 +2307,58 @@ fn compile_constructor_with_fields<'src>(
             break;
         }
     }
+    if has_super_class && !cg.returned {
+        cg.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
+        cg.push(Insn::ThrowIfSuperNotCorrectCall(0));
+        cg.push(Insn::Return);
+        cg.returned = true;
+    }
     cg.finish_with_catches()
+}
+
+fn compile_constructor_with_fields_tracked<'src>(
+    body: Option<&FunctionBody<'src>>,
+    params: &[FormalParameter<'src>],
+    fields: &[(String, &Expression<'src>)],
+    strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
+    lowering: &LoweringContext,
+    param_names: &[String],
+    has_super_class: bool,
+    source: &'src str,
+    source_mapper: Option<&'src SourceMapper>,
+) -> (Vec<u8>, Vec<u8>, Vec<CatchEntry>) {
+    let stmts: &[_] = match body {
+        Some(fb) => fb.statements.as_slice(),
+        None => &[],
+    };
+    let mut cg = CodeGen::new_with_source(strings, literal_arrays, lowering, source, source_mapper);
+    cg.derived_constructor = has_super_class;
+    cg.bind_function_param_names(param_names);
+    cg.emit_default_parameters(params);
+    if !fields.is_empty() {
+        cg.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
+        let this_reg = cg.alloc_reg();
+        cg.push(Insn::Sta(this_reg));
+        for (name, init_expr) in fields {
+            cg.emit_expr(init_expr);
+            let name_id = cg.intern(name);
+            cg.push(Insn::StObjByName(0, name_id, this_reg));
+        }
+    }
+    for stmt in stmts {
+        cg.emit_stmt(stmt);
+        if cg.returned {
+            break;
+        }
+    }
+    if has_super_class && !cg.returned {
+        cg.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
+        cg.push(Insn::ThrowIfSuperNotCorrectCall(0));
+        cg.push(Insn::Return);
+        cg.returned = true;
+    }
+    cg.finish_with_line_ops_and_catches()
 }
 
 /// Compile a statement slice through `CodeGen` and return `(bytecode, catch_entries)`.
@@ -1647,10 +2368,17 @@ fn compile_body_stmts(
     literal_arrays: &mut Vec<LiteralArray>,
     lowering: &LoweringContext,
     module_body: bool,
+    param_names: &[String],
 ) -> (Vec<u8>, Vec<CatchEntry>) {
     let mut cg = CodeGen::new(strings, literal_arrays, lowering);
     if module_body {
         cg.emit_module_lex_env_prologue();
+        cg.bind_param_names(param_names);
+    } else {
+        if stmts_capture_this_in_arrow(stmts) {
+            cg.emit_function_this_lex_env_prologue();
+        }
+        cg.bind_function_param_names(param_names);
     }
     for stmt in stmts {
         cg.emit_stmt(stmt);
@@ -1670,11 +2398,19 @@ fn compile_body_stmts_tracked(
     literal_arrays: &mut Vec<LiteralArray>,
     lowering: &LoweringContext,
     module_body: bool,
+    param_names: &[String],
     source: &str,
+    source_mapper: Option<&SourceMapper>,
 ) -> (Vec<u8>, Vec<u8>, Vec<CatchEntry>) {
-    let mut cg = CodeGen::new_with_source(strings, literal_arrays, lowering, source);
+    let mut cg = CodeGen::new_with_source(strings, literal_arrays, lowering, source, source_mapper);
     if module_body {
         cg.emit_module_lex_env_prologue();
+        cg.bind_param_names(param_names);
+    } else {
+        if stmts_capture_this_in_arrow(stmts) {
+            cg.emit_function_this_lex_env_prologue();
+        }
+        cg.bind_function_param_names(param_names);
     }
     for stmt in stmts {
         cg.emit_stmt(stmt);
@@ -1696,9 +2432,32 @@ fn compile_program_body_tracked(
     lowering: &LoweringContext,
     _is_module: bool,
     source: &str,
+    source_mapper: Option<&SourceMapper>,
 ) -> (Vec<u8>, Vec<u8>, Vec<CatchEntry>) {
-    compile_body_stmts_tracked(&program.body, strings, literal_arrays, lowering, true, source)
+    compile_body_stmts_tracked(
+        &program.body,
+        strings,
+        literal_arrays,
+        lowering,
+        true,
+        &[],
+        source,
+        source_mapper,
+    )
 }
+
+fn arrow_param_names(arrow: &oxc_ast::ast::ArrowFunctionExpression<'_>) -> Vec<String> {
+    arrow
+        .params
+        .items
+        .iter()
+        .filter_map(|p| match &p.pattern {
+            BindingPattern::BindingIdentifier(id) => Some(id.name.as_str().to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
 fn arrow_captures_from_body(body: &FunctionBody<'_>) -> ArrowCaptures {
     let mut uses_this = false;
     let mut uses_new_target = false;
@@ -1839,9 +2598,12 @@ struct CodeGen<'a> {
     /// unreachable code is not generated.
     returned: bool,
     arrow_captures: ArrowCaptures,
+    function_this_capture_env: bool,
+    derived_constructor: bool,
     /// Original source text used for line-number computation, or `None` when
     /// debug line tracking is disabled for this compilation unit.
     source: Option<&'a str>,
+    source_mapper: Option<&'a SourceMapper>,
     /// Line number program accumulator.  Present only when `source` is `Some`.
     line_tracker: Option<LineTracker>,
     /// Current source line number for the instruction being emitted.
@@ -1873,7 +2635,10 @@ impl<'a> CodeGen<'a> {
             next_reg: 0,
             returned: false,
             arrow_captures: ArrowCaptures::default(),
+            function_this_capture_env: false,
+            derived_constructor: false,
             source: None,
+            source_mapper: None,
             line_tracker: None,
             current_line: 1,
             current_col: 0,
@@ -1896,9 +2661,11 @@ impl<'a> CodeGen<'a> {
         literal_arrays: &'a mut Vec<LiteralArray>,
         lowering: &'a LoweringContext,
         source: &'a str,
+        source_mapper: Option<&'a SourceMapper>,
     ) -> Self {
         let mut gen = Self::new(strings, literal_arrays, lowering);
         gen.source = Some(source);
+        gen.source_mapper = source_mapper;
         gen.line_tracker = Some(LineTracker::new(1));
         gen
     }
@@ -1921,11 +2688,13 @@ impl<'a> CodeGen<'a> {
         lowering: &'a LoweringContext,
         arrow_captures: ArrowCaptures,
         source: Option<&'a str>,
+        source_mapper: Option<&'a SourceMapper>,
     ) -> Self {
         let mut gen = Self::new(strings, literal_arrays, lowering);
         gen.arrow_captures = arrow_captures;
         if let Some(src) = source {
             gen.source = Some(src);
+            gen.source_mapper = source_mapper;
             gen.line_tracker = Some(LineTracker::new(1));
         }
         gen
@@ -1938,14 +2707,93 @@ impl<'a> CodeGen<'a> {
         let literal_id = self.literal_arrays.len() as u16;
         self.literal_arrays
             .push(lexical_names_literal_array(&self.lowering.lexical_names));
+        let tracker = self.line_tracker.take();
         self.push(Insn::NewLexEnvWithName(
             self.lowering.lexical_names.len() as u8,
             literal_id,
         ));
-        self.push(Insn::MovV4(0, 8));
-        self.push(Insn::MovV4(1, 9));
-        self.push(Insn::MovV4(2, 10));
-        self.next_reg = self.next_reg.max(4);
+        self.line_tracker = tracker;
+        let reserves_class_binding = self.lowering.lexical_names.iter().any(|name| {
+            name.chars().next().is_some_and(char::is_uppercase)
+                && name.chars().any(char::is_lowercase)
+        });
+        self.next_reg = self
+            .next_reg
+            .max(if reserves_class_binding { 5 } else { 4 });
+    }
+
+    fn emit_function_this_lex_env_prologue(&mut self) {
+        let literal_id = self.literal_arrays.len() as u16;
+        self.literal_arrays
+            .push(lexical_names_literal_array(&["this".to_string()]));
+        self.push(Insn::NewLexEnvWithName(1, literal_id));
+        self.function_this_capture_env = true;
+    }
+
+    fn bind_param_names(&mut self, param_names: &[String]) {
+        for name in param_names {
+            if self.var_regs.contains_key(name) {
+                continue;
+            }
+            let reg = self.alloc_reg();
+            self.var_regs.insert(name.clone(), reg);
+        }
+    }
+
+    fn bind_function_param_names(&mut self, param_names: &[String]) {
+        for (idx, name) in param_names.iter().enumerate() {
+            if self.var_regs.contains_key(name) {
+                continue;
+            }
+            let reg = 3u8.saturating_add(idx as u8);
+            self.var_regs.insert(name.clone(), reg);
+        }
+
+        // Upstream keeps the mandatory params in v0..v2, user params from v3,
+        // and leaves one spill slot before RegScope temporaries. See
+        // binder::MANDATORY_PARAMS_NUMBER and PandaGen::CopyFunctionArguments.
+        let next = 4u8.saturating_add(param_names.len() as u8);
+        self.next_reg = self.next_reg.max(next);
+    }
+
+    fn emit_default_parameters(&mut self, params: &[FormalParameter<'_>]) {
+        for (idx, param) in params.iter().enumerate() {
+            let Some(initializer) = param.initializer.as_deref() else {
+                continue;
+            };
+            if !matches!(&param.pattern, BindingPattern::BindingIdentifier(_)) {
+                continue;
+            }
+
+            self.set_debug_pos(initializer.span().start);
+            let saved_next_reg = self.next_reg;
+            let param_reg = 3u8.saturating_add(idx as u8);
+            let value_reg = self.alloc_reg();
+            self.push(Insn::Lda(param_reg));
+            self.push(Insn::Sta(value_reg));
+            self.push(Insn::LdUndefined);
+            self.push(Insn::StrictEq(0, value_reg));
+            let skip_default = self.insns.len();
+            self.push(Insn::JeqzShort(0));
+            if is_undefined_literal(initializer) {
+                self.push(Insn::LdUndefined);
+                self.push(Insn::Sta(param_reg));
+            } else if let Some(value) = negative_integer_literal(initializer) {
+                self.push(Insn::LdAi(value));
+                self.push(Insn::Sta(value_reg));
+                self.push(Insn::Lda(value_reg));
+                self.push(Insn::Neg(0));
+                self.push(Insn::Sta(param_reg));
+            } else {
+                self.emit_expr(initializer);
+                self.push(Insn::Sta(value_reg));
+                self.push(Insn::Lda(value_reg));
+                self.push(Insn::Sta(param_reg));
+            }
+            let after_default = self.insns.len();
+            self.patch_jump_to(skip_default, after_default);
+            self.next_reg = saved_next_reg;
+        }
     }
 
     /// Append the bytes for `insn`, emitting per-instruction LNP entries.
@@ -1977,6 +2825,17 @@ impl<'a> CodeGen<'a> {
         self.push(insn);
     }
 
+    fn set_debug_pos(&mut self, offset: u32) {
+        if let Some(source) = self.source {
+            let (line, col) = self
+                .source_mapper
+                .and_then(|mapper| mapper.map_offset(source, offset))
+                .unwrap_or_else(|| (line_at(source, offset), col_at(source, offset)));
+            self.current_line = line;
+            self.current_col = col;
+        }
+    }
+
     /// Allocate the next virtual register (capped at 254 to leave one spare).
     fn alloc_reg(&mut self) -> u8 {
         let r = self.next_reg;
@@ -1997,6 +2856,7 @@ impl<'a> CodeGen<'a> {
                 self.push(Insn::LdUndefined);
                 self.push(Insn::AsyncFunctionResolve(0, areg));
             }
+            self.push_with_epilogue(Insn::LdUndefined);
             self.push_with_epilogue(Insn::ReturnUndefined);
         }
         (self.insns, self.catch_entries)
@@ -2008,6 +2868,7 @@ impl<'a> CodeGen<'a> {
                 self.push(Insn::LdUndefined);
                 self.push(Insn::AsyncFunctionResolve(0, areg));
             }
+            self.push_with_epilogue(Insn::LdUndefined);
             self.push_with_epilogue(Insn::ReturnUndefined);
         }
         let line_ops = self.line_tracker.map(|t| t.finish()).unwrap_or_default();
@@ -2020,11 +2881,7 @@ impl<'a> CodeGen<'a> {
         // Update current_line from the statement's source position so that
         // subsequent push() calls emit per-instruction LNP entries with the
         // correct line and column numbers.
-        if let Some(source) = self.source {
-            let offset = stmt.span().start;
-            self.current_line = line_at(source, offset);
-            self.current_col = col_at(source, offset);
-        }
+        self.set_debug_pos(stmt.span().start);
         match stmt {
             Statement::VariableDeclaration(decl) => {
                 self.emit_var_decl(decl);
@@ -2035,9 +2892,11 @@ impl<'a> CodeGen<'a> {
                 if matches!(&es.expression, Expression::StringLiteral(_)) {
                     return;
                 }
+                let saved_next_reg = self.next_reg;
                 self.emit_expr(&es.expression);
                 // Discard accumulator result (no sta needed for side-effect-only
                 // ExpressionStatements).
+                self.next_reg = saved_next_reg;
             }
             Statement::ReturnStatement(ret) => {
                 if let Some(arg) = &ret.argument {
@@ -2047,6 +2906,7 @@ impl<'a> CodeGen<'a> {
                     }
                     self.push_with_epilogue(Insn::Return);
                 } else {
+                    self.push(Insn::LdUndefined);
                     self.push_with_epilogue(Insn::LdUndefined);
                     if let Some(areg) = self.async_reg {
                         self.push(Insn::AsyncFunctionResolve(0, areg));
@@ -2056,9 +2916,52 @@ impl<'a> CodeGen<'a> {
                 self.returned = true;
             }
             Statement::ClassDeclaration(cls) => {
-                // Emit defineclasswithbuffer; result → accumulator.
                 let super_class = cls.super_class.as_ref();
                 let class_name = cls.id.as_ref().map(|id| id.name.as_str());
+                if let Some(id) = &cls.id {
+                    let name = id.name.as_str().to_string();
+                    if let Some(export_index) = self.lowering.export_index(&name) {
+                        let class_reg = self.alloc_reg();
+                        let var_reg = self.alloc_reg();
+                        self.var_regs.insert(name.clone(), var_reg);
+                        let proto_vreg = if let Some(sc) = super_class {
+                            self.emit_expr(sc);
+                            let reg = self.alloc_reg();
+                            self.push(Insn::Sta(reg));
+                            reg
+                        } else {
+                            0
+                        };
+                        let lit_arr_id = self.literal_arrays.len() as u16;
+                        self.literal_arrays.push(class_buffer_literal_array(
+                            class_name.unwrap_or(&name),
+                            &cls.body.body,
+                        ));
+                        let formal_count = constructor_required_param_count(&cls.body.body);
+                        self.push(Insn::DefineClassWithBuffer(
+                            0,
+                            lit_arr_id,
+                            lit_arr_id,
+                            formal_count,
+                            proto_vreg,
+                        ));
+                        self.push(Insn::Sta(class_reg));
+                        self.push(Insn::Sta(var_reg));
+                        self.emit_class_missing_properties(
+                            class_name.unwrap_or(&name),
+                            &cls.body.body,
+                            class_reg,
+                        );
+                        if let Some(lex_idx) = self.lowering.lexical_index(&name) {
+                            self.push(Insn::Lda(class_reg));
+                            self.push(Insn::StLexVar(0, lex_idx));
+                        }
+                        self.push(Insn::Lda(class_reg));
+                        self.push(Insn::StModuleVar(export_index));
+                        return;
+                    }
+                }
+                // Emit defineclasswithbuffer; result → accumulator.
                 self.emit_class_inner(class_name, &cls.body.body, super_class);
                 // Store the class constructor to a local register and,
                 // if the class has a name, expose it as a global.
@@ -2085,19 +2988,43 @@ impl<'a> CodeGen<'a> {
             }
             Statement::ExportDefaultDeclaration(export) => {
                 if let ExportDefaultDeclarationKind::ClassDeclaration(cls) = &export.declaration {
-                    let super_class = cls.super_class.as_ref();
-                    let class_name = cls.id.as_ref().map(|id| id.name.as_str());
-                    self.emit_class_inner(class_name, &cls.body.body, super_class);
-                    if let Some(id) = &cls.id {
+                    let local_name = cls.id.as_ref().map(|id| id.name.as_str());
+                    let class_name = local_name.unwrap_or("default");
+                    let class_reg = self.alloc_reg();
+                    let var_reg = self.alloc_reg();
+                    if let Some(name) = local_name {
+                        self.var_regs.insert(name.to_string(), var_reg);
+                    }
+                    let proto_vreg = if let Some(sc) = &cls.super_class {
+                        self.emit_expr(sc);
                         let reg = self.alloc_reg();
                         self.push(Insn::Sta(reg));
+                        reg
+                    } else {
+                        0
+                    };
+                    let lit_arr_id = self.literal_arrays.len() as u16;
+                    self.literal_arrays
+                        .push(class_buffer_literal_array(class_name, &cls.body.body));
+                    let formal_count = constructor_required_param_count(&cls.body.body);
+                    self.push(Insn::DefineClassWithBuffer(
+                        0,
+                        lit_arr_id,
+                        lit_arr_id,
+                        formal_count,
+                        proto_vreg,
+                    ));
+                    self.push(Insn::Sta(class_reg));
+                    self.push(Insn::Sta(var_reg));
+                    self.emit_class_missing_properties(class_name, &cls.body.body, class_reg);
+                    if let Some(export_index) = self.lowering.export_index("default") {
+                        self.push(Insn::Lda(class_reg));
+                        self.push(Insn::StModuleVar(export_index));
+                    }
+                    if let Some(id) = &cls.id {
                         let name = id.name.as_str().to_string();
-                        self.var_regs.insert(name.clone(), reg);
-                        let name_id = self.intern(&name);
-                        self.push(Insn::Lda(reg));
-                        self.push(Insn::TryStGlobalByName(0, name_id));
                         if let Some(export_index) = self.lowering.export_index(&name) {
-                            self.push(Insn::Lda(reg));
+                            self.push(Insn::Lda(class_reg));
                             self.push(Insn::StModuleVar(export_index));
                         }
                     }
@@ -2233,7 +3160,6 @@ impl<'a> CodeGen<'a> {
         self.continue_patches = outer_continue;
     }
 
-
     fn emit_for_of_stmt(&mut self, stmt: &ForOfStatement<'_>) {
         self.emit_expr(&stmt.right);
         self.push(Insn::GetIterator(0));
@@ -2352,15 +3278,9 @@ impl<'a> CodeGen<'a> {
     ///   <after>
     /// ```
     ///
-    /// `Jeqz` encodes a 16-bit signed offset measured from the **start** of the
-    /// `jeqz` instruction itself.  `Jmp` likewise is measured from its own start.
+    /// Branch offsets are measured from the start of the branch instruction.
     fn emit_if_stmt(&mut self, if_stmt: &oxc_ast::ast::IfStatement<'_>) {
-        // 1. Emit the test expression; result in accumulator.
-        self.emit_expr(&if_stmt.test);
-
-        // 2. Emit `jeqz` with a placeholder offset; remember its byte position.
-        let jeqz_pos = self.insns.len();
-        self.push(Insn::Jeqz(0)); // 3 bytes: [0x50, lo, hi]
+        let false_branch = self.emit_branch_if_false(&if_stmt.test);
 
         // 3. Emit consequent; preserve outer `returned` flag across the branch.
         let outer_returned = self.returned;
@@ -2372,14 +3292,11 @@ impl<'a> CodeGen<'a> {
         if let Some(alt) = &if_stmt.alternate {
             // 4a. Emit `jmp` to skip the alternate; remember its position.
             let jmp_pos = self.insns.len();
-            self.push(Insn::Jmp(0)); // 3 bytes: [0x4E, lo, hi]
+            self.push(Insn::JmpShort(0));
 
             // Patch jeqz → start of alternate (= current byte position).
             let alt_start = self.insns.len();
-            let jeqz_offset = (alt_start as i32 - jeqz_pos as i32) as i16;
-            let [lo, hi] = jeqz_offset.to_le_bytes();
-            self.insns[jeqz_pos + 1] = lo;
-            self.insns[jeqz_pos + 2] = hi;
+            self.patch_jump_to(false_branch, alt_start);
 
             // 5a. Emit alternate.
             let alt_outer_returned = self.returned;
@@ -2390,18 +3307,12 @@ impl<'a> CodeGen<'a> {
 
             // Patch jmp → just past the alternate.
             let end_pos = self.insns.len();
-            let jmp_offset = (end_pos as i32 - jmp_pos as i32) as i16;
-            let [lo2, hi2] = jmp_offset.to_le_bytes();
-            self.insns[jmp_pos + 1] = lo2;
-            self.insns[jmp_pos + 2] = hi2;
+            self.patch_jump_to(jmp_pos, end_pos);
         } else {
             // 4b. Patch jeqz → just past the consequent (no else branch).
             let _ = consequent_returned; // informational only for now
             let end_pos = self.insns.len();
-            let jeqz_offset = (end_pos as i32 - jeqz_pos as i32) as i16;
-            let [lo, hi] = jeqz_offset.to_le_bytes();
-            self.insns[jeqz_pos + 1] = lo;
-            self.insns[jeqz_pos + 2] = hi;
+            self.patch_jump_to(false_branch, end_pos);
         }
     }
 
@@ -2411,28 +3322,73 @@ impl<'a> CodeGen<'a> {
     fn patch_jumps_to_here(&mut self, positions: Vec<usize>) {
         let here = self.insns.len();
         for pos in positions {
-            let off = (here as i32 - pos as i32) as i16;
-            let [lo, hi] = off.to_le_bytes();
-            self.insns[pos + 1] = lo;
-            self.insns[pos + 2] = hi;
+            self.patch_jump_to(pos, here);
         }
     }
 
     /// Patch a list of `jmp(0)` placeholders to a specific byte position.
     fn patch_jumps_to(&mut self, positions: Vec<usize>, target: usize) {
         for pos in positions {
-            let off = (target as i32 - pos as i32) as i16;
-            let [lo, hi] = off.to_le_bytes();
-            self.insns[pos + 1] = lo;
-            self.insns[pos + 2] = hi;
+            self.patch_jump_to(pos, target);
         }
+    }
+
+    fn patch_jump_to(&mut self, pos: usize, target: usize) {
+        let off = target as i32 - pos as i32;
+        match self.insns[pos] {
+            0x4d | 0x4f | 0x51 => {
+                debug_assert!((i8::MIN as i32..=i8::MAX as i32).contains(&off));
+                self.insns[pos + 1] = off as i8 as u8;
+            }
+            _ => {
+                let [lo, hi] = (off as i16).to_le_bytes();
+                self.insns[pos + 1] = lo;
+                self.insns[pos + 2] = hi;
+            }
+        }
+    }
+
+    fn emit_branch_if_false(&mut self, expr: &Expression<'_>) -> usize {
+        if let Expression::BinaryExpression(bin) = expr {
+            if is_condition_comparison(bin.operator) {
+                self.emit_condition_comparison(bin);
+                let branch_pos = self.insns.len();
+                self.push(Insn::JeqzShort(0));
+                return branch_pos;
+            }
+        }
+
+        self.emit_expr(expr);
+        self.push(Insn::CallRuntimeIsFalse(0));
+        let branch_pos = self.insns.len();
+        self.push(Insn::JnezShort(0));
+        branch_pos
+    }
+
+    fn emit_branch_if_true_from_acc(&mut self) -> usize {
+        self.push(Insn::CallRuntimeIsTrue(0));
+        let branch_pos = self.insns.len();
+        self.push(Insn::JnezShort(0));
+        branch_pos
+    }
+
+    fn emit_negate_acc(&mut self) {
+        let false_branch = self.emit_branch_if_true_from_acc();
+        self.push(Insn::LdTrue);
+        let end_jump = self.insns.len();
+        self.push(Insn::JmpShort(0));
+
+        let false_label = self.insns.len();
+        self.patch_jump_to(false_branch, false_label);
+        self.push(Insn::LdFalse);
+
+        let end_label = self.insns.len();
+        self.patch_jump_to(end_jump, end_label);
     }
 
     fn emit_while_stmt(&mut self, while_stmt: &oxc_ast::ast::WhileStatement<'_>) {
         let loop_start = self.insns.len();
-        self.emit_expr(&while_stmt.test);
-        let jeqz_pos = self.insns.len();
-        self.push(Insn::Jeqz(0));
+        let false_branch = self.emit_branch_if_false(&while_stmt.test);
 
         let outer_break = std::mem::take(&mut self.break_patches);
         let outer_continue = std::mem::take(&mut self.continue_patches);
@@ -2448,10 +3404,7 @@ impl<'a> CodeGen<'a> {
         self.insns[jmp_pos + 1] = lo;
         self.insns[jmp_pos + 2] = hi;
 
-        let jeqz_off = (loop_exit as i32 - jeqz_pos as i32) as i16;
-        let [lo2, hi2] = jeqz_off.to_le_bytes();
-        self.insns[jeqz_pos + 1] = lo2;
-        self.insns[jeqz_pos + 2] = hi2;
+        self.patch_jump_to(false_branch, loop_exit);
 
         let breaks = std::mem::replace(&mut self.break_patches, outer_break);
         let continues = std::mem::replace(&mut self.continue_patches, outer_continue);
@@ -2468,15 +3421,12 @@ impl<'a> CodeGen<'a> {
         self.emit_stmt(&do_while.body);
 
         let continue_target = self.insns.len();
-        self.emit_expr(&do_while.test);
-        let jnez_pos = self.insns.len();
-        self.push(Insn::Jnez(0));
+        let false_branch = self.emit_branch_if_false(&do_while.test);
+        let jmp_pos = self.insns.len();
+        self.push(Insn::Jmp(0));
         let loop_exit = self.insns.len();
-
-        let back_off = (loop_start as i32 - jnez_pos as i32) as i16;
-        let [lo, hi] = back_off.to_le_bytes();
-        self.insns[jnez_pos + 1] = lo;
-        self.insns[jnez_pos + 2] = hi;
+        self.patch_jump_to(jmp_pos, loop_start);
+        self.patch_jump_to(false_branch, loop_exit);
 
         let breaks = std::mem::replace(&mut self.break_patches, outer_break);
         let continues = std::mem::replace(&mut self.continue_patches, outer_continue);
@@ -2493,9 +3443,7 @@ impl<'a> CodeGen<'a> {
         let loop_start = self.insns.len();
         let mut jeqz_pos: Option<usize> = None;
         if let Some(test) = &for_stmt.test {
-            self.emit_expr(test);
-            jeqz_pos = Some(self.insns.len());
-            self.push(Insn::Jeqz(0));
+            jeqz_pos = Some(self.emit_branch_if_false(test));
         }
 
         let outer_break = std::mem::take(&mut self.break_patches);
@@ -2518,10 +3466,7 @@ impl<'a> CodeGen<'a> {
         self.insns[jmp_pos + 2] = hi;
 
         if let Some(jpos) = jeqz_pos {
-            let off = (loop_exit as i32 - jpos as i32) as i16;
-            let [lo2, hi2] = off.to_le_bytes();
-            self.insns[jpos + 1] = lo2;
-            self.insns[jpos + 2] = hi2;
+            self.patch_jump_to(jpos, loop_exit);
         }
 
         let breaks = std::mem::replace(&mut self.break_patches, outer_break);
@@ -2607,7 +3552,11 @@ impl<'a> CodeGen<'a> {
             self.returned = catch_outer_returned;
 
             // Record the exception table entry.
-            self.catch_entries.push(CatchEntry { try_begin, try_end, catch_begin });
+            self.catch_entries.push(CatchEntry {
+                try_begin,
+                try_end,
+                catch_begin,
+            });
 
             // Patch jmp_past_catch → current position.
             let after_catch = self.insns.len();
@@ -2638,13 +3587,8 @@ impl<'a> CodeGen<'a> {
                     let name = id.name.as_str().to_string();
                     if let Some(init) = &declarator.init {
                         if let Expression::ClassExpression(cls) = init {
-                            let class_name =
-                                cls.id.as_ref().map_or(name.as_str(), |id| id.name.as_str());
-                            self.emit_class_inner(
-                                Some(class_name),
-                                &cls.body.body,
-                                cls.super_class.as_ref(),
-                            );
+                            self.emit_class_var_decl(&name, cls);
+                            continue;
                         } else {
                             self.emit_expr(init);
                         }
@@ -2673,7 +3617,9 @@ impl<'a> CodeGen<'a> {
                     self.push(Insn::Sta(tmp_reg));
                     for (i, elem) in arr_pat.elements.iter().enumerate() {
                         let Some(pat) = elem else { continue };
-                        let BindingPattern::BindingIdentifier(bid) = pat else { continue };
+                        let BindingPattern::BindingIdentifier(bid) = pat else {
+                            continue;
+                        };
                         let vname = bid.name.as_str().to_string();
                         let idx_str = i.to_string();
                         let name_id = self.intern(&idx_str);
@@ -2732,11 +3678,7 @@ impl<'a> CodeGen<'a> {
     fn emit_expr(&mut self, expr: &Expression<'_>) {
         // Update current_line and current_col from the expression's source position
         // for per-instruction LNP tracking.
-        if let Some(source) = self.source {
-            let offset = expr.span().start;
-            self.current_line = line_at(source, offset);
-            self.current_col = col_at(source, offset);
-        }
+        self.set_debug_pos(expr.span().start);
         match expr {
             Expression::NumericLiteral(n) => {
                 if n.value.fract() == 0.0
@@ -2792,10 +3734,14 @@ impl<'a> CodeGen<'a> {
                     // Arrow function: `this` was captured from the enclosing
                     // scope into a lexical environment slot.
                     self.push(Insn::LdLexVar(0, slot));
+                } else if self.function_this_capture_env {
+                    self.push(Insn::LdLexVar(0, 0));
                 } else {
-                    // Regular function or class method: use ldthis to load the
-                    // receiver that ArkRuntime bound when the function was called.
-                    self.push(Insn::LdThis);
+                    // PandaGen::GetThis loads binder::MANDATORY_PARAM_THIS.
+                    self.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
+                    if self.derived_constructor {
+                        self.push(Insn::ThrowIfSuperNotCorrectCall(0));
+                    }
                 }
             }
             Expression::MetaProperty(meta) => {
@@ -2848,7 +3794,7 @@ impl<'a> CodeGen<'a> {
             }
             Expression::ArrowFunctionExpression(arrow) => {
                 let captures = arrow_captures_from_body(arrow.body.as_ref());
-                if !captures.is_empty() {
+                if !captures.is_empty() && !self.function_this_capture_env {
                     // hvigor uses `newlexenvwithname` (0xb6) instead of plain
                     // `newlexenv` (0x09) so that ArkRuntime / debugger can map
                     // each lexical slot back to its source identifier.
@@ -2866,10 +3812,9 @@ impl<'a> CodeGen<'a> {
                         .push(lexical_names_literal_array(&lex_names));
                     self.push(Insn::NewLexEnvWithName(captures.len(), lit_id));
                     if let Some(slot) = captures.this_slot {
-                        // Capture the enclosing function's `this` via ldthis.
-                        // Arrow functions do not have their own `this` binding
-                        // so they inherit from the lexical environment.
-                        self.push(Insn::LdThis);
+                        // Arrow functions capture the enclosing mandatory
+                        // `this` binding into their lexical environment.
+                        self.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
                         self.push(Insn::StLexVar(0, slot));
                     }
                     if let Some(slot) = captures.new_target_slot {
@@ -2987,8 +3932,7 @@ impl<'a> CodeGen<'a> {
             oxc_ast::ast::ChainElement::CallExpression(call) => {
                 let is_method = matches!(
                     &call.callee,
-                    Expression::StaticMemberExpression(_)
-                        | Expression::ComputedMemberExpression(_)
+                    Expression::StaticMemberExpression(_) | Expression::ComputedMemberExpression(_)
                 );
                 if is_method {
                     let (recv_expr, method_name): (&Expression<'_>, Option<String>) =
@@ -3201,27 +4145,19 @@ impl<'a> CodeGen<'a> {
     // ── Conditional expression: test ? consequent : alternate ─────────────────
 
     fn emit_conditional_expr(&mut self, cond: &oxc_ast::ast::ConditionalExpression<'_>) {
-        self.emit_expr(&cond.test);
-        let jeqz_pos = self.insns.len();
-        self.push(Insn::Jeqz(0));
+        let false_branch = self.emit_branch_if_false(&cond.test);
 
         self.emit_expr(&cond.consequent);
         let jmp_pos = self.insns.len();
         self.push(Insn::Jmp(0));
 
         let alt_start = self.insns.len();
-        let jeqz_off = (alt_start as i32 - jeqz_pos as i32) as i16;
-        let [lo, hi] = jeqz_off.to_le_bytes();
-        self.insns[jeqz_pos + 1] = lo;
-        self.insns[jeqz_pos + 2] = hi;
+        self.patch_jump_to(false_branch, alt_start);
 
         self.emit_expr(&cond.alternate);
 
         let end_pos = self.insns.len();
-        let jmp_off = (end_pos as i32 - jmp_pos as i32) as i16;
-        let [lo2, hi2] = jmp_off.to_le_bytes();
-        self.insns[jmp_pos + 1] = lo2;
-        self.insns[jmp_pos + 2] = hi2;
+        self.patch_jump_to(jmp_pos, end_pos);
     }
 
     // ── Template literal: `q0${e0}q1…` ──────────────────────────────────────
@@ -3307,7 +4243,6 @@ impl<'a> CodeGen<'a> {
         self.async_reg = Some(reg);
     }
 
-
     fn emit_yield_expr(&mut self, yield_expr: &YieldExpression<'_>) {
         match &yield_expr.argument {
             Some(arg) => self.emit_expr(arg),
@@ -3352,13 +4287,13 @@ impl<'a> CodeGen<'a> {
         super_class: Option<&Expression<'_>>,
     ) {
         // Load the prototype (parent class) if present.
-        let (proto_argc, proto_vreg) = if let Some(sc) = super_class {
+        let proto_vreg = if let Some(sc) = super_class {
             self.emit_expr(sc);
             let reg = self.alloc_reg();
             self.push(Insn::Sta(reg));
-            (1u16, reg)
+            reg
         } else {
-            (0u16, 0u8)
+            0u8
         };
 
         // Register the class literal buffer and use its index as buf_id.
@@ -3368,12 +4303,153 @@ impl<'a> CodeGen<'a> {
             elements,
         ));
 
+        let formal_count = constructor_required_param_count(elements);
+
         // Emit defineclasswithbuffer:
         //   slot=0, ctor_id=lit_arr_id (stub), buf_id=lit_arr_id,
         //   proto_argc, proto_vreg
         self.push(Insn::DefineClassWithBuffer(
-            0, lit_arr_id, lit_arr_id, proto_argc, proto_vreg,
+            0,
+            lit_arr_id,
+            lit_arr_id,
+            formal_count,
+            proto_vreg,
         ));
+    }
+
+    fn emit_class_var_decl(&mut self, name: &str, cls: &oxc_ast::ast::Class<'_>) {
+        let lexical_slot = self.lowering.lexical_index(name);
+        let export_slot = self.lowering.export_index(name);
+        if lexical_slot.is_some() {
+            self.next_reg = self.next_reg.max(5);
+        } else if export_slot.is_some() {
+            self.next_reg = self.next_reg.min(4);
+        }
+        let saved_next_reg = self.next_reg;
+        let class_name = cls.id.as_ref().map_or(name, |id| id.name.as_str());
+        let class_reg = self.alloc_reg();
+        let var_reg = self.alloc_reg();
+        if lexical_slot.is_none() {
+            self.var_regs.insert(name.to_string(), var_reg);
+        }
+
+        let proto_vreg = if let Some(sc) = &cls.super_class {
+            self.emit_expr(sc);
+            let reg = self.alloc_reg();
+            self.push(Insn::Sta(reg));
+            reg
+        } else {
+            0u8
+        };
+
+        let lit_arr_id = self.literal_arrays.len() as u16;
+        self.literal_arrays
+            .push(class_buffer_literal_array(class_name, &cls.body.body));
+        let formal_count = constructor_required_param_count(&cls.body.body);
+        self.push(Insn::DefineClassWithBuffer(
+            0,
+            lit_arr_id,
+            lit_arr_id,
+            formal_count,
+            proto_vreg,
+        ));
+        self.push(Insn::Sta(class_reg));
+        self.push(Insn::Sta(var_reg));
+        self.emit_class_missing_properties(class_name, &cls.body.body, class_reg);
+        if let Some(slot) = lexical_slot {
+            self.push(Insn::Lda(class_reg));
+            self.push(Insn::Sta(class_reg));
+            self.push(Insn::Lda(class_reg));
+            self.push(Insn::StLexVar(0, slot));
+            self.next_reg = saved_next_reg;
+        }
+        if let Some(export_index) = export_slot {
+            self.push(Insn::Lda(class_reg));
+            self.push(Insn::StModuleVar(export_index));
+        }
+    }
+
+    fn emit_class_missing_properties(
+        &mut self,
+        class_name: &str,
+        elements: &[ClassElement<'_>],
+        class_reg: u8,
+    ) {
+        let prototype_id = self.intern("prototype");
+        self.push(Insn::Lda(class_reg));
+        self.push(Insn::LdObjByName(0, prototype_id));
+        let prototype_reg = self.alloc_reg();
+        self.push(Insn::Sta(prototype_reg));
+
+        let mut seen_names = HashMap::<String, u16>::new();
+        for element in elements {
+            let ClassElement::MethodDefinition(method) = element else {
+                continue;
+            };
+            let Some(record_name) = class_method_record_name(method, class_name) else {
+                continue;
+            };
+            let record_name = suffix_duplicate_method_name(record_name, &mut seen_names);
+            if method.kind == MethodDefinitionKind::Constructor || is_class_buffer_method(method) {
+                continue;
+            }
+            let Some(public_name) = method_key_name(&method.key) else {
+                continue;
+            };
+            let method_name_id = self.intern(&record_name);
+            let length = method.value.params.items.len() as u8;
+
+            if method.kind.is_accessor() {
+                let saved_next_reg = self.next_reg;
+                let name_reg = self.alloc_reg();
+                let undefined_reg = self.alloc_reg();
+                let method_reg = self.alloc_reg();
+                let public_name_id = self.intern(&public_name);
+                self.set_debug_pos(method.key.span().start);
+                self.push(Insn::LdaStr(public_name_id));
+                self.push(Insn::Sta(name_reg));
+                if method.kind == MethodDefinitionKind::Get {
+                    self.push(Insn::LdUndefined);
+                    self.push(Insn::Sta(undefined_reg));
+                    self.push(Insn::Lda(prototype_reg));
+                    self.push(Insn::DefineMethodShort(0, method_name_id, length));
+                    self.push(Insn::Sta(method_reg));
+                    self.push(Insn::LdFalse);
+                    self.push(Insn::DefineGetterSetterByValue(
+                        prototype_reg,
+                        name_reg,
+                        method_reg,
+                        undefined_reg,
+                    ));
+                } else {
+                    self.push(Insn::LdUndefined);
+                    self.push(Insn::Sta(undefined_reg));
+                    self.push(Insn::Lda(prototype_reg));
+                    self.push(Insn::DefineMethodShort(0, method_name_id, length));
+                    self.push(Insn::Sta(method_reg));
+                    self.push(Insn::LdFalse);
+                    self.push(Insn::DefineGetterSetterByValue(
+                        prototype_reg,
+                        name_reg,
+                        undefined_reg,
+                        method_reg,
+                    ));
+                }
+                self.next_reg = saved_next_reg;
+                continue;
+            }
+
+            let target_reg = if method.r#static {
+                class_reg
+            } else {
+                prototype_reg
+            };
+            self.set_debug_pos(method.key.span().start);
+            self.push(Insn::Lda(target_reg));
+            self.push(Insn::DefineMethodShort(0, method_name_id, length));
+            let public_name_id = self.intern(&public_name);
+            self.push(Insn::StOwnByName(0, public_name_id, target_reg));
+        }
     }
 
     // ── Computed member: obj[expr] ────────────────────────────────────────────
@@ -3386,36 +4462,42 @@ impl<'a> CodeGen<'a> {
                 return;
             }
         }
+        let saved_next_reg = self.next_reg;
+        let obj_reg = self.alloc_reg();
         self.emit_expr(&mem.object);
+        self.push(Insn::Sta(obj_reg));
         if let Expression::StringLiteral(key) = &mem.expression {
             let name_id = self.intern(key.value.as_str());
+            self.push(Insn::Lda(obj_reg));
             self.push(Insn::LdObjByName(0, name_id));
         }
+        self.next_reg = saved_next_reg;
         // Non-string computed keys are a TODO.
     }
 
     // ── Static member: obj.prop ───────────────────────────────────────────────
 
     fn emit_static_member(&mut self, mem: &oxc_ast::ast::StaticMemberExpression<'_>) {
+        let saved_next_reg = self.next_reg;
+        let obj_reg = self.alloc_reg();
         self.emit_expr(&mem.object);
+        self.push(Insn::Sta(obj_reg));
         // Update col to the property name position for per-instruction tracking.
-        if let Some(source) = self.source {
-            let offset = mem.property.span.start;
-            self.current_col = col_at(source, offset);
-        }
+        self.set_debug_pos(mem.property.span.start);
         let name_id = self.intern(mem.property.name.as_str());
+        self.push(Insn::Lda(obj_reg));
         self.push(Insn::LdObjByName(0, name_id));
+        self.next_reg = saved_next_reg;
     }
 
     // ── Assignment: lhs = rhs ─────────────────────────────────────────────────
 
     fn emit_assignment(&mut self, assign: &oxc_ast::ast::AssignmentExpression<'_>) {
-        self.emit_expr(&assign.right);
-
         // AssignmentTarget inherits variants from SimpleAssignmentTarget via
         // @inherit, so we match the inherited variants directly.
         match &assign.left {
             AssignmentTarget::AssignmentTargetIdentifier(id) => {
+                self.emit_expr(&assign.right);
                 let name = id.name.as_str();
                 if let Some(&reg) = self.var_regs.get(name) {
                     self.push(Insn::Sta(reg));
@@ -3427,39 +4509,44 @@ impl<'a> CodeGen<'a> {
             AssignmentTarget::ComputedMemberExpression(mem) => {
                 if is_global_this(&mem.object) {
                     if let Expression::StringLiteral(key) = &mem.expression {
+                        self.emit_expr(&assign.right);
                         let name_id = self.intern(key.value.as_str());
                         self.push(Insn::TryStGlobalByName(0, name_id));
                         return;
                     }
                 }
-                // General case: save rhs, load object, emit stobjbyname.
-                let rhs_reg = self.alloc_reg();
-                self.push(Insn::Sta(rhs_reg));
                 self.emit_expr(&mem.object);
                 let obj_reg = self.alloc_reg();
                 self.push(Insn::Sta(obj_reg));
-                self.push(Insn::Lda(rhs_reg));
                 if let Expression::StringLiteral(key) = &mem.expression {
+                    self.emit_expr(&assign.right);
                     let name_id = self.intern(key.value.as_str());
                     self.push(Insn::StObjByName(0, name_id, obj_reg));
                 }
             }
             AssignmentTarget::StaticMemberExpression(mem) => {
-                let rhs_reg = self.alloc_reg();
-                self.push(Insn::Sta(rhs_reg));
                 self.emit_expr(&mem.object);
                 let obj_reg = self.alloc_reg();
                 self.push(Insn::Sta(obj_reg));
-                self.push(Insn::Lda(rhs_reg));
-                // Update col to property name position for per-instruction tracking.
-                if let Some(source) = self.source {
-                    self.current_col = col_at(source, mem.property.span.start);
+                if assign.operator != AssignmentOperator::Assign {
+                    self.push(Insn::Lda(obj_reg));
+                    let name_id = self.intern(mem.property.name.as_str());
+                    self.push(Insn::LdObjByName(0, name_id));
+                    let lhs_reg = self.alloc_reg();
+                    self.push(Insn::Sta(lhs_reg));
+                    self.emit_expr(&assign.right);
+                    self.emit_assignment_binary(assign.operator, lhs_reg);
+                } else {
+                    self.emit_expr(&assign.right);
                 }
+                // Update col to property name position for per-instruction tracking.
+                self.set_debug_pos(mem.property.span.start);
                 let name_id = self.intern(mem.property.name.as_str());
                 self.push(Insn::StObjByName(0, name_id, obj_reg));
             }
             _ => {
                 // Destructuring assignments, TSAs, etc. — TODO.
+                self.emit_expr(&assign.right);
             }
         }
     }
@@ -3468,6 +4555,11 @@ impl<'a> CodeGen<'a> {
 
     fn emit_call(&mut self, call: &oxc_ast::ast::CallExpression<'_>) {
         let slot = 0u8;
+
+        if matches!(&call.callee, Expression::Super(_)) {
+            self.emit_super_call(call, slot);
+            return;
+        }
 
         // ── require("module_specifier") → tryldglobalbyname ──────────────────
         // ArkRuntime exposes module exports as globals through its `require`
@@ -3493,46 +4585,49 @@ impl<'a> CodeGen<'a> {
             return;
         }
 
-        // Plain function call.
-        // Save callee col before args change it.
-        let callee_col = self.current_col;
+        // Plain function call. Upstream CallExpression allocates a callee
+        // register first; arguments are then emitted into consecutive registers
+        // after it, and PandaGen::Call reloads callee before the call opcode.
+        let saved_next_reg = self.next_reg;
+        let callee_reg = self.alloc_reg();
         self.emit_expr(&call.callee);
         let call_fn_col = self.current_col;
+        self.push(Insn::Sta(callee_reg));
         let argc = call.arguments.len();
 
         // When any argument is a spread element, force the range form so that
         // the spread array is forwarded as a regular positional argument
         // (`foo(...args)` → `callrange 1, args_reg`).
         if Self::args_have_spread(&call.arguments) {
-            let v_start = self.next_reg;
-            let mut regs = Vec::with_capacity(argc);
-            for _ in 0..argc {
-                regs.push(self.alloc_reg());
-            }
-            for (i, arg) in call.arguments.iter().enumerate() {
+            for arg in &call.arguments {
                 self.emit_argument(arg);
-                self.push(Insn::Sta(regs[i]));
+                let reg = self.alloc_reg();
+                self.push(Insn::Sta(reg));
             }
             self.current_col = call_fn_col;
-            self.push(Insn::CallRange(slot, argc as u8, v_start));
+            self.push(Insn::Lda(callee_reg));
+            self.push(Insn::CallRange(slot, argc as u8, callee_reg + 1));
+            self.next_reg = saved_next_reg;
             return;
         }
 
-        let _ = callee_col;
         match argc {
             0 => {
                 self.current_col = call_fn_col;
+                self.push(Insn::Lda(callee_reg));
                 self.push(Insn::CallArg0(slot));
             }
             1 => {
                 let v0 = self.compile_arg_to_reg(&call.arguments[0]);
                 self.current_col = call_fn_col;
+                self.push(Insn::Lda(callee_reg));
                 self.push(Insn::CallArg1(slot, v0));
             }
             2 => {
                 let v0 = self.compile_arg_to_reg(&call.arguments[0]);
                 let v1 = self.compile_arg_to_reg(&call.arguments[1]);
                 self.current_col = call_fn_col;
+                self.push(Insn::Lda(callee_reg));
                 self.push(Insn::CallArgs2(slot, v0, v1));
             }
             3 => {
@@ -3540,25 +4635,26 @@ impl<'a> CodeGen<'a> {
                 let v1 = self.compile_arg_to_reg(&call.arguments[1]);
                 let v2 = self.compile_arg_to_reg(&call.arguments[2]);
                 self.current_col = call_fn_col;
+                self.push(Insn::Lda(callee_reg));
                 self.push(Insn::CallArgs3(slot, v0, v1, v2));
             }
             n => {
-                let v_start = self.next_reg;
-                let mut regs = Vec::with_capacity(n);
-                for _ in 0..n {
-                    regs.push(self.alloc_reg());
-                }
-                for (i, arg) in call.arguments.iter().enumerate() {
+                for arg in &call.arguments {
                     self.emit_argument(arg);
-                    self.push(Insn::Sta(regs[i]));
+                    let reg = self.alloc_reg();
+                    self.push(Insn::Sta(reg));
                 }
                 self.current_col = call_fn_col;
-                self.push(Insn::CallRange(slot, n as u8, v_start));
+                self.push(Insn::Lda(callee_reg));
+                self.push(Insn::CallRange(slot, n as u8, callee_reg + 1));
             }
         }
+        self.next_reg = saved_next_reg;
     }
 
     fn emit_method_call(&mut self, call: &oxc_ast::ast::CallExpression<'_>, slot: u8) {
+        let saved_next_reg = self.next_reg;
+
         // Extract receiver and method name from the callee.
         let (recv_expr, method_name): (&Expression<'_>, Option<String>) = match &call.callee {
             Expression::StaticMemberExpression(mem) => {
@@ -3575,21 +4671,24 @@ impl<'a> CodeGen<'a> {
             other => {
                 self.emit_expr(other);
                 self.push(Insn::CallArg0(slot));
+                self.next_reg = saved_next_reg;
                 return;
             }
         };
 
-        // Load receiver → this_reg.
-        self.emit_expr(recv_expr);
+        // Upstream CallExpression allocates a contiguous tuple:
+        //   callee, this, arg0, arg1, ...
+        // MemberExpression::Compile stores the receiver in `this` and leaves
+        // the property function in acc; PandaGen::CallThis then reloads callee
+        // before emitting the callthis* instruction.
+        let callee_reg = self.alloc_reg();
         let this_reg = self.alloc_reg();
+        self.emit_expr(recv_expr);
         self.push(Insn::Sta(this_reg));
 
         // Update col to the method name position for per-instruction tracking.
-        if let Some(source) = self.source {
-            if let Expression::StaticMemberExpression(mem) = &call.callee {
-                let offset = mem.property.span.start;
-                self.current_col = col_at(source, offset);
-            }
+        if let Expression::StaticMemberExpression(mem) = &call.callee {
+            self.set_debug_pos(mem.property.span.start);
         }
 
         // Load method function via ldobjbyname (or ldundefined as fallback).
@@ -3597,8 +4696,10 @@ impl<'a> CodeGen<'a> {
             let name_id = self.intern(mname);
             self.push(Insn::Lda(this_reg));
             self.push(Insn::LdObjByName(0, name_id));
+            self.push(Insn::Sta(callee_reg));
         } else {
             self.push(Insn::LdUndefined);
+            self.push(Insn::Sta(callee_reg));
         }
 
         let argc = call.arguments.len();
@@ -3612,33 +4713,35 @@ impl<'a> CodeGen<'a> {
         // When any argument is a spread element, force callthisrange so spread
         // arrays are forwarded as regular positional arguments.
         if Self::args_have_spread(&call.arguments) {
-            let mut arg_regs = Vec::with_capacity(argc);
-            for _ in 0..argc {
-                arg_regs.push(self.alloc_reg());
-            }
-            for (i, arg) in call.arguments.iter().enumerate() {
+            for arg in &call.arguments {
                 self.emit_argument(arg);
-                self.push(Insn::Sta(arg_regs[i]));
+                let reg = self.alloc_reg();
+                self.push(Insn::Sta(reg));
             }
             self.current_col = call_col; // reset to method col for call insn
+            self.push(Insn::Lda(callee_reg));
             self.push(Insn::CallThisRange(slot, argc as u8, this_reg));
+            self.next_reg = saved_next_reg;
             return;
         }
 
         match argc {
             0 => {
                 self.current_col = call_col;
+                self.push(Insn::Lda(callee_reg));
                 self.push(Insn::CallThis0(slot, this_reg));
             }
             1 => {
                 let v0 = self.compile_arg_to_reg(&call.arguments[0]);
                 self.current_col = call_col;
+                self.push(Insn::Lda(callee_reg));
                 self.push(Insn::CallThis1(slot, this_reg, v0));
             }
             2 => {
                 let v0 = self.compile_arg_to_reg(&call.arguments[0]);
                 let v1 = self.compile_arg_to_reg(&call.arguments[1]);
                 self.current_col = call_col;
+                self.push(Insn::Lda(callee_reg));
                 self.push(Insn::CallThis2(slot, this_reg, v0, v1));
             }
             3 => {
@@ -3646,21 +4749,51 @@ impl<'a> CodeGen<'a> {
                 let v1 = self.compile_arg_to_reg(&call.arguments[1]);
                 let v2 = self.compile_arg_to_reg(&call.arguments[2]);
                 self.current_col = call_col;
+                self.push(Insn::Lda(callee_reg));
                 self.push(Insn::CallThis3(slot, this_reg, v0, v1, v2));
             }
             n => {
-                let mut arg_regs = Vec::with_capacity(n);
-                for _ in 0..n {
-                    arg_regs.push(self.alloc_reg());
-                }
-                for (i, arg) in call.arguments.iter().enumerate() {
+                for arg in &call.arguments {
                     self.emit_argument(arg);
-                    self.push(Insn::Sta(arg_regs[i]));
+                    let reg = self.alloc_reg();
+                    self.push(Insn::Sta(reg));
                 }
                 self.current_col = call_col;
+                self.push(Insn::Lda(callee_reg));
                 self.push(Insn::CallThisRange(slot, n as u8, this_reg));
             }
         }
+
+        self.next_reg = saved_next_reg;
+    }
+
+    fn emit_super_call(&mut self, call: &oxc_ast::ast::CallExpression<'_>, slot: u8) {
+        let saved_next_reg = self.next_reg;
+        let argc = call.arguments.len();
+        let first_arg_reg = if argc == 0 {
+            let reg = self.alloc_reg();
+            self.push(Insn::LdUndefined);
+            self.push(Insn::Sta(reg));
+            reg
+        } else {
+            let reg = self.next_reg;
+            for arg in &call.arguments {
+                self.emit_argument(arg);
+                let arg_reg = self.alloc_reg();
+                self.push(Insn::Sta(arg_reg));
+            }
+            reg
+        };
+
+        self.push(Insn::SuperCallThisRange(slot, argc as u8, first_arg_reg));
+        self.next_reg = saved_next_reg;
+        let new_this_reg = self.alloc_reg();
+        self.push(Insn::Sta(new_this_reg));
+        self.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
+        self.push(Insn::ThrowIfSuperNotCorrectCall(1));
+        self.push(Insn::Lda(new_this_reg));
+        self.push(Insn::Sta(MANDATORY_PARAM_THIS_REG));
+        self.next_reg = saved_next_reg;
     }
 
     // ── New: new Ctor(args) ───────────────────────────────────────────────────
@@ -3688,9 +4821,16 @@ impl<'a> CodeGen<'a> {
 
     /// Compile an argument expression into a fresh register; return the register.
     fn compile_arg_to_reg(&mut self, arg: &Argument<'_>) -> u8 {
-        let reg = self.alloc_reg();
         self.emit_argument(arg);
+        let reg = self.alloc_reg();
         self.push(Insn::Sta(reg));
+        if matches!(
+            arg.as_expression(),
+            Some(Expression::ObjectExpression(obj)) if Self::is_static_object(obj)
+        ) {
+            self.push(Insn::Lda(reg));
+            self.push(Insn::Sta(reg));
+        }
         reg
     }
 
@@ -3721,41 +4861,109 @@ impl<'a> CodeGen<'a> {
     fn emit_binary_expr(&mut self, bin: &oxc_ast::ast::BinaryExpression<'_>) {
         use oxc_ast::ast::BinaryOperator as Op;
 
-        // Evaluate right operand first (store to register), then left (stays
-        // in accumulator).  The Panda format `op slot, vreg` semantics are
-        // `acc = acc OP v[vreg]`, so this ordering gives `left OP right`.
-        self.emit_expr(&bin.right);
-        let right_reg = self.alloc_reg();
-        self.push(Insn::Sta(right_reg));
-        self.emit_expr(&bin.left);
+        let saved_next_reg = self.next_reg;
+        if matches!(
+            bin.operator,
+            Op::Equality | Op::Inequality | Op::StrictEquality | Op::StrictInequality
+        ) {
+            if is_undefined_literal(&bin.left) && !is_undefined_literal(&bin.right) {
+                let left_reg = self.alloc_reg();
+                self.emit_expr(&bin.right);
+                self.push(Insn::Sta(left_reg));
+                self.emit_undefined_literal();
+                self.emit_binary_op(bin.operator, left_reg);
+                self.next_reg = saved_next_reg;
+                return;
+            }
+        }
 
-        match bin.operator {
-            Op::Addition => self.push(Insn::Add2(0, right_reg)),
-            Op::Subtraction => self.push(Insn::Sub2(0, right_reg)),
-            Op::Multiplication => self.push(Insn::Mul2(0, right_reg)),
-            Op::Division => self.push(Insn::Div2(0, right_reg)),
-            Op::Remainder => self.push(Insn::Mod2(0, right_reg)),
-            Op::Equality => self.push(Insn::Eq(0, right_reg)),
-            Op::Inequality => self.push(Insn::NotEq(0, right_reg)),
-            Op::StrictEquality => self.push(Insn::StrictEq(0, right_reg)),
-            Op::StrictInequality => self.push(Insn::StrictNotEq(0, right_reg)),
-            Op::LessThan => self.push(Insn::Less(0, right_reg)),
-            Op::LessEqualThan => self.push(Insn::LessEq(0, right_reg)),
-            Op::GreaterThan => self.push(Insn::Greater(0, right_reg)),
-            Op::GreaterEqualThan => self.push(Insn::GreaterEq(0, right_reg)),
-            Op::ShiftLeft => self.push(Insn::Shl2(0, right_reg)),
-            Op::ShiftRight => self.push(Insn::Shr2(0, right_reg)),
-            Op::ShiftRightZeroFill => self.push(Insn::Ashr2(0, right_reg)),
-            Op::BitwiseAnd => self.push(Insn::And2(0, right_reg)),
-            Op::BitwiseOR => self.push(Insn::Or2(0, right_reg)),
-            Op::BitwiseXOR => self.push(Insn::Xor2(0, right_reg)),
+        let left_reg = self.alloc_reg();
+        self.emit_expr(&bin.left);
+        self.push(Insn::Sta(left_reg));
+        if is_undefined_literal(&bin.right) {
+            self.emit_undefined_literal();
+        } else {
+            self.emit_expr(&bin.right);
+        }
+
+        self.emit_binary_op(bin.operator, left_reg);
+        self.next_reg = saved_next_reg;
+    }
+
+    fn emit_condition_comparison(&mut self, bin: &oxc_ast::ast::BinaryExpression<'_>) {
+        let saved_next_reg = self.next_reg;
+        if is_undefined_literal(&bin.left) && !is_undefined_literal(&bin.right) {
+            let left_reg = self.alloc_reg();
+            self.emit_expr(&bin.right);
+            self.push(Insn::Sta(left_reg));
+            self.emit_undefined_literal();
+            self.emit_binary_op(bin.operator, left_reg);
+            self.next_reg = saved_next_reg;
+            return;
+        }
+
+        let left_reg = self.alloc_reg();
+        self.emit_expr(&bin.left);
+        self.push(Insn::Sta(left_reg));
+        if is_undefined_literal(&bin.right) {
+            self.emit_undefined_literal();
+        } else {
+            self.emit_expr(&bin.right);
+        }
+        self.emit_binary_op(bin.operator, left_reg);
+        self.next_reg = saved_next_reg;
+    }
+
+    fn emit_binary_op(&mut self, op: oxc_ast::ast::BinaryOperator, left_reg: u8) {
+        use oxc_ast::ast::BinaryOperator as Op;
+
+        match op {
+            Op::Addition => self.push(Insn::Add2(0, left_reg)),
+            Op::Subtraction => self.push(Insn::Sub2(0, left_reg)),
+            Op::Multiplication => self.push(Insn::Mul2(0, left_reg)),
+            Op::Division => self.push(Insn::Div2(0, left_reg)),
+            Op::Remainder => self.push(Insn::Mod2(0, left_reg)),
+            Op::Equality => self.push(Insn::Eq(0, left_reg)),
+            Op::Inequality => self.push(Insn::NotEq(0, left_reg)),
+            Op::StrictEquality => self.push(Insn::StrictEq(0, left_reg)),
+            Op::StrictInequality => self.push(Insn::StrictNotEq(0, left_reg)),
+            Op::LessThan => self.push(Insn::Less(0, left_reg)),
+            Op::LessEqualThan => self.push(Insn::LessEq(0, left_reg)),
+            Op::GreaterThan => self.push(Insn::Greater(0, left_reg)),
+            Op::GreaterEqualThan => self.push(Insn::GreaterEq(0, left_reg)),
+            Op::ShiftLeft => self.push(Insn::Shl2(0, left_reg)),
+            Op::ShiftRight => self.push(Insn::Shr2(0, left_reg)),
+            Op::ShiftRightZeroFill => self.push(Insn::Ashr2(0, left_reg)),
+            Op::BitwiseAnd => self.push(Insn::And2(0, left_reg)),
+            Op::BitwiseOR => self.push(Insn::Or2(0, left_reg)),
+            Op::BitwiseXOR => self.push(Insn::Xor2(0, left_reg)),
             Op::In => {
-                // `key in obj`: left=key (in acc), right=obj (in right_reg).
-                self.push(Insn::IsIn(0, right_reg));
+                self.push(Insn::IsIn(0, left_reg));
             }
             // instanceof, ** etc. — emit acc for now.
             _ => {}
         }
+    }
+
+    fn emit_assignment_binary(&mut self, op: AssignmentOperator, left_reg: u8) {
+        match op {
+            AssignmentOperator::Addition => self.push(Insn::Add2(0, left_reg)),
+            AssignmentOperator::Subtraction => self.push(Insn::Sub2(0, left_reg)),
+            AssignmentOperator::Multiplication => self.push(Insn::Mul2(0, left_reg)),
+            AssignmentOperator::Division => self.push(Insn::Div2(0, left_reg)),
+            AssignmentOperator::Remainder => self.push(Insn::Mod2(0, left_reg)),
+            AssignmentOperator::ShiftLeft => self.push(Insn::Shl2(0, left_reg)),
+            AssignmentOperator::ShiftRight => self.push(Insn::Shr2(0, left_reg)),
+            AssignmentOperator::ShiftRightZeroFill => self.push(Insn::Ashr2(0, left_reg)),
+            AssignmentOperator::BitwiseAnd => self.push(Insn::And2(0, left_reg)),
+            AssignmentOperator::BitwiseOR => self.push(Insn::Or2(0, left_reg)),
+            AssignmentOperator::BitwiseXOR => self.push(Insn::Xor2(0, left_reg)),
+            _ => {}
+        }
+    }
+
+    fn emit_undefined_literal(&mut self) {
+        self.push(Insn::LdUndefined);
     }
 
     // ── Unary expression: OP operand ──────────────────────────────────────────
@@ -3764,7 +4972,9 @@ impl<'a> CodeGen<'a> {
         match unary.operator {
             UnaryOperator::Void => {
                 // `void expr` evaluates expr for side-effects, then yields undefined.
-                self.emit_expr(&unary.argument);
+                if !matches!(&unary.argument, Expression::NumericLiteral(num) if num.value == 0.0) {
+                    self.emit_expr(&unary.argument);
+                }
                 self.push(Insn::LdUndefined);
             }
             UnaryOperator::Typeof => {
@@ -3781,10 +4991,7 @@ impl<'a> CodeGen<'a> {
             }
             UnaryOperator::LogicalNot => {
                 self.emit_expr(&unary.argument);
-                // Use BitNot opcode (0x20) — the ArkCompiler `not` mnemonic.
-                // Runtime coercion to boolean is not implemented here but the
-                // bytecode sequence matches the instruction stream es2abc emits.
-                self.push(Insn::BitNot(0));
+                self.emit_negate_acc();
             }
             UnaryOperator::UnaryPlus => {
                 // Unary `+x` — just evaluate (converts to number conceptually).
@@ -3816,36 +5023,41 @@ impl<'a> CodeGen<'a> {
     ///   <after>
     /// ```
     fn emit_logical_expr(&mut self, log: &oxc_ast::ast::LogicalExpression<'_>) {
+        let saved_next_reg = self.next_reg;
         self.emit_expr(&log.left);
+        let lhs_reg = self.alloc_reg();
+        self.push(Insn::Sta(lhs_reg));
 
         let branch_pos = self.insns.len();
-        let (branch_insn, patch_byte_len) = match log.operator {
+        match log.operator {
             LogicalOperator::And => {
-                self.push(Insn::Jeqz(0)); // jeqz: if left is falsy, skip right
-                (true, 3usize) // jeqz = 3 bytes
+                self.push(Insn::CallRuntimeIsFalse(0));
+                self.push(Insn::Jnez(0));
             }
             LogicalOperator::Or => {
-                self.push(Insn::Jnez(0)); // jnez: if left is truthy, skip right
-                (false, 3usize)
+                self.push(Insn::CallRuntimeIsTrue(0));
+                self.push(Insn::Jnez(0));
             }
             LogicalOperator::Coalesce => {
                 // `a ?? b`: skip right only when left is not null/undefined.
                 // Approximation: treat as `||` (does not handle 0/""/false correctly).
+                self.push(Insn::CallRuntimeIsTrue(0));
                 self.push(Insn::Jnez(0));
-                (false, 3usize)
             }
         };
-        let _ = branch_insn;
-        let _ = patch_byte_len;
+        let branch_jump = branch_pos + 3;
 
         self.emit_expr(&log.right);
+        let end_jump = self.insns.len();
+        self.push(Insn::Jmp(0));
 
-        // Patch the branch to skip over the right-hand operand.
+        let skip_right = self.insns.len();
+        self.patch_jump_to(branch_jump, skip_right);
+        self.push(Insn::Lda(lhs_reg));
+
         let end_pos = self.insns.len();
-        let offset = (end_pos as i32 - branch_pos as i32) as i16;
-        let [lo, hi] = offset.to_le_bytes();
-        self.insns[branch_pos + 1] = lo;
-        self.insns[branch_pos + 2] = hi;
+        self.patch_jump_to(end_jump, end_pos);
+        self.next_reg = saved_next_reg;
     }
 }
 
@@ -3901,16 +5113,15 @@ struct StarExportEntry {
 
 impl ModuleRecordInfo {
     fn request_index(&mut self, specifier: &str) -> u16 {
-        let normalized = normalize_module_specifier(specifier);
         if let Some(index) = self
             .module_requests
             .iter()
-            .position(|request| *request == normalized)
+            .position(|request| request == specifier)
         {
             return index as u16;
         }
         let index = self.module_requests.len() as u16;
-        self.module_requests.push(normalized);
+        self.module_requests.push(specifier.to_string());
         index
     }
 
@@ -3934,13 +5145,17 @@ impl ModuleRecordInfo {
 
     fn add_namespace_import(&mut self, local_name: String, specifier: &str) {
         let module_request_idx = self.request_index(specifier);
-        if self.namespace_imports.iter().any(|i| {
-            i.local_name == local_name && i.module_request_idx == module_request_idx
-        }) {
+        if self
+            .namespace_imports
+            .iter()
+            .any(|i| i.local_name == local_name && i.module_request_idx == module_request_idx)
+        {
             return;
         }
-        self.namespace_imports
-            .push(NamespaceImportEntry { local_name, module_request_idx });
+        self.namespace_imports.push(NamespaceImportEntry {
+            local_name,
+            module_request_idx,
+        });
     }
 
     fn add_local_export(&mut self, local_name: String, export_name: &str) {
@@ -3957,16 +5172,13 @@ impl ModuleRecordInfo {
         });
     }
 
-    fn add_indirect_export(
-        &mut self,
-        export_name: String,
-        import_name: String,
-        specifier: &str,
-    ) {
+    fn add_indirect_export(&mut self, export_name: String, import_name: String, specifier: &str) {
         let module_request_idx = self.request_index(specifier);
-        if self.indirect_exports.iter().any(|e| {
-            e.export_name == export_name && e.module_request_idx == module_request_idx
-        }) {
+        if self
+            .indirect_exports
+            .iter()
+            .any(|e| e.export_name == export_name && e.module_request_idx == module_request_idx)
+        {
             return;
         }
         self.indirect_exports.push(IndirectExportEntry {
@@ -3985,7 +5197,8 @@ impl ModuleRecordInfo {
         {
             return;
         }
-        self.star_exports.push(StarExportEntry { module_request_idx });
+        self.star_exports
+            .push(StarExportEntry { module_request_idx });
     }
 }
 
@@ -4385,6 +5598,111 @@ fn is_module_exports_target(target: &AssignmentTarget<'_>) -> bool {
     matches!(&member.object, Expression::Identifier(id) if id.name.as_str() == "module")
 }
 
+fn is_undefined_literal(expr: &Expression<'_>) -> bool {
+    match expr {
+        Expression::Identifier(id) => id.name.as_str() == "undefined",
+        Expression::UnaryExpression(unary) if unary.operator == UnaryOperator::Void => {
+            matches!(&unary.argument, Expression::NumericLiteral(num) if num.value == 0.0)
+        }
+        Expression::ParenthesizedExpression(paren) => is_undefined_literal(&paren.expression),
+        _ => false,
+    }
+}
+
+fn negative_integer_literal(expr: &Expression<'_>) -> Option<i32> {
+    match expr {
+        Expression::UnaryExpression(unary) if unary.operator == UnaryOperator::UnaryNegation => {
+            if let Expression::NumericLiteral(num) = &unary.argument {
+                if num.value.fract() == 0.0 && num.value >= 0.0 && num.value <= i32::MAX as f64 {
+                    return Some(num.value as i32);
+                }
+            }
+            None
+        }
+        Expression::ParenthesizedExpression(paren) => negative_integer_literal(&paren.expression),
+        _ => None,
+    }
+}
+
+fn is_condition_comparison(op: oxc_ast::ast::BinaryOperator) -> bool {
+    use oxc_ast::ast::BinaryOperator as Op;
+    matches!(
+        op,
+        Op::Equality
+            | Op::Inequality
+            | Op::StrictEquality
+            | Op::StrictInequality
+            | Op::LessThan
+            | Op::LessEqualThan
+            | Op::GreaterThan
+            | Op::GreaterEqualThan
+    )
+}
+
+fn stmts_capture_this_in_arrow(stmts: &[Statement<'_>]) -> bool {
+    stmts.iter().any(stmt_captures_this_in_arrow)
+}
+
+fn stmt_captures_this_in_arrow(stmt: &Statement<'_>) -> bool {
+    match stmt {
+        Statement::ExpressionStatement(es) => expr_captures_this_in_arrow(&es.expression),
+        Statement::BlockStatement(block) => stmts_capture_this_in_arrow(&block.body),
+        Statement::IfStatement(if_stmt) => {
+            expr_captures_this_in_arrow(&if_stmt.test)
+                || stmt_captures_this_in_arrow(&if_stmt.consequent)
+                || if_stmt
+                    .alternate
+                    .as_ref()
+                    .is_some_and(|alt| stmt_captures_this_in_arrow(alt))
+        }
+        Statement::ReturnStatement(ret) => ret
+            .argument
+            .as_ref()
+            .is_some_and(expr_captures_this_in_arrow),
+        Statement::VariableDeclaration(decl) => decl
+            .declarations
+            .iter()
+            .any(|d| d.init.as_ref().is_some_and(expr_captures_this_in_arrow)),
+        _ => false,
+    }
+}
+
+fn expr_captures_this_in_arrow(expr: &Expression<'_>) -> bool {
+    match expr {
+        Expression::ArrowFunctionExpression(arrow) => arrow_captures_from_body(arrow.body.as_ref())
+            .this_slot
+            .is_some(),
+        Expression::CallExpression(call) => {
+            expr_captures_this_in_arrow(&call.callee)
+                || call
+                    .arguments
+                    .iter()
+                    .any(|arg| arg.as_expression().is_some_and(expr_captures_this_in_arrow))
+        }
+        Expression::StaticMemberExpression(member) => expr_captures_this_in_arrow(&member.object),
+        Expression::ComputedMemberExpression(member) => {
+            expr_captures_this_in_arrow(&member.object)
+                || expr_captures_this_in_arrow(&member.expression)
+        }
+        Expression::AssignmentExpression(assign) => expr_captures_this_in_arrow(&assign.right),
+        Expression::BinaryExpression(bin) => {
+            expr_captures_this_in_arrow(&bin.left) || expr_captures_this_in_arrow(&bin.right)
+        }
+        Expression::LogicalExpression(log) => {
+            expr_captures_this_in_arrow(&log.left) || expr_captures_this_in_arrow(&log.right)
+        }
+        Expression::ConditionalExpression(cond) => {
+            expr_captures_this_in_arrow(&cond.test)
+                || expr_captures_this_in_arrow(&cond.consequent)
+                || expr_captures_this_in_arrow(&cond.alternate)
+        }
+        Expression::ParenthesizedExpression(paren) => {
+            expr_captures_this_in_arrow(&paren.expression)
+        }
+        _ => false,
+    }
+}
+
 fn normalize_import_local_name(binding: &str, specifier: &str) -> String {
     if binding.starts_with("_ohos_") {
         return default_import_name(specifier);
@@ -4413,13 +5731,5 @@ fn module_export_name(name: &ModuleExportName<'_>) -> String {
         ModuleExportName::IdentifierName(ident) => ident.name.as_str().to_string(),
         ModuleExportName::IdentifierReference(ident) => ident.name.as_str().to_string(),
         ModuleExportName::StringLiteral(lit) => lit.value.as_str().to_string(),
-    }
-}
-
-fn normalize_module_specifier(specifier: &str) -> String {
-    if let Some(rest) = specifier.strip_prefix("@ohos:") {
-        format!("L@ohos.{};", rest)
-    } else {
-        specifier.to_string()
     }
 }

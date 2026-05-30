@@ -206,7 +206,10 @@ mod tests {
             .unwrap();
 
         let output = result.unwrap();
-        assert!(matches!(output.external, Some(ResolvedExternal::Bool(true))));
+        assert!(matches!(
+            output.external,
+            Some(ResolvedExternal::Bool(true))
+        ));
     }
 
     #[test]

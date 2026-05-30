@@ -409,8 +409,7 @@ mod tests {
             chunk_source_files,
         };
 
-        let written =
-            write_output(&chunk_graph, &output_dir, Some(&opts)).expect("write output");
+        let written = write_output(&chunk_graph, &output_dir, Some(&opts)).expect("write output");
 
         let source_maps = written.source_maps_path.expect("sourceMaps.map path");
         let value: serde_json::Value = serde_json::from_str(
@@ -425,10 +424,7 @@ mod tests {
         );
         let entry_key = "entry|entry|1.0.0|src/main/ets/entryability/EntryAbility.ts";
         let index_key = "entry|entry|1.0.0|src/main/ets/pages/Index.ts";
-        assert!(
-            value.get(entry_key).is_some(),
-            "missing key {entry_key}"
-        );
+        assert!(value.get(entry_key).is_some(), "missing key {entry_key}");
         assert!(value.get(index_key).is_some(), "missing key {index_key}");
 
         let entry_map = &value[entry_key];

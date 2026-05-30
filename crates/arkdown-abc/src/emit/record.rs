@@ -24,14 +24,33 @@ pub mod method_access {
 }
 
 /// Return the correct `access_flags` value for a method based on its name pattern.
-pub(crate) fn method_access_flags_for(name: &str) -> u32 {
+pub(crate) fn method_access_flags_for(method: &MethodRecord) -> u32 {
+    let name = method.name.as_str();
     if name == "func_main_0" || name.contains("#~@0=#") {
+        if name.contains("#~@0=#")
+            && method.bytecode.len() > 1
+            && !is_generated_default_derived_constructor(method)
+        {
+            return method_access::INSTANCE;
+        }
         method_access::MODULE_OR_CTOR
-    } else if name.contains('@') && name.contains("*#") {
+    } else if name.contains("*#") {
         method_access::ANON
     } else {
         method_access::INSTANCE
     }
+}
+
+fn is_generated_default_derived_constructor(method: &MethodRecord) -> bool {
+    // GENERATED_CONSTRUCTOR follows upstream es2panda's default derived class
+    // path: FunctionEnter, CopyRestArgs, SuperCallSpread, implicit this checks.
+    method.bytecode.starts_with(&[
+        0x44, 0x60, // mov v0, v6
+        0x44, 0x71, // mov v1, v7
+        0x44, 0x82, // mov v2, v8
+        0x44, 0x93, // mov v3, v9
+        0xcf, 0x00, // copyrestargs 0
+    ])
 }
 
 /// Encode a Panda `StringItem` as an inline ULEB128-prefixed null-terminated string.
@@ -128,7 +147,7 @@ pub fn encode_code_item(
 ///
 /// In Panda bytecode, every function — including a module's top-level
 /// `func_main_0` — is a method belonging to a class record.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MethodRecord {
     /// Method name string (e.g. `"func_main_0"` for the module entry point).
     pub name: String,
@@ -172,7 +191,7 @@ pub struct DebugInfoRecord {
 /// Used to emit the 6 module metadata fields that es2abc always writes:
 /// `pkgName@`, `isCommonjs`, `hasTopLevelAwait`, `isSharedModule`,
 /// `scopeNames`, `moduleRecordIdx`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FieldRecord {
     /// Field name string (stored as a StringItem in the file).
     pub name: String,
@@ -204,12 +223,28 @@ pub enum FieldValue {
 /// A compiled module, represented as a Panda `ClassItem`.
 ///
 /// One `ClassRecord` is produced per bundled JavaScript chunk file.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ClassRecord {
     /// Class name (the OHM URL or record identifier for this chunk).
     pub name: String,
     /// All methods belonging to this record.
     pub methods: Vec<MethodRecord>,
+    /// Global [`StringTable`] indices introduced while compiling this record.
+    ///
+    /// Panda bytecode string operands index into the file IndexHeader method
+    /// pool, not directly into a global string table.  Upstream es2abc groups
+    /// method-pool entries by record: this record's strings, method literals,
+    /// then literal arrays.  Keeping the per-record string indices lets the
+    /// serializer rebuild that pool and rewrite bytecode operands accordingly.
+    pub string_indices: Vec<u32>,
+    /// Global literal-array indices introduced while compiling this record.
+    pub literal_indices: Vec<usize>,
+    /// Literal arrays used by module metadata fields (`moduleRecordIdx`,
+    /// `scopeNames`).  Upstream emits these literal strings with the owning
+    /// program, but they are not entries in that record's method index pool.
+    pub module_literal_indices: Vec<usize>,
+    /// Function source-code strings created while MakeFunctionItems runs.
+    pub source_code_strings: Vec<String>,
     /// Access flags for this class (ULEB128-encoded in the binary).
     ///
     /// Regular JS module classes use `1` (ACC_PUBLIC).
@@ -266,7 +301,6 @@ impl ClassRecord {
             + fields_count
             + methods_count
             + class_tags
-            + self.source_file.as_ref().map_or(0, |_| 1 + 4)
             + field_bytes
             + self
                 .methods
@@ -294,7 +328,6 @@ impl ClassRecord {
             + uleb128(self.fields.len() as u64).len()
             + uleb128(self.methods.len() as u64).len()
             + 3
-            + self.source_file.as_ref().map_or(0, |_| 1 + 4)
             + self.field_items_byte_size()
     }
 
@@ -349,7 +382,7 @@ impl ClassRecord {
         &self,
         class_idx: u16,
         field_name_offsets: &[u32],
-        source_file_offset: Option<u32>,
+        _source_file_offset: Option<u32>,
         method_name_offsets: &[u32],
         code_offsets: &[u32],
         debug_info_offsets: &[Option<u32>],
@@ -386,10 +419,6 @@ impl ClassRecord {
         // ClassTag::SOURCE_LANG = 0x02.
         buf.push(0x02);
         buf.push(self.source_lang);
-        if let Some(source_file_offset) = source_file_offset {
-            buf.push(0x07);
-            buf.extend_from_slice(&source_file_offset.to_le_bytes());
-        }
         // ClassTag::NOTHING = 0x00 (terminates tagged section)
         buf.push(0x00);
 
@@ -437,7 +466,7 @@ impl ClassRecord {
             // name_off: u32 LE (file offset to method's StringItem)
             buf.extend_from_slice(&name_off.to_le_bytes());
             // access_flags: ULEB128 — per-method type (INSTANCE=0x008, MODULE_OR_CTOR=0x108, ANON=0x208)
-            buf.extend_from_slice(&uleb128(method_access_flags_for(&method.name) as u64));
+            buf.extend_from_slice(&uleb128(method_access_flags_for(method) as u64));
             // MethodTag::CODE = 0x01
             buf.push(0x01);
             // code_off: u32 LE (file offset to CodeItem)
@@ -468,7 +497,7 @@ impl MethodRecord {
         // + MethodTag::ANNOTATION(1) + ann_off(4)  ← always emitted
         // + MethodTag::DEBUG_INFO(1) + debug_off(4) ← only when debug_info present
         // + MethodTag::NOTHING(1)
-        let access_flags_len = uleb128(method_access_flags_for(&self.name) as u64).len();
+        let access_flags_len = uleb128(method_access_flags_for(self) as u64).len();
         16 + access_flags_len
             + (1 + 4) // MethodTag::ANNOTATION always emitted
             + self.debug_info.as_ref().map_or(0, |_| 1 + 4)
@@ -571,6 +600,10 @@ mod tests {
                 line_ops: vec![],
                 catch_entries: vec![],
             }],
+            string_indices: vec![],
+            literal_indices: vec![],
+            module_literal_indices: vec![],
+            source_code_strings: vec![],
             access_flags: 1,
             source_lang: 0,
             source_file: None,
@@ -601,6 +634,10 @@ mod tests {
                 line_ops: vec![],
                 catch_entries: vec![],
             }],
+            string_indices: vec![],
+            literal_indices: vec![],
+            module_literal_indices: vec![],
+            source_code_strings: vec![],
             access_flags: 1,
             source_lang: 0,
             source_file: None,

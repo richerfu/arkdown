@@ -72,8 +72,7 @@ impl CacheFile {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let json = serde_json::to_string_pretty(self)
-            .map_err(io::Error::other)?;
+        let json = serde_json::to_string_pretty(self).map_err(io::Error::other)?;
         std::fs::write(&path, json)
     }
 
@@ -91,7 +90,10 @@ impl CacheFile {
         if let Some(entry) = self.entries.iter_mut().find(|e| e.key == key) {
             entry.bytecode = hex_bytes;
         } else {
-            self.entries.push(CacheEntry { key, bytecode: hex_bytes });
+            self.entries.push(CacheEntry {
+                key,
+                bytecode: hex_bytes,
+            });
         }
     }
 }
@@ -111,7 +113,11 @@ pub fn derive_key(modules: &[(&str, &str)], module_mode: bool, debug_info: bool)
         hasher.update(source.as_bytes());
         hasher.update(b"\x00");
     }
-    hasher.update(if module_mode { b"module=1" } else { b"module=0" });
+    hasher.update(if module_mode {
+        b"module=1"
+    } else {
+        b"module=0"
+    });
     hasher.update(if debug_info { b"debug=1" } else { b"debug=0" });
     hex::encode(hasher.finalize())
 }

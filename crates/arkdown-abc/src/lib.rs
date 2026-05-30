@@ -244,22 +244,21 @@ globalThis["test"] = "hello";"#;
         compiler.compile(modules, &tmp).unwrap();
         let bytes = std::fs::read(&tmp).unwrap();
 
-        // hvigor stores @ohos: imports using class-descriptor notation.
-        // "@ohos:app.ability.UIAbility" → "L@ohos.app.ability.UIAbility;"
-        // "@ohos:hilog"                 → "L@ohos.hilog;"
-        let ohos_ui = b"L@ohos.app.ability.UIAbility;";
-        let ohos_hilog = b"L@ohos.hilog;";
+        // hvigor keeps the original module request strings in the method index
+        // and emits compact native records (for example L@ohos.app;) separately.
+        let ohos_ui = b"@ohos:app.ability.UIAbility";
+        let ohos_hilog = b"@ohos:hilog";
 
         let has_ui_ability = bytes.windows(ohos_ui.len()).any(|w| w == ohos_ui);
         let has_hilog = bytes.windows(ohos_hilog.len()).any(|w| w == ohos_hilog);
 
         assert!(
             has_ui_ability,
-            "L@ohos.app.ability.UIAbility; must appear as a StringItem in the ABC file"
+            "@ohos:app.ability.UIAbility must appear as a module request in the ABC file"
         );
         assert!(
             has_hilog,
-            "L@ohos.hilog; must appear as a StringItem in the ABC file"
+            "@ohos:hilog must appear as a module request in the ABC file"
         );
 
         let _ = std::fs::remove_file(&tmp);
@@ -402,7 +401,9 @@ export { EntryAbility as default };"#;
 
         // Second compile — should be a cache hit.
         let compiler2 = AbcCompiler::new(make_opts());
-        compiler2.compile(modules(), &out2).expect("second compile (cache hit)");
+        compiler2
+            .compile(modules(), &out2)
+            .expect("second compile (cache hit)");
 
         let bytes1 = std::fs::read(&out1).expect("read out1");
         let bytes2 = std::fs::read(&out2).expect("read out2");
@@ -412,8 +413,7 @@ export { EntryAbility as default };"#;
         );
 
         // Verify the cache file was created.
-        let cache_file_path =
-            crate::cache::CacheFile::path_for(cache_dir.path());
+        let cache_file_path = crate::cache::CacheFile::path_for(cache_dir.path());
         assert!(
             cache_file_path.exists(),
             "cache file must exist at {:?}",
@@ -482,8 +482,7 @@ export { EntryAbility as default };"#;
         );
 
         // The cache file must now contain 2 distinct entries.
-        let cache =
-            crate::cache::CacheFile::load(cache_dir.path());
+        let cache = crate::cache::CacheFile::load(cache_dir.path());
         assert_eq!(
             cache.entries.len(),
             2,

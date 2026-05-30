@@ -31,7 +31,9 @@ pub use loader_json::{generate_loader_json, ByteCodeHarEntry, LoaderJson, PkgBri
 pub use process_profile::{
     ark_virtual_machine_from_version, process_profile, process_profile_with_ark_vm_version,
 };
-pub use process_share_config::{merge_share_config, write_share_config, ShareConfigInput, ShareConfigOutput};
+pub use process_share_config::{
+    merge_share_config, write_share_config, ShareConfigInput, ShareConfigOutput,
+};
 pub use process_startup_config::{
     merge_startup_config, write_startup_config, StartupConfigInput, StartupConfigOutput,
 };
@@ -146,8 +148,7 @@ impl ProfileProcessor {
                 m
             };
 
-        let numeric_api =
-            compute_numeric_api_version(&self.config.product.compatible_sdk_version);
+        let numeric_api = compute_numeric_api_version(&self.config.product.compatible_sdk_version);
         let is_debug = matches!(self.config.build_mode, arkdown_core::BuildMode::Debug);
 
         // Build app section in hvigor's canonical field order.
@@ -396,7 +397,10 @@ fn manifest_to_json(
 
     // Build module object in hvigor's canonical order.
     let mut obj = serde_json::Map::new();
-    obj.insert("virtualMachine".into(), manifest.virtual_machine.clone().into());
+    obj.insert(
+        "virtualMachine".into(),
+        manifest.virtual_machine.clone().into(),
+    );
     if let Some(main_el) = &manifest.main_element {
         obj.insert("mainElement".into(), main_el.clone().into());
     }
@@ -409,14 +413,8 @@ fn manifest_to_json(
         "compileMode".into(),
         compile_mode_str(&manifest.compile_mode).into(),
     );
-    obj.insert(
-        "type".into(),
-        module_type_str(&manifest.module_type).into(),
-    );
-    obj.insert(
-        "dependencies".into(),
-        serde_json::Value::Array(vec![]),
-    );
+    obj.insert("type".into(), module_type_str(&manifest.module_type).into());
+    obj.insert("dependencies".into(), serde_json::Value::Array(vec![]));
     obj.insert("abilities".into(), serde_json::Value::Array(abilities));
     obj.insert(
         "deviceTypes".into(),

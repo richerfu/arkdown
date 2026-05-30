@@ -44,7 +44,11 @@ fn extract_leaf_component(
         Expression::Identifier(_) => {
             let name = component_name(&call.callee)?;
             let create_args = arguments_text(&call.arguments, source_text);
-            Ok(LeafComponent { name, create_args, chain_attrs: vec![] })
+            Ok(LeafComponent {
+                name,
+                create_args,
+                chain_attrs: vec![],
+            })
         }
         Expression::StaticMemberExpression(member) => {
             let attr_name = member.property.name.to_string();
@@ -79,9 +83,15 @@ fn lower_call_expression(
     out.push_str(&format!(
         "{indent}this.observeComponentCreation2((elmtId, isInitialRender) => {{\n"
     ));
-    out.push_str(&format!("{indent}    {}.create({});\n", lc.name, lc.create_args));
+    out.push_str(&format!(
+        "{indent}    {}.create({});\n",
+        lc.name, lc.create_args
+    ));
     for (attr_name, attr_args) in &lc.chain_attrs {
-        out.push_str(&format!("{indent}    {}.{attr_name}({attr_args});\n", lc.name));
+        out.push_str(&format!(
+            "{indent}    {}.{attr_name}({attr_args});\n",
+            lc.name
+        ));
     }
     out.push_str(&format!("{indent}}}, {});\n", lc.name));
     out.push_str(&format!("{indent}{}.pop();\n", lc.name));
@@ -113,7 +123,13 @@ pub fn lower_build_body(
         match statement {
             Statement::ExpressionStatement(statement) => match &statement.expression {
                 Expression::ArkUIComponentExpression(component) => {
-                    lower_component(component, source_text, "        ", &mut out, &mut span_hints)?;
+                    lower_component(
+                        component,
+                        source_text,
+                        "        ",
+                        &mut out,
+                        &mut span_hints,
+                    )?;
                 }
                 Expression::CallExpression(call) => {
                     lower_call_expression(call, source_text, "        ", &mut out)?;
@@ -139,7 +155,10 @@ fn lower_component(
 
     // Record span hint before emitting — current newline count is the body line.
     let body_line = out.bytes().filter(|&b| b == b'\n').count();
-    span_hints.push(SpanHint { body_line, original_span: component.span() });
+    span_hints.push(SpanHint {
+        body_line,
+        original_span: component.span(),
+    });
 
     out.push_str(&format!(
         "{indent}this.observeComponentCreation2((elmtId, isInitialRender) => {{\n"
@@ -220,7 +239,11 @@ pub fn lower_build_body_or_raw(
             };
             let raw = span_text(body, source_text);
             // Strip the surrounding `{` / `}` and re-indent each non-empty line.
-            let inner = raw.trim().trim_start_matches('{').trim_end_matches('}').trim();
+            let inner = raw
+                .trim()
+                .trim_start_matches('{')
+                .trim_end_matches('}')
+                .trim();
             let text = inner
                 .lines()
                 .filter(|line| !line.trim().is_empty())
@@ -247,7 +270,11 @@ pub fn lower_styles_body(body: Option<&FunctionBody<'_>>, source_text: &str) -> 
     };
     let body_text = span_text(body, source_text);
     // Strip the surrounding braces and process each line.
-    let inner = body_text.trim().trim_start_matches('{').trim_end_matches('}').trim();
+    let inner = body_text
+        .trim()
+        .trim_start_matches('{')
+        .trim_end_matches('}')
+        .trim();
     let mut out = String::new();
     for line in inner.lines() {
         let trimmed = line.trim();
@@ -286,7 +313,11 @@ mod tests {
     fn parse_and_lower(source: &str) -> Result<String, BuildLoweringError> {
         let allocator = Allocator::default();
         let parsed = Parser::new(&allocator, source, SourceType::ets()).parse();
-        assert!(parsed.errors.is_empty(), "parse errors: {:?}", parsed.errors);
+        assert!(
+            parsed.errors.is_empty(),
+            "parse errors: {:?}",
+            parsed.errors
+        );
         let struct_statement = parsed
             .program
             .body
@@ -341,7 +372,10 @@ struct Foo {
         assert!(out.contains("Text.create(\"Hello\");"), "got:\n{out}");
         assert!(out.contains("}, Text);"), "got:\n{out}");
         assert!(out.contains("Text.pop();"), "got:\n{out}");
-        assert!(!out.contains(".pop();\n        this.observeComponentCreation2"), "got:\n{out}");
+        assert!(
+            !out.contains(".pop();\n        this.observeComponentCreation2"),
+            "got:\n{out}"
+        );
     }
 
     #[test]
@@ -351,7 +385,10 @@ struct Foo {
         assert!(out.contains("Divider.create();"), "got:\n{out}");
         assert!(out.contains("}, Divider);"), "got:\n{out}");
         assert!(out.contains("Divider.pop();"), "got:\n{out}");
-        assert!(!out.contains("Divider.create(,"), "no empty-arg comma; got:\n{out}");
+        assert!(
+            !out.contains("Divider.create(,"),
+            "no empty-arg comma; got:\n{out}"
+        );
     }
 
     #[test]
@@ -367,13 +404,27 @@ struct Foo {
 }"#;
         let out = parse_and_lower(source).unwrap();
         let col_create = out.find("Column.create();").expect("Column.create missing");
-        let first = out.find("Text.create(\"first\");").expect("first Text.create missing");
-        let second = out.find("Text.create(\"second\");").expect("second Text.create missing");
+        let first = out
+            .find("Text.create(\"first\");")
+            .expect("first Text.create missing");
+        let second = out
+            .find("Text.create(\"second\");")
+            .expect("second Text.create missing");
         let col_pop = out.find("Column.pop();").expect("Column.pop missing");
-        assert!(col_create < first, "Column.create must precede first Text.create");
+        assert!(
+            col_create < first,
+            "Column.create must precede first Text.create"
+        );
         assert!(first < second, "first Text.create must precede second");
-        assert!(second < col_pop, "second Text.create must precede Column.pop");
-        assert_eq!(out.matches("Text.pop();").count(), 2, "two Text.pop() calls expected");
+        assert!(
+            second < col_pop,
+            "second Text.create must precede Column.pop"
+        );
+        assert_eq!(
+            out.matches("Text.pop();").count(),
+            2,
+            "two Text.pop() calls expected"
+        );
     }
 
     #[test]
@@ -391,7 +442,11 @@ struct Foo {
             2,
             "expected two observeComponentCreation2 calls; got:\n{out}"
         );
-        assert_eq!(out.matches("Text.pop();").count(), 2, "two Text.pop() calls; got:\n{out}");
+        assert_eq!(
+            out.matches("Text.pop();").count(),
+            2,
+            "two Text.pop() calls; got:\n{out}"
+        );
     }
 
     #[test]
@@ -440,14 +495,23 @@ struct Foo {
 }"#;
         let out = parse_and_lower(source).unwrap();
         for name in ["Flex", "Stack", "Column", "Row"] {
-            assert!(out.contains(&format!("{name}.create();")), "{name}.create missing; got:\n{out}");
-            assert!(out.contains(&format!("{name}.pop();")), "{name}.pop missing; got:\n{out}");
+            assert!(
+                out.contains(&format!("{name}.create();")),
+                "{name}.create missing; got:\n{out}"
+            );
+            assert!(
+                out.contains(&format!("{name}.pop();")),
+                "{name}.pop missing; got:\n{out}"
+            );
         }
         let flex_create = out.find("Flex.create();").unwrap();
         let row_create = out.find("Row.create();").unwrap();
         let row_pop = out.find("Row.pop();").unwrap();
         let flex_pop = out.find("Flex.pop();").unwrap();
-        assert!(flex_create < row_create, "Flex.create must come before Row.create");
+        assert!(
+            flex_create < row_create,
+            "Flex.create must come before Row.create"
+        );
         assert!(row_create < row_pop, "Row.create before Row.pop");
         assert!(row_pop < flex_pop, "Row.pop before Flex.pop");
     }
@@ -470,7 +534,10 @@ struct Foo {
         assert!(row_create < spacer_create);
         assert!(spacer_create < spacer_pop);
         assert!(spacer_pop < row_pop);
-        assert!(!out.contains("Row.pop();\n        Row.pop()"), "no duplicate Row.pop");
+        assert!(
+            !out.contains("Row.pop();\n        Row.pop()"),
+            "no duplicate Row.pop"
+        );
     }
 
     #[test]
@@ -483,8 +550,14 @@ struct Foo {
   }
 }"#;
         let out = parse_and_lower(source).unwrap();
-        assert!(out.contains("Image.create($r(\"app.media.logo\"));"), "got:\n{out}");
-        assert!(out.contains("Image.objectFit(ImageFit.Cover);"), "got:\n{out}");
+        assert!(
+            out.contains("Image.create($r(\"app.media.logo\"));"),
+            "got:\n{out}"
+        );
+        assert!(
+            out.contains("Image.objectFit(ImageFit.Cover);"),
+            "got:\n{out}"
+        );
         assert!(out.contains("Image.pop();"), "got:\n{out}");
     }
 
@@ -580,7 +653,11 @@ struct Index {
             .expect("expected build method");
 
         let (out, span_hints) = lower_build_body(build.value.body.as_deref(), source).unwrap();
-        assert_eq!(span_hints.len(), 3, "expected 3 span hints (Row, Column, Text)");
+        assert_eq!(
+            span_hints.len(),
+            3,
+            "expected 3 span hints (Row, Column, Text)"
+        );
         let expected = concat!(
             "        this.observeComponentCreation2((elmtId, isInitialRender) => {\n",
             "            Row.create();\n",

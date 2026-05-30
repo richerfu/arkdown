@@ -28,7 +28,11 @@ fn generate_pack_info(config: &ArkdownConfig, input: &PackInput) -> String {
 
     // HSP uses bundle_type "shared"; all other module types use "entry" as the
     // distro moduleType (HAP entry modules) unless extended in future.
-    let module_type = if input.bundle_type == "shared" { "shared" } else { "entry" };
+    let module_type = if input.bundle_type == "shared" {
+        "shared"
+    } else {
+        "entry"
+    };
 
     serde_json::json!({
         "summary": {

@@ -603,7 +603,10 @@ mod tests {
         // First call: no stored env → reports changed and writes env file.
         let mut cache = BuildCache::new(tmp.clone());
         let changed_first = cache.check_and_invalidate_compile_env(env).unwrap();
-        assert!(changed_first, "first call with no stored env must report changed");
+        assert!(
+            changed_first,
+            "first call with no stored env must report changed"
+        );
 
         // Now insert an entry (cache is empty after invalidation above).
         cache.insert(make_entry("a.ts", "h1")).unwrap();
@@ -633,20 +636,32 @@ mod tests {
         assert_eq!(cache.len(), 2);
 
         let changed = cache
-            .check_and_invalidate_compile_env("sdk12#12#OpenHarmony#/sdk/ets-loader#false#Entry#/tmp/cache")
+            .check_and_invalidate_compile_env(
+                "sdk12#12#OpenHarmony#/sdk/ets-loader#false#Entry#/tmp/cache",
+            )
             .unwrap();
         assert!(changed, "first call with no stored env must report changed");
-        assert_eq!(cache.len(), 0, "all entries must be invalidated on env change");
+        assert_eq!(
+            cache.len(),
+            0,
+            "all entries must be invalidated on env change"
+        );
 
         // Reloading from disk must also show empty.
         let mut cache2 = BuildCache::new(tmp.clone());
         cache2.load_from_disk().unwrap();
-        assert_eq!(cache2.len(), 0, "disk must be cleared after env invalidation");
+        assert_eq!(
+            cache2.len(),
+            0,
+            "disk must be cleared after env invalidation"
+        );
 
         // Changing the env again must also invalidate.
         cache2.insert(make_entry("c.ts", "h3")).unwrap();
         let changed2 = cache2
-            .check_and_invalidate_compile_env("sdk13#13#OpenHarmony#/sdk/ets-loader#true#Entry#/tmp/cache")
+            .check_and_invalidate_compile_env(
+                "sdk13#13#OpenHarmony#/sdk/ets-loader#true#Entry#/tmp/cache",
+            )
             .unwrap();
         assert!(changed2, "different env string must invalidate");
         assert_eq!(cache2.len(), 0);

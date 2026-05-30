@@ -309,9 +309,9 @@ fn build_manual_code_splitting_options() -> Result<ManualCodeSplittingOptions, A
         dyn Fn(
                 &str,
                 &ChunkingContext,
-            ) -> Pin<
-                Box<dyn Future<Output = anyhow::Result<Option<String>>> + Send + 'static>,
-            > + Send
+            )
+                -> Pin<Box<dyn Future<Output = anyhow::Result<Option<String>>> + Send + 'static>>
+            + Send
             + Sync,
     > = Arc::new(|module_id: &str, ctx: &ChunkingContext| {
         let result = ctx.get_module_info(module_id).and_then(|info| {

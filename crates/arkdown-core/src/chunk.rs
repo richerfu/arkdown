@@ -70,7 +70,6 @@ pub struct ArkChunk {
     pub dynamic_imports: Vec<String>,
 }
 
-
 /// The full chunk assignment for one OHOS module build.
 #[derive(Debug, Clone)]
 pub struct ChunkGraph {

@@ -5,9 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use arkdown_core::{HostModuleInfo, ModuleMeta};
 use rolldown_common::{ModuleInfo, NormalModule};
-use rolldown_plugin::{
-    HookBuildStartArgs, HookNoopReturn, HookUsage, Plugin, PluginContext,
-};
+use rolldown_plugin::{HookBuildStartArgs, HookNoopReturn, HookUsage, Plugin, PluginContext};
 
 use crate::meta_compute;
 
@@ -81,9 +79,9 @@ impl Plugin for ModuleMetaPlugin {
             let host_dep = meta.pkg_name.unwrap_or_default();
             let host_mod = meta.module_name.unwrap_or_default();
 
-            let mut map = reverse_map.lock().map_err(|e| {
-                anyhow::anyhow!("module-meta: failed to lock reverse_map: {e}")
-            })?;
+            let mut map = reverse_map
+                .lock()
+                .map_err(|e| anyhow::anyhow!("module-meta: failed to lock reverse_map: {e}"))?;
 
             for id in imported_ids.iter().chain(dynamically_imported_ids.iter()) {
                 map.entry(id.clone()).or_default().push(HostModuleInfo {
@@ -103,9 +101,10 @@ impl Plugin for ModuleMetaPlugin {
     ) -> impl std::future::Future<Output = HookNoopReturn> + Send {
         let reverse_map = Arc::clone(&self.reverse_map);
         async move {
-            reverse_map.lock().map_err(|e| {
-                anyhow::anyhow!("module-meta: failed to lock reverse_map: {e}")
-            })?.clear();
+            reverse_map
+                .lock()
+                .map_err(|e| anyhow::anyhow!("module-meta: failed to lock reverse_map: {e}"))?
+                .clear();
             Ok(())
         }
     }

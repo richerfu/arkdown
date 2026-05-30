@@ -125,16 +125,14 @@ fn source_file_from_source_map(source_map: Option<&str>) -> Option<String> {
 fn source_file_from_record_name(record_name: &str) -> String {
     // record_name = "com.example.app/entry/ets/pages/Index"
     // or "@bundle:com.example.app/entry/ets/pages/Index"
-    let rn = record_name
-        .strip_prefix("@bundle:")
-        .unwrap_or(record_name);
+    let rn = record_name.strip_prefix("@bundle:").unwrap_or(record_name);
     // Split: "com.example.app/entry/ets/pages/Index"
     // parts[0] = bundleName, parts[1] = moduleName, rest = ets path
     let parts: Vec<&str> = rn.splitn(3, '/').collect();
     if parts.len() >= 3 {
         let module_name = parts[1];
         let ets_rel = parts[2]; // "ets/pages/Index"
-        // Convert "ets/pages/Index" → "src/main/ets/pages/Index.ts"
+                                // Convert "ets/pages/Index" → "src/main/ets/pages/Index.ts"
         let src_path = if ets_rel.starts_with("ets/") {
             format!("src/main/{}.ts", ets_rel)
         } else {
@@ -144,6 +142,50 @@ fn source_file_from_record_name(record_name: &str) -> String {
     } else {
         rn.to_string()
     }
+}
+
+fn normalize_source_file(record_name: &str, source_file: String) -> String {
+    if source_file.contains('|') {
+        return source_file;
+    }
+    let source_file = source_file.trim_start_matches("./");
+    if !(source_file.starts_with("ets/") || source_file.starts_with("src/main/ets/")) {
+        return source_file.to_string();
+    }
+
+    let rn = record_name.strip_prefix("@bundle:").unwrap_or(record_name);
+    let parts: Vec<&str> = rn.splitn(3, '/').collect();
+    let module_name = parts.get(1).copied().unwrap_or("entry");
+    let src_path = if source_file.starts_with("src/main/") {
+        with_ts_extension(source_file)
+    } else {
+        format!("src/main/{}", with_ts_extension(source_file))
+    };
+    format!("{module_name}|{module_name}|1.0.0|{src_path}")
+}
+
+fn with_ts_extension(path: &str) -> String {
+    path.trim_end_matches(".ets")
+        .trim_end_matches(".js")
+        .trim_end_matches(".ts")
+        .to_string()
+        + ".ts"
+}
+
+fn cache_key_inputs(modules: &[AbcModule]) -> Vec<(String, String)> {
+    modules
+        .iter()
+        .map(|module| {
+            (
+                module.record_name.clone(),
+                format!(
+                    "{}\0source_map={}",
+                    module.source,
+                    module.source_map.as_deref().unwrap_or_default()
+                ),
+            )
+        })
+        .collect()
 }
 
 /// Pure-Rust ArkCompiler bytecode compiler.
@@ -200,7 +242,10 @@ impl AbcCompiler {
     /// Returns [`AbcError::Io`] if the output directory cannot be created or
     /// the file cannot be written.  Returns [`AbcError::Parse`] if any widget
     /// source contains hard syntax errors.
-    pub fn compile_widget(&self, config: &WidgetCompileConfig) -> Result<AbcArtifactResult, AbcError> {
+    pub fn compile_widget(
+        &self,
+        config: &WidgetCompileConfig,
+    ) -> Result<AbcArtifactResult, AbcError> {
         // Ensure the widget cache directory exists.
         if !config.cache_dir.as_os_str().is_empty() {
             fs_err::create_dir_all(&config.cache_dir).map_err(AbcError::Io)?;
@@ -219,11 +264,15 @@ impl AbcCompiler {
             }
             let source = fs_err::read_to_string(&input.path).map_err(AbcError::Io)?;
             let js_source = strip_typescript_types(&source);
-            let source_file = input.source_file.as_deref().map(str::to_string).or_else(|| {
-                config
-                    .debug_info
-                    .then(|| source_file_from_record_name(&input.record_name))
-            });
+            let source_file = input
+                .source_file
+                .as_deref()
+                .map(str::to_string)
+                .or_else(|| {
+                    config
+                        .debug_info
+                        .then(|| source_file_from_record_name(&input.record_name))
+                });
             has_debug_info |= source_file.is_some();
             let record = builder::build_record_with_debug(
                 &js_source,
@@ -281,9 +330,10 @@ impl AbcCompiler {
         // cached bytecode directly to `output` and return early — skipping all
         // IR lowering.
         if let Some(ref cache_dir) = self.options.cache_path {
-            let key_inputs: Vec<(&str, &str)> = modules
+            let key_inputs_owned = cache_key_inputs(&modules);
+            let key_inputs: Vec<(&str, &str)> = key_inputs_owned
                 .iter()
-                .map(|m| (m.record_name.as_str(), m.source.as_str()))
+                .map(|(record_name, source)| (record_name.as_str(), source.as_str()))
                 .collect();
             let key = derive_key(&key_inputs, self.options.module, self.options.debug_info);
 
@@ -312,21 +362,27 @@ impl AbcCompiler {
             // Strip TypeScript type annotations before parsing as plain JS.
             // The codegen fallback in the loader may preserve TS syntax when
             // the OXC parser cannot handle `.ets`-specific constructs.
-            let js_source = strip_typescript_types(&module.source);
-            let source_file =
-                source_file_from_source_map(module.source_map.as_deref()).or_else(|| {
+            let js_source = if module.source_map.is_some() {
+                module.source.clone()
+            } else {
+                strip_typescript_types(&module.source)
+            };
+            let source_file = source_file_from_source_map(module.source_map.as_deref())
+                .map(|source_file| normalize_source_file(&module.record_name, source_file))
+                .or_else(|| {
                     self.options
                         .debug_info
                         .then(|| source_file_from_record_name(&module.record_name))
                 });
             has_debug_info |= source_file.is_some();
-            let record = builder::build_record_with_debug(
+            let record = builder::build_record_with_debug_and_source_map(
                 &js_source,
                 &module.record_name,
                 &mut abc_file.strings,
                 &mut abc_file.literal_arrays,
                 source_file.as_deref(),
                 self.options.module,
+                module.source_map.as_deref(),
             )?;
             abc_file.add_record(record);
         }
@@ -343,9 +399,10 @@ impl AbcCompiler {
 
         // ── Write result to cache (SPEC-025) ──────────────────────────────────
         if let Some(ref cache_dir) = self.options.cache_path {
-            let key_inputs: Vec<(&str, &str)> = modules
+            let key_inputs_owned = cache_key_inputs(&modules);
+            let key_inputs: Vec<(&str, &str)> = key_inputs_owned
                 .iter()
-                .map(|m| (m.record_name.as_str(), m.source.as_str()))
+                .map(|(record_name, source)| (record_name.as_str(), source.as_str()))
                 .collect();
             let key = derive_key(&key_inputs, self.options.module, self.options.debug_info);
             let mut cache = CacheFile::load(cache_dir);

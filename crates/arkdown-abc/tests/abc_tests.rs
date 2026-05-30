@@ -65,12 +65,14 @@ fn lnp_body_end(bytes: &[u8], start: usize) -> usize {
     while pos < bytes.len() {
         let op = bytes[pos];
         match op {
-            0x00 => return pos + 1, // END_SEQUENCE
+            0x00 => return pos + 1,                              // END_SEQUENCE
             0x01 | 0x02 | 0x07 | 0x08 | 0x09 | 0x0a => pos += 1, // no inline operand
             0x03 | 0x04 | 0x05 | 0x06 => {
                 // START_LOCAL*, END_LOCAL, RESTART_LOCAL: skip opcode + reg SLEB128
                 pos += 1;
-                while pos < bytes.len() && (bytes[pos] & 0x80) != 0 { pos += 1; }
+                while pos < bytes.len() && (bytes[pos] & 0x80) != 0 {
+                    pos += 1;
+                }
                 pos += 1; // last SLEB128 byte
             }
             0x0b => pos += 1, // SET_COLUMN (operand in cp, not inline)
@@ -500,7 +502,7 @@ export { Index as default };"#,
     pos += 4;
     assert_eq!(
         inline_string_at(&bytes, request_string),
-        "L@ohos.app.ability.UIAbility;"
+        "@ohos:app.ability.UIAbility"
     );
     assert_eq!(read_u32(&bytes, pos), 1, "one regular import");
     pos += 4;
@@ -723,17 +725,11 @@ fn test_source_map_emits_source_file_debug_info_and_lnp() {
             class_name_at(&bytes, *off as usize) == "Lcom.example.app/entry/ets/pages/Index;"
         })
         .expect("user record exists") as usize;
-    let (class_source_file, method_debug_info) = first_user_method_debug_info(&bytes, user_off);
-    let class_source_file = class_source_file.expect("class SOURCE_FILE tag exists");
+    let (_class_source_file, method_debug_info) = first_user_method_debug_info(&bytes, user_off);
     let debug_info = method_debug_info.expect("method DEBUG_INFO tag exists");
-    assert_eq!(
-        inline_string_at(&bytes, class_source_file as usize),
-        source_file,
-        "source_map.sources[0] drives the emitted source file StringItem"
-    );
 
     // DebugInfo format (libpandafile DebugInfoItem::Write, corrected architecture):
-    //   line_num:           ULEB128(1)
+    //   line_num:           ULEB128(0xFFFF_FFFF)
     //   num_params:         ULEB128(0)
     //   constant_pool_size: ULEB128(N)   byte count of operand pool
     //   constant_pool:      [src_file_off_uleb, scope_var_operands..., epilogue_delta_uleb]
@@ -742,19 +738,26 @@ fn test_source_map_emits_source_file_debug_info_and_lnp() {
     // The constant_pool contains ULEB128-encoded OPERANDS for LNP opcodes
     // (not the opcodes themselves). The opcodes are in the separate LNP entry.
     let mut pos = debug_info as usize;
-    assert_eq!(read_uleb(&bytes, &mut pos), 1, "line_start is 1");
+    assert_eq!(
+        read_uleb(&bytes, &mut pos),
+        u32::MAX as u64,
+        "line_start uses hvigor NO_LINE_NUMBER sentinel"
+    );
     assert_eq!(read_uleb(&bytes, &mut pos), 0, "no parameter names emitted");
     let cp_size = read_uleb(&bytes, &mut pos) as usize;
     assert!(
         cp_size > 0,
         "constant pool must be non-empty (contains SET_FILE operand + scope var operands)"
     );
-    // The constant pool starts with the SET_FILE operand: ULEB128(source_file_offset).
-    // This is the operand for the SET_FILE (0x09) opcode in the LNP data_ stream.
-    let sf_from_cp = read_uleb(&bytes, &mut pos);
+    // The constant pool starts with SET_FILE, or SET_SOURCE_CODE then SET_FILE
+    // for module func_main_0.
+    let mut sf_from_cp = read_uleb(&bytes, &mut pos);
+    if inline_string_at(&bytes, sf_from_cp as usize) == "not supported" {
+        sf_from_cp = read_uleb(&bytes, &mut pos);
+    }
     assert_eq!(
-        sf_from_cp,
-        class_source_file as u64,
+        inline_string_at(&bytes, sf_from_cp as usize),
+        source_file,
         "constant pool first operand is the source file string offset (for SET_FILE)"
     );
     // Skip the rest of the constant pool (scope var operands, epilogue delta)
@@ -769,10 +772,14 @@ fn test_source_map_emits_source_file_debug_info_and_lnp() {
         "debug info references LNP index 0"
     );
 
-    // The LNP entry (in the separate LNP data_ stream) starts with SET_FILE (0x09).
+    // The LNP entry (in the separate LNP data_ stream) starts with SET_FILE
+    // (0x09), or SET_SOURCE_CODE (0x0a) followed by SET_FILE for func_main_0.
     // The LNP data_ contains opcodes + inline register SLEB128s (no other inline operands).
     let lnp_offset = read_u32(&bytes, lnp_idx_off) as usize;
-    assert_eq!(bytes[lnp_offset], 0x09, "LNP data_ starts with SET_FILE opcode (0x09)");
+    assert!(
+        bytes[lnp_offset] == 0x09 || (bytes[lnp_offset] == 0x0a && bytes[lnp_offset + 1] == 0x09),
+        "LNP data_ starts with SET_FILE or SET_SOURCE_CODE+SET_FILE"
+    );
     // After SET_FILE, the LNP contains START_LOCAL_EXTENDED entries (opcode + reg),
     // SET_PROLOGUE_END, body opcodes, SET_EPILOGUE_BEGIN, ADVANCE_PC, END_SEQUENCE.
     let lnp_end = lnp_body_end(&bytes, lnp_offset);
@@ -1114,7 +1121,10 @@ registerNamedRoute(() => new Index(void 0, {}), "", {bundleName: "com.example.ar
     let bytes = std::fs::read(&out).unwrap();
     assert!(bytes.starts_with(b"PANDA\0\0\0"));
     let sz = bytes.len();
-    eprintln!("[parity] debug two-module ABC = {sz}B / 9844B hvigor ({:.0}%)", sz as f64 / 9844.0 * 100.0);
+    eprintln!(
+        "[parity] debug two-module ABC = {sz}B / 9844B hvigor ({:.0}%)",
+        sz as f64 / 9844.0 * 100.0
+    );
     // Phase 5 parity (2026-05-30): Correct LNP opcode values + DebugInfo cp format +
     // L_ESSlotNumberAnnotation per-method + correct LNP architecture (opcodes in data_,
     // operands in cp) + added initialRender/getEntryName/closure methods = 73% (7174B).
@@ -1316,14 +1326,14 @@ fn test_static_object_uses_createobjectwithbuffer() {
 
 #[test]
 fn test_lnp_per_instruction_tracking() {
-    use arkdown_abc::ir::builder;
-    use arkdown_abc::emit::strings::StringTable;
     use arkdown_abc::emit::file::LiteralArray;
-    
+    use arkdown_abc::emit::strings::StringTable;
+    use arkdown_abc::ir::builder;
+
     let source = "var x = 1;\nvar y = 2;\n";
     let mut strings = StringTable::default();
     let mut literal_arrays: Vec<LiteralArray> = Vec::new();
-    
+
     let record = builder::build_record_with_debug(
         source,
         "test/module",
@@ -1331,22 +1341,38 @@ fn test_lnp_per_instruction_tracking() {
         &mut literal_arrays,
         Some("test.ts"),
         false,
-    ).unwrap();
-    
-    let main_method = record.methods.iter().find(|m| m.name == "func_main_0").unwrap();
+    )
+    .unwrap();
+
+    let main_method = record
+        .methods
+        .iter()
+        .find(|m| m.name == "func_main_0")
+        .unwrap();
     println!("func_main_0 line_ops len: {}", main_method.line_ops.len());
-    println!("func_main_0 line_ops hex: {}", main_method.line_ops.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" "));
-    
+    println!(
+        "func_main_0 line_ops hex: {}",
+        main_method
+            .line_ops
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+
     // Should have more than just END_SEQUENCE
-    assert!(main_method.line_ops.len() > 1, "line_ops should have more than just END_SEQUENCE");
+    assert!(
+        main_method.line_ops.len() > 1,
+        "line_ops should have more than just END_SEQUENCE"
+    );
 }
 
 #[test]
 fn test_lnp_module_with_class() {
-    use arkdown_abc::ir::builder;
-    use arkdown_abc::emit::strings::StringTable;
     use arkdown_abc::emit::file::LiteralArray;
-    
+    use arkdown_abc::emit::strings::StringTable;
+    use arkdown_abc::ir::builder;
+
     // Simulate what the bundled Index.ets looks like
     let source = r#"var Index = class extends ViewPU {
   constructor() { super(); }
@@ -1355,22 +1381,38 @@ registerNamedRoute(() => new Index(void 0, {}), "", {bundleName: "x"});
 "#;
     let mut strings = StringTable::default();
     let mut literal_arrays: Vec<LiteralArray> = Vec::new();
-    
+
     let record = builder::build_record_with_debug(
         source,
         "com.example.app/entry/ets/pages/Index",
         &mut strings,
         &mut literal_arrays,
         Some("./ets/pages/Index.ets"),
-        true,  // is_module
-    ).unwrap();
-    
-    let main_method = record.methods.iter().find(|m| m.name == "func_main_0").unwrap();
+        true, // is_module
+    )
+    .unwrap();
+
+    let main_method = record
+        .methods
+        .iter()
+        .find(|m| m.name == "func_main_0")
+        .unwrap();
     println!("func_main_0 line_ops len: {}", main_method.line_ops.len());
-    println!("func_main_0 line_ops hex: {}", main_method.line_ops.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" "));
-    
+    println!(
+        "func_main_0 line_ops hex: {}",
+        main_method
+            .line_ops
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+
     // Should have more than just END_SEQUENCE
-    assert!(main_method.line_ops.len() > 1, 
-        "line_ops should have more than just END_SEQUENCE, got {} bytes: {:?}", 
-        main_method.line_ops.len(), main_method.line_ops);
+    assert!(
+        main_method.line_ops.len() > 1,
+        "line_ops should have more than just END_SEQUENCE, got {} bytes: {:?}",
+        main_method.line_ops.len(),
+        main_method.line_ops
+    );
 }

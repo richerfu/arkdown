@@ -14,7 +14,10 @@ pub fn offset_to_line_col(source: &str, offset: u32) -> (u32, u32) {
     let clamped = offset.min(source.len());
     let prefix = &source[..clamped];
     let line = prefix.bytes().filter(|&b| b == b'\n').count() as u32;
-    let col = prefix.rfind('\n').map(|pos| clamped - pos - 1).unwrap_or(clamped) as u32;
+    let col = prefix
+        .rfind('\n')
+        .map(|pos| clamped - pos - 1)
+        .unwrap_or(clamped) as u32;
     (line, col)
 }
 
@@ -147,7 +150,11 @@ mod tests {
 
     #[test]
     fn test_build_source_map_json_structure() {
-        let entries = vec![MapEntry { generated_line: 2, src_line: 5, src_col: 4 }];
+        let entries = vec![MapEntry {
+            generated_line: 2,
+            src_line: 5,
+            src_col: 4,
+        }];
         let json = build_ets_source_map("src/main/ets/pages/Index.ets", 5, &entries);
         assert!(json.contains("\"version\":3"), "must have version 3");
         assert!(
@@ -182,8 +189,8 @@ use oxc_span::SourceType;
 /// Emits one 4-field VLQ segment per non-whitespace/comment token.
 pub fn build_token_source_map(source: &str, id: &str) -> Option<String> {
     let allocator = Allocator::default();
-    let source_type = SourceType::from_path(id)
-        .unwrap_or_else(|_| SourceType::ts().with_module(true));
+    let source_type =
+        SourceType::from_path(id).unwrap_or_else(|_| SourceType::ts().with_module(true));
     let parsed = Parser::new(&allocator, source, source_type)
         .with_config(TokensParserConfig)
         .parse();
@@ -195,10 +202,14 @@ pub fn build_token_source_map(source: &str, id: &str) -> Option<String> {
     let mut prev_src_col = 0i32;
     let mut mappings = String::new();
     let mut cur_gen_line = 0u32;
+    let mut prev_gen_col = 0i32;
     let mut first_on_line = true;
     for tok in &parsed.tokens {
         use oxc_parser::Kind;
-        if matches!(tok.kind(), Kind::Eof | Kind::Undetermined | Kind::Skip | Kind::HashbangComment) {
+        if matches!(
+            tok.kind(),
+            Kind::Eof | Kind::Undetermined | Kind::Skip | Kind::HashbangComment
+        ) {
             continue;
         }
         let start = tok.start();
@@ -206,6 +217,7 @@ pub fn build_token_source_map(source: &str, id: &str) -> Option<String> {
         while cur_gen_line < line {
             mappings.push(';');
             cur_gen_line += 1;
+            prev_gen_col = 0;
             first_on_line = true;
         }
         if !first_on_line {
@@ -213,7 +225,8 @@ pub fn build_token_source_map(source: &str, id: &str) -> Option<String> {
         }
         first_on_line = false;
         let gen_col = col as i32;
-        mappings.push_str(&encode_vlq(if cur_gen_line == line && !mappings.ends_with(';') && !mappings.is_empty() { 0 } else { gen_col }));
+        mappings.push_str(&encode_vlq(gen_col - prev_gen_col));
+        prev_gen_col = gen_col;
         mappings.push_str(&encode_vlq(0));
         mappings.push_str(&encode_vlq(line as i32 - prev_src_line));
         mappings.push_str(&encode_vlq(col as i32 - prev_src_col));
@@ -229,7 +242,9 @@ pub fn build_token_source_map(source: &str, id: &str) -> Option<String> {
 fn build_line_offsets_table(source: &str) -> Vec<u32> {
     let mut v = vec![0u32];
     for (i, b) in source.bytes().enumerate() {
-        if b == b'\n' { v.push((i + 1) as u32); }
+        if b == b'\n' {
+            v.push((i + 1) as u32);
+        }
     }
     v
 }

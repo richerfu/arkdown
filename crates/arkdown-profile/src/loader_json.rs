@@ -215,9 +215,7 @@ pub fn generate_loader_json(
             .into_iter()
             .flatten()
             .flatten()
-            .filter(|e| {
-                e.path().extension().and_then(|x| x.to_str()) == Some("ets")
-            })
+            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("ets"))
             .collect();
         // Sort for deterministic ordering across platforms.
         worker_files.sort_by_key(|e| e.file_name());
@@ -259,13 +257,12 @@ pub fn generate_loader_json(
                 for page in &pages {
                     // pageSourceFile is typically "src/main/ets/pages/Foo.ets";
                     // strip the "src/main/" prefix so it matches the ./ets/... format.
-                    let rel = if let Some(stripped) =
-                        page.page_source_file.strip_prefix("src/main/")
-                    {
-                        format!("./{}", stripped)
-                    } else {
-                        page.page_source_file.clone()
-                    };
+                    let rel =
+                        if let Some(stripped) = page.page_source_file.strip_prefix("src/main/") {
+                            format!("./{}", stripped)
+                        } else {
+                            page.page_source_file.clone()
+                        };
                     compile_entry.push(rel);
                 }
             }
@@ -305,10 +302,7 @@ pub fn generate_loader_json(
     // --- TASK-LOADER-01: scan oh_modules/ for ByteCode HAR dependencies ---
     let byte_code_har_info: HashMap<String, ByteCodeHarEntry> = {
         let scanned = scan_bytecode_har_deps(&module_cfg.src_path, &config.project_root);
-        scanned
-            .into_iter()
-            .map(|e| e.into_loader_entry())
-            .collect()
+        scanned.into_iter().map(|e| e.into_loader_entry()).collect()
     };
 
     // --- TASK-LOADER-02: populate dynamicImportLibInfo from oh-package.json5 ---
@@ -322,9 +316,7 @@ pub fn generate_loader_json(
         );
         entries
             .into_iter()
-            .filter_map(|(k, v)| {
-                serde_json::to_value(v).ok().map(|json| (k, json))
-            })
+            .filter_map(|(k, v)| serde_json::to_value(v).ok().map(|json| (k, json)))
             .collect()
     };
 
@@ -1014,7 +1006,9 @@ mod tests {
         let loader = generate_loader_json(&config, &module_cfg, &manifest);
 
         assert!(
-            loader.dynamic_import_lib_info.contains_key("@remote/shared"),
+            loader
+                .dynamic_import_lib_info
+                .contains_key("@remote/shared"),
             "dynamicImportLibInfo must contain @remote/shared"
         );
         let entry = &loader.dynamic_import_lib_info["@remote/shared"];
@@ -1036,10 +1030,12 @@ mod tests {
         let module_root = project_root.join("entry");
 
         // Create a ByteCode HAR package under oh_modules.
-        let pkg_dir = project_root.join("oh_modules").join("@ohos").join("abc-lib");
+        let pkg_dir = project_root
+            .join("oh_modules")
+            .join("@ohos")
+            .join("abc-lib");
         std::fs::create_dir_all(&pkg_dir).expect("create pkg dir");
-        std::fs::write(pkg_dir.join("index.abc"), b"PANDA\x00\x00\x00")
-            .expect("write index.abc");
+        std::fs::write(pkg_dir.join("index.abc"), b"PANDA\x00\x00\x00").expect("write index.abc");
         std::fs::write(
             pkg_dir.join("oh-package.json5"),
             r#"{ name: "@ohos/abc-lib", compatibleSdkVersion: "5.0.0(12)" }"#,

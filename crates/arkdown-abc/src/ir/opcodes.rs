@@ -128,6 +128,14 @@ pub enum Insn {
     /// `0x22` — `acc = acc - 1`.
     Dec(u8),
 
+    /// `0xFB 0x13` — `acc = ToBoolean(acc)`.
+    /// Non-default API builds route `istrue` through callruntime and carry an IC slot.
+    CallRuntimeIsTrue(u8),
+
+    /// `0xFB 0x14` — `acc = !ToBoolean(acc)`.
+    /// Non-default API builds route `isfalse` through callruntime and carry an IC slot.
+    CallRuntimeIsFalse(u8),
+
     // ── `this` loader ─────────────────────────────────────────────────────────
     /// `0x6F` `op_none` — load the current `this` value into accumulator.
     /// Used in regular (non-arrow) function bodies to access the receiver.
@@ -191,6 +199,10 @@ pub enum Insn {
     /// Encoding: `[0x31] [slot: u8] [argc: u8] [this_vreg: u8]` = 4 bytes.
     CallThisRange(u8, u8, u8),
 
+    /// `0x32` `op_imm1_8_imm2_8_v_8` — call superclass constructor with range args.
+    /// Encoding: `[0x32] [slot: u8] [argc: u8] [first_arg_vreg: u8]` = 4 bytes.
+    SuperCallThisRange(u8, u8, u8),
+
     // ── Global variable access ────────────────────────────────────────────────
     // Short form (imm=u8): opcode(1) + slot(1) + name_id(2) = 4 bytes.
     /// `0x3F` — load `globalThis.<name>` into accumulator.
@@ -221,6 +233,9 @@ pub enum Insn {
     /// `0xFE 0x09` — throw if accumulator is hole, using name string id.
     ThrowUndefinedIfHoleWithName(u16),
 
+    /// `0xFE 0x07` — validate super() call state.
+    ThrowIfSuperNotCorrectCall(u8),
+
     // ── Object property access ────────────────────────────────────────────────
     /// `0x42` — load `acc.<name>` into accumulator (acc is the object).
     /// Short form: `[0x42] [slot: u8] [name_id: u16 LE]` = 4 bytes.
@@ -237,6 +252,10 @@ pub enum Insn {
     /// Encoding: `[0x33] [slot: u8] [method_id: u16 LE] [length: u8]` = 5 bytes.
     DefineFuncShort(u8, u16, u8),
 
+    /// `0x34` — define method literal.
+    /// Encoding: `[0x34] [slot: u8] [method_id: u16 LE] [length: u8]` = 5 bytes.
+    DefineMethodShort(u8, u16, u8),
+
     /// `0x35` — define class with a literal-array initialiser buffer.
     /// `slot` = IC slot; `ctor_id` = 16-bit method index for the constructor;
     /// `buf_id` = 16-bit literal-array ID; `proto_argc` = number of prototype
@@ -244,11 +263,19 @@ pub enum Insn {
     /// Encoding: `[0x35] [slot:u8] [ctor_id:u16 LE] [buf_id:u16 LE] [proto_argc:u16 LE] [proto_vreg:u8]` = 9 bytes.
     DefineClassWithBuffer(u8, u16, u16, u16, u8),
 
+    /// `0xBC` — define getter/setter pair by property value.
+    /// Encoding: `[0xBC] [obj: u8] [key: u8] [getter: u8] [setter: u8]` = 5 bytes.
+    DefineGetterSetterByValue(u8, u8, u8, u8),
+
     /// `0x05` / `0x80` — create an empty array, carrying an IC slot.
     CreateEmptyArray(u16),
 
     /// `0x79` / `0xCB` — store accumulator into own array index.
     StOwnByIndex(u16, u8, u16),
+
+    /// `0x7A` — store accumulator into own named property.
+    /// Encoding: `[0x7A] [slot: u8] [name_id: u16 LE] [obj_vreg: u8]` = 5 bytes.
+    StOwnByName(u8, u16, u8),
 
     // ── Object construction ──────────────────────────────────────────────────
     /// `0x04` `op_none` — create an empty object literal `{}` into accumulator.
@@ -282,6 +309,10 @@ pub enum Insn {
     ReturnUndefined,
 
     // ── Unconditional branch ─────────────────────────────────────────────────
+    /// `0x4D` `op_imm_8` — jump by signed 8-bit byte offset.
+    /// Encoding: `[0x4D] [offset: i8]` = 2 bytes.
+    JmpShort(i8),
+
     /// `0x4E` `op_imm_16` — jump by signed 16-bit byte offset.
     /// Encoding: `[0x4E] [offset: i16 LE]` = 3 bytes.
     Jmp(i16),
@@ -291,12 +322,20 @@ pub enum Insn {
     JmpWide(i32),
 
     // ── Conditional branches ─────────────────────────────────────────────────
+    /// `0x4F` `op_imm_8` — jump if accumulator equals zero / is falsy.
+    /// Encoding: `[0x4F] [offset: i8]` = 2 bytes.
+    JeqzShort(i8),
+
     /// `0x50` `op_imm_16` — jump if accumulator equals zero / is falsy.
     /// Encoding: `[0x50] [offset: i16 LE]` = 3 bytes.
     Jeqz(i16),
 
     /// `0x9A` `op_imm_32` — wide form of `jeqz`.
     JeqzWide(i32),
+
+    /// `0x51` `op_imm_8` — jump if accumulator is not zero / is truthy.
+    /// Encoding: `[0x51] [offset: i8]` = 2 bytes.
+    JnezShort(i8),
 
     /// `0x9B` `op_imm_16` — jump if accumulator is not zero / is truthy.
     /// Encoding: `[0x9B] [offset: i16 LE]` = 3 bytes.
@@ -496,6 +535,8 @@ impl Insn {
             Insn::BitNot(slot) => vec![0x20, *slot],
             Insn::Inc(slot) => vec![0x21, *slot],
             Insn::Dec(slot) => vec![0x22, *slot],
+            Insn::CallRuntimeIsTrue(slot) => vec![0xfb, 0x13, *slot],
+            Insn::CallRuntimeIsFalse(slot) => vec![0xfb, 0x14, *slot],
 
             // ── this loader ──────────────────────────────────────────────────
             Insn::LdThis => vec![0x6F],
@@ -519,6 +560,7 @@ impl Insn {
             Insn::CallThis2(slot, this, v0, v1) => vec![0x2F, *slot, *this, *v0, *v1],
             Insn::CallThis3(slot, this, v0, v1, v2) => vec![0x30, *slot, *this, *v0, *v1, *v2],
             Insn::CallThisRange(slot, argc, this_vreg) => vec![0x31, *slot, *argc, *this_vreg],
+            Insn::SuperCallThisRange(slot, argc, v_start) => vec![0x32, *slot, *argc, *v_start],
 
             // ── global access ────────────────────────────────────────────────
             Insn::TryLdGlobalByName(slot, name_id) => {
@@ -546,6 +588,7 @@ impl Insn {
                 v.extend_from_slice(&name_id.to_le_bytes());
                 v
             }
+            Insn::ThrowIfSuperNotCorrectCall(kind) => vec![0xfe, 0x07, *kind],
 
             // ── object property ──────────────────────────────────────────────
             Insn::LdObjByName(slot, name_id) => {
@@ -567,6 +610,12 @@ impl Insn {
                 v.push(*length);
                 v
             }
+            Insn::DefineMethodShort(slot, method_id, length) => {
+                let mut v = vec![0x34, *slot];
+                v.extend_from_slice(&method_id.to_le_bytes());
+                v.push(*length);
+                v
+            }
             Insn::DefineClassWithBuffer(slot, ctor_id, buf_id, proto_argc, proto_vreg) => {
                 let mut v = vec![0x35, *slot];
                 v.extend_from_slice(&ctor_id.to_le_bytes());
@@ -574,6 +623,9 @@ impl Insn {
                 v.extend_from_slice(&proto_argc.to_le_bytes());
                 v.push(*proto_vreg);
                 v
+            }
+            Insn::DefineGetterSetterByValue(obj, key, getter, setter) => {
+                vec![0xbc, *obj, *key, *getter, *setter]
             }
             Insn::CreateEmptyArray(slot) if *slot <= u8::MAX as u16 => vec![0x05, *slot as u8],
             Insn::CreateEmptyArray(slot) => {
@@ -593,6 +645,12 @@ impl Insn {
                 v.extend_from_slice(&index.to_le_bytes());
                 v
             }
+            Insn::StOwnByName(slot, name_id, obj) => {
+                let mut v = vec![0x7a, *slot];
+                v.extend_from_slice(&name_id.to_le_bytes());
+                v.push(*obj);
+                v
+            }
 
             // ── object construction ──────────────────────────────────────────
             Insn::CreateEmptyObject => vec![0x04],
@@ -608,6 +666,7 @@ impl Insn {
             Insn::ReturnUndefined => vec![0x65],
 
             // ── branches ─────────────────────────────────────────────────────
+            Insn::JmpShort(off) => vec![0x4D, *off as u8],
             Insn::Jmp(off) => {
                 let mut v = vec![0x4E];
                 v.extend_from_slice(&off.to_le_bytes());
@@ -618,6 +677,7 @@ impl Insn {
                 v.extend_from_slice(&off.to_le_bytes());
                 v
             }
+            Insn::JeqzShort(off) => vec![0x4F, *off as u8],
             Insn::Jeqz(off) => {
                 let mut v = vec![0x50];
                 v.extend_from_slice(&off.to_le_bytes());
@@ -628,6 +688,7 @@ impl Insn {
                 v.extend_from_slice(&off.to_le_bytes());
                 v
             }
+            Insn::JnezShort(off) => vec![0x51, *off as u8],
             Insn::Jnez(off) => {
                 let mut v = vec![0x9B];
                 v.extend_from_slice(&off.to_le_bytes());
@@ -693,6 +754,7 @@ impl Insn {
             | Insn::StrictNotEq(_, _)
             | Insn::StrictEq(_, _) => 3,
             Insn::TypeOf(_) | Insn::Neg(_) | Insn::BitNot(_) | Insn::Inc(_) | Insn::Dec(_) => 2,
+            Insn::CallRuntimeIsTrue(_) | Insn::CallRuntimeIsFalse(_) => 3,
             Insn::LdThis => 1,
             Insn::CallArg0(_) => 2,
             Insn::CallArg1(_, _) => 3,
@@ -704,6 +766,7 @@ impl Insn {
             Insn::CallThis2(_, _, _, _) => 5,
             Insn::CallThis3(_, _, _, _, _) => 6,
             Insn::CallThisRange(_, _, _) => 4,
+            Insn::SuperCallThisRange(_, _, _) => 4,
             Insn::TryLdGlobalByName(_, _)
             | Insn::TryStGlobalByName(_, _)
             | Insn::LdObjByName(_, _) => 4,
@@ -712,9 +775,11 @@ impl Insn {
             Insn::NewLexEnv(_) => 2,
             Insn::NewLexEnvWithName(_, _) => 4,
             Insn::ThrowUndefinedIfHoleWithName(_) => 4,
+            Insn::ThrowIfSuperNotCorrectCall(_) => 3,
             Insn::StObjByName(_, _, _) => 5,
-            Insn::DefineFuncShort(_, _, _) => 5,
+            Insn::DefineFuncShort(_, _, _) | Insn::DefineMethodShort(_, _, _) => 5,
             Insn::DefineClassWithBuffer(_, _, _, _, _) => 9,
+            Insn::DefineGetterSetterByValue(_, _, _, _) => 5,
             Insn::CreateEmptyArray(slot) => {
                 if *slot <= u8::MAX as u16 {
                     2
@@ -729,10 +794,12 @@ impl Insn {
                     6
                 }
             }
+            Insn::StOwnByName(_, _, _) => 5,
             Insn::CreateEmptyObject => 1,
             Insn::CreateObjectWithBuffer(_, _) => 4,
             Insn::NewObjRange(_, _, _) => 4,
             Insn::Return | Insn::ReturnUndefined => 1,
+            Insn::JmpShort(_) | Insn::JeqzShort(_) | Insn::JnezShort(_) => 2,
             Insn::Jmp(_) | Insn::Jeqz(_) | Insn::Jnez(_) => 3,
             Insn::JmpWide(_) | Insn::JeqzWide(_) | Insn::JnezWide(_) => 5,
             Insn::Throw => 2,

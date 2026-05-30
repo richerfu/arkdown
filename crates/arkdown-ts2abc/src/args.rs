@@ -117,6 +117,7 @@ impl ArgParser {
                     .clone()
                     .unwrap_or_else(|| default_record_name(path)),
                 source_file: self.source_file.clone(),
+                source_map: None,
             })
             .collect();
 

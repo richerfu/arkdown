@@ -87,8 +87,7 @@ pub fn write_share_config(
         std::fs::create_dir_all(parent)?;
     }
     let value = serde_json::json!({ "crossAppSharedConfig": output.entries });
-    let json = serde_json::to_string(&value)
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    let json = serde_json::to_string(&value).map_err(|e| std::io::Error::other(e.to_string()))?;
     std::fs::write(output_path, json)?;
     Ok(())
 }
@@ -163,13 +162,18 @@ fn read_cross_app_shared_config_from_pkg(
             return vec![];
         }
 
-        let Some(arr) = raw.pointer("/module/crossAppSharedConfig").and_then(|v| v.as_array()) else {
+        let Some(arr) = raw
+            .pointer("/module/crossAppSharedConfig")
+            .and_then(|v| v.as_array())
+        else {
             return vec![];
         };
 
         let mut entries: Vec<CrossAppSharedConfigEntry> = arr
             .iter()
-            .filter_map(|item| serde_json::from_value::<CrossAppSharedConfigEntry>(item.clone()).ok())
+            .filter_map(|item| {
+                serde_json::from_value::<CrossAppSharedConfigEntry>(item.clone()).ok()
+            })
             .collect();
 
         // Fill in packageName from the directory name when absent.
@@ -202,7 +206,11 @@ fn check_duplicate_uris(entries: &[CrossAppSharedConfigEntry]) {
     for (uri, packages) in &uri_to_packages {
         if packages.len() > 1 {
             // Deduplicate package names before emitting the warning.
-            let mut unique: Vec<&&str> = packages.iter().collect::<std::collections::HashSet<_>>().into_iter().collect();
+            let mut unique: Vec<&&str> = packages
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
             unique.sort();
             eprintln!(
                 "[warn] crossAppSharedConfig: duplicate URI '{}' declared by packages: {:?}",

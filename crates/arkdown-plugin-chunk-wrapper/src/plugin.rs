@@ -62,7 +62,10 @@ impl ChunkWrapperPlugin {
         }
         output.push_str("})();\n");
 
-        Ok(Some(HookRenderChunkOutput { code: output, map: None }))
+        Ok(Some(HookRenderChunkOutput {
+            code: output,
+            map: None,
+        }))
     }
 }
 
@@ -234,7 +237,10 @@ const x = 1;"#;
     #[test]
     fn test_iife_present() {
         let plugin = ChunkWrapperPlugin::new(false);
-        let result = plugin.wrap_chunk("const x = 1;\n", "Entry").unwrap().unwrap();
+        let result = plugin
+            .wrap_chunk("const x = 1;\n", "Entry")
+            .unwrap()
+            .unwrap();
         assert!(result.code.contains("(function () {"));
         assert!(result.code.contains("})();"));
     }

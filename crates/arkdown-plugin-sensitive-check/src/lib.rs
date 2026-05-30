@@ -1,9 +1,7 @@
 use std::borrow::Cow;
 use std::path::Path;
 
-use rolldown_plugin::{
-    HookLoadArgs, HookLoadReturn, HookUsage, Plugin, SharedLoadPluginContext,
-};
+use rolldown_plugin::{HookLoadArgs, HookLoadReturn, HookUsage, Plugin, SharedLoadPluginContext};
 
 /// Plugin that validates import specifiers match the actual filesystem case.
 ///
@@ -127,9 +125,7 @@ mod tests {
 
     #[test]
     fn test_nonexistent_parent_does_not_error() {
-        let result = SensitiveCheckPlugin::check_case(
-            "/nonexistent_dir_arkdown_test/Module.ts",
-        );
+        let result = SensitiveCheckPlugin::check_case("/nonexistent_dir_arkdown_test/Module.ts");
         assert!(result.is_none());
     }
 

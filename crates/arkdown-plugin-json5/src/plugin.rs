@@ -221,15 +221,27 @@ mod tests {
         let path = tmp.path().to_string_lossy().to_string();
 
         let result = load_json_file(&path);
-        assert!(result.is_ok(), "JSON5 with comments/trailing commas must not error");
+        assert!(
+            result.is_ok(),
+            "JSON5 with comments/trailing commas must not error"
+        );
         let out = result.unwrap().unwrap();
-        assert!(out.code.contains("export var name"), "named export for 'name' key must be generated");
-        assert!(out.code.contains("export default"), "default export must always be generated");
+        assert!(
+            out.code.contains("export var name"),
+            "named export for 'name' key must be generated"
+        );
+        assert!(
+            out.code.contains("export default"),
+            "default export must always be generated"
+        );
     }
 
     #[test]
     fn test_load_returns_none_for_non_json_id() {
         let result = load_json_file("/some/path/module.ts").unwrap();
-        assert!(result.is_none(), "load must return None for non-JSON/JSON5 files");
+        assert!(
+            result.is_none(),
+            "load must return None for non-JSON/JSON5 files"
+        );
     }
 }

@@ -3,9 +3,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use rolldown_common::Output;
-use rolldown_plugin::{
-    HookGenerateBundleArgs, HookNoopReturn, HookUsage, Plugin, PluginContext,
-};
+use rolldown_plugin::{HookGenerateBundleArgs, HookNoopReturn, HookUsage, Plugin, PluginContext};
 
 pub struct DuplicateCheckPlugin;
 

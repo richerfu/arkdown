@@ -105,10 +105,8 @@ impl EtsTransformPlugin {
             module_name: module_name_from_id(id),
         };
 
-        let transformed =
-            transform::transform_ets_with_options(&source, &options).map_err(|e| {
-                anyhow::anyhow!("ets-transform: {e}")
-            })?;
+        let transformed = transform::transform_ets_with_options(&source, &options)
+            .map_err(|e| anyhow::anyhow!("ets-transform: {e}"))?;
 
         let final_source = api_transform::rewrite_imports_for_version(&transformed, api_version);
 
@@ -131,17 +129,19 @@ impl EtsTransformPlugin {
         // previous kit-rewritten-ETS map which had completely mismatched
         // coordinate spaces and prevented any chaining.
         if transformed == code {
-            // Case A: no struct transform — use per-token regenerated code.
-            let (gen_code, source_map_json) =
-                generate_code_and_source_map(&code, id).unwrap_or((final_source, None));
-            let final_code = api_transform::rewrite_imports_for_version(&gen_code, api_version);
+            // Case A: no struct transform. hvigor preserves the TypeScript
+            // source shape after kit import rewriting instead of re-emitting it
+            // through a general TS code generator, so keep literals, type
+            // annotations, and indentation intact here.
+            let final_source = format_hvigor_standard_ts(&final_source);
+            let source_map_json = source_map::build_token_source_map(&final_source, id);
             let map = source_map_json
                 .as_deref()
                 .and_then(|j| RolldownSourceMap::from_json_string(j).ok())
                 .map(|sm| HookTransformOutputMap::Sourcemap(Box::new(sm)))
                 .unwrap_or(HookTransformOutputMap::Null);
             Ok(Some(HookTransformOutput {
-                code: Some(final_code),
+                code: Some(final_source),
                 map,
                 ..Default::default()
             }))
@@ -152,17 +152,14 @@ impl EtsTransformPlugin {
             // parser operates on `source.content` (kit-rewritten), so span byte
             // offsets reference positions in that string — pass it as `ets_source`
             // so `offset_to_line_col` converts them correctly.
-            let (gen_code, source_map) = transform::transform_ets_viewpu_with_source_map(
-                &source,
-                &options,
-                &source.content,
-            )
-            .map(|(code, map)| {
-                let final_code =
-                    api_transform::rewrite_imports_for_version(&code, api_version);
-                (final_code, map)
-            })
-            .unwrap_or_else(|_| (final_source, None));
+            let (gen_code, source_map) =
+                transform::transform_ets_viewpu_with_source_map(&source, &options, &source.content)
+                    .map(|(code, map)| {
+                        let final_code =
+                            api_transform::rewrite_imports_for_version(&code, api_version);
+                        (final_code, map)
+                    })
+                    .unwrap_or_else(|_| (final_source, None));
             let map = source_map
                 .as_deref()
                 .and_then(|j| RolldownSourceMap::from_json_string(j).ok())
@@ -259,6 +256,53 @@ fn ensure_names_field(json: &str) -> String {
         }
     }
     serde_json::to_string(&value).unwrap_or_else(|_| json.to_string())
+}
+
+fn format_hvigor_standard_ts(source: &str) -> String {
+    let mut lines = Vec::new();
+    let mut iter = source.lines().peekable();
+
+    while let Some(line) = iter.next() {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let trimmed = line.trim_start();
+        if trimmed.ends_with('(') && trimmed.contains('.') {
+            let indent = hvigor_indent(line);
+            let mut args = Vec::new();
+            let mut closed = false;
+            while let Some(arg_line) = iter.peek().copied() {
+                let arg = arg_line.trim();
+                if arg == ");" {
+                    iter.next();
+                    closed = true;
+                    break;
+                }
+                if arg.is_empty() {
+                    break;
+                }
+                args.push(arg.trim_end_matches(',').to_string());
+                iter.next();
+            }
+            if closed && !args.is_empty() {
+                let prefix = trimmed.trim_end_matches('(');
+                lines.push(format!("{indent}{prefix}({});", args.join(", ")));
+                continue;
+            }
+        }
+
+        lines.push(format!("{}{}", hvigor_indent(line), trimmed));
+    }
+
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
+}
+
+fn hvigor_indent(line: &str) -> String {
+    let spaces = line.bytes().take_while(|&b| b == b' ').count();
+    " ".repeat(spaces * 2)
 }
 
 fn module_name_from_id(id: &str) -> Option<String> {
@@ -500,7 +544,9 @@ struct Index {\n\
         let plugin = EtsTransformPlugin::new(make_config(12));
         let code = "const x: number = 1;\nconst y: string = 'hi';";
         let id = "entry/src/main/ets/util.ts";
-        let out = plugin.do_transform(code, id).unwrap()
+        let out = plugin
+            .do_transform(code, id)
+            .unwrap()
             .expect("TS transform must return Some");
         let map_json = match &out.map {
             rolldown_plugin::HookTransformOutputMap::Sourcemap(sm) => sm.to_json_string(),
@@ -525,9 +571,12 @@ struct Index {\n\
     #[test]
     fn test_non_struct_ets_emits_per_token_source_map() {
         let plugin = EtsTransformPlugin::new(make_config(12));
-        let code = "import { UIAbility } from \"@ohos:app.ability.UIAbility\";\nconst TAG = 'test';";
+        let code =
+            "import { UIAbility } from \"@ohos:app.ability.UIAbility\";\nconst TAG = 'test';";
         let id = "entry/src/main/ets/entryability/EntryAbility.ets";
-        let out = plugin.do_transform(code, id).unwrap()
+        let out = plugin
+            .do_transform(code, id)
+            .unwrap()
             .expect("ETS non-struct transform must return Some");
         let map_json = match &out.map {
             rolldown_plugin::HookTransformOutputMap::Sourcemap(sm) => sm.to_json_string(),

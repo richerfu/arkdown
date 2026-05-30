@@ -57,8 +57,7 @@ pub fn normalize_integrated_hsps(
 ) -> Result<Vec<PathBuf>, PackError> {
     let mut output_paths = Vec::with_capacity(entries.len());
     for entry in entries {
-        let out_path =
-            normalize_single_hsp(entry, bundle_name, version_code, output_dir)?;
+        let out_path = normalize_single_hsp(entry, bundle_name, version_code, output_dir)?;
         output_paths.push(out_path);
     }
     Ok(output_paths)
@@ -106,8 +105,7 @@ fn normalize_single_hsp(
             let mut raw = Vec::new();
             src_entry.read_to_end(&mut raw)?;
             let patched = patch_pack_info(&raw, bundle_name, version_code)?;
-            let opts =
-                SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+            let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
             writer.start_file(&name, opts)?;
             writer.write_all(&patched)?;
         } else {
@@ -129,13 +127,9 @@ fn normalize_single_hsp(
 /// - `summary.app.version.code` → `version_code`
 ///
 /// Returns the patched JSON as compact bytes with a trailing newline (matching hvigor output).
-fn patch_pack_info(
-    raw: &[u8],
-    bundle_name: &str,
-    version_code: u64,
-) -> Result<Vec<u8>, PackError> {
-    let mut value: serde_json::Value = serde_json::from_slice(raw)
-        .map_err(|e| PackError::MalformedPackInfo(e.to_string()))?;
+fn patch_pack_info(raw: &[u8], bundle_name: &str, version_code: u64) -> Result<Vec<u8>, PackError> {
+    let mut value: serde_json::Value =
+        serde_json::from_slice(raw).map_err(|e| PackError::MalformedPackInfo(e.to_string()))?;
 
     if let Some(summary) = value.get_mut("summary") {
         if let Some(app) = summary.get_mut("app") {
@@ -146,8 +140,8 @@ fn patch_pack_info(
         }
     }
 
-    let mut out = serde_json::to_vec(&value)
-        .map_err(|e| PackError::MalformedPackInfo(e.to_string()))?;
+    let mut out =
+        serde_json::to_vec(&value).map_err(|e| PackError::MalformedPackInfo(e.to_string()))?;
     out.push(b'\n');
     Ok(out)
 }
@@ -161,14 +155,12 @@ mod tests {
         let cursor = std::io::Cursor::new(buf);
         let mut zw = zip::ZipWriter::new(cursor);
 
-        let opts =
-            SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
         zw.start_file("pack.info", opts).unwrap();
         zw.write_all(pack_info_json.as_bytes()).unwrap();
 
         for (name, data) in extra_entries {
-            let opts =
-                SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+            let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
             zw.start_file(*name, opts).unwrap();
             zw.write_all(data).unwrap();
         }
@@ -203,21 +195,12 @@ mod tests {
         };
 
         let out_dir = tmp.path().join("integrated");
-        let paths = normalize_integrated_hsps(
-            &[entry],
-            "com.host.app",
-            2000000,
-            &out_dir,
-        )
-        .unwrap();
+        let paths = normalize_integrated_hsps(&[entry], "com.host.app", 2000000, &out_dir).unwrap();
 
         assert_eq!(paths.len(), 1);
         let out_path = &paths[0];
         assert!(out_path.exists());
-        assert_eq!(
-            out_path,
-            &out_dir.join("mylib@1.0.0").join("mylib.hsp")
-        );
+        assert_eq!(out_path, &out_dir.join("mylib@1.0.0").join("mylib.hsp"));
 
         // Verify the output is a valid zip with patched pack.info.
         let out_file = std::fs::File::open(out_path).unwrap();
@@ -247,7 +230,8 @@ mod tests {
     fn test_normalize_preserves_other_entries() {
         let tmp = tempfile::tempdir().unwrap();
 
-        let pack_info = r#"{"summary":{"app":{"bundleName":"com.r","version":{"code":1}}},"packages":[]}"#;
+        let pack_info =
+            r#"{"summary":{"app":{"bundleName":"com.r","version":{"code":1}}},"packages":[]}"#;
         let abc_bytes = b"PANDA\x00\x00\x00";
         let hsp_bytes = make_hsp_bytes(pack_info, &[("ets/modules.abc", abc_bytes)]);
         let hsp_path = tmp.path().join("lib.hsp");
@@ -260,8 +244,7 @@ mod tests {
         };
 
         let out_dir = tmp.path().join("out");
-        let paths =
-            normalize_integrated_hsps(&[entry], "com.host", 9999, &out_dir).unwrap();
+        let paths = normalize_integrated_hsps(&[entry], "com.host", 9999, &out_dir).unwrap();
 
         let out_file = std::fs::File::open(&paths[0]).unwrap();
         let mut out_archive = zip::ZipArchive::new(out_file).unwrap();
@@ -281,8 +264,7 @@ mod tests {
         let buf = Vec::new();
         let cursor = std::io::Cursor::new(buf);
         let mut zw = zip::ZipWriter::new(cursor);
-        let opts =
-            SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+        let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
         zw.start_file("ets/modules.abc", opts).unwrap();
         zw.write_all(b"PAND").unwrap();
         let hsp_bytes = zw.finish().unwrap().into_inner();
@@ -296,8 +278,7 @@ mod tests {
             hsp_path,
         };
 
-        let result =
-            normalize_integrated_hsps(&[entry], "com.host", 1, &tmp.path().join("out"));
+        let result = normalize_integrated_hsps(&[entry], "com.host", 1, &tmp.path().join("out"));
         assert!(result.is_err());
         assert!(
             matches!(result.unwrap_err(), PackError::MissingInput(ref s) if s == "pack.info"),
@@ -308,8 +289,7 @@ mod tests {
     #[test]
     fn test_normalize_empty_entries_returns_empty_vec() {
         let tmp = tempfile::tempdir().unwrap();
-        let paths =
-            normalize_integrated_hsps(&[], "com.host", 1, tmp.path()).unwrap();
+        let paths = normalize_integrated_hsps(&[], "com.host", 1, tmp.path()).unwrap();
         assert!(paths.is_empty());
     }
 }

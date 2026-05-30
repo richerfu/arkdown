@@ -5,10 +5,9 @@ use std::sync::Arc;
 use arkdown::Bundler;
 use arkdown_config::{load_config, ConfigError};
 use arkdown_core::{
-    ArkdownConfig, BuildMode, BuildOption, ModuleConfig, ModuleJson5,
-    OhosModuleType, OutputTarget, ProductConfig, SdkConfig, StrictModeConfig,
+    ArkdownConfig, BuildMode, BuildOption, ModuleConfig, ModuleJson5, OhosModuleType, OutputTarget,
+    ProductConfig, SdkConfig, StrictModeConfig,
 };
-use rolldown_plugin::__inner::SharedPluginable;
 use arkdown_plugin_duplicate_check::DuplicateCheckPlugin;
 use arkdown_plugin_ets_transform::EtsTransformPlugin;
 use arkdown_plugin_json5::Json5Plugin;
@@ -16,6 +15,7 @@ use arkdown_plugin_module_meta::ModuleMetaPlugin;
 use arkdown_plugin_ohos_resolve::OhosResolvePlugin;
 use arkdown_profile::{LoaderJson, ProfileProcessor};
 use arkdown_resolver::ResolverConfig;
+use rolldown_plugin::__inner::SharedPluginable;
 
 fn fixture_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -43,12 +43,13 @@ fn make_test_config(fixture: &PathBuf) -> ArkdownConfig {
             build_option: BuildOption {
                 preload_so: vec![],
                 strict_mode: StrictModeConfig {
-                    case_sensitive_check: false,use_normalized_ohm_url: false,
+                    case_sensitive_check: false,
+                    use_normalized_ohm_url: false,
                 },
                 ark_options: None,
                 res_options: None,
                 source_option: None,
-                },
+            },
         },
         modules: vec![ModuleConfig {
             name: "entry".to_string(),
@@ -313,7 +314,8 @@ fn make_minimal_config(project_root: &PathBuf, build_mode: BuildMode) -> Arkdown
             build_option: BuildOption {
                 preload_so: vec![],
                 strict_mode: StrictModeConfig {
-                    case_sensitive_check: false,use_normalized_ohm_url: false,
+                    case_sensitive_check: false,
+                    use_normalized_ohm_url: false,
                 },
                 ark_options: None,
                 res_options: None,
@@ -472,7 +474,10 @@ async fn test_release_treeshake_removes_dead_export() {
         .map(|c| c.code.as_str())
         .collect();
 
-    println!("release output ({} bytes):\n{release_code}", release_code.len());
+    println!(
+        "release output ({} bytes):\n{release_code}",
+        release_code.len()
+    );
     assert!(
         !release_out.chunk_graph.chunks.is_empty(),
         "release build must produce at least one chunk"
@@ -494,8 +499,11 @@ async fn test_release_treeshake_removes_dead_export() {
         debug_code.len()
     );
 
-    println!("test_release_treeshake_removes_dead_export PASSED (debug={} bytes, release={} bytes)",
-        debug_code.len(), release_code.len());
+    println!(
+        "test_release_treeshake_removes_dead_export PASSED (debug={} bytes, release={} bytes)",
+        debug_code.len(),
+        release_code.len()
+    );
 }
 
 /// Verify `support_chunks=true` produces a vendors chunk for shared non-entry modules.
@@ -535,9 +543,15 @@ async fn test_support_chunks_produces_vendors_chunk() {
     );
 
     let bundler = Bundler::new(config, vec![]);
-    let bundle_out = bundler.bundle(&loader).await.expect("support_chunks bundle failed");
+    let bundle_out = bundler
+        .bundle(&loader)
+        .await
+        .expect("support_chunks bundle failed");
 
-    println!("support_chunks chunks produced: {}", bundle_out.chunk_files.len());
+    println!(
+        "support_chunks chunks produced: {}",
+        bundle_out.chunk_files.len()
+    );
     for (name, path) in &bundle_out.chunk_files {
         println!("  chunk '{}' → {}", name, path.display());
     }

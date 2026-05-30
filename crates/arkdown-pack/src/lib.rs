@@ -32,14 +32,14 @@ mod tests {
                 signing_config: None,
                 build_option: BuildOption {
                     preload_so: vec![],
-                strict_mode: StrictModeConfig {
+                    strict_mode: StrictModeConfig {
                         case_sensitive_check: false,
                         use_normalized_ohm_url: true,
                     },
                     ark_options: None,
                     res_options: None,
                     source_option: None,
-                    },
+                },
             },
             modules: vec![],
             sdk_config: SdkConfig {
@@ -81,7 +81,6 @@ mod tests {
             privacy_profile_path: None,
             source_maps_path: None,
             abilities: vec![],
-            
         });
         assert!(result.is_ok(), "{:?}", result.err());
         assert!(out.exists());
@@ -127,11 +126,11 @@ mod tests {
                 bundle_version_code: 1000000,
                 bundle_version_name: "1.0.0".to_string(),
                 bundle_type: "app".to_string(),
-            source_maps_path: None,
+                source_maps_path: None,
                 abilities: vec![],
-            integrated_hsps: vec![],
-            privacy_profile_path: None,
-        })
+                integrated_hsps: vec![],
+                privacy_profile_path: None,
+            })
             .unwrap();
 
         let file = fs::File::open(&out).unwrap();
@@ -163,7 +162,6 @@ mod tests {
             privacy_profile_path: None,
             source_maps_path: None,
             abilities: vec![],
-            
         });
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -240,7 +238,6 @@ mod tests {
             privacy_profile_path: None,
             source_maps_path: None,
             abilities: vec![],
-            
         });
         assert!(result.is_ok(), "{:?}", result.err());
         assert!(out.exists());
@@ -277,11 +274,11 @@ mod tests {
                 bundle_version_code: 1000000,
                 bundle_version_name: "1.0.0".to_string(),
                 bundle_type: "app".to_string(),
-            source_maps_path: None,
+                source_maps_path: None,
                 abilities: vec![],
                 privacy_profile_path: None,
-            integrated_hsps: vec![],
-        })
+                integrated_hsps: vec![],
+            })
             .unwrap();
 
         let file = fs::File::open(&out).unwrap();
@@ -322,12 +319,12 @@ mod tests {
                 bundle_version_code: 1000000,
                 bundle_version_name: "1.0.0".to_string(),
                 bundle_type: "app".to_string(),
-            
-            source_maps_path: None,
+
+                source_maps_path: None,
                 abilities: vec![],
                 privacy_profile_path: Some(privacy),
-            integrated_hsps: vec![],
-        })
+                integrated_hsps: vec![],
+            })
             .unwrap();
 
         let file = fs::File::open(&out).unwrap();

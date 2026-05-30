@@ -84,6 +84,9 @@ pub fn transform_ets_with_options(
     out.push_str(&content[last_end..]);
 
     if transformed_any {
+        while out.ends_with("\n\n") {
+            out.pop();
+        }
         Ok(out)
     } else {
         Ok(content.clone())
@@ -181,13 +184,11 @@ fn component_from_struct(
             StructElement::MethodDefinition(method)
                 if method.key.static_name().is_some_and(|name| name == "build") =>
             {
-                let (body, hints) =
-                    lower_build_body(method.value.body.as_deref(), source_text).map_err(
-                        |err| EtsTransformError::Fatal {
-                            file: id.to_string(),
-                            message: format!("unsupported ArkUI build() DSL: {err:?}"),
-                        },
-                    )?;
+                let (body, hints) = lower_build_body(method.value.body.as_deref(), source_text)
+                    .map_err(|err| EtsTransformError::Fatal {
+                        file: id.to_string(),
+                        message: format!("unsupported ArkUI build() DSL: {err:?}"),
+                    })?;
                 initial_render_body = body;
                 initial_render_span_hints = hints;
             }
@@ -306,7 +307,11 @@ pub fn transform_ets_viewpu_with_source_map(
             let span_hints = component.initial_render_span_hints.clone();
             let viewpu_code = generate_view_pu_class(&component);
             out.push_str(&viewpu_code);
-            struct_results.push(StructResult { viewpu_code, span_hints, out_offset });
+            struct_results.push(StructResult {
+                viewpu_code,
+                span_hints,
+                out_offset,
+            });
         } else {
             out.push_str(span_text(span, content));
         }
@@ -317,6 +322,9 @@ pub fn transform_ets_viewpu_with_source_map(
 
     if struct_results.is_empty() {
         return Ok((content.clone(), None));
+    }
+    while out.ends_with("\n\n") {
+        out.pop();
     }
 
     // Build cross-transform source map entries.  For each struct's span hints,
@@ -344,19 +352,21 @@ pub fn transform_ets_viewpu_with_source_map(
         for hint in &sr.span_hints {
             let abs_gen_line = body_start_line + hint.body_line;
             let (src_line, src_col) = offset_to_line_col(ets_source, hint.original_span.start);
-            entries.push(MapEntry { generated_line: abs_gen_line, src_line, src_col });
+            entries.push(MapEntry {
+                generated_line: abs_gen_line,
+                src_line,
+                src_col,
+            });
         }
     }
 
     let total_lines = out.lines().count();
-    let source_map =
-        build_ets_source_map(&source.id.id, total_lines.max(1), &entries);
+    let source_map = build_ets_source_map(&source.id.id, total_lines.max(1), &entries);
 
     Ok((out, Some(source_map)))
 }
 
 fn entry_registration(id: &str, options: &TransformOptions) -> EntryRegistrationInfo {
-    let page_full_path = id.trim_end_matches(".ets").to_string();
     let module_name = options
         .module_name
         .clone()
@@ -368,6 +378,11 @@ fn entry_registration(id: &str, options: &TransformOptions) -> EntryRegistration
         .unwrap_or(id)
         .trim_end_matches(".ets")
         .to_string();
+    let page_full_path = if id.contains("/src/main/ets/") {
+        format!("{module_name}/src/main/ets/{page_path}")
+    } else {
+        id.trim_end_matches(".ets").to_string()
+    };
 
     EntryRegistrationInfo {
         bundle_name: options.bundle_name.clone().unwrap_or_default(),

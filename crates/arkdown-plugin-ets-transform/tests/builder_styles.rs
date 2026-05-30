@@ -14,7 +14,6 @@
 /// valid TypeScript, and the `@Builder` decorator is stripped either way.
 /// Full `observeComponentCreation2` desugaring in `@Builder` bodies depends on
 /// the OXC ETS parser adding ArkUI expression support there in a future update.
-
 use arkdown_core::{ModuleSource, ModuleType, ResolvedId};
 use arkdown_plugin_ets_transform::transform::transform_ets;
 
@@ -80,7 +79,9 @@ struct MyCard {
         result
     );
     // The @Builder method must come after initialRender in the class body.
-    let initial_render_pos = result.find("initialRender()").expect("missing initialRender");
+    let initial_render_pos = result
+        .find("initialRender()")
+        .expect("missing initialRender");
     let builder_pos = result
         .find("headerBuilder():")
         .expect("missing headerBuilder");
@@ -186,11 +187,8 @@ struct Page {
   build() {}
 }
 "#;
-    let result = transform_ets(&make_source(
-        "entry/src/main/ets/components/Page.ets",
-        src,
-    ))
-    .unwrap();
+    let result =
+        transform_ets(&make_source("entry/src/main/ets/components/Page.ets", src)).unwrap();
 
     assert!(
         result.contains("header(): void {"),
@@ -231,11 +229,8 @@ fn test_styles_method_becomes_private_with_lowered_body() {
         styles_methods: vec![StylesMethodInfo {
             name: "myStyle".to_string(),
             params: String::new(),
-            lowered_body: concat!(
-                "        this.width(100);\n",
-                "        this.height(50);\n",
-            )
-            .to_string(),
+            lowered_body: concat!("        this.width(100);\n", "        this.height(50);\n",)
+                .to_string(),
         }],
         ..Default::default()
     };

@@ -435,10 +435,7 @@ mod tests {
                     .ark_options
                     .as_ref()
                     .expect("ark_options present");
-                let obf = ark_opts
-                    .obfuscation
-                    .as_ref()
-                    .expect("obfuscation present");
+                let obf = ark_opts.obfuscation.as_ref().expect("obfuscation present");
                 assert!(obf.enable_obfuscation);
                 assert_eq!(obf.rule_files.len(), 2);
                 // Paths must be absolute (resolved against project root).

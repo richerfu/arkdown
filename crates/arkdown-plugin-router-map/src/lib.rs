@@ -55,10 +55,8 @@ mod tests {
     #[test]
     fn test_no_invalidation_when_router_map_missing() {
         let cache = tempfile::NamedTempFile::new().unwrap();
-        let result = should_invalidate(
-            Path::new("/nonexistent_router_map_path.json"),
-            cache.path(),
-        );
+        let result =
+            should_invalidate(Path::new("/nonexistent_router_map_path.json"), cache.path());
         assert!(!result, "missing router map must not trigger invalidation");
     }
 

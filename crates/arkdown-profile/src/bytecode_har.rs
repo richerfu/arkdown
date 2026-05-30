@@ -56,7 +56,9 @@ impl ByteCodeHarScanEntry {
             package_name: self.package_name.clone(),
             abc_path: self.abc_path.to_string_lossy().into_owned(),
             compatible_sdk_version: self.compatible_sdk_version,
-            source_maps_path: self.source_maps_path.map(|p| p.to_string_lossy().into_owned()),
+            source_maps_path: self
+                .source_maps_path
+                .map(|p| p.to_string_lossy().into_owned()),
         };
         (self.package_name, entry)
     }
@@ -124,8 +126,11 @@ fn scan_oh_modules_dir(
                 if !scoped_dir.is_dir() {
                     continue;
                 }
-                let pkg_name =
-                    format!("{}/{}", name_str, scoped_entry.file_name().to_string_lossy());
+                let pkg_name = format!(
+                    "{}/{}",
+                    name_str,
+                    scoped_entry.file_name().to_string_lossy()
+                );
                 try_collect_bytecode_har(&scoped_dir, &pkg_name, seen, out);
             }
         } else {
@@ -358,11 +363,7 @@ fn read_module_name_from_pkg(pkg_dir: &Path, fallback: &str) -> String {
     }
 
     // Fallback: use the last path segment of the package name.
-    fallback
-        .rsplit('/')
-        .next()
-        .unwrap_or(fallback)
-        .to_string()
+    fallback.rsplit('/').next().unwrap_or(fallback).to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -464,7 +465,10 @@ mod tests {
         let project_dir = tmp.path();
 
         // Same package in both module oh_modules and project oh_modules.
-        for base in &[module_dir.join("oh_modules"), project_dir.join("oh_modules")] {
+        for base in &[
+            module_dir.join("oh_modules"),
+            project_dir.join("oh_modules"),
+        ] {
             let pkg = base.join("shared-har");
             write_abc(&pkg.join("index.abc"));
             write_file(&pkg.join("oh-package.json5"), r#"{ name: "shared-har" }"#);
@@ -498,8 +502,7 @@ mod tests {
     #[test]
     fn test_collect_dynamic_import_lib_info_empty() {
         let tmp = make_temp_dir();
-        let results =
-            collect_dynamic_import_lib_info("entry", &[], tmp.path(), tmp.path());
+        let results = collect_dynamic_import_lib_info("entry", &[], tmp.path(), tmp.path());
         assert!(results.is_empty());
     }
 
@@ -520,23 +523,24 @@ mod tests {
         );
 
         let deps = vec!["@remote/shared".to_string()];
-        let results =
-            collect_dynamic_import_lib_info("entry", &deps, tmp.path(), tmp.path());
+        let results = collect_dynamic_import_lib_info("entry", &deps, tmp.path(), tmp.path());
 
         assert_eq!(results.len(), 1);
         let (key, entry) = &results[0];
         assert_eq!(key, "@remote/shared");
         assert!(!entry.entry_file_path.is_empty());
         assert_eq!(entry.host_modules_info[0].host_module_name, "entry");
-        assert_eq!(entry.host_modules_info[0].host_dependency_name, "@remote/shared");
+        assert_eq!(
+            entry.host_modules_info[0].host_dependency_name,
+            "@remote/shared"
+        );
     }
 
     #[test]
     fn test_collect_dynamic_import_lib_info_missing_package_skipped() {
         let tmp = make_temp_dir();
         let deps = vec!["@missing/pkg".to_string()];
-        let results =
-            collect_dynamic_import_lib_info("entry", &deps, tmp.path(), tmp.path());
+        let results = collect_dynamic_import_lib_info("entry", &deps, tmp.path(), tmp.path());
         assert!(results.is_empty());
     }
 }

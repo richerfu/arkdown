@@ -88,7 +88,7 @@ pub fn generate_view_pu_class(info: &ComponentInfo) -> String {
         out.push_str(concat!(
             "if (!(\"finalizeConstruction\" in ViewPU.prototype)) {\n",
             "    Reflect.set(ViewPU.prototype, \"finalizeConstruction\", () => { });\n",
-            "}\n\n",
+            "}\n",
         ));
     }
 
@@ -283,7 +283,10 @@ pub fn generate_view_pu_class(info: &ComponentInfo) -> String {
         } else {
             method.params.clone()
         };
-        out.push_str(&format!("    private {}({}): void {{\n", method.name, params));
+        out.push_str(&format!(
+            "    private {}({}): void {{\n",
+            method.name, params
+        ));
         out.push_str(&method.lowered_body);
         out.push_str("    }\n");
     }
@@ -300,7 +303,6 @@ pub fn generate_view_pu_class(info: &ComponentInfo) -> String {
 
     // ── @Entry registration ───────────────────────────────────────────────────
     if info.is_entry {
-        out.push('\n');
         out.push_str(&generate_entry_registration(
             &info.name,
             info.entry_registration.as_ref(),
@@ -745,9 +747,9 @@ mod tests {
                 }],
                 initial_render_body: String::new(),
                 initial_render_span_hints: vec![],
-            builder_methods: vec![],
-            styles_methods: vec![],
-            entry_registration: None,
+                builder_methods: vec![],
+                styles_methods: vec![],
+                entry_registration: None,
             };
             let out = generate_view_pu_class(&info);
             assert!(

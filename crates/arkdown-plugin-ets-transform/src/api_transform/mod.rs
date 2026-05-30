@@ -119,7 +119,7 @@ pub fn rewrite_kit_imports(source: &str) -> String {
     // Pattern: import { A, B, C } from "@kit.XxxKit"  (single or double quotes)
     static KIT_RE: OnceLock<Regex> = OnceLock::new();
     let kit_re = KIT_RE.get_or_init(|| {
-        Regex::new(r#"import\s*\{([^}]+)\}\s*from\s*["'](@kit\.[^"']+)["']"#)
+        Regex::new(r#"import\s*\{([^}]+)\}\s*from\s*["'](@kit\.[^"']+)["']\s*;?"#)
             .expect("kit import regex must compile")
     });
 

@@ -69,12 +69,7 @@ pub fn merge_startup_config(input: StartupConfigInput<'_>) -> StartupConfigOutpu
                 .join("src/main/resources/base/profile")
                 .join(format!("{}.json", profile_name));
             if let Some(profile) = read_startup_profile(&profile_path) {
-                merge_tasks_from_profile(
-                    &profile,
-                    input.module_name,
-                    &profile_path,
-                    &mut merged,
-                );
+                merge_tasks_from_profile(&profile, input.module_name, &profile_path, &mut merged);
                 found_any = true;
             }
         }
@@ -124,8 +119,8 @@ pub fn write_startup_config(
             if let Some(parent) = output_path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            let json = serde_json::to_string(config)
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            let json =
+                serde_json::to_string(config).map_err(|e| std::io::Error::other(e.to_string()))?;
             std::fs::write(output_path, json)?;
             Ok(())
         }
@@ -199,9 +194,7 @@ fn collect_from_oh_modules(
             .unwrap_or("")
             .to_string();
 
-        if let Some((profile_name, module_name)) =
-            read_app_startup_from_pkg(&pkg_dir, &pkg_name)
-        {
+        if let Some((profile_name, module_name)) = read_app_startup_from_pkg(&pkg_dir, &pkg_name) {
             // Locate the startup profile JSON.
             let profile_path = find_startup_profile_in_pkg(&pkg_dir, &profile_name);
             if let Some(path) = profile_path {
@@ -286,9 +279,7 @@ fn check_duplicate_task_names(tasks: &[StartupTask], category: &str) {
         if !seen.insert(task.name.as_str()) {
             eprintln!(
                 "[warn] startup config: duplicate {} name '{}' (module: {:?})",
-                category,
-                task.name,
-                task.module_name
+                category, task.name, task.module_name
             );
         }
     }
@@ -368,8 +359,7 @@ mod tests {
         );
         // Write dep's startup profile
         write_file(
-            &dep_dir
-                .join("src/main/resources/base/profile/startup_config.json"),
+            &dep_dir.join("src/main/resources/base/profile/startup_config.json"),
             r#"{
                 "startupTasks": [
                     { "name": "HarTask", "srcEntry": "./ets/startup/HarTask.ets" }
@@ -488,7 +478,10 @@ mod tests {
 
     #[test]
     fn test_parse_profile_name() {
-        assert_eq!(parse_profile_name("$profile:startup_config"), Some("startup_config"));
+        assert_eq!(
+            parse_profile_name("$profile:startup_config"),
+            Some("startup_config")
+        );
         assert_eq!(parse_profile_name("$profile:my_config"), Some("my_config"));
         assert_eq!(parse_profile_name("not_a_profile"), None);
         assert_eq!(parse_profile_name(""), None);
@@ -538,9 +531,6 @@ mod tests {
         let config = output.config.unwrap();
         assert!(config.startup_tasks.is_empty());
         assert_eq!(config.app_preload_hint_startup_tasks.len(), 1);
-        assert_eq!(
-            config.app_preload_hint_startup_tasks[0].name,
-            "PreloadTask"
-        );
+        assert_eq!(config.app_preload_hint_startup_tasks[0].name, "PreloadTask");
     }
 }

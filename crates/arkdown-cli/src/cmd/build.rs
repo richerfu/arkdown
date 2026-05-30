@@ -7,16 +7,13 @@ use anyhow::{Context, Result};
 use clap::Args;
 
 use arkdown::{BundleOutput, Bundler};
-use arkdown_config::load_config;
 use arkdown_cache::BuildCache;
+use arkdown_config::load_config;
 use arkdown_core::{
     ArkChunk, ArkdownConfig, BuildMode, ChunkGraph, ChunkIdx, ModuleConfig, ModuleJson5,
     ModuleJson5Module, OutputTarget,
 };
-use index_vec::IndexVec;
-use rustc_hash::FxHashMap;
-use arkdown_obfuscate::{should_obfuscate, Obfuscator, ObfuscationOptions};
-use rolldown_plugin::__inner::SharedPluginable;
+use arkdown_obfuscate::{should_obfuscate, ObfuscationOptions, Obfuscator};
 use arkdown_pack::{HarPackInput, PackAbility, PackInput, Packager};
 use arkdown_plugin_duplicate_check::DuplicateCheckPlugin;
 use arkdown_plugin_ets_transform::EtsTransformPlugin;
@@ -25,13 +22,15 @@ use arkdown_plugin_module_meta::ModuleMetaPlugin;
 use arkdown_plugin_ohos_resolve::{process_importees, OhosResolvePlugin, ProcessImporteeConfig};
 use arkdown_plugin_router_map;
 use arkdown_profile::{
-    scan_bytecode_har_deps, ByteCodeHarEntry, ByteCodeHarScanEntry,
-    ProfileProcessor,
+    scan_bytecode_har_deps, ByteCodeHarEntry, ByteCodeHarScanEntry, ProfileProcessor,
 };
 use arkdown_resolver::ResolverConfig;
 use arkdown_resource::{ResourceCompileConfig, ResourceCompileInput, ResourceCompiler};
 use arkdown_sign::HapSigner;
 use arkdown_ts2abc::{compile_to_abc, Ts2abcInput, Ts2abcOptions};
+use index_vec::IndexVec;
+use rolldown_plugin::__inner::SharedPluginable;
+use rustc_hash::FxHashMap;
 
 use crate::progress::Progress;
 use crate::task_cache::TaskInputs;
@@ -157,10 +156,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         write_static_intermediate_files(&module.src_path)?;
 
         // Detect ByteCode HAR dependencies in oh_modules/ directories.
-        let mut bc_har_deps = scan_bytecode_har_deps(
-            &module.src_path,
-            &project_root,
-        );
+        let mut bc_har_deps = scan_bytecode_har_deps(&module.src_path, &project_root);
         // Sort for deterministic output.
         bc_har_deps.sort_by(|a, b| a.package_name.cmp(&b.package_name));
 
@@ -172,7 +168,10 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                     package_name: dep.package_name.clone(),
                     abc_path: dep.abc_path.to_string_lossy().into_owned(),
                     compatible_sdk_version: dep.compatible_sdk_version.clone(),
-                    source_maps_path: dep.source_maps_path.as_ref().map(|p| p.to_string_lossy().into_owned()),
+                    source_maps_path: dep
+                        .source_maps_path
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().into_owned()),
                 },
             );
         }
@@ -290,6 +289,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             .bundle(loader_json)
             .await
             .map_err(|e| anyhow::anyhow!("Bundle failed: {}", e))?;
+        write_compile_arkts_cache(module, loader_json, &config_arc)?;
         bundle_outs.push((bundle_out, false));
     }
     progress.done();
@@ -303,8 +303,10 @@ pub async fn run(args: BuildArgs) -> Result<()> {
     // The results are written to:
     //   1. loader.json (two new fields, omitted when empty)
     //   2. intermediates/importee/default/{module_name}/importee.json  (cache)
-    for (((module, _manifest, loader_json), (bundle_out, from_cache)), bc_har_deps) in
-        loader_jsons.iter_mut().zip(bundle_outs.iter()).zip(all_bc_har_deps.iter())
+    for (((module, _manifest, loader_json), (bundle_out, from_cache)), bc_har_deps) in loader_jsons
+        .iter_mut()
+        .zip(bundle_outs.iter())
+        .zip(all_bc_har_deps.iter())
     {
         if *from_cache {
             continue;
@@ -395,8 +397,10 @@ pub async fn run(args: BuildArgs) -> Result<()> {
 
     // Step 5: ABC compilation
     progress.step(5, 6, "Compiling ABC");
-    for (((module, _manifest, loader_json), (bundle_out, from_cache)), bc_har_deps) in
-        loader_jsons.iter().zip(bundle_outs.iter()).zip(all_bc_har_deps.iter())
+    for (((module, _manifest, loader_json), (bundle_out, from_cache)), bc_har_deps) in loader_jsons
+        .iter()
+        .zip(bundle_outs.iter())
+        .zip(all_bc_har_deps.iter())
     {
         if *from_cache {
             continue;
@@ -434,6 +438,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         // picked up and producing incorrect ABC record entries.
         let ts2abc_inputs = collect_js_chunks_from_output(
             &bundle_out.chunk_files,
+            &bundle_out.chunk_graph,
             &record_name_map,
             bundle_name,
             &loader_json.module_name,
@@ -441,8 +446,9 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         if !ts2abc_inputs.is_empty() {
             // ABC incremental compiler cache: hvigor uses es2abc --cache-file to
             // avoid re-parsing unchanged modules inside the ABC backend.
-            let abc_compiler_cache_path =
-                module.src_path.join("build/default/cache/abc/modules.abc.cache");
+            let abc_compiler_cache_path = module
+                .src_path
+                .join("build/default/cache/abc/modules.abc.cache");
             if let Some(parent) = abc_compiler_cache_path.parent() {
                 std::fs::create_dir_all(parent).ok();
             }
@@ -470,7 +476,13 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 cache_file: Some(abc_compiler_cache_path),
             })
             .map_err(|e| anyhow::anyhow!("ABC compile failed: {}", e))?;
-            write_hvigor_source_maps(bundle_out, loader_json, &record_name_map)?;
+            write_hvigor_source_maps(
+                bundle_out,
+                module,
+                loader_json,
+                &config_arc,
+                &record_name_map,
+            )?;
             if let Some(source_maps_path) = &bundle_out.source_maps_path {
                 copy_if_exists(
                     source_maps_path,
@@ -488,7 +500,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 let src = PathBuf::from(&loader_json.module_root_path)
                     .join(entry_path.trim_start_matches("./"));
                 if let Ok(content) = std::fs::read_to_string(&src) {
-// task-level cache; ABC cache is managed by TaskInputs
+                    // task-level cache; ABC cache is managed by TaskInputs
                 }
             }
 
@@ -522,9 +534,12 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         // merge; this append is correct for the current test fixture.)
         if !bc_har_deps.is_empty() {
             for dep in bc_har_deps {
-// Append ByteCode HAR abc to modules.abc (simple append for now)
+                // Append ByteCode HAR abc to modules.abc (simple append for now)
                 if let Ok(har_bytes) = std::fs::read(&dep.abc_path) {
-                    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&bundle_out.modules_abc_path) {
+                    if let Ok(mut f) = std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(&bundle_out.modules_abc_path)
+                    {
                         use std::io::Write;
                         let _ = f.write_all(&har_bytes);
                     }
@@ -579,9 +594,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                                     resources_dir: module.src_path.join("src/main/resources"),
                                     oh_package_json,
                                     output_path: output.clone(),
-            
-            
-        })
+                                })
                                 .map_err(|e| anyhow::anyhow!("Pack failed: {}", e))?,
                         )
                     } else {
@@ -631,7 +644,11 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                                             let p = module.src_path.join(
                                                 "src/main/resources/base/profile/privacy.json",
                                             );
-                                            if p.exists() { Some(p) } else { None }
+                                            if p.exists() {
+                                                Some(p)
+                                            } else {
+                                                None
+                                            }
                                         },
                                     })
                                     .map_err(|e| anyhow::anyhow!("Pack failed: {}", e))?,
@@ -940,6 +957,135 @@ fn copy_if_exists(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
+fn write_compile_arkts_cache(
+    module: &ModuleConfig,
+    loader_json: &arkdown_profile::LoaderJson,
+    config: &Arc<ArkdownConfig>,
+) -> Result<()> {
+    let module_root = PathBuf::from(&loader_json.module_root_path);
+    let mode_dir = match config.build_mode {
+        BuildMode::Debug => "debug",
+        BuildMode::Release => "release",
+    };
+    let cache_root = module
+        .src_path
+        .join("build/default/cache/default/default@CompileArkTS/esmodule")
+        .join(mode_dir);
+    let ts_root = cache_root.join(&loader_json.module_name).join("src/main");
+    let transformer = EtsTransformPlugin::new(config.clone());
+    let mut source_map_lines = Vec::new();
+
+    for entry in &loader_json.compile_entry {
+        let source_file = entry.trim_start_matches("./").to_string();
+        let source_path = module_root.join(&source_file);
+        if !source_path.exists() {
+            continue;
+        }
+
+        let source = fs_err::read_to_string(&source_path)
+            .with_context(|| format!("failed to read compile entry {}", source_path.display()))?;
+        let source_id = format!("{}/src/main/{}", loader_json.module_name, source_file);
+        let transformed = transformer
+            .do_transform(&source, &source_id)
+            .with_context(|| format!("failed to transform compile entry {source_id}"))?;
+        let Some(output) = transformed else {
+            continue;
+        };
+
+        let code = output.code.unwrap_or(source);
+        let ts_rel = with_extension(&source_file, "ts");
+        let ts_path = ts_root.join(&ts_rel);
+        if let Some(parent) = ts_path.parent() {
+            fs_err::create_dir_all(parent)?;
+        }
+        fs_err::write(&ts_path, code)
+            .with_context(|| format!("failed to write transformed TS {}", ts_path.display()))?;
+
+        if let Some(source_map) = output.map.into_sourcemap() {
+            let raw_map = source_map.to_json_string();
+            let map_value: serde_json::Value = serde_json::from_str(&raw_map)
+                .with_context(|| format!("failed to parse generated source map for {source_id}"))?;
+            let mappings = map_value
+                .get("mappings")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            let file = Path::new(&source_file)
+                .file_name()
+                .and_then(|file| file.to_str())
+                .unwrap_or(source_file.as_str());
+            let key = format!(
+                "{}|{}|1.0.0|src/main/{}",
+                loader_json.module_name,
+                loader_json.module_name,
+                with_extension(&source_file, "ts")
+            );
+            let val = serde_json::json!({
+                "version": 3,
+                "file": file,
+                "sourceRoot": "",
+                "sources": [format!("{}/src/main/{}", loader_json.module_name, source_file)],
+                "names": [],
+                "mappings": mappings,
+                "entry-package-info": format!("{}|1.0.0", loader_json.module_name),
+            });
+            source_map_lines.push(serde_json::json!({
+                "key": key,
+                "val": val,
+            }));
+        }
+    }
+
+    if !source_map_lines.is_empty() {
+        fs_err::create_dir_all(&cache_root)?;
+        let mut content = String::new();
+        for line in source_map_lines {
+            content.push_str(&serde_json::to_string(&line)?);
+            content.push('\n');
+        }
+        fs_err::write(cache_root.join("sourceMaps.json"), content)?;
+    }
+
+    Ok(())
+}
+
+fn read_compile_arkts_source_maps(
+    module: &ModuleConfig,
+    config: &Arc<ArkdownConfig>,
+) -> Result<Option<String>> {
+    let mode_dir = match config.build_mode {
+        BuildMode::Debug => "debug",
+        BuildMode::Release => "release",
+    };
+    let source_maps_json = module
+        .src_path
+        .join("build/default/cache/default/default@CompileArkTS/esmodule")
+        .join(mode_dir)
+        .join("sourceMaps.json");
+    if !source_maps_json.exists() {
+        return Ok(None);
+    }
+
+    let content = fs_err::read_to_string(&source_maps_json)?;
+    let mut source_maps = serde_json::Map::new();
+    for line in content.lines().filter(|line| !line.trim().is_empty()) {
+        let entry: serde_json::Value = serde_json::from_str(line)
+            .with_context(|| format!("failed to parse {}", source_maps_json.display()))?;
+        let Some(key) = entry.get("key").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let Some(val) = entry.get("val") else {
+            continue;
+        };
+        source_maps.insert(key.to_string(), val.clone());
+    }
+
+    if source_maps.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(serde_json::to_string_pretty(&source_maps)?))
+}
+
 #[derive(Debug, Clone)]
 struct ChunkCompileMeta {
     record_name: String,
@@ -957,6 +1103,7 @@ struct ChunkCompileMeta {
 /// from the chunk file's stem to avoid storing absolute filesystem paths.
 fn collect_js_chunks_from_output(
     chunk_files: &[(String, std::path::PathBuf)],
+    chunk_graph: &ChunkGraph,
     record_name_map: &HashMap<String, ChunkCompileMeta>,
     bundle_name: &str,
     module_name: &str,
@@ -982,6 +1129,11 @@ fn collect_js_chunks_from_output(
                 .map(|meta| meta.record_name.clone())
                 .unwrap_or_else(derived_record_name),
             source_file: meta.and_then(|meta| meta.source_file.clone()),
+            source_map: chunk_graph
+                .chunks
+                .iter()
+                .find(|chunk| chunk.name == *chunk_name)
+                .and_then(|chunk| chunk.source_map.clone()),
         });
     }
     modules
@@ -989,12 +1141,19 @@ fn collect_js_chunks_from_output(
 
 fn write_hvigor_source_maps(
     bundle_out: &arkdown::BundleOutput,
+    module: &ModuleConfig,
     loader_json: &arkdown_profile::LoaderJson,
+    config: &Arc<ArkdownConfig>,
     record_name_map: &HashMap<String, ChunkCompileMeta>,
 ) -> Result<()> {
     let Some(source_maps_path) = &bundle_out.source_maps_path else {
         return Ok(());
     };
+
+    if let Some(cache_maps) = read_compile_arkts_source_maps(module, config)? {
+        fs_err::write(source_maps_path, cache_maps)?;
+        return Ok(());
+    }
 
     let mut source_maps = serde_json::Map::new();
     for chunk in bundle_out.chunk_graph.chunks.iter() {
@@ -1069,7 +1228,11 @@ fn compute_config_hash(config: &ArkdownConfig) -> u64 {
         },
         config.product.bundle_name,
         config.sdk_config.compile_api_version,
-        config.product.build_option.strict_mode.use_normalized_ohm_url,
+        config
+            .product
+            .build_option
+            .strict_mode
+            .use_normalized_ohm_url,
     );
     for b in fingerprint.bytes() {
         h ^= b as u64;
@@ -1129,7 +1292,10 @@ fn compute_bundle_source_hash(entries: &[String], module_root: &str) -> u64 {
 /// Compute a deterministic hash over all rolldown configuration fields that
 /// affect the bundle output: build mode, treeshake, support_chunks,
 /// use_normalized_ohm_url, bundle name, and module name.
-fn compute_bundle_config_hash(config: &ArkdownConfig, loader_json: &arkdown_profile::LoaderJson) -> u64 {
+fn compute_bundle_config_hash(
+    config: &ArkdownConfig,
+    loader_json: &arkdown_profile::LoaderJson,
+) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
     let fingerprint = format!(
         "{}:{}:{}:{}:{}:{}",
@@ -1139,7 +1305,11 @@ fn compute_bundle_config_hash(config: &ArkdownConfig, loader_json: &arkdown_prof
         },
         config.product.bundle_name,
         config.sdk_config.compile_api_version,
-        config.product.build_option.strict_mode.use_normalized_ohm_url,
+        config
+            .product
+            .build_option
+            .strict_mode
+            .use_normalized_ohm_url,
         loader_json.support_chunks,
         loader_json.module_name,
     );
@@ -1149,6 +1319,3 @@ fn compute_bundle_config_hash(config: &ArkdownConfig, loader_json: &arkdown_prof
     }
     h
 }
-
-
-

@@ -35,7 +35,7 @@ fn make_config() -> Arc<ArkdownConfig> {
                 ark_options: None,
                 res_options: None,
                 source_option: None,
-                },
+            },
         },
         modules: vec![],
         sdk_config: SdkConfig {
@@ -81,8 +81,8 @@ fn minimal_pack_input(
         source_maps_path: None,
         abilities: vec![],
         integrated_hsps: vec![],
-            privacy_profile_path: None,
-        }
+        privacy_profile_path: None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -323,8 +323,8 @@ fn test_missing_abc_returns_missing_input_error() {
         source_maps_path: None,
         abilities: vec![],
         integrated_hsps: vec![],
-            privacy_profile_path: None,
-        });
+        privacy_profile_path: None,
+    });
     assert!(result.is_err(), "missing ABC must return Err");
     assert!(
         matches!(result.unwrap_err(), PackError::MissingInput(_)),
@@ -348,9 +348,9 @@ fn test_missing_module_json_returns_missing_input_error() {
         bundle_type: "app".to_string(),
         source_maps_path: None,
         abilities: vec![],
-            integrated_hsps: vec![],
-            privacy_profile_path: None,
-        });
+        integrated_hsps: vec![],
+        privacy_profile_path: None,
+    });
     assert!(result.is_err());
     assert!(matches!(result.unwrap_err(), PackError::MissingInput(_)));
 }
@@ -514,8 +514,7 @@ fn test_normalize_integrated_hsps_patches_pack_info() {
     };
 
     let out_dir = tmp.path().join("integrated");
-    let paths =
-        normalize_integrated_hsps(&[entry], "com.host.app", 2000000, &out_dir).unwrap();
+    let paths = normalize_integrated_hsps(&[entry], "com.host.app", 2000000, &out_dir).unwrap();
 
     assert_eq!(paths.len(), 1);
     let out_path = &paths[0];
@@ -597,8 +596,14 @@ fn test_pack_hap_embeds_integrated_hsp() {
         names
     );
     // Standard HAP entries must still be present.
-    assert!(names.iter().any(|n| *n == "module.json"), "module.json missing");
-    assert!(names.iter().any(|n| *n == "ets/modules.abc"), "ets/modules.abc missing");
+    assert!(
+        names.iter().any(|n| *n == "module.json"),
+        "module.json missing"
+    );
+    assert!(
+        names.iter().any(|n| *n == "ets/modules.abc"),
+        "ets/modules.abc missing"
+    );
 }
 
 #[test]
@@ -616,7 +621,9 @@ fn test_pack_hap_empty_integrated_hsps_no_libs_entry() {
     let names: Vec<_> = archive.file_names().collect();
 
     assert!(
-        !names.iter().any(|n| n.starts_with("libs/") && n.ends_with(".hsp")),
+        !names
+            .iter()
+            .any(|n| n.starts_with("libs/") && n.ends_with(".hsp")),
         "HAP with no integrated_hsps must not contain any .hsp under libs/; entries: {:?}",
         names
     );

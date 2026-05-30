@@ -146,7 +146,9 @@ mod tests {
 
     #[test]
     fn need_widget_compile_true_when_form_paths_present() {
-        let paths = vec![PathBuf::from("/project/entry/src/main/ets/widget/form.json")];
+        let paths = vec![PathBuf::from(
+            "/project/entry/src/main/ets/widget/form.json",
+        )];
         assert!(need_widget_compile(&paths, "entry"));
         assert!(need_widget_compile(&paths, "feature"));
         assert!(need_widget_compile(&paths, "shared"));
@@ -178,7 +180,10 @@ mod tests {
         }];
         let result =
             collect_form_json_paths(std::path::Path::new("/project/entry/src/main"), &abilities);
-        assert!(result.is_empty(), "non-form extension must not produce paths");
+        assert!(
+            result.is_empty(),
+            "non-form extension must not produce paths"
+        );
     }
 
     #[test]

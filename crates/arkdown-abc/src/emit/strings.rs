@@ -68,6 +68,11 @@ impl StringTable {
         self.strings.get(idx as usize).map(|s| s.as_str())
     }
 
+    /// Return the stable string id if `s` has already been interned.
+    pub fn id_of(&self, s: &str) -> Option<u32> {
+        self.index.get(s).copied()
+    }
+
     /// Number of unique strings currently interned.
     pub fn len(&self) -> usize {
         self.strings.len()
@@ -190,8 +195,14 @@ mod tests {
         let id1 = st.intern("pkgName@entry");
         let id2 = st.intern("other");
         let id3 = st.intern("pkgName@entry");
-        assert_eq!(id0, id1, "second intern of same string must return same index");
-        assert_eq!(id0, id3, "third intern of same string must return same index");
+        assert_eq!(
+            id0, id1,
+            "second intern of same string must return same index"
+        );
+        assert_eq!(
+            id0, id3,
+            "third intern of same string must return same index"
+        );
         assert_ne!(id0, id2, "distinct strings must have distinct indices");
         assert_eq!(st.len(), 2, "only two unique strings should be stored");
     }

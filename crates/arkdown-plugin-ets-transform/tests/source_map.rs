@@ -7,7 +7,6 @@
 /// the original `.ets` file.  The arkdown ETS transform must do the same so
 /// that DevTools / source-map consumers show the original `.ets` source in
 /// stack traces and the `ets/sourceMaps.map` file matches hvigor.
-
 use std::sync::Arc;
 
 use arkdown_core::{
@@ -30,7 +29,8 @@ fn make_plugin() -> EtsTransformPlugin {
             build_option: BuildOption {
                 preload_so: vec![],
                 strict_mode: StrictModeConfig {
-                    case_sensitive_check: false,use_normalized_ohm_url: true,
+                    case_sensitive_check: false,
+                    use_normalized_ohm_url: true,
                 },
                 ark_options: None,
                 res_options: None,
@@ -97,17 +97,27 @@ async fn test_component_source_map_references_ets_lines() {
     );
     let id = "entry/src/main/ets/pages/Hello.ets";
 
-    let result = plugin.do_transform(ets_source, id).unwrap()
+    let result = plugin
+        .do_transform(ets_source, id)
+        .unwrap()
         .expect("@Component transform must return Some");
 
     // Confirm the transform ran (ViewPU class emitted).
     assert!(
-        result.code.as_deref().unwrap_or("").contains("class Hello extends ViewPU"),
+        result
+            .code
+            .as_deref()
+            .unwrap_or("")
+            .contains("class Hello extends ViewPU"),
         "must emit ViewPU class; got:\n{}",
         result.code.as_deref().unwrap_or("")
     );
     assert!(
-        result.code.as_deref().unwrap_or("").contains("observeComponentCreation2"),
+        result
+            .code
+            .as_deref()
+            .unwrap_or("")
+            .contains("observeComponentCreation2"),
         "must lower Row()/Text() calls; got:\n{}",
         result.code.as_deref().unwrap_or("")
     );
@@ -125,7 +135,9 @@ async fn test_component_source_map_references_ets_lines() {
     assert_eq!(map["version"], 3, "source map version must be 3");
     let sources = map["sources"].as_array().expect("sources must be an array");
     assert!(
-        sources.iter().any(|s| s.as_str().is_some_and(|p| p.contains("Hello.ets"))),
+        sources
+            .iter()
+            .any(|s| s.as_str().is_some_and(|p| p.contains("Hello.ets"))),
         "sources must reference Hello.ets; got: {sources:?}"
     );
 
@@ -167,7 +179,9 @@ async fn test_non_component_ets_still_returns_source_map() {
     let code = "const greeting: string = 'hello';";
     let id = "entry/src/main/ets/util/helpers.ets";
 
-    let result = plugin.do_transform(code, id).unwrap()
+    let result = plugin
+        .do_transform(code, id)
+        .unwrap()
         .expect("non-component .ets must return Some");
 
     let map_json_str = match &result.map {
@@ -210,10 +224,15 @@ async fn test_multi_component_build_has_multiple_mapping_entries() {
     );
     let id = "entry/src/main/ets/pages/Page.ets";
 
-    let result = plugin.do_transform(ets_source, id).unwrap()
+    let result = plugin
+        .do_transform(ets_source, id)
+        .unwrap()
         .expect("@Component transform must return Some");
 
-    let map_json_str = match &result.map { rolldown_plugin::HookTransformOutputMap::Sourcemap(sm) => sm.to_json_string(), _ => panic!("source_map must be Some") };
+    let map_json_str = match &result.map {
+        rolldown_plugin::HookTransformOutputMap::Sourcemap(sm) => sm.to_json_string(),
+        _ => panic!("source_map must be Some"),
+    };
     let map: serde_json::Value = serde_json::from_str(&map_json_str).unwrap();
     let mappings = map["mappings"].as_str().unwrap();
     let groups: Vec<&str> = mappings.split(';').collect();
