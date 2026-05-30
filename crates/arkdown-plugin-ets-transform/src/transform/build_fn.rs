@@ -19,6 +19,8 @@ pub enum BuildLoweringError {
 pub struct SpanHint {
     /// 0-based line index within the `initialRender()` body text.
     pub body_line: usize,
+    /// 0-based column index within the generated line.
+    pub body_col: u32,
     /// Byte span of the ArkUI component expression in the original `.ets` source.
     pub original_span: Span,
 }
@@ -153,20 +155,59 @@ fn lower_component(
     let name = component_name(&component.callee)?;
     let args = arguments_text(&component.arguments, source_text);
 
-    // Record span hint before emitting — current newline count is the body line.
     let body_line = out.bytes().filter(|&b| b == b'\n').count();
-    span_hints.push(SpanHint {
-        body_line,
-        original_span: component.span(),
-    });
 
     out.push_str(&format!(
         "{indent}this.observeComponentCreation2((elmtId, isInitialRender) => {{\n"
     ));
+    push_span_hint(
+        span_hints,
+        body_line + 1,
+        indent.len() + 4,
+        component.callee.span(),
+    );
+    push_span_hint(
+        span_hints,
+        body_line + 1,
+        indent.len() + 4 + name.len(),
+        end_span(component.callee.span()),
+    );
+    push_argument_hints(
+        span_hints,
+        body_line + 1,
+        indent.len() + 4 + name.len() + ".create(".len(),
+        &component.arguments,
+        source_text,
+    );
     out.push_str(&format!("{indent}    {name}.create({args});\n"));
-    for chain in &component.chain_expressions {
+    for (index, chain) in component.chain_expressions.iter().enumerate() {
         let chain_name = chain_name(chain)?;
         let chain_args = arguments_text(&chain.arguments, source_text);
+        let line = body_line + 2 + index;
+        push_span_hint(span_hints, line, indent.len() + 4, component.callee.span());
+        push_span_hint(
+            span_hints,
+            line,
+            indent.len() + 4 + name.len(),
+            end_span(component.callee.span()),
+        );
+        if let Some(property_span) = chain_property_span(chain) {
+            let property_col = indent.len() + 4 + name.len() + 1;
+            push_span_hint(span_hints, line, property_col, property_span);
+            push_span_hint(
+                span_hints,
+                line,
+                property_col + chain_name.len(),
+                end_span(property_span),
+            );
+        }
+        push_argument_hints(
+            span_hints,
+            line,
+            indent.len() + 4 + name.len() + 1 + chain_name.len() + 1,
+            &chain.arguments,
+            source_text,
+        );
         out.push_str(&format!("{indent}    {name}.{chain_name}({chain_args});\n"));
     }
     out.push_str(&format!("{indent}}}, {name});\n"));
@@ -182,8 +223,96 @@ fn lower_component(
         }
     }
 
+    let pop_line = out.bytes().filter(|&b| b == b'\n').count();
+    push_span_hint(span_hints, pop_line, indent.len(), component.callee.span());
+    push_span_hint(
+        span_hints,
+        pop_line,
+        indent.len() + name.len(),
+        end_span(component.callee.span()),
+    );
     out.push_str(&format!("{indent}{name}.pop();\n"));
     Ok(())
+}
+
+fn push_span_hint(span_hints: &mut Vec<SpanHint>, body_line: usize, body_col: usize, span: Span) {
+    span_hints.push(SpanHint {
+        body_line,
+        body_col: body_col as u32,
+        original_span: span,
+    });
+}
+
+fn end_span(span: Span) -> Span {
+    Span::new(span.end, span.end)
+}
+
+fn chain_property_span(call: &CallExpression<'_>) -> Option<Span> {
+    match &call.callee {
+        Expression::StaticMemberExpression(member) => Some(member.property.span),
+        _ => None,
+    }
+}
+
+fn push_argument_hints(
+    span_hints: &mut Vec<SpanHint>,
+    body_line: usize,
+    mut body_col: usize,
+    arguments: &[Argument<'_>],
+    source_text: &str,
+) {
+    for (index, argument) in arguments.iter().enumerate() {
+        if index > 0 {
+            body_col += 2;
+        }
+        let text = span_text(argument, source_text);
+        let text = text.trim();
+        if !push_static_member_argument_hints(
+            span_hints,
+            body_line,
+            body_col,
+            argument,
+            source_text,
+        ) {
+            let span = argument.span();
+            push_span_hint(span_hints, body_line, body_col, span);
+            push_span_hint(span_hints, body_line, body_col + text.len(), end_span(span));
+        }
+        body_col += text.len();
+    }
+}
+
+fn push_static_member_argument_hints(
+    span_hints: &mut Vec<SpanHint>,
+    body_line: usize,
+    body_col: usize,
+    argument: &Argument<'_>,
+    source_text: &str,
+) -> bool {
+    let Argument::StaticMemberExpression(member) = argument else {
+        return false;
+    };
+
+    let object_text = span_text(&member.object, source_text);
+    let object_text = object_text.trim();
+    let property_text = member.property.name.as_str();
+    let property_col = body_col + object_text.len() + 1;
+
+    push_span_hint(span_hints, body_line, body_col, member.object.span());
+    push_span_hint(
+        span_hints,
+        body_line,
+        body_col + object_text.len(),
+        end_span(member.object.span()),
+    );
+    push_span_hint(span_hints, body_line, property_col, member.property.span);
+    push_span_hint(
+        span_hints,
+        body_line,
+        property_col + property_text.len(),
+        end_span(member.property.span),
+    );
+    true
 }
 
 fn component_name(callee: &Expression<'_>) -> Result<String, BuildLoweringError> {
@@ -653,10 +782,9 @@ struct Index {
             .expect("expected build method");
 
         let (out, span_hints) = lower_build_body(build.value.body.as_deref(), source).unwrap();
-        assert_eq!(
-            span_hints.len(),
-            3,
-            "expected 3 span hints (Row, Column, Text)"
+        assert!(
+            span_hints.len() >= 18,
+            "expected token-level span hints for Row, Column, and Text"
         );
         let expected = concat!(
             "        this.observeComponentCreation2((elmtId, isInitialRender) => {\n",

@@ -288,6 +288,7 @@ pub fn transform_ets_viewpu_with_source_map(
     struct StructResult {
         viewpu_code: String,
         span_hints: Vec<crate::transform::build_fn::SpanHint>,
+        static_span_hints: Vec<crate::transform::build_fn::SpanHint>,
         /// Byte range in the `out` string where this struct's ViewPU code starts.
         out_offset: usize,
     }
@@ -300,16 +301,23 @@ pub fn transform_ets_viewpu_with_source_map(
         let span = statement.span();
         out.push_str(&content[last_end..span.start as usize]);
 
-        if let Some(component) =
-            component_from_statement(statement, content, &source.id.id, options)?
+        if let Some((component, struct_statement)) =
+            component_with_struct_from_statement(statement, content, &source.id.id, options)?
         {
             let out_offset = out.len();
             let span_hints = component.initial_render_span_hints.clone();
             let viewpu_code = generate_view_pu_class(&component);
+            let static_span_hints = collect_component_static_span_hints(
+                &component,
+                struct_statement,
+                content,
+                &viewpu_code,
+            );
             out.push_str(&viewpu_code);
             struct_results.push(StructResult {
                 viewpu_code,
                 span_hints,
+                static_span_hints,
                 out_offset,
             });
         } else {
@@ -336,6 +344,17 @@ pub fn transform_ets_viewpu_with_source_map(
         // Line offset of this struct's ViewPU code within the full output.
         let struct_line_start = out[..sr.out_offset].bytes().filter(|&b| b == b'\n').count();
 
+        for hint in &sr.static_span_hints {
+            let abs_gen_line = struct_line_start + hint.body_line;
+            let (src_line, src_col) = offset_to_line_col(ets_source, hint.original_span.start);
+            entries.push(MapEntry {
+                generated_line: abs_gen_line,
+                generated_col: hint.body_col,
+                src_line,
+                src_col,
+            });
+        }
+
         // Find the `initialRender()` method declaration line within the ViewPU code
         // so we can locate the body start.
         let initial_render_line_in_struct = sr
@@ -354,6 +373,7 @@ pub fn transform_ets_viewpu_with_source_map(
             let (src_line, src_col) = offset_to_line_col(ets_source, hint.original_span.start);
             entries.push(MapEntry {
                 generated_line: abs_gen_line,
+                generated_col: hint.body_col,
                 src_line,
                 src_col,
             });
@@ -364,6 +384,234 @@ pub fn transform_ets_viewpu_with_source_map(
     let source_map = build_ets_source_map(&source.id.id, total_lines.max(1), &entries);
 
     Ok((out, Some(source_map)))
+}
+
+fn component_with_struct_from_statement<'a>(
+    statement: &'a Statement<'a>,
+    source_text: &str,
+    id: &str,
+    options: &TransformOptions,
+) -> Result<Option<(ComponentInfo, &'a StructStatement<'a>)>, EtsTransformError> {
+    match statement {
+        Statement::StructStatement(statement) => {
+            Ok(component_from_struct(statement, source_text, id, options)?
+                .map(|component| (component, statement.as_ref())))
+        }
+        Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref() {
+            Some(Declaration::StructStatement(statement)) => {
+                Ok(component_from_struct(statement, source_text, id, options)?
+                    .map(|component| (component, statement.as_ref())))
+            }
+            _ => Ok(None),
+        },
+        _ => Ok(None),
+    }
+}
+
+fn collect_component_static_span_hints(
+    component: &ComponentInfo,
+    statement: &StructStatement<'_>,
+    source_text: &str,
+    viewpu_code: &str,
+) -> Vec<crate::transform::build_fn::SpanHint> {
+    let mut hints = Vec::new();
+    let lines: Vec<&str> = viewpu_code.lines().collect();
+
+    if let Some(line) = find_line(&lines, |line| line.trim_start().starts_with("class ")) {
+        push_hint_for_text(&mut hints, &lines, line, &component.name, statement.id.span);
+    }
+
+    if let Some(line) = find_line(&lines, |line| line.trim_start().starts_with("constructor(")) {
+        push_hint(
+            &mut hints,
+            line,
+            leading_spaces(lines[line]),
+            statement.span,
+        );
+    }
+
+    if let Some(line) = find_line(&lines, |line| line.contains("this.finalizeConstruction()"))
+        .and_then(|line| find_next_line(&lines, line + 1, |line| line.trim() == "}"))
+    {
+        push_hint(
+            &mut hints,
+            line,
+            lines[line].trim_end().len(),
+            statement.span,
+        );
+    }
+
+    if let Some(line) = find_line(&lines, |line| {
+        line.trim_start().starts_with("initialRender()")
+    }) {
+        if let Some(build_span) = build_method_span(statement) {
+            push_hint(&mut hints, line, leading_spaces(lines[line]), build_span);
+            if let Some(close_line) = find_next_line(&lines, line + 1, |line| line.trim() == "}") {
+                push_hint(
+                    &mut hints,
+                    close_line,
+                    lines[close_line].trim_end().len(),
+                    end_span(build_span),
+                );
+            }
+        }
+    }
+
+    for element in &statement.body.body {
+        let StructElement::PropertyDefinition(property) = element else {
+            continue;
+        };
+        let Some(name) = property.key.static_name() else {
+            continue;
+        };
+        if !component
+            .state_fields
+            .iter()
+            .any(|field| field.name == name)
+        {
+            continue;
+        }
+        let name = name.as_ref();
+        let name_span = property.key.span();
+        let type_span = property
+            .type_annotation
+            .as_ref()
+            .map(|annotation| annotation.span());
+        let init_span = property.value.as_ref().map(|value| value.span());
+
+        if let Some(line) = find_line(&lines, |line| line.trim_start().starts_with(name)) {
+            push_hint_for_text(&mut hints, &lines, line, name, name_span);
+            if let Some(type_span) = type_span {
+                push_hint_for_text(
+                    &mut hints,
+                    &lines,
+                    line,
+                    "string",
+                    trim_type_span(type_span),
+                );
+            }
+        }
+        if let Some(line) = find_line(&lines, |line| {
+            line.contains(&format!("this.__{name} = new "))
+        }) {
+            if let Some(init_span) = init_span {
+                let initializer = span_text(init_span, source_text).trim();
+                push_hint_for_text(&mut hints, &lines, line, initializer, init_span);
+            }
+        }
+        if let Some(line) = find_line(&lines, |line| line.contains(&format!("private __{name}:"))) {
+            push_hint(
+                &mut hints,
+                line,
+                leading_spaces(lines[line]),
+                property.span(),
+            );
+            if let Some(type_span) = type_span {
+                push_hint_for_text(
+                    &mut hints,
+                    &lines,
+                    line,
+                    "string",
+                    trim_type_span(type_span),
+                );
+            }
+            push_hint(
+                &mut hints,
+                line,
+                lines[line].trim_end().len(),
+                end_span(property.span()),
+            );
+        }
+        if let Some(line) = find_line(&lines, |line| {
+            line.trim_start().starts_with(&format!("get {name}("))
+        }) {
+            push_hint_for_text(&mut hints, &lines, line, name, name_span);
+        }
+        if let Some(line) = find_line(&lines, |line| {
+            line.trim_start().starts_with(&format!("set {name}("))
+        }) {
+            push_hint_for_text(&mut hints, &lines, line, name, name_span);
+            if let Some(type_span) = type_span {
+                push_hint_for_text(
+                    &mut hints,
+                    &lines,
+                    line,
+                    "string",
+                    trim_type_span(type_span),
+                );
+            }
+        }
+    }
+
+    hints
+}
+
+fn find_line(lines: &[&str], pred: impl Fn(&str) -> bool) -> Option<usize> {
+    lines.iter().position(|line| pred(line))
+}
+
+fn find_next_line(lines: &[&str], start: usize, pred: impl Fn(&str) -> bool) -> Option<usize> {
+    lines
+        .iter()
+        .enumerate()
+        .skip(start)
+        .find_map(|(index, line)| pred(line).then_some(index))
+}
+
+fn leading_spaces(line: &str) -> usize {
+    line.bytes().take_while(|byte| *byte == b' ').count()
+}
+
+fn push_hint(
+    hints: &mut Vec<crate::transform::build_fn::SpanHint>,
+    body_line: usize,
+    body_col: usize,
+    original_span: Span,
+) {
+    hints.push(crate::transform::build_fn::SpanHint {
+        body_line,
+        body_col: body_col as u32,
+        original_span,
+    });
+}
+
+fn push_hint_for_text(
+    hints: &mut Vec<crate::transform::build_fn::SpanHint>,
+    lines: &[&str],
+    body_line: usize,
+    text: &str,
+    original_span: Span,
+) {
+    if let Some(body_col) = lines[body_line].find(text) {
+        push_hint(hints, body_line, body_col, original_span);
+        push_hint(
+            hints,
+            body_line,
+            body_col + text.len(),
+            end_span(original_span),
+        );
+    }
+}
+
+fn end_span(span: Span) -> Span {
+    Span::new(span.end, span.end)
+}
+
+fn trim_type_span(span: Span) -> Span {
+    span
+}
+
+fn build_method_span(statement: &StructStatement<'_>) -> Option<Span> {
+    statement.body.body.iter().find_map(|element| {
+        let StructElement::MethodDefinition(method) = element else {
+            return None;
+        };
+        method
+            .key
+            .static_name()
+            .is_some_and(|name| name == "build")
+            .then_some(method.span())
+    })
 }
 
 fn entry_registration(id: &str, options: &TransformOptions) -> EntryRegistrationInfo {

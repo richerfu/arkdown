@@ -54,6 +54,8 @@ pub fn encode_vlq(value: i32) -> String {
 pub struct MapEntry {
     /// 0-based line index in the generated ViewPU TypeScript output.
     pub generated_line: usize,
+    /// 0-based column index in the generated ViewPU TypeScript output.
+    pub generated_col: u32,
     /// 0-based line index in the original `.ets` source.
     pub src_line: u32,
     /// 0-based column index in the original `.ets` source.
@@ -75,7 +77,7 @@ pub fn build_ets_source_map(
     entries: &[MapEntry],
 ) -> String {
     let mut sorted = entries.to_vec();
-    sorted.sort_by_key(|e| e.generated_line);
+    sorted.sort_by_key(|e| (e.generated_line, e.generated_col));
 
     let mut mappings = String::new();
     let mut entry_idx = 0usize;
@@ -86,22 +88,26 @@ pub fn build_ets_source_map(
         if gen_line > 0 {
             mappings.push(';');
         }
-        if entry_idx < sorted.len() && sorted[entry_idx].generated_line == gen_line {
+        let mut prev_gen_col = 0i32;
+        let mut first_on_line = true;
+        while entry_idx < sorted.len() && sorted[entry_idx].generated_line == gen_line {
             let e = &sorted[entry_idx];
+            if !first_on_line {
+                mappings.push(',');
+            }
+            first_on_line = false;
+            let gen_col_delta = e.generated_col as i32 - prev_gen_col;
             let src_line_delta = e.src_line as i32 - prev_src_line;
             let src_col_delta = e.src_col as i32 - prev_src_col;
+            prev_gen_col = e.generated_col as i32;
             prev_src_line = e.src_line as i32;
             prev_src_col = e.src_col as i32;
-            // Segment: generated_col=0, source_idx=0, orig_line_delta, orig_col_delta
-            mappings.push_str(&encode_vlq(0));
+            // Segment: generated_col_delta, source_idx=0, orig_line_delta, orig_col_delta
+            mappings.push_str(&encode_vlq(gen_col_delta));
             mappings.push_str(&encode_vlq(0));
             mappings.push_str(&encode_vlq(src_line_delta));
             mappings.push_str(&encode_vlq(src_col_delta));
             entry_idx += 1;
-            // Advance past duplicate entries for the same generated line (keep first).
-            while entry_idx < sorted.len() && sorted[entry_idx].generated_line == gen_line {
-                entry_idx += 1;
-            }
         }
     }
 
@@ -152,6 +158,7 @@ mod tests {
     fn test_build_source_map_json_structure() {
         let entries = vec![MapEntry {
             generated_line: 2,
+            generated_col: 0,
             src_line: 5,
             src_col: 4,
         }];
