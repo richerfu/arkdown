@@ -3559,6 +3559,12 @@ impl<'a> CodeGen<'a> {
 
         let argc = call.arguments.len();
 
+        // Save the method name column for the call instruction.
+        // After compiling arguments, current_col is the last arg's col.
+        // The call instruction itself should use the method name col,
+        // matching es2panda's per-instruction column tracking.
+        let call_col = self.current_col;
+
         // When any argument is a spread element, force callthisrange so spread
         // arrays are forwarded as regular positional arguments.
         if Self::args_have_spread(&call.arguments) {
@@ -3570,25 +3576,32 @@ impl<'a> CodeGen<'a> {
                 self.emit_argument(arg);
                 self.push(Insn::Sta(arg_regs[i]));
             }
+            self.current_col = call_col; // reset to method col for call insn
             self.push(Insn::CallThisRange(slot, argc as u8, this_reg));
             return;
         }
 
         match argc {
-            0 => self.push(Insn::CallThis0(slot, this_reg)),
+            0 => {
+                self.current_col = call_col;
+                self.push(Insn::CallThis0(slot, this_reg));
+            }
             1 => {
                 let v0 = self.compile_arg_to_reg(&call.arguments[0]);
+                self.current_col = call_col;
                 self.push(Insn::CallThis1(slot, this_reg, v0));
             }
             2 => {
                 let v0 = self.compile_arg_to_reg(&call.arguments[0]);
                 let v1 = self.compile_arg_to_reg(&call.arguments[1]);
+                self.current_col = call_col;
                 self.push(Insn::CallThis2(slot, this_reg, v0, v1));
             }
             3 => {
                 let v0 = self.compile_arg_to_reg(&call.arguments[0]);
                 let v1 = self.compile_arg_to_reg(&call.arguments[1]);
                 let v2 = self.compile_arg_to_reg(&call.arguments[2]);
+                self.current_col = call_col;
                 self.push(Insn::CallThis3(slot, this_reg, v0, v1, v2));
             }
             n => {
@@ -3600,6 +3613,7 @@ impl<'a> CodeGen<'a> {
                     self.emit_argument(arg);
                     self.push(Insn::Sta(arg_regs[i]));
                 }
+                self.current_col = call_col;
                 self.push(Insn::CallThisRange(slot, n as u8, this_reg));
             }
         }
