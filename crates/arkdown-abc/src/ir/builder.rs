@@ -3451,6 +3451,10 @@ impl<'a> CodeGen<'a> {
                 let obj_reg = self.alloc_reg();
                 self.push(Insn::Sta(obj_reg));
                 self.push(Insn::Lda(rhs_reg));
+                // Update col to property name position for per-instruction tracking.
+                if let Some(source) = self.source {
+                    self.current_col = col_at(source, mem.property.span.start);
+                }
                 let name_id = self.intern(mem.property.name.as_str());
                 self.push(Insn::StObjByName(0, name_id, obj_reg));
             }
