@@ -3370,6 +3370,11 @@ impl<'a> CodeGen<'a> {
 
     fn emit_static_member(&mut self, mem: &oxc_ast::ast::StaticMemberExpression<'_>) {
         self.emit_expr(&mem.object);
+        // Update col to the property name position for per-instruction tracking.
+        if let Some(source) = self.source {
+            let offset = mem.property.span.start;
+            self.current_col = col_at(source, offset);
+        }
         let name_id = self.intern(mem.property.name.as_str());
         self.push(Insn::LdObjByName(0, name_id));
     }
@@ -3534,6 +3539,14 @@ impl<'a> CodeGen<'a> {
         self.emit_expr(recv_expr);
         let this_reg = self.alloc_reg();
         self.push(Insn::Sta(this_reg));
+
+        // Update col to the method name position for per-instruction tracking.
+        if let Some(source) = self.source {
+            if let Expression::StaticMemberExpression(mem) = &call.callee {
+                let offset = mem.property.span.start;
+                self.current_col = col_at(source, offset);
+            }
+        }
 
         // Load method function via ldobjbyname (or ldundefined as fallback).
         if let Some(ref mname) = method_name {
