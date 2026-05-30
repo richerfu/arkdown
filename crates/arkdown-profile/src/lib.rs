@@ -691,6 +691,8 @@ fi
                 extension_abilities: vec![],
                 src_entry: None,
                 metadata: vec![],
+                app_startup: None,
+                cross_app_shared_config: vec![],
             },
         };
 
