@@ -35,7 +35,7 @@ The local `build.js` flow is:
 `etsChecker`, `etsTransform`, `apiTransform`, coverage instrumentation, `genAbc`,
 and release-mode terser/minification when applicable.
 
-## Current arkdown Status (2026-05-29, updated)
+## Current arkdown Status (2026-05-30)
 
 `arkdown-cli` performs the full production pipeline:
 
@@ -47,37 +47,34 @@ and release-mode terser/minification when applicable.
 5. compile `.js` chunks via `arkdown-abc` (with LNP line tracking and scopeNames);
 6. package and sign HAP/HSP, or package source HAR.
 
-**Phase delivery (2026-05-29):**
+**Phase delivery (2026-05-30):**
 - Phase 0 (parity harness): ✅ minimal-hap + minimal-har + minimal-hsp fixtures
 - Phase 1 (loader.json): ✅ absolute paths, 18 fields match hvigor golden exactly
 - Phase 2 (ETS transform): ✅ @Prop, @Link, @ObjectLink, @Provide, @Consume, @Watch, @BuilderParam
 - Phase 3 (bundler): ✅ clean ESM, @ohos: external, treeshake off for debug
 - Phase 4 (importee): ✅ process_importees() ports hvigor process-importee.js
-- Phase 5 (ABC): 🔄 modules.abc 7510B vs hvigor 9844B (gap: 2334B — 76.3%) after LNP formula fix
+- Phase 5 (ABC): 🔄 unit-test parity 6344B/9844B (64%) — see below
 - Phase 6 (packaging): ✅ HAP zip identical to hvigor (11 entries)
 
-**Parity (minimal-hap, 2026-05-29):**
-- HAP zip: ✅ identical (11 entries, all content matches except 2 files below)
-- `ets/modules.abc`: hvigor 9844B, arkdown 7525B — gap 2319B (76.0% parity). Format bugs fixed (short names, correct LNP opcodes); remaining gap is missing ViewPU methods + full DebugInfoItem.
-  ✅ Literal arrays=10=[4,4,6,6,6,6,16,24,26,26] match hvigor exactly. ✅ Method records=20 match.
-  ✅ IndexSection method_index_count: hvigor 77, arkdown 69 (reduced from 98).
-    - Breakdown: 55 strings + 6 lit-arrays + 8 methods = 69
-    - hvigor: 58 strings + 6 lit-arrays + 13 methods = 77
-    - Gap: 3 fewer strings (hvigor has initialRender/rerender/getEntryName from ArkTS transform)
-      + 5 fewer methods (hvigor adds ArkTS-transform methods not in our implementation).
-  Remaining gap vs hvigor: 1486B — mainly LNP line-advance density (hvigor emits per-instruction
-  ADVANCE sequences; we emit per-statement) + ArkTS-transform methods not yet implemented.
-  Improvements made in this session (Task #45):
-  - `LiteralArray.in_method_index`: moduleRecordIdx and scopeNames excluded from method index
-    (they are field-only references, not bytecode operands) — saves 4 entries.
-  - `MethodRecord.in_method_index`: func_main_0 and regular class instance methods excluded
-    (only constructors and arrow functions are bytecode-referenced) — saves 15 entries.
-  - Global string deduplication: function/method parameters pre-allocated to virtual registers
-    (v3+) so they are loaded via `lda v<n>` rather than `tryldglobalbyname`, eliminating
-    unnecessary string table entries — saves 10 entries.
-  - Total reduction: 98 → 69 (−29 entries).
-  Remaining gap: per-instruction ADVANCE sequences between every instruction group (hvigor emits
-  much denser LNP coverage than our per-statement approach).
+**Parity (two-module debug parity test, 2026-05-30):**
+- `test_two_module_debug_parity`: 6344B / 9844B hvigor (64%)
+  Improvements in this session:
+  - ✅ Fixed LNP opcode values from libpandafile source:
+    - `SET_FILE = 0x09` (was 0x03)
+    - `START_LOCAL_EXTENDED = 0x04` (was 0x08)
+    - `SET_PROLOGUE_END = 0x07` (was 0x05)
+  - ✅ Fixed DebugInfo constant_pool format: `constant_pool_size` is now byte count
+    (was item count); constant_pool now contains `SET_FILE(0x09) + src_off` body LNP.
+  - ✅ Added `L_ESSlotNumberAnnotation` per-method annotations:
+    - `MethodTag::ANNOTATION = 0x06` in every MethodItem
+    - Annotation section: `class_idx(u16) + count(u16) + name_off(u32) + value(u32) + tag(u8)` = 13B/method
+    - "SlotNumber" StringItem shared across all annotations
+  - ✅ Method access_flags already correct from main branch (0x008/0x108/0x208)
+  Remaining gap vs hvigor (9844B):
+  - Per-instruction ADVANCE sequences in DebugInfo constant_pool (hvigor emits SPECIAL opcodes
+    for every instruction group; we emit minimal SET_FILE + END_SEQ)
+  - Missing ViewPU/ArkTS-transform methods (#~@0>#initialRender, #~@0<#getEntryName, etc.)
+  - LNP index placement (ours at file end; hvigor interleaves LNP entries with DebugInfo)
 - `ets/sourceMaps.map`: hvigor 1847B, arkdown 1281B — gap is per-statement vs per-token maps
 
 ## Major Missing Capabilities

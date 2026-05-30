@@ -713,22 +713,20 @@ fn compile_class_method_bodies(
                     _ => continue,
                 };
 
-                if let Some(init) = &declarator.init {
-                    if let Expression::ClassExpression(cls) = init {
-                        let class_name =
-                            cls.id.as_ref().map_or(name.as_str(), |id| id.name.as_str());
-                        compile_class_elements(
-                            Some(class_name),
-                            &cls.body.body,
-                            strings,
-                            literal_arrays,
-                            lowering,
-                            methods,
-                            source,
-                            source_file_path,
-                        );
-                        continue;
-                    }
+                if let Some(Expression::ClassExpression(cls)) = &declarator.init {
+                    let class_name =
+                        cls.id.as_ref().map_or(name.as_str(), |id| id.name.as_str());
+                    compile_class_elements(
+                        Some(class_name),
+                        &cls.body.body,
+                        strings,
+                        literal_arrays,
+                        lowering,
+                        methods,
+                        source,
+                        source_file_path,
+                    );
+                    continue;
                 }
             }
         }
@@ -790,7 +788,7 @@ fn collect_top_level_call_arg_arrows_expr(
 ) {
     match expr {
         Expression::CallExpression(call) => {
-            for (_, arg) in call.arguments.iter().enumerate() {
+            for arg in call.arguments.iter() {
                 let Some(arg_expr) = arg.as_expression() else {
                     continue;
                 };
@@ -867,6 +865,7 @@ fn collect_top_level_call_arg_arrows_expr(
 }
 
 /// Compile method bodies from a class element list and append MethodRecords.
+#[allow(clippy::too_many_arguments)]
 fn compile_class_elements(
     class_name: Option<&str>,
     elements: &[ClassElement<'_>],
@@ -967,8 +966,7 @@ fn compile_class_elements(
                         literal_arrays,
                         lowering,
                         Some(src),
-                    ).map(|(bc, lops, catches)| (bc, lops, catches))
-                    .unwrap_or_else(|| (vec![], vec![], vec![]))
+                    ).unwrap_or_else(|| (vec![], vec![], vec![]))
                 } else {
                     let (bc, catches) = compile_function_body_ext(
                         method.value.body.as_deref(),
@@ -1771,6 +1769,7 @@ struct CodeGen<'a> {
     break_patches: Vec<usize>,
     continue_patches: Vec<usize>,
     catch_entries: Vec<CatchEntry>,
+    #[allow(dead_code)]
     is_generator: bool,
     gen_reg: Option<u8>,
     is_async: bool,
@@ -2689,14 +2688,10 @@ impl<'a> CodeGen<'a> {
                 }
             }
             Expression::MetaProperty(meta) => {
-                if is_new_target_meta(meta) {
-                    if let Some(slot) = self.arrow_captures.new_target_slot {
-                        self.push(Insn::LdLexVar(0, slot));
-                    } else {
-                        self.push(Insn::LdUndefined);
-                    }
-                } else {
-                    self.push(Insn::LdUndefined);
+                let is_nt = is_new_target_meta(meta);
+                match (is_nt, self.arrow_captures.new_target_slot) {
+                    (true, Some(slot)) => self.push(Insn::LdLexVar(0, slot)),
+                    _ => self.push(Insn::LdUndefined),
                 }
             }
             Expression::ParenthesizedExpression(p) => {
@@ -3176,7 +3171,7 @@ impl<'a> CodeGen<'a> {
     /// literal buffer points at those MethodItems by file offset.
     ///
     /// After this call the class constructor is in the accumulator.
-
+    #[allow(dead_code)]
     fn emit_generator_prologue(&mut self) {
         if !self.is_generator {
             return;
@@ -3222,7 +3217,6 @@ impl<'a> CodeGen<'a> {
     /// public properties and no security boundary is required.  Full
     /// `ldprivateproperty` / `stprivateproperty` support requires a separate
     /// pass to collect all private field declarations and assign slot indices.
-
     fn emit_private_field(&mut self, priv_expr: &PrivateFieldExpression<'_>) {
         self.emit_expr(&priv_expr.object);
         let mangled = format!("__pvt_{}", priv_expr.field.name.as_str());

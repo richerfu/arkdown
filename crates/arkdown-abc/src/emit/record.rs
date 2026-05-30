@@ -14,7 +14,6 @@ pub(crate) fn uleb128(mut value: u64) -> Vec<u8> {
     out
 }
 
-const METHOD_ITEM_SIZE: usize = 18;
 pub const FIELD_OWNER_CLASS_IDX: u16 = u16::MAX;
 
 /// Method access flags constants for MethodItem `access_flags`.
@@ -34,7 +33,6 @@ pub(crate) fn method_access_flags_for(name: &str) -> u32 {
         method_access::INSTANCE
     }
 }
-
 
 /// Encode a Panda `StringItem` as an inline ULEB128-prefixed null-terminated string.
 ///
@@ -346,6 +344,7 @@ impl ClassRecord {
     ///   parallel to `self.methods`.
     /// - `code_offsets`: File offsets of each method's `CodeItem`, parallel to
     ///   `self.methods`.
+    #[allow(clippy::too_many_arguments)]
     pub fn serialize_class_item(
         &self,
         class_idx: u16,
@@ -354,12 +353,14 @@ impl ClassRecord {
         method_name_offsets: &[u32],
         code_offsets: &[u32],
         debug_info_offsets: &[Option<u32>],
+        annotation_offsets: &[u32],
         literal_array_offsets: &[u32],
     ) -> Vec<u8> {
         debug_assert_eq!(field_name_offsets.len(), self.fields.len());
         debug_assert_eq!(method_name_offsets.len(), self.methods.len());
         debug_assert_eq!(code_offsets.len(), self.methods.len());
         debug_assert_eq!(debug_info_offsets.len(), self.methods.len());
+        debug_assert_eq!(annotation_offsets.len(), self.methods.len());
 
         let mut buf = Vec::with_capacity(self.class_item_byte_size());
 
@@ -427,6 +428,7 @@ impl ClassRecord {
         for (i, method) in self.methods.iter().enumerate() {
             let name_off = method_name_offsets[i];
             let code_off = code_offsets[i];
+            let ann_off = annotation_offsets[i];
 
             // class_idx: u16 LE
             buf.extend_from_slice(&class_idx.to_le_bytes());
@@ -443,6 +445,10 @@ impl ClassRecord {
             // MethodTag::SOURCE_LANG = 0x02.
             buf.push(0x02);
             buf.push(self.source_lang);
+            // MethodTag::ANNOTATION = 0x06 + annotation offset (always emitted).
+            // Points to the L_ESSlotNumberAnnotation item for this method.
+            buf.push(0x06);
+            buf.extend_from_slice(&ann_off.to_le_bytes());
             if let Some(debug_info_off) = debug_info_offsets[i] {
                 buf.push(0x05);
                 buf.extend_from_slice(&debug_info_off.to_le_bytes());
@@ -456,11 +462,16 @@ impl ClassRecord {
 }
 
 impl MethodRecord {
-    fn method_item_byte_size(&self) -> usize {
+    pub(crate) fn method_item_byte_size(&self) -> usize {
         // class_idx(2) + proto_idx(2) + name_off(4) + access_flags(variable)
-        // + MethodTag::CODE(1) + code_off(4) + MethodTag::SOURCE_LANG(1) + lang(1) + NOTHING(1)
+        // + MethodTag::CODE(1) + code_off(4) + MethodTag::SOURCE_LANG(1) + lang(1)
+        // + MethodTag::ANNOTATION(1) + ann_off(4)  ← always emitted
+        // + MethodTag::DEBUG_INFO(1) + debug_off(4) ← only when debug_info present
+        // + MethodTag::NOTHING(1)
         let access_flags_len = uleb128(method_access_flags_for(&self.name) as u64).len();
-        16 + access_flags_len + self.debug_info.as_ref().map_or(0, |_| 1 + 4)
+        16 + access_flags_len
+            + (1 + 4) // MethodTag::ANNOTATION always emitted
+            + self.debug_info.as_ref().map_or(0, |_| 1 + 4)
     }
 }
 
@@ -572,9 +583,9 @@ mod tests {
         // fields_count ULEB128(0) = 1
         // methods_count ULEB128(1) = 1
         // class tags = 3
-        // method item = 18
-        // total = 11 + 4 + 1 + 1 + 1 + 3 + 18 = 39
-        assert_eq!(record.class_item_byte_size(), 39);
+        // method item: 16 (fixed) + 2 (access_flags 0x108 ULEB128) + 5 (annotation tag) = 23
+        // total = 11 + 4 + 1 + 1 + 1 + 3 + 23 = 44
+        assert_eq!(record.class_item_byte_size(), 44);
     }
 
     #[test]
@@ -596,7 +607,9 @@ mod tests {
             module_requests: vec![],
             fields: vec![],
         };
-        let bytes = record.serialize_class_item(4, &[], None, &[0x12a], &[0x1a1], &[None], &[]);
+        // annotation_offset = 0x200 (dummy annotation offset for test)
+        let bytes =
+            record.serialize_class_item(4, &[], None, &[0x12a], &[0x1a1], &[None], &[0x200], &[]);
         assert_eq!(bytes.len(), record.class_item_byte_size());
 
         // Verify inline class name starts with ULEB128(0x13) = "L_GLOBAL;"
@@ -633,7 +646,10 @@ mod tests {
         // MethodTag::SOURCE_LANG = 0x02, lang = 0x00
         assert_eq!(bytes[36], 0x02, "MethodTag::SOURCE_LANG");
         assert_eq!(bytes[37], 0x00, "lang");
+        // MethodTag::ANNOTATION = 0x06, ann_off = 0x200 LE
+        assert_eq!(bytes[38], 0x06, "MethodTag::ANNOTATION");
+        assert_eq!(&bytes[39..43], &[0x00, 0x02, 0x00, 0x00], "ann_off=0x200");
         // MethodTag::NOTHING = 0x00
-        assert_eq!(bytes[38], 0x00, "MethodTag::NOTHING");
+        assert_eq!(bytes[43], 0x00, "MethodTag::NOTHING");
     }
 }
