@@ -3462,7 +3462,10 @@ impl<'a> CodeGen<'a> {
         }
 
         // Plain function call.
+        // Save callee col before args change it.
+        let callee_col = self.current_col;
         self.emit_expr(&call.callee);
+        let call_fn_col = self.current_col;
         let argc = call.arguments.len();
 
         // When any argument is a spread element, force the range form so that
@@ -3478,25 +3481,33 @@ impl<'a> CodeGen<'a> {
                 self.emit_argument(arg);
                 self.push(Insn::Sta(regs[i]));
             }
+            self.current_col = call_fn_col;
             self.push(Insn::CallRange(slot, argc as u8, v_start));
             return;
         }
 
+        let _ = callee_col;
         match argc {
-            0 => self.push(Insn::CallArg0(slot)),
+            0 => {
+                self.current_col = call_fn_col;
+                self.push(Insn::CallArg0(slot));
+            }
             1 => {
                 let v0 = self.compile_arg_to_reg(&call.arguments[0]);
+                self.current_col = call_fn_col;
                 self.push(Insn::CallArg1(slot, v0));
             }
             2 => {
                 let v0 = self.compile_arg_to_reg(&call.arguments[0]);
                 let v1 = self.compile_arg_to_reg(&call.arguments[1]);
+                self.current_col = call_fn_col;
                 self.push(Insn::CallArgs2(slot, v0, v1));
             }
             3 => {
                 let v0 = self.compile_arg_to_reg(&call.arguments[0]);
                 let v1 = self.compile_arg_to_reg(&call.arguments[1]);
                 let v2 = self.compile_arg_to_reg(&call.arguments[2]);
+                self.current_col = call_fn_col;
                 self.push(Insn::CallArgs3(slot, v0, v1, v2));
             }
             n => {
@@ -3509,6 +3520,7 @@ impl<'a> CodeGen<'a> {
                     self.emit_argument(arg);
                     self.push(Insn::Sta(regs[i]));
                 }
+                self.current_col = call_fn_col;
                 self.push(Insn::CallRange(slot, n as u8, v_start));
             }
         }
