@@ -192,7 +192,33 @@ impl Bundler {
 
         // ── 6. Write loader_out/default/ets artifacts to disk ────────────────
         let output_dir = PathBuf::from(&loader_json.ace_module_build);
-        let written_output = output::write_output(&chunk_graph, &output_dir)?;
+
+        // Build the chunk_name → source_file map from compile_entry so that
+        // write_output can emit the hvigor per-file sourceMaps.map format.
+        let chunk_source_files: FxHashMap<String, String> = loader_json
+            .compile_entry
+            .iter()
+            .filter_map(|entry| {
+                let stem = std::path::Path::new(entry.as_str())
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_string())?;
+                // Strip leading "./" and the "ets/" prefix that module_root_path adds.
+                // compile_entry is relative to src/main (e.g. "./ets/pages/Index.ets").
+                let source_file = entry.trim_start_matches("./").to_string();
+                Some((stem, source_file))
+            })
+            .collect();
+
+        let source_map_opts = output::SourceMapOptions {
+            module_name: loader_json.module_name.clone(),
+            package_name: loader_json.module_name.clone(),
+            version: "1.0.0".to_string(),
+            chunk_source_files: chunk_source_files.into_iter().collect(),
+        };
+
+        let written_output =
+            output::write_output(&chunk_graph, &output_dir, Some(&source_map_opts))?;
         let modules_abc_path = output::modules_abc_path(&output_dir);
 
         Ok(BundleOutput {

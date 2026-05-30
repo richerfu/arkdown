@@ -110,13 +110,13 @@ impl Module {
 
     /// Whether this is an entry module (`false` for external modules).
     pub fn is_entry(&self) -> bool {
-        self.as_normal().map_or(false, |m| m.is_entry)
+        self.as_normal().is_some_and(|m| m.is_entry)
     }
 
     /// Whether this module has observable side effects.
     /// External modules are conservatively treated as side-effect-free.
     pub fn has_side_effects(&self) -> bool {
-        self.as_normal().map_or(false, |m| m.has_side_effects)
+        self.as_normal().is_some_and(|m| m.has_side_effects)
     }
 }
 

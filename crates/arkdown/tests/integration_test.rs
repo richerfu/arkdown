@@ -218,19 +218,36 @@ async fn test_build_minimal_hap_fixture() {
         fs_err::read_to_string(source_maps_path).expect("failed to read generated sourceMaps.map");
     let source_maps_json: serde_json::Value =
         serde_json::from_str(&source_maps).expect("sourceMaps.map must be valid JSON");
+
+    // The bundler now emits the hvigor per-file dict format: a JSON object whose
+    // keys are "{module}|{pkg}|{ver}|src/main/{path}.ts" and whose values are
+    // individual source map objects.  Validate that at least one such entry exists
+    // and contains a non-empty mappings string.
+    let obj = source_maps_json
+        .as_object()
+        .expect("sourceMaps.map must be a JSON object");
     assert!(
-        source_maps_json
-            .get("sources")
-            .and_then(|sources| sources.as_array())
-            .is_some_and(|sources| !sources.is_empty())
-            || source_maps_json
-                .get("mappings")
-                .and_then(|mappings| mappings.as_str())
-                .is_some_and(|mappings| !mappings.is_empty())
-            || source_maps_json
+        !obj.is_empty(),
+        "sourceMaps.map must not be empty — bundler produced no source maps"
+    );
+    // Every value must be a source map object with a non-empty mappings field or
+    // a non-empty sources array (falling back to the single-chunk raw-map case).
+    let has_real_maps = obj.values().any(|entry| {
+        entry
+            .get("mappings")
+            .and_then(|m| m.as_str())
+            .is_some_and(|m| !m.is_empty())
+            || entry
+                .get("sources")
+                .and_then(|s| s.as_array())
+                .is_some_and(|s| !s.is_empty())
+            || entry
                 .get("sections")
-                .and_then(|sections| sections.as_array())
-                .is_some_and(|sections| !sections.is_empty()),
+                .and_then(|s| s.as_array())
+                .is_some_and(|s| !s.is_empty())
+    });
+    assert!(
+        has_real_maps,
         "sourceMaps.map must be generated from real compile inputs"
     );
 

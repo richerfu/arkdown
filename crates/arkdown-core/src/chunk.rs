@@ -30,7 +30,7 @@ pub struct CrossChunkImportItem {
 }
 
 /// An output chunk produced by the code-splitting stage.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ArkChunk {
     /// Chunk file name (e.g., `"EntryAbility"`, `"commons"`, `"vendors"`).
     pub name: String,
@@ -70,28 +70,6 @@ pub struct ArkChunk {
     pub dynamic_imports: Vec<String>,
 }
 
-impl Default for ArkChunk {
-    fn default() -> Self {
-        ArkChunk {
-            name: String::new(),
-            chunk_hash: String::new(),
-            modules: vec![],
-            is_entry: false,
-            is_dynamic_entry: false,
-            facade_module_id: None,
-            entry_module: None,
-            code: String::new(),
-            source_map: None,
-            cross_chunk_imports: vec![],
-            cross_chunk_dynamic_imports: vec![],
-            imports_from_other_chunks: FxHashMap::default(),
-            exports_to_other_chunks: FxHashMap::default(),
-            exports: vec![],
-            imports: vec![],
-            dynamic_imports: vec![],
-        }
-    }
-}
 
 /// The full chunk assignment for one OHOS module build.
 #[derive(Debug, Clone)]
