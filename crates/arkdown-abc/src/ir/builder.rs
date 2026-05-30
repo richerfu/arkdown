@@ -55,22 +55,30 @@ fn line_at(source: &str, byte_offset: u32) -> u32 {
 
 /// Accumulates Panda LineNumberProgram opcodes for a single method.
 ///
-/// Panda LNP encoding constants (matching es2abc / libpandafile):
-/// - `OPCODE_BASE = 0x0A` (10): first SPECIAL_OPCODE value
-/// - `LINE_BASE = -5`: minimum line delta encodable in a SPECIAL opcode
-/// - `LINE_RANGE = 14`: number of line-delta values per SPECIAL row
+/// Implements the exact algorithm from libpandafile `BuildLineNumberProgram`:
+/// - `EmitLineNumber`: try SPECIAL; else ADV_LINE + SP(0,0)
+/// - `EmitColumnNumber`: flush pending ADV_PC, then SET_COLUMN
+/// - Per-instruction: EmitLineNumber + EmitColumnNumber + pc_inc += insn_size
 ///
-/// Opcodes emitted:
-/// - `SPECIAL_OPCODE` (opcode ≥ 0x0A): encodes a (pc_delta, line_delta) pair
-///   in a single byte: `op = (line_delta - LINE_BASE) * LINE_RANGE + pc_delta + OPCODE_BASE`.
-///   Valid when `0 ≤ pc_delta ≤ LINE_RANGE-1` and `LINE_BASE ≤ line_delta ≤ LINE_BASE+LINE_RANGE-1`.
-/// - `ADVANCE_LINE` (0x02) + SLEB128: adjusts the current line without a PC step.
-/// - `ADVANCE_PC` (0x01) + ULEB128: adjusts the current PC without a line change.
-/// - `END_SEQUENCE` (0x00): terminates the program (appended by `finish`).
+/// LNP encoding constants (from libpandafile/file_items.h):
+/// - `OPCODE_BASE = 0x0C` (12)
+/// - `LINE_BASE = -4`
+/// - `LINE_RANGE = 15`
+///
+/// Architecture: opcodes go to `data_` (ops), operands go to `constant_pool` (cp).
+/// Format of `finish()` output: [ops][0x00=END][cp_len:u32LE][cp]
 struct LineTracker {
     current_line: u32,
     current_pc: u32,
+    /// Pending PC increment (accumulated since last column/line emit).
+    pending_pc: u32,
+    /// Previous column (u32::MAX = not yet set; reserved for future per-instruction tracking).
+    #[allow(dead_code)]
+    prev_col: u32,
+    /// LNP data_ stream: opcode bytes + inline reg SLEB128s.
     ops: Vec<u8>,
+    /// DebugInfo constant_pool: ULEB128/SLEB128 operands for opcodes.
+    cp: Vec<u8>,
 }
 
 const LNP_OPCODE_BASE: u32 = 0x0C;
@@ -82,48 +90,80 @@ impl LineTracker {
         Self {
             current_line: start_line,
             current_pc: 0,
+            pending_pc: 0,
+            prev_col: u32::MAX,
             ops: Vec::new(),
+            cp: Vec::new(),
         }
     }
 
-    /// Record a `(new_pc, new_line)` pair and emit the minimal LNP opcode(s).
+    /// Emit SPECIAL(pc_inc, line_inc) if encodable; returns true on success.
+    fn try_special(&mut self, pc_inc: u32, line_inc: i32) -> bool {
+        let adj = line_inc - LNP_LINE_BASE;
+        if pc_inc < LNP_LINE_RANGE && adj >= 0 && (adj as u32) < LNP_LINE_RANGE {
+            let op = pc_inc * LNP_LINE_RANGE + adj as u32 + LNP_OPCODE_BASE;
+            if op <= 255 {
+                self.ops.push(op as u8);
+                self.current_pc += pc_inc;
+                self.current_line = (self.current_line as i32 + line_inc) as u32;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Emit ADV_PC(n): opcode to data_, operand to cp.
+    fn emit_adv_pc(&mut self, n: u32) {
+        if n == 0 { return; }
+        self.ops.push(0x01);
+        encode_uleb128(n as u64, &mut self.cp);
+        self.current_pc += n;
+    }
+
+    /// Emit ADV_LINE(n): opcode to data_, operand to cp.
+    fn emit_adv_line(&mut self, n: i32) {
+        self.ops.push(0x02);
+        encode_sleb128(n, &mut self.cp);
+        self.current_line = (self.current_line as i32 + n) as u32;
+    }
+
+    /// EmitNumber from libpandafile: try SPECIAL; else ADV_PC+SPECIAL or ADV_LINE+SP(0,0).
+    fn emit_number(&mut self, pc_inc: u32, line_inc: i32) {
+        if !self.try_special(pc_inc, line_inc) {
+            if pc_inc > 0 {
+                self.emit_adv_pc(pc_inc);
+                if !self.try_special(0, line_inc) {
+                    self.emit_adv_line(line_inc);
+                    self.try_special(0, 0); // SP(0,0) = OPCODE_BASE
+                }
+            } else {
+                self.emit_adv_line(line_inc);
+                self.try_special(0, 0); // SP(0,0)
+            }
+        }
+    }
+
+    /// Per-statement advance (no column). Used when column tracking is disabled.
     fn advance(&mut self, new_pc: u32, new_line: u32) {
         let pc_delta = new_pc.saturating_sub(self.current_pc);
         let line_delta = new_line as i32 - self.current_line as i32;
-        if pc_delta == 0 && line_delta == 0 {
-            return;
-        }
-
-        // Try SPECIAL_OPCODE (single byte):
-        //   op = (line_delta - LINE_BASE) * LINE_RANGE + pc_delta + OPCODE_BASE
-        // Valid when pc_delta is in [0, LINE_RANGE-1] and line_delta is in [LINE_BASE, LINE_BASE+LINE_RANGE-1].
-        let adjusted = line_delta - LNP_LINE_BASE;
-        if pc_delta < LNP_LINE_RANGE && adjusted >= 0 && (adjusted as u32) < LNP_LINE_RANGE {
-            let special = pc_delta * LNP_LINE_RANGE + adjusted as u32 + LNP_OPCODE_BASE;
-            if special <= 255 {
-                self.ops.push(special as u8);
-                self.current_pc = new_pc;
-                self.current_line = new_line;
-                return;
-            }
-        }
-
-        // Fall back to explicit ADVANCE_LINE + ADVANCE_PC.
+        if pc_delta == 0 && line_delta == 0 { return; }
+        self.pending_pc += pc_delta;
         if line_delta != 0 {
-            self.ops.push(0x02); // ADVANCE_LINE
-            encode_sleb128(line_delta, &mut self.ops);
+            self.emit_number(self.pending_pc, line_delta);
+            self.pending_pc = 0;
         }
-        if pc_delta > 0 {
-            self.ops.push(0x01); // ADVANCE_PC
-            encode_uleb128(pc_delta as u64, &mut self.ops);
-        }
-        self.current_pc = new_pc;
-        self.current_line = new_line;
     }
 
-    /// Append `END_SEQUENCE` and return the finished byte sequence.
+    /// Finish and return encoded bytes: [ops][0x00=END][cp_len:u32LE][cp].
     fn finish(mut self) -> Vec<u8> {
+        if self.pending_pc > 0 {
+            self.emit_adv_pc(self.pending_pc);
+        }
         self.ops.push(0x00); // END_SEQUENCE
+        let cp_len = self.cp.len() as u32;
+        self.ops.extend_from_slice(&cp_len.to_le_bytes());
+        self.ops.extend_from_slice(&self.cp);
         self.ops
     }
 }

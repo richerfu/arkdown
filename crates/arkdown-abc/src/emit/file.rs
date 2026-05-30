@@ -766,24 +766,24 @@ impl AbcFile {
                             cp.extend_from_slice(&uleb128(any_type_off as u64));
                         }
 
-                        // Body opcodes from line_ops (per-statement tracking).
-                        // line_ops format: opcodes + inline LEB128 operands (old format).
-                        // We split them: SPECIAL opcodes go to lnp_data; ADV_PC/LINE opcodes
-                        // go to lnp_data with their operands going to cp.
-                        {
-                            let mut lop = 0;
-                            while lop < method_ops.len() {
-                                let op = method_ops[lop];
-                                if op == 0x00 { break; }
-                                else if op == 0x01 || op == 0x02 {
-                                    lnp_data.push(op); lop += 1;
-                                    let start = lop;
-                                    while lop < method_ops.len() && (method_ops[lop] & 0x80) != 0 { lop += 1; }
-                                    if lop < method_ops.len() { lop += 1; }
-                                    cp.extend_from_slice(&method_ops[start..lop]);
-                                } else if op >= 0x0c {
-                                    lnp_data.push(op); lop += 1;
-                                } else { lop += 1; }
+                        // Body opcodes + cp from line_ops.
+                        // LineTracker::finish() format: [ops][0x00=END][cp_len:u32LE][cp]
+                        // Split: ops → lnp_data, cp → cp.
+                        if !method_ops.is_empty() {
+                            if let Some(end_pos) = method_ops.iter().position(|&b| b == 0x00) {
+                                lnp_data.extend_from_slice(&method_ops[..end_pos]);
+                                let after = end_pos + 1;
+                                if after + 4 <= method_ops.len() {
+                                    let cp_len = u32::from_le_bytes(
+                                        method_ops[after..after+4].try_into().unwrap_or([0;4])
+                                    ) as usize;
+                                    let cp_start = after + 4;
+                                    if cp_start + cp_len <= method_ops.len() {
+                                        cp.extend_from_slice(&method_ops[cp_start..cp_start+cp_len]);
+                                    }
+                                }
+                            } else {
+                                lnp_data.extend_from_slice(method_ops);
                             }
                         }
 
