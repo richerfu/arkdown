@@ -117,12 +117,33 @@ fn source_file_from_source_map(source_map: Option<&str>) -> Option<String> {
     None
 }
 
+/// Build the source file string in es2panda format:
+/// `"<moduleName>|<moduleName>|1.0.0|src/main/ets/<relpath>.ts"`
+///
+/// From golden binary analysis: "entry|entry|1.0.0|src/main/ets/pages/Index.ts"
+/// The format matches es2panda's SourceFile() output for OHOS modules.
 fn source_file_from_record_name(record_name: &str) -> String {
-    record_name
+    // record_name = "com.example.app/entry/ets/pages/Index"
+    // or "@bundle:com.example.app/entry/ets/pages/Index"
+    let rn = record_name
         .strip_prefix("@bundle:")
-        .unwrap_or(record_name)
-        .trim_start_matches('/')
-        .to_string()
+        .unwrap_or(record_name);
+    // Split: "com.example.app/entry/ets/pages/Index"
+    // parts[0] = bundleName, parts[1] = moduleName, rest = ets path
+    let parts: Vec<&str> = rn.splitn(3, '/').collect();
+    if parts.len() >= 3 {
+        let module_name = parts[1];
+        let ets_rel = parts[2]; // "ets/pages/Index"
+        // Convert "ets/pages/Index" → "src/main/ets/pages/Index.ts"
+        let src_path = if ets_rel.starts_with("ets/") {
+            format!("src/main/{}.ts", ets_rel)
+        } else {
+            format!("src/main/ets/{}.ts", ets_rel)
+        };
+        format!("{module_name}|{module_name}|1.0.0|{src_path}")
+    } else {
+        rn.to_string()
+    }
 }
 
 /// Pure-Rust ArkCompiler bytecode compiler.

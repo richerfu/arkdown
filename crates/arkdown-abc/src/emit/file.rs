@@ -687,7 +687,7 @@ impl AbcFile {
             //
             // We collect all per-method (lnp_data, constant_pool) pairs first, then
             // emit DebugInfo items with the correct constant_pool, then emit LNP entries.
-            let epilogue_pc_delta: u32 = 4;
+            let _epilogue_pc_delta: u32 = 4;
 
             // Per-LNP: (lnp_data, constant_pool, debug_line_start, param_offs)
             struct LnpEntry {
@@ -738,16 +738,25 @@ impl AbcFile {
                         let mut lnp_data: Vec<u8> = Vec::new();
                         let mut cp: Vec<u8> = Vec::new();
 
+                        // ── Build LNP matching libpandafile BuildLineNumberProgram exactly ──
+                        //
+                        // Pattern from golden binary analysis:
+                        //   SF → cp: src_off
+                        //   PC(num_args×2) → cp: prologue_size  [arg-copy prologue]
+                        //   SLE(reg) × (3+params) → cp: name,type,typesig per var
+                        //   [body from line_ops: LN+SP+SC+PC per instruction]
+                        //   EL(reg) × (3+params) → cp: closing_pc=0
+                        //   END
+
                         // SET_FILE
                         lnp_data.push(0x09);
                         cp.extend_from_slice(&uleb128(src_off as u64));
 
-                        // ADV_PC(initial) — initial pc offset before first instruction
-                        // We approximate as 0 (no initial advance) since we don't know
-                        // the exact bytecode layout.  This matches our per-statement tracking.
-                        // Note: golden emits ADV_PC(N) here where N = bytecode offset of
-                        // first instruction after prologue. We use 0 as approximation.
-                        // (This is why our LNP is slightly smaller than golden.)
+                        // ADV_PC(prologue_size): arg-copy prologue = num_args × 2B
+                        // Each argument is copied with a 2-byte mov instruction.
+                        let prologue_size = (method.num_args as u32) * 2;
+                        lnp_data.push(0x01); // ADV_PC
+                        cp.extend_from_slice(&uleb128(prologue_size as u64));
 
                         // START_LOCAL_EXTENDED for scope vars
                         for (i, &reg) in scope_regs.iter().enumerate() {
@@ -768,7 +777,6 @@ impl AbcFile {
 
                         // Body opcodes + cp from line_ops.
                         // LineTracker::finish() format: [ops][0x00=END][cp_len:u32LE][cp]
-                        // Split: ops → lnp_data, cp → cp.
                         if !method_ops.is_empty() {
                             if let Some(end_pos) = method_ops.iter().position(|&b| b == 0x00) {
                                 lnp_data.extend_from_slice(&method_ops[..end_pos]);
@@ -787,16 +795,11 @@ impl AbcFile {
                             }
                         }
 
-                        // ADV_PC(1) epilogue (no SET_EPILOGUE_BEGIN — golden doesn't emit it)
-                        lnp_data.push(0x01); // ADV_PC
-                        cp.extend_from_slice(&uleb128(epilogue_pc_delta as u64));
-
                         // END_LOCAL for each scope var (closing the scope)
-                        // END_LOCAL operand (closing pc) goes to cp
                         for &reg in scope_regs.iter() {
                             lnp_data.push(0x05); // END_LOCAL
                             lnp_data.extend_from_slice(&encode_sleb128_bytes(reg));
-                            cp.extend_from_slice(&uleb128(0)); // closing pc offset (approx)
+                            cp.extend_from_slice(&uleb128(0)); // closing pc offset
                         }
                         for param_idx in 0..param_offs.len() {
                             lnp_data.push(0x05); // END_LOCAL

@@ -53,6 +53,13 @@ fn line_at(source: &str, byte_offset: u32) -> u32 {
     1 + source[..end].bytes().filter(|&b| b == b'\n').count() as u32
 }
 
+/// Return the 0-based column number corresponding to `byte_offset` in `source`.
+fn col_at(source: &str, byte_offset: u32) -> u32 {
+    let end = (byte_offset as usize).min(source.len());
+    let last_nl = source[..end].rfind('\n').map_or(0, |p| p + 1);
+    (end - last_nl) as u32
+}
+
 /// Accumulates Panda LineNumberProgram opcodes for a single method.
 ///
 /// Implements the exact algorithm from libpandafile `BuildLineNumberProgram`:
@@ -72,8 +79,7 @@ struct LineTracker {
     current_pc: u32,
     /// Pending PC increment (accumulated since last column/line emit).
     pending_pc: u32,
-    /// Previous column (u32::MAX = not yet set; reserved for future per-instruction tracking).
-    #[allow(dead_code)]
+    /// Previous column number (u32::MAX = not yet set).
     prev_col: u32,
     /// LNP data_ stream: opcode bytes + inline reg SLEB128s.
     ops: Vec<u8>,
@@ -143,7 +149,32 @@ impl LineTracker {
         }
     }
 
-    /// Per-statement advance (no column). Used when column tracking is disabled.
+    /// EmitColumn: flush pending ADV_PC, then emit SET_COLUMN if column changed.
+    fn emit_column(&mut self, col: u32) {
+        if col == self.prev_col { return; }
+        if self.pending_pc > 0 {
+            self.emit_adv_pc(self.pending_pc);
+            self.pending_pc = 0;
+        }
+        self.ops.push(0x0b); // SET_COLUMN
+        encode_uleb128(col as u64, &mut self.cp);
+        self.prev_col = col;
+    }
+
+    /// Per-instruction advance: EmitLineNumber + EmitColumnNumber + accumulate pc.
+    /// Matches libpandafile BuildLineNumberProgram inner loop exactly.
+    fn advance_with_col(&mut self, new_line: u32, col: u32, insn_size: u32) {
+        let line_inc = new_line as i32 - self.current_line as i32;
+        if line_inc != 0 {
+            self.emit_number(self.pending_pc, line_inc);
+            self.pending_pc = 0;
+        }
+        self.emit_column(col);
+        self.pending_pc += insn_size;
+    }
+
+    /// Per-statement advance (no column). Kept for compatibility.
+    #[allow(dead_code)]
     fn advance(&mut self, new_pc: u32, new_line: u32) {
         let pc_delta = new_pc.saturating_sub(self.current_pc);
         let line_delta = new_line as i32 - self.current_line as i32;
@@ -1803,9 +1834,9 @@ struct CodeGen<'a> {
     /// Line number program accumulator.  Present only when `source` is `Some`.
     line_tracker: Option<LineTracker>,
     /// Current source line number for the instruction being emitted.
-    /// Updated by `emit_stmt()` and `emit_expr()` before calling `push()`.
-    /// Used by `push()` to emit per-instruction LNP entries.
     current_line: u32,
+    /// Current source column number (0-based) for the instruction being emitted.
+    current_col: u32,
     break_patches: Vec<usize>,
     continue_patches: Vec<usize>,
     catch_entries: Vec<CatchEntry>,
@@ -1834,6 +1865,7 @@ impl<'a> CodeGen<'a> {
             source: None,
             line_tracker: None,
             current_line: 1,
+            current_col: 0,
             break_patches: Vec::new(),
             continue_patches: Vec::new(),
             catch_entries: Vec::new(),
@@ -1888,24 +1920,31 @@ impl<'a> CodeGen<'a> {
         self.next_reg = self.next_reg.max(4);
     }
 
-    /// Append the bytes for `insn`, emitting an LNP advance entry if tracking is active.
+    /// Append the bytes for `insn`, emitting per-instruction LNP entries.
+    ///
+    /// Matches libpandafile BuildLineNumberProgram: per-instruction
+    /// EmitLineNumber + EmitColumnNumber + pc_inc += insn_size.
     fn push(&mut self, insn: Insn) {
-        if let Some(tracker) = self.line_tracker.as_mut() {
-            let pc = self.insns.len() as u32;
-            tracker.advance(pc, self.current_line);
-        }
         let bytes = insn.encode(self.strings);
+        let insn_size = bytes.len() as u32;
+        if let Some(tracker) = self.line_tracker.as_mut() {
+            tracker.advance_with_col(self.current_line, self.current_col, insn_size);
+        }
         self.insns.extend_from_slice(&bytes);
     }
 
-    /// Emit `SET_EPILOGUE_BEGIN` (0x09) into the LNP stream then push `insn`.
+    /// Push the final return instruction, emitting SC(RESET) epilogue marker first.
     ///
-    /// hvigor emits this LNP opcode immediately before the final `return` /
-    /// `returnundefined` instruction so the debugger can distinguish the
-    /// method epilogue from the last user statement.
+    /// Matches libpandafile: before the return instruction, emit SET_COLUMN(RESET)
+    /// to mark the epilogue boundary, as seen in all golden binary LNPs.
     fn push_with_epilogue(&mut self, insn: Insn) {
+        // Emit SC(RESET=0xFFFFFFFF) to mark the epilogue start.
+        // This matches the golden binary pattern: ...SC(R) PC(1)...
         if let Some(tracker) = self.line_tracker.as_mut() {
-            tracker.ops.push(0x09); // SET_EPILOGUE_BEGIN
+            // Force SC(RESET) by setting prev_col to something other than RESET
+            // then calling emit_column with RESET value.
+            tracker.prev_col = 0; // ensure SC is emitted
+            tracker.emit_column(u32::MAX); // SC(RESET)
         }
         self.push(insn);
     }
@@ -1952,9 +1991,11 @@ impl<'a> CodeGen<'a> {
     fn emit_stmt(&mut self, stmt: &Statement<'_>) {
         // Update current_line from the statement's source position so that
         // subsequent push() calls emit per-instruction LNP entries with the
-        // correct line number.
+        // correct line and column numbers.
         if let Some(source) = self.source {
-            self.current_line = line_at(source, stmt.span().start);
+            let offset = stmt.span().start;
+            self.current_line = line_at(source, offset);
+            self.current_col = col_at(source, offset);
         }
         match stmt {
             Statement::VariableDeclaration(decl) => {
@@ -2661,10 +2702,12 @@ impl<'a> CodeGen<'a> {
     // ── Expression compiler — result always in accumulator ────────────────────
 
     fn emit_expr(&mut self, expr: &Expression<'_>) {
-        // Update current_line from the expression's source position for
-        // sub-expression granularity in LNP tracking.
+        // Update current_line and current_col from the expression's source position
+        // for per-instruction LNP tracking.
         if let Some(source) = self.source {
-            self.current_line = line_at(source, expr.span().start);
+            let offset = expr.span().start;
+            self.current_line = line_at(source, offset);
+            self.current_col = col_at(source, offset);
         }
         match expr {
             Expression::NumericLiteral(n) => {
