@@ -1522,7 +1522,7 @@ fn compile_class_elements(
             let debug_info = source_file_path.map(|path| DebugInfoRecord {
                 line_start: 1,
                 source_file: path.to_string(),
-                param_names: sorted_debug_param_names(&param_names),
+                param_names: param_names.clone(),
             });
             methods.push(MethodRecord {
                 name: key_name,
@@ -1789,7 +1789,7 @@ fn collect_call_arg_arrows_expr(
                     let arrow_debug = source_file_path.map(|path| DebugInfoRecord {
                         line_start: 1,
                         source_file: path.to_string(),
-                        param_names: sorted_debug_param_names(&arrow_param_names),
+                        param_names: arrow_param_names.clone(),
                     });
                     methods.push(MethodRecord {
                         name: record_name,
@@ -1860,12 +1860,6 @@ fn class_method_record_name(method: &MethodDefinition<'_>, class_name: &str) -> 
 
 fn class_method_num_args(method: &MethodDefinition<'_>) -> u16 {
     method.value.params.items.len() as u16 + 3
-}
-
-fn sorted_debug_param_names(param_names: &[String]) -> Vec<String> {
-    let mut names = param_names.to_vec();
-    names.sort();
-    names
 }
 
 fn prepend_function_argument_copies(
