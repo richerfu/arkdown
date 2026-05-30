@@ -14,7 +14,9 @@ use arkdown_core::{
     ModuleJson5Module, OutputTarget,
 };
 use arkdown_obfuscate::{should_obfuscate, ObfuscationOptions, Obfuscator};
-use arkdown_pack::{HarPackInput, PackAbility, PackInput, Packager};
+use arkdown_pack::{
+    minify_package_intermediate_module_json, HarPackInput, PackAbility, PackInput, Packager,
+};
 use arkdown_plugin_duplicate_check::DuplicateCheckPlugin;
 use arkdown_plugin_ets_transform::EtsTransformPlugin;
 use arkdown_plugin_json5::Json5Plugin;
@@ -672,13 +674,11 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                     config_arc.sdk_config.compile_api_version,
                 )
                 .map_err(|e| anyhow::anyhow!("Sign failed: {}", e))?;
-                extract_zip_entry(
-                    &path,
-                    "module.json",
-                    &module
-                        .src_path
-                        .join("build/default/intermediates/package/default/module.json"),
-                )?;
+                let package_module_json = module
+                    .src_path
+                    .join("build/default/intermediates/package/default/module.json");
+                extract_zip_entry(&path, "module.json", &package_module_json)?;
+                rewrite_package_intermediate_module_json(&package_module_json)?;
                 write_hap_metadata(&module.src_path, &module.name, &manifest.device_types)?;
                 extract_zip_entry(&path, "pack.info", &output_dir.join("pack.info"))?;
                 if let Some(source_maps_path) = &bundle_out.source_maps_path {
@@ -889,6 +889,14 @@ fn write_json_minified_newline(path: &Path, value: &serde_json::Value) -> Result
     let mut content = serde_json::to_string(value)?;
     content.push('\n');
     write_bytes(path, content.as_bytes())
+}
+
+fn rewrite_package_intermediate_module_json(path: &Path) -> Result<()> {
+    let content = fs_err::read_to_string(path)?;
+    let content = minify_package_intermediate_module_json(&content)
+        .map_err(|err| anyhow::anyhow!("rewrite package module.json failed: {}", err))?;
+    fs_err::write(path, content.as_bytes())?;
+    Ok(())
 }
 
 fn canonical_or_owned(path: &Path) -> PathBuf {

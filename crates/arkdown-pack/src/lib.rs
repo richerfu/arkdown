@@ -5,7 +5,9 @@ pub mod zip_writer;
 
 pub use error::PackError;
 pub use integrated_hsp::{normalize_integrated_hsps, IntegratedHspEntry};
-pub use packager::{HarPackInput, PackAbility, PackInput, Packager};
+pub use packager::{
+    minify_package_intermediate_module_json, HarPackInput, PackAbility, PackInput, Packager,
+};
 
 #[cfg(test)]
 mod tests {
