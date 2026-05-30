@@ -151,7 +151,8 @@ fn first_user_method_debug_info(bytes: &[u8], class_offset: usize) -> (Option<u3
         pos += 1;
         match tag {
             0x00 => break,
-            0x01 | 0x05 => {
+            0x01 | 0x05 | 0x06 => {
+                // 0x01 = CODE, 0x05 = DEBUG_INFO, 0x06 = ANNOTATION
                 let off = read_u32(bytes, pos);
                 pos += 4;
                 if tag == 0x05 {
@@ -709,35 +710,48 @@ fn test_source_map_emits_source_file_debug_info_and_lnp() {
         "source_map.sources[0] drives the emitted source file StringItem"
     );
 
+    // DebugInfo format (libpandafile DebugInfoItem::Write):
+    //   line_num:           ULEB128(1)     1-based source line
+    //   num_params:         ULEB128(0)     no parameters tracked
+    //   constant_pool_size: ULEB128(5)     byte count: SET_FILE(1) + offset(4)
+    //   constant_pool:      [0x09, src_off_le_4bytes]  body LNP
+    //   lnp_index:          ULEB128(0)     index into LNP table
     let mut pos = debug_info as usize;
     assert_eq!(read_uleb(&bytes, &mut pos), 1, "line_start is 1");
     assert_eq!(read_uleb(&bytes, &mut pos), 0, "no parameter names emitted");
-    let cp_count = read_uleb(&bytes, &mut pos) as usize;
+    let cp_size = read_uleb(&bytes, &mut pos) as usize;
     assert_eq!(
-        cp_count, 1,
-        "constant pool has exactly one entry: the source file offset"
+        cp_size, 5,
+        "constant pool is 5 bytes: SET_FILE(1) + source_file_offset(4)"
+    );
+    // The constant pool starts with SET_FILE (0x09) + 4-byte source file offset.
+    assert_eq!(
+        bytes[pos], 0x09,
+        "constant pool starts with SET_FILE opcode (0x09)"
     );
     assert_eq!(
-        read_uleb(&bytes, &mut pos),
-        class_source_file as u64,
-        "DebugInfo constant pool stores the source file offset"
+        read_u32(&bytes, pos + 1),
+        class_source_file,
+        "SET_FILE operand is the source file string offset"
     );
+    pos += cp_size;
     assert_eq!(
         read_uleb(&bytes, &mut pos),
         0,
         "debug info references LNP index 0"
     );
 
+    // The LNP starts with SET_FILE (0x09) — correct opcode from libpandafile.
     let lnp_offset = read_u32(&bytes, lnp_idx_off) as usize;
-    assert_eq!(bytes[lnp_offset], 0x03, "LNP starts with SET_FILE opcode (0x03)");
+    assert_eq!(bytes[lnp_offset], 0x09, "LNP starts with SET_FILE opcode (0x09)");
     assert_eq!(
         read_u32(&bytes, lnp_offset + 1),
         class_source_file,
         "SET_FILE operand is the source file string offset"
     );
-    // After SET_FILE (5 bytes), the LNP may contain advance sequences
-    // (ADVANCE_PC, ADVANCE_LINE, SPECIAL_OPCODE) followed by END_SEQUENCE.
-    // Scan past the advance opcodes to find the terminating 0x00.
+    // After SET_FILE (5 bytes), the LNP may contain START_LOCAL_EXTENDED entries,
+    // SET_PROLOGUE_END, advance sequences (ADVANCE_PC, ADVANCE_LINE, SPECIAL_OPCODE)
+    // followed by END_SEQUENCE (0x00).
     let lnp_body = &bytes[lnp_offset + 5..];
     let end_seq_pos = lnp_body
         .iter()

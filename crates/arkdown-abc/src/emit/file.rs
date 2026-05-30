@@ -486,6 +486,14 @@ impl AbcFile {
             }
         }
 
+        // ── 1h. "SlotNumber" StringItem for L_ESSlotNumberAnnotation ────────────
+        //
+        // Every method gets a L_ESSlotNumberAnnotation item with one element
+        // named "SlotNumber".  We emit a single shared StringItem for this name.
+        let slot_number_str = inline_string("SlotNumber");
+        let slot_number_str_off = cur;
+        cur += slot_number_str.len() as u32;
+
         // ── 2. Compute ClassItem sizes & start offsets ────────────────────────
         let class_section_start = cur;
 
@@ -530,17 +538,17 @@ impl AbcFile {
         let mut index_class_offsets = Vec::with_capacity(index_class_count as usize);
         index_class_offsets.extend_from_slice(&[2, 6]);
         let mut name_to_index_class_idx = std::collections::HashMap::new();
-        let mut next_index_class_idx = 2u16;
-        for class in std::iter::once(&annotation_stubs[1])
+        for (i, class) in std::iter::once(&annotation_stubs[1])
             .chain(self.records.iter())
             .chain(sdk_stubs.iter())
+            .enumerate()
         {
             let off = *name_to_class_offset
                 .get(class.name.as_str())
                 .expect("indexed class name must have a ClassItem offset");
             index_class_offsets.push(off);
-            name_to_index_class_idx.insert(class.name.as_str(), next_index_class_idx);
-            next_index_class_idx += 1;
+            // Entries 0 and 1 are scalar placeholders; user classes start at index 2.
+            name_to_index_class_idx.insert(class.name.as_str(), 2u16 + i as u16);
         }
         debug_assert_eq!(index_class_offsets.len() as u32, index_class_count);
 
@@ -594,6 +602,39 @@ impl AbcFile {
             all_code_items.push(class_code_items);
         }
 
+        // ── Pre-compute AnnotationItem section ───────────────────────────────
+        //
+        // hvigor emits one `L_ESSlotNumberAnnotation` item per method.
+        // This annotation stores the IC slot count for the method.
+        //
+        // AnnotationItem format (libpandafile annotation_data_accessor.h):
+        //   class_idx: u16 LE  (2 = L_ESSlotNumberAnnotation in IndexSection)
+        //   count:     u16 LE  (1 element)
+        //   elements:  [(name_off: u32 LE, value: u32 LE)] * count
+        //   tags:      [tag: u8] * count  (0x37 = 'U32' type tag, after ALL elements)
+        // = 2+2+8+1 = 13 bytes per annotation
+        let annotation_section_start = code_cur;
+        let total_annotations: u32 = all_classes
+            .iter()
+            .map(|c| c.methods.len() as u32)
+            .sum();
+        let annotation_section_size = total_annotations * 13; // 13 bytes per annotation
+
+        // Per-class annotation offsets (parallel to methods).
+        let mut annotation_offsets_per_class: Vec<Vec<u32>> = Vec::with_capacity(all_classes.len());
+        {
+            let mut ann_cur = annotation_section_start;
+            for class in &all_classes {
+                let mut class_ann_offs = Vec::with_capacity(class.methods.len());
+                for _ in &class.methods {
+                    class_ann_offs.push(ann_cur);
+                    ann_cur += 13;
+                }
+                annotation_offsets_per_class.push(class_ann_offs);
+            }
+        }
+        let code_and_ann_end = annotation_section_start + annotation_section_size;
+
         // ── Pre-compute DebugInfo and LineNumberProgram sections ─────────────
         // Each debug method gets an LNP: SET_FILE + optional advance sequences +
         // END_SEQUENCE.  The source-file offset is stored in the DebugInfo
@@ -603,6 +644,7 @@ impl AbcFile {
         // ADVANCE_LINE, SPECIAL_OPCODE, END_SEQUENCE) from the IR builder, those
         // are embedded verbatim after the SET_FILE preamble.  Otherwise, a bare
         // END_SEQUENCE is appended for a minimal but valid LNP.
+        #[allow(clippy::type_complexity)]
         let (debug_info_offsets, debug_info_section, lnp_offsets, lnp_section): (
             Vec<Vec<Option<u32>>>,
             Vec<u8>,
@@ -612,7 +654,8 @@ impl AbcFile {
             let mut per_class_offsets = Vec::with_capacity(all_classes.len());
             let mut debug_buf = Vec::new();
             let mut lnp_buf = Vec::new();
-            let mut debug_cur = code_cur;
+            // DebugInfo section starts after CodeItems + AnnotationItems.
+            let mut debug_cur = code_and_ann_end;
             let mut lnp_index = 0u32;
             // Collect the source-file string offset AND the pre-encoded LNP
             // opcodes for each LNP in emission order.
@@ -652,15 +695,31 @@ impl AbcFile {
             let mut lnp_cur = debug_cur;
             for (i, &src_off) in lnp_source_file_offs.iter().enumerate() {
                 lnp_offsets.push(lnp_cur);
-                // Panda LNP body:
-                //   SET_FILE (0x03) + 4-byte LE string offset
-                //   START_LOCAL entries for scope variables and params
+                // Panda LNP body (correct opcodes from libpandafile/file_items.h):
+                //   SET_FILE (0x09) + 4-byte LE string offset
+                //   START_LOCAL_EXTENDED (0x04) entries for scope variables and params
+                //   SET_PROLOGUE_END (0x07)
                 //   <advance opcodes — may be empty>
-                //   END_SEQUENCE (0x00, already included in line_ops when non-empty)
-                lnp_buf.push(0x03); // SET_FILE
+                //   END_SEQUENCE (0x00)
+                //
+                // Correct LNP opcode values from LineNumberProgramItem::Opcode enum:
+                //   END_SEQUENCE       = 0x00
+                //   ADVANCE_PC         = 0x01
+                //   ADVANCE_LINE       = 0x02
+                //   START_LOCAL        = 0x03
+                //   START_LOCAL_EXTENDED = 0x04
+                //   END_LOCAL          = 0x05
+                //   RESTART_LOCAL      = 0x06
+                //   SET_PROLOGUE_END   = 0x07
+                //   SET_EPILOGUE_BEGIN = 0x08
+                //   SET_FILE           = 0x09
+                //   SET_SOURCE_CODE    = 0x0a
+                //   SET_COLUMN         = 0x0b
+                //   OPCODE_BASE        = 0x0c  (first SPECIAL opcode)
+                lnp_buf.push(0x09); // SET_FILE
                 lnp_buf.extend_from_slice(&src_off.to_le_bytes());
 
-                // START_LOCAL_EXTENDED (0x08) entries that hvigor always emits:
+                // START_LOCAL_EXTENDED (0x04) entries that hvigor always emits:
                 //   "this"      reg 0  type_off 0  type_tag 0
                 //   "newTarget" reg 1  type_off 0  type_tag 0
                 //   "funcObj"   reg 2  type_off 0  type_tag 0
@@ -668,7 +727,7 @@ impl AbcFile {
                 // Format: [0x04][name_off: u32 LE][reg: u8][type_off: u32 LE][type_tag: u16 LE]
                 // = 12 bytes per entry.
                 for (reg, &name_off) in scope_name_offsets.iter().enumerate() {
-                    lnp_buf.push(0x08); // START_LOCAL_EXTENDED
+                    lnp_buf.push(0x04); // START_LOCAL_EXTENDED
                     lnp_buf.extend_from_slice(&name_off.to_le_bytes());
                     lnp_buf.push(reg as u8);
                     lnp_buf.extend_from_slice(&0u32.to_le_bytes()); // type_off = 0
@@ -678,7 +737,7 @@ impl AbcFile {
                 // START_LOCAL_EXTENDED entries for formal parameters, starting at reg 3.
                 let param_offs = &per_lnp_param_name_offsets[i];
                 for (param_idx, &param_off) in param_offs.iter().enumerate() {
-                    lnp_buf.push(0x08); // START_LOCAL_EXTENDED
+                    lnp_buf.push(0x04); // START_LOCAL_EXTENDED
                     lnp_buf.extend_from_slice(&param_off.to_le_bytes());
                     lnp_buf.push(3 + param_idx as u8);
                     lnp_buf.extend_from_slice(&0u32.to_le_bytes()); // type_off = 0
@@ -688,9 +747,9 @@ impl AbcFile {
                 // Each START_LOCAL_EXTENDED entry is 12 bytes (1 + 4 + 1 + 4 + 2).
                 let start_local_bytes = (3 + param_offs.len()) as u32 * 12;
 
-                // SET_PROLOGUE_END (0x05): marks the end of the method prologue.
+                // SET_PROLOGUE_END (0x07): marks the end of the method prologue.
                 // hvigor emits this opcode after all START_LOCAL_EXTENDED entries.
-                lnp_buf.push(0x05); // SET_PROLOGUE_END
+                lnp_buf.push(0x07); // SET_PROLOGUE_END
 
                 let method_ops = lnp_method_line_ops[i];
                 if !method_ops.is_empty() {
@@ -708,7 +767,8 @@ impl AbcFile {
             (per_class_offsets, debug_buf, lnp_offsets, lnp_buf)
         };
 
-        let post_lnp_offset = code_cur + debug_info_section.len() as u32 + lnp_section.len() as u32;
+        // post_lnp_offset = after CodeItems + AnnotationItems + DebugInfo + LNP sections.
+        let post_lnp_offset = code_and_ann_end + debug_info_section.len() as u32 + lnp_section.len() as u32;
 
         // ── Pre-compute LiteralArray section bytes ────────────────────────────
         // The section is appended after all CodeItems and debug sections.
@@ -810,6 +870,7 @@ impl AbcFile {
                     &method_string_offsets[ci],
                     &code_offsets[ci],
                     &debug_info_offsets[ci],
+                    &annotation_offsets_per_class[ci],
                     &literal_array_offsets,
                 )
             })
@@ -949,6 +1010,9 @@ impl AbcFile {
             file.extend_from_slice(s);
         }
 
+        // ── "SlotNumber" StringItem for L_ESSlotNumberAnnotation ──────────────
+        file.extend_from_slice(&slot_number_str);
+
         debug_assert_eq!(file.len() as u32, class_section_start);
 
         // ── ClassItems ────────────────────────────────────────────────────────
@@ -964,6 +1028,28 @@ impl AbcFile {
             }
         }
         debug_assert_eq!(file.len() as u32, code_cur);
+
+        // ── AnnotationItems (L_ESSlotNumberAnnotation, one per method) ────────
+        //
+        // Format per annotation (libpandafile AnnotationDataAccessor):
+        //   class_idx: u16 LE  (2 = L_ESSlotNumberAnnotation in IndexSection)
+        //   count:     u16 LE  (1 element)
+        //   elements:  [(name_off: u32 LE, value: u32 LE)] * count
+        //   tags:      [tag: u8] * count  (0x37 = 'U32' type tag)
+        // = 2+2+8+1 = 13 bytes per annotation
+        //
+        // The IC slot count (value) is estimated as 0 for now; a full
+        // implementation would count IC-using instructions per method.
+        for class in &all_classes {
+            for _method in &class.methods {
+                file.extend_from_slice(&2u16.to_le_bytes()); // class_idx = 2 (L_ESSlotNumberAnnotation)
+                file.extend_from_slice(&1u16.to_le_bytes()); // count = 1
+                file.extend_from_slice(&slot_number_str_off.to_le_bytes()); // name_off → "SlotNumber"
+                file.extend_from_slice(&0u32.to_le_bytes()); // value = 0 (slot count)
+                file.push(0x37); // tag = 'U32' (0x37 = ASCII '7')
+            }
+        }
+        debug_assert_eq!(file.len() as u32, code_and_ann_end);
 
         // ── DebugInfo and LineNumberProgram sections ────────────────────────
         file.extend_from_slice(&debug_info_section);
@@ -1075,23 +1161,43 @@ fn adler32(data: &[u8]) -> u32 {
     (b << 16) | a
 }
 
+/// Encode a Panda `DebugInfoItem`.
+///
+/// libpandafile `DebugInfoItem::Write` format:
+/// ```text
+/// line_num:           ULEB128        (1-based source line of the method start)
+/// num_parameters:     ULEB128        (number of formal parameters)
+/// [param_off: ULEB128] * num_params  (file offset of each parameter name StringItem)
+/// constant_pool_size: ULEB128        (byte count of the constant pool that follows)
+/// constant_pool:      raw bytes      (LNP opcodes for the body, or empty)
+/// lnp_index:          ULEB128        (index into the LNP index table)
+/// ```
+///
+/// The `constant_pool` is raw bytes containing LNP opcodes for the method body.
+/// For our simplified implementation, the constant pool contains a single
+/// `SET_FILE (0x09) + 4-byte source_file_offset` entry so that debuggers can
+/// link the method back to its source file.
 fn encode_debug_info(
     line_start: u32,
     param_name_offsets: &[u32],
     source_file_offset: u32,
     lnp_index: u32,
 ) -> Vec<u8> {
-    let source_file_entry = uleb128(source_file_offset as u64);
-    let mut out = Vec::with_capacity(8 + source_file_entry.len());
+    // Constant pool: SET_FILE (0x09) + 4-byte LE source file string offset.
+    // This is the minimal body LNP that links the method to its source file.
+    let mut constant_pool = Vec::with_capacity(5);
+    constant_pool.push(0x09); // SET_FILE opcode
+    constant_pool.extend_from_slice(&source_file_offset.to_le_bytes());
+
+    let mut out = Vec::with_capacity(8 + constant_pool.len());
     out.extend_from_slice(&uleb128(line_start as u64));
     out.extend_from_slice(&uleb128(param_name_offsets.len() as u64));
     for &off in param_name_offsets {
         out.extend_from_slice(&uleb128(off as u64));
     }
-    // constant_pool_count = 1: one entry — the source file string offset.
-    // Use count (1), not byte length, to match libpandafile DebugInfoItem layout.
-    out.extend_from_slice(&uleb128(1));
-    out.extend_from_slice(&source_file_entry);
+    // constant_pool_size = byte count (not item count) of the constant pool.
+    out.extend_from_slice(&uleb128(constant_pool.len() as u64));
+    out.extend_from_slice(&constant_pool);
     out.extend_from_slice(&uleb128(lnp_index as u64));
     out
 }
