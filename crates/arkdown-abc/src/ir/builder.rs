@@ -1525,7 +1525,7 @@ fn compile_class_elements(
                     (bc, vec![], catches)
                 }
             } else if let Some(src) = source {
-                compile_function_body_tracked(
+                compile_function_body_tracked_with_end(
                     method.value.body.as_deref(),
                     strings,
                     literal_arrays,
@@ -1533,6 +1533,7 @@ fn compile_class_elements(
                     &param_names,
                     src,
                     source_mapper,
+                    Some(method.span.end),
                 )
             } else {
                 let (bc, catches) = compile_function_body(
@@ -2095,6 +2096,7 @@ fn compile_function_body(
 
 /// Like `compile_function_body` but also returns LNP line-advance opcodes.
 /// Returns `(bytecode, line_ops, catch_entries)`.
+#[allow(dead_code)]
 fn compile_function_body_tracked(
     body: Option<&FunctionBody<'_>>,
     strings: &mut StringTable,
@@ -2103,6 +2105,29 @@ fn compile_function_body_tracked(
     param_names: &[String],
     source: &str,
     source_mapper: Option<&SourceMapper>,
+) -> (Vec<u8>, Vec<u8>, Vec<CatchEntry>) {
+    compile_function_body_tracked_with_end(
+        body,
+        strings,
+        literal_arrays,
+        lowering,
+        param_names,
+        source,
+        source_mapper,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compile_function_body_tracked_with_end(
+    body: Option<&FunctionBody<'_>>,
+    strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
+    lowering: &LoweringContext,
+    param_names: &[String],
+    source: &str,
+    source_mapper: Option<&SourceMapper>,
+    function_end: Option<u32>,
 ) -> (Vec<u8>, Vec<u8>, Vec<CatchEntry>) {
     match body {
         Some(fb) => compile_body_stmts_tracked(
@@ -2114,6 +2139,7 @@ fn compile_function_body_tracked(
             param_names,
             source,
             source_mapper,
+            function_end,
         ),
         None => {
             let mut st = StringTable::default();
@@ -2451,8 +2477,10 @@ fn compile_body_stmts_tracked(
     param_names: &[String],
     source: &str,
     source_mapper: Option<&SourceMapper>,
+    function_end: Option<u32>,
 ) -> (Vec<u8>, Vec<u8>, Vec<CatchEntry>) {
     let mut cg = CodeGen::new_with_source(strings, literal_arrays, lowering, source, source_mapper);
+    cg.function_end = function_end;
     if module_body {
         cg.emit_module_lex_env_prologue();
         cg.bind_param_names(param_names);
@@ -2493,6 +2521,7 @@ fn compile_program_body_tracked(
         &[],
         source,
         source_mapper,
+        None,
     )
 }
 
@@ -2660,6 +2689,7 @@ struct CodeGen<'a> {
     current_line: u32,
     /// Current source column number (0-based) for the instruction being emitted.
     current_col: u32,
+    function_end: Option<u32>,
     break_patches: Vec<usize>,
     continue_patches: Vec<usize>,
     catch_entries: Vec<CatchEntry>,
@@ -2692,6 +2722,7 @@ impl<'a> CodeGen<'a> {
             line_tracker: None,
             current_line: 1,
             current_col: 0,
+            function_end: None,
             break_patches: Vec::new(),
             continue_patches: Vec::new(),
             catch_entries: Vec::new(),
@@ -2938,8 +2969,16 @@ impl<'a> CodeGen<'a> {
                 self.push(Insn::LdUndefined);
                 self.push(Insn::AsyncFunctionResolve(0, areg));
             }
-            self.push_with_epilogue(Insn::LdUndefined);
-            self.push_with_epilogue(Insn::ReturnUndefined);
+            if let Some(end) = self.function_end {
+                self.current_line = 0;
+                self.current_col = u32::MAX;
+                self.push(Insn::LdUndefined);
+                self.set_debug_pos(end);
+                self.push(Insn::ReturnUndefined);
+            } else {
+                self.push_with_epilogue(Insn::LdUndefined);
+                self.push_with_epilogue(Insn::ReturnUndefined);
+            }
         }
         let line_ops = self.line_tracker.map(|t| t.finish()).unwrap_or_default();
         (self.insns, line_ops, self.catch_entries)
@@ -2974,14 +3013,24 @@ impl<'a> CodeGen<'a> {
                     if let Some(areg) = self.async_reg {
                         self.push(Insn::AsyncFunctionResolve(0, areg));
                     }
-                    self.push_with_epilogue(Insn::Return);
+                    if let Some(end) = self.function_end {
+                        self.set_debug_pos(end);
+                        self.push(Insn::Return);
+                    } else {
+                        self.push_with_epilogue(Insn::Return);
+                    }
                 } else {
                     self.push(Insn::LdUndefined);
                     self.push_with_epilogue(Insn::LdUndefined);
                     if let Some(areg) = self.async_reg {
                         self.push(Insn::AsyncFunctionResolve(0, areg));
                     }
-                    self.push_with_epilogue(Insn::ReturnUndefined);
+                    if let Some(end) = self.function_end {
+                        self.set_debug_pos(end);
+                        self.push(Insn::ReturnUndefined);
+                    } else {
+                        self.push_with_epilogue(Insn::ReturnUndefined);
+                    }
                 }
                 self.returned = true;
             }
