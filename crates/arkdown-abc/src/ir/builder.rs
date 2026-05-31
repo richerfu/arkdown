@@ -4569,6 +4569,7 @@ impl<'a> CodeGen<'a> {
         let saved_next_reg = self.next_reg;
         let obj_reg = self.alloc_reg();
         self.emit_expr(&mem.object);
+        self.set_debug_pos(mem.span.start);
         self.push(Insn::Sta(obj_reg));
         if let Expression::StringLiteral(key) = &mem.expression {
             let name_id = self.intern(key.value.as_str());
@@ -4585,6 +4586,7 @@ impl<'a> CodeGen<'a> {
         let saved_next_reg = self.next_reg;
         let obj_reg = self.alloc_reg();
         self.emit_expr(&mem.object);
+        self.set_debug_pos(mem.span.start);
         self.push(Insn::Sta(obj_reg));
         // Update col to the property name position for per-instruction tracking.
         self.set_debug_pos(mem.property.span.start);
@@ -4621,6 +4623,7 @@ impl<'a> CodeGen<'a> {
                 }
                 self.emit_expr(&mem.object);
                 let obj_reg = self.alloc_reg();
+                self.set_debug_pos(mem.span.start);
                 self.push(Insn::Sta(obj_reg));
                 if let Expression::StringLiteral(key) = &mem.expression {
                     self.emit_expr(&assign.right);
@@ -4631,6 +4634,7 @@ impl<'a> CodeGen<'a> {
             AssignmentTarget::StaticMemberExpression(mem) => {
                 self.emit_expr(&mem.object);
                 let obj_reg = self.alloc_reg();
+                self.set_debug_pos(mem.span.start);
                 self.push(Insn::Sta(obj_reg));
                 if assign.operator != AssignmentOperator::Assign {
                     self.push(Insn::Lda(obj_reg));
@@ -4788,6 +4792,7 @@ impl<'a> CodeGen<'a> {
         let callee_reg = self.alloc_reg();
         let this_reg = self.alloc_reg();
         self.emit_expr(recv_expr);
+        self.set_debug_pos(call.callee.span().start);
         self.push(Insn::Sta(this_reg));
 
         // Update col to the method name position for per-instruction tracking.
