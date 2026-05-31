@@ -88,20 +88,9 @@ pub fn transform_ets_with_options(
     let mut out = String::with_capacity(content.len() + 512);
     let mut last_end = 0usize;
     let mut transformed_any = false;
-    let mut pending_function_decorator: Option<PendingFunctionDecorator> = None;
 
     for statement in &parsed.program.body {
         let span = statement.span();
-        if let Some(decorator) = pending_function_decorator_from_statement(statement, content) {
-            out.push_str(&content[last_end..span.start as usize]);
-            pending_function_decorator = Some(decorator);
-            transformed_any = true;
-            last_end = span.end as usize;
-            continue;
-        }
-
-        let pending_decorator = pending_function_decorator.take();
-
         if let Some(component) = component_from_statement(
             statement,
             content,
@@ -114,7 +103,7 @@ pub fn transform_ets_with_options(
             out.push_str(&generate_view_pu_class(&component));
             transformed_any = true;
         } else if let Some((start, replacement)) =
-            transform_non_component_statement(statement, content, pending_decorator.as_ref())
+            transform_non_component_statement(statement, content)
         {
             out.push_str(&content[last_end..start]);
             out.push_str(&replacement);
@@ -460,7 +449,6 @@ fn component_from_statement(
 fn transform_non_component_statement(
     statement: &Statement<'_>,
     source_text: &str,
-    pending_decorator: Option<&PendingFunctionDecorator>,
 ) -> Option<(usize, String)> {
     match statement {
         _ if is_orphan_arkui_decorator_statement(statement, source_text) => {
@@ -475,22 +463,13 @@ fn transform_non_component_statement(
                 span_text(statement.span(), source_text).replacen("import lazy", "import", 1);
             Some((statement.span().start as usize, text))
         }
-        Statement::FunctionDeclaration(function) => transform_decorated_function_with_pending(
-            function,
-            source_text,
-            false,
-            &[],
-            pending_decorator,
-        ),
+        Statement::FunctionDeclaration(function) => {
+            transform_decorated_function(function, source_text, false, &[])
+        }
         Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref() {
             Some(Declaration::FunctionDeclaration(function)) => {
-                let mut result = transform_decorated_function_with_extra_decorators(
-                    function,
-                    source_text,
-                    true,
-                    &export.decorators,
-                    pending_decorator,
-                )?;
+                let mut result =
+                    transform_decorated_function(function, source_text, true, &export.decorators)?;
                 for decorator in &export.decorators {
                     result.0 = result.0.min(decorator.span.start as usize);
                 }
@@ -524,46 +503,6 @@ fn is_orphan_arkui_decorator_statement(statement: &Statement<'_>, source_text: &
     )
 }
 
-#[derive(Debug, Clone)]
-struct PendingFunctionDecorator {
-    kind: String,
-    first_arg: Option<String>,
-}
-
-fn pending_function_decorator_from_statement(
-    statement: &Statement<'_>,
-    source_text: &str,
-) -> Option<PendingFunctionDecorator> {
-    let text = span_text(statement.span(), source_text).trim();
-    let (kind, first_arg) = parse_pending_function_decorator(text)?;
-    Some(PendingFunctionDecorator { kind, first_arg })
-}
-
-fn parse_pending_function_decorator(text: &str) -> Option<(String, Option<String>)> {
-    for kind in [
-        "Builder",
-        "LocalBuilder",
-        "Styles",
-        "Extend",
-        "AnimatableExtend",
-    ] {
-        if text == format!("@{kind}") {
-            return Some((kind.to_string(), None));
-        }
-        let prefix = format!("@{kind}(");
-        if text.starts_with(&prefix) && text.ends_with(')') {
-            let first_arg = text[prefix.len()..text.len() - 1]
-                .split(',')
-                .next()
-                .map(str::trim)
-                .filter(|arg| !arg.is_empty())
-                .map(str::to_string);
-            return Some((kind.to_string(), first_arg));
-        }
-    }
-    None
-}
-
 fn annotation_to_interface(annotation: &AnnotationDeclaration<'_>, source_text: &str) -> String {
     let mut out = format!("interface {} {{\n", annotation.id.name);
     for element in &annotation.body.body {
@@ -583,28 +522,11 @@ fn annotation_to_interface(annotation: &AnnotationDeclaration<'_>, source_text: 
     out
 }
 
-fn transform_decorated_function_with_extra_decorators(
+fn transform_decorated_function(
     function: &Function<'_>,
     source_text: &str,
     exported: bool,
     extra_decorators: &[Decorator<'_>],
-    pending_decorator: Option<&PendingFunctionDecorator>,
-) -> Option<(usize, String)> {
-    transform_decorated_function_with_pending(
-        function,
-        source_text,
-        exported,
-        extra_decorators,
-        pending_decorator,
-    )
-}
-
-fn transform_decorated_function_with_pending(
-    function: &Function<'_>,
-    source_text: &str,
-    exported: bool,
-    extra_decorators: &[Decorator<'_>],
-    pending_decorator: Option<&PendingFunctionDecorator>,
 ) -> Option<(usize, String)> {
     let decorators = function.decorators.iter().chain(extra_decorators.iter());
     let decorator_kind = decorators
@@ -616,8 +538,7 @@ fn transform_decorated_function_with_pending(
                 "Builder" | "LocalBuilder" | "Styles" | "Extend" | "AnimatableExtend"
             )
         })
-        .map(str::to_string)
-        .or_else(|| pending_decorator.map(|decorator| decorator.kind.clone()))?;
+        .map(str::to_string)?;
     let name = function.id.as_ref()?.name.as_str();
     let params = extract_params_text(function.params.span(), source_text);
     let export_prefix = if exported { "export " } else { "" };
@@ -637,7 +558,6 @@ fn transform_decorated_function_with_pending(
                 .chain(extra_decorators.iter())
                 .find(|decorator| decorator_name(decorator) == decorator_kind)
                 .and_then(|decorator| decorator_first_arg_text(decorator, source_text))
-                .or_else(|| pending_decorator.and_then(|decorator| decorator.first_arg.clone()))
                 .unwrap_or_else(|| "View".to_string());
             return Some((
                 start,
@@ -1084,20 +1004,9 @@ pub fn transform_ets_viewpu_with_source_map(
     let mut last_end = 0usize;
     let mut struct_results: Vec<StructResult> = Vec::new();
     let mut transformed_any = false;
-    let mut pending_function_decorator: Option<PendingFunctionDecorator> = None;
 
     for statement in &parsed.program.body {
         let span = statement.span();
-        if let Some(decorator) = pending_function_decorator_from_statement(statement, content) {
-            out.push_str(&content[last_end..span.start as usize]);
-            pending_function_decorator = Some(decorator);
-            transformed_any = true;
-            last_end = span.end as usize;
-            continue;
-        }
-
-        let pending_decorator = pending_function_decorator.take();
-
         if let Some((component, struct_statement)) = component_with_struct_from_statement(
             statement,
             content,
@@ -1125,7 +1034,7 @@ pub fn transform_ets_viewpu_with_source_map(
             });
             transformed_any = true;
         } else if let Some((start, replacement)) =
-            transform_non_component_statement(statement, content, pending_decorator.as_ref())
+            transform_non_component_statement(statement, content)
         {
             out.push_str(&content[last_end..start]);
             out.push_str(&replacement);
