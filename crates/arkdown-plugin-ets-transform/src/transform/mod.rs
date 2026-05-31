@@ -51,9 +51,17 @@ pub fn transform_ets_with_options(
 ) -> Result<String, EtsTransformError> {
     let content = &source.content;
 
-    // Fast path: files with no ArkUI-specific syntax pass through unchanged.
-    // The module_type change from Ets → Ts still happens in the plugin.
-    if !has_arkts_transform_syntax(content) {
+    let allocator = Allocator::default();
+    let source_type = SourceType::from_path(&source.id.id).unwrap_or_else(|_| SourceType::ets());
+    let parsed = Parser::new(&allocator, content, source_type).parse();
+    if !parsed.errors.is_empty() {
+        return Err(EtsTransformError::Fatal {
+            file: source.id.id.clone(),
+            message: format!("ArkUI parse failed: {:?}", parsed.errors),
+        });
+    }
+
+    if !program_has_arkts_transform_syntax(&parsed.program) {
         return Ok(content.clone());
     }
 
@@ -73,15 +81,6 @@ pub fn transform_ets_with_options(
         return Err(error.clone());
     }
 
-    let allocator = Allocator::default();
-    let source_type = SourceType::from_path(&source.id.id).unwrap_or_else(|_| SourceType::ets());
-    let parsed = Parser::new(&allocator, content, source_type).parse();
-    if !parsed.errors.is_empty() {
-        return Err(EtsTransformError::Fatal {
-            file: source.id.id.clone(),
-            message: format!("ArkUI parse failed: {:?}", parsed.errors),
-        });
-    }
     let simple_type_context =
         SimpleTypeContext::from_program(&parsed.program, &source.id.id, options);
 
@@ -357,48 +356,57 @@ fn is_known_arkui_decorator_line(trimmed: &str) -> bool {
     })
 }
 
-pub(crate) fn has_arkts_transform_syntax(content: &str) -> bool {
-    [
-        "@Component",
-        "@Entry",
-        "@CustomDialog",
-        "@ComponentV2",
-        "@Builder",
-        "@LocalBuilder",
-        "@Styles",
-        "@Extend",
-        "@AnimatableExtend",
-        "@interface",
-        "@Local",
-        "@Param",
-        "@Once",
-        "@Provider",
-        "@Consumer",
-        "@Event",
-        "@Env",
-        "@Require",
-        "@PropRef",
-        "@StoragePropRef",
-        "@LocalStoragePropRef",
-        "@Trace",
-        "@Computed",
-        "@Monitor",
-        "@SyncMonitor",
-        "@ComponentInit",
-        "@ComponentAppear",
-        "@ComponentBuilt",
-        "@ComponentAttach",
-        "@ComponentDetach",
-        "@ComponentReuse",
-        "@ComponentRecycle",
-        "@ComponentDisappear",
-        "@ComponentActive",
-        "@ComponentInactive",
-        "import lazy",
-        "struct ",
-    ]
-    .iter()
-    .any(|needle| content.contains(needle))
+pub(crate) fn has_arkts_transform_syntax(content: &str, id: &str) -> bool {
+    let allocator = Allocator::default();
+    let source_type = SourceType::from_path(id).unwrap_or_else(|_| SourceType::ets());
+    let parsed = Parser::new(&allocator, content, source_type).parse();
+    !parsed.errors.is_empty() || program_has_arkts_transform_syntax(&parsed.program)
+}
+
+fn program_has_arkts_transform_syntax(program: &Program<'_>) -> bool {
+    program
+        .body
+        .iter()
+        .any(statement_has_arkts_transform_syntax)
+}
+
+fn statement_has_arkts_transform_syntax(statement: &Statement<'_>) -> bool {
+    match statement {
+        Statement::StructStatement(_)
+        | Statement::AnnotationDeclaration(_)
+        | Statement::LazyImportDeclaration(_) => true,
+        Statement::ClassDeclaration(class) => decorators_have_arkui_syntax(&class.decorators),
+        Statement::FunctionDeclaration(function) => {
+            decorators_have_arkui_syntax(&function.decorators)
+        }
+        Statement::ExportNamedDeclaration(export) => {
+            decorators_have_arkui_syntax(&export.decorators)
+                || matches!(
+                    export.declaration.as_ref(),
+                    Some(Declaration::StructStatement(_))
+                        | Some(Declaration::AnnotationDeclaration(_))
+                )
+                || matches!(
+                    export.declaration.as_ref(),
+                    Some(Declaration::FunctionDeclaration(function))
+                        if decorators_have_arkui_syntax(&function.decorators)
+                )
+        }
+        Statement::ExportDefaultDeclaration(export) => {
+            matches!(
+                &export.declaration,
+                ExportDefaultDeclarationKind::StructStatement(_)
+            )
+        }
+        _ => false,
+    }
+}
+
+fn decorators_have_arkui_syntax(decorators: &[Decorator<'_>]) -> bool {
+    decorators
+        .iter()
+        .map(decorator_name)
+        .any(|name| KNOWN_ARKUI_DECORATORS.contains(&name))
 }
 
 fn component_from_statement(
@@ -974,10 +982,6 @@ pub fn transform_ets_viewpu_with_source_map(
 ) -> Result<(String, Option<String>), EtsTransformError> {
     let content = &source.content;
 
-    if !has_arkts_transform_syntax(content) {
-        return Ok((content.clone(), None));
-    }
-
     let allocator = Allocator::default();
     let source_type = SourceType::from_path(&source.id.id).unwrap_or_else(|_| SourceType::ets());
     let parsed = Parser::new(&allocator, content, source_type).parse();
@@ -986,6 +990,9 @@ pub fn transform_ets_viewpu_with_source_map(
             file: source.id.id.clone(),
             message: format!("ArkUI parse failed: {:?}", parsed.errors),
         });
+    }
+    if !program_has_arkts_transform_syntax(&parsed.program) {
+        return Ok((content.clone(), None));
     }
     let simple_type_context =
         SimpleTypeContext::from_program(&parsed.program, &source.id.id, options);

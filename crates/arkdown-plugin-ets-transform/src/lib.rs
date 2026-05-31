@@ -213,7 +213,7 @@ impl Plugin for EtsTransformPlugin {
                 Ok(code) => code,
                 Err(_) => return Ok(None),
             };
-            if !transform::has_arkts_transform_syntax(&code) {
+            if !transform::has_arkts_transform_syntax(&code, &id) {
                 return Ok(None);
             }
             let output = EtsTransformPlugin::new(config).do_transform(&code, &id)?;
