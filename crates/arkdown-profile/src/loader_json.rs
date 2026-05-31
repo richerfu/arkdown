@@ -267,9 +267,24 @@ pub fn generate_loader_json(
     module_path_map.insert(module_cfg.name.clone(), module_root.clone());
 
     // --- TASK-LOADER-01: scan oh_modules/ for ByteCode HAR dependencies ---
-    let byte_code_har_info: HashMap<String, ByteCodeHarEntry> = {
-        let scanned = scan_bytecode_har_deps(&module_cfg.src_path, &config.project_root);
-        scanned.into_iter().map(|e| e.into_loader_entry()).collect()
+    let bytecode_har_deps = scan_bytecode_har_deps(&module_cfg.src_path, &config.project_root);
+
+    let byte_code_har_info: HashMap<String, ByteCodeHarEntry> = bytecode_har_deps
+        .iter()
+        .cloned()
+        .map(|e| e.into_loader_entry())
+        .collect();
+
+    let declaration_entry = if use_normalized_ohm_url {
+        let mut entries: Vec<String> = bytecode_har_deps
+            .iter()
+            .flat_map(|dep| dep.declaration_entry.iter().cloned())
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        entries.retain(|entry| seen.insert(entry.clone()));
+        entries
+    } else {
+        Vec::new()
     };
 
     // --- TASK-LOADER-02: populate dynamicImportLibInfo from oh-package.json5 ---
@@ -296,7 +311,7 @@ pub fn generate_loader_json(
             module_root
         ),
         byte_code_har_info,
-        declaration_entry: vec![],
+        declaration_entry,
         module_name: module_cfg.name.clone(),
         hsp_name_ohm_map: HashMap::new(),
         har_name_ohm_map: HashMap::new(),
@@ -534,6 +549,7 @@ fn to_absolute_path_string(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::PathBuf;
 
     use arkdown_core::{
@@ -611,6 +627,55 @@ mod tests {
             description: None,
             src_entry: None,
         }
+    }
+
+    #[test]
+    fn test_loader_json_collects_bytecode_har_declaration_entry() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let project_root = tmp.path().to_path_buf();
+        let module_root = project_root.join("entry");
+        let pkg_dir = module_root.join("oh_modules").join("bytecode-har");
+        fs::create_dir_all(pkg_dir.join("ets")).expect("create bytecode har");
+        fs::write(
+            pkg_dir.join("ets").join("modules.abc"),
+            b"PANDA\x00\x00\x00",
+        )
+        .expect("write abc");
+        fs::write(
+            pkg_dir.join("oh-package.json5"),
+            r#"{
+              name: "bytecode-har",
+              compatibleSdkVersion: 12,
+              metadata: {
+                byteCodeHar: true,
+                declarationEntry: [
+                  "@normalized:N&entry&com.example&bytecode-har/src/main/ets/Worker&1.0.0",
+                  "@normalized:N&entry&com.example&bytecode-har/src/main/ets/Worker&1.0.0",
+                  "@normalized:N&entry&com.example&bytecode-har/src/main/ets/runtime&1.0.0"
+                ]
+              }
+            }"#,
+        )
+        .expect("write oh-package");
+
+        let mut config = make_config(true);
+        config.project_root = project_root;
+        let mut module_cfg = make_module_cfg();
+        module_cfg.src_path = module_root;
+        let loader = generate_loader_json(&config, &module_cfg, &make_manifest());
+
+        assert_eq!(
+            loader.declaration_entry,
+            vec![
+                "@normalized:N&entry&com.example&bytecode-har/src/main/ets/Worker&1.0.0",
+                "@normalized:N&entry&com.example&bytecode-har/src/main/ets/runtime&1.0.0",
+            ]
+        );
+        let entry = loader
+            .byte_code_har_info
+            .get("bytecode-har")
+            .expect("bytecode har info");
+        assert!(entry.abc_path.ends_with("ets/modules.abc"));
     }
 
     /// Verify loader.json round-trips through serde correctly.

@@ -5,7 +5,8 @@ use arkdown_core::{ModuleType, OhosResolvedModule, PkgContext};
 
 use crate::error::ResolveError;
 use crate::oh_modules::{
-    is_bytecode_har, read_declaration_entry, read_main_field, read_version_field,
+    is_bytecode_har, read_bytecode_abc_path, read_declaration_entry, read_main_field,
+    read_version_field,
 };
 
 /// Extensions tried in order during resolution.
@@ -176,8 +177,8 @@ impl OhosResolver {
             let version = read_version_field(&oh_package_path);
 
             if is_bytecode_har(&oh_package_path) {
-                let main = read_main_field(&oh_package_path).unwrap_or_default();
-                let abc_path = pkg_dir.join(&main);
+                let abc_path = read_bytecode_abc_path(&oh_package_path)
+                    .unwrap_or_else(|| pkg_dir.join("ets/modules.abc"));
                 let declaration_path = read_declaration_entry(&oh_package_path)
                     .unwrap_or_else(|| pkg_dir.join("index.d.ets"));
                 return Ok(OhosResolvedModule::BytecodeHar {

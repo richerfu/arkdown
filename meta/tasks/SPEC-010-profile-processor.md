@@ -189,16 +189,24 @@ matching internal `compileEntry` values as `./ets/workers/...`. This follows ups
 
 ### ByteCode HAR Info
 
-For each dependency that is a ByteCode HAR (has `metadata.abcPath` in its
-`oh-package.json5`), `arkdown-profile` resolves metadata paths relative to the
-package root and serializes absolute `abcPath`, optional `sourceMapsPath`, and
-optional `insightIntent` fields:
+For each dependency that is a ByteCode HAR (`metadata.byteCodeHar: true` with
+`ets/modules.abc`, or a compatibility fallback such as `metadata.abcPath`),
+`arkdown-profile` resolves metadata paths relative to the package root and
+serializes absolute `abcPath`, optional `sourceMapsPath`, and optional
+`insightIntent` fields:
 
 ```rust
 if let Some(abc_path) = dep.oh_package.metadata.as_ref().and_then(|m| m.abc_path.as_ref()) {
     byte_code_har_info.insert(dep.name.clone(), BytecodeHarInfo { ... });
 }
 ```
+
+Current hvigor-aligned behavior is stricter: a packaged ByteCode HAR is marked by
+`metadata.byteCodeHar: true`, uses `<pkg>/ets/modules.abc` as the default ABC
+artifact and `<pkg>/ets/sourceMaps.map` as the default source-map artifact.
+`metadata.abcPath` remains a compatibility fallback for older fixtures. The
+`metadata.declarationEntry` field is not a declaration-file path; it is a list of
+normalized OHM URLs that loader.json preserves in `declarationEntry`.
 
 ---
 
@@ -279,7 +287,7 @@ crates/arkdown-profile/
 - `generate_loader_json()` includes all `abilities[*].srcEntry` paths in `compileEntry`
 - `generate_loader_json()` includes `module.srcEntry` in `compileEntry` when present
 - Worker files from `buildOption.sourceOption.workers` appear in `compileEntry`
-- ByteCode HAR dependency (with `metadata.abcPath`) appears in `byteCodeHarInfo`, not in `compileEntry`
+- ByteCode HAR dependency (with `metadata.byteCodeHar: true` and `ets/modules.abc`) appears in `byteCodeHarInfo`, not in `compileEntry`
 - `pkgNameToPkgBriefInfo` includes the entry module's own package info (not just dependencies)
 - Local HAR dependency (`file:../my-har`) appears in `pkgNameToPkgBriefInfo` with the correct `pkgRoot` and `sourceRoots`
 - HAR abilities from dependencies are collected and merged into `module.abilities` in `process_profile()`

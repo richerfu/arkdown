@@ -9,36 +9,39 @@
 
 ## Summary
 
-Populate `loader_json.byteCodeHarInfo` from `oh-package.json5` dependencies that
-reference pre-compiled `.abc` packages. A ByteCode HAR is a HAR whose `oh-package.json5`
-has `metadata.abcPath` set, indicating it ships bytecode instead of source. The
-`byteCodeHarInfo` map is consumed by the ABC compiler to resolve cross-HAR module
-references without re-compiling the dependency.
+Populate `loader_json.byteCodeHarInfo` and `declarationEntry` from
+`oh-package.json5` dependencies that ship pre-compiled bytecode. hvigor marks a
+ByteCode HAR with `metadata.byteCodeHar: true`, expects the compiled artifact at
+`ets/modules.abc`, and preserves runtime-only reachability through
+`metadata.declarationEntry` normalized OHM URLs. The `byteCodeHarInfo` map is
+consumed by the ABC compiler to resolve cross-HAR module references without
+re-compiling the dependency.
 
 ---
 
 ## Background: What hvigor Does
 
-From `generate-loader-json.js::doTaskAction()` (via `DependencyManager`):
+From `byte-code-har-utils.js::collectByteCodeHarInfo()` and
+`generate-loader-json.js::setByteCodeHarInfoAndOtherCompileFiles()`:
 
 ```javascript
-// byteCodeHarInfo population
-const byteCodeHarDeps = this.dependencyManager.getByteCodeHarDependencies();
-byteCodeHarDeps.forEach(dep => {
-    const packageName = dep.getPackageName();
-    const abcPath = dep.getAbcPath();           // from oh-package.json5#metadata.abcPath
-    const sourceMapsPath = dep.getSourceMapsPath(); // optional
-    const compatibleSdkVersion = dep.getCompatibleSdkVersion();
-    const insightIntent = dep.getInsightIntentPath(); // optional
+const collectByteCodeHarInfo = (dep, byteCodeInfo) => {
+  const packageName = dep.getPackageName();
+  const root = dep.getDependencyRootPath();
+  const abcPath = path.join(root, "ets", "modules.abc");
+  const sourceMapsPath = path.join(root, "ets", "sourceMaps.map");
+  const insightIntentJsonPath = collectByteCodeHarInsightIntentJsonPath(dep);
+  const pkg = dep.getPackageJsonObj();
 
-    byteCodeHarInfo[packageName] = {
-        packageName,
-        abcPath,
-        sourceMapsPath,
-        compatibleSdkVersion,
-        insightIntent,
-    };
-});
+  byteCodeInfo.set(root, {
+    abcPath,
+    packageName,
+    compatibleSdkVersion: pkg?.compatibleSdkVersion,
+    compatibleSdkVersionStage: pkg?.compatibleSdkVersionStage,
+    ...(existsSync(sourceMapsPath) ? { sourceMapsPath } : {}),
+    ...(insightIntentJsonPath ? { insightIntentJsonPath } : {}),
+  });
+};
 ```
 
 A ByteCode HAR's `oh-package.json5` looks like:
@@ -49,15 +52,18 @@ A ByteCode HAR's `oh-package.json5` looks like:
   "version": "1.0.0",
   "main": "index.d.ts",
   "metadata": {
-    "abcPath": "./index.abc",
-    "sourceMapsPath": "./index.abc.map",
-    "insightIntentPath": "./insight_intent.json"
+    "byteCodeHar": true,
+    "declarationEntry": [
+      "@normalized:N&entry&com.example&my-bytecode-har/src/main/ets/Worker&1.0.0"
+    ]
   }
 }
 ```
 
-The `compatibleSdkVersion` comes from the HAR's `build-profile.json5` or is derived
-from the installed package metadata.
+`compatibleSdkVersion` and `compatibleSdkVersionStage` are read from the packaged
+`oh-package.json5`. hvigor's generated package also carries metadata such as
+`declarationEntry`, `extraImportees`, `globalDependencies`, and resource metadata
+when those features are used.
 
 ByteCode HAR dependencies must NOT appear in `compileEntry` (they are pre-compiled).
 They must appear in `byteCodeHarInfo` instead.
@@ -76,47 +82,46 @@ this.byteCodeHarToDependencyKeys = getByteCodeHarToDependencyKeys(this.targetSer
 
 ### 1. `OhPackageMetadata` Extension
 
-Extend `OhPackageJson5` in `arkdown-config` to include the `metadata` field:
+Represent the ByteCode HAR subset of `oh-package.json5#metadata`:
 
 ```rust
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct OhPackageMetadata {
-    /// Path to pre-compiled ABC file (relative to package root).
-    /// Presence of this field marks the package as a ByteCode HAR.
+    /// hvigor's ByteCode HAR marker.
+    pub byte_code_har: bool,
+    /// Compatibility fallback for older fixtures.
     pub abc_path: Option<PathBuf>,
     /// Optional source maps for the ABC file.
     pub source_maps_path: Option<PathBuf>,
     /// Optional insight intent JSON path.
     pub insight_intent_path: Option<PathBuf>,
+    /// Normalized OHM URLs for worker/runtimeOnly/startup/insight-intent records.
+    pub declaration_entry: Vec<String>,
 }
-
-// In OhPackageJson5:
-pub metadata: Option<OhPackageMetadata>,
 ```
 
 ### 2. `is_bytecode_har()` Detection
 
 ```rust
-impl OhPackageJson5 {
-    /// Returns true if this package ships pre-compiled bytecode (ByteCode HAR).
-    pub fn is_bytecode_har(&self) -> bool {
-        self.metadata
-            .as_ref()
-            .and_then(|m| m.abc_path.as_ref())
-            .is_some()
-    }
+pub fn is_bytecode_har(pkg_dir: &Path, pkg: &OhPackageJson5) -> bool {
+    pkg.metadata.byte_code_har && pkg_dir.join("ets/modules.abc").exists()
 }
 ```
 
 ### 3. `BytecodeHarInfo` Metadata
 
-- `metadata.abcPath` is the primary ByteCode HAR signal and becomes absolute
-  `byteCodeHarInfo[pkg].abcPath`.
+- `metadata.byteCodeHar` plus an existing `ets/modules.abc` is the hvigor-aligned
+  ByteCode HAR signal.
+- `byteCodeHarInfo[pkg].abcPath` points to absolute `<pkg>/ets/modules.abc`.
 - `metadata.sourceMapsPath` is serialized as absolute `sourceMapsPath` when present.
+- If `metadata.sourceMapsPath` is absent, `<pkg>/ets/sourceMaps.map` is used when
+  it exists.
 - `metadata.insightIntentPath` is serialized as absolute `insightIntent` when present.
-- `main` ending in `.abc` and root `index.abc` remain compatibility fallbacks for
-  older fixtures, but the metadata fields are the hvigor-aligned path.
+- `metadata.abcPath`, `main` ending in `.abc`, and root `index.abc` remain
+  compatibility fallbacks for older fixtures.
+- `metadata.declarationEntry` is an array of normalized OHM URLs. It must be
+  copied into loader.json `declarationEntry`; it is not a declaration file path.
 
 ### 4. `generate_loader_json()` Population
 
@@ -128,6 +133,7 @@ for dep in scan_bytecode_har_deps(module_root, project_root) {
         dep.package_name.clone(),
         dep.into_loader_entry().1,
     );
+    loader_json.declaration_entry.extend(dep.declaration_entry);
 }
 ```
 
@@ -141,23 +147,28 @@ Ensure that `loader_json.compile_entry` does not include source files from ByteC
 HAR dependencies. The existing entry collection in `generate_loader_json()` should
 skip any dependency where `is_bytecode_har()` is true.
 
-### 6. `harNameOhmMap` for ByteCode HARs
+### 6. `declarationEntry` Reachability
 
-ByteCode HARs also need entries in `harNameOhmMap` so the resolver can map package
-names to OHM URLs for cross-module references:
+hvigor has two declaration-entry paths:
 
-```rust
-// For each ByteCode HAR dep:
-loader_json.har_name_ohm_map.insert(
-    dep.package_name.clone(),
-    format!(
-        "@bundle:{}/{}/{}",
-        config.bundle_name,
-        dep.module_name,
-        dep.entry_ohm_path,
-    ),
-);
-```
+- When building a ByteCode HAR, `ProcessHarArtifacts.processDeclarationEntry()`
+  generates `metadata.declarationEntry` from ability `srcEntry`, startup tasks,
+  insight-intent entries, workers, `runtimeOnly.sources`, and bundled dependency
+  config.
+- When consuming a ByteCode HAR, `GenerateLoaderJson.processDeclarationEntry()`
+  copies dependency `metadata.declarationEntry` into loader.json and adds entry
+  OHM URLs for `runtimeOnly.packages` that reference ByteCode HARs.
+
+Current arkdown support copies dependency `metadata.declarationEntry` verbatim and
+deduplicates it. Generation of a ByteCode HAR's own `metadata.declarationEntry`
+remains a separate packaging-stage task.
+
+### 7. `harNameOhmMap` for ByteCode HARs
+
+ByteCode HARs also need entries in `harNameOhmMap` when building a ByteCode HAR
+target. hvigor derives those URLs from `pkgContextInfo` and
+`ohmurl-utils.generateOhmUrl()`. The full dependency-manager graph parity is
+still tracked separately.
 
 ---
 
@@ -180,10 +191,14 @@ crates/arkdown-resolver/src/
 
 ## Test Plan
 
-- `OhPackageJson5` with `metadata.abcPath` set: `is_bytecode_har()` returns `true`.
+- `OhPackageJson5` with `metadata.byteCodeHar: true` and `ets/modules.abc`:
+  `is_bytecode_har()` returns `true`.
 - `OhPackageJson5` without `metadata`: `is_bytecode_har()` returns `false`.
 - `generate_loader_json()` with a ByteCode HAR dep: dep appears in `byteCodeHarInfo`,
   NOT in `compileEntry`.
+- `generate_loader_json()` with a ByteCode HAR dep that has
+  `metadata.declarationEntry`: loader.json `declarationEntry` contains the same
+  normalized OHM URLs, deduplicated in first-seen order.
 - `generate_loader_json()` with a source HAR dep: dep appears in `compileEntry` and
   `pkgNameToPkgBriefInfo`, NOT in `byteCodeHarInfo`.
 - `BytecodeHarInfo.abc_path` is an absolute path (not relative to project root).
@@ -201,9 +216,13 @@ crates/arkdown-resolver/src/
 ## Upstream References
 
 - `~/Downloads/command-line-tools/hvigor/hvigor-ohos-plugin/src/tasks/generate-loader-json.js`
-  — `doTaskAction()` `byteCodeHarInfo` population, `DependencyManager` usage
-- `~/Downloads/command-line-tools/hvigor/hvigor-ohos-plugin/src/tasks/ark-compile.js`
-  — `setByteCodeHarToDependencyKeys()`, `isByteCodeHarDependency()`
+  — `setByteCodeHarInfoAndOtherCompileFiles()`, `processDeclarationEntry()`
+- `~/Downloads/command-line-tools/hvigor/hvigor-ohos-plugin/src/utils/byte-code-har-utils.js`
+  — `collectByteCodeHarInfo()`, `collectByteCodeInfoAndOtherCompileEntrances()`
+- `~/Downloads/command-line-tools/hvigor/hvigor-ohos-plugin/src/project/dependency/core/default-npm-dependency.js`
+  — `isByteCodeHarDependency()` reads `metadata.byteCodeHar`
+- `~/Downloads/command-line-tools/hvigor/hvigor-ohos-plugin/src/tasks/process-har-artifacts.js`
+  — ByteCode HAR package `metadata.declarationEntry` generation
 - `meta/tasks/SPEC-010-profile-processor.md` — `LoaderJson` schema, `byteCodeHarInfo` stub
 - `meta/design/module-resolution.md` — OHM URL format for HAR dependencies
 - `meta/design/hvigorw-analysis.md` §9 — `loader.json` schema reference

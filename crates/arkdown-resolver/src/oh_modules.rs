@@ -9,6 +9,13 @@ pub fn read_main_field(oh_package_path: &Path) -> Option<String> {
     v.get("main")?.as_str().map(|s| s.to_string())
 }
 
+/// Read the `types` field from an `oh-package.json5` file.
+pub fn read_types_field(oh_package_path: &Path) -> Option<String> {
+    let content = fs_err::read_to_string(oh_package_path).ok()?;
+    let v: serde_json::Value = json5::from_str(&content).ok()?;
+    v.get("types")?.as_str().map(|s| s.to_string())
+}
+
 /// Read the `version` field from an `oh-package.json5` file.
 ///
 /// Returns an empty string if the field is absent or unreadable.
@@ -29,38 +36,62 @@ pub fn read_version_field(oh_package_path: &Path) -> String {
 
 /// Returns `true` if this package is a ByteCode HAR.
 ///
-/// Criteria: `oh-package.json5` has `metadata.declarationEntry` OR `main` ends in `.abc`.
+/// hvigor marks ByteCode HAR packages with `metadata.byteCodeHar` and writes
+/// the bytecode to `ets/modules.abc`. `metadata.abcPath`, `main: "*.abc"`, and
+/// `index.abc` are accepted as compatibility fallbacks.
 pub fn is_bytecode_har(oh_package_path: &Path) -> bool {
-    let content = match fs_err::read_to_string(oh_package_path) {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    let v: serde_json::Value = match json5::from_str(&content) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-    if v.pointer("/metadata/declarationEntry").is_some() {
-        return true;
-    }
-    if let Some(main) = v.get("main").and_then(|m| m.as_str()) {
-        if main.ends_with(".abc") {
-            return true;
-        }
-    }
-    false
+    read_bytecode_abc_path(oh_package_path).is_some()
 }
 
-/// Resolve the declaration entry path for a ByteCode HAR.
-///
-/// Returns `None` if the package is not a ByteCode HAR or the field is missing.
-pub fn read_declaration_entry(oh_package_path: &Path) -> Option<PathBuf> {
+/// Resolve the bytecode artifact path for a ByteCode HAR.
+pub fn read_bytecode_abc_path(oh_package_path: &Path) -> Option<PathBuf> {
     let content = fs_err::read_to_string(oh_package_path).ok()?;
     let v: serde_json::Value = json5::from_str(&content).ok()?;
-    let decl = v
-        .pointer("/metadata/declarationEntry")
-        .and_then(|d| d.as_str())?;
     let pkg_dir = oh_package_path.parent()?;
-    Some(pkg_dir.join(decl))
+
+    if v.pointer("/metadata/byteCodeHar")
+        .and_then(|d| d.as_bool())
+        .unwrap_or(false)
+    {
+        let abc_path = pkg_dir.join("ets").join("modules.abc");
+        if abc_path.exists() {
+            return Some(abc_path);
+        }
+    }
+
+    if let Some(abc_path) = v.pointer("/metadata/abcPath").and_then(|d| d.as_str()) {
+        let abc_path = pkg_dir.join(abc_path);
+        if abc_path.exists() {
+            return Some(abc_path);
+        }
+    }
+
+    if let Some(main) = v
+        .get("main")
+        .and_then(|m| m.as_str())
+        .filter(|main| main.ends_with(".abc"))
+    {
+        let abc_path = pkg_dir.join(main);
+        if abc_path.exists() {
+            return Some(abc_path);
+        }
+    }
+
+    let abc_path = pkg_dir.join("index.abc");
+    abc_path.exists().then_some(abc_path)
+}
+
+/// Resolve the declaration file path for a ByteCode HAR.
+///
+/// `metadata.declarationEntry` is not a file path in hvigor; it is an array of
+/// normalized OHM URLs used to keep runtime-only records alive. For editor and
+/// type-resolution metadata, prefer `types`, then `index.d.ets`.
+pub fn read_declaration_entry(oh_package_path: &Path) -> Option<PathBuf> {
+    let pkg_dir = oh_package_path.parent()?;
+    if let Some(types) = read_types_field(oh_package_path) {
+        return Some(pkg_dir.join(types));
+    }
+    Some(pkg_dir.join("index.d.ets"))
 }
 
 #[cfg(test)]
@@ -77,16 +108,32 @@ mod tests {
     }
 
     #[test]
-    fn test_is_bytecode_har_declaration_entry() {
-        let json = r#"{ "name": "foo", "version": "1.0.0", "main": "index.ets", "metadata": { "declarationEntry": "index.d.ets" } }"#;
-        let (_dir, path) = write_temp(json);
+    fn test_is_bytecode_har_hvigor_marker() {
+        let (dir, path) = write_temp(
+            r#"{ "name": "foo", "version": "1.0.0", "metadata": { "byteCodeHar": true } }"#,
+        );
+        std::fs::create_dir_all(dir.path().join("ets")).unwrap();
+        std::fs::write(
+            dir.path().join("ets").join("modules.abc"),
+            b"PANDA\x00\x00\x00",
+        )
+        .unwrap();
         assert!(is_bytecode_har(&path));
+        assert!(read_bytecode_abc_path(&path)
+            .expect("abc path")
+            .ends_with("ets/modules.abc"));
     }
 
     #[test]
     fn test_is_bytecode_har_main_abc() {
         let json = r#"{ "name": "foo", "version": "1.0.0", "main": "dist/index.abc" }"#;
-        let (_dir, path) = write_temp(json);
+        let (dir, path) = write_temp(json);
+        std::fs::create_dir_all(dir.path().join("dist")).unwrap();
+        std::fs::write(
+            dir.path().join("dist").join("index.abc"),
+            b"PANDA\x00\x00\x00",
+        )
+        .unwrap();
         assert!(is_bytecode_har(&path));
     }
 
@@ -102,5 +149,23 @@ mod tests {
         let json = r#"{ "name": "foo", "main": "src/index.ets" }"#;
         let (_dir, path) = write_temp(json);
         assert_eq!(read_main_field(&path), Some("src/index.ets".to_string()));
+    }
+
+    #[test]
+    fn test_read_declaration_entry_uses_types_not_metadata_declaration_entry() {
+        let json = r#"{
+          "name": "foo",
+          "types": "dist/index.d.ts",
+          "metadata": {
+            "declarationEntry": [
+              "@normalized:N&entry&com.example&foo/src/main/ets/Worker&1.0.0"
+            ]
+          }
+        }"#;
+        let (dir, path) = write_temp(json);
+        assert_eq!(
+            read_declaration_entry(&path),
+            Some(dir.path().join("dist/index.d.ts"))
+        );
     }
 }

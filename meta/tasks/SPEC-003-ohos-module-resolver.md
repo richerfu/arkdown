@@ -31,7 +31,7 @@ See `meta/design/module-resolution.md` for full details. Summary:
 | `@shared:`   | `@shared:com.foo/hsp/path`      | External — not bundled                             |
 | Bare ohpm    | `my-ohpm-package`               | `oh_modules/<pkg>/oh-package.json5` → `main`       |
 | `file:` HAR  | `file:../my-har`                | Local directory → resolve `src/main/ets/index.ets` |
-| ByteCode HAR | package with `metadata.abcPath` | External ABC ref, skip source compilation          |
+| ByteCode HAR | package with `metadata.byteCodeHar` and `ets/modules.abc` | External ABC ref, skip source compilation          |
 
 ---
 
@@ -73,7 +73,7 @@ fn resolve(specifier, importer):
     5. bare specifier:
         a. look up in pkg_name_to_pkg_info (local HAR)
         b. look up in oh_modules/ (installed ohpm packages)
-        c. if oh-package.json5 has metadata.abcPath → BytecodeHar
+        c. if oh-package.json5 has metadata.byteCodeHar and ets/modules.abc → BytecodeHar
     6. fallback: return ResolveError::NotFound
 ```
 
@@ -209,7 +209,7 @@ file's directory, not the module root. This ensures that:
 - `resolve("@shared:com.foo/hsp/ets/index", importer)` → `ExternalHsp { .. }`
 - `resolve("./utils/helper", importer)` → `LocalSource` with `.ets` extension tried first, then `.ts`, then `.js`
 - `resolve("my-ohpm-pkg", importer)` → reads `oh_modules/my-ohpm-pkg/oh-package.json5` `main` field and returns `LocalSource` at that path
-- `resolve("my-bytecode-har", importer)` where `oh-package.json5` has `metadata.abcPath` → `BytecodeHar`
+- `resolve("my-bytecode-har", importer)` where `oh-package.json5` has `metadata.byteCodeHar: true` and `ets/modules.abc` → `BytecodeHar`
 - `resolve("file:../my-local-har", importer)` → `LocalSource` at the local HAR's `src/main/ets/index.ets`
 - `resolve("nonexistent-pkg", importer)` → `Err(ResolveError::NotFound { .. })`
 - OHM URL generation with `use_normalized_ohm_url = true`: `to_ohm_url()` on a local source file produces `"@bundle:com.example/entry/ets/utils/helper"` (no `.ets` extension, path relative to `src/main/`)
