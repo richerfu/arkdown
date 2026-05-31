@@ -291,7 +291,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             .bundle(loader_json)
             .await
             .map_err(|e| anyhow::anyhow!("Bundle failed: {}", e))?;
-        write_compile_arkts_cache(module, loader_json, &config_arc)?;
+        let _compile_arkts_inputs = write_compile_arkts_cache(module, loader_json, &config_arc)?;
         bundle_outs.push((bundle_out, false));
     }
     progress.done();
@@ -435,9 +435,10 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 ))
             })
             .collect();
-        // Use the explicit chunk file list from bundle_out rather than scanning the
-        // output directory — this prevents stale files from prior runs from being
-        // picked up and producing incorrect ABC record entries.
+        // Keep bytecode generation on the chunk path for now: the Rust ABC
+        // backend currently matches hvigor CodeItems from this source shape.
+        // The CompileArkTS cache TS files and filesInfo.txt are still generated
+        // above as the upstream debug/source-map oracle.
         let compile_arkts_source_maps = read_compile_arkts_source_map_values(module, &config_arc)?;
         let ts2abc_inputs = collect_js_chunks_from_output(
             &bundle_out.chunk_files,
@@ -979,7 +980,7 @@ fn write_compile_arkts_cache(
     module: &ModuleConfig,
     loader_json: &arkdown_profile::LoaderJson,
     config: &Arc<ArkdownConfig>,
-) -> Result<()> {
+) -> Result<Vec<Ts2abcInput>> {
     let module_root = PathBuf::from(&loader_json.module_root_path);
     let mode_dir = match config.build_mode {
         BuildMode::Debug => "debug",
@@ -992,6 +993,7 @@ fn write_compile_arkts_cache(
     let ts_root = cache_root.join(&loader_json.module_name).join("src/main");
     let transformer = EtsTransformPlugin::new(config.clone());
     let mut source_map_lines = Vec::new();
+    let mut compile_infos = Vec::new();
 
     for entry in &loader_json.compile_entry {
         let source_file = entry.trim_start_matches("./").to_string();
@@ -1018,6 +1020,25 @@ fn write_compile_arkts_cache(
         }
         fs_err::write(&ts_path, code)
             .with_context(|| format!("failed to write transformed TS {}", ts_path.display()))?;
+        compile_infos.push(CompileArkTsInfo {
+            ts_path,
+            record_name: format!(
+                "{}/{}/{}",
+                config.product.bundle_name,
+                loader_json.module_name,
+                source_file
+                    .trim_end_matches(".ets")
+                    .trim_end_matches(".ts")
+                    .trim_end_matches(".js")
+            ),
+            module_type: "esm".to_string(),
+            source_file: format!(
+                "{}|{}|1.0.0|src/main/{}",
+                loader_json.module_name, loader_json.module_name, ts_rel
+            ),
+            package_name: loader_json.module_name.clone(),
+            abc_cache_path: None,
+        });
 
         if let Some(source_map) = output.map.into_sourcemap() {
             let raw_map = source_map.to_json_string();
@@ -1046,24 +1067,96 @@ fn write_compile_arkts_cache(
                 "mappings": mappings,
                 "entry-package-info": format!("{}|1.0.0", loader_json.module_name),
             });
-            source_map_lines.push(serde_json::json!({
-                "key": key,
-                "val": val,
-            }));
+            source_map_lines.push(format!(
+                "{{\"key\": {}, \"val\": {}}}",
+                serde_json::to_string(&key)?,
+                serde_json::to_string(&val)?
+            ));
         }
     }
 
     if !source_map_lines.is_empty() {
         fs_err::create_dir_all(&cache_root)?;
-        let mut content = String::new();
-        for line in source_map_lines {
-            content.push_str(&serde_json::to_string(&line)?);
-            content.push('\n');
-        }
-        fs_err::write(cache_root.join("sourceMaps.json"), content)?;
+        fs_err::write(
+            cache_root.join("sourceMaps.json"),
+            source_map_lines.join("\n"),
+        )?;
     }
 
-    Ok(())
+    compile_infos.sort_by(|a, b| a.source_file.cmp(&b.source_file));
+    write_compile_arkts_abc_handoff(&cache_root, &compile_infos)
+}
+
+struct CompileArkTsInfo {
+    ts_path: PathBuf,
+    record_name: String,
+    module_type: String,
+    source_file: String,
+    package_name: String,
+    abc_cache_path: Option<PathBuf>,
+}
+
+fn write_compile_arkts_abc_handoff(
+    cache_root: &Path,
+    infos: &[CompileArkTsInfo],
+) -> Result<Vec<Ts2abcInput>> {
+    fs_err::create_dir_all(cache_root)?;
+    let cache_root = canonical_or_owned(cache_root);
+
+    let mut files_info = String::new();
+    let mut modules_cache = String::new();
+    let mut inputs = Vec::with_capacity(infos.len());
+
+    for info in infos {
+        let ts_path = canonical_or_owned(&info.ts_path);
+        let abc_cache_path = info
+            .abc_cache_path
+            .clone()
+            .unwrap_or_else(|| ts_path.with_extension("protoBin"));
+        files_info.push_str(&format!(
+            "{};{};{};{};{};false;ets\n",
+            path_string(&ts_path),
+            info.record_name,
+            info.module_type,
+            info.source_file,
+            info.package_name
+        ));
+        modules_cache.push_str(&format!(
+            "{};{}\n",
+            path_string(&ts_path),
+            path_string(&abc_cache_path)
+        ));
+        inputs.push(Ts2abcInput {
+            path: ts_path,
+            record_name: info.record_name.clone(),
+            source_file: Some(info.source_file.clone()),
+            source_map: None,
+        });
+    }
+
+    fs_err::write(cache_root.join("filesInfo.txt"), files_info)?;
+
+    let npm_entries_path = cache_root.join("npmEntries.txt");
+    let npm_entries = [
+        "@system.app:@native.system.app",
+        "@ohos.app:@native.ohos.app",
+        "@system.router:@native.system.router",
+        "@system.curves:@native.system.curves",
+        "@ohos.curves:@native.ohos.curves",
+        "@system.matrix4:@native.system.matrix4",
+        "@ohos.matrix4:@native.ohos.matrix4",
+    ]
+    .join("\n")
+        + "\n";
+    fs_err::write(&npm_entries_path, npm_entries)?;
+    modules_cache.push_str(&format!(
+        "{};{}\n",
+        path_string(&npm_entries_path),
+        path_string(&npm_entries_path.with_extension("protoBin"))
+    ));
+    fs_err::write(cache_root.join("modules.cache"), modules_cache)?;
+
+    Ok(inputs)
 }
 
 fn read_compile_arkts_source_maps(
