@@ -94,7 +94,7 @@ with that file list and `npmEntries.txt`.
 
 For the minimal fixture, the generated cache TypeScript bytes match hvigor. A
 temporary experiment compiling those cache TS files directly through `arkdown-abc`
-now emits 9859B and has the same 23 method records and byte-identical CodeItems
+now emits 9841B and has the same 23 method records and byte-identical CodeItems
 as hvigor. The fixes came directly from the upstream lowering path:
 `ClassDeclaration::Compile` / `ClassDefinition::Compile` scoped class temporaries,
 `ExportDefaultDeclaration` records named default classes under the class local
@@ -111,16 +111,15 @@ capture `this`, hidden `newlexenvwithname` prologue filtering, derived
 constructor final super-call validation source positions, and top-level
 call-argument arrow return positions. The current source-position pass also
 aligns class declaration/class export stores, variable declarator stores, call
-argument stores, and getter/setter property-key stores to the AST nodes used by
-upstream. These match
+argument stores, getter/setter property-key stores, and module-entry implicit
+return source reset to the AST nodes used by upstream. These match
 `FunctionBuilder::ImplicitReturn()`, `Condition::Compile()`,
 `Identifier::Compile()`, `GenScopeVariableInfo()`, and
 `CheckIfSuperCorrectCallBeforeReturn()` in upstream es2panda. The direct route
-is now 15B larger than hvigor overall while still having per-method undershoots
-and overshoots. The size increase came from restoring upstream source-backed
-events that were previously missing, not from changing bytecode. The remaining
-mismatch is in non-CodeItem ABC sections such as DebugInfo/LNP, annotations,
-indexes, or literal metadata rather than executable bytecode.
+is now 3B smaller than hvigor overall while still having per-method undershoots
+and overshoots. The remaining mismatch is in non-CodeItem ABC sections such as
+DebugInfo/LNP, annotations, indexes, or literal metadata rather than executable
+bytecode.
 
 Source-map routing was also checked against this state. Using rolldown chunk
 source maps for ABC debug info regressed the minimal fixture to 9679B, and the
@@ -130,7 +129,7 @@ upstream `gen_merged_abc.ts` passes `filesInfo.txt` and `npmEntries.txt` to
 source maps only for API compatibility; `source_file` is passed separately from
 `filesInfo`-style metadata, and LNP coordinates come from parsed source spans.
 This source-derived route currently emits 9700B while preserving all CodeItems.
-The direct cache-TS route also preserves CodeItems now, but it is 9859B and still
+The direct cache-TS route also preserves CodeItems now, but it is 9841B and still
 needs section-level parity before becoming the final default path.
 
 ## Remaining ABC Gap
@@ -145,8 +144,8 @@ Observed LNP differences:
   `Index #*#` and `Index #*#^1` are aligned on the direct cache-TS route.
 - `Index func_main_0` has identical CodeItem bytes and the early class
   declaration / getter-setter source-position stream is mostly aligned. Remaining
-  differences are concentrated near static-method/class-local closeout and
-  module implicit-return epilogue events.
+  differences are concentrated near static-method/class-local closeout and the
+  final module line closeout for `Index`.
 - Normal class methods show the same pattern: code bytes match, but the line and
   column coordinates come from a mixed chunk/cache coordinate system. For
   example, kept-for-inspection chunk JS had `EntryAbility.onBackground` on
@@ -193,7 +192,7 @@ Priority order from the current 2026-05-31 state:
    and field initializer variants still need golden coverage.
 3. **[ABC Direct TS] Diff non-CodeItem sections on the cache-TS route.** The
    source TS is already equal to hvigor and all direct-route CodeItems match; the
-   remaining 15B overall growth must be isolated to DebugInfo/LNP, annotations,
+   remaining 3B overall shrink must be isolated to DebugInfo/LNP, annotations,
    indexes, literal arrays, or other metadata, while preserving the per-method
    source-node fixes already matched to upstream.
 4. **[Parity harness] Add an ABC diff helper that compares CodeItems separately

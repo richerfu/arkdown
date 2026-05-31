@@ -2467,6 +2467,7 @@ fn compile_body_stmts(
     param_names: &[String],
 ) -> (Vec<u8>, Vec<CatchEntry>) {
     let mut cg = CodeGen::new(strings, literal_arrays, lowering);
+    cg.module_body = module_body;
     if module_body {
         cg.emit_module_lex_env_prologue();
         cg.bind_param_names(param_names);
@@ -2501,6 +2502,7 @@ fn compile_body_stmts_tracked(
 ) -> (Vec<u8>, Vec<u8>, Vec<CatchEntry>) {
     let mut cg = CodeGen::new_with_source(strings, literal_arrays, lowering, source, source_mapper);
     cg.function_end = function_end;
+    cg.module_body = module_body;
     if module_body {
         cg.emit_module_lex_env_prologue();
         cg.bind_param_names(param_names);
@@ -2718,6 +2720,7 @@ struct CodeGen<'a> {
     gen_reg: Option<u8>,
     is_async: bool,
     async_reg: Option<u8>,
+    module_body: bool,
 }
 
 impl<'a> CodeGen<'a> {
@@ -2750,6 +2753,7 @@ impl<'a> CodeGen<'a> {
             gen_reg: None,
             is_async: false,
             async_reg: None,
+            module_body: false,
         }
     }
 
@@ -2996,6 +3000,11 @@ impl<'a> CodeGen<'a> {
                 self.current_col = u32::MAX;
                 self.push(Insn::LdUndefined);
                 self.set_debug_pos(end);
+                self.push(Insn::ReturnUndefined);
+            } else if self.module_body && self.source.is_some() {
+                self.current_line = 0;
+                self.current_col = u32::MAX;
+                self.push(Insn::LdUndefined);
                 self.push(Insn::ReturnUndefined);
             } else {
                 self.push_with_epilogue(Insn::LdUndefined);
