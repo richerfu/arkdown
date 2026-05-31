@@ -65,7 +65,7 @@ pub fn process_profile_with_ark_vm_version(
         abilities,
         extension_abilities,
         dependencies: vec![],
-        router_map: None,
+        router_map: module_json5.module.router_map.clone(),
         pages: module_json5.module.pages.clone(),
         main_element: module_json5.module.main_element.clone(),
         description: module_json5.module.description.clone(),
@@ -108,6 +108,7 @@ mod tests {
                 main_element: None,
                 device_types: vec!["phone".to_string()],
                 pages: Some("$profile:main_pages".to_string()),
+                router_map: None,
                 description: None,
                 abilities: vec![AbilityConfig {
                     name: "EntryAbility".to_string(),

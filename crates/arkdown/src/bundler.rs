@@ -126,11 +126,10 @@ impl Bundler {
         // rolldown helpers (`__toESM`, `__copyProps`, etc.) that do not exist
         // in hvigor's bytecode.
         //
-        // module_types maps ".ets" → Ts so rolldown uses the TypeScript parser
-        // for ArkTS source files.  Rolldown's transform hook runs AFTER the
-        // parse step, so the module must parse successfully before EtsTransform
-        // can process ArkTS-specific constructs.  Standard-TypeScript .ets files
-        // (the common case) parse cleanly under the Ts parser.
+        // module_types maps ".ets" → Ts so rolldown parses the post-transform
+        // source as standard TypeScript. EtsTransformPlugin also implements the
+        // load hook, so ArkTS-only syntax such as @Builder functions and ArkUI
+        // DSL blocks is lowered before rolldown's parser sees the module.
         let mut module_types = rustc_hash::FxHashMap::default();
         module_types.insert("ets".to_string(), RdModuleType::Ts);
 

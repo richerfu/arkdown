@@ -3,7 +3,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use arkdown_core::{ArkdownConfig, BuildMode, HapManifest, ModuleConfig};
+use arkdown_core::{ArkdownConfig, BuildMode, HapManifest, ModuleConfig, OhosModuleType};
 
 use crate::bytecode_har::{collect_dynamic_import_lib_info, scan_bytecode_har_deps};
 
@@ -175,6 +175,16 @@ pub fn generate_loader_json(
     if let Some(src_entry) = &manifest.src_entry {
         compile_entry.push(src_entry.clone());
     }
+    if compile_entry.is_empty()
+        && matches!(
+            manifest.module_type,
+            OhosModuleType::Har | OhosModuleType::Shared
+        )
+    {
+        if let Some(main) = read_package_main(&module_cfg.src_path) {
+            compile_entry.push(to_absolute_path_string(&module_cfg.src_path.join(main)));
+        }
+    }
 
     // Include pages from $profile:main_pages so that page components are
     // compiled alongside ability entry points.  The EtsTransformPlugin stubs
@@ -228,47 +238,6 @@ pub fn generate_loader_json(
         }
     }
 
-    // Discover router map page entries from router_map.json.
-    // hvigor reads this profile and adds each destination page to compileEntry
-    // so the router pages are compiled even if not imported by any ability.
-    let router_map_path = module_cfg
-        .src_path
-        .join("src/main/resources/base/profile/router_map.json");
-    if router_map_path.is_file() {
-        if let Ok(content) = std::fs::read_to_string(&router_map_path) {
-            #[derive(serde::Deserialize)]
-            struct RouterMapFile {
-                #[serde(rename = "routerMap")]
-                router_map: Vec<RouterMapPage>,
-            }
-            #[derive(serde::Deserialize)]
-            struct RouterMapPage {
-                #[serde(rename = "pageSourceFile")]
-                page_source_file: String,
-            }
-            // Attempt top-level `{ "routerMap": [...] }` format first, then
-            // fall back to a bare array `[...]`.
-            let pages_opt: Option<Vec<RouterMapPage>> =
-                serde_json::from_str::<RouterMapFile>(&content)
-                    .map(|f| f.router_map)
-                    .ok()
-                    .or_else(|| serde_json::from_str::<Vec<RouterMapPage>>(&content).ok());
-            if let Some(pages) = pages_opt {
-                for page in &pages {
-                    // pageSourceFile is typically "src/main/ets/pages/Foo.ets";
-                    // strip the "src/main/" prefix so it matches the ./ets/... format.
-                    let rel =
-                        if let Some(stripped) = page.page_source_file.strip_prefix("src/main/") {
-                            format!("./{}", stripped)
-                        } else {
-                            page.page_source_file.clone()
-                        };
-                    compile_entry.push(rel);
-                }
-            }
-        }
-    }
-
     // Deduplicate while preserving order.
     {
         let mut seen = std::collections::HashSet::new();
@@ -295,6 +264,7 @@ pub fn generate_loader_json(
         .build_option
         .strict_mode
         .use_normalized_ohm_url;
+    let router_map = read_loader_router_map(module_cfg, manifest.router_map.as_deref());
 
     let mut module_path_map = HashMap::new();
     module_path_map.insert(module_cfg.name.clone(), module_root.clone());
@@ -337,7 +307,7 @@ pub fn generate_loader_json(
         hvigor_compile_entry: vec![],
         other_compile_files: vec![],
         dynamic_import_lib_info,
-        router_map: vec![],
+        router_map,
         hsp_resources_map: HashMap::new(),
         update_version_info: HashMap::new(),
         an_build_out_put: format!(
@@ -387,6 +357,72 @@ fn read_dynamic_dep_names(module_root: &Path) -> Vec<String> {
     json5::from_str::<PkgDynDeps>(&content)
         .map(|p| p.dynamic_dependencies.into_keys().collect())
         .unwrap_or_default()
+}
+
+fn read_package_main(module_root: &Path) -> Option<String> {
+    let path = module_root.join("oh-package.json5");
+    let content = std::fs::read_to_string(path).ok()?;
+
+    #[derive(serde::Deserialize)]
+    struct PackageMain {
+        main: Option<String>,
+    }
+
+    json5::from_str::<PackageMain>(&content).ok()?.main
+}
+
+fn read_loader_router_map(
+    module_cfg: &ModuleConfig,
+    router_map_ref: Option<&str>,
+) -> Vec<serde_json::Value> {
+    let Some(profile_name) = router_map_ref.and_then(|value| value.strip_prefix("$profile:"))
+    else {
+        return vec![];
+    };
+
+    let path = module_cfg
+        .src_path
+        .join("src/main/resources/base/profile")
+        .join(format!("{profile_name}.json"));
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return vec![];
+    };
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return vec![];
+    };
+
+    let Some(entries) = value
+        .get_mut("routerMap")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return value.as_array().cloned().unwrap_or_default();
+    };
+
+    let src_main = module_cfg.src_path.join("src/main");
+    for entry in entries.iter_mut() {
+        let Some(obj) = entry.as_object_mut() else {
+            continue;
+        };
+        let Some(page_source_file) = obj
+            .get("pageSourceFile")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        if Path::new(&page_source_file).is_absolute() {
+            continue;
+        }
+        let absolute = to_absolute_path_string(
+            &src_main.join(page_source_file.trim_start_matches("src/main/")),
+        );
+        obj.insert(
+            "pageSourceFile".to_string(),
+            serde_json::Value::String(absolute),
+        );
+    }
+
+    entries.clone()
 }
 
 /// Build the `pkgNameToPkgBriefInfo` map for the loader.json.
@@ -957,6 +993,71 @@ mod tests {
                 .len(),
             0
         );
+    }
+
+    #[test]
+    fn test_har_uses_oh_package_main_as_internal_entry() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let module_root = tmp.path().join("feature");
+        std::fs::create_dir_all(&module_root).unwrap();
+        std::fs::write(
+            module_root.join("oh-package.json5"),
+            r#"{ name: "feature", main: "Index.ets" }"#,
+        )
+        .unwrap();
+        std::fs::write(module_root.join("Index.ets"), "export {}").unwrap();
+
+        let config = make_config(false);
+        let module_cfg = ModuleConfig {
+            name: "feature".to_string(),
+            src_path: module_root.clone(),
+            module_type: OhosModuleType::Har,
+        };
+        let mut manifest = make_manifest();
+        manifest.module_name = "feature".to_string();
+        manifest.module_type = OhosModuleType::Har;
+        manifest.abilities.clear();
+        manifest.pages = None;
+
+        let loader = generate_loader_json(&config, &module_cfg, &manifest);
+        assert_eq!(
+            loader.compile_entry,
+            vec![to_absolute_path_string(&module_root.join("Index.ets"))]
+        );
+        assert!(loader.hvigor_compile_entry.is_empty());
+    }
+
+    #[test]
+    fn test_router_map_metadata_does_not_become_compile_entry() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let module_root = tmp.path().join("entry");
+        let profile_dir = module_root.join("src/main/resources/base/profile");
+        std::fs::create_dir_all(&profile_dir).unwrap();
+        std::fs::write(
+            profile_dir.join("router_map.json"),
+            r#"{"routerMap":[{"name":"detail","pageSourceFile":"src/main/ets/pages/Detail.ets","buildFunction":"DetailBuilder"}]}"#,
+        )
+        .unwrap();
+
+        let config = make_config(false);
+        let module_cfg = ModuleConfig {
+            name: "entry".to_string(),
+            src_path: module_root.clone(),
+            module_type: OhosModuleType::Entry,
+        };
+        let mut manifest = make_manifest();
+        manifest.pages = None;
+        manifest.router_map = Some("$profile:router_map".to_string());
+
+        let loader = generate_loader_json(&config, &module_cfg, &manifest);
+        assert_eq!(
+            loader.compile_entry,
+            vec!["./ets/entryability/EntryAbility.ets".to_string()]
+        );
+        assert_eq!(loader.router_map.len(), 1);
+        assert!(loader.router_map[0]["pageSourceFile"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("src/main/ets/pages/Detail.ets")));
     }
 
     /// Verify `dynamicImportLibInfo` is populated when an oh_modules dep exists.

@@ -503,6 +503,7 @@ mod tests {
                 main_element: Some("EntryAbility".to_string()),
                 device_types: vec!["phone".to_string()],
                 pages: Some("$profile:main_pages".to_string()),
+                router_map: None,
                 description: None,
                 abilities: vec![AbilityConfig {
                     name: "EntryAbility".to_string(),
@@ -670,6 +671,7 @@ fi
                 main_element: Some("EntryAbility".to_string()),
                 device_types: vec!["phone".to_string()],
                 pages: Some("$profile:main_pages".to_string()),
+                router_map: None,
                 description: Some("$string:module_desc".to_string()),
                 abilities: vec![AbilityConfig {
                     name: "EntryAbility".to_string(),

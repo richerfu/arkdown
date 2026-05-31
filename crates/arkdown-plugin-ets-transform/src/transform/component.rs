@@ -62,7 +62,12 @@ pub struct StateField {
 pub struct ComponentInfo {
     pub name: String,
     pub is_entry: bool,
+    pub is_exported: bool,
+    pub is_default_export: bool,
     pub state_fields: Vec<StateField>,
+    /// Struct members that are not ArkUI state/decorator fields and are not
+    /// build/@Builder/@Styles methods. hvigor keeps these as class members.
+    pub regular_members: Vec<String>,
     /// Lowered body for the hvigor-style `initialRender()` method.
     pub initial_render_body: String,
     /// Span hints collected during ArkUI DSL lowering.  Each hint records a
@@ -104,7 +109,17 @@ pub fn generate_view_pu_class(info: &ComponentInfo) -> String {
     }
     out.push_str("}\n");
 
-    out.push_str(&format!("class {} extends ViewPU {{\n", info.name));
+    let export_prefix = if info.is_default_export {
+        "export default "
+    } else if info.is_exported {
+        "export "
+    } else {
+        ""
+    };
+    out.push_str(&format!(
+        "{export_prefix}class {} extends ViewPU {{\n",
+        info.name
+    ));
 
     out.push_str(concat!(
         "    constructor(parent, params, __localStorage, elmtId = -1, paramsLambda = undefined, extraInfo) {\n",
@@ -256,6 +271,15 @@ pub fn generate_view_pu_class(info: &ComponentInfo) -> String {
         }
     }
 
+    for member in &info.regular_members {
+        out.push_str("    ");
+        out.push_str(member.trim());
+        if !member.trim_end().ends_with('}') && !member.trim_end().ends_with(';') {
+            out.push(';');
+        }
+        out.push('\n');
+    }
+
     out.push_str("    initialRender() {\n");
     out.push_str(&info.initial_render_body);
     out.push_str("    }\n");
@@ -320,6 +344,8 @@ mod tests {
         ComponentInfo {
             name: "Counter".to_string(),
             is_entry: false,
+            is_exported: false,
+            is_default_export: false,
             state_fields: vec![StateField {
                 name: "count".to_string(),
                 type_annotation: "number".to_string(),
@@ -328,6 +354,7 @@ mod tests {
                 watch_handler: None,
                 alias: None,
             }],
+            regular_members: vec![],
             initial_render_body: concat!(
                 "        this.observeComponentCreation2((elmtId, isInitialRender) => {\n",
                 "            Text.create(`${this.count}`);\n",
@@ -403,6 +430,8 @@ mod tests {
         let info = ComponentInfo {
             name: "Child".to_string(),
             is_entry: false,
+            is_exported: false,
+            is_default_export: false,
             state_fields: vec![StateField {
                 name: "value".to_string(),
                 type_annotation: "string".to_string(),
@@ -411,6 +440,7 @@ mod tests {
                 watch_handler: None,
                 alias: None,
             }],
+            regular_members: vec![],
             initial_render_body: String::new(),
             initial_render_span_hints: vec![],
             builder_methods: vec![],
@@ -430,7 +460,10 @@ mod tests {
         let info = ComponentInfo {
             name: "Empty".to_string(),
             is_entry: false,
+            is_exported: false,
+            is_default_export: false,
             state_fields: vec![],
+            regular_members: vec![],
             initial_render_body: String::new(),
             initial_render_span_hints: vec![],
             builder_methods: vec![],
@@ -449,6 +482,8 @@ mod tests {
         let info = ComponentInfo {
             name: "Child".to_string(),
             is_entry: false,
+            is_exported: false,
+            is_default_export: false,
             state_fields: vec![StateField {
                 name: "items".to_string(),
                 type_annotation: "string[]".to_string(),
@@ -457,6 +492,7 @@ mod tests {
                 watch_handler: None,
                 alias: None,
             }],
+            regular_members: vec![],
             initial_render_body: String::new(),
             initial_render_span_hints: vec![],
             builder_methods: vec![],
@@ -486,6 +522,8 @@ mod tests {
         let info = ComponentInfo {
             name: "ItemRow".to_string(),
             is_entry: false,
+            is_exported: false,
+            is_default_export: false,
             state_fields: vec![StateField {
                 name: "item".to_string(),
                 type_annotation: "Item".to_string(),
@@ -494,6 +532,7 @@ mod tests {
                 watch_handler: None,
                 alias: None,
             }],
+            regular_members: vec![],
             initial_render_body: String::new(),
             initial_render_span_hints: vec![],
             builder_methods: vec![],
@@ -518,6 +557,8 @@ mod tests {
         let info = ComponentInfo {
             name: "Parent".to_string(),
             is_entry: false,
+            is_exported: false,
+            is_default_export: false,
             state_fields: vec![StateField {
                 name: "theme".to_string(),
                 type_annotation: "string".to_string(),
@@ -526,6 +567,7 @@ mod tests {
                 watch_handler: None,
                 alias: None,
             }],
+            regular_members: vec![],
             initial_render_body: String::new(),
             initial_render_span_hints: vec![],
             builder_methods: vec![],
@@ -550,6 +592,8 @@ mod tests {
         let info = ComponentInfo {
             name: "Child".to_string(),
             is_entry: false,
+            is_exported: false,
+            is_default_export: false,
             state_fields: vec![StateField {
                 name: "theme".to_string(),
                 type_annotation: "string".to_string(),
@@ -558,6 +602,7 @@ mod tests {
                 watch_handler: None,
                 alias: None,
             }],
+            regular_members: vec![],
             initial_render_body: String::new(),
             initial_render_span_hints: vec![],
             builder_methods: vec![],
@@ -580,6 +625,8 @@ mod tests {
         let info = ComponentInfo {
             name: "Child".to_string(),
             is_entry: false,
+            is_exported: false,
+            is_default_export: false,
             state_fields: vec![StateField {
                 name: "currentTheme".to_string(),
                 type_annotation: "string".to_string(),
@@ -588,6 +635,7 @@ mod tests {
                 watch_handler: None,
                 alias: Some("theme".to_string()),
             }],
+            regular_members: vec![],
             initial_render_body: String::new(),
             initial_render_span_hints: vec![],
             builder_methods: vec![],
@@ -608,6 +656,8 @@ mod tests {
         let info = ComponentInfo {
             name: "Watcher".to_string(),
             is_entry: false,
+            is_exported: false,
+            is_default_export: false,
             state_fields: vec![StateField {
                 name: "count".to_string(),
                 type_annotation: "number".to_string(),
@@ -616,6 +666,7 @@ mod tests {
                 watch_handler: Some("onCountChange".to_string()),
                 alias: None,
             }],
+            regular_members: vec![],
             initial_render_body: String::new(),
             initial_render_span_hints: vec![],
             builder_methods: vec![],
@@ -661,6 +712,8 @@ mod tests {
         let info = ComponentInfo {
             name: "Card".to_string(),
             is_entry: false,
+            is_exported: false,
+            is_default_export: false,
             state_fields: vec![StateField {
                 name: "content".to_string(),
                 type_annotation: "() => void".to_string(),
@@ -669,6 +722,7 @@ mod tests {
                 watch_handler: None,
                 alias: None,
             }],
+            regular_members: vec![],
             initial_render_body: String::new(),
             initial_render_span_hints: vec![],
             builder_methods: vec![],
@@ -699,6 +753,8 @@ mod tests {
         let info = ComponentInfo {
             name: "Child".to_string(),
             is_entry: false,
+            is_exported: false,
+            is_default_export: false,
             state_fields: vec![StateField {
                 name: "title".to_string(),
                 type_annotation: "string".to_string(),
@@ -707,6 +763,7 @@ mod tests {
                 watch_handler: None,
                 alias: None,
             }],
+            regular_members: vec![],
             initial_render_body: String::new(),
             initial_render_span_hints: vec![],
             builder_methods: vec![],
@@ -737,6 +794,8 @@ mod tests {
             let info = ComponentInfo {
                 name: "StorageComp".to_string(),
                 is_entry: false,
+                is_exported: false,
+                is_default_export: false,
                 state_fields: vec![StateField {
                     name: "setting".to_string(),
                     type_annotation: "string".to_string(),
@@ -747,6 +806,7 @@ mod tests {
                 }],
                 initial_render_body: String::new(),
                 initial_render_span_hints: vec![],
+                regular_members: vec![],
                 builder_methods: vec![],
                 styles_methods: vec![],
                 entry_registration: None,

@@ -125,6 +125,9 @@ pub struct ModuleJson5Module {
     #[serde(default)]
     pub device_types: Vec<String>,
     pub pages: Option<String>,
+    /// `$profile:` router map reference, e.g. `"$profile:router_map"`.
+    #[serde(default, rename = "routerMap")]
+    pub router_map: Option<String>,
     /// Module description resource reference, e.g. `"$string:module_desc"`.
     #[serde(default)]
     pub description: Option<String>,
@@ -172,6 +175,7 @@ pub struct AbilityConfig {
 pub struct ExtensionAbilityConfig {
     pub name: String,
     pub src_entry: String,
+    #[serde(rename = "type", alias = "extensionType", default)]
     pub extension_type: String,
 }
 

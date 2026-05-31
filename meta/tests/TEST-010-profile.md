@@ -89,7 +89,8 @@ crates/arkdown-profile/src/
 
 ## router_map.rs
 
-### TC-013: router map entries included in `compileEntry`
+### TC-013: router map entries stay in loader `routerMap`
 
-- **Input**: router map JSON with `{ pageSourceFile: "./ets/pages/DetailPage.ets" }`
-- **Expected**: `"./ets/pages/DetailPage.ets"` added to `compileEntry`
+- **Input**: `module.json5#routerMap = "$profile:router_map"` and router map JSON with `{ pageSourceFile: "src/main/ets/pages/DetailPage.ets" }`
+- **Expected**: loader `routerMap` contains the entry with an absolute `pageSourceFile`
+- **Expected**: `compileEntry` is unchanged; router map pages are not bundler entry points

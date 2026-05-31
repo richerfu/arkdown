@@ -6,7 +6,10 @@ pub mod entry;
 
 use arkdown_core::ModuleSource;
 use oxc_allocator::Allocator;
-use oxc_ast::ast::{Declaration, Decorator, Expression, Statement, StructElement, StructStatement};
+use oxc_ast::ast::{
+    AnnotationDeclaration, AnnotationElement, Declaration, Decorator, ExportDefaultDeclarationKind,
+    Expression, Function, Statement, StructElement, StructStatement,
+};
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType, Span};
 
@@ -42,7 +45,7 @@ pub fn transform_ets_with_options(
 
     // Fast path: files with no ArkUI-specific syntax pass through unchanged.
     // The module_type change from Ets → Ts still happens in the plugin.
-    if !content.contains("@Component") && !content.contains("@Entry") {
+    if !has_arkts_transform_syntax(content) {
         return Ok(content.clone());
     }
 
@@ -64,17 +67,35 @@ pub fn transform_ets_with_options(
     let mut out = String::with_capacity(content.len() + 512);
     let mut last_end = 0usize;
     let mut transformed_any = false;
+    let mut pending_function_decorator: Option<PendingFunctionDecorator> = None;
 
     for statement in &parsed.program.body {
         let span = statement.span();
-        out.push_str(&content[last_end..span.start as usize]);
+        if let Some(decorator) = pending_function_decorator_from_statement(statement, content) {
+            out.push_str(&content[last_end..span.start as usize]);
+            pending_function_decorator = Some(decorator);
+            transformed_any = true;
+            last_end = span.end as usize;
+            continue;
+        }
+
+        let pending_decorator = pending_function_decorator.take();
 
         if let Some(component) =
             component_from_statement(statement, content, &source.id.id, options)?
         {
+            let start = component_replacement_start(statement, content);
+            out.push_str(&content[last_end..start]);
             out.push_str(&generate_view_pu_class(&component));
             transformed_any = true;
+        } else if let Some((start, replacement)) =
+            transform_non_component_statement(statement, content, pending_decorator.as_ref())
+        {
+            out.push_str(&content[last_end..start]);
+            out.push_str(&replacement);
+            transformed_any = true;
         } else {
+            out.push_str(&content[last_end..span.start as usize]);
             out.push_str(span_text(span, content));
         }
 
@@ -87,10 +108,55 @@ pub fn transform_ets_with_options(
         while out.ends_with("\n\n") {
             out.pop();
         }
-        Ok(out)
+        Ok(strip_orphan_arkui_decorator_lines(&out))
     } else {
         Ok(content.clone())
     }
+}
+
+fn strip_orphan_arkui_decorator_lines(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if matches!(
+            trimmed,
+            "@Component"
+                | "@Entry"
+                | "@CustomDialog"
+                | "@Reusable"
+                | "@ComponentV2"
+                | "@ReusableV2"
+                | "@Builder"
+                | "@LocalBuilder"
+                | "@Styles"
+        ) || trimmed.starts_with("@Extend(")
+            || trimmed.starts_with("@AnimatableExtend(")
+        {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+pub(crate) fn has_arkts_transform_syntax(content: &str) -> bool {
+    [
+        "@Component",
+        "@Entry",
+        "@CustomDialog",
+        "@ComponentV2",
+        "@Builder",
+        "@LocalBuilder",
+        "@Styles",
+        "@Extend",
+        "@AnimatableExtend",
+        "@interface",
+        "import lazy",
+        "struct ",
+    ]
+    .iter()
+    .any(|needle| content.contains(needle))
 }
 
 fn component_from_statement(
@@ -101,15 +167,313 @@ fn component_from_statement(
 ) -> Result<Option<ComponentInfo>, EtsTransformError> {
     match statement {
         Statement::StructStatement(statement) => {
-            component_from_struct(statement, source_text, id, options)
+            component_from_struct(statement, source_text, id, options, false, false)
         }
         Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref() {
             Some(Declaration::StructStatement(statement)) => {
-                component_from_struct(statement, source_text, id, options)
+                component_from_struct(statement, source_text, id, options, true, false)
+            }
+            _ => Ok(None),
+        },
+        Statement::ExportDefaultDeclaration(export) => match &export.declaration {
+            ExportDefaultDeclarationKind::StructStatement(statement) => {
+                component_from_struct(statement, source_text, id, options, true, true)
             }
             _ => Ok(None),
         },
         _ => Ok(None),
+    }
+}
+
+fn transform_non_component_statement(
+    statement: &Statement<'_>,
+    source_text: &str,
+    pending_decorator: Option<&PendingFunctionDecorator>,
+) -> Option<(usize, String)> {
+    match statement {
+        _ if is_orphan_arkui_decorator_statement(statement, source_text) => {
+            Some((statement.span().start as usize, String::new()))
+        }
+        Statement::AnnotationDeclaration(annotation) => Some((
+            annotation.span.start as usize,
+            annotation_to_interface(annotation, source_text),
+        )),
+        Statement::LazyImportDeclaration(_) => {
+            let text =
+                span_text(statement.span(), source_text).replacen("import lazy", "import", 1);
+            Some((statement.span().start as usize, text))
+        }
+        Statement::FunctionDeclaration(function) => transform_decorated_function_with_pending(
+            function,
+            source_text,
+            false,
+            &[],
+            pending_decorator,
+        ),
+        Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref() {
+            Some(Declaration::FunctionDeclaration(function)) => {
+                let mut result = transform_decorated_function_with_extra_decorators(
+                    function,
+                    source_text,
+                    true,
+                    &export.decorators,
+                    pending_decorator,
+                )?;
+                for decorator in &export.decorators {
+                    result.0 = result.0.min(decorator.span.start as usize);
+                }
+                result.0 = leading_decorator_start(source_text, result.0);
+                Some(result)
+            }
+            Some(Declaration::AnnotationDeclaration(annotation)) => {
+                let mut start = export.span.start as usize;
+                for decorator in &export.decorators {
+                    start = start.min(decorator.span.start as usize);
+                }
+                Some((
+                    start,
+                    format!(
+                        "export {}",
+                        annotation_to_interface(annotation, source_text)
+                    ),
+                ))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn is_orphan_arkui_decorator_statement(statement: &Statement<'_>, source_text: &str) -> bool {
+    let text = span_text(statement.span(), source_text).trim();
+    matches!(
+        text,
+        "@Component" | "@Entry" | "@CustomDialog" | "@Reusable" | "@ComponentV2" | "@ReusableV2"
+    )
+}
+
+#[derive(Debug, Clone)]
+struct PendingFunctionDecorator {
+    kind: String,
+    first_arg: Option<String>,
+}
+
+fn pending_function_decorator_from_statement(
+    statement: &Statement<'_>,
+    source_text: &str,
+) -> Option<PendingFunctionDecorator> {
+    let text = span_text(statement.span(), source_text).trim();
+    let (kind, first_arg) = parse_pending_function_decorator(text)?;
+    Some(PendingFunctionDecorator { kind, first_arg })
+}
+
+fn parse_pending_function_decorator(text: &str) -> Option<(String, Option<String>)> {
+    for kind in [
+        "Builder",
+        "LocalBuilder",
+        "Styles",
+        "Extend",
+        "AnimatableExtend",
+    ] {
+        if text == format!("@{kind}") {
+            return Some((kind.to_string(), None));
+        }
+        let prefix = format!("@{kind}(");
+        if text.starts_with(&prefix) && text.ends_with(')') {
+            let first_arg = text[prefix.len()..text.len() - 1]
+                .split(',')
+                .next()
+                .map(str::trim)
+                .filter(|arg| !arg.is_empty())
+                .map(str::to_string);
+            return Some((kind.to_string(), first_arg));
+        }
+    }
+    None
+}
+
+fn annotation_to_interface(annotation: &AnnotationDeclaration<'_>, source_text: &str) -> String {
+    let mut out = format!("interface {} {{\n", annotation.id.name);
+    for element in &annotation.body.body {
+        let AnnotationElement::PropertyDefinition(property) = element;
+        let Some(name) = property.key.static_name() else {
+            continue;
+        };
+        let ty = property
+            .type_annotation
+            .as_ref()
+            .map(|annotation| type_annotation_text(annotation.span(), source_text))
+            .unwrap_or_else(|| "unknown".to_string());
+        let optional = if property.optional { "?" } else { "" };
+        out.push_str(&format!("    {name}{optional}: {ty};\n"));
+    }
+    out.push_str("}\n");
+    out
+}
+
+fn transform_decorated_function_with_extra_decorators(
+    function: &Function<'_>,
+    source_text: &str,
+    exported: bool,
+    extra_decorators: &[Decorator<'_>],
+    pending_decorator: Option<&PendingFunctionDecorator>,
+) -> Option<(usize, String)> {
+    transform_decorated_function_with_pending(
+        function,
+        source_text,
+        exported,
+        extra_decorators,
+        pending_decorator,
+    )
+}
+
+fn transform_decorated_function_with_pending(
+    function: &Function<'_>,
+    source_text: &str,
+    exported: bool,
+    extra_decorators: &[Decorator<'_>],
+    pending_decorator: Option<&PendingFunctionDecorator>,
+) -> Option<(usize, String)> {
+    let decorators = function.decorators.iter().chain(extra_decorators.iter());
+    let decorator_kind = decorators
+        .clone()
+        .map(decorator_name)
+        .find(|name| {
+            matches!(
+                *name,
+                "Builder" | "LocalBuilder" | "Styles" | "Extend" | "AnimatableExtend"
+            )
+        })
+        .map(str::to_string)
+        .or_else(|| pending_decorator.map(|decorator| decorator.kind.clone()))?;
+    let name = function.id.as_ref()?.name.as_str();
+    let params = extract_params_text(function.params.span(), source_text);
+    let export_prefix = if exported { "export " } else { "" };
+    let start = decorators
+        .clone()
+        .fold(function.span.start, |start, decorator| {
+            start.min(decorator.span.start)
+        }) as usize;
+    let start = leading_decorator_start(source_text, start);
+
+    let body = match decorator_kind.as_str() {
+        "Styles" => lower_styles_body(function.body.as_deref(), source_text),
+        "Extend" | "AnimatableExtend" => {
+            let component = function
+                .decorators
+                .iter()
+                .chain(extra_decorators.iter())
+                .find(|decorator| decorator_name(decorator) == decorator_kind)
+                .and_then(|decorator| decorator_first_arg_text(decorator, source_text))
+                .or_else(|| pending_decorator.and_then(|decorator| decorator.first_arg.clone()))
+                .unwrap_or_else(|| "View".to_string());
+            return Some((
+                start,
+                format!(
+                    "{export_prefix}function __{component}__{name}({params}): void {{\n{}    }}",
+                    lower_extend_body(function.body.as_deref(), source_text, &component)
+                ),
+            ));
+        }
+        _ => lower_build_body_or_raw(function.body.as_deref(), source_text).0,
+    };
+
+    Some((
+        start,
+        format!("{export_prefix}function {name}({params}): void {{\n{body}    }}"),
+    ))
+}
+
+fn lower_extend_body(
+    body: Option<&oxc_ast::ast::FunctionBody<'_>>,
+    source_text: &str,
+    component: &str,
+) -> String {
+    let Some(body) = body else {
+        return String::new();
+    };
+    let body_text = span_text(body.span(), source_text);
+    let inner = body_text
+        .trim()
+        .trim_start_matches('{')
+        .trim_end_matches('}')
+        .trim();
+    let mut out = String::new();
+    for line in inner.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        out.push_str("        ");
+        if trimmed.starts_with('.') {
+            out.push_str(component);
+            out.push_str(trimmed);
+        } else {
+            out.push_str(trimmed);
+        }
+        if !trimmed.ends_with(';') && !trimmed.ends_with('{') && !trimmed.ends_with('}') {
+            out.push(';');
+        }
+        out.push('\n');
+    }
+    out
+}
+
+fn decorator_first_arg_text(decorator: &Decorator<'_>, source_text: &str) -> Option<String> {
+    let Expression::CallExpression(call) = &decorator.expression else {
+        return None;
+    };
+    call.arguments
+        .first()
+        .map(|arg| span_text(arg.span(), source_text).trim().to_string())
+}
+
+fn component_replacement_start(statement: &Statement<'_>, source_text: &str) -> usize {
+    let mut start = statement.span().start;
+    match statement {
+        Statement::StructStatement(statement) => {
+            for decorator in &statement.decorators {
+                start = start.min(decorator.span.start);
+            }
+        }
+        Statement::ExportNamedDeclaration(export) => {
+            for decorator in &export.decorators {
+                start = start.min(decorator.span.start);
+            }
+            if let Some(Declaration::StructStatement(statement)) = export.declaration.as_ref() {
+                for decorator in &statement.decorators {
+                    start = start.min(decorator.span.start);
+                }
+            }
+        }
+        Statement::ExportDefaultDeclaration(export) => {
+            if let ExportDefaultDeclarationKind::StructStatement(statement) = &export.declaration {
+                for decorator in &statement.decorators {
+                    start = start.min(decorator.span.start);
+                }
+            }
+        }
+        _ => {}
+    }
+    leading_decorator_start(source_text, start as usize)
+}
+
+fn leading_decorator_start(source_text: &str, start: usize) -> usize {
+    let mut cursor = start;
+    loop {
+        let before = &source_text[..cursor];
+        let trimmed_before = before.trim_end();
+        if trimmed_before.is_empty() {
+            return cursor;
+        }
+        let line_end = trimmed_before.len();
+        let line_start = source_text[..line_end].rfind('\n').map_or(0, |idx| idx + 1);
+        let line = &source_text[line_start..line_end];
+        if line.trim_start().starts_with('@') {
+            cursor = line_start;
+            continue;
+        }
+        return cursor;
     }
 }
 
@@ -118,11 +482,15 @@ fn component_from_struct(
     source_text: &str,
     id: &str,
     options: &TransformOptions,
+    is_exported: bool,
+    is_default_export: bool,
 ) -> Result<Option<ComponentInfo>, EtsTransformError> {
-    let has_component = statement
-        .decorators
-        .iter()
-        .any(|decorator| decorator_name(decorator) == "Component");
+    let has_component = statement.decorators.iter().any(|decorator| {
+        matches!(
+            decorator_name(decorator),
+            "Component" | "ComponentV2" | "CustomDialog"
+        )
+    });
     if !has_component {
         return Ok(None);
     }
@@ -136,6 +504,7 @@ fn component_from_struct(
     let mut initial_render_span_hints = Vec::new();
     let mut builder_methods: Vec<BuilderMethodInfo> = Vec::new();
     let mut styles_methods: Vec<StylesMethodInfo> = Vec::new();
+    let mut regular_members: Vec<String> = Vec::new();
 
     for element in &statement.body.body {
         match element {
@@ -146,6 +515,7 @@ fn component_from_struct(
                     .map(decorator_name)
                     .find(|name| is_state_decorator(name))
                 else {
+                    regular_members.push(span_text(element.span(), source_text).trim().to_string());
                     continue;
                 };
                 let Some(name) = property.key.static_name() else {
@@ -233,14 +603,19 @@ fn component_from_struct(
                     lowered_body,
                 });
             }
-            _ => {}
+            _ => {
+                regular_members.push(span_text(element.span(), source_text).trim().to_string());
+            }
         }
     }
 
     Ok(Some(ComponentInfo {
         name: statement.id.name.to_string(),
         is_entry,
+        is_exported,
+        is_default_export,
         state_fields,
+        regular_members,
         initial_render_body,
         initial_render_span_hints,
         entry_registration: is_entry.then(|| entry_registration(id, options)),
@@ -269,7 +644,7 @@ pub fn transform_ets_viewpu_with_source_map(
 ) -> Result<(String, Option<String>), EtsTransformError> {
     let content = &source.content;
 
-    if !content.contains("@Component") && !content.contains("@Entry") {
+    if !has_arkts_transform_syntax(content) {
         return Ok((content.clone(), None));
     }
 
@@ -296,14 +671,26 @@ pub fn transform_ets_viewpu_with_source_map(
     let mut out = String::with_capacity(content.len() + 512);
     let mut last_end = 0usize;
     let mut struct_results: Vec<StructResult> = Vec::new();
+    let mut transformed_any = false;
+    let mut pending_function_decorator: Option<PendingFunctionDecorator> = None;
 
     for statement in &parsed.program.body {
         let span = statement.span();
-        out.push_str(&content[last_end..span.start as usize]);
+        if let Some(decorator) = pending_function_decorator_from_statement(statement, content) {
+            out.push_str(&content[last_end..span.start as usize]);
+            pending_function_decorator = Some(decorator);
+            transformed_any = true;
+            last_end = span.end as usize;
+            continue;
+        }
+
+        let pending_decorator = pending_function_decorator.take();
 
         if let Some((component, struct_statement)) =
             component_with_struct_from_statement(statement, content, &source.id.id, options)?
         {
+            let start = component_replacement_start(statement, content);
+            out.push_str(&content[last_end..start]);
             let out_offset = out.len();
             let span_hints = component.initial_render_span_hints.clone();
             let viewpu_code = generate_view_pu_class(&component);
@@ -320,7 +707,15 @@ pub fn transform_ets_viewpu_with_source_map(
                 static_span_hints,
                 out_offset,
             });
+            transformed_any = true;
+        } else if let Some((start, replacement)) =
+            transform_non_component_statement(statement, content, pending_decorator.as_ref())
+        {
+            out.push_str(&content[last_end..start]);
+            out.push_str(&replacement);
+            transformed_any = true;
         } else {
+            out.push_str(&content[last_end..span.start as usize]);
             out.push_str(span_text(span, content));
         }
 
@@ -329,11 +724,16 @@ pub fn transform_ets_viewpu_with_source_map(
     out.push_str(&content[last_end..]);
 
     if struct_results.is_empty() {
-        return Ok((content.clone(), None));
+        return if transformed_any {
+            Ok((strip_orphan_arkui_decorator_lines(&out), None))
+        } else {
+            Ok((content.clone(), None))
+        };
     }
     while out.ends_with("\n\n") {
         out.pop();
     }
+    out = strip_orphan_arkui_decorator_lines(&out);
 
     // Build cross-transform source map entries.  For each struct's span hints,
     // compute the absolute ViewPU line number of the `initialRender()` body and
@@ -394,16 +794,29 @@ fn component_with_struct_from_statement<'a>(
 ) -> Result<Option<(ComponentInfo, &'a StructStatement<'a>)>, EtsTransformError> {
     match statement {
         Statement::StructStatement(statement) => {
-            Ok(component_from_struct(statement, source_text, id, options)?
-                .map(|component| (component, statement.as_ref())))
+            Ok(
+                component_from_struct(statement, source_text, id, options, false, false)?
+                    .map(|component| (component, statement.as_ref())),
+            )
         }
         Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref() {
             Some(Declaration::StructStatement(statement)) => {
-                Ok(component_from_struct(statement, source_text, id, options)?
-                    .map(|component| (component, statement.as_ref())))
+                Ok(
+                    component_from_struct(statement, source_text, id, options, true, false)?
+                        .map(|component| (component, statement.as_ref())),
+                )
             }
             _ => Ok(None),
         },
+        Statement::ExportDefaultDeclaration(export) => {
+            match &export.declaration {
+                ExportDefaultDeclarationKind::StructStatement(statement) => Ok(
+                    component_from_struct(statement, source_text, id, options, true, true)?
+                        .map(|component| (component, statement.as_ref())),
+                ),
+                _ => Ok(None),
+            }
+        }
         _ => Ok(None),
     }
 }
@@ -742,6 +1155,53 @@ mod tests {
         assert!(result.contains("class MyView extends ViewPU"));
         assert!(result.contains("initialRender()"));
         assert!(!result.contains("struct MyView"));
+    }
+
+    #[test]
+    fn test_transforms_export_component_without_leaking_decorator() {
+        let src = "import { Foo } from './foo';\n\n@Component\nexport struct MyView {\n  @State message: string = \"hi\";\n  build() {}\n}";
+        let result =
+            transform_ets(&make_source("entry/src/main/ets/pages/MyView.ets", src)).unwrap();
+        assert!(result.contains("class MyView extends ViewPU"));
+        assert!(
+            !result.contains("@Component"),
+            "component decorator must be consumed with export struct, got:\n{}",
+            result
+        );
+        assert!(!result.contains("export struct MyView"));
+    }
+
+    #[test]
+    fn test_transforms_default_export_component() {
+        let src = "@Component\nexport default struct MyView {\n  build() {}\n}";
+        let result =
+            transform_ets(&make_source("entry/src/main/ets/pages/MyView.ets", src)).unwrap();
+        assert!(result.contains("export default class MyView extends ViewPU"));
+        assert!(!result.contains("export default struct MyView"));
+    }
+
+    #[test]
+    fn test_transforms_export_builder_function_decorator() {
+        let src = "@Builder\nexport function Card(title: string) {\n  Column() {\n    Text(title)\n  }\n}";
+        let result =
+            transform_ets(&make_source("entry/src/main/ets/components/Card.ets", src)).unwrap();
+        assert!(result.contains("export function Card(title: string): void"));
+        assert!(result.contains("observeComponentCreation2"));
+        assert!(!result.contains("@Builder"));
+        assert!(!result.contains("Column() {"));
+    }
+
+    #[test]
+    fn test_transforms_builder_before_export_function() {
+        let src = "@Builder\nexport function LearningItem(learningItem: LearningPath) {\n  Column() {\n    Image(learningItem.thumbnail)\n      .width(LearningConstants.FULL_PERCENT)\n  }\n  .clip(true)\n}";
+        let result = transform_ets(&make_source(
+            "entry/src/main/ets/components/LearningItem.ets",
+            src,
+        ))
+        .unwrap();
+        assert!(!result.contains("@Builder"));
+        assert!(!result.contains("Column() {"));
+        assert!(result.contains(".clip(true);"));
     }
 
     #[test]

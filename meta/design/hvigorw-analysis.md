@@ -434,20 +434,24 @@ arkdown must write this exact format (or a superset that the SDK plugins can con
 
 ### `compileEntry` population (arkdown)
 
-`generate_loader_json` builds the internal `compile_entry` list from four sources in order:
+`generate_loader_json` builds arkdown's internal `compile_entry` list from hvigor entry sources in order:
 
 1. **Ability `srcEntry` paths** — from each `HapManifest.abilities[].src_entry`.
 2. **ExtensionAbility `srcEntry` paths** — from each `HapManifest.extension_abilities[].src_entry`.
-3. **`$profile:main_pages` page files** — resolved from `src/main/resources/base/profile/<name>.json`;
+3. **HAR/HSP package entry** — when a source HAR/shared module has no ability/module
+   `srcEntry`, read `oh-package.json5#main` (for example `Index.ets`) as the package entry.
+4. **`$profile:main_pages` page files** — resolved from `src/main/resources/base/profile/<name>.json`;
    each page entry `"pages/Index"` maps to `"./ets/pages/Index.ets"`.
-4. **Worker files** — every `*.ets` file found in `src/main/ets/workers/` is added as
+5. **Worker files** — every `*.ets` file found in `src/main/ets/workers/` is added as
    `"./ets/workers/<filename>.ets"` and also recorded in `LoaderJson.workers`.
-5. **Router map page destinations** — if `src/main/resources/base/profile/router_map.json`
-   exists, each entry's `pageSourceFile` is converted from `"src/main/ets/..."` to
-   `"./ets/..."` and appended to `compile_entry`.
 
-After all sources are collected, `compile_entry` is deduplicated (preserving order) so that
-a page listed in both `main_pages.json` and `router_map.json` appears only once.
+Router map JSON is **not** appended to `compile_entry`. Upstream `compiler/main.js`
+uses `aceBuildJson.routerMap` in `loadNavigationConfig()` for router metadata and
+obfuscation entry tracking, while `projectConfig.intentEntry` comes from
+`aceBuildJson.compileEntry`. arkdown mirrors that split: only `module.json5#routerMap`
+causes loader `routerMap` metadata to be populated.
+
+After all sources are collected, `compile_entry` is deduplicated preserving order.
 
 The serialized `compileEntry` field (`hvigor_compile_entry`) remains empty for the minimal-hap
 fixture, matching the golden hvigor output exactly. The internal `compile_entry` is used by

@@ -2894,7 +2894,7 @@ impl<'a> CodeGen<'a> {
             self.push(Insn::LdUndefined);
             self.push(Insn::StrictEq(0, value_reg));
             let skip_default = self.insns.len();
-            self.push(Insn::JeqzShort(0));
+            self.push(Insn::Jeqz(0));
             if is_undefined_literal(initializer) {
                 self.set_debug_pos(initializer.span().start);
                 self.push(Insn::LdUndefined);
@@ -3512,7 +3512,7 @@ impl<'a> CodeGen<'a> {
         if let Some(alt) = &if_stmt.alternate {
             // 4a. Emit `jmp` to skip the alternate; remember its position.
             let jmp_pos = self.insns.len();
-            self.push(Insn::JmpShort(0));
+            self.push(Insn::Jmp(0));
 
             // Patch jeqz → start of alternate (= current byte position).
             let alt_start = self.insns.len();
@@ -3574,7 +3574,7 @@ impl<'a> CodeGen<'a> {
                 self.emit_condition_comparison(bin);
                 self.set_debug_pos(bin.span.start);
                 let branch_pos = self.insns.len();
-                self.push(Insn::JeqzShort(0));
+                self.push(Insn::Jeqz(0));
                 return branch_pos;
             }
         }
@@ -3583,14 +3583,14 @@ impl<'a> CodeGen<'a> {
         self.set_debug_pos(expr.span().start);
         self.push(Insn::CallRuntimeIsFalse(0));
         let branch_pos = self.insns.len();
-        self.push(Insn::JnezShort(0));
+        self.push(Insn::Jnez(0));
         branch_pos
     }
 
     fn emit_branch_if_true_from_acc(&mut self) -> usize {
         self.push(Insn::CallRuntimeIsTrue(0));
         let branch_pos = self.insns.len();
-        self.push(Insn::JnezShort(0));
+        self.push(Insn::Jnez(0));
         branch_pos
     }
 
@@ -3598,7 +3598,7 @@ impl<'a> CodeGen<'a> {
         let false_branch = self.emit_branch_if_true_from_acc();
         self.push(Insn::LdTrue);
         let end_jump = self.insns.len();
-        self.push(Insn::JmpShort(0));
+        self.push(Insn::Jmp(0));
 
         let false_label = self.insns.len();
         self.patch_jump_to(false_branch, false_label);

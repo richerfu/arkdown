@@ -216,7 +216,9 @@ Leaf components (no closing brace children) still get `.pop()` but emit no neste
 ✅ **Implemented** (`crates/arkdown-plugin-ets-transform/src/transform/`, 2026-05-29)
 
 Struct methods decorated with `@Builder` remain as class methods with the same
-name (they are NOT renamed to `__method__`). The decorator is stripped.
+name (they are NOT renamed to `__method__`). Top-level `@Builder export function`
+is emitted as an exported `function name(...): void`, matching upstream handling
+of builder functions before bundling. The decorator is stripped.
 
 The body is lowered via `lower_build_body_or_raw`:
 
@@ -225,12 +227,10 @@ The body is lowered via `lower_build_body_or_raw`:
    well as `build()`): the body is fully desugared into
    `observeComponentCreation2` + `.pop()` pairs — identical to `build()`.
 
-2. **Current OXC ETS behaviour**: the parser applies ArkUI expression rules
-   only to the canonical `build()` method. `@Builder` bodies are parsed as
-   regular TypeScript, so `lower_build_body` returns `Err(UnsupportedStatement)`
-   and the fallback emits the raw source body text re-indented for a class
-   method. The output is syntactically valid TypeScript (e.g. `Text('hi')` is
-   a regular call expression).
+2. **Current OXC ETS behaviour**: the parser can expose ArkUI children inside
+   canonical `build()` bodies, nested callbacks, and some builder bodies. When a
+   builder body is parsed as regular TypeScript, the fallback emits statement
+   text as TypeScript instead of guessing missing ArkUI AST.
 
 ```typescript
 // Input:
@@ -431,7 +431,10 @@ invoking the SDK binary directly.
 | Source map from ETS → TS                     | `HookTransformOutput::map`                                                     | Identical: the transform produces a source map that is chained with downstream maps                                          |
 | `ModuleSource.module_type` change `Ets → Ts` | `HookTransformOutput::module_type` field                                       | rolldown allows transforms to change the module type; arkdown does the same                                                  |
 
-**Key divergence:** This transform runs only on `ModuleType::Ets` files. There is no equivalent in rolldown — ArkTS is OHOS-specific. The entire `etsTransform` stage has no counterpart in standard JS bundlers.
+**Key divergence:** this transform is OHOS-specific and has no standard rolldown
+equivalent. arkdown runs it in both `load` and `transform`: `load` lowers ArkTS-only
+syntax before rolldown's TypeScript parser, while `transform` preserves the existing
+source-map chaining path for already-loadable ETS/TS modules.
 
 ---
 

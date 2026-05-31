@@ -26,8 +26,9 @@ use oxc_codegen::{Codegen, CodegenOptions};
 use oxc_parser::Parser;
 use oxc_span::SourceType;
 use rolldown_plugin::{
-    HookTransformArgs, HookTransformOutput, HookTransformOutputMap, HookTransformReturn, HookUsage,
-    Plugin, SharedTransformPluginContext,
+    HookLoadArgs, HookLoadOutput, HookLoadReturn, HookTransformArgs, HookTransformOutput,
+    HookTransformOutputMap, HookTransformReturn, HookUsage, Plugin, SharedLoadPluginContext,
+    SharedTransformPluginContext,
 };
 use rolldown_sourcemap::SourceMap as RolldownSourceMap;
 
@@ -63,7 +64,8 @@ impl EtsTransformPlugin {
         }
 
         let original_source = code;
-        let code = api_transform::rewrite_kit_imports(original_source);
+        let code =
+            rewrite_type_only_reexports(&api_transform::rewrite_kit_imports(original_source), id);
         let api_version = self.config.sdk_config.compile_api_version;
 
         if !is_ets {
@@ -182,7 +184,33 @@ impl Plugin for EtsTransformPlugin {
     }
 
     fn register_hook_usage(&self) -> HookUsage {
-        HookUsage::Transform
+        HookUsage::Load | HookUsage::Transform
+    }
+
+    fn load(
+        &self,
+        _ctx: SharedLoadPluginContext,
+        args: &HookLoadArgs<'_>,
+    ) -> impl std::future::Future<Output = HookLoadReturn> + Send {
+        let id = args.id.to_owned();
+        let config = Arc::clone(&self.config);
+        async move {
+            if !id.ends_with(".ets") {
+                return Ok(None);
+            }
+            let code = match std::fs::read_to_string(&id) {
+                Ok(code) => code,
+                Err(_) => return Ok(None),
+            };
+            if !transform::has_arkts_transform_syntax(&code) {
+                return Ok(None);
+            }
+            let output = EtsTransformPlugin::new(config).do_transform(&code, &id)?;
+            Ok(output.map(|output| HookLoadOutput {
+                code: output.code.unwrap_or(code).into(),
+                ..Default::default()
+            }))
+        }
     }
 
     fn transform(
@@ -240,6 +268,113 @@ fn generate_code_and_source_map(source: &str, id: &str) -> Option<(String, Optio
         .build(&parsed.program);
     let map_json = result.map.map(|m| ensure_names_field(&m.to_json_string()));
     Some((result.code, map_json))
+}
+
+fn rewrite_type_only_reexports(source: &str, id: &str) -> String {
+    if !source.contains("export {") || !source.contains(" from ") {
+        return source.to_string();
+    }
+
+    let mut changed = false;
+    let mut out = String::with_capacity(source.len());
+    for line in source.lines() {
+        if let Some(rewritten) = rewrite_type_only_reexport_line(line, id) {
+            out.push_str(&rewritten);
+            changed = true;
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+
+    if changed {
+        out
+    } else {
+        source.to_string()
+    }
+}
+
+fn rewrite_type_only_reexport_line(line: &str, id: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if trimmed.starts_with("export type {") || !trimmed.starts_with("export {") {
+        return None;
+    }
+
+    let names_start = trimmed.find('{')? + 1;
+    let names_end = trimmed[names_start..].find('}')? + names_start;
+    let names_text = &trimmed[names_start..names_end];
+    let after = trimmed[names_end + 1..].trim_start();
+    if !after.starts_with("from ") {
+        return None;
+    }
+    let spec_text = after["from ".len()..].trim().trim_end_matches(';').trim();
+    let quote = spec_text.chars().next()?;
+    if quote != '\'' && quote != '"' {
+        return None;
+    }
+    let spec_end = spec_text[1..].find(quote)? + 1;
+    let specifier = &spec_text[1..spec_end];
+    if !specifier.starts_with('.') {
+        return None;
+    }
+    let target = resolve_relative_source(id, specifier)?;
+
+    let mut type_names = Vec::new();
+    let mut value_names = Vec::new();
+    for raw_name in names_text.split(',') {
+        let name = raw_name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let exported_name = name.split(" as ").next().unwrap_or(name).trim();
+        if source_exports_type_only(&target, exported_name) {
+            type_names.push(name.to_string());
+        } else {
+            value_names.push(name.to_string());
+        }
+    }
+
+    if type_names.is_empty() {
+        return None;
+    }
+
+    let from_clause = trimmed[names_end + 1..].trim_start();
+    let indent = &line[..line.len() - line.trim_start().len()];
+    if value_names.is_empty() {
+        return Some(format!(
+            "{indent}export type {{{}}} {from_clause}",
+            names_text
+        ));
+    }
+
+    Some(format!(
+        "{indent}export {{{}}} {from_clause}\n{indent}export type {{{}}} {from_clause}",
+        value_names.join(", "),
+        type_names.join(", ")
+    ))
+}
+
+fn resolve_relative_source(id: &str, specifier: &str) -> Option<std::path::PathBuf> {
+    let base = std::path::Path::new(id).parent()?;
+    let candidate = base.join(specifier);
+    let candidates = [
+        candidate.clone(),
+        candidate.with_extension("ets"),
+        candidate.with_extension("ts"),
+        candidate.join("Index.ets"),
+        candidate.join("index.ets"),
+        candidate.join("Index.ts"),
+        candidate.join("index.ts"),
+    ];
+    candidates.into_iter().find(|path| path.is_file())
+}
+
+fn source_exports_type_only(path: &std::path::Path, name: &str) -> bool {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    content.contains(&format!("export interface {name}"))
+        || content.contains(&format!("export type {name}"))
 }
 
 /// Ensure the Source Map v3 JSON object contains a `"names"` array.
@@ -604,6 +739,28 @@ struct Index {\n\
                 .iter()
                 .any(|s| s.as_str().is_some_and(|p| p.contains("EntryAbility"))),
             "sources must reference the original .ets file; got: {sources:?}"
+        );
+    }
+
+    #[test]
+    fn test_rewrites_interface_reexport_to_type_export() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let model_dir = root.join("src/main/ets/model");
+        std::fs::create_dir_all(&model_dir).unwrap();
+        std::fs::write(
+            model_dir.join("ActionEventData.ets"),
+            "export interface ActionEventData { value: boolean; }",
+        )
+        .unwrap();
+        let index = root.join("Index.ets");
+        std::fs::write(&index, "export {}").unwrap();
+        let source = "export { ActionEventData } from './src/main/ets/model/ActionEventData';";
+
+        let rewritten = rewrite_type_only_reexports(source, index.to_str().unwrap());
+        assert_eq!(
+            rewritten.trim(),
+            "export type { ActionEventData } from './src/main/ets/model/ActionEventData';"
         );
     }
 }

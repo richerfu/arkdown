@@ -55,6 +55,7 @@ fn single_ability_json5(module_name: &str) -> ModuleJson5 {
             main_element: Some("EntryAbility".to_string()),
             device_types: vec!["phone".to_string()],
             pages: Some("$profile:main_pages".to_string()),
+            router_map: None,
             description: None,
             abilities: vec![AbilityConfig {
                 name: "EntryAbility".to_string(),
@@ -198,6 +199,7 @@ fn test_multiple_abilities_produce_multiple_compile_entries() {
             main_element: None,
             device_types: vec!["phone".to_string()],
             pages: None,
+            router_map: None,
             description: None,
             abilities: vec![
                 AbilityConfig {

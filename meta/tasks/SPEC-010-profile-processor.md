@@ -170,9 +170,15 @@ base and keep them absolute. Fall back to CWD-join for any relative path that
 Collect `compileEntry` from:
 
 1. `module.json5#abilities[*].srcEntry`
-2. `module.json5#module.srcEntry`
-3. `buildOption.sourceOption.workers` array
-4. Router map `pageSourceFile` entries (from `processRouterMap`)
+2. `module.json5#extensionAbilities[*].srcEntry`
+3. `module.json5#module.srcEntry`
+4. source HAR/HSP `oh-package.json5#main` when no module/ability entry is declared
+5. `$profile:main_pages` page entries
+6. worker source entries
+
+Do not add router map `pageSourceFile` entries to `compileEntry`. Upstream keeps router
+map data in loader `routerMap` for navigation metadata and obfuscation tracking; it is
+not a rollup input list.
 
 ### ByteCode HAR Info
 

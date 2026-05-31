@@ -1,6 +1,6 @@
 use oxc_ast::ast::{
-    Argument, ArkUIChild, ArkUIComponentExpression, CallExpression, Expression, FunctionBody,
-    Statement,
+    Argument, ArkUIChild, ArkUIComponentExpression, BlockStatement, CallExpression, Expression,
+    FunctionBody, IfStatement, Statement,
 };
 use oxc_span::{GetSpan, Span};
 
@@ -122,27 +122,115 @@ pub fn lower_build_body(
     let mut out = String::new();
     let mut span_hints: Vec<SpanHint> = Vec::new();
     for statement in &body.statements {
-        match statement {
-            Statement::ExpressionStatement(statement) => match &statement.expression {
-                Expression::ArkUIComponentExpression(component) => {
-                    lower_component(
-                        component,
-                        source_text,
-                        "        ",
-                        &mut out,
-                        &mut span_hints,
-                    )?;
-                }
-                Expression::CallExpression(call) => {
-                    lower_call_expression(call, source_text, "        ", &mut out)?;
-                }
-                _ => return Err(BuildLoweringError::UnsupportedStatement),
-            },
-            _ => return Err(BuildLoweringError::UnsupportedStatement),
-        }
+        lower_statement(
+            statement,
+            source_text,
+            "        ",
+            &mut out,
+            &mut span_hints,
+        )?;
     }
 
     Ok((out, span_hints))
+}
+
+fn lower_statement(
+    statement: &Statement<'_>,
+    source_text: &str,
+    indent: &str,
+    out: &mut String,
+    span_hints: &mut Vec<SpanHint>,
+) -> Result<(), BuildLoweringError> {
+    match statement {
+        Statement::BlockStatement(block) => {
+            lower_block(block, source_text, indent, out, span_hints)
+        }
+        Statement::EmptyStatement(_) => Ok(()),
+        Statement::ExpressionStatement(statement) => {
+            lower_expression(&statement.expression, source_text, indent, out, span_hints)
+        }
+        Statement::IfStatement(statement) => {
+            lower_if_statement(statement, source_text, indent, out, span_hints)
+        }
+        _ => Err(BuildLoweringError::UnsupportedStatement),
+    }
+}
+
+fn lower_block(
+    block: &BlockStatement<'_>,
+    source_text: &str,
+    indent: &str,
+    out: &mut String,
+    span_hints: &mut Vec<SpanHint>,
+) -> Result<(), BuildLoweringError> {
+    for statement in &block.body {
+        lower_statement(statement, source_text, indent, out, span_hints)?;
+    }
+    Ok(())
+}
+
+fn lower_expression(
+    expression: &Expression<'_>,
+    source_text: &str,
+    indent: &str,
+    out: &mut String,
+    span_hints: &mut Vec<SpanHint>,
+) -> Result<(), BuildLoweringError> {
+    match expression {
+        Expression::ArkUIComponentExpression(component) => {
+            lower_component(component, source_text, indent, out, span_hints)
+        }
+        Expression::CallExpression(call) => {
+            match lower_call_expression(call, source_text, indent, out) {
+                Ok(()) => Ok(()),
+                Err(BuildLoweringError::UnsupportedCallee) => {
+                    let text = source_text[call.span].to_string();
+                    out.push_str(&format!("{indent}{};\n", text.trim()));
+                    Ok(())
+                }
+                Err(err) => Err(err),
+            }
+        }
+        _ => Err(BuildLoweringError::UnsupportedStatement),
+    }
+}
+
+fn lower_if_statement(
+    statement: &IfStatement<'_>,
+    source_text: &str,
+    indent: &str,
+    out: &mut String,
+    span_hints: &mut Vec<SpanHint>,
+) -> Result<(), BuildLoweringError> {
+    let test = span_text(&statement.test, source_text).trim().to_string();
+    out.push_str(&format!("{indent}if ({test}) {{\n"));
+    let branch_indent = format!("{indent}    ");
+    lower_statement(
+        &statement.consequent,
+        source_text,
+        &branch_indent,
+        out,
+        span_hints,
+    )?;
+    out.push_str(&format!("{indent}}}"));
+
+    if let Some(alternate) = &statement.alternate {
+        match alternate {
+            Statement::IfStatement(alternate_if) => {
+                out.push_str(" else ");
+                lower_if_statement(alternate_if, source_text, indent, out, span_hints)?;
+            }
+            _ => {
+                out.push_str(" else {\n");
+                lower_statement(alternate, source_text, &branch_indent, out, span_hints)?;
+                out.push_str(&format!("{indent}}}\n"));
+            }
+        }
+    } else {
+        out.push('\n');
+    }
+
+    Ok(())
 }
 
 fn lower_component(
@@ -217,8 +305,11 @@ fn lower_component(
             ArkUIChild::Component(child) => {
                 lower_component(child, source_text, indent, out, span_hints)?;
             }
-            ArkUIChild::Expression(_) | ArkUIChild::Statement(_) => {
-                return Err(BuildLoweringError::UnsupportedChild);
+            ArkUIChild::Expression(expression) => {
+                lower_expression(expression, source_text, indent, out, span_hints)?;
+            }
+            ArkUIChild::Statement(statement) => {
+                lower_statement(statement, source_text, indent, out, span_hints)?;
             }
         }
     }
@@ -332,9 +423,26 @@ fn chain_name(call: &CallExpression<'_>) -> Result<String, BuildLoweringError> {
 fn arguments_text(arguments: &[Argument<'_>], source_text: &str) -> String {
     arguments
         .iter()
-        .map(|argument| span_text(argument, source_text).trim().to_string())
+        .map(|argument| argument_text(argument, source_text))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn argument_text(argument: &Argument<'_>, source_text: &str) -> String {
+    let Some(Expression::ArrowFunctionExpression(arrow)) = argument.as_expression() else {
+        return span_text(argument, source_text).trim().to_string();
+    };
+    if arrow.expression {
+        return span_text(argument, source_text).trim().to_string();
+    }
+
+    match lower_build_body(Some(&arrow.body), source_text) {
+        Ok((body, _)) => {
+            let params = source_text[arrow.params.span].trim();
+            format!("{params} => {{\n{body}        }}")
+        }
+        Err(_) => span_text(argument, source_text).trim().to_string(),
+    }
 }
 
 fn span_text(node: &impl GetSpan, source_text: &str) -> String {
@@ -688,6 +796,42 @@ struct Foo {
             "got:\n{out}"
         );
         assert!(out.contains("Image.pop();"), "got:\n{out}");
+    }
+
+    #[test]
+    fn lowers_if_statement_children() {
+        let source = r#"@Component
+struct Foo {
+  @State show: boolean = true;
+  build() {
+    Column() {
+      if (this.show) {
+        Text("shown")
+      } else {
+        Text("hidden")
+      }
+    }
+  }
+}"#;
+        let out = parse_and_lower(source).unwrap();
+        let if_pos = out.find("if (this.show) {").expect("if missing");
+        let shown = out
+            .find("Text.create(\"shown\");")
+            .expect("shown Text.create missing");
+        let else_pos = out.find("} else {").expect("else missing");
+        let hidden = out
+            .find("Text.create(\"hidden\");")
+            .expect("hidden Text.create missing");
+        let col_pop = out.find("Column.pop();").expect("Column.pop missing");
+        assert!(if_pos < shown, "then branch lowered inside if; got:\n{out}");
+        assert!(shown < else_pos, "then branch before else; got:\n{out}");
+        assert!(else_pos < hidden, "else branch lowered; got:\n{out}");
+        assert!(hidden < col_pop, "children before parent pop; got:\n{out}");
+        assert_eq!(
+            out.matches("Text.pop();").count(),
+            2,
+            "both branch Text components are popped; got:\n{out}"
+        );
     }
 
     #[test]
