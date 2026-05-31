@@ -21,8 +21,10 @@ hvigor uses rollup 3 internally (via `@ohos/hvigor-arkts-compose` which depends 
 > **Key discovery**: `bundleName` comes from `AppScope/app.json5` (`app.bundleName`), NOT from
 > `build-profile.json5` products. `signingConfigs` lives at `build-profile.json5#app.signingConfigs`
 > and is referenced from products by name via `signingConfig: "default"`. Use `load_app_json5()`
-> to read `AppScope/app.json5`. `targetSdkVersion` may appear alongside `compatibleSdkVersion`
-> and uses the same `"X.Y.Z(N)"` format.
+> to read `AppScope/app.json5`; when present, `app.bundleName` must satisfy hvigor's schema
+> pattern and placeholder values such as `Bundle name` fail during config parsing.
+> `targetSdkVersion` may appear alongside `compatibleSdkVersion` and uses the same `"X.Y.Z(N)"`
+> format.
 
 ### hvigor behavior
 

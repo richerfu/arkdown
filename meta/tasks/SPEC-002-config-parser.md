@@ -47,6 +47,11 @@ the resolved config.
 }
 ```
 
+`app.bundleName` is validated with hvigor's schema pattern:
+`^(?:[a-zA-Z](?:\w*[0-9a-zA-Z])?)(?:\.[0-9a-zA-Z](?:\w*[0-9a-zA-Z])?){2,}$`.
+For example, `com.example.myapp` is valid, while template values such as
+`Bundle name` fail before profile processing.
+
 ### build-profile.json5 Schema
 
 `signingConfigs` is at `app` level (not inside products). Products reference a signing config by
@@ -225,7 +230,7 @@ crates/arkdown-config/
 | ----------------------------------------------------- | ------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
 | `ArkdownConfig`                                       | rolldown `InputOptions` + `OutputOptions`                    | arkdown merges both into a single config struct; rolldown separates build-time from emit-time options     |
 | `BuildMode::Debug/Release`                            | rolldown `treeshake` option + `minify` option                | arkdown uses a single mode enum; rolldown sets these independently                                        |
-| `AppJson5::bundle_name`                               | no rolldown equivalent                                       | OHOS-specific: read from `AppScope/app.json5`, not from `products`; identifies the app bundle in OHM URLs |
+| `AppJson5::bundle_name`                               | no rolldown equivalent                                       | OHOS-specific: read and hvigor-schema-validated from `AppScope/app.json5`, not from `products`; identifies the app bundle in OHM URLs |
 | `StrictModeConfig::use_normalized_ohm_url`            | no rolldown equivalent                                       | OHOS-specific: controls whether module IDs are OHM URLs or file paths                                     |
 | `ModuleConfig::oh_package`                            | rolldown reads `package.json`; no `oh-package.json5` concept | OHOS uses ohpm, not npm; `oh-package.json5` replaces `package.json`                                       |
 | `SdkConfig`                                           | rolldown has no SDK concept                                  | Pure arkdown addition: SDK version determines ArkTS API rewrites and signing block version                |

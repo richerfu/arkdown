@@ -236,10 +236,69 @@ pub fn load_app_json5(root: &std::path::Path) -> Result<RawAppJson5, ConfigError
         });
     }
     let content = fs_err::read_to_string(&path)?;
-    json5::from_str(&content).map_err(|e| ConfigError::ParseError {
-        file: path,
+    let app: RawAppJson5 = json5::from_str(&content).map_err(|e| ConfigError::ParseError {
+        file: path.clone(),
         message: e.to_string(),
+    })?;
+    validate_app_json5(&app, &path)?;
+    Ok(app)
+}
+
+fn validate_app_json5(app: &RawAppJson5, path: &std::path::Path) -> Result<(), ConfigError> {
+    if app.app.bundle_name.is_empty() || is_valid_hvigor_bundle_name(&app.app.bundle_name) {
+        return Ok(());
+    }
+
+    Err(ConfigError::ValidationError {
+        file: path.to_path_buf(),
+        message: format!(
+            "app.bundleName must match pattern \"^(?:[a-zA-Z](?:\\\\w*[0-9a-zA-Z])?)(?:\\\\.[0-9a-zA-Z](?:\\\\w*[0-9a-zA-Z])?){{2,}}$\", got {:?}",
+            app.app.bundle_name
+        ),
     })
+}
+
+fn is_valid_hvigor_bundle_name(value: &str) -> bool {
+    let mut segments = value.split('.');
+    let Some(first) = segments.next() else {
+        return false;
+    };
+    if !is_valid_bundle_segment(first, true) {
+        return false;
+    }
+
+    let mut suffix_count = 0;
+    for segment in segments {
+        suffix_count += 1;
+        if !is_valid_bundle_segment(segment, false) {
+            return false;
+        }
+    }
+    suffix_count >= 2
+}
+
+fn is_valid_bundle_segment(segment: &str, first_segment: bool) -> bool {
+    let bytes = segment.as_bytes();
+    let Some((&first, rest)) = bytes.split_first() else {
+        return false;
+    };
+    let first_ok = if first_segment {
+        first.is_ascii_alphabetic()
+    } else {
+        first.is_ascii_alphanumeric()
+    };
+    if !first_ok {
+        return false;
+    }
+    if !rest
+        .iter()
+        .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+    {
+        return false;
+    }
+    bytes
+        .last()
+        .is_some_and(|byte| byte.is_ascii_alphanumeric())
 }
 
 // ---------------------------------------------------------------------------
@@ -552,5 +611,47 @@ mod tests {
         assert_eq!(app.app.version_name, "1.0.0");
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_load_app_json5_rejects_hvigor_invalid_bundle_name() {
+        use std::io::Write;
+
+        let tmp = std::env::temp_dir().join("arkdown_appscope_invalid_bundle_test");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("AppScope")).unwrap();
+
+        let content = r#"{
+            "app": {
+                "bundleName": "Bundle name",
+                "vendor": "example",
+                "versionCode": 1000000,
+                "versionName": "1.0.0"
+            }
+        }"#;
+        let mut f = std::fs::File::create(tmp.join("AppScope/app.json5")).unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+
+        let err = load_app_json5(&tmp).expect_err("invalid bundleName rejected");
+        assert!(
+            matches!(err, ConfigError::ValidationError { .. }),
+            "expected validation error, got {err:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_hvigor_bundle_name_pattern() {
+        assert!(is_valid_hvigor_bundle_name("com.example.myapplication"));
+        assert!(is_valid_hvigor_bundle_name("a.b.c"));
+        assert!(is_valid_hvigor_bundle_name("com.example_1.app2"));
+
+        assert!(!is_valid_hvigor_bundle_name("Bundle name"));
+        assert!(!is_valid_hvigor_bundle_name("com.example"));
+        assert!(!is_valid_hvigor_bundle_name("1com.example.app"));
+        assert!(!is_valid_hvigor_bundle_name("com._example.app"));
+        assert!(!is_valid_hvigor_bundle_name("com.example_.app"));
+        assert!(!is_valid_hvigor_bundle_name("com.example.app_"));
     }
 }
