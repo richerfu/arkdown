@@ -2970,7 +2970,7 @@ impl<'a> CodeGen<'a> {
                 self.push(Insn::AsyncFunctionResolve(0, areg));
             }
             if let Some(end) = self.function_end {
-                self.current_line = 0;
+                self.current_line = u32::MAX;
                 self.current_col = u32::MAX;
                 self.push(Insn::LdUndefined);
                 self.set_debug_pos(end);
@@ -5106,6 +5106,7 @@ impl<'a> CodeGen<'a> {
         self.set_debug_pos(bin.span.start);
         self.push(Insn::Sta(left_reg));
         if is_undefined_literal(&bin.right) {
+            self.set_debug_pos(bin.right.span().start);
             self.emit_undefined_literal();
         } else {
             self.emit_expr(&bin.right);
