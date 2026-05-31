@@ -109,60 +109,31 @@ impl OhPackageJson5 {
 }
 ```
 
-### 3. `BytecodeHarInfo` Struct
+### 3. `BytecodeHarInfo` Metadata
 
-Already exists in `arkdown-profile::loader_json` as a partial stub. Complete it:
-
-```rust
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct BytecodeHarInfo {
-    pub package_name: String,
-    /// Absolute path to the pre-compiled .abc file.
-    pub abc_path: PathBuf,
-    /// Optional absolute path to source maps.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_maps_path: Option<PathBuf>,
-    /// Compatible SDK version string, e.g. "5.0.0(12)".
-    pub compatible_sdk_version: String,
-    /// Optional insight intent JSON path.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub insight_intent: Option<PathBuf>,
-}
-```
+- `metadata.abcPath` is the primary ByteCode HAR signal and becomes absolute
+  `byteCodeHarInfo[pkg].abcPath`.
+- `metadata.sourceMapsPath` is serialized as absolute `sourceMapsPath` when present.
+- `metadata.insightIntentPath` is serialized as absolute `insightIntent` when present.
+- `main` ending in `.abc` and root `index.abc` remain compatibility fallbacks for
+  older fixtures, but the metadata fields are the hvigor-aligned path.
 
 ### 4. `generate_loader_json()` Population
 
 In `arkdown-profile::loader_json::generate_loader_json()`:
 
 ```rust
-// For each dependency in oh-package.json5 resolved by arkdown-resolver:
-for dep in resolved_deps {
-    let oh_pkg = load_oh_package_json5(&dep.root_path)?;
-    if oh_pkg.is_bytecode_har() {
-        let meta = oh_pkg.metadata.as_ref().unwrap();
-        let abc_path = dep.root_path.join(meta.abc_path.as_ref().unwrap());
-        let source_maps_path = meta.source_maps_path.as_ref()
-            .map(|p| dep.root_path.join(p));
-        let insight_intent = meta.insight_intent_path.as_ref()
-            .map(|p| dep.root_path.join(p));
-
-        loader_json.by_byte_code_har_info.insert(
-            dep.package_name.clone(),
-            BytecodeHarInfo {
-                package_name: dep.package_name.clone(),
-                abc_path,
-                source_maps_path,
-                compatible_sdk_version: dep.compatible_sdk_version
-                    .unwrap_or_else(|| "5.0.0(12)".to_string()),
-                insight_intent,
-            },
-        );
-        // ByteCode HAR must NOT appear in compileEntry
-        // (already excluded by the dep.is_bytecode_har() check in entry collection)
-    }
+for dep in scan_bytecode_har_deps(module_root, project_root) {
+    loader_json.byte_code_har_info.insert(
+        dep.package_name.clone(),
+        dep.into_loader_entry().1,
+    );
 }
 ```
+
+`scan_bytecode_har_deps()` walks module and project `oh_modules/`, reads
+`oh-package.json5#metadata`, and resolves all serialized paths to absolute
+filesystem paths.
 
 ### 5. Exclude ByteCode HARs from `compileEntry`
 
@@ -216,8 +187,10 @@ crates/arkdown-resolver/src/
 - `generate_loader_json()` with a source HAR dep: dep appears in `compileEntry` and
   `pkgNameToPkgBriefInfo`, NOT in `byteCodeHarInfo`.
 - `BytecodeHarInfo.abc_path` is an absolute path (not relative to project root).
-- `BytecodeHarInfo.source_maps_path` is `None` when not specified in `oh-package.json5`.
-- `BytecodeHarInfo.compatible_sdk_version` defaults to `"5.0.0(12)"` when not specified.
+- `BytecodeHarInfo.source_maps_path` and `insight_intent` are absolute paths when
+  `metadata.sourceMapsPath` / `metadata.insightIntentPath` are specified.
+- `BytecodeHarInfo.compatible_sdk_version` is empty when not specified, matching the
+  current scanner's direct metadata read.
 - `loader.json` serialization: `byteCodeHarInfo` field is present and non-empty when
   ByteCode HAR deps exist; field is an empty object `{}` when no BC-HAR deps.
 - Round-trip: serialized `loader.json` deserializes back to the same `BytecodeHarInfo`

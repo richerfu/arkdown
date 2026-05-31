@@ -13,6 +13,21 @@ use crate::loader_json::ByteCodeHarEntry;
 struct OhPkgMinimal {
     #[serde(default)]
     compatible_sdk_version: Option<CompatibleSdkVersionField>,
+    #[serde(default)]
+    main: Option<String>,
+    #[serde(default)]
+    metadata: Option<OhPkgMetadata>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OhPkgMetadata {
+    #[serde(default)]
+    abc_path: Option<String>,
+    #[serde(default)]
+    source_maps_path: Option<String>,
+    #[serde(default)]
+    insight_intent_path: Option<String>,
 }
 
 /// `compatibleSdkVersion` can be a plain integer (`12`) or a string (`"5.0.0(12)"`).
@@ -47,6 +62,8 @@ pub struct ByteCodeHarScanEntry {
     pub compatible_sdk_version: String,
     /// Optional path to the `sourceMaps.map` file alongside the `.abc`.
     pub source_maps_path: Option<PathBuf>,
+    /// Optional path to the ByteCode HAR insight intent metadata.
+    pub insight_intent: Option<PathBuf>,
 }
 
 impl ByteCodeHarScanEntry {
@@ -59,6 +76,9 @@ impl ByteCodeHarScanEntry {
             source_maps_path: self
                 .source_maps_path
                 .map(|p| p.to_string_lossy().into_owned()),
+            insight_intent: self
+                .insight_intent
+                .map(|p| p.to_string_lossy().into_owned()),
         };
         (self.package_name, entry)
     }
@@ -70,8 +90,9 @@ impl ByteCodeHarScanEntry {
 
 /// Scan `oh_modules/` directories for ByteCode HAR packages.
 ///
-/// A package is a ByteCode HAR when it contains a pre-compiled `index.abc`
-/// (or `src/sourceMaps.map` alongside it) rather than raw ETS/TS source.
+/// A package is a ByteCode HAR when `oh-package.json5#metadata.abcPath` points
+/// at a pre-compiled `.abc` file. For compatibility with older fixtures this
+/// also accepts `main` values ending in `.abc` and a root-level `index.abc`.
 ///
 /// Searches in order:
 /// 1. `<module_root>/oh_modules/`
@@ -149,45 +170,78 @@ fn try_collect_bytecode_har(
         return;
     }
 
-    // A ByteCode HAR has a pre-compiled `index.abc` at the package root.
-    let abc_path = pkg_dir.join("index.abc");
-    if !abc_path.exists() {
+    let Some(pkg) = read_oh_package(pkg_dir) else {
         return;
-    }
-
-    let compatible_sdk_version = read_compatible_sdk_version(pkg_dir);
-    let source_maps_path = {
-        let candidate = pkg_dir.join("src").join("sourceMaps.map");
-        if candidate.exists() {
-            Some(candidate)
-        } else {
-            None
-        }
     };
+
+    let Some(abc_path) = resolve_bytecode_abc_path(pkg_dir, &pkg) else {
+        return;
+    };
+
+    let compatible_sdk_version = pkg
+        .compatible_sdk_version
+        .as_ref()
+        .map(CompatibleSdkVersionField::as_string)
+        .unwrap_or_default();
+    let source_maps_path = resolve_source_maps_path(pkg_dir, &pkg);
+    let insight_intent = pkg
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.insight_intent_path.as_deref())
+        .map(|path| pkg_dir.join(path));
 
     out.push(ByteCodeHarScanEntry {
         package_name: pkg_name.to_string(),
         abc_path,
         compatible_sdk_version,
         source_maps_path,
+        insight_intent,
     });
 }
 
-fn read_compatible_sdk_version(pkg_dir: &Path) -> String {
+fn read_oh_package(pkg_dir: &Path) -> Option<OhPkgMinimal> {
     let pkg_json = pkg_dir.join("oh-package.json5");
     if !pkg_json.exists() {
-        return String::new();
+        return None;
     }
-    let Ok(content) = std::fs::read_to_string(&pkg_json) else {
-        return String::new();
-    };
-    let Ok(parsed) = json5::from_str::<OhPkgMinimal>(&content) else {
-        return String::new();
-    };
-    parsed
-        .compatible_sdk_version
-        .map(|v| v.as_string())
-        .unwrap_or_default()
+    let content = std::fs::read_to_string(&pkg_json).ok()?;
+    json5::from_str::<OhPkgMinimal>(&content).ok()
+}
+
+fn resolve_bytecode_abc_path(pkg_dir: &Path, pkg: &OhPkgMinimal) -> Option<PathBuf> {
+    if let Some(path) = pkg
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.abc_path.as_deref())
+    {
+        let abc_path = pkg_dir.join(path);
+        if abc_path.exists() {
+            return Some(abc_path);
+        }
+    }
+
+    if let Some(main) = pkg.main.as_deref().filter(|main| main.ends_with(".abc")) {
+        let abc_path = pkg_dir.join(main);
+        if abc_path.exists() {
+            return Some(abc_path);
+        }
+    }
+
+    let abc_path = pkg_dir.join("index.abc");
+    abc_path.exists().then_some(abc_path)
+}
+
+fn resolve_source_maps_path(pkg_dir: &Path, pkg: &OhPkgMinimal) -> Option<PathBuf> {
+    if let Some(path) = pkg
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.source_maps_path.as_deref())
+    {
+        return Some(pkg_dir.join(path));
+    }
+
+    let candidate = pkg_dir.join("src").join("sourceMaps.map");
+    candidate.exists().then_some(candidate)
 }
 
 // ---------------------------------------------------------------------------
@@ -439,6 +493,52 @@ mod tests {
     }
 
     #[test]
+    fn test_scan_bytecode_har_uses_metadata_paths() {
+        let tmp = make_temp_dir();
+        let oh_modules = tmp.path().join("oh_modules");
+        let pkg_dir = oh_modules.join("metadata-har");
+
+        write_abc(&pkg_dir.join("dist").join("metadata.abc"));
+        write_file(&pkg_dir.join("maps").join("sourceMaps.map"), "{}");
+        write_file(&pkg_dir.join("insight").join("intent.json"), "{}");
+        write_file(
+            &pkg_dir.join("oh-package.json5"),
+            r#"{
+              name: "metadata-har",
+              compatibleSdkVersion: "5.0.0(12)",
+              metadata: {
+                abcPath: "dist/metadata.abc",
+                sourceMapsPath: "maps/sourceMaps.map",
+                insightIntentPath: "insight/intent.json"
+              }
+            }"#,
+        );
+
+        let results = scan_bytecode_har_deps(tmp.path(), tmp.path());
+        assert_eq!(results.len(), 1);
+        assert!(results[0].abc_path.ends_with("dist/metadata.abc"));
+        assert!(results[0]
+            .source_maps_path
+            .as_ref()
+            .is_some_and(|path| path.ends_with("maps/sourceMaps.map")));
+        assert!(results[0]
+            .insight_intent
+            .as_ref()
+            .is_some_and(|path| path.ends_with("insight/intent.json")));
+
+        let (_, loader_entry) = results[0].clone().into_loader_entry();
+        assert!(loader_entry.abc_path.ends_with("dist/metadata.abc"));
+        assert!(loader_entry
+            .source_maps_path
+            .as_ref()
+            .is_some_and(|path| path.ends_with("maps/sourceMaps.map")));
+        assert!(loader_entry
+            .insight_intent
+            .as_ref()
+            .is_some_and(|path| path.ends_with("insight/intent.json")));
+    }
+
+    #[test]
     fn test_scan_bytecode_har_skips_non_abc_packages() {
         let tmp = make_temp_dir();
         let oh_modules = tmp.path().join("oh_modules");
@@ -487,6 +587,9 @@ mod tests {
             source_maps_path: Some(PathBuf::from(
                 "/project/oh_modules/@scope/pkg/src/sourceMaps.map",
             )),
+            insight_intent: Some(PathBuf::from(
+                "/project/oh_modules/@scope/pkg/insight/intent.json",
+            )),
         };
         let (key, loader_entry) = entry.into_loader_entry();
         assert_eq!(key, "@scope/pkg");
@@ -497,6 +600,12 @@ mod tests {
         );
         assert_eq!(loader_entry.compatible_sdk_version, "5.0.0(12)");
         assert!(loader_entry.source_maps_path.is_some());
+        assert!(loader_entry.insight_intent.is_some());
+        let json = serde_json::to_value(&loader_entry).expect("serialize bytecode har entry");
+        assert_eq!(
+            json.get("insightIntent").and_then(|value| value.as_str()),
+            Some("/project/oh_modules/@scope/pkg/insight/intent.json")
+        );
     }
 
     #[test]

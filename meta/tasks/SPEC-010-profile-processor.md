@@ -132,7 +132,9 @@ reads this file instead of directly reading `module.json5`.
     "my-bytecode-har": {
       "packageName": "my-bytecode-har",
       "abcPath": "/path/to/index.abc",
-      "compatibleSdkVersion": "5.0.0(12)"
+      "compatibleSdkVersion": "5.0.0(12)",
+      "sourceMapsPath": "/path/to/sourceMaps.map",
+      "insightIntent": "/path/to/insight_intent.json"
     }
   },
   "hspNameOhmMap": {},
@@ -187,7 +189,10 @@ matching internal `compileEntry` values as `./ets/workers/...`. This follows ups
 
 ### ByteCode HAR Info
 
-For each dependency that is a ByteCode HAR (has `metadata.abcPath` in its `oh-package.json5`):
+For each dependency that is a ByteCode HAR (has `metadata.abcPath` in its
+`oh-package.json5`), `arkdown-profile` resolves metadata paths relative to the
+package root and serializes absolute `abcPath`, optional `sourceMapsPath`, and
+optional `insightIntent` fields:
 
 ```rust
 if let Some(abc_path) = dep.oh_package.metadata.as_ref().and_then(|m| m.abc_path.as_ref()) {

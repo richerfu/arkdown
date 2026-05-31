@@ -174,6 +174,10 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                         .source_maps_path
                         .as_ref()
                         .map(|p| p.to_string_lossy().into_owned()),
+                    insight_intent: dep
+                        .insight_intent
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().into_owned()),
                 },
             );
         }

@@ -43,8 +43,8 @@ Status symbols: ✅ implemented + parity-verified, 🔄 partial (gaps listed), �
 | # | hvigor Step | Field/Detail | arkdown | Status |
 |---|---|---|---|---|
 | D1 | Write loader.json: core 18 fields | `GenerateLoaderJson::doTaskAction()` → `generate-loader-json.js` | `arkdown-profile::generate_loader_json()` — all 18 fields match golden exactly | ✅ |
-| D2 | `byteCodeHarInfo` map (pre-compiled HAR `.abc` paths) | From `DependencyManager` | `loader_json.by_byte_code_har_info` struct exists but not populated for real BC-HAR deps | 🔄 |
-| D3 | `dynamicImportLibInfo` (cross-HAR dynamic imports) | `ArkCompile::initDefaultArkCompileConfig()` | Not populated | ❌ |
+| D2 | `byteCodeHarInfo` map (pre-compiled HAR `.abc` paths) | From `DependencyManager` / `oh-package.json5#metadata` | `scan_bytecode_har_deps()` populates `abcPath`, `sourceMapsPath`, `compatibleSdkVersion`, and `insightIntent` from package metadata, with `main: *.abc` / `index.abc` fallback for older fixtures. Remaining: `declarationEntry` OHM URL collection and full dependency-manager graph parity. | 🔄 |
+| D3 | `dynamicImportLibInfo` (cross-HAR dynamic imports) | `ArkCompile::initDefaultArkCompileConfig()` | Populated from `dynamicDependencies` package metadata for direct deps; post-bundle dynamic `import()` graph parity still incomplete | 🔄 |
 | D4 | `workers[]` (WebWorker `.ets`/`.ts`/`.js` file paths) | `compiler/main.js::readWorkerFile()` reads explicit loader entries; `loadWorker()` scans `workers/` recursively when absent | `generate_loader_json()` recursively scans `src/main/ets/workers`, serializes absolute `workers` only when non-empty, and adds matching `./ets/...` compile entries | ✅ |
 | D5 | `hspNameOhmMap` + `harNameOhmMap` for multi-module projects | From `DependencyManager` | Basic maps for simple projects; transitive dep resolution incomplete | 🔄 |
 
@@ -357,7 +357,7 @@ hide executable-bytecode regressions.
 
 ### TASK-LOADER-01: ByteCode HAR dependency maps (M)
 
-**What**: Populate `loader_json.by_byte_code_har_info` from `oh-package.json5` dependencies that reference pre-compiled `.abc` + `.d.ts` packages. Resolve `abcPath`, `sourceMapsPath`, `compatibleSdkVersion`, `insightIntent`.
+**What**: Populate `loader_json.byteCodeHarInfo` from `oh-package.json5` dependencies that reference pre-compiled `.abc` + `.d.ts` packages. Resolve `metadata.abcPath`, `metadata.sourceMapsPath`, `compatibleSdkVersion`, and `metadata.insightIntentPath`; keep `declarationEntry` as an OHM URL/record-name follow-up instead of guessing from paths.
 **File**: `crates/arkdown-profile/src/loader_json.rs`, `crates/arkdown-resolver/src/`
 **Upstream ref**: `GenerateLoaderJson::doTaskAction()` — `byteCodeHarInfo` population from `DependencyManager`; `loader.json` schema in `hvigorw-analysis.md §9`
 **Complexity**: M

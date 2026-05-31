@@ -134,6 +134,9 @@ pub struct ByteCodeHarEntry {
     /// Absolute path to the `sourceMaps.map` file, if present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_maps_path: Option<String>,
+    /// Absolute path to the insight intent metadata, if present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub insight_intent: Option<String>,
 }
 
 fn default_build_mode() -> String {
