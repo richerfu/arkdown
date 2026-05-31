@@ -128,7 +128,7 @@ instructions without changing CodeItem bytes:
 
 The generated CompileArkTS cache TypeScript files match hvigor for the minimal
 fixture, but compiling those files directly through `arkdown-abc` currently
-emits 9821B and preserves all 23 method records and CodeItems. The direct route
+emits 9859B and preserves all 23 method records and CodeItems. The direct route
 reached bytecode parity after top-level block traversal, named default class
 export lowering, lexical temporary scoping, class declaration missing property
 initialization, and the upstream 0-based source-line/default-parameter/unary
@@ -141,7 +141,10 @@ identifier node. It also matches `GenScopeVariableInfo()` by omitting debug
 locals for lexical-bound `this`, filters hidden function `this` lexenv prologue
 events, matches derived-constructor final super-call validation source
 positions, and aligns top-level call-argument arrow return positions with
-upstream source-backed LNP behavior. The remaining direct-route gap is
+upstream source-backed LNP behavior. It also aligns class declaration/class
+export stores, variable declarator stores, call argument stores, and getter/setter
+property-key stores to the AST nodes used by upstream. The remaining direct-route
+gap is
 non-CodeItem ABC metadata/DebugInfo/LNP rather than executable bytecode; the
 direct route still has mixed per-method under/over-shoots despite bytecode
 parity.

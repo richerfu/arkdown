@@ -66,6 +66,10 @@ fn col_at(source: &str, byte_offset: u32) -> u32 {
     (end - last_nl) as u32
 }
 
+fn argument_span_start(arg: &Argument<'_>) -> u32 {
+    arg.span().start
+}
+
 #[derive(Debug, Clone)]
 struct SourceMapSegment {
     generated_col: u32,
@@ -3064,6 +3068,7 @@ impl<'a> CodeGen<'a> {
                         let proto_vreg = if let Some(sc) = super_class {
                             self.emit_expr(sc);
                             let reg = self.alloc_reg();
+                            self.set_debug_pos(cls.body.span.start);
                             self.push(Insn::Sta(reg));
                             reg
                         } else {
@@ -3075,6 +3080,7 @@ impl<'a> CodeGen<'a> {
                             &cls.body.body,
                         ));
                         let formal_count = constructor_required_param_count(&cls.body.body);
+                        self.set_debug_pos(cls.body.span.start);
                         self.push(Insn::DefineClassWithBuffer(
                             0,
                             lit_arr_id,
@@ -3082,7 +3088,9 @@ impl<'a> CodeGen<'a> {
                             formal_count,
                             proto_vreg,
                         ));
+                        self.set_debug_pos(cls.body.span.start);
                         self.push(Insn::Sta(class_reg));
+                        self.set_debug_pos(id.span.start);
                         self.push(Insn::Sta(var_reg));
                         self.emit_class_missing_properties(
                             class_name.unwrap_or(&name),
@@ -3109,6 +3117,7 @@ impl<'a> CodeGen<'a> {
                     let proto_vreg = if let Some(sc) = super_class {
                         self.emit_expr(sc);
                         let reg = self.alloc_reg();
+                        self.set_debug_pos(cls.body.span.start);
                         self.push(Insn::Sta(reg));
                         reg
                     } else {
@@ -3120,6 +3129,7 @@ impl<'a> CodeGen<'a> {
                         &cls.body.body,
                     ));
                     let formal_count = constructor_required_param_count(&cls.body.body);
+                    self.set_debug_pos(cls.body.span.start);
                     self.push(Insn::DefineClassWithBuffer(
                         0,
                         lit_arr_id,
@@ -3127,7 +3137,9 @@ impl<'a> CodeGen<'a> {
                         formal_count,
                         proto_vreg,
                     ));
+                    self.set_debug_pos(cls.body.span.start);
                     self.push(Insn::Sta(class_reg));
+                    self.set_debug_pos(id.span.start);
                     self.push(Insn::Sta(var_reg));
                     self.emit_class_missing_properties(
                         class_name.unwrap_or(&name),
@@ -3167,6 +3179,7 @@ impl<'a> CodeGen<'a> {
                     let proto_vreg = if let Some(sc) = &cls.super_class {
                         self.emit_expr(sc);
                         let reg = self.alloc_reg();
+                        self.set_debug_pos(cls.body.span.start);
                         self.push(Insn::Sta(reg));
                         reg
                     } else {
@@ -3176,6 +3189,7 @@ impl<'a> CodeGen<'a> {
                     self.literal_arrays
                         .push(class_buffer_literal_array(class_name, &cls.body.body));
                     let formal_count = constructor_required_param_count(&cls.body.body);
+                    self.set_debug_pos(cls.body.span.start);
                     self.push(Insn::DefineClassWithBuffer(
                         0,
                         lit_arr_id,
@@ -3183,8 +3197,12 @@ impl<'a> CodeGen<'a> {
                         formal_count,
                         proto_vreg,
                     ));
+                    self.set_debug_pos(cls.body.span.start);
                     self.push(Insn::Sta(class_reg));
                     if let Some(name) = local_name {
+                        if let Some(id) = &cls.id {
+                            self.set_debug_pos(id.span.start);
+                        }
                         self.push(Insn::Sta(class_reg + 1));
                         self.emit_class_missing_properties(
                             class_name,
@@ -3194,6 +3212,9 @@ impl<'a> CodeGen<'a> {
                         );
                         if let Some(export_index) = self.lowering.export_index(name) {
                             self.push(Insn::Lda(class_reg));
+                            if let Some(id) = &cls.id {
+                                self.set_debug_pos(id.span.start);
+                            }
                             self.push(Insn::StModuleVar(export_index));
                         }
                     } else {
@@ -3778,6 +3799,7 @@ impl<'a> CodeGen<'a> {
                     }
                     let reg = self.alloc_reg();
                     self.var_regs.insert(name.clone(), reg);
+                    self.set_debug_pos(id.span.start);
                     self.push(Insn::Sta(reg));
                     if let Some(slot) = self.lowering.lexical_index(&name) {
                         self.push(Insn::Lda(reg));
@@ -4519,6 +4541,7 @@ impl<'a> CodeGen<'a> {
         let proto_vreg = if let Some(sc) = &cls.super_class {
             self.emit_expr(sc);
             let reg = self.alloc_reg();
+            self.set_debug_pos(cls.body.span.start);
             self.push(Insn::Sta(reg));
             reg
         } else {
@@ -4529,6 +4552,7 @@ impl<'a> CodeGen<'a> {
         self.literal_arrays
             .push(class_buffer_literal_array(class_name, &cls.body.body));
         let formal_count = constructor_required_param_count(&cls.body.body);
+        self.set_debug_pos(cls.body.span.start);
         self.push(Insn::DefineClassWithBuffer(
             0,
             lit_arr_id,
@@ -4536,7 +4560,11 @@ impl<'a> CodeGen<'a> {
             formal_count,
             proto_vreg,
         ));
+        self.set_debug_pos(cls.body.span.start);
         self.push(Insn::Sta(class_reg));
+        if let Some(id) = &cls.id {
+            self.set_debug_pos(id.span.start);
+        }
         self.push(Insn::Sta(var_reg));
         self.emit_class_missing_properties(
             class_name,
@@ -4598,7 +4626,7 @@ impl<'a> CodeGen<'a> {
                 let public_name_id = self.intern(&public_name);
                 self.set_debug_pos(method.key.span().start);
                 self.push(Insn::LdaStr(public_name_id));
-                self.set_debug_pos(class_span_start);
+                self.set_debug_pos(method.key.span().start);
                 self.push(Insn::Sta(name_reg));
                 self.set_debug_pos(class_span_start);
                 if method.kind == MethodDefinitionKind::Get {
@@ -5038,6 +5066,7 @@ impl<'a> CodeGen<'a> {
     fn compile_arg_to_reg(&mut self, arg: &Argument<'_>) -> u8 {
         self.emit_argument(arg);
         let reg = self.alloc_reg();
+        self.set_debug_pos(argument_span_start(arg));
         self.push(Insn::Sta(reg));
         if matches!(
             arg.as_expression(),
