@@ -959,7 +959,9 @@ impl AbcFile {
                         // register assignments.
                         let mut local_offs = param_offs.clone();
                         if !is_arrow {
-                            local_offs.push(("this".to_string(), 2, scope_offs_regular[2]));
+                            if !debug.lexical_this {
+                                local_offs.push(("this".to_string(), 2, scope_offs_regular[2]));
+                            }
                             local_offs.sort_by(|a, b| a.0.cmp(&b.0));
                         }
                         for &(_, reg, param_off) in &local_offs {
@@ -2331,7 +2333,7 @@ fn debug_scope_start_pc(method: &MethodRecord) -> u32 {
         pc += 4; // NewLexEnvWithName
         let this_src = method.num_vregs + MANDATORY_PARAM_THIS_REG as u16;
         if this_src <= u8::MAX as u16 {
-            pc += 5; // lda v(this_src) + stlexvar 0, 0
+            pc += 4; // lda v(this_src) + stlexvar 0, 0
         }
     }
 

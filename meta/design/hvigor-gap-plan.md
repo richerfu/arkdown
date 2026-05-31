@@ -94,7 +94,7 @@ with that file list and `npmEntries.txt`.
 
 For the minimal fixture, the generated cache TypeScript bytes match hvigor. A
 temporary experiment compiling those cache TS files directly through `arkdown-abc`
-now emits 9839B and has the same 23 method records and byte-identical CodeItems
+now emits 9843B and has the same 23 method records and byte-identical CodeItems
 as hvigor. The fixes came directly from the upstream lowering path:
 `ClassDeclaration::Compile` / `ClassDefinition::Compile` scoped class temporaries,
 `ExportDefaultDeclaration` records named default classes under the class local
@@ -105,10 +105,14 @@ use 0-based source lines plus per-node source positions for default parameters,
 receivers/writes, `new` expressions, class missing-property scope/local events,
 class-method return end positions, `super(...)` post-call instructions, implicit
 return `INVALID_SOURCE_LOCATION` (`u32::MAX` line/column) before generated
-`ldundefined`, and right-operand `undefined` source attribution in condition
-comparisons. The latter two match `FunctionBuilder::ImplicitReturn()`,
-`Condition::Compile()`, and `Identifier::Compile()` in upstream es2panda. The
-direct route is now 5B smaller than hvigor overall while still having per-method
+`ldundefined`, right-operand `undefined` source attribution in condition
+comparisons, lexical-bound `this` omission for methods whose nested arrows
+capture `this`, hidden `newlexenvwithname` prologue filtering, and derived
+constructor final super-call validation source positions. These match
+`FunctionBuilder::ImplicitReturn()`, `Condition::Compile()`,
+`Identifier::Compile()`, `GenScopeVariableInfo()`, and
+`CheckIfSuperCorrectCallBeforeReturn()` in upstream es2panda. The direct route
+is now 1B smaller than hvigor overall while still having per-method
 undershoots and overshoots, so the remaining mismatch is in non-CodeItem ABC
 sections such as DebugInfo/LNP, annotations, indexes, or literal metadata rather
 than executable bytecode.
@@ -121,7 +125,7 @@ upstream `gen_merged_abc.ts` passes `filesInfo.txt` and `npmEntries.txt` to
 source maps only for API compatibility; `source_file` is passed separately from
 `filesInfo`-style metadata, and LNP coordinates come from parsed source spans.
 This source-derived route currently emits 9700B while preserving all CodeItems.
-The direct cache-TS route also preserves CodeItems now, but it is 9839B and still
+The direct cache-TS route also preserves CodeItems now, but it is 9843B and still
 needs section-level parity before becoming the final default path.
 
 ## Remaining ABC Gap
@@ -189,7 +193,7 @@ Priority order from the current 2026-05-31 state:
    and field initializer variants still need golden coverage.
 4. **[ABC Direct TS] Diff non-CodeItem sections on the cache-TS route.** The
    source TS is already equal to hvigor and all direct-route CodeItems match; the
-   remaining 5B overall shrink must be isolated to DebugInfo/LNP, annotations,
+   remaining 1B overall shrink must be isolated to DebugInfo/LNP, annotations,
    indexes, literal arrays, or other metadata, while preserving the per-method
    source-node fixes already matched to upstream.
 5. **[Parity harness] Add an ABC diff helper that compares CodeItems separately

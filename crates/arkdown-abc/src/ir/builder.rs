@@ -659,6 +659,7 @@ pub fn build_record_with_debug_and_source_map(
                     line_start: 1,
                     source_file: file.clone(),
                     param_names: vec![],
+                    lexical_this: false,
                 });
             }
         }
@@ -1475,6 +1476,7 @@ fn compile_class_elements(
                         method.value.body.as_deref(),
                         &method.value.params.items,
                         method.value.span.start,
+                        method.span.end,
                         &instance_fields,
                         strings,
                         literal_arrays,
@@ -1552,6 +1554,11 @@ fn compile_class_elements(
                 line_start: 1,
                 source_file: path.to_string(),
                 param_names: param_names.clone(),
+                lexical_this: method
+                    .value
+                    .body
+                    .as_deref()
+                    .is_some_and(|body| stmts_capture_this_in_arrow(&body.statements)),
             });
             methods.push(MethodRecord {
                 name: key_name,
@@ -1819,6 +1826,7 @@ fn collect_call_arg_arrows_expr(
                         line_start: 1,
                         source_file: path.to_string(),
                         param_names: arrow_param_names.clone(),
+                        lexical_this: false,
                     });
                     methods.push(MethodRecord {
                         name: record_name,
@@ -2395,6 +2403,7 @@ fn compile_constructor_with_fields_tracked<'src>(
     body: Option<&FunctionBody<'src>>,
     params: &[FormalParameter<'src>],
     function_span_start: u32,
+    function_span_end: u32,
     fields: &[(String, &Expression<'src>)],
     strings: &mut StringTable,
     literal_arrays: &mut Vec<LiteralArray>,
@@ -2429,8 +2438,11 @@ fn compile_constructor_with_fields_tracked<'src>(
         }
     }
     if has_super_class && !cg.returned {
+        cg.current_line = u32::MAX;
+        cg.current_col = u32::MAX;
         cg.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
         cg.push(Insn::ThrowIfSuperNotCorrectCall(0));
+        cg.set_debug_pos(function_span_end);
         cg.push(Insn::Return);
         cg.returned = true;
     }
@@ -2807,7 +2819,9 @@ impl<'a> CodeGen<'a> {
         let literal_id = self.literal_arrays.len() as u16;
         self.literal_arrays
             .push(lexical_names_literal_array(&["this".to_string()]));
+        let tracker = self.line_tracker.take();
         self.push(Insn::NewLexEnvWithName(1, literal_id));
+        self.line_tracker = tracker;
         self.function_this_capture_env = true;
     }
 

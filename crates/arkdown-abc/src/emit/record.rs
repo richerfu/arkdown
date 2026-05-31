@@ -184,6 +184,11 @@ pub struct DebugInfoRecord {
     /// Formal parameter names, parallel to the method's parameter list.
     /// Empty for methods whose params are unnamed or not tracked.
     pub param_names: Vec<String>,
+    /// The function's `this` binding is captured into a lexical environment.
+    ///
+    /// Upstream `GenScopeVariableInfo()` skips local-variable debug entries for
+    /// `LexicalBound()` variables, so such methods must not emit a `this` local.
+    pub lexical_this: bool,
 }
 
 /// A field (instance or static) in a Panda `ClassItem`.
