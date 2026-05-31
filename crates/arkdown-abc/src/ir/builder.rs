@@ -49,10 +49,14 @@ fn encode_sleb128(mut value: i32, buf: &mut Vec<u8>) {
     }
 }
 
-/// Return the 1-based line number corresponding to `byte_offset` in `source`.
+/// Return the 0-based line number corresponding to `byte_offset` in `source`.
+///
+/// es2panda stores `lexer::SourcePosition::line` directly in
+/// `pandaIns->ins_debug.line_number`; that value is 0-based. The assembler
+/// then computes LNP deltas from the first instruction's debug line.
 fn line_at(source: &str, byte_offset: u32) -> u32 {
     let end = (byte_offset as usize).min(source.len());
-    1 + source[..end].bytes().filter(|&b| b == b'\n').count() as u32
+    source[..end].bytes().filter(|&b| b == b'\n').count() as u32
 }
 
 /// Return the 0-based column number corresponding to `byte_offset` in `source`.
@@ -111,13 +115,13 @@ impl SourceMapper {
     fn map_offset(&self, source: &str, byte_offset: u32) -> Option<(u32, u32)> {
         let gen_line = line_at(source, byte_offset);
         let gen_col = col_at(source, byte_offset);
-        let segments = self.lines.get(gen_line.saturating_sub(1) as usize)?;
+        let segments = self.lines.get(gen_line as usize)?;
         let segment = segments
             .iter()
             .take_while(|segment| segment.generated_col <= gen_col)
             .last()?;
         let col_delta = gen_col.saturating_sub(segment.generated_col);
-        Some((segment.source_line + 1, segment.source_col + col_delta))
+        Some((segment.source_line, segment.source_col + col_delta))
     }
 }
 
@@ -1405,6 +1409,7 @@ fn compile_class_elements(
             let (bytecode, catches) = compile_constructor_with_fields(
                 None,
                 &[],
+                0,
                 &instance_fields,
                 strings,
                 literal_arrays,
@@ -1469,6 +1474,7 @@ fn compile_class_elements(
                     compile_constructor_with_fields_tracked(
                         method.value.body.as_deref(),
                         &method.value.params.items,
+                        method.value.span.start,
                         &instance_fields,
                         strings,
                         literal_arrays,
@@ -1482,6 +1488,7 @@ fn compile_class_elements(
                     let (bc, catches) = compile_constructor_with_fields(
                         method.value.body.as_deref(),
                         &method.value.params.items,
+                        method.value.span.start,
                         &instance_fields,
                         strings,
                         literal_arrays,
@@ -2317,6 +2324,7 @@ fn default_derived_constructor_line_ops() -> Vec<u8> {
 fn compile_constructor_with_fields<'src>(
     body: Option<&FunctionBody<'src>>,
     params: &[FormalParameter<'src>],
+    function_span_start: u32,
     fields: &[(String, &Expression<'src>)],
     strings: &mut StringTable,
     literal_arrays: &mut Vec<LiteralArray>,
@@ -2331,7 +2339,7 @@ fn compile_constructor_with_fields<'src>(
     let mut cg = CodeGen::new(strings, literal_arrays, lowering);
     cg.derived_constructor = has_super_class;
     cg.bind_function_param_names(param_names);
-    cg.emit_default_parameters(params);
+    cg.emit_default_parameters(params, Some(function_span_start));
     if !fields.is_empty() {
         cg.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
         let this_reg = cg.alloc_reg();
@@ -2360,6 +2368,7 @@ fn compile_constructor_with_fields<'src>(
 fn compile_constructor_with_fields_tracked<'src>(
     body: Option<&FunctionBody<'src>>,
     params: &[FormalParameter<'src>],
+    function_span_start: u32,
     fields: &[(String, &Expression<'src>)],
     strings: &mut StringTable,
     literal_arrays: &mut Vec<LiteralArray>,
@@ -2376,7 +2385,7 @@ fn compile_constructor_with_fields_tracked<'src>(
     let mut cg = CodeGen::new_with_source(strings, literal_arrays, lowering, source, source_mapper);
     cg.derived_constructor = has_super_class;
     cg.bind_function_param_names(param_names);
-    cg.emit_default_parameters(params);
+    cg.emit_default_parameters(params, Some(function_span_start));
     if !fields.is_empty() {
         cg.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
         let this_reg = cg.alloc_reg();
@@ -2707,7 +2716,7 @@ impl<'a> CodeGen<'a> {
         let mut gen = Self::new(strings, literal_arrays, lowering);
         gen.source = Some(source);
         gen.source_mapper = source_mapper;
-        gen.line_tracker = Some(LineTracker::new(1));
+        gen.line_tracker = Some(LineTracker::new(u32::MAX));
         gen
     }
 
@@ -2736,7 +2745,7 @@ impl<'a> CodeGen<'a> {
         if let Some(src) = source {
             gen.source = Some(src);
             gen.source_mapper = source_mapper;
-            gen.line_tracker = Some(LineTracker::new(1));
+            gen.line_tracker = Some(LineTracker::new(u32::MAX));
         }
         gen
     }
@@ -2797,7 +2806,11 @@ impl<'a> CodeGen<'a> {
         self.next_reg = self.next_reg.max(next);
     }
 
-    fn emit_default_parameters(&mut self, params: &[FormalParameter<'_>]) {
+    fn emit_default_parameters(
+        &mut self,
+        params: &[FormalParameter<'_>],
+        function_span_start: Option<u32>,
+    ) {
         for (idx, param) in params.iter().enumerate() {
             let Some(initializer) = param.initializer.as_deref() else {
                 continue;
@@ -2806,27 +2819,43 @@ impl<'a> CodeGen<'a> {
                 continue;
             }
 
-            self.set_debug_pos(initializer.span().start);
+            let param_start = param.pattern.span().start;
+            let branch_start = function_span_start.unwrap_or(param_start);
+            self.set_debug_pos(param_start);
             let saved_next_reg = self.next_reg;
             let param_reg = 3u8.saturating_add(idx as u8);
             let value_reg = self.alloc_reg();
             self.push(Insn::Lda(param_reg));
+            self.set_debug_pos(branch_start);
             self.push(Insn::Sta(value_reg));
             self.push(Insn::LdUndefined);
             self.push(Insn::StrictEq(0, value_reg));
             let skip_default = self.insns.len();
             self.push(Insn::JeqzShort(0));
             if is_undefined_literal(initializer) {
+                self.set_debug_pos(initializer.span().start);
                 self.push(Insn::LdUndefined);
+                self.set_debug_pos(param_start);
                 self.push(Insn::Sta(param_reg));
             } else if let Some(value) = negative_integer_literal(initializer) {
+                let init_start = initializer.span().start;
+                let literal_start = initializer
+                    .span()
+                    .source_text(self.source.unwrap_or_default())
+                    .strip_prefix('-')
+                    .map(|_| init_start.saturating_add(1))
+                    .unwrap_or(init_start);
+                self.set_debug_pos(literal_start);
                 self.push(Insn::LdAi(value));
+                self.set_debug_pos(init_start);
                 self.push(Insn::Sta(value_reg));
                 self.push(Insn::Lda(value_reg));
                 self.push(Insn::Neg(0));
+                self.set_debug_pos(param_start);
                 self.push(Insn::Sta(param_reg));
             } else {
                 self.emit_expr(initializer);
+                self.set_debug_pos(param_start);
                 self.push(Insn::Sta(value_reg));
                 self.push(Insn::Lda(value_reg));
                 self.push(Insn::Sta(param_reg));
@@ -4860,6 +4889,7 @@ impl<'a> CodeGen<'a> {
             reg
         };
 
+        self.set_debug_pos(call.span.start);
         self.push(Insn::SuperCallThisRange(slot, argc as u8, first_arg_reg));
         self.next_reg = saved_next_reg;
         let new_this_reg = self.alloc_reg();
