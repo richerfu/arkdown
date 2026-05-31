@@ -44,7 +44,7 @@ Status symbols: ✅ implemented + parity-verified, 🔄 partial (gaps listed), �
 |---|---|---|---|---|
 | D1 | Write loader.json: core 18 fields | `GenerateLoaderJson::doTaskAction()` → `generate-loader-json.js` | `arkdown-profile::generate_loader_json()` — all 18 fields match golden exactly | ✅ |
 | D2 | `byteCodeHarInfo` map + ByteCode HAR `declarationEntry` | `byte-code-har-utils.js`, `GenerateLoaderJson.processDeclarationEntry()` | `scan_bytecode_har_deps()` now follows hvigor's `metadata.byteCodeHar` + `ets/modules.abc` convention, uses deterministic package traversal, populates `abcPath`, `sourceMapsPath`, `compatibleSdkVersion`, and `insightIntent`, and copies dependency `metadata.declarationEntry` normalized OHM URLs into loader.json. Remaining: generation of a ByteCode HAR's own declarationEntry from ability/startup/insightIntent/runtimeOnly/workers and full dependency-manager graph parity. | 🔄 |
-| D3 | `dynamicImportLibInfo` (runtime-only and cross-HAR dynamic imports) | `GenerateLoaderJson.processDynamicImport()` | Populated from `dynamicDependencies`, product `buildOption.arkOptions.runtimeOnly.packages`, and direct dependency `metadata.runtimeOnly.packages`; post-bundle dynamic `import()` graph parity and transitive dependency `metadata.runtimeOnly` traversal are still incomplete | 🔄 |
+| D3 | `runtimeOnly` compile entries and `dynamicImportLibInfo` (runtime-only and cross-HAR dynamic imports) | `GenerateLoaderJson.processDynamicImport()` | Product `buildOption.arkOptions.runtimeOnly.sources` now appends matching `.ets`/`.ts`/`.js` files to serialized `compileEntry` and local `src/main` bundler entries. `dynamicImportLibInfo` is populated from `dynamicDependencies`, product `runtimeOnly.packages`, and direct dependency `metadata.runtimeOnly.packages`. Remaining: dependency `metadata.runtimeOnly.sources`, post-bundle dynamic `import()` graph parity, and transitive dependency `metadata.runtimeOnly` traversal. | 🔄 |
 | D4 | `workers[]` (WebWorker `.ets`/`.ts`/`.js` file paths) | `compiler/main.js::readWorkerFile()` reads explicit loader entries; `loadWorker()` scans `workers/` recursively when absent | `generate_loader_json()` recursively scans `src/main/ets/workers`, serializes absolute `workers` only when non-empty, and adds matching `./ets/...` compile entries | ✅ |
 | D5 | `hspNameOhmMap` + `harNameOhmMap` for multi-module projects | From `DependencyManager` | Basic maps for simple projects; transitive dep resolution incomplete | 🔄 |
 
@@ -365,7 +365,7 @@ hide executable-bytecode regressions.
 
 ### TASK-LOADER-02: Dynamic import library info (M)
 
-**What**: Detect runtime-only and dynamic-import packages whose specifier resolves to a cross-HAR/ohpm dep. Write `dynamicImportLibInfo` in loader.json: `{ pkgName: { entryFilePath, moduleName } }`.
+**What**: Detect runtime-only source files and dynamic-import packages. Append product `runtimeOnly.sources` source files/directories to `compileEntry`, and write runtime-only/dynamic-import packages to `dynamicImportLibInfo`: `{ pkgName: { entryFilePath, moduleName } }`.
 **File**: `crates/arkdown-profile/src/loader_json.rs`, `crates/arkdown/src/` (post-bundle module graph walk)
 **Upstream ref**: `GenerateLoaderJson.processDynamicImport()`; `arkts-pack.js::generateConfig()` — `dynamicImportLibInfo` from resolver
 **Complexity**: M

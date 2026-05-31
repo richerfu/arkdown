@@ -149,6 +149,8 @@ pub struct RawArkOptions {
 pub struct RawRuntimeOnly {
     #[serde(default)]
     pub packages: Vec<String>,
+    #[serde(default)]
+    pub sources: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -379,7 +381,8 @@ mod tests {
                                 ruleOptions: { enable: false }
                             },
                             runtimeOnly: {
-                                packages: ["@ohos/dynamic-feature"]
+                                packages: ["@ohos/dynamic-feature"],
+                                sources: ["src/main/ets/runtime"]
                             }
                         }
                     }
@@ -404,6 +407,7 @@ mod tests {
             .and_then(|ark_options| ark_options.runtime_only.as_ref())
             .expect("runtimeOnly parsed");
         assert_eq!(runtime_only.packages, vec!["@ohos/dynamic-feature"]);
+        assert_eq!(runtime_only.sources, vec!["src/main/ets/runtime"]);
     }
 
     #[test]

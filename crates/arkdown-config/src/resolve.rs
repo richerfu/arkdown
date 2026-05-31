@@ -158,6 +158,7 @@ pub fn load_config(
                 .as_ref()
                 .map(|runtime_only| RuntimeOnlyConfig {
                     packages: runtime_only.packages.clone(),
+                    sources: runtime_only.sources.clone(),
                 });
             ArkOptions {
                 obfuscation,
@@ -423,7 +424,8 @@ mod tests {
                                 }
                             },
                             runtimeOnly: {
-                                packages: ["@ohos/runtime-only"]
+                                packages: ["@ohos/runtime-only"],
+                                sources: ["src/main/ets/runtime"]
                             }
                         }
                     }
@@ -453,6 +455,7 @@ mod tests {
                 assert!(obf.rule_files[1].ends_with("extra-rules.txt"));
                 let runtime_only = ark_opts.runtime_only.as_ref().expect("runtimeOnly present");
                 assert_eq!(runtime_only.packages, vec!["@ohos/runtime-only"]);
+                assert_eq!(runtime_only.sources, vec!["src/main/ets/runtime"]);
             }
             Err(ConfigError::SdkNotFound) => {
                 // Acceptable on machines without DevEco Studio

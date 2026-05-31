@@ -12,9 +12,11 @@
 Detect hvigor dynamic-import surfaces and populate
 `loader.json#dynamicImportLibInfo`. Besides post-bundle `import()` resolution,
 hvigor also uses `buildOption.arkOptions.runtimeOnly.packages` and dependency
-`metadata.runtimeOnly.packages` to describe packages loaded only at runtime. This
-map is read by the ArkRuntime to locate the entry file for dynamically imported
-modules.
+`metadata.runtimeOnly.packages` to describe packages loaded only at runtime.
+`buildOption.arkOptions.runtimeOnly.sources` is a separate hvigor surface: those
+source files are appended to `loader.json#compileEntry` instead of
+`dynamicImportLibInfo`. This map is read by the ArkRuntime to locate the entry
+file for dynamically imported modules.
 
 ---
 
@@ -25,6 +27,14 @@ From `generate-loader-json.js::processDynamicImport()` and
 
 ```javascript
 const runtimeOnly = buildOption?.arkOptions?.runtimeOnly;
+runtimeOnly?.sources?.forEach((source) => {
+  const sourcePath = path.resolve(modulePath, source);
+  if (fs.statSync(sourcePath).isFile()) {
+    this.compileEntry.push(sourcePath);
+  } else {
+    this.processDirectoryImport(sourcePath);
+  }
+});
 runtimeOnly?.packages?.forEach((pkg) => {
   this.isHarDependency(pkg)
     ? this.processHarDynamicImport(pkg, this.dynamicImportLibInfo)
@@ -40,10 +50,11 @@ runtimeOnly?.packages?.forEach((pkg) => {
 }
 ```
 
-The `dynamicImportLibInfo` is built from explicit runtime-only package metadata
-and, in the full hvigor pipeline, from dynamic import resolution during bundling.
-The resolver records the dependency's entry file path, module name, package path,
-local-dependency flag, and host module info.
+The `compileEntry` runtime-only source list is built from explicit current-module
+source metadata. The `dynamicImportLibInfo` is built from explicit runtime-only
+package metadata and, in the full hvigor pipeline, from dynamic import resolution
+during bundling. The resolver records the dependency's entry file path, module
+name, package path, local-dependency flag, and host module info.
 
 From `generate-loader-json.js::doTaskAction()`:
 
@@ -207,6 +218,9 @@ crates/arkdown-cli/src/
 
 - `buildOption.arkOptions.runtimeOnly.packages` containing `my-har`: `my-har`
   appears in `dynamicImportLibInfo` with correct `entryFilePath` and host module info.
+- `buildOption.arkOptions.runtimeOnly.sources` containing a source file or
+  directory: matching `.ets`, `.ts`, and `.js` files appear in serialized
+  `compileEntry`; files under `src/main` also become arkdown bundler entries.
 - A direct dependency whose `oh-package.json5#metadata.runtimeOnly.packages`
   contains `my-har`: `my-har` appears in `dynamicImportLibInfo`.
 - Source file with `import('my-har')` where `my-har` is a local HAR dep: `my-har`

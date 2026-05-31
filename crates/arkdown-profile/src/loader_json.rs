@@ -235,6 +235,18 @@ pub fn generate_loader_json(
         discovered_workers.push(to_absolute_path_string(path));
     }
 
+    let runtime_only_source_files = collect_runtime_only_source_files(config, module_cfg);
+    let hvigor_compile_entry: Vec<String> = runtime_only_source_files
+        .iter()
+        .map(|path| to_absolute_path_string(path))
+        .collect();
+    let src_main_root = module_cfg.src_path.join("src/main");
+    for path in &runtime_only_source_files {
+        if let Ok(rel) = path.strip_prefix(&src_main_root) {
+            compile_entry.push(format!("./{}", to_unix_path(rel)));
+        }
+    }
+
     // Deduplicate while preserving order.
     {
         let mut seen = std::collections::HashSet::new();
@@ -316,7 +328,7 @@ pub fn generate_loader_json(
         hsp_name_ohm_map: HashMap::new(),
         har_name_ohm_map: HashMap::new(),
         package_manager_type: "ohpm".to_string(),
-        hvigor_compile_entry: vec![],
+        hvigor_compile_entry,
         other_compile_files: vec![],
         dynamic_import_lib_info,
         router_map,
@@ -574,7 +586,50 @@ fn discover_worker_files(module_root: &Path) -> Vec<PathBuf> {
         return vec![];
     }
 
-    let mut stack = vec![workers_dir];
+    collect_dynamic_import_source_files(&workers_dir)
+}
+
+fn collect_runtime_only_source_files(
+    config: &ArkdownConfig,
+    module_cfg: &ModuleConfig,
+) -> Vec<PathBuf> {
+    let sources = config
+        .product
+        .build_option
+        .ark_options
+        .as_ref()
+        .and_then(|ark_options| ark_options.runtime_only.as_ref())
+        .map(|runtime_only| runtime_only.sources.as_slice())
+        .unwrap_or_default();
+
+    let mut files = Vec::new();
+    for source in sources {
+        let path = Path::new(source);
+        let source_path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            module_cfg.src_path.join(path)
+        };
+
+        if source_path.is_file() {
+            if is_dynamic_import_source_file(&source_path) {
+                files.push(source_path);
+            }
+            continue;
+        }
+
+        if source_path.is_dir() {
+            files.extend(collect_dynamic_import_source_files(&source_path));
+        }
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    files.retain(|path| seen.insert(to_unix_path(path)));
+    files
+}
+
+fn collect_dynamic_import_source_files(root: &Path) -> Vec<PathBuf> {
+    let mut stack = vec![root.to_path_buf()];
     let mut files = Vec::new();
     while let Some(dir) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -586,10 +641,7 @@ fn discover_worker_files(module_root: &Path) -> Vec<PathBuf> {
                 stack.push(path);
                 continue;
             }
-            if matches!(
-                path.extension().and_then(|ext| ext.to_str()),
-                Some("ets" | "ts" | "js")
-            ) {
+            if is_dynamic_import_source_file(&path) {
                 files.push(path);
             }
         }
@@ -597,6 +649,13 @@ fn discover_worker_files(module_root: &Path) -> Vec<PathBuf> {
 
     files.sort_by_key(|path| to_unix_path(path));
     files
+}
+
+fn is_dynamic_import_source_file(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|ext| ext.to_str()),
+        Some("ets" | "ts" | "js")
+    )
 }
 
 fn to_unix_path(path: &Path) -> String {
@@ -1401,6 +1460,7 @@ mod tests {
             types: vec![],
             runtime_only: Some(RuntimeOnlyConfig {
                 packages: vec!["@runtime/feature".to_string()],
+                sources: vec![],
             }),
         });
         let module_cfg = ModuleConfig {
@@ -1426,6 +1486,65 @@ mod tests {
                 .and_then(|value| value.get("hostModuleName"))
                 .and_then(|value| value.as_str()),
             Some("entry")
+        );
+    }
+
+    #[test]
+    fn test_loader_json_compile_entry_uses_runtime_only_sources() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let project_root = tmp.path().to_path_buf();
+        let module_root = project_root.join("entry");
+        let runtime_dir = module_root.join("src/main/ets/runtime");
+        let nested_dir = runtime_dir.join("nested");
+        std::fs::create_dir_all(&nested_dir).expect("create runtime dirs");
+        let keep = runtime_dir.join("Keep.ets");
+        let side = nested_dir.join("Side.ts");
+        std::fs::write(&keep, "export default class Keep {}").expect("write keep");
+        std::fs::write(&side, "export const side = true;").expect("write side");
+        std::fs::write(runtime_dir.join("ignored.txt"), "ignored").expect("write ignored");
+
+        let mut config = make_config(false);
+        config.project_root = project_root;
+        config.product.build_option.ark_options = Some(ArkOptions {
+            obfuscation: None,
+            types: vec![],
+            runtime_only: Some(RuntimeOnlyConfig {
+                packages: vec![],
+                sources: vec!["src/main/ets/runtime".to_string()],
+            }),
+        });
+        let module_cfg = ModuleConfig {
+            name: "entry".to_string(),
+            src_path: module_root.clone(),
+            module_type: OhosModuleType::Entry,
+        };
+
+        let loader = generate_loader_json(&config, &module_cfg, &make_manifest());
+
+        assert_eq!(
+            loader.hvigor_compile_entry,
+            vec![
+                to_absolute_path_string(&keep),
+                to_absolute_path_string(&side)
+            ]
+        );
+        assert!(loader
+            .compile_entry
+            .contains(&"./ets/runtime/Keep.ets".to_string()));
+        assert!(loader
+            .compile_entry
+            .contains(&"./ets/runtime/nested/Side.ts".to_string()));
+        assert!(!loader
+            .compile_entry
+            .contains(&"./ets/runtime/ignored.txt".to_string()));
+
+        let value = serde_json::to_value(&loader).expect("serialize loader");
+        assert_eq!(
+            value
+                .get("compileEntry")
+                .and_then(|value| value.as_array())
+                .map(Vec::len),
+            Some(2)
         );
     }
 

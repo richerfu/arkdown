@@ -130,6 +130,7 @@ pub struct SourceOption {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeOnlyConfig {
     pub packages: Vec<String>,
+    pub sources: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
