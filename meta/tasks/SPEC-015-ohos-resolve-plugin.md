@@ -106,8 +106,11 @@ pub struct ProcessImporteeResult {
 
 ### External specifier filtering
 
-Modules with IDs starting with `@ohos:`, `@ohos/`, `@kit.`, `@shared:`, `@bundle:`,
-`@system.`, or `@hms.` are excluded from both importee lists.
+Modules with IDs starting with `@ohos:`, `@kit.`, `@shared:`, `@bundle:`,
+`@system.`, or `@hms.` are excluded from both importee lists. Scoped
+`@ohos/*` package imports are not automatically external: they first resolve
+through `oh_modules` / `pkgNameToPkgBriefInfo`, and only fall back to SDK
+declarations when no package is present.
 
 ### loader.json integration
 
@@ -215,5 +218,5 @@ impl ArkdownPlugin for OhosResolvePlugin {
 - Case-sensitivity check enabled: `resolve_id("./Utils/Helper")` when actual path is `./utils/helper` → `Err(ArkdownError::CaseMismatch)` on macOS/Windows
 - Case-sensitivity check disabled: `resolve_id("./Utils/Helper")` passes through to the resolver without case validation
 - Case-sensitivity check is a no-op on Linux (skip the `read_dir` call on case-sensitive filesystems)
-- `resolve_id` returning `Ok(None)` for a specifier that OhosResolver cannot handle defers to the next plugin
+- `resolve_id` returns `Ok(None)` for absolute filesystem IDs so rolldown can keep its entry handling; unresolved OHOS/bare specifiers surface as errors instead of being silently externalized
 - Plugin name returns `"ohos-resolve"`

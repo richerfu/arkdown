@@ -61,10 +61,11 @@ impl OhosResolver {
     ///
     /// Resolution order:
     /// 1. `@bundle:` / `@shared:` → external bundle / HSP reference
-    /// 2. `@ohos/` → SDK API declaration
-    /// 3. `@kit.` → SDK kit declaration
-    /// 4. Relative (`./`, `../`) → local source file
-    /// 5. Bare specifier → `pkg_name_to_pkg_info`, then `oh_modules/`
+    /// 2. Bare package names, including scoped `@ohos/*` packages, from
+    ///    `pkg_name_to_pkg_info` / `oh_modules/`
+    /// 3. `@ohos/` → SDK API declaration
+    /// 4. `@kit.` → SDK kit declaration
+    /// 5. Relative (`./`, `../`) → local source file
     pub fn resolve(
         &self,
         specifier: &str,
@@ -92,7 +93,14 @@ impl OhosResolver {
             });
         }
 
-        // 2. @ohos/* → SDK API declaration
+        // 2. Bare packages take precedence over SDK declarations. OHOS package
+        // names often use the `@ohos/*` scope; hvigor resolves those through
+        // dependency metadata/oh_modules before falling back to SDK APIs.
+        if let Some(resolved) = self.resolve_bare_package(specifier) {
+            return Ok(resolved);
+        }
+
+        // 3. @ohos/* → SDK API declaration
         if let Some(api_name) = specifier.strip_prefix("@ohos/") {
             let filename = format!("@ohos.{}.d.ts", api_name);
             for api_dir in &self.config.sdk_api_dirs {
@@ -109,7 +117,7 @@ impl OhosResolver {
             });
         }
 
-        // 3. @kit.* → SDK kit declaration
+        // 4. @kit.* → SDK kit declaration
         if specifier.starts_with("@kit.") {
             let filename = format!("{}.d.ts", specifier);
             for kits_dir in &self.config.sdk_kits_dirs {
@@ -126,7 +134,7 @@ impl OhosResolver {
             });
         }
 
-        // 4. Relative imports
+        // 5. Relative imports
         if specifier.starts_with("./") || specifier.starts_with("../") {
             let importer_dir = importer.parent().unwrap_or(importer);
             let base = importer_dir.join(specifier);
@@ -144,13 +152,19 @@ impl OhosResolver {
             });
         }
 
-        // 5. Bare specifier: check pkg_name_to_pkg_info first
+        Err(ResolveError::NotFound {
+            specifier: specifier.to_string(),
+            importer: importer.to_string_lossy().into_owned(),
+        })
+    }
+
+    fn resolve_bare_package(&self, specifier: &str) -> Option<OhosResolvedModule> {
         if let Some(pkg_info) = self.config.pkg_name_to_pkg_info.get(specifier) {
             for src_root in &pkg_info.source_roots {
                 let base = src_root.join("index");
                 if let Some(resolved) = try_extensions(&base) {
                     let module_type = infer_module_type(&resolved);
-                    return Ok(OhosResolvedModule::LocalSource {
+                    return Some(OhosResolvedModule::LocalSource {
                         path: resolved,
                         module_type,
                         pkg_context: Some(PkgContext {
@@ -166,7 +180,6 @@ impl OhosResolver {
             }
         }
 
-        // 5b. Walk oh_modules_roots
         for root in &self.config.oh_modules_roots {
             let pkg_dir = root.join(specifier);
             let oh_package_path = pkg_dir.join("oh-package.json5");
@@ -181,7 +194,7 @@ impl OhosResolver {
                     .unwrap_or_else(|| pkg_dir.join("ets/modules.abc"));
                 let declaration_path = read_declaration_entry(&oh_package_path)
                     .unwrap_or_else(|| pkg_dir.join("index.d.ets"));
-                return Ok(OhosResolvedModule::BytecodeHar {
+                return Some(OhosResolvedModule::BytecodeHar {
                     abc_path,
                     declaration_path,
                     pkg_name: specifier.to_string(),
@@ -194,7 +207,7 @@ impl OhosResolver {
                 let entry_base = pkg_dir.join(&main);
                 if let Some(resolved) = try_extensions(&entry_base) {
                     let module_type = infer_module_type(&resolved);
-                    return Ok(OhosResolvedModule::RemotePackage {
+                    return Some(OhosResolvedModule::RemotePackage {
                         path: resolved,
                         module_type,
                         pkg_name: specifier.to_string(),
@@ -208,7 +221,7 @@ impl OhosResolver {
             let index_base = pkg_dir.join("index");
             if let Some(resolved) = try_extensions(&index_base) {
                 let module_type = infer_module_type(&resolved);
-                return Ok(OhosResolvedModule::RemotePackage {
+                return Some(OhosResolvedModule::RemotePackage {
                     path: resolved,
                     module_type,
                     pkg_name: specifier.to_string(),
@@ -218,10 +231,7 @@ impl OhosResolver {
             }
         }
 
-        Err(ResolveError::NotFound {
-            specifier: specifier.to_string(),
-            importer: importer.to_string_lossy().into_owned(),
-        })
+        None
     }
 }
 
@@ -326,6 +336,40 @@ mod tests {
                 assert!(path.exists());
             }
             _ => panic!("expected SdkDeclaration"),
+        }
+    }
+
+    #[test]
+    fn test_ohos_scoped_package_precedes_sdk_declaration() {
+        let dir = TempDir::new().unwrap();
+        let sdk_api_dir = dir.path().join("sdk/api");
+        fs::create_dir_all(&sdk_api_dir).unwrap();
+        fs::write(sdk_api_dir.join("@ohos.utils.d.ts"), "// sdk utils").unwrap();
+
+        let pkg_dir = dir.path().join("oh_modules/@ohos/utils");
+        fs::create_dir_all(pkg_dir.join("src/main/ets")).unwrap();
+        fs::write(
+            pkg_dir.join("oh-package.json5"),
+            r#"{ name: "@ohos/utils", main: "src/main/ets/index.ets" }"#,
+        )
+        .unwrap();
+        let entry = pkg_dir.join("src/main/ets/index.ets");
+        fs::write(&entry, "export const value = 1;").unwrap();
+
+        let resolver = make_resolver(
+            dir.path().to_path_buf(),
+            vec![sdk_api_dir],
+            vec![],
+            vec![dir.path().join("oh_modules")],
+        );
+        let importer = dir.path().join("src/main.ets");
+        let result = resolver.resolve("@ohos/utils", &importer).unwrap();
+        match result {
+            OhosResolvedModule::RemotePackage { path, pkg_name, .. } => {
+                assert_eq!(pkg_name, "@ohos/utils");
+                assert_eq!(path, entry);
+            }
+            _ => panic!("expected RemotePackage"),
         }
     }
 

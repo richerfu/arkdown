@@ -43,16 +43,15 @@ impl OhosResolvePlugin {
         importer: Option<&str>,
     ) -> anyhow::Result<Option<HookResolveIdOutput>> {
         let s = specifier;
-        if s.starts_with("@ohos:")
-            || s.starts_with("@ohos/")
-            || s.starts_with("@system.")
-            || s.starts_with("@native:")
-        {
+        if is_builtin_external_specifier(s) {
             return Ok(Some(HookResolveIdOutput {
                 id: s.into(),
                 external: Some(ResolvedExternal::Bool(true)),
                 ..Default::default()
             }));
+        }
+        if Path::new(s).is_absolute() {
+            return Ok(None);
         }
 
         let importer_path_buf: PathBuf;
@@ -63,10 +62,7 @@ impl OhosResolvePlugin {
             self.project_root.as_path()
         };
 
-        let resolved = match self.resolver.resolve(specifier, importer_path) {
-            Ok(r) => r,
-            Err(_) => return Ok(None),
-        };
+        let resolved = self.resolver.resolve(specifier, importer_path)?;
 
         let output = match resolved {
             OhosResolvedModule::ExternalBundle { ohm_url } => HookResolveIdOutput {
@@ -129,16 +125,15 @@ impl Plugin for OhosResolvePlugin {
         let project_root = self.project_root.clone();
         async move {
             let s = specifier.as_str();
-            if s.starts_with("@ohos:")
-                || s.starts_with("@ohos/")
-                || s.starts_with("@system.")
-                || s.starts_with("@native:")
-            {
+            if is_builtin_external_specifier(s) {
                 return Ok(Some(HookResolveIdOutput {
                     id: s.into(),
                     external: Some(ResolvedExternal::Bool(true)),
                     ..Default::default()
                 }));
+            }
+            if Path::new(s).is_absolute() {
+                return Ok(None);
             }
 
             let importer_path_buf: PathBuf;
@@ -149,10 +144,7 @@ impl Plugin for OhosResolvePlugin {
                 project_root.as_path()
             };
 
-            let resolved = match resolver.resolve(s, importer_path) {
-                Ok(r) => r,
-                Err(_) => return Ok(None),
-            };
+            let resolved = resolver.resolve(s, importer_path)?;
 
             let output = match resolved {
                 OhosResolvedModule::ExternalBundle { ohm_url } => HookResolveIdOutput {
@@ -196,6 +188,12 @@ impl Plugin for OhosResolvePlugin {
     }
 }
 
+fn is_builtin_external_specifier(specifier: &str) -> bool {
+    specifier.starts_with("@ohos:")
+        || specifier.starts_with("@system.")
+        || specifier.starts_with("@native:")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,12 +228,12 @@ mod tests {
     }
 
     #[test]
-    fn test_unknown_specifier_returns_none() {
+    fn test_unknown_specifier_returns_error() {
         let plugin = make_plugin();
         let result = plugin
             .resolve_sync("some-unknown-package", Some("/tmp/main.ets"))
-            .unwrap();
-        assert!(result.is_none());
+            .expect_err("unknown package must fail resolution");
+        assert!(result.to_string().contains("Module not found"));
     }
 
     #[test]

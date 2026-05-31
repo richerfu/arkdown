@@ -256,8 +256,8 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             Arc::new(OhosResolvePlugin::new(
                 ResolverConfig {
                     project_root: project_root.clone(),
-                    sdk_api_dirs: vec![],
-                    sdk_kits_dirs: vec![],
+                    sdk_api_dirs: sdk_api_dirs(&config_arc),
+                    sdk_kits_dirs: sdk_kits_dirs(&config_arc),
                     pkg_name_to_pkg_info: HashMap::new(),
                     use_normalized_ohm_url: config_arc
                         .product
@@ -938,6 +938,32 @@ fn resource_toolchains_dir(restool_path: &Path) -> PathBuf {
         }
     }
     toolchains_dir.to_path_buf()
+}
+
+fn sdk_api_dirs(config: &ArkdownConfig) -> Vec<PathBuf> {
+    let Some(ets_root) = sdk_ets_root(config) else {
+        return vec![];
+    };
+    let mut dirs = vec![ets_root.join("api")];
+    if let Some(ohos_root) = ets_root.parent() {
+        dirs.push(ohos_root.join("js/api"));
+    }
+    dirs
+}
+
+fn sdk_kits_dirs(config: &ArkdownConfig) -> Vec<PathBuf> {
+    sdk_ets_root(config)
+        .map(|ets_root| vec![ets_root.join("kits")])
+        .unwrap_or_default()
+}
+
+fn sdk_ets_root(config: &ArkdownConfig) -> Option<PathBuf> {
+    config
+        .sdk_config
+        .ets_loader_path
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
 }
 
 fn path_string(path: &Path) -> String {

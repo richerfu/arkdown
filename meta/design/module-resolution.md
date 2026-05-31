@@ -354,6 +354,9 @@ resolve(specifier, importer):
     → try extensions: [.ets, .ts, .js, .d.ets, .d.ts]
     → try index: [/index.ets, /index.ts, /index.js]
 
+  if specifier matches an ohpm package in pkgBriefInfo or oh_modules:
+    → package main/index source or ByteCode HAR metadata
+
   if specifier starts with '@ohos/':
     → sdk_api_dir / '@ohos.' + specifier[7:] + '.d.ts'
 
