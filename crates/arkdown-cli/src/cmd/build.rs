@@ -10,7 +10,7 @@ use arkdown::{BundleOutput, Bundler};
 use arkdown_config::{load_config, resolve::module_matches_output_target};
 use arkdown_core::{
     ArkdownConfig, BuildMode, ChunkGraph, ModuleConfig, ModuleJson5, ModuleJson5Module,
-    OutputTarget,
+    OhosModuleType, OutputTarget,
 };
 use arkdown_obfuscate::{should_obfuscate, ObfuscationOptions, Obfuscator};
 use arkdown_pack::{
@@ -73,18 +73,21 @@ pub async fn run(args: BuildArgs) -> Result<()> {
 
     // Step 1: Config
     progress.step(1, 6, "Parsing config");
-    let config = load_config(
-        &project_root,
-        mode,
-        target,
-        args.product.as_deref(),
-        args.module.as_deref(),
-    )
-    .context("Failed to parse project config")?;
+    let config = load_config(&project_root, mode, target, args.product.as_deref(), None)
+        .context("Failed to parse project config")?;
+    if let Some(module_name) = args.module.as_deref() {
+        if !config
+            .modules
+            .iter()
+            .any(|module| module.name == module_name)
+        {
+            return Err(anyhow::anyhow!("module not found: {module_name}"));
+        }
+    }
     progress.done();
 
     let config_arc = Arc::new(config);
-    let build_modules = build_modules_for_target(config_arc.as_ref());
+    let build_modules = build_modules_for_target(config_arc.as_ref(), args.module.as_deref());
 
     // Step 2: Resource compilation + Profile processing.
     // Resources must be compiled first so their numeric IDs (iconId, labelId,
@@ -112,9 +115,11 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         if app_scope_res.exists() {
             res_dirs.push(app_scope_res);
         }
-        let module_res_dir = module.src_path.join("src/main/resources");
-        if module_res_dir.exists() {
-            res_dirs.push(module_res_dir);
+        for resource_module in resource_modules_for_build(config_arc.as_ref(), module) {
+            let module_res_dir = resource_module.src_path.join("src/main/resources");
+            if module_res_dir.exists() && !res_dirs.contains(&module_res_dir) {
+                res_dirs.push(module_res_dir);
+            }
         }
         let resource_ids: HashMap<String, u32> = if !res_dirs.is_empty() {
             match resource_compiler.compile(ResourceCompileInput {
@@ -184,6 +189,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         processor
             .write_loader_json(&loader_json, &loader_json_out)
             .map_err(|e| anyhow::anyhow!("write loader.json with byteCodeHarInfo failed: {}", e))?;
+        write_router_map_intermediates(module, &loader_json, &config_arc, &res_out)?;
 
         loader_jsons.push((module.clone(), manifest, loader_json));
         all_bc_har_deps.push(bc_har_deps);
@@ -497,6 +503,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                         .join("build/default/intermediates/source_map/default/sourceMaps.map"),
                 )?;
             }
+            copy_ets_assets_to_loader_out(module, loader_json)?;
 
             for (_chunk_name, path) in &bundle_out.chunk_files {
                 if path.extension().and_then(|e| e.to_str()) == Some("js") && path.exists() {
@@ -627,7 +634,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                                     abc_path: modules_abc,
                                     resources_index,
                                     module_json,
-                                    native_libs: vec![],
+                                    native_libs: collect_native_libs(&project_root, module),
                                     output_path: output.clone(),
                                     resources_src_dir: Some(
                                         module.src_path.join(
@@ -727,17 +734,211 @@ fn read_module_json5(path: &std::path::Path) -> Result<ModuleJson5> {
     json5::from_str(&content).context("Failed to parse module.json5")
 }
 
-fn build_modules_for_target(config: &ArkdownConfig) -> Vec<&ModuleConfig> {
+fn build_modules_for_target<'a>(
+    config: &'a ArkdownConfig,
+    selected_module: Option<&str>,
+) -> Vec<&'a ModuleConfig> {
     let matching: Vec<&ModuleConfig> = config
         .modules
         .iter()
+        .filter(|module| {
+            selected_module
+                .map(|selected| module.name == selected)
+                .unwrap_or(true)
+        })
         .filter(|module| module_matches_output_target(&module.module_type, &config.output_target))
         .collect();
     if matching.is_empty() {
-        config.modules.iter().collect()
+        config
+            .modules
+            .iter()
+            .filter(|module| {
+                selected_module
+                    .map(|selected| module.name == selected)
+                    .unwrap_or(true)
+            })
+            .collect()
     } else {
         matching
     }
+}
+
+fn resource_modules_for_build<'a>(
+    config: &'a ArkdownConfig,
+    output_module: &'a ModuleConfig,
+) -> Vec<&'a ModuleConfig> {
+    match config.output_target {
+        OutputTarget::Hap | OutputTarget::Hsp => {
+            let mut modules = Vec::new();
+            for module in &config.modules {
+                if matches!(
+                    module.module_type,
+                    OhosModuleType::Entry | OhosModuleType::Feature
+                ) && module.name != output_module.name
+                {
+                    continue;
+                }
+                modules.push(module);
+            }
+            modules
+        }
+        _ => vec![output_module],
+    }
+}
+
+fn collect_native_libs(project_root: &Path, module: &ModuleConfig) -> Vec<PathBuf> {
+    let mut libs = Vec::new();
+    let mut seen = HashSet::new();
+    for root in [
+        module.src_path.join("src/main/libs"),
+        module.src_path.join("libs"),
+        module.src_path.join("oh_modules"),
+        project_root.join("oh_modules"),
+    ] {
+        if !root.exists() {
+            continue;
+        }
+        for entry in walkdir::WalkDir::new(root)
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_type().is_file())
+        {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("so") {
+                continue;
+            }
+            if path
+                .components()
+                .any(|component| component.as_os_str().to_string_lossy().as_ref() == "arm64-v8a")
+            {
+                let path = canonical_or_owned(path);
+                if seen.insert(path.clone()) {
+                    libs.push(path);
+                }
+            }
+        }
+    }
+    libs.sort();
+    libs
+}
+
+fn copy_ets_assets_to_loader_out(
+    module: &ModuleConfig,
+    loader_json: &arkdown_profile::LoaderJson,
+) -> Result<()> {
+    let ets_root = module.src_path.join("src/main/ets");
+    if !ets_root.exists() {
+        return Ok(());
+    }
+    let out_root = PathBuf::from(&loader_json.ace_module_build);
+    for entry in walkdir::WalkDir::new(&ets_root)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_file())
+    {
+        let path = entry.path();
+        let ext = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+        if !matches!(
+            ext,
+            "json" | "json5" | "png" | "jpg" | "jpeg" | "webp" | "gif" | "svg"
+        ) {
+            continue;
+        }
+        let Ok(rel) = path.strip_prefix(&ets_root) else {
+            continue;
+        };
+        copy_if_exists(path, &out_root.join(rel))?;
+    }
+    Ok(())
+}
+
+fn write_router_map_intermediates(
+    module: &ModuleConfig,
+    loader_json: &arkdown_profile::LoaderJson,
+    config: &ArkdownConfig,
+    res_out: &Path,
+) -> Result<()> {
+    if loader_json.router_map.is_empty() {
+        return Ok(());
+    }
+
+    let router_map = serde_json::json!({
+        "routerMap": loader_json
+            .router_map
+            .iter()
+            .filter_map(|entry| normalized_router_map_entry(entry, loader_json, config))
+            .collect::<Vec<_>>()
+    });
+    let bytes = serde_json::to_vec(&router_map)?;
+    write_bytes(
+        &module
+            .src_path
+            .join("build/default/intermediates/router_map/default/loader-router-map.json"),
+        &bytes,
+    )?;
+    write_bytes(
+        &module
+            .src_path
+            .join("build/default/intermediates/router_map/default/temp-router-map.json"),
+        &bytes,
+    )?;
+    write_bytes(
+        &res_out.join("resources/base/profile/default-router-map.json"),
+        &bytes,
+    )?;
+    Ok(())
+}
+
+fn normalized_router_map_entry(
+    entry: &serde_json::Value,
+    loader_json: &arkdown_profile::LoaderJson,
+    config: &ArkdownConfig,
+) -> Option<serde_json::Value> {
+    let obj = entry.as_object()?;
+    let page_source = obj.get("pageSourceFile")?.as_str()?;
+    let page_path = Path::new(page_source);
+    let (package_name, module_root) =
+        loader_json
+            .module_path_map
+            .iter()
+            .find_map(|(name, root)| {
+                let root = Path::new(root);
+                page_path.starts_with(root).then_some((name, root))
+            })?;
+    let src_main = module_root.join("src/main");
+    let rel = page_path
+        .strip_prefix(&src_main)
+        .ok()
+        .map(|path| format!("src/main/{}", slash_path(path)))
+        .unwrap_or_else(|| page_source.to_string());
+
+    let mut normalized = serde_json::Map::new();
+    if let Some(value) = obj.get("buildFunction") {
+        normalized.insert("buildFunction".to_string(), value.clone());
+    }
+    if let Some(value) = obj.get("data") {
+        normalized.insert("data".to_string(), value.clone());
+    }
+    if let Some(value) = obj.get("name") {
+        normalized.insert("name".to_string(), value.clone());
+    }
+    normalized.insert(
+        "moduleName".to_string(),
+        serde_json::Value::String(loader_json.module_name.clone()),
+    );
+    normalized.insert(
+        "bundleName".to_string(),
+        serde_json::Value::String(config.product.bundle_name.clone()),
+    );
+    normalized.insert("pageSourceFile".to_string(), serde_json::Value::String(rel));
+    normalized.insert(
+        "packageName".to_string(),
+        serde_json::Value::String(package_name.clone()),
+    );
+    if let Some(value) = obj.get("ohmurl") {
+        normalized.insert("ohmurl".to_string(), value.clone());
+    }
+    Some(serde_json::Value::Object(normalized))
 }
 
 fn write_profile_intermediates(module_root: &Path, final_module_json: &Path) -> Result<()> {

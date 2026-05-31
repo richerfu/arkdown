@@ -12,6 +12,7 @@ pub enum ResourceCategory {
     Element,
     Media,
     Profile,
+    Rawfile,
 }
 
 /// A single resource file discovered under a resources directory.
@@ -43,13 +44,37 @@ pub struct ResourceFile {
 pub fn scan_resources(resources_dir: &Path) -> Vec<ResourceFile> {
     let mut files = Vec::new();
 
-    // min_depth(2) skips the qualifier dirs themselves; max_depth(3) avoids going deeper.
-    for entry in WalkDir::new(resources_dir).min_depth(2).max_depth(3) {
+    for entry in WalkDir::new(resources_dir).min_depth(1) {
         let Ok(e) = entry else { continue };
         if !e.file_type().is_file() {
             continue;
         }
         let path = e.path();
+
+        if path.strip_prefix(resources_dir).ok().is_some_and(|rel| {
+            rel.components().next().and_then(|c| c.as_os_str().to_str()) == Some("rawfile")
+        }) {
+            let name = path
+                .file_stem()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+            files.push(ResourceFile {
+                qualifier: Qualifier(String::new()),
+                category: ResourceCategory::Rawfile,
+                path: path.to_path_buf(),
+                name,
+            });
+            continue;
+        }
+
+        if path
+            .strip_prefix(resources_dir)
+            .ok()
+            .is_some_and(|rel| rel.components().count() > 3)
+        {
+            continue;
+        }
 
         // Immediate parent → category directory name ("element", "media", "profile").
         let category_dir = path

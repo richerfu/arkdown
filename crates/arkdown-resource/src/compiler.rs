@@ -195,6 +195,24 @@ impl ResourceCompiler {
                         });
                         next_id += 1;
                     }
+
+                    ResourceCategory::Rawfile => {
+                        let Some(res_root) = input
+                            .resources_dirs
+                            .iter()
+                            .find(|dir| file.path.starts_with(dir))
+                        else {
+                            continue;
+                        };
+                        let Ok(relative_path) = file.path.strip_prefix(res_root) else {
+                            continue;
+                        };
+                        resource_copies.push(ResourceCopy {
+                            source: file.path.clone(),
+                            relative_path: relative_path.to_path_buf(),
+                            category: file.category.clone(),
+                        });
+                    }
                 }
             }
         }
@@ -239,6 +257,7 @@ fn resource_file_sort_key(file: &scan::ResourceFile) -> (String, u8, String) {
         },
         ResourceCategory::Media => 10,
         ResourceCategory::Profile => 20,
+        ResourceCategory::Rawfile => 30,
     };
     (file.qualifier.0.clone(), category_order, file.name.clone())
 }

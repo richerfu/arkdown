@@ -1,6 +1,6 @@
 use oxc_ast::ast::{
-    Argument, ArkUIChild, ArkUIComponentExpression, BlockStatement, CallExpression, Expression,
-    FunctionBody, IfStatement, Statement,
+    Argument, ArkUIChild, ArkUIComponentExpression, ArrowFunctionExpression, BlockStatement,
+    CallExpression, Expression, FunctionBody, IfStatement, Statement,
 };
 use oxc_span::{GetSpan, Span};
 
@@ -203,32 +203,65 @@ fn lower_if_statement(
     span_hints: &mut Vec<SpanHint>,
 ) -> Result<(), BuildLoweringError> {
     let test = span_text(&statement.test, source_text).trim().to_string();
-    out.push_str(&format!("{indent}if ({test}) {{\n"));
     let branch_indent = format!("{indent}    ");
+    let inner_indent = format!("{branch_indent}    ");
+
+    out.push_str(&format!(
+        "{indent}this.observeComponentCreation2((elmtId, isInitialRender) => {{\n"
+    ));
+    out.push_str(&format!("{branch_indent}If.create();\n"));
+    out.push_str(&format!("{branch_indent}if ({test}) {{\n"));
+    out.push_str(&format!(
+        "{inner_indent}this.ifElseBranchUpdateFunction(0, () => {{\n"
+    ));
     lower_statement(
         &statement.consequent,
         source_text,
-        &branch_indent,
+        &format!("{inner_indent}    "),
         out,
         span_hints,
     )?;
-    out.push_str(&format!("{indent}}}"));
+    out.push_str(&format!("{inner_indent}}});\n"));
 
+    let mut branch_index = 1usize;
     if let Some(alternate) = &statement.alternate {
+        out.push_str(&format!("{branch_indent}}} else {{\n"));
+        out.push_str(&format!(
+            "{inner_indent}this.ifElseBranchUpdateFunction({branch_index}, () => {{\n"
+        ));
         match alternate {
             Statement::IfStatement(alternate_if) => {
-                out.push_str(" else ");
-                lower_if_statement(alternate_if, source_text, indent, out, span_hints)?;
+                lower_if_statement(
+                    alternate_if,
+                    source_text,
+                    &format!("{inner_indent}    "),
+                    out,
+                    span_hints,
+                )?;
             }
             _ => {
-                out.push_str(" else {\n");
-                lower_statement(alternate, source_text, &branch_indent, out, span_hints)?;
-                out.push_str(&format!("{indent}}}\n"));
+                lower_statement(
+                    alternate,
+                    source_text,
+                    &format!("{inner_indent}    "),
+                    out,
+                    span_hints,
+                )?;
             }
         }
-    } else {
-        out.push('\n');
+        out.push_str(&format!("{inner_indent}}});\n"));
+        branch_index += 1;
     }
+    if branch_index == 1 {
+        out.push_str(&format!("{branch_indent}}} else {{\n"));
+        out.push_str(&format!(
+            "{inner_indent}this.ifElseBranchUpdateFunction(1, () => {{\n"
+        ));
+        out.push_str(&format!("{inner_indent}}});\n"));
+    }
+    out.push_str(&format!("{branch_indent}}}\n"));
+    out.push_str(&format!("{indent}}}, If);\n"));
+    out.push_str(&format!("{indent}If.pop();\n"));
 
     Ok(())
 }
@@ -242,6 +275,10 @@ fn lower_component(
 ) -> Result<(), BuildLoweringError> {
     let name = component_name(&component.callee)?;
     let args = arguments_text(&component.arguments, source_text);
+
+    if name == "LazyForEach" {
+        return lower_lazy_for_each(component, source_text, indent, out, span_hints);
+    }
 
     let body_line = out.bytes().filter(|&b| b == b'\n').count();
 
@@ -324,6 +361,78 @@ fn lower_component(
     );
     out.push_str(&format!("{indent}{name}.pop();\n"));
     Ok(())
+}
+
+fn lower_lazy_for_each(
+    component: &ArkUIComponentExpression<'_>,
+    source_text: &str,
+    indent: &str,
+    out: &mut String,
+    span_hints: &mut Vec<SpanHint>,
+) -> Result<(), BuildLoweringError> {
+    let Some(data_arg) = component.arguments.first() else {
+        return Err(BuildLoweringError::UnsupportedChild);
+    };
+    let Some(item_gen_arg) = component.arguments.get(1) else {
+        return Err(BuildLoweringError::UnsupportedChild);
+    };
+    let Some(item_gen) = argument_arrow(item_gen_arg) else {
+        return Err(BuildLoweringError::UnsupportedChild);
+    };
+
+    let data = argument_text(data_arg, source_text);
+    let item_params = source_text[item_gen.params.span].trim();
+    out.push_str(&format!(
+        "{indent}const __lazyForEachItemGenFunction = {item_params} => {{\n"
+    ));
+    lower_lazy_arrow_body(
+        item_gen,
+        source_text,
+        &format!("{indent}    "),
+        out,
+        span_hints,
+    )?;
+    out.push_str(&format!("{indent}}};\n"));
+
+    if let Some(id_func_arg) = component.arguments.get(2) {
+        let id_func = argument_text(id_func_arg, source_text);
+        out.push_str(&format!(
+            "{indent}const __lazyForEachItemIdFunc = {id_func};\n"
+        ));
+        out.push_str(&format!(
+            "{indent}LazyForEach.create(\"1\", this, {data}, __lazyForEachItemGenFunction, __lazyForEachItemIdFunc);\n"
+        ));
+    } else {
+        out.push_str(&format!(
+            "{indent}LazyForEach.create(\"1\", this, {data}, __lazyForEachItemGenFunction);\n"
+        ));
+    }
+    out.push_str(&format!("{indent}LazyForEach.pop();\n"));
+    Ok(())
+}
+
+fn lower_lazy_arrow_body(
+    arrow: &ArrowFunctionExpression<'_>,
+    source_text: &str,
+    indent: &str,
+    out: &mut String,
+    span_hints: &mut Vec<SpanHint>,
+) -> Result<(), BuildLoweringError> {
+    if arrow.expression {
+        out.push_str(&format!("{indent}return undefined;\n"));
+        return Ok(());
+    }
+    for statement in &arrow.body.statements {
+        lower_statement(statement, source_text, indent, out, span_hints)?;
+    }
+    Ok(())
+}
+
+fn argument_arrow<'a>(argument: &'a Argument<'a>) -> Option<&'a ArrowFunctionExpression<'a>> {
+    match argument.as_expression()? {
+        Expression::ArrowFunctionExpression(arrow) => Some(arrow),
+        _ => None,
+    }
 }
 
 fn push_span_hint(span_hints: &mut Vec<SpanHint>, body_line: usize, body_col: usize, span: Span) {
