@@ -302,6 +302,11 @@ fn build_chunk_graph(rd_output: rolldown::BundleOutput) -> Result<ChunkGraph, Ar
                     .facade_module_id
                     .as_ref()
                     .map(|id| id.as_str().to_owned()),
+                module_ids: chunk
+                    .module_ids
+                    .iter()
+                    .map(|id| id.as_str().to_owned())
+                    .collect(),
                 exports: chunk.exports.iter().map(|e| e.to_string()).collect(),
                 imports: chunk.imports.iter().map(|i| i.to_string()).collect(),
                 dynamic_imports: chunk

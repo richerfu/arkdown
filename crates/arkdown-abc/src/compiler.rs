@@ -67,23 +67,20 @@ pub struct AbcArtifactResult {
 /// falls back to raw source for `.ets` files. This function normalises source
 /// through OXC before bytecode lowering.
 ///
-/// If TypeScript parsing also fails (malformed source), we fall back to
-/// plain-JS parsing; if that too fails we return the input unchanged and let
-/// `build_record` surface the error with a proper diagnostic.
-/// Normalise `source` through a TSX parse + Codegen round-trip.
+/// Normalise `source` through a TypeScript parse + Codegen round-trip.
 ///
 /// The primary purpose is to remove non-standard ArkTS/ETS constructs that
-/// would confuse the downstream `SourceType::tsx()` parser used by
-/// `build_record`.  Standard TypeScript annotations (`): void`, `: Want`)
+/// would confuse the downstream `SourceType::ts()` parser used by
+/// `build_record`. Standard TypeScript annotations (`): void`, `: Want`)
 /// survive the round-trip unchanged — that is intentional: `build_record`
-/// now accepts TypeScript source directly via `SourceType::tsx()`, so we
+/// now accepts TypeScript source directly via `SourceType::ts()`, so we
 /// no longer need to fully strip the annotations here.
 ///
-/// Falls back to the original source if the TSX parser panics hard (e.g.
+/// Falls back to the original source if the TS parser panics hard (e.g.
 /// truly malformed input).
 fn strip_typescript_types(source: &str) -> String {
     let allocator = Allocator::default();
-    let parse_ret = Parser::new(&allocator, source, SourceType::tsx()).parse();
+    let parse_ret = Parser::new(&allocator, source, SourceType::ts()).parse();
     if parse_ret.panicked {
         return source.to_string();
     }

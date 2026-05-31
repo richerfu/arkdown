@@ -37,6 +37,7 @@ impl OhosResolvePlugin {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn resolve_sync(
         &self,
         specifier: &str,

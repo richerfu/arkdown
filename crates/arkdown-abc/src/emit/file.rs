@@ -1732,6 +1732,7 @@ fn method_index_string_refs(
     for method in &class.methods {
         collect_bytecode_string_indices(&method.bytecode, &mut indices);
     }
+    indices.retain(|idx| strings.get(*idx).is_some());
     indices.sort_unstable();
     indices.dedup();
     indices.sort_by(|a, b| {

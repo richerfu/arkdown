@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -7,11 +7,10 @@ use anyhow::{Context, Result};
 use clap::Args;
 
 use arkdown::{BundleOutput, Bundler};
-use arkdown_cache::BuildCache;
 use arkdown_config::{load_config, resolve::module_matches_output_target};
 use arkdown_core::{
-    ArkChunk, ArkdownConfig, BuildMode, ChunkGraph, ChunkIdx, ModuleConfig, ModuleJson5,
-    ModuleJson5Module, OutputTarget,
+    ArkdownConfig, BuildMode, ChunkGraph, ModuleConfig, ModuleJson5, ModuleJson5Module,
+    OutputTarget,
 };
 use arkdown_obfuscate::{should_obfuscate, ObfuscationOptions, Obfuscator};
 use arkdown_pack::{
@@ -30,9 +29,7 @@ use arkdown_resolver::ResolverConfig;
 use arkdown_resource::{ResourceCompileConfig, ResourceCompileInput, ResourceCompiler};
 use arkdown_sign::HapSigner;
 use arkdown_ts2abc::{compile_to_abc, Ts2abcInput, Ts2abcOptions};
-use index_vec::IndexVec;
 use rolldown_plugin::__inner::SharedPluginable;
-use rustc_hash::FxHashMap;
 
 use crate::progress::Progress;
 use crate::task_cache::TaskInputs;
@@ -222,9 +219,9 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             continue;
         }
 
-        // Clean stale .js files from previous builds so that collect_js_chunks_from_output
-        // (which uses the explicit file list) is the authoritative source, and any leftover
-        // files from a prior run do not sneak into the ABC compiler.
+        // Clean stale bundled .js files from previous builds. hvigor hands the
+        // Rollup module graph to CompileArkTS in ESMODULE mode, so these files
+        // are only temporary rolldown artifacts for arkdown.
         let chunk_dir_pre = output_dir.clone();
         if chunk_dir_pre.exists() {
             for entry in walkdir::WalkDir::new(&chunk_dir_pre)
@@ -298,7 +295,8 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             .bundle(loader_json)
             .await
             .map_err(|e| anyhow::anyhow!("Bundle failed: {}", e))?;
-        let compile_arkts_inputs = write_compile_arkts_cache(module, loader_json, &config_arc)?;
+        let compile_arkts_inputs =
+            write_compile_arkts_cache(module, loader_json, &config_arc, &bundle_out.chunk_graph)?;
         bundle_outs.push((bundle_out, false));
         compile_arkts_inputs_by_bundle.push(compile_arkts_inputs);
     }
@@ -313,7 +311,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
     // The results are written to:
     //   1. loader.json (two new fields, omitted when empty)
     //   2. intermediates/importee/default/{module_name}/importee.json  (cache)
-    for (((module, _manifest, loader_json), (bundle_out, from_cache)), bc_har_deps) in loader_jsons
+    for (((module, _manifest, loader_json), (bundle_out, from_cache)), _bc_har_deps) in loader_jsons
         .iter_mut()
         .zip(bundle_outs.iter())
         .zip(all_bc_har_deps.iter())
@@ -399,12 +397,6 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         }
     }
 
-    // ── Config hash for ABC cache invalidation ────────────────────────────────
-    //
-    // Captures build-mode, bundle identity, API version, and obfuscation rule
-    // state.  Any change to these values invalidates all cached ABC outputs.
-    let abc_config_hash = compute_config_hash(&config_arc);
-
     // Step 5: ABC compilation
     progress.step(5, 6, "Compiling ABC");
     for (
@@ -430,7 +422,6 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         // Format matches es2abc/hvigorw: "{bundleName}/{moduleName}/{pathFromEts}"
         // e.g. "com.example.arkdown.test/entry/ets/entryability/EntryAbility"
         // The ABC class is "L{record_name};" (no src/main, no & wrappers).
-        let bundle_name = &config_arc.product.bundle_name;
         let chunk_name_counts = compile_entry_stem_counts(&loader_json.compile_entry);
         let record_name_map: HashMap<String, ChunkCompileMeta> = loader_json
             .compile_entry
@@ -440,18 +431,9 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 let path = std::path::Path::new(entry_path);
                 path.file_stem()?.to_str()?;
                 let chunk_name = compile_entry_chunk_name(entry_path, index, &chunk_name_counts);
-                // entry_path like "./ets/entryability/EntryAbility.ets"
-                let stripped = entry_path
-                    .trim_start_matches("./")
-                    .trim_end_matches(".ets")
-                    .trim_end_matches(".ts")
-                    .trim_end_matches(".js");
-                let record_name =
-                    format!("{}/{}/{}", bundle_name, loader_json.module_name, stripped);
                 Some((
                     chunk_name,
                     ChunkCompileMeta {
-                        record_name,
                         source_file: Some(entry_path.clone()),
                     },
                 ))
@@ -461,16 +443,12 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             .get(bundle_index)
             .cloned()
             .unwrap_or_default();
-        let ts2abc_inputs = if cache_ts_inputs.is_empty() {
-            collect_js_chunks_from_output(
-                &bundle_out.chunk_files,
-                &record_name_map,
-                bundle_name,
-                &loader_json.module_name,
-            )
-        } else {
-            cache_ts_inputs
-        };
+        let ts2abc_inputs = cache_ts_inputs;
+        if ts2abc_inputs.is_empty() {
+            return Err(anyhow::anyhow!(
+                "CompileArkTS produced no module inputs; refusing to fall back to bundled chunks because hvigor compiles the Rollup module graph"
+            ));
+        }
         if !ts2abc_inputs.is_empty() {
             // ABC incremental compiler cache: hvigor uses es2abc --cache-file to
             // avoid re-parsing unchanged modules inside the ABC backend.
@@ -518,18 +496,6 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                         .src_path
                         .join("build/default/intermediates/source_map/default/sourceMaps.map"),
                 )?;
-            }
-
-            // ── Update incremental build cache ────────────────────────────────
-            //
-            // Record the content hash of every compile-entry source file so
-            // future builds can skip re-running ABC when nothing has changed.
-            for entry_path in &loader_json.compile_entry {
-                let src = PathBuf::from(&loader_json.module_root_path)
-                    .join(entry_path.trim_start_matches("./"));
-                if let Ok(content) = std::fs::read_to_string(&src) {
-                    // task-level cache; ABC cache is managed by TaskInputs
-                }
             }
 
             for (_chunk_name, path) in &bundle_out.chunk_files {
@@ -1048,8 +1014,8 @@ fn write_compile_arkts_cache(
     module: &ModuleConfig,
     loader_json: &arkdown_profile::LoaderJson,
     config: &Arc<ArkdownConfig>,
+    chunk_graph: &ChunkGraph,
 ) -> Result<Vec<Ts2abcInput>> {
-    let module_root = PathBuf::from(&loader_json.module_root_path);
     let mode_dir = match config.build_mode {
         BuildMode::Debug => "debug",
         BuildMode::Release => "release",
@@ -1062,31 +1028,43 @@ fn write_compile_arkts_cache(
     let mut source_map_lines = Vec::new();
     let mut compile_infos = Vec::new();
 
-    for entry in &loader_json.compile_entry {
-        let Some(entry_info) =
-            compile_entry_info(entry, &module_root, &cache_root, loader_json, config)
+    let module_ids = compile_module_ids(chunk_graph);
+    if module_ids.is_empty() {
+        return Err(anyhow::anyhow!(
+            "CompileArkTS module graph is empty; hvigor compiles Rollup getModuleIds(), so arkdown cannot continue without rolldown module_ids"
+        ));
+    }
+
+    for module_id in module_ids {
+        let Some(source_path) = module_id_to_source_path(&module_id) else {
+            continue;
+        };
+        let Some(entry_info) = compile_module_info(&source_path, &cache_root, loader_json, config)
         else {
             continue;
         };
-        if !entry_info.source_path.exists() {
-            continue;
-        }
 
         let source = fs_err::read_to_string(&entry_info.source_path).with_context(|| {
             format!(
-                "failed to read compile entry {}",
+                "failed to read CompileArkTS source {}",
                 entry_info.source_path.display()
             )
         })?;
-        let source_id = format!("{}/{}", entry_info.module_name, entry_info.source_file);
-        let transformed = transformer
-            .do_transform(&source, &source_id)
-            .with_context(|| format!("failed to transform compile entry {source_id}"))?;
-        let Some(output) = transformed else {
-            continue;
+        let transformed = if matches!(
+            entry_info.source_ext.as_str(),
+            "ets" | "ts" | "js" | "mjs" | "cjs"
+        ) {
+            transformer
+                .do_transform(&source, &module_id)
+                .with_context(|| format!("failed to transform CompileArkTS source {module_id}"))?
+        } else {
+            None
         };
 
-        let code = output.code.unwrap_or(source);
+        let code = transformed
+            .as_ref()
+            .and_then(|output| output.code.clone())
+            .unwrap_or_else(|| compile_source_passthrough(&source, &entry_info.source_ext));
         if let Some(parent) = entry_info.ts_path.parent() {
             fs_err::create_dir_all(parent)?;
         }
@@ -1101,14 +1079,15 @@ fn write_compile_arkts_cache(
             record_name: entry_info.record_name.clone(),
             module_type: "esm".to_string(),
             source_file: entry_info.source_file_info.clone(),
-            package_name: entry_info.module_name.clone(),
+            package_name: entry_info.package_name.clone(),
+            origin_source_lang: entry_info.origin_source_lang.clone(),
             abc_cache_path: None,
         });
 
-        if let Some(source_map) = output.map.into_sourcemap() {
+        if let Some(source_map) = transformed.and_then(|output| output.map.into_sourcemap()) {
             let raw_map = source_map.to_json_string();
             let map_value: serde_json::Value = serde_json::from_str(&raw_map)
-                .with_context(|| format!("failed to parse generated source map for {source_id}"))?;
+                .with_context(|| format!("failed to parse generated source map for {module_id}"))?;
             let mappings = map_value
                 .get("mappings")
                 .and_then(|value| value.as_str())
@@ -1122,10 +1101,10 @@ fn write_compile_arkts_cache(
                 "version": 3,
                 "file": file,
                 "sourceRoot": "",
-                "sources": [format!("{}/{}", entry_info.module_name, entry_info.source_file)],
+                "sources": [entry_info.source_path.to_string_lossy()],
                 "names": [],
                 "mappings": mappings,
-                "entry-package-info": format!("{}|1.0.0", entry_info.module_name),
+                "entry-package-info": format!("{}|1.0.0", loader_json.module_name),
             });
             source_map_lines.push(format!(
                 "{{\"key\": {}, \"val\": {}}}",
@@ -1133,6 +1112,12 @@ fn write_compile_arkts_cache(
                 serde_json::to_string(&val)?
             ));
         }
+    }
+
+    if compile_infos.is_empty() {
+        return Err(anyhow::anyhow!(
+            "CompileArkTS module graph had no compilable project modules"
+        ));
     }
 
     if !source_map_lines.is_empty() {
@@ -1147,29 +1132,70 @@ fn write_compile_arkts_cache(
     write_compile_arkts_abc_handoff(&cache_root, &compile_infos)
 }
 
-struct CompileEntryInfo {
+struct CompileModuleInfo {
     source_path: PathBuf,
     source_file: String,
     source_file_info: String,
     ts_path: PathBuf,
     record_name: String,
-    module_name: String,
+    package_name: String,
+    origin_source_lang: String,
+    source_ext: String,
 }
 
-fn compile_entry_info(
-    entry: &str,
-    host_src_main: &Path,
+fn compile_module_ids(chunk_graph: &ChunkGraph) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut ids = Vec::new();
+    for chunk in &chunk_graph.chunks {
+        for module_id in &chunk.module_ids {
+            if seen.insert(module_id.clone()) {
+                ids.push(module_id.clone());
+            }
+        }
+    }
+    ids.sort();
+    ids
+}
+
+fn module_id_to_source_path(module_id: &str) -> Option<PathBuf> {
+    if module_id.starts_with('\0') || module_id.starts_with("virtual:") {
+        return None;
+    }
+    let module_id = module_id
+        .split_once('?')
+        .map(|(path, _)| path)
+        .unwrap_or(module_id);
+    let path = Path::new(module_id);
+    if !path.is_absolute() || !path.exists() {
+        return None;
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    if file_name.ends_with(".d.ts") || file_name.ends_with(".d.ets") {
+        return None;
+    }
+    let ext = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+    if !matches!(ext, "ets" | "ts" | "js" | "mjs" | "cjs" | "json" | "json5") {
+        return None;
+    }
+    Some(canonical_or_owned(path))
+}
+
+fn compile_module_info(
+    source_path: &Path,
     cache_root: &Path,
     loader_json: &arkdown_profile::LoaderJson,
     config: &ArkdownConfig,
-) -> Option<CompileEntryInfo> {
-    let entry_path = Path::new(entry);
-    let source_path = if entry_path.is_absolute() {
-        entry_path.to_path_buf()
-    } else {
-        host_src_main.join(entry.trim_start_matches("./"))
-    };
+) -> Option<CompileModuleInfo> {
     let source_path = canonical_or_owned(&source_path);
+    let source_ext = source_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_string();
+    let output_ext = compile_output_extension(&source_ext)?;
 
     let mut module_roots: Vec<(&str, PathBuf)> = loader_json
         .module_path_map
@@ -1190,9 +1216,9 @@ fn compile_entry_info(
             continue;
         };
 
-        let ts_rel = with_extension(&source_file, "ts");
-        let ts_path = cache_root.join(module_name).join(&ts_rel);
-        let record_rel = record_relative_path(&ts_rel);
+        let out_rel = with_extension(&source_file, output_ext);
+        let ts_path = cache_root.join(module_name).join(&out_rel);
+        let record_rel = record_relative_path(&out_rel);
         let record_name = if module_name == loader_json.module_name {
             format!(
                 "{}/{}/{}",
@@ -1204,18 +1230,210 @@ fn compile_entry_info(
                 config.product.bundle_name, loader_json.module_name, module_name, record_rel
             )
         };
+        let version = package_version_or_default(&module_root);
 
-        return Some(CompileEntryInfo {
+        return Some(CompileModuleInfo {
             source_path,
             source_file: source_file.clone(),
             source_file_info: format!(
-                "{}|{}|1.0.0|{}",
-                loader_json.module_name, module_name, ts_rel
+                "{}|{}|{}|{}",
+                loader_json.module_name, module_name, version, out_rel
             ),
             ts_path,
             record_name,
-            module_name: module_name.to_string(),
+            package_name: module_name.to_string(),
+            origin_source_lang: origin_source_lang(&source_ext),
+            source_ext,
         });
+    }
+
+    remote_compile_module_info(&source_path, cache_root, loader_json)
+}
+
+fn remote_compile_module_info(
+    source_path: &Path,
+    cache_root: &Path,
+    loader_json: &arkdown_profile::LoaderJson,
+) -> Option<CompileModuleInfo> {
+    let source_ext = source_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_string();
+    let output_ext = compile_output_extension(&source_ext)?;
+    let package_root = find_package_root(source_path)?;
+    let package_name = package_name_or_dir(&package_root);
+    let package_version = package_version_or_default(&package_root);
+    let package_entry_name = pkg_modules_package_name(&package_root, loader_json)?;
+    let rel_to_pkg = slash_path(source_path.strip_prefix(&package_root).ok()?);
+    let out_rel = with_extension(&rel_to_pkg, output_ext);
+
+    let project_root = canonical_or_owned(Path::new(&loader_json.project_root_path));
+    let cache_rel = source_path.strip_prefix(&project_root).ok()?;
+    let ts_path = cache_root.join(with_extension(&slash_path(cache_rel), output_ext));
+    let record_name = format!(
+        "{}/{}",
+        package_entry_name,
+        out_rel
+            .trim_end_matches(".ets")
+            .trim_end_matches(".ts")
+            .trim_end_matches(".js")
+    );
+
+    Some(CompileModuleInfo {
+        source_path: source_path.to_path_buf(),
+        source_file: rel_to_pkg,
+        source_file_info: format!(
+            "{}|{}|{}|{}",
+            loader_json.module_name, package_name, package_version, out_rel
+        ),
+        ts_path,
+        record_name,
+        package_name: package_entry_name,
+        origin_source_lang: origin_source_lang(&source_ext),
+        source_ext,
+    })
+}
+
+fn compile_output_extension(source_ext: &str) -> Option<&'static str> {
+    match source_ext {
+        "ets" | "ts" => Some("ts"),
+        "js" | "mjs" | "cjs" => Some("js"),
+        "json" | "json5" => Some("json"),
+        _ => None,
+    }
+}
+
+fn origin_source_lang(source_ext: &str) -> String {
+    match source_ext {
+        "ets" => "ets",
+        "ts" => "ts",
+        "js" | "mjs" | "cjs" => "js",
+        _ => "",
+    }
+    .to_string()
+}
+
+fn compile_source_passthrough(source: &str, source_ext: &str) -> String {
+    match source_ext {
+        "json" | "json5" => {
+            let value: serde_json::Value = if source_ext == "json5" {
+                json5::from_str(source).unwrap_or(serde_json::Value::Null)
+            } else {
+                serde_json::from_str(source).unwrap_or(serde_json::Value::Null)
+            };
+            format!(
+                "export default {};\n",
+                serde_json::to_string(&value).unwrap_or_default()
+            )
+        }
+        _ => source.to_string(),
+    }
+}
+
+fn find_package_root(source_path: &Path) -> Option<PathBuf> {
+    if let Some(package_root) = package_root_from_modules_dir(source_path) {
+        return Some(package_root);
+    }
+
+    let mut dir = source_path.parent()?;
+    loop {
+        if dir.join("oh-package.json5").is_file() || dir.join("package.json").is_file() {
+            return Some(dir.to_path_buf());
+        }
+        let parent = dir.parent()?;
+        if parent == dir {
+            return None;
+        }
+        dir = parent;
+    }
+}
+
+fn package_root_from_modules_dir(source_path: &Path) -> Option<PathBuf> {
+    let components: Vec<_> = source_path.components().collect();
+    let mut modules_index = None;
+    for (index, component) in components.iter().enumerate() {
+        let name = component.as_os_str().to_str()?;
+        if name == "oh_modules" || name == "node_modules" {
+            modules_index = Some(index);
+        }
+    }
+
+    let modules_index = modules_index?;
+    let first = components.get(modules_index + 1)?.as_os_str().to_str()?;
+    let package_end = if first.starts_with('@') {
+        modules_index + 3
+    } else {
+        modules_index + 2
+    };
+    if package_end > components.len() {
+        return None;
+    }
+
+    let mut root = PathBuf::new();
+    for component in &components[..package_end] {
+        root.push(component.as_os_str());
+    }
+    Some(root)
+}
+
+fn package_name_or_dir(package_root: &Path) -> String {
+    read_manifest_string(package_root, "oh-package.json5", "name")
+        .or_else(|| read_manifest_string(package_root, "package.json", "name"))
+        .unwrap_or_else(|| {
+            package_root
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("")
+                .to_string()
+        })
+}
+
+fn package_version_or_default(package_root: &Path) -> String {
+    read_manifest_string(package_root, "oh-package.json5", "version")
+        .or_else(|| read_manifest_string(package_root, "package.json", "version"))
+        .filter(|version| !version.is_empty())
+        .unwrap_or_else(|| "1.0.0".to_string())
+}
+
+fn read_manifest_string(package_root: &Path, file_name: &str, field: &str) -> Option<String> {
+    let content = fs_err::read_to_string(package_root.join(file_name)).ok()?;
+    let value: serde_json::Value = if file_name.ends_with(".json5") {
+        json5::from_str(&content).ok()?
+    } else {
+        serde_json::from_str(&content).ok()?
+    };
+    value.get(field)?.as_str().map(str::to_string)
+}
+
+fn pkg_modules_package_name(
+    package_root: &Path,
+    loader_json: &arkdown_profile::LoaderJson,
+) -> Option<String> {
+    let package_root = canonical_or_owned(package_root);
+    let project_root = canonical_or_owned(Path::new(&loader_json.project_root_path));
+    let package_dir = if loader_json.package_manager_type == "ohpm" {
+        "oh_modules"
+    } else {
+        "node_modules"
+    };
+
+    if let Ok(rel) = package_root.strip_prefix(project_root.join(package_dir)) {
+        return Some(format!(
+            "pkg_modules/{}",
+            slash_path(rel).replace(package_dir, "pkg_modules")
+        ));
+    }
+
+    for (module_name, module_root) in &loader_json.module_path_map {
+        let module_root = canonical_or_owned(Path::new(module_root));
+        if let Ok(rel) = package_root.strip_prefix(module_root.join(package_dir)) {
+            return Some(format!(
+                "pkg_modules@{}/{}",
+                module_name,
+                slash_path(rel).replace(package_dir, "pkg_modules")
+            ));
+        }
     }
 
     None
@@ -1240,6 +1458,7 @@ struct CompileArkTsInfo {
     module_type: String,
     source_file: String,
     package_name: String,
+    origin_source_lang: String,
     abc_cache_path: Option<PathBuf>,
 }
 
@@ -1261,12 +1480,13 @@ fn write_compile_arkts_abc_handoff(
             .clone()
             .unwrap_or_else(|| ts_path.with_extension("protoBin"));
         files_info.push_str(&format!(
-            "{};{};{};{};{};false;ets\n",
+            "{};{};{};{};{};false;{}\n",
             path_string(&ts_path),
             info.record_name,
             info.module_type,
             info.source_file,
-            info.package_name
+            info.package_name,
+            info.origin_source_lang
         ));
         modules_cache.push_str(&format!(
             "{};{}\n",
@@ -1353,7 +1573,6 @@ fn compile_arkts_source_maps_json_path(
 
 #[derive(Debug, Clone)]
 struct ChunkCompileMeta {
-    record_name: String,
     source_file: Option<String>,
 }
 
@@ -1404,48 +1623,6 @@ fn compile_entry_chunk_name(
     } else {
         name
     }
-}
-
-/// Build [`Ts2abcInput`] entries from the explicit file list produced by the bundler.
-///
-/// Using `bundle_out.chunk_files` rather than scanning the output directory
-/// guarantees that stale `.js` files left over from previous builds never
-/// end up in the ABC compiler input.
-///
-/// When a chunk is not found in `record_name_map` (e.g. a shared chunk emitted
-/// by rolldown that is not listed in `compile_entry`), the record name is derived
-/// from the chunk file's stem to avoid storing absolute filesystem paths.
-fn collect_js_chunks_from_output(
-    chunk_files: &[(String, std::path::PathBuf)],
-    record_name_map: &HashMap<String, ChunkCompileMeta>,
-    bundle_name: &str,
-    module_name: &str,
-) -> Vec<Ts2abcInput> {
-    let mut modules = Vec::new();
-    for (chunk_name, path) in chunk_files {
-        if path.extension().and_then(|e| e.to_str()) != Some("js") {
-            continue;
-        }
-        let meta = record_name_map.get(chunk_name.as_str());
-        let derived_record_name = || {
-            // Derive record name from the JS file stem so we never embed an
-            // absolute filesystem path in the ABC StringItems table.
-            let stem = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or(chunk_name.as_str());
-            format!("{bundle_name}/{module_name}/{stem}")
-        };
-        modules.push(Ts2abcInput {
-            path: path.clone(),
-            record_name: meta
-                .map(|meta| meta.record_name.clone())
-                .unwrap_or_else(derived_record_name),
-            source_file: meta.and_then(|meta| meta.source_file.clone()),
-            source_map: None,
-        });
-    }
-    modules
 }
 
 fn collect_unresolved_external_imports(bundle_out: &BundleOutput) -> Vec<String> {
@@ -1571,110 +1748,8 @@ fn write_hvigor_source_maps(
     Ok(())
 }
 
-/// Derive a deterministic 64-bit hash from the build configuration fields that
-/// affect ABC compilation output.
-///
-/// A change to any of these fields (build mode, bundle name, API version,
-/// module URL normalisation, or obfuscation rules) must produce a different
-/// hash so that the incremental ABC cache is correctly invalidated.
-fn compute_config_hash(config: &ArkdownConfig) -> u64 {
-    let mut h: u64 = 0xcbf29ce484222325;
-    let fingerprint = format!(
-        "{}:{}:{}:{}",
-        match &config.build_mode {
-            BuildMode::Debug => "debug",
-            BuildMode::Release => "release",
-        },
-        config.product.bundle_name,
-        config.sdk_config.compile_api_version,
-        config
-            .product
-            .build_option
-            .strict_mode
-            .use_normalized_ohm_url,
-    );
-    for b in fingerprint.bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-
-    // Mix in the obfuscation rule hash for release builds so that editing
-    // obfuscation rules invalidates all cached ABC outputs.
-    if let Some(obf_config) = config
-        .product
-        .build_option
-        .ark_options
-        .as_ref()
-        .and_then(|a| a.obfuscation.as_ref())
-    {
-        if obf_config.enable_obfuscation {
-            let rule_files: Vec<PathBuf> = obf_config.rule_files.iter().cloned().collect();
-            let rule_hash = arkdown_obfuscate::compute_rule_hash(&rule_files);
-            h ^= rule_hash;
-            h = h.wrapping_mul(0x100000001b3);
-        }
-    }
-
-    h
-}
-
 fn with_extension(path: &str, extension: &str) -> String {
     path.rsplit_once('.')
         .map(|(stem, _)| format!("{stem}.{extension}"))
         .unwrap_or_else(|| format!("{path}.{extension}"))
-}
-
-/// Compute a deterministic FNV-1a hash over every compile-entry source file's
-/// contents plus its path.  Files are processed in sorted path order so the
-/// result is independent of directory iteration order.
-fn compute_bundle_source_hash(entries: &[String], module_root: &str) -> u64 {
-    let root = PathBuf::from(module_root);
-    let mut sorted = entries.to_vec();
-    sorted.sort();
-    let mut h: u64 = 0xcbf29ce484222325;
-    for entry in &sorted {
-        let path = root.join(entry.trim_start_matches("./"));
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            for b in content.bytes() {
-                h ^= b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-        }
-        for b in entry.bytes() {
-            h ^= b as u64;
-            h = h.wrapping_mul(0x100000001b3);
-        }
-    }
-    h
-}
-
-/// Compute a deterministic hash over all rolldown configuration fields that
-/// affect the bundle output: build mode, treeshake, support_chunks,
-/// use_normalized_ohm_url, bundle name, and module name.
-fn compute_bundle_config_hash(
-    config: &ArkdownConfig,
-    loader_json: &arkdown_profile::LoaderJson,
-) -> u64 {
-    let mut h: u64 = 0xcbf29ce484222325;
-    let fingerprint = format!(
-        "{}:{}:{}:{}:{}:{}",
-        match &config.build_mode {
-            BuildMode::Debug => "debug",
-            BuildMode::Release => "release",
-        },
-        config.product.bundle_name,
-        config.sdk_config.compile_api_version,
-        config
-            .product
-            .build_option
-            .strict_mode
-            .use_normalized_ohm_url,
-        loader_json.support_chunks,
-        loader_json.module_name,
-    );
-    for b in fingerprint.bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    h
 }

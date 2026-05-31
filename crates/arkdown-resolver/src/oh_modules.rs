@@ -18,6 +18,34 @@ pub fn read_package_main_field(package_root: &Path) -> Option<String> {
     })
 }
 
+/// Read the ESM package root entry from `exports["."].import`.
+pub fn read_package_exports_import_field(package_root: &Path) -> Option<String> {
+    read_exports_import_field(&package_root.join("oh-package.json5")).or_else(|| {
+        let content = fs_err::read_to_string(package_root.join("package.json")).ok()?;
+        let v: serde_json::Value = serde_json::from_str(&content).ok()?;
+        exports_import_value(&v)
+    })
+}
+
+fn read_exports_import_field(package_path: &Path) -> Option<String> {
+    let content = fs_err::read_to_string(package_path).ok()?;
+    let v: serde_json::Value = json5::from_str(&content).ok()?;
+    exports_import_value(&v)
+}
+
+fn exports_import_value(v: &serde_json::Value) -> Option<String> {
+    let exports = v.get("exports")?;
+    if let Some(root) = exports.get(".") {
+        if let Some(import) = root.get("import").and_then(|value| value.as_str()) {
+            return Some(import.to_string());
+        }
+        if let Some(default) = root.get("default").and_then(|value| value.as_str()) {
+            return Some(default.to_string());
+        }
+    }
+    exports.as_str().map(str::to_string)
+}
+
 /// Read the package `name` field from an `oh-package.json5` file.
 pub fn read_name_field(oh_package_path: &Path) -> Option<String> {
     let content = fs_err::read_to_string(oh_package_path).ok()?;

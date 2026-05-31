@@ -9,7 +9,8 @@ use oxc_resolver::{
 use crate::error::ResolveError;
 use crate::oh_modules::{
     is_bytecode_har, read_bytecode_abc_path, read_declaration_entry, read_file_dependencies,
-    read_name_field, read_package_main_field, read_package_version_field,
+    read_name_field, read_package_exports_import_field, read_package_main_field,
+    read_package_version_field,
 };
 
 /// Extensions tried in order during resolution.
@@ -269,7 +270,9 @@ impl OhosResolver {
         }
 
         let requested = if subpath.is_empty() {
-            read_package_main_field(&pkg_root.path).unwrap_or_else(|| "index".to_string())
+            read_package_exports_import_field(&pkg_root.path)
+                .or_else(|| read_package_main_field(&pkg_root.path))
+                .unwrap_or_else(|| "index".to_string())
         } else {
             subpath.to_string()
         };
@@ -278,28 +281,12 @@ impl OhosResolver {
             .or_else(|| self.resolve_package_path(&pkg_root.path, "index"))?;
         let module_type = infer_module_type(&resolved);
 
-        if pkg_root.local_source {
-            return Some(OhosResolvedModule::LocalSource {
-                path: resolved,
-                module_type,
-                pkg_context: Some(PkgContext {
-                    package_name: pkg_root.package_name.clone(),
-                    bundle_name: String::new(),
-                    module_name: String::new(),
-                    version: read_package_version_field(&pkg_root.path),
-                    pkg_path: pkg_root.path.clone(),
-                    entry_path: None,
-                }),
-            });
-        }
-
-        Some(OhosResolvedModule::RemotePackage {
-            path: resolved,
+        Some(remote_or_local_package_module(
+            resolved,
             module_type,
-            pkg_name: package_name.to_string(),
-            pkg_version: read_package_version_field(&pkg_root.path),
-            ohm_url: None,
-        })
+            package_name,
+            pkg_root,
+        ))
     }
 
     fn resolve_package_path(&self, package_root: &Path, request: &str) -> Option<PathBuf> {
@@ -316,6 +303,36 @@ impl OhosResolver {
                 let request = request.trim_start_matches("./");
                 try_extensions(&package_root.join(request)).map(canonicalize_existing)
             })
+    }
+}
+
+fn remote_or_local_package_module(
+    path: PathBuf,
+    module_type: ModuleType,
+    package_name: &str,
+    pkg_root: &PackageRoot,
+) -> OhosResolvedModule {
+    if pkg_root.local_source {
+        return OhosResolvedModule::LocalSource {
+            path,
+            module_type,
+            pkg_context: Some(PkgContext {
+                package_name: pkg_root.package_name.clone(),
+                bundle_name: String::new(),
+                module_name: String::new(),
+                version: read_package_version_field(&pkg_root.path),
+                pkg_path: pkg_root.path.clone(),
+                entry_path: None,
+            }),
+        };
+    }
+
+    OhosResolvedModule::RemotePackage {
+        path,
+        module_type,
+        pkg_name: package_name.to_string(),
+        pkg_version: read_package_version_field(&pkg_root.path),
+        ohm_url: None,
     }
 }
 
@@ -337,6 +354,7 @@ fn oxc_resolve_options(config: &ResolverConfig) -> OxcResolveOptions {
         .into_iter()
         .map(str::to_string)
         .collect(),
+        condition_names: vec!["import".to_string()],
         main_fields: vec!["main".to_string(), "module".to_string()],
         main_files: vec!["index".to_string()],
         modules,
@@ -850,6 +868,49 @@ mod tests {
                 assert_eq!(path, std::fs::canonicalize(&entry).unwrap());
                 assert_eq!(pkg_name, "bignumber.js");
                 assert_eq!(pkg_version, "9.0.1");
+            }
+            _ => panic!("expected RemotePackage"),
+        }
+    }
+
+    #[test]
+    fn test_esm_package_root_uses_exports_import_before_main() {
+        let dir = TempDir::new().unwrap();
+        let oh_modules_dir = dir.path().join("oh_modules");
+        let pkg_dir = oh_modules_dir.join(".ohpm/long@5.2.1/oh_modules/long");
+        fs::create_dir_all(pkg_dir.join("umd")).unwrap();
+        fs::write(
+            pkg_dir.join("oh-package.json5"),
+            r#"{
+              "name": "long",
+              "version": "5.2.1",
+              "type": "module",
+              "main": "umd/index.js",
+              "exports": {
+                ".": {
+                  "import": "./index.js",
+                  "require": "./umd/index.js"
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+        let esm_entry = pkg_dir.join("index.js");
+        let cjs_entry = pkg_dir.join("umd/index.js");
+        fs::write(&esm_entry, "export default class Long {}").unwrap();
+        fs::write(&cjs_entry, "module.exports = function Long() {}").unwrap();
+
+        let resolver = make_resolver(
+            dir.path().to_path_buf(),
+            vec![],
+            vec![],
+            vec![oh_modules_dir],
+        );
+        let importer = dir.path().join("src/main.ets");
+        let result = resolver.resolve("long", &importer).unwrap();
+        match result {
+            OhosResolvedModule::RemotePackage { path, .. } => {
+                assert_eq!(path, std::fs::canonicalize(&esm_entry).unwrap());
             }
             _ => panic!("expected RemotePackage"),
         }

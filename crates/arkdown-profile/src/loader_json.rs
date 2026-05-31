@@ -143,6 +143,36 @@ fn default_build_mode() -> String {
     "debug".to_string()
 }
 
+fn collect_form_src_entries(module_cfg: &ModuleConfig) -> Vec<String> {
+    let profile_dir = module_cfg.src_path.join("src/main/resources/base/profile");
+    let Ok(entries) = std::fs::read_dir(profile_dir) else {
+        return Vec::new();
+    };
+
+    let mut form_entries = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {
+            continue;
+        };
+        let Some(forms) = value.get("forms").and_then(|forms| forms.as_array()) else {
+            continue;
+        };
+        for form in forms {
+            if let Some(src) = form.get("src").and_then(|src| src.as_str()) {
+                form_entries.push(src.to_string());
+            }
+        }
+    }
+    form_entries
+}
+
 // ---------------------------------------------------------------------------
 // Generation
 // ---------------------------------------------------------------------------
@@ -173,6 +203,7 @@ pub fn generate_loader_json(
     for ext in &manifest.extension_abilities {
         compile_entry.push(ext.src_entry.clone());
     }
+    compile_entry.extend(collect_form_src_entries(module_cfg));
 
     // Module-level srcEntry (used by HSP shared packages that export a single file
     // without declaring abilities).

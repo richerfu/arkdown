@@ -393,7 +393,7 @@ pub fn build_record_with_debug_and_source_map(
     let literal_start = literal_arrays.len();
 
     let allocator = Allocator::default();
-    let source_type = SourceType::tsx().with_module(is_module);
+    let source_type = SourceType::ts().with_module(is_module);
     let ParserReturn {
         program,
         panicked,

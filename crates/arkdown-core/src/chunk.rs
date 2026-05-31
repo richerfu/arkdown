@@ -38,6 +38,13 @@ pub struct ArkChunk {
     pub chunk_hash: String,
     /// Modules included in this chunk.
     pub modules: Vec<ModuleIdx>,
+    /// Rolldown/Rollup module IDs included in this chunk.
+    ///
+    /// hvigor's CompileArkTS module-mode backend compiles the full Rollup
+    /// module graph (`getModuleIds()`), not just entry chunks. Preserve the
+    /// original string IDs so the CLI can generate `filesInfo.txt` from the
+    /// same graph surface.
+    pub module_ids: Vec<String>,
     /// Whether this chunk is an entry chunk.
     pub is_entry: bool,
     /// Whether this chunk is a dynamic-import entry.
