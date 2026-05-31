@@ -1,7 +1,7 @@
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     ClassElement, Declaration, Decorator, ExportDefaultDeclarationKind, Expression, PropertyKey,
-    Statement, StructElement, StructStatement,
+    Statement, StructElement, StructStatement, TSType,
 };
 use oxc_parser::{Parser, ParserReturn};
 use oxc_span::SourceType;
@@ -40,36 +40,18 @@ pub fn check(source: &str, file: &str) -> Vec<EtsTransformError> {
     for stmt in &program.body {
         match stmt {
             Statement::StructStatement(statement) => {
-                check_struct_component(
-                    statement,
-                    source,
-                    file,
-                    &mut seen_component_names,
-                    &mut errors,
-                );
+                check_struct_component(statement, file, &mut seen_component_names, &mut errors);
             }
             Statement::ExportNamedDeclaration(export) => {
                 if let Some(Declaration::StructStatement(statement)) = export.declaration.as_ref() {
-                    check_struct_component(
-                        statement,
-                        source,
-                        file,
-                        &mut seen_component_names,
-                        &mut errors,
-                    );
+                    check_struct_component(statement, file, &mut seen_component_names, &mut errors);
                 }
             }
             Statement::ExportDefaultDeclaration(export) => {
                 if let ExportDefaultDeclarationKind::StructStatement(statement) =
                     &export.declaration
                 {
-                    check_struct_component(
-                        statement,
-                        source,
-                        file,
-                        &mut seen_component_names,
-                        &mut errors,
-                    );
+                    check_struct_component(statement, file, &mut seen_component_names, &mut errors);
                 }
             }
             _ => {}
@@ -149,22 +131,12 @@ pub fn check(source: &str, file: &str) -> Vec<EtsTransformError> {
                             PropertyKey::StaticIdentifier(id) if id.name.as_str() == "build");
                         if is_build {
                             if let Some(ret_ty) = method.value.return_type.as_ref() {
-                                // Only void is allowed — check via span text is simpler
-                                // than deep-inspecting the TSTypeAnnotation tree.
-                                // We flag any explicit non-void annotation as an error.
-                                let ty_span = ret_ty.span;
-                                if ty_span.size() > 0 {
-                                    // Accept "void" silently; anything else is an error.
-                                    let annotation_text =
-                                        &source[ty_span.start as usize..ty_span.end as usize];
-                                    if !annotation_text.contains("void") {
-                                        errors.push(EtsTransformError::Diagnostic {
-                                            file: file.to_string(),
-                                            message: "build() must have a void return type"
-                                                .to_string(),
-                                            severity: DiagnosticSeverity::Error,
-                                        });
-                                    }
+                                if !is_void_type(&ret_ty.type_annotation) {
+                                    errors.push(EtsTransformError::Diagnostic {
+                                        file: file.to_string(),
+                                        message: "build() must have a void return type".to_string(),
+                                        severity: DiagnosticSeverity::Error,
+                                    });
                                 }
                             }
                         }
@@ -264,7 +236,6 @@ pub fn check(source: &str, file: &str) -> Vec<EtsTransformError> {
 
 fn check_struct_component(
     statement: &StructStatement<'_>,
-    source: &str,
     file: &str,
     seen_component_names: &mut std::collections::HashSet<String>,
     errors: &mut Vec<EtsTransformError>,
@@ -435,8 +406,7 @@ fn check_struct_component(
             matches!(&method.key, PropertyKey::StaticIdentifier(id) if id.name.as_str() == "build");
         if is_build {
             if let Some(ret_ty) = method.value.return_type.as_ref() {
-                let annotation_text = &source[ret_ty.span.start as usize..ret_ty.span.end as usize];
-                if !annotation_text.contains("void") {
+                if !is_void_type(&ret_ty.type_annotation) {
                     errors.push(EtsTransformError::Diagnostic {
                         file: file.to_string(),
                         message: "build() must have a void return type".to_string(),
@@ -445,5 +415,13 @@ fn check_struct_component(
                 }
             }
         }
+    }
+}
+
+fn is_void_type(ty: &TSType<'_>) -> bool {
+    match ty {
+        TSType::TSVoidKeyword(_) => true,
+        TSType::TSParenthesizedType(parenthesized) => is_void_type(&parenthesized.type_annotation),
+        _ => false,
     }
 }
