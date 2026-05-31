@@ -53,6 +53,17 @@ pub fn transform_ets_with_options(
     for diag in &diagnostics {
         eprintln!("[ets-checker] {:?}", diag);
     }
+    if let Some(error) = diagnostics.iter().find(|diag| {
+        matches!(
+            diag,
+            EtsTransformError::Diagnostic {
+                severity: crate::error::DiagnosticSeverity::Error,
+                ..
+            } | EtsTransformError::Fatal { .. }
+        )
+    }) {
+        return Err(error.clone());
+    }
 
     let allocator = Allocator::default();
     let source_type = SourceType::from_path(&source.id.id).unwrap_or_else(|_| SourceType::ets());
@@ -1342,6 +1353,74 @@ mod tests {
         assert!(!result.contains("@Consumer"));
         assert!(!result.contains("@Event"));
         assert!(!result.contains("@Computed"));
+    }
+
+    #[test]
+    fn test_rejects_struct_without_component_decorator_like_hvigor_checker() {
+        let src = "struct Plain {\n  build() {}\n}";
+        let err = transform_ets(&make_source("entry/src/main/ets/pages/Plain.ets", src))
+            .expect_err("plain ArkTS struct must fail in etsChecker");
+        assert!(
+            err.to_string()
+                .contains("Decorator '@Component', '@ComponentV2', or '@CustomDialog' is missing"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_rejects_component_v1_v2_decorator_mix() {
+        let src = "@Component\n@ComponentV2\nstruct Mixed {\n  build() {}\n}";
+        let err = transform_ets(&make_source("entry/src/main/ets/pages/Mixed.ets", src))
+            .expect_err("@Component and @ComponentV2 must be mutually exclusive");
+        assert!(
+            err.to_string()
+                .contains("can not be decorated with '@ComponentV2'"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_lowers_all_oxc_arkts_extra_nodes_to_standard_ts() {
+        let src = r#"
+@interface RouteMeta {
+  value: string;
+  minApiVersion: string;
+}
+
+import lazy LazyPage, { Helper } from './lazy';
+
+@Component
+struct Page {
+  @State title: string = 'hello';
+  build() {
+    Column() {
+      Text(this.title)
+    }
+  }
+}
+"#;
+        let result = transform_ets(&make_source("entry/src/main/ets/pages/Page.ets", src)).unwrap();
+        assert!(result.contains("interface RouteMeta"));
+        assert!(result.contains("import LazyPage, { Helper } from './lazy';"));
+        assert!(result.contains("class Page extends ViewPU"));
+        assert!(!result.contains("@interface"));
+        assert!(!result.contains("import lazy"));
+        assert!(!result.contains("struct Page"));
+        assert!(!result.contains("Column() {"));
+
+        let allocator = oxc_allocator::Allocator::default();
+        let parsed = oxc_parser::Parser::new(
+            &allocator,
+            &result,
+            oxc_span::SourceType::ts().with_module(true),
+        )
+        .parse();
+        assert!(
+            parsed.errors.is_empty(),
+            "lowered output must be standard TypeScript: {:?}\n{}",
+            parsed.errors,
+            result
+        );
     }
 
     #[test]

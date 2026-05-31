@@ -289,17 +289,40 @@ special ArkUI attribute expression nodes for `@Styles` bodies.
 
 ---
 
+## OXC ArkTS Extra Syntax Coverage
+
+✅ **Implemented** (`crates/arkdown-plugin-ets-transform/src/transform/`, 2026-05-31)
+
+The pinned `ohos-rs/oxc` revision exposes four ArkTS-only AST surfaces that
+standard TypeScript parsers cannot consume:
+
+| OXC node                       | Upstream hvigor/ets2bundle handling                                                                 | arkdown handling                                                                                              |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `StructStatement`              | `validate_ui_syntax.ts::validateStructSpec/checkDecorators`, then `process_component_class.ts`/`process_struct_componentV2.ts` lower to component classes | Checker validates required component decorators and V1/V2 conflicts; transform lowers component structs to `ViewPU` TypeScript |
+| `ArkUIComponentExpression`     | `process_component_class.ts::processComponentBlock` lowers declarative component calls in `build()` and related component contexts | `lower_build_body` emits `observeComponentCreation2`, `.create(...)`, chained attributes, callback bodies, and `.pop()` calls |
+| `AnnotationDeclaration`        | `ets_checker.ts` and `api_check_utils.ts` validate supported source-retention declarations; arkui declaration collectors recognize annotation declarations | Lowered to a TypeScript `interface` so rolldown/OXC standard TS parsing can continue without ArkTS syntax leakage |
+| `LazyImportDeclaration`        | `process_lazy_import.ts` preserves explicit `import lazy`, optionally auto-converts imports, and checks lazy re-export according to `reExportCheckMode` | Explicit `import lazy` is lowered to a normal `import` before rolldown parsing; auto-lazy conversion and re-export policy remain config gaps |
+
+The `load` hook runs this transform before rolldown scans `.ets` modules, so no
+OXC-only ArkTS node is handed to rolldown's normal TypeScript parser.
+
+---
+
 ## etsChecker: Validation Rules
 
-Runs before the transform. Produces `Vec<Diagnostic>` (warnings or errors). Never panics
-or aborts the build on warnings; fatal errors surface as `ArkdownError::EtsCheck`.
+Runs before the transform. Produces `Vec<Diagnostic>` (warnings or errors). It
+never aborts the build on warnings; error-level diagnostics stop the transform
+before ArkTS-only syntax can leak into rolldown's standard TypeScript parser.
 
 | Rule                         | Severity | Condition                                                                    |
 | ---------------------------- | -------- | ---------------------------------------------------------------------------- |
 | `missing-build-method`       | Error    | `@Component struct` has no `build()` method                                  |
-| `entry-without-component`    | Error    | `@Entry` applied to a struct without `@Component`                            |
+| `missing-component-decorator` | Error    | `struct` has no `@Component`, `@ComponentV2`, or `@CustomDialog` decorator   |
+| `entry-without-component`    | Error    | `@Entry` applied to a struct without a component decorator                   |
+| `component-v1-v2-conflict`   | Error    | `@ComponentV2` is combined with `@Component`, `@Reusable`, or `@CustomDialog` |
+| `reusable-v2-without-v2`     | Error    | `@ReusableV2` appears without `@ComponentV2`                                  |
 | `build-return-type`          | Error    | `build()` has a non-void return type annotation                              |
-| `state-on-non-component`     | Error    | `@State`/`@Prop`/`@Link` on a struct without `@Component`                    |
+| `state-on-non-component`     | Error    | state decorators on a struct without a component decorator                   |
 | `unsupported-state-type`     | Warning  | `@State` field type is not a supported observable type (function, undefined) |
 | `duplicate-component-name`   | Error    | Two `@Component struct` definitions with the same name in one file           |
 | `worker-uses-ui-decorator`   | Error    | File in `workers/` uses `@State`, `@Component`, or `@Entry`                  |
@@ -436,7 +459,7 @@ invoking the SDK binary directly.
 | -------------------------------------------- | ------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
 | `EtsTransformPlugin::transform`              | `Plugin::transform` returning `HookTransformOutput { code, map, module_type }` | Same hook; arkdown changes `module_type` from `Ets` to `Ts` in the output                                                    |
 | `etsTransform` (ArkUI desugar)               | Babel/SWC decorator transforms in the rollup/rolldown ecosystem                | Functionally equivalent: AST rewrite that desugars custom syntax to standard TS; arkdown uses `ohos-rs/oxc` instead of Babel |
-| `etsChecker`                                 | rolldown/Vite `vite-plugin-checker` pattern                                    | Diagnostic emission without aborting; rolldown does not have built-in type checking                                          |
+| `etsChecker`                                 | rolldown/Vite `vite-plugin-checker` pattern                                    | Warning diagnostics do not abort; error diagnostics stop the transform before ArkTS-only syntax reaches rolldown's TS parser |
 | `apiTransform` (SDK API rewrite)             | Babel `@babel/plugin-transform-*` plugins                                      | Version-gated rewrite table; no rolldown equivalent                                                                          |
 | Source map from ETS → TS                     | `HookTransformOutput::map`                                                     | Identical: the transform produces a source map that is chained with downstream maps                                          |
 | `ModuleSource.module_type` change `Ets → Ts` | `HookTransformOutput::module_type` field                                       | rolldown allows transforms to change the module type; arkdown does the same                                                  |
@@ -478,7 +501,10 @@ No other public types are exported. `EtsTransformer`, `EtsChecker`, and `ApiTran
 - Method chains in `build()` (`.onClick(...)`) appear inside the `observeComponentCreation2` callback
 - `etsChecker` rule `missing-build-method`: `@Component struct Foo {}` (no build) → `Err(ArkdownError::EtsCheck)` with rule ID `missing-build-method`
 - `etsChecker` rule `entry-without-component`: `@Entry struct Foo {}` (no `@Component`) → error
+- `etsChecker` rule `missing-component-decorator`: `struct Foo { build() {} }` → error matching upstream `validateStructSpec`
+- `etsChecker` rule `component-v1-v2-conflict`: `@Component @ComponentV2 struct Foo { build() {} }` → error
 - `etsChecker` rule `worker-uses-ui-decorator`: file in `workers/` with `@State` → error
+- OXC ArkTS extra syntax regression: one `.ets` source containing `@interface`, `import lazy`, `@Component struct`, and ArkUI `Column() { Text(...) }` lowers to standard TypeScript with no `@interface`, `import lazy`, `struct`, or ArkUI block syntax left
 - `apiTransform` for API version < 9: `import * as X from '@ohos/Y'` → `import X from '@system.Y'`
 - `apiTransform` for API version >= 9: no rewrite applied
 - Transform returns `Ok(None)` immediately for `module_type != ModuleType::Ets` without parsing

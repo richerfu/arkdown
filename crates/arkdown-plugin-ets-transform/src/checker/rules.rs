@@ -1,5 +1,8 @@
 use oxc_allocator::Allocator;
-use oxc_ast::ast::{ClassElement, Decorator, Expression, PropertyKey, Statement};
+use oxc_ast::ast::{
+    ClassElement, Declaration, Decorator, ExportDefaultDeclarationKind, Expression, PropertyKey,
+    Statement, StructElement, StructStatement,
+};
 use oxc_parser::{Parser, ParserReturn};
 use oxc_span::SourceType;
 
@@ -35,6 +38,43 @@ pub fn check(source: &str, file: &str) -> Vec<EtsTransformError> {
     let mut seen_component_names: std::collections::HashSet<String> = Default::default();
 
     for stmt in &program.body {
+        match stmt {
+            Statement::StructStatement(statement) => {
+                check_struct_component(
+                    statement,
+                    source,
+                    file,
+                    &mut seen_component_names,
+                    &mut errors,
+                );
+            }
+            Statement::ExportNamedDeclaration(export) => {
+                if let Some(Declaration::StructStatement(statement)) = export.declaration.as_ref() {
+                    check_struct_component(
+                        statement,
+                        source,
+                        file,
+                        &mut seen_component_names,
+                        &mut errors,
+                    );
+                }
+            }
+            Statement::ExportDefaultDeclaration(export) => {
+                if let ExportDefaultDeclarationKind::StructStatement(statement) =
+                    &export.declaration
+                {
+                    check_struct_component(
+                        statement,
+                        source,
+                        file,
+                        &mut seen_component_names,
+                        &mut errors,
+                    );
+                }
+            }
+            _ => {}
+        }
+
         if let Statement::ClassDeclaration(class) = stmt {
             let has_component = class
                 .decorators
@@ -220,4 +260,190 @@ pub fn check(source: &str, file: &str) -> Vec<EtsTransformError> {
     }
 
     errors
+}
+
+fn check_struct_component(
+    statement: &StructStatement<'_>,
+    source: &str,
+    file: &str,
+    seen_component_names: &mut std::collections::HashSet<String>,
+    errors: &mut Vec<EtsTransformError>,
+) {
+    let component_name = statement.id.name.as_str();
+    let decorator_names: Vec<&str> = statement.decorators.iter().map(decorator_name).collect();
+    let has_component_v1 = decorator_names.iter().any(|name| *name == "Component");
+    let has_component_v2 = decorator_names.iter().any(|name| *name == "ComponentV2");
+    let has_custom_dialog = decorator_names.iter().any(|name| *name == "CustomDialog");
+    let has_reusable = decorator_names.iter().any(|name| *name == "Reusable");
+    let has_reusable_v2 = decorator_names.iter().any(|name| *name == "ReusableV2");
+    let has_entry = decorator_names.iter().any(|name| *name == "Entry");
+    let has_component = has_component_v1 || has_component_v2 || has_custom_dialog;
+
+    if !has_component {
+        errors.push(EtsTransformError::Diagnostic {
+            file: file.to_string(),
+            message: format!(
+                "Decorator '@Component', '@ComponentV2', or '@CustomDialog' is missing for struct '{}'",
+                component_name
+            ),
+            severity: DiagnosticSeverity::Error,
+        });
+    }
+
+    if has_component_v2 && (has_component_v1 || has_reusable || has_custom_dialog) {
+        errors.push(EtsTransformError::Diagnostic {
+            file: file.to_string(),
+            message: format!(
+                "The struct '{}' can not be decorated with '@ComponentV2' and '@Component', '@Reusable', '@CustomDialog' at the same time",
+                component_name
+            ),
+            severity: DiagnosticSeverity::Error,
+        });
+    }
+
+    if has_reusable_v2 && !has_component_v2 {
+        errors.push(EtsTransformError::Diagnostic {
+            file: file.to_string(),
+            message:
+                "'@ReusableV2' is only applicable to custom components decorated by '@ComponentV2'"
+                    .to_string(),
+            severity: DiagnosticSeverity::Error,
+        });
+    }
+
+    if has_reusable && has_reusable_v2 {
+        errors.push(EtsTransformError::Diagnostic {
+            file: file.to_string(),
+            message:
+                "The '@Reusable' and '@ReusableV2' decorators cannot be applied simultaneously"
+                    .to_string(),
+            severity: DiagnosticSeverity::Error,
+        });
+    }
+
+    if has_entry && !has_component {
+        errors.push(EtsTransformError::Diagnostic {
+            file: file.to_string(),
+            message: "@Entry applied without @Component/@ComponentV2/@CustomDialog".to_string(),
+            severity: DiagnosticSeverity::Error,
+        });
+    }
+
+    if has_component {
+        if !seen_component_names.insert(component_name.to_string()) {
+            errors.push(EtsTransformError::Diagnostic {
+                file: file.to_string(),
+                message: format!("Duplicate @Component name '{}' in file", component_name),
+                severity: DiagnosticSeverity::Error,
+            });
+        }
+
+        let has_build = statement.body.body.iter().any(|element| {
+            matches!(
+                element,
+                StructElement::MethodDefinition(method)
+                    if matches!(&method.key, PropertyKey::StaticIdentifier(id) if id.name.as_str() == "build")
+            )
+        });
+        if !has_build {
+            errors.push(EtsTransformError::Diagnostic {
+                file: file.to_string(),
+                message: format!(
+                    "@Component struct '{}' is missing a build() method",
+                    component_name
+                ),
+                severity: DiagnosticSeverity::Error,
+            });
+        }
+
+        if file.contains("workers/") || file.contains("/worker/") {
+            errors.push(EtsTransformError::Diagnostic {
+                file: file.to_string(),
+                message: "@Component/@Entry must not be used in worker files".to_string(),
+                severity: DiagnosticSeverity::Error,
+            });
+        }
+    }
+
+    for element in &statement.body.body {
+        let StructElement::PropertyDefinition(prop) = element else {
+            continue;
+        };
+        let field_name = match &prop.key {
+            PropertyKey::StaticIdentifier(id) => id.name.as_str().to_string(),
+            _ => "<unknown>".to_string(),
+        };
+        let has_state_dec = prop.decorators.iter().any(|d| {
+            matches!(
+                decorator_name(d),
+                "State"
+                    | "Prop"
+                    | "Link"
+                    | "ObjectLink"
+                    | "Provide"
+                    | "Consume"
+                    | "StorageLink"
+                    | "StorageProp"
+                    | "LocalStorageLink"
+                    | "LocalStorageProp"
+            )
+        });
+        if has_state_dec && !has_component {
+            errors.push(EtsTransformError::Diagnostic {
+                file: file.to_string(),
+                message: format!(
+                    "State decorator on '{}' in non-@Component struct",
+                    field_name
+                ),
+                severity: DiagnosticSeverity::Error,
+            });
+        }
+
+        let is_builder_param = prop
+            .decorators
+            .iter()
+            .any(|d| decorator_name(d) == "BuilderParam");
+        if is_builder_param && prop.type_annotation.is_none() {
+            errors.push(EtsTransformError::Diagnostic {
+                file: file.to_string(),
+                message: format!(
+                    "@BuilderParam field '{}' has no type annotation",
+                    field_name
+                ),
+                severity: DiagnosticSeverity::Warning,
+            });
+        }
+
+        let is_state = prop.decorators.iter().any(|d| decorator_name(d) == "State");
+        if is_state && prop.type_annotation.is_none() {
+            errors.push(EtsTransformError::Diagnostic {
+                file: file.to_string(),
+                message: format!(
+                    "@State field '{}' has no type annotation (may be unsupported observable type)",
+                    field_name
+                ),
+                severity: DiagnosticSeverity::Warning,
+            });
+        }
+    }
+
+    for element in &statement.body.body {
+        let StructElement::MethodDefinition(method) = element else {
+            continue;
+        };
+        let is_build =
+            matches!(&method.key, PropertyKey::StaticIdentifier(id) if id.name.as_str() == "build");
+        if is_build {
+            if let Some(ret_ty) = method.value.return_type.as_ref() {
+                let annotation_text = &source[ret_ty.span.start as usize..ret_ty.span.end as usize];
+                if !annotation_text.contains("void") {
+                    errors.push(EtsTransformError::Diagnostic {
+                        file: file.to_string(),
+                        message: "build() must have a void return type".to_string(),
+                        severity: DiagnosticSeverity::Error,
+                    });
+                }
+            }
+        }
+    }
 }
