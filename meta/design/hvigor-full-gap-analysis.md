@@ -45,7 +45,7 @@ Status symbols: ✅ implemented + parity-verified, 🔄 partial (gaps listed), �
 | D1 | Write loader.json: core 18 fields | `GenerateLoaderJson::doTaskAction()` → `generate-loader-json.js` | `arkdown-profile::generate_loader_json()` — all 18 fields match golden exactly | ✅ |
 | D2 | `byteCodeHarInfo` map (pre-compiled HAR `.abc` paths) | From `DependencyManager` | `loader_json.by_byte_code_har_info` struct exists but not populated for real BC-HAR deps | 🔄 |
 | D3 | `dynamicImportLibInfo` (cross-HAR dynamic imports) | `ArkCompile::initDefaultArkCompileConfig()` | Not populated | ❌ |
-| D4 | `workers[]` (WebWorker `.ets` file paths) | `GenerateLoaderJson` from `workers/` scan | Present in struct but not fully connected to worker discovery | 🔄 |
+| D4 | `workers[]` (WebWorker `.ets`/`.ts`/`.js` file paths) | `compiler/main.js::readWorkerFile()` reads explicit loader entries; `loadWorker()` scans `workers/` recursively when absent | `generate_loader_json()` recursively scans `src/main/ets/workers`, serializes absolute `workers` only when non-empty, and adds matching `./ets/...` compile entries | ✅ |
 | D5 | `hspNameOhmMap` + `harNameOhmMap` for multi-module projects | From `DependencyManager` | Basic maps for simple projects; transitive dep resolution incomplete | 🔄 |
 
 ### Stage E — ArkCompile Task Setup
@@ -224,7 +224,7 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 - Impact: release HAP sizes larger than necessary
 
 **D2-D5 — Multi-module dependency maps incomplete**
-- `byteCodeHarInfo`, `dynamicImportLibInfo`, transitive `harNameOhmMap`/`hspNameOhmMap` not populated
+- `byteCodeHarInfo`, `dynamicImportLibInfo`, transitive `harNameOhmMap`/`hspNameOhmMap` not fully populated
 - Impact: any project with ByteCode HAR or HSP dependencies fails to resolve
 
 **K3-K4 — HSP/HAR parity unverified**

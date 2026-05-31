@@ -174,11 +174,16 @@ Collect `compileEntry` from:
 3. `module.json5#module.srcEntry`
 4. source HAR/HSP `oh-package.json5#main` when no module/ability entry is declared
 5. `$profile:main_pages` page entries
-6. worker source entries
+6. worker source entries from `src/main/ets/workers`, recursively scanning `.ets`, `.ts`, and `.js`
 
 Do not add router map `pageSourceFile` entries to `compileEntry`. Upstream keeps router
 map data in loader `routerMap` for navigation metadata and obfuscation tracking; it is
 not a rollup input list.
+
+When workers are present, serialize loader `workers` as absolute file paths and add
+matching internal `compileEntry` values as `./ets/workers/...`. This follows upstream
+`compiler/main.js`: `readWorkerFile()` consumes explicit `loader.json#workers`, while
+`loadWorker()` scans the `workers` directory recursively when the field is absent.
 
 ### ByteCode HAR Info
 

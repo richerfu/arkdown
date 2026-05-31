@@ -101,8 +101,9 @@ pub struct LoaderJson {
     /// Map of package name → brief package info (source roots, etc.).
     #[serde(skip)]
     pub pkg_name_to_pkg_brief_info: HashMap<String, PkgBriefInfo>,
-    /// WebWorker source file paths.
-    #[serde(skip)]
+    /// WebWorker source file paths. hvigor reads this field when present and
+    /// expects filesystem paths to `.ets`, `.ts`, or `.js` worker sources.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workers: Vec<String>,
 }
 
@@ -215,27 +216,20 @@ pub fn generate_loader_json(
         }
     }
 
-    // Discover WebWorker files from src/main/ets/workers/*.ets.
-    // hvigor emits these as top-level `workers` entries AND includes them in
-    // the bundler's compile entry list so they are compiled as separate chunks.
-    let workers_dir = module_cfg.src_path.join("src/main/ets/workers");
+    // Discover WebWorker files from src/main/ets/workers. Upstream
+    // `main.js::readWorkerFile()` accepts explicit loader.json `workers` entries
+    // with .ets/.ts/.js suffixes; `loadWorker()` otherwise scans this directory
+    // recursively. Keep both surfaces aligned: serialize absolute worker paths
+    // for loader consumers and add relative `./ets/...` entries for arkdown's
+    // in-process bundler.
+    let worker_files = discover_worker_files(&module_cfg.src_path);
     let mut discovered_workers: Vec<String> = vec![];
-    if workers_dir.is_dir() {
-        let mut worker_files: Vec<_> = std::fs::read_dir(&workers_dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("ets"))
-            .collect();
-        // Sort for deterministic ordering across platforms.
-        worker_files.sort_by_key(|e| e.file_name());
-        for entry in worker_files {
-            if let Some(name) = entry.file_name().to_str() {
-                let rel = format!("./ets/workers/{}", name);
-                compile_entry.push(rel.clone());
-                discovered_workers.push(rel);
-            }
+    let ets_root = module_cfg.src_path.join("src/main/ets");
+    for path in &worker_files {
+        if let Ok(rel) = path.strip_prefix(&ets_root) {
+            compile_entry.push(format!("./ets/{}", to_unix_path(rel)));
         }
+        discovered_workers.push(to_absolute_path_string(path));
     }
 
     // Deduplicate while preserving order.
@@ -447,6 +441,41 @@ fn build_pkg_brief_info(
         },
     );
     map
+}
+
+fn discover_worker_files(module_root: &Path) -> Vec<PathBuf> {
+    let workers_dir = module_root.join("src/main/ets/workers");
+    if !workers_dir.is_dir() {
+        return vec![];
+    }
+
+    let mut stack = vec![workers_dir];
+    let mut files = Vec::new();
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if matches!(
+                path.extension().and_then(|ext| ext.to_str()),
+                Some("ets" | "ts" | "js")
+            ) {
+                files.push(path);
+            }
+        }
+    }
+
+    files.sort_by_key(|path| to_unix_path(path));
+    files
+}
+
+fn to_unix_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 fn normalize_path_string(path: &Path) -> String {
@@ -968,6 +997,50 @@ mod tests {
         assert!(
             std::path::Path::new(an).is_absolute(),
             "anBuildOutPut must be absolute: {an}"
+        );
+    }
+
+    #[test]
+    fn test_loader_json_serializes_recursive_workers_when_present() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let project_root = tmp.path();
+        let module_root = project_root.join("entry");
+        let workers_dir = module_root.join("src/main/ets/workers/nested");
+        std::fs::create_dir_all(&workers_dir).expect("create workers dir");
+        std::fs::write(module_root.join("src/main/ets/workers/MainWorker.ets"), "").unwrap();
+        std::fs::write(workers_dir.join("ChildWorker.ts"), "").unwrap();
+        std::fs::write(workers_dir.join("ignored.txt"), "").unwrap();
+
+        let mut config = make_config(false);
+        config.project_root = project_root.to_path_buf();
+        let mut module_cfg = make_module_cfg();
+        module_cfg.src_path = module_root.clone();
+        let manifest = make_manifest();
+
+        let loader = generate_loader_json(&config, &module_cfg, &manifest);
+        assert_eq!(
+            loader.workers,
+            vec![
+                to_absolute_path_string(&module_root.join("src/main/ets/workers/MainWorker.ets")),
+                to_absolute_path_string(
+                    &module_root.join("src/main/ets/workers/nested/ChildWorker.ts")
+                ),
+            ]
+        );
+        assert!(loader
+            .compile_entry
+            .contains(&"./ets/workers/MainWorker.ets".to_string()));
+        assert!(loader
+            .compile_entry
+            .contains(&"./ets/workers/nested/ChildWorker.ts".to_string()));
+
+        let value = serde_json::to_value(&loader).expect("serialize loader");
+        assert_eq!(
+            value
+                .get("workers")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
+            Some(2)
         );
     }
 
