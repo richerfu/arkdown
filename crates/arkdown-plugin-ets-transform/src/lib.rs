@@ -108,6 +108,12 @@ impl EtsTransformPlugin {
         let options = transform::TransformOptions {
             bundle_name: Some(self.config.product.bundle_name.clone()),
             module_name: module_name_from_id(id),
+            module_roots: self
+                .config
+                .modules
+                .iter()
+                .map(|module| (module.name.clone(), module.src_path.clone()))
+                .collect(),
         };
 
         let transformed = transform::transform_ets_with_options(&source, &options)

@@ -4,11 +4,17 @@ pub mod component;
 pub mod decorator;
 pub mod entry;
 
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
+
 use arkdown_core::ModuleSource;
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     AnnotationDeclaration, AnnotationElement, Declaration, Decorator, ExportDefaultDeclarationKind,
-    Expression, Function, Statement, StructElement, StructStatement, TSLiteral, TSType,
+    Expression, Function, ImportDeclarationSpecifier, ModuleExportName, Program, Statement,
+    StructElement, StructStatement, TSLiteral, TSType, TSTypeName,
 };
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType, Span};
@@ -27,6 +33,7 @@ use crate::transform::entry::EntryRegistrationInfo;
 pub struct TransformOptions {
     pub bundle_name: Option<String>,
     pub module_name: Option<String>,
+    pub module_roots: Vec<(String, PathBuf)>,
 }
 
 /// Transform an ArkTS `.ets` source file into TypeScript.
@@ -75,6 +82,8 @@ pub fn transform_ets_with_options(
             message: format!("ArkUI parse failed: {:?}", parsed.errors),
         });
     }
+    let simple_type_context =
+        SimpleTypeContext::from_program(&parsed.program, &source.id.id, options);
 
     let mut out = String::with_capacity(content.len() + 512);
     let mut last_end = 0usize;
@@ -93,9 +102,13 @@ pub fn transform_ets_with_options(
 
         let pending_decorator = pending_function_decorator.take();
 
-        if let Some(component) =
-            component_from_statement(statement, content, &source.id.id, options)?
-        {
+        if let Some(component) = component_from_statement(
+            statement,
+            content,
+            &source.id.id,
+            options,
+            &simple_type_context,
+        )? {
             let start = component_replacement_start(statement, content);
             out.push_str(&content[last_end..start]);
             out.push_str(&generate_view_pu_class(&component));
@@ -404,21 +417,40 @@ fn component_from_statement(
     source_text: &str,
     id: &str,
     options: &TransformOptions,
+    simple_type_context: &SimpleTypeContext,
 ) -> Result<Option<ComponentInfo>, EtsTransformError> {
     match statement {
-        Statement::StructStatement(statement) => {
-            component_from_struct(statement, source_text, id, options, false, false)
-        }
+        Statement::StructStatement(statement) => component_from_struct(
+            statement,
+            source_text,
+            id,
+            options,
+            false,
+            false,
+            simple_type_context,
+        ),
         Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref() {
-            Some(Declaration::StructStatement(statement)) => {
-                component_from_struct(statement, source_text, id, options, true, false)
-            }
+            Some(Declaration::StructStatement(statement)) => component_from_struct(
+                statement,
+                source_text,
+                id,
+                options,
+                true,
+                false,
+                simple_type_context,
+            ),
             _ => Ok(None),
         },
         Statement::ExportDefaultDeclaration(export) => match &export.declaration {
-            ExportDefaultDeclarationKind::StructStatement(statement) => {
-                component_from_struct(statement, source_text, id, options, true, true)
-            }
+            ExportDefaultDeclarationKind::StructStatement(statement) => component_from_struct(
+                statement,
+                source_text,
+                id,
+                options,
+                true,
+                true,
+                simple_type_context,
+            ),
             _ => Ok(None),
         },
         _ => Ok(None),
@@ -729,6 +761,7 @@ fn component_from_struct(
     options: &TransformOptions,
     is_exported: bool,
     is_default_export: bool,
+    simple_type_context: &SimpleTypeContext,
 ) -> Result<Option<ComponentInfo>, EtsTransformError> {
     let has_component = statement.decorators.iter().any(|decorator| {
         matches!(
@@ -796,7 +829,7 @@ fn component_from_struct(
                     .decorators
                     .iter()
                     .find(|d| decorator_name(d) == "Watch")
-                    .and_then(|d| decorator_string_arg(d, source_text));
+                    .and_then(decorator_string_arg);
                 // Extract alias from @Provide("alias") or @Consume("alias").
                 let alias = property
                     .decorators
@@ -807,7 +840,7 @@ fn component_from_struct(
                             "Provide" | "Consume" | "Provider" | "Consumer"
                         )
                     })
-                    .and_then(|d| decorator_string_arg(d, source_text));
+                    .and_then(decorator_string_arg);
                 let decorator_arg = property
                     .decorators
                     .iter()
@@ -821,7 +854,8 @@ fn component_from_struct(
                     watch_handler,
                     alias,
                     decorator_arg,
-                    is_simple_type: type_node.is_none_or(is_simple_type_annotation),
+                    is_simple_type: type_node
+                        .is_none_or(|ty| simple_type_context.is_simple_type_annotation(ty)),
                 });
             }
             StructElement::MethodDefinition(method)
@@ -1033,6 +1067,8 @@ pub fn transform_ets_viewpu_with_source_map(
             message: format!("ArkUI parse failed: {:?}", parsed.errors),
         });
     }
+    let simple_type_context =
+        SimpleTypeContext::from_program(&parsed.program, &source.id.id, options);
 
     // Collect (viewpu_code, span_hints) per transformed struct so we can
     // compute absolute line numbers after the full output is assembled.
@@ -1062,9 +1098,13 @@ pub fn transform_ets_viewpu_with_source_map(
 
         let pending_decorator = pending_function_decorator.take();
 
-        if let Some((component, struct_statement)) =
-            component_with_struct_from_statement(statement, content, &source.id.id, options)?
-        {
+        if let Some((component, struct_statement)) = component_with_struct_from_statement(
+            statement,
+            content,
+            &source.id.id,
+            options,
+            &simple_type_context,
+        )? {
             let start = component_replacement_start(statement, content);
             out.push_str(&content[last_end..start]);
             let out_offset = out.len();
@@ -1167,32 +1207,45 @@ fn component_with_struct_from_statement<'a>(
     source_text: &str,
     id: &str,
     options: &TransformOptions,
+    simple_type_context: &SimpleTypeContext,
 ) -> Result<Option<(ComponentInfo, &'a StructStatement<'a>)>, EtsTransformError> {
     match statement {
-        Statement::StructStatement(statement) => {
-            Ok(
-                component_from_struct(statement, source_text, id, options, false, false)?
-                    .map(|component| (component, statement.as_ref())),
-            )
-        }
+        Statement::StructStatement(statement) => Ok(component_from_struct(
+            statement,
+            source_text,
+            id,
+            options,
+            false,
+            false,
+            simple_type_context,
+        )?
+        .map(|component| (component, statement.as_ref()))),
         Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref() {
-            Some(Declaration::StructStatement(statement)) => {
-                Ok(
-                    component_from_struct(statement, source_text, id, options, true, false)?
-                        .map(|component| (component, statement.as_ref())),
-                )
-            }
+            Some(Declaration::StructStatement(statement)) => Ok(component_from_struct(
+                statement,
+                source_text,
+                id,
+                options,
+                true,
+                false,
+                simple_type_context,
+            )?
+            .map(|component| (component, statement.as_ref()))),
             _ => Ok(None),
         },
-        Statement::ExportDefaultDeclaration(export) => {
-            match &export.declaration {
-                ExportDefaultDeclarationKind::StructStatement(statement) => Ok(
-                    component_from_struct(statement, source_text, id, options, true, true)?
-                        .map(|component| (component, statement.as_ref())),
-                ),
-                _ => Ok(None),
-            }
-        }
+        Statement::ExportDefaultDeclaration(export) => match &export.declaration {
+            ExportDefaultDeclarationKind::StructStatement(statement) => Ok(component_from_struct(
+                statement,
+                source_text,
+                id,
+                options,
+                true,
+                true,
+                simple_type_context,
+            )?
+            .map(|component| (component, statement.as_ref()))),
+            _ => Ok(None),
+        },
         _ => Ok(None),
     }
 }
@@ -1447,24 +1500,12 @@ fn decorator_name<'a>(decorator: &'a Decorator<'a>) -> &'a str {
 /// Used to extract the handler name from `@Watch("handler")` and the alias
 /// from `@Provide("alias")` / `@Consume("alias")`.  Returns `None` if the
 /// decorator has no arguments or the first argument is not a string literal.
-fn decorator_string_arg(decorator: &Decorator<'_>, source_text: &str) -> Option<String> {
+fn decorator_string_arg(decorator: &Decorator<'_>) -> Option<String> {
     if let Expression::CallExpression(call) = &decorator.expression {
         if let Some(arg) = call.arguments.first() {
-            // Use `as_expression()` — the oxc fork uses `inherit_variants!` so
-            // `Argument` does not have a direct `Expression` variant.
             if let Some(expr) = arg.as_expression() {
                 if let Expression::StringLiteral(lit) = expr {
                     return Some(lit.value.to_string());
-                }
-                // Fallback: slice the span text and strip surrounding quotes.
-                let raw = span_text(expr.span(), source_text).trim().to_string();
-                let unquoted = raw
-                    .trim_start_matches('"')
-                    .trim_end_matches('"')
-                    .trim_start_matches('\'')
-                    .trim_end_matches('\'');
-                if !unquoted.is_empty() {
-                    return Some(unquoted.to_string());
                 }
             }
         }
@@ -1487,22 +1528,216 @@ fn decorator_arg_text(decorator: &Decorator<'_>, source_text: &str) -> Option<St
     }
 }
 
-fn is_simple_type_annotation(ty: &TSType<'_>) -> bool {
-    match ty {
-        TSType::TSStringKeyword(_) | TSType::TSNumberKeyword(_) | TSType::TSBooleanKeyword(_) => {
-            true
+#[derive(Debug, Default)]
+struct SimpleTypeContext {
+    enum_names: HashSet<String>,
+}
+
+impl SimpleTypeContext {
+    /// Mirrors ets-loader `process_component_member.js`: primitive annotations
+    /// are simple, and `TSTypeReference` is simple only when its identifier is
+    /// present in the enum collection populated from local/imported AST exports.
+    fn from_program(program: &Program<'_>, id: &str, options: &TransformOptions) -> Self {
+        let mut enum_names = local_enum_names(program);
+        let importer = Path::new(id);
+
+        for statement in &program.body {
+            let Statement::ImportDeclaration(import) = statement else {
+                continue;
+            };
+            let Some(specifiers) = &import.specifiers else {
+                continue;
+            };
+            let Some(target) =
+                resolve_import_target(import.source.value.as_str(), importer, options)
+            else {
+                continue;
+            };
+            let target_enums = exported_enum_names(&target, &mut HashSet::new());
+            if target_enums.is_empty() {
+                continue;
+            }
+
+            for specifier in specifiers {
+                let ImportDeclarationSpecifier::ImportSpecifier(specifier) = specifier else {
+                    continue;
+                };
+                let imported = module_export_name_value(&specifier.imported);
+                if target_enums.contains(&imported) {
+                    enum_names.insert(specifier.local.name.to_string());
+                }
+            }
         }
-        TSType::TSLiteralType(literal) => matches!(
-            &literal.literal,
-            TSLiteral::StringLiteral(_)
-                | TSLiteral::NumericLiteral(_)
-                | TSLiteral::BooleanLiteral(_)
-        ),
-        TSType::TSUnionType(union) => union.types.iter().all(is_simple_type_annotation),
-        TSType::TSParenthesizedType(parenthesized) => {
-            is_simple_type_annotation(&parenthesized.type_annotation)
+
+        Self { enum_names }
+    }
+
+    fn is_simple_type_annotation(&self, ty: &TSType<'_>) -> bool {
+        match ty {
+            TSType::TSStringKeyword(_)
+            | TSType::TSNumberKeyword(_)
+            | TSType::TSBooleanKeyword(_) => true,
+            TSType::TSLiteralType(literal) => matches!(
+                &literal.literal,
+                TSLiteral::StringLiteral(_)
+                    | TSLiteral::NumericLiteral(_)
+                    | TSLiteral::BooleanLiteral(_)
+            ),
+            TSType::TSTypeReference(reference) => match &reference.type_name {
+                TSTypeName::IdentifierReference(identifier) => {
+                    self.enum_names.contains(identifier.name.as_str())
+                }
+                _ => false,
+            },
+            TSType::TSUnionType(union) => union
+                .types
+                .iter()
+                .all(|ty| self.is_simple_type_annotation(ty)),
+            TSType::TSParenthesizedType(parenthesized) => {
+                self.is_simple_type_annotation(&parenthesized.type_annotation)
+            }
+            _ => false,
         }
-        _ => false,
+    }
+}
+
+fn local_enum_names(program: &Program<'_>) -> HashSet<String> {
+    let mut enums = HashSet::new();
+    for statement in &program.body {
+        match statement {
+            Statement::TSEnumDeclaration(declaration) => {
+                enums.insert(declaration.id.name.to_string());
+            }
+            Statement::ExportNamedDeclaration(export) => {
+                if let Some(Declaration::TSEnumDeclaration(declaration)) = &export.declaration {
+                    enums.insert(declaration.id.name.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    enums
+}
+
+fn exported_enum_names(path: &Path, visited: &mut HashSet<PathBuf>) -> HashSet<String> {
+    let path = normalize_existing_path(path);
+    if !visited.insert(path.clone()) {
+        return HashSet::new();
+    }
+
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return HashSet::new();
+    };
+    let allocator = Allocator::default();
+    let source_type = SourceType::from_path(&path).unwrap_or_else(|_| SourceType::ets());
+    let parsed = Parser::new(&allocator, &content, source_type).parse();
+    if !parsed.errors.is_empty() {
+        return HashSet::new();
+    }
+
+    let mut exports = HashSet::new();
+    for statement in &parsed.program.body {
+        match statement {
+            Statement::ExportNamedDeclaration(export) => {
+                if let Some(Declaration::TSEnumDeclaration(declaration)) = &export.declaration {
+                    exports.insert(declaration.id.name.to_string());
+                }
+
+                let Some(source) = &export.source else {
+                    continue;
+                };
+                let Some(target) = resolve_relative_import(path.parent(), source.value.as_str())
+                else {
+                    continue;
+                };
+                let target_enums = exported_enum_names(&target, visited);
+                for specifier in &export.specifiers {
+                    let local = module_export_name_value(&specifier.local);
+                    if target_enums.contains(&local) {
+                        exports.insert(module_export_name_value(&specifier.exported));
+                    }
+                }
+            }
+            Statement::ExportAllDeclaration(export) => {
+                let Some(target) =
+                    resolve_relative_import(path.parent(), export.source.value.as_str())
+                else {
+                    continue;
+                };
+                exports.extend(exported_enum_names(&target, visited));
+            }
+            _ => {}
+        }
+    }
+
+    exports
+}
+
+fn resolve_import_target(
+    specifier: &str,
+    importer: &Path,
+    options: &TransformOptions,
+) -> Option<PathBuf> {
+    if specifier.starts_with("./") || specifier.starts_with("../") {
+        return resolve_relative_import(importer.parent(), specifier);
+    }
+
+    let package_name = specifier
+        .strip_prefix("@ohos/")
+        .or_else(|| specifier.strip_prefix("@ohos:"))
+        .unwrap_or(specifier)
+        .split('/')
+        .next()
+        .unwrap_or(specifier);
+
+    options.module_roots.iter().find_map(|(name, root)| {
+        (name == package_name || specifier.ends_with(name))
+            .then(|| module_entry_path(root))
+            .flatten()
+    })
+}
+
+fn module_entry_path(root: &Path) -> Option<PathBuf> {
+    [
+        root.join("Index.ets"),
+        root.join("index.ets"),
+        root.join("Index.ts"),
+        root.join("index.ts"),
+        root.join("src/main/ets/Index.ets"),
+        root.join("src/main/ets/index.ets"),
+        root.join("src/main/ets/Index.ts"),
+        root.join("src/main/ets/index.ts"),
+    ]
+    .into_iter()
+    .find(|path| path.is_file())
+}
+
+fn resolve_relative_import(base: Option<&Path>, specifier: &str) -> Option<PathBuf> {
+    let candidate = base?.join(specifier);
+    [
+        candidate.clone(),
+        candidate.with_extension("ets"),
+        candidate.with_extension("ts"),
+        candidate.with_extension("d.ets"),
+        candidate.with_extension("d.ts"),
+        candidate.join("Index.ets"),
+        candidate.join("index.ets"),
+        candidate.join("Index.ts"),
+        candidate.join("index.ts"),
+    ]
+    .into_iter()
+    .find(|path| path.is_file())
+}
+
+fn normalize_existing_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn module_export_name_value(name: &ModuleExportName<'_>) -> String {
+    match name {
+        ModuleExportName::IdentifierName(identifier) => identifier.name.to_string(),
+        ModuleExportName::IdentifierReference(identifier) => identifier.name.to_string(),
+        ModuleExportName::StringLiteral(literal) => literal.value.to_string(),
     }
 }
 
@@ -1827,6 +2062,7 @@ export function PhotoConfirmBuilder() {
         let options = TransformOptions {
             bundle_name: Some("com.example.arkdown.test".to_string()),
             module_name: Some("entry".to_string()),
+            module_roots: Vec::new(),
         };
         let result = transform_ets_with_options(
             &make_source("entry/src/main/ets/pages/Page.ets", src),
@@ -1875,6 +2111,64 @@ export function PhotoConfirmBuilder() {
             "lowered output must be valid TypeScript: {:?}\n{}",
             parsed.errors,
             result
+        );
+    }
+
+    #[test]
+    fn test_imported_reexported_enum_state_is_simple_like_hvigor_enum_collection() {
+        let temp = tempfile::tempdir().unwrap();
+        let utils_root = temp.path().join("commons/utils");
+        let enum_dir = utils_root.join("src/main/ets/common");
+        std::fs::create_dir_all(&enum_dir).unwrap();
+        std::fs::write(
+            utils_root.join("Index.ets"),
+            r#"
+export {
+  EventTypeEnum,
+  LoadingStatus,
+  WebpageStatus,
+  ResourcesType
+} from './src/main/ets/common/CommonEnums';
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            enum_dir.join("CommonEnums.ets"),
+            "export enum LoadingStatus { OFF, LOADING, SUCCESS, FAILED }\nexport enum EventTypeEnum { A }\nexport class ResourcesType {}\n",
+        )
+        .unwrap();
+
+        let src = r#"
+import {
+  EventTypeEnum,
+  LoadingStatus,
+  ResourcesType
+} from '@ohos/utils';
+
+@Component
+struct Page {
+  @State loadingStatus: LoadingStatus = LoadingStatus.Loading;
+  build() {}
+}
+"#;
+        let options = TransformOptions {
+            module_roots: vec![("utils".to_string(), utils_root)],
+            ..Default::default()
+        };
+        let result = transform_ets_with_options(
+            &make_source(
+                temp.path()
+                    .join("features/discover/src/main/ets/pages/Page.ets")
+                    .to_str()
+                    .unwrap(),
+                src,
+            ),
+            &options,
+        )
+        .unwrap();
+        assert!(
+            result.contains("private __loadingStatus: ObservedPropertySimplePU<LoadingStatus>"),
+            "imported enum state must use SimplePU like hvigor enumCollection, got:\n{result}"
         );
     }
 
