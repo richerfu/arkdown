@@ -394,6 +394,60 @@ fn manifest_to_json(
             serde_json::Value::Object(obj)
         })
         .collect();
+    let extension_abilities: Vec<serde_json::Value> = manifest
+        .extension_abilities
+        .iter()
+        .map(|a| {
+            let label_id = resource_ids
+                .zip(a.label.as_deref())
+                .and_then(|(ids, r)| resolve_res_ref(r, ids));
+            let description_id = resource_ids
+                .zip(a.description.as_deref())
+                .and_then(|(ids, r)| resolve_res_ref(r, ids));
+
+            let metadata: Vec<serde_json::Value> = a
+                .metadata
+                .iter()
+                .map(|entry| {
+                    let mut obj = serde_json::Map::new();
+                    obj.insert("name".into(), entry.name.clone().into());
+                    if let Some(value) = &entry.value {
+                        obj.insert("value".into(), value.clone().into());
+                    }
+                    if let Some(resource) = &entry.resource {
+                        obj.insert("resource".into(), resource.clone().into());
+                        if let Some(id) =
+                            resource_ids.and_then(|ids| resolve_res_ref(resource, ids))
+                        {
+                            obj.insert("resourceId".into(), (id as u64).into());
+                        }
+                    }
+                    serde_json::Value::Object(obj)
+                })
+                .collect();
+
+            let mut obj = serde_json::Map::new();
+            obj.insert("name".into(), a.name.clone().into());
+            obj.insert("srcEntry".into(), a.src_entry.clone().into());
+            if let Some(label) = &a.label {
+                obj.insert("label".into(), label.clone().into());
+            }
+            if let Some(description) = &a.description {
+                obj.insert("description".into(), description.clone().into());
+            }
+            obj.insert("type".into(), a.extension_type.clone().into());
+            if !metadata.is_empty() {
+                obj.insert("metadata".into(), serde_json::Value::Array(metadata));
+            }
+            if let Some(id) = label_id {
+                obj.insert("labelId".into(), (id as u64).into());
+            }
+            if let Some(id) = description_id {
+                obj.insert("descriptionId".into(), (id as u64).into());
+            }
+            serde_json::Value::Object(obj)
+        })
+        .collect();
 
     // Build module object in hvigor's canonical order.
     let mut obj = serde_json::Map::new();
@@ -416,6 +470,12 @@ fn manifest_to_json(
     obj.insert("type".into(), module_type_str(&manifest.module_type).into());
     obj.insert("dependencies".into(), serde_json::Value::Array(vec![]));
     obj.insert("abilities".into(), serde_json::Value::Array(abilities));
+    if !extension_abilities.is_empty() {
+        obj.insert(
+            "extensionAbilities".into(),
+            serde_json::Value::Array(extension_abilities),
+        );
+    }
     obj.insert(
         "deviceTypes".into(),
         serde_json::Value::Array(

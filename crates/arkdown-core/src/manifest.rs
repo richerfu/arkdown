@@ -99,6 +99,12 @@ pub struct ExtensionAbilityEntry {
     pub name: String,
     pub src_entry: String,
     pub extension_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metadata: Vec<MetadataEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -177,6 +183,12 @@ pub struct ExtensionAbilityConfig {
     pub src_entry: String,
     #[serde(rename = "type", alias = "extensionType", default)]
     pub extension_type: String,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub metadata: Vec<MetadataEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

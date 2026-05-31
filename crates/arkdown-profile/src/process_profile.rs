@@ -53,6 +53,9 @@ pub fn process_profile_with_ark_vm_version(
             name: e.name.clone(),
             src_entry: e.src_entry.clone(),
             extension_type: e.extension_type.clone(),
+            label: e.label.clone(),
+            description: e.description.clone(),
+            metadata: e.metadata.clone(),
         })
         .collect();
 
