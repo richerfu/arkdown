@@ -16,7 +16,7 @@ longer the current state.
 Current minimal-hap state:
 
 - hvigor `ets/modules.abc`: 9844B
-- arkdown `ets/modules.abc`: 9705B
+- arkdown `ets/modules.abc`: 9727B
 - the expected call-argument closure methods are present:
   - `#~@0>@1*#`
   - `#~@0>@1*#^1`

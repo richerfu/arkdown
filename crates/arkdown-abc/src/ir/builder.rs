@@ -1379,10 +1379,16 @@ fn compile_class_elements(
     if !has_constructor {
         // Synthesize a default constructor that still runs field initializers.
         let is_default_derived_constructor = has_super_class && instance_fields.is_empty();
-        let (bytecode, catches) = if is_default_derived_constructor {
-            compile_default_derived_constructor()
+        let (bytecode, line_ops, catches) = if is_default_derived_constructor {
+            let (bytecode, catches) = compile_default_derived_constructor();
+            let line_ops = if source.is_some() {
+                default_derived_constructor_line_ops()
+            } else {
+                Vec::new()
+            };
+            (bytecode, line_ops, catches)
         } else {
-            compile_constructor_with_fields(
+            let (bytecode, catches) = compile_constructor_with_fields(
                 None,
                 &[],
                 &instance_fields,
@@ -1391,7 +1397,8 @@ fn compile_class_elements(
                 lowering,
                 &[],
                 has_super_class,
-            )
+            );
+            (bytecode, Vec::new(), catches)
         };
         let num_vregs = if is_default_derived_constructor {
             6
@@ -1404,7 +1411,7 @@ fn compile_class_elements(
             num_vregs,
             num_args: 4,
             debug_info: None,
-            line_ops: vec![],
+            line_ops,
             catch_entries: catches,
         });
     }
@@ -2260,6 +2267,32 @@ fn compile_default_derived_constructor() -> (Vec<u8>, Vec<CatchEntry>) {
         0x64, // return
     ];
     (bytecode, vec![])
+}
+
+fn default_derived_constructor_line_ops() -> Vec<u8> {
+    // Upstream GENERATED_CONSTRUCTOR debug info is attached after the hidden
+    // argument-copy prologue. The bytecode itself is fixed above; this function
+    // only mirrors es2panda's source-position stream for that body.
+    let mut tracker = LineTracker::new(1);
+
+    // copyrestargs/sta/lda stay at the class start position.
+    tracker.advance_with_col(2, 0, 2);
+    tracker.advance_with_col(2, 0, 2);
+    tracker.advance_with_col(2, 0, 2);
+
+    // supercallspread and derived-constructor validation inherit the class body
+    // position until the final "this" validation pair.
+    for size in [2, 2, 3, 2, 2, 3, 2, 2] {
+        tracker.advance_with_col(8, 15, size);
+    }
+
+    // The final validation pair is emitted with reset column, then the implicit
+    // return uses the generated constructor end position.
+    tracker.advance_with_col(1, u32::MAX, 2);
+    tracker.advance_with_col(1, u32::MAX, 3);
+    tracker.advance_with_col(8, 15, 1);
+
+    tracker.finish()
 }
 
 /// Compile a constructor body, prepending instance field initializer code.

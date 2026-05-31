@@ -68,12 +68,12 @@ Current byte-level parity for the local minimal-hap fixture:
 |---|---:|---:|---|
 | unsigned HAP entry order | 11 entries | 11 entries | identical |
 | non-ABC HAP entries | n/a | n/a | byte-identical |
-| `ets/modules.abc` | 9844B | 9705B | different |
+| `ets/modules.abc` | 9844B | 9727B | different |
 | ABC method CodeItems | n/a | n/a | byte-identical for all compared methods |
 | ABC DebugInfo/LNP/column program | n/a | n/a | remaining gap |
 
 The earlier 7174B/9844B, 7525B/9844B, and 8675B/9844B reports are obsolete.
-Those gaps covered already-fixed structural issues. The current 139B gap is not
+Those gaps covered already-fixed structural issues. The current 117B gap is not
 method bytecode: it is DebugInfo, LineNumberProgram, column program, and local
 variable event encoding.
 
@@ -105,9 +105,10 @@ The remaining gap is in source-position metadata, not executable bytecode.
 
 Observed LNP differences:
 
-- Some generated methods inherit no AST/source position in `arkdown-abc`, so their
-  line_ops contain only scope start/end or epilogue reset events. Example:
-  `EntryAbility #~@0=#EntryAbility` and top-level `Index #*#`.
+- Some generated methods still inherit incomplete AST/source positions in
+  `arkdown-abc`, so their line_ops differ from hvigor. The default derived
+  `EntryAbility #~@0=#EntryAbility` constructor is aligned; top-level closures
+  such as `Index #*#` remain.
 - `Index func_main_0` has identical CodeItem bytes but different line/column event
   density and column values. hvigor records source positions from es2panda's AST
   nodes and from generated instruction inheritance; `arkdown-abc` currently uses
@@ -118,8 +119,9 @@ Observed LNP differences:
 
 Required implementation work:
 
-1. Attach source positions to synthesized constructor field-initializer and
-   default-return sequences the same way es2panda does.
+1. Extend the synthesized constructor source-position fix beyond the default
+   derived constructor path when field initializers or explicit constructor
+   bodies are present.
 2. Make expression-body arrows and top-level call-argument closures use the arrow
    AST range for the first body instruction and function end range for return.
 3. Make inserted instructions inherit the nearest previous emitted source position.
@@ -144,14 +146,14 @@ Required implementation work:
 
 Priority order from the current 2026-05-31 state:
 
-1. **[ABC DebugInfo] Align constructor source-position events.** Start with
-   `EntryAbility #~@0=#EntryAbility`, where hvigor has constructor body line/column
-   rows and `arkdown` currently has only scope rows.
-2. **[ABC DebugInfo] Align top-level closure source positions.** Start with
+1. **[ABC DebugInfo] Align top-level closure source positions.** Start with
    `Index #*#` and `Index #*#^1`, using arrow AST start/end behavior from
    `emitter.cpp`.
-3. **[ABC DebugInfo] Align `Index func_main_0` column stream.** CodeItem bytes
+2. **[ABC DebugInfo] Align `Index func_main_0` column stream.** CodeItem bytes
    already match; only LNP body and DebugInfo constant_pool differ.
+3. **[ABC DebugInfo] Generalize constructor source-position events.** The default
+   derived constructor now matches the minimal fixture; explicit constructors
+   and field initializer variants still need golden coverage.
 4. **[ABC Direct TS] Re-enable cache-TS compilation only after CodeItems match.**
    The source TS is already equal to hvigor; the current shrink is a backend gap.
 5. **[Parity harness] Add an ABC diff helper that compares CodeItems separately

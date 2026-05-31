@@ -97,7 +97,7 @@ Current artifact comparison:
 | HAP entry order | 11 entries | 11 entries | ✅ identical |
 | non-ABC entries | n/a | n/a | ✅ byte-identical |
 | `ets/sourceMaps.map` | n/a | n/a | ✅ byte-identical in current fixture |
-| `ets/modules.abc` | 9844B | 9705B | 🔄 remaining gap |
+| `ets/modules.abc` | 9844B | 9727B | 🔄 remaining gap |
 
 The `ets/modules.abc` gap is no longer a method bytecode gap. The current
 comparison shows all relevant method CodeItems are byte-identical to hvigor; the

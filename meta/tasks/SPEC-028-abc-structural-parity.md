@@ -20,7 +20,7 @@ except for `ets/modules.abc`.
 ABC status:
 
 - hvigor `ets/modules.abc`: 9844B
-- arkdown `ets/modules.abc`: 9705B
+- arkdown `ets/modules.abc`: 9727B
 - all compared method CodeItems are byte-identical
 - remaining difference is DebugInfo, LineNumberProgram, column-number events,
   and local-variable debug metadata
@@ -48,13 +48,59 @@ the old assumptions:
 - per-instruction tracking is wired through `CodeGen::push()`; the remaining
   problem is which source line/column is attached to each instruction
 
-## Active Bug 1: Synthesized Constructor Source Positions
+## Completed Fix: Default Derived Constructor Source Positions
+
+`EntryAbility #~@0=#EntryAbility` now matches hvigor for the minimal fixture:
+CodeItem bytes, LNP length, and DebugInfo constant_pool length all align. The
+implementation adds a tracked line/column stream for the default derived
+constructor without changing its bytecode.
+
+Remaining constructor work is broader coverage: explicit constructors and
+constructors with field initializers still need golden comparison.
+
+## Active Bug 1: Top-Level Closure Source Positions
 
 ### Problem
 
-`EntryAbility #~@0=#EntryAbility` has byte-identical CodeItem output, but hvigor
-emits constructor body line/column events while `arkdown` currently emits only
-scope local start/end rows for this method.
+Top-level call-argument closures such as `Index #*#` and `Index #*#^1` have
+matching CodeItems but different LNP/column streams. `arkdown` currently loses
+the arrow AST source position for some synthesized closure methods.
+
+### Fix
+
+When collecting top-level call-argument arrows:
+
+- use the arrow AST start position for the first body instruction;
+- use the arrow/function end position for return instructions;
+- recurse through call/new/object/member expressions only according to upstream
+  closure emission behavior, without adding extra closure methods.
+
+## Active Bug 2: `func_main_0` Column Stream
+
+### Problem
+
+`Index func_main_0` has identical CodeItem bytes but different LNP and DebugInfo
+constant_pool bytes. The remaining mismatch is line/column event attribution and
+mid-method local-variable debug events, not executable bytecode.
+
+### Fix
+
+Align `CodeGen::set_debug_pos()` calls with es2panda instruction boundaries:
+
+- apply positions before every expression/literal/member/call instruction group
+  that es2panda attaches to an AST node;
+- make inserted instructions inherit the previous source position;
+- keep return handling aligned with `UpdateForReturnIns()` in `emitter.cpp`;
+- keep local-variable start/end events interleaved according to
+  `CollectLocalVariable()` and `BuildLineNumberProgram()`.
+
+## Active Bug 3: General Constructor Source Positions
+
+### Problem
+
+The default derived constructor path matches the minimal fixture, but explicit
+constructors and field-initializer constructors still need the same
+source-position treatment.
 
 ### Upstream Behavior
 
@@ -74,42 +120,6 @@ instructions without changing CodeItem bytes:
    instruction groups;
 2. preserve inherited source position for generated helper instructions;
 3. use function/block end position before generated return instructions.
-
-## Active Bug 2: Top-Level Closure Source Positions
-
-### Problem
-
-Top-level call-argument closures such as `Index #*#` and `Index #*#^1` have
-matching CodeItems but different LNP/column streams. `arkdown` currently loses
-the arrow AST source position for some synthesized closure methods.
-
-### Fix
-
-When collecting top-level call-argument arrows:
-
-- use the arrow AST start position for the first body instruction;
-- use the arrow/function end position for return instructions;
-- recurse through call/new/object/member expressions only according to upstream
-  closure emission behavior, without adding extra closure methods.
-
-## Active Bug 3: `func_main_0` Column Stream
-
-### Problem
-
-`Index func_main_0` has identical CodeItem bytes but different LNP and DebugInfo
-constant_pool bytes. The remaining mismatch is line/column event attribution and
-mid-method local-variable debug events, not executable bytecode.
-
-### Fix
-
-Align `CodeGen::set_debug_pos()` calls with es2panda instruction boundaries:
-
-- apply positions before every expression/literal/member/call instruction group
-  that es2panda attaches to an AST node;
-- make inserted instructions inherit the previous source position;
-- keep return handling aligned with `UpdateForReturnIns()` in `emitter.cpp`;
-- keep local-variable start/end events interleaved according to
-  `CollectLocalVariable()` and `BuildLineNumberProgram()`.
 
 ## Active Bug 4: Direct CompileArkTS Cache-TS Route
 

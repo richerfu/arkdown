@@ -116,7 +116,7 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 | H2 | Lower AST → Panda IR | `es2abc` compiler passes | `arkdown-abc::ir::` modules | 🔄 |
 | H3 | Emit ABC binary: Header, StringTable, LiteralArrayTable | `assembler/assembly_emitter.cpp` | Implemented; structural match | ✅ |
 | H4 | Emit ClassIndex + ClassRecords (one per rolldown chunk) | `assembly_emitter.cpp::SerializeClasses()` | Implemented | ✅ |
-| H5 | MethodRecords with Panda bytecode | `assembly_emitter.cpp::SerializeMethods()` | CodeItems are byte-identical for the minimal-hap fixture; remaining `modules.abc` delta is DebugInfo/LNP only (9705B / 9844B) | 🔄 |
+| H5 | MethodRecords with Panda bytecode | `assembly_emitter.cpp::SerializeMethods()` | CodeItems are byte-identical for the minimal-hap fixture; remaining `modules.abc` delta is DebugInfo/LNP only (9727B / 9844B) | 🔄 |
 | H6 | LNP index at file end (after literal arrays) | hvigor places lnp_idx_off at total_size | ✅ Fixed: LNP index now emitted as final section | ✅ |
 | H7 | Module annotation strings deduplicated in StringTable | Single string entry shared across all records | ✅ Fixed: field name strings deduplicated across classes | ✅ |
 | H8 | Method index ordering [strings\|methods\|lits] | `assembly_emitter.cpp` method pool layout | ✅ Fixed: method index now [bytecode_strings\|methods\|literal_arrays] | ✅ |
