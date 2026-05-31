@@ -63,15 +63,16 @@ constructors with field initializers still need golden comparison.
 ### Problem
 
 Top-level call-argument closures such as `Index #*#` and `Index #*#^1` have
-matching CodeItems but different LNP/column streams. `arkdown` currently loses
-the arrow AST source position for some synthesized closure methods.
+matching CodeItems. On the direct cache-TS route their LNP/column streams now
+match hvigor after restoring upstream arrow return source positions.
 
 ### Fix
 
 When collecting top-level call-argument arrows:
 
 - use the arrow AST start position for the first body instruction;
-- use the arrow/function end position for return instructions;
+- use the block end for empty-block generated returns;
+- use the expression end for expression-body returns;
 - recurse through call/new/object/member expressions only according to upstream
   closure emission behavior, without adding extra closure methods.
 
@@ -127,7 +128,7 @@ instructions without changing CodeItem bytes:
 
 The generated CompileArkTS cache TypeScript files match hvigor for the minimal
 fixture, but compiling those files directly through `arkdown-abc` currently
-emits 9843B and preserves all 23 method records and CodeItems. The direct route
+emits 9821B and preserves all 23 method records and CodeItems. The direct route
 reached bytecode parity after top-level block traversal, named default class
 export lowering, lexical temporary scoping, class declaration missing property
 initialization, and the upstream 0-based source-line/default-parameter/unary
@@ -138,8 +139,9 @@ generated implicit-return `ldundefined`, and matches `Condition::Compile()` plus
 `Identifier::Compile()` by attributing right-side `undefined` comparisons to the
 identifier node. It also matches `GenScopeVariableInfo()` by omitting debug
 locals for lexical-bound `this`, filters hidden function `this` lexenv prologue
-events, and matches derived-constructor final super-call validation source
-positions. The remaining direct-route gap is
+events, matches derived-constructor final super-call validation source
+positions, and aligns top-level call-argument arrow return positions with
+upstream source-backed LNP behavior. The remaining direct-route gap is
 non-CodeItem ABC metadata/DebugInfo/LNP rather than executable bytecode; the
 direct route still has mixed per-method under/over-shoots despite bytecode
 parity.

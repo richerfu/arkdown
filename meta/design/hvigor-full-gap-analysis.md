@@ -120,7 +120,7 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 | H6 | LNP index at file end (after literal arrays) | hvigor places lnp_idx_off at total_size | ✅ Fixed: LNP index now emitted as final section | ✅ |
 | H7 | Module annotation strings deduplicated in StringTable | Single string entry shared across all records | ✅ Fixed: field name strings deduplicated across classes | ✅ |
 | H8 | Method index ordering [strings\|methods\|lits] | `assembly_emitter.cpp` method pool layout | ✅ Fixed: method index now [bytecode_strings\|methods\|literal_arrays] | ✅ |
-| H9 | LNP body and DebugInfo constant_pool | `emitter.cpp` attaches AST source positions from parsed input source; `BuildLineNumberProgram()` consumes pandasm instruction source positions, real bytecode sizes, columns, and local-variable events | Per-instruction plumbing exists; source-position event stream still differs. Source maps are no longer passed into `arkdown-abc` for LNP generation; current source-derived output is 9700B with CodeItems still byte-identical. The direct cache-TS route is 9843B after aligning 0-based lines, default-parameter nodes, `typeof`/unary logical-not nodes, binary-expression right nodes, condition-comparison nodes, member receiver/write nodes, `new` expression nodes, class missing-property scope/local events, class-method return end positions, `super(...)` post-call nodes, upstream `INVALID_SOURCE_LOCATION` before implicit-return `ldundefined`, right-operand `undefined` source attribution in condition comparisons, lexical-bound `this` local omission, hidden function `this` lexenv prologue filtering, and derived-constructor final return positions. | 🔄 |
+| H9 | LNP body and DebugInfo constant_pool | `emitter.cpp` attaches AST source positions from parsed input source; `BuildLineNumberProgram()` consumes pandasm instruction source positions, real bytecode sizes, columns, and local-variable events | Per-instruction plumbing exists; source-position event stream still differs. Source maps are no longer passed into `arkdown-abc` for LNP generation; current source-derived output is 9700B with CodeItems still byte-identical. The direct cache-TS route is 9821B after aligning 0-based lines, default-parameter nodes, `typeof`/unary logical-not nodes, binary-expression right nodes, condition-comparison nodes, member receiver/write nodes, `new` expression nodes, class missing-property scope/local events, class-method return end positions, `super(...)` post-call nodes, upstream `INVALID_SOURCE_LOCATION` before implicit-return `ldundefined`, right-operand `undefined` source attribution in condition comparisons, lexical-bound `this` local omission, hidden function `this` lexenv prologue filtering, derived-constructor final return positions, and top-level call-argument arrow return positions. | 🔄 |
 | H10 | `--merge-abc`: all module records in single `.abc` | Multiple records merged with shared StringTable | Implemented | ✅ |
 | H11 | Incremental ABC cache via `--cache-file` (msgpack) | `es2abc --cache-file <path>` | CLI passes a cache-file path/marker, but backend does not implement real es2abc-compatible incremental cache | ❌ |
 | H12 | Widget compilation (separate pass, `widgetCompile: "true"`) | ArkCompile calls `initWidgetDefaultArkCompileConfig()` for form entries | Not implemented (SPEC-027) | ❌ |
@@ -183,14 +183,14 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 
 **H9 — ABC DebugInfo/LNP source-position event stream**
 - hvigor: `emitter.cpp::GenInstructionDebugInfo()` attaches AST start positions to normal instructions and function/block end positions to return instructions; `BuildLineNumberProgram()` then emits line/column and local-variable events from the pandasm instruction stream
-- arkdown: CodeItems now match for the minimal-hap fixture, but some synthesized constructors and top-level closures have missing or different source-position events
+- arkdown: CodeItems now match for the minimal-hap fixture; the direct cache-TS route has aligned the default derived constructor and top-level `Index #*#` / `Index #*#^1` closures, while `func_main_0` and some class/method source-position events still differ
 - Root cause: `CodeGen::set_debug_pos()` coverage does not yet match es2panda's IR-node source-position assignment and generated-instruction inheritance; additionally, hvigor's LNP coordinates come from the CompileArkTS cache TS parsed by `es2abc`, while arkdown currently preserves CodeItem parity by compiling the rolldown chunk shape
 - Fix: align constructor, arrow, `func_main_0`, inserted-instruction, and return-position event generation without changing CodeItem bytes
 
 **H10 — Direct CompileArkTS cache-TS backend route**
 - hvigor: CompileArkTS writes transformed TS cache files, `filesInfo.txt`, `npmEntries.txt`, and invokes `es2abc @filesInfo`
 - arkdown: now writes matching handoff metadata, and the cache TS files match hvigor for the minimal fixture
-- Current blocker: direct cache-TS compilation through `arkdown-abc` emits 9843B and now has all 23 method records with byte-identical CodeItems; the remaining 1B overall gap is non-CodeItem ABC metadata/DebugInfo/LNP
+- Current blocker: direct cache-TS compilation through `arkdown-abc` emits 9821B and now has all 23 method records with byte-identical CodeItems; the remaining 23B overall gap is non-CodeItem ABC metadata/DebugInfo/LNP
 - Fix: keep final compilation on the current chunk path until the cache-TS route also matches non-CodeItem sections
 
 **F16 — Missing ViewPU lowering in etsTransform**
@@ -261,9 +261,10 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 ### TASK-ABC-01: Align DebugInfo/LNP source-position events (M)
 
 **What**: Preserve current CodeItem parity while aligning the DebugInfo constant_pool
-and LineNumberProgram event stream with hvigor. Start with synthesized constructors
-(`EntryAbility #~@0=#EntryAbility`), top-level closures (`Index #*#`), and
-`Index func_main_0`.
+and LineNumberProgram event stream with hvigor. The default derived constructor
+and top-level closures (`Index #*#`, `Index #*#^1`) are aligned on the direct
+cache-TS route; continue with `Index func_main_0` and the remaining class/method
+source-position events.
 **File**: `crates/arkdown-abc/src/ir/builder.rs`, `crates/arkdown-abc/src/emit/file.rs`
 **Upstream ref**: `emitter.cpp::GenInstructionDebugInfo()`,
 `assembly-emitter.cpp::BuildLineNumberProgram()`,

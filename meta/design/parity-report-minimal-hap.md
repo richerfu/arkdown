@@ -124,7 +124,9 @@ Current parity:
 For this fixture, the transformed cache TypeScript files are byte-identical to
 hvigor. Directly compiling those cache TS files through the current Rust ABC
 backend now preserves all 23 method records and byte-identical CodeItems. The
-direct cache-TS route is 9843B versus hvigor's 9844B; the remaining 1B overall
-gap is non-CodeItem DebugInfo/LNP or other metadata. Final ABC generation
+direct cache-TS route is 9821B versus hvigor's 9844B; the remaining 23B overall
+gap is non-CodeItem DebugInfo/LNP or other metadata. The latest reduction comes
+from aligning top-level call-argument arrow return positions with upstream
+source-backed LNP behavior, not from dropping executable bytecode. Final ABC generation
 intentionally remains on the chunk input path until the direct TS route also
 matches those non-CodeItem sections.

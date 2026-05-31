@@ -2198,11 +2198,15 @@ fn compile_arrow_body_with_line_ops<'src>(
         source,
         source_mapper,
     );
+    if !expression_body && body.statements.is_empty() {
+        gen.function_end = Some(body.span.end);
+    }
     gen.bind_function_param_names(param_names);
     if expression_body {
         if let [Statement::ExpressionStatement(expr_stmt)] = body.statements.as_slice() {
             gen.emit_expr(&expr_stmt.expression);
-            gen.push_with_epilogue(Insn::Return);
+            gen.set_debug_pos(expr_stmt.expression.span().end);
+            gen.push(Insn::Return);
             gen.returned = true;
             return gen.finish_with_line_ops_and_catches();
         }

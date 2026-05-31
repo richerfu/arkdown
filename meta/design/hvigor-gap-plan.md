@@ -94,7 +94,7 @@ with that file list and `npmEntries.txt`.
 
 For the minimal fixture, the generated cache TypeScript bytes match hvigor. A
 temporary experiment compiling those cache TS files directly through `arkdown-abc`
-now emits 9843B and has the same 23 method records and byte-identical CodeItems
+now emits 9821B and has the same 23 method records and byte-identical CodeItems
 as hvigor. The fixes came directly from the upstream lowering path:
 `ClassDeclaration::Compile` / `ClassDefinition::Compile` scoped class temporaries,
 `ExportDefaultDeclaration` records named default classes under the class local
@@ -107,15 +107,17 @@ class-method return end positions, `super(...)` post-call instructions, implicit
 return `INVALID_SOURCE_LOCATION` (`u32::MAX` line/column) before generated
 `ldundefined`, right-operand `undefined` source attribution in condition
 comparisons, lexical-bound `this` omission for methods whose nested arrows
-capture `this`, hidden `newlexenvwithname` prologue filtering, and derived
-constructor final super-call validation source positions. These match
+capture `this`, hidden `newlexenvwithname` prologue filtering, derived
+constructor final super-call validation source positions, and top-level
+call-argument arrow return positions. These match
 `FunctionBuilder::ImplicitReturn()`, `Condition::Compile()`,
 `Identifier::Compile()`, `GenScopeVariableInfo()`, and
 `CheckIfSuperCorrectCallBeforeReturn()` in upstream es2panda. The direct route
-is now 1B smaller than hvigor overall while still having per-method
-undershoots and overshoots, so the remaining mismatch is in non-CodeItem ABC
-sections such as DebugInfo/LNP, annotations, indexes, or literal metadata rather
-than executable bytecode.
+is now 23B smaller than hvigor overall while still having per-method
+undershoots and overshoots. The size shrink came from correcting source-backed
+arrow return LNP that previously overcounted, not from dropping bytecode. The
+remaining mismatch is in non-CodeItem ABC sections such as DebugInfo/LNP,
+annotations, indexes, or literal metadata rather than executable bytecode.
 
 Source-map routing was also checked against this state. Using rolldown chunk
 source maps for ABC debug info regressed the minimal fixture to 9679B, and the
@@ -125,7 +127,7 @@ upstream `gen_merged_abc.ts` passes `filesInfo.txt` and `npmEntries.txt` to
 source maps only for API compatibility; `source_file` is passed separately from
 `filesInfo`-style metadata, and LNP coordinates come from parsed source spans.
 This source-derived route currently emits 9700B while preserving all CodeItems.
-The direct cache-TS route also preserves CodeItems now, but it is 9843B and still
+The direct cache-TS route also preserves CodeItems now, but it is 9821B and still
 needs section-level parity before becoming the final default path.
 
 ## Remaining ABC Gap
@@ -137,7 +139,7 @@ Observed LNP differences:
 - Some generated methods still inherit incomplete AST/source positions in
   `arkdown-abc`, so their line_ops differ from hvigor. The default derived
   `EntryAbility #~@0=#EntryAbility` constructor is aligned; top-level closures
-  such as `Index #*#` remain.
+  `Index #*#` and `Index #*#^1` are aligned on the direct cache-TS route.
 - `Index func_main_0` has identical CodeItem bytes but different line/column event
   density and column values. hvigor records source positions from es2panda's AST
   nodes and from generated instruction inheritance; `arkdown-abc` currently uses
@@ -159,12 +161,10 @@ Required implementation work:
 1. Extend the synthesized constructor source-position fix beyond the default
    derived constructor path when field initializers or explicit constructor
    bodies are present.
-2. Make expression-body arrows and top-level call-argument closures use the arrow
-   AST range for the first body instruction and function end range for return.
-3. Make inserted instructions inherit the nearest previous emitted source position.
-4. Keep `BuildLineNumberProgram` semantics based on real bytecode sizes, column
+2. Make inserted instructions inherit the nearest previous emitted source position.
+3. Keep `BuildLineNumberProgram` semantics based on real bytecode sizes, column
    changes, and local-variable start/end events.
-5. Re-run the minimal-hap comparison and require: only `ets/modules.abc` differs
+4. Re-run the minimal-hap comparison and require: only `ets/modules.abc` differs
    until DebugInfo reaches byte parity; CodeItems must remain byte-identical.
 
 ## Major Remaining Capabilities Beyond Minimal-HAP
@@ -183,20 +183,17 @@ Required implementation work:
 
 Priority order from the current 2026-05-31 state:
 
-1. **[ABC DebugInfo] Align top-level closure source positions.** Start with
-   `Index #*#` and `Index #*#^1`, using arrow AST start/end behavior from
-   `emitter.cpp`.
-2. **[ABC DebugInfo] Align `Index func_main_0` column stream.** CodeItem bytes
+1. **[ABC DebugInfo] Align `Index func_main_0` column stream.** CodeItem bytes
    already match; only LNP body and DebugInfo constant_pool differ.
-3. **[ABC DebugInfo] Generalize constructor source-position events.** The default
+2. **[ABC DebugInfo] Generalize constructor source-position events.** The default
    derived constructor now matches the minimal fixture; explicit constructors
    and field initializer variants still need golden coverage.
-4. **[ABC Direct TS] Diff non-CodeItem sections on the cache-TS route.** The
+3. **[ABC Direct TS] Diff non-CodeItem sections on the cache-TS route.** The
    source TS is already equal to hvigor and all direct-route CodeItems match; the
-   remaining 1B overall shrink must be isolated to DebugInfo/LNP, annotations,
+   remaining 23B overall shrink must be isolated to DebugInfo/LNP, annotations,
    indexes, literal arrays, or other metadata, while preserving the per-method
    source-node fixes already matched to upstream.
-5. **[Parity harness] Add an ABC diff helper that compares CodeItems separately
+4. **[Parity harness] Add an ABC diff helper that compares CodeItems separately
    from DebugInfo/LNP.** This prevents future regressions from being hidden by
    total file-size changes.
 
