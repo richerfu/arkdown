@@ -9,20 +9,26 @@
 
 ## Summary
 
-Detect `import()` dynamic import calls whose specifier resolves to a cross-HAR
-dependency and populate `loader.json#dynamicImportLibInfo`. This map is read by the
-ArkRuntime to locate the entry file for dynamically imported HAR modules at runtime.
+Detect hvigor dynamic-import surfaces and populate
+`loader.json#dynamicImportLibInfo`. Besides post-bundle `import()` resolution,
+hvigor also uses `buildOption.arkOptions.runtimeOnly.packages` and dependency
+`metadata.runtimeOnly` to describe packages loaded only at runtime. This map is
+read by the ArkRuntime to locate the entry file for dynamically imported modules.
 
 ---
 
 ## Background: What hvigor Does
 
-From `generate-loader-json.js` and `arkts-pack.js::generateConfig()`:
+From `generate-loader-json.js::processDynamicImport()` and
+`arkts-pack.js::generateConfig()`:
 
 ```javascript
-// In generateConfig():
-// dynamicImportLibInfo is populated by the resolver plugin during bundling.
-// After bundling, it is read from the projectConfig and written to loader.json.
+const runtimeOnly = buildOption?.arkOptions?.runtimeOnly;
+runtimeOnly?.packages?.forEach((pkg) => {
+  this.isHarDependency(pkg)
+    ? this.processHarDynamicImport(pkg, this.dynamicImportLibInfo)
+    : this.processOtherDynamicImport(pkg, this.dynamicImportLibInfo);
+});
 
 // dynamicImportLibInfo shape:
 {
@@ -33,9 +39,10 @@ From `generate-loader-json.js` and `arkts-pack.js::generateConfig()`:
 }
 ```
 
-The `dynamicImportLibInfo` is built during the rollup `resolveId` hook when a dynamic
-import specifier (`import('my-har')`) resolves to a HAR package. The resolver records
-the HAR's entry file path and module name.
+The `dynamicImportLibInfo` is built from explicit runtime-only package metadata
+and, in the full hvigor pipeline, from dynamic import resolution during bundling.
+The resolver records the dependency's entry file path, module name, package path,
+local-dependency flag, and host module info.
 
 From `generate-loader-json.js::doTaskAction()`:
 
@@ -197,6 +204,8 @@ crates/arkdown-cli/src/
 
 ## Test Plan
 
+- `buildOption.arkOptions.runtimeOnly.packages` containing `my-har`: `my-har`
+  appears in `dynamicImportLibInfo` with correct `entryFilePath` and host module info.
 - Source file with `import('my-har')` where `my-har` is a local HAR dep: `my-har`
   appears in `dynamicImportLibInfo` with correct `entryFilePath` and `moduleName`.
 - Static import `import { x } from 'my-har'`: `my-har` does NOT appear in

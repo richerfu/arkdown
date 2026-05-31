@@ -2,7 +2,7 @@ use std::path::Path;
 
 use arkdown_core::{
     ArkOptions, ArkdownConfig, BuildMode, BuildOption, ModuleConfig, ObfuscationConfig,
-    OutputTarget, ProductConfig, SigningConfig, StrictModeConfig,
+    OutputTarget, ProductConfig, RuntimeOnlyConfig, SigningConfig, StrictModeConfig,
 };
 
 use crate::build_profile::{load_app_json5, load_build_profile, parse_api_version};
@@ -153,10 +153,16 @@ pub fn load_config(
                     rule_files,
                 }
             });
+            let runtime_only = ao
+                .runtime_only
+                .as_ref()
+                .map(|runtime_only| RuntimeOnlyConfig {
+                    packages: runtime_only.packages.clone(),
+                });
             ArkOptions {
                 obfuscation,
                 types: Vec::new(),
-                runtime_only: None,
+                runtime_only,
             }
         });
 
@@ -415,6 +421,9 @@ mod tests {
                                     enable: true,
                                     rules: ["./obfuscation-rules.txt", "./extra-rules.txt"]
                                 }
+                            },
+                            runtimeOnly: {
+                                packages: ["@ohos/runtime-only"]
                             }
                         }
                     }
@@ -442,6 +451,8 @@ mod tests {
                 assert!(obf.rule_files[0].is_absolute());
                 assert!(obf.rule_files[0].ends_with("obfuscation-rules.txt"));
                 assert!(obf.rule_files[1].ends_with("extra-rules.txt"));
+                let runtime_only = ark_opts.runtime_only.as_ref().expect("runtimeOnly present");
+                assert_eq!(runtime_only.packages, vec!["@ohos/runtime-only"]);
             }
             Err(ConfigError::SdkNotFound) => {
                 // Acceptable on machines without DevEco Studio

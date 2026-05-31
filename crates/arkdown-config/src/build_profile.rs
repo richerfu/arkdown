@@ -136,8 +136,19 @@ pub struct RawStrictMode {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RawArkOptions {
+    #[serde(default)]
     pub obfuscation: Option<RawObfuscation>,
+    #[serde(default)]
+    pub runtime_only: Option<RawRuntimeOnly>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RawRuntimeOnly {
+    #[serde(default)]
+    pub packages: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -366,6 +377,9 @@ mod tests {
                         arkOptions: {
                             obfuscation: {
                                 ruleOptions: { enable: false }
+                            },
+                            runtimeOnly: {
+                                packages: ["@ohos/dynamic-feature"]
                             }
                         }
                     }
@@ -384,6 +398,12 @@ mod tests {
         let strict = build_option.strict_mode.as_ref().unwrap();
         assert!(strict.case_sensitive_check);
         assert!(strict.use_normalized_ohm_url);
+        let runtime_only = build_option
+            .ark_options
+            .as_ref()
+            .and_then(|ark_options| ark_options.runtime_only.as_ref())
+            .expect("runtimeOnly parsed");
+        assert_eq!(runtime_only.packages, vec!["@ohos/dynamic-feature"]);
     }
 
     #[test]

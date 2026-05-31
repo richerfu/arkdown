@@ -289,7 +289,7 @@ pub fn generate_loader_json(
 
     // --- TASK-LOADER-02: populate dynamicImportLibInfo from oh-package.json5 ---
     let dynamic_import_lib_info: HashMap<String, serde_json::Value> = {
-        let dynamic_dep_names = read_dynamic_dep_names(&module_cfg.src_path);
+        let dynamic_dep_names = collect_dynamic_import_dep_names(config, &module_cfg.src_path);
         let entries = collect_dynamic_import_lib_info(
             &module_cfg.name,
             &dynamic_dep_names,
@@ -348,6 +348,27 @@ pub fn generate_loader_json(
         pkg_name_to_pkg_brief_info: build_pkg_brief_info(config, module_cfg),
         workers: discovered_workers,
     }
+}
+
+/// Read dynamic import package names from hvigor-aligned sources.
+///
+/// hvigor's `GenerateLoaderJson.processDynamicImport()` consumes
+/// `buildOption.arkOptions.runtimeOnly.packages`; `dynamicDependencies` remains
+/// a package metadata source for direct dynamic dependencies.
+fn collect_dynamic_import_dep_names(config: &ArkdownConfig, module_root: &Path) -> Vec<String> {
+    let mut names = read_dynamic_dep_names(module_root);
+    if let Some(runtime_only) = config
+        .product
+        .build_option
+        .ark_options
+        .as_ref()
+        .and_then(|ark_options| ark_options.runtime_only.as_ref())
+    {
+        names.extend(runtime_only.packages.iter().cloned());
+    }
+    let mut seen = std::collections::HashSet::new();
+    names.retain(|name| seen.insert(name.clone()));
+    names
 }
 
 /// Read `dynamicDependencies` package names from `oh-package.json5` in `module_root`.
@@ -553,8 +574,9 @@ mod tests {
     use std::path::PathBuf;
 
     use arkdown_core::{
-        AbilityEntry, ArkdownConfig, BuildMode, BuildOption, HapManifest, ModuleConfig,
-        OhosModuleType, OutputTarget, ProductConfig, SdkConfig, StrictModeConfig,
+        AbilityEntry, ArkOptions, ArkdownConfig, BuildMode, BuildOption, HapManifest, ModuleConfig,
+        OhosModuleType, OutputTarget, ProductConfig, RuntimeOnlyConfig, SdkConfig,
+        StrictModeConfig,
     };
 
     use super::*;
@@ -1261,6 +1283,63 @@ mod tests {
         assert!(
             entry.get("hostModulesInfo").is_some(),
             "entry must have hostModulesInfo"
+        );
+    }
+
+    #[test]
+    fn test_loader_json_dynamic_import_lib_info_uses_runtime_only_packages() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let project_root = tmp.path().to_path_buf();
+        let module_root = project_root.join("entry");
+        std::fs::create_dir_all(&module_root).expect("create module dir");
+
+        let pkg_dir = project_root
+            .join("oh_modules")
+            .join("@runtime")
+            .join("feature");
+        std::fs::create_dir_all(&pkg_dir).expect("create pkg dir");
+        std::fs::write(
+            pkg_dir.join("oh-package.json5"),
+            r#"{ name: "@runtime/feature", main: "src/main/ets/Index.ets" }"#,
+        )
+        .expect("write pkg oh-package.json5");
+        let ets_dir = pkg_dir.join("src").join("main").join("ets");
+        std::fs::create_dir_all(&ets_dir).expect("create ets dir");
+        std::fs::write(ets_dir.join("Index.ets"), "export default class Feature {}")
+            .expect("write index.ets");
+
+        let mut config = make_config(false);
+        config.project_root = project_root.clone();
+        config.product.build_option.ark_options = Some(ArkOptions {
+            obfuscation: None,
+            types: vec![],
+            runtime_only: Some(RuntimeOnlyConfig {
+                packages: vec!["@runtime/feature".to_string()],
+            }),
+        });
+        let module_cfg = ModuleConfig {
+            name: "entry".to_string(),
+            src_path: module_root,
+            module_type: OhosModuleType::Entry,
+        };
+
+        let loader = generate_loader_json(&config, &module_cfg, &make_manifest());
+
+        assert!(
+            loader
+                .dynamic_import_lib_info
+                .contains_key("@runtime/feature"),
+            "runtimeOnly.packages must feed dynamicImportLibInfo"
+        );
+        let entry = &loader.dynamic_import_lib_info["@runtime/feature"];
+        assert_eq!(
+            entry
+                .get("hostModulesInfo")
+                .and_then(|value| value.as_array())
+                .and_then(|values| values.first())
+                .and_then(|value| value.get("hostModuleName"))
+                .and_then(|value| value.as_str()),
+            Some("entry")
         );
     }
 
