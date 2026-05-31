@@ -25,9 +25,6 @@ thiserror = { workspace = true }
 # Serialization (for source map JSON post-processing)
 serde_json = { workspace = true }
 
-# Regex (for @kit.* import rewriting)
-regex = { workspace = true }
-
 [dev-dependencies]
 tempfile = "3"
 tokio = { workspace = true }

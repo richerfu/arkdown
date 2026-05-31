@@ -879,9 +879,6 @@ fn component_from_struct(
             StructElement::MethodDefinition(method) => {
                 regular_members.push(strip_orphan_arkui_decorator_lines(
                     balanced_method_text(method, statement.span(), source_text)
-                        .or_else(|| {
-                            balanced_member_text(element.span().start as usize, source_text)
-                        })
                         .unwrap_or_else(|| span_text(element.span(), source_text).to_string())
                         .trim(),
                 ));

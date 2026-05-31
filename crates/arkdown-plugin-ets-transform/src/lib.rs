@@ -231,10 +231,10 @@ impl Plugin for EtsTransformPlugin {
 }
 
 #[derive(Debug)]
-struct SourcePatch {
-    start: usize,
-    end: usize,
-    replacement: String,
+pub(crate) struct SourcePatch {
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+    pub(crate) replacement: String,
 }
 
 #[derive(Debug)]
@@ -360,7 +360,7 @@ fn import_specifier_text(specifier: &oxc_ast::ast::ImportSpecifier<'_>) -> Strin
     }
 }
 
-fn module_export_name_text(name: &ModuleExportName<'_>) -> String {
+pub(crate) fn module_export_name_text(name: &ModuleExportName<'_>) -> String {
     match name {
         ModuleExportName::IdentifierName(identifier) => identifier.name.to_string(),
         ModuleExportName::IdentifierReference(identifier) => identifier.name.to_string(),
@@ -371,7 +371,7 @@ fn module_export_name_text(name: &ModuleExportName<'_>) -> String {
     }
 }
 
-fn apply_source_patches(source: &str, mut patches: Vec<SourcePatch>) -> String {
+pub(crate) fn apply_source_patches(source: &str, mut patches: Vec<SourcePatch>) -> String {
     if patches.is_empty() {
         return source.to_string();
     }

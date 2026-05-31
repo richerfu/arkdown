@@ -188,9 +188,10 @@ mod tests {
 }
 
 use oxc_allocator::Allocator;
+use oxc_ast::ast::{ImportDeclarationSpecifier, Statement};
 use oxc_parser::config::TokensParserConfig;
 use oxc_parser::Parser;
-use oxc_span::SourceType;
+use oxc_span::{GetSpan, SourceType};
 
 /// Build a per-token source map for `source` (identity mapping).
 /// Emits one 4-field VLQ segment per non-whitespace/comment token.
@@ -261,9 +262,9 @@ pub fn build_hvigor_standard_source_map(
 ) -> Option<String> {
     let generated_tokens = collect_tokens(generated, id)?;
     let original_tokens = collect_tokens(original, id)?;
-    let generated_import_end = generated_import_prefix_end(generated);
-    let original_import_end = original_import_prefix_end(original);
-    let original_bindings = collect_original_kit_bindings(original);
+    let generated_import_end = generated_import_prefix_end(generated, id);
+    let original_import_end = original_import_prefix_end(original, id);
+    let original_bindings = collect_original_kit_bindings(original, id);
     let mut entries = Vec::new();
 
     for token in generated_tokens
@@ -402,68 +403,95 @@ fn collect_tokens(source: &str, id: &str) -> Option<Vec<TokenInfo>> {
     Some(tokens)
 }
 
-fn generated_import_prefix_end(source: &str) -> u32 {
-    let mut offset = 0usize;
-    for line in source.split_inclusive('\n') {
-        if line.trim_start().starts_with("import ") {
-            offset += line.len();
-        } else {
-            break;
-        }
-    }
-    offset as u32
+fn generated_import_prefix_end(source: &str, id: &str) -> u32 {
+    import_prefix_end(source, id, false)
 }
 
-fn original_import_prefix_end(source: &str) -> u32 {
-    let mut offset = 0usize;
-    for line in source.split_inclusive('\n') {
-        if line.trim_start().starts_with("import ") || line.trim().is_empty() {
-            offset += line.len();
-        } else {
-            break;
-        }
-    }
-    offset as u32
+fn original_import_prefix_end(source: &str, id: &str) -> u32 {
+    import_prefix_end(source, id, true)
 }
 
-fn collect_original_kit_bindings(source: &str) -> std::collections::HashMap<String, (u32, u32)> {
-    use regex::Regex;
-    use std::sync::OnceLock;
+fn import_prefix_end(source: &str, id: &str, include_trailing_blank_lines: bool) -> u32 {
+    let allocator = Allocator::default();
+    let source_type =
+        SourceType::from_path(id).unwrap_or_else(|_| SourceType::ts().with_module(true));
+    let parsed = Parser::new(&allocator, source, source_type).parse();
+    if !parsed.errors.is_empty() {
+        return 0;
+    }
 
-    static KIT_RE: OnceLock<Regex> = OnceLock::new();
-    let kit_re = KIT_RE.get_or_init(|| {
-        Regex::new(r#"import\s*\{([^}]+)\}\s*from\s*["']@kit\.[^"']+["']\s*;?"#)
-            .expect("kit import regex must compile")
-    });
+    let mut end = 0usize;
+    for statement in &parsed.program.body {
+        if matches!(statement, Statement::ImportDeclaration(_)) {
+            end = line_end_after(source, statement.span().end as usize);
+            continue;
+        }
+        break;
+    }
+
+    if include_trailing_blank_lines {
+        end = consume_blank_lines(source, end);
+    }
+    end as u32
+}
+
+fn line_end_after(source: &str, offset: usize) -> usize {
+    source
+        .get(offset..)
+        .and_then(|rest| rest.find('\n').map(|newline| offset + newline + 1))
+        .unwrap_or(offset)
+}
+
+fn consume_blank_lines(source: &str, mut offset: usize) -> usize {
+    while let Some(rest) = source.get(offset..) {
+        if rest.is_empty() {
+            break;
+        }
+        let line_end = rest
+            .find('\n')
+            .map(|newline| offset + newline + 1)
+            .unwrap_or(source.len());
+        let Some(line) = source.get(offset..line_end) else {
+            break;
+        };
+        if !line.trim().is_empty() {
+            break;
+        }
+        offset = line_end;
+    }
+    offset
+}
+
+fn collect_original_kit_bindings(
+    source: &str,
+    id: &str,
+) -> std::collections::HashMap<String, (u32, u32)> {
+    let allocator = Allocator::default();
+    let source_type =
+        SourceType::from_path(id).unwrap_or_else(|_| SourceType::ts().with_module(true));
+    let parsed = Parser::new(&allocator, source, source_type).parse();
+    if !parsed.errors.is_empty() {
+        return std::collections::HashMap::new();
+    }
 
     let mut bindings = std::collections::HashMap::new();
-    for cap in kit_re.captures_iter(source) {
-        let Some(names_match) = cap.get(1) else {
+    for statement in &parsed.program.body {
+        let Statement::ImportDeclaration(import) = statement else {
             continue;
         };
-        let names = names_match.as_str();
-        let mut search_offset = 0usize;
-        for part in names.split(',') {
-            let part_start = names[search_offset..]
-                .find(part)
-                .map(|idx| search_offset + idx)
-                .unwrap_or(search_offset);
-            search_offset = part_start + part.len() + 1;
-
-            let trimmed = part.trim();
-            if trimmed.is_empty() {
+        if !crate::kit_map::is_kit_specifier(import.source.value.as_str()) {
+            continue;
+        }
+        let Some(specifiers) = import.specifiers.as_ref() else {
+            continue;
+        };
+        for specifier in specifiers {
+            let ImportDeclarationSpecifier::ImportSpecifier(specifier) = specifier else {
                 continue;
-            }
-            let binding = trimmed
-                .split_once(" as ")
-                .map(|(_, alias)| alias.trim())
-                .unwrap_or(trimmed);
-            let binding_start_in_part = part.find(binding).unwrap_or(0);
-            let start = names_match.start() + part_start + binding_start_in_part;
-            bindings.insert(
-                binding.to_string(),
-                (start as u32, (start + binding.len()) as u32),
-            );
+            };
+            let name = specifier.local.name.as_str();
+            let span = specifier.local.span;
+            bindings.insert(name.to_string(), (span.start, span.end));
         }
     }
     bindings

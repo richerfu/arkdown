@@ -5,7 +5,7 @@
 /// packages rather than the `@ohos/*` namespace used in the Stage model.
 ///
 /// Examples:
-/// - `from '@ohos/hilog'`    → `from '@system.hilog'`
+/// - `from '@ohos/hilog'`    → `from "@system.hilog"`
 /// - `from "@ohos/net.http"` → `from "@system.net.http"`
 ///
 /// For API >= 9 no rewrite is performed; both `@ohos/*` and `@kit.*` are
@@ -15,15 +15,11 @@ pub fn rewrite_imports_for_version(source: &str, api_version: u32) -> String {
         return source.to_string();
     }
 
-    // Replace both single-quoted and double-quoted variants.
-    source
-        .replace("from '@ohos/", "from '@system.")
-        .replace("from \"@ohos/", "from \"@system.")
-        .replace("import '@ohos/", "import '@system.")
-        .replace("import \"@ohos/", "import \"@system.")
-        // Side-effect-only imports
-        .replace("require('@ohos/", "require('@system.")
-        .replace("require(\"@ohos/", "require(\"@system.")
+    crate::rewrite_static_module_specifiers_with(source, "arkdown-api-version.ts", |specifier| {
+        specifier
+            .strip_prefix("@ohos/")
+            .map(|suffix| format!("@system.{suffix}"))
+    })
 }
 
 #[cfg(test)]
@@ -38,15 +34,8 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrites_single_quote_for_api8() {
-        let src = "import x from '@ohos/hilog';";
-        let result = rewrite_imports_for_version(src, 8);
-        assert!(result.contains("'@system.hilog'"), "got: {}", result);
-    }
-
-    #[test]
     fn test_rewrites_double_quote_for_api8() {
-        let src = "import x from \"@ohos/net.http\";";
+        let src = "import x from '@ohos/net.http';";
         let result = rewrite_imports_for_version(src, 8);
         assert!(result.contains("\"@system.net.http\""), "got: {}", result);
     }

@@ -2,79 +2,13 @@ mod version_table;
 
 pub use version_table::rewrite_imports_for_version;
 
-/// Replace ArkUI `build()` method DSL bodies with valid JavaScript stubs.
-///
-/// The ArkUI declarative syntax like `Row() { Column() { } }.width()` is not
-/// valid TypeScript and cannot be parsed by standard parsers. For bundling
-/// purposes we replace the entire body with `return;` so the class structure
-/// remains valid TypeScript.
-///
-/// Only exact `build()` method declarations are matched — names such as
-/// `rebuild()` or `_build()` are left untouched.
-pub fn stub_arkui_build_bodies(source: &str) -> String {
-    let mut result = source.to_string();
-    let mut search_from = 0usize;
+use oxc_allocator::Allocator;
+use oxc_ast::ast::{ImportDeclaration, ImportDeclarationSpecifier, Statement};
+use oxc_parser::Parser;
+use oxc_semantic::{Scoping, SemanticBuilder};
+use oxc_span::SourceType;
 
-    loop {
-        // Look for the literal "build()" starting from our current position.
-        let Some(rel_pos) = result[search_from..].find("build()") else {
-            break;
-        };
-        let abs_pos = search_from + rel_pos;
-
-        // Reject occurrences that are part of a longer identifier, e.g. "rebuild()".
-        let pre_char = result[..abs_pos].chars().last();
-        if matches!(pre_char, Some(c) if c.is_alphanumeric() || c == '_') {
-            search_from = abs_pos + 1;
-            continue;
-        }
-
-        // Find the opening brace '{' that starts the method body.
-        // There may be optional whitespace between "build()" and "{".
-        let after_decl = abs_pos + "build()".len();
-        let Some(rel_brace) = result[after_decl..].find('{') else {
-            break;
-        };
-        // Make sure there is only whitespace between "build()" and "{".
-        let between = &result[after_decl..after_decl + rel_brace];
-        if !between.chars().all(|c| c.is_whitespace()) {
-            search_from = abs_pos + 1;
-            continue;
-        }
-
-        let abs_brace = after_decl + rel_brace;
-
-        // Walk forward from the opening brace counting depth to find the
-        // matching closing brace.
-        let mut depth = 0usize;
-        let mut end_pos: Option<usize> = None;
-        for (i, ch) in result[abs_brace..].char_indices() {
-            match ch {
-                '{' => depth += 1,
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        end_pos = Some(abs_brace + i);
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        let Some(end) = end_pos else {
-            // Unbalanced braces — leave the rest of the source unchanged.
-            break;
-        };
-
-        // Replace the entire "build() { ... }" span with the stub.
-        let stub = "build() { return; }";
-        result = format!("{}{}{}", &result[..abs_pos], stub, &result[end + 1..]);
-        // Advance past the stub so we do not re-scan it.
-        search_from = abs_pos + stub.len();
-    }
-
-    result
-}
+use crate::{apply_source_patches, module_export_name_text, SourcePatch};
 
 /// Apply all API-version-gated source transforms.
 ///
@@ -113,129 +47,81 @@ pub fn apply(source: &str, api_version: u32) -> String {
 /// If a kit specifier is unknown or none of its named imports have a mapping the
 /// original declaration is left unchanged.
 pub fn rewrite_kit_imports(source: &str) -> String {
-    use regex::Regex;
-    use std::sync::OnceLock;
+    let allocator = Allocator::default();
+    let source_type = SourceType::from_path("arkdown-input.ets")
+        .unwrap_or_else(|_| SourceType::ts().with_module(true));
+    let parsed = Parser::new(&allocator, source, source_type).parse();
+    if !parsed.errors.is_empty() {
+        return source.to_string();
+    }
 
-    // Pattern: import { A, B, C } from "@kit.XxxKit"  (single or double quotes)
-    static KIT_RE: OnceLock<Regex> = OnceLock::new();
-    let kit_re = KIT_RE.get_or_init(|| {
-        Regex::new(r#"import\s*\{([^}]+)\}\s*from\s*["'](@kit\.[^"']+)["']\s*;?"#)
-            .expect("kit import regex must compile")
-    });
+    let semantic_ret = SemanticBuilder::new().build(&parsed.program);
+    if !semantic_ret.errors.is_empty() {
+        return source.to_string();
+    }
+    let scoping = semantic_ret.semantic.scoping();
 
-    let mut result = String::with_capacity(source.len());
-    let mut last_end = 0;
-    let source_without_imports = kit_re.replace_all(source, "");
+    let mut patches = Vec::new();
+    for statement in &parsed.program.body {
+        let Statement::ImportDeclaration(import) = statement else {
+            continue;
+        };
+        let Some(replacement) = rewrite_kit_import_declaration(import, scoping) else {
+            continue;
+        };
+        patches.push(SourcePatch {
+            start: import.span.start as usize,
+            end: import.span.end as usize,
+            replacement,
+        });
+    }
 
-    for cap in kit_re.captures_iter(source) {
-        let full_match = cap.get(0).unwrap();
-        let names_str = cap[1].trim();
-        let kit_spec = cap[2].trim();
+    apply_source_patches(source, patches)
+}
 
-        // Append everything before this match unchanged.
-        result.push_str(&source[last_end..full_match.start()]);
+fn rewrite_kit_import_declaration(
+    import: &ImportDeclaration<'_>,
+    scoping: &Scoping,
+) -> Option<String> {
+    let kit_specifier = import.source.value.as_str();
+    if !crate::kit_map::is_kit_specifier(kit_specifier) {
+        return None;
+    }
 
-        let mut any_mapped = false;
-        let mut fragment = String::new();
+    let specifiers = import.specifiers.as_ref()?;
+    let mut out = String::new();
+    let mut any_mapped = false;
 
-        for name_part in names_str.split(',') {
-            let name = name_part.trim();
-            if name.is_empty() {
-                continue;
-            }
+    for specifier in specifiers {
+        let ImportDeclarationSpecifier::ImportSpecifier(specifier) = specifier else {
+            continue;
+        };
 
-            // Handle "OriginalName as Alias" form.
-            let (original_name, binding) = if let Some(idx) = name.find(" as ") {
-                let orig = name[..idx].trim();
-                let alias = name[idx + 4..].trim();
-                (orig, alias)
-            } else {
-                (name, name)
-            };
+        let imported_name = module_export_name_text(&specifier.imported);
+        let local_name = specifier.local.name.as_str();
+        let Some(ohos_module) = crate::kit_map::resolve_kit_import(kit_specifier, &imported_name)
+        else {
+            continue;
+        };
 
-            if let Some(ohos_module) = crate::kit_map::resolve_kit_import(kit_spec, original_name) {
-                let type_prefix = if binding_has_value_usage(&source_without_imports, binding) {
-                    ""
-                } else {
-                    "type "
-                };
-                fragment.push_str(&format!(
-                    "import {type_prefix}{binding} from \"{ohos_module}\";\n",
-                ));
-                any_mapped = true;
-            }
-        }
-
-        if any_mapped {
-            // Remove trailing newline so the caller sees one blank line at most.
-            result.push_str(fragment.trim_end_matches('\n'));
+        let type_prefix = if import.import_kind.is_type()
+            || specifier.import_kind.is_type()
+            || specifier.local.symbol_id.get().is_some_and(|symbol_id| {
+                !scoping
+                    .get_resolved_references(symbol_id)
+                    .any(|reference| reference.flags().is_value())
+            }) {
+            "type "
         } else {
-            // Nothing mapped — keep the original import verbatim.
-            result.push_str(full_match.as_str());
-        }
-
-        last_end = full_match.end();
+            ""
+        };
+        out.push_str(&format!(
+            "import {type_prefix}{local_name} from \"{ohos_module}\";\n",
+        ));
+        any_mapped = true;
     }
 
-    result.push_str(&source[last_end..]);
-    result
-}
-
-fn binding_has_value_usage(source: &str, binding: &str) -> bool {
-    let mut seen = false;
-    for (start, _) in identifier_occurrences(source, binding) {
-        seen = true;
-        if !is_type_position(source, start) {
-            return true;
-        }
-    }
-    !seen
-}
-
-fn identifier_occurrences<'a>(
-    source: &'a str,
-    binding: &'a str,
-) -> impl Iterator<Item = (usize, usize)> + 'a {
-    source
-        .match_indices(binding)
-        .filter_map(move |(start, text)| {
-            let end = start + text.len();
-            let before = source[..start].chars().next_back();
-            let after = source[end..].chars().next();
-            let before_ok = before.is_none_or(|ch| !is_ident_continue(ch));
-            let after_ok = after.is_none_or(|ch| !is_ident_continue(ch));
-            (before_ok && after_ok).then_some((start, end))
-        })
-}
-
-fn is_ident_continue(ch: char) -> bool {
-    ch == '_' || ch == '$' || ch.is_ascii_alphanumeric()
-}
-
-fn is_type_position(source: &str, start: usize) -> bool {
-    let prefix = &source[..start];
-    let significant_start = prefix
-        .rfind(['\n', ';', '{', '}'])
-        .map(|idx| idx + 1)
-        .unwrap_or(0);
-    let segment = &prefix[significant_start..];
-
-    if segment.rfind(':').is_some_and(|colon| {
-        !segment[colon + 1..]
-            .chars()
-            .any(|ch| matches!(ch, '=' | ';' | '{' | '}'))
-    }) {
-        return true;
-    }
-
-    let trimmed = prefix.trim_end();
-    trimmed.ends_with(" as")
-        || trimmed.ends_with("type")
-        || trimmed.ends_with("interface")
-        || trimmed.ends_with("implements")
-        || trimmed.ends_with('|')
-        || trimmed.ends_with('&')
-        || trimmed.ends_with('<')
+    any_mapped.then(|| out.trim_end_matches('\n').to_string())
 }
 
 #[cfg(test)]
@@ -244,7 +130,8 @@ mod tests {
 
     #[test]
     fn test_rewrite_single_import() {
-        let src = r#"import { UIAbility } from "@kit.AbilityKit";"#;
+        let src = r#"import { UIAbility } from "@kit.AbilityKit";
+const Ability = UIAbility;"#;
         let out = rewrite_kit_imports(src);
         assert!(
             out.contains("import UIAbility from \"@ohos:app.ability.UIAbility\""),
@@ -258,7 +145,9 @@ mod tests {
 
     #[test]
     fn test_rewrite_multiple_imports_same_kit() {
-        let src = r#"import { UIAbility, Want } from "@kit.AbilityKit";"#;
+        let src = r#"import { UIAbility, Want } from "@kit.AbilityKit";
+const Ability = UIAbility;
+const value = new Want();"#;
         let out = rewrite_kit_imports(src);
         assert!(
             out.contains("import UIAbility from \"@ohos:app.ability.UIAbility\""),
@@ -272,7 +161,8 @@ mod tests {
 
     #[test]
     fn test_rewrite_aliased_import() {
-        let src = r#"import { UIAbility as UA } from "@kit.AbilityKit";"#;
+        let src = r#"import { UIAbility as UA } from "@kit.AbilityKit";
+const Ability = UA;"#;
         let out = rewrite_kit_imports(src);
         assert!(
             out.contains("import UA from \"@ohos:app.ability.UIAbility\""),
@@ -282,7 +172,8 @@ mod tests {
 
     #[test]
     fn test_rewrite_hilog() {
-        let src = r#"import { hilog } from "@kit.PerformanceAnalysisKit";"#;
+        let src = r#"import { hilog } from "@kit.PerformanceAnalysisKit";
+hilog.info(0, "tag", "message");"#;
         let out = rewrite_kit_imports(src);
         assert!(
             out.contains("import hilog from \"@ohos:hilog\""),
@@ -306,7 +197,7 @@ mod tests {
 
     #[test]
     fn test_single_quoted_kit_import() {
-        let src = "import { hilog } from '@kit.PerformanceAnalysisKit';";
+        let src = "import { hilog } from '@kit.PerformanceAnalysisKit';\nhilog.info(0, 'tag', 'message');";
         let out = rewrite_kit_imports(src);
         assert!(
             out.contains("import hilog from \"@ohos:hilog\""),
@@ -314,76 +205,15 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // stub_arkui_build_bodies
-    // -----------------------------------------------------------------------
-
     #[test]
-    fn test_stub_empty_build_body() {
-        let src = "class Index extends ViewPU {\n  build() {}\n}";
-        let out = super::stub_arkui_build_bodies(src);
-        // An already-empty body is replaced with the canonical stub.
-        assert!(out.contains("build() { return; }"), "got: {out}");
+    fn test_type_only_kit_import_uses_oxc_semantic() {
+        let src = r#"import { AbilityConstant } from "@kit.AbilityKit";
+type LaunchParam = AbilityConstant.StartOptions;
+const text = "AbilityConstant";"#;
+        let out = rewrite_kit_imports(src);
         assert!(
-            !out.contains("build() build()"),
-            "build() declaration must not be duplicated; got: {out}"
-        );
-    }
-
-    #[test]
-    fn test_stub_simple_arkui_build() {
-        let src = "class Index extends ViewPU {\n  build() {\n    Row() {\n      Column() {\n        Text('hi')\n      }\n    }\n  }\n}";
-        let out = super::stub_arkui_build_bodies(src);
-        assert!(
-            out.contains("build() { return; }"),
-            "body must be stubbed; got: {out}"
-        );
-        assert!(
-            !out.contains("build() build()"),
-            "build() declaration must not be duplicated; got: {out}"
-        );
-        assert!(!out.contains("Row()"), "ArkUI DSL must be gone; got: {out}");
-    }
-
-    #[test]
-    fn test_stub_does_not_touch_rebuild() {
-        let src = "class Foo {\n  rebuild() {\n    doSomething();\n  }\n}";
-        let out = super::stub_arkui_build_bodies(src);
-        // "rebuild()" must not be touched.
-        assert!(
-            out.contains("rebuild()"),
-            "rebuild() must be preserved; got: {out}"
-        );
-        assert!(
-            out.contains("doSomething()"),
-            "body must be preserved; got: {out}"
-        );
-    }
-
-    #[test]
-    fn test_stub_nested_braces() {
-        // build() body contains an object literal — nested braces must balance correctly.
-        let src = "class C extends ViewPU {\n  build() {\n    if (true) {\n      let x = { a: 1 };\n    }\n  }\n  other() { return 42; }\n}";
-        let out = super::stub_arkui_build_bodies(src);
-        assert!(out.contains("build() { return; }"), "got: {out}");
-        assert!(
-            !out.contains("build() build()"),
-            "build() declaration must not be duplicated; got: {out}"
-        );
-        // other() must remain untouched.
-        assert!(
-            out.contains("other() { return 42; }"),
-            "other() body must be unchanged; got: {out}"
-        );
-    }
-
-    #[test]
-    fn test_stub_no_build_passthrough() {
-        let src = "class Foo {\n  render() {\n    return null;\n  }\n}";
-        let out = super::stub_arkui_build_bodies(src);
-        assert_eq!(
-            out, src,
-            "source without build() must be returned unchanged"
+            out.contains("import type AbilityConstant from \"@ohos:app.ability.AbilityConstant\""),
+            "type-only kit import must be decided from semantic references; got: {out}"
         );
     }
 }
