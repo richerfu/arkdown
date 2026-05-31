@@ -18,8 +18,6 @@ pub enum ConstructorInitKind {
     BuilderParamInit,
     /// Storage-backed properties (`@StorageProp`, `@StorageLink`,
     /// `@LocalStorageProp`, `@LocalStorageLink`) use runtime storage APIs.
-    /// We emit a placeholder `undefined` assignment; full storage init requires
-    /// localStorage/AppStorage plumbing that lives outside the struct transform.
     StorageInit,
 }
 
@@ -32,10 +30,32 @@ pub enum ConstructorInitKind {
 /// Derived from `createTypeReferencePU` in ets-loader `process_component_class.js`
 /// (PU / partial-update mode, API >= 9).
 pub fn state_decorator_class(decorator: &str) -> &'static str {
+    state_decorator_class_for(decorator, true)
+}
+
+pub fn state_decorator_class_for(decorator: &str, is_simple_type: bool) -> &'static str {
     match decorator {
-        "State" | "Provide" | "Local" | "Provider" | "Env" | "Trace" => "ObservedPropertySimplePU",
-        "Prop" | "Param" | "Once" | "PropRef" => "SynchedPropertySimpleOneWayPU",
-        "Link" => "SynchedPropertySimpleTwoWayPU",
+        "State" | "Provide" | "Local" | "Provider" | "Env" | "Trace" => {
+            if is_simple_type {
+                "ObservedPropertySimplePU"
+            } else {
+                "ObservedPropertyObjectPU"
+            }
+        }
+        "Prop" | "Param" | "Once" | "PropRef" => {
+            if is_simple_type {
+                "SynchedPropertySimpleOneWayPU"
+            } else {
+                "SynchedPropertyObjectOneWayPU"
+            }
+        }
+        "Link" => {
+            if is_simple_type {
+                "SynchedPropertySimpleTwoWayPU"
+            } else {
+                "SynchedPropertyObjectTwoWayPU"
+            }
+        }
         "ObjectLink" => "SynchedPropertyNesedObjectPU",
         // Consume and the storage decorators all share ObservedPropertyAbstractPU as
         // the declared field type in PU mode (they are resolved/linked at runtime).
@@ -115,6 +135,13 @@ pub fn has_update_state_vars_slot(decorator: &str) -> bool {
     matches!(
         decorator,
         "Prop" | "Param" | "Once" | "PropRef" | "LocalStorageProp" | "BuilderParam"
+    )
+}
+
+pub fn has_initially_provided_value_slot(decorator: &str) -> bool {
+    matches!(
+        decorator,
+        "State" | "Provide" | "Prop" | "ObjectLink" | "BuilderParam" | "Local" | "Provider"
     )
 }
 

@@ -8,7 +8,7 @@ use arkdown_core::ModuleSource;
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     AnnotationDeclaration, AnnotationElement, Declaration, Decorator, ExportDefaultDeclarationKind,
-    Expression, Function, Statement, StructElement, StructStatement,
+    Expression, Function, Statement, StructElement, StructStatement, TSLiteral, TSType,
 };
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType, Span};
@@ -17,7 +17,8 @@ use crate::error::EtsTransformError;
 use crate::source_map::{build_ets_source_map, offset_to_line_col, MapEntry};
 use crate::transform::build_fn::{lower_build_body, lower_build_body_or_raw, lower_styles_body};
 use crate::transform::component::{
-    generate_view_pu_class, BuilderMethodInfo, ComponentInfo, StateField, StylesMethodInfo,
+    generate_view_pu_class, BuilderMethodInfo, ComponentInfo, ParamField, StateField,
+    StylesMethodInfo,
 };
 use crate::transform::decorator::is_state_decorator;
 use crate::transform::entry::EntryRegistrationInfo;
@@ -119,9 +120,7 @@ pub fn transform_ets_with_options(
         while out.ends_with("\n\n") {
             out.pop();
         }
-        Ok(ensure_viewpu_finalize_construction_shim(
-            &strip_orphan_arkui_decorator_lines(&out),
-        ))
+        Ok(finalize_viewpu_output(&out))
     } else {
         Ok(content.clone())
     }
@@ -133,6 +132,13 @@ const VIEWPU_FINALIZE_CONSTRUCTION_SHIM: &str = concat!(
     "}\n",
 );
 
+fn finalize_viewpu_output(source: &str) -> String {
+    let out = strip_orphan_arkui_decorator_lines(source);
+    let out = strip_leading_file_comments(&out);
+    let out = ensure_viewpu_finalize_construction_shim(&out);
+    hoist_viewpu_params_interfaces(&out)
+}
+
 fn ensure_viewpu_finalize_construction_shim(source: &str) -> String {
     if !source.contains("extends ViewPU")
         || source.contains("\"finalizeConstruction\" in ViewPU.prototype")
@@ -142,6 +148,100 @@ fn ensure_viewpu_finalize_construction_shim(source: &str) -> String {
     let mut out = String::with_capacity(VIEWPU_FINALIZE_CONSTRUCTION_SHIM.len() + source.len());
     out.push_str(VIEWPU_FINALIZE_CONSTRUCTION_SHIM);
     out.push_str(source);
+    out
+}
+
+fn strip_leading_file_comments(source: &str) -> String {
+    let mut rest = source.trim_start();
+    let stripped_prefix_len = source.len() - rest.len();
+    let mut removed = false;
+
+    loop {
+        if let Some(after) = rest.strip_prefix("/*") {
+            let Some(end) = after.find("*/") else {
+                break;
+            };
+            rest = after[end + "*/".len()..].trim_start();
+            removed = true;
+            continue;
+        }
+
+        if let Some(after) = rest.strip_prefix("//") {
+            let Some(end) = after.find('\n') else {
+                return String::new();
+            };
+            rest = after[end + 1..].trim_start();
+            removed = true;
+            continue;
+        }
+
+        break;
+    }
+
+    if removed {
+        rest.to_string()
+    } else if stripped_prefix_len == 0 {
+        source.to_string()
+    } else {
+        source[stripped_prefix_len..].to_string()
+    }
+}
+
+fn hoist_viewpu_params_interfaces(source: &str) -> String {
+    if !source.contains("_Params") || !source.contains("extends ViewPU") {
+        return source.to_string();
+    }
+
+    let mut interfaces = Vec::new();
+    let mut body = String::with_capacity(source.len());
+    let lines: Vec<&str> = source.split_inclusive('\n').collect();
+    let mut index = 0usize;
+
+    while index < lines.len() {
+        let line = lines[index];
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("interface ") && trimmed.contains("_Params ") {
+            let mut block = String::new();
+            block.push_str(line);
+            index += 1;
+            while index < lines.len() {
+                let block_line = lines[index];
+                block.push_str(block_line);
+                index += 1;
+                if block_line.trim() == "}" {
+                    break;
+                }
+            }
+            interfaces.push(block);
+            continue;
+        }
+
+        body.push_str(line);
+        index += 1;
+    }
+
+    if interfaces.is_empty() {
+        return source.to_string();
+    }
+
+    interfaces.reverse();
+    let mut out = String::with_capacity(source.len());
+    if let Some(after_shim) = body
+        .find("}\n")
+        .filter(|_| body.starts_with("if (!(\"finalizeConstruction\" in ViewPU.prototype)) {\n"))
+    {
+        let split = after_shim + "}\n".len();
+        out.push_str(&body[..split]);
+        for interface in &interfaces {
+            out.push_str(interface);
+        }
+        out.push_str(&body[split..]);
+    } else {
+        for interface in &interfaces {
+            out.push_str(interface);
+        }
+        out.push_str(&body);
+    }
     out
 }
 
@@ -650,10 +750,23 @@ fn component_from_struct(
     let mut builder_methods: Vec<BuilderMethodInfo> = Vec::new();
     let mut styles_methods: Vec<StylesMethodInfo> = Vec::new();
     let mut regular_members: Vec<String> = Vec::new();
+    let mut params_fields: Vec<ParamField> = Vec::new();
 
     for element in &statement.body.body {
         match element {
             StructElement::PropertyDefinition(property) => {
+                if let Some(name) = property.key.static_name() {
+                    let type_annotation = property
+                        .type_annotation
+                        .as_ref()
+                        .map(|annotation| type_annotation_text(annotation.span(), source_text))
+                        .unwrap_or_default();
+                    params_fields.push(ParamField {
+                        name: name.into_owned(),
+                        type_annotation,
+                    });
+                }
+
                 let decorator_names: Vec<&str> =
                     property.decorators.iter().map(decorator_name).collect();
                 let Some(decorator) = primary_state_decorator(&decorator_names) else {
@@ -665,6 +778,10 @@ fn component_from_struct(
                 let Some(name) = property.key.static_name() else {
                     continue;
                 };
+                let type_node = property
+                    .type_annotation
+                    .as_ref()
+                    .map(|annotation| &annotation.type_annotation);
                 let type_annotation = property
                     .type_annotation
                     .as_ref()
@@ -691,6 +808,11 @@ fn component_from_struct(
                         )
                     })
                     .and_then(|d| decorator_string_arg(d, source_text));
+                let decorator_arg = property
+                    .decorators
+                    .iter()
+                    .find(|d| decorator_name(d) == decorator)
+                    .and_then(|d| decorator_arg_text(d, source_text));
                 state_fields.push(StateField {
                     name: name.into_owned(),
                     type_annotation,
@@ -698,6 +820,8 @@ fn component_from_struct(
                     initializer,
                     watch_handler,
                     alias,
+                    decorator_arg,
+                    is_simple_type: type_node.is_none_or(is_simple_type_annotation),
                 });
             }
             StructElement::MethodDefinition(method)
@@ -771,6 +895,7 @@ fn component_from_struct(
         is_exported,
         is_default_export,
         state_fields,
+        params_fields,
         regular_members,
         initial_render_body,
         initial_render_span_hints,
@@ -855,7 +980,9 @@ fn primary_state_decorator(names: &[&str]) -> Option<&'static str> {
     [
         "State",
         "StorageLink",
+        "StorageProp",
         "LocalStorageLink",
+        "LocalStorageProp",
         "Link",
         "ObjectLink",
         "LocalStoragePropRef",
@@ -985,8 +1112,7 @@ pub fn transform_ets_viewpu_with_source_map(
     while out.ends_with("\n\n") {
         out.pop();
     }
-    out = strip_orphan_arkui_decorator_lines(&out);
-    out = ensure_viewpu_finalize_construction_shim(&out);
+    out = finalize_viewpu_output(&out);
 
     // Build cross-transform source map entries.  For each struct's span hints,
     // compute the absolute ViewPU line number of the `initialRender()` body and
@@ -1349,6 +1475,40 @@ fn decorator_string_arg(decorator: &Decorator<'_>, source_text: &str) -> Option<
     None
 }
 
+fn decorator_arg_text(decorator: &Decorator<'_>, source_text: &str) -> Option<String> {
+    if let Expression::CallExpression(call) = &decorator.expression {
+        let arg = call.arguments.first()?;
+        let expr = arg.as_expression()?;
+        let raw = span_text(expr.span(), source_text).trim();
+        if raw.is_empty() {
+            None
+        } else {
+            Some(raw.to_string())
+        }
+    } else {
+        None
+    }
+}
+
+fn is_simple_type_annotation(ty: &TSType<'_>) -> bool {
+    match ty {
+        TSType::TSStringKeyword(_) | TSType::TSNumberKeyword(_) | TSType::TSBooleanKeyword(_) => {
+            true
+        }
+        TSType::TSLiteralType(literal) => matches!(
+            &literal.literal,
+            TSLiteral::StringLiteral(_)
+                | TSLiteral::NumericLiteral(_)
+                | TSLiteral::BooleanLiteral(_)
+        ),
+        TSType::TSUnionType(union) => union.types.iter().all(is_simple_type_annotation),
+        TSType::TSParenthesizedType(parenthesized) => {
+            is_simple_type_annotation(&parenthesized.type_annotation)
+        }
+        _ => false,
+    }
+}
+
 fn type_annotation_text(span: Span, source_text: &str) -> String {
     span_text(span, source_text)
         .trim()
@@ -1422,6 +1582,39 @@ mod tests {
             result
         );
         assert!(!result.contains("export struct MyView"));
+    }
+
+    #[test]
+    fn test_hoists_component_params_like_hvigor_interface_node_set() {
+        let src = r#"
+/*
+ * Copyright header
+ */
+import { Foo } from './foo';
+
+@Component
+export struct First {
+  @State message: string = '';
+  build() {}
+}
+
+@Component
+struct Second {
+  @State count: number = 0;
+  build() {}
+}
+"#;
+        let result =
+            transform_ets(&make_source("entry/src/main/ets/pages/Multi.ets", src)).unwrap();
+        assert!(result.starts_with("if (!(\"finalizeConstruction\" in ViewPU.prototype))"));
+        let second = result.find("interface Second_Params").unwrap();
+        let first = result.find("interface First_Params").unwrap();
+        let import = result.find("import { Foo }").unwrap();
+        let first_class = result.find("export class First extends ViewPU").unwrap();
+        assert!(second < first);
+        assert!(first < import);
+        assert!(import < first_class);
+        assert!(!result.contains("Copyright header"));
     }
 
     #[test]
@@ -1705,12 +1898,12 @@ struct ItemList {
         ))
         .unwrap();
         assert!(
-            result.contains("private __items: SynchedPropertySimpleTwoWayPU<string[]>"),
-            "expected SynchedPropertySimpleTwoWayPU backing field, got:\n{}",
+            result.contains("private __items: SynchedPropertyObjectTwoWayPU<string[]>"),
+            "expected SynchedPropertyObjectTwoWayPU backing field for non-simple array type, got:\n{}",
             result
         );
         assert!(
-            result.contains("new SynchedPropertySimpleTwoWayPU(params.items, this, \"items\")"),
+            result.contains("new SynchedPropertyObjectTwoWayPU(params.items, this, \"items\")"),
             "expected params.items init for @Link, got:\n{}",
             result
         );

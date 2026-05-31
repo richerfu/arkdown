@@ -17,7 +17,7 @@ use arkdown_pack::{
     minify_package_intermediate_module_json, HarPackInput, PackAbility, PackInput, Packager,
 };
 use arkdown_plugin_duplicate_check::DuplicateCheckPlugin;
-use arkdown_plugin_ets_transform::EtsTransformPlugin;
+use arkdown_plugin_ets_transform::{rewrite_static_module_specifiers_with, EtsTransformPlugin};
 use arkdown_plugin_json5::Json5Plugin;
 use arkdown_plugin_module_meta::ModuleMetaPlugin;
 use arkdown_plugin_ohos_resolve::{process_importees, OhosResolvePlugin, ProcessImporteeConfig};
@@ -1051,11 +1051,6 @@ fn write_compile_arkts_cache(
                 entry_info.source_path.display()
             )
         })?;
-        if matches!(entry_info.source_ext.as_str(), "ets" | "ts")
-            && is_const_enum_type_only_module(&source)
-        {
-            continue;
-        }
         let transformed = if matches!(
             entry_info.source_ext.as_str(),
             "ets" | "ts" | "js" | "mjs" | "cjs"
@@ -1397,75 +1392,9 @@ fn rewrite_compile_module_imports_to_ohm(
     loader_json: &arkdown_profile::LoaderJson,
     config: &ArkdownConfig,
 ) -> String {
-    let mut changed = false;
-    let mut rewritten = String::with_capacity(source.len());
-
-    for line in source.split_inclusive('\n') {
-        let Some(next_line) =
-            rewrite_compile_import_line_to_ohm(line, importer, cache_root, loader_json, config)
-        else {
-            rewritten.push_str(line);
-            continue;
-        };
-        changed = true;
-        rewritten.push_str(&next_line);
-    }
-
-    if changed {
-        rewritten
-    } else {
-        source.to_string()
-    }
-}
-
-fn rewrite_compile_import_line_to_ohm(
-    line: &str,
-    importer: &Path,
-    cache_root: &Path,
-    loader_json: &arkdown_profile::LoaderJson,
-    config: &ArkdownConfig,
-) -> Option<String> {
-    let trimmed = line.trim_start();
-    if trimmed.starts_with("import type ") || trimmed.starts_with("export type ") {
-        return None;
-    }
-    let (spec_start, spec_end, specifier) = find_static_module_specifier(line)?;
-    let ohm =
-        compile_module_ohm_for_specifier(specifier, importer, cache_root, loader_json, config)?;
-    if ohm == specifier {
-        return None;
-    }
-
-    let mut out = String::with_capacity(line.len() + ohm.len().saturating_sub(specifier.len()));
-    out.push_str(&line[..spec_start]);
-    out.push_str(&ohm);
-    out.push_str(&line[spec_end..]);
-    Some(out)
-}
-
-fn find_static_module_specifier(line: &str) -> Option<(usize, usize, &str)> {
-    if let Some(from_idx) = line.find(" from ") {
-        return find_quoted_specifier(line, from_idx + " from ".len());
-    }
-
-    let trimmed = line.trim_start();
-    if trimmed.starts_with("import ") || trimmed.starts_with("export ") {
-        let offset = line.len() - trimmed.len();
-        return find_quoted_specifier(line, offset);
-    }
-    None
-}
-
-fn find_quoted_specifier(line: &str, start: usize) -> Option<(usize, usize, &str)> {
-    let bytes = line.as_bytes();
-    let quote_start = bytes[start..]
-        .iter()
-        .position(|byte| *byte == b'\'' || *byte == b'"')?
-        + start;
-    let quote = bytes[quote_start];
-    let spec_start = quote_start + 1;
-    let spec_end = bytes[spec_start..].iter().position(|byte| *byte == quote)? + spec_start;
-    Some((spec_start, spec_end, &line[spec_start..spec_end]))
+    rewrite_static_module_specifiers_with(source, &importer.to_string_lossy(), |specifier| {
+        compile_module_ohm_for_specifier(specifier, importer, cache_root, loader_json, config)
+    })
 }
 
 fn compile_module_ohm_for_specifier(
@@ -1578,60 +1507,6 @@ fn resolve_source_request(base_dir: &Path, request: &str) -> Option<PathBuf> {
         }
     }
     None
-}
-
-fn is_const_enum_type_only_module(source: &str) -> bool {
-    if !source.contains("const enum") {
-        return false;
-    }
-
-    let mut scrubbed = String::new();
-    for line in source.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("//")
-            || trimmed.starts_with('*')
-            || trimmed.starts_with("/*")
-            || trimmed.starts_with("import ")
-            || trimmed.starts_with("export type ")
-            || trimmed.starts_with("type ")
-            || trimmed.starts_with("export interface ")
-            || trimmed.starts_with("interface ")
-        {
-            continue;
-        }
-        scrubbed.push_str(line);
-        scrubbed.push('\n');
-    }
-
-    for runtime in [
-        "export class ",
-        "class ",
-        "export function ",
-        "function ",
-        "export const ",
-        "const ",
-        "export let ",
-        "let ",
-        "export var ",
-        "var ",
-    ] {
-        if runtime == "export const " || runtime == "const " {
-            let mut search_start = 0;
-            while let Some(offset) = scrubbed[search_start..].find(runtime) {
-                let start = search_start + offset + runtime.len();
-                if !scrubbed[start..].trim_start().starts_with("enum ") {
-                    return false;
-                }
-                search_start = start;
-            }
-            continue;
-        }
-        if scrubbed.contains(runtime) {
-            return false;
-        }
-    }
-
-    true
 }
 
 fn origin_source_lang(source_ext: &str) -> String {

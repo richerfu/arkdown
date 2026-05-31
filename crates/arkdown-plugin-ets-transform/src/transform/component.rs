@@ -1,7 +1,7 @@
 use crate::transform::build_fn::SpanHint;
 use crate::transform::decorator::{
-    constructor_init_kind, has_update_state_vars_slot, is_state_decorator, state_decorator_class,
-    ConstructorInitKind,
+    constructor_init_kind, has_initially_provided_value_slot, has_update_state_vars_slot,
+    is_state_decorator, state_decorator_class_for, ConstructorInitKind,
 };
 use crate::transform::entry::{generate_entry_registration, EntryRegistrationInfo};
 
@@ -55,6 +55,18 @@ pub struct StateField {
     /// For `@Consume`, this is the key looked up from an ancestor `@Provide`.
     /// When absent the field name itself is used as the key.
     pub alias: Option<String>,
+    /// First decorator argument expression text for decorators that pass the
+    /// original expression through to runtime APIs, such as `@StorageProp`.
+    pub decorator_arg: Option<String>,
+    /// Result of hvigor's `isSimpleType` equivalent for this field, derived
+    /// from the OXC type annotation AST.
+    pub is_simple_type: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ParamField {
+    pub name: String,
+    pub type_annotation: String,
 }
 
 /// Structural description of a parsed `@Component` struct, ready for code generation.
@@ -65,6 +77,10 @@ pub struct ComponentInfo {
     pub is_exported: bool,
     pub is_default_export: bool,
     pub state_fields: Vec<StateField>,
+    /// All struct properties in source order. hvigor adds every property to
+    /// the generated `*_Params` interface from `createVariableInitStatement`,
+    /// including regular/private fields and callback fields.
+    pub params_fields: Vec<ParamField>,
     /// Struct members that are not ArkUI state/decorator fields and are not
     /// build/@Builder/@Styles methods. hvigor keeps these as class members.
     pub regular_members: Vec<String>,
@@ -89,23 +105,31 @@ pub struct ComponentInfo {
 pub fn generate_view_pu_class(info: &ComponentInfo) -> String {
     let mut out = String::with_capacity(512);
 
-    if info.is_entry {
-        out.push_str(concat!(
-            "if (!(\"finalizeConstruction\" in ViewPU.prototype)) {\n",
-            "    Reflect.set(ViewPU.prototype, \"finalizeConstruction\", () => { });\n",
-            "}\n",
-        ));
-    }
-
     let params_type = format!("{}_Params", info.name);
     out.push_str(&format!("interface {params_type} {{\n"));
-    for field in &info.state_fields {
-        let ty = if field.type_annotation.is_empty() {
-            "unknown"
+    let fallback_params;
+    let params_fields = if info.params_fields.is_empty() {
+        fallback_params = info
+            .state_fields
+            .iter()
+            .map(|field| ParamField {
+                name: field.name.clone(),
+                type_annotation: field.type_annotation.clone(),
+            })
+            .collect::<Vec<_>>();
+        &fallback_params
+    } else {
+        &info.params_fields
+    };
+    for field in params_fields {
+        if field.type_annotation.is_empty() {
+            out.push_str(&format!("    {}?;\n", field.name));
         } else {
-            field.type_annotation.as_str()
-        };
-        out.push_str(&format!("    {}?: {};\n", field.name, ty));
+            out.push_str(&format!(
+                "    {}?: {};\n",
+                field.name, field.type_annotation
+            ));
+        }
     }
     out.push_str("}\n");
 
@@ -129,7 +153,7 @@ pub fn generate_view_pu_class(info: &ComponentInfo) -> String {
         "        }\n",
     ));
     for field in &info.state_fields {
-        let backing = state_decorator_class(&field.decorator);
+        let backing = state_decorator_class_for(&field.decorator, field.is_simple_type);
         let local_init = field.initializer.as_deref().unwrap_or("undefined");
         match constructor_init_kind(&field.decorator) {
             ConstructorInitKind::NewWithLocalInit => {
@@ -166,17 +190,29 @@ pub fn generate_view_pu_class(info: &ComponentInfo) -> String {
                 ));
             }
             ConstructorInitKind::StorageInit => {
-                // @StorageProp / @StorageLink / @LocalStorageProp / @LocalStorageLink:
-                // full storage plumbing is outside the struct transform scope.
-                // Emit a typed backing assignment; downstream runtime wires up storage.
+                let key = field
+                    .decorator_arg
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|arg| !arg.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("\"{}\"", field.name));
+                let api = match field.decorator.as_str() {
+                    "StorageLink" | "LocalStorageLink" => "createStorageLink",
+                    _ => "createStorageProp",
+                };
                 out.push_str(&format!(
-                    "        this.__{name} = undefined;\n",
+                    "        this.__{name} = this.{api}({key}, {init}, \"{name}\");\n",
                     name = field.name,
+                    api = api,
+                    key = key,
+                    init = local_init,
                 ));
             }
         }
     }
-    // @Watch — emit declareWatch calls after field inits, before setInitiallyProvidedValue.
+    out.push_str("        this.setInitiallyProvidedValue(params);\n");
+    // @Watch — hvigor appends declareWatch calls after setInitiallyProvidedValue.
     for field in &info.state_fields {
         if let Some(handler) = &field.watch_handler {
             out.push_str(&format!(
@@ -186,13 +222,16 @@ pub fn generate_view_pu_class(info: &ComponentInfo) -> String {
             ));
         }
     }
-    out.push_str("        this.setInitiallyProvidedValue(params);\n");
     out.push_str("        this.finalizeConstruction();\n    }\n");
 
     out.push_str(&format!(
         "    setInitiallyProvidedValue(params: {params_type}) {{\n"
     ));
-    for field in &info.state_fields {
+    for field in info
+        .state_fields
+        .iter()
+        .filter(|field| has_initially_provided_value_slot(&field.decorator))
+    {
         out.push_str(&format!(
             "        if (params.{name} !== undefined) {{\n            this.{name} = params.{name};\n        }}\n",
             name = field.name,
@@ -238,7 +277,7 @@ pub fn generate_view_pu_class(info: &ComponentInfo) -> String {
     ));
 
     for field in &info.state_fields {
-        let backing = state_decorator_class(&field.decorator);
+        let backing = state_decorator_class_for(&field.decorator, field.is_simple_type);
         let type_param = if field.type_annotation.is_empty() {
             String::new()
         } else {
@@ -250,9 +289,6 @@ pub fn generate_view_pu_class(info: &ComponentInfo) -> String {
             backing = backing,
             type_param = type_param,
         ));
-    }
-
-    for field in &info.state_fields {
         if is_state_decorator(&field.decorator) {
             let ty = if field.type_annotation.is_empty() {
                 "unknown"
@@ -272,12 +308,7 @@ pub fn generate_view_pu_class(info: &ComponentInfo) -> String {
     }
 
     for member in &info.regular_members {
-        out.push_str("    ");
-        out.push_str(member.trim());
-        if !member.trim_end().ends_with('}') && !member.trim_end().ends_with(';') {
-            out.push(';');
-        }
-        out.push('\n');
+        out.push_str(&render_regular_member(member));
     }
 
     out.push_str("    initialRender() {\n");
@@ -336,6 +367,39 @@ pub fn generate_view_pu_class(info: &ComponentInfo) -> String {
     out
 }
 
+fn render_regular_member(member: &str) -> String {
+    let trimmed = member.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let mut lines = trimmed.lines().collect::<Vec<_>>();
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
+
+    let mut out = String::new();
+    for (idx, line) in lines.iter().enumerate() {
+        let is_final_closing_brace = idx + 1 == lines.len() && line.trim() == "}";
+        out.push_str("    ");
+        if is_final_closing_brace {
+            out.push('}');
+        } else if idx == 0 {
+            out.push_str(line.trim_start());
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    if !trimmed.ends_with('}') && !trimmed.ends_with(';') {
+        if out.ends_with('\n') {
+            out.pop();
+        }
+        out.push_str(";\n");
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -353,7 +417,10 @@ mod tests {
                 initializer: Some("0".to_string()),
                 watch_handler: None,
                 alias: None,
+                decorator_arg: None,
+                is_simple_type: true,
             }],
+            params_fields: vec![],
             regular_members: vec![],
             initial_render_body: concat!(
                 "        this.observeComponentCreation2((elmtId, isInitialRender) => {\n",
@@ -439,7 +506,10 @@ mod tests {
                 initializer: None,
                 watch_handler: None,
                 alias: None,
+                decorator_arg: None,
+                is_simple_type: true,
             }],
+            params_fields: vec![],
             regular_members: vec![],
             initial_render_body: String::new(),
             initial_render_span_hints: vec![],
@@ -463,6 +533,7 @@ mod tests {
             is_exported: false,
             is_default_export: false,
             state_fields: vec![],
+            params_fields: vec![],
             regular_members: vec![],
             initial_render_body: String::new(),
             initial_render_span_hints: vec![],
@@ -491,7 +562,10 @@ mod tests {
                 initializer: None,
                 watch_handler: None,
                 alias: None,
+                decorator_arg: None,
+                is_simple_type: false,
             }],
+            params_fields: vec![],
             regular_members: vec![],
             initial_render_body: String::new(),
             initial_render_span_hints: vec![],
@@ -501,11 +575,11 @@ mod tests {
         };
         let out = generate_view_pu_class(&info);
         assert!(
-            out.contains("private __items: SynchedPropertySimpleTwoWayPU<string[]>"),
+            out.contains("private __items: SynchedPropertyObjectTwoWayPU<string[]>"),
             "wrong backing class for @Link"
         );
         assert!(
-            out.contains("new SynchedPropertySimpleTwoWayPU(params.items, this, \"items\")"),
+            out.contains("new SynchedPropertyObjectTwoWayPU(params.items, this, \"items\")"),
             "@Link must be initialised from params, not from a local literal"
         );
         // @Link does NOT appear in updateStateVars
@@ -531,7 +605,10 @@ mod tests {
                 initializer: None,
                 watch_handler: None,
                 alias: None,
+                decorator_arg: None,
+                is_simple_type: true,
             }],
+            params_fields: vec![],
             regular_members: vec![],
             initial_render_body: String::new(),
             initial_render_span_hints: vec![],
@@ -566,7 +643,10 @@ mod tests {
                 initializer: Some("\"dark\"".to_string()),
                 watch_handler: None,
                 alias: None,
+                decorator_arg: None,
+                is_simple_type: true,
             }],
+            params_fields: vec![],
             regular_members: vec![],
             initial_render_body: String::new(),
             initial_render_span_hints: vec![],
@@ -601,7 +681,10 @@ mod tests {
                 initializer: None,
                 watch_handler: None,
                 alias: None,
+                decorator_arg: None,
+                is_simple_type: true,
             }],
+            params_fields: vec![],
             regular_members: vec![],
             initial_render_body: String::new(),
             initial_render_span_hints: vec![],
@@ -634,7 +717,10 @@ mod tests {
                 initializer: None,
                 watch_handler: None,
                 alias: Some("theme".to_string()),
+                decorator_arg: None,
+                is_simple_type: true,
             }],
+            params_fields: vec![],
             regular_members: vec![],
             initial_render_body: String::new(),
             initial_render_span_hints: vec![],
@@ -665,7 +751,10 @@ mod tests {
                 initializer: Some("0".to_string()),
                 watch_handler: Some("onCountChange".to_string()),
                 alias: None,
+                decorator_arg: None,
+                is_simple_type: true,
             }],
+            params_fields: vec![],
             regular_members: vec![],
             initial_render_body: String::new(),
             initial_render_span_hints: vec![],
@@ -674,8 +763,8 @@ mod tests {
             entry_registration: None,
         };
         let out = generate_view_pu_class(&info);
-        // The declareWatch call must appear AFTER the backing field init and BEFORE
-        // setInitiallyProvidedValue, as the hvigor ets-loader emits it.
+        // The declareWatch call must appear AFTER setInitiallyProvidedValue, as
+        // hvigor appends it after field init and initial param assignment.
         let declare_pos = out
             .find("this.declareWatch(\"count\", this.onCountChange)")
             .expect("missing declareWatch call");
@@ -690,8 +779,8 @@ mod tests {
             "declareWatch must come after field init"
         );
         assert!(
-            declare_pos < set_pos,
-            "declareWatch must come before setInitiallyProvidedValue"
+            set_pos < declare_pos,
+            "declareWatch must come after setInitiallyProvidedValue"
         );
     }
 
@@ -721,7 +810,10 @@ mod tests {
                 initializer: None,
                 watch_handler: None,
                 alias: None,
+                decorator_arg: None,
+                is_simple_type: true,
             }],
+            params_fields: vec![],
             regular_members: vec![],
             initial_render_body: String::new(),
             initial_render_span_hints: vec![],
@@ -762,7 +854,10 @@ mod tests {
                 initializer: Some("\"default\"".to_string()),
                 watch_handler: None,
                 alias: None,
+                decorator_arg: None,
+                is_simple_type: true,
             }],
+            params_fields: vec![],
             regular_members: vec![],
             initial_render_body: String::new(),
             initial_render_span_hints: vec![],
@@ -803,7 +898,10 @@ mod tests {
                     initializer: None,
                     watch_handler: None,
                     alias: None,
+                    decorator_arg: None,
+                    is_simple_type: true,
                 }],
+                params_fields: vec![],
                 initial_render_body: String::new(),
                 initial_render_span_hints: vec![],
                 regular_members: vec![],
@@ -817,8 +915,15 @@ mod tests {
                 "wrong backing class for @{decorator}"
             );
             assert!(
-                out.contains("this.__setting = undefined"),
-                "@{decorator} must emit a storage placeholder init"
+                out.contains(&format!(
+                    "this.__setting = this.{}(\"setting\", undefined, \"setting\")",
+                    if decorator.ends_with("Link") {
+                        "createStorageLink"
+                    } else {
+                        "createStorageProp"
+                    }
+                )),
+                "@{decorator} must emit hvigor storage runtime init"
             );
         }
     }
