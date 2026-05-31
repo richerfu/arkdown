@@ -1894,7 +1894,12 @@ fn infer_func_main_class_local_events(
         .any(|name| name.starts_with('#') && name.ends_with("_Params"));
     let reg = if has_params_shape { 6 } else { 5 };
     let base_pc = debug_scope_start_pc(method);
-    let Some(start_pc) = infer_second_line_change_pc(method.line_ops.as_slice(), base_pc) else {
+    let start_pc = if has_params_shape {
+        infer_first_large_line_change_pc(method.line_ops.as_slice(), base_pc)
+    } else {
+        infer_second_line_change_pc(method.line_ops.as_slice(), base_pc)
+    };
+    let Some(start_pc) = start_pc else {
         return Vec::new();
     };
     let Some(end_pc) = infer_class_local_end_pc(method.bytecode.as_slice(), has_params_shape)
@@ -1932,6 +1937,19 @@ fn class_short_name(class_name: &str) -> Option<String> {
 }
 
 fn infer_second_line_change_pc(method_ops: &[u8], base_pc: u32) -> Option<u32> {
+    infer_nth_line_change_pc(method_ops, base_pc, 2, 1)
+}
+
+fn infer_first_large_line_change_pc(method_ops: &[u8], base_pc: u32) -> Option<u32> {
+    infer_nth_line_change_pc(method_ops, base_pc, 1, 2)
+}
+
+fn infer_nth_line_change_pc(
+    method_ops: &[u8],
+    base_pc: u32,
+    target_change: u8,
+    min_abs_delta: i32,
+) -> Option<u32> {
     let (ops, cp) = split_line_ops(method_ops)?;
     let mut cp_pos = 0usize;
     let mut op_pos = 0usize;
@@ -1949,9 +1967,9 @@ fn infer_second_line_change_pc(method_ops: &[u8], base_pc: u32) -> Option<u32> {
             0x02 => {
                 let (line_delta, next) = read_sleb128_from(cp, cp_pos)?;
                 cp_pos = next;
-                if line_delta != 0 {
+                if line_delta.unsigned_abs() >= min_abs_delta as u32 {
                     line_changes += 1;
-                    if line_changes == 2 {
+                    if line_changes == target_change {
                         return Some(pc);
                     }
                 }
@@ -1977,9 +1995,9 @@ fn infer_second_line_change_pc(method_ops: &[u8], base_pc: u32) -> Option<u32> {
                 let pc_delta = adjusted / LNP_LINE_RANGE;
                 let line_delta = (adjusted % LNP_LINE_RANGE) as i32 + LNP_LINE_BASE;
                 pc = pc.saturating_add(pc_delta);
-                if line_delta != 0 {
+                if line_delta.unsigned_abs() >= min_abs_delta as u32 {
                     line_changes += 1;
-                    if line_changes == 2 {
+                    if line_changes == target_change {
                         return Some(pc);
                     }
                 }

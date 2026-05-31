@@ -3021,6 +3021,7 @@ impl<'a> CodeGen<'a> {
                             class_name.unwrap_or(&name),
                             &cls.body.body,
                             class_reg,
+                            cls.body.span.start,
                         );
                         if let Some(lex_idx) = self.lowering.lexical_index(&name) {
                             self.push(Insn::Lda(class_reg));
@@ -3065,6 +3066,7 @@ impl<'a> CodeGen<'a> {
                         class_name.unwrap_or(&name),
                         &cls.body.body,
                         class_reg,
+                        cls.body.span.start,
                     );
                     if let Some(lex_idx) = self.lowering.lexical_index(&name) {
                         self.push(Insn::Lda(class_reg));
@@ -3117,13 +3119,23 @@ impl<'a> CodeGen<'a> {
                     self.push(Insn::Sta(class_reg));
                     if let Some(name) = local_name {
                         self.push(Insn::Sta(class_reg + 1));
-                        self.emit_class_missing_properties(class_name, &cls.body.body, class_reg);
+                        self.emit_class_missing_properties(
+                            class_name,
+                            &cls.body.body,
+                            class_reg,
+                            cls.body.span.start,
+                        );
                         if let Some(export_index) = self.lowering.export_index(name) {
                             self.push(Insn::Lda(class_reg));
                             self.push(Insn::StModuleVar(export_index));
                         }
                     } else {
-                        self.emit_class_missing_properties(class_name, &cls.body.body, class_reg);
+                        self.emit_class_missing_properties(
+                            class_name,
+                            &cls.body.body,
+                            class_reg,
+                            cls.body.span.start,
+                        );
                         if let Some(export_index) = self.lowering.export_index("default") {
                             self.push(Insn::Lda(class_reg));
                             self.push(Insn::StModuleVar(export_index));
@@ -4459,7 +4471,12 @@ impl<'a> CodeGen<'a> {
         ));
         self.push(Insn::Sta(class_reg));
         self.push(Insn::Sta(var_reg));
-        self.emit_class_missing_properties(class_name, &cls.body.body, class_reg);
+        self.emit_class_missing_properties(
+            class_name,
+            &cls.body.body,
+            class_reg,
+            cls.body.span.start,
+        );
         if let Some(slot) = lexical_slot {
             self.push(Insn::Lda(class_reg));
             self.push(Insn::Sta(class_reg));
@@ -4478,11 +4495,14 @@ impl<'a> CodeGen<'a> {
         class_name: &str,
         elements: &[ClassElement<'_>],
         class_reg: u8,
+        class_span_start: u32,
     ) {
         let prototype_id = self.intern("prototype");
+        self.set_debug_pos(class_span_start);
         self.push(Insn::Lda(class_reg));
         self.push(Insn::LdObjByName(0, prototype_id));
         let prototype_reg = self.alloc_reg();
+        self.set_debug_pos(class_span_start);
         self.push(Insn::Sta(prototype_reg));
 
         let mut seen_names = HashMap::<String, u16>::new();
@@ -4511,14 +4531,22 @@ impl<'a> CodeGen<'a> {
                 let public_name_id = self.intern(&public_name);
                 self.set_debug_pos(method.key.span().start);
                 self.push(Insn::LdaStr(public_name_id));
+                self.set_debug_pos(class_span_start);
                 self.push(Insn::Sta(name_reg));
+                self.set_debug_pos(class_span_start);
                 if method.kind == MethodDefinitionKind::Get {
                     self.push(Insn::LdUndefined);
+                    self.set_debug_pos(class_span_start);
                     self.push(Insn::Sta(undefined_reg));
+                    self.set_debug_pos(class_span_start);
                     self.push(Insn::Lda(prototype_reg));
+                    self.set_debug_pos(method.value.span.start);
                     self.push(Insn::DefineMethodShort(0, method_name_id, length));
+                    self.set_debug_pos(method.value.span.start);
                     self.push(Insn::Sta(method_reg));
+                    self.set_debug_pos(class_span_start);
                     self.push(Insn::LdFalse);
+                    self.set_debug_pos(class_span_start);
                     self.push(Insn::DefineGetterSetterByValue(
                         prototype_reg,
                         name_reg,
@@ -4527,11 +4555,17 @@ impl<'a> CodeGen<'a> {
                     ));
                 } else {
                     self.push(Insn::LdUndefined);
+                    self.set_debug_pos(class_span_start);
                     self.push(Insn::Sta(undefined_reg));
+                    self.set_debug_pos(class_span_start);
                     self.push(Insn::Lda(prototype_reg));
+                    self.set_debug_pos(method.value.span.start);
                     self.push(Insn::DefineMethodShort(0, method_name_id, length));
+                    self.set_debug_pos(method.value.span.start);
                     self.push(Insn::Sta(method_reg));
+                    self.set_debug_pos(class_span_start);
                     self.push(Insn::LdFalse);
+                    self.set_debug_pos(class_span_start);
                     self.push(Insn::DefineGetterSetterByValue(
                         prototype_reg,
                         name_reg,
@@ -4548,10 +4582,12 @@ impl<'a> CodeGen<'a> {
             } else {
                 prototype_reg
             };
-            self.set_debug_pos(method.key.span().start);
+            self.set_debug_pos(class_span_start);
             self.push(Insn::Lda(target_reg));
+            self.set_debug_pos(method.value.span.start);
             self.push(Insn::DefineMethodShort(0, method_name_id, length));
             let public_name_id = self.intern(&public_name);
+            self.set_debug_pos(method.span.start);
             self.push(Insn::StOwnByName(0, public_name_id, target_reg));
         }
     }
