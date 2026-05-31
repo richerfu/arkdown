@@ -99,6 +99,14 @@ a transform-input mismatch. Until that backend path is complete, final ABC
 generation stays on the chunk input path because that is the only path currently
 preserving CodeItem parity.
 
+Source-map routing was also checked against this state. Using rolldown chunk
+source maps for ABC debug info regressed the minimal fixture to 9679B, while the
+current CompileArkTS source-map oracle keeps the output at 9727B. The regression
+confirms that a simple source-map switch is not the fix. The remaining work is
+to make the Rust backend accept the hvigor cache-TS input shape without losing
+CodeItem parity, or to provide an equivalent debug-coordinate source for the
+current chunk input path.
+
 ## Remaining ABC Gap
 
 The remaining gap is in source-position metadata, not executable bytecode.
@@ -113,6 +121,11 @@ Observed LNP differences:
   density and column values. hvigor records source positions from es2panda's AST
   nodes and from generated instruction inheritance; `arkdown-abc` currently uses
   a smaller set of `set_debug_pos()` calls.
+- Normal class methods show the same pattern: code bytes match, but the line and
+  column coordinates come from a mixed chunk/cache coordinate system. For
+  example, kept-for-inspection chunk JS had `EntryAbility.onBackground` on
+  chunk lines 22-23 while the CompileArkTS cache TS has it on lines 24-25, and
+  hvigor records the cache-TS coordinates.
 - The LNP algorithm shape is now close to upstream, but the input event stream is
   not yet identical. The next work is to align event generation, not package
   layout or method bytecode.
