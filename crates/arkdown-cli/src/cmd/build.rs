@@ -1027,6 +1027,7 @@ fn write_compile_arkts_cache(
     let transformer = EtsTransformPlugin::new(config.clone());
     let mut source_map_lines = Vec::new();
     let mut compile_infos = Vec::new();
+    let mut pkg_entries = PackageEntryInfos::default();
 
     let module_ids = compile_module_ids(chunk_graph);
     if module_ids.is_empty() {
@@ -1050,6 +1051,11 @@ fn write_compile_arkts_cache(
                 entry_info.source_path.display()
             )
         })?;
+        if matches!(entry_info.source_ext.as_str(), "ets" | "ts")
+            && is_const_enum_type_only_module(&source)
+        {
+            continue;
+        }
         let transformed = if matches!(
             entry_info.source_ext.as_str(),
             "ets" | "ts" | "js" | "mjs" | "cjs"
@@ -1065,6 +1071,23 @@ fn write_compile_arkts_cache(
             .as_ref()
             .and_then(|output| output.code.clone())
             .unwrap_or_else(|| compile_source_passthrough(&source, &entry_info.source_ext));
+        let code = if matches!(
+            entry_info.source_ext.as_str(),
+            "ets" | "ts" | "js" | "mjs" | "cjs"
+        ) {
+            rewrite_compile_module_imports_to_ohm(
+                &code,
+                &entry_info.source_path,
+                &cache_root,
+                loader_json,
+                config,
+            )
+        } else {
+            code
+        };
+        if matches!(entry_info.source_ext.as_str(), "ets" | "ts") && code.trim().is_empty() {
+            continue;
+        }
         if let Some(parent) = entry_info.ts_path.parent() {
             fs_err::create_dir_all(parent)?;
         }
@@ -1077,12 +1100,15 @@ fn write_compile_arkts_cache(
         compile_infos.push(CompileArkTsInfo {
             ts_path: entry_info.ts_path.clone(),
             record_name: entry_info.record_name.clone(),
-            module_type: "esm".to_string(),
+            module_type: entry_info.module_type.clone(),
             source_file: entry_info.source_file_info.clone(),
             package_name: entry_info.package_name.clone(),
             origin_source_lang: entry_info.origin_source_lang.clone(),
             abc_cache_path: None,
         });
+        if !loader_json.use_normalized_ohm_url && is_package_entry_file(&entry_info.source_path) {
+            add_graph_package_entry(&mut pkg_entries, &entry_info, loader_json);
+        }
 
         if let Some(source_map) = transformed.and_then(|output| output.map.into_sourcemap()) {
             let raw_map = source_map.to_json_string();
@@ -1129,7 +1155,11 @@ fn write_compile_arkts_cache(
     }
 
     compile_infos.sort_by(|a, b| a.source_file.cmp(&b.source_file));
-    write_compile_arkts_abc_handoff(&cache_root, &compile_infos)
+    if !loader_json.use_normalized_ohm_url {
+        add_dynamic_import_package_entries(&mut pkg_entries, loader_json, config);
+    }
+    add_native_package_entries(&mut pkg_entries);
+    write_compile_arkts_abc_handoff(&cache_root, &compile_infos, &pkg_entries)
 }
 
 struct CompileModuleInfo {
@@ -1139,6 +1169,7 @@ struct CompileModuleInfo {
     ts_path: PathBuf,
     record_name: String,
     package_name: String,
+    module_type: String,
     origin_source_lang: String,
     source_ext: String,
 }
@@ -1153,7 +1184,6 @@ fn compile_module_ids(chunk_graph: &ChunkGraph) -> Vec<String> {
             }
         }
     }
-    ids.sort();
     ids
 }
 
@@ -1195,7 +1225,7 @@ fn compile_module_info(
         .and_then(|ext| ext.to_str())
         .unwrap_or("")
         .to_string();
-    let output_ext = compile_output_extension(&source_ext)?;
+    let output_ext = compile_output_extension(&source_path, &source_ext)?;
 
     let mut module_roots: Vec<(&str, PathBuf)> = loader_json
         .module_path_map
@@ -1231,6 +1261,7 @@ fn compile_module_info(
             )
         };
         let version = package_version_or_default(&module_root);
+        let module_type = module_type_for_source(&source_path, &source_ext);
 
         return Some(CompileModuleInfo {
             source_path,
@@ -1242,6 +1273,7 @@ fn compile_module_info(
             ts_path,
             record_name,
             package_name: module_name.to_string(),
+            module_type,
             origin_source_lang: origin_source_lang(&source_ext),
             source_ext,
         });
@@ -1260,7 +1292,7 @@ fn remote_compile_module_info(
         .and_then(|ext| ext.to_str())
         .unwrap_or("")
         .to_string();
-    let output_ext = compile_output_extension(&source_ext)?;
+    let output_ext = compile_output_extension(&source_path, &source_ext)?;
     let package_root = find_package_root(source_path)?;
     let package_name = package_name_or_dir(&package_root);
     let package_version = package_version_or_default(&package_root);
@@ -1290,18 +1322,316 @@ fn remote_compile_module_info(
         ts_path,
         record_name,
         package_name: package_entry_name,
+        module_type: module_type_for_source(source_path, &source_ext),
         origin_source_lang: origin_source_lang(&source_ext),
         source_ext,
     })
 }
 
-fn compile_output_extension(source_ext: &str) -> Option<&'static str> {
+fn compile_output_extension(source_path: &Path, source_ext: &str) -> Option<&'static str> {
     match source_ext {
-        "ets" | "ts" => Some("ts"),
+        "ets" => Some(if should_emit_js_for_ts_or_ets(source_path) {
+            "js"
+        } else {
+            "ts"
+        }),
+        "ts" => Some(if should_emit_js_for_ts_or_ets(source_path) {
+            "js"
+        } else {
+            "ts"
+        }),
         "js" | "mjs" | "cjs" => Some("js"),
         "json" | "json5" => Some("json"),
         _ => None,
     }
+}
+
+fn should_emit_js_for_ts_or_ets(source_path: &Path) -> bool {
+    let Ok(source) = fs_err::read_to_string(source_path) else {
+        return false;
+    };
+    if has_keep_ts_comment(&source) {
+        return false;
+    }
+    has_ts_no_check_or_ignore_comment(&source)
+}
+
+fn has_keep_ts_comment(source: &str) -> bool {
+    source
+        .lines()
+        .next()
+        .is_some_and(|line| line.trim() == "// @keepTs")
+}
+
+fn has_ts_no_check_or_ignore_comment(source: &str) -> bool {
+    source
+        .lines()
+        .any(|line| line.contains("@ts-nocheck") || line.contains("@ts-ignore"))
+}
+
+fn module_type_for_source(source_path: &Path, source_ext: &str) -> String {
+    let is_commonjs = match source_ext {
+        "cjs" => true,
+        "mjs" | "ets" | "ts" => false,
+        "js" => fs_err::read_to_string(source_path)
+            .map(|source| {
+                let package_has_module_field = find_package_root(source_path)
+                    .and_then(|root| read_manifest_string(&root, "oh-package.json5", "module"))
+                    .is_some();
+                !package_has_module_field
+                    && (source.contains("module.exports")
+                        || source.contains("exports.")
+                        || source.contains("= exports")
+                        || source.contains("require("))
+            })
+            .unwrap_or(false),
+        _ => false,
+    };
+    if is_commonjs { "commonjs" } else { "esm" }.to_string()
+}
+
+fn rewrite_compile_module_imports_to_ohm(
+    source: &str,
+    importer: &Path,
+    cache_root: &Path,
+    loader_json: &arkdown_profile::LoaderJson,
+    config: &ArkdownConfig,
+) -> String {
+    let mut changed = false;
+    let mut rewritten = String::with_capacity(source.len());
+
+    for line in source.split_inclusive('\n') {
+        let Some(next_line) =
+            rewrite_compile_import_line_to_ohm(line, importer, cache_root, loader_json, config)
+        else {
+            rewritten.push_str(line);
+            continue;
+        };
+        changed = true;
+        rewritten.push_str(&next_line);
+    }
+
+    if changed {
+        rewritten
+    } else {
+        source.to_string()
+    }
+}
+
+fn rewrite_compile_import_line_to_ohm(
+    line: &str,
+    importer: &Path,
+    cache_root: &Path,
+    loader_json: &arkdown_profile::LoaderJson,
+    config: &ArkdownConfig,
+) -> Option<String> {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("import type ") || trimmed.starts_with("export type ") {
+        return None;
+    }
+    let (spec_start, spec_end, specifier) = find_static_module_specifier(line)?;
+    let ohm =
+        compile_module_ohm_for_specifier(specifier, importer, cache_root, loader_json, config)?;
+    if ohm == specifier {
+        return None;
+    }
+
+    let mut out = String::with_capacity(line.len() + ohm.len().saturating_sub(specifier.len()));
+    out.push_str(&line[..spec_start]);
+    out.push_str(&ohm);
+    out.push_str(&line[spec_end..]);
+    Some(out)
+}
+
+fn find_static_module_specifier(line: &str) -> Option<(usize, usize, &str)> {
+    if let Some(from_idx) = line.find(" from ") {
+        return find_quoted_specifier(line, from_idx + " from ".len());
+    }
+
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("import ") || trimmed.starts_with("export ") {
+        let offset = line.len() - trimmed.len();
+        return find_quoted_specifier(line, offset);
+    }
+    None
+}
+
+fn find_quoted_specifier(line: &str, start: usize) -> Option<(usize, usize, &str)> {
+    let bytes = line.as_bytes();
+    let quote_start = bytes[start..]
+        .iter()
+        .position(|byte| *byte == b'\'' || *byte == b'"')?
+        + start;
+    let quote = bytes[quote_start];
+    let spec_start = quote_start + 1;
+    let spec_end = bytes[spec_start..].iter().position(|byte| *byte == quote)? + spec_start;
+    Some((spec_start, spec_end, &line[spec_start..spec_end]))
+}
+
+fn compile_module_ohm_for_specifier(
+    specifier: &str,
+    importer: &Path,
+    cache_root: &Path,
+    loader_json: &arkdown_profile::LoaderJson,
+    config: &ArkdownConfig,
+) -> Option<String> {
+    if specifier.starts_with("@bundle:")
+        || specifier.starts_with("@shared:")
+        || specifier.starts_with("@ohos:")
+        || specifier.starts_with("@system.")
+        || specifier.starts_with("@native:")
+    {
+        return None;
+    }
+
+    let resolved = if specifier.starts_with('.') {
+        resolve_source_request(importer.parent()?, specifier)?
+    } else {
+        local_entry_for_package_specifier(specifier, importer, loader_json)?
+    };
+    let info = compile_module_info(&resolved, cache_root, loader_json, config)?;
+    Some(format!("@bundle:{}", info.record_name))
+}
+
+fn local_entry_for_package_specifier(
+    specifier: &str,
+    importer: &Path,
+    loader_json: &arkdown_profile::LoaderJson,
+) -> Option<PathBuf> {
+    if let Some(dynamic_info) = loader_json.dynamic_import_lib_info.get(specifier) {
+        let entry_file = dynamic_info
+            .get("entryFilePath")
+            .and_then(|value| value.as_str())?;
+        return Some(canonical_or_owned(Path::new(entry_file)));
+    }
+
+    if let Some(importer_root) = find_package_root(importer) {
+        if let Some(dep_value) = read_manifest_dependency_value(&importer_root, specifier) {
+            if let Some(local_dep) = dep_value.strip_prefix("file:") {
+                let dep_root = canonical_or_owned(&importer_root.join(local_dep));
+                if let Some(entry) = package_entry_path(&dep_root) {
+                    return Some(canonical_or_owned(&entry));
+                }
+            }
+        }
+    }
+
+    for module_root in loader_json.module_path_map.values() {
+        let module_root = canonical_or_owned(Path::new(module_root));
+        if package_name_or_dir(&module_root) != specifier {
+            continue;
+        }
+        if let Some(entry) = package_entry_path(&module_root) {
+            return Some(canonical_or_owned(&entry));
+        }
+    }
+    None
+}
+
+fn read_manifest_dependency_value(package_root: &Path, specifier: &str) -> Option<String> {
+    for file_name in ["oh-package.json5", "package.json"] {
+        let path = package_root.join(file_name);
+        if !path.is_file() {
+            continue;
+        }
+        let content = fs_err::read_to_string(&path).ok()?;
+        let value: serde_json::Value = if file_name.ends_with(".json5") {
+            json5::from_str(&content).ok()?
+        } else {
+            serde_json::from_str(&content).ok()?
+        };
+        for field in ["dependencies", "dynamicDependencies", "devDependencies"] {
+            if let Some(dep) = value
+                .get(field)
+                .and_then(|deps| deps.get(specifier))
+                .and_then(|dep| dep.as_str())
+            {
+                return Some(dep.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn resolve_source_request(base_dir: &Path, request: &str) -> Option<PathBuf> {
+    let base = base_dir.join(request);
+    if base.is_file() {
+        return Some(canonical_or_owned(&base));
+    }
+    for ext in ["ets", "ts", "js", "mjs", "cjs", "json", "json5"] {
+        let candidate = base.with_extension(ext);
+        if candidate.is_file() {
+            return Some(canonical_or_owned(&candidate));
+        }
+    }
+    for index in [
+        "index.ets",
+        "index.ts",
+        "index.js",
+        "index.mjs",
+        "index.cjs",
+        "index.json",
+    ] {
+        let candidate = base.join(index);
+        if candidate.is_file() {
+            return Some(canonical_or_owned(&candidate));
+        }
+    }
+    None
+}
+
+fn is_const_enum_type_only_module(source: &str) -> bool {
+    if !source.contains("const enum") {
+        return false;
+    }
+
+    let mut scrubbed = String::new();
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//")
+            || trimmed.starts_with('*')
+            || trimmed.starts_with("/*")
+            || trimmed.starts_with("import ")
+            || trimmed.starts_with("export type ")
+            || trimmed.starts_with("type ")
+            || trimmed.starts_with("export interface ")
+            || trimmed.starts_with("interface ")
+        {
+            continue;
+        }
+        scrubbed.push_str(line);
+        scrubbed.push('\n');
+    }
+
+    for runtime in [
+        "export class ",
+        "class ",
+        "export function ",
+        "function ",
+        "export const ",
+        "const ",
+        "export let ",
+        "let ",
+        "export var ",
+        "var ",
+    ] {
+        if runtime == "export const " || runtime == "const " {
+            let mut search_start = 0;
+            while let Some(offset) = scrubbed[search_start..].find(runtime) {
+                let start = search_start + offset + runtime.len();
+                if !scrubbed[start..].trim_start().starts_with("enum ") {
+                    return false;
+                }
+                search_start = start;
+            }
+            continue;
+        }
+        if scrubbed.contains(runtime) {
+            return false;
+        }
+    }
+
+    true
 }
 
 fn origin_source_lang(source_ext: &str) -> String {
@@ -1410,7 +1740,6 @@ fn pkg_modules_package_name(
     package_root: &Path,
     loader_json: &arkdown_profile::LoaderJson,
 ) -> Option<String> {
-    let package_root = canonical_or_owned(package_root);
     let project_root = canonical_or_owned(Path::new(&loader_json.project_root_path));
     let package_dir = if loader_json.package_manager_type == "ohpm" {
         "oh_modules"
@@ -1452,6 +1781,320 @@ fn slash_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+#[derive(Default)]
+struct PackageEntryInfos {
+    entries: Vec<(String, String)>,
+    seen: HashSet<String>,
+}
+
+impl PackageEntryInfos {
+    fn insert(&mut self, entry_path: impl Into<String>, build_path: impl Into<String>) {
+        let entry_path = entry_path.into();
+        if self.seen.insert(entry_path.clone()) {
+            self.entries.push((entry_path, build_path.into()));
+        }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &(String, String)> {
+        self.entries.iter()
+    }
+}
+
+fn add_graph_package_entry(
+    entries: &mut PackageEntryInfos,
+    info: &CompileModuleInfo,
+    loader_json: &arkdown_profile::LoaderJson,
+) {
+    if is_local_compile_module(&info.source_path, loader_json) {
+        add_local_dynamic_entry_aliases(entries, info, loader_json);
+        return;
+    }
+
+    add_remote_package_entry(entries, &info.source_path, loader_json);
+}
+
+fn add_dynamic_import_package_entries(
+    entries: &mut PackageEntryInfos,
+    loader_json: &arkdown_profile::LoaderJson,
+    config: &ArkdownConfig,
+) {
+    for (dep_name, value) in &loader_json.dynamic_import_lib_info {
+        if let Some(app_path) = native_shared_object_entry(dep_name, loader_json, config) {
+            entries.insert(dep_name.clone(), app_path);
+            continue;
+        }
+
+        let is_local = value
+            .get("isLocalDependency")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let entry_file = value
+            .get("entryFilePath")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        if entry_file.is_empty() {
+            continue;
+        }
+        let entry_path = canonical_or_owned(Path::new(entry_file));
+
+        if is_local {
+            if let Some(local_info) =
+                local_compile_info_for_dynamic_entry(&entry_path, loader_json, config)
+            {
+                add_local_dynamic_entry_aliases(entries, &local_info, loader_json);
+            }
+        } else {
+            add_remote_package_entry(entries, &entry_path, loader_json);
+        }
+    }
+}
+
+fn add_local_dynamic_entry_aliases(
+    entries: &mut PackageEntryInfos,
+    info: &CompileModuleInfo,
+    loader_json: &arkdown_profile::LoaderJson,
+) {
+    let Some(host_infos) = dynamic_host_infos_for_entry(&info.source_path, loader_json) else {
+        return;
+    };
+    for host in host_infos {
+        let host_dependency_name = host
+            .get("hostDependencyName")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let host_module_name = host
+            .get("hostModuleName")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        if host_dependency_name.is_empty() || host_module_name.is_empty() {
+            continue;
+        }
+        entries.insert(
+            format!("pkg_modules@{host_module_name}/{host_dependency_name}"),
+            info.record_name.clone(),
+        );
+        entries.insert(
+            host_dependency_name.to_string(),
+            format!("@bundle.{}", info.record_name),
+        );
+    }
+}
+
+fn dynamic_host_infos_for_entry<'a>(
+    entry_path: &Path,
+    loader_json: &'a arkdown_profile::LoaderJson,
+) -> Option<&'a Vec<serde_json::Value>> {
+    let entry_path = canonical_or_owned(entry_path);
+    for value in loader_json.dynamic_import_lib_info.values() {
+        let Some(dynamic_entry_file) = value.get("entryFilePath").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if canonical_or_owned(Path::new(dynamic_entry_file)) != entry_path {
+            continue;
+        }
+        return value.get("hostModulesInfo").and_then(|v| v.as_array());
+    }
+    None
+}
+
+fn local_compile_info_for_dynamic_entry(
+    entry_path: &Path,
+    loader_json: &arkdown_profile::LoaderJson,
+    config: &ArkdownConfig,
+) -> Option<CompileModuleInfo> {
+    let mode_dir = match config.build_mode {
+        BuildMode::Debug => "debug",
+        BuildMode::Release => "release",
+    };
+    let module_root = loader_json.module_path_map.get(&loader_json.module_name)?;
+    let cache_root = Path::new(module_root)
+        .join("build/default/cache/default/default@CompileArkTS/esmodule")
+        .join(mode_dir);
+    compile_module_info(entry_path, &cache_root, loader_json, config)
+}
+
+fn add_remote_package_entry(
+    entries: &mut PackageEntryInfos,
+    source_path: &Path,
+    loader_json: &arkdown_profile::LoaderJson,
+) {
+    let Some(package_root) = find_package_root(source_path) else {
+        return;
+    };
+    let Some(package_entry_name) = pkg_modules_package_name(&package_root, loader_json) else {
+        return;
+    };
+    let Ok(rel_to_pkg) = source_path.strip_prefix(&package_root) else {
+        return;
+    };
+    let build_path = format!(
+        "{}/{}",
+        package_entry_name,
+        strip_source_extension(&slash_path(rel_to_pkg))
+    );
+    entries.insert(package_entry_name.clone(), build_path);
+
+    for alias in symlink_pkg_module_aliases(&package_root, loader_json) {
+        entries.insert(alias, package_entry_name.clone());
+    }
+}
+
+fn native_shared_object_entry(
+    dep_name: &str,
+    loader_json: &arkdown_profile::LoaderJson,
+    config: &ArkdownConfig,
+) -> Option<String> {
+    let stem = dep_name.strip_prefix("lib")?.strip_suffix(".so")?;
+    Some(format!(
+        "@app.{}/{}/{}",
+        config.product.bundle_name, loader_json.module_name, stem
+    ))
+}
+
+fn add_native_package_entries(entries: &mut PackageEntryInfos) {
+    for name in [
+        "system.app",
+        "ohos.app",
+        "system.router",
+        "system.curves",
+        "ohos.curves",
+        "system.matrix4",
+        "ohos.matrix4",
+    ] {
+        entries.insert(format!("@{name}"), format!("@native.{name}"));
+    }
+}
+
+fn is_local_compile_module(source_path: &Path, loader_json: &arkdown_profile::LoaderJson) -> bool {
+    let source_path = canonical_or_owned(source_path);
+    loader_json.module_path_map.values().any(|module_root| {
+        let module_root = canonical_or_owned(Path::new(module_root));
+        source_path.starts_with(&module_root)
+            && !source_path.components().any(|component| {
+                let name = component.as_os_str().to_string_lossy();
+                name == "oh_modules" || name == "node_modules"
+            })
+    })
+}
+
+fn is_package_entry_file(source_path: &Path) -> bool {
+    let source_path = canonical_or_owned(source_path);
+    let Some(package_root) = find_package_root(&source_path) else {
+        return false;
+    };
+    package_entry_path(&package_root)
+        .map(|entry| canonical_or_owned(&entry) == source_path)
+        .unwrap_or(false)
+}
+
+fn package_entry_path(package_root: &Path) -> Option<PathBuf> {
+    let request = read_package_exports_import_field_local(package_root)
+        .or_else(|| read_manifest_string(package_root, "oh-package.json5", "main"))
+        .or_else(|| read_manifest_string(package_root, "package.json", "main"))
+        .unwrap_or_else(|| "index".to_string());
+    resolve_package_request(package_root, &request)
+        .or_else(|| resolve_package_request(package_root, "index"))
+}
+
+fn read_package_exports_import_field_local(package_root: &Path) -> Option<String> {
+    for file_name in ["oh-package.json5", "package.json"] {
+        let content = fs_err::read_to_string(package_root.join(file_name)).ok()?;
+        let value: serde_json::Value = if file_name.ends_with(".json5") {
+            json5::from_str(&content).ok()?
+        } else {
+            serde_json::from_str(&content).ok()?
+        };
+        let dot = value.get("exports")?.get(".")?;
+        if let Some(import) = dot.get("import").and_then(|v| v.as_str()) {
+            return Some(import.to_string());
+        }
+        if let Some(default) = dot.get("default").and_then(|v| v.as_str()) {
+            return Some(default.to_string());
+        }
+    }
+    None
+}
+
+fn resolve_package_request(package_root: &Path, request: &str) -> Option<PathBuf> {
+    let request = request.trim_start_matches("./");
+    let base = package_root.join(request);
+    if base.is_file() {
+        return Some(base);
+    }
+    for ext in ["ets", "ts", "js", "mjs", "cjs", "json"] {
+        let candidate = base.with_extension(ext);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    for index in [
+        "index.ets",
+        "index.ts",
+        "index.js",
+        "index.mjs",
+        "index.cjs",
+    ] {
+        let candidate = base.join(index);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn symlink_pkg_module_aliases(
+    package_root: &Path,
+    loader_json: &arkdown_profile::LoaderJson,
+) -> Vec<String> {
+    let package_root = canonical_or_owned(package_root);
+    let mut aliases = Vec::new();
+    let mut roots = vec![Path::new(&loader_json.project_root_path).join("oh_modules")];
+    for module_root in loader_json.module_path_map.values() {
+        roots.push(Path::new(module_root).join("oh_modules"));
+    }
+    for root in roots {
+        if !root.is_dir() {
+            continue;
+        }
+        for entry in walkdir::WalkDir::new(root)
+            .follow_links(false)
+            .max_depth(8)
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+        {
+            let Ok(file_type) = std::fs::symlink_metadata(entry.path()).map(|m| m.file_type())
+            else {
+                continue;
+            };
+            if !file_type.is_symlink() {
+                continue;
+            }
+            let entry_path = slash_path(entry.path());
+            if entry_path.contains("/oh_modules/.ohpm/oh_modules/") {
+                continue;
+            }
+            if canonical_or_owned(entry.path()) != package_root {
+                continue;
+            }
+            if let Some(alias) = pkg_modules_package_name(entry.path(), loader_json) {
+                aliases.push(alias);
+            }
+        }
+    }
+    aliases.sort();
+    aliases.dedup();
+    aliases
+}
+
+fn strip_source_extension(path: &str) -> &str {
+    for ext in [".ets", ".ts", ".js", ".mjs", ".cjs", ".json", ".json5"] {
+        if let Some(stripped) = path.strip_suffix(ext) {
+            return stripped;
+        }
+    }
+    path
+}
+
 struct CompileArkTsInfo {
     ts_path: PathBuf,
     record_name: String,
@@ -1465,6 +2108,7 @@ struct CompileArkTsInfo {
 fn write_compile_arkts_abc_handoff(
     cache_root: &Path,
     infos: &[CompileArkTsInfo],
+    pkg_entries: &PackageEntryInfos,
 ) -> Result<Vec<Ts2abcInput>> {
     fs_err::create_dir_all(cache_root)?;
     let cache_root = canonical_or_owned(cache_root);
@@ -1504,17 +2148,13 @@ fn write_compile_arkts_abc_handoff(
     fs_err::write(cache_root.join("filesInfo.txt"), files_info)?;
 
     let npm_entries_path = cache_root.join("npmEntries.txt");
-    let npm_entries = [
-        "@system.app:@native.system.app",
-        "@ohos.app:@native.ohos.app",
-        "@system.router:@native.system.router",
-        "@system.curves:@native.system.curves",
-        "@ohos.curves:@native.ohos.curves",
-        "@system.matrix4:@native.system.matrix4",
-        "@ohos.matrix4:@native.ohos.matrix4",
-    ]
-    .join("\n")
-        + "\n";
+    let mut npm_entries = String::new();
+    for (entry_path, build_path) in pkg_entries.iter() {
+        npm_entries.push_str(entry_path);
+        npm_entries.push(':');
+        npm_entries.push_str(build_path);
+        npm_entries.push('\n');
+    }
     fs_err::write(&npm_entries_path, npm_entries)?;
     modules_cache.push_str(&format!(
         "{};{}\n",

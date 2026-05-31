@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 arkdown-core = { path = "../arkdown-core" }
 
-# Parser, transformer, codegen — ohos-rs fork only
+# Parser and codegen — ohos-rs fork only
 oxc_allocator = { workspace = true }
 oxc_parser    = { workspace = true }
 oxc_ast       = { workspace = true }

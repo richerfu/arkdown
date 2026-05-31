@@ -21,9 +21,13 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use arkdown_core::{ArkdownConfig, ModuleSource, ModuleType, ResolvedId};
+#[cfg(test)]
 use oxc_allocator::Allocator;
+#[cfg(test)]
 use oxc_codegen::{Codegen, CodegenOptions};
+#[cfg(test)]
 use oxc_parser::Parser;
+#[cfg(test)]
 use oxc_span::SourceType;
 use rolldown_plugin::{
     HookLoadArgs, HookLoadOutput, HookLoadReturn, HookTransformArgs, HookTransformOutput,
@@ -70,15 +74,10 @@ impl EtsTransformPlugin {
 
         if !is_ets {
             // .ts files: kit rewrite + version-gated rewrites only.
-            //
-            // Return the oxc-regenerated code together with its source map so
-            // that the map's generated-side coordinates exactly match the code
-            // we hand to rolldown.  rolldown can then chain:
-            //   bundled-output → regenerated-code → kit-rewritten source
-            // producing a per-token map in the final chunk.source_map.
-            let (gen_code, source_map_json) =
-                generate_code_and_source_map(&code, id).unwrap_or((code, None));
-            let final_code = api_transform::rewrite_imports_for_version(&gen_code, api_version);
+            let final_code = api_transform::rewrite_imports_for_version(&code, api_version);
+            let source_map_json =
+                source_map::build_hvigor_standard_source_map(&final_code, original_source, id)
+                    .or_else(|| source_map::build_token_source_map(&final_code, id));
             let map = source_map_json
                 .as_deref()
                 .and_then(|j| RolldownSourceMap::from_json_string(j).ok())
@@ -252,6 +251,7 @@ pub fn generate_source_map_for_file(source: &str, id: &str) -> Option<String> {
 
 /// Returns `None` if parsing fails; callers should fall back to the raw source
 /// text with no source map in that case.
+#[cfg(test)]
 fn generate_code_and_source_map(source: &str, id: &str) -> Option<(String, Option<String>)> {
     let allocator = Allocator::default();
     let source_type =
@@ -401,6 +401,7 @@ fn is_identifier_part(ch: char) -> bool {
 /// oxc may omit the field when no names are tracked. This function parses the
 /// JSON and inserts an empty array if the field is absent, then re-serializes.
 /// If parsing fails the original string is returned unchanged.
+#[cfg(test)]
 fn ensure_names_field(json: &str) -> String {
     let Ok(mut value) = serde_json::from_str::<serde_json::Value>(json) else {
         return json.to_string();

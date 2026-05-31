@@ -328,6 +328,11 @@ pub fn collect_dynamic_import_lib_info(
         };
 
         let is_local = is_local_dependency(dep_name, module_root);
+        let pkg_dir = if is_local {
+            std::fs::canonicalize(&pkg_dir).unwrap_or(pkg_dir)
+        } else {
+            pkg_dir
+        };
         let entry_file = find_entry_file(&pkg_dir);
         let pkg_module_name = read_module_name_from_pkg(&pkg_dir, dep_name);
 
@@ -374,6 +379,8 @@ fn is_local_dependency(dep_name: &str, module_root: &Path) -> bool {
     #[serde(rename_all = "camelCase")]
     struct PkgDeps {
         #[serde(default)]
+        dependencies: std::collections::HashMap<String, String>,
+        #[serde(default)]
         dynamic_dependencies: std::collections::HashMap<String, String>,
     }
 
@@ -384,6 +391,7 @@ fn is_local_dependency(dep_name: &str, module_root: &Path) -> bool {
     parsed
         .dynamic_dependencies
         .get(dep_name)
+        .or_else(|| parsed.dependencies.get(dep_name))
         .map(|v| v.starts_with("file:"))
         .unwrap_or(false)
 }

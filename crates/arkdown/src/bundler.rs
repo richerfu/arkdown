@@ -29,8 +29,9 @@ use arkdown_core::{ArkChunk, ArkdownConfig, ArkdownError, BuildMode, ChunkGraph}
 use arkdown_profile::LoaderJson;
 use rolldown::{BundlerOptions, InputItem, OutputFormat};
 use rolldown_common::{
-    ChunkingContext, ManualCodeSplittingOptions, MatchGroup, MatchGroupName, MatchGroupTest,
-    ModuleType as RdModuleType, Output, SourceMapType, TreeshakeOptions,
+    BundlerTransformOptions, ChunkingContext, ManualCodeSplittingOptions, MatchGroup,
+    MatchGroupName, MatchGroupTest, ModuleType as RdModuleType, Output, SourceMapType,
+    TreeshakeOptions, TypeScriptOptions,
 };
 use rolldown_plugin::__inner::SharedPluginable;
 use rolldown_utils::js_regex::HybridRegex;
@@ -171,6 +172,10 @@ impl Bundler {
             sourcemap: Some(SourceMapType::Hidden),
             treeshake,
             manual_code_splitting,
+            transform: Some(BundlerTransformOptions {
+                typescript: Some(TypeScriptOptions::default()),
+                ..Default::default()
+            }),
             ..Default::default()
         };
 

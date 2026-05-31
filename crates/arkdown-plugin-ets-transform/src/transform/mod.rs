@@ -119,10 +119,30 @@ pub fn transform_ets_with_options(
         while out.ends_with("\n\n") {
             out.pop();
         }
-        Ok(strip_orphan_arkui_decorator_lines(&out))
+        Ok(ensure_viewpu_finalize_construction_shim(
+            &strip_orphan_arkui_decorator_lines(&out),
+        ))
     } else {
         Ok(content.clone())
     }
+}
+
+const VIEWPU_FINALIZE_CONSTRUCTION_SHIM: &str = concat!(
+    "if (!(\"finalizeConstruction\" in ViewPU.prototype)) {\n",
+    "    Reflect.set(ViewPU.prototype, \"finalizeConstruction\", () => { });\n",
+    "}\n",
+);
+
+fn ensure_viewpu_finalize_construction_shim(source: &str) -> String {
+    if !source.contains("extends ViewPU")
+        || source.contains("\"finalizeConstruction\" in ViewPU.prototype")
+    {
+        return source.to_string();
+    }
+    let mut out = String::with_capacity(VIEWPU_FINALIZE_CONSTRUCTION_SHIM.len() + source.len());
+    out.push_str(VIEWPU_FINALIZE_CONSTRUCTION_SHIM);
+    out.push_str(source);
+    out
 }
 
 fn strip_orphan_arkui_decorator_lines(source: &str) -> String {
@@ -966,6 +986,7 @@ pub fn transform_ets_viewpu_with_source_map(
         out.pop();
     }
     out = strip_orphan_arkui_decorator_lines(&out);
+    out = ensure_viewpu_finalize_construction_shim(&out);
 
     // Build cross-transform source map entries.  For each struct's span hints,
     // compute the absolute ViewPU line number of the `initialRender()` body and
