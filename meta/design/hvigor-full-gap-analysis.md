@@ -93,7 +93,7 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 | F25 | `manualChunks` (when `supportChunks` enabled): `node_modules` → "commons", non-entry → "vendors" | rollup output option | Not implemented for release builds | ❌ |
 | F26 | `treeshake: true` in release mode | rollup input option | Always false (disabled); release mode not wired | ❌ |
 | F27 | Source maps (`sourcemap: true`) for JSBUNDLE non-preview | rollup output option | Not generated in ESMODULE mode (correct); JSBUNDLE mode not supported | 🔄 |
-| F28 | `sourcemapPathTransform` — strip `projectTopDir` from paths | rollup output option | Per-statement source maps in ESMODULE mode; JSBUNDLE path transform missing | 🔄 |
+| F28 | `sourcemapPathTransform` — strip `projectTopDir` from paths | rollup output option | Minimal ESMODULE fixture matches; JSBUNDLE path transform missing | 🔄 |
 
 ### Stage G — Post-Bundle Processing
 
@@ -116,16 +116,16 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 | H2 | Lower AST → Panda IR | `es2abc` compiler passes | `arkdown-abc::ir::` modules | 🔄 |
 | H3 | Emit ABC binary: Header, StringTable, LiteralArrayTable | `assembler/assembly_emitter.cpp` | Implemented; structural match | ✅ |
 | H4 | Emit ClassIndex + ClassRecords (one per rolldown chunk) | `assembly_emitter.cpp::SerializeClasses()` | Implemented | ✅ |
-| H5 | MethodRecords with Panda bytecode | `assembly_emitter.cpp::SerializeMethods()` | 88.1% parity (8675B / 9844B) — Phase 5 structural fixes applied | 🔄 |
+| H5 | MethodRecords with Panda bytecode | `assembly_emitter.cpp::SerializeMethods()` | CodeItems are byte-identical for the minimal-hap fixture; remaining `modules.abc` delta is DebugInfo/LNP only (9705B / 9844B) | 🔄 |
 | H6 | LNP index at file end (after literal arrays) | hvigor places lnp_idx_off at total_size | ✅ Fixed: LNP index now emitted as final section | ✅ |
 | H7 | Module annotation strings deduplicated in StringTable | Single string entry shared across all records | ✅ Fixed: field name strings deduplicated across classes | ✅ |
 | H8 | Method index ordering [strings\|methods\|lits] | `assembly_emitter.cpp` method pool layout | ✅ Fixed: method index now [bytecode_strings\|methods\|literal_arrays] | ✅ |
-| H9 | LNP body: per-instruction ADVANCE opcodes (105B/LNP) | `assembly_emitter.cpp` emits one LNP row per bytecode instruction | Per-statement density (58B/LNP) — 1.8× too sparse | 🔄 |
+| H9 | LNP body and DebugInfo constant_pool | `BuildLineNumberProgram()` consumes pandasm instruction source positions, real bytecode sizes, columns, and local-variable events | Per-instruction plumbing exists; source-position event stream still differs | 🔄 |
 | H10 | `--merge-abc`: all module records in single `.abc` | Multiple records merged with shared StringTable | Implemented | ✅ |
-| H11 | Incremental ABC cache via `--cache-file` (msgpack) | `es2abc --cache-file <path>` | Not implemented; `cache_path: None` passed from CLI | ❌ |
+| H11 | Incremental ABC cache via `--cache-file` (msgpack) | `es2abc --cache-file <path>` | CLI passes a cache-file path/marker, but backend does not implement real es2abc-compatible incremental cache | ❌ |
 | H12 | Widget compilation (separate pass, `widgetCompile: "true"`) | ArkCompile calls `initWidgetDefaultArkCompileConfig()` for form entries | Not implemented (SPEC-027) | ❌ |
 | H13 | ArkData compile (`arkDataCompile()`) | Separate compiler invocation for ArkData sources | Not implemented | ❌ |
-| H14 | Source position maps: per-token VLQ density | ets-loader generates per-token source maps | Per-statement source maps (329 vs 910 chars for EntryAbility) | 🔄 |
+| H14 | CompileArkTS source maps and final `sourceMaps.map` | ets-loader writes `sourceMaps.json`; package includes `ets/sourceMaps.map` | Minimal-hap `sourceMaps.json` and final `ets/sourceMaps.map` match; broader source-map coverage unverified | 🔄 |
 
 ### Stage I — Obfuscation and Minification (Release)
 
@@ -154,7 +154,7 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 | K2 | Assemble HAP zip (11 canonical entries) | `PackageHap` → `make-pack-info.js` + zip | `arkdown-pack::pack_hap()` — matches hvigor golden exactly | ✅ |
 | K3 | Assemble HSP zip | `PackageHsp` | `arkdown-pack::pack_hsp()` — similar to HAP but unverified for HSP-specific content | 🔄 |
 | K4 | Assemble HAR (source HAR, not ByteCode HAR) | `PackageHar` | `arkdown-pack::pack_har()` — basic implementation | 🔄 |
-| K5 | `ProcessIntegratedHsp` — embed remote/integrated HSP deps | `process-integrated-hsp.js` | Not implemented | ❌ |
+| K5 | `ProcessIntegratedHsp` — embed remote/integrated HSP deps | `process-integrated-hsp.js` | `arkdown-pack` has `IntegratedHspEntry` and normalized embed support; CLI has no real remote HSP discovery yet | 🔄 |
 | K6 | Native SO library embedding (`libs/arm64-v8a/`) | `PackageHap` + `CacheNativeLibs` | Not implemented (no native build flow) | ❌ |
 
 ### Stage L — Signing
@@ -179,29 +179,19 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 
 ## 2. Gap Inventory
 
-### Critical Gaps (blocking real ArkUI apps)
+### Critical Gaps (blocking full hvigor parity)
 
-**H6 — func_main_0 OHM prefix bug**
-- hvigor: each module's top-level function is stored as bare `func_main_0` in the method NameItem
-- arkdown: stores full OHM-prefixed path (e.g., `@bundle:com.example/entry/src/main/ets/pages/Index#func_main_0`)
-- Root cause: `MethodRecord::name` set from module OHM path in `arkdown-abc/src/compiler.rs`
-- Fix: strip module prefix from method NameItem for `func_main_0`; OHM path belongs only in the ClassRecord name
+**H9 — ABC DebugInfo/LNP source-position event stream**
+- hvigor: `emitter.cpp::GenInstructionDebugInfo()` attaches AST start positions to normal instructions and function/block end positions to return instructions; `BuildLineNumberProgram()` then emits line/column and local-variable events from the pandasm instruction stream
+- arkdown: CodeItems now match for the minimal-hap fixture, but some synthesized constructors and top-level closures have missing or different source-position events
+- Root cause: `CodeGen::set_debug_pos()` coverage does not yet match es2panda's IR-node source-position assignment and generated-instruction inheritance
+- Fix: align constructor, arrow, `func_main_0`, inserted-instruction, and return-position event generation without changing CodeItem bytes
 
-**H7 — Duplicate annotation strings in StringTable**
-- hvigor: annotation strings (`pkgName@entry`, `isCommonjs`, `hasTopLevelAwait`, `isSharedModule`, `scopeNames`, `moduleRecordIdx`) appear once in the StringTable
-- arkdown: each per-chunk annotation pass re-adds these strings instead of reusing the existing StringItem offsets
-- Root cause: `StringPool::intern()` not called before annotation emission in `arkdown-abc/src/emit/`
-
-**H8 — External module ref format**
-- hvigor: external SDK modules stored as `L@ohos.app.ability.UIAbility;` descriptor format
-- arkdown: stores as `@native.ohos.app.ability.UIAbility` (missing `L...;` Panda class descriptor wrapper)
-- Root cause: `ExternalClass::class_name()` in `arkdown-abc/src/emit/`
-
-**H9 — LNP per-instruction density**
-- hvigor/es2abc: emits one SPECIAL_OPCODE per bytecode instruction (105B/LNP average)
-- arkdown: emits one LNP row per source statement (58B/LNP) — 1.8× too sparse
-- Root cause: `LineTracker::advance()` called once per statement in `CodeGen::emit_stmt()`, not once per emitted instruction
-- Fix: call `LineTracker::advance()` after every call to `CodeGen::push()` (per instruction)
+**H10 — Direct CompileArkTS cache-TS backend route**
+- hvigor: CompileArkTS writes transformed TS cache files, `filesInfo.txt`, `npmEntries.txt`, and invokes `es2abc @filesInfo`
+- arkdown: now writes matching handoff metadata, and the cache TS files match hvigor for the minimal fixture
+- Current blocker: direct cache-TS compilation through `arkdown-abc` shrinks the ABC and changes/misses CodeItems, proving a backend logic gap on that input shape
+- Fix: keep final compilation on the current chunk path until direct cache-TS CodeItems match hvigor
 
 **F16 — Missing ViewPU lowering in etsTransform**
 - hvigor: `etsTransform` SDK plugin fully lowers ArkUI `struct`+`build()` blocks into `observeComponentCreation2()`, `.create()`, attribute method calls, and `.pop()` calls
@@ -213,10 +203,9 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 - arkdown: no type checking; compilation proceeds even with type errors
 - Impact: diagnostic parity zero; SDK API misuse not caught at build time
 
-**H14 — Per-token source map density**
-- hvigor sourceMaps.map: per-token VLQ encoding (910 chars for EntryAbility)
-- arkdown sourceMaps.map: per-statement (329 chars) — 2.8× too coarse
-- Impact: debugger breakpoints and source attribution incorrect at sub-statement granularity
+**H14 — Source map breadth beyond minimal-hap**
+- minimal-hap: CompileArkTS `sourceMaps.json` and final `ets/sourceMaps.map` match the hvigor reference
+- remaining work: verify and extend source-map parity across broader ArkUI syntax, dependencies, release mode, and JSBUNDLE paths
 
 ### High-Impact Gaps (blocking release/production builds)
 
@@ -269,47 +258,41 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 
 ## 3. Implementation Tasks
 
-### TASK-ABC-01: Fix func_main_0 OHM prefix (S)
+### TASK-ABC-01: Align DebugInfo/LNP source-position events (M)
 
-**What**: Strip module OHM path from method NameItem for `func_main_0` and any other per-method names. Only the ClassRecord name carries the OHM path.
-**File**: `crates/arkdown-abc/src/compiler.rs`, `crates/arkdown-abc/src/emit/`
-**Upstream ref**: `arkcompiler_ets_frontend/assembler/assembly_emitter.cpp::SerializeMethod()` — method name stored as `method.GetName()` (bare), class name stored with full descriptor
-**Complexity**: S
-**Depends on**: nothing
-
-### TASK-ABC-02: Deduplicate annotation strings (S)
-
-**What**: Ensure `pkgName@entry`, `isCommonjs`, `hasTopLevelAwait`, `isSharedModule`, `scopeNames`, `moduleRecordIdx` are interned into the StringPool before annotation emission, so the same StringItem offset is reused across all records.
-**File**: `crates/arkdown-abc/src/emit/string_pool.rs` (or equivalent), annotation emission path
-**Upstream ref**: `arkcompiler_ets_frontend/assembler/assembly_emitter.cpp::SerializeStringTable()` — strings interned before all records serialized
-**Complexity**: S
-**Depends on**: nothing
-
-### TASK-ABC-03: Fix external module ref descriptor format (S)
-
-**What**: Emit external SDK module class names in Panda class descriptor format `L@ohos.app.ability.UIAbility;` instead of raw `@native.ohos.app.ability.UIAbility`.
-**File**: `crates/arkdown-abc/src/emit/` — wherever ExternalClass name is serialized
-**Upstream ref**: `arkcompiler_ets_frontend/assembler/assembly_emitter.cpp` — external class descriptor format matches Panda `Lpackage/ClassName;` convention
-**Complexity**: S
-**Depends on**: nothing
-
-### TASK-ABC-04: Per-instruction LNP ADVANCE density (M)
-
-**What**: Move `LineTracker::advance()` call from `emit_stmt()`/`emit_expr()` to immediately after every `CodeGen::push()` call, so each bytecode instruction emits a LNP row. Also verify SPECIAL_OPCODE range: `op = (line_delta * 16 + pc_delta) + 8`, fall back to explicit ADVANCE_LINE + ADVANCE_PC when delta exceeds range.
-**File**: `crates/arkdown-abc/src/compiler.rs` — `CodeGen::push()` and `LineTracker`
-**Upstream ref**: `arkcompiler_ets_frontend/assembler/assembly_emitter.cpp::EmitLineNumberProgram()` — one LNP entry per instruction
+**What**: Preserve current CodeItem parity while aligning the DebugInfo constant_pool
+and LineNumberProgram event stream with hvigor. Start with synthesized constructors
+(`EntryAbility #~@0=#EntryAbility`), top-level closures (`Index #*#`), and
+`Index func_main_0`.
+**File**: `crates/arkdown-abc/src/ir/builder.rs`, `crates/arkdown-abc/src/emit/file.rs`
+**Upstream ref**: `emitter.cpp::GenInstructionDebugInfo()`,
+`assembly-emitter.cpp::BuildLineNumberProgram()`,
+`codegen_dynamic.cpp` generated-instruction source-position inheritance
 **Complexity**: M
 **Depends on**: nothing
 
-### TASK-ABC-05: Per-token source map VLQ density (M)
+### TASK-ABC-02: Direct CompileArkTS cache-TS CodeItem parity (M)
 
-**What**: Switch `arkdown-plugin-ets-transform` and rolldown source map output from per-statement to per-token granularity, matching `ets-loader`'s TypeScript codegen which emits one mapping per identifier/token.
-**File**: `crates/arkdown-plugin-ets-transform/src/`, rolldown source map configuration
-**Upstream ref**: SDK `ets-loader` TypeScript codegen; `@ohos/hvigor-arkts-compose/dist/src/arkts-pack.js::getOutputConfig()` — `sourcemapPathTransform` applied to rollup source maps
+**What**: Use the hvigor-style `filesInfo.txt`/`npmEntries.txt` handoff as the
+input route only after compiling the generated cache TS files preserves all
+CodeItems. The cache TS bytes already match hvigor for the minimal fixture; the
+current shrink is a backend logic gap.
+**File**: `crates/arkdown-cli/src/cmd/build.rs`, `crates/arkdown-abc/src/`
+**Upstream ref**: `gen_merged_abc.ts`
 **Complexity**: M
+**Depends on**: TASK-ABC-01
+
+### TASK-ABC-03: ABC section diff harness (S)
+
+**What**: Add a regression helper that compares CodeItems separately from
+DebugInfo/LNP/StringTable/ClassRecord sections, so total ABC size changes do not
+hide executable-bytecode regressions.
+**File**: `crates/arkdown-cli/tests/`, `crates/arkdown-abc/tests/`
+**Upstream ref**: local hvigor minimal-hap golden
+**Complexity**: S
 **Depends on**: nothing
 
-### TASK-ABC-06: ABC incremental cache wiring (M)
+### TASK-ABC-04: ABC incremental cache wiring (M)
 
 **What**: Pass `cache_path` from CLI through `AbcCompiler` config. Implement per-function `SHA256(source_text)` keyed msgpack cache. On hit, skip IR lowering and emit cached bytecode. Invalidate when `compileEnv` key changes.
 **File**: `crates/arkdown-abc/src/compiler.rs`, `crates/arkdown-cli/src/main.rs`
@@ -317,7 +300,7 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 **Complexity**: M
 **Depends on**: TASK-CACHE-01
 
-### TASK-ABC-07: Widget compilation pass (M)
+### TASK-ABC-05: Widget compilation pass (M)
 
 **What**: Implement `initWidgetDefaultArkCompileConfig()` equivalent: second `arkdown-abc` invocation with `widgetCompile: true`, separate cache dir, widget-specific loader.json input.
 **File**: `crates/arkdown-abc/`, `crates/arkdown-cli/`
@@ -441,16 +424,16 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 
 ## 4. Priority Ordering
 
-### Priority 1 — ABC Structural Parity (unblock real apps)
+### Priority 1 — ABC DebugInfo Parity (finish minimal-hap byte parity)
 
-These close the remaining 13% ABC gap and fix correctness bugs that prevent real ArkUI runtime execution.
+These close the remaining minimal-hap `modules.abc` byte gap while preserving
+the current CodeItem parity.
 
 | Task | Complexity | Impact |
 |------|------------|--------|
-| TASK-ABC-01: Fix func_main_0 OHM prefix | S | High — incorrect module lookup at runtime |
-| TASK-ABC-02: Deduplicate annotation strings | S | Medium — inflated `.abc` size |
-| TASK-ABC-03: Fix external module ref format | S | High — SDK modules not resolvable at runtime |
-| TASK-ABC-04: Per-instruction LNP density | M | Medium — debug info incorrect |
+| TASK-ABC-01: Align DebugInfo/LNP source positions | M | Required for final byte parity |
+| TASK-ABC-02: Direct cache-TS CodeItem parity | M | Required before switching to hvigor `filesInfo.txt` input |
+| TASK-ABC-03: ABC section diff harness | S | Prevents CodeItem regressions |
 
 ### Priority 2 — ArkUI Component Support (unblock real UI pages)
 
@@ -482,9 +465,8 @@ These close the remaining 13% ABC gap and fix correctness bugs that prevent real
 
 | Task | Complexity | Impact |
 |------|------------|--------|
-| TASK-ABC-05: Per-token source map density | M | Debugger UX |
-| TASK-ABC-06: ABC incremental cache | M | Compile speed |
-| TASK-ABC-07: Widget compile pass | M | Card/widget apps (SPEC-027) |
+| TASK-ABC-04: ABC incremental cache | M | Compile speed |
+| TASK-ABC-05: Widget compile pass | M | Card/widget apps (SPEC-027) |
 | TASK-PACK-01: Preloaded SO | S | Apps with native libs |
 | TASK-PACK-03: Privacy profile | S | Privacy-sensitive apps |
 | TASK-WATCH-01: Watch mode | L | DevEco IDE integration |
@@ -518,14 +500,14 @@ These close the remaining 13% ABC gap and fix correctness bugs that prevent real
 | ArkCompile Setup (E) | 4 | 2 | 0 | 2 |
 | Rollup Plugins (F) | 28 | 13 | 4 | 11 |
 | Post-Bundle Processing (G) | 8 | 2 | 1 | 5 |
-| ABC Compilation (H) | 14 | 4 | 6 | 4 |
+| ABC Compilation (H) | 14 | 7 | 4 | 3 |
 | Obfuscation/Minification (I) | 5 | 0 | 0 | 5 |
 | Incremental Cache (J) | 4 | 0 | 0 | 4 |
-| Packaging (K) | 6 | 2 | 2 | 2 |
+| Packaging (K) | 6 | 2 | 3 | 1 |
 | Signing (L) | 3 | 2 | 1 | 0 |
 | Advanced/Watch (M) | 5 | 0 | 0 | 5 |
-| **Total** | **95** | **32** | **19** | **44** |
+| **Total** | **95** | **35** | **18** | **42** |
 
-**Current overall pipeline coverage: ~34% fully verified, ~20% partial, ~46% not started.**
+**Current overall pipeline coverage: ~37% fully verified, ~19% partial, ~44% not started.**
 The HAP golden-parity path (minimal-hap fixture with no dependencies) covers ~68 of the 95 steps.
-The remaining 44 ❌ steps are concentrated in: release-mode obfuscation+minification, incremental caching, watch mode, full ViewPU ArkUI lowering, and multi-module dependency handling.
+The remaining 42 ❌ steps are concentrated in: release-mode obfuscation+minification, incremental caching, watch mode, full ViewPU ArkUI lowering, and multi-module dependency handling.

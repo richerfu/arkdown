@@ -3,6 +3,8 @@
 Documents the field-by-field comparison between arkdown and hvigor golden output
 for the `minimal-hap` integration fixture (API 12, single `EntryAbility`).
 
+Last updated: 2026-05-31.
+
 ## module.json
 
 ### `module` section
@@ -85,5 +87,42 @@ These match hvigor's `restool` output for the same resource layout.
 
 ## HAP zip structure
 
-The full 11-entry HAP zip matches hvigor golden exactly (see `hvigor-gap-plan.md`
-Phase 6 for details on remaining gaps in `ets/modules.abc` and `ets/sourceMaps.map`).
+The unsigned HAP zip has the same 11 entries in the same order as hvigor. All
+entries are byte-identical except `ets/modules.abc`.
+
+Current artifact comparison:
+
+| Entry | hvigor | arkdown | Status |
+|---|---:|---:|---|
+| HAP entry order | 11 entries | 11 entries | ✅ identical |
+| non-ABC entries | n/a | n/a | ✅ byte-identical |
+| `ets/sourceMaps.map` | n/a | n/a | ✅ byte-identical in current fixture |
+| `ets/modules.abc` | 9844B | 9705B | 🔄 remaining gap |
+
+The `ets/modules.abc` gap is no longer a method bytecode gap. The current
+comparison shows all relevant method CodeItems are byte-identical to hvigor; the
+remaining difference is in DebugInfo, LineNumberProgram, column-number events,
+and local-variable debug metadata.
+
+## CompileArkTS handoff files
+
+`arkdown` now emits the hvigor CompileArkTS handoff files under:
+
+```text
+entry/build/default/cache/default/default@CompileArkTS/esmodule/debug/
+```
+
+Current parity:
+
+| File | Status |
+|---|---|
+| `sourceMaps.json` | ✅ byte-identical |
+| `npmEntries.txt` | ✅ byte-identical |
+| `filesInfo.txt` | ✅ same fields and order; absolute root path differs by workspace |
+| `modules.cache` | ✅ same mapping shape and order; absolute root path differs by workspace |
+
+For this fixture, the transformed cache TypeScript files are byte-identical to
+hvigor. Directly compiling those cache TS files through the current Rust ABC
+backend produces a smaller ABC and changes/misses some CodeItems, so final ABC
+generation intentionally remains on the chunk input path until the direct TS
+backend behavior is complete.
