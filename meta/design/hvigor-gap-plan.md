@@ -94,11 +94,13 @@ with that file list and `npmEntries.txt`.
 
 For the minimal fixture, the generated cache TypeScript bytes match hvigor. A
 temporary experiment compiling those cache TS files directly through `arkdown-abc`
-shrunk the ABC to about 9364B and changed/missed several CodeItems. That proves
-the shrink was a Rust backend logic gap for the direct cache-TS input shape, not
-a transform-input mismatch. Until that backend path is complete, final ABC
-generation stays on the chunk input path because that is the only path currently
-preserving CodeItem parity.
+now emits 9572B after fixing top-level block traversal for call-argument arrows.
+That direct route has the same 23 method records as hvigor, but still has two
+CodeItem differences: `EntryAbility func_main_0` and `Index func_main_0`. This
+proves the remaining shrink is a Rust backend logic gap for the direct cache-TS
+input shape, not a transform-input mismatch. Until that backend path is complete,
+final ABC generation stays on the chunk input path because that is the only path
+currently preserving full CodeItem parity.
 
 Source-map routing was also checked against this state. Using rolldown chunk
 source maps for ABC debug info regressed the minimal fixture to 9679B, and the
@@ -176,7 +178,8 @@ Priority order from the current 2026-05-31 state:
    derived constructor now matches the minimal fixture; explicit constructors
    and field initializer variants still need golden coverage.
 4. **[ABC Direct TS] Re-enable cache-TS compilation only after CodeItems match.**
-   The source TS is already equal to hvigor; the current shrink is a backend gap.
+   The source TS is already equal to hvigor; direct cache TS now has the correct
+   method count, with only `func_main_0` CodeItems still different.
 5. **[Parity harness] Add an ABC diff helper that compares CodeItems separately
    from DebugInfo/LNP.** This prevents future regressions from being hidden by
    total file-size changes.

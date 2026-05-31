@@ -127,8 +127,10 @@ instructions without changing CodeItem bytes:
 
 The generated CompileArkTS cache TypeScript files match hvigor for the minimal
 fixture, but compiling those files directly through `arkdown-abc` currently
-shrinks the ABC and changes/misses some CodeItems. This proves the direct TS
-input route has backend logic gaps.
+emits 9572B and still changes the two module `func_main_0` CodeItems. The direct
+route now has all 23 method records after top-level block traversal was added
+for call-argument arrows, so the remaining gap is backend lowering of module
+top-level code rather than missing closure records.
 
 ### Fix
 

@@ -372,6 +372,45 @@ export { EntryAbility as default };"#;
         );
     }
 
+    #[test]
+    fn test_top_level_block_call_arg_arrows_are_collected() {
+        use crate::emit::file::LiteralArray;
+        use crate::emit::strings::StringTable;
+        use crate::ir::builder::build_record_with_debug;
+
+        let source = r#"
+if (!("finalizeConstruction" in ViewPU.prototype)) {
+    Reflect.set(ViewPU.prototype, "finalizeConstruction", () => {});
+}
+class Index extends ViewPU {}
+registerNamedRoute(() => new Index(undefined, {}), "", {});
+"#;
+
+        let mut strings = StringTable::default();
+        let mut literal_arrays: Vec<LiteralArray> = Vec::new();
+        let record = build_record_with_debug(
+            source,
+            "com.example.app/entry/ets/pages/Index",
+            &mut strings,
+            &mut literal_arrays,
+            Some("entry|entry|1.0.0|src/main/ets/pages/Index.ts"),
+            true,
+        )
+        .expect("build_record_with_debug failed");
+
+        let method_names: Vec<&str> = record.methods.iter().map(|m| m.name.as_str()).collect();
+        assert!(
+            method_names.contains(&"#*#"),
+            "block-scoped Reflect.set arrow must be collected; got: {:?}",
+            method_names
+        );
+        assert!(
+            method_names.contains(&"#*#^1"),
+            "registerNamedRoute arrow must keep the second top-level closure name; got: {:?}",
+            method_names
+        );
+    }
+
     // ── Incremental cache tests (SPEC-025) ──────────────────────────────────
 
     /// Verify that a cache hit avoids recompilation: compile once with a cache

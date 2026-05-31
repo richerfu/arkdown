@@ -1242,6 +1242,20 @@ fn collect_top_level_call_arg_arrows(
                 );
             }
         }
+        Statement::BlockStatement(block) => {
+            for stmt in &block.body {
+                collect_top_level_call_arg_arrows(
+                    stmt,
+                    strings,
+                    literal_arrays,
+                    lowering,
+                    methods,
+                    seen_names,
+                    source,
+                    source_mapper,
+                );
+            }
+        }
         _ => {}
     }
 }
