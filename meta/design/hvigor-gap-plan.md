@@ -94,13 +94,14 @@ with that file list and `npmEntries.txt`.
 
 For the minimal fixture, the generated cache TypeScript bytes match hvigor. A
 temporary experiment compiling those cache TS files directly through `arkdown-abc`
-now emits 9572B after fixing top-level block traversal for call-argument arrows.
-That direct route has the same 23 method records as hvigor, but still has two
-CodeItem differences: `EntryAbility func_main_0` and `Index func_main_0`. This
-proves the remaining shrink is a Rust backend logic gap for the direct cache-TS
-input shape, not a transform-input mismatch. Until that backend path is complete,
-final ABC generation stays on the chunk input path because that is the only path
-currently preserving full CodeItem parity.
+now emits 9697B and has the same 23 method records and byte-identical CodeItems
+as hvigor. The fixes came directly from the upstream lowering path:
+`ClassDeclaration::Compile` / `ClassDefinition::Compile` scoped class temporaries,
+`ExportDefaultDeclaration` records named default classes under the class local
+name, and top-level block traversal collects call-argument arrows. The direct
+route still produces a smaller file overall, so the remaining shrink is now in
+non-CodeItem ABC sections such as DebugInfo/LNP, annotations, indexes, or literal
+metadata rather than executable bytecode.
 
 Source-map routing was also checked against this state. Using rolldown chunk
 source maps for ABC debug info regressed the minimal fixture to 9679B, and the
@@ -110,9 +111,8 @@ upstream `gen_merged_abc.ts` passes `filesInfo.txt` and `npmEntries.txt` to
 source maps only for API compatibility; `source_file` is passed separately from
 `filesInfo`-style metadata, and LNP coordinates come from parsed source spans.
 This source-derived route currently emits 9700B while preserving all CodeItems.
-The remaining work is therefore to make the Rust backend accept the hvigor
-cache-TS input shape without losing CodeItem parity, or to provide an equivalent
-cache-TS coordinate source for the current chunk input path.
+The direct cache-TS route also preserves CodeItems now, but it is 9697B and still
+needs section-level parity before becoming the final default path.
 
 ## Remaining ABC Gap
 
@@ -158,7 +158,7 @@ Required implementation work:
 | Area | Status | Remaining work |
 |---|---|---|
 | ABC DebugInfo/LNP | partial | Align source-position event stream with es2panda/emitter.cpp. |
-| Direct cache-TS ABC route | partial | Complete Rust backend behavior for hvigor `filesInfo.txt` inputs without losing CodeItem parity. |
+| Direct cache-TS ABC route | partial | CodeItems match; align remaining non-CodeItem sections before switching final generation to cache TS. |
 | ArkTS transform breadth | partial | Broaden beyond minimal fixture: `@Builder`, `@Styles`, more ArkUI DSL forms, diagnostics. |
 | Release builds | partial | Obfuscation, terser/minification, release treeshake/manual chunks, release source maps. |
 | Incremental cache | partial | Rollup msgpack cache, task input cache, real ABC `--cache-file` equivalent. |
@@ -177,9 +177,10 @@ Priority order from the current 2026-05-31 state:
 3. **[ABC DebugInfo] Generalize constructor source-position events.** The default
    derived constructor now matches the minimal fixture; explicit constructors
    and field initializer variants still need golden coverage.
-4. **[ABC Direct TS] Re-enable cache-TS compilation only after CodeItems match.**
-   The source TS is already equal to hvigor; direct cache TS now has the correct
-   method count, with only `func_main_0` CodeItems still different.
+4. **[ABC Direct TS] Diff non-CodeItem sections on the cache-TS route.** The
+   source TS is already equal to hvigor and all direct-route CodeItems match; the
+   remaining 147B shrink must be isolated to DebugInfo/LNP, annotations, indexes,
+   literal arrays, or other metadata.
 5. **[Parity harness] Add an ABC diff helper that compares CodeItems separately
    from DebugInfo/LNP.** This prevents future regressions from being hidden by
    total file-size changes.

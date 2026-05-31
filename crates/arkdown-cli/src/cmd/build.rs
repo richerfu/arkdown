@@ -581,86 +581,92 @@ pub async fn run(args: BuildArgs) -> Result<()> {
 
         std::fs::create_dir_all(&output_dir)?;
 
-        let out =
-            match &config_arc.output_target {
-                OutputTarget::Har => {
-                    // HAR: package ETS sources rather than compiled ABC
-                    let source_dir = module.src_path.join("src/main/ets");
-                    let oh_package_json = module.src_path.join("oh-package.json5");
-                    if source_dir.exists() {
+        let out = match &config_arc.output_target {
+            OutputTarget::Har => {
+                // HAR: package ETS sources rather than compiled ABC
+                let source_dir = module.src_path.join("src/main/ets");
+                let oh_package_json = module.src_path.join("oh-package.json5");
+                if source_dir.exists() {
+                    Some(
+                        packager
+                            .pack_har(HarPackInput {
+                                module_name: module.name.clone(),
+                                source_dir,
+                                resources_dir: module.src_path.join("src/main/resources"),
+                                oh_package_json,
+                                output_path: output.clone(),
+                            })
+                            .map_err(|e| anyhow::anyhow!("Pack failed: {}", e))?,
+                    )
+                } else {
+                    None
+                }
+            }
+            _ => {
+                // HAP / HSP: need module.json and modules.abc; resources.index is optional
+                if module_json.exists() && modules_abc.exists() {
+                    // Create an empty resources.index placeholder if resources were not compiled
+                    if !resources_index.exists() {
+                        if let Some(parent) = resources_index.parent() {
+                            std::fs::create_dir_all(parent)?;
+                        }
+                        std::fs::write(&resources_index, &[])?;
+                    }
+                    {
+                        let source_maps_path = bundle_out.source_maps_path.clone().or_else(|| {
+                            let candidate = module.src_path.join(
+                                "build/default/intermediates/loader_out/default/ets/sourceMaps.map",
+                            );
+                            candidate.exists().then_some(candidate)
+                        });
+                        // Abilities from the processed manifest
+                        let abilities: Vec<PackAbility> = manifest
+                            .abilities
+                            .iter()
+                            .map(|a| PackAbility {
+                                name: a.name.clone(),
+                                label: a.label.clone(),
+                            })
+                            .collect();
                         Some(
                             packager
-                                .pack_har(HarPackInput {
+                                .pack_hap(PackInput {
                                     module_name: module.name.clone(),
-                                    source_dir,
-                                    resources_dir: module.src_path.join("src/main/resources"),
-                                    oh_package_json,
+                                    abc_path: modules_abc,
+                                    resources_index,
+                                    module_json,
+                                    native_libs: vec![],
                                     output_path: output.clone(),
+                                    resources_src_dir: Some(
+                                        module.src_path.join(
+                                            "build/default/intermediates/res/default/resources",
+                                        ),
+                                    ),
+                                    bundle_version_code: 1000000,
+                                    bundle_version_name: "1.0.0".to_string(),
+                                    bundle_type: "app".to_string(),
+                                    source_maps_path,
+                                    abilities,
+                                    integrated_hsps: vec![],
+                                    privacy_profile_path: {
+                                        let p = module
+                                            .src_path
+                                            .join("src/main/resources/base/profile/privacy.json");
+                                        if p.exists() {
+                                            Some(p)
+                                        } else {
+                                            None
+                                        }
+                                    },
                                 })
                                 .map_err(|e| anyhow::anyhow!("Pack failed: {}", e))?,
                         )
-                    } else {
-                        None
                     }
+                } else {
+                    None
                 }
-                _ => {
-                    // HAP / HSP: need module.json and modules.abc; resources.index is optional
-                    if module_json.exists() && modules_abc.exists() {
-                        // Create an empty resources.index placeholder if resources were not compiled
-                        if !resources_index.exists() {
-                            if let Some(parent) = resources_index.parent() {
-                                std::fs::create_dir_all(parent)?;
-                            }
-                            std::fs::write(&resources_index, &[])?;
-                        }
-                        {
-                            let source_maps_path = bundle_out.source_maps_path.clone();
-                            // Abilities from the processed manifest
-                            let abilities: Vec<PackAbility> = manifest
-                                .abilities
-                                .iter()
-                                .map(|a| PackAbility {
-                                    name: a.name.clone(),
-                                    label: a.label.clone(),
-                                })
-                                .collect();
-                            Some(
-                                packager
-                                    .pack_hap(PackInput {
-                                        module_name: module.name.clone(),
-                                        abc_path: modules_abc,
-                                        resources_index,
-                                        module_json,
-                                        native_libs: vec![],
-                                        output_path: output.clone(),
-                                        resources_src_dir: Some(module.src_path.join(
-                                            "build/default/intermediates/res/default/resources",
-                                        )),
-                                        bundle_version_code: 1000000,
-                                        bundle_version_name: "1.0.0".to_string(),
-                                        bundle_type: "app".to_string(),
-                                        source_maps_path,
-                                        abilities,
-                                        integrated_hsps: vec![],
-                                        privacy_profile_path: {
-                                            let p = module.src_path.join(
-                                                "src/main/resources/base/profile/privacy.json",
-                                            );
-                                            if p.exists() {
-                                                Some(p)
-                                            } else {
-                                                None
-                                            }
-                                        },
-                                    })
-                                    .map_err(|e| anyhow::anyhow!("Pack failed: {}", e))?,
-                            )
-                        }
-                    } else {
-                        None
-                    }
-                }
-            };
+            }
+        };
         if let Some(path) = out {
             let final_path = if matches!(&config_arc.output_target, OutputTarget::Har) {
                 path

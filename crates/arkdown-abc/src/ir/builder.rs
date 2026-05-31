@@ -3003,28 +3003,58 @@ impl<'a> CodeGen<'a> {
                     }
                 }
                 // Emit defineclasswithbuffer; result → accumulator.
-                self.emit_class_inner(class_name, &cls.body.body, super_class);
-                // Store the class constructor to a local register and,
-                // if the class has a name, expose it as a global.
                 if let Some(id) = &cls.id {
-                    let reg = self.alloc_reg();
-                    self.push(Insn::Sta(reg));
                     let name = id.name.as_str().to_string();
-                    self.var_regs.insert(name.clone(), reg);
-                    let name_id = self.intern(&name);
-                    self.push(Insn::Lda(reg));
-                    self.push(Insn::TryStGlobalByName(0, name_id));
-                    // Class declarations are lexical bindings: also populate the
-                    // named lexical slot so inner arrow functions can access the
-                    // class via `ldlexvar` (hvigor / es2abc behaviour).
+                    let saved_next_reg = self.next_reg;
+                    let class_reg = self.alloc_reg();
+                    let var_reg = self.alloc_reg();
+                    self.var_regs.insert(name.clone(), var_reg);
+                    let proto_vreg = if let Some(sc) = super_class {
+                        self.emit_expr(sc);
+                        let reg = self.alloc_reg();
+                        self.push(Insn::Sta(reg));
+                        reg
+                    } else {
+                        0
+                    };
+                    let lit_arr_id = self.literal_arrays.len() as u16;
+                    self.literal_arrays.push(class_buffer_literal_array(
+                        class_name.unwrap_or(&name),
+                        &cls.body.body,
+                    ));
+                    let formal_count = constructor_required_param_count(&cls.body.body);
+                    self.push(Insn::DefineClassWithBuffer(
+                        0,
+                        lit_arr_id,
+                        lit_arr_id,
+                        formal_count,
+                        proto_vreg,
+                    ));
+                    self.push(Insn::Sta(class_reg));
+                    self.push(Insn::Sta(var_reg));
+                    self.emit_class_missing_properties(
+                        class_name.unwrap_or(&name),
+                        &cls.body.body,
+                        class_reg,
+                    );
                     if let Some(lex_idx) = self.lowering.lexical_index(&name) {
-                        self.push(Insn::Lda(reg));
+                        self.push(Insn::Lda(class_reg));
+                        self.push(Insn::Sta(class_reg));
+                        self.push(Insn::Lda(class_reg));
                         self.push(Insn::StLexVar(0, lex_idx));
+                        self.var_regs.remove(&name);
+                        self.next_reg = saved_next_reg;
+                    } else {
+                        let name_id = self.intern(&name);
+                        self.push(Insn::Lda(class_reg));
+                        self.push(Insn::TryStGlobalByName(0, name_id));
                     }
                     if let Some(export_index) = self.lowering.export_index(&name) {
-                        self.push(Insn::Lda(reg));
+                        self.push(Insn::Lda(class_reg));
                         self.push(Insn::StModuleVar(export_index));
                     }
+                } else {
+                    self.emit_class_inner(class_name, &cls.body.body, super_class);
                 }
             }
             Statement::ExportDefaultDeclaration(export) => {
@@ -3032,9 +3062,9 @@ impl<'a> CodeGen<'a> {
                     let local_name = cls.id.as_ref().map(|id| id.name.as_str());
                     let class_name = local_name.unwrap_or("default");
                     let class_reg = self.alloc_reg();
-                    let var_reg = self.alloc_reg();
                     if let Some(name) = local_name {
-                        self.var_regs.insert(name.to_string(), var_reg);
+                        self.var_regs.insert(name.to_string(), class_reg + 1);
+                        self.next_reg = self.next_reg.max(class_reg.saturating_add(2));
                     }
                     let proto_vreg = if let Some(sc) = &cls.super_class {
                         self.emit_expr(sc);
@@ -3056,15 +3086,16 @@ impl<'a> CodeGen<'a> {
                         proto_vreg,
                     ));
                     self.push(Insn::Sta(class_reg));
-                    self.push(Insn::Sta(var_reg));
-                    self.emit_class_missing_properties(class_name, &cls.body.body, class_reg);
-                    if let Some(export_index) = self.lowering.export_index("default") {
-                        self.push(Insn::Lda(class_reg));
-                        self.push(Insn::StModuleVar(export_index));
-                    }
-                    if let Some(id) = &cls.id {
-                        let name = id.name.as_str().to_string();
-                        if let Some(export_index) = self.lowering.export_index(&name) {
+                    if let Some(name) = local_name {
+                        self.push(Insn::Sta(class_reg + 1));
+                        self.emit_class_missing_properties(class_name, &cls.body.body, class_reg);
+                        if let Some(export_index) = self.lowering.export_index(name) {
+                            self.push(Insn::Lda(class_reg));
+                            self.push(Insn::StModuleVar(export_index));
+                        }
+                    } else {
+                        self.emit_class_missing_properties(class_name, &cls.body.body, class_reg);
+                        if let Some(export_index) = self.lowering.export_index("default") {
                             self.push(Insn::Lda(class_reg));
                             self.push(Insn::StModuleVar(export_index));
                         }
@@ -3626,6 +3657,7 @@ impl<'a> CodeGen<'a> {
             match &declarator.id {
                 BindingPattern::BindingIdentifier(id) => {
                     let name = id.name.as_str().to_string();
+                    let saved_next_reg = self.next_reg;
                     if let Some(init) = &declarator.init {
                         if let Expression::ClassExpression(cls) = init {
                             self.emit_class_var_decl(&name, cls);
@@ -3642,6 +3674,8 @@ impl<'a> CodeGen<'a> {
                     if let Some(slot) = self.lowering.lexical_index(&name) {
                         self.push(Insn::Lda(reg));
                         self.push(Insn::StLexVar(0, slot));
+                        self.var_regs.remove(&name);
+                        self.next_reg = saved_next_reg;
                     }
                     if let Some(export_index) = self.lowering.export_index(&name) {
                         self.push(Insn::Lda(reg));
@@ -5494,9 +5528,19 @@ fn scan_stmt_for_module_record(stmt: &Statement<'_>, info: &mut ModuleRecordInfo
                 scan_expr_for_module_record(arg, info);
             }
         }
-        Statement::ExportDefaultDeclaration(_) => {
-            info.add_local_export("default".to_string(), "default");
-        }
+        Statement::ExportDefaultDeclaration(export) => match &export.declaration {
+            ExportDefaultDeclarationKind::ClassDeclaration(cls) => {
+                let local_name = cls.id.as_ref().map_or("default", |id| id.name.as_str());
+                info.add_local_export(local_name.to_string(), "default");
+            }
+            ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
+                let local_name = func.id.as_ref().map_or("default", |id| id.name.as_str());
+                info.add_local_export(local_name.to_string(), "default");
+            }
+            _ => {
+                info.add_local_export("default".to_string(), "default");
+            }
+        },
         Statement::ExportNamedDeclaration(export) => {
             if export.export_kind == ImportOrExportKind::Type {
                 return;

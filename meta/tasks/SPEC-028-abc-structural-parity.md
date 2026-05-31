@@ -127,10 +127,11 @@ instructions without changing CodeItem bytes:
 
 The generated CompileArkTS cache TypeScript files match hvigor for the minimal
 fixture, but compiling those files directly through `arkdown-abc` currently
-emits 9572B and still changes the two module `func_main_0` CodeItems. The direct
-route now has all 23 method records after top-level block traversal was added
-for call-argument arrows, so the remaining gap is backend lowering of module
-top-level code rather than missing closure records.
+emits 9697B and now preserves all 23 method records and CodeItems. The direct
+route reached bytecode parity after top-level block traversal, named default
+class export lowering, lexical temporary scoping, and class declaration missing
+property initialization were aligned to upstream. The remaining direct-route gap
+is non-CodeItem ABC metadata/DebugInfo/LNP rather than executable bytecode.
 
 ### Fix
 
@@ -143,7 +144,8 @@ on that input shape. Use the handoff files as an oracle:
   upstream `es2abc` writes into pandasm DebugInfo;
 - `sourceMaps.json`/`sourceMaps.map` are package debugger artifacts, not inputs
   to `BuildLineNumberProgram()`;
-- direct TS compilation must first preserve the same CodeItems as hvigor.
+- direct TS compilation now preserves the same CodeItems as hvigor, but must
+  still match the remaining non-CodeItem sections before becoming the final path.
 
 ## Acceptance Criteria
 

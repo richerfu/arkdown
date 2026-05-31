@@ -190,8 +190,8 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 **H10 — Direct CompileArkTS cache-TS backend route**
 - hvigor: CompileArkTS writes transformed TS cache files, `filesInfo.txt`, `npmEntries.txt`, and invokes `es2abc @filesInfo`
 - arkdown: now writes matching handoff metadata, and the cache TS files match hvigor for the minimal fixture
-- Current blocker: direct cache-TS compilation through `arkdown-abc` emits 9572B and now has all 23 method records after block-scoped call-argument arrows were collected, but `EntryAbility func_main_0` and `Index func_main_0` CodeItems still differ
-- Fix: keep final compilation on the current chunk path until direct cache-TS CodeItems match hvigor
+- Current blocker: direct cache-TS compilation through `arkdown-abc` emits 9697B and now has all 23 method records with byte-identical CodeItems; the remaining gap is non-CodeItem ABC metadata/DebugInfo/LNP
+- Fix: keep final compilation on the current chunk path until the cache-TS route also matches non-CodeItem sections
 
 **F16 — Missing ViewPU lowering in etsTransform**
 - hvigor: `etsTransform` SDK plugin fully lowers ArkUI `struct`+`build()` blocks into `observeComponentCreation2()`, `.create()`, attribute method calls, and `.pop()` calls
@@ -275,9 +275,9 @@ and LineNumberProgram event stream with hvigor. Start with synthesized construct
 
 **What**: Use the hvigor-style `filesInfo.txt`/`npmEntries.txt` handoff as the
 input route only after compiling the generated cache TS files preserves all
-CodeItems. The cache TS bytes already match hvigor for the minimal fixture; the
-current direct route has the correct method count, but still differs in the two
-module `func_main_0` CodeItems.
+CodeItems. The cache TS bytes already match hvigor for the minimal fixture, and
+the current direct route now has matching method count and CodeItems; remaining
+work is to align non-CodeItem sections before switching final generation.
 **File**: `crates/arkdown-cli/src/cmd/build.rs`, `crates/arkdown-abc/src/`
 **Upstream ref**: `gen_merged_abc.ts`
 **Complexity**: M

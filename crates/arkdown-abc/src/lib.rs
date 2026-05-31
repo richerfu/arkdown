@@ -411,6 +411,46 @@ registerNamedRoute(() => new Index(undefined, {}), "", {});
         );
     }
 
+    #[test]
+    fn test_class_declaration_emits_missing_property_initializers() {
+        use crate::emit::file::LiteralArray;
+        use crate::emit::strings::StringTable;
+        use crate::ir::builder::build_record_with_debug;
+
+        let source = r#"
+class Index extends ViewPU {
+    initialRender() {}
+    rerender() {}
+    static getEntryName() { return "Index"; }
+}
+registerNamedRoute(() => new Index(undefined, {}), "", {});
+"#;
+
+        let mut strings = StringTable::default();
+        let mut literal_arrays: Vec<LiteralArray> = Vec::new();
+        let record = build_record_with_debug(
+            source,
+            "com.example.app/entry/ets/pages/Index",
+            &mut strings,
+            &mut literal_arrays,
+            Some("entry|entry|1.0.0|src/main/ets/pages/Index.ts"),
+            true,
+        )
+        .expect("build_record_with_debug failed");
+
+        let main = record
+            .methods
+            .iter()
+            .find(|m| m.name == "func_main_0")
+            .expect("func_main_0 must exist");
+        let stown_count = main.bytecode.iter().filter(|&&b| b == 0x7a).count();
+        assert!(
+            stown_count >= 3,
+            "class declaration must install initialRender/rerender/getEntryName; bytecode={:02x?}",
+            main.bytecode
+        );
+    }
+
     // ── Incremental cache tests (SPEC-025) ──────────────────────────────────
 
     /// Verify that a cache hit avoids recompilation: compile once with a cache
