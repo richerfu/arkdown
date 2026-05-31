@@ -77,6 +77,10 @@ const HEADER_SIZE: usize = 0x3C;
 
 const SOURCE_LANG_ECMASCRIPT: u8 = 0x00;
 
+fn align4(value: u32) -> u32 {
+    (value + 3) & !3
+}
+
 /// Assembled Panda `.abc` file ready for serialization.
 pub struct AbcFile {
     /// Interned string table for bytecode string operands (`lda.str`,
@@ -506,15 +510,19 @@ impl AbcFile {
                             string_items.get_or_create("args");
                         }
                     }
-                    let mut param_entries = Vec::with_capacity(debug.param_names.len());
-                    for (param_idx, param_name) in debug.param_names.iter().enumerate() {
-                        let off = string_items.get_or_create(param_name);
-                        param_entries.push((param_name.clone(), 3 + param_idx as i32, off));
-                    }
+                    let mut param_entries: Vec<(String, i32)> = debug
+                        .param_names
+                        .iter()
+                        .enumerate()
+                        .map(|(param_idx, param_name)| (param_name.clone(), 3 + param_idx as i32))
+                        .collect();
                     param_entries.sort_by(|a, b| a.0.cmp(&b.0));
                     let param_offsets = param_entries
                         .into_iter()
-                        .map(|(name, reg, off)| (name, reg, off))
+                        .map(|(name, reg)| {
+                            let off = string_items.get_or_create(&name);
+                            (name, reg, off)
+                        })
                         .collect();
                     if !is_arrow {
                         string_items.get_or_create("this");
@@ -1110,10 +1118,14 @@ impl AbcFile {
         }
 
         // ── 5. Assemble the file ──────────────────────────────────────────────
-        // LNP index is placed at the end of the file (after literal arrays), so the actual
-        // file size is total_size + num_lnp * 4.  `total_size` == `lnp_idx_off`.
-        let lnp_idx_off = if num_lnp == 0 { 0 } else { total_size };
-        let final_size = total_size + num_lnp * 4;
+        // LNP index is placed at the end of the file and aligned to 4 bytes;
+        // hvigor pads between the DebugInfo/LNP payload and the index when needed.
+        let lnp_idx_off = if num_lnp == 0 { 0 } else { align4(total_size) };
+        let final_size = if num_lnp == 0 {
+            total_size
+        } else {
+            lnp_idx_off + num_lnp * 4
+        };
 
         let mut file: Vec<u8> = Vec::with_capacity(final_size as usize + 4);
 
@@ -1244,7 +1256,10 @@ impl AbcFile {
         // ── LineNumberProgram index (at file end, after literal arrays) ────────
         //
         // hvigor places the LNP index as the final section of the file.  The
-        // `lnp_idx_off` header field points here (= `total_size`).
+        // `lnp_idx_off` header field points here.
+        while (file.len() as u32) < lnp_idx_off {
+            file.push(0);
+        }
         for offset in &lnp_offsets {
             file.extend_from_slice(&offset.to_le_bytes());
         }

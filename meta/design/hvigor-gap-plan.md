@@ -55,28 +55,30 @@ Phase status for `tests/fixtures/minimal-hap`:
 - Phase 1 (loader/profile/resource): minimal-hap fields match hvigor.
 - Phase 2 (ArkTS transform): minimal fixture transformed TS and source maps match the
   hvigor fixture for the exercised code.
-- Phase 3 (bundler): output shape is close enough that all ABC CodeItems now match
-  hvigor when compiling the current chunk inputs.
+- Phase 3 (bundler): rolldown output is still produced for loader/package side
+  effects; final ABC input now follows hvigor's CompileArkTS cache-TS route.
 - Phase 4 (CompileArkTS handoff): `sourceMaps.json` and `npmEntries.txt` match hvigor;
   `filesInfo.txt` and `modules.cache` differ only by absolute project root paths.
-- Phase 5 (ABC): remaining final HAP byte difference is only `ets/modules.abc`.
-- Phase 6 (packaging): unsigned HAP entry order and all non-ABC entries are byte-identical.
+- Phase 5 (ABC): `ets/modules.abc` is byte-identical to hvigor for the minimal
+  fixture.
+- Phase 6 (packaging): unsigned HAP entry order and all entries are
+  byte-identical.
 
 Current byte-level parity for the local minimal-hap fixture:
 
 | Artifact | hvigor | arkdown | Status |
 |---|---:|---:|---|
 | unsigned HAP entry order | 11 entries | 11 entries | identical |
-| non-ABC HAP entries | n/a | n/a | byte-identical |
-| `ets/modules.abc` | 9844B | 9700B | different |
+| HAP entries | n/a | n/a | byte-identical |
+| `ets/modules.abc` | 9844B | 9844B | byte-identical |
 | ABC method CodeItems | n/a | n/a | byte-identical for all compared methods |
-| ABC DebugInfo/LNP/column program | n/a | n/a | remaining gap |
+| ABC DebugInfo/LNP/column program | n/a | n/a | byte-identical for all compared methods |
 
-The earlier 7174B/9844B, 7525B/9844B, 8675B/9844B, and 9727B/9844B reports are
-obsolete. Those gaps covered already-fixed structural issues or the now-removed
-source-map-driven LNP route. The current 144B gap is not method bytecode: all
-23 compared CodeItems are byte-identical. The remaining delta is DebugInfo,
-LineNumberProgram, column program, and local-variable event encoding.
+The earlier 7174B/9844B, 7525B/9844B, 8675B/9844B, 9700B/9844B,
+9727B/9844B, and 9842B/9844B reports are obsolete. Those gaps covered
+already-fixed structural issues, the old chunk-source ABC route, or the
+now-removed source-map-driven LNP route. The current minimal-hap ABC and
+unsigned HAP are byte-identical to hvigor.
 
 ## CompileArkTS Source Route
 
@@ -92,10 +94,10 @@ with that file list and `npmEntries.txt`.
 - `build/default/cache/default/default@CompileArkTS/esmodule/debug/npmEntries.txt`
 - `build/default/cache/default/default@CompileArkTS/esmodule/debug/modules.cache`
 
-For the minimal fixture, the generated cache TypeScript bytes match hvigor. A
-temporary experiment compiling those cache TS files directly through `arkdown-abc`
-now emits 9842B and has the same 23 method records and byte-identical CodeItems
-as hvigor. The fixes came directly from the upstream lowering path:
+For the minimal fixture, the generated cache TypeScript bytes match hvigor.
+Compiling those cache TS files through `arkdown-abc` now emits a 9844B
+`modules.abc` that is byte-identical to hvigor, and the CLI uses this route for
+final ABC generation. The fixes came directly from the upstream lowering path:
 `ClassDeclaration::Compile` / `ClassDefinition::Compile` scoped class temporaries,
 `ExportDefaultDeclaration` records named default classes under the class local
 name, top-level block traversal collects call-argument arrows, and
@@ -116,11 +118,11 @@ module-entry implicit return source reset, and no-argument `return;` lowering to
 the AST nodes used by upstream. These match
 `FunctionBuilder::ImplicitReturn()`, `Condition::Compile()`,
 `Identifier::Compile()`, `GenScopeVariableInfo()`, and
-`CheckIfSuperCorrectCallBeforeReturn()` in upstream es2panda. The direct route
-is now 2B smaller than hvigor overall while still having per-method undershoots
-and overshoots. The remaining mismatch is in non-CodeItem ABC sections such as
-DebugInfo/LNP, annotations, indexes, or literal metadata rather than executable
-bytecode.
+`CheckIfSuperCorrectCallBeforeReturn()` in upstream es2panda. Final byte parity
+also required upstream `LineNumberProgramItem::EmitSpecialOpcode()` semantics
+for pc deltas, hvigor's 4-byte-aligned trailing LNP index, sorted parameter-name
+string insertion, and MethodItem tag order `CODE -> SOURCE_LANG -> DEBUG_INFO
+-> ANNOTATION -> NOTHING`.
 
 Source-map routing was also checked against this state. Using rolldown chunk
 source maps for ABC debug info regressed the minimal fixture to 9679B, and the
@@ -129,53 +131,23 @@ upstream `gen_merged_abc.ts` passes `filesInfo.txt` and `npmEntries.txt` to
 `es2abc`, not a source-map argument for LNP generation. `arkdown-abc` now accepts
 source maps only for API compatibility; `source_file` is passed separately from
 `filesInfo`-style metadata, and LNP coordinates come from parsed source spans.
-This source-derived route currently emits 9700B while preserving all CodeItems.
-The direct cache-TS route also preserves CodeItems now, but it is 9842B and still
-needs section-level parity before becoming the final default path.
+The old chunk source-derived route emitted 9700B while preserving CodeItems, but
+it is no longer the final ABC route. The direct cache-TS route is now the default
+and matches hvigor byte-for-byte for the minimal fixture.
 
-## Remaining ABC Gap
+## Remaining Minimal-HAP Gap
 
-The remaining gap is in source-position metadata, not executable bytecode.
-
-Observed LNP differences:
-
-- Some generated methods still inherit incomplete AST/source positions in
-  `arkdown-abc`, so their line_ops differ from hvigor. The default derived
-  `EntryAbility #~@0=#EntryAbility` constructor is aligned; top-level closures
-  `Index #*#` and `Index #*#^1` are aligned on the direct cache-TS route.
-- `Index func_main_0` has identical CodeItem bytes and the early class
-  declaration / getter-setter source-position stream is mostly aligned. Remaining
-  differences are concentrated near static-method/class-local closeout and the
-  final module line closeout for `Index`.
-- Normal class methods show the same pattern: code bytes match, but the line and
-  column coordinates come from a mixed chunk/cache coordinate system. For
-  example, kept-for-inspection chunk JS had `EntryAbility.onBackground` on
-  chunk lines 22-23 while the CompileArkTS cache TS has it on lines 24-25, and
-  hvigor records the cache-TS coordinates.
-- `sourceMaps.json` and final `ets/sourceMaps.map` are already byte-identical
-  for the minimal fixture, so they are no longer considered the active ABC LNP
-  input. They still matter for debugger remapping after ABC parity is achieved.
-- The LNP algorithm shape is now close to upstream, but the input event stream is
-  not yet identical. The next work is to align event generation, not package
-  layout or method bytecode.
-
-Required implementation work:
-
-1. Extend the synthesized constructor source-position fix beyond the default
-   derived constructor path when field initializers or explicit constructor
-   bodies are present.
-2. Make inserted instructions inherit the nearest previous emitted source position.
-3. Keep `BuildLineNumberProgram` semantics based on real bytecode sizes, column
-   changes, and local-variable start/end events.
-4. Re-run the minimal-hap comparison and require: only `ets/modules.abc` differs
-   until DebugInfo reaches byte parity; CodeItems must remain byte-identical.
+There is no remaining `modules.abc` or unsigned HAP packaging gap for the
+minimal fixture. The unsigned archive has the same 11 entries, in the same
+order, with byte-identical payloads. Signed HAP output may be reordered by the
+signing layer and is not the unsigned packaging oracle.
 
 ## Major Remaining Capabilities Beyond Minimal-HAP
 
 | Area | Status | Remaining work |
 |---|---|---|
-| ABC DebugInfo/LNP | partial | Align source-position event stream with es2panda/emitter.cpp. |
-| Direct cache-TS ABC route | partial | CodeItems match; align remaining non-CodeItem sections before switching final generation to cache TS. |
+| ABC DebugInfo/LNP | minimal fixture aligned | Broaden golden coverage beyond minimal-hap. |
+| Direct cache-TS ABC route | minimal fixture aligned | Keep as final ABC route; extend fixture coverage. |
 | ArkTS transform breadth | partial | Broaden beyond minimal fixture: `@Builder`, `@Styles`, more ArkUI DSL forms, diagnostics. |
 | Release builds | partial | Obfuscation, terser/minification, release treeshake/manual chunks, release source maps. |
 | Incremental cache | partial | Rollup msgpack cache, task input cache, real ABC `--cache-file` equivalent. |
@@ -186,19 +158,12 @@ Required implementation work:
 
 Priority order from the current 2026-05-31 state:
 
-1. **[ABC DebugInfo] Align `Index func_main_0` column stream.** CodeItem bytes
-   already match; only LNP body and DebugInfo constant_pool differ.
-2. **[ABC DebugInfo] Generalize constructor source-position events.** The default
-   derived constructor now matches the minimal fixture; explicit constructors
-   and field initializer variants still need golden coverage.
-3. **[ABC Direct TS] Diff non-CodeItem sections on the cache-TS route.** The
-   source TS is already equal to hvigor and all direct-route CodeItems match; the
-   remaining 2B overall shrink must be isolated to DebugInfo/LNP, annotations,
-   indexes, literal arrays, or other metadata, while preserving the per-method
-   source-node fixes already matched to upstream.
-4. **[Parity harness] Add an ABC diff helper that compares CodeItems separately
-   from DebugInfo/LNP.** This prevents future regressions from being hidden by
-   total file-size changes.
+1. **[ABC Coverage] Add broader cache-TS golden fixtures.** Keep minimal-hap
+   byte parity while covering explicit constructors, field initializers, ArkUI
+   DSL variants, imports, dependencies, release mode, HSP, HAR, and HmosWorld.
+2. **[Parity harness] Add a stable ABC diff helper.** It should compare
+   CodeItems, DebugInfo/LNP, method records, indexes, literal arrays, and final
+   bytes separately so future regressions are localized immediately.
 
 ## SPEC Coverage Map
 

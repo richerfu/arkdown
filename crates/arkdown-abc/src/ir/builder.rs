@@ -67,6 +67,12 @@ fn col_at(source: &str, byte_offset: u32) -> u32 {
 }
 
 fn argument_span_start(arg: &Argument<'_>) -> u32 {
+    if let Some(expr) = arg.as_expression() {
+        if let Expression::CallExpression(call) = expr {
+            return call.callee.span().start;
+        }
+        return expr.span().start;
+    }
     arg.span().start
 }
 
@@ -212,7 +218,7 @@ impl LineTracker {
     /// Emit SPECIAL(pc_inc, line_inc) if encodable; returns true on success.
     fn try_special(&mut self, pc_inc: u32, line_inc: i32) -> bool {
         let adj = line_inc - LNP_LINE_BASE;
-        if pc_inc < LNP_LINE_RANGE && adj >= 0 && (adj as u32) < LNP_LINE_RANGE {
+        if adj >= 0 && (adj as u32) < LNP_LINE_RANGE {
             let op = pc_inc * LNP_LINE_RANGE + adj as u32 + LNP_OPCODE_BASE;
             if op <= 255 {
                 self.ops.push(op as u8);
@@ -3566,6 +3572,7 @@ impl<'a> CodeGen<'a> {
         if let Expression::BinaryExpression(bin) = expr {
             if is_condition_comparison(bin.operator) {
                 self.emit_condition_comparison(bin);
+                self.set_debug_pos(bin.span.start);
                 let branch_pos = self.insns.len();
                 self.push(Insn::JeqzShort(0));
                 return branch_pos;
@@ -3573,6 +3580,7 @@ impl<'a> CodeGen<'a> {
         }
 
         self.emit_expr(expr);
+        self.set_debug_pos(expr.span().start);
         self.push(Insn::CallRuntimeIsFalse(0));
         let branch_pos = self.insns.len();
         self.push(Insn::JnezShort(0));
@@ -4842,6 +4850,7 @@ impl<'a> CodeGen<'a> {
         let saved_next_reg = self.next_reg;
         let callee_reg = self.alloc_reg();
         self.emit_expr(&call.callee);
+        let call_fn_line = self.current_line;
         let call_fn_col = self.current_col;
         self.push(Insn::Sta(callee_reg));
         let argc = call.arguments.len();
@@ -4853,8 +4862,10 @@ impl<'a> CodeGen<'a> {
             for arg in &call.arguments {
                 self.emit_argument(arg);
                 let reg = self.alloc_reg();
+                self.set_debug_pos(argument_span_start(arg));
                 self.push(Insn::Sta(reg));
             }
+            self.current_line = call_fn_line;
             self.current_col = call_fn_col;
             self.push(Insn::Lda(callee_reg));
             self.push(Insn::CallRange(slot, argc as u8, callee_reg + 1));
@@ -4864,12 +4875,14 @@ impl<'a> CodeGen<'a> {
 
         match argc {
             0 => {
+                self.current_line = call_fn_line;
                 self.current_col = call_fn_col;
                 self.push(Insn::Lda(callee_reg));
                 self.push(Insn::CallArg0(slot));
             }
             1 => {
                 let v0 = self.compile_arg_to_reg(&call.arguments[0]);
+                self.current_line = call_fn_line;
                 self.current_col = call_fn_col;
                 self.push(Insn::Lda(callee_reg));
                 self.push(Insn::CallArg1(slot, v0));
@@ -4877,6 +4890,7 @@ impl<'a> CodeGen<'a> {
             2 => {
                 let v0 = self.compile_arg_to_reg(&call.arguments[0]);
                 let v1 = self.compile_arg_to_reg(&call.arguments[1]);
+                self.current_line = call_fn_line;
                 self.current_col = call_fn_col;
                 self.push(Insn::Lda(callee_reg));
                 self.push(Insn::CallArgs2(slot, v0, v1));
@@ -4885,6 +4899,7 @@ impl<'a> CodeGen<'a> {
                 let v0 = self.compile_arg_to_reg(&call.arguments[0]);
                 let v1 = self.compile_arg_to_reg(&call.arguments[1]);
                 let v2 = self.compile_arg_to_reg(&call.arguments[2]);
+                self.current_line = call_fn_line;
                 self.current_col = call_fn_col;
                 self.push(Insn::Lda(callee_reg));
                 self.push(Insn::CallArgs3(slot, v0, v1, v2));
@@ -4893,8 +4908,10 @@ impl<'a> CodeGen<'a> {
                 for arg in &call.arguments {
                     self.emit_argument(arg);
                     let reg = self.alloc_reg();
+                    self.set_debug_pos(argument_span_start(arg));
                     self.push(Insn::Sta(reg));
                 }
+                self.current_line = call_fn_line;
                 self.current_col = call_fn_col;
                 self.push(Insn::Lda(callee_reg));
                 self.push(Insn::CallRange(slot, n as u8, callee_reg + 1));
@@ -4960,6 +4977,7 @@ impl<'a> CodeGen<'a> {
         // After compiling arguments, current_col is the last arg's col.
         // The call instruction itself should use the method name col,
         // matching es2panda's per-instruction column tracking.
+        let call_line = self.current_line;
         let call_col = self.current_col;
 
         // When any argument is a spread element, force callthisrange so spread
@@ -4968,8 +4986,10 @@ impl<'a> CodeGen<'a> {
             for arg in &call.arguments {
                 self.emit_argument(arg);
                 let reg = self.alloc_reg();
+                self.set_debug_pos(argument_span_start(arg));
                 self.push(Insn::Sta(reg));
             }
+            self.current_line = call_line;
             self.current_col = call_col; // reset to method col for call insn
             self.push(Insn::Lda(callee_reg));
             self.push(Insn::CallThisRange(slot, argc as u8, this_reg));
@@ -4979,12 +4999,14 @@ impl<'a> CodeGen<'a> {
 
         match argc {
             0 => {
+                self.current_line = call_line;
                 self.current_col = call_col;
                 self.push(Insn::Lda(callee_reg));
                 self.push(Insn::CallThis0(slot, this_reg));
             }
             1 => {
                 let v0 = self.compile_arg_to_reg(&call.arguments[0]);
+                self.current_line = call_line;
                 self.current_col = call_col;
                 self.push(Insn::Lda(callee_reg));
                 self.push(Insn::CallThis1(slot, this_reg, v0));
@@ -4992,6 +5014,7 @@ impl<'a> CodeGen<'a> {
             2 => {
                 let v0 = self.compile_arg_to_reg(&call.arguments[0]);
                 let v1 = self.compile_arg_to_reg(&call.arguments[1]);
+                self.current_line = call_line;
                 self.current_col = call_col;
                 self.push(Insn::Lda(callee_reg));
                 self.push(Insn::CallThis2(slot, this_reg, v0, v1));
@@ -5000,6 +5023,7 @@ impl<'a> CodeGen<'a> {
                 let v0 = self.compile_arg_to_reg(&call.arguments[0]);
                 let v1 = self.compile_arg_to_reg(&call.arguments[1]);
                 let v2 = self.compile_arg_to_reg(&call.arguments[2]);
+                self.current_line = call_line;
                 self.current_col = call_col;
                 self.push(Insn::Lda(callee_reg));
                 self.push(Insn::CallThis3(slot, this_reg, v0, v1, v2));
@@ -5008,8 +5032,10 @@ impl<'a> CodeGen<'a> {
                 for arg in &call.arguments {
                     self.emit_argument(arg);
                     let reg = self.alloc_reg();
+                    self.set_debug_pos(argument_span_start(arg));
                     self.push(Insn::Sta(reg));
                 }
+                self.current_line = call_line;
                 self.current_col = call_col;
                 self.push(Insn::Lda(callee_reg));
                 self.push(Insn::CallThisRange(slot, n as u8, this_reg));

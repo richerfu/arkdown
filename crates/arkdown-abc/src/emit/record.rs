@@ -479,14 +479,14 @@ impl ClassRecord {
             // MethodTag::SOURCE_LANG = 0x02.
             buf.push(0x02);
             buf.push(self.source_lang);
-            // MethodTag::ANNOTATION = 0x06 + annotation offset (always emitted).
-            // Points to the L_ESSlotNumberAnnotation item for this method.
-            buf.push(0x06);
-            buf.extend_from_slice(&ann_off.to_le_bytes());
             if let Some(debug_info_off) = debug_info_offsets[i] {
                 buf.push(0x05);
                 buf.extend_from_slice(&debug_info_off.to_le_bytes());
             }
+            // MethodTag::ANNOTATION = 0x06 + annotation offset (always emitted).
+            // Points to the L_ESSlotNumberAnnotation item for this method.
+            buf.push(0x06);
+            buf.extend_from_slice(&ann_off.to_le_bytes());
             // MethodTag::NOTHING = 0x00
             buf.push(0x00);
         }

@@ -116,11 +116,11 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 | H2 | Lower AST → Panda IR | `es2abc` compiler passes | `arkdown-abc::ir::` modules | 🔄 |
 | H3 | Emit ABC binary: Header, StringTable, LiteralArrayTable | `assembler/assembly_emitter.cpp` | Implemented; structural match | ✅ |
 | H4 | Emit ClassIndex + ClassRecords (one per rolldown chunk) | `assembly_emitter.cpp::SerializeClasses()` | Implemented | ✅ |
-| H5 | MethodRecords with Panda bytecode | `assembly_emitter.cpp::SerializeMethods()` | CodeItems are byte-identical for the minimal-hap fixture; remaining `modules.abc` delta is DebugInfo/LNP only (9700B / 9844B) | 🔄 |
+| H5 | MethodRecords with Panda bytecode | `assembly_emitter.cpp::SerializeMethods()` | Minimal-hap `modules.abc` is byte-identical to hvigor on the CompileArkTS cache-TS route | ✅ |
 | H6 | LNP index at file end (after literal arrays) | hvigor places lnp_idx_off at total_size | ✅ Fixed: LNP index now emitted as final section | ✅ |
 | H7 | Module annotation strings deduplicated in StringTable | Single string entry shared across all records | ✅ Fixed: field name strings deduplicated across classes | ✅ |
 | H8 | Method index ordering [strings\|methods\|lits] | `assembly_emitter.cpp` method pool layout | ✅ Fixed: method index now [bytecode_strings\|methods\|literal_arrays] | ✅ |
-| H9 | LNP body and DebugInfo constant_pool | `emitter.cpp` attaches AST source positions from parsed input source; `BuildLineNumberProgram()` consumes pandasm instruction source positions, real bytecode sizes, columns, and local-variable events | Per-instruction plumbing exists; source-position event stream still differs. Source maps are no longer passed into `arkdown-abc` for LNP generation; current source-derived output is 9700B with CodeItems still byte-identical. The direct cache-TS route is 9842B after aligning 0-based lines, default-parameter nodes, `typeof`/unary logical-not nodes, binary-expression right nodes, condition-comparison nodes, member receiver/write nodes, call argument stores, variable declarator stores, `new` expression nodes, class declaration/class export stores, class local closeout, class missing-property scope/local events, getter/setter property-key stores, class-method return end positions, `super(...)` post-call nodes, upstream `INVALID_SOURCE_LOCATION` before implicit-return `ldundefined`, module-entry implicit return source reset, no-argument `return;` lowering, right-operand `undefined` source attribution in condition comparisons, lexical-bound `this` local omission, hidden function `this` lexenv prologue filtering, derived-constructor final return positions, and top-level call-argument arrow return positions. | 🔄 |
+| H9 | LNP body and DebugInfo constant_pool | `emitter.cpp` attaches AST source positions from parsed input source; `BuildLineNumberProgram()` consumes pandasm instruction source positions, real bytecode sizes, columns, and local-variable events | Minimal-hap is byte-identical on the cache-TS route after aligning source positions, call/branch/argument stores, implicit returns, lexical `this` locals, special-opcode pc deltas, MethodItem tag order, parameter-name string order, and aligned trailing LNP index. Broader fixtures still need coverage. | 🔄 |
 | H10 | `--merge-abc`: all module records in single `.abc` | Multiple records merged with shared StringTable | Implemented | ✅ |
 | H11 | Incremental ABC cache via `--cache-file` (msgpack) | `es2abc --cache-file <path>` | CLI passes a cache-file path/marker, but backend does not implement real es2abc-compatible incremental cache | ❌ |
 | H12 | Widget compilation (separate pass, `widgetCompile: "true"`) | ArkCompile calls `initWidgetDefaultArkCompileConfig()` for form entries | Not implemented (SPEC-027) | ❌ |
@@ -183,15 +183,14 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 
 **H9 — ABC DebugInfo/LNP source-position event stream**
 - hvigor: `emitter.cpp::GenInstructionDebugInfo()` attaches AST start positions to normal instructions and function/block end positions to return instructions; `BuildLineNumberProgram()` then emits line/column and local-variable events from the pandasm instruction stream
-- arkdown: CodeItems now match for the minimal-hap fixture; the direct cache-TS route has aligned the default derived constructor and top-level `Index #*#` / `Index #*#^1` closures, while `func_main_0` and some class/method source-position events still differ
-- Root cause: `CodeGen::set_debug_pos()` coverage does not yet match es2panda's IR-node source-position assignment and generated-instruction inheritance; additionally, hvigor's LNP coordinates come from the CompileArkTS cache TS parsed by `es2abc`, while arkdown currently preserves CodeItem parity by compiling the rolldown chunk shape
-- Fix: align constructor, arrow, `func_main_0`, inserted-instruction, and return-position event generation without changing CodeItem bytes
+- arkdown: minimal-hap now matches hvigor byte-for-byte on `ets/modules.abc`
+- Remaining work: broaden golden coverage to explicit constructors, field initializers, more ArkUI DSL forms, imports/dependencies, release mode, HSP/HAR, and HmosWorld
 
 **H10 — Direct CompileArkTS cache-TS backend route**
 - hvigor: CompileArkTS writes transformed TS cache files, `filesInfo.txt`, `npmEntries.txt`, and invokes `es2abc @filesInfo`
-- arkdown: now writes matching handoff metadata, and the cache TS files match hvigor for the minimal fixture
-- Current blocker: direct cache-TS compilation through `arkdown-abc` emits 9842B and now has all 23 method records with byte-identical CodeItems; the remaining 2B overall gap is non-CodeItem ABC metadata/DebugInfo/LNP
-- Fix: keep final compilation on the current chunk path until the cache-TS route also matches non-CodeItem sections
+- arkdown: writes matching handoff metadata, generates cache TS bytes that match hvigor for the minimal fixture, and now uses that route for final ABC generation
+- Current status: minimal-hap `ets/modules.abc` is 9844B and byte-identical to hvigor
+- Remaining work: keep this as the default route while extending fixture coverage and implementing real es2abc-compatible incremental cache behavior
 
 **F16 — Missing ViewPU lowering in etsTransform**
 - hvigor: `etsTransform` SDK plugin fully lowers ArkUI `struct`+`build()` blocks into `observeComponentCreation2()`, `.create()`, attribute method calls, and `.pop()` calls
@@ -260,11 +259,10 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 
 ### TASK-ABC-01: Align DebugInfo/LNP source-position events (M)
 
-**What**: Preserve current CodeItem parity while aligning the DebugInfo constant_pool
-and LineNumberProgram event stream with hvigor. The default derived constructor
-and top-level closures (`Index #*#`, `Index #*#^1`) are aligned on the direct
-cache-TS route; continue with `Index func_main_0` and the remaining class/method
-source-position events.
+**What**: Preserve minimal-hap byte parity while extending the DebugInfo/LNP
+source-position rules to broader golden fixtures. The minimal cache-TS route is
+now aligned; future work should prevent regressions as more ArkUI and module
+forms are added.
 **File**: `crates/arkdown-abc/src/ir/builder.rs`, `crates/arkdown-abc/src/emit/file.rs`
 **Upstream ref**: `emitter.cpp::GenInstructionDebugInfo()`,
 `assembly-emitter.cpp::BuildLineNumberProgram()`,
@@ -274,11 +272,10 @@ source-position events.
 
 ### TASK-ABC-02: Direct CompileArkTS cache-TS CodeItem parity (M)
 
-**What**: Use the hvigor-style `filesInfo.txt`/`npmEntries.txt` handoff as the
-input route only after compiling the generated cache TS files preserves all
-CodeItems. The cache TS bytes already match hvigor for the minimal fixture, and
-the current direct route now has matching method count and CodeItems; remaining
-work is to align non-CodeItem sections before switching final generation.
+**What**: Keep the hvigor-style `filesInfo.txt`/`npmEntries.txt` handoff as the
+final ABC input route. The cache TS bytes and `modules.abc` now match hvigor for
+the minimal fixture; remaining work is broader coverage and real incremental
+cache compatibility.
 **File**: `crates/arkdown-cli/src/cmd/build.rs`, `crates/arkdown-abc/src/`
 **Upstream ref**: `gen_merged_abc.ts`
 **Complexity**: M
@@ -428,13 +425,13 @@ hide executable-bytecode regressions.
 
 ### Priority 1 — ABC DebugInfo Parity (finish minimal-hap byte parity)
 
-These close the remaining minimal-hap `modules.abc` byte gap while preserving
-the current CodeItem parity.
+These preserve the closed minimal-hap `modules.abc` byte parity while expanding
+coverage.
 
 | Task | Complexity | Impact |
 |------|------------|--------|
-| TASK-ABC-01: Align DebugInfo/LNP source positions | M | Required for final byte parity |
-| TASK-ABC-02: Direct cache-TS CodeItem parity | M | Required before switching to hvigor `filesInfo.txt` input |
+| TASK-ABC-01: Align DebugInfo/LNP source positions | M | Preserve byte parity across broader fixtures |
+| TASK-ABC-02: Direct cache-TS CodeItem parity | M | Default route; extend coverage and cache behavior |
 | TASK-ABC-03: ABC section diff harness | S | Prevents CodeItem regressions |
 
 ### Priority 2 — ArkUI Component Support (unblock real UI pages)

@@ -14,22 +14,21 @@
 
 ## Current State
 
-For `tests/fixtures/minimal-hap`, the unsigned HAP is byte-identical to hvigor
-except for `ets/modules.abc`.
+For `tests/fixtures/minimal-hap`, the unsigned HAP entry order and all entries
+are byte-identical to hvigor.
 
 ABC status:
 
 - hvigor `ets/modules.abc`: 9844B
-- arkdown `ets/modules.abc`: 9700B
-- all 23 compared method CodeItems are byte-identical
-- remaining difference is DebugInfo, LineNumberProgram, column-number events,
-  and local-variable debug metadata
+- arkdown `ets/modules.abc`: 9844B
+- all 23 compared method records, CodeItems, DebugInfo, LineNumberProgram
+  streams, and final ABC bytes are byte-identical
 
 Older reports that described `func_main_0` OHM prefix, duplicate annotation
 strings, external descriptor format, or per-statement-only LNP as the active
 minimal-hap blockers are obsolete. Those structural gaps have either been fixed
-or are not the current minimal-hap delta. The active blocker is now the exact
-source-position event stream used to build DebugInfo/LNP.
+or are not the current minimal-hap delta. The active blocker is now preserving
+this byte parity across broader fixtures.
 
 ## Completed Structural Fixes
 
@@ -45,8 +44,10 @@ the old assumptions:
 - LNP opcodes and DebugInfo constant_pool architecture follow upstream
   `BuildLineNumberProgram`: opcodes in LNP `data_`, operands in DebugInfo
   `constant_pool`
-- per-instruction tracking is wired through `CodeGen::push()`; the remaining
-  problem is which source line/column is attached to each instruction
+- per-instruction tracking is wired through `CodeGen::push()`
+- MethodItem tag order matches hvigor:
+  `CODE -> SOURCE_LANG -> DEBUG_INFO -> ANNOTATION -> NOTHING`
+- trailing LNP index is 4-byte aligned like hvigor
 
 ## Completed Fix: Default Derived Constructor Source Positions
 
@@ -76,13 +77,13 @@ When collecting top-level call-argument arrows:
 - recurse through call/new/object/member expressions only according to upstream
   closure emission behavior, without adding extra closure methods.
 
-## Active Bug 2: `func_main_0` Column Stream
+## Completed Fix: `func_main_0` Column Stream
 
 ### Problem
 
-`Index func_main_0` has identical CodeItem bytes but different LNP and DebugInfo
-constant_pool bytes. The remaining mismatch is line/column event attribution and
-mid-method local-variable debug events, not executable bytecode.
+`Index func_main_0` now matches hvigor on the cache-TS route. The previous
+mismatch was line/column event attribution and mid-method local-variable debug
+events, not executable bytecode.
 
 ### Fix
 
@@ -122,13 +123,13 @@ instructions without changing CodeItem bytes:
 2. preserve inherited source position for generated helper instructions;
 3. use function/block end position before generated return instructions.
 
-## Active Bug 4: Direct CompileArkTS Cache-TS Route
+## Completed Fix: Direct CompileArkTS Cache-TS Route
 
 ### Problem
 
 The generated CompileArkTS cache TypeScript files match hvigor for the minimal
-fixture, but compiling those files directly through `arkdown-abc` currently
-emits 9842B and preserves all 23 method records and CodeItems. The direct route
+fixture, and compiling those files through `arkdown-abc` now emits a 9844B
+`modules.abc` that is byte-identical to hvigor. The direct route
 reached bytecode parity after top-level block traversal, named default class
 export lowering, lexical temporary scoping, class declaration missing property
 initialization, and the upstream 0-based source-line/default-parameter/unary
@@ -142,18 +143,16 @@ locals for lexical-bound `this`, filters hidden function `this` lexenv prologue
 events, matches derived-constructor final super-call validation source
 positions, and aligns top-level call-argument arrow return positions with
 upstream source-backed LNP behavior. It also aligns class declaration/class
-export stores, variable declarator stores, call argument stores, and getter/setter
-property-key stores to the AST nodes used by upstream. The remaining direct-route
-gap is now concentrated in non-CodeItem ABC metadata/DebugInfo/LNP, especially
-EntryAbility callback and `initialRender` nested closure/method LNP records.
-The mismatch is not executable bytecode; the
-direct route still has mixed per-method under/over-shoots despite bytecode
-parity.
+export stores, variable declarator stores, call argument stores, branch
+conditions, call instruction line/column restoration, range-call argument
+stores, getter/setter property-key stores, special-opcode pc-delta boundaries,
+parameter-name string order, MethodItem tag order, and trailing LNP-index
+alignment to upstream behavior.
 
 ### Fix
 
-Do not switch final ABC generation to the cache-TS handoff until CodeItems match
-on that input shape. Use the handoff files as an oracle:
+Keep final ABC generation on the cache-TS handoff, matching hvigor's `es2abc`
+input shape:
 
 - `filesInfo.txt` supplies record name, source file, package name, and module type;
 - `npmEntries.txt` supplies native SDK module aliases;
@@ -161,17 +160,17 @@ on that input shape. Use the handoff files as an oracle:
   upstream `es2abc` writes into pandasm DebugInfo;
 - `sourceMaps.json`/`sourceMaps.map` are package debugger artifacts, not inputs
   to `BuildLineNumberProgram()`;
-- direct TS compilation now preserves the same CodeItems as hvigor, but must
-  still match the remaining non-CodeItem sections before becoming the final path.
+- direct TS compilation now preserves the same CodeItems and non-CodeItem ABC
+  sections as hvigor for the minimal fixture.
 
 ## Acceptance Criteria
 
 For the minimal-hap fixture:
 
-1. HAP entry order remains identical to hvigor.
-2. All non-ABC HAP entries remain byte-identical.
+1. HAP entry order is aligned to hvigor.
+2. All same-name HAP entries remain byte-identical.
 3. All method CodeItems remain byte-identical.
-4. `ets/modules.abc` DebugInfo/LNP bytes converge to hvigor.
+4. `ets/modules.abc` remains byte-identical to hvigor.
 5. No fix is accepted if it reduces ABC size by dropping method bytecode or
    omitting closure/class generation logic.
 

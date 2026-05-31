@@ -191,6 +191,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
     // Step 3: Bundling
     progress.step(3, 6, "Bundling");
     let mut bundle_outs: Vec<(BundleOutput, bool)> = Vec::new();
+    let mut compile_arkts_inputs_by_bundle: Vec<Vec<Ts2abcInput>> = Vec::new();
     for (module, _manifest, loader_json) in &loader_jsons {
         let cache_dir = PathBuf::from(&loader_json.cache_path);
         let output_dir = PathBuf::from(&loader_json.ace_module_build);
@@ -212,6 +213,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 },
                 true,
             ));
+            compile_arkts_inputs_by_bundle.push(Vec::new());
             continue;
         }
 
@@ -291,8 +293,9 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             .bundle(loader_json)
             .await
             .map_err(|e| anyhow::anyhow!("Bundle failed: {}", e))?;
-        let _compile_arkts_inputs = write_compile_arkts_cache(module, loader_json, &config_arc)?;
+        let compile_arkts_inputs = write_compile_arkts_cache(module, loader_json, &config_arc)?;
         bundle_outs.push((bundle_out, false));
+        compile_arkts_inputs_by_bundle.push(compile_arkts_inputs);
     }
     progress.done();
 
@@ -399,10 +402,14 @@ pub async fn run(args: BuildArgs) -> Result<()> {
 
     // Step 5: ABC compilation
     progress.step(5, 6, "Compiling ABC");
-    for (((module, _manifest, loader_json), (bundle_out, from_cache)), bc_har_deps) in loader_jsons
+    for (
+        bundle_index,
+        (((module, _manifest, loader_json), (bundle_out, from_cache)), bc_har_deps),
+    ) in loader_jsons
         .iter()
         .zip(bundle_outs.iter())
         .zip(all_bc_har_deps.iter())
+        .enumerate()
     {
         if *from_cache {
             continue;
@@ -435,16 +442,20 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 ))
             })
             .collect();
-        // Keep bytecode generation on the chunk path for now: the Rust ABC
-        // backend currently matches hvigor CodeItems from this source shape.
-        // The CompileArkTS cache TS files and filesInfo.txt are still generated
-        // above as the upstream debug source-file oracle.
-        let ts2abc_inputs = collect_js_chunks_from_output(
-            &bundle_out.chunk_files,
-            &record_name_map,
-            bundle_name,
-            &loader_json.module_name,
-        );
+        let cache_ts_inputs = compile_arkts_inputs_by_bundle
+            .get(bundle_index)
+            .cloned()
+            .unwrap_or_default();
+        let ts2abc_inputs = if cache_ts_inputs.is_empty() {
+            collect_js_chunks_from_output(
+                &bundle_out.chunk_files,
+                &record_name_map,
+                bundle_name,
+                &loader_json.module_name,
+            )
+        } else {
+            cache_ts_inputs
+        };
         if !ts2abc_inputs.is_empty() {
             // ABC incremental compiler cache: hvigor uses es2abc --cache-file to
             // avoid re-parsing unchanged modules inside the ABC backend.

@@ -88,21 +88,21 @@ These match hvigor's `restool` output for the same resource layout.
 ## HAP zip structure
 
 The unsigned HAP zip has the same 11 entries in the same order as hvigor. All
-entries are byte-identical except `ets/modules.abc`.
+entries are byte-identical.
 
 Current artifact comparison:
 
 | Entry | hvigor | arkdown | Status |
 |---|---:|---:|---|
 | HAP entry order | 11 entries | 11 entries | ✅ identical |
-| non-ABC entries | n/a | n/a | ✅ byte-identical |
+| HAP entries | n/a | n/a | ✅ byte-identical |
 | `ets/sourceMaps.map` | n/a | n/a | ✅ byte-identical in current fixture |
-| `ets/modules.abc` | 9844B | 9700B | 🔄 remaining gap |
+| `ets/modules.abc` | 9844B | 9844B | ✅ byte-identical |
 
-The `ets/modules.abc` gap is no longer a method bytecode gap. The current
-comparison shows all 23 parsed method CodeItems are byte-identical to hvigor; the
-remaining difference is in DebugInfo, LineNumberProgram, column-number events,
-and local-variable debug metadata.
+The `ets/modules.abc` gap is closed for the minimal fixture. The current
+comparison shows all 23 parsed method records, CodeItems, DebugInfo,
+LineNumberProgram streams, indexes, and final ABC bytes are byte-identical to
+hvigor.
 
 ## CompileArkTS handoff files
 
@@ -122,13 +122,6 @@ Current parity:
 | `modules.cache` | ✅ same mapping shape and order; absolute root path differs by workspace |
 
 For this fixture, the transformed cache TypeScript files are byte-identical to
-hvigor. Directly compiling those cache TS files through the current Rust ABC
-backend now preserves all 23 method records and byte-identical CodeItems. The
-direct cache-TS route is 9842B versus hvigor's 9844B; the remaining 2B overall
-gap is non-CodeItem DebugInfo/LNP or other metadata. The latest change restores
-upstream source-backed events for class declarations, variable declarators, call
-arguments, getter/setter property keys, class local closeout, module-entry
-implicit returns, and no-argument `return;` lowering without changing executable
-bytecode. Final ABC generation
-intentionally remains on the chunk input path until the direct TS route also
-matches those non-CodeItem sections.
+hvigor. Final ABC generation now uses those cache TS files, matching the
+upstream CompileArkTS handoff instead of compiling rolldown chunk text. For the
+minimal fixture this produces a byte-identical 9844B `ets/modules.abc`.
