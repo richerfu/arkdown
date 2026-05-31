@@ -139,7 +139,10 @@ for dep in scan_bytecode_har_deps(module_root, project_root) {
 
 `scan_bytecode_har_deps()` walks module and project `oh_modules/`, reads
 `oh-package.json5#metadata`, and resolves all serialized paths to absolute
-filesystem paths.
+filesystem paths. Directory entries are sorted before scanning so loader output
+does not depend on filesystem iteration order. A package name is marked as seen
+only after a valid ByteCode HAR artifact is found, so an invalid shadow directory
+does not hide a valid dependency from a later search root.
 
 ### 5. Exclude ByteCode HARs from `compileEntry`
 

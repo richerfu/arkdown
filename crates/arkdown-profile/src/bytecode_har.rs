@@ -133,11 +133,7 @@ fn scan_oh_modules_dir(
     seen: &mut std::collections::HashSet<String>,
     out: &mut Vec<ByteCodeHarScanEntry>,
 ) {
-    let Ok(entries) = std::fs::read_dir(oh_modules) else {
-        return;
-    };
-
-    for entry in entries.flatten() {
+    for entry in read_dir_sorted(oh_modules) {
         let pkg_dir = entry.path();
         if !pkg_dir.is_dir() {
             continue;
@@ -148,10 +144,7 @@ fn scan_oh_modules_dir(
         // Handle scoped packages: `@scope/pkg` lives as `oh_modules/@scope/pkg`.
         if name_str.starts_with('@') {
             // Recurse one level for scoped packages.
-            let Ok(scoped) = std::fs::read_dir(&pkg_dir) else {
-                continue;
-            };
-            for scoped_entry in scoped.flatten() {
+            for scoped_entry in read_dir_sorted(&pkg_dir) {
                 let scoped_dir = scoped_entry.path();
                 if !scoped_dir.is_dir() {
                     continue;
@@ -169,13 +162,22 @@ fn scan_oh_modules_dir(
     }
 }
 
+fn read_dir_sorted(dir: &Path) -> Vec<std::fs::DirEntry> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut entries: Vec<_> = entries.flatten().collect();
+    entries.sort_by_key(|entry| entry.file_name());
+    entries
+}
+
 fn try_collect_bytecode_har(
     pkg_dir: &Path,
     pkg_name: &str,
     seen: &mut std::collections::HashSet<String>,
     out: &mut Vec<ByteCodeHarScanEntry>,
 ) {
-    if !seen.insert(pkg_name.to_string()) {
+    if seen.contains(pkg_name) {
         return;
     }
 
@@ -204,6 +206,7 @@ fn try_collect_bytecode_har(
         .map(|metadata| metadata.declaration_entry.clone())
         .unwrap_or_default();
 
+    seen.insert(pkg_name.to_string());
     out.push(ByteCodeHarScanEntry {
         package_name: pkg_name.to_string(),
         abc_path,
@@ -642,6 +645,52 @@ mod tests {
 
         let results = scan_bytecode_har_deps(&module_dir, project_dir);
         assert_eq!(results.len(), 1, "same package must not appear twice");
+    }
+
+    #[test]
+    fn test_scan_bytecode_har_order_is_deterministic() {
+        let tmp = make_temp_dir();
+        let oh_modules = tmp.path().join("oh_modules");
+
+        for pkg_name in ["z-har", "a-har", "m-har"] {
+            let pkg = oh_modules.join(pkg_name);
+            write_abc(&pkg.join("ets").join("modules.abc"));
+            write_file(
+                &pkg.join("oh-package.json5"),
+                r#"{ name: "ignored", metadata: { byteCodeHar: true } }"#,
+            );
+        }
+
+        let results = scan_bytecode_har_deps(tmp.path(), tmp.path());
+        let names: Vec<_> = results
+            .iter()
+            .map(|entry| entry.package_name.as_str())
+            .collect();
+        assert_eq!(names, vec!["a-har", "m-har", "z-har"]);
+    }
+
+    #[test]
+    fn test_scan_bytecode_har_invalid_shadow_does_not_mark_seen() {
+        let tmp = make_temp_dir();
+        let module_dir = tmp.path().join("entry");
+        let project_dir = tmp.path();
+
+        let invalid_pkg = module_dir.join("oh_modules").join("shared-har");
+        write_file(
+            &invalid_pkg.join("oh-package.json5"),
+            r#"{ name: "shared-har", metadata: { byteCodeHar: true } }"#,
+        );
+
+        let valid_pkg = project_dir.join("oh_modules").join("shared-har");
+        write_abc(&valid_pkg.join("ets").join("modules.abc"));
+        write_file(
+            &valid_pkg.join("oh-package.json5"),
+            r#"{ name: "shared-har", metadata: { byteCodeHar: true } }"#,
+        );
+
+        let results = scan_bytecode_har_deps(&module_dir, project_dir);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].abc_path.ends_with("ets/modules.abc"));
     }
 
     #[test]
