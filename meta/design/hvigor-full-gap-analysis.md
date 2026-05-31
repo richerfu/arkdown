@@ -120,7 +120,7 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 | H6 | LNP index at file end (after literal arrays) | hvigor places lnp_idx_off at total_size | ✅ Fixed: LNP index now emitted as final section | ✅ |
 | H7 | Module annotation strings deduplicated in StringTable | Single string entry shared across all records | ✅ Fixed: field name strings deduplicated across classes | ✅ |
 | H8 | Method index ordering [strings\|methods\|lits] | `assembly_emitter.cpp` method pool layout | ✅ Fixed: method index now [bytecode_strings\|methods\|literal_arrays] | ✅ |
-| H9 | LNP body and DebugInfo constant_pool | `emitter.cpp` attaches AST source positions from parsed input source; `BuildLineNumberProgram()` consumes pandasm instruction source positions, real bytecode sizes, columns, and local-variable events | Per-instruction plumbing exists; source-position event stream still differs. Source maps are no longer passed into `arkdown-abc` for LNP generation; current source-derived output is 9700B with CodeItems still byte-identical. The direct cache-TS route is 9758B after aligning 0-based lines, default-parameter nodes, unary logical-not nodes, binary-expression right nodes, member receiver nodes, and `super(...)` post-call nodes. | 🔄 |
+| H9 | LNP body and DebugInfo constant_pool | `emitter.cpp` attaches AST source positions from parsed input source; `BuildLineNumberProgram()` consumes pandasm instruction source positions, real bytecode sizes, columns, and local-variable events | Per-instruction plumbing exists; source-position event stream still differs. Source maps are no longer passed into `arkdown-abc` for LNP generation; current source-derived output is 9700B with CodeItems still byte-identical. The direct cache-TS route is 9792B after aligning 0-based lines, default-parameter nodes, `typeof`/unary logical-not nodes, binary-expression right nodes, condition-comparison nodes, member receiver/write nodes, `new` expression nodes, and `super(...)` post-call nodes. | 🔄 |
 | H10 | `--merge-abc`: all module records in single `.abc` | Multiple records merged with shared StringTable | Implemented | ✅ |
 | H11 | Incremental ABC cache via `--cache-file` (msgpack) | `es2abc --cache-file <path>` | CLI passes a cache-file path/marker, but backend does not implement real es2abc-compatible incremental cache | ❌ |
 | H12 | Widget compilation (separate pass, `widgetCompile: "true"`) | ArkCompile calls `initWidgetDefaultArkCompileConfig()` for form entries | Not implemented (SPEC-027) | ❌ |
@@ -190,7 +190,7 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 **H10 — Direct CompileArkTS cache-TS backend route**
 - hvigor: CompileArkTS writes transformed TS cache files, `filesInfo.txt`, `npmEntries.txt`, and invokes `es2abc @filesInfo`
 - arkdown: now writes matching handoff metadata, and the cache TS files match hvigor for the minimal fixture
-- Current blocker: direct cache-TS compilation through `arkdown-abc` emits 9758B and now has all 23 method records with byte-identical CodeItems; the remaining gap is non-CodeItem ABC metadata/DebugInfo/LNP
+- Current blocker: direct cache-TS compilation through `arkdown-abc` emits 9792B and now has all 23 method records with byte-identical CodeItems; the remaining gap is non-CodeItem ABC metadata/DebugInfo/LNP
 - Fix: keep final compilation on the current chunk path until the cache-TS route also matches non-CodeItem sections
 
 **F16 — Missing ViewPU lowering in etsTransform**

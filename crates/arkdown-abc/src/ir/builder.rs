@@ -4647,8 +4647,7 @@ impl<'a> CodeGen<'a> {
                 } else {
                     self.emit_expr(&assign.right);
                 }
-                // Update col to property name position for per-instruction tracking.
-                self.set_debug_pos(mem.property.span.start);
+                self.set_debug_pos(mem.span.start);
                 let name_id = self.intern(mem.property.name.as_str());
                 self.push(Insn::StObjByName(0, name_id, obj_reg));
             }
@@ -4912,6 +4911,7 @@ impl<'a> CodeGen<'a> {
         let slot = 0u8;
         self.emit_expr(&new_expr.callee);
         let ctor_reg = self.alloc_reg();
+        self.set_debug_pos(new_expr.span.start);
         self.push(Insn::Sta(ctor_reg));
         let argc = new_expr.arguments.len();
         // Allocate argument registers contiguous after ctor_reg and compile each arg.
@@ -4921,9 +4921,11 @@ impl<'a> CodeGen<'a> {
         }
         for (i, arg) in new_expr.arguments.iter().enumerate() {
             self.emit_argument(arg);
+            self.set_debug_pos(new_expr.span.start);
             self.push(Insn::Sta(arg_regs[i]));
         }
         // newobjrange slot, (argc+1), ctor_reg — registers are [ctor, arg0, arg1, …].
+        self.set_debug_pos(new_expr.span.start);
         self.push(Insn::NewObjRange(slot, argc as u8 + 1, ctor_reg));
     }
 
@@ -4989,6 +4991,7 @@ impl<'a> CodeGen<'a> {
 
         let left_reg = self.alloc_reg();
         self.emit_expr(&bin.left);
+        self.set_debug_pos(bin.right.span().start);
         self.push(Insn::Sta(left_reg));
         if is_undefined_literal(&bin.right) {
             self.emit_undefined_literal();
@@ -4996,6 +4999,7 @@ impl<'a> CodeGen<'a> {
             self.emit_expr(&bin.right);
         }
 
+        self.set_debug_pos(bin.right.span().start);
         self.emit_binary_op(bin.operator, left_reg);
         self.next_reg = saved_next_reg;
     }
@@ -5014,14 +5018,14 @@ impl<'a> CodeGen<'a> {
 
         let left_reg = self.alloc_reg();
         self.emit_expr(&bin.left);
-        self.set_debug_pos(bin.right.span().start);
+        self.set_debug_pos(bin.span.start);
         self.push(Insn::Sta(left_reg));
         if is_undefined_literal(&bin.right) {
             self.emit_undefined_literal();
         } else {
             self.emit_expr(&bin.right);
         }
-        self.set_debug_pos(bin.right.span().start);
+        self.set_debug_pos(bin.span.start);
         self.emit_binary_op(bin.operator, left_reg);
         self.next_reg = saved_next_reg;
     }
@@ -5091,6 +5095,7 @@ impl<'a> CodeGen<'a> {
             }
             UnaryOperator::Typeof => {
                 self.emit_expr(&unary.argument);
+                self.set_debug_pos(unary.span.start);
                 self.push(Insn::TypeOf(0));
             }
             UnaryOperator::UnaryNegation => {

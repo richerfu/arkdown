@@ -127,13 +127,13 @@ instructions without changing CodeItem bytes:
 
 The generated CompileArkTS cache TypeScript files match hvigor for the minimal
 fixture, but compiling those files directly through `arkdown-abc` currently
-emits 9758B and preserves all 23 method records and CodeItems. The direct route
+emits 9792B and preserves all 23 method records and CodeItems. The direct route
 reached bytecode parity after top-level block traversal, named default class
 export lowering, lexical temporary scoping, class declaration missing property
 initialization, and the upstream 0-based source-line/default-parameter/unary
-logical-not/binary-expression-right/member-receiver/super-call source-position
-rules were aligned. The remaining direct-route gap is non-CodeItem ABC
-metadata/DebugInfo/LNP rather than executable bytecode.
+logical-not/binary-expression-right/condition-comparison/member-write/new-expression/super-call
+source-position rules were aligned. The remaining direct-route gap is
+non-CodeItem ABC metadata/DebugInfo/LNP rather than executable bytecode.
 
 ### Fix
 
