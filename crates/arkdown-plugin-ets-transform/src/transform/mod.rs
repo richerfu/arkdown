@@ -118,26 +118,110 @@ fn strip_orphan_arkui_decorator_lines(source: &str) -> String {
     let mut out = String::with_capacity(source.len());
     for line in source.lines() {
         let trimmed = line.trim();
-        if matches!(
-            trimmed,
-            "@Component"
-                | "@Entry"
-                | "@CustomDialog"
-                | "@Reusable"
-                | "@ComponentV2"
-                | "@ReusableV2"
-                | "@Builder"
-                | "@LocalBuilder"
-                | "@Styles"
-        ) || trimmed.starts_with("@Extend(")
-            || trimmed.starts_with("@AnimatableExtend(")
-        {
+        if is_known_arkui_decorator_line(trimmed) {
+            continue;
+        }
+        if let Some(stripped) = strip_known_arkui_decorator_prefix(line) {
+            out.push_str(&stripped);
+            out.push('\n');
             continue;
         }
         out.push_str(line);
         out.push('\n');
     }
     out
+}
+
+fn strip_known_arkui_decorator_prefix(line: &str) -> Option<String> {
+    let indent_len = line.len() - line.trim_start().len();
+    let (indent, trimmed) = line.split_at(indent_len);
+    if !trimmed.starts_with('@') {
+        return None;
+    }
+
+    for name in KNOWN_ARKUI_DECORATORS {
+        let bare = format!("@{name}");
+        if let Some(rest) = trimmed.strip_prefix(&bare) {
+            if rest.starts_with(char::is_whitespace) {
+                return Some(format!("{indent}{}", rest.trim_start()));
+            }
+        }
+
+        let call = format!("@{name}(");
+        if trimmed.starts_with(&call) {
+            let close = trimmed.find(')')?;
+            let rest = trimmed[close + 1..].trim_start();
+            if !rest.is_empty() {
+                return Some(format!("{indent}{rest}"));
+            }
+        }
+    }
+
+    None
+}
+
+const KNOWN_ARKUI_DECORATORS: &[&str] = &[
+    "Component",
+    "Entry",
+    "CustomDialog",
+    "Reusable",
+    "ComponentV2",
+    "ReusableV2",
+    "Builder",
+    "LocalBuilder",
+    "Styles",
+    "Extend",
+    "AnimatableExtend",
+    "State",
+    "Prop",
+    "Link",
+    "ObjectLink",
+    "Provide",
+    "Consume",
+    "BuilderParam",
+    "StorageLink",
+    "StorageProp",
+    "StoragePropRef",
+    "LocalStorageLink",
+    "LocalStorageProp",
+    "LocalStoragePropRef",
+    "Local",
+    "Param",
+    "Once",
+    "Provider",
+    "Consumer",
+    "Event",
+    "Env",
+    "Require",
+    "Watch",
+    "Trace",
+    "Computed",
+    "Monitor",
+    "SyncMonitor",
+    "ComponentInit",
+    "ComponentAppear",
+    "ComponentBuilt",
+    "ComponentAttach",
+    "ComponentDetach",
+    "ComponentReuse",
+    "ComponentRecycle",
+    "ComponentDisappear",
+    "ComponentActive",
+    "ComponentInactive",
+];
+
+fn is_known_arkui_decorator_line(trimmed: &str) -> bool {
+    if KNOWN_ARKUI_DECORATORS
+        .iter()
+        .any(|name| trimmed == format!("@{name}"))
+    {
+        return true;
+    }
+
+    KNOWN_ARKUI_DECORATORS.iter().any(|name| {
+        let prefix = format!("@{name}(");
+        trimmed.starts_with(&prefix) && trimmed.ends_with(')')
+    })
 }
 
 pub(crate) fn has_arkts_transform_syntax(content: &str) -> bool {
@@ -152,6 +236,31 @@ pub(crate) fn has_arkts_transform_syntax(content: &str) -> bool {
         "@Extend",
         "@AnimatableExtend",
         "@interface",
+        "@Local",
+        "@Param",
+        "@Once",
+        "@Provider",
+        "@Consumer",
+        "@Event",
+        "@Env",
+        "@Require",
+        "@PropRef",
+        "@StoragePropRef",
+        "@LocalStoragePropRef",
+        "@Trace",
+        "@Computed",
+        "@Monitor",
+        "@SyncMonitor",
+        "@ComponentInit",
+        "@ComponentAppear",
+        "@ComponentBuilt",
+        "@ComponentAttach",
+        "@ComponentDetach",
+        "@ComponentReuse",
+        "@ComponentRecycle",
+        "@ComponentDisappear",
+        "@ComponentActive",
+        "@ComponentInactive",
         "import lazy",
         "struct ",
     ]
@@ -509,13 +618,12 @@ fn component_from_struct(
     for element in &statement.body.body {
         match element {
             StructElement::PropertyDefinition(property) => {
-                let Some(decorator) = property
-                    .decorators
-                    .iter()
-                    .map(decorator_name)
-                    .find(|name| is_state_decorator(name))
-                else {
-                    regular_members.push(span_text(element.span(), source_text).trim().to_string());
+                let decorator_names: Vec<&str> =
+                    property.decorators.iter().map(decorator_name).collect();
+                let Some(decorator) = primary_state_decorator(&decorator_names) else {
+                    regular_members.push(strip_orphan_arkui_decorator_lines(
+                        span_text(element.span(), source_text).trim(),
+                    ));
                     continue;
                 };
                 let Some(name) = property.key.static_name() else {
@@ -540,7 +648,12 @@ fn component_from_struct(
                 let alias = property
                     .decorators
                     .iter()
-                    .find(|d| matches!(decorator_name(d), "Provide" | "Consume"))
+                    .find(|d| {
+                        matches!(
+                            decorator_name(d),
+                            "Provide" | "Consume" | "Provider" | "Consumer"
+                        )
+                    })
                     .and_then(|d| decorator_string_arg(d, source_text));
                 state_fields.push(StateField {
                     name: name.into_owned(),
@@ -604,7 +717,9 @@ fn component_from_struct(
                 });
             }
             _ => {
-                regular_members.push(span_text(element.span(), source_text).trim().to_string());
+                regular_members.push(strip_orphan_arkui_decorator_lines(
+                    span_text(element.span(), source_text).trim(),
+                ));
             }
         }
     }
@@ -622,6 +737,33 @@ fn component_from_struct(
         builder_methods,
         styles_methods,
     }))
+}
+
+fn primary_state_decorator(names: &[&str]) -> Option<&'static str> {
+    // Mirrors upstream arkui-plugins classifyV1Property/classifyV2Property order.
+    // Meta decorators such as @Watch and @Require are intentionally absent.
+    [
+        "State",
+        "StorageLink",
+        "LocalStorageLink",
+        "Link",
+        "ObjectLink",
+        "LocalStoragePropRef",
+        "StoragePropRef",
+        "PropRef",
+        "Provide",
+        "Consume",
+        "BuilderParam",
+        "Local",
+        "Once",
+        "Param",
+        "Provider",
+        "Consumer",
+        "Env",
+        "Trace",
+    ]
+    .into_iter()
+    .find(|candidate| names.iter().any(|name| name == candidate) && is_state_decorator(candidate))
 }
 
 /// Transform a struct-annotated `.ets` file to ViewPU TypeScript and produce a
@@ -1178,6 +1320,28 @@ mod tests {
             transform_ets(&make_source("entry/src/main/ets/pages/MyView.ets", src)).unwrap();
         assert!(result.contains("export default class MyView extends ViewPU"));
         assert!(!result.contains("export default struct MyView"));
+    }
+
+    #[test]
+    fn test_transforms_component_v2_property_decorators() {
+        let src = "@ComponentV2\nstruct MyView {\n  @Local count: number = 0;\n  @Param title: string = '';\n  @Provider('theme') theme: string = 'dark';\n  @Consumer('theme') incoming: string = '';\n  @Event onTap: () => void = () => {};\n  @Computed\n  get label(): string { return this.title; }\n  build() {}\n}";
+        let result =
+            transform_ets(&make_source("entry/src/main/ets/pages/MyView.ets", src)).unwrap();
+        assert!(result.contains("class MyView extends ViewPU"));
+        assert!(result.contains("private __count: ObservedPropertySimplePU<number>"));
+        assert!(result.contains("private __title: SynchedPropertySimpleOneWayPU<string>"));
+        assert!(
+            result.contains("this.__incoming = this.initializeConsume(\"theme\", \"incoming\")")
+        );
+        assert!(result.contains("onTap: () => void = () => {};"));
+        assert!(result.contains("get label(): string { return this.title; }"));
+        assert!(!result.contains("@ComponentV2"));
+        assert!(!result.contains("@Local"));
+        assert!(!result.contains("@Param"));
+        assert!(!result.contains("@Provider"));
+        assert!(!result.contains("@Consumer"));
+        assert!(!result.contains("@Event"));
+        assert!(!result.contains("@Computed"));
     }
 
     #[test]

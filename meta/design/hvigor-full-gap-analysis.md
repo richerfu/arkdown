@@ -194,8 +194,8 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 
 **F16 — Missing ViewPU lowering in etsTransform**
 - hvigor: `etsTransform` SDK plugin fully lowers ArkUI `struct`+`build()` blocks into `observeComponentCreation2()`, `.create()`, attribute method calls, and `.pop()` calls
-- arkdown: `EtsTransformPlugin` stubs out `build()` bodies and transforms state decorators but does not perform ViewPU lowering
-- Impact: any real ArkUI page (e.g., `@Entry @Component struct Index`) compiles syntactically but produces non-functional runtime code
+- arkdown: `EtsTransformPlugin` now lowers `@Component`/`@Entry`/`@CustomDialog` structs, top-level and method `@Builder`, `@Styles`, `@Extend`/`@AnimatableExtend`, `@interface`, `import lazy`, ArkUI `if`/callback bodies, and the upstream V1/V2 property-decorator classification set into TypeScript the rolldown/OXC path can parse
+- Remaining impact: full `@ComponentV2` runtime semantics still need golden parity against upstream `arkui-plugins`; current coverage is syntax lowering plus conservative ViewPU-compatible state backing
 
 **F15 — No etsChecker (TypeScript type checking)**
 - hvigor: `etsChecker` runs `ets_checker.js` from the SDK for full TypeScript semantic analysis

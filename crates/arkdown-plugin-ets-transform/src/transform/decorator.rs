@@ -33,15 +33,20 @@ pub enum ConstructorInitKind {
 /// (PU / partial-update mode, API >= 9).
 pub fn state_decorator_class(decorator: &str) -> &'static str {
     match decorator {
-        "State" | "Provide" => "ObservedPropertySimplePU",
-        "Prop" => "SynchedPropertySimpleOneWayPU",
+        "State" | "Provide" | "Local" | "Provider" | "Env" | "Trace" => "ObservedPropertySimplePU",
+        "Prop" | "Param" | "Once" | "PropRef" => "SynchedPropertySimpleOneWayPU",
         "Link" => "SynchedPropertySimpleTwoWayPU",
         "ObjectLink" => "SynchedPropertyNesedObjectPU",
         // Consume and the storage decorators all share ObservedPropertyAbstractPU as
         // the declared field type in PU mode (they are resolved/linked at runtime).
-        "Consume" | "StorageLink" | "StorageProp" | "LocalStorageLink" | "LocalStorageProp" => {
-            "ObservedPropertyAbstractPU"
-        }
+        "Consume"
+        | "Consumer"
+        | "StorageLink"
+        | "StorageProp"
+        | "StoragePropRef"
+        | "LocalStorageLink"
+        | "LocalStorageProp"
+        | "LocalStoragePropRef" => "ObservedPropertyAbstractPU",
         "BuilderParam" => "WrappedBuilder",
         _ => "ObservedPropertySimplePU",
     }
@@ -55,13 +60,20 @@ pub fn state_decorator_class(decorator: &str) -> &'static str {
 /// `process_component_member.js`.
 pub fn constructor_init_kind(decorator: &str) -> ConstructorInitKind {
     match decorator {
-        "State" | "Provide" => ConstructorInitKind::NewWithLocalInit,
-        "Prop" | "Link" | "ObjectLink" => ConstructorInitKind::NewWithParamInit,
-        "Consume" => ConstructorInitKind::ConsumeInit,
-        "BuilderParam" => ConstructorInitKind::BuilderParamInit,
-        "StorageLink" | "StorageProp" | "LocalStorageLink" | "LocalStorageProp" => {
-            ConstructorInitKind::StorageInit
+        "State" | "Provide" | "Local" | "Provider" | "Env" | "Trace" => {
+            ConstructorInitKind::NewWithLocalInit
         }
+        "Prop" | "Param" | "Once" | "Link" | "ObjectLink" | "PropRef" => {
+            ConstructorInitKind::NewWithParamInit
+        }
+        "Consume" | "Consumer" => ConstructorInitKind::ConsumeInit,
+        "BuilderParam" => ConstructorInitKind::BuilderParamInit,
+        "StorageLink"
+        | "StorageProp"
+        | "StoragePropRef"
+        | "LocalStorageLink"
+        | "LocalStorageProp"
+        | "LocalStoragePropRef" => ConstructorInitKind::StorageInit,
         _ => ConstructorInitKind::NewWithLocalInit,
     }
 }
@@ -81,7 +93,17 @@ pub fn is_state_decorator(decorator: &str) -> bool {
             | "Provide"
             | "Consume"
             | "ObjectLink"
+            | "PropRef"
             | "BuilderParam"
+            | "Local"
+            | "Param"
+            | "Once"
+            | "Provider"
+            | "Consumer"
+            | "Env"
+            | "Trace"
+            | "StoragePropRef"
+            | "LocalStoragePropRef"
     )
 }
 
@@ -90,7 +112,10 @@ pub fn is_state_decorator(decorator: &str) -> bool {
 /// Only decorators that receive new values from the parent on re-render need a slot.
 /// Derived from the `setUpdateParamsDecorators` set in ets-loader and the SPEC-004a table.
 pub fn has_update_state_vars_slot(decorator: &str) -> bool {
-    matches!(decorator, "Prop" | "LocalStorageProp" | "BuilderParam")
+    matches!(
+        decorator,
+        "Prop" | "Param" | "Once" | "PropRef" | "LocalStorageProp" | "BuilderParam"
+    )
 }
 
 #[cfg(test)]
@@ -134,6 +159,15 @@ mod tests {
             "ObservedPropertyAbstractPU"
         );
         assert_eq!(state_decorator_class("BuilderParam"), "WrappedBuilder");
+        assert_eq!(state_decorator_class("Local"), "ObservedPropertySimplePU");
+        assert_eq!(
+            state_decorator_class("Param"),
+            "SynchedPropertySimpleOneWayPU"
+        );
+        assert_eq!(
+            state_decorator_class("Consumer"),
+            "ObservedPropertyAbstractPU"
+        );
     }
 
     #[test]
@@ -174,11 +208,24 @@ mod tests {
             constructor_init_kind("LocalStorageLink"),
             ConstructorInitKind::StorageInit
         );
+        assert_eq!(
+            constructor_init_kind("Local"),
+            ConstructorInitKind::NewWithLocalInit
+        );
+        assert_eq!(
+            constructor_init_kind("Param"),
+            ConstructorInitKind::NewWithParamInit
+        );
+        assert_eq!(
+            constructor_init_kind("Consumer"),
+            ConstructorInitKind::ConsumeInit
+        );
     }
 
     #[test]
     fn test_has_update_state_vars_slot() {
         assert!(has_update_state_vars_slot("Prop"));
+        assert!(has_update_state_vars_slot("Param"));
         assert!(has_update_state_vars_slot("LocalStorageProp"));
         assert!(has_update_state_vars_slot("BuilderParam"));
         assert!(!has_update_state_vars_slot("State"));

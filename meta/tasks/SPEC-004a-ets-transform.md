@@ -156,7 +156,17 @@ mode (API >= 9).
 | `@Provide`          | `ObservedPropertySimplePU<T>`            | `new ObservedPropertySimplePU(init, this, "x")`              | No                      |
 | `@Consume`          | `ObservedPropertyAbstractPU<T>`          | `this.initializeConsume("alias_or_x", "x")`                  | No                      |
 | `@ObjectLink`       | `SynchedPropertyNesedObjectPU<T>`        | `new SynchedPropertyNesedObjectPU(params.x, this, "x")`      | No                      |
+| `@PropRef`          | `SynchedPropertySimpleOneWayPU<T>`       | `new SynchedPropertySimpleOneWayPU(params.x, this, "x")`     | Yes                     |
+| `@StoragePropRef`   | `ObservedPropertyAbstractPU<T>`          | `this.__x = undefined` (storage runtime wires it up)         | No                      |
+| `@LocalStoragePropRef` | `ObservedPropertyAbstractPU<T>`       | `this.__x = undefined` (storage runtime wires it up)         | No                      |
+| `@Local`            | `ObservedPropertySimplePU<T>`            | `new ObservedPropertySimplePU(init, this, "x")`              | No                      |
+| `@Param` / `@Once`  | `SynchedPropertySimpleOneWayPU<T>`       | `new SynchedPropertySimpleOneWayPU(params.x, this, "x")`     | Yes                     |
+| `@Provider`         | `ObservedPropertySimplePU<T>`            | `new ObservedPropertySimplePU(init, this, "x")`              | No                      |
+| `@Consumer`         | `ObservedPropertyAbstractPU<T>`          | `this.initializeConsume("alias_or_x", "x")`                  | No                      |
+| `@Env`              | `ObservedPropertySimplePU<T>`            | `new ObservedPropertySimplePU(init, this, "x")`              | No                      |
+| `@Event` / `@Require` | (regular member metadata)              | decorator stripped, member emitted as TypeScript             | —                       |
 | `@Watch`            | (no backing field; adds `declareWatch`)  | `this.declareWatch("x", this.handlerName)` after field inits | —                       |
+| `@Computed` / `@Monitor` / lifecycle decorators | (regular method metadata) | decorator stripped, method emitted as TypeScript | —                       |
 | `@Builder`          | ✅ Class method, body lowered via `lower_build_body_or_raw` | —                                         | —                       |
 | `@Styles`           | ✅ `private` class method, `.attr(x)` → `this.attr(x)` in body | —                                     | —                       |
 | `@BuilderParam`     | `WrappedBuilder<Parameters<T>>`          | `this.x = init` (direct, no `__` prefix in ctor)            | Yes                     |
