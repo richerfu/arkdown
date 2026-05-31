@@ -1,7 +1,7 @@
 # TEST-011: arkdown-resource (Resource Compiler)
 
 **Crate**: `arkdown-resource`
-**Reference**: `https://gitcode.com/openharmony/developtools_restool`
+**Reference**: `https://github.com/openharmony/developtools_global_resource_tool`
 
 ---
 

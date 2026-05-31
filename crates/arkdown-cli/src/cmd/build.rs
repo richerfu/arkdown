@@ -438,13 +438,10 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         // Keep bytecode generation on the chunk path for now: the Rust ABC
         // backend currently matches hvigor CodeItems from this source shape.
         // The CompileArkTS cache TS files and filesInfo.txt are still generated
-        // above as the upstream debug/source-map oracle.
-        let compile_arkts_source_maps = read_compile_arkts_source_map_values(module, &config_arc)?;
+        // above as the upstream debug source-file oracle.
         let ts2abc_inputs = collect_js_chunks_from_output(
             &bundle_out.chunk_files,
-            &bundle_out.chunk_graph,
             &record_name_map,
-            &compile_arkts_source_maps,
             bundle_name,
             &loader_json.module_name,
         );
@@ -1204,32 +1201,6 @@ fn compile_arkts_source_maps_json_path(
         .join("sourceMaps.json")
 }
 
-fn read_compile_arkts_source_map_values(
-    module: &ModuleConfig,
-    config: &Arc<ArkdownConfig>,
-) -> Result<HashMap<String, String>> {
-    let source_maps_json = compile_arkts_source_maps_json_path(module, config);
-    if !source_maps_json.exists() {
-        return Ok(HashMap::new());
-    }
-
-    let content = fs_err::read_to_string(&source_maps_json)?;
-    let mut source_maps = HashMap::new();
-    for line in content.lines().filter(|line| !line.trim().is_empty()) {
-        let entry: serde_json::Value = serde_json::from_str(line)
-            .with_context(|| format!("failed to parse {}", source_maps_json.display()))?;
-        let Some(key) = entry.get("key").and_then(|value| value.as_str()) else {
-            continue;
-        };
-        let Some(val) = entry.get("val") else {
-            continue;
-        };
-        source_maps.insert(key.to_string(), serde_json::to_string(val)?);
-    }
-
-    Ok(source_maps)
-}
-
 #[derive(Debug, Clone)]
 struct ChunkCompileMeta {
     record_name: String,
@@ -1247,9 +1218,7 @@ struct ChunkCompileMeta {
 /// from the chunk file's stem to avoid storing absolute filesystem paths.
 fn collect_js_chunks_from_output(
     chunk_files: &[(String, std::path::PathBuf)],
-    chunk_graph: &ChunkGraph,
     record_name_map: &HashMap<String, ChunkCompileMeta>,
-    compile_arkts_source_maps: &HashMap<String, String>,
     bundle_name: &str,
     module_name: &str,
 ) -> Vec<Ts2abcInput> {
@@ -1274,23 +1243,7 @@ fn collect_js_chunks_from_output(
                 .map(|meta| meta.record_name.clone())
                 .unwrap_or_else(derived_record_name),
             source_file: meta.and_then(|meta| meta.source_file.clone()),
-            source_map: meta
-                .and_then(|meta| meta.source_file.as_deref())
-                .and_then(|source_file| {
-                    let source_file = source_file.trim_start_matches("./");
-                    let key = format!(
-                        "{module_name}|{module_name}|1.0.0|src/main/{}",
-                        with_extension(source_file, "ts")
-                    );
-                    compile_arkts_source_maps.get(&key).cloned()
-                })
-                .or_else(|| {
-                    chunk_graph
-                        .chunks
-                        .iter()
-                        .find(|chunk| chunk.name == *chunk_name)
-                        .and_then(|chunk| chunk.source_map.clone())
-                }),
+            source_map: None,
         });
     }
     modules

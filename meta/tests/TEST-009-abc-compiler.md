@@ -1,7 +1,7 @@
 # TEST-009: arkdown-abc (ArkCompiler Bytecode Compiler)
 
 **Crate**: `arkdown-abc`
-**Reference**: `https://gitcode.com/openharmony/arkcompiler_ets_frontend`
+**Reference**: `https://github.com/openharmony/arkcompiler_ets_frontend`
 
 ---
 

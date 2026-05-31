@@ -346,7 +346,7 @@ See [abc-pipeline.md](abc-pipeline.md) for the complete Panda IR and bytecode fo
 ### arkdown replacement
 
 `arkdown-resource` reimplements restool in pure Rust, porting from
-`https://gitcode.com/openharmony/developtools_restool`. No subprocess invocation.
+`https://github.com/openharmony/developtools_global_resource_tool`. No subprocess invocation.
 All resource scanning, ID assignment, and binary serialization runs in-process.
 
 ---

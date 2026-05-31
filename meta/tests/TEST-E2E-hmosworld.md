@@ -1,6 +1,6 @@
 # TEST-E2E: hmosworld End-to-End Build and Device Verification
 
-**Project**: `https://gitcode.com/HarmonyOS_Samples/hmosworld`
+**Project**: `https://github.com/susns/HmosWorld`
 **Subdirectory**: `HMOSWorld/Application`
 **Purpose**: The golden-path integration test. A full arkdown build of a real, multi-module
 HarmonyOS project that produces valid HAR/HAP/APP artifacts and runs correctly on a HOS device.
@@ -57,7 +57,7 @@ tests/integration/
 
 ```bash
 # Clone the test fixture (run once)
-git clone https://gitcode.com/HarmonyOS_Samples/hmosworld tests/fixtures/hmosworld
+git clone https://github.com/susns/HmosWorld tests/fixtures/hmosworld
 
 # Set SDK location for ets-loader transform
 export OHOS_SDK_HOME=/path/to/sdk/default/openharmony

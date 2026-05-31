@@ -13,8 +13,8 @@ Implement the ArkCompiler bytecode (`.abc`) compilation pipeline in pure Rust. T
 Rust port of `es2abc` — the ETS/JS → bytecode compiler from OpenHarmony's
 `arkcompiler_ets_frontend` project.
 
-**Reference implementation**: `https://gitcode.com/openharmony/arkcompiler_ets_frontend`
-**Bytecode format spec**: `https://gitcode.com/openharmony/arkcompiler_runtime_core`
+**Reference implementation**: `https://github.com/openharmony/arkcompiler_ets_frontend`
+**Bytecode format spec**: `https://github.com/openharmony/arkcompiler_runtime_core`
 
 The compiled Rust implementation replaces the SDK `es2abc` binary entirely.
 No subprocess invocation. All compilation logic lives in this crate.
@@ -198,8 +198,10 @@ cross-record references at runtime.
 
 ### 4. Line Number Programs (Debug Info)
 
-When a source file path is available (via `source_map` or `debug_info: true`), each method
-gets a `DebugInfoRecord` and a Panda **LineNumberProgram (LNP)**.
+When a source file path is available and debug info is enabled, each method gets
+a `DebugInfoRecord` and a Panda **LineNumberProgram (LNP)**. The line/column
+coordinates are derived from the source text parsed by `es2abc`, not from the
+packaged `sourceMaps.map` artifact.
 
 #### DebugInfoRecord binary layout (emitted in the DebugInfo section)
 
@@ -236,10 +238,13 @@ Valid when `0 ≤ pc_delta ≤ 16` and `0 ≤ line_delta ≤ 15` and `op ≤ 255
 
 - `MethodRecord::line_ops` holds the pre-encoded LNP body (including END_SEQUENCE)
   produced by `LineTracker::finish()`.
-- Line tracking is currently enabled only for `func_main_0` (the module entry point)
-  when a source file is attached. Nested function methods carry `line_ops: vec![]`
-  and fall back to a minimal `SET_FILE + END_SEQUENCE` LNP.
-- `LineTracker` computes 1-based line numbers from byte offsets using `line_at(source, offset)`.
+- Line tracking is enabled for methods with source files. The active parity work
+  is to make the source-position event stream match upstream `emitter.cpp`:
+  normal instructions use AST start positions, return instructions use the
+  enclosing function/block end, and inserted instructions inherit the nearest
+  previous emitted source position.
+- `LineTracker` computes 1-based line numbers and column numbers from source
+  byte offsets using `line_at(source, offset)` and related helpers.
 - The LNP section in the emitted file uses `line_ops` verbatim when non-empty, or emits
   a bare `0x00` (END_SEQUENCE) otherwise.
 
@@ -333,10 +338,10 @@ crates/arkdown-abc/
 
 ## Design References
 
-- `meta/design/abc-pipeline.md` — module input contract, source map chain, flags context
+- `meta/design/abc-pipeline.md` — module input contract, DebugInfo coordinate source, flags context
 - `meta/design/chunk-model.md` — legacy IIFE chunk behavior where applicable
-- OpenHarmony source: `https://gitcode.com/openharmony/arkcompiler_ets_frontend`
-- Bytecode format: `https://gitcode.com/openharmony/arkcompiler_runtime_core`
+- OpenHarmony source: `https://github.com/openharmony/arkcompiler_ets_frontend`
+- Bytecode format: `https://github.com/openharmony/arkcompiler_runtime_core`
 
 ---
 

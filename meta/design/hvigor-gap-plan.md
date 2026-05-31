@@ -68,14 +68,15 @@ Current byte-level parity for the local minimal-hap fixture:
 |---|---:|---:|---|
 | unsigned HAP entry order | 11 entries | 11 entries | identical |
 | non-ABC HAP entries | n/a | n/a | byte-identical |
-| `ets/modules.abc` | 9844B | 9727B | different |
+| `ets/modules.abc` | 9844B | 9700B | different |
 | ABC method CodeItems | n/a | n/a | byte-identical for all compared methods |
 | ABC DebugInfo/LNP/column program | n/a | n/a | remaining gap |
 
-The earlier 7174B/9844B, 7525B/9844B, and 8675B/9844B reports are obsolete.
-Those gaps covered already-fixed structural issues. The current 117B gap is not
-method bytecode: it is DebugInfo, LineNumberProgram, column program, and local
-variable event encoding.
+The earlier 7174B/9844B, 7525B/9844B, 8675B/9844B, and 9727B/9844B reports are
+obsolete. Those gaps covered already-fixed structural issues or the now-removed
+source-map-driven LNP route. The current 144B gap is not method bytecode: all
+23 compared CodeItems are byte-identical. The remaining delta is DebugInfo,
+LineNumberProgram, column program, and local-variable event encoding.
 
 ## CompileArkTS Source Route
 
@@ -100,12 +101,16 @@ generation stays on the chunk input path because that is the only path currently
 preserving CodeItem parity.
 
 Source-map routing was also checked against this state. Using rolldown chunk
-source maps for ABC debug info regressed the minimal fixture to 9679B, while the
-current CompileArkTS source-map oracle keeps the output at 9727B. The regression
-confirms that a simple source-map switch is not the fix. The remaining work is
-to make the Rust backend accept the hvigor cache-TS input shape without losing
-CodeItem parity, or to provide an equivalent debug-coordinate source for the
-current chunk input path.
+source maps for ABC debug info regressed the minimal fixture to 9679B, and the
+old CompileArkTS source-map-backed route produced 9727B. Both were incorrect:
+upstream `gen_merged_abc.ts` passes `filesInfo.txt` and `npmEntries.txt` to
+`es2abc`, not a source-map argument for LNP generation. `arkdown-abc` now accepts
+source maps only for API compatibility; `source_file` is passed separately from
+`filesInfo`-style metadata, and LNP coordinates come from parsed source spans.
+This source-derived route currently emits 9700B while preserving all CodeItems.
+The remaining work is therefore to make the Rust backend accept the hvigor
+cache-TS input shape without losing CodeItem parity, or to provide an equivalent
+cache-TS coordinate source for the current chunk input path.
 
 ## Remaining ABC Gap
 
@@ -126,6 +131,9 @@ Observed LNP differences:
   example, kept-for-inspection chunk JS had `EntryAbility.onBackground` on
   chunk lines 22-23 while the CompileArkTS cache TS has it on lines 24-25, and
   hvigor records the cache-TS coordinates.
+- `sourceMaps.json` and final `ets/sourceMaps.map` are already byte-identical
+  for the minimal fixture, so they are no longer considered the active ABC LNP
+  input. They still matter for debugger remapping after ABC parity is achieved.
 - The LNP algorithm shape is now close to upstream, but the input event stream is
   not yet identical. The next work is to align event generation, not package
   layout or method bytecode.

@@ -133,6 +133,7 @@ mod tests {
             record_name: "main".to_string(),
             source: "(function () { var x = 1; })()".to_string(),
             source_map: None,
+            source_file: None,
         }];
         let tmp = std::env::temp_dir().join("test_abc_minimal.abc");
         let result = compiler.compile(modules, &tmp);
@@ -154,11 +155,13 @@ mod tests {
                 record_name: "@bundle:com.example/entry/ets/pages/Index".to_string(),
                 source: "(function () { var x = 1; })()".to_string(),
                 source_map: None,
+                source_file: None,
             },
             AbcModule {
                 record_name: "@bundle:com.example/entry/ets/utils/Helper".to_string(),
                 source: "(function () { function helper() { return 42; } })()".to_string(),
                 source_map: None,
+                source_file: None,
             },
         ];
         let tmp = std::env::temp_dir().join("test_abc_multi.abc");
@@ -189,6 +192,7 @@ mod tests {
             record_name: "bad".to_string(),
             source: "this is not valid javascript ???".to_string(),
             source_map: None,
+            source_file: None,
         }];
         let tmp = std::env::temp_dir().join("test_abc_parse_error.abc");
         let result = compiler.compile(modules, &tmp);
@@ -205,6 +209,7 @@ mod tests {
             record_name: "test_record".to_string(),
             source: "(function(){}())".to_string(),
             source_map: None,
+            source_file: None,
         }];
         let tmp = std::env::temp_dir().join("test_abc_result_fields.abc");
         let result = compiler.compile(modules, &tmp).unwrap();
@@ -239,6 +244,7 @@ globalThis["test"] = "hello";"#;
             record_name: "entry/src/main/ets/test".to_string(),
             source: source.to_string(),
             source_map: None,
+            source_file: None,
         }];
         let tmp = std::env::temp_dir().join("test_abc_module_requests.abc");
         compiler.compile(modules, &tmp).unwrap();
@@ -392,6 +398,7 @@ export { EntryAbility as default };"#;
                 record_name: "entry/main".to_string(),
                 source: "(function () { var x = 42; })()".to_string(),
                 source_map: None,
+                source_file: None,
             }]
         };
 
@@ -452,6 +459,7 @@ export { EntryAbility as default };"#;
                     record_name: "entry/moduleA".to_string(),
                     source: "(function () { var x = 1; })()".to_string(),
                     source_map: None,
+                    source_file: None,
                 }],
                 &out1,
             )
@@ -466,6 +474,7 @@ export { EntryAbility as default };"#;
                     record_name: "entry/moduleB".to_string(),
                     source: "(function () { var x = 1; })()".to_string(),
                     source_map: None,
+                    source_file: None,
                 }],
                 &out2,
             )

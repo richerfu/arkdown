@@ -26,6 +26,7 @@ fn iife_module(record_name: &str, source: &str) -> AbcModule {
         record_name: record_name.to_string(),
         source: source.to_string(),
         source_map: None,
+        source_file: None,
     }
 }
 
@@ -680,6 +681,7 @@ fn test_compile_source_map_field_ignored_safely() {
             record_name: "sm_test".to_string(),
             source: "(function(){ var y = 2; })();".to_string(),
             source_map: Some(r#"{"version":3,"sources":[],"mappings":""}"#.to_string()),
+            source_file: None,
         }],
         &out,
     );
@@ -692,7 +694,7 @@ fn test_compile_source_map_field_ignored_safely() {
 }
 
 #[test]
-fn test_source_map_emits_source_file_debug_info_and_lnp() {
+fn test_source_file_emits_debug_info_and_lnp() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = tmp.path().join("sourcemap-debug.abc");
     let source_file = "entry/src/main/ets/pages/Index.ts";
@@ -701,16 +703,15 @@ fn test_source_map_emits_source_file_debug_info_and_lnp() {
             vec![AbcModule {
                 record_name: "com.example.app/entry/ets/pages/Index".to_string(),
                 source: "(function(){ var x = 1; })();".to_string(),
-                source_map: Some(format!(
-                    r#"{{"version":3,"sources":["{source_file}"],"mappings":""}}"#
-                )),
+                source_map: None,
+                source_file: Some(source_file.to_string()),
             }],
             &out,
         )
         .expect("compile must succeed");
     assert!(
         result.has_debug_info,
-        "source-map backed LNP data marks the artifact as debug-bearing"
+        "source-file backed LNP data marks the artifact as debug-bearing"
     );
 
     let bytes = std::fs::read(&out).expect("read .abc");
@@ -805,6 +806,7 @@ fn module_record(record_name: &str, source: &str) -> AbcModule {
         record_name: record_name.to_string(),
         source: source.to_string(),
         source_map: None,
+        source_file: None,
     }
 }
 
@@ -1108,11 +1110,13 @@ registerNamedRoute(() => new Index(void 0, {}), "", {bundleName: "com.example.ar
                 record_name: "com.example.test/entry/ets/entryability/EntryAbility".to_string(),
                 source: entry_source.to_string(),
                 source_map: None,
+                source_file: None,
             },
             AbcModule {
                 record_name: "com.example.test/entry/ets/pages/Index".to_string(),
                 source: index_source.to_string(),
                 source_map: None,
+                source_file: None,
             },
         ],
         &out,

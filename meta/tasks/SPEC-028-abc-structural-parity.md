@@ -20,8 +20,8 @@ except for `ets/modules.abc`.
 ABC status:
 
 - hvigor `ets/modules.abc`: 9844B
-- arkdown `ets/modules.abc`: 9727B
-- all compared method CodeItems are byte-identical
+- arkdown `ets/modules.abc`: 9700B
+- all 23 compared method CodeItems are byte-identical
 - remaining difference is DebugInfo, LineNumberProgram, column-number events,
   and local-variable debug metadata
 
@@ -137,7 +137,10 @@ on that input shape. Use the handoff files as an oracle:
 
 - `filesInfo.txt` supplies record name, source file, package name, and module type;
 - `npmEntries.txt` supplies native SDK module aliases;
-- `sourceMaps.json` supplies the debug source-map oracle;
+- the cache TS source text supplies the AST line/column coordinates that
+  upstream `es2abc` writes into pandasm DebugInfo;
+- `sourceMaps.json`/`sourceMaps.map` are package debugger artifacts, not inputs
+  to `BuildLineNumberProgram()`;
 - direct TS compilation must first preserve the same CodeItems as hvigor.
 
 ## Acceptance Criteria

@@ -199,7 +199,7 @@ crates/arkdown-config/
 
 ## Acceptance Criteria
 
-- Parses the `hmosworld` sample project (`https://gitee.com/harmonyos_samples/hmosworld`) without errors
+- Parses the `hmosworld` sample project (`https://github.com/susns/HmosWorld`) without errors
 - Extracts correct `compile_api_version` from `compatibleSdkVersion`
 - Locates `es2abc` and `restool` binaries via SDK discovery
 - `ArkdownConfig::from_project(root, mode, target, product_name, module_name)` is the public API

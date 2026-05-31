@@ -15,7 +15,8 @@ fn main() {
     compiler.compile(vec![
         AbcModule { record_name: "test/index".to_string(),
             source: r#"registerNamedRoute(() => {}, "", {bundleName: "com.example.test", moduleName: "entry", pagePath: "pages/Index", pageFullPath: "entry/src/main/ets/pages/Index", integratedHsp: "false", moduleType: "followWithHap"});"#.to_string(),
-            source_map: None },
+            source_map: None,
+            source_file: None },
     ], &out).expect("compile");
     let bytes = std::fs::read(&out).expect("read");
     let num_lit = u32::from_le_bytes(bytes[0x2C..0x30].try_into().unwrap());

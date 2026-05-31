@@ -3,7 +3,7 @@
 This document describes the ArkCompiler bytecode (`.abc`) compilation step — the mandatory
 transformation from JS/TS source to ArkRuntime-executable bytecode. In arkdown this
 is implemented as a pure Rust crate (`arkdown-abc`), porting the reference implementation
-at `https://gitcode.com/openharmony/arkcompiler_ets_frontend`.
+at `https://github.com/openharmony/arkcompiler_ets_frontend`.
 
 ---
 
@@ -31,8 +31,8 @@ There is no way to ship a HAP containing plain `.js` files.
 
 ## 2. Reference Implementation
 
-**Source**: `https://gitcode.com/openharmony/arkcompiler_ets_frontend`
-**Bytecode format**: `https://gitcode.com/openharmony/arkcompiler_runtime_core`
+**Source**: `https://github.com/openharmony/arkcompiler_ets_frontend`
+**Bytecode format**: `https://github.com/openharmony/arkcompiler_runtime_core`
 
 The reference `es2abc` tool (C++) performs:
 
@@ -155,8 +155,14 @@ When `opt_level = 0` (debug builds):
 
 - Emit `DebugInfoSection` containing source position tables
 - Maps each bytecode instruction to a source line/column
-- Source positions chain: `.ets` → bundled JS (rolldown source map) → `.abc` offsets
-- DevEco Studio debugger reads this chain to show breakpoints in `.ets` source
+- ABC line/column positions come from the JS/TS source text that `es2abc`
+  parses. Upstream `emitter.cpp::GenInstructionDebugInfo()` attaches AST
+  `Range().start` positions to normal instructions and function/block end
+  positions to return instructions; `assembly-emitter.cpp::BuildLineNumberProgram()`
+  then emits LNP and column events from that pandasm instruction stream.
+- `sourceMaps.map` is still packaged for debugger source remapping, but it is
+  not an input to `BuildLineNumberProgram()` and must not be treated as the
+  ABC DebugInfo coordinate source.
 
 ### DebugInfoItem binary layout
 
@@ -204,9 +210,12 @@ When the range is exceeded, fall back to explicit `ADVANCE_LINE` + `ADVANCE_PC` 
 - Line tracking is active for all methods that have a source file.
   `CodeGen::push()` emits one `LineTracker::advance()` call per bytecode instruction
   (per-instruction ADVANCE density, matching hvigor/es2abc).
-- `CodeGen::current_line: u32` is updated at the start of each `emit_stmt()` and
-  `emit_expr()` call, giving accurate per-sub-expression line attribution.
-- 1-based line numbers are computed from span byte offsets via `line_at()`.
+- `CodeGen::set_debug_pos()` should model the upstream AST-node assignment:
+  normal instructions use the attached AST node start, return instructions use
+  the enclosing function or block end, and inserted instructions inherit the
+  nearest previous emitted source position.
+- 1-based line numbers and 0-based column numbers are computed from parsed
+  source spans via `line_at()`/`col_at()`.
 
 **Current LNP body structure** emitted by `arkdown-abc` for each method with debug info:
 

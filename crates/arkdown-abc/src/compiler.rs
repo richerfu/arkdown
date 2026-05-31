@@ -40,8 +40,15 @@ pub struct AbcModule {
     /// the input is parsed as an ECMAScript module. IIFE-wrapped CommonJS is
     /// supported only as a legacy/non-module compatibility shape.
     pub source: String,
-    /// Optional source-map JSON string for the input source.
+    /// Optional source-map JSON string accepted for API compatibility.
+    ///
+    /// This is not used to derive ABC DebugInfo line/column coordinates.
     pub source_map: Option<String>,
+    /// Optional debug source-file name stored in the ABC DebugInfo section.
+    ///
+    /// Upstream `es2abc` gets this from `filesInfo.txt`; source maps are not
+    /// inputs to `BuildLineNumberProgram()`.
+    pub source_file: Option<String>,
 }
 
 /// Output produced by a successful compilation run.
@@ -81,40 +88,6 @@ fn strip_typescript_types(source: &str) -> String {
         return source.to_string();
     }
     Codegen::new().build(&parse_ret.program).code
-}
-
-fn source_file_from_source_map(source_map: Option<&str>) -> Option<String> {
-    let map = source_map?;
-    let key = map.find("\"sources\"")?;
-    let after_key = &map[key + "\"sources\"".len()..];
-    let array_start = after_key.find('[')?;
-    let mut rest = after_key[array_start + 1..].trim_start();
-    if !rest.starts_with('"') {
-        return None;
-    }
-    rest = &rest[1..];
-
-    let mut out = String::new();
-    let mut chars = rest.chars();
-    while let Some(ch) = chars.next() {
-        match ch {
-            '"' => return (!out.is_empty()).then_some(out),
-            '\\' => {
-                let escaped = chars.next()?;
-                match escaped {
-                    '"' | '\\' | '/' => out.push(escaped),
-                    'b' => out.push('\u{0008}'),
-                    'f' => out.push('\u{000c}'),
-                    'n' => out.push('\n'),
-                    'r' => out.push('\r'),
-                    't' => out.push('\t'),
-                    _ => return None,
-                }
-            }
-            _ => out.push(ch),
-        }
-    }
-    None
 }
 
 /// Build the source file string in es2panda format:
@@ -179,9 +152,9 @@ fn cache_key_inputs(modules: &[AbcModule]) -> Vec<(String, String)> {
             (
                 module.record_name.clone(),
                 format!(
-                    "{}\0source_map={}",
+                    "{}\0source_file={}",
                     module.source,
-                    module.source_map.as_deref().unwrap_or_default()
+                    module.source_file.as_deref().unwrap_or_default()
                 ),
             )
         })
@@ -210,7 +183,7 @@ fn cache_key_inputs(modules: &[AbcModule]) -> Vec<(String, String)> {
 /// });
 ///
 /// let result = compiler.compile(
-///     vec![AbcModule { record_name: "entry/main".into(), source: "export const x = 1;" .into(), source_map: None }],
+///     vec![AbcModule { record_name: "entry/main".into(), source: "export const x = 1;" .into(), source_map: None, source_file: None }],
 ///     Path::new("output/modules.abc"),
 /// )?;
 /// println!("wrote {} bytes to {:?}", std::fs::metadata(&result.path)?.len(), result.path);
@@ -362,27 +335,30 @@ impl AbcCompiler {
             // Strip TypeScript type annotations before parsing as plain JS.
             // The codegen fallback in the loader may preserve TS syntax when
             // the OXC parser cannot handle `.ets`-specific constructs.
-            let js_source = if module.source_map.is_some() {
+            let js_source = if module.source_file.is_some() {
                 module.source.clone()
             } else {
                 strip_typescript_types(&module.source)
             };
-            let source_file = source_file_from_source_map(module.source_map.as_deref())
-                .map(|source_file| normalize_source_file(&module.record_name, source_file))
+            let source_file = module
+                .source_file
+                .as_deref()
+                .map(|source_file| {
+                    normalize_source_file(&module.record_name, source_file.to_string())
+                })
                 .or_else(|| {
                     self.options
                         .debug_info
                         .then(|| source_file_from_record_name(&module.record_name))
                 });
             has_debug_info |= source_file.is_some();
-            let record = builder::build_record_with_debug_and_source_map(
+            let record = builder::build_record_with_debug(
                 &js_source,
                 &module.record_name,
                 &mut abc_file.strings,
                 &mut abc_file.literal_arrays,
                 source_file.as_deref(),
                 self.options.module,
-                module.source_map.as_deref(),
             )?;
             abc_file.add_record(record);
         }

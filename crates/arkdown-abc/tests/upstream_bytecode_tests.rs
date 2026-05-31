@@ -53,6 +53,7 @@ fn compile_case(case: &UpstreamCase) -> Vec<u8> {
                 record_name: format!("upstream/{}", case.name),
                 source: case.source.to_string(),
                 source_map: None,
+                source_file: None,
             }],
             &out,
         )

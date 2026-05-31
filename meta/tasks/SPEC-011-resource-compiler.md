@@ -13,7 +13,7 @@ Implement the OHOS resource compilation pipeline in pure Rust. This is a Rust po
 `restool` — the resource compiler that transforms `src/main/resources/` into binary
 `resources.index` and compiled resource tables.
 
-**Reference implementation**: `https://gitcode.com/openharmony/developtools_restool`
+**Reference implementation**: `https://github.com/openharmony/developtools_global_resource_tool`
 
 No subprocess invocation. All resource compilation logic lives in this crate.
 
@@ -21,7 +21,7 @@ No subprocess invocation. All resource compilation logic lives in this crate.
 
 ## Background: What restool Does
 
-From the OpenHarmony `developtools_restool` source, the compilation pipeline:
+From the OpenHarmony `developtools_global_resource_tool` source, the compilation pipeline:
 
 1. **Scan** — walk `resources/` directory tree, categorize files by type and qualifier
 2. **Parse** — parse `element/string.json`, `element/color.json`, etc. into resource entries
@@ -194,7 +194,7 @@ crates/arkdown-resource/
 
 - `meta/design/pipeline.md` — Phase 10 (Resource Compilation)
 - `meta/design/hvigorw-analysis.md` — CompileResource task context
-- OpenHarmony source: `https://gitcode.com/openharmony/developtools_restool`
+- OpenHarmony source: `https://github.com/openharmony/developtools_global_resource_tool`
 
 ---
 

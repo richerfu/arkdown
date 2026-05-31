@@ -116,11 +116,11 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 | H2 | Lower AST → Panda IR | `es2abc` compiler passes | `arkdown-abc::ir::` modules | 🔄 |
 | H3 | Emit ABC binary: Header, StringTable, LiteralArrayTable | `assembler/assembly_emitter.cpp` | Implemented; structural match | ✅ |
 | H4 | Emit ClassIndex + ClassRecords (one per rolldown chunk) | `assembly_emitter.cpp::SerializeClasses()` | Implemented | ✅ |
-| H5 | MethodRecords with Panda bytecode | `assembly_emitter.cpp::SerializeMethods()` | CodeItems are byte-identical for the minimal-hap fixture; remaining `modules.abc` delta is DebugInfo/LNP only (9727B / 9844B) | 🔄 |
+| H5 | MethodRecords with Panda bytecode | `assembly_emitter.cpp::SerializeMethods()` | CodeItems are byte-identical for the minimal-hap fixture; remaining `modules.abc` delta is DebugInfo/LNP only (9700B / 9844B) | 🔄 |
 | H6 | LNP index at file end (after literal arrays) | hvigor places lnp_idx_off at total_size | ✅ Fixed: LNP index now emitted as final section | ✅ |
 | H7 | Module annotation strings deduplicated in StringTable | Single string entry shared across all records | ✅ Fixed: field name strings deduplicated across classes | ✅ |
 | H8 | Method index ordering [strings\|methods\|lits] | `assembly_emitter.cpp` method pool layout | ✅ Fixed: method index now [bytecode_strings\|methods\|literal_arrays] | ✅ |
-| H9 | LNP body and DebugInfo constant_pool | `BuildLineNumberProgram()` consumes pandasm instruction source positions, real bytecode sizes, columns, and local-variable events | Per-instruction plumbing exists; source-position event stream still differs. Rolldown chunk source maps were tested and regressed the fixture to 9679B, so the current gap is not fixed by simply switching source-map inputs. | 🔄 |
+| H9 | LNP body and DebugInfo constant_pool | `emitter.cpp` attaches AST source positions from parsed input source; `BuildLineNumberProgram()` consumes pandasm instruction source positions, real bytecode sizes, columns, and local-variable events | Per-instruction plumbing exists; source-position event stream still differs. Source maps are no longer passed into `arkdown-abc` for LNP generation; current source-derived output is 9700B with CodeItems still byte-identical. The fix is cache-TS coordinate parity or direct cache-TS backend parity. | 🔄 |
 | H10 | `--merge-abc`: all module records in single `.abc` | Multiple records merged with shared StringTable | Implemented | ✅ |
 | H11 | Incremental ABC cache via `--cache-file` (msgpack) | `es2abc --cache-file <path>` | CLI passes a cache-file path/marker, but backend does not implement real es2abc-compatible incremental cache | ❌ |
 | H12 | Widget compilation (separate pass, `widgetCompile: "true"`) | ArkCompile calls `initWidgetDefaultArkCompileConfig()` for form entries | Not implemented (SPEC-027) | ❌ |
@@ -184,7 +184,7 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 **H9 — ABC DebugInfo/LNP source-position event stream**
 - hvigor: `emitter.cpp::GenInstructionDebugInfo()` attaches AST start positions to normal instructions and function/block end positions to return instructions; `BuildLineNumberProgram()` then emits line/column and local-variable events from the pandasm instruction stream
 - arkdown: CodeItems now match for the minimal-hap fixture, but some synthesized constructors and top-level closures have missing or different source-position events
-- Root cause: `CodeGen::set_debug_pos()` coverage does not yet match es2panda's IR-node source-position assignment and generated-instruction inheritance
+- Root cause: `CodeGen::set_debug_pos()` coverage does not yet match es2panda's IR-node source-position assignment and generated-instruction inheritance; additionally, hvigor's LNP coordinates come from the CompileArkTS cache TS parsed by `es2abc`, while arkdown currently preserves CodeItem parity by compiling the rolldown chunk shape
 - Fix: align constructor, arrow, `func_main_0`, inserted-instruction, and return-position event generation without changing CodeItem bytes
 
 **H10 — Direct CompileArkTS cache-TS backend route**
@@ -482,9 +482,9 @@ the current CodeItem parity.
 | Build orchestration | `~/Downloads/command-line-tools/hvigor/hvigor-ohos-plugin/node_modules/@ohos/hvigor-arkts-base/dist/src/build.js` |
 | SDK plugin loading | `~/Downloads/command-line-tools/hvigor/hvigor-ohos-plugin/node_modules/@ohos/hvigor-arkts-compose/dist/src/util/load-sdk-functions.js` |
 | Importee processing | `~/Downloads/command-line-tools/hvigor/hvigor-ohos-plugin/node_modules/@ohos/hvigor-arkts-base/dist/src/build-steps/process-importee.js` |
-| assembly_emitter.cpp | `https://gitcode.com/openharmony/arkcompiler_ets_frontend/raw/master/assembler/assembly_emitter.cpp` |
-| assembly_emitter.h | `https://gitcode.com/openharmony/arkcompiler_ets_frontend/raw/master/assembler/assembly_emitter.h` |
-| Panda bytecode ISA | `https://gitcode.com/openharmony/arkcompiler_runtime_core/src/branch/master/isa/isa.yaml` |
+| assembly-emitter.cpp | `https://github.com/openharmony/arkcompiler_runtime_core/blob/master/static_core/assembler/assembly-emitter.cpp` |
+| assembly-emitter.h | `https://github.com/openharmony/arkcompiler_runtime_core/blob/master/static_core/assembler/assembly-emitter.h` |
+| Panda bytecode ISA | `https://github.com/openharmony/arkcompiler_runtime_core/blob/master/static_core/isa/isa.yaml` |
 | ets-loader source | DevEco SDK: `<OHOS_SDK_HOME>/ets/build-tools/ets-loader/` |
 
 ---

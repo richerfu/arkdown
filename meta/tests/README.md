@@ -51,7 +51,7 @@ exact behavioral parity cases derived from reading the original source.
 Clone the fixture:
 
 ```bash
-git clone https://gitcode.com/HarmonyOS_Samples/hmosworld tests/fixtures/hmosworld
+git clone https://github.com/susns/HmosWorld tests/fixtures/hmosworld
 ```
 
 ## Origin Behavioral Parity
@@ -67,5 +67,5 @@ Original source locations:
 - `module-meta-info-plugin` → hvigor-arkts-compose `dist/src/plugins/module-meta-info-plugin.js`
 - `har-deduplicate` → hvigor-arkts-compose `dist/src/plugins/har-deduplicate/`
 - `check-duplicate-filenames-plugin` → hvigor-arkts-compose `dist/src/plugins/check-duplicate-filenames-plugin.js`
-- `es2abc` (ABC compiler) → `https://gitcode.com/openharmony/arkcompiler_ets_frontend`
-- `restool` (resource compiler) → `https://gitcode.com/openharmony/developtools_restool`
+- `es2abc` (ABC compiler) → `https://github.com/openharmony/arkcompiler_ets_frontend`
+- `restool` (resource compiler) → `https://github.com/openharmony/developtools_global_resource_tool`
