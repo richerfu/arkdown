@@ -124,10 +124,11 @@ Current parity:
 For this fixture, the transformed cache TypeScript files are byte-identical to
 hvigor. Directly compiling those cache TS files through the current Rust ABC
 backend now preserves all 23 method records and byte-identical CodeItems. The
-direct cache-TS route is 9841B versus hvigor's 9844B; the remaining 3B overall
+direct cache-TS route is 9842B versus hvigor's 9844B; the remaining 2B overall
 gap is non-CodeItem DebugInfo/LNP or other metadata. The latest change restores
 upstream source-backed events for class declarations, variable declarators, call
-arguments, getter/setter property keys, and module-entry implicit returns without
-changing executable bytecode. Final ABC generation
+arguments, getter/setter property keys, class local closeout, module-entry
+implicit returns, and no-argument `return;` lowering without changing executable
+bytecode. Final ABC generation
 intentionally remains on the chunk input path until the direct TS route also
 matches those non-CodeItem sections.

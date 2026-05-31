@@ -2202,7 +2202,7 @@ fn compile_arrow_body_with_line_ops<'src>(
         source,
         source_mapper,
     );
-    if !expression_body && body.statements.is_empty() {
+    if !expression_body {
         gen.function_end = Some(body.span.end);
     }
     gen.bind_function_param_names(param_names);
@@ -3002,7 +3002,7 @@ impl<'a> CodeGen<'a> {
                 self.set_debug_pos(end);
                 self.push(Insn::ReturnUndefined);
             } else if self.module_body && self.source.is_some() {
-                self.current_line = 0;
+                self.current_line = u32::MAX;
                 self.current_col = u32::MAX;
                 self.push(Insn::LdUndefined);
                 self.push(Insn::ReturnUndefined);
@@ -3052,7 +3052,9 @@ impl<'a> CodeGen<'a> {
                     }
                 } else {
                     self.push(Insn::LdUndefined);
-                    self.push_with_epilogue(Insn::LdUndefined);
+                    self.current_line = u32::MAX;
+                    self.current_col = u32::MAX;
+                    self.push(Insn::LdUndefined);
                     if let Some(areg) = self.async_reg {
                         self.push(Insn::AsyncFunctionResolve(0, areg));
                     }
@@ -3157,7 +3159,9 @@ impl<'a> CodeGen<'a> {
                         cls.body.span.start,
                     );
                     if let Some(lex_idx) = self.lowering.lexical_index(&name) {
+                        self.set_debug_pos(cls.body.span.start);
                         self.push(Insn::Lda(class_reg));
+                        self.set_debug_pos(id.span.start);
                         self.push(Insn::Sta(class_reg));
                         self.push(Insn::Lda(class_reg));
                         self.push(Insn::StLexVar(0, lex_idx));
