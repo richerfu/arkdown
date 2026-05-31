@@ -366,6 +366,10 @@ fn collect_dynamic_import_dep_names(config: &ArkdownConfig, module_root: &Path) 
     {
         names.extend(runtime_only.packages.iter().cloned());
     }
+    names.extend(read_dependency_runtime_only_package_names(
+        module_root,
+        &config.project_root,
+    ));
     let mut seen = std::collections::HashSet::new();
     names.retain(|name| seen.insert(name.clone()));
     names
@@ -390,6 +394,88 @@ fn read_dynamic_dep_names(module_root: &Path) -> Vec<String> {
     json5::from_str::<PkgDynDeps>(&content)
         .map(|p| p.dynamic_dependencies.into_keys().collect())
         .unwrap_or_default()
+}
+
+fn read_dependency_runtime_only_package_names(
+    module_root: &Path,
+    project_root: &Path,
+) -> Vec<String> {
+    let dep_names = read_package_dep_names(module_root);
+    let mut names = Vec::new();
+    for dep_name in dep_names {
+        let Some(pkg_dir) = resolve_oh_module_dir(&dep_name, module_root, project_root) else {
+            continue;
+        };
+        names.extend(read_pkg_runtime_only_packages(&pkg_dir));
+    }
+    names
+}
+
+fn read_package_dep_names(module_root: &Path) -> Vec<String> {
+    let path = module_root.join("oh-package.json5");
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return vec![];
+    };
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PkgDeps {
+        #[serde(default)]
+        dependencies: HashMap<String, String>,
+    }
+
+    json5::from_str::<PkgDeps>(&content)
+        .map(|p| p.dependencies.into_keys().collect())
+        .unwrap_or_default()
+}
+
+fn read_pkg_runtime_only_packages(pkg_dir: &Path) -> Vec<String> {
+    let path = pkg_dir.join("oh-package.json5");
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return vec![];
+    };
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PkgRuntimeOnly {
+        #[serde(default)]
+        metadata: PkgMetadata,
+    }
+
+    #[derive(Default, serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PkgMetadata {
+        #[serde(default)]
+        runtime_only: PkgRuntimeOnlyConfig,
+    }
+
+    #[derive(Default, serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PkgRuntimeOnlyConfig {
+        #[serde(default)]
+        packages: Vec<String>,
+    }
+
+    json5::from_str::<PkgRuntimeOnly>(&content)
+        .map(|p| p.metadata.runtime_only.packages)
+        .unwrap_or_default()
+}
+
+fn resolve_oh_module_dir(
+    dep_name: &str,
+    module_root: &Path,
+    project_root: &Path,
+) -> Option<PathBuf> {
+    for base in &[
+        module_root.join("oh_modules"),
+        project_root.join("oh_modules"),
+    ] {
+        let candidate = base.join(dep_name);
+        if candidate.exists() && candidate.is_dir() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 fn read_package_main(module_root: &Path) -> Option<String> {
@@ -1340,6 +1426,72 @@ mod tests {
                 .and_then(|value| value.get("hostModuleName"))
                 .and_then(|value| value.as_str()),
             Some("entry")
+        );
+    }
+
+    #[test]
+    fn test_loader_json_dynamic_import_lib_info_uses_dependency_runtime_only_packages() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let project_root = tmp.path().to_path_buf();
+        let module_root = project_root.join("entry");
+        std::fs::create_dir_all(&module_root).expect("create module dir");
+        std::fs::write(
+            module_root.join("oh-package.json5"),
+            r#"{
+              name: "entry",
+              dependencies: {
+                "source-har": "1.0.0"
+              }
+            }"#,
+        )
+        .expect("write entry oh-package");
+
+        let dep_dir = project_root.join("oh_modules").join("source-har");
+        std::fs::create_dir_all(&dep_dir).expect("create dep dir");
+        std::fs::write(
+            dep_dir.join("oh-package.json5"),
+            r#"{
+              name: "source-har",
+              metadata: {
+                runtimeOnly: {
+                  packages: ["@runtime/indirect"]
+                }
+              }
+            }"#,
+        )
+        .expect("write dep oh-package");
+
+        let runtime_pkg = project_root
+            .join("oh_modules")
+            .join("@runtime")
+            .join("indirect");
+        std::fs::create_dir_all(runtime_pkg.join("src/main/ets")).expect("create runtime dep");
+        std::fs::write(
+            runtime_pkg.join("oh-package.json5"),
+            r#"{ name: "@runtime/indirect", main: "src/main/ets/Index.ets" }"#,
+        )
+        .expect("write runtime oh-package");
+        std::fs::write(
+            runtime_pkg.join("src/main/ets/Index.ets"),
+            "export default class RuntimeIndirect {}",
+        )
+        .expect("write runtime index");
+
+        let mut config = make_config(false);
+        config.project_root = project_root.clone();
+        let module_cfg = ModuleConfig {
+            name: "entry".to_string(),
+            src_path: module_root,
+            module_type: OhosModuleType::Entry,
+        };
+
+        let loader = generate_loader_json(&config, &module_cfg, &make_manifest());
+
+        assert!(
+            loader
+                .dynamic_import_lib_info
+                .contains_key("@runtime/indirect"),
+            "dependency metadata.runtimeOnly.packages must feed dynamicImportLibInfo"
         );
     }
 

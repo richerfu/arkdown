@@ -12,8 +12,9 @@
 Detect hvigor dynamic-import surfaces and populate
 `loader.json#dynamicImportLibInfo`. Besides post-bundle `import()` resolution,
 hvigor also uses `buildOption.arkOptions.runtimeOnly.packages` and dependency
-`metadata.runtimeOnly` to describe packages loaded only at runtime. This map is
-read by the ArkRuntime to locate the entry file for dynamically imported modules.
+`metadata.runtimeOnly.packages` to describe packages loaded only at runtime. This
+map is read by the ArkRuntime to locate the entry file for dynamically imported
+modules.
 
 ---
 
@@ -206,6 +207,8 @@ crates/arkdown-cli/src/
 
 - `buildOption.arkOptions.runtimeOnly.packages` containing `my-har`: `my-har`
   appears in `dynamicImportLibInfo` with correct `entryFilePath` and host module info.
+- A direct dependency whose `oh-package.json5#metadata.runtimeOnly.packages`
+  contains `my-har`: `my-har` appears in `dynamicImportLibInfo`.
 - Source file with `import('my-har')` where `my-har` is a local HAR dep: `my-har`
   appears in `dynamicImportLibInfo` with correct `entryFilePath` and `moduleName`.
 - Static import `import { x } from 'my-har'`: `my-har` does NOT appear in
