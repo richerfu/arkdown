@@ -2,7 +2,8 @@ use std::path::Path;
 
 use arkdown_core::{
     ArkOptions, ArkdownConfig, BuildMode, BuildOption, ModuleConfig, ObfuscationConfig,
-    OutputTarget, ProductConfig, RuntimeOnlyConfig, SigningConfig, StrictModeConfig,
+    OhosModuleType, OutputTarget, ProductConfig, RuntimeOnlyConfig, SigningConfig,
+    StrictModeConfig,
 };
 
 use crate::build_profile::{load_app_json5, load_build_profile, parse_api_version};
@@ -212,6 +213,10 @@ pub fn load_config(
             Err(e) => return Err(e),
         };
 
+        if module_name.is_none() && !module_matches_output_target(&module_type, &target) {
+            continue;
+        }
+
         modules.push(ModuleConfig {
             name: raw_mod.name,
             src_path: module_root,
@@ -242,6 +247,17 @@ pub fn load_config(
         modules,
         sdk_config,
     })
+}
+
+fn module_matches_output_target(module_type: &OhosModuleType, target: &OutputTarget) -> bool {
+    match target {
+        OutputTarget::Hap => {
+            matches!(module_type, OhosModuleType::Entry | OhosModuleType::Feature)
+        }
+        OutputTarget::Hsp => matches!(module_type, OhosModuleType::Shared),
+        OutputTarget::Har => matches!(module_type, OhosModuleType::Har),
+        OutputTarget::Preview | OutputTarget::Test => true,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -464,5 +480,29 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_module_type_matches_output_target() {
+        assert!(module_matches_output_target(
+            &arkdown_core::OhosModuleType::Entry,
+            &OutputTarget::Hap
+        ));
+        assert!(module_matches_output_target(
+            &arkdown_core::OhosModuleType::Feature,
+            &OutputTarget::Hap
+        ));
+        assert!(!module_matches_output_target(
+            &arkdown_core::OhosModuleType::Har,
+            &OutputTarget::Hap
+        ));
+        assert!(module_matches_output_target(
+            &arkdown_core::OhosModuleType::Har,
+            &OutputTarget::Har
+        ));
+        assert!(module_matches_output_target(
+            &arkdown_core::OhosModuleType::Shared,
+            &OutputTarget::Hsp
+        ));
     }
 }

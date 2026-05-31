@@ -128,6 +128,8 @@ From the SDK path, derive:
 - `products` × `modules` × `targets` defines a matrix; resolve to the selected product+module combination
   - CLI flag `--product <name>` selects the product (default: first product)
   - CLI flag `--module <name>` scopes to one module (default: all modules)
+  - Without `--module`, filter modules by artifact target like hvigor tasks:
+    `hap` builds `entry`/`feature`, `hsp` builds `shared`, and `har` builds `har`
 - `buildModeSet` defines available modes; CLI `--mode debug|release` selects (default: `debug`)
 
 ---

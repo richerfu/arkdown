@@ -72,7 +72,10 @@ rolldown reads a `rolldown.config.js` (or `.ts`) file. arkdown uses JSON5 direct
 - `compatibleSdkVersion` drives `--target-api-version` for `es2abc`
 - `useNormalizedOHMUrl` enables OHM URL normalization (see [module-resolution.md](module-resolution.md))
 - `signingConfigs` reference `.p12`/`.p7b`/`.cer` material for HAP signing
-- Multiple `products` × `modules` × `targets` create a matrix of build outputs
+- Multiple `products` × `modules` × `targets` create a matrix of build outputs.
+  The default target task selects matching module types: HAP builds `entry` and
+  `feature` modules, HSP builds `shared`, and HAR builds `har`. Explicit
+  `--module` keeps the requested module scoped for diagnosis or one-off builds.
 
 ---
 
