@@ -94,15 +94,15 @@ with that file list and `npmEntries.txt`.
 
 For the minimal fixture, the generated cache TypeScript bytes match hvigor. A
 temporary experiment compiling those cache TS files directly through `arkdown-abc`
-now emits 9732B and has the same 23 method records and byte-identical CodeItems
+now emits 9738B and has the same 23 method records and byte-identical CodeItems
 as hvigor. The fixes came directly from the upstream lowering path:
 `ClassDeclaration::Compile` / `ClassDefinition::Compile` scoped class temporaries,
 `ExportDefaultDeclaration` records named default classes under the class local
 name, top-level block traversal collects call-argument arrows, and
 `FunctionEmitter::GenInstructionDebugInfo` / `CompileFunctionParameterDeclaration`
-use 0-based source lines plus per-node source positions for default parameters
-and `super(...)` post-call instructions. The direct route still produces a
-smaller file overall, so the remaining shrink is now in
+use 0-based source lines plus per-node source positions for default parameters,
+unary logical-not, binary expressions, and `super(...)` post-call instructions.
+The direct route still produces a smaller file overall, so the remaining shrink is now in
 non-CodeItem ABC sections such as DebugInfo/LNP, annotations, indexes, or literal
 metadata rather than executable bytecode.
 
@@ -114,7 +114,7 @@ upstream `gen_merged_abc.ts` passes `filesInfo.txt` and `npmEntries.txt` to
 source maps only for API compatibility; `source_file` is passed separately from
 `filesInfo`-style metadata, and LNP coordinates come from parsed source spans.
 This source-derived route currently emits 9700B while preserving all CodeItems.
-The direct cache-TS route also preserves CodeItems now, but it is 9732B and still
+The direct cache-TS route also preserves CodeItems now, but it is 9738B and still
 needs section-level parity before becoming the final default path.
 
 ## Remaining ABC Gap
@@ -182,7 +182,7 @@ Priority order from the current 2026-05-31 state:
    and field initializer variants still need golden coverage.
 4. **[ABC Direct TS] Diff non-CodeItem sections on the cache-TS route.** The
    source TS is already equal to hvigor and all direct-route CodeItems match; the
-   remaining 112B shrink must be isolated to DebugInfo/LNP, annotations, indexes,
+   remaining 106B shrink must be isolated to DebugInfo/LNP, annotations, indexes,
    literal arrays, or other metadata.
 5. **[Parity harness] Add an ABC diff helper that compares CodeItems separately
    from DebugInfo/LNP.** This prevents future regressions from being hidden by

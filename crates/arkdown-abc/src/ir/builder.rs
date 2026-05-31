@@ -5009,12 +5009,14 @@ impl<'a> CodeGen<'a> {
 
         let left_reg = self.alloc_reg();
         self.emit_expr(&bin.left);
+        self.set_debug_pos(bin.right.span().start);
         self.push(Insn::Sta(left_reg));
         if is_undefined_literal(&bin.right) {
             self.emit_undefined_literal();
         } else {
             self.emit_expr(&bin.right);
         }
+        self.set_debug_pos(bin.right.span().start);
         self.emit_binary_op(bin.operator, left_reg);
         self.next_reg = saved_next_reg;
     }
@@ -5096,6 +5098,7 @@ impl<'a> CodeGen<'a> {
             }
             UnaryOperator::LogicalNot => {
                 self.emit_expr(&unary.argument);
+                self.set_debug_pos(unary.span.start);
                 self.emit_negate_acc();
             }
             UnaryOperator::UnaryPlus => {
