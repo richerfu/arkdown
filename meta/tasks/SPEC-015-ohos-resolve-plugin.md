@@ -109,8 +109,17 @@ pub struct ProcessImporteeResult {
 Modules with IDs starting with `@ohos:`, `@kit.`, `@shared:`, `@bundle:`,
 `@system.`, or `@hms.` are excluded from both importee lists. Scoped
 `@ohos/*` package imports are not automatically external: they first resolve
-through `oh_modules` / `pkgNameToPkgBriefInfo`, and only fall back to SDK
-declarations when no package is present.
+through hvigor-style package-root metadata: project `file:` HAR aliases,
+`pkgNameToPkgBriefInfo`, importer-nearest/configured `oh_modules`, and
+`.ohpm/oh_modules`. Only when no package root is present do they fall back to
+SDK declarations.
+
+Unresolved bare/OHOS package specifiers may still be externalized at the
+rolldown layer, matching hvigor/rollup's "could not be resolved - treating it
+as an external dependency" warning path. arkdown then rejects those unresolved
+external imports before ABC generation with an ArkTS compiler-style `Cannot
+find module` error. This path is a correctness guard, not the normal mechanism
+for ohpm/HAR packages.
 
 ### loader.json integration
 
@@ -180,7 +189,7 @@ crates/arkdown-plugin-ohos-resolve/
 | `SdkDeclaration` → `external: true, module_type: Declaration` | rolldown has no `Declaration` type                   | arkdown adds `ModuleType::Declaration` to signal "skip loading"; rolldown would use `external: true` alone                  |
 | `BytecodeHar` → `external: true, module_type: BytecodeHar`    | no rolldown equivalent                               | OHOS-specific: ABC path carried in the ID string for use by packager                                                        |
 | `generate_bundle` / `rewrite_bytecode_har_imports`            | rolldown chunk rendering                             | In rolldown, cross-chunk imports are rewritten during code generation; arkdown does this post-bundle for ByteCode HAR cases |
-| `@rollup/plugin-node-resolve` replacement                     | rolldown built-in resolver                           | rolldown has a built-in resolver; arkdown replaces it with this OHOS-aware plugin                                           |
+| `@rollup/plugin-node-resolve` replacement                     | rolldown built-in resolver + `oxc_resolver`          | arkdown keeps the OHOS-aware plugin for hvigor semantics and delegates generic filesystem/package probing to `oxc_resolver` |
 
 ---
 
@@ -218,5 +227,5 @@ impl ArkdownPlugin for OhosResolvePlugin {
 - Case-sensitivity check enabled: `resolve_id("./Utils/Helper")` when actual path is `./utils/helper` → `Err(ArkdownError::CaseMismatch)` on macOS/Windows
 - Case-sensitivity check disabled: `resolve_id("./Utils/Helper")` passes through to the resolver without case validation
 - Case-sensitivity check is a no-op on Linux (skip the `read_dir` call on case-sensitive filesystems)
-- `resolve_id` returns `Ok(None)` for absolute filesystem IDs so rolldown can keep its entry handling; unresolved OHOS/bare specifiers surface as errors instead of being silently externalized
+- `resolve_id` returns `Ok(None)` for absolute filesystem IDs so rolldown can keep its entry handling; unresolved relative specifiers stay strict, while unresolved bare/OHOS package specifiers are externalized only as a fallback guard and rejected before ABC generation
 - Plugin name returns `"ohos-resolve"`

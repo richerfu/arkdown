@@ -453,6 +453,7 @@ dependencies = [
  "arkdown-core",
  "fs-err",
  "json5",
+ "oxc_resolver",
  "serde",
  "serde_json",
  "tempfile",

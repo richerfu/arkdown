@@ -9,6 +9,52 @@ pub fn read_main_field(oh_package_path: &Path) -> Option<String> {
     v.get("main")?.as_str().map(|s| s.to_string())
 }
 
+/// Read the `main` field from an `oh-package.json5` or `package.json` file.
+pub fn read_package_main_field(package_root: &Path) -> Option<String> {
+    read_main_field(&package_root.join("oh-package.json5")).or_else(|| {
+        let content = fs_err::read_to_string(package_root.join("package.json")).ok()?;
+        let v: serde_json::Value = serde_json::from_str(&content).ok()?;
+        v.get("main")?.as_str().map(|s| s.to_string())
+    })
+}
+
+/// Read the package `name` field from an `oh-package.json5` file.
+pub fn read_name_field(oh_package_path: &Path) -> Option<String> {
+    let content = fs_err::read_to_string(oh_package_path).ok()?;
+    let v: serde_json::Value = json5::from_str(&content).ok()?;
+    v.get("name")?.as_str().map(|s| s.to_string())
+}
+
+/// Read file: dependencies from an `oh-package.json5` file.
+pub fn read_file_dependencies(oh_package_path: &Path) -> Vec<(String, PathBuf)> {
+    let Some(package_root) = oh_package_path.parent() else {
+        return Vec::new();
+    };
+    let Ok(content) = fs_err::read_to_string(oh_package_path) else {
+        return Vec::new();
+    };
+    let Ok(v) = json5::from_str::<serde_json::Value>(&content) else {
+        return Vec::new();
+    };
+
+    let mut deps = Vec::new();
+    for field in ["dependencies", "dynamicDependencies"] {
+        let Some(map) = v.get(field).and_then(|deps| deps.as_object()) else {
+            continue;
+        };
+        for (name, value) in map {
+            let Some(raw) = value.as_str() else {
+                continue;
+            };
+            let Some(relative_path) = raw.strip_prefix("file:") else {
+                continue;
+            };
+            deps.push((name.clone(), package_root.join(relative_path)));
+        }
+    }
+    deps
+}
+
 /// Read the `types` field from an `oh-package.json5` file.
 pub fn read_types_field(oh_package_path: &Path) -> Option<String> {
     let content = fs_err::read_to_string(oh_package_path).ok()?;
@@ -25,6 +71,28 @@ pub fn read_version_field(oh_package_path: &Path) -> String {
         Err(_) => return String::new(),
     };
     let v: serde_json::Value = match json5::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return String::new(),
+    };
+    v.get("version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Read the package version from `oh-package.json5` or `package.json`.
+pub fn read_package_version_field(package_root: &Path) -> String {
+    let oh_package_path = package_root.join("oh-package.json5");
+    let version = read_version_field(&oh_package_path);
+    if !version.is_empty() {
+        return version;
+    }
+
+    let content = match fs_err::read_to_string(package_root.join("package.json")) {
+        Ok(c) => c,
+        Err(_) => return String::new(),
+    };
+    let v: serde_json::Value = match serde_json::from_str(&content) {
         Ok(v) => v,
         Err(_) => return String::new(),
     };

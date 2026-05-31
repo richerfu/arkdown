@@ -10,6 +10,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 json5 = { workspace = true }
 fs-err = { workspace = true }
+oxc_resolver = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -62,7 +62,13 @@ impl OhosResolvePlugin {
             self.project_root.as_path()
         };
 
-        let resolved = self.resolver.resolve(specifier, importer_path)?;
+        let resolved = match self.resolver.resolve(specifier, importer_path) {
+            Ok(resolved) => resolved,
+            Err(_) if should_externalize_unresolved(s) => {
+                return Ok(Some(unresolved_external_output(s)));
+            }
+            Err(err) => return Err(err.into()),
+        };
 
         let output = match resolved {
             OhosResolvedModule::ExternalBundle { ohm_url } => HookResolveIdOutput {
@@ -144,7 +150,13 @@ impl Plugin for OhosResolvePlugin {
                 project_root.as_path()
             };
 
-            let resolved = resolver.resolve(s, importer_path)?;
+            let resolved = match resolver.resolve(s, importer_path) {
+                Ok(resolved) => resolved,
+                Err(_) if should_externalize_unresolved(s) => {
+                    return Ok(Some(unresolved_external_output(s)));
+                }
+                Err(err) => return Err(err.into()),
+            };
 
             let output = match resolved {
                 OhosResolvedModule::ExternalBundle { ohm_url } => HookResolveIdOutput {
@@ -194,6 +206,20 @@ fn is_builtin_external_specifier(specifier: &str) -> bool {
         || specifier.starts_with("@native:")
 }
 
+fn should_externalize_unresolved(specifier: &str) -> bool {
+    !Path::new(specifier).is_absolute()
+        && !specifier.starts_with("./")
+        && !specifier.starts_with("../")
+}
+
+fn unresolved_external_output(specifier: &str) -> HookResolveIdOutput {
+    HookResolveIdOutput {
+        id: specifier.into(),
+        external: Some(ResolvedExternal::Bool(true)),
+        ..Default::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,12 +254,26 @@ mod tests {
     }
 
     #[test]
-    fn test_unknown_specifier_returns_error() {
+    fn test_unknown_bare_specifier_is_externalized() {
         let plugin = make_plugin();
         let result = plugin
             .resolve_sync("some-unknown-package", Some("/tmp/main.ets"))
-            .expect_err("unknown package must fail resolution");
-        assert!(result.to_string().contains("Module not found"));
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.id.as_str(), "some-unknown-package");
+        assert!(matches!(
+            result.external,
+            Some(ResolvedExternal::Bool(true))
+        ));
+    }
+
+    #[test]
+    fn test_unknown_relative_specifier_returns_error() {
+        let plugin = make_plugin();
+        let err = plugin
+            .resolve_sync("./missing", Some("/tmp/main.ets"))
+            .expect_err("relative resolution must stay strict");
+        assert!(err.to_string().contains("Module not found"));
     }
 
     #[test]

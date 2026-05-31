@@ -476,11 +476,7 @@ pub fn lower_build_body_or_raw(
             };
             let raw = span_text(body, source_text);
             // Strip the surrounding `{` / `}` and re-indent each non-empty line.
-            let inner = raw
-                .trim()
-                .trim_start_matches('{')
-                .trim_end_matches('}')
-                .trim();
+            let inner = strip_outer_block(&raw);
             let text = inner
                 .lines()
                 .filter(|line| !line.trim().is_empty())
@@ -507,25 +503,36 @@ pub fn lower_styles_body(body: Option<&FunctionBody<'_>>, source_text: &str) -> 
     };
     let body_text = span_text(body, source_text);
     // Strip the surrounding braces and process each line.
-    let inner = body_text
-        .trim()
-        .trim_start_matches('{')
-        .trim_end_matches('}')
-        .trim();
+    let inner = strip_outer_block(&body_text);
     let mut out = String::new();
+    let mut chain = String::new();
+    let mut paren_depth = 0i32;
     for line in inner.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
-        if trimmed.starts_with('.') {
-            // @Styles attribute chain: .attr(x) → this.attr(x);
-            out.push_str("        this");
-            out.push_str(trimmed);
-            if !trimmed.ends_with(';') {
-                out.push(';');
+        if !chain.is_empty() {
+            chain.push('\n');
+            chain.push_str("        ");
+            chain.push_str(trimmed);
+            paren_depth += paren_delta(trimmed);
+            if paren_depth <= 0 {
+                push_styles_chain(&mut out, &chain);
+                chain.clear();
+                paren_depth = 0;
             }
-            out.push('\n');
+            continue;
+        }
+        if trimmed.starts_with('.') {
+            chain.push_str("this");
+            chain.push_str(trimmed);
+            paren_depth = paren_delta(trimmed);
+            if paren_depth <= 0 {
+                push_styles_chain(&mut out, &chain);
+                chain.clear();
+                paren_depth = 0;
+            }
         } else {
             // Regular statement — emit as-is with indentation.
             out.push_str("        ");
@@ -536,7 +543,36 @@ pub fn lower_styles_body(body: Option<&FunctionBody<'_>>, source_text: &str) -> 
             out.push('\n');
         }
     }
+    if !chain.is_empty() {
+        push_styles_chain(&mut out, &chain);
+    }
     out
+}
+
+fn push_styles_chain(out: &mut String, chain: &str) {
+    out.push_str("        ");
+    out.push_str(chain);
+    if !chain.trim_end().ends_with(';') {
+        out.push(';');
+    }
+    out.push('\n');
+}
+
+fn paren_delta(text: &str) -> i32 {
+    text.chars().fold(0, |acc, ch| match ch {
+        '(' => acc + 1,
+        ')' => acc - 1,
+        _ => acc,
+    })
+}
+
+fn strip_outer_block(text: &str) -> &str {
+    let trimmed = text.trim();
+    if trimmed.starts_with('{') && trimmed.ends_with('}') && trimmed.len() >= 2 {
+        trimmed[1..trimmed.len() - 1].trim()
+    } else {
+        trimmed
+    }
 }
 
 #[cfg(test)]

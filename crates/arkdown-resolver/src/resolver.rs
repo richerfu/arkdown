@@ -1,12 +1,15 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use arkdown_core::{ModuleType, OhosResolvedModule, PkgContext};
+use oxc_resolver::{
+    EnforceExtension, ResolveOptions as OxcResolveOptions, Resolver as OxcResolver,
+};
 
 use crate::error::ResolveError;
 use crate::oh_modules::{
-    is_bytecode_har, read_bytecode_abc_path, read_declaration_entry, read_main_field,
-    read_version_field,
+    is_bytecode_har, read_bytecode_abc_path, read_declaration_entry, read_file_dependencies,
+    read_name_field, read_package_main_field, read_package_version_field,
 };
 
 /// Extensions tried in order during resolution.
@@ -49,12 +52,27 @@ pub struct PkgBriefInfo {
 /// resolution rules (OHM URLs, SDK APIs, `oh_modules/`, relative imports).
 pub struct OhosResolver {
     config: ResolverConfig,
+    fs_resolver: OxcResolver,
+    package_roots: HashMap<String, PackageRoot>,
+}
+
+#[derive(Debug, Clone)]
+struct PackageRoot {
+    path: PathBuf,
+    package_name: String,
+    local_source: bool,
 }
 
 impl OhosResolver {
     /// Create a new resolver with the given configuration.
     pub fn new(config: ResolverConfig) -> Self {
-        OhosResolver { config }
+        let fs_resolver = OxcResolver::new(oxc_resolve_options(&config));
+        let package_roots = build_package_roots(&config);
+        OhosResolver {
+            config,
+            fs_resolver,
+            package_roots,
+        }
     }
 
     /// Resolve `specifier` imported from `importer`.
@@ -96,7 +114,7 @@ impl OhosResolver {
         // 2. Bare packages take precedence over SDK declarations. OHOS package
         // names often use the `@ohos/*` scope; hvigor resolves those through
         // dependency metadata/oh_modules before falling back to SDK APIs.
-        if let Some(resolved) = self.resolve_bare_package(specifier) {
+        if let Some(resolved) = self.resolve_bare_package(specifier, importer) {
             return Ok(resolved);
         }
 
@@ -136,9 +154,19 @@ impl OhosResolver {
 
         // 5. Relative imports
         if specifier.starts_with("./") || specifier.starts_with("../") {
+            if let Ok(resolution) = self.fs_resolver.resolve_file(importer, specifier) {
+                let resolved = canonicalize_existing(resolution.into_path_buf());
+                let module_type = infer_module_type(&resolved);
+                return Ok(OhosResolvedModule::LocalSource {
+                    path: resolved,
+                    module_type,
+                    pkg_context: None,
+                });
+            }
+
             let importer_dir = importer.parent().unwrap_or(importer);
-            let base = importer_dir.join(specifier);
-            if let Some(resolved) = try_extensions(&base) {
+            if let Some(resolved) = try_extensions(&importer_dir.join(specifier)) {
+                let resolved = canonicalize_existing(resolved);
                 let module_type = infer_module_type(&resolved);
                 return Ok(OhosResolvedModule::LocalSource {
                     path: resolved,
@@ -158,81 +186,323 @@ impl OhosResolver {
         })
     }
 
-    fn resolve_bare_package(&self, specifier: &str) -> Option<OhosResolvedModule> {
-        if let Some(pkg_info) = self.config.pkg_name_to_pkg_info.get(specifier) {
-            for src_root in &pkg_info.source_roots {
-                let base = src_root.join("index");
-                if let Some(resolved) = try_extensions(&base) {
-                    let module_type = infer_module_type(&resolved);
-                    return Some(OhosResolvedModule::LocalSource {
-                        path: resolved,
-                        module_type,
-                        pkg_context: Some(PkgContext {
-                            package_name: pkg_info.pkg_name.clone(),
-                            bundle_name: String::new(),
-                            module_name: String::new(),
-                            version: String::new(),
-                            pkg_path: pkg_info.pkg_root.clone(),
-                            entry_path: None,
-                        }),
-                    });
+    fn resolve_bare_package(&self, specifier: &str, importer: &Path) -> Option<OhosResolvedModule> {
+        if specifier.starts_with("./") || specifier.starts_with("../") || specifier.starts_with('/')
+        {
+            return None;
+        }
+
+        for candidate in package_candidates(specifier) {
+            if let Some(pkg_root) = self.package_root_for(&candidate.package_name, importer) {
+                if let Some(resolved) = self.resolve_package_entry(
+                    &candidate.package_name,
+                    &candidate.subpath,
+                    &pkg_root,
+                ) {
+                    return Some(resolved);
                 }
             }
         }
 
-        for root in &self.config.oh_modules_roots {
-            let pkg_dir = root.join(specifier);
-            let oh_package_path = pkg_dir.join("oh-package.json5");
-            if !oh_package_path.is_file() {
-                continue;
-            }
-
-            let version = read_version_field(&oh_package_path);
-
-            if is_bytecode_har(&oh_package_path) {
-                let abc_path = read_bytecode_abc_path(&oh_package_path)
-                    .unwrap_or_else(|| pkg_dir.join("ets/modules.abc"));
-                let declaration_path = read_declaration_entry(&oh_package_path)
-                    .unwrap_or_else(|| pkg_dir.join("index.d.ets"));
-                return Some(OhosResolvedModule::BytecodeHar {
-                    abc_path,
-                    declaration_path,
-                    pkg_name: specifier.to_string(),
-                    ohm_url: format!("@bundle:{}", specifier),
-                });
-            }
-
-            // Normal remote package: resolve entry via `main` field
-            if let Some(main) = read_main_field(&oh_package_path) {
-                let entry_base = pkg_dir.join(&main);
-                if let Some(resolved) = try_extensions(&entry_base) {
-                    let module_type = infer_module_type(&resolved);
-                    return Some(OhosResolvedModule::RemotePackage {
-                        path: resolved,
-                        module_type,
-                        pkg_name: specifier.to_string(),
-                        pkg_version: version,
-                        ohm_url: None,
-                    });
-                }
-            }
-
-            // Fallback: try index files in pkg_dir
-            let index_base = pkg_dir.join("index");
-            if let Some(resolved) = try_extensions(&index_base) {
+        let importer_dir = importer.parent().unwrap_or(importer);
+        self.fs_resolver
+            .resolve(importer_dir, specifier)
+            .ok()
+            .map(|resolution| {
+                let resolved = canonicalize_existing(resolution.into_path_buf());
                 let module_type = infer_module_type(&resolved);
-                return Some(OhosResolvedModule::RemotePackage {
+                OhosResolvedModule::RemotePackage {
                     path: resolved,
                     module_type,
                     pkg_name: specifier.to_string(),
-                    pkg_version: version,
+                    pkg_version: String::new(),
                     ohm_url: None,
+                }
+            })
+    }
+
+    fn package_root_for(&self, package_name: &str, importer: &Path) -> Option<PackageRoot> {
+        if let Some(root) = self.package_roots.get(package_name) {
+            return Some(root.clone());
+        }
+
+        let mut current = importer.parent().unwrap_or(importer);
+        loop {
+            let root = current.join("oh_modules");
+            if let Some(path) = package_root_in_oh_modules(&root, package_name) {
+                return Some(PackageRoot {
+                    path,
+                    package_name: package_name.to_string(),
+                    local_source: false,
                 });
             }
+            if current == self.config.project_root {
+                break;
+            }
+            let Some(parent) = current.parent() else {
+                break;
+            };
+            current = parent;
         }
 
         None
     }
+
+    fn resolve_package_entry(
+        &self,
+        package_name: &str,
+        subpath: &str,
+        pkg_root: &PackageRoot,
+    ) -> Option<OhosResolvedModule> {
+        let oh_package_path = pkg_root.path.join("oh-package.json5");
+        if oh_package_path.is_file() && is_bytecode_har(&oh_package_path) {
+            let abc_path = read_bytecode_abc_path(&oh_package_path)
+                .unwrap_or_else(|| pkg_root.path.join("ets/modules.abc"));
+            let declaration_path = read_declaration_entry(&oh_package_path)
+                .unwrap_or_else(|| pkg_root.path.join("index.d.ets"));
+            return Some(OhosResolvedModule::BytecodeHar {
+                abc_path,
+                declaration_path,
+                pkg_name: package_name.to_string(),
+                ohm_url: format!("@bundle:{}", package_name),
+            });
+        }
+
+        let requested = if subpath.is_empty() {
+            read_package_main_field(&pkg_root.path).unwrap_or_else(|| "index".to_string())
+        } else {
+            subpath.to_string()
+        };
+        let resolved = self
+            .resolve_package_path(&pkg_root.path, &requested)
+            .or_else(|| self.resolve_package_path(&pkg_root.path, "index"))?;
+        let module_type = infer_module_type(&resolved);
+
+        if pkg_root.local_source {
+            return Some(OhosResolvedModule::LocalSource {
+                path: resolved,
+                module_type,
+                pkg_context: Some(PkgContext {
+                    package_name: pkg_root.package_name.clone(),
+                    bundle_name: String::new(),
+                    module_name: String::new(),
+                    version: read_package_version_field(&pkg_root.path),
+                    pkg_path: pkg_root.path.clone(),
+                    entry_path: None,
+                }),
+            });
+        }
+
+        Some(OhosResolvedModule::RemotePackage {
+            path: resolved,
+            module_type,
+            pkg_name: package_name.to_string(),
+            pkg_version: read_package_version_field(&pkg_root.path),
+            ohm_url: None,
+        })
+    }
+
+    fn resolve_package_path(&self, package_root: &Path, request: &str) -> Option<PathBuf> {
+        let request = if request.starts_with("./") || request.starts_with("../") {
+            request.to_string()
+        } else {
+            format!("./{}", request)
+        };
+        self.fs_resolver
+            .resolve(package_root, &request)
+            .ok()
+            .map(|resolution| canonicalize_existing(resolution.into_path_buf()))
+            .or_else(|| {
+                let request = request.trim_start_matches("./");
+                try_extensions(&package_root.join(request)).map(canonicalize_existing)
+            })
+    }
+}
+
+fn oxc_resolve_options(config: &ResolverConfig) -> OxcResolveOptions {
+    let mut modules: Vec<String> = Vec::new();
+    for root in &config.oh_modules_roots {
+        modules.push(root.to_string_lossy().into_owned());
+        modules.push(root.join(".ohpm/oh_modules").to_string_lossy().into_owned());
+    }
+    if modules.is_empty() {
+        modules.push("oh_modules".to_string());
+    }
+
+    OxcResolveOptions {
+        cwd: Some(config.project_root.clone()),
+        extensions: [
+            ".ets", ".ts", ".js", ".mjs", ".cjs", ".json", ".d.ets", ".d.ts",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect(),
+        main_fields: vec!["main".to_string(), "module".to_string()],
+        main_files: vec!["index".to_string()],
+        modules,
+        node_path: false,
+        enforce_extension: EnforceExtension::Disabled,
+        symlinks: true,
+        ..OxcResolveOptions::default()
+    }
+}
+
+fn build_package_roots(config: &ResolverConfig) -> HashMap<String, PackageRoot> {
+    let mut roots = HashMap::new();
+
+    for (name, info) in &config.pkg_name_to_pkg_info {
+        roots.insert(
+            name.clone(),
+            PackageRoot {
+                path: canonicalize_existing(info.pkg_root.clone()),
+                package_name: info.pkg_name.clone(),
+                local_source: true,
+            },
+        );
+    }
+
+    collect_project_file_dependencies(&config.project_root, &mut roots);
+
+    for root in &config.oh_modules_roots {
+        collect_oh_modules_package_roots(root, &mut roots);
+    }
+
+    roots
+}
+
+fn collect_project_file_dependencies(
+    project_root: &Path,
+    roots: &mut HashMap<String, PackageRoot>,
+) {
+    let mut visited = HashSet::new();
+    collect_project_file_dependencies_inner(project_root, roots, &mut visited);
+}
+
+fn collect_project_file_dependencies_inner(
+    dir: &Path,
+    roots: &mut HashMap<String, PackageRoot>,
+    visited: &mut HashSet<PathBuf>,
+) {
+    let Ok(real_dir) = std::fs::canonicalize(dir) else {
+        return;
+    };
+    if !visited.insert(real_dir.clone()) {
+        return;
+    }
+
+    let package_path = dir.join("oh-package.json5");
+    if package_path.is_file() {
+        for (name, path) in read_file_dependencies(&package_path) {
+            let real_path = canonicalize_existing(path);
+            roots.entry(name.clone()).or_insert(PackageRoot {
+                path: real_path,
+                package_name: name,
+                local_source: true,
+            });
+        }
+    }
+
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if matches!(
+            name.as_ref(),
+            ".git" | "oh_modules" | "node_modules" | "build" | "target"
+        ) {
+            continue;
+        }
+        if path.is_dir() {
+            collect_project_file_dependencies_inner(&path, roots, visited);
+        }
+    }
+}
+
+fn collect_oh_modules_package_roots(root: &Path, roots: &mut HashMap<String, PackageRoot>) {
+    collect_package_manifest_roots(root, roots, false, 0, 8);
+    collect_package_manifest_roots(&root.join(".ohpm"), roots, false, 0, 6);
+}
+
+fn collect_package_manifest_roots(
+    dir: &Path,
+    roots: &mut HashMap<String, PackageRoot>,
+    local_source: bool,
+    depth: usize,
+    max_depth: usize,
+) {
+    if depth > max_depth || !dir.is_dir() {
+        return;
+    }
+
+    let package_path = dir.join("oh-package.json5");
+    if package_path.is_file() {
+        if let Some(package_name) = read_name_field(&package_path) {
+            roots.entry(package_name.clone()).or_insert(PackageRoot {
+                path: canonicalize_existing(dir.to_path_buf()),
+                package_name,
+                local_source,
+            });
+        }
+    }
+
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_package_manifest_roots(&path, roots, local_source, depth + 1, max_depth);
+        }
+    }
+}
+
+fn package_root_in_oh_modules(root: &Path, package_name: &str) -> Option<PathBuf> {
+    let candidates = [
+        root.join(package_name),
+        root.join(".ohpm/oh_modules").join(package_name),
+    ];
+    candidates
+        .into_iter()
+        .find(|path| path.join("oh-package.json5").is_file() || path.join("package.json").is_file())
+        .map(canonicalize_existing)
+}
+
+#[derive(Debug)]
+struct PackageCandidate {
+    package_name: String,
+    subpath: String,
+}
+
+fn package_candidates(specifier: &str) -> Vec<PackageCandidate> {
+    if specifier.starts_with("./")
+        || specifier.starts_with("../")
+        || specifier.starts_with('/')
+        || specifier.starts_with('@') && !specifier.contains('/')
+    {
+        return Vec::new();
+    }
+
+    let parts: Vec<&str> = specifier.split('/').collect();
+    let min_parts = if specifier.starts_with('@') { 2 } else { 1 };
+    if parts.len() < min_parts {
+        return Vec::new();
+    }
+
+    let mut candidates = Vec::new();
+    for end in (min_parts..=parts.len()).rev() {
+        candidates.push(PackageCandidate {
+            package_name: parts[..end].join("/"),
+            subpath: parts[end..].join("/"),
+        });
+    }
+    candidates
+}
+
+fn canonicalize_existing(path: PathBuf) -> PathBuf {
+    std::fs::canonicalize(&path).unwrap_or(path)
 }
 
 /// Try to resolve a path by trying the exact path, then each extension, then index variants.
@@ -367,7 +637,7 @@ mod tests {
         match result {
             OhosResolvedModule::RemotePackage { path, pkg_name, .. } => {
                 assert_eq!(pkg_name, "@ohos/utils");
-                assert_eq!(path, entry);
+                assert_eq!(path, std::fs::canonicalize(&entry).unwrap());
             }
             _ => panic!("expected RemotePackage"),
         }
@@ -462,7 +732,7 @@ mod tests {
             OhosResolvedModule::LocalSource {
                 path, module_type, ..
             } => {
-                assert_eq!(path, helper);
+                assert_eq!(path, std::fs::canonicalize(&helper).unwrap());
                 assert_eq!(module_type, ModuleType::Ets);
             }
             _ => panic!("expected LocalSource"),
@@ -501,6 +771,85 @@ mod tests {
             } => {
                 assert_eq!(pkg_name, "mylib");
                 assert_eq!(pkg_version, "1.2.3");
+            }
+            _ => panic!("expected RemotePackage"),
+        }
+    }
+
+    #[test]
+    fn test_file_dependency_alias_subpath_resolves_like_hvigor_dep_info() {
+        let dir = TempDir::new().unwrap();
+        let app = dir.path().join("entry");
+        let dep = dir.path().join("commons/network");
+        fs::create_dir_all(&app).unwrap();
+        fs::create_dir_all(&dep).unwrap();
+        fs::write(
+            app.join("oh-package.json5"),
+            r#"{
+              "name": "entry",
+              "dependencies": { "@ohos/network": "file:../commons/network" }
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            dep.join("oh-package.json5"),
+            r#"{ "name": "network", "version": "1.0.0", "main": "Index.ets" }"#,
+        )
+        .unwrap();
+        let request = dep.join("Request.ts");
+        fs::write(&request, "export const ok = true;").unwrap();
+
+        let resolver = make_resolver(dir.path().to_path_buf(), vec![], vec![], vec![]);
+        let importer = app.join("src/main/ets/Index.ets");
+        let result = resolver
+            .resolve("@ohos/network/Request", &importer)
+            .unwrap();
+        match result {
+            OhosResolvedModule::LocalSource {
+                path, pkg_context, ..
+            } => {
+                assert_eq!(path, std::fs::canonicalize(&request).unwrap());
+                assert_eq!(
+                    pkg_context.expect("pkg context").package_name,
+                    "@ohos/network"
+                );
+            }
+            _ => panic!("expected LocalSource"),
+        }
+    }
+
+    #[test]
+    fn test_ohpm_shared_symlink_farm_resolves_oh_package_main() {
+        let dir = TempDir::new().unwrap();
+        let oh_modules_dir = dir.path().join("oh_modules");
+        let pkg_dir = oh_modules_dir.join(".ohpm/bignumber.js@9.0.1/oh_modules/bignumber.js");
+        fs::create_dir_all(&pkg_dir).unwrap();
+        fs::write(
+            pkg_dir.join("oh-package.json5"),
+            r#"{ "name": "bignumber.js", "version": "9.0.1", "main": "bignumber" }"#,
+        )
+        .unwrap();
+        let entry = pkg_dir.join("bignumber.js");
+        fs::write(&entry, "export default function BigNumber() {}").unwrap();
+
+        let resolver = make_resolver(
+            dir.path().to_path_buf(),
+            vec![],
+            vec![],
+            vec![oh_modules_dir],
+        );
+        let importer = dir.path().join("src/main.ets");
+        let result = resolver.resolve("bignumber.js", &importer).unwrap();
+        match result {
+            OhosResolvedModule::RemotePackage {
+                path,
+                pkg_name,
+                pkg_version,
+                ..
+            } => {
+                assert_eq!(path, std::fs::canonicalize(&entry).unwrap());
+                assert_eq!(pkg_name, "bignumber.js");
+                assert_eq!(pkg_version, "9.0.1");
             }
             _ => panic!("expected RemotePackage"),
         }

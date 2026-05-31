@@ -70,7 +70,7 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 | F2 | `invalidCachePlugin` — per-file cache invalidation | after commonPlugin | `arkdown-cache` exists; not wired to rolldown plugin hooks | ❌ |
 | F3 | `checkDuplicateFilenamesPlugin` — ABC record name collision check | built-in | `arkdown-plugin-duplicate-check` | ✅ |
 | F4 | `moduleMetaInfoPlugin` (ESM mode only) — pkgName, OHM identity, hostModulesInfo | `moduleParsed` hook | `arkdown-plugin-module-meta` | ✅ |
-| F5 | `ohos-resolve` / `@ohos/node-resolve` — OHOS module resolution | `resolveId` | `arkdown-plugin-ohos-resolve` wrapping `arkdown-resolver` | ✅ |
+| F5 | `ohos-resolve` / `@ohos/node-resolve` — OHOS module resolution | `resolveId` | `arkdown-plugin-ohos-resolve` wrapping `arkdown-resolver`; generic probing delegated to `oxc_resolver`, hvigor semantics cover `oh-package.json5`, project `file:` aliases, `oh_modules`, and `.ohpm/oh_modules` | ✅ |
 | F6 | `routerMapPlugin` — collect router entries per `buildEnd` | `buildEnd` | `arkdown-plugin-router-map` | ✅ |
 | F7 | `newOhmUrlPlugin` — rewrite module IDs to OHM URLs | `resolveId` transform | Implemented in `arkdown-plugin-ohos-resolve` via `useNormalizedOHMUrl` | ✅ |
 | F8 | `sensitiveCheckPlugin` — case-sensitive import validation | `resolveId` | `arkdown-plugin-sensitive-check` | ✅ |
@@ -190,7 +190,8 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 - hvigor: CompileArkTS writes transformed TS cache files, `filesInfo.txt`, `npmEntries.txt`, and invokes `es2abc @filesInfo`
 - arkdown: writes matching handoff metadata, generates cache TS bytes that match hvigor for the minimal fixture, and now uses that route for final ABC generation
 - Current status: minimal-hap `ets/modules.abc` is 9844B and byte-identical to hvigor
-- Remaining work: keep this as the default route while extending fixture coverage and implementing real es2abc-compatible incremental cache behavior
+- HmosWorld status: after `oxc_resolver`-backed hvigor package-root resolution, HmosWorld builds end-to-end without unresolved package externals. `filesInfo.txt` now uses hvigor-style per-module cache paths/record names for local HAR sources, but the record set is still incomplete (`filesInfo.txt` 87 lines vs hvigor 571; `npmEntries.txt` 7 lines vs hvigor 57). Output is still smaller than hvigor (`modules.abc` 757,216B vs 4,756,944B; source map 170,478B vs 2,383,603B), so remaining parity work is now in CompileArkTS source graph/npmEntries coverage and ABC/source-map breadth rather than simple package lookup.
+- Remaining work: keep this as the default route while extending fixture coverage, aligning `filesInfo.txt`/`npmEntries.txt` record sets with hvigor on HmosWorld, and implementing real es2abc-compatible incremental cache behavior
 
 **F16 — Missing ViewPU lowering in etsTransform**
 - hvigor: `etsTransform` SDK plugin fully lowers ArkUI `struct`+`build()` blocks into `observeComponentCreation2()`, `.create()`, attribute method calls, and `.pop()` calls

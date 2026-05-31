@@ -170,11 +170,12 @@ When `useNativeResolver` is disabled (default or unsupported platform), a JavaSc
 
 arkdown's `arkdown-plugin-ohos-resolve` crate implements a full Rust resolver:
 
-1. Start with `oxc-resolver` as the base algorithm
+1. Start with the upstream Rust `oxc_resolver` crate as the base filesystem/package algorithm
 2. Layer OHOS-specific rules on top:
    - `@ohos/*` → SDK api path
    - `@kit/*` → SDK kits path
-   - `oh_modules/` directory walk (instead of `node_modules/`)
+   - `oh_modules/` and `.ohpm/oh_modules` package roots (instead of `node_modules/`)
+   - project `file:` HAR dependency aliases, matching hvigor `dep_info.depName2RootPath`
    - `oh-package.json5` instead of `package.json` for main/types fields
 
 ### `pkgNameToPkgBriefInfo` — the OHOS package brief info map
@@ -189,7 +190,7 @@ type PkgBriefInfo = {
 type PkgBriefInfoMap = Record<string, PkgBriefInfo>;
 ```
 
-This map is built by `ArkCompile.setPkgNameToPkgBriefInfo()` and passed to the resolver. It enables the resolver to find source files for local HAR dependencies without traversing the full file system.
+This map is built by `ArkCompile.setPkgNameToPkgBriefInfo()` and passed to the resolver. It enables the resolver to find source files for local HAR dependencies without traversing the full file system. arkdown also scans project `oh-package.json5` `file:` dependencies up front so scoped aliases such as `@ohos/login/Index` resolve through the same package-root path as hvigor instead of falling through to SDK lookup or unresolved-external handling.
 
 ---
 

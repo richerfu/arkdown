@@ -235,15 +235,27 @@ pub fn generate_loader_json(
         discovered_workers.push(to_absolute_path_string(path));
     }
 
-    let runtime_only_source_files = collect_runtime_only_source_files(config, module_cfg);
-    let hvigor_compile_entry: Vec<String> = runtime_only_source_files
+    let router_map = read_loader_router_maps(config, module_cfg, manifest.router_map.as_deref());
+
+    let mut serialized_compile_entry = collect_runtime_only_source_files(config, module_cfg);
+    serialized_compile_entry.extend(collect_runtime_only_package_source_files(
+        config, module_cfg,
+    ));
+    serialized_compile_entry.extend(collect_dependency_router_map_source_files(
+        config, module_cfg,
+    ));
+    dedupe_paths(&mut serialized_compile_entry);
+
+    let hvigor_compile_entry: Vec<String> = serialized_compile_entry
         .iter()
         .map(|path| to_absolute_path_string(path))
         .collect();
     let src_main_root = module_cfg.src_path.join("src/main");
-    for path in &runtime_only_source_files {
+    for path in &serialized_compile_entry {
         if let Ok(rel) = path.strip_prefix(&src_main_root) {
             compile_entry.push(format!("./{}", to_unix_path(rel)));
+        } else {
+            compile_entry.push(to_absolute_path_string(path));
         }
     }
 
@@ -273,10 +285,16 @@ pub fn generate_loader_json(
         .build_option
         .strict_mode
         .use_normalized_ohm_url;
-    let router_map = read_loader_router_map(module_cfg, manifest.router_map.as_deref());
-
     let mut module_path_map = HashMap::new();
-    module_path_map.insert(module_cfg.name.clone(), module_root.clone());
+    for project_module in &config.modules {
+        module_path_map.insert(
+            project_module.name.clone(),
+            to_absolute_path_string(&project_module.src_path),
+        );
+    }
+    if module_path_map.is_empty() {
+        module_path_map.insert(module_cfg.name.clone(), module_root.clone());
+    }
 
     // --- TASK-LOADER-01: scan oh_modules/ for ByteCode HAR dependencies ---
     let bytecode_har_deps = scan_bytecode_har_deps(&module_cfg.src_path, &config.project_root);
@@ -369,6 +387,7 @@ pub fn generate_loader_json(
 /// a package metadata source for direct dynamic dependencies.
 fn collect_dynamic_import_dep_names(config: &ArkdownConfig, module_root: &Path) -> Vec<String> {
     let mut names = read_dynamic_dep_names(module_root);
+    names.extend(read_module_runtime_only(module_root).packages);
     if let Some(runtime_only) = config
         .product
         .build_option
@@ -405,6 +424,56 @@ fn read_dynamic_dep_names(module_root: &Path) -> Vec<String> {
 
     json5::from_str::<PkgDynDeps>(&content)
         .map(|p| p.dynamic_dependencies.into_keys().collect())
+        .unwrap_or_default()
+}
+
+#[derive(Default)]
+struct RuntimeOnlyLists {
+    packages: Vec<String>,
+    sources: Vec<String>,
+}
+
+fn read_module_runtime_only(module_root: &Path) -> RuntimeOnlyLists {
+    let path = module_root.join("build-profile.json5");
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return RuntimeOnlyLists::default();
+    };
+
+    #[derive(Default, serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ModuleBuildProfile {
+        #[serde(default)]
+        build_option: ModuleBuildOption,
+    }
+
+    #[derive(Default, serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ModuleBuildOption {
+        #[serde(default)]
+        ark_options: ModuleArkOptions,
+    }
+
+    #[derive(Default, serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ModuleArkOptions {
+        #[serde(default)]
+        runtime_only: ModuleRuntimeOnly,
+    }
+
+    #[derive(Default, serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ModuleRuntimeOnly {
+        #[serde(default)]
+        packages: Vec<String>,
+        #[serde(default)]
+        sources: Vec<String>,
+    }
+
+    json5::from_str::<ModuleBuildProfile>(&content)
+        .map(|profile| RuntimeOnlyLists {
+            packages: profile.build_option.ark_options.runtime_only.packages,
+            sources: profile.build_option.ark_options.runtime_only.sources,
+        })
         .unwrap_or_default()
 }
 
@@ -502,7 +571,40 @@ fn read_package_main(module_root: &Path) -> Option<String> {
     json5::from_str::<PackageMain>(&content).ok()?.main
 }
 
+fn read_loader_router_maps(
+    config: &ArkdownConfig,
+    host_module: &ModuleConfig,
+    router_map_ref: Option<&str>,
+) -> Vec<serde_json::Value> {
+    let mut router_maps = Vec::new();
+    router_maps.extend(read_loader_router_map(
+        &config.product.bundle_name,
+        &host_module.name,
+        host_module,
+        router_map_ref,
+    ));
+
+    for module_cfg in &config.modules {
+        if module_cfg.name == host_module.name {
+            continue;
+        }
+        let Some(router_map_ref) = read_module_router_map_ref(module_cfg) else {
+            continue;
+        };
+        router_maps.extend(read_loader_router_map(
+            &config.product.bundle_name,
+            &host_module.name,
+            module_cfg,
+            Some(&router_map_ref),
+        ));
+    }
+
+    router_maps
+}
+
 fn read_loader_router_map(
+    bundle_name: &str,
+    host_module_name: &str,
     module_cfg: &ModuleConfig,
     router_map_ref: Option<&str>,
 ) -> Vec<serde_json::Value> {
@@ -547,6 +649,20 @@ fn read_loader_router_map(
         let absolute = to_absolute_path_string(
             &src_main.join(page_source_file.trim_start_matches("src/main/")),
         );
+        let rel_ets = page_source_file
+            .trim_start_matches("src/main/ets/")
+            .trim_end_matches(".ets")
+            .trim_end_matches(".ts")
+            .trim_end_matches(".js");
+        let ohmurl = if module_cfg.name == host_module_name {
+            format!("@bundle:{bundle_name}/{host_module_name}/ets/{rel_ets}")
+        } else {
+            format!(
+                "@bundle:{bundle_name}/{host_module_name}@{}/ets/{rel_ets}",
+                module_cfg.name
+            )
+        };
+        obj.insert("ohmurl".to_string(), serde_json::Value::String(ohmurl));
         obj.insert(
             "pageSourceFile".to_string(),
             serde_json::Value::String(absolute),
@@ -554,6 +670,52 @@ fn read_loader_router_map(
     }
 
     entries.clone()
+}
+
+fn read_module_router_map_ref(module_cfg: &ModuleConfig) -> Option<String> {
+    let path = module_cfg.src_path.join("src/main/module.json5");
+    let content = std::fs::read_to_string(path).ok()?;
+    #[derive(serde::Deserialize)]
+    struct ModuleJson {
+        module: ModuleRouterMap,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ModuleRouterMap {
+        router_map: Option<String>,
+    }
+    json5::from_str::<ModuleJson>(&content)
+        .ok()?
+        .module
+        .router_map
+}
+
+fn collect_dependency_router_map_source_files(
+    config: &ArkdownConfig,
+    host_module: &ModuleConfig,
+) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for module_cfg in &config.modules {
+        if module_cfg.name == host_module.name {
+            continue;
+        }
+        let Some(router_map_ref) = read_module_router_map_ref(module_cfg) else {
+            continue;
+        };
+        let router_map = read_loader_router_map(
+            &config.product.bundle_name,
+            &host_module.name,
+            module_cfg,
+            Some(&router_map_ref),
+        );
+        files.extend(router_map.iter().filter_map(|entry| {
+            entry
+                .get("pageSourceFile")
+                .and_then(serde_json::Value::as_str)
+                .map(PathBuf::from)
+        }));
+    }
+    files
 }
 
 /// Build the `pkgNameToPkgBriefInfo` map for the loader.json.
@@ -593,17 +755,21 @@ fn collect_runtime_only_source_files(
     config: &ArkdownConfig,
     module_cfg: &ModuleConfig,
 ) -> Vec<PathBuf> {
-    let sources = config
-        .product
-        .build_option
-        .ark_options
-        .as_ref()
-        .and_then(|ark_options| ark_options.runtime_only.as_ref())
-        .map(|runtime_only| runtime_only.sources.as_slice())
-        .unwrap_or_default();
+    let module_runtime_only = read_module_runtime_only(&module_cfg.src_path);
+    let mut sources: Vec<String> = module_runtime_only.sources;
+    sources.extend(
+        config
+            .product
+            .build_option
+            .ark_options
+            .as_ref()
+            .and_then(|ark_options| ark_options.runtime_only.as_ref())
+            .map(|runtime_only| runtime_only.sources.clone())
+            .unwrap_or_default(),
+    );
 
     let mut files = Vec::new();
-    for source in sources {
+    for source in &sources {
         let path = Path::new(source);
         let source_path = if path.is_absolute() {
             path.to_path_buf()
@@ -628,6 +794,59 @@ fn collect_runtime_only_source_files(
     files
 }
 
+fn collect_runtime_only_package_source_files(
+    config: &ArkdownConfig,
+    module_cfg: &ModuleConfig,
+) -> Vec<PathBuf> {
+    let module_runtime_only = read_module_runtime_only(&module_cfg.src_path);
+    let mut packages: Vec<String> = module_runtime_only.packages;
+    packages.extend(
+        config
+            .product
+            .build_option
+            .ark_options
+            .as_ref()
+            .and_then(|ark_options| ark_options.runtime_only.as_ref())
+            .map(|runtime_only| runtime_only.packages.clone())
+            .unwrap_or_default(),
+    );
+
+    let mut files = Vec::new();
+    for package in &packages {
+        let Some(pkg_dir) =
+            resolve_oh_module_dir(package, &module_cfg.src_path, &config.project_root)
+        else {
+            continue;
+        };
+        files.extend(collect_package_source_files(&pkg_dir));
+    }
+    dedupe_paths(&mut files);
+    files
+}
+
+fn collect_package_source_files(pkg_dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for stem in ["Index", "index"] {
+        for ext in ["ets", "ts", "js"] {
+            let candidate = pkg_dir.join(format!("{stem}.{ext}"));
+            if candidate.is_file() {
+                files.push(candidate);
+            }
+        }
+    }
+
+    let ets_root = pkg_dir.join("src/main/ets");
+    if ets_root.is_dir() {
+        files.extend(collect_dynamic_import_source_files(&ets_root));
+    }
+    files.sort_by_key(|path| {
+        path.strip_prefix(pkg_dir)
+            .map(to_unix_path)
+            .unwrap_or_else(|_| to_unix_path(path))
+    });
+    files
+}
+
 fn collect_dynamic_import_source_files(root: &Path) -> Vec<PathBuf> {
     let mut stack = vec![root.to_path_buf()];
     let mut files = Vec::new();
@@ -649,6 +868,11 @@ fn collect_dynamic_import_source_files(root: &Path) -> Vec<PathBuf> {
 
     files.sort_by_key(|path| to_unix_path(path));
     files
+}
+
+fn dedupe_paths(files: &mut Vec<PathBuf>) {
+    let mut seen = std::collections::HashSet::new();
+    files.retain(|path| seen.insert(to_absolute_path_string(path)));
 }
 
 fn is_dynamic_import_source_file(path: &Path) -> bool {

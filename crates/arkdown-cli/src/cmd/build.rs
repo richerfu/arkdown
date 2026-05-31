@@ -8,7 +8,7 @@ use clap::Args;
 
 use arkdown::{BundleOutput, Bundler};
 use arkdown_cache::BuildCache;
-use arkdown_config::load_config;
+use arkdown_config::{load_config, resolve::module_matches_output_target};
 use arkdown_core::{
     ArkChunk, ArkdownConfig, BuildMode, ChunkGraph, ChunkIdx, ModuleConfig, ModuleJson5,
     ModuleJson5Module, OutputTarget,
@@ -87,6 +87,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
     progress.done();
 
     let config_arc = Arc::new(config);
+    let build_modules = build_modules_for_target(config_arc.as_ref());
 
     // Step 2: Resource compilation + Profile processing.
     // Resources must be compiled first so their numeric IDs (iconId, labelId,
@@ -97,7 +98,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
     // Parallel list of ByteCode HAR dependencies per module, indexed identically
     // to loader_jsons.
     let mut all_bc_har_deps: Vec<Vec<ByteCodeHarScanEntry>> = Vec::new();
-    for module in &config_arc.modules {
+    for module in build_modules {
         // --- Resource compilation (precedes profile so IDs are available) ---
         let resource_compiler = ResourceCompiler::new(ResourceCompileConfig {
             package_name: config_arc.product.bundle_name.clone(),
@@ -418,17 +419,27 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         if *from_cache {
             continue;
         }
+        let unresolved_imports = collect_unresolved_external_imports(bundle_out);
+        if !unresolved_imports.is_empty() {
+            return Err(anyhow::anyhow!(
+                "ArkTS Compiler Error\n{}",
+                format_unresolved_import_errors(&unresolved_imports)
+            ));
+        }
         // Build record metadata map: chunk_stem → OHM URL module path.
         // Format matches es2abc/hvigorw: "{bundleName}/{moduleName}/{pathFromEts}"
         // e.g. "com.example.arkdown.test/entry/ets/entryability/EntryAbility"
         // The ABC class is "L{record_name};" (no src/main, no & wrappers).
         let bundle_name = &config_arc.product.bundle_name;
+        let chunk_name_counts = compile_entry_stem_counts(&loader_json.compile_entry);
         let record_name_map: HashMap<String, ChunkCompileMeta> = loader_json
             .compile_entry
             .iter()
-            .filter_map(|entry_path| {
+            .enumerate()
+            .filter_map(|(index, entry_path)| {
                 let path = std::path::Path::new(entry_path);
-                let stem = path.file_stem()?.to_str()?.to_string();
+                path.file_stem()?.to_str()?;
+                let chunk_name = compile_entry_chunk_name(entry_path, index, &chunk_name_counts);
                 // entry_path like "./ets/entryability/EntryAbility.ets"
                 let stripped = entry_path
                     .trim_start_matches("./")
@@ -438,7 +449,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 let record_name =
                     format!("{}/{}/{}", bundle_name, loader_json.module_name, stripped);
                 Some((
-                    stem,
+                    chunk_name,
                     ChunkCompileMeta {
                         record_name,
                         source_file: Some(entry_path.clone()),
@@ -750,6 +761,19 @@ fn read_module_json5(path: &std::path::Path) -> Result<ModuleJson5> {
     json5::from_str(&content).context("Failed to parse module.json5")
 }
 
+fn build_modules_for_target(config: &ArkdownConfig) -> Vec<&ModuleConfig> {
+    let matching: Vec<&ModuleConfig> = config
+        .modules
+        .iter()
+        .filter(|module| module_matches_output_target(&module.module_type, &config.output_target))
+        .collect();
+    if matching.is_empty() {
+        config.modules.iter().collect()
+    } else {
+        matching
+    }
+}
+
 fn write_profile_intermediates(module_root: &Path, final_module_json: &Path) -> Result<()> {
     let content = fs_err::read_to_string(final_module_json)?;
     let final_value: serde_json::Value = serde_json::from_str(&content)?;
@@ -1034,21 +1058,27 @@ fn write_compile_arkts_cache(
         .src_path
         .join("build/default/cache/default/default@CompileArkTS/esmodule")
         .join(mode_dir);
-    let ts_root = cache_root.join(&loader_json.module_name).join("src/main");
     let transformer = EtsTransformPlugin::new(config.clone());
     let mut source_map_lines = Vec::new();
     let mut compile_infos = Vec::new();
 
     for entry in &loader_json.compile_entry {
-        let source_file = entry.trim_start_matches("./").to_string();
-        let source_path = module_root.join(&source_file);
-        if !source_path.exists() {
+        let Some(entry_info) =
+            compile_entry_info(entry, &module_root, &cache_root, loader_json, config)
+        else {
+            continue;
+        };
+        if !entry_info.source_path.exists() {
             continue;
         }
 
-        let source = fs_err::read_to_string(&source_path)
-            .with_context(|| format!("failed to read compile entry {}", source_path.display()))?;
-        let source_id = format!("{}/src/main/{}", loader_json.module_name, source_file);
+        let source = fs_err::read_to_string(&entry_info.source_path).with_context(|| {
+            format!(
+                "failed to read compile entry {}",
+                entry_info.source_path.display()
+            )
+        })?;
+        let source_id = format!("{}/{}", entry_info.module_name, entry_info.source_file);
         let transformed = transformer
             .do_transform(&source, &source_id)
             .with_context(|| format!("failed to transform compile entry {source_id}"))?;
@@ -1057,30 +1087,21 @@ fn write_compile_arkts_cache(
         };
 
         let code = output.code.unwrap_or(source);
-        let ts_rel = with_extension(&source_file, "ts");
-        let ts_path = ts_root.join(&ts_rel);
-        if let Some(parent) = ts_path.parent() {
+        if let Some(parent) = entry_info.ts_path.parent() {
             fs_err::create_dir_all(parent)?;
         }
-        fs_err::write(&ts_path, code)
-            .with_context(|| format!("failed to write transformed TS {}", ts_path.display()))?;
+        fs_err::write(&entry_info.ts_path, code).with_context(|| {
+            format!(
+                "failed to write transformed TS {}",
+                entry_info.ts_path.display()
+            )
+        })?;
         compile_infos.push(CompileArkTsInfo {
-            ts_path,
-            record_name: format!(
-                "{}/{}/{}",
-                config.product.bundle_name,
-                loader_json.module_name,
-                source_file
-                    .trim_end_matches(".ets")
-                    .trim_end_matches(".ts")
-                    .trim_end_matches(".js")
-            ),
+            ts_path: entry_info.ts_path.clone(),
+            record_name: entry_info.record_name.clone(),
             module_type: "esm".to_string(),
-            source_file: format!(
-                "{}|{}|1.0.0|src/main/{}",
-                loader_json.module_name, loader_json.module_name, ts_rel
-            ),
-            package_name: loader_json.module_name.clone(),
+            source_file: entry_info.source_file_info.clone(),
+            package_name: entry_info.module_name.clone(),
             abc_cache_path: None,
         });
 
@@ -1092,24 +1113,19 @@ fn write_compile_arkts_cache(
                 .get("mappings")
                 .and_then(|value| value.as_str())
                 .unwrap_or_default();
-            let file = Path::new(&source_file)
+            let file = Path::new(&entry_info.source_file)
                 .file_name()
                 .and_then(|file| file.to_str())
-                .unwrap_or(source_file.as_str());
-            let key = format!(
-                "{}|{}|1.0.0|src/main/{}",
-                loader_json.module_name,
-                loader_json.module_name,
-                with_extension(&source_file, "ts")
-            );
+                .unwrap_or(entry_info.source_file.as_str());
+            let key = entry_info.source_file_info.clone();
             let val = serde_json::json!({
                 "version": 3,
                 "file": file,
                 "sourceRoot": "",
-                "sources": [format!("{}/src/main/{}", loader_json.module_name, source_file)],
+                "sources": [format!("{}/{}", entry_info.module_name, entry_info.source_file)],
                 "names": [],
                 "mappings": mappings,
-                "entry-package-info": format!("{}|1.0.0", loader_json.module_name),
+                "entry-package-info": format!("{}|1.0.0", entry_info.module_name),
             });
             source_map_lines.push(format!(
                 "{{\"key\": {}, \"val\": {}}}",
@@ -1129,6 +1145,93 @@ fn write_compile_arkts_cache(
 
     compile_infos.sort_by(|a, b| a.source_file.cmp(&b.source_file));
     write_compile_arkts_abc_handoff(&cache_root, &compile_infos)
+}
+
+struct CompileEntryInfo {
+    source_path: PathBuf,
+    source_file: String,
+    source_file_info: String,
+    ts_path: PathBuf,
+    record_name: String,
+    module_name: String,
+}
+
+fn compile_entry_info(
+    entry: &str,
+    host_src_main: &Path,
+    cache_root: &Path,
+    loader_json: &arkdown_profile::LoaderJson,
+    config: &ArkdownConfig,
+) -> Option<CompileEntryInfo> {
+    let entry_path = Path::new(entry);
+    let source_path = if entry_path.is_absolute() {
+        entry_path.to_path_buf()
+    } else {
+        host_src_main.join(entry.trim_start_matches("./"))
+    };
+    let source_path = canonical_or_owned(&source_path);
+
+    let mut module_roots: Vec<(&str, PathBuf)> = loader_json
+        .module_path_map
+        .iter()
+        .map(|(module_name, module_root)| (module_name.as_str(), PathBuf::from(module_root)))
+        .collect();
+    module_roots.sort_by(|a, b| b.1.components().count().cmp(&a.1.components().count()));
+
+    for (module_name, module_root) in module_roots {
+        let module_root = canonical_or_owned(&module_root);
+        let src_main = module_root.join("src/main");
+
+        let source_file = if let Ok(rel) = source_path.strip_prefix(&src_main) {
+            format!("src/main/{}", slash_path(rel))
+        } else if let Ok(rel) = source_path.strip_prefix(&module_root) {
+            slash_path(rel)
+        } else {
+            continue;
+        };
+
+        let ts_rel = with_extension(&source_file, "ts");
+        let ts_path = cache_root.join(module_name).join(&ts_rel);
+        let record_rel = record_relative_path(&ts_rel);
+        let record_name = if module_name == loader_json.module_name {
+            format!(
+                "{}/{}/{}",
+                config.product.bundle_name, loader_json.module_name, record_rel
+            )
+        } else {
+            format!(
+                "{}/{}@{}/{}",
+                config.product.bundle_name, loader_json.module_name, module_name, record_rel
+            )
+        };
+
+        return Some(CompileEntryInfo {
+            source_path,
+            source_file: source_file.clone(),
+            source_file_info: format!(
+                "{}|{}|1.0.0|{}",
+                loader_json.module_name, module_name, ts_rel
+            ),
+            ts_path,
+            record_name,
+            module_name: module_name.to_string(),
+        });
+    }
+
+    None
+}
+
+fn record_relative_path(ts_rel: &str) -> String {
+    let rel = ts_rel
+        .trim_start_matches("src/main/")
+        .trim_end_matches(".ets")
+        .trim_end_matches(".ts")
+        .trim_end_matches(".js");
+    rel.to_string()
+}
+
+fn slash_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 struct CompileArkTsInfo {
@@ -1254,6 +1357,55 @@ struct ChunkCompileMeta {
     source_file: Option<String>,
 }
 
+fn compile_entry_stem_counts(entries: &[String]) -> HashMap<String, usize> {
+    let mut counts = HashMap::new();
+    for entry in entries {
+        if let Some(stem) = std::path::Path::new(entry.as_str())
+            .file_stem()
+            .and_then(|s| s.to_str())
+        {
+            *counts.entry(stem.to_string()).or_insert(0) += 1;
+        }
+    }
+    counts
+}
+
+fn compile_entry_chunk_name(
+    entry: &str,
+    index: usize,
+    stem_counts: &HashMap<String, usize>,
+) -> String {
+    let Some(stem) = std::path::Path::new(entry)
+        .file_stem()
+        .and_then(|s| s.to_str())
+    else {
+        return format!("entry_{index}");
+    };
+
+    if stem_counts.get(stem).copied().unwrap_or(0) <= 1 {
+        return stem.to_string();
+    }
+
+    let stripped = entry
+        .trim_start_matches("./")
+        .trim_end_matches(".ets")
+        .trim_end_matches(".ts")
+        .trim_end_matches(".js");
+    let mut name = String::with_capacity(stripped.len());
+    for ch in stripped.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '$' {
+            name.push(ch);
+        } else {
+            name.push('_');
+        }
+    }
+    if name.is_empty() {
+        format!("entry_{index}")
+    } else {
+        name
+    }
+}
+
 /// Build [`Ts2abcInput`] entries from the explicit file list produced by the bundler.
 ///
 /// Using `bundle_out.chunk_files` rather than scanning the output directory
@@ -1294,6 +1446,56 @@ fn collect_js_chunks_from_output(
         });
     }
     modules
+}
+
+fn collect_unresolved_external_imports(bundle_out: &BundleOutput) -> Vec<String> {
+    let mut imports = Vec::new();
+    let internal_files: std::collections::HashSet<String> = bundle_out
+        .chunk_files
+        .iter()
+        .filter_map(|(_, path)| path.file_name()?.to_str().map(str::to_string))
+        .collect();
+    for chunk in &bundle_out.chunk_graph.chunks {
+        for specifier in chunk.imports.iter().chain(chunk.dynamic_imports.iter()) {
+            if internal_files.contains(specifier.trim_start_matches("./")) {
+                continue;
+            }
+            if is_compile_unresolved_external(specifier) && !imports.contains(specifier) {
+                imports.push(specifier.clone());
+            }
+        }
+    }
+    imports
+}
+
+fn is_compile_unresolved_external(specifier: &str) -> bool {
+    !(specifier.starts_with("./")
+        || specifier.starts_with("../")
+        || specifier.starts_with('/')
+        || specifier.starts_with("@bundle:")
+        || specifier.starts_with("@shared:")
+        || specifier.starts_with("@ohos:")
+        || specifier.starts_with("@ohos.")
+        || specifier.starts_with("@kit.")
+        || specifier.starts_with("@hms.")
+        || specifier.starts_with("@system.")
+        || specifier.starts_with("@native:")
+        || specifier.ends_with(".so"))
+}
+
+fn format_unresolved_import_errors(imports: &[String]) -> String {
+    imports
+        .iter()
+        .enumerate()
+        .map(|(idx, specifier)| {
+            format!(
+                "{} ERROR: 10505001 ArkTS Compiler Error\nError Message: Cannot find module '{}' or its corresponding type declarations.",
+                idx + 1,
+                specifier
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn write_hvigor_source_maps(

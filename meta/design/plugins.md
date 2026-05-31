@@ -59,7 +59,7 @@ The OHOS-aware node-resolve plugin. Used instead of `@rollup/plugin-node-resolve
 **arkdown Rust crate**: `arkdown-plugin-ohos-resolve`
 **Priority**: P0
 **Complexity**: High
-**Notes**: This is the most complex plugin. Must handle all OHOS specifier forms (see [module-resolution.md](module-resolution.md)). The Huawei oxc-resolver fork (`oxc-resolver@1.11.0-htrunk1`) provides the base algorithm; arkdown extends it with OHOS-specific rules. The Rust implementation eliminates the NAPI boundary overhead entirely.
+**Notes**: This is the most complex plugin. Must handle all OHOS specifier forms (see [module-resolution.md](module-resolution.md)). arkdown now delegates generic filesystem/package probing to the upstream Rust `oxc_resolver` crate and keeps only hvigor-specific semantics in local code: `oh-package.json5`, `oh_modules` / `.ohpm`, SDK fallback, ByteCode HAR, and project `file:` HAR aliases. The Rust implementation eliminates the NAPI boundary overhead entirely.
 
 ---
 

@@ -11,7 +11,8 @@
 
 Implement the OHOS-aware module resolver that maps import specifiers to absolute file paths or
 external references. Replaces `@ohos/hvigor-arkts-compose`'s `plugins/resolve/` chain and
-`@rollup/plugin-node-resolve`. Built on top of `oxc_resolver` from `ohos-rs/oxc`.
+`@rollup/plugin-node-resolve`. Built on top of the upstream `oxc_resolver` crate, with
+OHOS-specific package roots and `oh-package.json5` handling layered above it.
 
 This crate is a library — it exposes a `OhosResolver` struct used by the loader and the
 resolve plugin. It does NOT implement the `ArkdownPlugin` trait directly (that is SPEC-015).
@@ -42,7 +43,8 @@ See `meta/design/module-resolution.md` for full details. Summary:
 ```rust
 pub struct OhosResolver {
     config: ResolverConfig,
-    oxc_resolver: OxcResolver,  // from ohos-rs/oxc (oxc_resolver crate)
+    fs_resolver: OxcResolver,   // upstream oxc_resolver crate
+    package_roots: HashMap<String, PackageRoot>,
 }
 
 pub struct ResolverConfig {
@@ -67,13 +69,16 @@ impl OhosResolver {
 ```
 fn resolve(specifier, importer):
     1. if specifier starts with "@bundle:" or "@shared:" → ExternalBundle/ExternalHsp
-    2. if specifier starts with "@ohos/" → SdkDeclaration (sdk_api_paths lookup)
-    3. if specifier starts with "@kit." → SdkDeclaration (sdk kits lookup)
-    4. if specifier starts with "./" or "../" → relative resolution via oxc_resolver
-    5. bare specifier:
-        a. look up in pkg_name_to_pkg_info (local HAR)
-        b. look up in oh_modules/ (installed ohpm packages)
-        c. if oh-package.json5 has metadata.byteCodeHar and ets/modules.abc → BytecodeHar
+    2. try bare/package resolution before SDK fallback:
+        a. split scoped/unscoped specifiers by longest package prefix
+        b. look up file: HAR aliases discovered from project oh-package.json5 dependencies
+        c. look up pkg_name_to_pkg_info (loader local HAR metadata)
+        d. look up importer-nearest and configured oh_modules roots, including .ohpm/oh_modules
+        e. if oh-package.json5 has metadata.byteCodeHar and ets/modules.abc → BytecodeHar
+        f. use oxc_resolver for filesystem probing, extension aliases, symlinks, and index fallback
+    3. if specifier starts with "@ohos/" and no package was found → SdkDeclaration
+    4. if specifier starts with "@kit." → SdkDeclaration (sdk kits lookup)
+    5. if specifier starts with "./" or "../" → relative resolution via oxc_resolver
     6. fallback: return ResolveError::NotFound
 ```
 
@@ -119,7 +124,10 @@ oh_modules/
         └── src/main/ets/index.ets
 ```
 
-The resolver reads `oh-package.json5`'s `main` field to find the entry file.
+The resolver reads `oh-package.json5`'s `main` field to find the entry file. For
+ohpm's lockfile layout it also scans `.ohpm/**/oh_modules/<pkg>/oh-package.json5`
+and the shared `.ohpm/oh_modules` symlink farm, matching hvigor's `dep_info`
+`depName2RootPath` model.
 
 ---
 
@@ -194,8 +202,8 @@ file's directory, not the module root. This ensures that:
 | `OhosResolvedModule::LocalSource`                 | `HookResolveIdOutput { external: false, id: abs_path }`                 | Identical; rolldown uses `id` as absolute path                                                                                                                                                |
 | `OhosResolvedModule::SdkDeclaration`              | `HookResolveIdOutput { external: true }` with `ModuleType::Declaration` | rolldown has no concept of declaration-only modules; arkdown skips loading them entirely                                                                                                      |
 | `OhosResolvedModule::BytecodeHar`                 | no rolldown equivalent                                                  | OHOS-specific: resolved as external (`external: true`) but carries `abc_path` for the packager                                                                                                |
-| `ResolverConfig::pkg_name_to_pkg_info`            | rolldown reads `node_modules/` + `package.json`                         | OHOS uses `oh_modules/` + `oh-package.json5`; the map replaces Node.js package resolution                                                                                                     |
-| `ResolverConfig::oh_modules_roots`                | rolldown `resolve.modules` option (`["node_modules"]`)                  | Same purpose: list of directories to search for bare specifiers                                                                                                                               |
+| `ResolverConfig::pkg_name_to_pkg_info` + discovered file aliases | rolldown reads `node_modules/` + `package.json`                         | OHOS uses `oh_modules/`, project `file:` HAR deps, and `oh-package.json5`; this mirrors hvigor's dependency-root metadata before SDK fallback                                                  |
+| `ResolverConfig::oh_modules_roots`                | rolldown/oxc `resolve.modules` option (`["node_modules"]`)              | Same purpose: list of directories to search for bare specifiers; arkdown adds `.ohpm/oh_modules` and uses `oxc_resolver` cache/symlink behavior                                               |
 | Extension resolution order (`.ets`, `.ts`, `.js`) | rolldown `resolve.extensions` option                                    | OHOS tries `.ets` first (arkdown-specific); rolldown default is `[".js", ".ts"]`                                                                                                              |
 | `to_ohm_url()`                                    | no rolldown equivalent                                                  | OHOS-specific: converts resolved paths to `@bundle:bundleName/moduleName/path` strings                                                                                                        |
 

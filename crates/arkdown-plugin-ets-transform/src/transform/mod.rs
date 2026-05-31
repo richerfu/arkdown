@@ -513,11 +513,7 @@ fn lower_extend_body(
         return String::new();
     };
     let body_text = span_text(body.span(), source_text);
-    let inner = body_text
-        .trim()
-        .trim_start_matches('{')
-        .trim_end_matches('}')
-        .trim();
+    let inner = strip_outer_block(&body_text);
     let mut out = String::new();
     for line in inner.lines() {
         let trimmed = line.trim();
@@ -537,6 +533,15 @@ fn lower_extend_body(
         out.push('\n');
     }
     out
+}
+
+fn strip_outer_block(text: &str) -> &str {
+    let trimmed = text.trim();
+    if trimmed.starts_with('{') && trimmed.ends_with('}') && trimmed.len() >= 2 {
+        trimmed[1..trimmed.len() - 1].trim()
+    } else {
+        trimmed
+    }
 }
 
 fn decorator_first_arg_text(decorator: &Decorator<'_>, source_text: &str) -> Option<String> {
@@ -727,9 +732,14 @@ fn component_from_struct(
                     lowered_body,
                 });
             }
-            _ => {
+            StructElement::MethodDefinition(method) => {
                 regular_members.push(strip_orphan_arkui_decorator_lines(
-                    span_text(element.span(), source_text).trim(),
+                    balanced_method_text(method, statement.span(), source_text)
+                        .or_else(|| {
+                            balanced_member_text(element.span().start as usize, source_text)
+                        })
+                        .unwrap_or_else(|| span_text(element.span(), source_text).to_string())
+                        .trim(),
                 ));
             }
         }
@@ -748,6 +758,75 @@ fn component_from_struct(
         builder_methods,
         styles_methods,
     }))
+}
+
+fn balanced_method_text(
+    method: &oxc_ast::ast::MethodDefinition<'_>,
+    _struct_span: Span,
+    source_text: &str,
+) -> Option<String> {
+    let key_start = method.key.span().start as usize;
+    let start = method_source_line_start(key_start, source_text)?;
+    balanced_member_text(start, source_text)
+}
+
+fn method_source_line_start(key_start: usize, source_text: &str) -> Option<usize> {
+    source_text.get(..key_start)?;
+    let line_start = source_text[..key_start]
+        .rfind('\n')
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    let prefix = source_text.get(line_start..key_start)?;
+    let leading_ws = prefix.len() - prefix.trim_start().len();
+    let trimmed = prefix.trim();
+    if trimmed.is_empty() || is_method_modifier_prefix(trimmed) {
+        Some(line_start + leading_ws)
+    } else {
+        Some(key_start)
+    }
+}
+
+fn is_method_modifier_prefix(prefix: &str) -> bool {
+    prefix.split_whitespace().all(|token| {
+        matches!(
+            token,
+            "async" | "public" | "private" | "protected" | "static" | "override" | "get" | "set"
+        )
+    })
+}
+
+fn balanced_member_text(start: usize, source_text: &str) -> Option<String> {
+    let rest = source_text.get(start..)?;
+    let open_rel = rest.find('{')?;
+    let open = start + open_rel;
+    let mut depth = 0i32;
+    let mut in_string: Option<char> = None;
+    let mut escaped = false;
+    for (offset, ch) in source_text.get(open..)?.char_indices() {
+        if let Some(quote) = in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == quote {
+                in_string = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' | '`' => in_string = Some(ch),
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    let end = open + offset + ch.len_utf8();
+                    return source_text.get(start..end).map(str::to_string);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn primary_state_decorator(names: &[&str]) -> Option<&'static str> {
@@ -1445,6 +1524,90 @@ struct Page {
         assert!(!result.contains("@Builder"));
         assert!(!result.contains("Column() {"));
         assert!(result.contains(".clip(true);"));
+    }
+
+    #[test]
+    fn test_keeps_regular_method_body_before_top_level_builder() {
+        let src = r#"
+@Component
+export struct ConfirmView {
+  @Consume('appPathStack') appPathStack: NavPathStack;
+  @State uri: string = '';
+  @StorageProp('currentBreakpoint') currentBreakpoint: string = BreakpointTypeEnum.MD;
+
+  async savePhoto() {
+    const imageSource: image.ImageSource = image.createImageSource(ProfileConstants.getInstance().LOCAL_PROFILE_PATH);
+    imageSource.createPixelMap((err, pixelMap) => {
+      Logger.error('tag', `createPixelMap error: ${err}`)
+    });
+    await imageSource.release();
+  }
+
+  checkBackAction(isCenter?: boolean) {
+    AlertDialog.show(
+      {
+        message: $r('app.string.sure_cancel'),
+        autoCancel: false,
+        offset: isCenter ? { dx: 0, dy: 0 } : {
+          dx: $r('app.float.xxl_padding_margin'),
+          dy: AppStorage.get<number>('statusBarHeight') || 0
+        },
+        primaryButton: {
+          value: $r('app.string.cancel'),
+          action: () => {
+            Logger.info('tag', 'cancel');
+          }
+        },
+        secondaryButton: {
+          value: $r('app.string.sure'),
+          action: () => {
+            Logger.info('tag', 'sure');
+            this.uri = '';
+          }
+        }
+      }
+    )
+  }
+
+  build() {}
+}
+
+@Builder
+export function PhotoConfirmBuilder() {
+  ConfirmView();
+}
+"#;
+        let result = transform_ets(&make_source(
+            "features/mine/src/main/ets/views/ConfirmView.ets",
+            src,
+        ))
+        .unwrap();
+        assert!(
+            result.contains("async savePhoto()"),
+            "regular method modifiers must be preserved, got:\n{result}"
+        );
+        assert!(
+            result.contains("secondaryButton"),
+            "regular method body must be preserved, got:\n{result}"
+        );
+        assert!(
+            !result.contains("AlertDialog.show(\nexport function"),
+            "method body was truncated before top-level builder, got:\n{result}"
+        );
+
+        let allocator = oxc_allocator::Allocator::default();
+        let parsed = oxc_parser::Parser::new(
+            &allocator,
+            &result,
+            oxc_span::SourceType::ts().with_module(true),
+        )
+        .parse();
+        assert!(
+            parsed.errors.is_empty(),
+            "lowered output must be valid TypeScript: {:?}\n{}",
+            parsed.errors,
+            result
+        );
     }
 
     #[test]

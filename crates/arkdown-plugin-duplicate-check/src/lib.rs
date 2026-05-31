@@ -30,16 +30,16 @@ impl Plugin for DuplicateCheckPlugin {
         let mut seen: HashMap<String, String> = HashMap::new();
         for output in args.bundle.iter() {
             if let Output::Chunk(chunk) = output {
-                let name = chunk.name.to_string();
-                if let Some(existing) = seen.get(&name) {
+                let filename = chunk.filename.to_string();
+                if let Some(existing) = seen.get(&filename) {
                     let err = format!(
-                        "Duplicate chunk name '{}' detected: first '{}', second '{}'. \
+                        "Duplicate chunk filename '{}' detected: first '{}', second '{}'. \
                          Rename one to avoid .abc record conflicts.",
-                        name, existing, name
+                        filename, existing, filename
                     );
                     return std::future::ready(Err(anyhow::anyhow!(err)));
                 }
-                seen.insert(name.clone(), name);
+                seen.insert(filename.clone(), filename);
             }
         }
         std::future::ready(Ok(()))

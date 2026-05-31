@@ -213,10 +213,6 @@ pub fn load_config(
             Err(e) => return Err(e),
         };
 
-        if module_name.is_none() && !module_matches_output_target(&module_type, &target) {
-            continue;
-        }
-
         modules.push(ModuleConfig {
             name: raw_mod.name,
             src_path: module_root,
@@ -249,7 +245,7 @@ pub fn load_config(
     })
 }
 
-fn module_matches_output_target(module_type: &OhosModuleType, target: &OutputTarget) -> bool {
+pub fn module_matches_output_target(module_type: &OhosModuleType, target: &OutputTarget) -> bool {
     match target {
         OutputTarget::Hap => {
             matches!(module_type, OhosModuleType::Entry | OhosModuleType::Feature)

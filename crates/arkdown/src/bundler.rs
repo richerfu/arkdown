@@ -85,6 +85,7 @@ impl Bundler {
                     .join(normalized)
             });
 
+        let chunk_name_counts = compile_entry_stem_counts(&loader_json.compile_entry);
         let input: Vec<InputItem> = loader_json
             .compile_entry
             .iter()
@@ -104,11 +105,7 @@ impl Bundler {
                 // Derive chunk name from the compile_entry file stem so rolldown
                 // writes "EntryAbility.js" instead of "entry_0.js".  This keeps
                 // the ABC record_name_map lookup (stem → OHM class path) working.
-                let chunk_name = std::path::Path::new(entry.as_str())
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| format!("entry_{i}"));
+                let chunk_name = compile_entry_chunk_name(entry, i, &chunk_name_counts);
                 InputItem {
                     name: Some(chunk_name),
                     import: import_path,
@@ -197,15 +194,11 @@ impl Bundler {
         let chunk_source_files: FxHashMap<String, String> = loader_json
             .compile_entry
             .iter()
-            .filter_map(|entry| {
-                let stem = std::path::Path::new(entry.as_str())
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .map(|s| s.to_string())?;
-                // Strip leading "./" and the "ets/" prefix that module_root_path adds.
-                // compile_entry is relative to src/main (e.g. "./ets/pages/Index.ets").
+            .enumerate()
+            .map(|(i, entry)| {
+                let chunk_name = compile_entry_chunk_name(entry, i, &chunk_name_counts);
                 let source_file = entry.trim_start_matches("./").to_string();
-                Some((stem, source_file))
+                (chunk_name, source_file)
             })
             .collect();
 
@@ -234,6 +227,55 @@ impl Bundler {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+fn compile_entry_stem_counts(entries: &[String]) -> FxHashMap<String, usize> {
+    let mut counts = FxHashMap::default();
+    for entry in entries {
+        if let Some(stem) = std::path::Path::new(entry.as_str())
+            .file_stem()
+            .and_then(|s| s.to_str())
+        {
+            *counts.entry(stem.to_string()).or_insert(0) += 1;
+        }
+    }
+    counts
+}
+
+fn compile_entry_chunk_name(
+    entry: &str,
+    index: usize,
+    stem_counts: &FxHashMap<String, usize>,
+) -> String {
+    let Some(stem) = std::path::Path::new(entry)
+        .file_stem()
+        .and_then(|s| s.to_str())
+    else {
+        return format!("entry_{index}");
+    };
+
+    if stem_counts.get(stem).copied().unwrap_or(0) <= 1 {
+        return stem.to_string();
+    }
+
+    let stripped = entry
+        .trim_start_matches("./")
+        .trim_end_matches(".ets")
+        .trim_end_matches(".ts")
+        .trim_end_matches(".js");
+    let mut name = String::with_capacity(stripped.len());
+    for ch in stripped.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '$' {
+            name.push(ch);
+        } else {
+            name.push('_');
+        }
+    }
+    if name.is_empty() {
+        format!("entry_{index}")
+    } else {
+        name
+    }
+}
+
 /// Convert rolldown's [`rolldown::BundleOutput`] into our [`ChunkGraph`].
 ///
 /// Asset outputs (CSS, images, etc.) are ignored — only `Output::Chunk`
@@ -245,8 +287,13 @@ fn build_chunk_graph(rd_output: rolldown::BundleOutput) -> Result<ChunkGraph, Ar
 
     for asset in rd_output.assets {
         if let Output::Chunk(chunk) = asset {
+            let chunk_name = std::path::Path::new(chunk.filename.as_str())
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(chunk.name.as_str())
+                .to_string();
             let ark_chunk = ArkChunk {
-                name: chunk.name.to_string(),
+                name: chunk_name,
                 code: chunk.code.clone(),
                 source_map: chunk.map.as_ref().map(|map| map.to_json_string()),
                 is_entry: chunk.is_entry,

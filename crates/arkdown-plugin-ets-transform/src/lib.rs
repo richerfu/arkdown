@@ -373,8 +373,26 @@ fn source_exports_type_only(path: &std::path::Path, name: &str) -> bool {
     let Ok(content) = std::fs::read_to_string(path) else {
         return false;
     };
-    content.contains(&format!("export interface {name}"))
-        || content.contains(&format!("export type {name}"))
+    contains_exported_type_decl(&content, "interface", name)
+        || contains_exported_type_decl(&content, "type", name)
+}
+
+fn contains_exported_type_decl(content: &str, kind: &str, name: &str) -> bool {
+    let needle = format!("export {kind} {name}");
+    let mut search_start = 0usize;
+    while let Some(offset) = content[search_start..].find(&needle) {
+        let end = search_start + offset + needle.len();
+        let next = content[end..].chars().next();
+        if next.is_none_or(|ch| !is_identifier_part(ch)) {
+            return true;
+        }
+        search_start = end;
+    }
+    false
+}
+
+fn is_identifier_part(ch: char) -> bool {
+    ch == '_' || ch == '$' || ch.is_ascii_alphanumeric()
 }
 
 /// Ensure the Source Map v3 JSON object contains a `"names"` array.
@@ -408,6 +426,7 @@ fn format_hvigor_standard_ts(source: &str) -> String {
         if trimmed.ends_with('(') && trimmed.contains('.') {
             let indent = hvigor_indent(line);
             let mut args = Vec::new();
+            let mut consumed = Vec::new();
             let mut closed = false;
             while let Some(arg_line) = iter.peek().copied() {
                 let arg = arg_line.trim();
@@ -419,6 +438,7 @@ fn format_hvigor_standard_ts(source: &str) -> String {
                 if arg.is_empty() {
                     break;
                 }
+                consumed.push(arg_line);
                 args.push(arg.trim_end_matches(',').to_string());
                 iter.next();
             }
@@ -427,6 +447,15 @@ fn format_hvigor_standard_ts(source: &str) -> String {
                 lines.push(format!("{indent}{prefix}({});", args.join(", ")));
                 continue;
             }
+            lines.push(format!("{}{}", hvigor_indent(line), trimmed));
+            for consumed_line in consumed {
+                lines.push(format!(
+                    "{}{}",
+                    hvigor_indent(consumed_line),
+                    consumed_line.trim_start()
+                ));
+            }
+            continue;
         }
 
         lines.push(format!("{}{}", hvigor_indent(line), trimmed));
@@ -528,6 +557,34 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&output).unwrap();
         let names = v["names"].as_array().unwrap();
         assert_eq!(names.len(), 2, "existing names must be preserved");
+    }
+
+    #[test]
+    fn test_hvigor_standard_format_preserves_unmerged_multiline_call() {
+        let input = "class ConfirmView {\n  checkBackAction() {\n    AlertDialog.show(\n      {\n        value: true\n      }\n    )\n  }\n}\n";
+        let output = format_hvigor_standard_ts(input);
+        assert!(
+            output.contains("value: true"),
+            "formatter must not drop call body when the close line is not `);`: {output}"
+        );
+        assert!(
+            output.contains("    )"),
+            "formatter must preserve the unmatched close line: {output}"
+        );
+    }
+
+    #[test]
+    fn test_type_only_export_detection_uses_identifier_boundary() {
+        let content = "export interface BreakpointTypes<T> {}\nexport class BreakpointType<T> {}\n";
+        assert!(
+            !contains_exported_type_decl(content, "interface", "BreakpointType"),
+            "BreakpointType must not match BreakpointTypes"
+        );
+        assert!(contains_exported_type_decl(
+            "export interface ResponseData {}\n",
+            "interface",
+            "ResponseData"
+        ));
     }
 
     #[test]
