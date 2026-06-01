@@ -1,4 +1,5 @@
 use oxc_ast::ast::ModuleExportName;
+use string_wizard::MagicString;
 
 #[derive(Debug)]
 pub(crate) struct SourcePatch {
@@ -22,17 +23,84 @@ pub(crate) fn apply_source_patches(source: &str, mut patches: Vec<SourcePatch>) 
     if patches.is_empty() {
         return source.to_string();
     }
+
     patches.sort_by_key(|patch| patch.start);
-    let mut out = String::with_capacity(source.len());
+    let mut magic = MagicString::new(source);
     let mut last_end = 0usize;
     for patch in patches {
         if patch.start < last_end {
             continue;
         }
-        out.push_str(&source[last_end..patch.start]);
-        out.push_str(&patch.replacement);
+
+        if patch.start == patch.end {
+            magic.append_left(patch.start as u32, patch.replacement);
+        } else {
+            magic
+                .update(patch.start as u32, patch.end as u32, patch.replacement)
+                .expect("source patches must describe valid non-overlapping byte ranges");
+        }
         last_end = patch.end;
     }
-    out.push_str(&source[last_end..]);
-    out
+    magic.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn applies_ordered_replacements_with_magic_string() {
+        let output = apply_source_patches(
+            "abcdef",
+            vec![
+                SourcePatch {
+                    start: 1,
+                    end: 3,
+                    replacement: "XX".to_string(),
+                },
+                SourcePatch {
+                    start: 4,
+                    end: 6,
+                    replacement: "YY".to_string(),
+                },
+            ],
+        );
+
+        assert_eq!(output, "aXXdYY");
+    }
+
+    #[test]
+    fn applies_zero_length_insertions_before_index() {
+        let output = apply_source_patches(
+            "abcd",
+            vec![SourcePatch {
+                start: 2,
+                end: 2,
+                replacement: "XX".to_string(),
+            }],
+        );
+
+        assert_eq!(output, "abXXcd");
+    }
+
+    #[test]
+    fn skips_overlapping_patches_like_previous_manual_applier() {
+        let output = apply_source_patches(
+            "abcdef",
+            vec![
+                SourcePatch {
+                    start: 1,
+                    end: 4,
+                    replacement: "X".to_string(),
+                },
+                SourcePatch {
+                    start: 2,
+                    end: 5,
+                    replacement: "Y".to_string(),
+                },
+            ],
+        );
+
+        assert_eq!(output, "aXef");
+    }
 }
