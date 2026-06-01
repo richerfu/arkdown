@@ -26,10 +26,14 @@ fn ensure_viewpu_finalize_construction_shim(source: &str) -> String {
         return source.to_owned();
     }
 
-    let mut out = String::with_capacity(VIEWPU_FINALIZE_CONSTRUCTION_SHIM.len() + source.len());
-    out.push_str(VIEWPU_FINALIZE_CONSTRUCTION_SHIM);
-    out.push_str(source);
-    out
+    apply_source_patches(
+        source,
+        vec![SourcePatch {
+            start: 0,
+            end: 0,
+            replacement: VIEWPU_FINALIZE_CONSTRUCTION_SHIM.to_string(),
+        }],
+    )
 }
 
 fn strip_leading_file_comments(source: &str) -> String {
