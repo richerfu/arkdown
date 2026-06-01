@@ -471,7 +471,7 @@ impl Packager {
                     .filter(|e| e.file_type().is_file())
                 {
                     let rel = entry.path().strip_prefix(res_src).unwrap_or(entry.path());
-                    let dest = format!("resources/{}", rel.to_string_lossy().replace('\\', "/"));
+                    let dest = ArchivePath::resources(rel);
                     let ext = entry
                         .path()
                         .extension()
@@ -516,12 +516,11 @@ impl Packager {
         // Native .so libraries — stored, placed under libs/arm64-v8a/
         for so_path in &input.native_libs {
             if so_path.exists() {
-                let arch_dir = "libs/arm64-v8a";
                 let filename = so_path
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("unknown.so");
-                let dest = format!("{}/{}", arch_dir, filename);
+                let dest = ArchivePath::native_lib(filename);
                 zip_writer::add_file_stored(&mut writer, &dest, so_path)?;
             }
         }
@@ -530,7 +529,7 @@ impl Packager {
         // Each HSP must have been normalized via `normalize_integrated_hsps()` before packing.
         for hsp in &input.integrated_hsps {
             if hsp.hsp_path.exists() {
-                let dest = format!("libs/{}/{}", hsp.hsp_dir_name, hsp.hsp_file_name);
+                let dest = ArchivePath::integrated_hsp(&hsp.hsp_dir_name, &hsp.hsp_file_name);
                 zip_writer::add_file_stored(&mut writer, &dest, &hsp.hsp_path)?;
             }
         }
@@ -585,7 +584,7 @@ impl Packager {
                     .path()
                     .strip_prefix(&input.source_dir)
                     .unwrap_or(entry.path());
-                let dest = format!("src/main/ets/{}", rel.to_string_lossy().replace('\\', "/"));
+                let dest = ArchivePath::har_ets(rel);
                 zip_writer::add_file_deflate(&mut writer, &dest, entry.path())?;
             }
         }
@@ -615,7 +614,7 @@ fn add_loader_out_ets_assets<W: std::io::Write + std::io::Seek>(
         {
             continue;
         }
-        let dest = format!("ets/{rel_text}");
+        let dest = ArchivePath::ets(&rel_text);
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         if ext == "json" {
             add_json_resource_deflate(writer, &dest, path)?;
@@ -638,11 +637,51 @@ fn add_profile_guided_ap<W: std::io::Write + std::io::Seek>(
     let Some(module_root) = output_parent.ancestors().nth(4) else {
         return Ok(());
     };
-    let ap_path = module_root.join(format!("{}.ap", input.module_name));
+    let ap_path = module_root.join(ArchivePath::profile_guided_ap_file(&input.module_name));
     if ap_path.exists() {
-        zip_writer::add_file_stored(writer, &format!("ap/{}.ap", input.module_name), &ap_path)?;
+        zip_writer::add_file_stored(
+            writer,
+            &ArchivePath::profile_guided_ap(&input.module_name),
+            &ap_path,
+        )?;
     }
     Ok(())
+}
+
+struct ArchivePath;
+
+impl ArchivePath {
+    fn resources(rel: &std::path::Path) -> String {
+        format!("resources/{}", slash_path(rel))
+    }
+
+    fn native_lib(filename: &str) -> String {
+        format!("libs/arm64-v8a/{filename}")
+    }
+
+    fn integrated_hsp(dir_name: &str, file_name: &str) -> String {
+        format!("libs/{dir_name}/{file_name}")
+    }
+
+    fn har_ets(rel: &std::path::Path) -> String {
+        format!("src/main/ets/{}", slash_path(rel))
+    }
+
+    fn ets(rel_text: &str) -> String {
+        format!("ets/{rel_text}")
+    }
+
+    fn profile_guided_ap(module_name: &str) -> String {
+        format!("ap/{}", Self::profile_guided_ap_file(module_name))
+    }
+
+    fn profile_guided_ap_file(module_name: &str) -> String {
+        format!("{module_name}.ap")
+    }
+}
+
+fn slash_path(path: &std::path::Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 fn add_json_resource_deflate<W: std::io::Write + std::io::Seek>(
