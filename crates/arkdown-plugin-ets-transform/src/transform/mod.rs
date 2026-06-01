@@ -64,6 +64,7 @@ pub(crate) use crate::transform::syntax::has_arkts_transform_syntax;
 use crate::transform::syntax::program_has_arkts_transform_syntax;
 use crate::transform::viewpu_finalize::finalize_viewpu_output;
 pub use crate::transform::viewpu_source_map::transform_ets_viewpu_with_source_map;
+use crate::{apply_source_patches, SourcePatch};
 
 #[derive(Debug, Clone, Default)]
 pub struct TransformOptions {
@@ -171,8 +172,7 @@ pub fn transform_ets_with_options(
     );
     let builder_functions = collect_builder_function_names(&parsed.program, &source.id.id, options);
 
-    let mut out = String::with_capacity(content.len() + 512);
-    let mut last_end = 0usize;
+    let mut patches = Vec::new();
     let mut transformed_any = false;
 
     for statement in &parsed.program.body {
@@ -189,8 +189,11 @@ pub fn transform_ets_with_options(
             &hvigor_source_id,
         )? {
             let start = component_replacement_start(statement, content);
-            out.push_str(&content[last_end..start]);
-            out.push_str(&generate_view_pu_class(&component));
+            patches.push(SourcePatch {
+                start,
+                end: span.end as usize,
+                replacement: generate_view_pu_class(&component),
+            });
             transformed_any = true;
         } else if let Some((start, replacement)) = transform_non_component_statement(
             statement,
@@ -202,20 +205,17 @@ pub fn transform_ets_with_options(
             &builder_functions,
             &hvigor_source_id,
         )? {
-            out.push_str(&content[last_end..start]);
-            out.push_str(&replacement);
+            patches.push(SourcePatch {
+                start,
+                end: span.end as usize,
+                replacement,
+            });
             transformed_any = true;
-        } else {
-            out.push_str(&content[last_end..span.start as usize]);
-            out.push_str(span_text(span, content));
         }
-
-        last_end = span.end as usize;
     }
 
-    out.push_str(&content[last_end..]);
-
     if transformed_any {
+        let mut out = apply_source_patches(content, patches);
         while out.ends_with("\n\n") {
             out.pop();
         }
