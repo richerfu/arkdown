@@ -13,12 +13,14 @@ use oxc_span::{GetSpan, SourceType};
 
 use crate::emit::file::{LiteralArray, LiteralEntry};
 use crate::emit::record::{
-    CatchEntry, ClassRecord, DebugInfoRecord, FieldRecord, FieldValue, MethodRecord,
+    CatchEntry, ClassRecord, DebugInfoRecord, FieldRecord, FieldValue, MethodKind, MethodRecord,
     FIELD_OWNER_CLASS_IDX,
 };
 use crate::emit::strings::StringTable;
 use crate::error::AbcError;
-use crate::ir::function_records::{collect_function_records, FunctionRecord, FunctionRecordNode};
+use crate::ir::function_records::{
+    collect_function_records, FunctionNameAllocator, FunctionRecord, FunctionRecordNode,
+};
 use crate::ir::opcodes::Insn;
 
 const MANDATORY_PARAM_THIS_REG: u8 = 2;
@@ -457,14 +459,17 @@ pub fn build_record_with_debug_and_source_map(
         debug_info: None,
         line_ops: func_main_line_ops,
         catch_entries: func_main_catches,
+        kind: MethodKind::Module,
+        method_pool_entry: false,
     });
 
     // Determine which statement slice to scan for declarations. Upstream
     // module mode scans normal top-level statements.
     let scan_stmts: &[Statement<'_>] = statement_scan_body(&program, is_module);
     let tracked_source = source_file.as_ref().map(|_| source);
+    let mut function_names = FunctionNameAllocator::new(source);
 
-    for function in collect_function_records(&program, scan_stmts, source) {
+    for function in collect_function_records(&program, scan_stmts, &mut function_names) {
         compile_function_record(
             function,
             strings,
@@ -489,6 +494,7 @@ pub fn build_record_with_debug_and_source_map(
         tracked_source,
         source_file,
         source_mapper,
+        &mut function_names,
     );
 
     // ArkRuntime finds modules by their OHM URL class name format:
@@ -515,7 +521,7 @@ pub fn build_record_with_debug_and_source_map(
     let module_record_idx = literal_arrays.len();
     literal_arrays.push(module_record_literal_array(&module_record));
     let scope_names_idx = literal_arrays.len();
-    literal_arrays.push(scope_names_literal_array(&methods, record_name));
+    literal_arrays.push(scope_names_literal_array(scan_stmts, record_name));
 
     // The 6 module metadata fields that es2abc always writes into every user
     // class record.  ArkRuntime reads these to understand how to load the
@@ -789,44 +795,8 @@ fn module_record_literal_array(module_record: &ModuleRecordInfo) -> LiteralArray
     LiteralArray { entries }
 }
 
-fn scope_names_literal_array(methods: &[MethodRecord], record_name: &str) -> LiteralArray {
-    // hvigor format: [class_short_name, first_method_with_call_arg_closures]
-    //
-    // es2abc emits this two-element array for the `scopeNames` class field so
-    // ArkRuntime / the source debugger can locate the closure scope chain.
-    // The array is only present when at least one class method contains call-arg
-    // arrow functions (i.e. there are `#~@0>@*` records in the method list).
-    //
-    // Class short name: last `/`-separated component of `record_name`
-    // (e.g. "EntryAbility" from "…/entryability/EntryAbility").
-    // Method name: the instance/static method name immediately preceding the
-    // first `#~@0>@` closure record.
-
-    // Scan methods in order: when we see a #~@0>@* record, the preceding class
-    // method (instance or static, not constructor) is the one with closures.
-    let mut last_class_method_short: Option<String> = None;
-    let mut first_closure_owner: Option<String> = None;
-
-    for method in methods {
-        let name = &method.name;
-        if name.starts_with("#~@0>#") || name.starts_with("#~@0<#") {
-            // Instance or static method — strip prefix to get short name.
-            let short = name
-                .strip_prefix("#~@0>#")
-                .or_else(|| name.strip_prefix("#~@0<#"))
-                .unwrap_or(name.as_str());
-            // Strip any `^N` duplicate suffix (e.g. "foo^1" → "foo").
-            let short = short.split('^').next().unwrap_or(short);
-            last_class_method_short = Some(short.to_string());
-        } else if name.starts_with("#~@0>@") {
-            // Call-arg closure record — its "owner" is the preceding class method.
-            if first_closure_owner.is_none() {
-                first_closure_owner = last_class_method_short.take();
-            }
-        }
-    }
-
-    let Some(owner_method) = first_closure_owner else {
+fn scope_names_literal_array(stmts: &[Statement<'_>], record_name: &str) -> LiteralArray {
+    let Some(owner_method) = first_scope_names_owner_method(stmts) else {
         // No call-arg closures in this class → no scopeNames payload.
         return LiteralArray { entries: vec![] };
     };
@@ -843,6 +813,211 @@ fn scope_names_literal_array(methods: &[MethodRecord], record_name: &str) -> Lit
             LiteralEntry::TaggedString(owner_method),
         ],
     }
+}
+
+fn first_scope_names_owner_method(stmts: &[Statement<'_>]) -> Option<String> {
+    for stmt in stmts {
+        match stmt {
+            Statement::ClassDeclaration(class) => {
+                if let Some(name) = first_scope_names_owner_in_class(&class.body.body) {
+                    return Some(name);
+                }
+            }
+            Statement::ExportDefaultDeclaration(export) => {
+                if let ExportDefaultDeclarationKind::ClassDeclaration(class) = &export.declaration {
+                    if let Some(name) = first_scope_names_owner_in_class(&class.body.body) {
+                        return Some(name);
+                    }
+                }
+            }
+            Statement::ExportNamedDeclaration(export) => {
+                if let Some(Declaration::ClassDeclaration(class)) = &export.declaration {
+                    if let Some(name) = first_scope_names_owner_in_class(&class.body.body) {
+                        return Some(name);
+                    }
+                }
+            }
+            Statement::VariableDeclaration(decl) => {
+                for declarator in &decl.declarations {
+                    if let Some(Expression::ClassExpression(class)) = &declarator.init {
+                        if let Some(name) = first_scope_names_owner_in_class(&class.body.body) {
+                            return Some(name);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn first_scope_names_owner_in_class(elements: &[ClassElement<'_>]) -> Option<String> {
+    for element in elements {
+        let ClassElement::MethodDefinition(method) = element else {
+            continue;
+        };
+        if method.kind == MethodDefinitionKind::Constructor {
+            continue;
+        }
+        if !method_body_contains_arrow(method) {
+            continue;
+        }
+        if let Some(name) = method_key_name(&method.key) {
+            return Some(name);
+        }
+    }
+    None
+}
+
+fn method_body_contains_arrow(method: &MethodDefinition<'_>) -> bool {
+    method
+        .value
+        .body
+        .as_deref()
+        .is_some_and(|body| statements_contain_arrow(&body.statements))
+}
+
+fn statements_contain_arrow(stmts: &[Statement<'_>]) -> bool {
+    stmts.iter().any(statement_contains_arrow)
+}
+
+fn statement_contains_arrow(stmt: &Statement<'_>) -> bool {
+    match stmt {
+        Statement::BlockStatement(block) => statements_contain_arrow(&block.body),
+        Statement::ExpressionStatement(stmt) => expression_contains_arrow(&stmt.expression),
+        Statement::VariableDeclaration(decl) => decl.declarations.iter().any(|declarator| {
+            declarator
+                .init
+                .as_ref()
+                .is_some_and(expression_contains_arrow)
+        }),
+        Statement::IfStatement(stmt) => {
+            expression_contains_arrow(&stmt.test)
+                || statement_contains_arrow(&stmt.consequent)
+                || stmt
+                    .alternate
+                    .as_ref()
+                    .is_some_and(statement_contains_arrow)
+        }
+        Statement::ReturnStatement(stmt) => stmt
+            .argument
+            .as_ref()
+            .is_some_and(expression_contains_arrow),
+        Statement::ThrowStatement(stmt) => expression_contains_arrow(&stmt.argument),
+        Statement::WhileStatement(stmt) => {
+            expression_contains_arrow(&stmt.test) || statement_contains_arrow(&stmt.body)
+        }
+        Statement::DoWhileStatement(stmt) => {
+            statement_contains_arrow(&stmt.body) || expression_contains_arrow(&stmt.test)
+        }
+        Statement::ForStatement(stmt) => {
+            stmt.init.as_ref().is_some_and(|init| match init {
+                oxc_ast::ast::ForStatementInit::VariableDeclaration(decl) => {
+                    decl.declarations.iter().any(|declarator| {
+                        declarator
+                            .init
+                            .as_ref()
+                            .is_some_and(expression_contains_arrow)
+                    })
+                }
+                oxc_ast::ast::ForStatementInit::AssignmentExpression(assign) => {
+                    expression_contains_arrow(&assign.right)
+                }
+                oxc_ast::ast::ForStatementInit::SequenceExpression(seq) => {
+                    seq.expressions.iter().any(expression_contains_arrow)
+                }
+                expr => expression_contains_arrow(expr.to_expression()),
+            }) || stmt.test.as_ref().is_some_and(expression_contains_arrow)
+                || stmt.update.as_ref().is_some_and(expression_contains_arrow)
+                || statement_contains_arrow(&stmt.body)
+        }
+        Statement::ForInStatement(stmt) => {
+            expression_contains_arrow(&stmt.right) || statement_contains_arrow(&stmt.body)
+        }
+        Statement::ForOfStatement(stmt) => {
+            expression_contains_arrow(&stmt.right) || statement_contains_arrow(&stmt.body)
+        }
+        Statement::TryStatement(stmt) => {
+            statements_contain_arrow(&stmt.block.body)
+                || stmt
+                    .handler
+                    .as_ref()
+                    .is_some_and(|handler| statements_contain_arrow(&handler.body.body))
+                || stmt
+                    .finalizer
+                    .as_ref()
+                    .is_some_and(|finalizer| statements_contain_arrow(&finalizer.body))
+        }
+        Statement::SwitchStatement(stmt) => {
+            expression_contains_arrow(&stmt.discriminant)
+                || stmt.cases.iter().any(|case| {
+                    case.test.as_ref().is_some_and(expression_contains_arrow)
+                        || statements_contain_arrow(&case.consequent)
+                })
+        }
+        _ => false,
+    }
+}
+
+fn expression_contains_arrow(expr: &Expression<'_>) -> bool {
+    match expr {
+        Expression::ArrowFunctionExpression(_) => true,
+        Expression::FunctionExpression(function) => function
+            .body
+            .as_ref()
+            .is_some_and(|body| statements_contain_arrow(&body.statements)),
+        Expression::AssignmentExpression(assign) => expression_contains_arrow(&assign.right),
+        Expression::CallExpression(call) => {
+            expression_contains_arrow(&call.callee)
+                || call.arguments.iter().any(argument_contains_arrow)
+        }
+        Expression::NewExpression(new_expr) => {
+            expression_contains_arrow(&new_expr.callee)
+                || new_expr.arguments.iter().any(argument_contains_arrow)
+        }
+        Expression::ObjectExpression(object) => object.properties.iter().any(|property| {
+            let oxc_ast::ast::ObjectPropertyKind::ObjectProperty(property) = property else {
+                return false;
+            };
+            expression_contains_arrow(&property.value)
+        }),
+        Expression::ArrayExpression(array) => array.elements.iter().any(|element| {
+            element
+                .as_expression()
+                .is_some_and(expression_contains_arrow)
+        }),
+        Expression::SequenceExpression(seq) => {
+            seq.expressions.iter().any(expression_contains_arrow)
+        }
+        Expression::ConditionalExpression(cond) => {
+            expression_contains_arrow(&cond.test)
+                || expression_contains_arrow(&cond.consequent)
+                || expression_contains_arrow(&cond.alternate)
+        }
+        Expression::BinaryExpression(expr) => {
+            expression_contains_arrow(&expr.left) || expression_contains_arrow(&expr.right)
+        }
+        Expression::LogicalExpression(expr) => {
+            expression_contains_arrow(&expr.left) || expression_contains_arrow(&expr.right)
+        }
+        Expression::UnaryExpression(expr) => expression_contains_arrow(&expr.argument),
+        Expression::ParenthesizedExpression(expr) => expression_contains_arrow(&expr.expression),
+        Expression::ClassExpression(class) => {
+            first_scope_names_owner_in_class(&class.body.body).is_some()
+        }
+        Expression::TSAsExpression(expr) => expression_contains_arrow(&expr.expression),
+        Expression::TSSatisfiesExpression(expr) => expression_contains_arrow(&expr.expression),
+        Expression::TSNonNullExpression(expr) => expression_contains_arrow(&expr.expression),
+        Expression::TSTypeAssertion(expr) => expression_contains_arrow(&expr.expression),
+        _ => false,
+    }
+}
+
+fn argument_contains_arrow(argument: &Argument<'_>) -> bool {
+    argument
+        .as_expression()
+        .is_some_and(expression_contains_arrow)
 }
 
 // ── Byte-count heuristics ─────────────────────────────────────────────────────
@@ -1075,6 +1250,8 @@ fn compile_function_record(
                 }),
                 line_ops,
                 catch_entries: catches,
+                kind: MethodKind::Function,
+                method_pool_entry: false,
             });
         }
         FunctionRecordNode::Arrow(arrow) => {
@@ -1107,6 +1284,8 @@ fn compile_function_record(
                 }),
                 line_ops,
                 catch_entries: catches,
+                kind: MethodKind::Anonymous,
+                method_pool_entry: true,
             });
         }
     }
@@ -1126,6 +1305,7 @@ fn compile_class_method_bodies(
     source: Option<&str>,
     source_file_path: Option<&str>,
     source_mapper: Option<&SourceMapper>,
+    function_names: &mut FunctionNameAllocator<'_>,
 ) {
     for stmt in stmts {
         // Handle `class Foo { ... }` (ClassDeclaration)
@@ -1142,6 +1322,7 @@ fn compile_class_method_bodies(
                 source,
                 source_file_path,
                 source_mapper,
+                function_names,
             );
             continue;
         }
@@ -1159,6 +1340,7 @@ fn compile_class_method_bodies(
                     source,
                     source_file_path,
                     source_mapper,
+                    function_names,
                 );
             }
             continue;
@@ -1177,6 +1359,7 @@ fn compile_class_method_bodies(
                     source,
                     source_file_path,
                     source_mapper,
+                    function_names,
                 );
             }
             continue;
@@ -1204,6 +1387,7 @@ fn compile_class_method_bodies(
                         source,
                         source_file_path,
                         source_mapper,
+                        function_names,
                     );
                     continue;
                 }
@@ -1225,6 +1409,7 @@ fn compile_class_elements(
     source: Option<&str>,
     source_file_path: Option<&str>,
     source_mapper: Option<&SourceMapper>,
+    function_names: &mut FunctionNameAllocator<'_>,
 ) {
     let class_name = class_name.unwrap_or("_");
 
@@ -1282,23 +1467,24 @@ fn compile_class_elements(
             estimate_vregs(&bytecode)
         };
         methods.push(MethodRecord {
-            name: format!("#~@0=#{class_name}"),
+            name: function_names.bind(0, 0, Some(class_name)),
             bytecode,
             num_vregs,
             num_args: 4,
             debug_info: None,
             line_ops,
             catch_entries: catches,
+            kind: MethodKind::Constructor,
+            method_pool_entry: true,
         });
     }
 
-    let mut seen_names = HashMap::<String, u16>::new();
     for element in elements {
         if let ClassElement::MethodDefinition(method) = element {
-            let Some(key_name) = class_method_record_name(method, class_name) else {
+            let Some(key_name) = class_method_record_name(method, class_name, function_names)
+            else {
                 continue;
             };
-            let key_name = suffix_duplicate_method_name(key_name, &mut seen_names);
             let param_names: Vec<String> = method
                 .value
                 .params
@@ -1422,19 +1608,28 @@ fn compile_class_elements(
                 debug_info,
                 line_ops: method_line_ops,
                 catch_entries: method_catches,
+                kind: if is_constructor {
+                    MethodKind::Constructor
+                } else {
+                    MethodKind::Function
+                },
+                method_pool_entry: is_class_buffer_method(method),
             });
         }
     }
 }
 
-fn class_method_record_name(method: &MethodDefinition<'_>, class_name: &str) -> Option<String> {
-    let key = method_key_name(&method.key)?;
-    let name = match method.kind {
-        MethodDefinitionKind::Constructor => format!("#~@0=#{class_name}"),
-        _ if method.r#static => format!("#~@0<#{key}"),
-        _ => format!("#~@0>#{key}"),
+fn class_method_record_name(
+    method: &MethodDefinition<'_>,
+    class_name: &str,
+    function_names: &mut FunctionNameAllocator<'_>,
+) -> Option<String> {
+    let name = if method.kind == MethodDefinitionKind::Constructor {
+        class_name.to_string()
+    } else {
+        method_key_name(&method.key)?
     };
-    Some(name)
+    Some(function_names.bind(method.value.span.start, method.value.span.end, Some(&name)))
 }
 
 fn class_method_num_args(method: &MethodDefinition<'_>) -> u16 {
@@ -1528,30 +1723,14 @@ fn method_key_name(key: &PropertyKey<'_>) -> Option<String> {
     }
 }
 
-fn suffix_duplicate_method_name(name: String, seen_names: &mut HashMap<String, u16>) -> String {
-    let count = seen_names.entry(name.clone()).or_insert(0);
-    let suffixed = if *count == 0 {
-        name
-    } else {
-        format!("{name}^{count}")
-    };
-    *count += 1;
-    suffixed
-}
-
-fn class_buffer_literal_array(class_name: &str, elements: &[ClassElement<'_>]) -> LiteralArray {
+fn class_buffer_literal_array(_class_name: &str, elements: &[ClassElement<'_>]) -> LiteralArray {
     let mut entries = Vec::new();
-    let mut seen_names = HashMap::<String, u16>::new();
     let mut instance_method_count = 0u32;
 
     for element in elements {
         let ClassElement::MethodDefinition(method) = element else {
             continue;
         };
-        let Some(method_name) = class_method_record_name(method, class_name) else {
-            continue;
-        };
-        let method_name = suffix_duplicate_method_name(method_name, &mut seen_names);
 
         if !is_class_buffer_method(method) {
             continue;
@@ -1560,8 +1739,8 @@ fn class_buffer_literal_array(class_name: &str, elements: &[ClassElement<'_>]) -
             continue;
         };
 
-        entries.push(LiteralEntry::TaggedString(public_name));
-        entries.push(LiteralEntry::TaggedMethodName(method_name));
+        entries.push(LiteralEntry::TaggedString(public_name.clone()));
+        entries.push(LiteralEntry::TaggedMethodName(public_name));
         entries.push(LiteralEntry::TaggedMethodAffiliate(
             method.value.params.items.len() as u16,
         ));
@@ -4142,7 +4321,7 @@ impl<'a> CodeGen<'a> {
 
     fn emit_class_missing_properties(
         &mut self,
-        class_name: &str,
+        _class_name: &str,
         elements: &[ClassElement<'_>],
         class_reg: u8,
         class_span_start: u32,
@@ -4155,21 +4334,17 @@ impl<'a> CodeGen<'a> {
         self.set_debug_pos(class_span_start);
         self.push(Insn::Sta(prototype_reg));
 
-        let mut seen_names = HashMap::<String, u16>::new();
         for element in elements {
             let ClassElement::MethodDefinition(method) = element else {
                 continue;
             };
-            let Some(record_name) = class_method_record_name(method, class_name) else {
-                continue;
-            };
-            let record_name = suffix_duplicate_method_name(record_name, &mut seen_names);
             if method.kind == MethodDefinitionKind::Constructor || is_class_buffer_method(method) {
                 continue;
             }
             let Some(public_name) = method_key_name(&method.key) else {
                 continue;
             };
+            let record_name = public_name.clone();
             let method_name_id = self.intern(&record_name);
             let length = method.value.params.items.len() as u8;
 

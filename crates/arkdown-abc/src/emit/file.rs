@@ -1,6 +1,6 @@
 use crate::emit::record::{
-    encode_code_item, inline_string, uleb128, ClassRecord, FieldRecord, FieldValue, MethodRecord,
-    FIELD_OWNER_CLASS_IDX,
+    encode_code_item, inline_string, uleb128, ClassRecord, FieldRecord, FieldValue, MethodKind,
+    MethodRecord, FIELD_OWNER_CLASS_IDX,
 };
 use crate::emit::strings::StringTable;
 
@@ -425,8 +425,6 @@ impl AbcFile {
             class_section_start + class_item_sizes.iter().sum::<usize>() as u32;
 
         // Build the class-OHM-URL prefix (strip "L" prefix and ";" suffix).
-        // hvigor stores full-path method strings: "<OHM_URL>.<method_short_name>"
-        // e.g. "com.example.app/entry/ets/pages/Index.#~@0>#initialRender"
         let class_ohm_urls: Vec<String> = all_classes
             .iter()
             .map(|c| {
@@ -521,9 +519,7 @@ impl AbcFile {
                     string_items.get_or_create(&method.name);
 
                 if let Some(debug) = &method.debug_info {
-                    let is_arrow = method.name.contains("@1*#")
-                        || method.name == "#*#"
-                        || method.name.starts_with("#*#^");
+                    let is_arrow = method.kind == MethodKind::Anonymous;
                     if is_arrow {
                         string_items.get_or_create("0newTarget");
                         string_items.get_or_create("0this");
@@ -532,7 +528,7 @@ impl AbcFile {
                         string_items.get_or_create("4funcObj");
                         string_items.get_or_create("any");
                         string_items.get_or_create("4newTarget");
-                        if method.name.contains("#~@0=") {
+                        if method.kind == MethodKind::Constructor {
                             string_items.get_or_create("args");
                         }
                     }
@@ -898,11 +894,9 @@ impl AbcFile {
                         // Scope var register layout (from es2panda GenScopeVariableInfo):
                         //   Regular: r0=funcObj, r1=newTarget, r2=this
                         //   Arrow:   r1=newTarget, r2=this, r0=funcObj
-                        let is_arrow = method.name.contains("@1*#")
-                            || method.name == "#*#"
-                            || method.name.starts_with("#*#^");
+                        let is_arrow = method.kind == MethodKind::Anonymous;
                         let mut param_offs = param_offs;
-                        let is_generated_constructor = method.name.contains("#~@0=")
+                        let is_generated_constructor = method.kind == MethodKind::Constructor
                             && param_offs.is_empty()
                             && method.num_args > 3;
                         if is_generated_constructor {
@@ -1612,9 +1606,9 @@ fn build_method_pool_layouts(
             for &method_idx in &layout.method_indices {
                 let pool_index = next_pool_index;
                 let method = &class.methods[method_idx];
-                if method.name.contains("#~@0=") {
+                if method.kind == MethodKind::Constructor {
                     layout.ctor_pool_index = pool_index;
-                } else if method.name.contains("*#") {
+                } else if method.kind == MethodKind::Anonymous {
                     layout.definefunc_pool_indices.push(pool_index);
                 }
                 if let Some(name_id) = strings.id_of(&method.name) {
@@ -1840,19 +1834,10 @@ fn method_index_method_indices(class: &ClassRecord) -> Vec<usize> {
         .methods
         .iter()
         .enumerate()
-        .filter_map(|(idx, method)| method_is_method_pool_literal(&method.name).then_some(idx))
+        .filter_map(|(idx, method)| method.method_pool_entry.then_some(idx))
         .collect();
     indices.sort_by(|&a, &b| class.methods[a].name.cmp(&class.methods[b].name));
     indices
-}
-
-fn method_is_method_pool_literal(name: &str) -> bool {
-    name.contains("#~@0=")
-        || name.contains("#~@0<#")
-        || name.contains("*#")
-        || name.contains("#initialRender")
-        || name.contains("#message")
-        || name.contains("#rerender")
 }
 
 fn instruction_len(opcode: u8, next: Option<u8>) -> usize {

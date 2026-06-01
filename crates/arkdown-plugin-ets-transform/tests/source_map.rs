@@ -39,7 +39,10 @@ fn make_plugin() -> EtsTransformPlugin {
         },
         modules: vec![],
         sdk_config: SdkConfig {
-            ets_loader_path: PathBuf::from("/unused"),
+            ets_loader_path: PathBuf::from(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/ets-loader"
+            )),
             es2abc_path: PathBuf::from("/unused"),
             restool_path: PathBuf::from("/unused"),
             compile_api_version: 12,

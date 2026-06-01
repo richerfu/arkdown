@@ -12,7 +12,7 @@
 /// `@ohos:xxx` source module path.
 ///
 /// Returns `None` if the kit specifier is unknown or the named export has no
-/// known mapping (caller should fall back to keeping the original import).
+/// known mapping (caller should keep the original import).
 pub fn resolve_kit_import(kit_specifier: &str, named_import: &str) -> Option<&'static str> {
     match (kit_specifier, named_import) {
         // ── @kit.AVSessionKit ───────────────────────────────────────────────────

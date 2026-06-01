@@ -72,6 +72,14 @@ pub fn state_decorator_class_for(decorator: &str, is_simple_type: bool) -> &'sta
     }
 }
 
+pub fn state_decorator_decl_class_for(decorator: &str, is_simple_type: bool) -> &'static str {
+    match decorator {
+        "Prop" | "Param" | "Once" | "PropRef" if !is_simple_type => "SynchedPropertySimpleOneWayPU",
+        "Link" if !is_simple_type => "SynchedPropertySimpleOneWayPU",
+        _ => state_decorator_class_for(decorator, is_simple_type),
+    }
+}
+
 /// Returns the constructor initialisation strategy for a given decorator.
 ///
 /// Derived from `updateObservedPropertyPU`, `updateSynchedPropertyTwoWayPU`,
@@ -132,16 +140,13 @@ pub fn is_state_decorator(decorator: &str) -> bool {
 /// Only decorators that receive new values from the parent on re-render need a slot.
 /// Derived from the `setUpdateParamsDecorators` set in ets-loader and the SPEC-004a table.
 pub fn has_update_state_vars_slot(decorator: &str) -> bool {
-    matches!(
-        decorator,
-        "Prop" | "Param" | "Once" | "PropRef" | "BuilderParam"
-    )
+    matches!(decorator, "Prop" | "Param" | "Once" | "PropRef")
 }
 
 pub fn has_initially_provided_value_slot(decorator: &str) -> bool {
     matches!(
         decorator,
-        "State" | "Provide" | "Prop" | "ObjectLink" | "BuilderParam" | "Local" | "Provider"
+        "State" | "Provide" | "ObjectLink" | "BuilderParam" | "Local" | "Provider"
     )
 }
 
@@ -253,7 +258,7 @@ mod tests {
     fn test_has_update_state_vars_slot() {
         assert!(has_update_state_vars_slot("Prop"));
         assert!(has_update_state_vars_slot("Param"));
-        assert!(has_update_state_vars_slot("BuilderParam"));
+        assert!(!has_update_state_vars_slot("BuilderParam"));
         assert!(!has_update_state_vars_slot("LocalStorageProp"));
         assert!(!has_update_state_vars_slot("State"));
         assert!(!has_update_state_vars_slot("Link"));

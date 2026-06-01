@@ -1,8 +1,10 @@
 pub mod build_fn;
 pub mod builder;
 pub mod component;
+pub mod component_meta;
 pub mod decorator;
 pub mod entry;
+pub mod global_rewrite;
 
 use std::{
     collections::HashSet,
@@ -22,19 +24,22 @@ use oxc_span::{GetSpan, SourceType, Span};
 
 use crate::error::EtsTransformError;
 use crate::source_map::{build_ets_source_map, offset_to_line_col, MapEntry};
-use crate::transform::build_fn::{lower_build_body, lower_build_body_or_raw, lower_styles_body};
+use crate::transform::build_fn::{lower_build_body_with_custom_components, lower_styles_body};
 use crate::transform::component::{
-    generate_view_pu_class, BuilderMethodInfo, ComponentInfo, ParamField, StateField,
+    generate_view_pu_class, BuilderMethodInfo, ComponentInfo, ParamField, RegularField, StateField,
     StylesMethodInfo,
 };
+use crate::transform::component_meta::ComponentMetadata;
 use crate::transform::decorator::is_state_decorator;
 use crate::transform::entry::EntryRegistrationInfo;
+use crate::transform::global_rewrite::rewrite_global_context_calls_in_function_text;
 
 #[derive(Debug, Clone, Default)]
 pub struct TransformOptions {
     pub bundle_name: Option<String>,
     pub module_name: Option<String>,
     pub module_roots: Vec<(String, PathBuf)>,
+    pub component_metadata: ComponentMetadata,
 }
 
 /// Transform an ArkTS `.ets` source file into TypeScript.
@@ -118,6 +123,17 @@ pub fn transform_ets_with_options(
 
     let simple_type_context =
         SimpleTypeContext::from_program(&parsed.program, &source.id.id, options);
+    let mut custom_components = HashSet::new();
+    for statement in &parsed.program.body {
+        collect_custom_component_names(statement, &mut custom_components);
+    }
+    collect_imported_component_names(
+        &parsed.program,
+        &source.id.id,
+        options,
+        &mut custom_components,
+    );
+    let builder_functions = collect_builder_function_names(&parsed.program, &source.id.id, options);
 
     let mut out = String::with_capacity(content.len() + 512);
     let mut last_end = 0usize;
@@ -131,14 +147,21 @@ pub fn transform_ets_with_options(
             &source.id.id,
             options,
             &simple_type_context,
+            &custom_components,
+            &builder_functions,
         )? {
             let start = component_replacement_start(statement, content);
             out.push_str(&content[last_end..start]);
             out.push_str(&generate_view_pu_class(&component));
             transformed_any = true;
-        } else if let Some((start, replacement)) =
-            transform_non_component_statement(statement, content)
-        {
+        } else if let Some((start, replacement)) = transform_non_component_statement(
+            statement,
+            content,
+            &source.id.id,
+            options,
+            &custom_components,
+            &builder_functions,
+        )? {
             out.push_str(&content[last_end..start]);
             out.push_str(&replacement);
             transformed_any = true;
@@ -450,6 +473,8 @@ fn component_from_statement(
     id: &str,
     options: &TransformOptions,
     simple_type_context: &SimpleTypeContext,
+    custom_components: &HashSet<String>,
+    builder_functions: &HashSet<String>,
 ) -> Result<Option<ComponentInfo>, EtsTransformError> {
     match statement {
         Statement::StructStatement(statement) => component_from_struct(
@@ -460,6 +485,8 @@ fn component_from_statement(
             false,
             false,
             simple_type_context,
+            custom_components,
+            builder_functions,
         ),
         Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref() {
             Some(Declaration::StructStatement(statement)) => component_from_struct(
@@ -470,6 +497,8 @@ fn component_from_statement(
                 true,
                 false,
                 simple_type_context,
+                custom_components,
+                builder_functions,
             ),
             _ => Ok(None),
         },
@@ -482,6 +511,8 @@ fn component_from_statement(
                 true,
                 true,
                 simple_type_context,
+                custom_components,
+                builder_functions,
             ),
             _ => Ok(None),
         },
@@ -492,8 +523,12 @@ fn component_from_statement(
 fn transform_non_component_statement(
     statement: &Statement<'_>,
     source_text: &str,
-) -> Option<(usize, String)> {
-    match statement {
+    id: &str,
+    options: &TransformOptions,
+    custom_components: &HashSet<String>,
+    builder_functions: &HashSet<String>,
+) -> Result<Option<(usize, String)>, EtsTransformError> {
+    let replacement = match statement {
         _ if is_orphan_arkui_decorator_statement(statement, source_text) => {
             Some((statement.span().start as usize, String::new()))
         }
@@ -506,13 +541,32 @@ fn transform_non_component_statement(
                 span_text(statement.span(), source_text).replacen("import lazy", "import", 1);
             Some((statement.span().start as usize, text))
         }
-        Statement::FunctionDeclaration(function) => {
-            transform_decorated_function(function, source_text, false, &[])
-        }
+        Statement::FunctionDeclaration(function) => transform_decorated_function(
+            function,
+            source_text,
+            id,
+            custom_components,
+            builder_functions,
+            &options.component_metadata,
+            false,
+            &[],
+        )?,
         Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref() {
             Some(Declaration::FunctionDeclaration(function)) => {
-                let mut result =
-                    transform_decorated_function(function, source_text, true, &export.decorators)?;
+                let mut result = transform_decorated_function(
+                    function,
+                    source_text,
+                    id,
+                    custom_components,
+                    builder_functions,
+                    &options.component_metadata,
+                    true,
+                    &export.decorators,
+                )?
+                .ok_or_else(|| EtsTransformError::Fatal {
+                    file: id.to_string(),
+                    message: "decorated export function did not transform".to_string(),
+                })?;
                 for decorator in &export.decorators {
                     result.0 = result.0.min(decorator.span.start as usize);
                 }
@@ -535,7 +589,8 @@ fn transform_non_component_statement(
             _ => None,
         },
         _ => None,
-    }
+    };
+    Ok(replacement)
 }
 
 fn is_orphan_arkui_decorator_statement(statement: &Statement<'_>, source_text: &str) -> bool {
@@ -568,9 +623,13 @@ fn annotation_to_interface(annotation: &AnnotationDeclaration<'_>, source_text: 
 fn transform_decorated_function(
     function: &Function<'_>,
     source_text: &str,
+    id: &str,
+    custom_components: &HashSet<String>,
+    builder_functions: &HashSet<String>,
+    component_metadata: &ComponentMetadata,
     exported: bool,
     extra_decorators: &[Decorator<'_>],
-) -> Option<(usize, String)> {
+) -> Result<Option<(usize, String)>, EtsTransformError> {
     let decorators = function.decorators.iter().chain(extra_decorators.iter());
     let decorator_kind = decorators
         .clone()
@@ -581,9 +640,25 @@ fn transform_decorated_function(
                 "Builder" | "LocalBuilder" | "Styles" | "Extend" | "AnimatableExtend"
             )
         })
-        .map(str::to_string)?;
-    let name = function.id.as_ref()?.name.as_str();
+        .map(str::to_string);
+    let Some(decorator_kind) = decorator_kind else {
+        return Ok(None);
+    };
+    let Some(function_id) = function.id.as_ref() else {
+        return Ok(None);
+    };
+    let name = function_id.name.as_str();
     let params = extract_params_text(function.params.span(), source_text);
+    let params = if matches!(decorator_kind.as_str(), "Builder" | "LocalBuilder") {
+        append_builder_parent_param(params)
+    } else {
+        params
+    };
+    let return_annotation = function
+        .return_type
+        .as_ref()
+        .map(|annotation| format!(": {}", type_annotation_text(annotation.span(), source_text)))
+        .unwrap_or_default();
     let export_prefix = if exported { "export " } else { "" };
     let start = decorators
         .clone()
@@ -602,21 +677,35 @@ fn transform_decorated_function(
                 .find(|decorator| decorator_name(decorator) == decorator_kind)
                 .and_then(|decorator| decorator_first_arg_text(decorator, source_text))
                 .unwrap_or_else(|| "View".to_string());
-            return Some((
+            return Ok(Some((
                 start,
                 format!(
                     "{export_prefix}function __{component}__{name}({params}): void {{\n{}    }}",
                     lower_extend_body(function.body.as_deref(), source_text, &component)
                 ),
-            ));
+            )));
         }
-        _ => lower_build_body_or_raw(function.body.as_deref(), source_text).0,
+        _ => {
+            lower_build_body_with_custom_components(
+                function.body.as_deref(),
+                source_text,
+                id,
+                custom_components,
+                builder_functions,
+                component_metadata,
+            )
+            .map_err(|err| EtsTransformError::Fatal {
+                file: id.to_string(),
+                message: format!("unsupported ArkUI builder DSL: {err:?}"),
+            })?
+            .0
+        }
     };
 
-    Some((
+    Ok(Some((
         start,
-        format!("{export_prefix}function {name}({params}): void {{\n{body}    }}"),
-    ))
+        format!("{export_prefix}function {name}({params}){return_annotation} {{\n{body}    }}"),
+    )))
 }
 
 fn lower_extend_body(
@@ -734,6 +823,119 @@ fn collect_custom_component_names(statement: &Statement<'_>, names: &mut HashSet
         }
         _ => {}
     }
+}
+
+fn collect_imported_component_names(
+    program: &Program<'_>,
+    id: &str,
+    options: &TransformOptions,
+    names: &mut HashSet<String>,
+) {
+    let importer = Path::new(id);
+    for statement in &program.body {
+        let Statement::ImportDeclaration(import) = statement else {
+            continue;
+        };
+        let Some(specifiers) = &import.specifiers else {
+            continue;
+        };
+        let Some(target) = resolve_import_target(import.source.value.as_str(), importer, options)
+        else {
+            continue;
+        };
+        let target_components = exported_component_names(&target, &mut HashSet::new());
+        if target_components.is_empty() {
+            continue;
+        }
+        for specifier in specifiers {
+            match specifier {
+                ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
+                    let imported = module_export_name_value(&specifier.imported);
+                    if (imported == "default" && target_components.has_default)
+                        || target_components.named.contains(&imported)
+                    {
+                        names.insert(specifier.local.name.to_string());
+                    }
+                }
+                ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
+                    if target_components.has_default || target_components.named.contains("default")
+                    {
+                        names.insert(specifier.local.name.to_string());
+                    }
+                }
+                ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => {}
+            }
+        }
+    }
+}
+
+fn collect_builder_function_names(
+    program: &Program<'_>,
+    id: &str,
+    options: &TransformOptions,
+) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for statement in &program.body {
+        match statement {
+            Statement::FunctionDeclaration(function)
+                if function_has_decorator(function, "Builder") =>
+            {
+                if let Some(function_id) = &function.id {
+                    names.insert(function_id.name.to_string());
+                }
+            }
+            Statement::ExportNamedDeclaration(export) => {
+                if let Some(Declaration::FunctionDeclaration(function)) = &export.declaration {
+                    if function_has_decorator(function, "Builder")
+                        || export
+                            .decorators
+                            .iter()
+                            .any(|d| decorator_name(d) == "Builder")
+                    {
+                        if let Some(function_id) = &function.id {
+                            names.insert(function_id.name.to_string());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let importer = Path::new(id);
+    for statement in &program.body {
+        let Statement::ImportDeclaration(import) = statement else {
+            continue;
+        };
+        let Some(specifiers) = &import.specifiers else {
+            continue;
+        };
+        let Some(target) = resolve_import_target(import.source.value.as_str(), importer, options)
+        else {
+            continue;
+        };
+        let target_builders = exported_builder_function_names(&target, &mut HashSet::new());
+        if target_builders.is_empty() {
+            continue;
+        }
+        for specifier in specifiers {
+            let ImportDeclarationSpecifier::ImportSpecifier(specifier) = specifier else {
+                continue;
+            };
+            let imported = module_export_name_value(&specifier.imported);
+            if target_builders.contains(&imported) {
+                names.insert(specifier.local.name.to_string());
+            }
+        }
+    }
+    names
+}
+
+fn function_has_decorator(function: &Function<'_>, name: &str) -> bool {
+    function
+        .decorators
+        .iter()
+        .any(|decorator| decorator_name(decorator) == name)
 }
 
 fn collect_statement_component_names(
@@ -1009,14 +1211,10 @@ fn component_from_struct(
     is_exported: bool,
     is_default_export: bool,
     simple_type_context: &SimpleTypeContext,
+    custom_components: &HashSet<String>,
+    builder_functions: &HashSet<String>,
 ) -> Result<Option<ComponentInfo>, EtsTransformError> {
-    let has_component = statement.decorators.iter().any(|decorator| {
-        matches!(
-            decorator_name(decorator),
-            "Component" | "ComponentV2" | "CustomDialog"
-        )
-    });
-    if !has_component {
+    if !is_component_struct(statement) {
         return Ok(None);
     }
 
@@ -1028,9 +1226,16 @@ fn component_from_struct(
     let mut initial_render_body = String::new();
     let mut initial_render_span_hints = Vec::new();
     let mut builder_methods: Vec<BuilderMethodInfo> = Vec::new();
+    let builder_method_names = collect_struct_builder_method_names(statement);
+    let builder_param_names = collect_struct_builder_param_names(statement);
+    let mut visible_builder_methods = builder_functions.clone();
+    visible_builder_methods.extend(builder_method_names.iter().cloned());
+    visible_builder_methods.extend(builder_param_names.iter().cloned());
     let mut styles_methods: Vec<StylesMethodInfo> = Vec::new();
     let mut regular_members: Vec<String> = Vec::new();
     let mut params_fields: Vec<ParamField> = Vec::new();
+    let mut property_order: Vec<String> = Vec::new();
+    let mut regular_fields: Vec<RegularField> = Vec::new();
 
     for element in &statement.body.body {
         match element {
@@ -1041,18 +1246,38 @@ fn component_from_struct(
                         .as_ref()
                         .map(|annotation| type_annotation_text(annotation.span(), source_text))
                         .unwrap_or_default();
+                    let name = name.into_owned();
+                    property_order.push(name.clone());
                     params_fields.push(ParamField {
-                        name: name.into_owned(),
-                        type_annotation,
+                        name,
+                        type_annotation: type_annotation.clone(),
                     });
                 }
 
                 let decorator_names: Vec<&str> =
                     property.decorators.iter().map(decorator_name).collect();
                 let Some(decorator) = primary_state_decorator(&decorator_names) else {
-                    regular_members.push(strip_orphan_arkui_decorator_lines(
-                        span_text(element.span(), source_text).trim(),
-                    ));
+                    if let Some(name) = property.key.static_name() {
+                        let type_annotation = property
+                            .type_annotation
+                            .as_ref()
+                            .map(|annotation| type_annotation_text(annotation.span(), source_text))
+                            .unwrap_or_default();
+                        let initializer = property
+                            .value
+                            .as_ref()
+                            .map(|value| span_text(value.span(), source_text).trim().to_string());
+                        regular_fields.push(RegularField {
+                            name: name.into_owned(),
+                            type_annotation,
+                            initializer,
+                            optional: property.optional,
+                        });
+                    } else {
+                        regular_members.push(strip_orphan_arkui_decorator_lines(
+                            span_text(element.span(), source_text).trim(),
+                        ));
+                    }
                     continue;
                 };
                 let Some(name) = property.key.static_name() else {
@@ -1108,11 +1333,18 @@ fn component_from_struct(
             StructElement::MethodDefinition(method)
                 if method.key.static_name().is_some_and(|name| name == "build") =>
             {
-                let (body, hints) = lower_build_body(method.value.body.as_deref(), source_text)
-                    .map_err(|err| EtsTransformError::Fatal {
-                        file: id.to_string(),
-                        message: format!("unsupported ArkUI build() DSL: {err:?}"),
-                    })?;
+                let (body, hints) = lower_build_body_with_custom_components(
+                    method.value.body.as_deref(),
+                    source_text,
+                    id,
+                    custom_components,
+                    &visible_builder_methods,
+                    &options.component_metadata,
+                )
+                .map_err(|err| EtsTransformError::Fatal {
+                    file: id.to_string(),
+                    message: format!("unsupported ArkUI build() DSL: {err:?}"),
+                })?;
                 initial_render_body = body;
                 initial_render_span_hints = hints;
             }
@@ -1126,16 +1358,33 @@ fn component_from_struct(
                 let Some(name) = method.key.static_name() else {
                     continue;
                 };
-                let params = extract_params_text(method.value.params.span(), source_text);
-                // Lower the ArkUI DSL body; fall back to raw TS text when the
-                // OXC ETS parser did not produce ArkUIComponentExpression nodes
-                // (which happens for @Builder bodies — the parser only applies
-                // ArkUI expression rules to the canonical build() method).
-                let (lowered_body, _) =
-                    lower_build_body_or_raw(method.value.body.as_deref(), source_text);
+                let params = append_builder_parent_param(extract_params_text(
+                    method.value.params.span(),
+                    source_text,
+                ));
+                let (lowered_body, _) = lower_build_body_with_custom_components(
+                    method.value.body.as_deref(),
+                    source_text,
+                    id,
+                    custom_components,
+                    &visible_builder_methods,
+                    &options.component_metadata,
+                )
+                .map_err(|err| EtsTransformError::Fatal {
+                    file: id.to_string(),
+                    message: format!("unsupported ArkUI @Builder DSL: {err:?}"),
+                })?;
                 builder_methods.push(BuilderMethodInfo {
                     name: name.into_owned(),
                     params,
+                    return_annotation: method
+                        .value
+                        .return_type
+                        .as_ref()
+                        .map(|annotation| {
+                            format!(": {}", type_annotation_text(annotation.span(), source_text))
+                        })
+                        .unwrap_or_default(),
                     lowered_body,
                 });
             }
@@ -1158,11 +1407,22 @@ fn component_from_struct(
                 });
             }
             StructElement::MethodDefinition(method) => {
-                regular_members.push(strip_orphan_arkui_decorator_lines(
-                    balanced_method_text(method, statement.span(), source_text)
-                        .unwrap_or_else(|| span_text(element.span(), source_text).to_string())
-                        .trim(),
-                ));
+                let (member_start, member_text) =
+                    balanced_method_text(method, statement.span(), source_text).unwrap_or_else(
+                        || {
+                            (
+                                element.span().start as usize,
+                                span_text(element.span(), source_text).to_string(),
+                            )
+                        },
+                    );
+                let member_text = rewrite_global_context_calls_in_function_text(
+                    &method.value,
+                    source_text,
+                    member_start,
+                    &member_text,
+                );
+                regular_members.push(strip_orphan_arkui_decorator_lines(member_text.trim()));
             }
         }
     }
@@ -1174,23 +1434,89 @@ fn component_from_struct(
         is_default_export,
         state_fields,
         params_fields,
+        property_order,
+        regular_fields,
         regular_members,
         initial_render_body,
         initial_render_span_hints,
-        entry_registration: is_entry.then(|| entry_registration(id, options)),
+        entry_registration: is_entry.then(|| {
+            let storage = statement
+                .decorators
+                .iter()
+                .find(|decorator| decorator_name(decorator) == "Entry")
+                .and_then(|decorator| decorator_arg_text(decorator, source_text));
+            entry_registration(id, options, storage)
+        }),
         builder_methods,
         styles_methods,
     }))
+}
+
+fn is_component_struct(statement: &StructStatement<'_>) -> bool {
+    statement.decorators.iter().any(|decorator| {
+        matches!(
+            decorator_name(decorator),
+            "Component" | "ComponentV2" | "CustomDialog"
+        )
+    })
+}
+
+fn collect_struct_builder_method_names(statement: &StructStatement<'_>) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for element in &statement.body.body {
+        let StructElement::MethodDefinition(method) = element else {
+            continue;
+        };
+        if !method
+            .decorators
+            .iter()
+            .any(|decorator| decorator_name(decorator) == "Builder")
+        {
+            continue;
+        }
+        if let Some(name) = method.key.static_name() {
+            names.insert(name.into_owned());
+        }
+    }
+    names
+}
+
+fn collect_struct_builder_param_names(statement: &StructStatement<'_>) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for element in &statement.body.body {
+        let StructElement::PropertyDefinition(property) = element else {
+            continue;
+        };
+        if !property
+            .decorators
+            .iter()
+            .any(|decorator| decorator_name(decorator) == "BuilderParam")
+        {
+            continue;
+        }
+        if let Some(name) = property.key.static_name() {
+            names.insert(name.into_owned());
+        }
+    }
+    names
+}
+
+fn append_builder_parent_param(params: String) -> String {
+    if params.trim().is_empty() {
+        "parent = null".to_string()
+    } else {
+        format!("{params}, parent = null")
+    }
 }
 
 fn balanced_method_text(
     method: &oxc_ast::ast::MethodDefinition<'_>,
     _struct_span: Span,
     source_text: &str,
-) -> Option<String> {
+) -> Option<(usize, String)> {
     let key_start = method.key.span().start as usize;
     let start = method_source_line_start(key_start, source_text)?;
-    balanced_member_text(start, source_text)
+    balanced_member_text(start, source_text).map(|text| (start, text))
 }
 
 fn method_source_line_start(key_start: usize, source_text: &str) -> Option<usize> {
@@ -1263,6 +1589,7 @@ fn primary_state_decorator(names: &[&str]) -> Option<&'static str> {
         "LocalStorageProp",
         "Link",
         "ObjectLink",
+        "Prop",
         "LocalStoragePropRef",
         "StoragePropRef",
         "PropRef",
@@ -1274,6 +1601,7 @@ fn primary_state_decorator(names: &[&str]) -> Option<&'static str> {
         "Param",
         "Provider",
         "Consumer",
+        "Event",
         "Env",
         "Trace",
     ]
@@ -1315,6 +1643,17 @@ pub fn transform_ets_viewpu_with_source_map(
     }
     let simple_type_context =
         SimpleTypeContext::from_program(&parsed.program, &source.id.id, options);
+    let mut custom_components = HashSet::new();
+    for statement in &parsed.program.body {
+        collect_custom_component_names(statement, &mut custom_components);
+    }
+    collect_imported_component_names(
+        &parsed.program,
+        &source.id.id,
+        options,
+        &mut custom_components,
+    );
+    let builder_functions = collect_builder_function_names(&parsed.program, &source.id.id, options);
 
     // Collect (viewpu_code, span_hints) per transformed struct so we can
     // compute absolute line numbers after the full output is assembled.
@@ -1339,6 +1678,8 @@ pub fn transform_ets_viewpu_with_source_map(
             &source.id.id,
             options,
             &simple_type_context,
+            &custom_components,
+            &builder_functions,
         )? {
             let start = component_replacement_start(statement, content);
             out.push_str(&content[last_end..start]);
@@ -1359,9 +1700,14 @@ pub fn transform_ets_viewpu_with_source_map(
                 out_offset,
             });
             transformed_any = true;
-        } else if let Some((start, replacement)) =
-            transform_non_component_statement(statement, content)
-        {
+        } else if let Some((start, replacement)) = transform_non_component_statement(
+            statement,
+            content,
+            &source.id.id,
+            options,
+            &custom_components,
+            &builder_functions,
+        )? {
             out.push_str(&content[last_end..start]);
             out.push_str(&replacement);
             transformed_any = true;
@@ -1443,6 +1789,8 @@ fn component_with_struct_from_statement<'a>(
     id: &str,
     options: &TransformOptions,
     simple_type_context: &SimpleTypeContext,
+    custom_components: &HashSet<String>,
+    builder_functions: &HashSet<String>,
 ) -> Result<Option<(ComponentInfo, &'a StructStatement<'a>)>, EtsTransformError> {
     match statement {
         Statement::StructStatement(statement) => Ok(component_from_struct(
@@ -1453,6 +1801,8 @@ fn component_with_struct_from_statement<'a>(
             false,
             false,
             simple_type_context,
+            custom_components,
+            builder_functions,
         )?
         .map(|component| (component, statement.as_ref()))),
         Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref() {
@@ -1464,6 +1814,8 @@ fn component_with_struct_from_statement<'a>(
                 true,
                 false,
                 simple_type_context,
+                custom_components,
+                builder_functions,
             )?
             .map(|component| (component, statement.as_ref()))),
             _ => Ok(None),
@@ -1477,6 +1829,8 @@ fn component_with_struct_from_statement<'a>(
                 true,
                 true,
                 simple_type_context,
+                custom_components,
+                builder_functions,
             )?
             .map(|component| (component, statement.as_ref()))),
             _ => Ok(None),
@@ -1691,7 +2045,11 @@ fn build_method_span(statement: &StructStatement<'_>) -> Option<Span> {
     })
 }
 
-fn entry_registration(id: &str, options: &TransformOptions) -> EntryRegistrationInfo {
+fn entry_registration(
+    id: &str,
+    options: &TransformOptions,
+    storage: Option<String>,
+) -> EntryRegistrationInfo {
     let module_name = options
         .module_name
         .clone()
@@ -1716,6 +2074,7 @@ fn entry_registration(id: &str, options: &TransformOptions) -> EntryRegistration
         page_full_path,
         integrated_hsp: "false".to_string(),
         module_type: "followWithHap".to_string(),
+        storage,
     }
 }
 
@@ -1906,6 +2265,202 @@ fn exported_enum_names(path: &Path, visited: &mut HashSet<PathBuf>) -> HashSet<S
     }
 
     exports
+}
+
+fn exported_builder_function_names(path: &Path, visited: &mut HashSet<PathBuf>) -> HashSet<String> {
+    let path = normalize_existing_path(path);
+    if !visited.insert(path.clone()) {
+        return HashSet::new();
+    }
+
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return HashSet::new();
+    };
+    let allocator = Allocator::default();
+    let source_type = SourceType::from_path(&path).unwrap_or_else(|_| SourceType::ets());
+    let parsed = Parser::new(&allocator, &content, source_type).parse();
+    if !parsed.errors.is_empty() {
+        return HashSet::new();
+    }
+
+    let mut exports = HashSet::new();
+    for statement in &parsed.program.body {
+        match statement {
+            Statement::FunctionDeclaration(function)
+                if function_has_decorator(function, "Builder") =>
+            {
+                if let Some(function_id) = &function.id {
+                    exports.insert(function_id.name.to_string());
+                }
+            }
+            Statement::ExportNamedDeclaration(export) => {
+                if let Some(Declaration::FunctionDeclaration(function)) = &export.declaration {
+                    if function_has_decorator(function, "Builder")
+                        || export
+                            .decorators
+                            .iter()
+                            .any(|d| decorator_name(d) == "Builder")
+                    {
+                        if let Some(function_id) = &function.id {
+                            exports.insert(function_id.name.to_string());
+                        }
+                    }
+                }
+
+                let Some(source) = &export.source else {
+                    continue;
+                };
+                let Some(target) = resolve_relative_import(path.parent(), source.value.as_str())
+                else {
+                    continue;
+                };
+                let target_builders = exported_builder_function_names(&target, visited);
+                for specifier in &export.specifiers {
+                    let local = module_export_name_value(&specifier.local);
+                    if target_builders.contains(&local) {
+                        exports.insert(module_export_name_value(&specifier.exported));
+                    }
+                }
+            }
+            Statement::ExportAllDeclaration(export) => {
+                let Some(target) =
+                    resolve_relative_import(path.parent(), export.source.value.as_str())
+                else {
+                    continue;
+                };
+                exports.extend(exported_builder_function_names(&target, visited));
+            }
+            _ => {}
+        }
+    }
+
+    exports
+}
+
+#[derive(Default)]
+struct ExportedComponentNames {
+    named: HashSet<String>,
+    has_default: bool,
+}
+
+impl ExportedComponentNames {
+    fn is_empty(&self) -> bool {
+        self.named.is_empty() && !self.has_default
+    }
+
+    fn extend(&mut self, other: ExportedComponentNames) {
+        self.named.extend(other.named);
+        self.has_default |= other.has_default;
+    }
+}
+
+fn exported_component_names(path: &Path, visited: &mut HashSet<PathBuf>) -> ExportedComponentNames {
+    let path = normalize_existing_path(path);
+    if !visited.insert(path.clone()) {
+        return ExportedComponentNames::default();
+    }
+
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return ExportedComponentNames::default();
+    };
+    let allocator = Allocator::default();
+    let source_type = SourceType::from_path(&path).unwrap_or_else(|_| SourceType::ets());
+    let parsed = Parser::new(&allocator, &content, source_type).parse();
+    if !parsed.errors.is_empty() {
+        return ExportedComponentNames::default();
+    }
+
+    let mut local_components = HashSet::new();
+    for statement in &parsed.program.body {
+        collect_local_component_exports(statement, &mut local_components);
+    }
+
+    let mut exports = ExportedComponentNames::default();
+    for statement in &parsed.program.body {
+        match statement {
+            Statement::ExportNamedDeclaration(export) => {
+                if let Some(Declaration::StructStatement(statement)) = export.declaration.as_ref() {
+                    if is_component_struct(statement) {
+                        exports.named.insert(statement.id.name.to_string());
+                    }
+                    continue;
+                }
+
+                if let Some(source) = &export.source {
+                    let Some(target) =
+                        resolve_relative_import(path.parent(), source.value.as_str())
+                    else {
+                        continue;
+                    };
+                    let target_components = exported_component_names(&target, visited);
+                    for specifier in &export.specifiers {
+                        let local = module_export_name_value(&specifier.local);
+                        let exported = module_export_name_value(&specifier.exported);
+                        let matches_target = (local == "default" && target_components.has_default)
+                            || target_components.named.contains(&local);
+                        if exported == "default" && matches_target {
+                            exports.has_default = true;
+                        } else if matches_target {
+                            exports.named.insert(exported);
+                        }
+                    }
+                } else {
+                    for specifier in &export.specifiers {
+                        let local = module_export_name_value(&specifier.local);
+                        let exported = module_export_name_value(&specifier.exported);
+                        if exported == "default" && local_components.contains(&local) {
+                            exports.has_default = true;
+                        } else if local_components.contains(&local) {
+                            exports.named.insert(exported);
+                        }
+                    }
+                }
+            }
+            Statement::ExportDefaultDeclaration(export) => {
+                if let ExportDefaultDeclarationKind::StructStatement(statement) =
+                    &export.declaration
+                {
+                    if is_component_struct(statement) {
+                        exports.has_default = true;
+                    }
+                }
+            }
+            Statement::ExportAllDeclaration(export) => {
+                let Some(target) =
+                    resolve_relative_import(path.parent(), export.source.value.as_str())
+                else {
+                    continue;
+                };
+                exports.extend(exported_component_names(&target, visited));
+            }
+            _ => {}
+        }
+    }
+
+    exports
+}
+
+fn collect_local_component_exports(statement: &Statement<'_>, names: &mut HashSet<String>) {
+    match statement {
+        Statement::StructStatement(statement) if is_component_struct(statement) => {
+            names.insert(statement.id.name.to_string());
+        }
+        Statement::ExportNamedDeclaration(export) => {
+            if let Some(Declaration::StructStatement(statement)) = export.declaration.as_ref() {
+                if is_component_struct(statement) {
+                    names.insert(statement.id.name.to_string());
+                }
+            }
+        }
+        Statement::ExportDefaultDeclaration(export) => {
+            if let ExportDefaultDeclarationKind::StructStatement(statement) = &export.declaration {
+                if is_component_struct(statement) {
+                    names.insert(statement.id.name.to_string());
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 fn resolve_import_target(
@@ -2104,7 +2659,9 @@ struct Second {
         assert!(
             result.contains("this.__incoming = this.initializeConsume(\"theme\", \"incoming\")")
         );
-        assert!(result.contains("onTap: () => void = () => {};"));
+        assert!(result.contains("this.onTap = () => {};"));
+        assert!(result.contains("if (params.onTap !== undefined)"));
+        assert!(result.contains("private onTap: () => void;"));
         assert!(result.contains("get label(): string { return this.title; }"));
         assert!(!result.contains("@ComponentV2"));
         assert!(!result.contains("@Local"));
@@ -2188,10 +2745,18 @@ struct Page {
         let src = "@Builder\nexport function Card(title: string) {\n  Column() {\n    Text(title)\n  }\n}";
         let result =
             transform_ets(&make_source("entry/src/main/ets/components/Card.ets", src)).unwrap();
-        assert!(result.contains("export function Card(title: string): void"));
+        assert!(result.contains("export function Card(title: string, parent = null)"));
         assert!(result.contains("observeComponentCreation2"));
         assert!(!result.contains("@Builder"));
         assert!(!result.contains("Column() {"));
+    }
+
+    #[test]
+    fn test_top_level_builder_preserves_explicit_return_type() {
+        let src = "@Builder\nexport function Card(): void {\n  Text('card')\n}";
+        let result =
+            transform_ets(&make_source("entry/src/main/ets/components/Card.ets", src)).unwrap();
+        assert!(result.contains("export function Card(parent = null): void"));
     }
 
     #[test]
@@ -2298,6 +2863,7 @@ export function PhotoConfirmBuilder() {
             bundle_name: Some("com.example.arkdown.test".to_string()),
             module_name: Some("entry".to_string()),
             module_roots: Vec::new(),
+            component_metadata: ComponentMetadata::default(),
         };
         let result = transform_ets_with_options(
             &make_source("entry/src/main/ets/pages/Page.ets", src),
@@ -2424,8 +2990,8 @@ struct ItemList {
         ))
         .unwrap();
         assert!(
-            result.contains("private __items: SynchedPropertyObjectTwoWayPU<string[]>"),
-            "expected SynchedPropertyObjectTwoWayPU backing field for non-simple array type, got:\n{}",
+            result.contains("private __items: SynchedPropertySimpleOneWayPU<string[]>"),
+            "expected SynchedPropertySimpleOneWayPU declaration for non-simple @Link type, got:\n{}",
             result
         );
         assert!(
@@ -2519,6 +3085,122 @@ struct ThemedChild {
         assert!(
             result.contains("this.initializeConsume(\"theme\", \"theme\")"),
             "expected initializeConsume for @Consume, got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_prop_decorator_lowers_to_synched_property_one_way_pu() {
+        let src = r#"
+@Component
+struct CardItem {
+  @Prop itemData: string;
+  build() {}
+}
+"#;
+        let result = transform_ets(&make_source(
+            "products/phone/src/main/ets/widget/pages/WidgetCard.ets",
+            src,
+        ))
+        .unwrap();
+        assert!(
+            result.contains("this.__itemData = new SynchedPropertySimpleOneWayPU(params.itemData, this, \"itemData\")"),
+            "expected @Prop constructor init from params, got:\n{}",
+            result
+        );
+        assert!(
+            result.contains("get itemData()"),
+            "expected @Prop getter, got:\n{}",
+            result
+        );
+        assert!(
+            result.contains("this.__itemData.reset(params.itemData)"),
+            "expected @Prop updateStateVars reset, got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_custom_component_call_lowers_like_hvigor_partial_update() {
+        let src = r#"
+@Component
+struct Child {
+  @Prop itemData: string;
+  build() {}
+}
+
+@Component
+struct Parent {
+  @State value: string = "a";
+  build() {
+    Column() {
+      Child({ itemData: this.value })
+    }
+  }
+}
+"#;
+        let result = transform_ets(&make_source(
+            "products/phone/src/main/ets/pages/Parent.ets",
+            src,
+        ))
+        .unwrap();
+        assert!(
+            result.contains("let componentCall = new Child(this, { itemData: this.value }, undefined, elmtId, () => { }"),
+            "expected custom component constructor path, got:\n{}",
+            result
+        );
+        assert!(
+            result.contains("ViewPU.create(componentCall);"),
+            "expected ViewPU.create for custom component, got:\n{}",
+            result
+        );
+        assert!(
+            result.contains("let paramsLambda = () =>"),
+            "expected paramsLambda for custom component, got:\n{}",
+            result
+        );
+        assert!(
+            result
+                .contains("this.updateStateVarsOfChildByElmtId(elmtId, { itemData: this.value });"),
+            "expected child updateStateVars branch, got:\n{}",
+            result
+        );
+        assert!(
+            !result.contains("Child.create"),
+            "custom component must not lower to built-in create/pop path, got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_entry_with_storage_lowers_to_load_ets_card() {
+        let src = r#"
+let storage = new LocalStorage();
+
+@Entry(storage)
+@Component
+struct WidgetCard {
+  build() {}
+}
+"#;
+        let result = transform_ets_with_options(
+            &make_source("phone/src/main/ets/widget/pages/WidgetCard.ets", src),
+            &TransformOptions {
+                bundle_name: Some("com.example.hmosworld".to_string()),
+                module_name: Some("phone".to_string()),
+                module_roots: vec![],
+                component_metadata: ComponentMetadata::default(),
+            },
+        )
+        .unwrap();
+        assert!(
+            result.contains("loadEtsCard(new WidgetCard(undefined, {}, storage), \"com.example.hmosworld/phone/ets/widget/pages/WidgetCard\")"),
+            "expected widget entry to use loadEtsCard, got:\n{}",
+            result
+        );
+        assert!(
+            !result.contains("registerNamedRoute(() => new WidgetCard"),
+            "widget entry must not use page route registration, got:\n{}",
             result
         );
     }

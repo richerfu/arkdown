@@ -7,6 +7,7 @@ pub struct EntryRegistrationInfo {
     pub page_full_path: String,
     pub integrated_hsp: String,
     pub module_type: String,
+    pub storage: Option<String>,
 }
 
 /// Generate the `@Entry` registration code appended after the ViewPU class.
@@ -17,6 +18,24 @@ pub fn generate_entry_registration(
     component_name: &str,
     info: Option<&EntryRegistrationInfo>,
 ) -> String {
+    if let Some(info) = info.filter(|info| info.storage.is_some()) {
+        let storage = info.storage.as_deref().unwrap_or("undefined");
+        let record_name = format!(
+            "{}/{}/ets/{}",
+            info.bundle_name, info.module_name, info.page_path
+        );
+        return format!(
+            concat!(
+                "ViewStackProcessor.StartGetAccessRecordingFor(ViewStackProcessor.AllocateNewElmetIdForNextComponent());\n",
+                "loadEtsCard(new {name}(undefined, {{}}, {storage}), \"{record_name}\");\n",
+                "ViewStackProcessor.StopGetAccessRecording();\n"
+            ),
+            name = component_name,
+            storage = storage,
+            record_name = escape_string(&record_name),
+        );
+    }
+
     let metadata = if let Some(info) = info {
         format!(
             concat!(

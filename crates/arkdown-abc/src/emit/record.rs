@@ -23,21 +23,23 @@ pub mod method_access {
     pub const ANON: u32 = 0x208;
 }
 
-/// Return the correct `access_flags` value for a method based on its name pattern.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MethodKind {
+    Module,
+    Function,
+    Constructor,
+    Anonymous,
+}
+
+/// Return the correct `access_flags` value for a method based on its IR role.
 pub(crate) fn method_access_flags_for(method: &MethodRecord) -> u32 {
-    let name = method.name.as_str();
-    if name == "func_main_0" || name.contains("#~@0=#") {
-        if name.contains("#~@0=#")
-            && method.bytecode.len() > 1
-            && !is_generated_default_derived_constructor(method)
-        {
-            return method_access::INSTANCE;
+    match method.kind {
+        MethodKind::Module => method_access::MODULE_OR_CTOR,
+        MethodKind::Constructor if is_generated_default_derived_constructor(method) => {
+            method_access::MODULE_OR_CTOR
         }
-        method_access::MODULE_OR_CTOR
-    } else if name.contains("*#") {
-        method_access::ANON
-    } else {
-        method_access::INSTANCE
+        MethodKind::Anonymous => method_access::ANON,
+        MethodKind::Function | MethodKind::Constructor => method_access::INSTANCE,
     }
 }
 
@@ -172,6 +174,8 @@ pub struct MethodRecord {
     /// (by bytecode byte offset) to its catch handler entry point.  Empty for
     /// methods with no `try`/`catch` blocks.
     pub catch_entries: Vec<CatchEntry>,
+    pub kind: MethodKind,
+    pub method_pool_entry: bool,
 }
 
 /// Minimal method debug info linked through a Panda LineNumberProgram.
@@ -604,6 +608,8 @@ mod tests {
                 debug_info: None,
                 line_ops: vec![],
                 catch_entries: vec![],
+                kind: MethodKind::Module,
+                method_pool_entry: false,
             }],
             string_indices: vec![],
             literal_indices: vec![],
@@ -638,6 +644,8 @@ mod tests {
                 debug_info: None,
                 line_ops: vec![],
                 catch_entries: vec![],
+                kind: MethodKind::Module,
+                method_pool_entry: false,
             }],
             string_indices: vec![],
             literal_indices: vec![],

@@ -138,10 +138,15 @@ impl EtsTransformPlugin {
                 .iter()
                 .map(|module| (module.name.clone(), module.src_path.clone()))
                 .collect(),
+            component_metadata: transform::component_meta::ComponentMetadata::from_ets_loader_path(
+                &self.config.sdk_config.ets_loader_path,
+            )?,
         };
 
-        let transformed = transform::transform_ets_with_options(&source, &options)
-            .map_err(|e| anyhow::anyhow!("ets-transform: {e}"))?;
+        let transformed = transform::transform_ets_with_options(&source, &options).map_err(|e| {
+            tracing::error!(target: "arkdown::ets_transform", file = %id, error = %e, "ETS transform failed");
+            anyhow::anyhow!("ets-transform: {e}")
+        })?;
 
         let final_source = api_transform::rewrite_imports_for_version(&transformed, api_version);
         let final_source = typescript_emit::rewrite_imported_const_enums(&final_source, id);
@@ -195,6 +200,10 @@ impl EtsTransformPlugin {
             // so `offset_to_line_col` converts them correctly.
             let (gen_code, source_map) =
                 transform::transform_ets_viewpu_with_source_map(&source, &options, &source.content)
+                    .map_err(|e| {
+                        tracing::error!(target: "arkdown::ets_transform", file = %id, error = %e, "ETS source-map transform failed");
+                        anyhow::anyhow!("ets-transform source-map: {e}")
+                    })
                     .map(|(code, map)| {
                         let final_code =
                             api_transform::rewrite_imports_for_version(&code, api_version);
@@ -207,8 +216,7 @@ impl EtsTransformPlugin {
                             self.resource_refs.as_ref(),
                         );
                         (final_code, map)
-                    })
-                    .unwrap_or_else(|_| (final_source, None));
+                    })?;
             let map = source_map
                 .as_deref()
                 .and_then(|j| RolldownSourceMap::from_json_string(j).ok())
@@ -549,8 +557,8 @@ pub fn generate_source_map_for_file(source: &str, id: &str) -> Option<String> {
     source_map::build_token_source_map(source, id)
 }
 
-/// Returns `None` if parsing fails; callers should fall back to the raw source
-/// text with no source map in that case.
+/// Returns `None` if parsing fails; tests use that to assert source-map
+/// generation only when OXC parsed the source successfully.
 #[cfg(test)]
 fn generate_code_and_source_map(source: &str, id: &str) -> Option<(String, Option<String>)> {
     let allocator = Allocator::default();
@@ -910,7 +918,10 @@ mod tests {
             },
             modules: vec![],
             sdk_config: SdkConfig {
-                ets_loader_path: PathBuf::from("/unused"),
+                ets_loader_path: PathBuf::from(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/fixtures/ets-loader"
+                )),
                 es2abc_path: PathBuf::from("/unused"),
                 restool_path: PathBuf::from("/unused"),
                 compile_api_version: api_version,

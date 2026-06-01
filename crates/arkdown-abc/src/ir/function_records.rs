@@ -23,14 +23,12 @@ pub(super) struct FunctionRecord<'a> {
 pub(super) fn collect_function_records<'a>(
     program: &'a Program<'a>,
     stmts: &'a [Statement<'a>],
-    source: &'a str,
+    names: &mut FunctionNameAllocator<'a>,
 ) -> Vec<FunctionRecord<'a>> {
     let mut collector = FunctionRecordCollector {
-        source,
+        names,
         records: Vec::new(),
         seen_spans: HashSet::new(),
-        normal_names: HashSet::new(),
-        duplicate_names: HashMap::new(),
     };
 
     // func_main_0 is represented by the Program scope and is emitted by the caller.
@@ -45,15 +43,56 @@ pub(super) fn collect_function_records<'a>(
     collector.records
 }
 
-struct FunctionRecordCollector<'a> {
-    source: &'a str,
+struct FunctionRecordCollector<'a, 'names> {
+    names: &'names mut FunctionNameAllocator<'a>,
     records: Vec<FunctionRecord<'a>>,
     seen_spans: HashSet<(u32, u32)>,
-    normal_names: HashSet<String>,
-    duplicate_names: HashMap<String, u16>,
 }
 
-impl<'a> FunctionRecordCollector<'a> {
+#[derive(Debug, Default)]
+pub(super) struct FunctionNameAllocator<'a> {
+    normal_names: HashSet<String>,
+    duplicate_names: HashMap<String, u16>,
+    source: Option<&'a str>,
+}
+
+impl<'a> FunctionNameAllocator<'a> {
+    pub(super) fn new(source: &'a str) -> Self {
+        Self {
+            normal_names: HashSet::new(),
+            duplicate_names: HashMap::new(),
+            source: Some(source),
+        }
+    }
+
+    pub(super) fn bind(&mut self, start: u32, end: u32, name: Option<&str>) -> String {
+        let name = name.unwrap_or_default();
+        let ordinary_name = !name.is_empty() && !name.contains('.') && !name.contains('\\');
+        if ordinary_name && self.normal_names.insert(name.to_string()) {
+            return name.to_string();
+        }
+
+        let source = self.source.unwrap_or_default();
+        let hash_input = format!("{}{}", source_slice(source, start, end), name);
+        let mut result = format!("#{}#", fnv1a64(&hash_input));
+        let duplicate_count = self.duplicate_names.entry(hash_input).or_insert(0);
+        if *duplicate_count > 0 {
+            result = format!(
+                "#{hash}_{}#",
+                *duplicate_count,
+                hash = &result[1..result.len() - 1]
+            );
+        }
+        *duplicate_count += 1;
+
+        if ordinary_name {
+            result.push_str(name);
+        }
+        result
+    }
+}
+
+impl<'a, 'names> FunctionRecordCollector<'a, 'names> {
     fn scan_stmt(&mut self, stmt: &'a Statement<'a>) {
         match stmt {
             Statement::BlockStatement(block) => {
@@ -334,7 +373,7 @@ impl<'a> FunctionRecordCollector<'a> {
             return;
         }
         let explicit_name = function.id.as_ref().map(|id| id.name.as_str());
-        let name = self.bind_function_name(
+        let name = self.names.bind(
             function.span.start,
             function.span.end,
             explicit_name.or(inferred_name),
@@ -354,36 +393,13 @@ impl<'a> FunctionRecordCollector<'a> {
         if !self.seen_spans.insert(span) {
             return;
         }
-        let name = self.bind_function_name(arrow.span.start, arrow.span.end, inferred_name);
+        let name = self
+            .names
+            .bind(arrow.span.start, arrow.span.end, inferred_name);
         self.records.push(FunctionRecord {
             name,
             node: FunctionRecordNode::Arrow(arrow),
         });
-    }
-
-    fn bind_function_name(&mut self, start: u32, end: u32, name: Option<&str>) -> String {
-        let name = name.unwrap_or_default();
-        let ordinary_name = !name.is_empty() && !name.contains('.') && !name.contains('\\');
-        if ordinary_name && self.normal_names.insert(name.to_string()) {
-            return name.to_string();
-        }
-
-        let hash_input = format!("{}{}", source_slice(self.source, start, end), name);
-        let mut result = format!("#{}#", fnv1a64(&hash_input));
-        let duplicate_count = self.duplicate_names.entry(hash_input).or_insert(0);
-        if *duplicate_count > 0 {
-            result = format!(
-                "#{hash}_{}#",
-                *duplicate_count,
-                hash = &result[1..result.len() - 1]
-            );
-        }
-        *duplicate_count += 1;
-
-        if ordinary_name {
-            result.push_str(name);
-        }
-        result
     }
 }
 

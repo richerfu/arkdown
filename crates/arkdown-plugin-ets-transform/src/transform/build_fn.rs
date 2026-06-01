@@ -1,14 +1,20 @@
+use std::collections::HashSet;
+
 use oxc_ast::ast::{
-    Argument, ArkUIChild, ArkUIComponentExpression, ArrowFunctionExpression, BlockStatement,
-    CallExpression, Expression, FunctionBody, IfStatement, Statement,
+    Argument, ArkUIChild, ArkUIComponentExpression, ArrowFunctionExpression, BindingPattern,
+    BlockStatement, CallExpression, Expression, FormalParameter, FunctionBody, IfStatement,
+    Statement,
 };
 use oxc_span::{GetSpan, Span};
+
+use crate::transform::component_meta::ComponentMetadata;
+use crate::transform::global_rewrite::rewrite_global_context_calls_in_expression;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuildLoweringError {
     UnsupportedStatement,
     UnsupportedChild,
-    UnsupportedCallee,
+    UnsupportedCallee(String),
     UnsupportedChain,
 }
 
@@ -41,11 +47,14 @@ struct LeafComponent {
 fn extract_leaf_component(
     call: &CallExpression<'_>,
     source_text: &str,
+    source_id: &str,
+    custom_components: &HashSet<String>,
+    builder_methods: &HashSet<String>,
 ) -> Result<LeafComponent, BuildLoweringError> {
     match &call.callee {
         Expression::Identifier(_) => {
             let name = component_name(&call.callee)?;
-            let create_args = arguments_text(&call.arguments, source_text);
+            let create_args = raw_arguments_text(&call.arguments, source_text);
             Ok(LeafComponent {
                 name,
                 create_args,
@@ -54,17 +63,28 @@ fn extract_leaf_component(
         }
         Expression::StaticMemberExpression(member) => {
             let attr_name = member.property.name.to_string();
-            let attr_args = arguments_text(&call.arguments, source_text);
+            let attr_args =
+                attribute_arguments_text(&attr_name, &call.arguments, source_text, builder_methods);
             match &member.object {
                 Expression::CallExpression(inner) => {
-                    let mut lc = extract_leaf_component(inner, source_text)?;
+                    let mut lc = extract_leaf_component(
+                        inner,
+                        source_text,
+                        source_id,
+                        custom_components,
+                        builder_methods,
+                    )?;
                     lc.chain_attrs.push((attr_name, attr_args));
                     Ok(lc)
                 }
-                _ => Err(BuildLoweringError::UnsupportedCallee),
+                _ => Err(BuildLoweringError::UnsupportedCallee(
+                    span_text(&member.object, source_text).trim().to_string(),
+                )),
             }
         }
-        _ => Err(BuildLoweringError::UnsupportedCallee),
+        _ => Err(BuildLoweringError::UnsupportedCallee(
+            span_text(&call.callee, source_text).trim().to_string(),
+        )),
     }
 }
 
@@ -78,10 +98,48 @@ fn extract_leaf_component(
 fn lower_call_expression(
     call: &CallExpression<'_>,
     source_text: &str,
+    source_id: &str,
+    custom_components: &HashSet<String>,
+    builder_methods: &HashSet<String>,
+    component_metadata: &ComponentMetadata,
     indent: &str,
     out: &mut String,
+    span_hints: &mut Vec<SpanHint>,
 ) -> Result<(), BuildLoweringError> {
-    let lc = extract_leaf_component(call, source_text)?;
+    if matches_component_call(call, "ForEach") {
+        return lower_for_each(
+            &call.arguments,
+            source_text,
+            source_id,
+            custom_components,
+            builder_methods,
+            component_metadata,
+            indent,
+            out,
+            span_hints,
+        );
+    }
+
+    let lc = extract_leaf_component(
+        call,
+        source_text,
+        source_id,
+        custom_components,
+        builder_methods,
+    )?;
+    if custom_components.contains(&lc.name) && lc.chain_attrs.is_empty() {
+        emit_custom_component_call(
+            &lc.name,
+            lc.create_args.trim(),
+            call.span,
+            source_text,
+            source_id,
+            indent,
+            out,
+            span_hints,
+        );
+        return Ok(());
+    }
     out.push_str(&format!(
         "{indent}this.observeComponentCreation2((elmtId, isInitialRender) => {{\n"
     ));
@@ -96,7 +154,9 @@ fn lower_call_expression(
         ));
     }
     out.push_str(&format!("{indent}}}, {});\n", lc.name));
-    out.push_str(&format!("{indent}{}.pop();\n", lc.name));
+    if component_metadata.needs_pop(&lc.name) {
+        out.push_str(&format!("{indent}{}.pop();\n", lc.name));
+    }
     Ok(())
 }
 
@@ -115,6 +175,24 @@ pub fn lower_build_body(
     body: Option<&FunctionBody<'_>>,
     source_text: &str,
 ) -> Result<(String, Vec<SpanHint>), BuildLoweringError> {
+    lower_build_body_with_custom_components(
+        body,
+        source_text,
+        "",
+        &HashSet::new(),
+        &HashSet::new(),
+        &ComponentMetadata::default(),
+    )
+}
+
+pub fn lower_build_body_with_custom_components(
+    body: Option<&FunctionBody<'_>>,
+    source_text: &str,
+    source_id: &str,
+    custom_components: &HashSet<String>,
+    builder_methods: &HashSet<String>,
+    component_metadata: &ComponentMetadata,
+) -> Result<(String, Vec<SpanHint>), BuildLoweringError> {
     let Some(body) = body else {
         return Ok((String::new(), vec![]));
     };
@@ -125,6 +203,10 @@ pub fn lower_build_body(
         lower_statement(
             statement,
             source_text,
+            source_id,
+            custom_components,
+            builder_methods,
+            component_metadata,
             "        ",
             &mut out,
             &mut span_hints,
@@ -137,21 +219,49 @@ pub fn lower_build_body(
 fn lower_statement(
     statement: &Statement<'_>,
     source_text: &str,
+    source_id: &str,
+    custom_components: &HashSet<String>,
+    builder_methods: &HashSet<String>,
+    component_metadata: &ComponentMetadata,
     indent: &str,
     out: &mut String,
     span_hints: &mut Vec<SpanHint>,
 ) -> Result<(), BuildLoweringError> {
     match statement {
-        Statement::BlockStatement(block) => {
-            lower_block(block, source_text, indent, out, span_hints)
-        }
+        Statement::BlockStatement(block) => lower_block(
+            block,
+            source_text,
+            source_id,
+            custom_components,
+            builder_methods,
+            component_metadata,
+            indent,
+            out,
+            span_hints,
+        ),
         Statement::EmptyStatement(_) => Ok(()),
-        Statement::ExpressionStatement(statement) => {
-            lower_expression(&statement.expression, source_text, indent, out, span_hints)
-        }
-        Statement::IfStatement(statement) => {
-            lower_if_statement(statement, source_text, indent, out, span_hints)
-        }
+        Statement::ExpressionStatement(statement) => lower_expression(
+            &statement.expression,
+            source_text,
+            source_id,
+            custom_components,
+            builder_methods,
+            component_metadata,
+            indent,
+            out,
+            span_hints,
+        ),
+        Statement::IfStatement(statement) => lower_if_statement(
+            statement,
+            source_text,
+            source_id,
+            custom_components,
+            builder_methods,
+            component_metadata,
+            indent,
+            out,
+            span_hints,
+        ),
         _ => Err(BuildLoweringError::UnsupportedStatement),
     }
 }
@@ -159,12 +269,26 @@ fn lower_statement(
 fn lower_block(
     block: &BlockStatement<'_>,
     source_text: &str,
+    source_id: &str,
+    custom_components: &HashSet<String>,
+    builder_methods: &HashSet<String>,
+    component_metadata: &ComponentMetadata,
     indent: &str,
     out: &mut String,
     span_hints: &mut Vec<SpanHint>,
 ) -> Result<(), BuildLoweringError> {
     for statement in &block.body {
-        lower_statement(statement, source_text, indent, out, span_hints)?;
+        lower_statement(
+            statement,
+            source_text,
+            source_id,
+            custom_components,
+            builder_methods,
+            component_metadata,
+            indent,
+            out,
+            span_hints,
+        )?;
     }
     Ok(())
 }
@@ -172,23 +296,41 @@ fn lower_block(
 fn lower_expression(
     expression: &Expression<'_>,
     source_text: &str,
+    source_id: &str,
+    custom_components: &HashSet<String>,
+    builder_methods: &HashSet<String>,
+    component_metadata: &ComponentMetadata,
     indent: &str,
     out: &mut String,
     span_hints: &mut Vec<SpanHint>,
 ) -> Result<(), BuildLoweringError> {
     match expression {
-        Expression::ArkUIComponentExpression(component) => {
-            lower_component(component, source_text, indent, out, span_hints)
-        }
+        Expression::ArkUIComponentExpression(component) => lower_component(
+            component,
+            source_text,
+            source_id,
+            custom_components,
+            builder_methods,
+            component_metadata,
+            indent,
+            out,
+            span_hints,
+        ),
         Expression::CallExpression(call) => {
-            match lower_call_expression(call, source_text, indent, out) {
-                Ok(()) => Ok(()),
-                Err(BuildLoweringError::UnsupportedCallee) => {
-                    let text = source_text[call.span].to_string();
-                    out.push_str(&format!("{indent}{};\n", text.trim()));
-                    Ok(())
-                }
-                Err(err) => Err(err),
+            if lower_builder_method_call(call, source_text, builder_methods, indent, out) {
+                Ok(())
+            } else {
+                lower_call_expression(
+                    call,
+                    source_text,
+                    source_id,
+                    custom_components,
+                    builder_methods,
+                    component_metadata,
+                    indent,
+                    out,
+                    span_hints,
+                )
             }
         }
         _ => Err(BuildLoweringError::UnsupportedStatement),
@@ -198,6 +340,10 @@ fn lower_expression(
 fn lower_if_statement(
     statement: &IfStatement<'_>,
     source_text: &str,
+    source_id: &str,
+    custom_components: &HashSet<String>,
+    builder_methods: &HashSet<String>,
+    component_metadata: &ComponentMetadata,
     indent: &str,
     out: &mut String,
     span_hints: &mut Vec<SpanHint>,
@@ -217,6 +363,10 @@ fn lower_if_statement(
     lower_statement(
         &statement.consequent,
         source_text,
+        source_id,
+        custom_components,
+        builder_methods,
+        component_metadata,
         &format!("{inner_indent}    "),
         out,
         span_hints,
@@ -234,6 +384,10 @@ fn lower_if_statement(
                 lower_if_statement(
                     alternate_if,
                     source_text,
+                    source_id,
+                    custom_components,
+                    builder_methods,
+                    component_metadata,
                     &format!("{inner_indent}    "),
                     out,
                     span_hints,
@@ -243,6 +397,10 @@ fn lower_if_statement(
                 lower_statement(
                     alternate,
                     source_text,
+                    source_id,
+                    custom_components,
+                    builder_methods,
+                    component_metadata,
                     &format!("{inner_indent}    "),
                     out,
                     span_hints,
@@ -269,21 +427,83 @@ fn lower_if_statement(
 fn lower_component(
     component: &ArkUIComponentExpression<'_>,
     source_text: &str,
+    source_id: &str,
+    custom_components: &HashSet<String>,
+    builder_methods: &HashSet<String>,
+    component_metadata: &ComponentMetadata,
     indent: &str,
     out: &mut String,
     span_hints: &mut Vec<SpanHint>,
 ) -> Result<(), BuildLoweringError> {
     let name = component_name(&component.callee)?;
-    let args = arguments_text(&component.arguments, source_text);
 
-    if name == "LazyForEach" {
-        return lower_lazy_for_each(component, source_text, indent, out, span_hints);
+    if builder_methods.contains(&name) {
+        if !component.children.is_empty() {
+            return Err(BuildLoweringError::UnsupportedChild);
+        }
+        let args = raw_arguments_text(&component.arguments, source_text);
+        out.push_str(&format!("{indent}{name}.bind(this)({args});\n"));
+        return Ok(());
     }
+
+    if custom_components.contains(&name) {
+        let args = raw_arguments_text(&component.arguments, source_text);
+        emit_custom_component_call(
+            &name,
+            args.trim(),
+            component.span,
+            source_text,
+            source_id,
+            indent,
+            out,
+            span_hints,
+        );
+        return Ok(());
+    }
+
+    if name == "ForEach" {
+        return lower_for_each(
+            &component.arguments,
+            source_text,
+            source_id,
+            custom_components,
+            builder_methods,
+            component_metadata,
+            indent,
+            out,
+            span_hints,
+        );
+    }
+    if name == "LazyForEach" {
+        return lower_lazy_for_each(
+            component,
+            source_text,
+            source_id,
+            custom_components,
+            builder_methods,
+            component_metadata,
+            indent,
+            out,
+            span_hints,
+        );
+    }
+
+    let args = raw_arguments_text(&component.arguments, source_text);
     if name == "ListItem"
         && !component.children.is_empty()
         && is_lazy_list_item(component, source_text)
     {
-        return lower_lazy_list_item(component, source_text, indent, out, span_hints);
+        return lower_lazy_list_item(
+            component,
+            source_text,
+            source_id,
+            custom_components,
+            builder_methods,
+            component_metadata,
+            indent,
+            out,
+            span_hints,
+        );
     }
 
     let body_line = out.bytes().filter(|&b| b == b'\n').count();
@@ -313,7 +533,8 @@ fn lower_component(
     out.push_str(&format!("{indent}    {name}.create({args});\n"));
     for (index, chain) in component.chain_expressions.iter().enumerate() {
         let chain_name = chain_name(chain)?;
-        let chain_args = arguments_text(&chain.arguments, source_text);
+        let chain_args =
+            attribute_arguments_text(&chain_name, &chain.arguments, source_text, builder_methods);
         let line = body_line + 2 + index;
         push_span_hint(span_hints, line, indent.len() + 4, component.callee.span());
         push_span_hint(
@@ -346,39 +567,113 @@ fn lower_component(
     for child in &component.children {
         match child {
             ArkUIChild::Component(child) => {
-                lower_component(child, source_text, indent, out, span_hints)?;
+                lower_component(
+                    child,
+                    source_text,
+                    source_id,
+                    custom_components,
+                    builder_methods,
+                    component_metadata,
+                    indent,
+                    out,
+                    span_hints,
+                )?;
             }
             ArkUIChild::Expression(expression) => {
-                lower_expression(expression, source_text, indent, out, span_hints)?;
+                lower_expression(
+                    expression,
+                    source_text,
+                    source_id,
+                    custom_components,
+                    builder_methods,
+                    component_metadata,
+                    indent,
+                    out,
+                    span_hints,
+                )?;
             }
             ArkUIChild::Statement(statement) => {
-                lower_statement(statement, source_text, indent, out, span_hints)?;
+                lower_statement(
+                    statement,
+                    source_text,
+                    source_id,
+                    custom_components,
+                    builder_methods,
+                    component_metadata,
+                    indent,
+                    out,
+                    span_hints,
+                )?;
             }
         }
     }
 
-    let pop_line = out.bytes().filter(|&b| b == b'\n').count();
-    push_span_hint(span_hints, pop_line, indent.len(), component.callee.span());
-    push_span_hint(
-        span_hints,
-        pop_line,
-        indent.len() + name.len(),
-        end_span(component.callee.span()),
-    );
-    out.push_str(&format!("{indent}{name}.pop();\n"));
+    if component_metadata.needs_pop(&name) {
+        let pop_line = out.bytes().filter(|&b| b == b'\n').count();
+        push_span_hint(span_hints, pop_line, indent.len(), component.callee.span());
+        push_span_hint(
+            span_hints,
+            pop_line,
+            indent.len() + name.len(),
+            end_span(component.callee.span()),
+        );
+        out.push_str(&format!("{indent}{name}.pop();\n"));
+    }
     Ok(())
+}
+
+fn emit_custom_component_call(
+    name: &str,
+    args: &str,
+    span: Span,
+    source_text: &str,
+    source_id: &str,
+    indent: &str,
+    out: &mut String,
+    span_hints: &mut Vec<SpanHint>,
+) {
+    let body_line = out.bytes().filter(|&b| b == b'\n').count();
+    push_span_hint(span_hints, body_line, indent.len(), span);
+
+    let params = if args.is_empty() { "{}" } else { args };
+    let (line, col) = source_position(source_text, span.start);
+    let page = component_page_path(source_id);
+    out.push_str(&format!(
+        "{indent}this.observeComponentCreation2((elmtId, isInitialRender) => {{\n"
+    ));
+    out.push_str(&format!("{indent}    if (isInitialRender) {{\n"));
+    out.push_str(&format!(
+        "{indent}        let componentCall = new {name}(this, {params}, undefined, elmtId, () => {{ }}, {{ page: \"{page}\", line: {line}, col: {col} }});\n"
+    ));
+    out.push_str(&format!("{indent}        ViewPU.create(componentCall);\n"));
+    out.push_str(&format!("{indent}        let paramsLambda = () => {{\n"));
+    out.push_str(&format!("{indent}            return {params};\n"));
+    out.push_str(&format!("{indent}        }};\n"));
+    out.push_str(&format!(
+        "{indent}        componentCall.paramsGenerator_ = paramsLambda;\n"
+    ));
+    out.push_str(&format!("{indent}    }} else {{\n"));
+    out.push_str(&format!(
+        "{indent}        this.updateStateVarsOfChildByElmtId(elmtId, {params});\n"
+    ));
+    out.push_str(&format!("{indent}    }}\n"));
+    out.push_str(&format!("{indent}}}, {{ name: \"{name}\" }});\n"));
 }
 
 fn is_lazy_list_item(component: &ArkUIComponentExpression<'_>, source_text: &str) -> bool {
     !component
         .arguments
         .first()
-        .is_some_and(|arg| argument_text(arg, source_text).trim() == "\"false\"")
+        .is_some_and(|arg| raw_argument_text(arg, source_text).trim() == "\"false\"")
 }
 
 fn lower_lazy_list_item(
     component: &ArkUIComponentExpression<'_>,
     source_text: &str,
+    source_id: &str,
+    custom_components: &HashSet<String>,
+    builder_methods: &HashSet<String>,
+    component_metadata: &ComponentMetadata,
     indent: &str,
     out: &mut String,
     span_hints: &mut Vec<SpanHint>,
@@ -407,6 +702,14 @@ fn lower_lazy_list_item(
     out.push_str(&format!(
         "{inner}    ListItem.create(deepRenderFunction, true);\n"
     ));
+    for chain in &component.chain_expressions {
+        let chain_name = chain_name(chain)?;
+        let chain_args =
+            attribute_arguments_text(&chain_name, &chain.arguments, source_text, builder_methods);
+        out.push_str(&format!(
+            "{inner}    ListItem.{chain_name}({chain_args});\n"
+        ));
+    }
     out.push_str(&format!("{inner}}};\n"));
     out.push_str(&format!(
         "{inner}const deepRenderFunction = (elmtId, isInitialRender) => {{\n"
@@ -414,13 +717,16 @@ fn lower_lazy_list_item(
     out.push_str(&format!(
         "{inner}    itemCreation(elmtId, isInitialRender);\n"
     ));
-    out.push_str(&format!("{inner}    {{\n"));
     for child in &component.children {
         match child {
             ArkUIChild::Component(child) => {
                 lower_component(
                     child,
                     source_text,
+                    source_id,
+                    custom_components,
+                    builder_methods,
+                    component_metadata,
                     &format!("{inner}        "),
                     out,
                     span_hints,
@@ -430,6 +736,10 @@ fn lower_lazy_list_item(
                 lower_expression(
                     expression,
                     source_text,
+                    source_id,
+                    custom_components,
+                    builder_methods,
+                    component_metadata,
                     &format!("{inner}        "),
                     out,
                     span_hints,
@@ -439,6 +749,10 @@ fn lower_lazy_list_item(
                 lower_statement(
                     statement,
                     source_text,
+                    source_id,
+                    custom_components,
+                    builder_methods,
+                    component_metadata,
                     &format!("{inner}        "),
                     out,
                     span_hints,
@@ -446,7 +760,6 @@ fn lower_lazy_list_item(
             }
         }
     }
-    out.push_str(&format!("{inner}    }}\n"));
     out.push_str(&format!("{inner}    ListItem.pop();\n"));
     out.push_str(&format!("{inner}}};\n"));
     out.push_str(&format!(
@@ -457,9 +770,97 @@ fn lower_lazy_list_item(
     Ok(())
 }
 
+fn lower_for_each(
+    arguments: &[Argument<'_>],
+    source_text: &str,
+    source_id: &str,
+    custom_components: &HashSet<String>,
+    builder_methods: &HashSet<String>,
+    component_metadata: &ComponentMetadata,
+    indent: &str,
+    out: &mut String,
+    span_hints: &mut Vec<SpanHint>,
+) -> Result<(), BuildLoweringError> {
+    let Some(data_arg) = arguments.first() else {
+        return Err(BuildLoweringError::UnsupportedChild);
+    };
+    let Some(item_gen_arg) = arguments.get(1) else {
+        return Err(BuildLoweringError::UnsupportedChild);
+    };
+    let Some(item_gen) = argument_arrow(item_gen_arg) else {
+        return Err(BuildLoweringError::UnsupportedChild);
+    };
+
+    let data = raw_argument_text(data_arg, source_text);
+    let item_param = item_gen.params.items.first();
+    let index_param = item_gen.params.items.get(1);
+    let generator_params = match (item_param, index_param) {
+        (None, _) => "()".to_string(),
+        (Some(_), Some(index_param)) => {
+            format!("(_item, {})", span_text(index_param, source_text).trim())
+        }
+        (Some(_), None) => "_item".to_string(),
+    };
+
+    out.push_str(&format!(
+        "{indent}this.observeComponentCreation2((elmtId, isInitialRender) => {{\n"
+    ));
+    out.push_str(&format!("{indent}    ForEach.create();\n"));
+    out.push_str(&format!(
+        "{indent}    const forEachItemGenFunction = {generator_params} => {{\n"
+    ));
+    if let Some(item_param) = item_param {
+        let Some(item_name) = binding_parameter_name(item_param) else {
+            return Err(BuildLoweringError::UnsupportedChild);
+        };
+        out.push_str(&format!("{indent}        const {item_name} = _item;\n"));
+    }
+    lower_lazy_arrow_body(
+        item_gen,
+        source_text,
+        source_id,
+        custom_components,
+        builder_methods,
+        component_metadata,
+        &format!("{indent}        "),
+        out,
+        span_hints,
+    )?;
+    out.push_str(&format!("{indent}    }};\n"));
+
+    if item_param.is_some() {
+        if let Some(key_arg) = arguments.get(2) {
+            let key = raw_argument_text(key_arg, source_text);
+            let item_gen_uses_index = index_param.is_some();
+            let key_uses_index = argument_arrow(key_arg)
+                .and_then(|arrow| arrow.params.items.get(1))
+                .is_some();
+            out.push_str(&format!(
+            "{indent}    this.forEachUpdateFunction(elmtId, {data}, forEachItemGenFunction, {key}, {item_gen_uses_index}, {key_uses_index});\n"
+        ));
+        } else {
+            out.push_str(&format!(
+                "{indent}    this.forEachUpdateFunction(elmtId, {data}, forEachItemGenFunction);\n"
+            ));
+        }
+    } else {
+        out.push_str(&format!(
+            "{indent}    this.forEachUpdateFunction(elmtId, {data}, forEachItemGenFunction);\n"
+        ));
+    }
+
+    out.push_str(&format!("{indent}}}, ForEach);\n"));
+    out.push_str(&format!("{indent}ForEach.pop();\n"));
+    Ok(())
+}
+
 fn lower_lazy_for_each(
     component: &ArkUIComponentExpression<'_>,
     source_text: &str,
+    source_id: &str,
+    custom_components: &HashSet<String>,
+    builder_methods: &HashSet<String>,
+    component_metadata: &ComponentMetadata,
     indent: &str,
     out: &mut String,
     span_hints: &mut Vec<SpanHint>,
@@ -474,7 +875,7 @@ fn lower_lazy_for_each(
         return Err(BuildLoweringError::UnsupportedChild);
     };
 
-    let data = argument_text(data_arg, source_text);
+    let data = raw_argument_text(data_arg, source_text);
     let item_params = source_text[item_gen.params.span].trim();
     out.push_str(&format!(
         "{indent}const __lazyForEachItemGenFunction = {item_params} => {{\n"
@@ -482,6 +883,10 @@ fn lower_lazy_for_each(
     lower_lazy_arrow_body(
         item_gen,
         source_text,
+        source_id,
+        custom_components,
+        builder_methods,
+        component_metadata,
         &format!("{indent}    "),
         out,
         span_hints,
@@ -489,7 +894,7 @@ fn lower_lazy_for_each(
     out.push_str(&format!("{indent}}};\n"));
 
     if let Some(id_func_arg) = component.arguments.get(2) {
-        let id_func = argument_text(id_func_arg, source_text);
+        let id_func = raw_argument_text(id_func_arg, source_text);
         out.push_str(&format!(
             "{indent}const __lazyForEachItemIdFunc = {id_func};\n"
         ));
@@ -508,6 +913,10 @@ fn lower_lazy_for_each(
 fn lower_lazy_arrow_body(
     arrow: &ArrowFunctionExpression<'_>,
     source_text: &str,
+    source_id: &str,
+    custom_components: &HashSet<String>,
+    builder_methods: &HashSet<String>,
+    component_metadata: &ComponentMetadata,
     indent: &str,
     out: &mut String,
     span_hints: &mut Vec<SpanHint>,
@@ -517,7 +926,17 @@ fn lower_lazy_arrow_body(
         return Ok(());
     }
     for statement in &arrow.body.statements {
-        lower_statement(statement, source_text, indent, out, span_hints)?;
+        lower_statement(
+            statement,
+            source_text,
+            source_id,
+            custom_components,
+            builder_methods,
+            component_metadata,
+            indent,
+            out,
+            span_hints,
+        )?;
     }
     Ok(())
 }
@@ -529,12 +948,41 @@ fn argument_arrow<'a>(argument: &'a Argument<'a>) -> Option<&'a ArrowFunctionExp
     }
 }
 
+fn binding_parameter_name<'a>(parameter: &'a FormalParameter<'a>) -> Option<&'a str> {
+    match &parameter.pattern {
+        BindingPattern::BindingIdentifier(identifier) => Some(identifier.name.as_str()),
+        _ => None,
+    }
+}
+
+fn matches_component_call(call: &CallExpression<'_>, expected: &str) -> bool {
+    matches!(&call.callee, Expression::Identifier(identifier) if identifier.name == expected)
+}
+
 fn push_span_hint(span_hints: &mut Vec<SpanHint>, body_line: usize, body_col: usize, span: Span) {
     span_hints.push(SpanHint {
         body_line,
         body_col: body_col as u32,
         original_span: span,
     });
+}
+
+fn source_position(source_text: &str, offset: u32) -> (usize, usize) {
+    let end = (offset as usize).min(source_text.len());
+    let prefix = &source_text[..end];
+    let line = prefix.bytes().filter(|&b| b == b'\n').count() + 1;
+    let col = prefix
+        .rfind('\n')
+        .map_or(prefix.len(), |idx| prefix.len().saturating_sub(idx + 1))
+        + 1;
+    (line, col)
+}
+
+fn component_page_path(source_id: &str) -> &str {
+    source_id
+        .find("products/")
+        .map(|idx| &source_id[idx..])
+        .unwrap_or(source_id)
 }
 
 fn end_span(span: Span) -> Span {
@@ -612,7 +1060,9 @@ fn push_static_member_argument_hints(
 fn component_name(callee: &Expression<'_>) -> Result<String, BuildLoweringError> {
     match callee {
         Expression::Identifier(identifier) => Ok(identifier.name.to_string()),
-        _ => Err(BuildLoweringError::UnsupportedCallee),
+        _ => Err(BuildLoweringError::UnsupportedCallee(
+            "non-identifier component callee".to_string(),
+        )),
     }
 }
 
@@ -623,71 +1073,121 @@ fn chain_name(call: &CallExpression<'_>) -> Result<String, BuildLoweringError> {
     }
 }
 
-fn arguments_text(arguments: &[Argument<'_>], source_text: &str) -> String {
+fn raw_arguments_text(arguments: &[Argument<'_>], source_text: &str) -> String {
     arguments
         .iter()
-        .map(|argument| argument_text(argument, source_text))
+        .map(|argument| raw_argument_text(argument, source_text))
         .collect::<Vec<_>>()
         .join(", ")
 }
 
-fn argument_text(argument: &Argument<'_>, source_text: &str) -> String {
-    let Some(Expression::ArrowFunctionExpression(arrow)) = argument.as_expression() else {
-        return span_text(argument, source_text).trim().to_string();
-    };
-    if arrow.expression {
-        return span_text(argument, source_text).trim().to_string();
-    }
-
-    match lower_build_body(Some(&arrow.body), source_text) {
-        Ok((body, _)) => {
-            let params = source_text[arrow.params.span].trim();
-            format!("{params} => {{\n{body}        }}")
+fn attribute_arguments_text(
+    attr_name: &str,
+    arguments: &[Argument<'_>],
+    source_text: &str,
+    builder_methods: &HashSet<String>,
+) -> String {
+    if is_builder_attribute(attr_name) && arguments.len() == 1 {
+        if let Some(name) = argument_builder_method_name(&arguments[0], builder_methods) {
+            return format!("{{ builder: this.{name}.bind(this) }}");
         }
-        Err(_) => span_text(argument, source_text).trim().to_string(),
     }
+    raw_arguments_text(arguments, source_text)
+}
+
+fn is_builder_attribute(name: &str) -> bool {
+    matches!(
+        name,
+        "background"
+            | "bindPopup"
+            | "bindMenu"
+            | "bindContextMenu"
+            | "bindContextMenuByResponseType"
+            | "bindContextMenuByIsShow"
+            | "bindContextMenuWithResponse"
+            | "title"
+            | "menus"
+            | "toolBar"
+            | "tabBar"
+            | "toolbar"
+            | "onDragStart"
+            | "onItemDragStart"
+            | "swipeAction"
+            | "bindContentCover"
+            | "bindSheet"
+            | "navDestination"
+            | "overlay"
+            | "toolbarConfiguration"
+            | "customKeyboard"
+            | "bindSelectionMenu"
+            | "description"
+            | "showUnit"
+            | "create"
+            | "addBuilderSpan"
+            | "dragPreview"
+            | "accessibilityVirtualNode"
+            | "header"
+            | "footer"
+    )
+}
+
+fn argument_builder_method_name<'a>(
+    argument: &'a Argument<'a>,
+    builder_methods: &HashSet<String>,
+) -> Option<String> {
+    let expr = argument.as_expression()?;
+    builder_method_member_name(expr, builder_methods)
+}
+
+fn builder_method_member_name(
+    expression: &Expression<'_>,
+    builder_methods: &HashSet<String>,
+) -> Option<String> {
+    let Expression::StaticMemberExpression(member) = expression else {
+        return None;
+    };
+    if !matches!(&member.object, Expression::ThisExpression(_)) {
+        return None;
+    }
+    let name = member.property.name.as_str();
+    builder_methods.contains(name).then(|| name.to_string())
+}
+
+fn raw_argument_text(argument: &Argument<'_>, source_text: &str) -> String {
+    if let Some(expression) = argument.as_expression() {
+        return rewrite_global_context_calls_in_expression(expression, source_text)
+            .trim()
+            .to_string();
+    }
+    span_text(argument, source_text).trim().to_string()
+}
+
+fn lower_builder_method_call(
+    call: &CallExpression<'_>,
+    source_text: &str,
+    builder_methods: &HashSet<String>,
+    indent: &str,
+    out: &mut String,
+) -> bool {
+    if let Some(name) = builder_method_member_name(&call.callee, builder_methods) {
+        let args = raw_arguments_text(&call.arguments, source_text);
+        out.push_str(&format!("{indent}this.{name}.bind(this)({args});\n"));
+        return true;
+    }
+    if let Expression::Identifier(identifier) = &call.callee {
+        let name = identifier.name.as_str();
+        if builder_methods.contains(name) {
+            let args = raw_arguments_text(&call.arguments, source_text);
+            out.push_str(&format!("{indent}{name}.bind(this)({args});\n"));
+            return true;
+        }
+    };
+    false
 }
 
 fn span_text(node: &impl GetSpan, source_text: &str) -> String {
     let span = node.span();
     source_text[span].to_string()
-}
-
-/// Lower an ArkUI `build()` body, falling back to the raw source text on failure.
-///
-/// The OXC ETS parser applies `ArkUIComponentExpression` parsing only to
-/// the canonical `build()` method.  `@Builder` method bodies are parsed as
-/// regular TypeScript, so `lower_build_body` returns
-/// `Err(UnsupportedStatement)` for them.
-///
-/// On failure this function extracts the inner body text from the source span
-/// and re-indents it for a class method body.  The raw TypeScript is valid
-/// (e.g. `Text('hi')` is a regular function call) even if not fully desugared.
-///
-/// Returns `(lowered_text, span_hints)`.  Span hints are empty on the raw
-/// fallback path because the OXC parser did not produce ArkUI AST nodes.
-pub fn lower_build_body_or_raw(
-    body: Option<&FunctionBody<'_>>,
-    source_text: &str,
-) -> (String, Vec<SpanHint>) {
-    match lower_build_body(body, source_text) {
-        Ok(result) => result,
-        Err(_) => {
-            // Fall back to raw inner body text, re-indented for a class method.
-            let Some(body) = body else {
-                return (String::new(), vec![]);
-            };
-            let raw = span_text(body, source_text);
-            // Strip the surrounding `{` / `}` and re-indent each non-empty line.
-            let inner = strip_outer_block(&raw);
-            let text = inner
-                .lines()
-                .filter(|line| !line.trim().is_empty())
-                .map(|line| format!("        {}\n", line.trim()))
-                .collect();
-            (text, vec![])
-        }
-    }
 }
 
 /// Lower a `@Styles` method body into valid TypeScript.
@@ -785,6 +1285,15 @@ mod tests {
     use oxc_ast::ast::{Declaration, StructElement};
     use oxc_parser::Parser;
     use oxc_span::SourceType;
+    use std::path::Path;
+
+    fn test_component_metadata() -> ComponentMetadata {
+        ComponentMetadata::from_ets_loader_path(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/ets-loader"
+        )))
+        .expect("test ets-loader metadata")
+    }
 
     fn parse_and_lower(source: &str) -> Result<String, BuildLoweringError> {
         let allocator = Allocator::default();
@@ -820,7 +1329,15 @@ mod tests {
                 _ => None,
             })
             .expect("expected build method");
-        lower_build_body(build.value.body.as_deref(), source).map(|(code, _)| code)
+        lower_build_body_with_custom_components(
+            build.value.body.as_deref(),
+            source,
+            "",
+            &HashSet::new(),
+            &HashSet::new(),
+            &test_component_metadata(),
+        )
+        .map(|(code, _)| code)
     }
 
     #[test]
@@ -860,7 +1377,7 @@ struct Foo {
         let out = parse_and_lower(source).unwrap();
         assert!(out.contains("Divider.create();"), "got:\n{out}");
         assert!(out.contains("}, Divider);"), "got:\n{out}");
-        assert!(out.contains("Divider.pop();"), "got:\n{out}");
+        assert!(!out.contains("Divider.pop();"), "got:\n{out}");
         assert!(
             !out.contains("Divider.create(,"),
             "no empty-arg comma; got:\n{out}"
@@ -1034,7 +1551,31 @@ struct Foo {
             out.contains("Image.objectFit(ImageFit.Cover);"),
             "got:\n{out}"
         );
-        assert!(out.contains("Image.pop();"), "got:\n{out}");
+        assert!(!out.contains("Image.pop();"), "got:\n{out}");
+    }
+
+    #[test]
+    fn preserves_regular_function_calls_inside_attribute_arrow() {
+        let source = r#"@Component
+struct Foo {
+  build() {
+    Row() {
+    }.onClick(() => {
+      postCardAction(this, { action: "router" });
+    })
+  }
+}"#;
+        let out = parse_and_lower(source).unwrap();
+        assert!(
+            out.contains(
+                "Row.onClick(() => {\n      postCardAction(this, { action: \"router\" });\n    });"
+            ),
+            "attribute arrow body should be preserved as source text; got:\n{out}"
+        );
+        assert!(
+            !out.contains("postCardAction.create"),
+            "ordinary function calls in attribute callbacks are not ArkUI components; got:\n{out}"
+        );
     }
 
     #[test]

@@ -6,14 +6,8 @@
 ///
 /// # @Builder body lowering note
 ///
-/// The OXC ETS parser applies `ArkUIComponentExpression` parsing only to the
-/// canonical `build()` method — not to `@Builder` method bodies.  In those
-/// bodies `Text('hi')` is parsed as a regular TypeScript `CallExpression`.
-/// `lower_build_body_or_raw` therefore falls back to emitting the raw body
-/// source text re-indented as a method body.  The output is still syntactically
-/// valid TypeScript, and the `@Builder` decorator is stripped either way.
-/// Full `observeComponentCreation2` desugaring in `@Builder` bodies depends on
-/// the OXC ETS parser adding ArkUI expression support there in a future update.
+/// `@Builder` bodies are lowered through the same OXC ArkUI AST path as
+/// `build()`. Unsupported DSL shapes must surface as transform errors.
 use arkdown_core::{ModuleSource, ModuleType, ResolvedId};
 use arkdown_plugin_ets_transform::transform::transform_ets;
 
@@ -34,8 +28,6 @@ fn make_source(id: &str, content: &str) -> ModuleSource {
 
 /// `@Builder` decorator is stripped and the method appears in the ViewPU class.
 ///
-/// The OXC ETS parser does not apply ArkUI expression rules to `@Builder`
-/// bodies, so the body is emitted as raw TypeScript source text.
 #[test]
 fn test_builder_method_decorator_stripped_and_method_present() {
     let src = r#"
@@ -62,14 +54,13 @@ struct MyCard {
     );
     // The method name is preserved (no __headerBuilder__ rename).
     assert!(
-        result.contains("headerBuilder(): void {"),
-        "expected 'headerBuilder(): void {{'; got:\n{}",
+        result.contains("headerBuilder(parent = null) {"),
+        "expected 'headerBuilder(parent = null) {{'; got:\n{}",
         result
     );
-    // The body content is present (raw fallback path: Text(...) as a call).
     assert!(
-        result.contains("Text"),
-        "body content must be preserved; got:\n{}",
+        result.contains("Text.create('header');"),
+        "builder body must be lowered through ArkUI AST; got:\n{}",
         result
     );
     // The ViewPU class must be generated.
@@ -83,7 +74,7 @@ struct MyCard {
         .find("initialRender()")
         .expect("missing initialRender");
     let builder_pos = result
-        .find("headerBuilder():")
+        .find("headerBuilder(parent = null)")
         .expect("missing headerBuilder");
     assert!(
         builder_pos > initial_render_pos,
@@ -112,14 +103,13 @@ struct Banner {
 
     // Full method signature including parameter type must appear.
     assert!(
-        result.contains("labelRow(text: string): void {"),
-        "expected 'labelRow(text: string): void {{'; got:\n{}",
+        result.contains("labelRow(text: string, parent = null) {"),
+        "expected 'labelRow(text: string, parent = null) {{'; got:\n{}",
         result
     );
-    // The raw body is forwarded.
     assert!(
-        result.contains("text"),
-        "body content must reference the parameter; got:\n{}",
+        result.contains("Text.create(text);"),
+        "builder body must lower Text(text); got:\n{}",
         result
     );
     assert!(
@@ -156,14 +146,13 @@ struct Counter {
         result
     );
     assert!(
-        result.contains("counterDisplay(): void {"),
+        result.contains("counterDisplay(parent = null) {"),
         "missing @Builder method; got:\n{}",
         result
     );
-    // Body content preserved.
     assert!(
-        result.contains("this.count"),
-        "body must reference this.count; got:\n{}",
+        result.contains("Text.create(`${this.count}`);"),
+        "builder body must lower the Text expression; got:\n{}",
         result
     );
 }
@@ -191,12 +180,12 @@ struct Page {
         transform_ets(&make_source("entry/src/main/ets/components/Page.ets", src)).unwrap();
 
     assert!(
-        result.contains("header(): void {"),
+        result.contains("header(parent = null) {"),
         "first @Builder method missing; got:\n{}",
         result
     );
     assert!(
-        result.contains("footer(): void {"),
+        result.contains("footer(parent = null) {"),
         "second @Builder method missing; got:\n{}",
         result
     );
@@ -333,7 +322,8 @@ fn test_builder_and_styles_together() {
         name: "Combined".to_string(),
         builder_methods: vec![BuilderMethodInfo {
             name: "titleArea".to_string(),
-            params: String::new(),
+            params: "parent = null".to_string(),
+            return_annotation: String::new(),
             lowered_body: concat!(
                 "        this.observeComponentCreation2((elmtId, isInitialRender) => {\n",
                 "            Text.create('title');\n",
@@ -353,7 +343,7 @@ fn test_builder_and_styles_together() {
 
     // @Builder method is present and not private.
     assert!(
-        out.contains("titleArea(): void {"),
+        out.contains("titleArea(parent = null) {"),
         "missing @Builder method; got:\n{}",
         out
     );
