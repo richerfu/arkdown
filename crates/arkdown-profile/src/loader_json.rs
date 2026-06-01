@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 use arkdown_core::{ArkdownConfig, BuildMode, HapManifest, ModuleConfig, OhosModuleType};
@@ -20,7 +21,7 @@ use crate::bytecode_har::{collect_dynamic_import_lib_info, scan_bytecode_har_dep
 #[serde(rename_all = "camelCase")]
 pub struct LoaderJson {
     /// Map of module name → absolute module root path.
-    pub module_path_map: HashMap<String, String>,
+    pub module_path_map: IndexMap<String, String>,
     /// hvigor compile mode string, e.g. `"esmodule"`.
     pub compile_mode: String,
     /// Absolute path to the project root directory.
@@ -45,7 +46,7 @@ pub struct LoaderJson {
     /// Additional compile files emitted by hvigor. Empty for the minimal fixture.
     pub other_compile_files: Vec<String>,
     /// Dynamic import metadata. Empty until dependency collection is implemented.
-    pub dynamic_import_lib_info: HashMap<String, serde_json::Value>,
+    pub dynamic_import_lib_info: IndexMap<String, serde_json::Value>,
     /// Router map entries. Empty for the minimal fixture.
     pub router_map: Vec<serde_json::Value>,
     /// HSP resource table map. Empty for the minimal fixture.
@@ -316,7 +317,7 @@ pub fn generate_loader_json(
         .build_option
         .strict_mode
         .use_normalized_ohm_url;
-    let mut module_path_map = HashMap::new();
+    let mut module_path_map = IndexMap::new();
     for project_module in &config.modules {
         module_path_map.insert(
             project_module.name.clone(),
@@ -349,7 +350,7 @@ pub fn generate_loader_json(
     };
 
     // --- TASK-LOADER-02: populate dynamicImportLibInfo from oh-package.json5 ---
-    let dynamic_import_lib_info: HashMap<String, serde_json::Value> = {
+    let dynamic_import_lib_info: IndexMap<String, serde_json::Value> = {
         let dynamic_dep_names = collect_dynamic_import_dep_names(config, &module_cfg.src_path);
         let entries = collect_dynamic_import_lib_info(
             &module_cfg.name,

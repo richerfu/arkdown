@@ -18,6 +18,7 @@
 //! reference implementations.
 
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -31,8 +32,8 @@ use arkdown_profile::LoaderJson;
 use rolldown::{BundlerOptions, InputItem, OutputFormat};
 use rolldown_common::{
     BundlerTransformOptions, ChunkingContext, ManualCodeSplittingOptions, MatchGroup,
-    MatchGroupName, MatchGroupTest, ModuleType as RdModuleType, Output, SourceMapType,
-    TreeshakeOptions, TypeScriptOptions,
+    MatchGroupName, MatchGroupTest, ModuleInfo, ModuleType as RdModuleType, NormalModule, Output,
+    SourceMapType, TreeshakeOptions, TypeScriptOptions,
 };
 use rolldown_plugin::{__inner::SharedPluginable, HookUsage, Plugin, PluginContext};
 use rolldown_utils::js_regex::HybridRegex;
@@ -87,9 +88,9 @@ impl Bundler {
                     .join(normalized)
             });
 
-        let chunk_name_counts = compile_entry_stem_counts(&loader_json.compile_entry);
-        let input: Vec<InputItem> = loader_json
-            .compile_entry
+        let rollup_entries = rollup_input_entries(loader_json);
+        let chunk_name_counts = compile_entry_stem_counts(&rollup_entries);
+        let input: Vec<InputItem> = rollup_entries
             .iter()
             .enumerate()
             .map(|(i, entry)| {
@@ -116,10 +117,10 @@ impl Bundler {
             .collect();
 
         // ── 2. Pass plugins directly to rolldown ─────────────────────────────
-        let full_module_ids = Arc::new(Mutex::new(Vec::new()));
+        let parsed_modules = Arc::new(Mutex::new(Vec::new()));
         let mut rd_plugins: Vec<SharedPluginable> = self.plugins.clone();
         rd_plugins.push(Arc::new(ModuleIdCollectorPlugin {
-            ids: Arc::clone(&full_module_ids),
+            modules: Arc::clone(&parsed_modules),
         }) as SharedPluginable);
 
         // ── 3. Build rolldown BundlerOptions ─────────────────────────────────
@@ -194,10 +195,17 @@ impl Bundler {
             .map_err(|e| ArkdownError::Bundler(format!("{e:?}")))?;
 
         // ── 5. Convert rolldown output → ChunkGraph ───────────────────────────
-        let collected_module_ids = full_module_ids
+        let mut parsed_modules = parsed_modules
             .lock()
-            .map(|ids| ids.clone())
+            .map(|modules| modules.clone())
             .unwrap_or_default();
+        parsed_modules.sort_by_key(|(idx, _)| *idx);
+        let mut seen_module_ids = HashSet::new();
+        let collected_module_ids = parsed_modules
+            .into_iter()
+            .map(|(_, id)| id)
+            .filter(|id| seen_module_ids.insert(id.clone()))
+            .collect::<Vec<_>>();
         let chunk_graph = build_chunk_graph(rd_output, collected_module_ids)?;
 
         // ── 6. Write loader_out/default/ets artifacts to disk ────────────────
@@ -205,8 +213,7 @@ impl Bundler {
 
         // Build the chunk_name → source_file map from compile_entry so that
         // write_output can emit the hvigor per-file sourceMaps.map format.
-        let chunk_source_files: FxHashMap<String, String> = loader_json
-            .compile_entry
+        let chunk_source_files: FxHashMap<String, String> = rollup_entries
             .iter()
             .enumerate()
             .map(|(i, entry)| {
@@ -254,6 +261,21 @@ fn compile_entry_stem_counts(entries: &[String]) -> FxHashMap<String, usize> {
     counts
 }
 
+fn rollup_input_entries(loader_json: &LoaderJson) -> Vec<String> {
+    let mut entries = Vec::new();
+    let mut seen = HashSet::new();
+    for entry in loader_json
+        .hvigor_compile_entry
+        .iter()
+        .chain(loader_json.compile_entry.iter())
+    {
+        if seen.insert(entry.clone()) {
+            entries.push(entry.clone());
+        }
+    }
+    entries
+}
+
 fn compile_entry_chunk_name(
     entry: &str,
     index: usize,
@@ -296,7 +318,7 @@ fn compile_entry_chunk_name(
 /// entries are included in the chunk graph.
 #[derive(Debug)]
 struct ModuleIdCollectorPlugin {
-    ids: Arc<Mutex<Vec<String>>>,
+    modules: Arc<Mutex<Vec<(usize, String)>>>,
 }
 
 impl Plugin for ModuleIdCollectorPlugin {
@@ -305,23 +327,21 @@ impl Plugin for ModuleIdCollectorPlugin {
     }
 
     fn register_hook_usage(&self) -> HookUsage {
-        HookUsage::GenerateBundle
+        HookUsage::ModuleParsed
     }
 
-    fn generate_bundle(
+    fn module_parsed(
         &self,
-        ctx: &PluginContext,
-        _args: &mut rolldown_plugin::HookGenerateBundleArgs<'_>,
+        _ctx: &PluginContext,
+        _module_info: Arc<ModuleInfo>,
+        normal_module: &NormalModule,
     ) -> impl Future<Output = anyhow::Result<()>> + Send {
-        let ids = ctx
-            .get_module_ids()
-            .into_iter()
-            .map(|id| id.to_string())
-            .collect::<Vec<_>>();
-        let slot = Arc::clone(&self.ids);
+        let idx = normal_module.idx.index();
+        let id = normal_module.id.to_string();
+        let slot = Arc::clone(&self.modules);
         async move {
             if let Ok(mut slot) = slot.lock() {
-                *slot = ids;
+                slot.push((idx, id));
             }
             Ok(())
         }

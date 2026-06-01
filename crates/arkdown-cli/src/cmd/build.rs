@@ -1682,7 +1682,6 @@ fn write_compile_arkts_cache(
         )?;
     }
 
-    compile_infos.sort_by(|a, b| a.source_file.cmp(&b.source_file));
     if !loader_json.use_normalized_ohm_url {
         add_dynamic_import_package_entries(&mut pkg_entries, loader_json, config);
     }
@@ -1706,19 +1705,16 @@ struct CompileModuleInfo {
 fn compile_module_ids(chunk_graph: &ChunkGraph) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut ids = Vec::new();
-    let source_ids = if chunk_graph.full_module_ids.is_empty() {
-        None
-    } else {
-        Some(chunk_graph.full_module_ids.iter())
-    };
-    if let Some(source_ids) = source_ids {
-        for module_id in source_ids {
+
+    if !chunk_graph.full_module_ids.is_empty() {
+        for module_id in &chunk_graph.full_module_ids {
             if seen.insert(module_id.clone()) {
                 ids.push(module_id.clone());
             }
         }
         return ids;
     }
+
     for chunk in &chunk_graph.chunks {
         for module_id in &chunk.module_ids {
             if seen.insert(module_id.clone()) {
