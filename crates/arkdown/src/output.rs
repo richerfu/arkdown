@@ -218,7 +218,7 @@ fn hvigor_source_maps_content(
                 .get("mappings")
                 .and_then(|value| value.as_str())
                 .unwrap_or_default();
-            let fallback_source_file = source_map
+            let source_map_source_file = source_map
                 .value
                 .get("sources")
                 .and_then(|sources| sources.as_array())
@@ -229,7 +229,7 @@ fn hvigor_source_maps_content(
                 chunk_name: source_map.chunk_name.clone(),
                 mappings: mappings.to_string(),
                 source_file: None,
-                fallback_source_file,
+                source_map_source_file,
             }
         })
         .collect::<Vec<_>>();

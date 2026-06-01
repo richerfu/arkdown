@@ -104,7 +104,7 @@ pub(super) fn write_hvigor_source_maps(
             chunk_name: chunk.name.to_string(),
             mappings: mappings.to_string(),
             source_file: Some(source_file.to_string()),
-            fallback_source_file: None,
+            source_map_source_file: None,
         });
     }
 

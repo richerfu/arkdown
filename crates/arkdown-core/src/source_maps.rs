@@ -93,7 +93,7 @@ pub struct HvigorSourceMapEntry {
     pub chunk_name: String,
     pub mappings: String,
     pub source_file: Option<String>,
-    pub fallback_source_file: Option<String>,
+    pub source_map_source_file: Option<String>,
 }
 
 pub fn hvigor_source_maps_json(
@@ -119,7 +119,7 @@ pub fn hvigor_source_maps_json(
             })
             .or_else(|| {
                 source_map
-                    .fallback_source_file
+                    .source_map_source_file
                     .as_deref()
                     .map(|source_file| source_file.to_string())
             })
