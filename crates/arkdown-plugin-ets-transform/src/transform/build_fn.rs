@@ -756,7 +756,7 @@ fn lower_component(
             return Err(BuildLoweringError::UnsupportedChild);
         }
         let args = raw_arguments_text_with_context(&component.arguments, source_text, &context);
-        out.push_str(&format!("{indent}{name}.bind(this)({args});\n"));
+        emit_builder_method_call(out, indent, None, &name, &args);
         return Ok(());
     }
 
@@ -1217,18 +1217,36 @@ fn lower_builder_method_call(
 ) -> bool {
     if let Some(name) = builder_method_member_name(&call.callee, builder_methods) {
         let args = raw_arguments_text_with_context(&call.arguments, source_text, context);
-        out.push_str(&format!("{indent}this.{name}.bind(this)({args});\n"));
+        emit_builder_method_call(out, indent, Some("this"), &name, &args);
         return true;
     }
     if let Expression::Identifier(identifier) = &call.callee {
         let name = identifier.name.as_str();
         if builder_methods.contains(name) {
             let args = raw_arguments_text_with_context(&call.arguments, source_text, context);
-            out.push_str(&format!("{indent}{name}.bind(this)({args});\n"));
+            emit_builder_method_call(out, indent, None, name, &args);
             return true;
         }
     };
     false
+}
+
+fn emit_builder_method_call(
+    out: &mut String,
+    indent: &str,
+    receiver: Option<&str>,
+    name: &str,
+    args: &str,
+) {
+    let mut writer = ViewpuWriter::new(out);
+    if let Some(receiver) = receiver {
+        writer.line(
+            indent,
+            format_args!("{receiver}.{name}.bind(this)({args});"),
+        );
+    } else {
+        writer.line(indent, format_args!("{name}.bind(this)({args});"));
+    }
 }
 
 fn span_text(node: &impl GetSpan, source_text: &str) -> String {
