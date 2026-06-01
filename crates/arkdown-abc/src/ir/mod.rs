@@ -1,3 +1,4 @@
+pub(super) mod argument_prologue;
 pub(super) mod ast_analysis;
 pub mod builder;
 pub(super) mod bytecode_metrics;

@@ -14,6 +14,9 @@ use crate::emit::file::{LiteralArray, LiteralEntry};
 use crate::emit::record::{CatchEntry, ClassRecord, DebugInfoRecord, MethodKind, MethodRecord};
 use crate::emit::strings::StringTable;
 use crate::error::AbcError;
+use crate::ir::argument_prologue::{
+    prepend_function_argument_copies, prepend_module_argument_copies,
+};
 use crate::ir::ast_analysis::{
     arrow_captures_from_body, is_condition_comparison, is_global_this, is_new_target_meta,
     is_undefined_literal, method_body_contains_arrow, negative_integer_literal,
@@ -465,7 +468,12 @@ fn compile_function_record(
             );
             let num_vregs = estimate_vregs(&bytecode);
             let num_args = arrow.params.items.len() as u16 + 3;
-            let bytecode = prepend_function_argument_copies(bytecode, num_vregs, num_args);
+            let bytecode = prepend_function_argument_copies(
+                bytecode,
+                num_vregs,
+                num_args,
+                MANDATORY_PARAM_THIS_REG,
+            );
             methods.push(MethodRecord {
                 name: function.name,
                 bytecode,
@@ -784,7 +792,12 @@ fn compile_class_elements(
             };
             let num_vregs = estimate_vregs(&bytecode).max(4 + param_names.len() as u16);
             let num_args = class_method_num_args(method);
-            let bytecode = prepend_function_argument_copies(bytecode, num_vregs, num_args);
+            let bytecode = prepend_function_argument_copies(
+                bytecode,
+                num_vregs,
+                num_args,
+                MANDATORY_PARAM_THIS_REG,
+            );
             let debug_info = source_file_path.map(|path| DebugInfoRecord {
                 line_start: 1,
                 source_file: path.to_string(),
@@ -812,85 +825,6 @@ fn compile_class_elements(
             });
         }
     }
-}
-
-fn prepend_function_argument_copies(
-    mut bytecode: Vec<u8>,
-    num_vregs: u16,
-    num_args: u16,
-) -> Vec<u8> {
-    if num_args == 0 {
-        return bytecode;
-    }
-
-    let has_this_lexenv = bytecode.first() == Some(&0xb6) && bytecode.get(1) == Some(&1);
-    let mut prologue = Vec::new();
-    for dst in 0..num_args {
-        if has_this_lexenv && dst == MANDATORY_PARAM_THIS_REG as u16 {
-            continue;
-        }
-        let src = num_vregs + dst;
-        if dst <= 0x0f && src <= 0x0f {
-            prologue.extend_from_slice(
-                &Insn::MovV4(dst as u8, src as u8).encode(&mut StringTable::default()),
-            );
-        } else if src <= u8::MAX as u16 {
-            prologue.extend_from_slice(
-                &Insn::MovV8(dst as u8, src as u8).encode(&mut StringTable::default()),
-            );
-        } else {
-            prologue.extend_from_slice(&Insn::MovV16(dst, src).encode(&mut StringTable::default()));
-        }
-    }
-
-    if has_this_lexenv {
-        let lexenv: Vec<u8> = bytecode.drain(..4).collect();
-        let this_src = num_vregs + MANDATORY_PARAM_THIS_REG as u16;
-        let mut with_lexenv = lexenv;
-        with_lexenv.append(&mut prologue);
-        if this_src <= u8::MAX as u16 {
-            with_lexenv
-                .extend_from_slice(&Insn::Lda(this_src as u8).encode(&mut StringTable::default()));
-            with_lexenv
-                .extend_from_slice(&Insn::StLexVar(0, 0).encode(&mut StringTable::default()));
-        }
-        with_lexenv.append(&mut bytecode);
-        return with_lexenv;
-    }
-
-    prologue.append(&mut bytecode);
-    prologue
-}
-
-fn prepend_module_argument_copies(mut bytecode: Vec<u8>, num_vregs: u16, num_args: u16) -> Vec<u8> {
-    if num_args == 0 {
-        return bytecode;
-    }
-    let mut prologue = Vec::new();
-    for dst in 0..num_args {
-        let src = num_vregs + dst;
-        if dst <= 0x0f && src <= 0x0f {
-            prologue.extend_from_slice(
-                &Insn::MovV4(dst as u8, src as u8).encode(&mut StringTable::default()),
-            );
-        } else if src <= u8::MAX as u16 {
-            prologue.extend_from_slice(
-                &Insn::MovV8(dst as u8, src as u8).encode(&mut StringTable::default()),
-            );
-        } else {
-            prologue.extend_from_slice(&Insn::MovV16(dst, src).encode(&mut StringTable::default()));
-        }
-    }
-
-    if bytecode.first() == Some(&0xb6) && bytecode.len() >= 4 {
-        let mut with_lexenv: Vec<u8> = bytecode.drain(..4).collect();
-        with_lexenv.append(&mut prologue);
-        with_lexenv.append(&mut bytecode);
-        return with_lexenv;
-    }
-
-    prologue.append(&mut bytecode);
-    prologue
 }
 
 /// Compile the top-level program body into bytecode for the `main` method.
