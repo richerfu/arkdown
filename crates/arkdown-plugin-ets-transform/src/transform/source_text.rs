@@ -1,3 +1,4 @@
+use crate::{apply_source_patches, SourcePatch};
 use oxc_ast::ast::{Declaration, Decorator, ExportDefaultDeclarationKind, Expression, Statement};
 use oxc_span::{GetSpan, Span};
 
@@ -126,18 +127,27 @@ pub(super) fn member_text_without_decorators(
         .collect::<Vec<_>>();
     ranges.sort_unstable();
 
-    let mut out = String::with_capacity(end - start);
-    let mut cursor = start;
+    let mut merged_ranges: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
     for (remove_start, remove_end) in ranges {
-        if remove_start > cursor {
-            out.push_str(&source_text[cursor..remove_start]);
+        if let Some((_, merged_end)) = merged_ranges.last_mut() {
+            if remove_start <= *merged_end {
+                *merged_end = (*merged_end).max(remove_end);
+                continue;
+            }
         }
-        cursor = cursor.max(remove_end);
+
+        merged_ranges.push((remove_start, remove_end));
     }
-    if cursor < end {
-        out.push_str(&source_text[cursor..end]);
-    }
-    out
+
+    let patches = merged_ranges
+        .into_iter()
+        .map(|(remove_start, remove_end)| SourcePatch {
+            start: remove_start - start,
+            end: remove_end - start,
+            replacement: String::new(),
+        })
+        .collect();
+    apply_source_patches(&source_text[start..end], patches)
 }
 
 pub(super) fn balanced_method_text(
