@@ -5,17 +5,16 @@ use oxc_syntax::scope::ScopeFlags;
 
 use crate::{apply_source_patches, SourcePatch};
 
-/// Rewrites global ArkUI runtime calls in a source expression using OXC AST spans.
-pub(crate) fn rewrite_global_context_calls_in_expression(
+pub(crate) fn rewrite_global_context_calls_in_expression_if_needed(
     expression: &Expression<'_>,
     source_text: &str,
-) -> String {
+) -> Option<String> {
     let span = expression.span();
     let mut visitor = GlobalContextCallVisitor {
         patches: Vec::new(),
     };
     visitor.visit_expression(expression);
-    apply_patches_in_span(source_text, span, visitor.patches)
+    (!visitor.patches.is_empty()).then(|| apply_patches_in_span(source_text, span, visitor.patches))
 }
 
 /// Rewrites global ArkUI runtime calls in a class/function member text.

@@ -11,7 +11,9 @@ use oxc_ast::ast::{
 use oxc_span::{GetSpan, Span};
 
 use crate::transform::component_meta::ComponentMetadata;
-use crate::transform::global_rewrite::rewrite_global_context_calls_in_expression;
+use crate::transform::global_rewrite::rewrite_global_context_calls_in_expression_if_needed;
+use crate::transform::source_emit::original_node_text;
+use crate::transform::viewpu_emit::ViewpuWriter;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuildLoweringError {
@@ -100,10 +102,10 @@ fn push_attribute_calls(
     component_name: &str,
     attrs: &[(String, String, bool)],
 ) {
+    let mut writer = ViewpuWriter::new(out);
+    let attr_indent = format!("{indent}    ");
     for (attr_name, attr_args, _) in attrs {
-        out.push_str(&format!(
-            "{indent}    {component_name}.{attr_name}({attr_args});\n"
-        ));
+        writer.component_attribute(&attr_indent, component_name, attr_name, attr_args);
     }
 }
 
@@ -285,20 +287,22 @@ fn lower_call_expression(
         );
         return Ok(());
     }
-    out.push_str(&format!(
-        "{indent}{}.observeComponentCreation2((elmtId, isInitialRender) => {{\n",
-        context.view_context()
-    ));
-    out.push_str(&format!(
-        "{indent}    {}.{}({});\n",
-        lc.name,
-        create_method_name(&lc.name, false),
-        lc.create_args
-    ));
+    {
+        let mut writer = ViewpuWriter::new(out);
+        let create_indent = format!("{indent}    ");
+        writer.observe_component_creation_start(indent, context.view_context());
+        writer.component_create(
+            &create_indent,
+            &lc.name,
+            create_method_name(&lc.name, false),
+            &lc.create_args,
+        );
+    }
     push_attribute_calls(out, indent, &lc.name, &lc.chain_attrs);
-    out.push_str(&format!("{indent}}}, {});\n", lc.name));
+    let mut writer = ViewpuWriter::new(out);
+    writer.observe_component_creation_end(indent, &lc.name);
     if component_metadata.needs_pop(&lc.name) {
-        out.push_str(&format!("{indent}{}.pop();\n", lc.name));
+        writer.component_pop(indent, &lc.name);
     }
     Ok(())
 }
@@ -614,20 +618,23 @@ fn lower_if_statement(
     out: &mut String,
     span_hints: &mut Vec<SpanHint>,
 ) -> Result<(), BuildLoweringError> {
-    let test = span_text(&statement.test, source_text).trim().to_string();
+    let test = original_node_text(&statement.test, source_text);
     let branch_indent = format!("{indent}    ");
     let inner_indent = format!("{branch_indent}    ");
 
-    out.push_str(&format!(
-        "{indent}{}.observeComponentCreation2((elmtId, isInitialRender) => {{\n",
-        context.view_context()
-    ));
-    out.push_str(&format!("{branch_indent}If.create();\n"));
-    out.push_str(&format!("{branch_indent}if ({test}) {{\n"));
-    out.push_str(&format!(
-        "{inner_indent}{}.ifElseBranchUpdateFunction(0, () => {{\n",
-        context.view_context()
-    ));
+    {
+        let mut writer = ViewpuWriter::new(out);
+        writer.observe_component_creation_start(indent, context.view_context());
+        writer.line(&branch_indent, format_args!("If.create();"));
+        writer.line(&branch_indent, format_args!("if ({test}) {{"));
+        writer.line(
+            &inner_indent,
+            format_args!(
+                "{}.ifElseBranchUpdateFunction(0, () => {{",
+                context.view_context()
+            ),
+        );
+    }
     lower_statement(
         &statement.consequent,
         source_text,
@@ -641,15 +648,24 @@ fn lower_if_statement(
         out,
         span_hints,
     )?;
-    out.push_str(&format!("{inner_indent}}});\n"));
+    {
+        let mut writer = ViewpuWriter::new(out);
+        writer.line(&inner_indent, format_args!("}});"));
+    }
 
     let mut branch_index = 1usize;
     if let Some(alternate) = &statement.alternate {
-        out.push_str(&format!("{branch_indent}}} else {{\n"));
-        out.push_str(&format!(
-            "{inner_indent}{}.ifElseBranchUpdateFunction({branch_index}, () => {{\n",
-            context.view_context()
-        ));
+        {
+            let mut writer = ViewpuWriter::new(out);
+            writer.line(&branch_indent, format_args!("}} else {{"));
+            writer.line(
+                &inner_indent,
+                format_args!(
+                    "{}.ifElseBranchUpdateFunction({branch_index}, () => {{",
+                    context.view_context()
+                ),
+            );
+        }
         match alternate {
             Statement::IfStatement(alternate_if) => {
                 lower_if_statement(
@@ -682,20 +698,28 @@ fn lower_if_statement(
                 )?;
             }
         }
-        out.push_str(&format!("{inner_indent}}});\n"));
+        {
+            let mut writer = ViewpuWriter::new(out);
+            writer.line(&inner_indent, format_args!("}});"));
+        }
         branch_index += 1;
     }
     if branch_index == 1 {
-        out.push_str(&format!("{branch_indent}}} else {{\n"));
-        out.push_str(&format!(
-            "{inner_indent}{}.ifElseBranchUpdateFunction(1, () => {{\n",
-            context.view_context()
-        ));
-        out.push_str(&format!("{inner_indent}}});\n"));
+        let mut writer = ViewpuWriter::new(out);
+        writer.line(&branch_indent, format_args!("}} else {{"));
+        writer.line(
+            &inner_indent,
+            format_args!(
+                "{}.ifElseBranchUpdateFunction(1, () => {{",
+                context.view_context()
+            ),
+        );
+        writer.line(&inner_indent, format_args!("}});"));
     }
-    out.push_str(&format!("{branch_indent}}}\n"));
-    out.push_str(&format!("{indent}}}, If);\n"));
-    out.push_str(&format!("{indent}If.pop();\n"));
+    let mut writer = ViewpuWriter::new(out);
+    writer.line(&branch_indent, format_args!("}}"));
+    writer.observe_component_creation_end(indent, "If");
+    writer.component_pop(indent, "If");
 
     Ok(())
 }
@@ -794,10 +818,10 @@ fn lower_component(
 
     let body_line = out.bytes().filter(|&b| b == b'\n').count();
 
-    out.push_str(&format!(
-        "{indent}{}.observeComponentCreation2((elmtId, isInitialRender) => {{\n",
-        context.view_context()
-    ));
+    {
+        let mut writer = ViewpuWriter::new(out);
+        writer.observe_component_creation_start(indent, context.view_context());
+    }
     push_span_hint(
         span_hints,
         body_line + 1,
@@ -817,10 +841,16 @@ fn lower_component(
         &component.arguments,
         source_text,
     );
-    out.push_str(&format!(
-        "{indent}    {name}.{}({args});\n",
-        create_method_name(&name, !component.children.is_empty())
-    ));
+    {
+        let mut writer = ViewpuWriter::new(out);
+        let create_indent = format!("{indent}    ");
+        writer.component_create(
+            &create_indent,
+            &name,
+            create_method_name(&name, !component.children.is_empty()),
+            &args,
+        );
+    }
     let mut attrs = Vec::new();
     for (index, chain) in component.chain_expressions.iter().enumerate() {
         let chain_name = chain_name(chain)?;
@@ -863,7 +893,10 @@ fn lower_component(
         ));
     }
     push_attribute_calls(out, indent, &name, &attrs);
-    out.push_str(&format!("{indent}}}, {name});\n"));
+    {
+        let mut writer = ViewpuWriter::new(out);
+        writer.observe_component_creation_end(indent, &name);
+    }
 
     for child in &component.children {
         match child {
@@ -924,7 +957,8 @@ fn lower_component(
             indent.len() + name.len(),
             end_span(component.callee.span()),
         );
-        out.push_str(&format!("{indent}{name}.pop();\n"));
+        let mut writer = ViewpuWriter::new(out);
+        writer.component_pop(indent, &name);
     }
     Ok(())
 }
@@ -967,30 +1001,33 @@ fn emit_custom_component_call(
     let page = component_page_path(source_id);
     out.push_str(&format!("{indent}{{\n"));
     let inner = format!("{indent}    ");
+    let inner2 = format!("{inner}    ");
+    let inner3 = format!("{inner}        ");
+    let inner4 = format!("{inner}            ");
     out.push_str(&format!(
         "{inner}{}.observeComponentCreation2((elmtId, isInitialRender) => {{\n",
         context.view_context()
     ));
-    out.push_str(&format!("{inner}    if (isInitialRender) {{\n"));
+    out.push_str(&format!("{inner2}if (isInitialRender) {{\n"));
     out.push_str(&format!(
-        "{inner}        let componentCall = new {name}({}, {}, undefined, elmtId, () => {{ }}, {{ page: \"{page}\", line: {line}, col: {col} }});\n",
+        "{inner3}let componentCall = new {name}({}, {}, undefined, elmtId, () => {{ }}, {{ page: \"{page}\", line: {line}, col: {col} }});\n",
         context.view_context(),
         params.constructor
     ));
-    out.push_str(&format!("{inner}        ViewPU.create(componentCall);\n"));
-    out.push_str(&format!("{inner}        let paramsLambda = () => {{\n"));
-    out.push_str(&format!("{inner}            return {};\n", params.lambda));
-    out.push_str(&format!("{inner}        }};\n"));
+    out.push_str(&format!("{inner3}ViewPU.create(componentCall);\n"));
+    out.push_str(&format!("{inner3}let paramsLambda = () => {{\n"));
+    out.push_str(&format!("{inner4}return {};\n", params.lambda));
+    out.push_str(&format!("{inner3}}};\n"));
     out.push_str(&format!(
-        "{inner}        componentCall.paramsGenerator_ = paramsLambda;\n"
+        "{inner3}componentCall.paramsGenerator_ = paramsLambda;\n"
     ));
-    out.push_str(&format!("{inner}    }} else {{\n"));
+    out.push_str(&format!("{inner2}}} else {{\n"));
     out.push_str(&format!(
-        "{inner}        {}.updateStateVarsOfChildByElmtId(elmtId, {});\n",
+        "{inner3}{}.updateStateVarsOfChildByElmtId(elmtId, {});\n",
         context.view_context(),
         params.update
     ));
-    out.push_str(&format!("{inner}    }}\n"));
+    out.push_str(&format!("{inner2}}}\n"));
     out.push_str(&format!("{inner}}}, {{ name: \"{name}\" }});\n"));
     out.push_str(&format!("{indent}}}\n"));
 }
@@ -1024,6 +1061,10 @@ fn emit_reusable_custom_component_call(
     out.push_str(&format!("{indent}}}, __Recycle__);\n"));
     out.push_str(&format!("{indent}{{\n"));
     let inner = format!("{indent}    ");
+    let inner2 = format!("{inner}    ");
+    let inner3 = format!("{inner}        ");
+    let inner4 = format!("{inner}            ");
+    let inner5 = format!("{inner}                ");
     out.push_str(&format!(
         "{inner}{}.observeRecycleComponentCreation({reuse_id}, (elmtId, isInitialRender, recycleNode = null) => {{\n",
         context.view_context()
@@ -1031,46 +1072,45 @@ fn emit_reusable_custom_component_call(
     out.push_str(&format!(
         "{inner}    ViewStackProcessor.StartGetAccessRecordingFor(elmtId);\n"
     ));
-    out.push_str(&format!("{inner}    if (isInitialRender) {{\n"));
+    out.push_str(&format!("{inner2}if (isInitialRender) {{\n"));
     out.push_str(&format!(
-        "{inner}        let componentCall = recycleNode ? recycleNode : new {name}({}, {}, undefined, elmtId, () => {{ }}, {{ page: \"{page}\", line: {line}, col: {col} }});\n",
+        "{inner3}let componentCall = recycleNode ? recycleNode : new {name}({}, {}, undefined, elmtId, () => {{ }}, {{ page: \"{page}\", line: {line}, col: {col} }});\n",
         context.view_context(),
         params.constructor
     ));
     out.push_str(&format!(
-        "{inner}        ViewPU.createRecycle(componentCall, recycleNode !== null, {reuse_id}, () => {{\n"
+        "{inner3}ViewPU.createRecycle(componentCall, recycleNode !== null, {reuse_id}, () => {{\n"
     ));
     out.push_str(&format!(
-        "{inner}            if (recycleNode && typeof recycleNode.aboutToReuseInternal === \"function\") {{\n"
+        "{inner4}if (recycleNode && typeof recycleNode.aboutToReuseInternal === \"function\") {{\n"
+    ));
+    out.push_str(&format!("{inner5}recycleNode.aboutToReuseInternal();\n"));
+    out.push_str(&format!("{inner4}}} else {{\n"));
+    out.push_str(&format!(
+        "{inner5}if (recycleNode.aboutToReuse && typeof recycleNode.aboutToReuse === \"function\") {{\n"
     ));
     out.push_str(&format!(
-        "{inner}                recycleNode.aboutToReuseInternal();\n"
-    ));
-    out.push_str(&format!("{inner}            }} else {{\n"));
-    out.push_str(&format!(
-        "{inner}                if (recycleNode.aboutToReuse && typeof recycleNode.aboutToReuse === \"function\") {{\n"
-    ));
-    out.push_str(&format!(
-        "{inner}                    recycleNode.aboutToReuse({});\n",
+        "{}recycleNode.aboutToReuse({});\n",
+        format!("{inner}                    "),
         params.lambda
     ));
-    out.push_str(&format!("{inner}                }}\n"));
-    out.push_str(&format!("{inner}                recycleNode.rerender();\n"));
-    out.push_str(&format!("{inner}            }}\n"));
-    out.push_str(&format!("{inner}        }});\n"));
-    out.push_str(&format!("{inner}        let paramsLambda = () => {{\n"));
-    out.push_str(&format!("{inner}            return {};\n", params.lambda));
-    out.push_str(&format!("{inner}        }};\n"));
+    out.push_str(&format!("{inner5}}}\n"));
+    out.push_str(&format!("{inner5}recycleNode.rerender();\n"));
+    out.push_str(&format!("{inner4}}}\n"));
+    out.push_str(&format!("{inner3}}});\n"));
+    out.push_str(&format!("{inner3}let paramsLambda = () => {{\n"));
+    out.push_str(&format!("{inner4}return {};\n", params.lambda));
+    out.push_str(&format!("{inner3}}};\n"));
     out.push_str(&format!(
-        "{inner}        componentCall.paramsGenerator_ = paramsLambda;\n"
+        "{inner3}componentCall.paramsGenerator_ = paramsLambda;\n"
     ));
-    out.push_str(&format!("{inner}    }} else {{\n"));
+    out.push_str(&format!("{inner2}}} else {{\n"));
     out.push_str(&format!(
-        "{inner}        {}.updateStateVarsOfChildByElmtId(elmtId, {});\n",
+        "{inner3}{}.updateStateVarsOfChildByElmtId(elmtId, {});\n",
         context.view_context(),
         params.update
     ));
-    out.push_str(&format!("{inner}    }}\n"));
+    out.push_str(&format!("{inner2}}}\n"));
     out.push_str(&format!(
         "{inner}    ViewStackProcessor.StopGetAccessRecording();\n"
     ));
@@ -1199,7 +1239,7 @@ fn custom_component_property_text(
             {
                 return None;
             }
-            let key = span_text(&property.key, source_text).trim().to_string();
+            let key = original_node_text(&property.key, source_text);
             let value = custom_component_value_text(
                 &property.value,
                 source_text,
@@ -1216,7 +1256,7 @@ fn custom_component_property_text(
             } else {
                 Some(format!(
                     "        {}",
-                    span_text(spread.as_ref(), source_text).trim()
+                    original_node_text(spread.as_ref(), source_text)
                 ))
             }
         }
@@ -1243,7 +1283,7 @@ fn custom_component_value_text(
         return match mode {
             ParamMode::Ctor => format!("this.__{name}"),
             ParamMode::Lambda => format!("this.{name}"),
-            ParamMode::Update => span_text(value, source_text).trim().to_string(),
+            ParamMode::Update => original_node_text(value, source_text),
         };
     }
     if mode == ParamMode::Ctor
@@ -1259,7 +1299,7 @@ fn custom_component_value_text(
             return text;
         }
     }
-    span_text(value, source_text).trim().to_string()
+    original_node_text(value, source_text)
 }
 
 fn this_member_name(value: &Expression<'_>) -> Option<String> {
@@ -1419,7 +1459,7 @@ fn raw_object_argument_text(
     }
     Some(format!(
         "ObservedObject.GetRawObject({})",
-        span_text(expression, source_text).trim()
+        original_node_text(expression, source_text)
     ))
 }
 
@@ -1633,7 +1673,7 @@ fn lower_for_each(
     let generator_params = match (item_param, index_param) {
         (None, _) => "()".to_string(),
         (Some(_), Some(index_param)) => {
-            format!("(_item, {})", span_text(index_param, source_text).trim())
+            format!("(_item, {})", original_node_text(index_param, source_text))
         }
         (Some(_), None) => "_item".to_string(),
     };
@@ -1860,8 +1900,7 @@ fn push_argument_hints(
         if index > 0 {
             body_col += 2;
         }
-        let text = span_text(argument, source_text);
-        let text = text.trim();
+        let text = original_node_text(argument, source_text);
         if !push_static_member_argument_hints(
             span_hints,
             body_line,
@@ -1888,8 +1927,7 @@ fn push_static_member_argument_hints(
         return false;
     };
 
-    let object_text = span_text(&member.object, source_text);
-    let object_text = object_text.trim();
+    let object_text = original_node_text(&member.object, source_text);
     let property_text = member.property.name.as_str();
     let property_col = body_col + object_text.len() + 1;
 
@@ -2021,11 +2059,10 @@ fn builder_method_member_name(
 
 fn raw_argument_text(argument: &Argument<'_>, source_text: &str) -> String {
     if let Some(expression) = argument.as_expression() {
-        return rewrite_global_context_calls_in_expression(expression, source_text)
-            .trim()
-            .to_string();
+        return rewrite_global_context_calls_in_expression_if_needed(expression, source_text)
+            .unwrap_or_else(|| original_node_text(expression, source_text));
     }
-    span_text(argument, source_text).trim().to_string()
+    original_node_text(argument, source_text)
 }
 
 fn raw_argument_text_with_context(

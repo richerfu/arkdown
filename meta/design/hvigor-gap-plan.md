@@ -213,6 +213,15 @@ constructor params receive the parent backing field (`this.__x`), while
 printer/comment/format gaps and additional ViewPU custom-component/paramsLambda
 forms still to audit from upstream source.
 
+The ViewPU output architecture has started moving away from direct string
+assembly. Upstream evidence shows SDK lowering is TypeScript AST based and
+printed by `ts.createPrinter()`, while Rolldown renders modules from OXC codegen
+output plus structured source-map `Source` segments. `arkdown` now centralizes
+unchanged original AST fragments in `source_emit::original_node_text()` and
+generated ViewPU statement output in `viewpu_emit::ViewpuWriter`. This keeps
+current hvigor-sensitive source shape stable while establishing the boundary
+needed to replace the textual sink with a ViewPU IR or direct OXC AST generator.
+
 The struct-transform source map offset is also corrected after final ViewPU
 output normalization. `finalizeConstruction` shim insertion and interface
 hoisting can move generated lines; mappings now locate the final

@@ -5,6 +5,8 @@ pub mod component_meta;
 pub mod decorator;
 pub mod entry;
 pub mod global_rewrite;
+pub mod source_emit;
+pub mod viewpu_emit;
 
 use std::{
     collections::{HashMap, HashSet},

@@ -25,6 +25,31 @@ depends on this transform.
 The current `arkdown-plugin-ets-transform` stubs out `build()` bodies and transforms state
 decorators but does not perform ViewPU lowering. This SPEC defines the full lowering.
 
+## Implementation Architecture
+
+Upstream `ets-loader` does not implement ViewPU lowering by concatenating large
+source strings. The key source path is TypeScript AST based:
+
+- `process_component_build.ts`, `process_component_class.ts`, and
+  `process_custom_component.ts` create or update `ts.Node` values with
+  `ts.factory.create*` / `ts.factory.update*`.
+- `fast_build/ets_ui/rollup-plugin-ets-typescript.ts::printSourceFile()` prints
+  the transformed tree with `ts.createPrinter({ newLine: LineFeed })`.
+- `fast_build/ark_compiler/module/module_source_file.ts::processTransformedTsModuleRequest()`
+  rewrites static import/export and dynamic import specifiers with a TypeScript
+  transformer. `MagicString` is reserved for localized source patches and source
+  map fallback behavior, not the main ViewPU semantic lowering.
+
+`arkdown` must follow the same boundary. Build lowering decisions are made from
+OXC ArkUI AST nodes. Original source nodes that are not semantically changed are
+emitted through the centralized `source_emit::original_node_text()` helper so
+their hvigor-observed source shape, quote style, and callback body formatting are
+preserved. Newly generated ViewPU statements go through `viewpu_emit::ViewpuWriter`
+instead of ad hoc `out.push_str(format!(...))` at each lowering site. This is a
+transition layer: the long-term backend should replace `ViewpuWriter`'s textual
+sink with a ViewPU IR or direct OXC AST construction, then print through OXC
+codegen in the same way Rolldown renders modules from OXC codegen output.
+
 ---
 
 ## ArkUI DSL → ViewPU Lowering Contract

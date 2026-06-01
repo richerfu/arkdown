@@ -391,6 +391,7 @@ fn split_import_declaration(
     }
     let specifiers = import.specifiers.as_ref()?;
     let source_text = import.source.value.as_str();
+    let quote = string_literal_quote(&import.source);
     let mut default_or_namespace = Vec::new();
     let mut named = Vec::new();
     let mut has_type_only_named = false;
@@ -444,16 +445,29 @@ fn split_import_declaration(
             out.push_str(&value_named.join(", "));
             out.push_str(" }");
         }
-        out.push_str(" from \"");
+        out.push_str(" from ");
+        out.push(quote);
         out.push_str(source_text);
-        out.push_str("\";\n");
+        out.push(quote);
+        out.push_str(";\n");
     }
     out.push_str("import type { ");
     out.push_str(&type_named.join(", "));
-    out.push_str(" } from \"");
+    out.push_str(" } from ");
+    out.push(quote);
     out.push_str(source_text);
-    out.push_str("\";");
+    out.push(quote);
+    out.push(';');
     Some(out)
+}
+
+fn string_literal_quote(literal: &StringLiteral<'_>) -> char {
+    literal
+        .raw
+        .as_ref()
+        .and_then(|raw| raw.chars().next())
+        .filter(|quote| *quote == '\'' || *quote == '"')
+        .unwrap_or('"')
 }
 
 fn import_specifier_text(specifier: &oxc_ast::ast::ImportSpecifier<'_>) -> String {
@@ -517,10 +531,16 @@ pub fn rewrite_static_module_specifiers_with(
     for statement in &parsed.program.body {
         match statement {
             Statement::ImportDeclaration(import) => {
+                if import.import_kind.is_type() && import.source.value.as_str().starts_with('.') {
+                    continue;
+                }
                 push_module_specifier_patch(&import.source, &mut rewrite, &mut patches);
             }
             Statement::ExportNamedDeclaration(export) => {
                 if let Some(source) = &export.source {
+                    if export.export_kind.is_type() && source.value.as_str().starts_with('.') {
+                        continue;
+                    }
                     push_module_specifier_patch(source, &mut rewrite, &mut patches);
                 }
             }
@@ -1375,12 +1395,45 @@ Runtime.start();
             .expect("TS transform must return Some");
         let output = out.code.unwrap_or_default();
         assert!(
-            output.contains("import { Runtime } from \"./model\";"),
+            output.contains("import { Runtime } from './model';"),
             "value import must remain a value import; got:\n{output}"
         );
         assert!(
-            output.contains("import type { Shape, Alias as AliasType } from \"./model\";"),
+            output.contains("import type { Shape, Alias as AliasType } from './model';"),
             "type-only imports must be split using semantic reference flags; got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn test_static_rewrite_keeps_relative_type_only_imports() {
+        let code = "\
+import type { HomeResources } from './HomeResource';
+import { Runtime } from './Runtime';
+export type { Model } from './Model';
+export { Value } from './Value';
+";
+        let out = rewrite_static_module_specifiers_with(
+            code,
+            "entry/src/main/ets/model/Use.ts",
+            |spec| {
+                spec.starts_with('.')
+                    .then(|| format!("@bundle:com.example/entry/ets/model/{spec}"))
+            },
+        );
+        assert!(
+            out.contains("import type { HomeResources } from './HomeResource';"),
+            "relative type-only imports must stay relative like upstream import_path_expand; got:\n{out}"
+        );
+        assert!(
+            out.contains("export type { Model } from './Model';"),
+            "relative type-only exports must stay relative; got:\n{out}"
+        );
+        assert!(
+            out.contains(
+                "import { Runtime } from \"@bundle:com.example/entry/ets/model/./Runtime\";"
+            ) && out
+                .contains("export { Value } from \"@bundle:com.example/entry/ets/model/./Value\";"),
+            "value imports/exports should still rewrite; got:\n{out}"
         );
     }
 }
