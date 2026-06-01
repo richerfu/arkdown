@@ -233,6 +233,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         if task_inputs.matches_cached(&cache_dir) && cached_abc.exists() {
             let stub_graph = ChunkGraph {
                 chunks: Default::default(),
+                full_module_ids: Default::default(),
                 module_to_chunk: Default::default(),
                 entry_module_to_entry_chunk: Default::default(),
             };
@@ -1643,6 +1644,19 @@ struct CompileModuleInfo {
 fn compile_module_ids(chunk_graph: &ChunkGraph) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut ids = Vec::new();
+    let source_ids = if chunk_graph.full_module_ids.is_empty() {
+        None
+    } else {
+        Some(chunk_graph.full_module_ids.iter())
+    };
+    if let Some(source_ids) = source_ids {
+        for module_id in source_ids {
+            if seen.insert(module_id.clone()) {
+                ids.push(module_id.clone());
+            }
+        }
+        return ids;
+    }
     for chunk in &chunk_graph.chunks {
         for module_id in &chunk.module_ids {
             if seen.insert(module_id.clone()) {
@@ -2749,4 +2763,39 @@ fn with_extension(path: &str, extension: &str) -> String {
     path.rsplit_once('.')
         .map(|(stem, _)| format!("{stem}.{extension}"))
         .unwrap_or_else(|| format!("{path}.{extension}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use arkdown_core::{ArkChunk, ChunkGraph};
+    use index_vec::IndexVec;
+    use rustc_hash::FxHashMap;
+
+    use super::compile_module_ids;
+
+    #[test]
+    fn compile_module_ids_prefers_full_rolldown_module_graph() {
+        let graph = ChunkGraph {
+            chunks: vec![ArkChunk {
+                module_ids: vec!["/project/entry/src/main/ets/Index.ets".to_string()],
+                ..Default::default()
+            }]
+            .into_iter()
+            .collect::<IndexVec<_, _>>(),
+            full_module_ids: vec![
+                "/project/entry/src/main/ets/Index.ets".to_string(),
+                "/project/entry/src/main/ets/PureReexport.ts".to_string(),
+            ],
+            module_to_chunk: IndexVec::new(),
+            entry_module_to_entry_chunk: FxHashMap::default(),
+        };
+
+        assert_eq!(
+            compile_module_ids(&graph),
+            vec![
+                "/project/entry/src/main/ets/Index.ets".to_string(),
+                "/project/entry/src/main/ets/PureReexport.ts".to_string(),
+            ]
+        );
+    }
 }

@@ -280,6 +280,7 @@ mod tests {
     fn graph(chunks: Vec<ArkChunk>) -> ChunkGraph {
         ChunkGraph {
             chunks: chunks.into_iter().collect::<IndexVec<_, _>>(),
+            full_module_ids: Vec::new(),
             module_to_chunk: IndexVec::new(),
             entry_module_to_entry_chunk: FxHashMap::default(),
         }

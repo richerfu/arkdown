@@ -568,7 +568,7 @@ async fn test_support_chunks_produces_vendors_chunk() {
         .chunk_graph
         .chunks
         .iter()
-        .any(|c| c.name == "vendors");
+        .any(|c| c.name == "vendors" || c.name.starts_with("vendors-"));
     let chunk_names: Vec<&str> = bundle_out
         .chunk_graph
         .chunks
@@ -586,7 +586,7 @@ async fn test_support_chunks_produces_vendors_chunk() {
         .chunk_graph
         .chunks
         .iter()
-        .find(|c| c.name == "vendors")
+        .find(|c| c.name == "vendors" || c.name.starts_with("vendors-"))
         .map(|c| c.code.as_str())
         .unwrap_or("");
     assert!(

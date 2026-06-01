@@ -81,6 +81,13 @@ pub struct ArkChunk {
 #[derive(Debug, Clone)]
 pub struct ChunkGraph {
     pub chunks: IndexVec<ChunkIdx, ArkChunk>,
+    /// Full Rollup/Rolldown module graph IDs, matching Rollup `getModuleIds()`.
+    ///
+    /// `ArkChunk::module_ids` only contains modules that survived chunk
+    /// generation. hvigor's CompileArkTS cache is written from the full module
+    /// graph, so pure re-export/type/const modules that are tree-shaken from
+    /// output chunks still need to be preserved here.
+    pub full_module_ids: Vec<String>,
     /// Maps [`ModuleIdx`] → [`ChunkIdx`].
     pub module_to_chunk: IndexVec<ModuleIdx, Option<ChunkIdx>>,
     /// Maps entry [`ModuleIdx`] → entry [`ChunkIdx`].
@@ -227,6 +234,7 @@ mod tests {
     fn test_chunk_graph_empty_construction() {
         let graph = ChunkGraph {
             chunks: IndexVec::new(),
+            full_module_ids: Vec::new(),
             module_to_chunk: IndexVec::new(),
             entry_module_to_entry_chunk: FxHashMap::default(),
         };
@@ -246,6 +254,7 @@ mod tests {
 
         let graph = ChunkGraph {
             chunks,
+            full_module_ids: Vec::new(),
             module_to_chunk: IndexVec::new(),
             entry_module_to_entry_chunk: FxHashMap::default(),
         };

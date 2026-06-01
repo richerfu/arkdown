@@ -945,6 +945,7 @@ fn test_non_entry_importees_populated_with_har_dep() {
 
     let graph = ChunkGraph {
         chunks,
+        full_module_ids: Vec::new(),
         module_to_chunk: IndexVec::new(),
         entry_module_to_entry_chunk: FxHashMap::default(),
     };

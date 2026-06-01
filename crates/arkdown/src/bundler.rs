@@ -17,10 +17,11 @@
 //! and are no longer called from here.  They are retained in the codebase as
 //! reference implementations.
 
+use std::borrow::Cow;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use index_vec::IndexVec;
 use rustc_hash::FxHashMap;
@@ -33,7 +34,7 @@ use rolldown_common::{
     MatchGroupName, MatchGroupTest, ModuleType as RdModuleType, Output, SourceMapType,
     TreeshakeOptions, TypeScriptOptions,
 };
-use rolldown_plugin::__inner::SharedPluginable;
+use rolldown_plugin::{__inner::SharedPluginable, HookUsage, Plugin, PluginContext};
 use rolldown_utils::js_regex::HybridRegex;
 
 use crate::output;
@@ -115,7 +116,11 @@ impl Bundler {
             .collect();
 
         // ── 2. Pass plugins directly to rolldown ─────────────────────────────
-        let rd_plugins: Vec<SharedPluginable> = self.plugins.clone();
+        let full_module_ids = Arc::new(Mutex::new(Vec::new()));
+        let mut rd_plugins: Vec<SharedPluginable> = self.plugins.clone();
+        rd_plugins.push(Arc::new(ModuleIdCollectorPlugin {
+            ids: Arc::clone(&full_module_ids),
+        }) as SharedPluginable);
 
         // ── 3. Build rolldown BundlerOptions ─────────────────────────────────
         //
@@ -189,7 +194,11 @@ impl Bundler {
             .map_err(|e| ArkdownError::Bundler(format!("{e:?}")))?;
 
         // ── 5. Convert rolldown output → ChunkGraph ───────────────────────────
-        let chunk_graph = build_chunk_graph(rd_output)?;
+        let collected_module_ids = full_module_ids
+            .lock()
+            .map(|ids| ids.clone())
+            .unwrap_or_default();
+        let chunk_graph = build_chunk_graph(rd_output, collected_module_ids)?;
 
         // ── 6. Write loader_out/default/ets artifacts to disk ────────────────
         let output_dir = PathBuf::from(&loader_json.ace_module_build);
@@ -285,7 +294,44 @@ fn compile_entry_chunk_name(
 ///
 /// Asset outputs (CSS, images, etc.) are ignored — only `Output::Chunk`
 /// entries are included in the chunk graph.
-fn build_chunk_graph(rd_output: rolldown::BundleOutput) -> Result<ChunkGraph, ArkdownError> {
+#[derive(Debug)]
+struct ModuleIdCollectorPlugin {
+    ids: Arc<Mutex<Vec<String>>>,
+}
+
+impl Plugin for ModuleIdCollectorPlugin {
+    fn name(&self) -> Cow<'static, str> {
+        Cow::Borrowed("arkdown-module-id-collector")
+    }
+
+    fn register_hook_usage(&self) -> HookUsage {
+        HookUsage::GenerateBundle
+    }
+
+    fn generate_bundle(
+        &self,
+        ctx: &PluginContext,
+        _args: &mut rolldown_plugin::HookGenerateBundleArgs<'_>,
+    ) -> impl Future<Output = anyhow::Result<()>> + Send {
+        let ids = ctx
+            .get_module_ids()
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>();
+        let slot = Arc::clone(&self.ids);
+        async move {
+            if let Ok(mut slot) = slot.lock() {
+                *slot = ids;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn build_chunk_graph(
+    rd_output: rolldown::BundleOutput,
+    full_module_ids: Vec<String>,
+) -> Result<ChunkGraph, ArkdownError> {
     use arkdown_core::ChunkIdx;
 
     let mut chunks: IndexVec<ChunkIdx, ArkChunk> = IndexVec::new();
@@ -327,6 +373,7 @@ fn build_chunk_graph(rd_output: rolldown::BundleOutput) -> Result<ChunkGraph, Ar
 
     Ok(ChunkGraph {
         chunks,
+        full_module_ids,
         // module_to_chunk and entry_module_to_entry_chunk are not populated
         // from rolldown output because rolldown uses its own module index space.
         // Callers that need module→chunk mapping (e.g. arkdown-abc) must use

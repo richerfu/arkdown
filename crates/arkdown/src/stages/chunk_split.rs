@@ -97,6 +97,7 @@ pub fn split_chunks(graph: &ModuleGraph, support_chunks: bool) -> ChunkGraph {
 
     ChunkGraph {
         chunks,
+        full_module_ids: Vec::new(),
         module_to_chunk,
         entry_module_to_entry_chunk,
     }
