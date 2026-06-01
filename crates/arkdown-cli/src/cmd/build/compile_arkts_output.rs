@@ -1,14 +1,13 @@
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 pub(super) use arkdown::compile_entry::{compile_entry_chunk_name, compile_entry_stem_counts};
+use arkdown::source_maps::{hvigor_source_maps_json, HvigorSourceMapEntry, HvigorSourceMapOptions};
 use arkdown::BundleOutput;
 use arkdown_core::{ArkdownConfig, ModuleConfig};
 
 use super::compile_arkts_handoff::read_compile_arkts_source_maps;
-use super::compile_arkts_modules::with_extension;
 
 #[derive(Debug, Clone)]
 pub(super) struct ChunkCompileMeta {
@@ -81,7 +80,7 @@ pub(super) fn write_hvigor_source_maps(
         return Ok(());
     }
 
-    let mut source_maps = serde_json::Map::new();
+    let mut source_maps = Vec::new();
     for chunk in bundle_out.chunk_graph.chunks.iter() {
         let Some(meta) = record_name_map.get(chunk.name.as_str()) else {
             continue;
@@ -99,36 +98,25 @@ pub(super) fn write_hvigor_source_maps(
             .get("mappings")
             .and_then(|value| value.as_str())
             .unwrap_or_default();
-        let source_file = source_file.trim_start_matches("./");
-        let key = format!(
-            "{}|{}|1.0.0|src/main/{}",
-            loader_json.module_name,
-            loader_json.module_name,
-            with_extension(source_file, "ts")
-        );
-        let file = Path::new(source_file)
-            .file_name()
-            .and_then(|file| file.to_str())
-            .unwrap_or(source_file);
-        let source = format!("{}/src/main/{}", loader_json.module_name, source_file);
-
-        source_maps.insert(
-            key,
-            serde_json::json!({
-                "version": 3,
-                "file": file,
-                "sourceRoot": "",
-                "sources": [source],
-                "names": [],
-                "mappings": mappings,
-                "entry-package-info": format!("{}|1.0.0", loader_json.module_name),
-            }),
-        );
+        source_maps.push(HvigorSourceMapEntry {
+            chunk_name: chunk.name.to_string(),
+            mappings: mappings.to_string(),
+            source_file: Some(source_file.to_string()),
+            fallback_source_file: None,
+        });
     }
 
     if !source_maps.is_empty() {
-        let content = serde_json::to_string_pretty(&source_maps)
-            .context("failed to serialize hvigor sourceMaps.map")?;
+        let content = hvigor_source_maps_json(
+            &source_maps,
+            &HvigorSourceMapOptions {
+                module_name: loader_json.module_name.clone(),
+                package_name: loader_json.module_name.clone(),
+                version: "1.0.0".to_string(),
+                chunk_source_files: HashMap::new(),
+            },
+        )
+        .context("failed to serialize hvigor sourceMaps.map")?;
         fs_err::write(source_maps_path, content)?;
     }
 

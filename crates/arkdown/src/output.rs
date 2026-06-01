@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 
 use arkdown_core::{ArkdownError, ChunkGraph};
 
+use crate::source_maps::{hvigor_source_maps_json, HvigorSourceMapEntry, HvigorSourceMapOptions};
+
 pub const MODULES_ABC_FILE_NAME: &str = "modules.abc";
 pub const SOURCE_MAPS_FILE_NAME: &str = "sourceMaps.map";
 
@@ -32,6 +34,17 @@ pub struct SourceMapOptions {
     /// path relative to `src/main` (e.g. `"ets/entryability/EntryAbility.ets"`).
     /// Used to build the per-file key and the `sources` / `file` fields.
     pub chunk_source_files: HashMap<String, String>,
+}
+
+impl From<&SourceMapOptions> for HvigorSourceMapOptions {
+    fn from(value: &SourceMapOptions) -> Self {
+        Self {
+            module_name: value.module_name.clone(),
+            package_name: value.package_name.clone(),
+            version: value.version.clone(),
+            chunk_source_files: value.chunk_source_files.clone(),
+        }
+    }
 }
 
 /// Path used by native ABC compilation and packaging for the merged module ABC.
@@ -197,68 +210,31 @@ fn hvigor_source_maps_content(
     source_maps: &[ChunkSourceMap<'_>],
     opts: &SourceMapOptions,
 ) -> Result<String, ArkdownError> {
-    let mut map = serde_json::Map::new();
-
-    for sm in source_maps {
-        let source_file = match opts.chunk_source_files.get(&sm.chunk_name) {
-            Some(sf) => sf.trim_start_matches("./").to_string(),
-            None => {
-                // Fall back to deriving source_file from the raw map's sources array.
-                sm.value
-                    .get("sources")
-                    .and_then(|s| s.as_array())
-                    .and_then(|arr| arr.first())
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(&sm.chunk_name)
-                    .to_string()
+    let entries = source_maps
+        .iter()
+        .map(|source_map| {
+            let mappings = source_map
+                .value
+                .get("mappings")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            let fallback_source_file = source_map
+                .value
+                .get("sources")
+                .and_then(|sources| sources.as_array())
+                .and_then(|sources| sources.first())
+                .and_then(|source| source.as_str())
+                .map(str::to_string);
+            HvigorSourceMapEntry {
+                chunk_name: source_map.chunk_name.clone(),
+                mappings: mappings.to_string(),
+                source_file: None,
+                fallback_source_file,
             }
-        };
-
-        let key = format!(
-            "{}|{}|{}|src/main/{}",
-            opts.module_name,
-            opts.package_name,
-            opts.version,
-            with_ts_extension(&source_file),
-        );
-
-        let file = std::path::Path::new(&source_file)
-            .file_name()
-            .and_then(|f| f.to_str())
-            .unwrap_or(&source_file)
-            .to_string();
-
-        let source = format!("{}/src/main/{}", opts.module_name, source_file);
-
-        let mappings = sm
-            .value
-            .get("mappings")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-
-        map.insert(
-            key,
-            serde_json::json!({
-                "version": 3,
-                "file": file,
-                "sourceRoot": "",
-                "sources": [source],
-                "names": [],
-                "mappings": mappings,
-                "entry-package-info": format!("{}|{}", opts.module_name, opts.version),
-            }),
-        );
-    }
-
-    serde_json::to_string_pretty(&map)
+        })
+        .collect::<Vec<_>>();
+    hvigor_source_maps_json(&entries, &HvigorSourceMapOptions::from(opts))
         .map_err(|e| ArkdownError::Bundler(format!("failed to serialize sourceMaps.map: {e}")))
-}
-
-/// Replace the file extension with `.ts`, preserving the rest of the path.
-fn with_ts_extension(path: &str) -> String {
-    path.rsplit_once('.')
-        .map(|(stem, _)| format!("{stem}.ts"))
-        .unwrap_or_else(|| format!("{path}.ts"))
 }
 
 #[cfg(test)]

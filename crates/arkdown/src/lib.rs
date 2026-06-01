@@ -19,5 +19,6 @@
 pub mod bundler;
 pub mod compile_entry;
 pub mod output;
+pub mod source_maps;
 
 pub use bundler::{BundleOutput, Bundler};
