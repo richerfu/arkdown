@@ -1,5 +1,4 @@
 pub mod build_fn;
-pub mod builder;
 pub mod component;
 mod component_analysis;
 mod component_collection;
