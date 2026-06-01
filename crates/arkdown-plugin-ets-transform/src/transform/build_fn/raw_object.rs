@@ -4,6 +4,7 @@ use oxc_ast::ast::{Argument, CallExpression, ChainElement, Expression, FunctionB
 use oxc_span::{GetSpan, Span};
 
 use super::BuildContext;
+use crate::source_edit::{apply_source_patches, SourcePatch};
 use crate::transform::source_emit::original_node_text;
 
 pub(super) fn expression_text_with_raw_object_call_args(
@@ -192,18 +193,27 @@ fn apply_span_replacements(
         return None;
     }
     replacements.sort_by_key(|(span, _)| span.start);
-    let mut out = String::new();
-    let mut cursor = base_span.start as usize;
-    for (span, replacement) in replacements {
-        let start = span.start as usize;
-        let end = span.end as usize;
-        if start < cursor || end > base_span.end as usize {
-            continue;
-        }
-        out.push_str(&source_text[cursor..start]);
-        out.push_str(&replacement);
-        cursor = end;
-    }
-    out.push_str(&source_text[cursor..base_span.end as usize]);
-    Some(out.trim().to_string())
+    let base_start = base_span.start as usize;
+    let base_end = base_span.end as usize;
+    let mut last_end = base_start;
+    let patches = replacements
+        .into_iter()
+        .filter_map(|(span, replacement)| {
+            let start = span.start as usize;
+            let end = span.end as usize;
+            if start < last_end || end > base_end {
+                return None;
+            }
+            last_end = end;
+            Some(SourcePatch {
+                start: start - base_start,
+                end: end - base_start,
+                replacement,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    (!patches.is_empty())
+        .then(|| apply_source_patches(&source_text[base_start..base_end], patches))
+        .map(|output| output.trim().to_string())
 }
