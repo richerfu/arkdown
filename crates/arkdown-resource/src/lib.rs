@@ -34,6 +34,9 @@ pub mod profile;
 pub mod scan;
 pub mod table;
 
+mod ids;
+mod layout;
+
 // Re-export the primary public API at crate root.
 pub use compiler::{
     CompiledEntry, ResourceCompileConfig, ResourceCompileInput, ResourceCompileOutput,

@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::error::ResourceError;
+use crate::ids::ResourceIdAllocator;
+use crate::layout::ResourceOutputLayout;
 use crate::scan::ResourceCategory;
 use crate::{element, index, scan, table};
 
@@ -120,18 +122,16 @@ impl ResourceCompiler {
         &self,
         input: ResourceCompileInput,
     ) -> Result<ResourceCompileOutput, ResourceError> {
-        fs_err::create_dir_all(&input.output_dir)?;
+        let layout = ResourceOutputLayout::new(input.output_dir.clone());
+        fs_err::create_dir_all(layout.root())?;
 
         let mut all_entries: Vec<CompiledEntry> = Vec::new();
         let mut profiles: Vec<(String, PathBuf)> = Vec::new();
         let mut resource_copies: Vec<ResourceCopy> = Vec::new();
         let mut emitted_resources: HashSet<(String, u32, String)> = HashSet::new();
-        let start_id = restool_start_id(&self.config.module_name, &self.config.module_names);
-        let mut next_id: u32 = start_id;
-        // Tracks name → numeric ID for every resource that is assigned an ID.
-        let mut resource_ids: HashMap<String, u32> = HashMap::new();
+        let mut id_allocator =
+            ResourceIdAllocator::new(&self.config.module_name, &self.config.module_names);
         let mut resource_infos: HashMap<String, ResourceInfo> = HashMap::new();
-        let mut assigned_ids: HashMap<(u32, String), u32> = HashMap::new();
 
         for res_dir in &input.resources_dirs {
             let mut files = scan::scan_resources(res_dir);
@@ -221,7 +221,7 @@ impl ResourceCompiler {
                             relative_path: relative_path.clone(),
                             category: file.category.clone(),
                         });
-                        let out_path = input.output_dir.join("resources").join(&relative_path);
+                        let out_path = layout.resource_path(&relative_path);
                         profiles.push((file.name.clone(), out_path));
                         profile_entries
                             .entry((entry_type, file.name.clone()))
@@ -261,45 +261,43 @@ impl ResourceCompiler {
 
             commit_pending_entries(
                 &element_entries,
-                &mut assigned_ids,
-                &mut resource_ids,
+                &mut id_allocator,
                 &mut resource_infos,
                 &mut emitted_resources,
                 &mut all_entries,
-                &mut next_id,
             );
             commit_pending_entries(
                 &media_entries,
-                &mut assigned_ids,
-                &mut resource_ids,
+                &mut id_allocator,
                 &mut resource_infos,
                 &mut emitted_resources,
                 &mut all_entries,
-                &mut next_id,
             );
             commit_pending_entries(
                 &profile_entries,
-                &mut assigned_ids,
-                &mut resource_ids,
+                &mut id_allocator,
                 &mut resource_infos,
                 &mut emitted_resources,
                 &mut all_entries,
-                &mut next_id,
             );
         }
 
-        let resources_dir = input.output_dir.join("resources");
-        copy_resource_files(&resource_copies, &resources_dir, &resource_ids)?;
+        let resources_dir = layout.resources_dir();
+        copy_resource_files(
+            &resource_copies,
+            &resources_dir,
+            id_allocator.resource_ids(),
+        )?;
 
         // Write binary index.
-        let index_path = input.output_dir.join("resources.index");
+        let index_path = layout.resources_index();
         index::write_resources_index(&all_entries, &index_path)?;
 
         // Write human-readable table.
-        let table_path = input.output_dir.join("ResourceTable.txt");
+        let table_path = layout.resource_table();
         table::write_resource_table(&all_entries, &table_path)?;
 
-        let ids_defined_path = input.output_dir.join("ids_map").join("id_defined.json");
+        let ids_defined_path = layout.ids_defined();
         write_id_defined(&all_entries, &ids_defined_path)?;
 
         Ok(ResourceCompileOutput {
@@ -308,57 +306,21 @@ impl ResourceCompiler {
             ids_defined: ids_defined_path,
             resources_dir,
             profiles,
-            resource_ids,
+            resource_ids: id_allocator.into_resource_ids(),
             resource_infos,
         })
     }
 }
 
-fn restool_start_id(module_name: &str, module_names: &[String]) -> u32 {
-    if module_names.is_empty() {
-        return 0x0100_0000;
-    }
-    let mut names = module_names.to_vec();
-    names.sort();
-    let index = names
-        .iter()
-        .position(|name| name == module_name)
-        .unwrap_or_default() as u32;
-    let mut start_id = (index + 1) * 0x0100_0000;
-    if start_id >= 0x0700_0000 {
-        start_id += 0x0100_0000;
-    }
-    start_id
-}
-
-fn resource_id_for(
-    assigned_ids: &mut HashMap<(u32, String), u32>,
-    resource_ids: &mut HashMap<String, u32>,
-    next_id: &mut u32,
-    entry_type: u32,
-    name: &str,
-) -> u32 {
-    if let Some(id) = assigned_ids.get(&(entry_type, name.to_string())) {
-        return *id;
-    }
-    let id = *next_id;
-    *next_id += 1;
-    assigned_ids.insert((entry_type, name.to_string()), id);
-    resource_ids.entry(name.to_string()).or_insert(id);
-    id
-}
-
 fn commit_pending_entries(
     groups: &BTreeMap<(u32, String), Vec<PendingEntry>>,
-    assigned_ids: &mut HashMap<(u32, String), u32>,
-    resource_ids: &mut HashMap<String, u32>,
+    id_allocator: &mut ResourceIdAllocator,
     resource_infos: &mut HashMap<String, ResourceInfo>,
     emitted_resources: &mut HashSet<(String, u32, String)>,
     all_entries: &mut Vec<CompiledEntry>,
-    next_id: &mut u32,
 ) {
     for ((entry_type, id_name), entries) in groups {
-        let id = resource_id_for(assigned_ids, resource_ids, next_id, *entry_type, id_name);
+        let id = id_allocator.assign(*entry_type, id_name);
         for entry in entries {
             if let Some(resource_key) = &entry.resource_key {
                 resource_infos
