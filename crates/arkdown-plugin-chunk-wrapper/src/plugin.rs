@@ -1,14 +1,11 @@
 use std::borrow::Cow;
 
-use oxc_allocator::Allocator;
-use oxc_ast::ast::Statement;
-use oxc_parser::Parser;
-use oxc_span::SourceType;
 use rolldown_plugin::{
     HookRenderChunkArgs, HookRenderChunkOutput, HookRenderChunkReturn, HookUsage, Plugin,
     PluginContext,
 };
 
+use crate::module_split::split_imports;
 use crate::registry;
 
 pub struct ChunkWrapperPlugin {
@@ -91,104 +88,6 @@ impl Plugin for ChunkWrapperPlugin {
             plugin.wrap_chunk(&code, &chunk_name)
         }
     }
-}
-
-fn split_imports(source: &str) -> (String, String) {
-    let allocator = Allocator::default();
-    let source_type = SourceType::tsx();
-    let parse_result = Parser::new(&allocator, source, source_type).parse();
-
-    if parse_result.panicked {
-        return (String::new(), source.to_owned());
-    }
-
-    let mut import_ranges: Vec<(u32, u32)> = Vec::new();
-    let mut export_ranges: Vec<(u32, u32)> = Vec::new();
-
-    for stmt in &parse_result.program.body {
-        match stmt {
-            Statement::ImportDeclaration(decl) => {
-                import_ranges.push((decl.span.start, decl.span.end));
-            }
-            Statement::ExportNamedDeclaration(d) => {
-                export_ranges.push((d.span.start, d.span.end));
-            }
-            Statement::ExportDefaultDeclaration(d) => {
-                export_ranges.push((d.span.start, d.span.end));
-            }
-            Statement::ExportAllDeclaration(d) => {
-                export_ranges.push((d.span.start, d.span.end));
-            }
-            _ => {}
-        }
-    }
-
-    if import_ranges.is_empty() && export_ranges.is_empty() {
-        return (String::new(), source.to_owned());
-    }
-
-    let bytes = source.as_bytes();
-    let mut imports = String::new();
-    let mut body = String::new();
-
-    for &(start, end) in &import_ranges {
-        imports.push_str(&source[start as usize..end as usize]);
-        imports.push('\n');
-    }
-
-    let mut excluded: Vec<(u32, u32, Option<String>)> = Vec::new();
-    for &(start, end) in &import_ranges {
-        excluded.push((start, end, None));
-    }
-    for &(start, end) in &export_ranges {
-        let text = &source[start as usize..end as usize];
-        let stripped = strip_export_keyword(text);
-        excluded.push((start, end, Some(stripped)));
-    }
-    excluded.sort_by_key(|(s, _, _)| *s);
-
-    let mut pos = 0usize;
-    for (start, end, replacement) in &excluded {
-        let s = *start as usize;
-        let e = *end as usize;
-        if s > pos {
-            body.push_str(&source[pos..s]);
-        }
-        match replacement {
-            None => {
-                let newlines = bytes[s..e].iter().filter(|&&b| b == b'\n').count();
-                for _ in 0..newlines {
-                    body.push('\n');
-                }
-            }
-            Some(stripped) => {
-                body.push_str(stripped);
-            }
-        }
-        pos = e;
-    }
-    if pos < source.len() {
-        body.push_str(&source[pos..]);
-    }
-
-    (imports, body)
-}
-
-fn strip_export_keyword(text: &str) -> String {
-    let t = text.trim_start();
-    if let Some(rest) = t.strip_prefix("export default ") {
-        return rest.to_string();
-    }
-    if let Some(rest) = t.strip_prefix("export default\n") {
-        return rest.to_string();
-    }
-    if t.starts_with("export {") || t.starts_with("export type {") {
-        return String::new();
-    }
-    if let Some(rest) = t.strip_prefix("export ") {
-        return rest.to_string();
-    }
-    t.to_string()
 }
 
 #[cfg(test)]

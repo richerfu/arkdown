@@ -4,6 +4,7 @@
 //! cross-chunk `require()` calls to `globalThis[...]` lookups as required by
 //! ArkRuntime (which cannot execute raw CommonJS or ESM directly).
 
+mod module_split;
 pub mod plugin;
 pub mod registry;
 pub mod rewrite;
