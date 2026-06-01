@@ -13,9 +13,11 @@
 pub mod api_transform;
 pub mod checker;
 pub mod error;
+mod hvigor_format;
 pub mod kit_map;
 mod module_rewrite;
 mod resource_transform;
+mod source_edit;
 pub mod source_map;
 mod sys_resource;
 pub mod transform;
@@ -26,10 +28,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use arkdown_core::{ArkdownConfig, ModuleSource, ModuleType, ResolvedId};
+use hvigor_format::{format_hvigor_standard_ts, module_name_from_id};
 use module_rewrite::{rewrite_type_only_reexports, split_type_only_named_imports};
 #[cfg(test)]
 use oxc_allocator::Allocator;
-use oxc_ast::ast::ModuleExportName;
 #[cfg(test)]
 use oxc_codegen::{Codegen, CodegenOptions};
 #[cfg(test)]
@@ -48,6 +50,7 @@ pub use module_rewrite::rewrite_static_module_specifiers_with;
 #[cfg(test)]
 pub(crate) use module_rewrite::{exported_binding_kinds, ExportBindingKind};
 pub use resource_transform::ResourceReference;
+pub(crate) use source_edit::{apply_source_patches, module_export_name_text, SourcePatch};
 pub use sys_resource::load_system_resource_references;
 
 /// ArkTS transform plugin — desugars `.ets` files into TypeScript.
@@ -340,43 +343,6 @@ impl Plugin for EtsTransformPlugin {
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct SourcePatch {
-    pub(crate) start: usize,
-    pub(crate) end: usize,
-    pub(crate) replacement: String,
-}
-
-pub(crate) fn module_export_name_text(name: &ModuleExportName<'_>) -> String {
-    match name {
-        ModuleExportName::IdentifierName(identifier) => identifier.name.to_string(),
-        ModuleExportName::IdentifierReference(identifier) => identifier.name.to_string(),
-        ModuleExportName::StringLiteral(literal) => literal.raw.as_ref().map_or_else(
-            || format!("{:?}", literal.value.as_str()),
-            ToString::to_string,
-        ),
-    }
-}
-
-pub(crate) fn apply_source_patches(source: &str, mut patches: Vec<SourcePatch>) -> String {
-    if patches.is_empty() {
-        return source.to_string();
-    }
-    patches.sort_by_key(|patch| patch.start);
-    let mut out = String::with_capacity(source.len());
-    let mut last_end = 0usize;
-    for patch in patches {
-        if patch.start < last_end {
-            continue;
-        }
-        out.push_str(&source[last_end..patch.start]);
-        out.push_str(&patch.replacement);
-        last_end = patch.end;
-    }
-    out.push_str(&source[last_end..]);
-    out
-}
-
 /// Parse `source` and re-emit it with oxc codegen, returning both the
 /// regenerated source text and a per-token VLQ source map.
 ///
@@ -440,74 +406,6 @@ fn ensure_names_field(json: &str) -> String {
         }
     }
     serde_json::to_string(&value).unwrap_or_else(|_| json.to_string())
-}
-
-fn format_hvigor_standard_ts(source: &str) -> String {
-    let mut lines = Vec::new();
-    let mut iter = source.lines().peekable();
-
-    while let Some(line) = iter.next() {
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        let trimmed = line.trim_start();
-        if trimmed.ends_with('(') && trimmed.contains('.') {
-            let indent = hvigor_indent(line);
-            let mut args = Vec::new();
-            let mut consumed = Vec::new();
-            let mut closed = false;
-            while let Some(arg_line) = iter.peek().copied() {
-                let arg = arg_line.trim();
-                if arg == ");" {
-                    iter.next();
-                    closed = true;
-                    break;
-                }
-                if arg.is_empty() {
-                    break;
-                }
-                consumed.push(arg_line);
-                args.push(arg.trim_end_matches(',').to_string());
-                iter.next();
-            }
-            if closed && !args.is_empty() {
-                let prefix = trimmed.trim_end_matches('(');
-                lines.push(format!("{indent}{prefix}({});", args.join(", ")));
-                continue;
-            }
-            lines.push(format!("{}{}", hvigor_indent(line), trimmed));
-            for consumed_line in consumed {
-                lines.push(format!(
-                    "{}{}",
-                    hvigor_indent(consumed_line),
-                    consumed_line.trim_start()
-                ));
-            }
-            continue;
-        }
-
-        lines.push(format!("{}{}", hvigor_indent(line), trimmed));
-    }
-
-    let mut out = lines.join("\n");
-    out.push('\n');
-    out
-}
-
-fn hvigor_indent(line: &str) -> String {
-    let spaces = line.bytes().take_while(|&b| b == b' ').count();
-    " ".repeat(spaces * 2)
-}
-
-fn module_name_from_id(id: &str) -> Option<String> {
-    id.split("/src/main/ets/").next().and_then(|prefix| {
-        if prefix == id || prefix.is_empty() {
-            None
-        } else {
-            prefix.rsplit('/').next().map(str::to_string)
-        }
-    })
 }
 
 #[cfg(test)]
