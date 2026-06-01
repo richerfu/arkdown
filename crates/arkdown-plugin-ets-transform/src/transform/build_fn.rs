@@ -1,9 +1,9 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use oxc_ast::ast::{
     Argument, ArkUIChild, ArkUIComponentExpression, ArrowFunctionExpression, BindingPattern,
     BlockStatement, CallExpression, Expression, FormalParameter, FunctionBody, IfStatement,
-    Statement,
+    ObjectExpression, ObjectPropertyKind, PropertyKey, Statement,
 };
 use oxc_span::{GetSpan, Span};
 
@@ -30,6 +30,14 @@ pub struct SpanHint {
     /// Byte span of the ArkUI component expression in the original `.ets` source.
     pub original_span: Span,
 }
+
+#[derive(Clone, Debug, Default)]
+pub struct CustomComponentInfo {
+    pub update_props: HashSet<String>,
+    pub reusable: bool,
+}
+
+pub type CustomComponentUpdateProps = HashMap<String, CustomComponentInfo>;
 
 /// Extracted representation of a leaf component call and its attribute chain.
 struct LeafComponent {
@@ -101,6 +109,7 @@ fn lower_call_expression(
     source_id: &str,
     custom_components: &HashSet<String>,
     builder_methods: &HashSet<String>,
+    custom_component_update_props: &CustomComponentUpdateProps,
     component_metadata: &ComponentMetadata,
     indent: &str,
     out: &mut String,
@@ -113,6 +122,7 @@ fn lower_call_expression(
             source_id,
             custom_components,
             builder_methods,
+            custom_component_update_props,
             component_metadata,
             indent,
             out,
@@ -127,11 +137,21 @@ fn lower_call_expression(
         custom_components,
         builder_methods,
     )?;
-    if custom_components.contains(&lc.name) && lc.chain_attrs.is_empty() {
+    if custom_components.contains(&lc.name)
+        && (lc.chain_attrs.is_empty()
+            || custom_component_update_props
+                .get(&lc.name)
+                .is_some_and(|info| {
+                    info.reusable && lc.chain_attrs.iter().all(|(name, _)| name == "reuseId")
+                }))
+    {
+        let base_call = base_component_call(call);
         emit_custom_component_call(
             &lc.name,
-            lc.create_args.trim(),
-            call.span,
+            &base_call.arguments,
+            custom_component_update_props.get(&lc.name),
+            custom_reuse_id_from_leaf_attrs(&lc.chain_attrs),
+            base_call.span,
             source_text,
             source_id,
             indent,
@@ -160,6 +180,17 @@ fn lower_call_expression(
     Ok(())
 }
 
+fn base_component_call<'a>(call: &'a CallExpression<'a>) -> &'a CallExpression<'a> {
+    let mut current = call;
+    while let Expression::StaticMemberExpression(member) = &current.callee {
+        let Expression::CallExpression(inner) = &member.object else {
+            break;
+        };
+        current = inner;
+    }
+    current
+}
+
 /// Lower an ArkUI `build()` body using the ohos-rs/oxc ArkUI AST.
 ///
 /// This intentionally covers only the minimal fixture shape confirmed from
@@ -181,6 +212,7 @@ pub fn lower_build_body(
         "",
         &HashSet::new(),
         &HashSet::new(),
+        &CustomComponentUpdateProps::new(),
         &ComponentMetadata::default(),
     )
 }
@@ -191,6 +223,7 @@ pub fn lower_build_body_with_custom_components(
     source_id: &str,
     custom_components: &HashSet<String>,
     builder_methods: &HashSet<String>,
+    custom_component_update_props: &CustomComponentUpdateProps,
     component_metadata: &ComponentMetadata,
 ) -> Result<(String, Vec<SpanHint>), BuildLoweringError> {
     let Some(body) = body else {
@@ -206,6 +239,7 @@ pub fn lower_build_body_with_custom_components(
             source_id,
             custom_components,
             builder_methods,
+            custom_component_update_props,
             component_metadata,
             "        ",
             &mut out,
@@ -222,6 +256,7 @@ fn lower_statement(
     source_id: &str,
     custom_components: &HashSet<String>,
     builder_methods: &HashSet<String>,
+    custom_component_update_props: &CustomComponentUpdateProps,
     component_metadata: &ComponentMetadata,
     indent: &str,
     out: &mut String,
@@ -234,6 +269,7 @@ fn lower_statement(
             source_id,
             custom_components,
             builder_methods,
+            custom_component_update_props,
             component_metadata,
             indent,
             out,
@@ -246,6 +282,7 @@ fn lower_statement(
             source_id,
             custom_components,
             builder_methods,
+            custom_component_update_props,
             component_metadata,
             indent,
             out,
@@ -257,6 +294,7 @@ fn lower_statement(
             source_id,
             custom_components,
             builder_methods,
+            custom_component_update_props,
             component_metadata,
             indent,
             out,
@@ -272,6 +310,7 @@ fn lower_block(
     source_id: &str,
     custom_components: &HashSet<String>,
     builder_methods: &HashSet<String>,
+    custom_component_update_props: &CustomComponentUpdateProps,
     component_metadata: &ComponentMetadata,
     indent: &str,
     out: &mut String,
@@ -284,6 +323,7 @@ fn lower_block(
             source_id,
             custom_components,
             builder_methods,
+            custom_component_update_props,
             component_metadata,
             indent,
             out,
@@ -299,6 +339,7 @@ fn lower_expression(
     source_id: &str,
     custom_components: &HashSet<String>,
     builder_methods: &HashSet<String>,
+    custom_component_update_props: &CustomComponentUpdateProps,
     component_metadata: &ComponentMetadata,
     indent: &str,
     out: &mut String,
@@ -311,6 +352,7 @@ fn lower_expression(
             source_id,
             custom_components,
             builder_methods,
+            custom_component_update_props,
             component_metadata,
             indent,
             out,
@@ -326,6 +368,7 @@ fn lower_expression(
                     source_id,
                     custom_components,
                     builder_methods,
+                    custom_component_update_props,
                     component_metadata,
                     indent,
                     out,
@@ -343,6 +386,7 @@ fn lower_if_statement(
     source_id: &str,
     custom_components: &HashSet<String>,
     builder_methods: &HashSet<String>,
+    custom_component_update_props: &CustomComponentUpdateProps,
     component_metadata: &ComponentMetadata,
     indent: &str,
     out: &mut String,
@@ -366,6 +410,7 @@ fn lower_if_statement(
         source_id,
         custom_components,
         builder_methods,
+        custom_component_update_props,
         component_metadata,
         &format!("{inner_indent}    "),
         out,
@@ -387,6 +432,7 @@ fn lower_if_statement(
                     source_id,
                     custom_components,
                     builder_methods,
+                    custom_component_update_props,
                     component_metadata,
                     &format!("{inner_indent}    "),
                     out,
@@ -400,6 +446,7 @@ fn lower_if_statement(
                     source_id,
                     custom_components,
                     builder_methods,
+                    custom_component_update_props,
                     component_metadata,
                     &format!("{inner_indent}    "),
                     out,
@@ -430,6 +477,7 @@ fn lower_component(
     source_id: &str,
     custom_components: &HashSet<String>,
     builder_methods: &HashSet<String>,
+    custom_component_update_props: &CustomComponentUpdateProps,
     component_metadata: &ComponentMetadata,
     indent: &str,
     out: &mut String,
@@ -447,11 +495,12 @@ fn lower_component(
     }
 
     if custom_components.contains(&name) {
-        let args = raw_arguments_text(&component.arguments, source_text);
         emit_custom_component_call(
             &name,
-            args.trim(),
-            component.span,
+            &component.arguments,
+            custom_component_update_props.get(&name),
+            custom_reuse_id_from_component_attrs(component, source_text),
+            component.callee.span(),
             source_text,
             source_id,
             indent,
@@ -468,6 +517,7 @@ fn lower_component(
             source_id,
             custom_components,
             builder_methods,
+            custom_component_update_props,
             component_metadata,
             indent,
             out,
@@ -481,6 +531,7 @@ fn lower_component(
             source_id,
             custom_components,
             builder_methods,
+            custom_component_update_props,
             component_metadata,
             indent,
             out,
@@ -499,6 +550,7 @@ fn lower_component(
             source_id,
             custom_components,
             builder_methods,
+            custom_component_update_props,
             component_metadata,
             indent,
             out,
@@ -573,6 +625,7 @@ fn lower_component(
                     source_id,
                     custom_components,
                     builder_methods,
+                    custom_component_update_props,
                     component_metadata,
                     indent,
                     out,
@@ -586,6 +639,7 @@ fn lower_component(
                     source_id,
                     custom_components,
                     builder_methods,
+                    custom_component_update_props,
                     component_metadata,
                     indent,
                     out,
@@ -599,6 +653,7 @@ fn lower_component(
                     source_id,
                     custom_components,
                     builder_methods,
+                    custom_component_update_props,
                     component_metadata,
                     indent,
                     out,
@@ -624,7 +679,74 @@ fn lower_component(
 
 fn emit_custom_component_call(
     name: &str,
-    args: &str,
+    arguments: &[Argument<'_>],
+    component_info: Option<&CustomComponentInfo>,
+    reuse_id: Option<String>,
+    span: Span,
+    source_text: &str,
+    source_id: &str,
+    indent: &str,
+    out: &mut String,
+    span_hints: &mut Vec<SpanHint>,
+) {
+    if component_info.is_some_and(|info| info.reusable) {
+        emit_reusable_custom_component_call(
+            name,
+            arguments,
+            component_info,
+            reuse_id,
+            span,
+            source_text,
+            source_id,
+            indent,
+            out,
+            span_hints,
+        );
+        return;
+    }
+
+    let body_line = out.bytes().filter(|&b| b == b'\n').count();
+    push_span_hint(span_hints, body_line, indent.len(), span);
+
+    let params = custom_component_params(
+        arguments,
+        source_text,
+        component_info.map(|info| &info.update_props),
+    );
+    let (line, col) = source_position(source_text, span.start);
+    let page = component_page_path(source_id);
+    out.push_str(&format!("{indent}{{\n"));
+    let inner = format!("{indent}    ");
+    out.push_str(&format!(
+        "{inner}this.observeComponentCreation2((elmtId, isInitialRender) => {{\n"
+    ));
+    out.push_str(&format!("{inner}    if (isInitialRender) {{\n"));
+    out.push_str(&format!(
+        "{inner}        let componentCall = new {name}(this, {}, undefined, elmtId, () => {{ }}, {{ page: \"{page}\", line: {line}, col: {col} }});\n",
+        params.constructor
+    ));
+    out.push_str(&format!("{inner}        ViewPU.create(componentCall);\n"));
+    out.push_str(&format!("{inner}        let paramsLambda = () => {{\n"));
+    out.push_str(&format!("{inner}            return {};\n", params.lambda));
+    out.push_str(&format!("{inner}        }};\n"));
+    out.push_str(&format!(
+        "{inner}        componentCall.paramsGenerator_ = paramsLambda;\n"
+    ));
+    out.push_str(&format!("{inner}    }} else {{\n"));
+    out.push_str(&format!(
+        "{inner}        this.updateStateVarsOfChildByElmtId(elmtId, {});\n",
+        params.update
+    ));
+    out.push_str(&format!("{inner}    }}\n"));
+    out.push_str(&format!("{inner}}}, {{ name: \"{name}\" }});\n"));
+    out.push_str(&format!("{indent}}}\n"));
+}
+
+fn emit_reusable_custom_component_call(
+    name: &str,
+    arguments: &[Argument<'_>],
+    component_info: Option<&CustomComponentInfo>,
+    reuse_id: Option<String>,
     span: Span,
     source_text: &str,
     source_id: &str,
@@ -635,29 +757,237 @@ fn emit_custom_component_call(
     let body_line = out.bytes().filter(|&b| b == b'\n').count();
     push_span_hint(span_hints, body_line, indent.len(), span);
 
-    let params = if args.is_empty() { "{}" } else { args };
+    let params = custom_component_params(
+        arguments,
+        source_text,
+        component_info.map(|info| &info.update_props),
+    );
     let (line, col) = source_position(source_text, span.start);
     let page = component_page_path(source_id);
+    let reuse_id = reuse_id.unwrap_or_else(|| format!("'{name}'"));
+
     out.push_str(&format!(
         "{indent}this.observeComponentCreation2((elmtId, isInitialRender) => {{\n"
     ));
-    out.push_str(&format!("{indent}    if (isInitialRender) {{\n"));
+    out.push_str(&format!("{indent}    __Recycle__.create();\n"));
+    out.push_str(&format!("{indent}}}, __Recycle__);\n"));
+    out.push_str(&format!("{indent}{{\n"));
+    let inner = format!("{indent}    ");
     out.push_str(&format!(
-        "{indent}        let componentCall = new {name}(this, {params}, undefined, elmtId, () => {{ }}, {{ page: \"{page}\", line: {line}, col: {col} }});\n"
+        "{inner}this.observeRecycleComponentCreation({reuse_id}, (elmtId, isInitialRender, recycleNode = null) => {{\n"
     ));
-    out.push_str(&format!("{indent}        ViewPU.create(componentCall);\n"));
-    out.push_str(&format!("{indent}        let paramsLambda = () => {{\n"));
-    out.push_str(&format!("{indent}            return {params};\n"));
-    out.push_str(&format!("{indent}        }};\n"));
     out.push_str(&format!(
-        "{indent}        componentCall.paramsGenerator_ = paramsLambda;\n"
+        "{inner}    ViewStackProcessor.StartGetAccessRecordingFor(elmtId);\n"
     ));
-    out.push_str(&format!("{indent}    }} else {{\n"));
+    out.push_str(&format!("{inner}    if (isInitialRender) {{\n"));
     out.push_str(&format!(
-        "{indent}        this.updateStateVarsOfChildByElmtId(elmtId, {params});\n"
+        "{inner}        let componentCall = recycleNode ? recycleNode : new {name}(this, {}, undefined, elmtId, () => {{ }}, {{ page: \"{page}\", line: {line}, col: {col} }});\n",
+        params.constructor
     ));
-    out.push_str(&format!("{indent}    }}\n"));
-    out.push_str(&format!("{indent}}}, {{ name: \"{name}\" }});\n"));
+    out.push_str(&format!(
+        "{inner}        ViewPU.createRecycle(componentCall, recycleNode !== null, {reuse_id}, () => {{\n"
+    ));
+    out.push_str(&format!(
+        "{inner}            if (recycleNode && typeof recycleNode.aboutToReuseInternal === \"function\") {{\n"
+    ));
+    out.push_str(&format!(
+        "{inner}                recycleNode.aboutToReuseInternal();\n"
+    ));
+    out.push_str(&format!("{inner}            }} else {{\n"));
+    out.push_str(&format!(
+        "{inner}                if (recycleNode.aboutToReuse && typeof recycleNode.aboutToReuse === \"function\") {{\n"
+    ));
+    out.push_str(&format!(
+        "{inner}                    recycleNode.aboutToReuse({});\n",
+        params.lambda
+    ));
+    out.push_str(&format!("{inner}                }}\n"));
+    out.push_str(&format!("{inner}                recycleNode.rerender();\n"));
+    out.push_str(&format!("{inner}            }}\n"));
+    out.push_str(&format!("{inner}        }});\n"));
+    out.push_str(&format!("{inner}        let paramsLambda = () => {{\n"));
+    out.push_str(&format!("{inner}            return {};\n", params.lambda));
+    out.push_str(&format!("{inner}        }};\n"));
+    out.push_str(&format!(
+        "{inner}        componentCall.paramsGenerator_ = paramsLambda;\n"
+    ));
+    out.push_str(&format!("{inner}    }} else {{\n"));
+    out.push_str(&format!(
+        "{inner}        this.updateStateVarsOfChildByElmtId(elmtId, {});\n",
+        params.update
+    ));
+    out.push_str(&format!("{inner}    }}\n"));
+    out.push_str(&format!(
+        "{inner}    ViewStackProcessor.StopGetAccessRecording();\n"
+    ));
+    out.push_str(&format!("{inner}}});\n"));
+    out.push_str(&format!("{indent}}}\n"));
+    out.push_str(&format!("{indent}__Recycle__.pop();\n"));
+}
+
+fn custom_reuse_id_from_leaf_attrs(attrs: &[(String, String)]) -> Option<String> {
+    attrs
+        .iter()
+        .find(|(name, _)| name == "reuseId")
+        .map(|(_, args)| args.trim().to_string())
+}
+
+fn custom_reuse_id_from_component_attrs(
+    component: &ArkUIComponentExpression<'_>,
+    source_text: &str,
+) -> Option<String> {
+    component.chain_expressions.iter().find_map(|chain| {
+        let name = chain_name(chain).ok()?;
+        if name == "reuseId" {
+            Some(
+                raw_arguments_text(&chain.arguments, source_text)
+                    .trim()
+                    .to_string(),
+            )
+        } else {
+            None
+        }
+    })
+}
+
+struct CustomComponentParams {
+    constructor: String,
+    lambda: String,
+    update: String,
+}
+
+fn custom_component_params(
+    arguments: &[Argument<'_>],
+    source_text: &str,
+    update_props: Option<&HashSet<String>>,
+) -> CustomComponentParams {
+    let Some(Argument::ObjectExpression(object)) = arguments.first() else {
+        let params = if arguments.is_empty() {
+            "{}".to_string()
+        } else {
+            raw_arguments_text(arguments, source_text)
+        };
+        return CustomComponentParams {
+            constructor: params.clone(),
+            lambda: params,
+            update: "{}".to_string(),
+        };
+    };
+
+    CustomComponentParams {
+        constructor: custom_component_object_text(
+            object,
+            source_text,
+            update_props,
+            ParamMode::Ctor,
+        ),
+        lambda: custom_component_object_text(object, source_text, update_props, ParamMode::Lambda),
+        update: custom_component_object_text(object, source_text, update_props, ParamMode::Update),
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ParamMode {
+    Ctor,
+    Lambda,
+    Update,
+}
+
+fn custom_component_object_text(
+    object: &ObjectExpression<'_>,
+    source_text: &str,
+    update_props: Option<&HashSet<String>>,
+    mode: ParamMode,
+) -> String {
+    let properties = object
+        .properties
+        .iter()
+        .filter_map(|property| {
+            custom_component_property_text(property, source_text, update_props, mode)
+        })
+        .collect::<Vec<_>>();
+    if properties.is_empty() {
+        "{}".to_string()
+    } else {
+        format!("{{\n{}\n      }}", properties.join(",\n"))
+    }
+}
+
+fn custom_component_property_text(
+    property: &ObjectPropertyKind<'_>,
+    source_text: &str,
+    update_props: Option<&HashSet<String>>,
+    mode: ParamMode,
+) -> Option<String> {
+    match property {
+        ObjectPropertyKind::ObjectProperty(property) => {
+            let key_name = property_key_name(&property.key);
+            if mode == ParamMode::Update
+                && !key_name.is_some_and(|name| {
+                    update_props.is_some_and(|props| props.contains(name.as_str()))
+                })
+            {
+                return None;
+            }
+            let key = span_text(&property.key, source_text).trim().to_string();
+            let value = custom_component_value_text(&property.value, source_text, mode);
+            Some(format!("        {key}: {value}"))
+        }
+        ObjectPropertyKind::SpreadProperty(spread) => {
+            if mode == ParamMode::Update {
+                None
+            } else {
+                Some(format!(
+                    "        {}",
+                    span_text(spread.as_ref(), source_text).trim()
+                ))
+            }
+        }
+    }
+}
+
+fn property_key_name(key: &PropertyKey<'_>) -> Option<String> {
+    match key {
+        PropertyKey::StaticIdentifier(identifier) => Some(identifier.name.to_string()),
+        PropertyKey::StringLiteral(literal) => Some(literal.value.to_string()),
+        _ => None,
+    }
+}
+
+fn custom_component_value_text(
+    value: &Expression<'_>,
+    source_text: &str,
+    mode: ParamMode,
+) -> String {
+    if let Some(name) = dollar_reference_name(value) {
+        return match mode {
+            ParamMode::Ctor => format!("this.__{name}"),
+            ParamMode::Lambda => format!("this.{name}"),
+            ParamMode::Update => span_text(value, source_text).trim().to_string(),
+        };
+    }
+    span_text(value, source_text).trim().to_string()
+}
+
+fn dollar_reference_name(value: &Expression<'_>) -> Option<String> {
+    match value {
+        Expression::Identifier(identifier) => identifier
+            .name
+            .as_str()
+            .strip_prefix('$')
+            .map(str::to_string),
+        Expression::StaticMemberExpression(member)
+            if matches!(&member.object, Expression::ThisExpression(_)) =>
+        {
+            member
+                .property
+                .name
+                .as_str()
+                .strip_prefix('$')
+                .map(str::to_string)
+        }
+        _ => None,
+    }
 }
 
 fn is_lazy_list_item(component: &ArkUIComponentExpression<'_>, source_text: &str) -> bool {
@@ -673,6 +1003,7 @@ fn lower_lazy_list_item(
     source_id: &str,
     custom_components: &HashSet<String>,
     builder_methods: &HashSet<String>,
+    custom_component_update_props: &CustomComponentUpdateProps,
     component_metadata: &ComponentMetadata,
     indent: &str,
     out: &mut String,
@@ -726,6 +1057,7 @@ fn lower_lazy_list_item(
                     source_id,
                     custom_components,
                     builder_methods,
+                    custom_component_update_props,
                     component_metadata,
                     &format!("{inner}        "),
                     out,
@@ -739,6 +1071,7 @@ fn lower_lazy_list_item(
                     source_id,
                     custom_components,
                     builder_methods,
+                    custom_component_update_props,
                     component_metadata,
                     &format!("{inner}        "),
                     out,
@@ -752,6 +1085,7 @@ fn lower_lazy_list_item(
                     source_id,
                     custom_components,
                     builder_methods,
+                    custom_component_update_props,
                     component_metadata,
                     &format!("{inner}        "),
                     out,
@@ -776,6 +1110,7 @@ fn lower_for_each(
     source_id: &str,
     custom_components: &HashSet<String>,
     builder_methods: &HashSet<String>,
+    custom_component_update_props: &CustomComponentUpdateProps,
     component_metadata: &ComponentMetadata,
     indent: &str,
     out: &mut String,
@@ -821,6 +1156,7 @@ fn lower_for_each(
         source_id,
         custom_components,
         builder_methods,
+        custom_component_update_props,
         component_metadata,
         &format!("{indent}        "),
         out,
@@ -860,6 +1196,7 @@ fn lower_lazy_for_each(
     source_id: &str,
     custom_components: &HashSet<String>,
     builder_methods: &HashSet<String>,
+    custom_component_update_props: &CustomComponentUpdateProps,
     component_metadata: &ComponentMetadata,
     indent: &str,
     out: &mut String,
@@ -886,6 +1223,7 @@ fn lower_lazy_for_each(
         source_id,
         custom_components,
         builder_methods,
+        custom_component_update_props,
         component_metadata,
         &format!("{indent}    "),
         out,
@@ -916,6 +1254,7 @@ fn lower_lazy_arrow_body(
     source_id: &str,
     custom_components: &HashSet<String>,
     builder_methods: &HashSet<String>,
+    custom_component_update_props: &CustomComponentUpdateProps,
     component_metadata: &ComponentMetadata,
     indent: &str,
     out: &mut String,
@@ -932,6 +1271,7 @@ fn lower_lazy_arrow_body(
             source_id,
             custom_components,
             builder_methods,
+            custom_component_update_props,
             component_metadata,
             indent,
             out,
@@ -1335,6 +1675,7 @@ mod tests {
             "",
             &HashSet::new(),
             &HashSet::new(),
+            &CustomComponentUpdateProps::new(),
             &test_component_metadata(),
         )
         .map(|(code, _)| code)

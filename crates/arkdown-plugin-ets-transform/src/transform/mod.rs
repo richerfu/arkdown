@@ -7,7 +7,7 @@ pub mod entry;
 pub mod global_rewrite;
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
 };
 
@@ -24,7 +24,10 @@ use oxc_span::{GetSpan, SourceType, Span};
 
 use crate::error::EtsTransformError;
 use crate::source_map::{build_ets_source_map, offset_to_line_col, MapEntry};
-use crate::transform::build_fn::{lower_build_body_with_custom_components, lower_styles_body};
+use crate::transform::build_fn::{
+    lower_build_body_with_custom_components, lower_styles_body, CustomComponentInfo,
+    CustomComponentUpdateProps,
+};
 use crate::transform::component::{
     generate_view_pu_class, BuilderMethodInfo, ComponentInfo, ParamField, RegularField, StateField,
     StylesMethodInfo,
@@ -124,14 +127,17 @@ pub fn transform_ets_with_options(
     let simple_type_context =
         SimpleTypeContext::from_program(&parsed.program, &source.id.id, options);
     let mut custom_components = HashSet::new();
+    let mut custom_component_update_props = CustomComponentUpdateProps::new();
     for statement in &parsed.program.body {
         collect_custom_component_names(statement, &mut custom_components);
+        collect_local_component_update_props(statement, &mut custom_component_update_props);
     }
     collect_imported_component_names(
         &parsed.program,
         &source.id.id,
         options,
         &mut custom_components,
+        &mut custom_component_update_props,
     );
     let builder_functions = collect_builder_function_names(&parsed.program, &source.id.id, options);
 
@@ -148,6 +154,7 @@ pub fn transform_ets_with_options(
             options,
             &simple_type_context,
             &custom_components,
+            &custom_component_update_props,
             &builder_functions,
         )? {
             let start = component_replacement_start(statement, content);
@@ -160,6 +167,7 @@ pub fn transform_ets_with_options(
             &source.id.id,
             options,
             &custom_components,
+            &custom_component_update_props,
             &builder_functions,
         )? {
             out.push_str(&content[last_end..start]);
@@ -474,6 +482,7 @@ fn component_from_statement(
     options: &TransformOptions,
     simple_type_context: &SimpleTypeContext,
     custom_components: &HashSet<String>,
+    custom_component_update_props: &CustomComponentUpdateProps,
     builder_functions: &HashSet<String>,
 ) -> Result<Option<ComponentInfo>, EtsTransformError> {
     match statement {
@@ -486,6 +495,7 @@ fn component_from_statement(
             false,
             simple_type_context,
             custom_components,
+            custom_component_update_props,
             builder_functions,
         ),
         Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref() {
@@ -498,6 +508,7 @@ fn component_from_statement(
                 false,
                 simple_type_context,
                 custom_components,
+                custom_component_update_props,
                 builder_functions,
             ),
             _ => Ok(None),
@@ -512,6 +523,7 @@ fn component_from_statement(
                 true,
                 simple_type_context,
                 custom_components,
+                custom_component_update_props,
                 builder_functions,
             ),
             _ => Ok(None),
@@ -526,6 +538,7 @@ fn transform_non_component_statement(
     id: &str,
     options: &TransformOptions,
     custom_components: &HashSet<String>,
+    custom_component_update_props: &CustomComponentUpdateProps,
     builder_functions: &HashSet<String>,
 ) -> Result<Option<(usize, String)>, EtsTransformError> {
     let replacement = match statement {
@@ -546,6 +559,7 @@ fn transform_non_component_statement(
             source_text,
             id,
             custom_components,
+            custom_component_update_props,
             builder_functions,
             &options.component_metadata,
             false,
@@ -558,6 +572,7 @@ fn transform_non_component_statement(
                     source_text,
                     id,
                     custom_components,
+                    custom_component_update_props,
                     builder_functions,
                     &options.component_metadata,
                     true,
@@ -625,6 +640,7 @@ fn transform_decorated_function(
     source_text: &str,
     id: &str,
     custom_components: &HashSet<String>,
+    custom_component_update_props: &CustomComponentUpdateProps,
     builder_functions: &HashSet<String>,
     component_metadata: &ComponentMetadata,
     exported: bool,
@@ -692,6 +708,7 @@ fn transform_decorated_function(
                 id,
                 custom_components,
                 builder_functions,
+                custom_component_update_props,
                 component_metadata,
             )
             .map_err(|err| EtsTransformError::Fatal {
@@ -825,11 +842,38 @@ fn collect_custom_component_names(statement: &Statement<'_>, names: &mut HashSet
     }
 }
 
+fn collect_local_component_update_props(
+    statement: &Statement<'_>,
+    update_props: &mut CustomComponentUpdateProps,
+) {
+    match statement {
+        Statement::StructStatement(statement) if is_component_struct(statement) => {
+            update_props.insert(statement.id.name.to_string(), component_info(statement));
+        }
+        Statement::ExportNamedDeclaration(export) => {
+            if let Some(Declaration::StructStatement(statement)) = export.declaration.as_ref() {
+                if is_component_struct(statement) {
+                    update_props.insert(statement.id.name.to_string(), component_info(statement));
+                }
+            }
+        }
+        Statement::ExportDefaultDeclaration(export) => {
+            if let ExportDefaultDeclarationKind::StructStatement(statement) = &export.declaration {
+                if is_component_struct(statement) {
+                    update_props.insert(statement.id.name.to_string(), component_info(statement));
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 fn collect_imported_component_names(
     program: &Program<'_>,
     id: &str,
     options: &TransformOptions,
     names: &mut HashSet<String>,
+    update_props: &mut CustomComponentUpdateProps,
 ) {
     let importer = Path::new(id);
     for statement in &program.body {
@@ -851,16 +895,24 @@ fn collect_imported_component_names(
             match specifier {
                 ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
                     let imported = module_export_name_value(&specifier.imported);
-                    if (imported == "default" && target_components.has_default)
-                        || target_components.named.contains(&imported)
-                    {
-                        names.insert(specifier.local.name.to_string());
+                    let local = specifier.local.name.to_string();
+                    if imported == "default" && target_components.has_default {
+                        names.insert(local.clone());
+                        update_props.insert(local, target_components.default_info.clone());
+                    } else if let Some(props) = target_components.named.get(&imported) {
+                        names.insert(local.clone());
+                        update_props.insert(local, props.clone());
                     }
                 }
                 ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
-                    if target_components.has_default || target_components.named.contains("default")
-                    {
-                        names.insert(specifier.local.name.to_string());
+                    if target_components.has_default {
+                        let local = specifier.local.name.to_string();
+                        names.insert(local.clone());
+                        update_props.insert(local, target_components.default_info.clone());
+                    } else if let Some(props) = target_components.named.get("default") {
+                        let local = specifier.local.name.to_string();
+                        names.insert(local.clone());
+                        update_props.insert(local, props.clone());
                     }
                 }
                 ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => {}
@@ -1212,6 +1264,7 @@ fn component_from_struct(
     is_default_export: bool,
     simple_type_context: &SimpleTypeContext,
     custom_components: &HashSet<String>,
+    custom_component_update_props: &CustomComponentUpdateProps,
     builder_functions: &HashSet<String>,
 ) -> Result<Option<ComponentInfo>, EtsTransformError> {
     if !is_component_struct(statement) {
@@ -1339,6 +1392,7 @@ fn component_from_struct(
                     id,
                     custom_components,
                     &visible_builder_methods,
+                    custom_component_update_props,
                     &options.component_metadata,
                 )
                 .map_err(|err| EtsTransformError::Fatal {
@@ -1368,6 +1422,7 @@ fn component_from_struct(
                     id,
                     custom_components,
                     &visible_builder_methods,
+                    custom_component_update_props,
                     &options.component_metadata,
                 )
                 .map_err(|err| EtsTransformError::Fatal {
@@ -1459,6 +1514,36 @@ fn is_component_struct(statement: &StructStatement<'_>) -> bool {
             "Component" | "ComponentV2" | "CustomDialog"
         )
     })
+}
+
+fn component_update_prop_names(statement: &StructStatement<'_>) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for element in &statement.body.body {
+        let StructElement::PropertyDefinition(property) = element else {
+            continue;
+        };
+        if !property
+            .decorators
+            .iter()
+            .any(|decorator| matches!(decorator_name(decorator), "Prop" | "ObjectLink"))
+        {
+            continue;
+        }
+        if let Some(name) = property.key.static_name() {
+            names.insert(name.into_owned());
+        }
+    }
+    names
+}
+
+fn component_info(statement: &StructStatement<'_>) -> CustomComponentInfo {
+    CustomComponentInfo {
+        update_props: component_update_prop_names(statement),
+        reusable: statement
+            .decorators
+            .iter()
+            .any(|decorator| decorator_name(decorator) == "Reusable"),
+    }
 }
 
 fn collect_struct_builder_method_names(statement: &StructStatement<'_>) -> HashSet<String> {
@@ -1644,14 +1729,17 @@ pub fn transform_ets_viewpu_with_source_map(
     let simple_type_context =
         SimpleTypeContext::from_program(&parsed.program, &source.id.id, options);
     let mut custom_components = HashSet::new();
+    let mut custom_component_update_props = CustomComponentUpdateProps::new();
     for statement in &parsed.program.body {
         collect_custom_component_names(statement, &mut custom_components);
+        collect_local_component_update_props(statement, &mut custom_component_update_props);
     }
     collect_imported_component_names(
         &parsed.program,
         &source.id.id,
         options,
         &mut custom_components,
+        &mut custom_component_update_props,
     );
     let builder_functions = collect_builder_function_names(&parsed.program, &source.id.id, options);
 
@@ -1679,6 +1767,7 @@ pub fn transform_ets_viewpu_with_source_map(
             options,
             &simple_type_context,
             &custom_components,
+            &custom_component_update_props,
             &builder_functions,
         )? {
             let start = component_replacement_start(statement, content);
@@ -1706,6 +1795,7 @@ pub fn transform_ets_viewpu_with_source_map(
             &source.id.id,
             options,
             &custom_components,
+            &custom_component_update_props,
             &builder_functions,
         )? {
             out.push_str(&content[last_end..start]);
@@ -1790,6 +1880,7 @@ fn component_with_struct_from_statement<'a>(
     options: &TransformOptions,
     simple_type_context: &SimpleTypeContext,
     custom_components: &HashSet<String>,
+    custom_component_update_props: &CustomComponentUpdateProps,
     builder_functions: &HashSet<String>,
 ) -> Result<Option<(ComponentInfo, &'a StructStatement<'a>)>, EtsTransformError> {
     match statement {
@@ -1802,6 +1893,7 @@ fn component_with_struct_from_statement<'a>(
             false,
             simple_type_context,
             custom_components,
+            custom_component_update_props,
             builder_functions,
         )?
         .map(|component| (component, statement.as_ref()))),
@@ -1815,6 +1907,7 @@ fn component_with_struct_from_statement<'a>(
                 false,
                 simple_type_context,
                 custom_components,
+                custom_component_update_props,
                 builder_functions,
             )?
             .map(|component| (component, statement.as_ref()))),
@@ -1830,6 +1923,7 @@ fn component_with_struct_from_statement<'a>(
                 true,
                 simple_type_context,
                 custom_components,
+                custom_component_update_props,
                 builder_functions,
             )?
             .map(|component| (component, statement.as_ref()))),
@@ -2339,8 +2433,9 @@ fn exported_builder_function_names(path: &Path, visited: &mut HashSet<PathBuf>) 
 
 #[derive(Default)]
 struct ExportedComponentNames {
-    named: HashSet<String>,
+    named: HashMap<String, CustomComponentInfo>,
     has_default: bool,
+    default_info: CustomComponentInfo,
 }
 
 impl ExportedComponentNames {
@@ -2350,7 +2445,10 @@ impl ExportedComponentNames {
 
     fn extend(&mut self, other: ExportedComponentNames) {
         self.named.extend(other.named);
-        self.has_default |= other.has_default;
+        if other.has_default {
+            self.has_default = true;
+            self.default_info = other.default_info;
+        }
     }
 }
 
@@ -2370,7 +2468,7 @@ fn exported_component_names(path: &Path, visited: &mut HashSet<PathBuf>) -> Expo
         return ExportedComponentNames::default();
     }
 
-    let mut local_components = HashSet::new();
+    let mut local_components = CustomComponentUpdateProps::new();
     for statement in &parsed.program.body {
         collect_local_component_exports(statement, &mut local_components);
     }
@@ -2381,7 +2479,9 @@ fn exported_component_names(path: &Path, visited: &mut HashSet<PathBuf>) -> Expo
             Statement::ExportNamedDeclaration(export) => {
                 if let Some(Declaration::StructStatement(statement)) = export.declaration.as_ref() {
                     if is_component_struct(statement) {
-                        exports.named.insert(statement.id.name.to_string());
+                        exports
+                            .named
+                            .insert(statement.id.name.to_string(), component_info(statement));
                     }
                     continue;
                 }
@@ -2396,22 +2496,28 @@ fn exported_component_names(path: &Path, visited: &mut HashSet<PathBuf>) -> Expo
                     for specifier in &export.specifiers {
                         let local = module_export_name_value(&specifier.local);
                         let exported = module_export_name_value(&specifier.exported);
-                        let matches_target = (local == "default" && target_components.has_default)
-                            || target_components.named.contains(&local);
-                        if exported == "default" && matches_target {
+                        let props = if local == "default" && target_components.has_default {
+                            Some(&target_components.default_info)
+                        } else {
+                            target_components.named.get(&local)
+                        };
+                        if exported == "default" && props.is_some() {
                             exports.has_default = true;
-                        } else if matches_target {
-                            exports.named.insert(exported);
+                            exports.default_info = props.cloned().unwrap_or_default();
+                        } else if let Some(props) = props {
+                            exports.named.insert(exported, props.clone());
                         }
                     }
                 } else {
                     for specifier in &export.specifiers {
                         let local = module_export_name_value(&specifier.local);
                         let exported = module_export_name_value(&specifier.exported);
-                        if exported == "default" && local_components.contains(&local) {
+                        if exported == "default" && local_components.contains_key(&local) {
                             exports.has_default = true;
-                        } else if local_components.contains(&local) {
-                            exports.named.insert(exported);
+                            exports.default_info =
+                                local_components.get(&local).cloned().unwrap_or_default();
+                        } else if let Some(props) = local_components.get(&local) {
+                            exports.named.insert(exported, props.clone());
                         }
                     }
                 }
@@ -2422,6 +2528,7 @@ fn exported_component_names(path: &Path, visited: &mut HashSet<PathBuf>) -> Expo
                 {
                     if is_component_struct(statement) {
                         exports.has_default = true;
+                        exports.default_info = component_info(statement);
                     }
                 }
             }
@@ -2440,22 +2547,25 @@ fn exported_component_names(path: &Path, visited: &mut HashSet<PathBuf>) -> Expo
     exports
 }
 
-fn collect_local_component_exports(statement: &Statement<'_>, names: &mut HashSet<String>) {
+fn collect_local_component_exports(
+    statement: &Statement<'_>,
+    names: &mut CustomComponentUpdateProps,
+) {
     match statement {
         Statement::StructStatement(statement) if is_component_struct(statement) => {
-            names.insert(statement.id.name.to_string());
+            names.insert(statement.id.name.to_string(), component_info(statement));
         }
         Statement::ExportNamedDeclaration(export) => {
             if let Some(Declaration::StructStatement(statement)) = export.declaration.as_ref() {
                 if is_component_struct(statement) {
-                    names.insert(statement.id.name.to_string());
+                    names.insert(statement.id.name.to_string(), component_info(statement));
                 }
             }
         }
         Statement::ExportDefaultDeclaration(export) => {
             if let ExportDefaultDeclarationKind::StructStatement(statement) = &export.declaration {
                 if is_component_struct(statement) {
-                    names.insert(statement.id.name.to_string());
+                    names.insert(statement.id.name.to_string(), component_info(statement));
                 }
             }
         }
@@ -3145,7 +3255,9 @@ struct Parent {
         ))
         .unwrap();
         assert!(
-            result.contains("let componentCall = new Child(this, { itemData: this.value }, undefined, elmtId, () => { }"),
+            result.contains("let componentCall = new Child(this, {")
+                && result.contains("itemData: this.value")
+                && result.contains("undefined, elmtId, () => { }"),
             "expected custom component constructor path, got:\n{}",
             result
         );
@@ -3160,14 +3272,56 @@ struct Parent {
             result
         );
         assert!(
-            result
-                .contains("this.updateStateVarsOfChildByElmtId(elmtId, { itemData: this.value });"),
+            result.contains("this.updateStateVarsOfChildByElmtId(elmtId, {")
+                && result.contains("itemData: this.value"),
             "expected child updateStateVars branch, got:\n{}",
             result
         );
         assert!(
             !result.contains("Child.create"),
             "custom component must not lower to built-in create/pop path, got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_reusable_component_reuseid_uses_recycle_creation() {
+        let src = r#"
+@Reusable
+@Component
+struct Child {
+  @State itemData: string = "";
+  build() {}
+}
+
+@Component
+struct Parent {
+  @State value: string = "a";
+  build() {
+    Child({ itemData: this.value }).reuseId('child')
+  }
+}
+"#;
+        let result = transform_ets(&make_source(
+            "products/phone/src/main/ets/pages/Parent.ets",
+            src,
+        ))
+        .unwrap();
+        assert!(
+            result.contains("this.observeRecycleComponentCreation('child'")
+                && result
+                    .contains("ViewPU.createRecycle(componentCall, recycleNode !== null, 'child'")
+                && result.contains("new Child(this, {")
+                && result.contains("itemData: this.value")
+                && result.contains("recycleNode.aboutToReuse({"),
+            "expected @Reusable custom component recycle path, got:\n{}",
+            result
+        );
+        assert!(
+            !result.contains("new Child(this, 'child'")
+                && !result.contains("return 'child'")
+                && !result.contains("Child.create"),
+            "reuseId must not replace constructor params or lower as a built-in component, got:\n{}",
             result
         );
     }
