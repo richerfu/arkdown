@@ -5,6 +5,7 @@ use oxc_ast::ast::{
 use oxc_span::Span;
 
 use crate::transform::source_emit::original_node_text;
+use crate::transform::viewpu_emit::ViewpuWriter;
 
 use super::raw_object::expression_text_with_raw_object_call_args;
 use super::{
@@ -48,37 +49,95 @@ pub(super) fn emit_custom_component_call(
     let params = custom_component_params(arguments, source_text, component_info, &context);
     let (line, col) = source_position(source_text, span.start);
     let page = component_page_path(source_id);
-    out.push_str(&format!("{indent}{{\n"));
+    let mut writer = ViewpuWriter::new(out);
+    writer.line(indent, format_args!("{{"));
     let inner = format!("{indent}    ");
     let inner2 = format!("{inner}    ");
     let inner3 = format!("{inner}        ");
     let inner4 = format!("{inner}            ");
-    out.push_str(&format!(
-        "{inner}{}.observeComponentCreation2((elmtId, isInitialRender) => {{\n",
-        context.view_context()
-    ));
-    out.push_str(&format!("{inner2}if (isInitialRender) {{\n"));
-    out.push_str(&format!(
-        "{inner3}let componentCall = new {name}({}, {}, undefined, elmtId, () => {{ }}, {{ page: \"{page}\", line: {line}, col: {col} }});\n",
-        context.view_context(),
-        params.constructor
-    ));
-    out.push_str(&format!("{inner3}ViewPU.create(componentCall);\n"));
-    out.push_str(&format!("{inner3}let paramsLambda = () => {{\n"));
-    out.push_str(&format!("{inner4}return {};\n", params.lambda));
-    out.push_str(&format!("{inner3}}};\n"));
-    out.push_str(&format!(
-        "{inner3}componentCall.paramsGenerator_ = paramsLambda;\n"
-    ));
-    out.push_str(&format!("{inner2}}} else {{\n"));
-    out.push_str(&format!(
-        "{inner3}{}.updateStateVarsOfChildByElmtId(elmtId, {});\n",
-        context.view_context(),
-        params.update
-    ));
-    out.push_str(&format!("{inner2}}}\n"));
-    out.push_str(&format!("{inner}}}, {{ name: \"{name}\" }});\n"));
-    out.push_str(&format!("{indent}}}\n"));
+    writer.line(
+        &inner,
+        format_args!(
+            "{}.observeComponentCreation2((elmtId, isInitialRender) => {{",
+            context.view_context()
+        ),
+    );
+    writer.line(&inner2, format_args!("if (isInitialRender) {{"));
+    writer.line(
+        &inner3,
+        format_args!(
+            "let componentCall = new {name}({}, {}, undefined, elmtId, () => {{ }}, {{ page: \"{page}\", line: {line}, col: {col} }});",
+            context.view_context(),
+            params.constructor
+        ),
+    );
+    writer.line(&inner3, format_args!("ViewPU.create(componentCall);"));
+    writer.line(&inner3, format_args!("let paramsLambda = () => {{"));
+    writer.line(&inner4, format_args!("return {};", params.lambda));
+    writer.line(&inner3, format_args!("}};"));
+    writer.line(
+        &inner3,
+        format_args!("componentCall.paramsGenerator_ = paramsLambda;"),
+    );
+    writer.line(&inner2, format_args!("}} else {{"));
+    writer.line(
+        &inner3,
+        format_args!(
+            "{}.updateStateVarsOfChildByElmtId(elmtId, {});",
+            context.view_context(),
+            params.update
+        ),
+    );
+    writer.line(&inner2, format_args!("}}"));
+    writer.line(&inner, format_args!("}}, {{ name: \"{name}\" }});"));
+    writer.line(indent, format_args!("}}"));
+}
+
+struct CustomComponentWriter<'a, 'b> {
+    writer: ViewpuWriter<'a>,
+    indent: &'b str,
+}
+
+impl<'a, 'b> CustomComponentWriter<'a, 'b> {
+    fn new(out: &'a mut String, indent: &'b str) -> Self {
+        Self {
+            writer: ViewpuWriter::new(out),
+            indent,
+        }
+    }
+
+    fn line(&mut self, indent: &str, args: std::fmt::Arguments<'_>) {
+        self.writer.line(indent, args);
+    }
+
+    fn base(&mut self, args: std::fmt::Arguments<'_>) {
+        self.writer.line(self.indent, args);
+    }
+}
+
+struct CustomComponentIndent {
+    inner: String,
+    inner2: String,
+    inner3: String,
+    inner4: String,
+    inner5: String,
+}
+
+impl CustomComponentIndent {
+    fn new(indent: &str) -> Self {
+        let inner = format!("{indent}    ");
+        let inner2 = format!("{inner}    ");
+        let inner3 = format!("{inner}        ");
+        let inner4 = format!("{inner}            ");
+        let inner5 = format!("{inner}                ");
+        Self {
+            inner,
+            inner2,
+            inner3,
+            inner4,
+            inner5,
+        }
+    }
 }
 
 fn emit_reusable_custom_component_call(
@@ -101,71 +160,91 @@ fn emit_reusable_custom_component_call(
     let (line, col) = source_position(source_text, span.start);
     let page = component_page_path(source_id);
     let reuse_id = reuse_id.unwrap_or_else(|| format!("'{name}'"));
+    let mut writer = CustomComponentWriter::new(out, indent);
+    let i = CustomComponentIndent::new(indent);
 
-    out.push_str(&format!(
-        "{indent}{}.observeComponentCreation2((elmtId, isInitialRender) => {{\n",
+    writer.base(format_args!(
+        "{}.observeComponentCreation2((elmtId, isInitialRender) => {{",
         context.view_context()
     ));
-    out.push_str(&format!("{indent}    __Recycle__.create();\n"));
-    out.push_str(&format!("{indent}}}, __Recycle__);\n"));
-    out.push_str(&format!("{indent}{{\n"));
-    let inner = format!("{indent}    ");
-    let inner2 = format!("{inner}    ");
-    let inner3 = format!("{inner}        ");
-    let inner4 = format!("{inner}            ");
-    let inner5 = format!("{inner}                ");
-    out.push_str(&format!(
-        "{inner}{}.observeRecycleComponentCreation({reuse_id}, (elmtId, isInitialRender, recycleNode = null) => {{\n",
-        context.view_context()
-    ));
-    out.push_str(&format!(
-        "{inner}    ViewStackProcessor.StartGetAccessRecordingFor(elmtId);\n"
-    ));
-    out.push_str(&format!("{inner2}if (isInitialRender) {{\n"));
-    out.push_str(&format!(
-        "{inner3}let componentCall = recycleNode ? recycleNode : new {name}({}, {}, undefined, elmtId, () => {{ }}, {{ page: \"{page}\", line: {line}, col: {col} }});\n",
-        context.view_context(),
-        params.constructor
-    ));
-    out.push_str(&format!(
-        "{inner3}ViewPU.createRecycle(componentCall, recycleNode !== null, {reuse_id}, () => {{\n"
-    ));
-    out.push_str(&format!(
-        "{inner4}if (recycleNode && typeof recycleNode.aboutToReuseInternal === \"function\") {{\n"
-    ));
-    out.push_str(&format!("{inner5}recycleNode.aboutToReuseInternal();\n"));
-    out.push_str(&format!("{inner4}}} else {{\n"));
-    out.push_str(&format!(
-        "{inner5}if (recycleNode.aboutToReuse && typeof recycleNode.aboutToReuse === \"function\") {{\n"
-    ));
-    out.push_str(&format!(
-        "{}recycleNode.aboutToReuse({});\n",
-        format!("{inner}                    "),
-        params.lambda
-    ));
-    out.push_str(&format!("{inner5}}}\n"));
-    out.push_str(&format!("{inner5}recycleNode.rerender();\n"));
-    out.push_str(&format!("{inner4}}}\n"));
-    out.push_str(&format!("{inner3}}});\n"));
-    out.push_str(&format!("{inner3}let paramsLambda = () => {{\n"));
-    out.push_str(&format!("{inner4}return {};\n", params.lambda));
-    out.push_str(&format!("{inner3}}};\n"));
-    out.push_str(&format!(
-        "{inner3}componentCall.paramsGenerator_ = paramsLambda;\n"
-    ));
-    out.push_str(&format!("{inner2}}} else {{\n"));
-    out.push_str(&format!(
-        "{inner3}{}.updateStateVarsOfChildByElmtId(elmtId, {});\n",
-        context.view_context(),
-        params.update
-    ));
-    out.push_str(&format!("{inner2}}}\n"));
-    out.push_str(&format!(
-        "{inner}    ViewStackProcessor.StopGetAccessRecording();\n"
-    ));
-    out.push_str(&format!("{inner}}});\n"));
-    out.push_str(&format!("{indent}}}\n"));
-    out.push_str(&format!("{indent}__Recycle__.pop();\n"));
+    writer.base(format_args!("    __Recycle__.create();"));
+    writer.base(format_args!("}}, __Recycle__);"));
+    writer.base(format_args!("{{"));
+    writer.line(
+        &i.inner,
+        format_args!(
+            "{}.observeRecycleComponentCreation({reuse_id}, (elmtId, isInitialRender, recycleNode = null) => {{",
+            context.view_context()
+        ),
+    );
+    writer.line(
+        &i.inner,
+        format_args!("    ViewStackProcessor.StartGetAccessRecordingFor(elmtId);"),
+    );
+    writer.line(&i.inner2, format_args!("if (isInitialRender) {{"));
+    writer.line(
+        &i.inner3,
+        format_args!(
+            "let componentCall = recycleNode ? recycleNode : new {name}({}, {}, undefined, elmtId, () => {{ }}, {{ page: \"{page}\", line: {line}, col: {col} }});",
+            context.view_context(),
+            params.constructor
+        ),
+    );
+    writer.line(
+        &i.inner3,
+        format_args!(
+            "ViewPU.createRecycle(componentCall, recycleNode !== null, {reuse_id}, () => {{"
+        ),
+    );
+    writer.line(
+        &i.inner4,
+        format_args!(
+            "if (recycleNode && typeof recycleNode.aboutToReuseInternal === \"function\") {{"
+        ),
+    );
+    writer.line(
+        &i.inner5,
+        format_args!("recycleNode.aboutToReuseInternal();"),
+    );
+    writer.line(&i.inner4, format_args!("}} else {{"));
+    writer.line(
+        &i.inner5,
+        format_args!(
+            "if (recycleNode.aboutToReuse && typeof recycleNode.aboutToReuse === \"function\") {{"
+        ),
+    );
+    writer.line(
+        &format!("{}                    ", i.inner),
+        format_args!("recycleNode.aboutToReuse({});", params.lambda),
+    );
+    writer.line(&i.inner5, format_args!("}}"));
+    writer.line(&i.inner5, format_args!("recycleNode.rerender();"));
+    writer.line(&i.inner4, format_args!("}}"));
+    writer.line(&i.inner3, format_args!("}});"));
+    writer.line(&i.inner3, format_args!("let paramsLambda = () => {{"));
+    writer.line(&i.inner4, format_args!("return {};", params.lambda));
+    writer.line(&i.inner3, format_args!("}};"));
+    writer.line(
+        &i.inner3,
+        format_args!("componentCall.paramsGenerator_ = paramsLambda;"),
+    );
+    writer.line(&i.inner2, format_args!("}} else {{"));
+    writer.line(
+        &i.inner3,
+        format_args!(
+            "{}.updateStateVarsOfChildByElmtId(elmtId, {});",
+            context.view_context(),
+            params.update
+        ),
+    );
+    writer.line(&i.inner2, format_args!("}}"));
+    writer.line(
+        &i.inner,
+        format_args!("    ViewStackProcessor.StopGetAccessRecording();"),
+    );
+    writer.line(&i.inner, format_args!("}});"));
+    writer.base(format_args!("}}"));
+    writer.base(format_args!("__Recycle__.pop();"));
 }
 
 pub(super) fn custom_reuse_id_from_leaf_attrs(attrs: &[(String, String, bool)]) -> Option<String> {
