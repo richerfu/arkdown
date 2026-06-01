@@ -62,7 +62,7 @@ Steps 3 and 4 run in parallel (resources and JS bundling are independent).
 
 ### Plugin Wiring (required in `build.rs`)
 
-The bundler must be constructed with exactly these 6 plugins in this order:
+The bundler must be constructed with these plugins in this order:
 
 ```rust
 let plugins: Vec<Arc<dyn ArkdownPlugin>> = vec![
@@ -71,12 +71,11 @@ let plugins: Vec<Arc<dyn ArkdownPlugin>> = vec![
     Arc::new(ModuleMetaPlugin::new(&config)),           // 3. OHOS metadata
     Arc::new(Json5Plugin::new()),                       // 4. JSON/JSON5 imports
     Arc::new(DuplicateCheckPlugin::new()),              // 5. filename uniqueness
-    Arc::new(ChunkWrapperPlugin::new(&config)),         // 6. IIFE wrap (last)
 ];
 ```
 
 Missing any plugin or ordering them differently will produce incorrect output or panics.
-`EtsTransformPlugin` must be first; `ChunkWrapperPlugin` must be last.
+`EtsTransformPlugin` must be first so ArkTS syntax is lowered before rolldown parses modules.
 
 ### `arkdown clean`
 

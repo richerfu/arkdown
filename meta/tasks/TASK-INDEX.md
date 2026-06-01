@@ -23,10 +23,9 @@ Each SPEC file contains three standard sections:
 | SPEC-003  | OHOS Module Resolver                    | `arkdown-resolver`               | SPEC-001           |
 | SPEC-004  | Module Loader + Plugin Pipeline         | `arkdown-loader`                 | SPEC-001, 003      |
 | SPEC-005  | Bundler Core (rolldown integration)     | `arkdown`                        | SPEC-001, 003, 004 |
-| SPEC-006  | Chunk Wrapper Plugin (IIFE)             | `arkdown-plugin-chunk-wrapper`   | SPEC-005           |
 | SPEC-007  | JSON5 Import Plugin                     | `arkdown-plugin-json5`           | SPEC-005           |
 | SPEC-008  | Duplicate Filename Check Plugin         | `arkdown-plugin-duplicate-check` | SPEC-005           |
-| SPEC-009  | ArkCompiler Bytecode Compiler (Rust)    | `arkdown-abc`                    | SPEC-005, 006      |
+| SPEC-009  | ArkCompiler Bytecode Compiler (Rust)    | `arkdown-abc`                    | SPEC-005           |
 | SPEC-010  | Profile Processor (module.json5)        | `arkdown-profile`                | SPEC-002           |
 | SPEC-011  | Resource Compiler (Rust, ports restool) | `arkdown-resource`               | SPEC-002           |
 | SPEC-012  | HAP/HSP/HAR Packager                    | `arkdown-pack`                   | SPEC-009, 010, 011 |

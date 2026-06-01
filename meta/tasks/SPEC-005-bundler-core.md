@@ -3,7 +3,7 @@
 **Crate**: `arkdown`
 **Priority**: P0
 **Blocked by**: SPEC-001, SPEC-003, SPEC-004
-**Blocks**: SPEC-006, SPEC-007, SPEC-008, SPEC-009, SPEC-014, SPEC-016, SPEC-017, SPEC-018
+**Blocks**: SPEC-007, SPEC-008, SPEC-009, SPEC-014, SPEC-016, SPEC-017, SPEC-018
 
 ---
 
@@ -59,10 +59,8 @@ if config.support_chunks {
 
 ### Stage 4: Code Generation
 
-For each chunk, use `oxc_codegen` to generate JavaScript source. Output format is **CJS**
-(not ESM) — this is required because the ArkRuntime does not support native ESM. The CJS
-output uses `require()` for cross-chunk references, which are then replaced by
-`wrapper-chunk-plugin` (SPEC-006).
+For each chunk, rolldown generates JavaScript source. Output format is **ESM** for the
+CompileArkTS module-mode pipeline, matching hvigor's `es2abc --module` input contract.
 
 ```rust
 let codegen = CodeGenerator::new()
@@ -73,8 +71,8 @@ let output = codegen.build(&ast);
 
 ### Stage 5: render_chunk Plugin Hook
 
-For each chunk, run the `render_chunk` plugin hook chain. Plugins that transform chunk code
-(e.g., `arkdown-plugin-chunk-wrapper`) run here.
+For each chunk, rolldown runs the `render_chunk` plugin hook chain. arkdown does not add
+an IIFE/CommonJS wrapper in this stage.
 
 ```rust
 for chunk in &mut chunk_graph.chunks {
@@ -133,12 +131,10 @@ The bundler (and CLI) must wire exactly these 6 plugins, **in this order**:
 3. ModuleMetaPlugin        (arkdown-plugin-module-meta)     — per-module OHOS metadata annotation
 4. Json5Plugin             (arkdown-plugin-json5)           — JSON/JSON5 import support
 5. DuplicateCheckPlugin    (arkdown-plugin-duplicate-check) — filename uniqueness enforcement
-6. ChunkWrapperPlugin      (arkdown-plugin-chunk-wrapper)   — IIFE wrapping, globalThis registry (runs last)
 ```
 
-`EtsTransformPlugin` must be first (transform must happen before resolve + parse). `ChunkWrapperPlugin`
-must be last (post-bundle IIFE wrap via `render_chunk`). Order of 2–5 is stable but these must
-all come before ChunkWrapper.
+`EtsTransformPlugin` must be first (transform must happen before resolve + parse). Order of 2–5 is
+stable.
 
 ```rust
 let plugins: Vec<Arc<dyn ArkdownPlugin>> = vec![
@@ -147,7 +143,6 @@ let plugins: Vec<Arc<dyn ArkdownPlugin>> = vec![
     Arc::new(ModuleMetaPlugin::new(&config)),
     Arc::new(Json5Plugin::new()),
     Arc::new(DuplicateCheckPlugin::new()),
-    Arc::new(ChunkWrapperPlugin::new(&config)),
 ];
 let bundler = Bundler::new(config, plugins);
 ```
@@ -197,12 +192,7 @@ crates/arkdown/
 └── src/
     ├── lib.rs
     ├── bundler.rs          (Bundler struct, bundle() orchestration)
-    ├── stages/
-    │   ├── link.rs         (cross-module symbol resolution)
-    │   ├── tree_shake.rs   (side-effect analysis, inclusion marking)
-    │   ├── chunk_split.rs  (entry-based chunk assignment, supportChunks logic)
-    │   └── codegen.rs      (oxc_codegen invocation, CJS output)
-    ├── loader_json.rs      (LoaderJson struct, read from disk)
+    ├── compile_entry.rs    (hvigor compileEntry naming)
     └── output.rs           (write chunk files to aceModuleBuild/)
 ```
 
@@ -211,17 +201,17 @@ crates/arkdown/
 ## Acceptance Criteria
 
 - `Bundler::bundle()` on `MyApplication/entry` produces `.js` chunk files in `aceModuleBuild/`
-- CJS output (not ESM) — `require()` calls for cross-module imports
+- ESM output suitable for `es2abc --module`
 - Release builds tree-shake unused exports; debug builds include everything
 - With `supportChunks: false`, single chunk per entry point
-- Source maps emitted alongside each `.js` file
+- Source maps are emitted as hvigor-compatible `sourceMaps.map`
 
 ---
 
 ## Design References
 
 - `meta/design/pipeline.md` — Phases 5–8
-- `meta/design/chunk-model.md` — chunk splitting, supportChunks, IIFE requirement
+- `meta/design/chunk-model.md` — legacy chunk-wrapper background only
 - `meta/design/hvigorw-analysis.md` — loader.json schema, aceModuleBuild path
 - `meta/design/types.md` — `ModuleGraph`, `ChunkGraph`, `ArkChunk`
 
@@ -235,18 +225,18 @@ crates/arkdown/
 | Stage 1 (Link)                        | rolldown link stage                           | Identical: resolve cross-module symbol references                                                                      |
 | Stage 2 (Tree Shake)                  | rolldown tree-shaking (`treeshake: true`)     | Same algorithm (inclusion marking); arkdown enables only in `BuildMode::Release`                                       |
 | Stage 3 (Chunk Split)                 | rolldown `manualChunks` + automatic splitting | arkdown reads `loader.json` `compileEntry`; rolldown reads `input` option; both produce `ChunkGraph`                   |
-| Stage 4 (Code Generation, CJS output) | rolldown `OutputOptions::format = Cjs`        | **Intentional divergence**: both emit CJS; arkdown then wraps in IIFE (SPEC-006); rolldown would emit ESM for browsers |
+| Stage 4 (Code Generation, ESM output) | rolldown `OutputOptions::format = Esm`        | Matches hvigor CompileArkTS module-mode input                                                                         |
 | `render_chunk` hook dispatch          | rolldown `PluginDriver::render_chunk()`       | Identical hook semantics                                                                                               |
 | `generate_bundle` hook dispatch       | rolldown `PluginDriver::generate_bundle()`    | Identical                                                                                                              |
 | `BundleOutput::chunk_graph`           | rolldown `BundleOutput` / `RolldownOutput`    | Same concept; arkdown adds `output_dir` and `chunk_files` for direct file path tracking                                |
 | `LoaderJson::compileEntry`            | rolldown `InputOptions::input`                | Functionally equivalent: both specify entry point file paths                                                           |
 | `supportChunks` flag                  | rolldown always splits chunks                 | OHOS-specific: when `false`, one chunk per entry (no shared chunks)                                                    |
-| `ArkChunk::chunk_hash`                | rolldown `Chunk::content_hash`                | Same purpose (fingerprinting); arkdown uses it as the `globalThis` registry key suffix                                 |
-| `cross_chunk_imports` on `ArkChunk`   | rolldown `Chunk::cross_chunk_imports`         | Identical semantics; drives the `require()` → `globalThis[]` replacement in SPEC-006                                   |
+| `ArkChunk::chunk_hash`                | rolldown `Chunk::content_hash`                | Same purpose (fingerprinting)                                                                                         |
+| `cross_chunk_imports` on `ArkChunk`   | rolldown `Chunk::cross_chunk_imports`         | Identical semantics                                                                                                   |
 
 **Key divergences from rolldown that must always be preserved:**
 
-1. Output format is CJS (Stage 4), not ESM. This is required so wrapper-chunk-plugin (SPEC-006) can rewrite `require()` calls to `globalThis[]`.
+1. Output format is ESM for module-mode ABC compilation; do not add CJS/IIFE wrapping unless upstream hvigor introduces that contract for this path.
 2. Entry points come from `loader.json` `compileEntry`, not from an `input` option struct.
 3. `supportChunks = false` (the most common OHOS case) means exactly one chunk per entry — no shared chunk extraction.
 
@@ -255,11 +245,11 @@ crates/arkdown/
 ## Test Requirements
 
 - `Bundler::bundle()` on a two-file project (`A.ets` imports from `B.ets`) produces a single chunk per entry with both modules inlined (when `supportChunks: false`)
-- CJS output verification: chunk code contains `var _b = require("./B")` style calls (not ESM `import`)
+- ESM output verification: chunk code stays compatible with module-mode ABC compilation
 - With `supportChunks: true`, a module imported from two entries is extracted into a separate chunk
 - Tree shaking in release mode: an exported but never-imported function is absent from the output
 - Tree shaking in debug mode: all exports are present regardless of whether they are imported
-- Source maps written alongside each `.js` chunk file in `aceModuleBuild/`
+- Source maps written to hvigor-compatible `sourceMaps.map` in `aceModuleBuild/`
 - `render_chunk` hook is called once per chunk; returning `None` from all plugins leaves code unchanged
 - `generate_bundle` hook is called once after all chunks are rendered; modifying `bundle.chunks` in the hook affects written output
 - `loader.json` with `compileEntry: ["./ets/pages/Index.ets"]` produces exactly one entry chunk named `"Index"`

@@ -23,7 +23,6 @@ arkdown-pack = { workspace = true }
 arkdown-sign = { workspace = true }
 arkdown-obfuscate = { workspace = true }
 arkdown-plugin-ets-transform = { workspace = true }
-arkdown-plugin-chunk-wrapper = { workspace = true }
 arkdown-plugin-ohos-resolve = { workspace = true }
 arkdown-plugin-module-meta = { workspace = true }
 arkdown-plugin-duplicate-check = { workspace = true }

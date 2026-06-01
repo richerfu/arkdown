@@ -1,5 +1,3 @@
-use std::ops::Range;
-
 use index_vec::IndexVec;
 use rustc_hash::FxHashMap;
 
@@ -92,30 +90,6 @@ pub struct ChunkGraph {
     pub module_to_chunk: IndexVec<ModuleIdx, Option<ChunkIdx>>,
     /// Maps entry [`ModuleIdx`] → entry [`ChunkIdx`].
     pub entry_module_to_entry_chunk: FxHashMap<ModuleIdx, ChunkIdx>,
-}
-
-/// Legacy IIFE-wrapped chunk metadata produced by `arkdown-plugin-chunk-wrapper`.
-/// Current module-mode ABC compilation does not require this wrapper shape.
-#[derive(Debug, Clone)]
-pub struct IifeChunk {
-    pub chunk: ArkChunk,
-    /// Cross-chunk import replacements made by the chunk-wrapper plugin.
-    /// Maps `"chunkId"` → `"globalThis['chunkId_hash']"`.
-    pub require_replacements: Vec<RequireReplacement>,
-    /// Global registry export appended at end of chunk:
-    /// `"globalThis['fileName_hash'] = { export1: exports.export1, ... }"`.
-    pub registry_export: Option<String>,
-}
-
-/// One `require(...)` → `globalThis[...]` replacement performed by the chunk-wrapper plugin.
-#[derive(Debug, Clone)]
-pub struct RequireReplacement {
-    /// Original call, e.g. `require('chunkId')`.
-    pub original: String,
-    /// Replacement expression, e.g. `globalThis['chunkId_hash']`.
-    pub replacement: String,
-    /// Byte range of the original text in the chunk source.
-    pub byte_range: Range<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -260,32 +234,5 @@ mod tests {
         };
         assert_eq!(graph.chunks.len(), 1);
         assert_eq!(graph.chunks[ChunkIdx::from_usize(0)].name, "commons");
-    }
-
-    // ── IifeChunk and RequireReplacement ─────────────────────────────────────
-
-    #[test]
-    fn test_require_replacement_construction() {
-        let r = RequireReplacement {
-            original: "require('commons')".to_string(),
-            replacement: "globalThis['commons_abcd']".to_string(),
-            byte_range: 42..60,
-        };
-        assert_eq!(r.original, "require('commons')");
-        assert_eq!(r.replacement, "globalThis['commons_abcd']");
-        assert_eq!(r.byte_range, 42..60);
-    }
-
-    #[test]
-    fn test_iife_chunk_construction() {
-        let iife = IifeChunk {
-            chunk: ArkChunk::default(),
-            require_replacements: vec![],
-            registry_export: Some(
-                "globalThis['entry_hash'] = { default: exports.default }".to_string(),
-            ),
-        };
-        assert!(iife.require_replacements.is_empty());
-        assert!(iife.registry_export.is_some());
     }
 }

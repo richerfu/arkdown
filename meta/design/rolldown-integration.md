@@ -20,8 +20,8 @@ Updated after the ohos-rs/oxc fork was upgraded to 0.133.0 on 2026-05-28.
 ## Background
 
 arkdown is a pure-Rust bundler for OpenHarmony OS that reimplements
-rolldown's architecture with OHOS-specific semantics (IIFE wrapping,
-`globalThis` registry, OHM URLs, ArkTS support).
+rolldown's architecture with OHOS-specific semantics (OHM URLs, ArkTS
+support, hvigor-compatible loader output).
 
 The project pins a custom oxc fork that adds ArkTS (`.ets`) parser support:
 
@@ -170,7 +170,6 @@ If ever needed:
 
 **OHOS-specific features rolldown does NOT cover (arkdown still owns):**
 
-- IIFE wrapping + `globalThis` registry (`arkdown-plugin-chunk-wrapper`)
 - OHM URL resolution (`arkdown-plugin-ohos-resolve`)
 - ArkTS transform (`arkdown-plugin-ets-transform`)
 - HAR/HSP deduplication (`arkdown-plugin-har-dedup`)

@@ -144,7 +144,6 @@ dependencies = [
  "arkdown-config",
  "arkdown-core",
  "arkdown-loader",
- "arkdown-plugin-chunk-wrapper",
  "arkdown-plugin-duplicate-check",
  "arkdown-plugin-ets-transform",
  "arkdown-plugin-json5",
@@ -219,7 +218,6 @@ dependencies = [
  "arkdown-core",
  "arkdown-obfuscate",
  "arkdown-pack",
- "arkdown-plugin-chunk-wrapper",
  "arkdown-plugin-duplicate-check",
  "arkdown-plugin-ets-transform",
  "arkdown-plugin-json5",
@@ -321,18 +319,6 @@ dependencies = [
  "thiserror 2.0.18",
  "walkdir",
  "zip",
-]
-
-[[package]]
-name = "arkdown-plugin-chunk-wrapper"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "oxc_allocator 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
- "oxc_ast 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
- "oxc_parser 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
- "oxc_span 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
- "rolldown_plugin",
 ]
 
 [[package]]

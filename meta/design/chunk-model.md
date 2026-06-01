@@ -1,20 +1,23 @@
 # OHOS Chunk Architecture
 
-This document describes how OHOS modules are split into output chunks, the mandatory IIFE wrapper format, and why ArkRuntime requires this architecture.
+This document is legacy background for the older wrapper-chunk model. The current arkdown
+CompileArkTS path emits ESM chunks through rolldown and compiles them with `es2abc --module`;
+it does not ship an `arkdown-plugin-chunk-wrapper` crate.
 
 ---
 
-## 1. The Core Constraint: No Native ESM in ArkRuntime
+## 1. Legacy Constraint: IIFE Runtime Registry
 
 OHOS's ArkRuntime does **not** support native ES Module `import`/`export` semantics at the JavaScript level. All code runs in a single global context after being compiled to `.abc` bytecode. The module system is implemented on top of `globalThis` as a registry, not via the ECMAScript module specification.
 
-This means the rollup/rolldown output format **cannot** be `esm`. Instead:
+The older wrapper model used this shape:
 
 - Format is `cjs` (CommonJS)
 - Cross-chunk dependencies use `globalThis['chunkName_hash']` instead of `require()`/`import()`
 - Each chunk is an IIFE that registers its exports into `globalThis`
 
-The `wrapper-chunk-plugin` implements this conversion as a rollup `renderChunk` hook.
+Do not reintroduce this wrapper for current module-mode ABC compilation unless upstream
+hvigor source proves that this path is active for the target build mode.
 
 ---
 
@@ -193,7 +196,7 @@ function manualChunks(id, { getModuleInfo }) {
 - `oh_modules/` dependencies → `commons` chunk
 - Non-entry local modules → `vendors` chunk
 - Entry files → entry-named chunks
-- `wrapper-chunk-plugin` processes cross-chunk require() → globalThis[]
+- legacy wrapper-chunk processing rewrites cross-chunk require() → globalThis[]
 - Used for larger applications with many shared dependencies
 
 ---
@@ -336,7 +339,6 @@ In arkdown, `arkdown-plugin-har-dedup` implements this same deduplication pass.
 
 ## Cross-Reference
 
-- [abc-pipeline.md](abc-pipeline.md) — what es2abc does with the IIFE output
-- [pipeline.md](pipeline.md) — where chunk wrapping fits in the overall pipeline
-- [plugins.md](plugins.md) — `arkdown-plugin-chunk-wrapper` implementation
+- [abc-pipeline.md](abc-pipeline.md) — current `es2abc --module` input contract
+- [pipeline.md](pipeline.md) — current rolldown CompileArkTS pipeline
 - [hvigorw-analysis.md](hvigorw-analysis.md) — `supportChunks` flag and loader.json

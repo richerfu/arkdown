@@ -6,7 +6,6 @@ members = [
     "crates/arkdown-resolver",
     "crates/arkdown-loader",
     "crates/arkdown",
-    "crates/arkdown-plugin-chunk-wrapper",
     "crates/arkdown-plugin-json5",
     "crates/arkdown-plugin-duplicate-check",
     "crates/arkdown-plugin-module-meta",
@@ -37,7 +36,6 @@ arkdown-core = { path = "crates/arkdown-core" }
 arkdown-loader = { path = "crates/arkdown-loader" }
 arkdown-obfuscate = { path = "crates/arkdown-obfuscate" }
 arkdown-pack = { path = "crates/arkdown-pack" }
-arkdown-plugin-chunk-wrapper = { path = "crates/arkdown-plugin-chunk-wrapper" }
 arkdown-plugin-duplicate-check = { path = "crates/arkdown-plugin-duplicate-check" }
 arkdown-plugin-ets-transform = { path = "crates/arkdown-plugin-ets-transform" }
 arkdown-plugin-json5 = { path = "crates/arkdown-plugin-json5" }
