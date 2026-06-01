@@ -4,6 +4,7 @@ mod component_analysis;
 mod component_collection;
 mod component_field;
 pub mod component_meta;
+mod declaration_emit;
 pub mod decorator;
 pub mod entry;
 pub mod global_rewrite;
@@ -22,8 +23,8 @@ use std::{
 use arkdown_core::ModuleSource;
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    AnnotationDeclaration, AnnotationElement, Declaration, Decorator, ExportDefaultDeclarationKind,
-    Function, Statement, StructElement, StructStatement,
+    Declaration, Decorator, ExportDefaultDeclarationKind, Function, Statement, StructElement,
+    StructStatement,
 };
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
@@ -46,6 +47,9 @@ use crate::transform::component_collection::{
     collect_statement_component_names, collect_statement_if_component_names,
 };
 use crate::transform::component_meta::ComponentMetadata;
+use crate::transform::declaration_emit::{
+    BuilderParams, ExtendBodyEmitter, ParamsInterfaceEmitter, TopLevelFunctionEmitter,
+};
 use crate::transform::decorator::{
     decorator_arg_text, decorator_name, decorator_string_arg, is_state_decorator,
 };
@@ -295,7 +299,7 @@ fn transform_non_component_statement(
     let replacement = match statement {
         Statement::AnnotationDeclaration(annotation) => Some((
             annotation.span.start as usize,
-            annotation_to_interface(annotation, source_text),
+            ParamsInterfaceEmitter::new(annotation, source_text).emit(),
         )),
         Statement::LazyImportDeclaration(_) => {
             let text =
@@ -345,10 +349,7 @@ fn transform_non_component_statement(
                 }
                 Some((
                     start,
-                    format!(
-                        "export {}",
-                        annotation_to_interface(annotation, source_text)
-                    ),
+                    ParamsInterfaceEmitter::new(annotation, source_text).emit_exported(),
                 ))
             }
             _ => None,
@@ -356,25 +357,6 @@ fn transform_non_component_statement(
         _ => None,
     };
     Ok(replacement)
-}
-
-fn annotation_to_interface(annotation: &AnnotationDeclaration<'_>, source_text: &str) -> String {
-    let mut out = format!("interface {} {{\n", annotation.id.name);
-    for element in &annotation.body.body {
-        let AnnotationElement::PropertyDefinition(property) = element;
-        let Some(name) = property.key.static_name() else {
-            continue;
-        };
-        let ty = property
-            .type_annotation
-            .as_ref()
-            .map(|annotation| type_annotation_text(annotation.span(), source_text))
-            .unwrap_or_else(|| "unknown".to_string());
-        let optional = if property.optional { "?" } else { "" };
-        out.push_str(&format!("    {name}{optional}: {ty};\n"));
-    }
-    out.push_str("}\n");
-    out
 }
 
 fn transform_decorated_function(
@@ -409,7 +391,7 @@ fn transform_decorated_function(
     let name = function_id.name.as_str();
     let params = extract_params_text(function.params.span(), source_text);
     let params = if matches!(decorator_kind.as_str(), "Builder" | "LocalBuilder") {
-        append_builder_parent_param(params)
+        BuilderParams::with_parent(params)
     } else {
         params
     };
@@ -418,7 +400,6 @@ fn transform_decorated_function(
         .as_ref()
         .map(|annotation| format!(": {}", type_annotation_text(annotation.span(), source_text)))
         .unwrap_or_default();
-    let export_prefix = if exported { "export " } else { "" };
     let start = decorators
         .clone()
         .fold(function.span.start, |start, decorator| {
@@ -436,12 +417,11 @@ fn transform_decorated_function(
                 .find(|decorator| decorator_name(decorator) == decorator_kind)
                 .and_then(|decorator| decorator_first_arg_text(decorator, source_text))
                 .unwrap_or_else(|| "View".to_string());
+            let body =
+                ExtendBodyEmitter::new(function.body.as_deref(), source_text, &component).emit();
             return Ok(Some((
                 start,
-                format!(
-                    "{export_prefix}function __{component}__{name}({params}): void {{\n{}    }}",
-                    lower_extend_body(function.body.as_deref(), source_text, &component)
-                ),
+                TopLevelFunctionEmitter::extend(exported, &component, name, &params, &body).emit(),
             )));
         }
         _ => {
@@ -464,48 +444,9 @@ fn transform_decorated_function(
 
     Ok(Some((
         start,
-        format!("{export_prefix}function {name}({params}){return_annotation} {{\n{body}    }}"),
+        TopLevelFunctionEmitter::decorated(exported, name, &params, &return_annotation, &body)
+            .emit(),
     )))
-}
-
-fn lower_extend_body(
-    body: Option<&oxc_ast::ast::FunctionBody<'_>>,
-    source_text: &str,
-    component: &str,
-) -> String {
-    let Some(body) = body else {
-        return String::new();
-    };
-    let body_text = span_text(body.span(), source_text);
-    let inner = strip_outer_block(&body_text);
-    let mut out = String::new();
-    for line in inner.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        out.push_str("        ");
-        if trimmed.starts_with('.') {
-            out.push_str(component);
-            out.push_str(trimmed);
-        } else {
-            out.push_str(trimmed);
-        }
-        if !trimmed.ends_with(';') && !trimmed.ends_with('{') && !trimmed.ends_with('}') {
-            out.push(';');
-        }
-        out.push('\n');
-    }
-    out
-}
-
-fn strip_outer_block(text: &str) -> &str {
-    let trimmed = text.trim();
-    if trimmed.starts_with('{') && trimmed.ends_with('}') && trimmed.len() >= 2 {
-        trimmed[1..trimmed.len() - 1].trim()
-    } else {
-        trimmed
-    }
 }
 
 fn component_from_struct(
@@ -674,7 +615,7 @@ fn component_from_struct(
                 let Some(name) = method.key.static_name() else {
                     continue;
                 };
-                let params = append_builder_parent_param(extract_params_text(
+                let params = BuilderParams::with_parent(extract_params_text(
                     method.value.params.span(),
                     source_text,
                 ));
@@ -782,14 +723,6 @@ fn is_component_struct(statement: &StructStatement<'_>) -> bool {
         )
     })
 }
-fn append_builder_parent_param(params: String) -> String {
-    if params.trim().is_empty() {
-        "parent = null".to_string()
-    } else {
-        format!("{params}, parent = null")
-    }
-}
-
 fn primary_state_decorator(names: &[&str]) -> Option<&'static str> {
     // Mirrors upstream arkui-plugins classifyV1Property/classifyV2Property order.
     // Meta decorators such as @Watch and @Require are intentionally absent.
