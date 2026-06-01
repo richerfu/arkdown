@@ -19,6 +19,6 @@
 pub mod bundler;
 pub mod compile_entry;
 pub mod output;
-pub mod source_maps;
 
+pub use arkdown_core::source_maps;
 pub use bundler::{BundleOutput, Bundler};

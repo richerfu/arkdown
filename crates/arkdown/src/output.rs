@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use arkdown_core::{ArkdownError, ChunkGraph};
-
-use crate::source_maps::{hvigor_source_maps_json, HvigorSourceMapEntry, HvigorSourceMapOptions};
+use arkdown_core::{
+    hvigor_source_maps_json, ArkdownError, ChunkGraph, HvigorSourceMapEntry, HvigorSourceMapOptions,
+};
 
 pub const MODULES_ABC_FILE_NAME: &str = "modules.abc";
 pub const SOURCE_MAPS_FILE_NAME: &str = "sourceMaps.map";
