@@ -1,3 +1,5 @@
+use std::fmt::Write;
+
 use oxc_ast::ast::{Argument, CallExpression, ChainElement, Expression, FunctionBody, Statement};
 use oxc_span::{GetSpan, Span};
 
@@ -151,10 +153,24 @@ fn raw_object_argument_text(
     if !context.is_raw_object_field(name) {
         return None;
     }
-    Some(format!(
-        "ObservedObject.GetRawObject({})",
-        original_node_text(expression, source_text)
-    ))
+    Some(RawObjectCallEmitter::new(&original_node_text(expression, source_text)).emit())
+}
+
+struct RawObjectCallEmitter<'a> {
+    expression: &'a str,
+}
+
+impl<'a> RawObjectCallEmitter<'a> {
+    fn new(expression: &'a str) -> Self {
+        Self { expression }
+    }
+
+    fn emit(&self) -> String {
+        let mut out = String::new();
+        write!(out, "ObservedObject.GetRawObject({})", self.expression)
+            .expect("writing to String cannot fail");
+        out
+    }
 }
 
 pub(super) fn raw_object_argument_text_from_argument(

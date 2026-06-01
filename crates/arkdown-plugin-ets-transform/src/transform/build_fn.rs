@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    fmt::Write,
     sync::Arc,
 };
 
@@ -1121,10 +1122,27 @@ fn attribute_arguments_text(
 ) -> String {
     if is_builder_attribute(attr_name) && arguments.len() == 1 {
         if let Some(name) = argument_builder_method_name(&arguments[0], builder_methods) {
-            return format!("{{ builder: this.{name}.bind(this) }}");
+            return BuilderAttributeArgument::new(&name).emit();
         }
     }
     raw_arguments_text_with_context(arguments, source_text, context)
+}
+
+struct BuilderAttributeArgument<'a> {
+    name: &'a str,
+}
+
+impl<'a> BuilderAttributeArgument<'a> {
+    fn new(name: &'a str) -> Self {
+        Self { name }
+    }
+
+    fn emit(&self) -> String {
+        let mut out = String::new();
+        write!(out, "{{ builder: this.{}.bind(this) }}", self.name)
+            .expect("writing to String cannot fail");
+        out
+    }
 }
 
 fn is_builder_attribute(name: &str) -> bool {
