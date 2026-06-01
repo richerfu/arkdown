@@ -1,4 +1,5 @@
 use oxc_ast::ast::{Decorator, Expression};
+use oxc_span::GetSpan;
 
 pub(super) fn decorator_name<'a>(decorator: &'a Decorator<'a>) -> &'a str {
     match &decorator.expression {
@@ -8,6 +9,39 @@ pub(super) fn decorator_name<'a>(decorator: &'a Decorator<'a>) -> &'a str {
             _ => "",
         },
         _ => "",
+    }
+}
+
+/// Extract the first string-literal argument from a decorator call expression.
+///
+/// Used to extract the handler name from `@Watch("handler")` and the alias
+/// from `@Provide("alias")` / `@Consume("alias")`.  Returns `None` if the
+/// decorator has no arguments or the first argument is not a string literal.
+pub(super) fn decorator_string_arg(decorator: &Decorator<'_>) -> Option<String> {
+    if let Expression::CallExpression(call) = &decorator.expression {
+        if let Some(arg) = call.arguments.first() {
+            if let Some(expr) = arg.as_expression() {
+                if let Expression::StringLiteral(lit) = expr {
+                    return Some(lit.value.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+pub(super) fn decorator_arg_text(decorator: &Decorator<'_>, source_text: &str) -> Option<String> {
+    if let Expression::CallExpression(call) = &decorator.expression {
+        let arg = call.arguments.first()?;
+        let expr = arg.as_expression()?;
+        let raw = source_text[expr.span()].trim();
+        if raw.is_empty() {
+            None
+        } else {
+            Some(raw.to_string())
+        }
+    } else {
+        None
     }
 }
 
