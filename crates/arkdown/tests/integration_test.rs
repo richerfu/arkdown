@@ -148,7 +148,6 @@ async fn test_build_minimal_hap_fixture() {
                     module.src_path.join("oh_modules"),
                     project_root.join("oh_modules"),
                 ],
-                module_src_roots: vec![module.src_path.join("src/main/ets")],
             },
             project_root.clone(),
             false,

@@ -236,7 +236,6 @@ mod tests {
                 use_normalized_ohm_url: false,
                 case_sensitive_check: false,
                 oh_modules_roots: vec![],
-                module_src_roots: vec![],
             },
             PathBuf::from("/tmp"),
             false,

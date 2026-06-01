@@ -139,7 +139,6 @@ fn run_bundle_miss(
                 use_normalized_ohm_url: false,
                 case_sensitive_check: false,
                 oh_modules_roots: vec![],
-                module_src_roots: vec![module.src_path.join("src/main/ets")],
             },
             fixture.to_path_buf(),
             false,

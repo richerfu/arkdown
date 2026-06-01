@@ -13,9 +13,6 @@ use crate::oh_modules::{
     read_package_version_field,
 };
 
-/// Extensions tried in order during resolution.
-const EXTENSIONS: &[&str] = &[".ets", ".ts", ".js", ".d.ets", ".d.ts"];
-
 /// Configuration for the OHOS module resolver.
 pub struct ResolverConfig {
     /// Absolute path to the project root directory.
@@ -32,8 +29,6 @@ pub struct ResolverConfig {
     pub case_sensitive_check: bool,
     /// Per-module `oh_modules/` roots and project-root `oh_modules/`.
     pub oh_modules_roots: Vec<PathBuf>,
-    /// Module source roots (for relative resolution fallback).
-    pub module_src_roots: Vec<PathBuf>,
 }
 
 /// Brief package information extracted from `loader.json`.
@@ -165,16 +160,6 @@ impl OhosResolver {
                 });
             }
 
-            let importer_dir = importer.parent().unwrap_or(importer);
-            if let Some(resolved) = try_extensions(&importer_dir.join(specifier)) {
-                let resolved = canonicalize_existing(resolved);
-                let module_type = infer_module_type(&resolved);
-                return Ok(OhosResolvedModule::LocalSource {
-                    path: resolved,
-                    module_type,
-                    pkg_context: None,
-                });
-            }
             return Err(ResolveError::NotFound {
                 specifier: specifier.to_string(),
                 importer: importer.to_string_lossy().into_owned(),
@@ -294,10 +279,6 @@ impl OhosResolver {
             .resolve(package_root, &request)
             .ok()
             .map(|resolution| canonicalize_existing(resolution.into_path_buf()))
-            .or_else(|| {
-                let request = request.trim_start_matches("./");
-                try_extensions(&package_root.join(request)).map(canonicalize_existing)
-            })
     }
 
     fn oxc_resolve_options(config: &ResolverConfig) -> OxcResolveOptions {
@@ -533,38 +514,6 @@ fn canonicalize_existing(path: PathBuf) -> PathBuf {
     std::fs::canonicalize(&path).unwrap_or(path)
 }
 
-/// Try to resolve a path by trying the exact path, then each extension, then index variants.
-pub fn try_extensions(base: &Path) -> Option<PathBuf> {
-    // 1. Exact path as given (must be a file, not a directory)
-    if base.is_file() {
-        return Some(base.to_path_buf());
-    }
-    // 2. With each extension appended
-    for ext in EXTENSIONS {
-        let ext_clean = ext.trim_start_matches('.');
-        // build a path like `base.ets` — don't replace any existing extension
-        let mut s = base.to_string_lossy().into_owned();
-        s.push_str(ext);
-        let p = PathBuf::from(s);
-        if p.is_file() {
-            return Some(p);
-        }
-        // Also try replacing existing extension (handles `foo.ts` → `foo.ets`)
-        let p2 = base.with_extension(ext_clean);
-        if p2.is_file() {
-            return Some(p2);
-        }
-    }
-    // 3. As a directory with an index file
-    for ext in &[".ets", ".ts", ".js"] {
-        let p = base.join(format!("index{}", ext));
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    None
-}
-
 /// Infer the [`ModuleType`] from a file extension.
 pub fn infer_module_type(path: &Path) -> ModuleType {
     match path.extension().and_then(|e| e.to_str()) {
@@ -595,7 +544,6 @@ mod tests {
             use_normalized_ohm_url: true,
             case_sensitive_check: false,
             oh_modules_roots,
-            module_src_roots: vec![],
         })
     }
 
@@ -701,47 +649,6 @@ mod tests {
         assert_eq!(bundle, "com.example");
         assert_eq!(module, "entry");
         assert_eq!(path, "ets/pages/Index");
-    }
-
-    // Test 5: try_extensions — .ets tried first
-    #[test]
-    fn test_try_extensions_ets_first() {
-        let dir = TempDir::new().unwrap();
-        let ets_file = dir.path().join("MyComp.ets");
-        let ts_file = dir.path().join("MyComp.ts");
-        // Create both; .ets should be found first
-        fs::write(&ets_file, "// ets").unwrap();
-        fs::write(&ts_file, "// ts").unwrap();
-
-        let base = dir.path().join("MyComp");
-        let resolved = try_extensions(&base).unwrap();
-        assert_eq!(resolved, ets_file);
-    }
-
-    // Test 5b: try_extensions — falls back to .ts when .ets absent
-    #[test]
-    fn test_try_extensions_ts_fallback() {
-        let dir = TempDir::new().unwrap();
-        let ts_file = dir.path().join("utils.ts");
-        fs::write(&ts_file, "// ts").unwrap();
-
-        let base = dir.path().join("utils");
-        let resolved = try_extensions(&base).unwrap();
-        assert_eq!(resolved, ts_file);
-    }
-
-    // Test 5c: try_extensions — index.ets via directory fallback
-    #[test]
-    fn test_try_extensions_index_fallback() {
-        let dir = TempDir::new().unwrap();
-        let pkg_dir = dir.path().join("mypkg");
-        fs::create_dir_all(&pkg_dir).unwrap();
-        let index_file = pkg_dir.join("index.ets");
-        fs::write(&index_file, "// index").unwrap();
-
-        let base = pkg_dir.clone();
-        let resolved = try_extensions(&base).unwrap();
-        assert_eq!(resolved, index_file);
     }
 
     // Test 6: relative import resolution
