@@ -1,7 +1,7 @@
 //! `arkdown` — bundler core for OpenHarmony OS projects.
 //!
-//! Orchestrates the full pipeline: module loading, graph construction, linking,
-//! tree-shaking, chunk splitting, CJS codegen, and file output.
+//! Orchestrates the full pipeline around rolldown: module loading, plugin
+//! transforms, chunk graph conversion, and file output.
 //!
 //! ## Quick start
 //! ```rust,ignore
@@ -18,6 +18,5 @@
 
 pub mod bundler;
 pub mod output;
-pub mod stages;
 
 pub use bundler::{BundleOutput, Bundler};
