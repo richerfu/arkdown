@@ -358,6 +358,11 @@ Rewrites deprecated or version-gated OHOS API calls based on
 
 All API rewrites are driven by a static version table baked into the crate (derived from
 `sdk/default/openharmony/ets/api/` declaration structure). No runtime SDK path lookup.
+The generated `@kit.*` replacement imports are emitted as OXC import-declaration AST
+nodes and printed with OXC codegen, matching the upstream `ets2bundle` pattern of
+mutating TypeScript AST and printing with `ts.createPrinter({ newLine: LineFeed })`
+(`developtools_ace_ets2bundle/compiler/src/process_module_files.ts` and
+`process_lazy_import.ts`).
 
 ---
 

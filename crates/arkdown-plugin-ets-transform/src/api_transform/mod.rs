@@ -3,10 +3,14 @@ mod version_table;
 pub use version_table::rewrite_imports_for_version;
 
 use oxc_allocator::Allocator;
-use oxc_ast::ast::{ImportDeclaration, ImportDeclarationSpecifier, Statement};
+use oxc_ast::ast::{
+    ImportDeclaration, ImportDeclarationSpecifier, ImportOrExportKind, Program, Statement,
+};
+use oxc_ast::{AstBuilder, NONE};
+use oxc_codegen::Codegen;
 use oxc_parser::Parser;
 use oxc_semantic::{Scoping, SemanticBuilder};
-use oxc_span::SourceType;
+use oxc_span::{SourceType, SPAN};
 
 use crate::{apply_source_patches, module_export_name_text, SourcePatch};
 
@@ -89,8 +93,7 @@ fn rewrite_kit_import_declaration(
     }
 
     let specifiers = import.specifiers.as_ref()?;
-    let mut out = String::new();
-    let mut any_mapped = false;
+    let mut imports = Vec::new();
 
     for specifier in specifiers {
         let ImportDeclarationSpecifier::ImportSpecifier(specifier) = specifier else {
@@ -104,24 +107,89 @@ fn rewrite_kit_import_declaration(
             continue;
         };
 
-        let type_prefix = if import.import_kind.is_type()
+        let import_kind = if import.import_kind.is_type()
             || specifier.import_kind.is_type()
             || specifier.local.symbol_id.get().is_some_and(|symbol_id| {
                 !scoping
                     .get_resolved_references(symbol_id)
                     .any(|reference| reference.flags().is_value())
             }) {
-            "type "
+            ImportOrExportKind::Type
         } else {
-            ""
+            ImportOrExportKind::Value
         };
-        out.push_str(&format!(
-            "import {type_prefix}{local_name} from \"{ohos_module}\";\n",
-        ));
-        any_mapped = true;
+        imports.push(KitImportBinding {
+            local_name: local_name.to_owned(),
+            module: ohos_module.to_owned(),
+            import_kind,
+        });
     }
 
-    any_mapped.then(|| out.trim_end_matches('\n').to_string())
+    (!imports.is_empty()).then(|| KitImportEmitter::new(imports).emit())
+}
+
+struct KitImportBinding {
+    local_name: String,
+    module: String,
+    import_kind: ImportOrExportKind,
+}
+
+struct KitImportEmitter {
+    imports: Vec<KitImportBinding>,
+}
+
+impl KitImportEmitter {
+    fn new(imports: Vec<KitImportBinding>) -> Self {
+        Self { imports }
+    }
+
+    fn emit(&self) -> String {
+        let allocator = Allocator::default();
+        let ast = AstBuilder::new(&allocator);
+        let statements = ast.vec_from_iter(
+            self.imports
+                .iter()
+                .map(|import| self.import_statement(ast, import)),
+        );
+        let program = ast.program(
+            SPAN,
+            SourceType::ts().with_module(true),
+            "",
+            ast.vec(),
+            None,
+            ast.vec(),
+            statements,
+        );
+        Self::render_program(&program)
+    }
+
+    fn import_statement<'a>(
+        &self,
+        ast: AstBuilder<'a>,
+        import: &KitImportBinding,
+    ) -> Statement<'a> {
+        let local_name: &'a str = ast.allocator.alloc_str(&import.local_name);
+        let module: &'a str = ast.allocator.alloc_str(&import.module);
+        let specifier = ImportDeclarationSpecifier::ImportDefaultSpecifier(
+            ast.alloc_import_default_specifier(SPAN, ast.binding_identifier(SPAN, local_name)),
+        );
+        Statement::from(ast.module_declaration_import_declaration(
+            SPAN,
+            Some(ast.vec1(specifier)),
+            ast.string_literal(SPAN, module, None),
+            None,
+            NONE,
+            import.import_kind,
+        ))
+    }
+
+    fn render_program(program: &Program<'_>) -> String {
+        Codegen::new()
+            .build(program)
+            .code
+            .trim_end_matches('\n')
+            .to_owned()
+    }
 }
 
 #[cfg(test)]

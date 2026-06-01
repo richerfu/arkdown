@@ -221,9 +221,11 @@ output, joins maps with `rolldown_sourcemap`, and uses
 post-render mutations. `arkdown` now centralizes unchanged original AST fragments
 in `source_emit::original_node_text()` and generated ViewPU output in
 `viewpu_emit::ViewpuWriter` with an internal `ViewpuAstEmitter` for standard
-component creation closures and ViewPU call statements. The emitter builds OXC
-AST nodes and prints them with OXC codegen, while keeping parser/codegen state
-localized in the emitter object. Source-map JSON/VLQ emission has been moved to
+component creation closures and ViewPU call statements. API import rewriting now
+also emits generated `@kit.*` replacement imports as OXC import-declaration AST
+nodes instead of formatting import text manually. These emitters build OXC AST
+nodes and print them with OXC codegen, while keeping parser/codegen state
+localized in emitter objects. Source-map JSON/VLQ emission has been moved to
 Rolldown's Rust sourcemap stack; the next required step is replacing remaining
 custom-component/recycle blocks, `If` control-flow blocks, and ViewPU
 class/member generation with a ViewPU IR or direct OXC AST generator.
