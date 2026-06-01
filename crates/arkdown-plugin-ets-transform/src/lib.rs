@@ -50,7 +50,9 @@ pub use module_rewrite::rewrite_static_module_specifiers_with;
 #[cfg(test)]
 pub(crate) use module_rewrite::{exported_binding_kinds, ExportBindingKind};
 pub use resource_transform::ResourceReference;
-pub(crate) use source_edit::{apply_source_patches, module_export_name_text, SourcePatch};
+pub(crate) use source_edit::{
+    apply_source_patches, apply_source_patches_with_offsets, module_export_name_text, SourcePatch,
+};
 pub use sys_resource::load_system_resource_references;
 
 /// ArkTS transform plugin — desugars `.ets` files into TypeScript.

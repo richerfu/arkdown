@@ -17,6 +17,7 @@ use crate::transform::component_analysis::{
     collect_imported_component_names, collect_local_component_update_props, SimpleTypeContext,
 };
 use crate::transform::viewpu_finalize::finalize_viewpu_output;
+use crate::{apply_source_patches_with_offsets, SourcePatch};
 
 use super::{
     component_from_struct, component_replacement_start, hvigor_source_path,
@@ -29,6 +30,7 @@ struct StructResult {
     viewpu_code: String,
     span_hints: Vec<SpanHint>,
     static_span_hints: Vec<SpanHint>,
+    patch_index: usize,
     out_offset: usize,
     class_line_in_viewpu: usize,
     class_line_text: String,
@@ -84,8 +86,7 @@ pub fn transform_ets_viewpu_with_source_map(
     );
     let builder_functions = collect_builder_function_names(&parsed.program, &source.id.id, options);
 
-    let mut out = String::with_capacity(content.len() + 512);
-    let mut last_end = 0usize;
+    let mut patches = Vec::new();
     let mut struct_results: Vec<StructResult> = Vec::new();
     let mut transformed_any = false;
 
@@ -103,8 +104,6 @@ pub fn transform_ets_viewpu_with_source_map(
             &hvigor_source_id,
         )? {
             let start = component_replacement_start(statement, content);
-            out.push_str(&content[last_end..start]);
-            let out_offset = out.len();
             let span_hints = component.initial_render_span_hints.clone();
             let viewpu_code = generate_view_pu_class(&component);
             let (class_line_in_viewpu, class_line_text) =
@@ -115,12 +114,18 @@ pub fn transform_ets_viewpu_with_source_map(
                 content,
                 &viewpu_code,
             );
-            out.push_str(&viewpu_code);
+            let patch_index = patches.len();
+            patches.push(SourcePatch {
+                start,
+                end: span.end as usize,
+                replacement: viewpu_code.clone(),
+            });
             struct_results.push(StructResult {
                 viewpu_code,
                 span_hints,
                 static_span_hints,
-                out_offset,
+                patch_index,
+                out_offset: 0,
                 class_line_in_viewpu,
                 class_line_text,
             });
@@ -135,17 +140,23 @@ pub fn transform_ets_viewpu_with_source_map(
             &builder_functions,
             &hvigor_source_id,
         )? {
-            out.push_str(&content[last_end..start]);
-            out.push_str(&replacement);
+            patches.push(SourcePatch {
+                start,
+                end: span.end as usize,
+                replacement,
+            });
             transformed_any = true;
-        } else {
-            out.push_str(&content[last_end..span.start as usize]);
-            out.push_str(span_text(span, content));
         }
-
-        last_end = span.end as usize;
     }
-    out.push_str(&content[last_end..]);
+    let patched_source = apply_source_patches_with_offsets(content, patches);
+    let mut out = patched_source.code;
+    for result in &mut struct_results {
+        result.out_offset = patched_source
+            .output_starts
+            .get(result.patch_index)
+            .and_then(|offset| *offset)
+            .expect("component patch must be applied");
+    }
 
     if struct_results.is_empty() {
         return if transformed_any {
