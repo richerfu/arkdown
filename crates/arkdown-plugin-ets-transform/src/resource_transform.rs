@@ -7,7 +7,6 @@
 //! ad hoc at call sites.
 
 use std::collections::HashMap;
-use std::fmt::Write;
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{CallExpression, Expression};
@@ -70,24 +69,15 @@ impl ResourceObject {
     }
 
     fn emit(&self) -> String {
-        let mut out = String::new();
-        out.push_str("{ \"id\": ");
-        let _ = write!(out, "{}", self.id);
-        out.push_str(", \"type\": ");
-        let _ = write!(out, "{}", self.runtime_type);
-        out.push_str(", params: [");
-        for (index, param) in self.params.iter().enumerate() {
-            if index > 0 {
-                out.push_str(", ");
-            }
-            out.push_str(param);
-        }
-        out.push_str("], \"bundleName\": ");
-        push_quoted_js_string(&mut out, &self.bundle_name);
-        out.push_str(", \"moduleName\": ");
-        push_quoted_js_string(&mut out, &self.module_name);
-        out.push_str(" }");
-        out
+        let params = self.params.join(", ");
+        let bundle_name =
+            serde_json::to_string(&self.bundle_name).expect("resource bundle name is JSON-safe");
+        let module_name =
+            serde_json::to_string(&self.module_name).expect("resource module name is JSON-safe");
+        format!(
+            "{{ \"id\": {}, \"type\": {}, params: [{}], \"bundleName\": {}, \"moduleName\": {} }}",
+            self.id, self.runtime_type, params, bundle_name, module_name
+        )
     }
 }
 
@@ -238,19 +228,4 @@ fn resource_key(resource_name: &str) -> Option<String> {
         && !resource.is_empty()
         && resource_runtime_type(ty).is_some())
     .then(|| format!("{source}.{name}"))
-}
-
-fn push_quoted_js_string(out: &mut String, value: &str) {
-    out.push('"');
-    for ch in value.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            _ => out.push(ch),
-        }
-    }
-    out.push('"');
 }
