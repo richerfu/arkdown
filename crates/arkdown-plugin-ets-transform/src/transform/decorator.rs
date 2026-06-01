@@ -134,7 +134,7 @@ pub fn is_state_decorator(decorator: &str) -> bool {
 pub fn has_update_state_vars_slot(decorator: &str) -> bool {
     matches!(
         decorator,
-        "Prop" | "Param" | "Once" | "PropRef" | "LocalStorageProp" | "BuilderParam"
+        "Prop" | "Param" | "Once" | "PropRef" | "BuilderParam"
     )
 }
 
@@ -253,8 +253,8 @@ mod tests {
     fn test_has_update_state_vars_slot() {
         assert!(has_update_state_vars_slot("Prop"));
         assert!(has_update_state_vars_slot("Param"));
-        assert!(has_update_state_vars_slot("LocalStorageProp"));
         assert!(has_update_state_vars_slot("BuilderParam"));
+        assert!(!has_update_state_vars_slot("LocalStorageProp"));
         assert!(!has_update_state_vars_slot("State"));
         assert!(!has_update_state_vars_slot("Link"));
         assert!(!has_update_state_vars_slot("Provide"));

@@ -7,9 +7,11 @@ fn main() {
         debug_info: false,
         opt_level: 0,
         target_api_version: 12,
+        target_api_sub_version: None,
         merge_abc: true,
         module: true,
         cache_path: None,
+        npm_entries: None,
     });
     // Simple test with registerNamedRoute object
     compiler.compile(vec![

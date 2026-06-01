@@ -27,6 +27,9 @@ Important upstream OpenHarmony refs:
   `expandAllImportPaths`, `processKitImport`, and obfuscation name collection.
 - `developtools_ace_ets2bundle/compiler/src/gen_merged_abc.ts` writes
   `filesInfo.txt`, `npmEntries.txt`, and calls `es2abc @filesInfo --npm-module-entry-list`.
+- `arkcompiler_ets_frontend/es2panda/util/moduleHelpers.cpp`
+  `CompileNpmModuleEntryList()` lowers each `npmEntries.txt` line into a
+  standalone pandasm record with one `u8=false` field.
 - `arkcompiler_ets_frontend/es2panda/compiler/core/emitter/emitter.cpp` assigns
   per-instruction source line/column. Return instructions use function or block
   end positions.
@@ -177,21 +180,41 @@ Current HmosWorld artifact status after a clean arkdown rebuild:
 | `filesInfo.txt` record set | 571 | 571 | identical |
 | `modules.cache` entries | 572 | 572 | identical |
 | `npmEntries.txt` entries | 57 | 57 | identical |
-| `ets/modules.abc` | 4,756,944B | 2,337,080B | not aligned |
-| `ets/widgets.abc` | 42,348B | 27,560B | not aligned |
+| `ets/modules.abc` | 4,756,944B | 3,531,868B | not aligned |
+| `ets/widgets.abc` | 42,348B | 30,020B | not aligned |
+| ABC file version | `0x0002000c` | `0x0002000c` | aligned |
+| ABC class count | 630 | 630 | aligned |
+| ABC LNP/method count (`modules.abc`) | 7,757 | 7,121 | not aligned |
+| ABC LNP/method count (`widgets.abc`) | 83 | 71 | not aligned |
+| ABC literal-array count | 5,743 | 2,130 | not aligned |
 
 The size reduction is therefore not caused by missing app/sys resource objects in
-the generated TypeScript cache or by missing CompileArkTS handoff modules. The
-remaining gap must be investigated from byte-for-byte cache-source differences and
-upstream `arkcompiler_ets_frontend` C++/TS behavior, including generated metadata,
-debug-info sections, literal arrays, and bytecode records.
+the generated TypeScript cache or by missing CompileArkTS handoff modules.
+`arkdown-abc` now also lowers `npmEntries.txt` using the upstream
+`CompileNpmModuleEntryList()` record shape, wraps pandasm record names as
+`L<record>;`, de-duplicates fixed SDK stubs when real npm-entry records provide
+the same SDK namespace classes, and collects function/arrow records with the
+upstream `Binder::LegacyBuildFunction()` FNV-1a naming model. The ETS transform
+now follows upstream `process_component_build.ts` for `ListItem` lazy create
+blocks and upstream `process_component_class.ts` for `LocalStorageProp` class
+field initializers. Remaining cache-source gaps are visible in class-method
+internal names and some custom-component `paramsLambda` blocks. The remaining
+large gap is in the native es2abc merge path: running the SDK `es2abc` with
+hvigor's actual flags
+(`--debug-info @filesInfo.txt --npm-module-entry-list npmEntries.txt --merge-abc
+--enable-release-column --cache-file @modules.cache`) reproduces hvigor's
+`modules.abc` byte-for-byte from the hvigor cache, while the same command on the
+current arkdown cache produces a 4,555,404B ABC. That leaves two separate gaps:
+cache-source/printer parity (~201KB on HmosWorld) and Rust backend parity for
+debug-info/literal-array/protoBin ProgramCache merge semantics (~2.21MB on
+HmosWorld).
 
 ## Major Remaining Capabilities Beyond Minimal-HAP
 
 | Area | Status | Remaining work |
 |---|---|---|
 | ABC DebugInfo/LNP | minimal fixture aligned | Broaden golden coverage beyond minimal-hap. |
-| Direct cache-TS ABC route | minimal fixture aligned | Keep as final ABC route; extend fixture coverage. |
+| Direct cache-TS ABC route | minimal fixture aligned; HmosWorld handoff and npm-entry records wired | Keep as final ABC route; implement hvigor `modules.cache`/protoBin ProgramCache merge semantics. |
 | ArkTS transform breadth | partial | Broaden beyond minimal fixture: `@Builder`, `@Styles`, more ArkUI DSL forms, diagnostics. Resource lowering and imported const-enum lowering are AST-based for HmosWorld. |
 | Release builds | partial | Obfuscation, terser/minification, release treeshake/manual chunks, release source maps. |
 | Incremental cache | partial | Rollup msgpack cache, task input cache, real ABC `--cache-file` equivalent. |
@@ -204,9 +227,10 @@ Priority order from the current 2026-06-01 state:
 
 1. **[HmosWorld ABC delta] Diff hvigor and arkdown CompileArkTS bytes.** The HAP
    entry list, `$r/$rawfile` cache check, `filesInfo.txt`, `modules.cache`, and
-   `npmEntries.txt` now align, but `modules.abc` is still much smaller. Compare
-   transformed TS/JS bytes, record names, DebugInfo/LNP, literal arrays, and method
-   tables before changing compiler code.
+   `npmEntries.txt` now align and npm-entry records are lowered, but
+   `modules.abc` is still much smaller. Next compare transformed TS/JS bytes and
+   then port the native `--cache-file @modules.cache` ProgramCache/protoBin merge
+   behavior from upstream C++.
 2. **[Parity harness] Add a stable ABC diff helper.** It should compare
    CodeItems, DebugInfo/LNP, method records, indexes, literal arrays, and final
    bytes separately so future regressions are localized immediately.

@@ -190,6 +190,12 @@ pub fn generate_view_pu_class(info: &ComponentInfo) -> String {
                 ));
             }
             ConstructorInitKind::StorageInit => {
+                if matches!(
+                    field.decorator.as_str(),
+                    "LocalStorageLink" | "LocalStorageProp" | "LocalStoragePropRef"
+                ) {
+                    continue;
+                }
                 let key = field
                     .decorator_arg
                     .as_deref()
@@ -284,11 +290,37 @@ pub fn generate_view_pu_class(info: &ComponentInfo) -> String {
             format!("<{}>", field.type_annotation)
         };
         out.push_str(&format!(
-            "    private __{name}: {backing}{type_param};\n",
+            "    private __{name}: {backing}{type_param}",
             name = field.name,
             backing = backing,
             type_param = type_param,
         ));
+        if matches!(
+            field.decorator.as_str(),
+            "LocalStorageLink" | "LocalStorageProp" | "LocalStoragePropRef"
+        ) {
+            let local_init = field.initializer.as_deref().unwrap_or("undefined");
+            let key = field
+                .decorator_arg
+                .as_deref()
+                .map(str::trim)
+                .filter(|arg| !arg.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("\"{}\"", field.name));
+            let api = match field.decorator.as_str() {
+                "LocalStorageLink" => "createLocalStorageLink",
+                _ => "createLocalStorageProp",
+            };
+            out.push_str(&format!(
+                " = this.{api}{type_param}({key}, {init}, \"{name}\")",
+                name = field.name,
+                api = api,
+                type_param = type_param,
+                key = key,
+                init = local_init,
+            ));
+        }
+        out.push_str(";\n");
         if is_state_decorator(&field.decorator) {
             let ty = if field.type_annotation.is_empty() {
                 "unknown"
@@ -915,14 +947,25 @@ mod tests {
                 "wrong backing class for @{decorator}"
             );
             assert!(
-                out.contains(&format!(
-                    "this.__setting = this.{}(\"setting\", undefined, \"setting\")",
-                    if decorator.ends_with("Link") {
-                        "createStorageLink"
-                    } else {
-                        "createStorageProp"
-                    }
-                )),
+                if decorator.starts_with("LocalStorage") {
+                    out.contains(&format!(
+                        "private __setting: ObservedPropertyAbstractPU<string> = this.{}<string>(\"setting\", undefined, \"setting\")",
+                        if decorator.ends_with("Link") {
+                            "createLocalStorageLink"
+                        } else {
+                            "createLocalStorageProp"
+                        }
+                    ))
+                } else {
+                    out.contains(&format!(
+                        "this.__setting = this.{}(\"setting\", undefined, \"setting\")",
+                        if decorator.ends_with("Link") {
+                            "createStorageLink"
+                        } else {
+                            "createStorageProp"
+                        }
+                    ))
+                },
                 "@{decorator} must emit hvigor storage runtime init"
             );
         }

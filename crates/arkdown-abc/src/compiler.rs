@@ -6,9 +6,10 @@ use oxc_parser::Parser;
 use oxc_span::SourceType;
 
 use crate::cache::{derive_key, CacheFile};
-use crate::emit::file::AbcFile;
+use crate::emit::file::{version_for_target_api, AbcFile};
 use crate::error::AbcError;
 use crate::ir::builder;
+use crate::npm_entries::load_npm_entry_records;
 use crate::widget::WidgetCompileConfig;
 
 /// Options controlling how the [`AbcCompiler`] compiles JavaScript to Panda
@@ -20,6 +21,8 @@ pub struct AbcCompileOptions {
     pub opt_level: u8,
     /// Target OpenHarmony API version (e.g. `12` for API 12 / HarmonyOS 4.x).
     pub target_api_version: u32,
+    /// Optional target API stage/sub-version passed as `--target-api-sub-version`.
+    pub target_api_sub_version: Option<String>,
     /// Merge all records into a single `.abc` output file.
     pub merge_abc: bool,
     /// Parse and lower inputs as ECMAScript modules, matching upstream
@@ -27,6 +30,11 @@ pub struct AbcCompileOptions {
     pub module: bool,
     /// Optional path to an incremental build cache directory.
     pub cache_path: Option<PathBuf>,
+    /// Optional hvigor/es2abc `--npm-module-entry-list` file.
+    ///
+    /// Upstream `CompileNpmModuleEntryList` lowers each line into a standalone
+    /// `pandasm::Record` with one `u8=false` field; it is not parsed as JS.
+    pub npm_entries: Option<PathBuf>,
 }
 
 /// An input source file to compile.
@@ -142,8 +150,11 @@ fn with_ts_extension(path: &str) -> String {
         + ".ts"
 }
 
-fn cache_key_inputs(modules: &[AbcModule]) -> Vec<(String, String)> {
-    modules
+fn cache_key_inputs(
+    modules: &[AbcModule],
+    npm_entries_source: Option<&str>,
+) -> Vec<(String, String)> {
+    let mut inputs: Vec<(String, String)> = modules
         .iter()
         .map(|module| {
             (
@@ -155,7 +166,11 @@ fn cache_key_inputs(modules: &[AbcModule]) -> Vec<(String, String)> {
                 ),
             )
         })
-        .collect()
+        .collect();
+    if let Some(source) = npm_entries_source {
+        inputs.push(("__arkdown_npm_entries__".to_string(), source.to_string()));
+    }
+    inputs
 }
 
 /// Pure-Rust ArkCompiler bytecode compiler.
@@ -174,9 +189,11 @@ fn cache_key_inputs(modules: &[AbcModule]) -> Vec<(String, String)> {
 ///     debug_info: false,
 ///     opt_level: 0,
 ///     target_api_version: 12,
+///     target_api_sub_version: None,
 ///     merge_abc: true,
 ///     module: true,
 ///     cache_path: None,
+///     npm_entries: None,
 /// });
 ///
 /// let result = compiler.compile(
@@ -256,7 +273,8 @@ impl AbcCompiler {
             abc_file.add_record(record);
         }
 
-        let bytes = abc_file.serialize();
+        let bytes = abc_file
+            .serialize_with_version(version_for_target_api(config.target_api_version, None));
 
         if let Some(parent) = config.output.parent() {
             if !parent.as_os_str().is_empty() {
@@ -293,6 +311,21 @@ impl AbcCompiler {
         modules: Vec<AbcModule>,
         output: &Path,
     ) -> Result<AbcArtifactResult, AbcError> {
+        let npm_entries_source = self
+            .options
+            .npm_entries
+            .as_ref()
+            .map(fs_err::read_to_string)
+            .transpose()
+            .map_err(AbcError::Io)?;
+
+        tracing::debug!(
+            module_count = modules.len(),
+            npm_entries = ?self.options.npm_entries,
+            debug_info = self.options.debug_info,
+            "abc compile start"
+        );
+
         // ── Incremental cache check (SPEC-025) ────────────────────────────────
         //
         // Derive a cache key from all module sources and the relevant compile
@@ -300,7 +333,7 @@ impl AbcCompiler {
         // cached bytecode directly to `output` and return early — skipping all
         // IR lowering.
         if let Some(ref cache_dir) = self.options.cache_path {
-            let key_inputs_owned = cache_key_inputs(&modules);
+            let key_inputs_owned = cache_key_inputs(&modules, npm_entries_source.as_deref());
             let key_inputs: Vec<(&str, &str)> = key_inputs_owned
                 .iter()
                 .map(|(record_name, source)| (record_name.as_str(), source.as_str()))
@@ -309,6 +342,7 @@ impl AbcCompiler {
 
             let cache = CacheFile::load(cache_dir);
             if let Some(cached_bytes) = cache.lookup(&key) {
+                tracing::debug!(cache = %cache_dir.display(), "abc cache hit");
                 // Cache hit — write cached bytecode and return.
                 if let Some(parent) = output.parent() {
                     if !parent.as_os_str().is_empty() {
@@ -322,6 +356,7 @@ impl AbcCompiler {
                     has_debug_info: self.options.debug_info,
                 });
             }
+            tracing::debug!(cache = %cache_dir.display(), "abc cache miss");
         }
 
         // ── Full compilation ──────────────────────────────────────────────────
@@ -360,7 +395,22 @@ impl AbcCompiler {
             abc_file.add_record(record);
         }
 
-        let bytes = abc_file.serialize();
+        if let Some(path) = &self.options.npm_entries {
+            let records = load_npm_entry_records(path)?;
+            tracing::debug!(
+                npm_entries = %path.display(),
+                record_count = records.len(),
+                "lowered npm module entry records"
+            );
+            for record in records {
+                abc_file.add_record(record);
+            }
+        }
+
+        let bytes = abc_file.serialize_with_version(version_for_target_api(
+            self.options.target_api_version,
+            self.options.target_api_sub_version.as_deref(),
+        ));
 
         // Ensure the output directory exists.
         if let Some(parent) = output.parent() {
@@ -372,7 +422,7 @@ impl AbcCompiler {
 
         // ── Write result to cache (SPEC-025) ──────────────────────────────────
         if let Some(ref cache_dir) = self.options.cache_path {
-            let key_inputs_owned = cache_key_inputs(&modules);
+            let key_inputs_owned = cache_key_inputs(&modules, npm_entries_source.as_deref());
             let key_inputs: Vec<(&str, &str)> = key_inputs_owned
                 .iter()
                 .map(|(record_name, source)| (record_name.as_str(), source.as_str()))

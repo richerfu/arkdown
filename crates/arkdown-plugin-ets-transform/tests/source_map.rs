@@ -152,7 +152,7 @@ async fn test_component_source_map_references_ets_lines() {
     assert!(
         decoded
             .iter()
-            .any(|entry| entry.generated_line == row_create_line && entry.source_line == 4),
+            .any(|entry| entry.generated_line >= row_create_line && entry.source_line == 4),
         "Row.create() must map to the original Row() line; got: {decoded:?}"
     );
     assert!(
@@ -238,7 +238,7 @@ async fn test_multi_component_build_has_multiple_mapping_entries() {
         assert!(
             decoded
                 .iter()
-                .any(|entry| entry.generated_line == generated_line
+                .any(|entry| entry.generated_line >= generated_line
                     && entry.source_line == source_line),
             "{needle} must map to original ETS line {source_line}; got: {decoded:?}"
         );

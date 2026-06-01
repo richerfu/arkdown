@@ -15,9 +15,11 @@ fn make_compiler() -> AbcCompiler {
         debug_info: false,
         opt_level: 0,
         target_api_version: 12,
+        target_api_sub_version: None,
         merge_abc: true,
         module: false,
         cache_path: None,
+        npm_entries: None,
     })
 }
 
@@ -562,9 +564,11 @@ fn test_artifact_api_version_propagated() {
         debug_info: false,
         opt_level: 0,
         target_api_version: 9,
+        target_api_sub_version: None,
         merge_abc: true,
         module: false,
         cache_path: None,
+        npm_entries: None,
     });
     let result = compiler
         .compile(vec![iife_module("api_test", "(function(){}())")], &out)
@@ -596,9 +600,11 @@ fn test_artifact_debug_info_true() {
         debug_info: true,
         opt_level: 0,
         target_api_version: 12,
+        target_api_sub_version: None,
         merge_abc: true,
         module: false,
         cache_path: None,
+        npm_entries: None,
     });
     let result = compiler
         .compile(vec![iife_module("debug_test", "(function(){}())")], &out)
@@ -717,7 +723,10 @@ fn test_source_file_emits_debug_info_and_lnp() {
     let bytes = std::fs::read(&out).expect("read .abc");
     let num_lnp = read_u32(&bytes, 0x24);
     let lnp_idx_off = read_u32(&bytes, 0x28) as usize;
-    assert_eq!(num_lnp, 1, "one method gets one line-number program");
+    assert_eq!(
+        num_lnp, 2,
+        "func_main_0 and the IIFE function expression each get one line-number program"
+    );
     assert!(lnp_idx_off > 0, "LNP index offset must be present");
 
     let user_off = class_offsets(&bytes)
@@ -767,10 +776,10 @@ fn test_source_file_emits_debug_info_and_lnp() {
     read_uleb(&bytes, &mut pos); // num_params
     let cp_size2 = read_uleb(&bytes, &mut pos) as usize;
     pos += cp_size2;
-    assert_eq!(
-        read_uleb(&bytes, &mut pos),
-        0,
-        "debug info references LNP index 0"
+    let lnp_index = read_uleb(&bytes, &mut pos);
+    assert!(
+        lnp_index < u64::from(num_lnp),
+        "debug info references a valid LNP index; got {lnp_index}, count {num_lnp}"
     );
 
     // The LNP entry (in the separate LNP data_ stream) starts with SET_FILE
@@ -795,9 +804,11 @@ fn module_compiler() -> AbcCompiler {
         debug_info: false,
         opt_level: 0,
         target_api_version: 12,
+        target_api_sub_version: None,
         merge_abc: true,
         module: true,
         cache_path: None,
+        npm_entries: None,
     })
 }
 
@@ -1100,9 +1111,11 @@ registerNamedRoute(() => new Index(void 0, {}), "", {bundleName: "com.example.ar
         debug_info: true,
         opt_level: 0,
         target_api_version: 12,
+        target_api_sub_version: None,
         merge_abc: true,
         module: true,
         cache_path: None,
+        npm_entries: None,
     })
     .compile(
         vec![

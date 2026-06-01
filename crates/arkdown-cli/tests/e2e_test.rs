@@ -219,6 +219,7 @@ fn run_build(fixture: &PathBuf) -> PathBuf {
             cache_file: None,
             module: true,
             commonjs: false,
+            npm_module_entry_list: None,
         })
         .expect("abc compile");
         for (_chunk_name, path) in &bundle_out.chunk_files {
@@ -461,6 +462,7 @@ fn run_build_hsp(fixture: &PathBuf) -> PathBuf {
             cache_file: None,
             module: true,
             commonjs: false,
+            npm_module_entry_list: None,
         })
         .expect("abc compile");
     }
@@ -1178,6 +1180,7 @@ fn run_build_bc_har(fixture_src: &PathBuf) -> (PathBuf, PathBuf) {
             cache_file: None,
             module: true,
             commonjs: false,
+            npm_module_entry_list: None,
         })
         .expect("abc compile");
         for (_chunk_name, path) in &bundle_out.chunk_files {

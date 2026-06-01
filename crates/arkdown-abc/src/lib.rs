@@ -32,6 +32,7 @@ pub mod compiler;
 pub mod emit;
 pub mod error;
 pub mod ir;
+mod npm_entries;
 pub mod widget;
 
 pub use compiler::{AbcArtifactResult, AbcCompileOptions, AbcCompiler, AbcModule};
@@ -69,6 +70,22 @@ mod tests {
             version,
             crate::emit::file::VERSION,
             "ABC version field must match VERSION constant"
+        );
+    }
+
+    #[test]
+    fn test_target_api_version_mapping() {
+        assert_eq!(
+            crate::emit::file::version_for_target_api(12, None),
+            0x0002_000C
+        );
+        assert_eq!(
+            crate::emit::file::version_for_target_api(17, None),
+            0x0006_000C
+        );
+        assert_eq!(
+            crate::emit::file::version_for_target_api(20, None),
+            0x0001_000D
         );
     }
 
@@ -120,9 +137,11 @@ mod tests {
             debug_info: false,
             opt_level: 0,
             target_api_version: 12,
+            target_api_sub_version: None,
             merge_abc: true,
             module: false,
             cache_path: None,
+            npm_entries: None,
         })
     }
 
@@ -233,9 +252,11 @@ mod tests {
             debug_info: false,
             opt_level: 0,
             target_api_version: 12,
+            target_api_sub_version: None,
             merge_abc: true,
             module: true,
             cache_path: None,
+            npm_entries: None,
         });
         let source = r#"import UIAbility from "@ohos:app.ability.UIAbility";
 import hilog from "@ohos:hilog";
@@ -373,6 +394,43 @@ export { EntryAbility as default };"#;
     }
 
     #[test]
+    fn test_ast_function_scope_records_are_collected() {
+        use crate::emit::file::LiteralArray;
+        use crate::emit::strings::StringTable;
+        use crate::ir::builder::build_record_with_debug;
+
+        let source = r#"
+function outer() {
+  function nested() { return 1; }
+  const local = function() { return nested(); };
+  const arrow = () => local();
+  return arrow();
+}
+const object = { method() { return outer(); } };
+"#;
+
+        let mut strings = StringTable::default();
+        let mut literal_arrays: Vec<LiteralArray> = Vec::new();
+        let record = build_record_with_debug(
+            source,
+            "pkg/test/functions",
+            &mut strings,
+            &mut literal_arrays,
+            Some("functions.js"),
+            true,
+        )
+        .expect("build_record_with_debug failed");
+
+        let method_names: Vec<&str> = record.methods.iter().map(|m| m.name.as_str()).collect();
+        for expected in ["func_main_0", "outer", "nested", "local", "method"] {
+            assert!(
+                method_names.contains(&expected),
+                "missing {expected}; got {method_names:?}"
+            );
+        }
+    }
+
+    #[test]
     fn test_top_level_block_call_arg_arrows_are_collected() {
         use crate::emit::file::LiteralArray;
         use crate::emit::strings::StringTable;
@@ -399,14 +457,18 @@ registerNamedRoute(() => new Index(undefined, {}), "", {});
         .expect("build_record_with_debug failed");
 
         let method_names: Vec<&str> = record.methods.iter().map(|m| m.name.as_str()).collect();
+        let anonymous_arrows = method_names
+            .iter()
+            .filter(|name| name.starts_with('#') && name.ends_with('#') && !name.contains('*'))
+            .count();
         assert!(
-            method_names.contains(&"#*#"),
-            "block-scoped Reflect.set arrow must be collected; got: {:?}",
+            anonymous_arrows >= 2,
+            "top-level call-argument arrows must be collected through the upstream function queue; got: {:?}",
             method_names
         );
         assert!(
-            method_names.contains(&"#*#^1"),
-            "registerNamedRoute arrow must keep the second top-level closure name; got: {:?}",
+            !method_names.iter().any(|name| name.starts_with("#*#")),
+            "top-level arrows must not use the removed custom #*# naming path; got: {:?}",
             method_names
         );
     }
@@ -467,9 +529,11 @@ registerNamedRoute(() => new Index(undefined, {}), "", {});
             debug_info: false,
             opt_level: 0,
             target_api_version: 12,
+            target_api_sub_version: None,
             merge_abc: true,
             module: false,
             cache_path: Some(cache_dir.path().to_path_buf()),
+            npm_entries: None,
         };
 
         let modules = || {
@@ -523,9 +587,11 @@ registerNamedRoute(() => new Index(undefined, {}), "", {});
             debug_info: false,
             opt_level: 0,
             target_api_version: 12,
+            target_api_sub_version: None,
             merge_abc: true,
             module: false,
             cache_path: Some(cache_dir.path().to_path_buf()),
+            npm_entries: None,
         };
 
         // Compile module A — the record name appears in the ABC string table, so

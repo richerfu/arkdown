@@ -224,7 +224,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
     // Step 3: Bundling
     progress.step(3, 6, "Bundling");
     let mut bundle_outs: Vec<(BundleOutput, bool)> = Vec::new();
-    let mut compile_arkts_inputs_by_bundle: Vec<Vec<Ts2abcInput>> = Vec::new();
+    let mut compile_arkts_handoffs_by_bundle: Vec<CompileArkTsHandoff> = Vec::new();
     for (module, _manifest, loader_json, resource_refs) in &loader_jsons {
         let cache_dir = PathBuf::from(&loader_json.cache_path);
         let output_dir = PathBuf::from(&loader_json.ace_module_build);
@@ -246,7 +246,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 },
                 true,
             ));
-            compile_arkts_inputs_by_bundle.push(Vec::new());
+            compile_arkts_handoffs_by_bundle.push(CompileArkTsHandoff::default());
             continue;
         }
 
@@ -329,7 +329,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             .bundle(loader_json)
             .await
             .map_err(|e| anyhow::anyhow!("Bundle failed: {}", e))?;
-        let compile_arkts_inputs = write_compile_arkts_cache(
+        let compile_arkts_handoff = write_compile_arkts_cache(
             module,
             loader_json,
             &config_arc,
@@ -337,7 +337,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             resource_refs,
         )?;
         bundle_outs.push((bundle_out, false));
-        compile_arkts_inputs_by_bundle.push(compile_arkts_inputs);
+        compile_arkts_handoffs_by_bundle.push(compile_arkts_handoff);
     }
     progress.done();
 
@@ -481,11 +481,11 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 ))
             })
             .collect();
-        let cache_ts_inputs = compile_arkts_inputs_by_bundle
+        let compile_arkts_handoff = compile_arkts_handoffs_by_bundle
             .get(bundle_index)
             .cloned()
             .unwrap_or_default();
-        let ts2abc_inputs = cache_ts_inputs;
+        let ts2abc_inputs = compile_arkts_handoff.inputs;
         if ts2abc_inputs.is_empty() {
             return Err(anyhow::anyhow!(
                 "CompileArkTS produced no module inputs; refusing to fall back to bundled chunks because hvigor compiles the Rollup module graph"
@@ -522,6 +522,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 module: true,
                 commonjs: false,
                 cache_file: Some(abc_compiler_cache_path),
+                npm_module_entry_list: compile_arkts_handoff.npm_entries_path,
             })
             .map_err(|e| anyhow::anyhow!("ABC compile failed: {}", e))?;
             write_hvigor_source_maps(
@@ -1006,7 +1007,7 @@ fn compile_widget_pass(
         add_dynamic_import_package_entries(&mut pkg_entries, loader_json, config);
     }
     add_native_package_entries(&mut pkg_entries);
-    let inputs = write_compile_arkts_abc_handoff(&cache_root, &compile_infos, &pkg_entries)?;
+    let handoff = write_compile_arkts_abc_handoff(&cache_root, &compile_infos, &pkg_entries)?;
 
     let collection_value = serde_json::Value::Object(component_collection);
     let collection_bytes = serde_json::to_vec_pretty(&collection_value)?;
@@ -1035,7 +1036,7 @@ fn compile_widget_pass(
         fs_err::create_dir_all(parent)?;
     }
     compile_to_abc(Ts2abcOptions {
-        inputs,
+        inputs: handoff.inputs,
         output: widget_abc,
         target_api_version: config.sdk_config.compile_api_version,
         target_api_sub_version: None,
@@ -1049,6 +1050,7 @@ fn compile_widget_pass(
         module: true,
         commonjs: false,
         cache_file: Some(widget_cache_file),
+        npm_module_entry_list: handoff.npm_entries_path,
     })
     .map_err(|e| anyhow::anyhow!("widget ABC compile failed: {}", e))?;
 
@@ -1481,7 +1483,7 @@ fn write_compile_arkts_cache(
     config: &Arc<ArkdownConfig>,
     chunk_graph: &ChunkGraph,
     resource_refs: &HashMap<String, ResourceReference>,
-) -> Result<Vec<Ts2abcInput>> {
+) -> Result<CompileArkTsHandoff> {
     let mode_dir = match config.build_mode {
         BuildMode::Debug => "debug",
         BuildMode::Release => "release",
@@ -2451,11 +2453,17 @@ struct CompileArkTsInfo {
     abc_cache_path: Option<PathBuf>,
 }
 
+#[derive(Clone, Debug, Default)]
+struct CompileArkTsHandoff {
+    inputs: Vec<Ts2abcInput>,
+    npm_entries_path: Option<PathBuf>,
+}
+
 fn write_compile_arkts_abc_handoff(
     cache_root: &Path,
     infos: &[CompileArkTsInfo],
     pkg_entries: &PackageEntryInfos,
-) -> Result<Vec<Ts2abcInput>> {
+) -> Result<CompileArkTsHandoff> {
     fs_err::create_dir_all(cache_root)?;
     let cache_root = canonical_or_owned(cache_root);
 
@@ -2509,7 +2517,10 @@ fn write_compile_arkts_abc_handoff(
     ));
     fs_err::write(cache_root.join("modules.cache"), modules_cache)?;
 
-    Ok(inputs)
+    Ok(CompileArkTsHandoff {
+        inputs,
+        npm_entries_path: Some(npm_entries_path),
+    })
 }
 
 fn read_compile_arkts_source_maps(

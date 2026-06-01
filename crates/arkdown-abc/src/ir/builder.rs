@@ -18,6 +18,7 @@ use crate::emit::record::{
 };
 use crate::emit::strings::StringTable;
 use crate::error::AbcError;
+use crate::ir::function_records::{collect_function_records, FunctionRecord, FunctionRecordNode};
 use crate::ir::opcodes::Insn;
 
 const MANDATORY_PARAM_THIS_REG: u8 = 2;
@@ -461,122 +462,24 @@ pub fn build_record_with_debug_and_source_map(
     // Determine which statement slice to scan for declarations. Upstream
     // module mode scans normal top-level statements.
     let scan_stmts: &[Statement<'_>] = statement_scan_body(&program, is_module);
+    let tracked_source = source_file.as_ref().map(|_| source);
 
-    // Emit a method entry for each named top-level FunctionDeclaration.
-    for stmt in scan_stmts {
-        if let Statement::FunctionDeclaration(func) = stmt {
-            if let Some(id) = &func.id {
-                let func_name = id.name.as_str().to_string();
-                let param_names: Vec<String> = func
-                    .params
-                    .items
-                    .iter()
-                    .filter_map(|p| match &p.pattern {
-                        BindingPattern::BindingIdentifier(id) => Some(id.name.as_str().to_string()),
-                        _ => None,
-                    })
-                    .collect();
-                let rest_info: Option<(String, u8)> = func.params.rest.as_ref().and_then(|rp| {
-                    if let BindingPattern::BindingIdentifier(bid) = &rp.rest.argument {
-                        Some((bid.name.as_str().to_string(), func.params.items.len() as u8))
-                    } else {
-                        None
-                    }
-                });
-                let is_async = func.r#async;
-                let (func_bytecode, func_catches) = if rest_info.is_some() || is_async {
-                    compile_function_body_ext(
-                        func.body.as_deref(),
-                        rest_info,
-                        is_async,
-                        strings,
-                        literal_arrays,
-                        &lowering,
-                        &param_names,
-                    )
-                } else {
-                    compile_function_body(
-                        func.body.as_deref(),
-                        strings,
-                        literal_arrays,
-                        &lowering,
-                        &param_names,
-                    )
-                };
-                let num_vregs = estimate_vregs(&func_bytecode);
-                methods.push(MethodRecord {
-                    name: func_name,
-                    bytecode: func_bytecode,
-                    num_vregs,
-                    num_args: func.params.items.len() as u16,
-                    debug_info: None,
-                    line_ops: vec![],
-                    catch_entries: func_catches,
-                });
-            }
-        }
-        if let Statement::ExportNamedDeclaration(export) = stmt {
-            if let Some(Declaration::FunctionDeclaration(func)) = &export.declaration {
-                if let Some(id) = &func.id {
-                    let func_name = id.name.as_str().to_string();
-                    let param_names: Vec<String> = func
-                        .params
-                        .items
-                        .iter()
-                        .filter_map(|p| match &p.pattern {
-                            BindingPattern::BindingIdentifier(id) => {
-                                Some(id.name.as_str().to_string())
-                            }
-                            _ => None,
-                        })
-                        .collect();
-                    let rest_info: Option<(String, u8)> =
-                        func.params.rest.as_ref().and_then(|rp| {
-                            if let BindingPattern::BindingIdentifier(bid) = &rp.rest.argument {
-                                Some((bid.name.as_str().to_string(), func.params.items.len() as u8))
-                            } else {
-                                None
-                            }
-                        });
-                    let is_async = func.r#async;
-                    let (func_bytecode, func_catches) = if rest_info.is_some() || is_async {
-                        compile_function_body_ext(
-                            func.body.as_deref(),
-                            rest_info,
-                            is_async,
-                            strings,
-                            literal_arrays,
-                            &lowering,
-                            &param_names,
-                        )
-                    } else {
-                        compile_function_body(
-                            func.body.as_deref(),
-                            strings,
-                            literal_arrays,
-                            &lowering,
-                            &param_names,
-                        )
-                    };
-                    let num_vregs = estimate_vregs(&func_bytecode);
-                    methods.push(MethodRecord {
-                        name: func_name,
-                        bytecode: func_bytecode,
-                        num_vregs,
-                        num_args: func.params.items.len() as u16,
-                        debug_info: None,
-                        line_ops: vec![],
-                        catch_entries: func_catches,
-                    });
-                }
-            }
-        }
+    for function in collect_function_records(&program, scan_stmts, source) {
+        compile_function_record(
+            function,
+            strings,
+            literal_arrays,
+            &lowering,
+            &mut methods,
+            tracked_source,
+            source_file,
+            source_mapper,
+        );
     }
 
     // Compile class method bodies found in the selected statement body.
     // Module mode scans top-level statements directly; non-module compatibility
     // inputs are always the top-level program body.
-    let tracked_source = source_file.as_ref().map(|_| source);
     compile_class_method_bodies(
         scan_stmts,
         strings,
@@ -587,24 +490,6 @@ pub fn build_record_with_debug_and_source_map(
         source_file,
         source_mapper,
     );
-
-    // Collect top-level call-argument arrow functions (e.g. registerNamedRoute callback
-    // and Reflect.set finalizeConstruction stub). hvigor names these #*# / #*#^1.
-    {
-        let mut seen = HashMap::<String, u16>::new();
-        for stmt in scan_stmts {
-            collect_top_level_call_arg_arrows(
-                stmt,
-                strings,
-                literal_arrays,
-                &lowering,
-                &mut methods,
-                &mut seen,
-                tracked_source,
-                source_mapper,
-            );
-        }
-    }
 
     // ArkRuntime finds modules by their OHM URL class name format:
     //   "L{bundleName}/{moduleName}/{pathFromEts};"
@@ -1108,6 +993,125 @@ fn statement_scan_body<'a>(program: &'a Program<'_>, _is_module: bool) -> &'a [S
     program.body.as_slice()
 }
 
+#[allow(clippy::too_many_arguments)]
+fn compile_function_record(
+    function: FunctionRecord<'_>,
+    strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
+    lowering: &LoweringContext,
+    methods: &mut Vec<MethodRecord>,
+    source: Option<&str>,
+    source_file_path: Option<&str>,
+    source_mapper: Option<&SourceMapper>,
+) {
+    match function.node {
+        FunctionRecordNode::Function(func) => {
+            if func.declare || func.body.is_none() {
+                return;
+            }
+            let param_names = function_param_names(func);
+            let rest_info = function_rest_param(func);
+            let (bytecode, line_ops, catches) = if rest_info.is_some() || func.r#async {
+                if let Some(src) = source {
+                    compile_function_body_ext_tracked(
+                        func.body.as_deref(),
+                        rest_info,
+                        func.r#async,
+                        strings,
+                        literal_arrays,
+                        lowering,
+                        &param_names,
+                        Some(src),
+                        source_mapper,
+                    )
+                    .unwrap_or_else(|| (vec![], vec![], vec![]))
+                } else {
+                    let (bytecode, catches) = compile_function_body_ext(
+                        func.body.as_deref(),
+                        rest_info,
+                        func.r#async,
+                        strings,
+                        literal_arrays,
+                        lowering,
+                        &param_names,
+                    );
+                    (bytecode, Vec::new(), catches)
+                }
+            } else if let Some(src) = source {
+                compile_function_body_tracked_with_end(
+                    func.body.as_deref(),
+                    strings,
+                    literal_arrays,
+                    lowering,
+                    &param_names,
+                    src,
+                    source_mapper,
+                    Some(func.span.end),
+                )
+            } else {
+                let (bytecode, catches) = compile_function_body(
+                    func.body.as_deref(),
+                    strings,
+                    literal_arrays,
+                    lowering,
+                    &param_names,
+                );
+                (bytecode, Vec::new(), catches)
+            };
+            let num_vregs = estimate_vregs(&bytecode);
+            methods.push(MethodRecord {
+                name: function.name,
+                bytecode,
+                num_vregs,
+                num_args: func.params.items.len() as u16,
+                debug_info: source_file_path.map(|path| DebugInfoRecord {
+                    line_start: 1,
+                    source_file: path.to_string(),
+                    param_names,
+                    lexical_this: func
+                        .body
+                        .as_deref()
+                        .is_some_and(|body| stmts_capture_this_in_arrow(&body.statements)),
+                }),
+                line_ops,
+                catch_entries: catches,
+            });
+        }
+        FunctionRecordNode::Arrow(arrow) => {
+            let captures = arrow_captures_from_body(arrow.body.as_ref());
+            let param_names = arrow_param_names(arrow);
+            let (bytecode, line_ops, catches) = compile_arrow_body_with_line_ops(
+                arrow.body.as_ref(),
+                strings,
+                literal_arrays,
+                lowering,
+                captures,
+                &param_names,
+                arrow.expression,
+                source,
+                source_mapper,
+            );
+            let num_vregs = estimate_vregs(&bytecode);
+            let num_args = arrow.params.items.len() as u16 + 3;
+            let bytecode = prepend_function_argument_copies(bytecode, num_vregs, num_args);
+            methods.push(MethodRecord {
+                name: function.name,
+                bytecode,
+                num_vregs,
+                num_args,
+                debug_info: source_file_path.map(|path| DebugInfoRecord {
+                    line_start: 1,
+                    source_file: path.to_string(),
+                    param_names,
+                    lexical_this: captures.this_slot.is_some(),
+                }),
+                line_ops,
+                catch_entries: catches,
+            });
+        }
+    }
+}
+
 /// Walk `stmts` for `ClassDeclaration`s and compile each method body into a
 /// separate [`MethodRecord`], appending them to `methods`.
 ///
@@ -1208,164 +1212,6 @@ fn compile_class_method_bodies(
     }
 }
 
-/// Collect top-level call-argument arrow functions and emit MethodRecords named
-/// `#*#` / `#*#^1` / … — the hvigor naming for module-scope closures.
-fn collect_top_level_call_arg_arrows(
-    stmt: &Statement<'_>,
-    strings: &mut StringTable,
-    literal_arrays: &mut Vec<LiteralArray>,
-    lowering: &LoweringContext,
-    methods: &mut Vec<MethodRecord>,
-    seen_names: &mut HashMap<String, u16>,
-    source: Option<&str>,
-    source_mapper: Option<&SourceMapper>,
-) {
-    match stmt {
-        Statement::ExpressionStatement(es) => {
-            collect_top_level_call_arg_arrows_expr(
-                &es.expression,
-                strings,
-                literal_arrays,
-                lowering,
-                methods,
-                seen_names,
-                source,
-                source_mapper,
-            );
-        }
-        Statement::IfStatement(if_stmt) => {
-            collect_top_level_call_arg_arrows(
-                &if_stmt.consequent,
-                strings,
-                literal_arrays,
-                lowering,
-                methods,
-                seen_names,
-                source,
-                source_mapper,
-            );
-            if let Some(alt) = &if_stmt.alternate {
-                collect_top_level_call_arg_arrows(
-                    alt,
-                    strings,
-                    literal_arrays,
-                    lowering,
-                    methods,
-                    seen_names,
-                    source,
-                    source_mapper,
-                );
-            }
-        }
-        Statement::BlockStatement(block) => {
-            for stmt in &block.body {
-                collect_top_level_call_arg_arrows(
-                    stmt,
-                    strings,
-                    literal_arrays,
-                    lowering,
-                    methods,
-                    seen_names,
-                    source,
-                    source_mapper,
-                );
-            }
-        }
-        _ => {}
-    }
-}
-
-fn collect_top_level_call_arg_arrows_expr(
-    expr: &Expression<'_>,
-    strings: &mut StringTable,
-    literal_arrays: &mut Vec<LiteralArray>,
-    lowering: &LoweringContext,
-    methods: &mut Vec<MethodRecord>,
-    seen_names: &mut HashMap<String, u16>,
-    source: Option<&str>,
-    source_mapper: Option<&SourceMapper>,
-) {
-    match expr {
-        Expression::CallExpression(call) => {
-            for arg in call.arguments.iter() {
-                let Some(arg_expr) = arg.as_expression() else {
-                    continue;
-                };
-                if let Expression::ArrowFunctionExpression(arrow) = arg_expr {
-                    let base_name = "#*#".to_string();
-                    let record_name = suffix_duplicate_method_name(base_name, seen_names);
-                    let captures = arrow_captures_from_body(arrow.body.as_ref());
-                    let param_names = arrow_param_names(arrow);
-                    let (bytecode, arrow_line_ops, arrow_catches) =
-                        compile_arrow_body_with_line_ops(
-                            arrow.body.as_ref(),
-                            strings,
-                            literal_arrays,
-                            lowering,
-                            captures,
-                            &param_names,
-                            arrow.expression,
-                            source,
-                            source_mapper,
-                        );
-                    let num_vregs = estimate_vregs(&bytecode);
-                    let num_args = arrow.params.items.len() as u16 + 3;
-                    let bytecode = prepend_function_argument_copies(bytecode, num_vregs, num_args);
-                    let closure_debug: Option<DebugInfoRecord> = None;
-                    let _ = param_names; // top-level closures don't track param debug info
-                    methods.push(MethodRecord {
-                        name: record_name,
-                        bytecode,
-                        num_vregs,
-                        num_args,
-                        debug_info: closure_debug,
-                        line_ops: arrow_line_ops,
-                        catch_entries: arrow_catches,
-                    });
-                    // Recurse into body for deeper top-level closures.
-                    let body_ref = arrow.body.as_ref();
-                    for s in &body_ref.statements {
-                        collect_top_level_call_arg_arrows(
-                            s,
-                            strings,
-                            literal_arrays,
-                            lowering,
-                            methods,
-                            seen_names,
-                            source,
-                            source_mapper,
-                        );
-                    }
-                } else {
-                    collect_top_level_call_arg_arrows_expr(
-                        arg_expr,
-                        strings,
-                        literal_arrays,
-                        lowering,
-                        methods,
-                        seen_names,
-                        source,
-                        source_mapper,
-                    );
-                }
-            }
-        }
-        Expression::StaticMemberExpression(mem) => {
-            collect_top_level_call_arg_arrows_expr(
-                &mem.object,
-                strings,
-                literal_arrays,
-                lowering,
-                methods,
-                seen_names,
-                source,
-                source_mapper,
-            );
-        }
-        _ => {}
-    }
-}
-
 /// Compile method bodies from a class element list and append MethodRecords.
 #[allow(clippy::too_many_arguments)]
 fn compile_class_elements(
@@ -1447,8 +1293,6 @@ fn compile_class_elements(
     }
 
     let mut seen_names = HashMap::<String, u16>::new();
-    // Shared counter for call-arg arrow closures across all methods in the class.
-    let mut closure_seen_names = HashMap::<String, u16>::new();
     for element in elements {
         if let ClassElement::MethodDefinition(method) = element {
             let Some(key_name) = class_method_record_name(method, class_name) else {
@@ -1579,319 +1423,7 @@ fn compile_class_elements(
                 line_ops: method_line_ops,
                 catch_entries: method_catches,
             });
-
-            collect_class_method_arrow_records(
-                class_name,
-                method.value.body.as_deref(),
-                strings,
-                literal_arrays,
-                lowering,
-                methods,
-            );
-
-            // Collect arrow functions passed as call arguments (e.g.
-            // observeComponentCreation2 callbacks) as separate MethodRecords.
-            collect_call_arg_arrow_records(
-                method.value.body.as_deref(),
-                strings,
-                literal_arrays,
-                lowering,
-                methods,
-                &mut closure_seen_names,
-                source_file_path,
-                source,
-                source_mapper,
-            );
         }
-    }
-}
-
-fn collect_class_method_arrow_records(
-    class_name: &str,
-    body: Option<&FunctionBody<'_>>,
-    strings: &mut StringTable,
-    literal_arrays: &mut Vec<LiteralArray>,
-    lowering: &LoweringContext,
-    methods: &mut Vec<MethodRecord>,
-) {
-    let Some(body) = body else {
-        return;
-    };
-    for stmt in &body.statements {
-        collect_arrow_records_from_stmt(
-            class_name,
-            stmt,
-            strings,
-            literal_arrays,
-            lowering,
-            methods,
-        );
-    }
-}
-
-fn collect_arrow_records_from_stmt(
-    class_name: &str,
-    stmt: &Statement<'_>,
-    strings: &mut StringTable,
-    literal_arrays: &mut Vec<LiteralArray>,
-    lowering: &LoweringContext,
-    methods: &mut Vec<MethodRecord>,
-) {
-    match stmt {
-        Statement::VariableDeclaration(decl) => {
-            for declarator in &decl.declarations {
-                let BindingPattern::BindingIdentifier(id) = &declarator.id else {
-                    continue;
-                };
-                let Some(Expression::ArrowFunctionExpression(arrow)) = &declarator.init else {
-                    continue;
-                };
-                let captures = arrow_captures_from_body(arrow.body.as_ref());
-                let param_names = arrow_param_names(arrow);
-                let (bytecode, arrow_catches) = compile_arrow_body(
-                    arrow.body.as_ref(),
-                    strings,
-                    literal_arrays,
-                    lowering,
-                    captures,
-                    &param_names,
-                    arrow.expression,
-                );
-                let num_vregs = estimate_vregs(&bytecode);
-                let num_args = arrow.params.items.len() as u16 + 3;
-                let bytecode = prepend_function_argument_copies(bytecode, num_vregs, num_args);
-                methods.push(MethodRecord {
-                    name: format!("#~{class_name}@0*#{}", id.name.as_str()),
-                    bytecode,
-                    num_vregs,
-                    num_args,
-                    debug_info: None,
-                    line_ops: vec![],
-                    catch_entries: arrow_catches,
-                });
-            }
-        }
-        Statement::BlockStatement(block) => {
-            for stmt in &block.body {
-                collect_arrow_records_from_stmt(
-                    class_name,
-                    stmt,
-                    strings,
-                    literal_arrays,
-                    lowering,
-                    methods,
-                );
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Scan a method body for arrow functions passed as call-expression arguments and
-/// emit a MethodRecord for each one.
-///
-/// hvigor names these `#~@0>@{pos}*#` (1-indexed arg position) with `^N` suffixes
-/// for subsequent occurrences.  `seen_names` is shared across all class methods so
-/// the counter is class-global.
-fn collect_call_arg_arrow_records(
-    body: Option<&FunctionBody<'_>>,
-    strings: &mut StringTable,
-    literal_arrays: &mut Vec<LiteralArray>,
-    lowering: &LoweringContext,
-    methods: &mut Vec<MethodRecord>,
-    seen_names: &mut HashMap<String, u16>,
-    source_file_path: Option<&str>,
-    source: Option<&str>,
-    source_mapper: Option<&SourceMapper>,
-) {
-    let Some(body) = body else {
-        return;
-    };
-    for stmt in &body.statements {
-        collect_call_arg_arrows_stmt(
-            stmt,
-            strings,
-            literal_arrays,
-            lowering,
-            methods,
-            seen_names,
-            source_file_path,
-            source,
-            source_mapper,
-        );
-    }
-}
-
-fn collect_call_arg_arrows_stmt(
-    stmt: &Statement<'_>,
-    strings: &mut StringTable,
-    literal_arrays: &mut Vec<LiteralArray>,
-    lowering: &LoweringContext,
-    methods: &mut Vec<MethodRecord>,
-    seen_names: &mut HashMap<String, u16>,
-    source_file_path: Option<&str>,
-    source: Option<&str>,
-    source_mapper: Option<&SourceMapper>,
-) {
-    match stmt {
-        Statement::ExpressionStatement(es) => {
-            collect_call_arg_arrows_expr(
-                &es.expression,
-                strings,
-                literal_arrays,
-                lowering,
-                methods,
-                seen_names,
-                source_file_path,
-                source,
-                source_mapper,
-            );
-        }
-        Statement::BlockStatement(block) => {
-            for s in &block.body {
-                collect_call_arg_arrows_stmt(
-                    s,
-                    strings,
-                    literal_arrays,
-                    lowering,
-                    methods,
-                    seen_names,
-                    source_file_path,
-                    source,
-                    source_mapper,
-                );
-            }
-        }
-        Statement::IfStatement(if_stmt) => {
-            collect_call_arg_arrows_stmt(
-                &if_stmt.consequent,
-                strings,
-                literal_arrays,
-                lowering,
-                methods,
-                seen_names,
-                source_file_path,
-                source,
-                source_mapper,
-            );
-            if let Some(alt) = &if_stmt.alternate {
-                collect_call_arg_arrows_stmt(
-                    alt,
-                    strings,
-                    literal_arrays,
-                    lowering,
-                    methods,
-                    seen_names,
-                    source_file_path,
-                    source,
-                    source_mapper,
-                );
-            }
-        }
-        _ => {}
-    }
-}
-
-fn collect_call_arg_arrows_expr(
-    expr: &Expression<'_>,
-    strings: &mut StringTable,
-    literal_arrays: &mut Vec<LiteralArray>,
-    lowering: &LoweringContext,
-    methods: &mut Vec<MethodRecord>,
-    seen_names: &mut HashMap<String, u16>,
-    source_file_path: Option<&str>,
-    source: Option<&str>,
-    source_mapper: Option<&SourceMapper>,
-) {
-    match expr {
-        Expression::CallExpression(call) => {
-            for (idx, arg) in call.arguments.iter().enumerate() {
-                let Some(arg_expr) = arg.as_expression() else {
-                    continue;
-                };
-                if let Expression::ArrowFunctionExpression(arrow) = arg_expr {
-                    // hvigor always uses "@1" as a fixed marker for call-argument
-                    // closures regardless of which argument position the arrow is at.
-                    let _ = idx;
-                    let base_name = "#~@0>@1*#".to_string();
-                    let record_name = suffix_duplicate_method_name(base_name, seen_names);
-                    let captures = arrow_captures_from_body(arrow.body.as_ref());
-                    let arrow_param_names = arrow_param_names(arrow);
-                    let (bytecode, arrow_line_ops, arrow_catches) =
-                        compile_arrow_body_with_line_ops(
-                            arrow.body.as_ref(),
-                            strings,
-                            literal_arrays,
-                            lowering,
-                            captures,
-                            &arrow_param_names,
-                            arrow.expression,
-                            source,
-                            source_mapper,
-                        );
-                    let num_vregs = estimate_vregs(&bytecode);
-                    let num_args = arrow.params.items.len() as u16 + 3;
-                    let bytecode = prepend_function_argument_copies(bytecode, num_vregs, num_args);
-                    let arrow_debug = source_file_path.map(|path| DebugInfoRecord {
-                        line_start: 1,
-                        source_file: path.to_string(),
-                        param_names: arrow_param_names.clone(),
-                        lexical_this: false,
-                    });
-                    methods.push(MethodRecord {
-                        name: record_name,
-                        bytecode,
-                        num_vregs,
-                        num_args,
-                        debug_info: arrow_debug,
-                        line_ops: arrow_line_ops,
-                        catch_entries: arrow_catches,
-                    });
-                    // Recurse into the arrow body for deeper nested closures.
-                    let body_ref = arrow.body.as_ref();
-                    for s in &body_ref.statements {
-                        collect_call_arg_arrows_stmt(
-                            s,
-                            strings,
-                            literal_arrays,
-                            lowering,
-                            methods,
-                            seen_names,
-                            source_file_path,
-                            source,
-                            source_mapper,
-                        );
-                    }
-                } else {
-                    // Recurse into non-arrow args (e.g. chained calls).
-                    collect_call_arg_arrows_expr(
-                        arg_expr,
-                        strings,
-                        literal_arrays,
-                        lowering,
-                        methods,
-                        seen_names,
-                        source_file_path,
-                        source,
-                        source_mapper,
-                    );
-                }
-            }
-        }
-        Expression::StaticMemberExpression(mem) => {
-            collect_call_arg_arrows_expr(
-                &mem.object,
-                strings,
-                literal_arrays,
-                lowering,
-                methods,
-                seen_names,
-                source_file_path,
-                source,
-                source_mapper,
-            );
-        }
-        _ => {}
     }
 }
 
@@ -2164,29 +1696,6 @@ fn compile_function_body_tracked_with_end(
             (Insn::ReturnUndefined.encode(&mut st), vec![], vec![])
         }
     }
-}
-
-fn compile_arrow_body(
-    body: &FunctionBody<'_>,
-    strings: &mut StringTable,
-    literal_arrays: &mut Vec<LiteralArray>,
-    lowering: &LoweringContext,
-    captures: ArrowCaptures,
-    param_names: &[String],
-    expression_body: bool,
-) -> (Vec<u8>, Vec<CatchEntry>) {
-    let (bytecode, _line_ops, catches) = compile_arrow_body_with_line_ops(
-        body,
-        strings,
-        literal_arrays,
-        lowering,
-        captures,
-        param_names,
-        expression_body,
-        None,
-        None,
-    );
-    (bytecode, catches)
 }
 
 fn compile_arrow_body_with_line_ops<'src>(
@@ -2563,6 +2072,31 @@ fn arrow_param_names(arrow: &oxc_ast::ast::ArrowFunctionExpression<'_>) -> Vec<S
             _ => None,
         })
         .collect()
+}
+
+fn function_param_names(function: &oxc_ast::ast::Function<'_>) -> Vec<String> {
+    function
+        .params
+        .items
+        .iter()
+        .filter_map(|param| match &param.pattern {
+            BindingPattern::BindingIdentifier(id) => Some(id.name.as_str().to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn function_rest_param(function: &oxc_ast::ast::Function<'_>) -> Option<(String, u8)> {
+    function.params.rest.as_ref().and_then(|rest_param| {
+        if let BindingPattern::BindingIdentifier(id) = &rest_param.rest.argument {
+            Some((
+                id.name.as_str().to_string(),
+                function.params.items.len() as u8,
+            ))
+        } else {
+            None
+        }
+    })
 }
 
 fn arrow_captures_from_body(body: &FunctionBody<'_>) -> ArrowCaptures {

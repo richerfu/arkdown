@@ -2,34 +2,43 @@
 
 **Crate**: `arkdown-abc`
 **Priority**: P1
-**Status**: IMPLEMENTED (2026-05-29)
+**Status**: PARTIAL / INTERNAL CACHE ONLY (updated 2026-06-01)
 
 ---
 
 ## Overview
 
-Per-compilation SHA-256 keyed on-disk cache for the ABC compiler.  When
-`AbcCompileOptions::cache_path` is set, the compiler checks the cache before
-running the IR lowering pass.  A cache hit writes the cached bytecode directly
-to the output file, skipping all `build_record` calls.
+The current implementation is a per-compilation SHA-256 keyed JSON cache used by
+the Rust backend. It is useful as an internal development cache, but it is **not**
+hvigor parity. hvigor passes `--cache-file @modules.cache` to es2abc; that file
+maps CompileArkTS cache sources to `.protoBin` ProgramCache files, including
+`npmEntries.txt -> npmEntries.protoBin`.
+
+Full parity requires replacing the JSON cache path with upstream-compatible
+`modules.cache`/protoBin ProgramCache generation and merge semantics.
 
 ---
 
 ## API
 
 No public API changes beyond `AbcCompileOptions::cache_path: Option<PathBuf>`,
-which was already present but previously ignored.  The field is now wired.
+plus `AbcCompileOptions::npm_entries: Option<PathBuf>`.
 
 ### `AbcCompileOptions::cache_path`
 
 ```rust
-/// Optional path to an incremental build cache directory.
+/// Optional path to arkdown's internal JSON incremental cache directory.
 ///
 /// When set, the compiler stores compiled `.abc` bytecode in
 /// `<cache_path>/modules.abc.cache` (JSON format).  On subsequent runs
 /// with identical inputs the cached bytecode is used directly, skipping
-/// IR lowering.
+/// IR lowering. This is not hvigor's `--cache-file @modules.cache` format.
 pub cache_path: Option<PathBuf>,
+
+/// Optional hvigor/es2abc `--npm-module-entry-list` file. This is lowered as
+/// upstream `CompileNpmModuleEntryList()` records and is included in the JSON
+/// cache key.
+pub npm_entries: Option<PathBuf>,
 ```
 
 ---
@@ -46,8 +55,9 @@ Path: `<cache_path>/modules.abc.cache`
 }
 ```
 
-- **`key`**: SHA-256 hex digest of all module record names, source texts, and
-  the `module` / `debug_info` compile options (in order).
+- **`key`**: SHA-256 hex digest of all module record names, source texts,
+  optional `npmEntries.txt` text, and the `module` / `debug_info` compile
+  options (in order).
 - **`bytecode`**: Hex-encoded compiled `.abc` binary.
 
 ---
@@ -62,8 +72,8 @@ SHA-256( record_name_0 || NUL || source_0 || NUL
        || "debug="  || ("0" | "1") )
 ```
 
-Any change to a source text, record name, or compile option produces a new key
-and triggers a full recompile.
+Any change to a source text, record name, npm-entry list, or compile option
+produces a new key and triggers a full recompile.
 
 ---
 
@@ -80,12 +90,16 @@ and triggers a full recompile.
 
 1. Before compilation: calls `derive_key` + `CacheFile::load` + `lookup`.
    On hit: writes cached bytes to output and returns early.
-2. After compilation: calls `CacheFile::load` + `upsert` + `save`.
+2. Lowers `npmEntries.txt` as upstream-style records when present.
+3. After compilation: calls `CacheFile::load` + `upsert` + `save`.
    Cache write errors are non-fatal (silently ignored).
 
 ### Modified: `crates/arkdown-abc/Cargo.toml`
 
-Added workspace dependencies: `sha2`, `serde`, `serde_json`, `hex`.
+Added workspace dependencies: `sha2`, `serde`, `serde_json`, `hex`, `tracing`.
+
+Diagnostics must use `tracing::debug!`/`tracing::warn!`; do not add a custom
+debug logging mechanism.
 
 ---
 

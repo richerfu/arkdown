@@ -61,7 +61,9 @@ pub(crate) fn emit_javascript(source: &str, id: &str) -> Option<String> {
     };
 
     let mut options = TransformOptions::default();
+    options.assumptions.set_public_class_fields = true;
     options.typescript.optimize_const_enums = true;
+    options.typescript.remove_class_fields_without_initializer = true;
     let path = Path::new(id);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         Transformer::new(&allocator, path, &options)
@@ -374,6 +376,23 @@ mod tests {
         assert!(
             output.contains("\"provider\"") && !output.contains("Constant.Key.MapProviderKey"),
             "namespace const enum must be inlined; got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn emit_js_matches_typescript_class_field_semantics() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_path = dir.path().join("Model.ts");
+        let source =
+            "class Model { value: string; count = 1; constructor() { this.value = 'ok'; } }\n";
+        let output = emit_javascript(source, source_path.to_str().unwrap()).unwrap();
+        assert!(
+            !output.contains("value;"),
+            "type-only class fields must be removed like TypeScript useDefineForClassFields=false; got:\n{output}"
+        );
+        assert!(
+            output.contains("this.count = 1"),
+            "initialized class fields must be lowered into constructor assignments; got:\n{output}"
         );
     }
 }

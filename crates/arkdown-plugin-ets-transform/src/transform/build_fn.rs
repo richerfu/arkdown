@@ -279,6 +279,12 @@ fn lower_component(
     if name == "LazyForEach" {
         return lower_lazy_for_each(component, source_text, indent, out, span_hints);
     }
+    if name == "ListItem"
+        && !component.children.is_empty()
+        && is_lazy_list_item(component, source_text)
+    {
+        return lower_lazy_list_item(component, source_text, indent, out, span_hints);
+    }
 
     let body_line = out.bytes().filter(|&b| b == b'\n').count();
 
@@ -360,6 +366,94 @@ fn lower_component(
         end_span(component.callee.span()),
     );
     out.push_str(&format!("{indent}{name}.pop();\n"));
+    Ok(())
+}
+
+fn is_lazy_list_item(component: &ArkUIComponentExpression<'_>, source_text: &str) -> bool {
+    !component
+        .arguments
+        .first()
+        .is_some_and(|arg| argument_text(arg, source_text).trim() == "\"false\"")
+}
+
+fn lower_lazy_list_item(
+    component: &ArkUIComponentExpression<'_>,
+    source_text: &str,
+    indent: &str,
+    out: &mut String,
+    span_hints: &mut Vec<SpanHint>,
+) -> Result<(), BuildLoweringError> {
+    out.push_str(&format!("{indent}{{\n"));
+    let inner = format!("{indent}    ");
+    out.push_str(&format!(
+        "{inner}const itemCreation = (elmtId, isInitialRender) => {{\n"
+    ));
+    out.push_str(&format!(
+        "{inner}    ViewStackProcessor.StartGetAccessRecordingFor(elmtId);\n"
+    ));
+    out.push_str(&format!(
+        "{inner}    ListItem.create(deepRenderFunction, true);\n"
+    ));
+    out.push_str(&format!("{inner}    if (!isInitialRender) {{\n"));
+    out.push_str(&format!("{inner}        ListItem.pop();\n"));
+    out.push_str(&format!("{inner}    }}\n"));
+    out.push_str(&format!(
+        "{inner}    ViewStackProcessor.StopGetAccessRecording();\n"
+    ));
+    out.push_str(&format!("{inner}}};\n"));
+    out.push_str(&format!(
+        "{inner}const itemCreation2 = (elmtId, isInitialRender) => {{\n"
+    ));
+    out.push_str(&format!(
+        "{inner}    ListItem.create(deepRenderFunction, true);\n"
+    ));
+    out.push_str(&format!("{inner}}};\n"));
+    out.push_str(&format!(
+        "{inner}const deepRenderFunction = (elmtId, isInitialRender) => {{\n"
+    ));
+    out.push_str(&format!(
+        "{inner}    itemCreation(elmtId, isInitialRender);\n"
+    ));
+    out.push_str(&format!("{inner}    {{\n"));
+    for child in &component.children {
+        match child {
+            ArkUIChild::Component(child) => {
+                lower_component(
+                    child,
+                    source_text,
+                    &format!("{inner}        "),
+                    out,
+                    span_hints,
+                )?;
+            }
+            ArkUIChild::Expression(expression) => {
+                lower_expression(
+                    expression,
+                    source_text,
+                    &format!("{inner}        "),
+                    out,
+                    span_hints,
+                )?;
+            }
+            ArkUIChild::Statement(statement) => {
+                lower_statement(
+                    statement,
+                    source_text,
+                    &format!("{inner}        "),
+                    out,
+                    span_hints,
+                )?;
+            }
+        }
+    }
+    out.push_str(&format!("{inner}    }}\n"));
+    out.push_str(&format!("{inner}    ListItem.pop();\n"));
+    out.push_str(&format!("{inner}}};\n"));
+    out.push_str(&format!(
+        "{inner}this.observeComponentCreation2(itemCreation2, ListItem);\n"
+    ));
+    out.push_str(&format!("{inner}ListItem.pop();\n"));
+    out.push_str(&format!("{indent}}}\n"));
     Ok(())
 }
 

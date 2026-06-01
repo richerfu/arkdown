@@ -190,8 +190,8 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 - hvigor: CompileArkTS writes transformed TS cache files, `filesInfo.txt`, `npmEntries.txt`, and invokes `es2abc @filesInfo`
 - arkdown: writes matching handoff metadata, generates cache TS bytes that match hvigor for the minimal fixture, and now uses that route for final ABC generation
 - Current status: minimal-hap `ets/modules.abc` is 9844B and byte-identical to hvigor
-- HmosWorld status: after `oxc_resolver`-backed hvigor package-root resolution, AST resource lowering, and upstream-style imported const-enum lowering, HmosWorld builds end-to-end without unresolved package externals. `filesInfo.txt`, `modules.cache`, and `npmEntries.txt` now match hvigor by record set (`571/571` files, `572/572` cache entries, and `57/57` package entries). Cache source generation also rewrites local value imports to hvigor-style `@bundle:` OHM URLs and emits the ViewPU `finalizeConstruction` shim for the same number of component files as hvigor (`60/60`). Output is still smaller than hvigor (`modules.abc` 2,337,080B vs 4,756,944B), so remaining parity work is now in cache source byte-for-byte differences and ABC/source-map breadth rather than module discovery.
-- Remaining work: finish byte-for-byte parity with hvigor's TypeScript printer/source-map output, then continue porting native es2abc lowering/debug/source-map behavior into `arkdown-abc`.
+- HmosWorld status: after `oxc_resolver`-backed hvigor package-root resolution, AST resource lowering, upstream-style imported const-enum lowering, upstream `CompileNpmModuleEntryList()` npm-entry record lowering, upstream `Binder::LegacyBuildFunction()` function-scope queue collection, `ListItem` lazy item block lowering, and `LocalStorageProp` field-initializer lowering, HmosWorld builds end-to-end without unresolved package externals. `filesInfo.txt`, `modules.cache`, and `npmEntries.txt` match hvigor by record set (`571/571` files, `572/572` cache entries, and `57/57` package entries). Cache source generation also rewrites local value imports to hvigor-style `@bundle:` OHM URLs and emits the ViewPU `finalizeConstruction` shim for the same number of component files as hvigor (`60/60`). ABC file version is aligned for API 12 (`0x0002000c`), and class count is aligned (`630/630`) after pandasm record-name wrapping and SDK-stub de-duplication. Output is still smaller than hvigor (`modules.abc` 3,531,868B vs 4,756,944B; `widgets.abc` 30,020B vs 42,348B), with LNP/method count `7,121/7,757` for `modules.abc`, `71/83` for `widgets.abc`, and literal-array count `2,130/5,743`. SDK `es2abc` reproduces hvigor byte-for-byte from hvigor's cache with `--debug-info`, `--npm-module-entry-list`, and `--cache-file @modules.cache`; the same command on arkdown's cache is still the oracle for separating cache-source/printer gaps from Rust backend ProgramCache/protoBin/debug-info/literal-array merge gaps.
+- Remaining work: finish byte-for-byte parity with hvigor's TypeScript printer/source-map output, then port native es2abc `--cache-file @modules.cache` ProgramCache/protoBin merge and debug-info behavior into `arkdown-abc`.
 
 **F16 — Missing ViewPU lowering in etsTransform**
 - hvigor: `etsTransform` SDK plugin fully lowers ArkUI `struct`+`build()` blocks into `observeComponentCreation2()`, `.create()`, attribute method calls, and `.pop()` calls
@@ -275,8 +275,9 @@ forms are added.
 
 **What**: Keep the hvigor-style `filesInfo.txt`/`npmEntries.txt` handoff as the
 final ABC input route. The cache TS bytes and `modules.abc` now match hvigor for
-the minimal fixture; remaining work is broader coverage and real incremental
-cache compatibility.
+the minimal fixture, and `npmEntries.txt` is lowered as upstream
+`CompileNpmModuleEntryList()` records. Remaining work is broader coverage and
+real `modules.cache`/protoBin ProgramCache compatibility.
 **File**: `crates/arkdown-cli/src/cmd/build.rs`, `crates/arkdown-abc/src/`
 **Upstream ref**: `gen_merged_abc.ts`
 **Complexity**: M
@@ -294,7 +295,11 @@ hide executable-bytecode regressions.
 
 ### TASK-ABC-04: ABC incremental cache wiring (M)
 
-**What**: Pass `cache_path` from CLI through `AbcCompiler` config. Implement per-function `SHA256(source_text)` keyed msgpack cache. On hit, skip IR lowering and emit cached bytecode. Invalidate when `compileEnv` key changes.
+**What**: Replace the current arkdown JSON cache with hvigor-compatible
+`--cache-file @modules.cache` behavior. Parse source-to-protoBin mappings,
+generate/update protoBin ProgramCache entries, and merge cached programs with
+the same semantics as upstream es2panda. Use `tracing::debug!` for diagnostics;
+do not add a custom debug channel.
 **File**: `crates/arkdown-abc/src/compiler.rs`, `crates/arkdown-cli/src/main.rs`
 **Upstream ref**: `es2abc --cache-file` behavior; hvigor `RollupCacheService` msgpack cache at `cache/msgpack/MSGPACK_COMPILE_CACHE_DIR_NAME`; `ark-compile.js::trace()` and `doTaskAction()` cache setup
 **Complexity**: M

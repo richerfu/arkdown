@@ -138,14 +138,33 @@ Records share the string table and literal array table, so common strings are de
 
 ## 6. Incremental Compilation Cache
 
-Cache strategy mirrors the original `--cache-file` behavior:
+The current Rust cache is an internal development cache and does **not** yet
+mirror hvigor's `--cache-file @modules.cache` behavior. hvigor writes a
+`modules.cache` mapping from each CompileArkTS cache source to a `.protoBin`
+ProgramCache file, plus an entry for `npmEntries.txt -> npmEntries.protoBin`.
+Upstream es2panda then merges those cached programs during `ResolveAndGenerate()`.
 
-- Cache key per function: `SHA256(function_source_text)`
-- On hit: emit cached bytecode directly, skip IR lowering
-- On miss: lower to IR, emit bytecode, store in cache
-- Cache format: msgpack file per module, stored in `build/.arkdown_cache/abc/`
-- Full invalidation when: `target_api_version` changes, `opt_level` changes, or
-  config hash changes (see SPEC-019)
+Implemented parity pieces:
+
+- CLI writes hvigor-style `filesInfo.txt`, `npmEntries.txt`, and `modules.cache`.
+- `arkdown-ts2abc` accepts `--npm-module-entry-list`.
+- `arkdown-abc` lowers `npmEntries.txt` through the same record shape as
+  upstream `CompileNpmModuleEntryList()`: one record per line, one `u8=false`
+  field named by the build path. Record names are serialized in pandasm class
+  form (`L<record>;`), and fixed SDK namespace stubs are de-duplicated when the
+  npm-entry records provide the real SDK namespace classes.
+- ABC header version is selected from target API, matching native es2abc
+  (`0x0002000c` for API 12, `0x0006000c` for API 12..17 current/release).
+- Diagnostic output uses the community `tracing` stack (`tracing::debug!`,
+  `ARKDOWN_LOG=debug`) rather than a custom debug logging path.
+
+Remaining parity work:
+
+- replace the internal JSON bytecode cache with `modules.cache`/`.protoBin`
+  ProgramCache semantics;
+- include cached Program merge order and debug-info data exactly as upstream
+  es2panda does;
+- keep cache diagnostics on `tracing`.
 
 ---
 

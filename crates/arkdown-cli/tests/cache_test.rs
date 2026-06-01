@@ -356,6 +356,7 @@ fn run_pipeline(fixture: &Path) -> PathBuf {
                 module: true,
                 commonjs: false,
                 cache_file: Some(abc_cache_file),
+                npm_module_entry_list: None,
             })
             .expect("abc compile");
 

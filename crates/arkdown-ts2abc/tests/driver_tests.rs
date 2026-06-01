@@ -23,6 +23,7 @@ fn compile_to_abc_uses_rust_backend_and_writes_panda_file() {
         module: true,
         commonjs: false,
         cache_file: None,
+        npm_module_entry_list: None,
     })
     .unwrap();
 
@@ -55,11 +56,54 @@ fn compile_to_abc_accepts_module_source_without_iife_wrapper() {
         module: true,
         commonjs: false,
         cache_file: None,
+        npm_module_entry_list: None,
     })
     .unwrap();
 
     let bytes = fs_err::read(result.abc_path).unwrap();
     assert!(bytes.starts_with(b"PANDA\0\0\0"));
+}
+
+#[test]
+fn compile_to_abc_lowers_npm_module_entry_list_records() {
+    let tmp = tempfile::tempdir().unwrap();
+    let source = tmp.path().join("entry.js");
+    let entries = tmp.path().join("npmEntries.txt");
+    let output = tmp.path().join("modules.abc");
+    fs_err::write(&source, "export const value = 1;").unwrap();
+    fs_err::write(
+        &entries,
+        "@normalized:N&entry/src/main/ets/pages/Index&:/pkg_modules/a/index\n",
+    )
+    .unwrap();
+
+    let result = compile_to_abc(Ts2abcOptions {
+        inputs: vec![Ts2abcInput {
+            path: source,
+            record_name: "entry/main".into(),
+            source_file: None,
+            source_map: None,
+        }],
+        output: output.clone(),
+        target_api_version: 12,
+        target_api_sub_version: None,
+        debug_info: false,
+        opt_level: 0,
+        merge_abc: true,
+        module: true,
+        commonjs: false,
+        cache_file: None,
+        npm_module_entry_list: Some(entries),
+    })
+    .unwrap();
+
+    let bytes = fs_err::read(result.abc_path).unwrap();
+    assert!(bytes
+        .windows(b"@normalized".len())
+        .any(|window| window == b"@normalized"));
+    assert!(bytes
+        .windows(b"N&entry/src/main/ets/pages/Index&:/pkg_modules/a/index".len())
+        .any(|window| window == b"N&entry/src/main/ets/pages/Index&:/pkg_modules/a/index"));
 }
 
 #[test]
@@ -102,6 +146,7 @@ fn check_minimal_hap_num_lit() {
         module: true,
         commonjs: false,
         cache_file: None,
+        npm_module_entry_list: None,
     })
     .unwrap();
     let data = std::fs::read(&out).unwrap();

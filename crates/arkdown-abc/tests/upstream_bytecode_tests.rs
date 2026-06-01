@@ -43,9 +43,11 @@ fn compile_case(case: &UpstreamCase) -> Vec<u8> {
         debug_info: false,
         opt_level: 0,
         target_api_version: 12,
+        target_api_sub_version: None,
         merge_abc: true,
         module: false,
         cache_path: None,
+        npm_entries: None,
     });
     compiler
         .compile(

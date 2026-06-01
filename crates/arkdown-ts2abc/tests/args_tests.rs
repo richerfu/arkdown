@@ -76,6 +76,30 @@ fn parses_minimal_compile_command() {
 }
 
 #[test]
+fn parses_npm_module_entry_list_flag() {
+    let command = parse_ts2abc_args([
+        "--module",
+        "--merge-abc",
+        "--npm-module-entry-list",
+        "npmEntries.txt",
+        "--output",
+        "modules.abc",
+        "Index.js",
+    ])
+    .unwrap();
+
+    match command {
+        Ts2abcCommand::Compile(options) => {
+            assert_eq!(
+                options.npm_module_entry_list,
+                Some(PathBuf::from("npmEntries.txt"))
+            );
+        }
+        other => panic!("expected compile command, got {other:?}"),
+    }
+}
+
+#[test]
 fn rejects_unknown_native_backend_flag_explicitly() {
     let err = parse_ts2abc_args(["--dump-assembly"]).unwrap_err();
     assert!(matches!(err, Ts2abcError::UnsupportedFlag(flag) if flag == "--dump-assembly"));

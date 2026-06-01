@@ -59,15 +59,26 @@ impl LiteralEntry {
 /// ASCII string `"PANDA"` followed by three `\x00` bytes (8 bytes total).
 pub const MAGIC: [u8; 8] = *b"PANDA\x00\x00\x00";
 
-/// File format version at offset 0x0C.
+/// Default file format version at offset 0x0C.
 ///
 /// hvigorw (DevEco Studio 6.0, target SDK 5.0.5(17)) produces version
 /// `[0x0C, 0x00, 0x06, 0x00]` = `0x0006_000C` in little-endian.
 /// This matches what the ArkRuntime at API 17 expects.
 ///
-/// Note: the standalone DevEco 6.0 es2abc binary produces `0x0001_000D`,
-/// but hvigorw's internal es2abc uses `0x0006_000C`.  We match hvigorw.
+/// Compiler entry points should use [`version_for_target_api`] instead of this
+/// default so API 12 projects emit `0x0002_000C` and API 12..17 release/current
+/// projects emit `0x0006_000C`.
 pub const VERSION: u32 = 0x0006_000C;
+
+pub fn version_for_target_api(api: u32, sub_api: Option<&str>) -> u32 {
+    match api {
+        9 | 10 => 0x0000_0009,
+        11 => 0x0002_000B,
+        12 if matches!(sub_api, None | Some("beta1") | Some("beta2")) => 0x0002_000C,
+        12..=17 => 0x0006_000C,
+        _ => 0x0001_000D,
+    }
+}
 
 /// Byte length of the fixed `.abc` file header.
 ///
@@ -181,12 +192,16 @@ impl AbcFile {
     /// depend on the offset values themselves, only on method counts), derive
     /// CodeItem start offsets, then serialize with correct absolute offsets.
     pub fn serialize(&self) -> Vec<u8> {
+        self.serialize_with_version(VERSION)
+    }
+
+    pub fn serialize_with_version(&self, version: u32) -> Vec<u8> {
         // ── SDK framework namespace stubs ────────────────────────────────────
         //
-        // hvigorw always emits these 7 ClassItems as placeholder stubs for the
-        // OHOS SDK runtime namespaces, each with one `@native.*` u8 field.
-        // They are NOT derived from the user's imports — they are a fixed set
-        // present in every merged ABC file.
+        // hvigorw emits these ClassItems for SDK runtime namespaces. In the
+        // native CompileArkTS path they come from `npmEntries.txt` records; in
+        // older direct-source tests they are represented by these compatibility
+        // stubs. If a real record with the same class name exists, prefer it.
         //
         // Class names start with 'L@' (0x40) so they sort before 'L_' annotation
         // stubs (0x5F) and before user class names that start with 'L' followed by
@@ -322,6 +337,17 @@ impl AbcFile {
         // Physical ClassItem order follows libpandafile ItemContainer insertion:
         // annotation records, user records, then fixed SDK stubs.  The top-level
         // class index is sorted separately below.
+        let record_names: std::collections::HashSet<&str> = self
+            .records
+            .iter()
+            .map(|record| record.name.as_str())
+            .collect();
+        let sdk_stubs: Vec<ClassRecord> = sdk_stubs
+            .iter()
+            .filter(|stub| !record_names.contains(stub.name.as_str()))
+            .cloned()
+            .collect();
+
         let all_classes_owned: Vec<ClassRecord> = annotation_stubs
             .iter()
             .cloned()
@@ -1132,7 +1158,7 @@ impl AbcFile {
         // ── Header (60 bytes = 0x3C) ──────────────────────────────────────────
         file.extend_from_slice(&MAGIC); // 0x00 magic[8]
         file.extend_from_slice(&0u32.to_le_bytes()); // 0x08 checksum (patched)
-        file.extend_from_slice(&VERSION.to_le_bytes()); // 0x0C version
+        file.extend_from_slice(&version.to_le_bytes()); // 0x0C version
         file.extend_from_slice(&0u32.to_le_bytes()); // 0x10 file_size (patched)
         file.extend_from_slice(&0u32.to_le_bytes()); // 0x14 foreign_off = 0
         file.extend_from_slice(&0u32.to_le_bytes()); // 0x18 foreign_size = 0

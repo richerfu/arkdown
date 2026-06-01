@@ -24,6 +24,7 @@ pub struct Ts2abcOptions {
     pub module: bool,
     pub commonjs: bool,
     pub cache_file: Option<PathBuf>,
+    pub npm_module_entry_list: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,9 +66,11 @@ impl BytecodeBackend for ArkdownAbcBackend {
             debug_info: options.debug_info,
             opt_level: options.opt_level,
             target_api_version: options.target_api_version,
+            target_api_sub_version: options.target_api_sub_version.clone(),
             merge_abc: options.merge_abc,
             module: options.module,
             cache_path: options.cache_file.clone(),
+            npm_entries: options.npm_module_entry_list.clone(),
         });
         let artifact = compiler.compile(modules, &options.output)?;
         Ok(Ts2abcOutput {

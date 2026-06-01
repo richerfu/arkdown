@@ -38,6 +38,7 @@ struct ArgParser {
     record_name: Option<String>,
     source_file: Option<String>,
     cache_file: Option<PathBuf>,
+    npm_module_entry_list: Option<PathBuf>,
     debug_info: bool,
     merge_abc: bool,
     module: bool,
@@ -60,6 +61,7 @@ impl ArgParser {
             record_name: None,
             source_file: None,
             cache_file: None,
+            npm_module_entry_list: None,
             debug_info: false,
             merge_abc: false,
             module: false,
@@ -132,6 +134,7 @@ impl ArgParser {
             module: self.module,
             commonjs: self.commonjs,
             cache_file: self.cache_file.clone(),
+            npm_module_entry_list: self.npm_module_entry_list.clone(),
         }))
     }
 
@@ -170,6 +173,9 @@ impl ArgParser {
             "--record-name" => self.record_name = Some(self.value(flag, value)?),
             "--source-file" => self.source_file = Some(self.value(flag, value)?),
             "--cache-file" => self.cache_file = Some(PathBuf::from(self.value(flag, value)?)),
+            "--npm-module-entry-list" => {
+                self.npm_module_entry_list = Some(PathBuf::from(self.value(flag, value)?));
+            }
             "--debug-info" => self.debug_info = true,
             "--merge-abc" => self.merge_abc = true,
             "--module" => self.module = true,
