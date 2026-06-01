@@ -36,6 +36,6 @@ pub mod table;
 // Re-export the primary public API at crate root.
 pub use compiler::{
     CompiledEntry, ResourceCompileConfig, ResourceCompileInput, ResourceCompileOutput,
-    ResourceCompiler,
+    ResourceCompiler, ResourceInfo,
 };
 pub use error::ResourceError;

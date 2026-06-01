@@ -14,8 +14,11 @@ pub mod api_transform;
 pub mod checker;
 pub mod error;
 pub mod kit_map;
+mod resource_transform;
 pub mod source_map;
+mod sys_resource;
 pub mod transform;
+mod typescript_emit;
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -32,6 +35,7 @@ use oxc_codegen::{Codegen, CodegenOptions};
 use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
 use oxc_span::SourceType;
+use resource_transform::rewrite_resource_references;
 use rolldown_plugin::{
     HookLoadArgs, HookLoadOutput, HookLoadReturn, HookTransformArgs, HookTransformOutput,
     HookTransformOutputMap, HookTransformReturn, HookUsage, Plugin, SharedLoadPluginContext,
@@ -39,12 +43,16 @@ use rolldown_plugin::{
 };
 use rolldown_sourcemap::SourceMap as RolldownSourceMap;
 
+pub use resource_transform::ResourceReference;
+pub use sys_resource::load_system_resource_references;
+
 /// ArkTS transform plugin — desugars `.ets` files into TypeScript.
 ///
 /// Register this plugin in the plugin list before any TypeScript-only plugins
 /// so that `.ets` modules are converted to `.ts` before downstream processing begins.
 pub struct EtsTransformPlugin {
     pub config: Arc<ArkdownConfig>,
+    resource_refs: Arc<HashMap<String, ResourceReference>>,
 }
 
 impl std::fmt::Debug for EtsTransformPlugin {
@@ -55,7 +63,20 @@ impl std::fmt::Debug for EtsTransformPlugin {
 
 impl EtsTransformPlugin {
     pub fn new(config: Arc<ArkdownConfig>) -> Self {
-        EtsTransformPlugin { config }
+        EtsTransformPlugin {
+            config,
+            resource_refs: Arc::new(HashMap::new()),
+        }
+    }
+
+    pub fn with_resource_references(
+        config: Arc<ArkdownConfig>,
+        resource_refs: HashMap<String, ResourceReference>,
+    ) -> Self {
+        EtsTransformPlugin {
+            config,
+            resource_refs: Arc::new(resource_refs),
+        }
     }
 
     pub fn do_transform(
@@ -78,7 +99,10 @@ impl EtsTransformPlugin {
         if !is_ets {
             // .ts files: kit rewrite + version-gated rewrites only.
             let final_code = api_transform::rewrite_imports_for_version(&code, api_version);
+            let final_code = typescript_emit::rewrite_imported_const_enums(&final_code, id);
             let final_code = split_type_only_named_imports(&final_code, id);
+            let final_code =
+                rewrite_resource_references(&final_code, id, self.resource_refs.as_ref());
             let source_map_json =
                 source_map::build_hvigor_standard_source_map(&final_code, original_source, id)
                     .or_else(|| source_map::build_token_source_map(&final_code, id));
@@ -120,7 +144,10 @@ impl EtsTransformPlugin {
             .map_err(|e| anyhow::anyhow!("ets-transform: {e}"))?;
 
         let final_source = api_transform::rewrite_imports_for_version(&transformed, api_version);
+        let final_source = typescript_emit::rewrite_imported_const_enums(&final_source, id);
         let final_source = split_type_only_named_imports(&final_source, id);
+        let final_source =
+            rewrite_resource_references(&final_source, id, self.resource_refs.as_ref());
 
         // For .ets files the struct transform may rewrite the entire file
         // (e.g. Index.ets → ViewPU TypeScript).  Split into two cases:
@@ -171,7 +198,14 @@ impl EtsTransformPlugin {
                     .map(|(code, map)| {
                         let final_code =
                             api_transform::rewrite_imports_for_version(&code, api_version);
+                        let final_code =
+                            typescript_emit::rewrite_imported_const_enums(&final_code, id);
                         let final_code = split_type_only_named_imports(&final_code, id);
+                        let final_code = rewrite_resource_references(
+                            &final_code,
+                            id,
+                            self.resource_refs.as_ref(),
+                        );
                         (final_code, map)
                     })
                     .unwrap_or_else(|_| (final_source, None));
@@ -186,6 +220,31 @@ impl EtsTransformPlugin {
                 ..Default::default()
             }))
         }
+    }
+
+    pub fn do_compile_transform(
+        &self,
+        code: &str,
+        id: &str,
+        emit_js: bool,
+    ) -> anyhow::Result<Option<HookTransformOutput>> {
+        let Some(mut output) = self.do_transform(code, id)? else {
+            return Ok(None);
+        };
+        if emit_js {
+            if let Some(current_code) = output.code.as_deref() {
+                if let Some(js_code) = typescript_emit::emit_javascript(current_code, id) {
+                    let source_map_json = source_map::build_token_source_map(&js_code, id);
+                    output.map = source_map_json
+                        .as_deref()
+                        .and_then(|j| RolldownSourceMap::from_json_string(j).ok())
+                        .map(|sm| HookTransformOutputMap::Sourcemap(Box::new(sm)))
+                        .unwrap_or(HookTransformOutputMap::Null);
+                    output.code = Some(js_code);
+                }
+            }
+        }
+        Ok(Some(output))
     }
 }
 
@@ -205,6 +264,7 @@ impl Plugin for EtsTransformPlugin {
     ) -> impl std::future::Future<Output = HookLoadReturn> + Send {
         let id = args.id.to_owned();
         let config = Arc::clone(&self.config);
+        let resource_refs = Arc::clone(&self.resource_refs);
         async move {
             if !id.ends_with(".ets") {
                 return Ok(None);
@@ -216,7 +276,11 @@ impl Plugin for EtsTransformPlugin {
             if !transform::has_arkts_transform_syntax(&code, &id) {
                 return Ok(None);
             }
-            let output = EtsTransformPlugin::new(config).do_transform(&code, &id)?;
+            let output = EtsTransformPlugin {
+                config,
+                resource_refs,
+            }
+            .do_transform(&code, &id)?;
             Ok(output.map(|output| HookLoadOutput {
                 code: output.code.unwrap_or(code).into(),
                 ..Default::default()
@@ -232,7 +296,14 @@ impl Plugin for EtsTransformPlugin {
         let code = args.code.as_str().to_owned();
         let id = args.id.to_owned();
         let config = Arc::clone(&self.config);
-        async move { EtsTransformPlugin::new(config).do_transform(&code, &id) }
+        let resource_refs = Arc::clone(&self.resource_refs);
+        async move {
+            EtsTransformPlugin {
+                config,
+                resource_refs,
+            }
+            .do_transform(&code, &id)
+        }
     }
 }
 
@@ -964,6 +1035,107 @@ mod tests {
             !code.contains("@kit."),
             "@kit.* specifier must be gone; got:\n{}",
             code
+        );
+    }
+
+    #[test]
+    fn test_plugin_lowers_resource_calls_from_ast() {
+        let plugin = EtsTransformPlugin::with_resource_references(
+            make_config(12),
+            HashMap::from([
+                (
+                    "app.string.title".to_string(),
+                    ResourceReference {
+                        id: 0x0100_0001,
+                        runtime_type: 10003,
+                        bundle_name: "com.example.test".to_string(),
+                        module_name: "entry".to_string(),
+                    },
+                ),
+                (
+                    "app.float.topic_icon_border".to_string(),
+                    ResourceReference {
+                        id: 0x0100_0002,
+                        runtime_type: 10002,
+                        bundle_name: "com.example.test".to_string(),
+                        module_name: "entry".to_string(),
+                    },
+                ),
+                (
+                    "sys.color.ohos_id_color_emphasize".to_string(),
+                    ResourceReference {
+                        id: 125829135,
+                        runtime_type: 10001,
+                        bundle_name: "com.example.test".to_string(),
+                        module_name: "entry".to_string(),
+                    },
+                ),
+            ]),
+        );
+        let code = "\
+const text = \"$r('app.string.title')\";\n\
+const title = $r('app.string.title', 'fallback');\n\
+const sysColor = $r('sys.color.ohos_id_color_emphasize');\n\
+const raw = $rawfile('data/config.json');\n\
+const dynamic = $r(resourceName);\n\
+if (!(\"finalizeConstruction\" in ViewPU.prototype)) {\n\
+  Reflect.set(ViewPU.prototype, \"finalizeConstruction\", () => { });\n\
+}\n\
+interface TopicItemView_Params { item?: Topic; }\n\
+import type { Topic } from \"@bundle:com.example.test/entry@topic/ets/model/Topic\";\n\
+class TopicItemView extends ViewPU {\n\
+  private __isSelected: ObservedPropertySimplePU<boolean>;\n\
+  initialRender() {\n\
+    Button.borderWidth(this.isSelected ? $r('app.float.topic_icon_border') : 0);\n\
+  }\n\
+}\n\
+function __Text__topicTitleStyle(): void {\n\
+  Text.fontSize($r('app.float.topic_icon_border'));\n\
+}\n";
+        let result = plugin
+            .do_transform(code, "app/src/main/ets/util.ets")
+            .unwrap()
+            .expect("ETS transform must return Some");
+        let output = result.code.unwrap_or_default();
+        assert!(
+            output.contains("const text = \"$r('app.string.title')\";"),
+            "resource-like text inside a string literal must not be rewritten; got:\n{output}"
+        );
+        assert!(
+            output.contains(
+                "const title = { \"id\": 16777217, \"type\": 10003, params: ['fallback'], \"bundleName\": \"com.example.test\", \"moduleName\": \"entry\" };"
+            ),
+            "static $r call must become the hvigor resource object; got:\n{output}"
+        );
+        assert!(
+            output.contains(
+                "const raw = { \"id\": 0, \"type\": 30000, params: ['data/config.json'], \"bundleName\": \"com.example.test\", \"moduleName\": \"entry\" };"
+            ),
+            "static $rawfile call must become the hvigor rawfile object; got:\n{output}"
+        );
+        assert!(
+            output.contains(
+                "const sysColor = { \"id\": 125829135, \"type\": 10001, params: [], \"bundleName\": \"com.example.test\", \"moduleName\": \"entry\" };"
+            ),
+            "static sys $r call must become the hvigor resource object; got:\n{output}"
+        );
+        assert!(
+            output.contains(
+                "const dynamic = { \"id\": -1, \"type\": -1, params: [resourceName], \"bundleName\": \"com.example.test\", \"moduleName\": \"entry\" };"
+            ),
+            "dynamic $r call must become the hvigor variable resource object; got:\n{output}"
+        );
+        assert!(
+            output.contains(
+                "Button.borderWidth(this.isSelected ? { \"id\": 16777218, \"type\": 10002, params: [], \"bundleName\": \"com.example.test\", \"moduleName\": \"entry\" } : 0);"
+            ),
+            "resource call inside generated component class must be lowered; got:\n{output}"
+        );
+        assert!(
+            output.contains(
+                "Text.fontSize({ \"id\": 16777218, \"type\": 10002, params: [], \"bundleName\": \"com.example.test\", \"moduleName\": \"entry\" });"
+            ),
+            "resource call inside generated style function must be lowered; got:\n{output}"
         );
     }
 

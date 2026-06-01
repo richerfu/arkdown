@@ -102,7 +102,7 @@ pub fn transform_ets_with_options(
 
     let diagnostics = crate::checker::check(content, &source.id.id);
     for diag in &diagnostics {
-        eprintln!("[ets-checker] {:?}", diag);
+        tracing::debug!(file = %source.id.id, diagnostic = ?diag, "ets checker diagnostic");
     }
     if let Some(error) = diagnostics.iter().find(|diag| {
         matches!(

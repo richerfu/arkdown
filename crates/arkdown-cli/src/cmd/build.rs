@@ -18,8 +18,8 @@ use arkdown_pack::{
 };
 use arkdown_plugin_duplicate_check::DuplicateCheckPlugin;
 use arkdown_plugin_ets_transform::{
-    rewrite_static_module_specifiers_with, transform::collect_arkui_component_names,
-    EtsTransformPlugin,
+    load_system_resource_references, rewrite_static_module_specifiers_with,
+    transform::collect_arkui_component_names, EtsTransformPlugin, ResourceReference,
 };
 use arkdown_plugin_json5::Json5Plugin;
 use arkdown_plugin_module_meta::ModuleMetaPlugin;
@@ -124,21 +124,43 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 res_dirs.push(module_res_dir);
             }
         }
+        let mut resource_refs = HashMap::new();
         let resource_ids: HashMap<String, u32> = if !res_dirs.is_empty() {
             match resource_compiler.compile(ResourceCompileInput {
                 resources_dirs: res_dirs,
                 output_dir: res_out.clone(),
             }) {
-                Ok(out) => out.resource_ids,
+                Ok(out) => {
+                    resource_refs = out
+                        .resource_infos
+                        .into_iter()
+                        .map(|(name, info)| {
+                            (
+                                format!("app.{name}"),
+                                ResourceReference {
+                                    id: info.id,
+                                    runtime_type: info.runtime_type,
+                                    bundle_name: config_arc.product.bundle_name.clone(),
+                                    module_name: module.name.clone(),
+                                },
+                            )
+                        })
+                        .collect();
+                    out.resource_ids
+                }
                 Err(e) => {
-                    eprintln!("[warn] resource compilation failed: {e}");
+                    tracing::warn!(error = %e, "resource compilation failed");
                     HashMap::new()
                 }
             }
         } else {
             HashMap::new()
         };
-
+        resource_refs.extend(load_system_resource_references(
+            &config_arc.sdk_config.ets_loader_path,
+            &config_arc.product.bundle_name,
+            &module.name,
+        )?);
         // --- Profile processing ---
         let module_json5_path = module.src_path.join("src/main/module.json5");
         let module_json5 = read_module_json5(&module_json5_path)?;
@@ -194,7 +216,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             .map_err(|e| anyhow::anyhow!("write loader.json with byteCodeHarInfo failed: {}", e))?;
         write_router_map_intermediates(module, &loader_json, &config_arc, &res_out)?;
 
-        loader_jsons.push((module.clone(), manifest, loader_json));
+        loader_jsons.push((module.clone(), manifest, loader_json, resource_refs));
         all_bc_har_deps.push(bc_har_deps);
     }
     progress.done();
@@ -203,7 +225,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
     progress.step(3, 6, "Bundling");
     let mut bundle_outs: Vec<(BundleOutput, bool)> = Vec::new();
     let mut compile_arkts_inputs_by_bundle: Vec<Vec<Ts2abcInput>> = Vec::new();
-    for (module, _manifest, loader_json) in &loader_jsons {
+    for (module, _manifest, loader_json, resource_refs) in &loader_jsons {
         let cache_dir = PathBuf::from(&loader_json.cache_path);
         let output_dir = PathBuf::from(&loader_json.ace_module_build);
         let cached_abc = output_dir.join("modules.abc");
@@ -258,7 +280,10 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         // Bundling
         let plugins: Vec<SharedPluginable> = vec![
             // 1. ETS transform — must be first, desugars .ets before any other plugin sees it
-            Arc::new(EtsTransformPlugin::new(config_arc.clone())) as SharedPluginable,
+            Arc::new(EtsTransformPlugin::with_resource_references(
+                config_arc.clone(),
+                resource_refs.clone(),
+            )) as SharedPluginable,
             // 2. OHOS module resolver — maps specifiers to OHM URLs / local paths
             Arc::new(OhosResolvePlugin::new(
                 ResolverConfig {
@@ -304,8 +329,13 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             .bundle(loader_json)
             .await
             .map_err(|e| anyhow::anyhow!("Bundle failed: {}", e))?;
-        let compile_arkts_inputs =
-            write_compile_arkts_cache(module, loader_json, &config_arc, &bundle_out.chunk_graph)?;
+        let compile_arkts_inputs = write_compile_arkts_cache(
+            module,
+            loader_json,
+            &config_arc,
+            &bundle_out.chunk_graph,
+            resource_refs,
+        )?;
         bundle_outs.push((bundle_out, false));
         compile_arkts_inputs_by_bundle.push(compile_arkts_inputs);
     }
@@ -320,7 +350,10 @@ pub async fn run(args: BuildArgs) -> Result<()> {
     // The results are written to:
     //   1. loader.json (two new fields, omitted when empty)
     //   2. intermediates/importee/default/{module_name}/importee.json  (cache)
-    for (((module, _manifest, loader_json), (bundle_out, from_cache)), _bc_har_deps) in loader_jsons
+    for (
+        ((module, _manifest, loader_json, _resource_refs), (bundle_out, from_cache)),
+        _bc_har_deps,
+    ) in loader_jsons
         .iter_mut()
         .zip(bundle_outs.iter())
         .zip(all_bc_har_deps.iter())
@@ -344,7 +377,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 loader_json.compiled_importees = result.compiled_importees;
             }
             Err(e) => {
-                eprintln!("[warn] process_importees failed: {e}");
+                tracing::warn!(error = %e, "process_importees failed");
             }
         }
         // Add ByteCode HAR OHM URLs to compiledImportees. They are pre-compiled
@@ -400,7 +433,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                     }
                 }
                 Err(e) => {
-                    eprintln!("[warn] could not initialize obfuscator, skipping: {e}");
+                    tracing::warn!(error = %e, "could not initialize obfuscator, skipping");
                 }
             }
         }
@@ -410,7 +443,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
     progress.step(5, 6, "Compiling ABC");
     for (
         bundle_index,
-        (((module, _manifest, loader_json), (bundle_out, from_cache)), bc_har_deps),
+        (((module, _manifest, loader_json, resource_refs), (bundle_out, from_cache)), bc_har_deps),
     ) in loader_jsons
         .iter()
         .zip(bundle_outs.iter())
@@ -507,7 +540,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 )?;
             }
             copy_ets_assets_to_loader_out(module, loader_json)?;
-            compile_widget_pass(module, _manifest, loader_json, &config_arc)?;
+            compile_widget_pass(module, _manifest, loader_json, &config_arc, resource_refs)?;
 
             for (_chunk_name, path) in &bundle_out.chunk_files {
                 if path.extension().and_then(|e| e.to_str()) == Some("js") && path.exists() {
@@ -529,7 +562,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             let cache_dir = PathBuf::from(&loader_json.cache_path);
             let task_inputs = TaskInputs::compute(&config_arc, loader_json);
             if let Err(e) = task_inputs.save(&cache_dir) {
-                eprintln!("[warn] failed to save task inputs cache: {e}");
+                tracing::warn!(error = %e, "failed to save task inputs cache");
             }
         }
         // Append ByteCode HAR pre-compiled .abc files to the output modules.abc.
@@ -558,7 +591,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
     progress.step(6, 6, "Packaging");
     let packager = Packager::new(config_arc.clone());
     let mut output_paths = Vec::new();
-    for ((module, manifest, _loader_json), (bundle_out, _from_cache)) in
+    for ((module, manifest, _loader_json, _resource_refs), (bundle_out, _from_cache)) in
         loader_jsons.iter().zip(bundle_outs.iter())
     {
         let module_json = module
@@ -874,6 +907,7 @@ fn compile_widget_pass(
     manifest: &arkdown_core::HapManifest,
     loader_json: &arkdown_profile::LoaderJson,
     config: &Arc<ArkdownConfig>,
+    resource_refs: &HashMap<String, ResourceReference>,
 ) -> Result<()> {
     if matches!(module.module_type, OhosModuleType::Har) {
         return Ok(());
@@ -892,7 +926,8 @@ fn compile_widget_pass(
         .src_path
         .join("build/default/cache/default/default@CompileArkTS/esmodule")
         .join(mode_dir);
-    let transformer = EtsTransformPlugin::new(config.clone());
+    let transformer =
+        EtsTransformPlugin::with_resource_references(config.clone(), resource_refs.clone());
     let mut compile_infos = Vec::new();
     let mut component_collection = serde_json::Map::new();
 
@@ -1445,6 +1480,7 @@ fn write_compile_arkts_cache(
     loader_json: &arkdown_profile::LoaderJson,
     config: &Arc<ArkdownConfig>,
     chunk_graph: &ChunkGraph,
+    resource_refs: &HashMap<String, ResourceReference>,
 ) -> Result<Vec<Ts2abcInput>> {
     let mode_dir = match config.build_mode {
         BuildMode::Debug => "debug",
@@ -1454,7 +1490,8 @@ fn write_compile_arkts_cache(
         .src_path
         .join("build/default/cache/default/default@CompileArkTS/esmodule")
         .join(mode_dir);
-    let transformer = EtsTransformPlugin::new(config.clone());
+    let transformer =
+        EtsTransformPlugin::with_resource_references(config.clone(), resource_refs.clone());
     let mut source_map_lines = Vec::new();
     let mut compile_infos = Vec::new();
     let mut pkg_entries = PackageEntryInfos::default();
@@ -1485,9 +1522,10 @@ fn write_compile_arkts_cache(
             entry_info.source_ext.as_str(),
             "ets" | "ts" | "js" | "mjs" | "cjs"
         ) {
-            transformer
-                .do_transform(&source, &module_id)
-                .with_context(|| format!("failed to transform CompileArkTS source {module_id}"))?
+            let transformed = transformer
+                .do_compile_transform(&source, &module_id, entry_info.output_ext == "js")
+                .with_context(|| format!("failed to transform CompileArkTS source {module_id}"))?;
+            transformed
         } else {
             None
         };
@@ -1597,6 +1635,7 @@ struct CompileModuleInfo {
     module_type: String,
     origin_source_lang: String,
     source_ext: String,
+    output_ext: String,
 }
 
 fn compile_module_ids(chunk_graph: &ChunkGraph) -> Vec<String> {
@@ -1701,6 +1740,7 @@ fn compile_module_info(
             module_type,
             origin_source_lang: origin_source_lang(&source_ext),
             source_ext,
+            output_ext: output_ext.to_string(),
         });
     }
 
@@ -1750,6 +1790,7 @@ fn remote_compile_module_info(
         module_type: module_type_for_source(source_path, &source_ext),
         origin_source_lang: origin_source_lang(&source_ext),
         source_ext,
+        output_ext: output_ext.to_string(),
     })
 }
 

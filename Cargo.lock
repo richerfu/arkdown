@@ -240,6 +240,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "walkdir",
  "zip",
 ]
@@ -346,16 +348,20 @@ dependencies = [
  "arkdown-core",
  "oxc_allocator 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
  "oxc_ast 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
+ "oxc_ast_visit 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
  "oxc_codegen 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
  "oxc_parser 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
  "oxc_semantic 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
  "oxc_span 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
+ "oxc_syntax 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
+ "oxc_transformer 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
  "rolldown_plugin",
  "rolldown_sourcemap",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

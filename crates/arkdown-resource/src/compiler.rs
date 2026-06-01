@@ -53,6 +53,15 @@ pub struct ResourceCompileOutput {
     /// These IDs are used by the profile processor to write `iconId`, `labelId`, and
     /// `descriptionId` into `module.json`.
     pub resource_ids: HashMap<String, u32>,
+    /// Map of `"type.name"` → runtime resource info used by ets-loader's
+    /// `$r()` transform, e.g. `"string.app_name"` or `"media.icon"`.
+    pub resource_infos: HashMap<String, ResourceInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceInfo {
+    pub id: u32,
+    pub runtime_type: u32,
 }
 
 /// A single compiled resource entry ready to be written to `resources.index`.
@@ -107,6 +116,7 @@ impl ResourceCompiler {
         let mut next_id: u32 = 0x0100_0000;
         // Tracks name → numeric ID for every resource that is assigned an ID.
         let mut resource_ids: HashMap<String, u32> = HashMap::new();
+        let mut resource_infos: HashMap<String, ResourceInfo> = HashMap::new();
 
         for res_dir in &input.resources_dirs {
             let mut files = scan::scan_resources(res_dir);
@@ -127,12 +137,19 @@ impl ResourceCompiler {
                                 continue;
                             }
                             resource_ids.entry(e.name.clone()).or_insert(next_id);
+                            let runtime_type = runtime_resource_type(entry_type);
+                            let resource_key =
+                                format!("{}.{}", resource_type_name(entry_type), e.name.clone());
                             all_entries.push(CompiledEntry {
                                 id: next_id,
                                 entry_type,
                                 name: e.name,
                                 value: e.value,
                                 qualifier: file.qualifier.0.clone(),
+                            });
+                            resource_infos.entry(resource_key).or_insert(ResourceInfo {
+                                id: next_id,
+                                runtime_type,
                             });
                             next_id += 1;
                         }
@@ -150,6 +167,7 @@ impl ResourceCompiler {
                             continue;
                         }
                         resource_ids.entry(file.name.clone()).or_insert(next_id);
+                        let resource_key = format!("media.{}", file.name);
                         let relative_path = PathBuf::from(qualifier).join("media").join(filename);
                         resource_copies.push(ResourceCopy {
                             source: file.path.clone(),
@@ -162,6 +180,10 @@ impl ResourceCompiler {
                             name: file.name.clone(),
                             value: resource_value_path(&self.config.module_name, &relative_path),
                             qualifier: file.qualifier.0.clone(),
+                        });
+                        resource_infos.entry(resource_key).or_insert(ResourceInfo {
+                            id: next_id,
+                            runtime_type: runtime_resource_type(entry_type),
                         });
                         next_id += 1;
                     }
@@ -238,7 +260,30 @@ impl ResourceCompiler {
             resources_dir,
             profiles,
             resource_ids,
+            resource_infos,
         })
+    }
+}
+
+fn resource_type_name(entry_type: u32) -> &'static str {
+    match entry_type {
+        0x05 => "integer",
+        0x06 => "float",
+        0x09 => "string",
+        0x0E => "color",
+        0x13 => "media",
+        _ => "unknown",
+    }
+}
+
+fn runtime_resource_type(entry_type: u32) -> u32 {
+    match entry_type {
+        0x0E => 10001,
+        0x06 => 10002,
+        0x09 => 10003,
+        0x05 => 10007,
+        0x13 => 20000,
+        _ => 0,
     }
 }
 

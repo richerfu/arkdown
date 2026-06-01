@@ -37,7 +37,7 @@ Important upstream OpenHarmony refs:
   generated/inserted instructions inherit the nearest previous emitted source
   position when no explicit source position is attached.
 
-## Current arkdown Status (2026-05-31)
+## Current arkdown Status (2026-06-01)
 
 `arkdown-cli` performs the full minimal HAP pipeline:
 
@@ -142,13 +142,57 @@ minimal fixture. The unsigned archive has the same 11 entries, in the same
 order, with byte-identical payloads. Signed HAP output may be reordered by the
 signing layer and is not the unsigned packaging oracle.
 
+## HmosWorld Evidence (2026-06-01)
+
+HmosWorld is tracked from the GitHub mirror `https://github.com/susns/HmosWorld`.
+The current local comparison uses the `phone` HAP module with dependencies installed
+by `ohpm`.
+
+The CompileArkTS resource-lowering path now follows SDK `ets-loader` source instead
+of decompiled ABC inference:
+
+- app resources are read from `arkdown-resource` as `app.<type>.<name>`;
+- SDK system resources are parsed with OXC AST from `ets-loader/sysResource.js`,
+  matching hvigor's `initSystemResource()` load of `resources.sys`;
+- `$r(...)` and `$rawfile(...)` are rewritten by AST call-expression matching, not
+  source-string scanning;
+- the post-transform HmosWorld CompileArkTS cache contains no remaining
+  `$r` or `$rawfile` calls, matching the hvigor cache on that check.
+
+The CompileArkTS graph handoff now also follows the upstream TypeScript
+transform path:
+
+- imported const-enum member reads are lowered from OXC AST using the upstream
+  `getTypeExportImportAndConstEnumTransformer` model, then OXC's TypeScript
+  transformer strips types for files whose hvigor cache output is `.js`;
+- const-enum-only dependency modules no longer remain in arkdown's Rollup module
+  graph after they become type-only imports.
+
+Current HmosWorld artifact status after a clean arkdown rebuild:
+
+| Artifact | hvigor | arkdown | Status |
+|---|---:|---:|---|
+| unsigned HAP entry list | 356 entries | 356 entries | identical |
+| residual `$r` / `$rawfile` in cache TS | 0 | 0 | identical on this check |
+| `filesInfo.txt` record set | 571 | 571 | identical |
+| `modules.cache` entries | 572 | 572 | identical |
+| `npmEntries.txt` entries | 57 | 57 | identical |
+| `ets/modules.abc` | 4,756,944B | 2,337,080B | not aligned |
+| `ets/widgets.abc` | 42,348B | 27,560B | not aligned |
+
+The size reduction is therefore not caused by missing app/sys resource objects in
+the generated TypeScript cache or by missing CompileArkTS handoff modules. The
+remaining gap must be investigated from byte-for-byte cache-source differences and
+upstream `arkcompiler_ets_frontend` C++/TS behavior, including generated metadata,
+debug-info sections, literal arrays, and bytecode records.
+
 ## Major Remaining Capabilities Beyond Minimal-HAP
 
 | Area | Status | Remaining work |
 |---|---|---|
 | ABC DebugInfo/LNP | minimal fixture aligned | Broaden golden coverage beyond minimal-hap. |
 | Direct cache-TS ABC route | minimal fixture aligned | Keep as final ABC route; extend fixture coverage. |
-| ArkTS transform breadth | partial | Broaden beyond minimal fixture: `@Builder`, `@Styles`, more ArkUI DSL forms, diagnostics. |
+| ArkTS transform breadth | partial | Broaden beyond minimal fixture: `@Builder`, `@Styles`, more ArkUI DSL forms, diagnostics. Resource lowering and imported const-enum lowering are AST-based for HmosWorld. |
 | Release builds | partial | Obfuscation, terser/minification, release treeshake/manual chunks, release source maps. |
 | Incremental cache | partial | Rollup msgpack cache, task input cache, real ABC `--cache-file` equivalent. |
 | Multi-module dependencies | partial | ByteCode HAR, dynamic imports, HSP/HAR transitive maps, workers. |
@@ -156,11 +200,13 @@ signing layer and is not the unsigned packaging oracle.
 
 ## Immediate Next Tasks
 
-Priority order from the current 2026-05-31 state:
+Priority order from the current 2026-06-01 state:
 
-1. **[ABC Coverage] Add broader cache-TS golden fixtures.** Keep minimal-hap
-   byte parity while covering explicit constructors, field initializers, ArkUI
-   DSL variants, imports, dependencies, release mode, HSP, HAR, and HmosWorld.
+1. **[HmosWorld ABC delta] Diff hvigor and arkdown CompileArkTS bytes.** The HAP
+   entry list, `$r/$rawfile` cache check, `filesInfo.txt`, `modules.cache`, and
+   `npmEntries.txt` now align, but `modules.abc` is still much smaller. Compare
+   transformed TS/JS bytes, record names, DebugInfo/LNP, literal arrays, and method
+   tables before changing compiler code.
 2. **[Parity harness] Add a stable ABC diff helper.** It should compare
    CodeItems, DebugInfo/LNP, method records, indexes, literal arrays, and final
    bytes separately so future regressions are localized immediately.

@@ -20,7 +20,9 @@ as a single `ArkdownPlugin` crate:
 | `apiTransform` | `apiTransform` plugin | Rewrites OHOS API calls by target SDK version      |
 
 When this crate is in use, the `transform.rs` subprocess path in `arkdown-loader` is
-disabled. `OHOS_SDK_HOME` is no longer required at build time.
+disabled. The transform itself is pure Rust, but build-time SDK discovery is still required
+for the same data hvigor loads from `ets-loader`: in particular `sysResource.js` for
+`$r('sys.*')` lowering and SDK API metadata for version-gated API rewrites.
 
 ---
 
@@ -34,19 +36,30 @@ pub struct EtsTransformPlugin {
 }
 ```
 
-It implements `ArkdownPlugin`. Only the `transform` hook is non-trivial; all others are
-no-ops (default implementations).
+It implements the rolldown plugin interface. The CLI constructs it with a per-module
+resource reference table via `with_resource_references(config, refs)`, matching
+hvigor's `_main.resources` shape for both app resources and SDK system resources.
 
 The `transform` hook:
 
 1. Returns `Ok(None)` immediately for any `module_type != ModuleType::Ets`
 2. Parses source with `ohos-rs/oxc` (ArkTS grammar)
-3. Runs `etsChecker` — emits diagnostics, never aborts on warnings
+3. Runs `etsChecker` — reports diagnostics through `tracing` for debug-level
+   inspection and never aborts on warnings
 4. Runs `etsTransform` — mutates AST in place
 5. Runs `apiTransform` — rewrites API calls by `config.sdk_config.compile_api_version`
-6. Generates source map via `oxc_codegen` from the **kit-rewritten** pre-transform source
+6. Lowers imported const-enum member reads from OXC AST, following upstream
+   `getTypeExportImportAndConstEnumTransformer`; const-enum-only imports then
+   become type-only before rolldown builds the graph.
+7. Lowers `$r(...)` / `$rawfile(...)` call expressions using the OXC AST visitor and
+   hvigor's `RESOURCE_TYPE` ids. App references are keyed as `app.<type>.<name>` from
+   `arkdown-resource`; system references are parsed from SDK `ets-loader/sysResource.js`
+   and keyed as `sys.<type>.<name>`. Unknown dynamic expressions follow upstream and emit
+   `{ id: -1, type: -1, params: [...], bundleName, moduleName }`; static `$rawfile`
+   emits type `30000` and also carries bundle/module metadata.
+8. Generates source map via `oxc_codegen` from the **kit-rewritten** pre-transform source
    (not the final ViewPU class) so positions reference the short original `.ets` file
-7. Returns `ModuleSource` with `module_type` changed to `ModuleType::Ts`
+9. Returns `ModuleSource` with `module_type` changed to `ModuleType::Ts`
 
 ---
 

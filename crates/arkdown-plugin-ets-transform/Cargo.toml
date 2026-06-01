@@ -13,6 +13,9 @@ oxc_ast       = { workspace = true }
 oxc_codegen   = { workspace = true }
 oxc_semantic  = { workspace = true }
 oxc_span      = { workspace = true }
+oxc_ast_visit = { workspace = true }
+oxc_syntax    = { workspace = true }
+oxc_transformer = { workspace = true }
 
 # Rolldown plugin API
 rolldown_plugin    = "1.0.3"
@@ -21,6 +24,7 @@ rolldown_sourcemap = "1.0.3"
 # Error handling
 anyhow    = { workspace = true }
 thiserror = { workspace = true }
+tracing   = { workspace = true }
 
 # Serialization (for source map JSON post-processing)
 serde_json = { workspace = true }

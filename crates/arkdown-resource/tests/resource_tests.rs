@@ -176,6 +176,48 @@ fn test_resource_table_lists_media_entries() {
     );
 }
 
+#[test]
+fn test_resource_infos_use_hvigor_runtime_types() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let element_dir = tmp.path().join("res/base/element");
+    let media_dir = tmp.path().join("res/base/media");
+    let profile_dir = tmp.path().join("res/base/profile");
+    fs::create_dir_all(&element_dir).unwrap();
+    fs::create_dir_all(&media_dir).unwrap();
+    fs::create_dir_all(&profile_dir).unwrap();
+    fs::write(
+        element_dir.join("string.json"),
+        r#"{"string":[{"name":"title","value":"Title"}]}"#,
+    )
+    .unwrap();
+    fs::write(
+        element_dir.join("color.json"),
+        r##"{"color":[{"name":"brand","value":"#FFFFFF"}]}"##,
+    )
+    .unwrap();
+    fs::write(media_dir.join("icon.png"), b"png").unwrap();
+    fs::write(
+        profile_dir.join("main_pages.json"),
+        r#"{"src":["pages/Index"]}"#,
+    )
+    .unwrap();
+
+    let result = make_compiler()
+        .compile(ResourceCompileInput {
+            resources_dirs: vec![tmp.path().join("res")],
+            output_dir: tmp.path().join("out"),
+        })
+        .expect("compile must succeed");
+
+    assert_eq!(result.resource_infos["string.title"].runtime_type, 10003);
+    assert_eq!(result.resource_infos["color.brand"].runtime_type, 10001);
+    assert_eq!(result.resource_infos["media.icon"].runtime_type, 20000);
+    assert!(
+        !result.resource_infos.contains_key("profile.main_pages"),
+        "hvigor RESOURCE_TYPE has rawfile but no profile, so profile resources must not be exposed as $r runtime references"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Output paths returned in ResourceCompileOutput
 // ---------------------------------------------------------------------------
