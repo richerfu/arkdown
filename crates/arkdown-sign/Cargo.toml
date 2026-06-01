@@ -26,6 +26,7 @@ fs-err         = { workspace = true }
 aes-gcm        = { workspace = true }
 pbkdf2         = { workspace = true }
 hex            = { workspace = true }
+tracing        = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

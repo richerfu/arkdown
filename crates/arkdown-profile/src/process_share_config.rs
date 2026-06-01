@@ -212,9 +212,10 @@ fn check_duplicate_uris(entries: &[CrossAppSharedConfigEntry]) {
                 .into_iter()
                 .collect();
             unique.sort();
-            eprintln!(
-                "[warn] crossAppSharedConfig: duplicate URI '{}' declared by packages: {:?}",
-                uri, unique
+            tracing::warn!(
+                uri,
+                packages = ?unique,
+                "crossAppSharedConfig duplicate URI declared by multiple packages"
             );
         }
     }

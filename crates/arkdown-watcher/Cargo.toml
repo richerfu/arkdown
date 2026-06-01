@@ -10,3 +10,4 @@ tokio = { workspace = true }
 crossbeam-channel = { workspace = true }
 thiserror = { workspace = true }
 fs-err = { workspace = true }
+tracing = { workspace = true }

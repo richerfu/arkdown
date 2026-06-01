@@ -277,9 +277,11 @@ fn check_duplicate_task_names(tasks: &[StartupTask], category: &str) {
     let mut seen: HashSet<&str> = HashSet::new();
     for task in tasks {
         if !seen.insert(task.name.as_str()) {
-            eprintln!(
-                "[warn] startup config: duplicate {} name '{}' (module: {:?})",
-                category, task.name, task.module_name
+            tracing::warn!(
+                category,
+                name = task.name,
+                module_name = ?task.module_name,
+                "startup config duplicate task name"
             );
         }
     }

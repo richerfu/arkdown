@@ -454,6 +454,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
@@ -509,6 +510,7 @@ dependencies = [
  "spki",
  "tempfile",
  "thiserror 2.0.18",
+ "tracing",
  "x509-cert",
  "zip",
 ]
@@ -534,6 +536,7 @@ dependencies = [
  "notify",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

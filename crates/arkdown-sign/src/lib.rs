@@ -132,10 +132,7 @@ impl HapSigner {
                 if input != output {
                     std::fs::copy(input, output)?;
                 }
-                eprintln!(
-                    "warning: no signing config — output is unsigned: {}",
-                    output.display()
-                );
+                tracing::warn!(output = %output.display(), "no signing config; output is unsigned");
                 Ok(())
             }
             Some(cfg) => {
@@ -326,7 +323,7 @@ pub fn write_hvigorw_script(project_root: &Path) -> std::io::Result<()> {
         std::fs::set_permissions(&script_path, perms)?;
     }
 
-    println!("Written: {}", script_path.display());
+    tracing::info!(path = %script_path.display(), "wrote hvigorw compatibility script");
     Ok(())
 }
 

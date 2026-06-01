@@ -57,27 +57,25 @@ impl FileWatcher {
             }
         }
 
-        eprintln!(
-            "arkdown: watching {} director{} for changes",
-            self.watch_dirs.iter().filter(|d| d.exists()).count(),
-            if self.watch_dirs.len() == 1 {
-                "y"
-            } else {
-                "ies"
-            }
+        tracing::info!(
+            watch_dir_count = self.watch_dirs.iter().filter(|d| d.exists()).count(),
+            "arkdown watcher started"
         );
 
         loop {
             let changed = collect_changes(&rx, self.debounce);
             if !changed.is_empty() {
                 let start = Instant::now();
-                eprintln!("arkdown: {} file(s) changed, rebuilding...", changed.len());
+                tracing::info!(
+                    changed_count = changed.len(),
+                    "arkdown watcher rebuild started"
+                );
                 if let Err(e) = on_change(&changed) {
-                    eprintln!("arkdown: rebuild failed: {}", e);
+                    tracing::error!(error = %e, "arkdown watcher rebuild failed");
                 } else {
-                    eprintln!(
-                        "arkdown: rebuild done ({:.1}s)",
-                        start.elapsed().as_secs_f32()
+                    tracing::info!(
+                        elapsed_ms = start.elapsed().as_millis(),
+                        "arkdown watcher rebuild finished"
                     );
                 }
             }
