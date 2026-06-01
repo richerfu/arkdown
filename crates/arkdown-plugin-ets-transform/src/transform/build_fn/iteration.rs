@@ -7,6 +7,7 @@ use oxc_ast::ast::{
 
 use crate::transform::component_meta::ComponentMetadata;
 use crate::transform::source_emit::original_node_text;
+use crate::transform::viewpu_emit::ViewpuWriter;
 
 use super::raw_object::raw_object_argument_text_from_argument;
 use super::{
@@ -38,30 +39,38 @@ pub(super) fn lower_lazy_list_item(
     out: &mut String,
     span_hints: &mut Vec<SpanHint>,
 ) -> Result<(), BuildLoweringError> {
-    out.push_str(&format!("{indent}{{\n"));
+    let mut writer = ViewpuWriter::new(out);
+    writer.line(indent, format_args!("{{"));
     let inner = format!("{indent}    ");
-    out.push_str(&format!(
-        "{inner}const itemCreation = (elmtId, isInitialRender) => {{\n"
-    ));
-    out.push_str(&format!(
-        "{inner}    ViewStackProcessor.StartGetAccessRecordingFor(elmtId);\n"
-    ));
-    out.push_str(&format!(
-        "{inner}    ListItem.create(deepRenderFunction, true);\n"
-    ));
-    out.push_str(&format!("{inner}    if (!isInitialRender) {{\n"));
-    out.push_str(&format!("{inner}        ListItem.pop();\n"));
-    out.push_str(&format!("{inner}    }}\n"));
-    out.push_str(&format!(
-        "{inner}    ViewStackProcessor.StopGetAccessRecording();\n"
-    ));
-    out.push_str(&format!("{inner}}};\n"));
-    out.push_str(&format!(
-        "{inner}const itemCreation2 = (elmtId, isInitialRender) => {{\n"
-    ));
-    out.push_str(&format!(
-        "{inner}    ListItem.create(deepRenderFunction, true);\n"
-    ));
+    let child_indent = format!("{inner}        ");
+    writer.line(
+        &inner,
+        format_args!("const itemCreation = (elmtId, isInitialRender) => {{"),
+    );
+    writer.line(
+        &inner,
+        format_args!("    ViewStackProcessor.StartGetAccessRecordingFor(elmtId);"),
+    );
+    writer.line(
+        &inner,
+        format_args!("    ListItem.create(deepRenderFunction, true);"),
+    );
+    writer.line(&inner, format_args!("    if (!isInitialRender) {{"));
+    writer.line(&inner, format_args!("        ListItem.pop();"));
+    writer.line(&inner, format_args!("    }}"));
+    writer.line(
+        &inner,
+        format_args!("    ViewStackProcessor.StopGetAccessRecording();"),
+    );
+    writer.line(&inner, format_args!("}};"));
+    writer.line(
+        &inner,
+        format_args!("const itemCreation2 = (elmtId, isInitialRender) => {{"),
+    );
+    writer.line(
+        &inner,
+        format_args!("    ListItem.create(deepRenderFunction, true);"),
+    );
     for chain in &component.chain_expressions {
         let chain_name = chain_name(chain)?;
         let chain_args = attribute_arguments_text(
@@ -71,17 +80,21 @@ pub(super) fn lower_lazy_list_item(
             builder_methods,
             &context,
         );
-        out.push_str(&format!(
-            "{inner}    ListItem.{chain_name}({chain_args});\n"
-        ));
+        writer.line(
+            &inner,
+            format_args!("    ListItem.{chain_name}({chain_args});"),
+        );
     }
-    out.push_str(&format!("{inner}}};\n"));
-    out.push_str(&format!(
-        "{inner}const deepRenderFunction = (elmtId, isInitialRender) => {{\n"
-    ));
-    out.push_str(&format!(
-        "{inner}    itemCreation(elmtId, isInitialRender);\n"
-    ));
+    writer.line(&inner, format_args!("}};"));
+    writer.line(
+        &inner,
+        format_args!("const deepRenderFunction = (elmtId, isInitialRender) => {{"),
+    );
+    writer.line(
+        &inner,
+        format_args!("    itemCreation(elmtId, isInitialRender);"),
+    );
+    drop(writer);
     for child in &component.children {
         match child {
             ArkUIChild::Component(child) => {
@@ -94,7 +107,7 @@ pub(super) fn lower_lazy_list_item(
                     custom_component_update_props,
                     component_metadata,
                     context.clone(),
-                    &format!("{inner}        "),
+                    &child_indent,
                     out,
                     span_hints,
                 )?;
@@ -109,7 +122,7 @@ pub(super) fn lower_lazy_list_item(
                     custom_component_update_props,
                     component_metadata,
                     context.clone(),
-                    &format!("{inner}        "),
+                    &child_indent,
                     out,
                     span_hints,
                 )?;
@@ -124,21 +137,25 @@ pub(super) fn lower_lazy_list_item(
                     custom_component_update_props,
                     component_metadata,
                     context.clone(),
-                    &format!("{inner}        "),
+                    &child_indent,
                     out,
                     span_hints,
                 )?;
             }
         }
     }
-    out.push_str(&format!("{inner}    ListItem.pop();\n"));
-    out.push_str(&format!("{inner}}};\n"));
-    out.push_str(&format!(
-        "{inner}{}.observeComponentCreation2(itemCreation2, ListItem);\n",
-        context.view_context()
-    ));
-    out.push_str(&format!("{inner}ListItem.pop();\n"));
-    out.push_str(&format!("{indent}}}\n"));
+    let mut writer = ViewpuWriter::new(out);
+    writer.line(&inner, format_args!("    ListItem.pop();"));
+    writer.line(&inner, format_args!("}};"));
+    writer.line(
+        &inner,
+        format_args!(
+            "{}.observeComponentCreation2(itemCreation2, ListItem);",
+            context.view_context()
+        ),
+    );
+    writer.line(&inner, format_args!("ListItem.pop();"));
+    writer.line(indent, format_args!("}}"));
     Ok(())
 }
 
@@ -177,20 +194,28 @@ pub(super) fn lower_for_each(
         (Some(_), None) => "_item".to_string(),
     };
 
-    out.push_str(&format!(
-        "{indent}{}.observeComponentCreation2((elmtId, isInitialRender) => {{\n",
-        context.view_context()
-    ));
-    out.push_str(&format!("{indent}    ForEach.create();\n"));
-    out.push_str(&format!(
-        "{indent}    const forEachItemGenFunction = {generator_params} => {{\n"
-    ));
-    if let Some(item_param) = item_param {
-        let Some(item_name) = binding_parameter_name(item_param) else {
-            return Err(BuildLoweringError::UnsupportedChild);
-        };
-        out.push_str(&format!("{indent}        const {item_name} = _item;\n"));
+    {
+        let mut writer = ViewpuWriter::new(out);
+        writer.line(
+            indent,
+            format_args!(
+                "{}.observeComponentCreation2((elmtId, isInitialRender) => {{",
+                context.view_context()
+            ),
+        );
+        writer.line(indent, format_args!("    ForEach.create();"));
+        writer.line(
+            indent,
+            format_args!("    const forEachItemGenFunction = {generator_params} => {{"),
+        );
+        if let Some(item_param) = item_param {
+            let Some(item_name) = binding_parameter_name(item_param) else {
+                return Err(BuildLoweringError::UnsupportedChild);
+            };
+            writer.line(indent, format_args!("        const {item_name} = _item;"));
+        }
     }
+    let body_indent = format!("{indent}        ");
     lower_lazy_arrow_body(
         item_gen,
         source_text,
@@ -200,12 +225,13 @@ pub(super) fn lower_for_each(
         custom_component_update_props,
         component_metadata,
         context.clone(),
-        &format!("{indent}        "),
+        &body_indent,
         out,
         span_hints,
     )?;
-    out.push_str(&format!("{indent}    }};\n"));
 
+    let mut writer = ViewpuWriter::new(out);
+    writer.line(indent, format_args!("    }};"));
     if item_param.is_some() {
         if let Some(key_arg) = arguments.get(2) {
             let key = raw_argument_text_with_context(key_arg, source_text, &context);
@@ -213,25 +239,34 @@ pub(super) fn lower_for_each(
             let key_uses_index = argument_arrow(key_arg)
                 .and_then(|arrow| arrow.params.items.get(1))
                 .is_some();
-            out.push_str(&format!(
-            "{indent}    {}.forEachUpdateFunction(elmtId, {data}, forEachItemGenFunction, {key}, {item_gen_uses_index}, {key_uses_index});\n",
-            context.view_context()
-        ));
+            writer.line(
+                indent,
+                format_args!(
+                    "    {}.forEachUpdateFunction(elmtId, {data}, forEachItemGenFunction, {key}, {item_gen_uses_index}, {key_uses_index});",
+                    context.view_context()
+                ),
+            );
         } else {
-            out.push_str(&format!(
-                "{indent}    {}.forEachUpdateFunction(elmtId, {data}, forEachItemGenFunction);\n",
-                context.view_context()
-            ));
+            writer.line(
+                indent,
+                format_args!(
+                    "    {}.forEachUpdateFunction(elmtId, {data}, forEachItemGenFunction);",
+                    context.view_context()
+                ),
+            );
         }
     } else {
-        out.push_str(&format!(
-            "{indent}    {}.forEachUpdateFunction(elmtId, {data}, forEachItemGenFunction);\n",
-            context.view_context()
-        ));
+        writer.line(
+            indent,
+            format_args!(
+                "    {}.forEachUpdateFunction(elmtId, {data}, forEachItemGenFunction);",
+                context.view_context()
+            ),
+        );
     }
 
-    out.push_str(&format!("{indent}}}, ForEach);\n"));
-    out.push_str(&format!("{indent}ForEach.pop();\n"));
+    writer.line(indent, format_args!("}}, ForEach);"));
+    writer.line(indent, format_args!("ForEach.pop();"));
     Ok(())
 }
 
@@ -261,9 +296,14 @@ pub(super) fn lower_lazy_for_each(
     let data = raw_object_argument_text_from_argument(data_arg, source_text, &context)
         .unwrap_or_else(|| raw_argument_text(data_arg, source_text));
     let item_params = source_text[item_gen.params.span].trim();
-    out.push_str(&format!(
-        "{indent}const __lazyForEachItemGenFunction = {item_params} => {{\n"
-    ));
+    {
+        let mut writer = ViewpuWriter::new(out);
+        writer.line(
+            indent,
+            format_args!("const __lazyForEachItemGenFunction = {item_params} => {{"),
+        );
+    }
+    let body_indent = format!("{indent}    ");
     lower_lazy_arrow_body(
         item_gen,
         source_text,
@@ -273,28 +313,36 @@ pub(super) fn lower_lazy_for_each(
         custom_component_update_props,
         component_metadata,
         context.clone(),
-        &format!("{indent}    "),
+        &body_indent,
         out,
         span_hints,
     )?;
-    out.push_str(&format!("{indent}}};\n"));
 
+    let mut writer = ViewpuWriter::new(out);
+    writer.line(indent, format_args!("}};"));
     if let Some(id_func_arg) = component.arguments.get(2) {
         let id_func = raw_argument_text_with_context(id_func_arg, source_text, &context);
-        out.push_str(&format!(
-            "{indent}const __lazyForEachItemIdFunc = {id_func};\n"
-        ));
-        out.push_str(&format!(
-            "{indent}LazyForEach.create(\"1\", {}, {data}, __lazyForEachItemGenFunction, __lazyForEachItemIdFunc);\n",
-            context.view_context()
-        ));
+        writer.line(
+            indent,
+            format_args!("const __lazyForEachItemIdFunc = {id_func};"),
+        );
+        writer.line(
+            indent,
+            format_args!(
+                "LazyForEach.create(\"1\", {}, {data}, __lazyForEachItemGenFunction, __lazyForEachItemIdFunc);",
+                context.view_context()
+            ),
+        );
     } else {
-        out.push_str(&format!(
-            "{indent}LazyForEach.create(\"1\", {}, {data}, __lazyForEachItemGenFunction);\n",
-            context.view_context()
-        ));
+        writer.line(
+            indent,
+            format_args!(
+                "LazyForEach.create(\"1\", {}, {data}, __lazyForEachItemGenFunction);",
+                context.view_context()
+            ),
+        );
     }
-    out.push_str(&format!("{indent}LazyForEach.pop();\n"));
+    writer.line(indent, format_args!("LazyForEach.pop();"));
     Ok(())
 }
 
@@ -312,7 +360,7 @@ fn lower_lazy_arrow_body(
     span_hints: &mut Vec<SpanHint>,
 ) -> Result<(), BuildLoweringError> {
     if arrow.expression {
-        out.push_str(&format!("{indent}return undefined;\n"));
+        ViewpuWriter::new(out).line(indent, format_args!("return undefined;"));
         return Ok(());
     }
     for statement in &arrow.body.statements {
