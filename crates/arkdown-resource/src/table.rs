@@ -13,6 +13,8 @@ pub fn write_resource_table(
     output: &Path,
 ) -> Result<(), std::io::Error> {
     let mut sorted = entries.iter().collect::<Vec<_>>();
+    sorted.sort_by(|a, b| a.id.cmp(&b.id));
+    sorted.dedup_by(|a, b| a.id == b.id);
     sorted.sort_by(|a, b| {
         type_sort_order(a.entry_type)
             .cmp(&type_sort_order(b.entry_type))
@@ -34,8 +36,8 @@ pub fn write_resource_table(
 
 pub(crate) fn type_name(t: u32) -> &'static str {
     match t {
-        0x05 => "integer",
-        0x06 => "float",
+        0x08 => "integer",
+        0x12 => "float",
         0x09 => "string",
         0x0E => "color",
         0x13 => "media",
@@ -48,8 +50,8 @@ fn type_sort_order(t: u32) -> u8 {
     match t {
         0x09 => 0, // string
         0x0E => 1, // color
-        0x06 => 2, // float
-        0x05 => 3, // integer
+        0x12 => 2, // float
+        0x08 => 3, // integer
         0x13 => 4, // media
         0x14 => 5, // profile
         _ => 9,

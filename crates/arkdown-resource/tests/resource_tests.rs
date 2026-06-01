@@ -11,6 +11,7 @@ fn make_compiler() -> ResourceCompiler {
     ResourceCompiler::new(ResourceCompileConfig {
         package_name: "com.example.tests".into(),
         module_name: "entry".into(),
+        module_names: vec![],
         device_types: vec!["phone".into()],
         is_debug: false,
     })
@@ -362,6 +363,7 @@ fn test_hvigor_resource_layout_dedup_and_processed_media_json() {
     let result = ResourceCompiler::new(ResourceCompileConfig {
         package_name: "com.example.tests".into(),
         module_name: "entry".into(),
+        module_names: vec![],
         device_types: vec!["phone".into()],
         is_debug: false,
     })

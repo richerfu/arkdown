@@ -14,6 +14,7 @@
 //! let compiler = ResourceCompiler::new(ResourceCompileConfig {
 //!     package_name: "com.example.myapp".into(),
 //!     module_name: "entry".into(),
+//!     module_names: vec![],
 //!     device_types: vec!["phone".into()],
 //!     is_debug: false,
 //! });

@@ -199,6 +199,7 @@ fn run_pipeline(fixture: &Path) -> PathBuf {
         let rc = ResourceCompiler::new(ResourceCompileConfig {
             package_name: config.product.bundle_name.clone(),
             module_name: module.name.clone(),
+            module_names: vec![],
             device_types: vec!["phone".to_string()],
             is_debug: true,
         });

@@ -4,7 +4,7 @@
 //! element JSON files, copies media and profile files, and writes
 //! `resources.index` and `ResourceTable.txt` to the output directory.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -20,6 +20,10 @@ pub struct ResourceCompileConfig {
     pub package_name: String,
     /// HAP module name (e.g. `"entry"`).
     pub module_name: String,
+    /// Full restool `moduleNames` set. When present, restool sorts the module
+    /// names and chooses this module's resource ID cluster from its sorted
+    /// position.
+    pub module_names: Vec<String>,
     /// Target device types (e.g. `["phone", "tablet"]`).
     pub device_types: Vec<String>,
     /// Whether this is a debug build.
@@ -89,6 +93,16 @@ struct ResourceCopy {
     category: ResourceCategory,
 }
 
+#[derive(Debug, Clone)]
+struct PendingEntry {
+    entry_type: u32,
+    name: String,
+    value: String,
+    qualifier: String,
+    resource_key: Option<String>,
+    runtime_type: u32,
+}
+
 /// Pure-Rust implementation of OpenHarmony's `restool` resource compiler.
 pub struct ResourceCompiler {
     config: ResourceCompileConfig,
@@ -111,47 +125,49 @@ impl ResourceCompiler {
         let mut all_entries: Vec<CompiledEntry> = Vec::new();
         let mut profiles: Vec<(String, PathBuf)> = Vec::new();
         let mut resource_copies: Vec<ResourceCopy> = Vec::new();
-        let mut seen_resources: HashSet<(String, u32, String)> = HashSet::new();
-        // Resource IDs start at 0x01000000 and increment monotonically.
-        let mut next_id: u32 = 0x0100_0000;
+        let mut emitted_resources: HashSet<(String, u32, String)> = HashSet::new();
+        let start_id = restool_start_id(&self.config.module_name, &self.config.module_names);
+        let mut next_id: u32 = start_id;
         // Tracks name → numeric ID for every resource that is assigned an ID.
         let mut resource_ids: HashMap<String, u32> = HashMap::new();
         let mut resource_infos: HashMap<String, ResourceInfo> = HashMap::new();
+        let mut assigned_ids: HashMap<(u32, String), u32> = HashMap::new();
 
         for res_dir in &input.resources_dirs {
             let mut files = scan::scan_resources(res_dir);
-            files.sort_by(resource_file_cmp);
+            files.sort_by(|a, b| a.path.cmp(&b.path));
+            let mut seen_in_module: HashSet<(String, u32, String)> = HashSet::new();
+            let mut element_entries: BTreeMap<(u32, String), Vec<PendingEntry>> = BTreeMap::new();
+            let mut media_entries: BTreeMap<(u32, String), Vec<PendingEntry>> = BTreeMap::new();
+            let mut profile_entries: BTreeMap<(u32, String), Vec<PendingEntry>> = BTreeMap::new();
 
             for file in &files {
                 match file.category {
                     ResourceCategory::Element => {
-                        let mut entries = element::parse_element_file(&file.path);
-                        entries.sort_by(|a, b| a.name.cmp(&b.name));
+                        let entries = element::parse_element_file(&file.path);
                         for e in entries {
                             let entry_type = e.entry_type.resource_type_id();
-                            if !seen_resources.insert((
+                            if !seen_in_module.insert((
                                 file.qualifier.0.clone(),
                                 entry_type,
                                 e.name.clone(),
                             )) {
                                 continue;
                             }
-                            resource_ids.entry(e.name.clone()).or_insert(next_id);
                             let runtime_type = runtime_resource_type(entry_type);
                             let resource_key =
                                 format!("{}.{}", resource_type_name(entry_type), e.name.clone());
-                            all_entries.push(CompiledEntry {
-                                id: next_id,
-                                entry_type,
-                                name: e.name,
-                                value: e.value,
-                                qualifier: file.qualifier.0.clone(),
-                            });
-                            resource_infos.entry(resource_key).or_insert(ResourceInfo {
-                                id: next_id,
-                                runtime_type,
-                            });
-                            next_id += 1;
+                            element_entries
+                                .entry((entry_type, e.name.clone()))
+                                .or_default()
+                                .push(PendingEntry {
+                                    entry_type,
+                                    name: e.name,
+                                    value: e.value,
+                                    qualifier: file.qualifier.0.clone(),
+                                    resource_key: Some(resource_key),
+                                    runtime_type,
+                                });
                         }
                     }
 
@@ -159,47 +175,46 @@ impl ResourceCompiler {
                         let filename = file.path.file_name().expect("media file has no filename");
                         let qualifier = qualifier_dir(&file.qualifier.0);
                         let entry_type = 0x13; // MEDIA type (matches restool 6.0)
-                        if !seen_resources.insert((
+                        if !seen_in_module.insert((
                             file.qualifier.0.clone(),
                             entry_type,
                             file.name.clone(),
                         )) {
                             continue;
                         }
-                        resource_ids.entry(file.name.clone()).or_insert(next_id);
-                        let resource_key = format!("media.{}", file.name);
                         let relative_path = PathBuf::from(qualifier).join("media").join(filename);
                         resource_copies.push(ResourceCopy {
                             source: file.path.clone(),
                             relative_path: relative_path.clone(),
                             category: file.category.clone(),
                         });
-                        all_entries.push(CompiledEntry {
-                            id: next_id,
-                            entry_type,
-                            name: file.name.clone(),
-                            value: resource_value_path(&self.config.module_name, &relative_path),
-                            qualifier: file.qualifier.0.clone(),
-                        });
-                        resource_infos.entry(resource_key).or_insert(ResourceInfo {
-                            id: next_id,
-                            runtime_type: runtime_resource_type(entry_type),
-                        });
-                        next_id += 1;
+                        media_entries
+                            .entry((entry_type, file.name.clone()))
+                            .or_default()
+                            .push(PendingEntry {
+                                entry_type,
+                                name: file.name.clone(),
+                                value: resource_value_path(
+                                    &self.config.module_name,
+                                    &relative_path,
+                                ),
+                                qualifier: file.qualifier.0.clone(),
+                                resource_key: Some(format!("media.{}", file.name)),
+                                runtime_type: runtime_resource_type(entry_type),
+                            });
                     }
 
                     ResourceCategory::Profile => {
                         let filename = file.path.file_name().expect("profile file has no filename");
                         let qualifier = qualifier_dir(&file.qualifier.0);
                         let entry_type = 0x14; // PROFILE type (matches restool 6.0)
-                        if !seen_resources.insert((
+                        if !seen_in_module.insert((
                             file.qualifier.0.clone(),
                             entry_type,
                             file.name.clone(),
                         )) {
                             continue;
                         }
-                        resource_ids.entry(file.name.clone()).or_insert(next_id);
                         let relative_path = PathBuf::from(qualifier).join("profile").join(filename);
                         resource_copies.push(ResourceCopy {
                             source: file.path.clone(),
@@ -208,14 +223,20 @@ impl ResourceCompiler {
                         });
                         let out_path = input.output_dir.join("resources").join(&relative_path);
                         profiles.push((file.name.clone(), out_path));
-                        all_entries.push(CompiledEntry {
-                            id: next_id,
-                            entry_type,
-                            name: file.name.clone(),
-                            value: resource_value_path(&self.config.module_name, &relative_path),
-                            qualifier: file.qualifier.0.clone(),
-                        });
-                        next_id += 1;
+                        profile_entries
+                            .entry((entry_type, file.name.clone()))
+                            .or_default()
+                            .push(PendingEntry {
+                                entry_type,
+                                name: file.name.clone(),
+                                value: resource_value_path(
+                                    &self.config.module_name,
+                                    &relative_path,
+                                ),
+                                qualifier: file.qualifier.0.clone(),
+                                resource_key: None,
+                                runtime_type: runtime_resource_type(entry_type),
+                            });
                     }
 
                     ResourceCategory::Rawfile => {
@@ -237,6 +258,34 @@ impl ResourceCompiler {
                     }
                 }
             }
+
+            commit_pending_entries(
+                &element_entries,
+                &mut assigned_ids,
+                &mut resource_ids,
+                &mut resource_infos,
+                &mut emitted_resources,
+                &mut all_entries,
+                &mut next_id,
+            );
+            commit_pending_entries(
+                &media_entries,
+                &mut assigned_ids,
+                &mut resource_ids,
+                &mut resource_infos,
+                &mut emitted_resources,
+                &mut all_entries,
+                &mut next_id,
+            );
+            commit_pending_entries(
+                &profile_entries,
+                &mut assigned_ids,
+                &mut resource_ids,
+                &mut resource_infos,
+                &mut emitted_resources,
+                &mut all_entries,
+                &mut next_id,
+            );
         }
 
         let resources_dir = input.output_dir.join("resources");
@@ -265,13 +314,86 @@ impl ResourceCompiler {
     }
 }
 
+fn restool_start_id(module_name: &str, module_names: &[String]) -> u32 {
+    if module_names.is_empty() {
+        return 0x0100_0000;
+    }
+    let mut names = module_names.to_vec();
+    names.sort();
+    let index = names
+        .iter()
+        .position(|name| name == module_name)
+        .unwrap_or_default() as u32;
+    let mut start_id = (index + 1) * 0x0100_0000;
+    if start_id >= 0x0700_0000 {
+        start_id += 0x0100_0000;
+    }
+    start_id
+}
+
+fn resource_id_for(
+    assigned_ids: &mut HashMap<(u32, String), u32>,
+    resource_ids: &mut HashMap<String, u32>,
+    next_id: &mut u32,
+    entry_type: u32,
+    name: &str,
+) -> u32 {
+    if let Some(id) = assigned_ids.get(&(entry_type, name.to_string())) {
+        return *id;
+    }
+    let id = *next_id;
+    *next_id += 1;
+    assigned_ids.insert((entry_type, name.to_string()), id);
+    resource_ids.entry(name.to_string()).or_insert(id);
+    id
+}
+
+fn commit_pending_entries(
+    groups: &BTreeMap<(u32, String), Vec<PendingEntry>>,
+    assigned_ids: &mut HashMap<(u32, String), u32>,
+    resource_ids: &mut HashMap<String, u32>,
+    resource_infos: &mut HashMap<String, ResourceInfo>,
+    emitted_resources: &mut HashSet<(String, u32, String)>,
+    all_entries: &mut Vec<CompiledEntry>,
+    next_id: &mut u32,
+) {
+    for ((entry_type, id_name), entries) in groups {
+        let id = resource_id_for(assigned_ids, resource_ids, next_id, *entry_type, id_name);
+        for entry in entries {
+            if let Some(resource_key) = &entry.resource_key {
+                resource_infos
+                    .entry(resource_key.clone())
+                    .or_insert(ResourceInfo {
+                        id,
+                        runtime_type: entry.runtime_type,
+                    });
+            }
+            if !emitted_resources.insert((
+                entry.qualifier.clone(),
+                entry.entry_type,
+                entry.name.clone(),
+            )) {
+                continue;
+            }
+            all_entries.push(CompiledEntry {
+                id,
+                entry_type: entry.entry_type,
+                name: entry.name.clone(),
+                value: entry.value.clone(),
+                qualifier: entry.qualifier.clone(),
+            });
+        }
+    }
+}
+
 fn resource_type_name(entry_type: u32) -> &'static str {
     match entry_type {
-        0x05 => "integer",
-        0x06 => "float",
+        0x08 => "integer",
+        0x12 => "float",
         0x09 => "string",
         0x0E => "color",
         0x13 => "media",
+        0x14 => "profile",
         _ => "unknown",
     }
 }
@@ -279,32 +401,12 @@ fn resource_type_name(entry_type: u32) -> &'static str {
 fn runtime_resource_type(entry_type: u32) -> u32 {
     match entry_type {
         0x0E => 10001,
-        0x06 => 10002,
+        0x12 => 10002,
         0x09 => 10003,
-        0x05 => 10007,
+        0x08 => 10007,
         0x13 => 20000,
         _ => 0,
     }
-}
-
-fn resource_file_cmp(a: &scan::ResourceFile, b: &scan::ResourceFile) -> std::cmp::Ordering {
-    resource_file_sort_key(a).cmp(&resource_file_sort_key(b))
-}
-
-fn resource_file_sort_key(file: &scan::ResourceFile) -> (String, u8, String) {
-    let category_order = match file.category {
-        ResourceCategory::Element => match file.name.as_str() {
-            "string" => 0,
-            "color" => 1,
-            "float" => 2,
-            "integer" => 3,
-            _ => 9,
-        },
-        ResourceCategory::Media => 10,
-        ResourceCategory::Profile => 20,
-        ResourceCategory::Rawfile => 30,
-    };
-    (file.qualifier.0.clone(), category_order, file.name.clone())
 }
 
 fn qualifier_dir(qualifier: &str) -> &str {
@@ -333,6 +435,9 @@ fn copy_resource_files(
         let out_path = resources_dir.join(&copy.relative_path);
         if let Some(parent) = out_path.parent() {
             fs_err::create_dir_all(parent)?;
+        }
+        if out_path.exists() {
+            continue;
         }
 
         if copy.category == ResourceCategory::Media
@@ -380,13 +485,16 @@ fn write_id_defined(entries: &[CompiledEntry], output: &Path) -> Result<(), Reso
     if let Some(parent) = output.parent() {
         fs_err::create_dir_all(parent)?;
     }
-    let records = entries
+    let mut unique = entries.iter().collect::<Vec<_>>();
+    unique.sort_by(|a, b| a.id.cmp(&b.id));
+    unique.dedup_by(|a, b| a.id == b.id);
+    let records = unique
         .iter()
         .map(|entry| {
             serde_json::json!({
                 "type": table::type_name(entry.entry_type),
                 "name": entry.name,
-                "id": format!("0x{:08x}", entry.id),
+                "id": format!("0x{:08X}", entry.id),
             })
         })
         .collect::<Vec<_>>();
@@ -405,6 +513,7 @@ mod tests {
         ResourceCompiler::new(ResourceCompileConfig {
             package_name: "com.example.test".into(),
             module_name: "entry".into(),
+            module_names: vec![],
             device_types: vec!["phone".into()],
             is_debug: true,
         })

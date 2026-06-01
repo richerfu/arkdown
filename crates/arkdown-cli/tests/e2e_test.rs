@@ -130,6 +130,7 @@ fn run_build(fixture: &PathBuf) -> PathBuf {
         let rc = ResourceCompiler::new(ResourceCompileConfig {
             package_name: config.product.bundle_name.clone(),
             module_name: module.name.clone(),
+            module_names: vec![],
             device_types: vec!["phone".to_string()],
             is_debug: true,
         });
@@ -379,6 +380,7 @@ fn run_build_hsp(fixture: &PathBuf) -> PathBuf {
         let rc = ResourceCompiler::new(ResourceCompileConfig {
             package_name: config.product.bundle_name.clone(),
             module_name: module.name.clone(),
+            module_names: vec![],
             device_types: vec!["phone".to_string()],
             is_debug: true,
         });
@@ -1057,6 +1059,7 @@ fn run_build_bc_har(fixture_src: &PathBuf) -> (PathBuf, PathBuf) {
         let rc = ResourceCompiler::new(ResourceCompileConfig {
             package_name: config.product.bundle_name.clone(),
             module_name: module.name.clone(),
+            module_names: vec![],
             device_types: vec!["phone".to_string()],
             is_debug: true,
         });
