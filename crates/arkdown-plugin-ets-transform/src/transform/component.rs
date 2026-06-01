@@ -1,9 +1,8 @@
 use crate::transform::build_fn::SpanHint;
-use crate::transform::decorator::{
-    constructor_init_kind, has_initially_provided_value_slot, has_update_state_vars_slot,
-    is_state_decorator, state_decorator_class_for, state_decorator_decl_class_for,
-    ConstructorInitKind,
+use crate::transform::component_field::{
+    push_regular_field_declaration, push_state_constructor_init, push_state_field_declaration,
 };
+use crate::transform::decorator::{has_initially_provided_value_slot, has_update_state_vars_slot};
 use crate::transform::entry::{generate_entry_registration, EntryRegistrationInfo};
 
 /// A `@Builder` method extracted from a `@Component` struct.
@@ -364,144 +363,6 @@ fn find_regular_field<'a>(info: &'a ComponentInfo, name: &str) -> Option<&'a Reg
 
 fn find_state_field<'a>(info: &'a ComponentInfo, name: &str) -> Option<&'a StateField> {
     info.state_fields.iter().find(|field| field.name == name)
-}
-
-fn push_state_constructor_init(out: &mut String, field: &StateField) {
-    let backing = state_decorator_class_for(&field.decorator, field.is_simple_type);
-    let local_init = field.initializer.as_deref().unwrap_or("undefined");
-    match constructor_init_kind(&field.decorator) {
-        ConstructorInitKind::NewWithLocalInit => {
-            out.push_str(&format!(
-                "        this.__{name} = new {backing}({init}, this, \"{name}\");\n",
-                name = field.name,
-                backing = backing,
-                init = local_init,
-            ));
-        }
-        ConstructorInitKind::NewWithParamInit => {
-            out.push_str(&format!(
-                "        this.__{name} = new {backing}(params.{name}, this, \"{name}\");\n",
-                name = field.name,
-                backing = backing,
-            ));
-        }
-        ConstructorInitKind::ConsumeInit => {
-            let key = field.alias.as_deref().unwrap_or(field.name.as_str());
-            out.push_str(&format!(
-                "        this.__{name} = this.initializeConsume(\"{key}\", \"{name}\");\n",
-                name = field.name,
-                key = key,
-            ));
-        }
-        ConstructorInitKind::BuilderParamInit => {
-            out.push_str(&format!(
-                "        this.{name} = {init};\n",
-                name = field.name,
-                init = local_init,
-            ));
-        }
-        ConstructorInitKind::StorageInit => {
-            if matches!(
-                field.decorator.as_str(),
-                "LocalStorageLink" | "LocalStorageProp" | "LocalStoragePropRef"
-            ) {
-                return;
-            }
-            let key = field
-                .decorator_arg
-                .as_deref()
-                .map(str::trim)
-                .filter(|arg| !arg.is_empty())
-                .map(str::to_string)
-                .unwrap_or_else(|| format!("\"{}\"", field.name));
-            let api = match field.decorator.as_str() {
-                "StorageLink" | "LocalStorageLink" => "createStorageLink",
-                _ => "createStorageProp",
-            };
-            out.push_str(&format!(
-                "        this.__{name} = this.{api}({key}, {init}, \"{name}\");\n",
-                name = field.name,
-                api = api,
-                key = key,
-                init = local_init,
-            ));
-        }
-    }
-}
-
-fn push_regular_field_declaration(out: &mut String, field: &RegularField) {
-    out.push_str("    private ");
-    out.push_str(&field.name);
-    if field.optional {
-        out.push('?');
-    }
-    if !field.type_annotation.is_empty() {
-        out.push_str(": ");
-        out.push_str(&field.type_annotation);
-    }
-    out.push_str(";\n");
-}
-
-fn push_state_field_declaration(out: &mut String, field: &StateField) {
-    if field.decorator == "BuilderParam" {
-        out.push_str(&format!("    private __{}?;\n", field.name));
-        return;
-    }
-
-    let backing = state_decorator_decl_class_for(&field.decorator, field.is_simple_type);
-    let type_param = if field.type_annotation.is_empty() {
-        String::new()
-    } else {
-        format!("<{}>", field.type_annotation)
-    };
-    out.push_str(&format!(
-        "    private __{name}: {backing}{type_param}",
-        name = field.name,
-        backing = backing,
-        type_param = type_param,
-    ));
-    if matches!(
-        field.decorator.as_str(),
-        "LocalStorageLink" | "LocalStorageProp" | "LocalStoragePropRef"
-    ) {
-        let local_init = field.initializer.as_deref().unwrap_or("undefined");
-        let key = field
-            .decorator_arg
-            .as_deref()
-            .map(str::trim)
-            .filter(|arg| !arg.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("\"{}\"", field.name));
-        let api = match field.decorator.as_str() {
-            "LocalStorageLink" => "createLocalStorageLink",
-            _ => "createLocalStorageProp",
-        };
-        out.push_str(&format!(
-            " = this.{api}{type_param}({key}, {init}, \"{name}\")",
-            name = field.name,
-            api = api,
-            type_param = type_param,
-            key = key,
-            init = local_init,
-        ));
-    }
-    out.push_str(";\n");
-    if is_state_decorator(&field.decorator) {
-        let ty = if field.type_annotation.is_empty() {
-            "unknown"
-        } else {
-            field.type_annotation.as_str()
-        };
-        out.push_str(&format!(
-            "    get {name}() {{\n        return this.__{name}.get();\n    }}\n",
-            name = field.name,
-        ));
-        out.push_str(&format!(
-            "    set {name}(newValue: {ty}) {{\n        this.__{name}.set(newValue);\n    }}\n",
-            name = field.name,
-            ty = ty,
-        ));
-    }
 }
 
 fn render_regular_member(member: &str) -> String {

@@ -2,6 +2,7 @@ pub mod build_fn;
 pub mod component;
 mod component_analysis;
 mod component_collection;
+mod component_field;
 pub mod component_meta;
 pub mod decorator;
 pub mod entry;
