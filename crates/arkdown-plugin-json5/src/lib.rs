@@ -1,2 +1,4 @@
+mod module_emit;
 pub mod plugin;
-pub use plugin::{generate_esm_from_json, Json5Plugin};
+pub use module_emit::generate_esm_from_json;
+pub use plugin::Json5Plugin;
