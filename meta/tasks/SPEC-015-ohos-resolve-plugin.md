@@ -47,24 +47,6 @@ async fn resolve_id(&self, ctx: &ResolveContext, specifier: &str, importer: Opti
 }
 ```
 
-## generate_bundle Hook (process-importee equivalent)
-
-After bundling completes, rewrite import paths in the bundle output for:
-
-1. **ByteCode HAR entries**: Replace the source reference with the pre-compiled ABC path reference
-2. **Bundled dependencies**: When `is_bundled_dependencies` is true, include HAR source in bundle output
-
-```rust
-async fn generate_bundle(&self, ctx: &mut GenerateBundleContext, bundle: &mut ChunkGraph,
-    is_write: bool) -> PluginResult<()>
-{
-    for chunk in bundle.chunks.iter_mut() {
-        self.rewrite_bytecode_har_imports(chunk, &ctx.byte_code_har_info)?;
-    }
-    Ok(())
-}
-```
-
 ## Post-Bundle Importee Processing (`importee.rs`)
 
 The `process_importees` function is a standalone post-bundle pass (not a plugin hook) that
@@ -183,12 +165,11 @@ crates/arkdown-plugin-ohos-resolve/
 | arkdown concept                                               | rolldown equivalent                                  | note                                                                                                                        |
 | ------------------------------------------------------------- | ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
 | `OhosResolvePlugin::resolve_id`                               | `Plugin::resolve_id` returning `HookResolveIdOutput` | Identical hook; arkdown maps `OhosResolvedModule` → `ResolvedId` here                                                       |
-| `OhosResolvePlugin::generate_bundle`                          | `Plugin::generate_bundle`                            | Same hook; used for post-bundle import path rewriting (process-importee equivalent)                                         |
+| post-bundle importee pass                                      | no rolldown hook in arkdown                          | `process_importees` runs from the CLI after bundling, matching hvigor's `process-importee.js` output files                  |
 | `OhosResolvePlugin::case_check`                               | no direct rolldown equivalent                        | The case-sensitivity check is integrated into the resolve hook; rolldown does not have this                                 |
 | `ExternalBundle` → `ResolvedId { external: true }`            | `HookResolveIdOutput { external: true }`             | Identical semantics                                                                                                         |
 | `SdkDeclaration` → `external: true, module_type: Declaration` | rolldown has no `Declaration` type                   | arkdown adds `ModuleType::Declaration` to signal "skip loading"; rolldown would use `external: true` alone                  |
 | `BytecodeHar` → `external: true, module_type: BytecodeHar`    | no rolldown equivalent                               | OHOS-specific: ABC path carried in the ID string for use by packager                                                        |
-| `generate_bundle` / `rewrite_bytecode_har_imports`            | rolldown chunk rendering                             | In rolldown, cross-chunk imports are rewritten during code generation; arkdown does this post-bundle for ByteCode HAR cases |
 | `@rollup/plugin-node-resolve` replacement                     | rolldown built-in resolver + `oxc_resolver`          | arkdown keeps the OHOS-aware plugin for hvigor semantics and delegates generic filesystem/package probing to `oxc_resolver` |
 
 ---
