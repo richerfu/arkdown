@@ -87,6 +87,7 @@ pub struct ComponentInfo {
     pub is_entry: bool,
     pub is_exported: bool,
     pub is_default_export: bool,
+    pub is_reusable: bool,
     pub state_fields: Vec<StateField>,
     /// All struct properties in source order. hvigor adds every property to
     /// the generated `*_Params` interface from `createVariableInitStatement`,
@@ -271,6 +272,20 @@ pub fn generate_view_pu_class(info: &ComponentInfo) -> String {
         "        this.aboutToBeDeletedInternal();\n",
         "    }\n",
     ));
+
+    if info.is_reusable {
+        out.push_str("    updateRecycleElmtId(oldElmtId, newElmtId) {\n");
+        for field in &info.state_fields {
+            if field.decorator == "BuilderParam" {
+                continue;
+            }
+            out.push_str(&format!(
+                "        this.__{name}.updateElmtId(oldElmtId, newElmtId);\n",
+                name = field.name,
+            ));
+        }
+        out.push_str("    }\n");
+    }
 
     for name in property_order {
         if let Some(field) = find_regular_field(info, name) {
@@ -532,6 +547,7 @@ mod tests {
             is_entry: false,
             is_exported: false,
             is_default_export: false,
+            is_reusable: false,
             state_fields: vec![StateField {
                 name: "count".to_string(),
                 type_annotation: "number".to_string(),
@@ -623,6 +639,7 @@ mod tests {
             is_entry: false,
             is_exported: false,
             is_default_export: false,
+            is_reusable: false,
             state_fields: vec![StateField {
                 name: "value".to_string(),
                 type_annotation: "string".to_string(),
@@ -662,6 +679,7 @@ mod tests {
             is_entry: false,
             is_exported: false,
             is_default_export: false,
+            is_reusable: false,
             state_fields: vec![],
             params_fields: vec![],
             property_order: vec![],
@@ -687,6 +705,7 @@ mod tests {
             is_entry: false,
             is_exported: false,
             is_default_export: false,
+            is_reusable: false,
             state_fields: vec![StateField {
                 name: "items".to_string(),
                 type_annotation: "string[]".to_string(),
@@ -732,6 +751,7 @@ mod tests {
             is_entry: false,
             is_exported: false,
             is_default_export: false,
+            is_reusable: false,
             state_fields: vec![StateField {
                 name: "item".to_string(),
                 type_annotation: "Item".to_string(),
@@ -763,6 +783,70 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_reusable_component_generates_update_recycle_elmt_id() {
+        let info = ComponentInfo {
+            name: "ReusableRow".to_string(),
+            is_entry: false,
+            is_exported: false,
+            is_default_export: false,
+            is_reusable: true,
+            state_fields: vec![
+                StateField {
+                    name: "item".to_string(),
+                    type_annotation: "Item".to_string(),
+                    decorator: "ObjectLink".to_string(),
+                    initializer: None,
+                    watch_handler: None,
+                    alias: None,
+                    decorator_arg: None,
+                    is_simple_type: false,
+                },
+                StateField {
+                    name: "content".to_string(),
+                    type_annotation: "() => void".to_string(),
+                    decorator: "BuilderParam".to_string(),
+                    initializer: None,
+                    watch_handler: None,
+                    alias: None,
+                    decorator_arg: None,
+                    is_simple_type: true,
+                },
+            ],
+            params_fields: vec![],
+            property_order: vec![],
+            regular_fields: vec![RegularField {
+                name: "local".to_string(),
+                type_annotation: "number".to_string(),
+                initializer: Some("1".to_string()),
+                optional: false,
+            }],
+            regular_members: vec![],
+            initial_render_body: String::new(),
+            initial_render_span_hints: vec![],
+            builder_methods: vec![],
+            styles_methods: vec![],
+            entry_registration: None,
+        };
+        let out = generate_view_pu_class(&info);
+        assert!(
+            out.contains("updateRecycleElmtId(oldElmtId, newElmtId)"),
+            "reusable component should emit updateRecycleElmtId, got:\n{out}"
+        );
+        assert!(
+            out.contains("this.__item.updateElmtId(oldElmtId, newElmtId);"),
+            "non-regular state fields should update element id"
+        );
+        assert!(
+            !out.contains("this.__content.updateElmtId"),
+            "@BuilderParam is immutable and should not update element id"
+        );
+        assert!(
+            !out.contains("this.__local.updateElmtId"),
+            "regular fields should not update element id"
+        );
+    }
+
     // ── @Provide ──────────────────────────────────────────────────────────────
 
     #[test]
@@ -772,6 +856,7 @@ mod tests {
             is_entry: false,
             is_exported: false,
             is_default_export: false,
+            is_reusable: false,
             state_fields: vec![StateField {
                 name: "theme".to_string(),
                 type_annotation: "string".to_string(),
@@ -812,6 +897,7 @@ mod tests {
             is_entry: false,
             is_exported: false,
             is_default_export: false,
+            is_reusable: false,
             state_fields: vec![StateField {
                 name: "theme".to_string(),
                 type_annotation: "string".to_string(),
@@ -850,6 +936,7 @@ mod tests {
             is_entry: false,
             is_exported: false,
             is_default_export: false,
+            is_reusable: false,
             state_fields: vec![StateField {
                 name: "currentTheme".to_string(),
                 type_annotation: "string".to_string(),
@@ -886,6 +973,7 @@ mod tests {
             is_entry: false,
             is_exported: false,
             is_default_export: false,
+            is_reusable: false,
             state_fields: vec![StateField {
                 name: "count".to_string(),
                 type_annotation: "number".to_string(),
@@ -947,6 +1035,7 @@ mod tests {
             is_entry: false,
             is_exported: false,
             is_default_export: false,
+            is_reusable: false,
             state_fields: vec![StateField {
                 name: "content".to_string(),
                 type_annotation: "() => void".to_string(),
@@ -992,6 +1081,7 @@ mod tests {
             is_entry: false,
             is_exported: false,
             is_default_export: false,
+            is_reusable: false,
             state_fields: vec![StateField {
                 name: "title".to_string(),
                 type_annotation: "string".to_string(),
@@ -1038,6 +1128,7 @@ mod tests {
                 is_entry: false,
                 is_exported: false,
                 is_default_export: false,
+                is_reusable: false,
                 state_fields: vec![StateField {
                     name: "setting".to_string(),
                     type_annotation: "string".to_string(),

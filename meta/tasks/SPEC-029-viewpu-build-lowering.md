@@ -240,6 +240,14 @@ SDK `process_component_build.js::createComponent()` special-cases `Button`:
 - `Button(label) { ... }` lowers to `Button.createWithChild(label)`.
 - Other built-in components use `.create(...)`.
 
+### 7b. Reusable Component Element-Id Update
+
+When a struct is collected as reusable, SDK
+`process_component_class.ts::addDeleteParamsFunc(..., true)` emits
+`updateRecycleElmtId(oldElmtId, newElmtId)`. The method calls
+`this.__field.updateElmtId(oldElmtId, newElmtId)` for non-regular state
+backing fields and skips regular properties and `@BuilderParam`.
+
 ### 7b. Builder Parent Context
 
 SDK `parentConditionalExpression()` is `(parent ? parent : this)`. Top-level

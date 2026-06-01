@@ -179,8 +179,8 @@ Current HmosWorld artifact status after a clean arkdown rebuild:
 | `filesInfo.txt` record set | 571 | 571 | identical set; order differs at line 3 |
 | `modules.cache` entries | 572 | 572 | identical set; order differs at line 3 |
 | `npmEntries.txt` entries | 57 | 57 | identical set; order differs at line 1 |
-| cache TS content hashes | 571 files | 571 files | 81 exact; 62 whitespace/comment-only; 428 semantic-like diffs |
-| `ets/modules.abc` | 2,875,016B | 3,917,592B | not aligned |
+| cache TS content hashes | 571 files | 571 files | 81 exact; 63 whitespace/comment-only; 427 semantic-like diffs |
+| `ets/modules.abc` | 2,875,016B | 3,919,652B | not aligned |
 | `ets/widgets.abc` | 28,424B | 38,936B | not aligned |
 | ABC file version | `0x0002000c` | `0x0002000c` | aligned |
 
@@ -198,8 +198,9 @@ into `if (isInitialRender)`. The regular-attribute split uses OXC AST nodes and
 SDK enum declarations instead of source-string matching. Component member
 lowering follows upstream `process_component_member.js` for direct `@Prop`
 `updateStateVars().reset(params.x)`, and upstream `process_component_class.js`
-for `LocalStorageProp` class field initializers. Remaining cache-source gaps are
-still broad, with known printer/comment/format gaps and additional ViewPU
+for `LocalStorageProp` class field initializers and reusable-component
+`updateRecycleElmtId()` generation. Remaining cache-source gaps are still broad,
+with known printer/comment/format gaps and additional ViewPU
 custom-component/paramsLambda forms still to audit from upstream source.
 
 The struct-transform source map offset is also corrected after final ViewPU
@@ -239,10 +240,9 @@ Priority order from the current 2026-06-01 state:
    `npmEntries.txt` now align by set and npm-entry records are lowered, but
    `modules.abc` remains larger in arkdown. Next compare transformed TS/JS bytes
    by upstream transform area, starting with custom-component recycle/update
-   hooks, `ObservedObject.GetRawObject(...)` wrapping in params lambdas, and
-   TypeScript printer/comment preservation, then continue into native
-   `--cache-file @modules.cache` ProgramCache/protoBin merge behavior from
-   upstream C++.
+   `ObservedObject.GetRawObject(...)` wrapping in params lambdas and TypeScript
+   printer/comment preservation, then continue into native `--cache-file
+   @modules.cache` ProgramCache/protoBin merge behavior from upstream C++.
 2. **[Parity harness] Add a stable ABC diff helper.** It should compare
    CodeItems, DebugInfo/LNP, method records, indexes, literal arrays, and final
    bytes separately so future regressions are localized immediately.

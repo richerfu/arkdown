@@ -1434,6 +1434,10 @@ fn component_from_struct(
         is_entry,
         is_exported,
         is_default_export,
+        is_reusable: statement
+            .decorators
+            .iter()
+            .any(|decorator| decorator_name(decorator) == "Reusable"),
         state_fields,
         params_fields,
         property_order,
