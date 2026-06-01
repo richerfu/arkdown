@@ -1,3 +1,5 @@
+use std::fmt::Write;
+
 use oxc_ast::ast::{
     Argument, ArkUIComponentExpression, Expression, ObjectExpression, ObjectPropertyKind,
     PropertyKey,
@@ -49,48 +51,45 @@ pub(super) fn emit_custom_component_call(
     let params = custom_component_params(arguments, source_text, component_info, &context);
     let (line, col) = source_position(source_text, span.start);
     let page = component_page_path(source_id);
-    let mut writer = ViewpuWriter::new(out);
-    writer.line(indent, format_args!("{{"));
-    let inner = format!("{indent}    ");
-    let inner2 = format!("{inner}    ");
-    let inner3 = format!("{inner}        ");
-    let inner4 = format!("{inner}            ");
+    let mut writer = CustomComponentWriter::new(out, indent);
+    let i = CustomComponentIndent::new(indent);
+    writer.base(format_args!("{{"));
     writer.line(
-        &inner,
+        &i.inner,
         format_args!(
             "{}.observeComponentCreation2((elmtId, isInitialRender) => {{",
             context.view_context()
         ),
     );
-    writer.line(&inner2, format_args!("if (isInitialRender) {{"));
+    writer.line(&i.inner2, format_args!("if (isInitialRender) {{"));
     writer.line(
-        &inner3,
+        &i.inner3,
         format_args!(
             "let componentCall = new {name}({}, {}, undefined, elmtId, () => {{ }}, {{ page: \"{page}\", line: {line}, col: {col} }});",
             context.view_context(),
             params.constructor
         ),
     );
-    writer.line(&inner3, format_args!("ViewPU.create(componentCall);"));
-    writer.line(&inner3, format_args!("let paramsLambda = () => {{"));
-    writer.line(&inner4, format_args!("return {};", params.lambda));
-    writer.line(&inner3, format_args!("}};"));
+    writer.line(&i.inner3, format_args!("ViewPU.create(componentCall);"));
+    writer.line(&i.inner3, format_args!("let paramsLambda = () => {{"));
+    writer.line(&i.inner4, format_args!("return {};", params.lambda));
+    writer.line(&i.inner3, format_args!("}};"));
     writer.line(
-        &inner3,
+        &i.inner3,
         format_args!("componentCall.paramsGenerator_ = paramsLambda;"),
     );
-    writer.line(&inner2, format_args!("}} else {{"));
+    writer.line(&i.inner2, format_args!("}} else {{"));
     writer.line(
-        &inner3,
+        &i.inner3,
         format_args!(
             "{}.updateStateVarsOfChildByElmtId(elmtId, {});",
             context.view_context(),
             params.update
         ),
     );
-    writer.line(&inner2, format_args!("}}"));
-    writer.line(&inner, format_args!("}}, {{ name: \"{name}\" }});"));
-    writer.line(indent, format_args!("}}"));
+    writer.line(&i.inner2, format_args!("}}"));
+    writer.line(&i.inner, format_args!("}}, {{ name: \"{name}\" }});"));
+    writer.base(format_args!("}}"));
 }
 
 struct CustomComponentWriter<'a, 'b> {
@@ -121,6 +120,7 @@ struct CustomComponentIndent {
     inner3: String,
     inner4: String,
     inner5: String,
+    inner6: String,
 }
 
 impl CustomComponentIndent {
@@ -130,12 +130,14 @@ impl CustomComponentIndent {
         let inner3 = format!("{inner}        ");
         let inner4 = format!("{inner}            ");
         let inner5 = format!("{inner}                ");
+        let inner6 = format!("{inner}                    ");
         Self {
             inner,
             inner2,
             inner3,
             inner4,
             inner5,
+            inner6,
         }
     }
 }
@@ -159,7 +161,7 @@ fn emit_reusable_custom_component_call(
     let params = custom_component_params(arguments, source_text, component_info, &context);
     let (line, col) = source_position(source_text, span.start);
     let page = component_page_path(source_id);
-    let reuse_id = reuse_id.unwrap_or_else(|| format!("'{name}'"));
+    let reuse_id = reuse_id.unwrap_or_else(|| CustomComponentReuseId::default_for(name));
     let mut writer = CustomComponentWriter::new(out, indent);
     let i = CustomComponentIndent::new(indent);
 
@@ -214,7 +216,7 @@ fn emit_reusable_custom_component_call(
         ),
     );
     writer.line(
-        &format!("{}                    ", i.inner),
+        &i.inner6,
         format_args!("recycleNode.aboutToReuse({});", params.lambda),
     );
     writer.line(&i.inner5, format_args!("}}"));
@@ -245,6 +247,16 @@ fn emit_reusable_custom_component_call(
     writer.line(&i.inner, format_args!("}});"));
     writer.base(format_args!("}}"));
     writer.base(format_args!("__Recycle__.pop();"));
+}
+
+struct CustomComponentReuseId;
+
+impl CustomComponentReuseId {
+    fn default_for(name: &str) -> String {
+        let mut out = String::new();
+        write!(out, "'{name}'").expect("writing to String cannot fail");
+        out
+    }
 }
 
 pub(super) fn custom_reuse_id_from_leaf_attrs(attrs: &[(String, String, bool)]) -> Option<String> {
@@ -346,7 +358,30 @@ fn custom_component_object_text(
     if properties.is_empty() {
         "{}".to_string()
     } else {
-        format!("{{\n{}\n      }}", properties.join(",\n"))
+        CustomComponentObjectEmitter::new(properties).emit()
+    }
+}
+
+struct CustomComponentObjectEmitter {
+    properties: Vec<String>,
+}
+
+impl CustomComponentObjectEmitter {
+    fn new(properties: Vec<String>) -> Self {
+        Self { properties }
+    }
+
+    fn emit(&self) -> String {
+        let mut out = String::new();
+        out.push_str("{\n");
+        for (index, property) in self.properties.iter().enumerate() {
+            if index > 0 {
+                out.push_str(",\n");
+            }
+            out.push_str(property);
+        }
+        out.push_str("\n      }");
+        out
     }
 }
 
@@ -376,18 +411,34 @@ fn custom_component_property_text(
                 mode,
                 context,
             );
-            Some(format!("        {key}: {value}"))
+            Some(CustomComponentPropertyEmitter::key_value(&key, &value))
         }
         ObjectPropertyKind::SpreadProperty(spread) => {
             if mode == ParamMode::Update {
                 None
             } else {
-                Some(format!(
-                    "        {}",
-                    original_node_text(spread.as_ref(), source_text)
-                ))
+                Some(CustomComponentPropertyEmitter::spread(&original_node_text(
+                    spread.as_ref(),
+                    source_text,
+                )))
             }
         }
+    }
+}
+
+struct CustomComponentPropertyEmitter;
+
+impl CustomComponentPropertyEmitter {
+    fn key_value(key: &str, value: &str) -> String {
+        let mut out = String::new();
+        write!(out, "        {key}: {value}").expect("writing to String cannot fail");
+        out
+    }
+
+    fn spread(spread: &str) -> String {
+        let mut out = String::new();
+        write!(out, "        {spread}").expect("writing to String cannot fail");
+        out
     }
 }
 
@@ -409,8 +460,8 @@ fn custom_component_value_text(
 ) -> String {
     if let Some(name) = dollar_reference_name(value) {
         return match mode {
-            ParamMode::Ctor => format!("this.__{name}"),
-            ParamMode::Lambda => format!("this.{name}"),
+            ParamMode::Ctor => CustomComponentReference::backing(&name),
+            ParamMode::Lambda => CustomComponentReference::direct(&name),
             ParamMode::Update => original_node_text(value, source_text),
         };
     }
@@ -419,7 +470,7 @@ fn custom_component_value_text(
             .is_some_and(|name| component_info.is_some_and(|info| info.link_props.contains(name)))
     {
         if let Some(name) = this_member_name(value) {
-            return format!("this.__{name}");
+            return CustomComponentReference::backing(&name);
         }
     }
     if matches!(mode, ParamMode::Ctor | ParamMode::Lambda) {
@@ -428,6 +479,22 @@ fn custom_component_value_text(
         }
     }
     original_node_text(value, source_text)
+}
+
+struct CustomComponentReference;
+
+impl CustomComponentReference {
+    fn backing(name: &str) -> String {
+        let mut out = String::new();
+        write!(out, "this.__{name}").expect("writing to String cannot fail");
+        out
+    }
+
+    fn direct(name: &str) -> String {
+        let mut out = String::new();
+        write!(out, "this.{name}").expect("writing to String cannot fail");
+        out
+    }
 }
 
 fn this_member_name(value: &Expression<'_>) -> Option<String> {
