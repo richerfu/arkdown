@@ -38,6 +38,7 @@ use rolldown_common::{
 use rolldown_plugin::{__inner::SharedPluginable, HookUsage, Plugin, PluginContext};
 use rolldown_utils::js_regex::HybridRegex;
 
+use crate::compile_entry::{compile_entry_chunk_name, compile_entry_stem_counts};
 use crate::output;
 
 /// The top-level bundler for one OHOS module build.
@@ -200,14 +201,14 @@ impl Bundler {
 struct BundlePlan {
     module_root: PathBuf,
     entries: Vec<String>,
-    stem_counts: FxHashMap<String, usize>,
+    stem_counts: HashMap<String, usize>,
 }
 
 impl BundlePlan {
     fn from_loader_json(loader_json: &LoaderJson) -> Self {
         let module_root = Self::canonical_module_root(&loader_json.module_root_path);
         let entries = Self::rollup_input_entries(loader_json);
-        let stem_counts = Self::compile_entry_stem_counts(&entries);
+        let stem_counts = compile_entry_stem_counts(&entries);
         Self {
             module_root,
             entries,
@@ -220,7 +221,7 @@ impl BundlePlan {
             .iter()
             .enumerate()
             .map(|(index, entry)| InputItem {
-                name: Some(self.chunk_name(entry, index)),
+                name: Some(compile_entry_chunk_name(entry, index, &self.stem_counts)),
                 import: self.import_path(entry),
             })
             .collect()
@@ -232,7 +233,7 @@ impl BundlePlan {
             .enumerate()
             .map(|(index, entry)| {
                 (
-                    self.chunk_name(entry, index),
+                    compile_entry_chunk_name(entry, index, &self.stem_counts),
                     entry.trim_start_matches("./").to_string(),
                 )
             })
@@ -248,53 +249,6 @@ impl BundlePlan {
         std::fs::canonicalize(&candidate)
             .map(|path| path.to_string_lossy().to_string())
             .unwrap_or_else(|_| candidate.to_string_lossy().to_string())
-    }
-
-    fn chunk_name(&self, entry: &str, index: usize) -> String {
-        let Some(stem) = std::path::Path::new(entry)
-            .file_stem()
-            .and_then(|s| s.to_str())
-        else {
-            return format!("entry_{index}");
-        };
-
-        if self.stem_counts.get(stem).copied().unwrap_or(0) <= 1 {
-            return stem.to_string();
-        }
-
-        let stripped = entry
-            .trim_start_matches("./")
-            .trim_end_matches(".ets")
-            .trim_end_matches(".ts")
-            .trim_end_matches(".js");
-        let name = stripped
-            .chars()
-            .map(|ch| {
-                if ch.is_ascii_alphanumeric() || ch == '_' || ch == '$' {
-                    ch
-                } else {
-                    '_'
-                }
-            })
-            .collect::<String>();
-        if name.is_empty() {
-            format!("entry_{index}")
-        } else {
-            name
-        }
-    }
-
-    fn compile_entry_stem_counts(entries: &[String]) -> FxHashMap<String, usize> {
-        let mut counts = FxHashMap::default();
-        for entry in entries {
-            if let Some(stem) = std::path::Path::new(entry.as_str())
-                .file_stem()
-                .and_then(|s| s.to_str())
-            {
-                *counts.entry(stem.to_string()).or_insert(0) += 1;
-            }
-        }
-        counts
     }
 
     fn rollup_input_entries(loader_json: &LoaderJson) -> Vec<String> {

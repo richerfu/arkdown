@@ -3,6 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+pub(super) use arkdown::compile_entry::{compile_entry_chunk_name, compile_entry_stem_counts};
 use arkdown::BundleOutput;
 use arkdown_core::{ArkdownConfig, ModuleConfig};
 
@@ -12,52 +13,6 @@ use super::compile_arkts_modules::with_extension;
 #[derive(Debug, Clone)]
 pub(super) struct ChunkCompileMeta {
     pub(super) source_file: Option<String>,
-}
-
-pub(super) fn compile_entry_stem_counts(entries: &[String]) -> HashMap<String, usize> {
-    let mut counts = HashMap::new();
-    for entry in entries {
-        if let Some(stem) = Path::new(entry.as_str())
-            .file_stem()
-            .and_then(|s| s.to_str())
-        {
-            *counts.entry(stem.to_string()).or_insert(0) += 1;
-        }
-    }
-    counts
-}
-
-pub(super) fn compile_entry_chunk_name(
-    entry: &str,
-    index: usize,
-    stem_counts: &HashMap<String, usize>,
-) -> String {
-    let Some(stem) = Path::new(entry).file_stem().and_then(|s| s.to_str()) else {
-        return format!("entry_{index}");
-    };
-
-    if stem_counts.get(stem).copied().unwrap_or(0) <= 1 {
-        return stem.to_string();
-    }
-
-    let stripped = entry
-        .trim_start_matches("./")
-        .trim_end_matches(".ets")
-        .trim_end_matches(".ts")
-        .trim_end_matches(".js");
-    let mut name = String::with_capacity(stripped.len());
-    for ch in stripped.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '$' {
-            name.push(ch);
-        } else {
-            name.push('_');
-        }
-    }
-    if name.is_empty() {
-        format!("entry_{index}")
-    } else {
-        name
-    }
 }
 
 pub(super) fn collect_unresolved_external_imports(bundle_out: &BundleOutput) -> Vec<String> {

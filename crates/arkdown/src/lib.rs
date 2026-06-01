@@ -17,6 +17,7 @@
 //! ```
 
 pub mod bundler;
+pub mod compile_entry;
 pub mod output;
 
 pub use bundler::{BundleOutput, Bundler};
