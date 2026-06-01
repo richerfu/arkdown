@@ -1,9 +1,12 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use oxc_ast::ast::{
     Argument, ArkUIChild, ArkUIComponentExpression, ArrowFunctionExpression, BindingPattern,
-    BlockStatement, CallExpression, Expression, FormalParameter, FunctionBody, IfStatement,
-    ObjectExpression, ObjectPropertyKind, PropertyKey, Statement,
+    BlockStatement, CallExpression, ChainElement, Expression, FormalParameter, FunctionBody,
+    IfStatement, ObjectExpression, ObjectPropertyKind, PropertyKey, Statement,
 };
 use oxc_span::{GetSpan, Span};
 
@@ -39,24 +42,35 @@ pub struct CustomComponentInfo {
 
 pub type CustomComponentUpdateProps = HashMap<String, CustomComponentInfo>;
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct BuildContext {
     use_parent_context: bool,
+    raw_object_fields: Arc<HashSet<String>>,
 }
 
 impl BuildContext {
     fn builder() -> Self {
         Self {
             use_parent_context: true,
+            ..Default::default()
         }
     }
 
-    fn view_context(self) -> &'static str {
+    fn view_context(&self) -> &'static str {
         if self.use_parent_context {
             "(parent ? parent : this)"
         } else {
             "this"
         }
+    }
+
+    fn with_raw_object_fields(mut self, raw_object_fields: &HashSet<String>) -> Self {
+        self.raw_object_fields = Arc::new(raw_object_fields.clone());
+        self
+    }
+
+    fn is_raw_object_field(&self, name: &str) -> bool {
+        self.raw_object_fields.contains(name)
     }
 }
 
@@ -167,11 +181,13 @@ fn extract_leaf_component(
     custom_components: &HashSet<String>,
     builder_methods: &HashSet<String>,
     component_metadata: &ComponentMetadata,
+    context: &BuildContext,
 ) -> Result<LeafComponent, BuildLoweringError> {
     match &call.callee {
         Expression::Identifier(_) => {
             let name = component_name(&call.callee)?;
-            let create_args = raw_arguments_text(&call.arguments, source_text);
+            let create_args =
+                raw_arguments_text_with_context(&call.arguments, source_text, context);
             Ok(LeafComponent {
                 name,
                 create_args,
@@ -180,8 +196,13 @@ fn extract_leaf_component(
         }
         Expression::StaticMemberExpression(member) => {
             let attr_name = member.property.name.to_string();
-            let attr_args =
-                attribute_arguments_text(&attr_name, &call.arguments, source_text, builder_methods);
+            let attr_args = attribute_arguments_text(
+                &attr_name,
+                &call.arguments,
+                source_text,
+                builder_methods,
+                context,
+            );
             match &member.object {
                 Expression::CallExpression(inner) => {
                     let mut lc = extract_leaf_component(
@@ -191,6 +212,7 @@ fn extract_leaf_component(
                         custom_components,
                         builder_methods,
                         component_metadata,
+                        context,
                     )?;
                     lc.chain_attrs.push((
                         attr_name,
@@ -239,7 +261,7 @@ fn lower_call_expression(
             builder_methods,
             custom_component_update_props,
             component_metadata,
-            context,
+            context.clone(),
             indent,
             out,
             span_hints,
@@ -253,6 +275,7 @@ fn lower_call_expression(
         custom_components,
         builder_methods,
         component_metadata,
+        &context,
     )?;
     if custom_components.contains(&lc.name)
         && (lc.chain_attrs.is_empty()
@@ -271,7 +294,7 @@ fn lower_call_expression(
             base_call.span,
             source_text,
             source_id,
-            context,
+            context.clone(),
             indent,
             out,
             span_hints,
@@ -354,6 +377,28 @@ pub fn lower_build_body_with_custom_components(
     )
 }
 
+pub fn lower_build_body_with_component_context(
+    body: Option<&FunctionBody<'_>>,
+    source_text: &str,
+    source_id: &str,
+    custom_components: &HashSet<String>,
+    builder_methods: &HashSet<String>,
+    custom_component_update_props: &CustomComponentUpdateProps,
+    component_metadata: &ComponentMetadata,
+    raw_object_fields: &HashSet<String>,
+) -> Result<(String, Vec<SpanHint>), BuildLoweringError> {
+    lower_build_body_with_context(
+        body,
+        source_text,
+        source_id,
+        custom_components,
+        builder_methods,
+        custom_component_update_props,
+        component_metadata,
+        BuildContext::default().with_raw_object_fields(raw_object_fields),
+    )
+}
+
 pub fn lower_builder_body_with_custom_components(
     body: Option<&FunctionBody<'_>>,
     source_text: &str,
@@ -372,6 +417,28 @@ pub fn lower_builder_body_with_custom_components(
         custom_component_update_props,
         component_metadata,
         BuildContext::builder(),
+    )
+}
+
+pub fn lower_builder_body_with_component_context(
+    body: Option<&FunctionBody<'_>>,
+    source_text: &str,
+    source_id: &str,
+    custom_components: &HashSet<String>,
+    builder_methods: &HashSet<String>,
+    custom_component_update_props: &CustomComponentUpdateProps,
+    component_metadata: &ComponentMetadata,
+    raw_object_fields: &HashSet<String>,
+) -> Result<(String, Vec<SpanHint>), BuildLoweringError> {
+    lower_build_body_with_context(
+        body,
+        source_text,
+        source_id,
+        custom_components,
+        builder_methods,
+        custom_component_update_props,
+        component_metadata,
+        BuildContext::builder().with_raw_object_fields(raw_object_fields),
     )
 }
 
@@ -400,7 +467,7 @@ fn lower_build_body_with_context(
             builder_methods,
             custom_component_update_props,
             component_metadata,
-            context,
+            context.clone(),
             "        ",
             &mut out,
             &mut span_hints,
@@ -432,7 +499,7 @@ fn lower_statement(
             builder_methods,
             custom_component_update_props,
             component_metadata,
-            context,
+            context.clone(),
             indent,
             out,
             span_hints,
@@ -490,7 +557,7 @@ fn lower_block(
             builder_methods,
             custom_component_update_props,
             component_metadata,
-            context,
+            context.clone(),
             indent,
             out,
             span_hints,
@@ -527,7 +594,8 @@ fn lower_expression(
             span_hints,
         ),
         Expression::CallExpression(call) => {
-            if lower_builder_method_call(call, source_text, builder_methods, indent, out) {
+            if lower_builder_method_call(call, source_text, builder_methods, &context, indent, out)
+            {
                 Ok(())
             } else {
                 lower_call_expression(
@@ -584,7 +652,7 @@ fn lower_if_statement(
         builder_methods,
         custom_component_update_props,
         component_metadata,
-        context,
+        context.clone(),
         &format!("{inner_indent}    "),
         out,
         span_hints,
@@ -608,7 +676,7 @@ fn lower_if_statement(
                     builder_methods,
                     custom_component_update_props,
                     component_metadata,
-                    context,
+                    context.clone(),
                     &format!("{inner_indent}    "),
                     out,
                     span_hints,
@@ -623,7 +691,7 @@ fn lower_if_statement(
                     builder_methods,
                     custom_component_update_props,
                     component_metadata,
-                    context,
+                    context.clone(),
                     &format!("{inner_indent}    "),
                     out,
                     span_hints,
@@ -667,7 +735,7 @@ fn lower_component(
         if !component.children.is_empty() {
             return Err(BuildLoweringError::UnsupportedChild);
         }
-        let args = raw_arguments_text(&component.arguments, source_text);
+        let args = raw_arguments_text_with_context(&component.arguments, source_text, &context);
         out.push_str(&format!("{indent}{name}.bind(this)({args});\n"));
         return Ok(());
     }
@@ -720,7 +788,7 @@ fn lower_component(
         );
     }
 
-    let args = raw_arguments_text(&component.arguments, source_text);
+    let args = raw_arguments_text_with_context(&component.arguments, source_text, &context);
     if name == "ListItem"
         && !component.children.is_empty()
         && is_lazy_list_item(component, source_text)
@@ -772,8 +840,13 @@ fn lower_component(
     let mut attrs = Vec::new();
     for (index, chain) in component.chain_expressions.iter().enumerate() {
         let chain_name = chain_name(chain)?;
-        let chain_args =
-            attribute_arguments_text(&chain_name, &chain.arguments, source_text, builder_methods);
+        let chain_args = attribute_arguments_text(
+            &chain_name,
+            &chain.arguments,
+            source_text,
+            builder_methods,
+            &context,
+        );
         let line = body_line + 2 + index;
         push_span_hint(span_hints, line, indent.len() + 4, component.callee.span());
         push_span_hint(
@@ -819,7 +892,7 @@ fn lower_component(
                     builder_methods,
                     custom_component_update_props,
                     component_metadata,
-                    context,
+                    context.clone(),
                     indent,
                     out,
                     span_hints,
@@ -834,7 +907,7 @@ fn lower_component(
                     builder_methods,
                     custom_component_update_props,
                     component_metadata,
-                    context,
+                    context.clone(),
                     indent,
                     out,
                     span_hints,
@@ -849,7 +922,7 @@ fn lower_component(
                     builder_methods,
                     custom_component_update_props,
                     component_metadata,
-                    context,
+                    context.clone(),
                     indent,
                     out,
                     span_hints,
@@ -909,6 +982,7 @@ fn emit_custom_component_call(
         arguments,
         source_text,
         component_info.map(|info| &info.update_props),
+        &context,
     );
     let (line, col) = source_position(source_text, span.start);
     let page = component_page_path(source_id);
@@ -962,6 +1036,7 @@ fn emit_reusable_custom_component_call(
         arguments,
         source_text,
         component_info.map(|info| &info.update_props),
+        &context,
     );
     let (line, col) = source_position(source_text, span.start);
     let page = component_page_path(source_id);
@@ -1065,6 +1140,7 @@ fn custom_component_params(
     arguments: &[Argument<'_>],
     source_text: &str,
     update_props: Option<&HashSet<String>>,
+    context: &BuildContext,
 ) -> CustomComponentParams {
     let Some(Argument::ObjectExpression(object)) = arguments.first() else {
         let params = if arguments.is_empty() {
@@ -1085,9 +1161,22 @@ fn custom_component_params(
             source_text,
             update_props,
             ParamMode::Ctor,
+            context,
         ),
-        lambda: custom_component_object_text(object, source_text, update_props, ParamMode::Lambda),
-        update: custom_component_object_text(object, source_text, update_props, ParamMode::Update),
+        lambda: custom_component_object_text(
+            object,
+            source_text,
+            update_props,
+            ParamMode::Lambda,
+            context,
+        ),
+        update: custom_component_object_text(
+            object,
+            source_text,
+            update_props,
+            ParamMode::Update,
+            context,
+        ),
     }
 }
 
@@ -1103,12 +1192,13 @@ fn custom_component_object_text(
     source_text: &str,
     update_props: Option<&HashSet<String>>,
     mode: ParamMode,
+    context: &BuildContext,
 ) -> String {
     let properties = object
         .properties
         .iter()
         .filter_map(|property| {
-            custom_component_property_text(property, source_text, update_props, mode)
+            custom_component_property_text(property, source_text, update_props, mode, context)
         })
         .collect::<Vec<_>>();
     if properties.is_empty() {
@@ -1123,6 +1213,7 @@ fn custom_component_property_text(
     source_text: &str,
     update_props: Option<&HashSet<String>>,
     mode: ParamMode,
+    context: &BuildContext,
 ) -> Option<String> {
     match property {
         ObjectPropertyKind::ObjectProperty(property) => {
@@ -1135,7 +1226,7 @@ fn custom_component_property_text(
                 return None;
             }
             let key = span_text(&property.key, source_text).trim().to_string();
-            let value = custom_component_value_text(&property.value, source_text, mode);
+            let value = custom_component_value_text(&property.value, source_text, mode, context);
             Some(format!("        {key}: {value}"))
         }
         ObjectPropertyKind::SpreadProperty(spread) => {
@@ -1163,6 +1254,7 @@ fn custom_component_value_text(
     value: &Expression<'_>,
     source_text: &str,
     mode: ParamMode,
+    context: &BuildContext,
 ) -> String {
     if let Some(name) = dollar_reference_name(value) {
         return match mode {
@@ -1171,7 +1263,200 @@ fn custom_component_value_text(
             ParamMode::Update => span_text(value, source_text).trim().to_string(),
         };
     }
+    if matches!(mode, ParamMode::Ctor | ParamMode::Lambda) {
+        if let Some(text) = expression_text_with_raw_object_call_args(value, source_text, context) {
+            return text;
+        }
+    }
     span_text(value, source_text).trim().to_string()
+}
+
+fn expression_text_with_raw_object_call_args(
+    expression: &Expression<'_>,
+    source_text: &str,
+    context: &BuildContext,
+) -> Option<String> {
+    let mut replacements = Vec::new();
+    collect_raw_object_call_arg_replacements(expression, source_text, context, &mut replacements);
+    apply_span_replacements(expression.span(), source_text, replacements)
+}
+
+fn collect_raw_object_call_arg_replacements(
+    expression: &Expression<'_>,
+    source_text: &str,
+    context: &BuildContext,
+    replacements: &mut Vec<(Span, String)>,
+) {
+    match expression {
+        Expression::CallExpression(call) => {
+            collect_call_raw_object_replacements(call, source_text, context, replacements);
+        }
+        Expression::ChainExpression(chain) => {
+            if let ChainElement::CallExpression(call) = &chain.expression {
+                collect_call_raw_object_replacements(call, source_text, context, replacements);
+            }
+        }
+        Expression::ArrowFunctionExpression(arrow) => {
+            collect_function_body_raw_object_replacements(
+                &arrow.body,
+                source_text,
+                context,
+                replacements,
+            );
+        }
+        Expression::ParenthesizedExpression(parenthesized) => {
+            collect_raw_object_call_arg_replacements(
+                &parenthesized.expression,
+                source_text,
+                context,
+                replacements,
+            );
+        }
+        _ => {}
+    }
+}
+
+fn collect_call_raw_object_replacements(
+    call: &CallExpression<'_>,
+    source_text: &str,
+    context: &BuildContext,
+    replacements: &mut Vec<(Span, String)>,
+) {
+    for argument in &call.arguments {
+        let Some(expression) = argument.as_expression() else {
+            continue;
+        };
+        if let Some(raw_object_text) = raw_object_argument_text(expression, source_text, context) {
+            replacements.push((argument.span(), raw_object_text));
+        } else {
+            collect_raw_object_call_arg_replacements(
+                expression,
+                source_text,
+                context,
+                replacements,
+            );
+        }
+    }
+}
+
+fn collect_function_body_raw_object_replacements(
+    body: &FunctionBody<'_>,
+    source_text: &str,
+    context: &BuildContext,
+    replacements: &mut Vec<(Span, String)>,
+) {
+    for statement in &body.statements {
+        collect_statement_raw_object_replacements(statement, source_text, context, replacements);
+    }
+}
+
+fn collect_statement_raw_object_replacements(
+    statement: &Statement<'_>,
+    source_text: &str,
+    context: &BuildContext,
+    replacements: &mut Vec<(Span, String)>,
+) {
+    match statement {
+        Statement::ExpressionStatement(statement) => collect_raw_object_call_arg_replacements(
+            &statement.expression,
+            source_text,
+            context,
+            replacements,
+        ),
+        Statement::ReturnStatement(statement) => {
+            if let Some(argument) = &statement.argument {
+                collect_raw_object_call_arg_replacements(
+                    argument,
+                    source_text,
+                    context,
+                    replacements,
+                );
+            }
+        }
+        Statement::BlockStatement(block) => {
+            for statement in &block.body {
+                collect_statement_raw_object_replacements(
+                    statement,
+                    source_text,
+                    context,
+                    replacements,
+                );
+            }
+        }
+        Statement::IfStatement(statement) => {
+            collect_statement_raw_object_replacements(
+                &statement.consequent,
+                source_text,
+                context,
+                replacements,
+            );
+            if let Some(alternate) = &statement.alternate {
+                collect_statement_raw_object_replacements(
+                    alternate,
+                    source_text,
+                    context,
+                    replacements,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn raw_object_argument_text(
+    expression: &Expression<'_>,
+    source_text: &str,
+    context: &BuildContext,
+) -> Option<String> {
+    let Expression::StaticMemberExpression(member) = expression else {
+        return None;
+    };
+    if !matches!(&member.object, Expression::ThisExpression(_)) {
+        return None;
+    }
+    let name = member.property.name.as_str();
+    if !context.is_raw_object_field(name) {
+        return None;
+    }
+    Some(format!(
+        "ObservedObject.GetRawObject({})",
+        span_text(expression, source_text).trim()
+    ))
+}
+
+fn raw_object_argument_text_from_argument(
+    argument: &Argument<'_>,
+    source_text: &str,
+    context: &BuildContext,
+) -> Option<String> {
+    argument
+        .as_expression()
+        .and_then(|expression| raw_object_argument_text(expression, source_text, context))
+}
+
+fn apply_span_replacements(
+    base_span: Span,
+    source_text: &str,
+    mut replacements: Vec<(Span, String)>,
+) -> Option<String> {
+    if replacements.is_empty() {
+        return None;
+    }
+    replacements.sort_by_key(|(span, _)| span.start);
+    let mut out = String::new();
+    let mut cursor = base_span.start as usize;
+    for (span, replacement) in replacements {
+        let start = span.start as usize;
+        let end = span.end as usize;
+        if start < cursor || end > base_span.end as usize {
+            continue;
+        }
+        out.push_str(&source_text[cursor..start]);
+        out.push_str(&replacement);
+        cursor = end;
+    }
+    out.push_str(&source_text[cursor..base_span.end as usize]);
+    Some(out.trim().to_string())
 }
 
 fn dollar_reference_name(value: &Expression<'_>) -> Option<String> {
@@ -1241,8 +1526,13 @@ fn lower_lazy_list_item(
     ));
     for chain in &component.chain_expressions {
         let chain_name = chain_name(chain)?;
-        let chain_args =
-            attribute_arguments_text(&chain_name, &chain.arguments, source_text, builder_methods);
+        let chain_args = attribute_arguments_text(
+            &chain_name,
+            &chain.arguments,
+            source_text,
+            builder_methods,
+            &context,
+        );
         out.push_str(&format!(
             "{inner}    ListItem.{chain_name}({chain_args});\n"
         ));
@@ -1265,7 +1555,7 @@ fn lower_lazy_list_item(
                     builder_methods,
                     custom_component_update_props,
                     component_metadata,
-                    context,
+                    context.clone(),
                     &format!("{inner}        "),
                     out,
                     span_hints,
@@ -1280,7 +1570,7 @@ fn lower_lazy_list_item(
                     builder_methods,
                     custom_component_update_props,
                     component_metadata,
-                    context,
+                    context.clone(),
                     &format!("{inner}        "),
                     out,
                     span_hints,
@@ -1295,7 +1585,7 @@ fn lower_lazy_list_item(
                     builder_methods,
                     custom_component_update_props,
                     component_metadata,
-                    context,
+                    context.clone(),
                     &format!("{inner}        "),
                     out,
                     span_hints,
@@ -1337,7 +1627,8 @@ fn lower_for_each(
         return Err(BuildLoweringError::UnsupportedChild);
     };
 
-    let data = raw_argument_text(data_arg, source_text);
+    let data = raw_object_argument_text_from_argument(data_arg, source_text, &context)
+        .unwrap_or_else(|| raw_argument_text(data_arg, source_text));
     let item_param = item_gen.params.items.first();
     let index_param = item_gen.params.items.get(1);
     let generator_params = match (item_param, index_param) {
@@ -1370,7 +1661,7 @@ fn lower_for_each(
         builder_methods,
         custom_component_update_props,
         component_metadata,
-        context,
+        context.clone(),
         &format!("{indent}        "),
         out,
         span_hints,
@@ -1379,7 +1670,7 @@ fn lower_for_each(
 
     if item_param.is_some() {
         if let Some(key_arg) = arguments.get(2) {
-            let key = raw_argument_text(key_arg, source_text);
+            let key = raw_argument_text_with_context(key_arg, source_text, &context);
             let item_gen_uses_index = index_param.is_some();
             let key_uses_index = argument_arrow(key_arg)
                 .and_then(|arrow| arrow.params.items.get(1))
@@ -1429,7 +1720,8 @@ fn lower_lazy_for_each(
         return Err(BuildLoweringError::UnsupportedChild);
     };
 
-    let data = raw_argument_text(data_arg, source_text);
+    let data = raw_object_argument_text_from_argument(data_arg, source_text, &context)
+        .unwrap_or_else(|| raw_argument_text(data_arg, source_text));
     let item_params = source_text[item_gen.params.span].trim();
     out.push_str(&format!(
         "{indent}const __lazyForEachItemGenFunction = {item_params} => {{\n"
@@ -1442,7 +1734,7 @@ fn lower_lazy_for_each(
         builder_methods,
         custom_component_update_props,
         component_metadata,
-        context,
+        context.clone(),
         &format!("{indent}    "),
         out,
         span_hints,
@@ -1450,7 +1742,7 @@ fn lower_lazy_for_each(
     out.push_str(&format!("{indent}}};\n"));
 
     if let Some(id_func_arg) = component.arguments.get(2) {
-        let id_func = raw_argument_text(id_func_arg, source_text);
+        let id_func = raw_argument_text_with_context(id_func_arg, source_text, &context);
         out.push_str(&format!(
             "{indent}const __lazyForEachItemIdFunc = {id_func};\n"
         ));
@@ -1494,7 +1786,7 @@ fn lower_lazy_arrow_body(
             builder_methods,
             custom_component_update_props,
             component_metadata,
-            context,
+            context.clone(),
             indent,
             out,
             span_hints,
@@ -1643,18 +1935,31 @@ fn raw_arguments_text(arguments: &[Argument<'_>], source_text: &str) -> String {
         .join(", ")
 }
 
+fn raw_arguments_text_with_context(
+    arguments: &[Argument<'_>],
+    source_text: &str,
+    context: &BuildContext,
+) -> String {
+    arguments
+        .iter()
+        .map(|argument| raw_argument_text_with_context(argument, source_text, context))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn attribute_arguments_text(
     attr_name: &str,
     arguments: &[Argument<'_>],
     source_text: &str,
     builder_methods: &HashSet<String>,
+    context: &BuildContext,
 ) -> String {
     if is_builder_attribute(attr_name) && arguments.len() == 1 {
         if let Some(name) = argument_builder_method_name(&arguments[0], builder_methods) {
             return format!("{{ builder: this.{name}.bind(this) }}");
         }
     }
-    raw_arguments_text(arguments, source_text)
+    raw_arguments_text_with_context(arguments, source_text, context)
 }
 
 fn is_builder_attribute(name: &str) -> bool {
@@ -1724,22 +2029,37 @@ fn raw_argument_text(argument: &Argument<'_>, source_text: &str) -> String {
     span_text(argument, source_text).trim().to_string()
 }
 
+fn raw_argument_text_with_context(
+    argument: &Argument<'_>,
+    source_text: &str,
+    context: &BuildContext,
+) -> String {
+    raw_object_argument_text_from_argument(argument, source_text, context)
+        .or_else(|| {
+            argument.as_expression().and_then(|expression| {
+                expression_text_with_raw_object_call_args(expression, source_text, context)
+            })
+        })
+        .unwrap_or_else(|| raw_argument_text(argument, source_text))
+}
+
 fn lower_builder_method_call(
     call: &CallExpression<'_>,
     source_text: &str,
     builder_methods: &HashSet<String>,
+    context: &BuildContext,
     indent: &str,
     out: &mut String,
 ) -> bool {
     if let Some(name) = builder_method_member_name(&call.callee, builder_methods) {
-        let args = raw_arguments_text(&call.arguments, source_text);
+        let args = raw_arguments_text_with_context(&call.arguments, source_text, context);
         out.push_str(&format!("{indent}this.{name}.bind(this)({args});\n"));
         return true;
     }
     if let Expression::Identifier(identifier) = &call.callee {
         let name = identifier.name.as_str();
         if builder_methods.contains(name) {
-            let args = raw_arguments_text(&call.arguments, source_text);
+            let args = raw_arguments_text_with_context(&call.arguments, source_text, context);
             out.push_str(&format!("{indent}{name}.bind(this)({args});\n"));
             return true;
         }

@@ -248,7 +248,29 @@ When a struct is collected as reusable, SDK
 `this.__field.updateElmtId(oldElmtId, newElmtId)` for non-regular state
 backing fields and skips regular properties and `@BuilderParam`.
 
-### 7b. Builder Parent Context
+### 7c. Raw Observed Object Call Arguments
+
+SDK `process_component_class.ts::processBuildMember()` wraps a non-simple V1
+observed state field with `ObservedObject.GetRawObject(...)` when that field is
+used as a call argument inside `build()` / `@Builder` lowering. The upstream
+predicate is `isNeedGetRawObject()`:
+
+- disabled in ComponentV2 compatibility / make-v1-observed contexts;
+- requires a `PropertyAccessExpression` like `this.item`;
+- the property name must be present in `stateObjectCollection`;
+- the parent must be a `CallExpression`;
+- the property access must not be the call callee and must not already call
+  `ObservedObject.GetRawObject`.
+
+`stateObjectCollection` is populated from decorated component fields whose type
+is not simple, excluding `@BuilderParam`. Arkdown mirrors this with OXC AST
+nodes: it collects non-simple state fields from the component struct and applies
+the wrapper only while generating call arguments. Direct object-literal params
+such as `{ item: this.item }` remain unchanged; callback params such as
+`() => this.handle(this.item)` become
+`() => this.handle(ObservedObject.GetRawObject(this.item))`.
+
+### 7d. Builder Parent Context
 
 SDK `parentConditionalExpression()` is `(parent ? parent : this)`. Top-level
 `@Builder` functions and component `@Builder` methods receive `parent = null`;

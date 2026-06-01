@@ -25,8 +25,9 @@ use oxc_span::{GetSpan, SourceType, Span};
 use crate::error::EtsTransformError;
 use crate::source_map::{build_ets_source_map, offset_to_line_col, MapEntry};
 use crate::transform::build_fn::{
-    lower_build_body_with_custom_components, lower_builder_body_with_custom_components,
-    lower_styles_body, CustomComponentInfo, CustomComponentUpdateProps,
+    lower_build_body_with_component_context, lower_builder_body_with_component_context,
+    lower_builder_body_with_custom_components, lower_styles_body, CustomComponentInfo,
+    CustomComponentUpdateProps,
 };
 use crate::transform::component::{
     generate_view_pu_class, BuilderMethodInfo, ComponentInfo, ParamField, RegularField, StateField,
@@ -1225,6 +1226,7 @@ fn component_from_struct(
     let mut visible_builder_methods = builder_functions.clone();
     visible_builder_methods.extend(builder_method_names.iter().cloned());
     visible_builder_methods.extend(builder_param_names.iter().cloned());
+    let raw_object_fields = component_raw_object_field_names(statement, simple_type_context);
     let mut styles_methods: Vec<StylesMethodInfo> = Vec::new();
     let mut regular_members: Vec<String> = Vec::new();
     let mut params_fields: Vec<ParamField> = Vec::new();
@@ -1333,7 +1335,7 @@ fn component_from_struct(
             StructElement::MethodDefinition(method)
                 if method.key.static_name().is_some_and(|name| name == "build") =>
             {
-                let (body, hints) = lower_build_body_with_custom_components(
+                let (body, hints) = lower_build_body_with_component_context(
                     method.value.body.as_deref(),
                     source_text,
                     hvigor_source_id,
@@ -1341,6 +1343,7 @@ fn component_from_struct(
                     &visible_builder_methods,
                     custom_component_update_props,
                     &options.component_metadata,
+                    &raw_object_fields,
                 )
                 .map_err(|err| EtsTransformError::Fatal {
                     file: id.to_string(),
@@ -1363,7 +1366,7 @@ fn component_from_struct(
                     method.value.params.span(),
                     source_text,
                 ));
-                let (lowered_body, _) = lower_builder_body_with_custom_components(
+                let (lowered_body, _) = lower_builder_body_with_component_context(
                     method.value.body.as_deref(),
                     source_text,
                     hvigor_source_id,
@@ -1371,6 +1374,7 @@ fn component_from_struct(
                     &visible_builder_methods,
                     custom_component_update_props,
                     &options.component_metadata,
+                    &raw_object_fields,
                 )
                 .map_err(|err| EtsTransformError::Fatal {
                     file: id.to_string(),
@@ -1698,6 +1702,39 @@ fn primary_state_decorator(names: &[&str]) -> Option<&'static str> {
     ]
     .into_iter()
     .find(|candidate| names.iter().any(|name| name == candidate) && is_state_decorator(candidate))
+}
+
+fn component_raw_object_field_names(
+    statement: &StructStatement<'_>,
+    simple_type_context: &SimpleTypeContext,
+) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for element in &statement.body.body {
+        let StructElement::PropertyDefinition(property) = element else {
+            continue;
+        };
+        let decorator_names: Vec<&str> = property.decorators.iter().map(decorator_name).collect();
+        let Some(decorator) = primary_state_decorator(&decorator_names) else {
+            continue;
+        };
+        if decorator == "BuilderParam" {
+            continue;
+        }
+        let Some(name) = property.key.static_name() else {
+            continue;
+        };
+        let Some(type_node) = property
+            .type_annotation
+            .as_ref()
+            .map(|annotation| &annotation.type_annotation)
+        else {
+            continue;
+        };
+        if !simple_type_context.is_simple_type_annotation(type_node) {
+            names.insert(name.into_owned());
+        }
+    }
+    names
 }
 
 /// Transform a struct-annotated `.ets` file to ViewPU TypeScript and produce a
@@ -3340,6 +3377,81 @@ struct Parent {
         assert!(
             !result.contains("Child.create"),
             "custom component must not lower to built-in create/pop path, got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_custom_component_callback_wraps_raw_observed_state_argument() {
+        let src = r#"
+class Item {}
+
+@Component
+struct Child {
+  @ObjectLink item: Item;
+  @Prop onClicked: () => void;
+  build() {}
+}
+
+@Component
+struct Parent {
+  @ObjectLink item: Item;
+  handle(item: Item) {}
+  build() {
+    Child({
+      item: this.item,
+      onClicked: () => this.handle(this.item)
+    })
+  }
+}
+"#;
+        let result = transform_ets(&make_source(
+            "products/phone/src/main/ets/pages/Parent.ets",
+            src,
+        ))
+        .unwrap();
+        assert!(
+            result.contains("item: this.item"),
+            "direct custom component param must stay unchanged, got:\n{}",
+            result
+        );
+        assert!(
+            result.contains("onClicked: () => this.handle(ObservedObject.GetRawObject(this.item))"),
+            "expected callback call argument to match upstream GetRawObject lowering, got:\n{}",
+            result
+        );
+        assert!(
+            !result.contains("item: ObservedObject.GetRawObject(this.item)"),
+            "GetRawObject must be limited to call arguments, got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_for_each_wraps_raw_observed_state_data_argument() {
+        let src = r#"
+class Item {}
+
+@Component
+struct Parent {
+  @State items: Item[] = [];
+  build() {
+    ForEach(this.items, (item: Item) => {
+      Text("item")
+    })
+  }
+}
+"#;
+        let result = transform_ets(&make_source(
+            "products/phone/src/main/ets/pages/Parent.ets",
+            src,
+        ))
+        .unwrap();
+        assert!(
+            result.contains(
+                "this.forEachUpdateFunction(elmtId, ObservedObject.GetRawObject(this.items), forEachItemGenFunction)"
+            ),
+            "expected ForEach data argument to match upstream GetRawObject lowering, got:\n{}",
             result
         );
     }
