@@ -25,8 +25,8 @@ use oxc_span::{GetSpan, SourceType, Span};
 use crate::error::EtsTransformError;
 use crate::source_map::{build_ets_source_map, offset_to_line_col, MapEntry};
 use crate::transform::build_fn::{
-    lower_build_body_with_custom_components, lower_styles_body, CustomComponentInfo,
-    CustomComponentUpdateProps,
+    lower_build_body_with_custom_components, lower_builder_body_with_custom_components,
+    lower_styles_body, CustomComponentInfo, CustomComponentUpdateProps,
 };
 use crate::transform::component::{
     generate_view_pu_class, BuilderMethodInfo, ComponentInfo, ParamField, RegularField, StateField,
@@ -642,7 +642,7 @@ fn transform_decorated_function(
             )));
         }
         _ => {
-            lower_build_body_with_custom_components(
+            lower_builder_body_with_custom_components(
                 function.body.as_deref(),
                 source_text,
                 hvigor_source_id,
@@ -1363,7 +1363,7 @@ fn component_from_struct(
                     method.value.params.span(),
                     source_text,
                 ));
-                let (lowered_body, _) = lower_build_body_with_custom_components(
+                let (lowered_body, _) = lower_builder_body_with_custom_components(
                     method.value.body.as_deref(),
                     source_text,
                     hvigor_source_id,

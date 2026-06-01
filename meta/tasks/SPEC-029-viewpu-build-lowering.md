@@ -209,13 +209,35 @@ rerender() {
 
 ### 7. updateStateVars() Method
 
-Always emitted. Body: update any `@Prop` fields from params if present:
+Always emitted. In PU / partial-update mode this follows SDK
+`ets-loader/lib/process_component_member.js`: `validatePropDecorator()` adds a
+`createStateVarsBody()` statement, which directly calls `reset(params.x)`.
 ```javascript
 updateStateVars(params) {
-  if (params.propField !== undefined) {
-    this.__propField.set(params.propField);
-  }
+  this.__propField.reset(params.propField);
 }
+```
+
+`@State` state-vars paths, when emitted for lazy/advanced modes, keep the SDK
+truthiness guard before `.set(...)`.
+
+### 7a. Button Create Method
+
+SDK `process_component_build.js::createComponent()` special-cases `Button`:
+
+- `Button(label)` without children lowers to `Button.createWithLabel(label)`.
+- `Button(label) { ... }` lowers to `Button.createWithChild(label)`.
+- Other built-in components use `.create(...)`.
+
+### 7b. Builder Parent Context
+
+SDK `parentConditionalExpression()` is `(parent ? parent : this)`. Top-level
+`@Builder` functions and component `@Builder` methods receive `parent = null`;
+their lowered ArkUI framework calls use that parent context:
+
+```javascript
+(parent ? parent : this).observeComponentCreation2(...)
+(parent ? parent : this).ifElseBranchUpdateFunction(...)
 ```
 
 ### 8. purgeVariableDependenciesOnElmtId()
@@ -397,7 +419,7 @@ pub fn transform_viewpu(
 - Input: `@Prop count: number`
 - Assert: backing type is `SynchedPropertySimpleOneWay`
 - Assert: `setInitiallyProvidedValue` contains the prop update
-- Assert: `updateStateVars` contains the prop update
+- Assert: `updateStateVars` contains direct `this.__count.reset(params.count)` with no `undefined` guard
 
 ### Lifecycle Preservation
 

@@ -175,39 +175,38 @@ Current HmosWorld artifact status after a clean arkdown rebuild:
 
 | Artifact | hvigor | arkdown | Status |
 |---|---:|---:|---|
-| unsigned HAP entry list | 356 entries | 356 entries | identical |
 | residual `$r` / `$rawfile` in cache TS | 0 | 0 | identical on this check |
-| `filesInfo.txt` record set | 571 | 571 | identical |
-| `modules.cache` entries | 572 | 572 | identical |
-| `npmEntries.txt` entries | 57 | 57 | identical |
-| `ets/modules.abc` | 4,756,944B | 3,531,868B | not aligned |
-| `ets/widgets.abc` | 42,348B | 30,020B | not aligned |
+| `filesInfo.txt` record set | 571 | 571 | identical set; order differs at line 3 |
+| `modules.cache` entries | 572 | 572 | identical set; order differs at line 3 |
+| `npmEntries.txt` entries | 57 | 57 | identical set; order differs at line 1 |
+| cache TS content hashes | 571 files | 571 files | 490 files still differ |
+| `ets/modules.abc` | 2,875,016B | 3,914,216B | not aligned |
+| `ets/widgets.abc` | 28,424B | 38,864B | not aligned |
 | ABC file version | `0x0002000c` | `0x0002000c` | aligned |
-| ABC class count | 630 | 630 | aligned |
-| ABC LNP/method count (`modules.abc`) | 7,757 | 7,121 | not aligned |
-| ABC LNP/method count (`widgets.abc`) | 83 | 71 | not aligned |
-| ABC literal-array count | 5,743 | 2,130 | not aligned |
 
-The size reduction is therefore not caused by missing app/sys resource objects in
-the generated TypeScript cache or by missing CompileArkTS handoff modules.
+The ABC byte delta is therefore not caused by missing app/sys resource objects
+in the generated TypeScript cache or by missing CompileArkTS handoff modules.
 `arkdown-abc` now also lowers `npmEntries.txt` using the upstream
 `CompileNpmModuleEntryList()` record shape, wraps pandasm record names as
 `L<record>;`, de-duplicates fixed SDK stubs when real npm-entry records provide
 the same SDK namespace classes, and collects function/arrow records with the
 upstream `Binder::LegacyBuildFunction()` FNV-1a naming model. The ETS transform
-now follows upstream `process_component_build.ts` for `ListItem` lazy create
-blocks and upstream `process_component_class.ts` for `LocalStorageProp` class
-field initializers. Remaining cache-source gaps are visible in class-method
-internal names and some custom-component `paramsLambda` blocks. The remaining
-large gap is in the native es2abc merge path: running the SDK `es2abc` with
-hvigor's actual flags
-(`--debug-info @filesInfo.txt --npm-module-entry-list npmEntries.txt --merge-abc
---enable-release-column --cache-file @modules.cache`) reproduces hvigor's
-`modules.abc` byte-for-byte from the hvigor cache, while the same command on the
-current arkdown cache produces a 4,555,404B ABC. That leaves two separate gaps:
-cache-source/printer parity (~201KB on HmosWorld) and Rust backend parity for
-debug-info/literal-array/protoBin ProgramCache merge semantics (~2.21MB on
-HmosWorld).
+now follows upstream `process_component_build.js` for `ListItem` lazy create
+blocks, `Button.createWithLabel/createWithChild`, and builder parent-context
+framework calls, upstream `process_component_member.js` for direct `@Prop`
+`updateStateVars().reset(params.x)`, and upstream `process_component_class.js`
+for `LocalStorageProp` class field initializers. Remaining cache-source gaps are
+still broad: 490 of 571 HmosWorld cache TS files differ after path
+normalization, with known printer/comment/format gaps and additional ViewPU
+custom-component/paramsLambda forms still to audit from upstream source.
+
+Rollup/Rolldown order note: hvigor's SDK Rollup plugin context exposes
+`getModuleIds()` as `graph.modulesById.keys()` over a JavaScript `Map`; Rolldown
+1.0.3 exposes `get_module_ids()` from a `DashMap` iterator. Arkdown therefore
+tracks Rolldown `ModuleIdx` as the closest currently available stable graph
+order, but exact hvigor insertion order is still not proven. This order affects
+CompileArkTS handoff files and byte-for-byte ABC/HAP parity even when runtime
+semantics are otherwise unchanged.
 
 ## Major Remaining Capabilities Beyond Minimal-HAP
 
@@ -215,7 +214,7 @@ HmosWorld).
 |---|---|---|
 | ABC DebugInfo/LNP | minimal fixture aligned | Broaden golden coverage beyond minimal-hap. |
 | Direct cache-TS ABC route | minimal fixture aligned; HmosWorld handoff and npm-entry records wired | Keep as final ABC route; implement hvigor `modules.cache`/protoBin ProgramCache merge semantics. |
-| ArkTS transform breadth | partial | Broaden beyond minimal fixture: `@Builder`, `@Styles`, more ArkUI DSL forms, diagnostics. Resource lowering and imported const-enum lowering are AST-based for HmosWorld. |
+| ArkTS transform breadth | partial | Broaden beyond minimal fixture: remaining custom-component, `@ComponentV2`, paramsLambda, printer/comment, and diagnostic forms. Resource lowering, imported const-enum lowering, Button creation, builder parent context, and `@Prop` updateStateVars are AST/upstream-source based for HmosWorld. |
 | Release builds | partial | Obfuscation, terser/minification, release treeshake/manual chunks, release source maps. |
 | Incremental cache | partial | Rollup msgpack cache, task input cache, real ABC `--cache-file` equivalent. |
 | Multi-module dependencies | partial | ByteCode HAR, dynamic imports, HSP/HAR transitive maps, workers. |

@@ -63,6 +63,11 @@ struct MyCard {
         "builder body must be lowered through ArkUI AST; got:\n{}",
         result
     );
+    assert!(
+        result.contains("(parent ? parent : this).observeComponentCreation2"),
+        "@Builder body must use hvigor parent context; got:\n{}",
+        result
+    );
     // The ViewPU class must be generated.
     assert!(
         result.contains("class MyCard extends ViewPU"),
@@ -79,6 +84,41 @@ struct MyCard {
     assert!(
         builder_pos > initial_render_pos,
         "@Builder method must come after initialRender in class body"
+    );
+}
+
+#[test]
+fn test_global_builder_uses_parent_context_in_if_branch() {
+    let src = r#"
+@Builder
+export function HistoryItem(text: string, selected: boolean) {
+  if (selected) {
+    Button(text) {
+      Text(text)
+    }
+  }
+}
+"#;
+    let result = transform_ets(&make_source(
+        "entry/src/main/ets/components/HistoryItem.ets",
+        src,
+    ))
+    .unwrap();
+
+    assert!(
+        result.contains("(parent ? parent : this).observeComponentCreation2"),
+        "global @Builder must observe through parent context; got:\n{}",
+        result
+    );
+    assert!(
+        result.contains("(parent ? parent : this).ifElseBranchUpdateFunction"),
+        "global @Builder if branches must update through parent context; got:\n{}",
+        result
+    );
+    assert!(
+        result.contains("Button.createWithChild(text);"),
+        "Button with children must use hvigor createWithChild; got:\n{}",
+        result
     );
 }
 

@@ -225,15 +225,22 @@ pub fn generate_view_pu_class(info: &ComponentInfo) -> String {
 
     out.push_str(&format!("    updateStateVars(params: {params_type}) {{\n"));
     for field in &prop_fields {
-        let update_api = match field.decorator.as_str() {
-            "Prop" | "Param" | "Once" | "PropRef" => "reset",
-            _ => "set",
-        };
-        out.push_str(&format!(
-            "        if (params.{name} !== undefined) {{\n            this.__{name}.{update_api}(params.{name});\n        }}\n",
-            name = field.name,
-            update_api = update_api,
-        ));
+        if field.decorator == "State" {
+            out.push_str(&format!(
+                "        if (params.{name}) {{\n            this.__{name}.set(params.{name});\n        }}\n",
+                name = field.name,
+            ));
+        } else {
+            let update_api = match field.decorator.as_str() {
+                "Prop" | "Param" | "Once" | "PropRef" => "reset",
+                _ => "set",
+            };
+            out.push_str(&format!(
+                "        this.__{name}.{update_api}(params.{name});\n",
+                name = field.name,
+                update_api = update_api,
+            ));
+        }
     }
     out.push_str("    }\n");
 
@@ -639,8 +646,12 @@ mod tests {
         let out = generate_view_pu_class(&info);
         assert!(out.contains("private __value: SynchedPropertySimpleOneWayPU<string>"));
         assert!(
-            out.contains("params.__value") || out.contains("params.value"),
-            "updateStateVars should reference prop field"
+            out.contains("this.__value.reset(params.value);"),
+            "updateStateVars should directly reset @Prop like hvigor, got:\n{out}"
+        );
+        assert!(
+            !out.contains("if (params.value !== undefined)"),
+            "@Prop updateStateVars must not guard reset in hvigor PU output"
         );
     }
 

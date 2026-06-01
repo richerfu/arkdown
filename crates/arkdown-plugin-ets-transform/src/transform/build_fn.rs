@@ -39,11 +39,44 @@ pub struct CustomComponentInfo {
 
 pub type CustomComponentUpdateProps = HashMap<String, CustomComponentInfo>;
 
+#[derive(Clone, Copy, Debug, Default)]
+struct BuildContext {
+    use_parent_context: bool,
+}
+
+impl BuildContext {
+    fn builder() -> Self {
+        Self {
+            use_parent_context: true,
+        }
+    }
+
+    fn view_context(self) -> &'static str {
+        if self.use_parent_context {
+            "(parent ? parent : this)"
+        } else {
+            "this"
+        }
+    }
+}
+
 /// Extracted representation of a leaf component call and its attribute chain.
 struct LeafComponent {
     name: String,
     create_args: String,
     chain_attrs: Vec<(String, String)>,
+}
+
+fn create_method_name(component_name: &str, has_children: bool) -> &'static str {
+    if component_name == "Button" {
+        if has_children {
+            "createWithChild"
+        } else {
+            "createWithLabel"
+        }
+    } else {
+        "create"
+    }
 }
 
 /// Recursively unwrap a chained `CallExpression` into its base component name,
@@ -111,6 +144,7 @@ fn lower_call_expression(
     builder_methods: &HashSet<String>,
     custom_component_update_props: &CustomComponentUpdateProps,
     component_metadata: &ComponentMetadata,
+    context: BuildContext,
     indent: &str,
     out: &mut String,
     span_hints: &mut Vec<SpanHint>,
@@ -124,6 +158,7 @@ fn lower_call_expression(
             builder_methods,
             custom_component_update_props,
             component_metadata,
+            context,
             indent,
             out,
             span_hints,
@@ -154,6 +189,7 @@ fn lower_call_expression(
             base_call.span,
             source_text,
             source_id,
+            context,
             indent,
             out,
             span_hints,
@@ -161,11 +197,14 @@ fn lower_call_expression(
         return Ok(());
     }
     out.push_str(&format!(
-        "{indent}this.observeComponentCreation2((elmtId, isInitialRender) => {{\n"
+        "{indent}{}.observeComponentCreation2((elmtId, isInitialRender) => {{\n",
+        context.view_context()
     ));
     out.push_str(&format!(
-        "{indent}    {}.create({});\n",
-        lc.name, lc.create_args
+        "{indent}    {}.{}({});\n",
+        lc.name,
+        create_method_name(&lc.name, false),
+        lc.create_args
     ));
     for (attr_name, attr_args) in &lc.chain_attrs {
         out.push_str(&format!(
@@ -226,6 +265,49 @@ pub fn lower_build_body_with_custom_components(
     custom_component_update_props: &CustomComponentUpdateProps,
     component_metadata: &ComponentMetadata,
 ) -> Result<(String, Vec<SpanHint>), BuildLoweringError> {
+    lower_build_body_with_context(
+        body,
+        source_text,
+        source_id,
+        custom_components,
+        builder_methods,
+        custom_component_update_props,
+        component_metadata,
+        BuildContext::default(),
+    )
+}
+
+pub fn lower_builder_body_with_custom_components(
+    body: Option<&FunctionBody<'_>>,
+    source_text: &str,
+    source_id: &str,
+    custom_components: &HashSet<String>,
+    builder_methods: &HashSet<String>,
+    custom_component_update_props: &CustomComponentUpdateProps,
+    component_metadata: &ComponentMetadata,
+) -> Result<(String, Vec<SpanHint>), BuildLoweringError> {
+    lower_build_body_with_context(
+        body,
+        source_text,
+        source_id,
+        custom_components,
+        builder_methods,
+        custom_component_update_props,
+        component_metadata,
+        BuildContext::builder(),
+    )
+}
+
+fn lower_build_body_with_context(
+    body: Option<&FunctionBody<'_>>,
+    source_text: &str,
+    source_id: &str,
+    custom_components: &HashSet<String>,
+    builder_methods: &HashSet<String>,
+    custom_component_update_props: &CustomComponentUpdateProps,
+    component_metadata: &ComponentMetadata,
+    context: BuildContext,
+) -> Result<(String, Vec<SpanHint>), BuildLoweringError> {
     let Some(body) = body else {
         return Ok((String::new(), vec![]));
     };
@@ -241,6 +323,7 @@ pub fn lower_build_body_with_custom_components(
             builder_methods,
             custom_component_update_props,
             component_metadata,
+            context,
             "        ",
             &mut out,
             &mut span_hints,
@@ -258,6 +341,7 @@ fn lower_statement(
     builder_methods: &HashSet<String>,
     custom_component_update_props: &CustomComponentUpdateProps,
     component_metadata: &ComponentMetadata,
+    context: BuildContext,
     indent: &str,
     out: &mut String,
     span_hints: &mut Vec<SpanHint>,
@@ -271,6 +355,7 @@ fn lower_statement(
             builder_methods,
             custom_component_update_props,
             component_metadata,
+            context,
             indent,
             out,
             span_hints,
@@ -284,6 +369,7 @@ fn lower_statement(
             builder_methods,
             custom_component_update_props,
             component_metadata,
+            context,
             indent,
             out,
             span_hints,
@@ -296,6 +382,7 @@ fn lower_statement(
             builder_methods,
             custom_component_update_props,
             component_metadata,
+            context,
             indent,
             out,
             span_hints,
@@ -312,6 +399,7 @@ fn lower_block(
     builder_methods: &HashSet<String>,
     custom_component_update_props: &CustomComponentUpdateProps,
     component_metadata: &ComponentMetadata,
+    context: BuildContext,
     indent: &str,
     out: &mut String,
     span_hints: &mut Vec<SpanHint>,
@@ -325,6 +413,7 @@ fn lower_block(
             builder_methods,
             custom_component_update_props,
             component_metadata,
+            context,
             indent,
             out,
             span_hints,
@@ -341,6 +430,7 @@ fn lower_expression(
     builder_methods: &HashSet<String>,
     custom_component_update_props: &CustomComponentUpdateProps,
     component_metadata: &ComponentMetadata,
+    context: BuildContext,
     indent: &str,
     out: &mut String,
     span_hints: &mut Vec<SpanHint>,
@@ -354,6 +444,7 @@ fn lower_expression(
             builder_methods,
             custom_component_update_props,
             component_metadata,
+            context,
             indent,
             out,
             span_hints,
@@ -370,6 +461,7 @@ fn lower_expression(
                     builder_methods,
                     custom_component_update_props,
                     component_metadata,
+                    context,
                     indent,
                     out,
                     span_hints,
@@ -388,6 +480,7 @@ fn lower_if_statement(
     builder_methods: &HashSet<String>,
     custom_component_update_props: &CustomComponentUpdateProps,
     component_metadata: &ComponentMetadata,
+    context: BuildContext,
     indent: &str,
     out: &mut String,
     span_hints: &mut Vec<SpanHint>,
@@ -397,12 +490,14 @@ fn lower_if_statement(
     let inner_indent = format!("{branch_indent}    ");
 
     out.push_str(&format!(
-        "{indent}this.observeComponentCreation2((elmtId, isInitialRender) => {{\n"
+        "{indent}{}.observeComponentCreation2((elmtId, isInitialRender) => {{\n",
+        context.view_context()
     ));
     out.push_str(&format!("{branch_indent}If.create();\n"));
     out.push_str(&format!("{branch_indent}if ({test}) {{\n"));
     out.push_str(&format!(
-        "{inner_indent}this.ifElseBranchUpdateFunction(0, () => {{\n"
+        "{inner_indent}{}.ifElseBranchUpdateFunction(0, () => {{\n",
+        context.view_context()
     ));
     lower_statement(
         &statement.consequent,
@@ -412,6 +507,7 @@ fn lower_if_statement(
         builder_methods,
         custom_component_update_props,
         component_metadata,
+        context,
         &format!("{inner_indent}    "),
         out,
         span_hints,
@@ -422,7 +518,8 @@ fn lower_if_statement(
     if let Some(alternate) = &statement.alternate {
         out.push_str(&format!("{branch_indent}}} else {{\n"));
         out.push_str(&format!(
-            "{inner_indent}this.ifElseBranchUpdateFunction({branch_index}, () => {{\n"
+            "{inner_indent}{}.ifElseBranchUpdateFunction({branch_index}, () => {{\n",
+            context.view_context()
         ));
         match alternate {
             Statement::IfStatement(alternate_if) => {
@@ -434,6 +531,7 @@ fn lower_if_statement(
                     builder_methods,
                     custom_component_update_props,
                     component_metadata,
+                    context,
                     &format!("{inner_indent}    "),
                     out,
                     span_hints,
@@ -448,6 +546,7 @@ fn lower_if_statement(
                     builder_methods,
                     custom_component_update_props,
                     component_metadata,
+                    context,
                     &format!("{inner_indent}    "),
                     out,
                     span_hints,
@@ -460,7 +559,8 @@ fn lower_if_statement(
     if branch_index == 1 {
         out.push_str(&format!("{branch_indent}}} else {{\n"));
         out.push_str(&format!(
-            "{inner_indent}this.ifElseBranchUpdateFunction(1, () => {{\n"
+            "{inner_indent}{}.ifElseBranchUpdateFunction(1, () => {{\n",
+            context.view_context()
         ));
         out.push_str(&format!("{inner_indent}}});\n"));
     }
@@ -479,6 +579,7 @@ fn lower_component(
     builder_methods: &HashSet<String>,
     custom_component_update_props: &CustomComponentUpdateProps,
     component_metadata: &ComponentMetadata,
+    context: BuildContext,
     indent: &str,
     out: &mut String,
     span_hints: &mut Vec<SpanHint>,
@@ -503,6 +604,7 @@ fn lower_component(
             component.callee.span(),
             source_text,
             source_id,
+            context,
             indent,
             out,
             span_hints,
@@ -519,6 +621,7 @@ fn lower_component(
             builder_methods,
             custom_component_update_props,
             component_metadata,
+            context,
             indent,
             out,
             span_hints,
@@ -533,6 +636,7 @@ fn lower_component(
             builder_methods,
             custom_component_update_props,
             component_metadata,
+            context,
             indent,
             out,
             span_hints,
@@ -552,6 +656,7 @@ fn lower_component(
             builder_methods,
             custom_component_update_props,
             component_metadata,
+            context,
             indent,
             out,
             span_hints,
@@ -561,7 +666,8 @@ fn lower_component(
     let body_line = out.bytes().filter(|&b| b == b'\n').count();
 
     out.push_str(&format!(
-        "{indent}this.observeComponentCreation2((elmtId, isInitialRender) => {{\n"
+        "{indent}{}.observeComponentCreation2((elmtId, isInitialRender) => {{\n",
+        context.view_context()
     ));
     push_span_hint(
         span_hints,
@@ -582,7 +688,10 @@ fn lower_component(
         &component.arguments,
         source_text,
     );
-    out.push_str(&format!("{indent}    {name}.create({args});\n"));
+    out.push_str(&format!(
+        "{indent}    {name}.{}({args});\n",
+        create_method_name(&name, !component.children.is_empty())
+    ));
     for (index, chain) in component.chain_expressions.iter().enumerate() {
         let chain_name = chain_name(chain)?;
         let chain_args =
@@ -627,6 +736,7 @@ fn lower_component(
                     builder_methods,
                     custom_component_update_props,
                     component_metadata,
+                    context,
                     indent,
                     out,
                     span_hints,
@@ -641,6 +751,7 @@ fn lower_component(
                     builder_methods,
                     custom_component_update_props,
                     component_metadata,
+                    context,
                     indent,
                     out,
                     span_hints,
@@ -655,6 +766,7 @@ fn lower_component(
                     builder_methods,
                     custom_component_update_props,
                     component_metadata,
+                    context,
                     indent,
                     out,
                     span_hints,
@@ -685,6 +797,7 @@ fn emit_custom_component_call(
     span: Span,
     source_text: &str,
     source_id: &str,
+    context: BuildContext,
     indent: &str,
     out: &mut String,
     span_hints: &mut Vec<SpanHint>,
@@ -698,6 +811,7 @@ fn emit_custom_component_call(
             span,
             source_text,
             source_id,
+            context,
             indent,
             out,
             span_hints,
@@ -718,11 +832,13 @@ fn emit_custom_component_call(
     out.push_str(&format!("{indent}{{\n"));
     let inner = format!("{indent}    ");
     out.push_str(&format!(
-        "{inner}this.observeComponentCreation2((elmtId, isInitialRender) => {{\n"
+        "{inner}{}.observeComponentCreation2((elmtId, isInitialRender) => {{\n",
+        context.view_context()
     ));
     out.push_str(&format!("{inner}    if (isInitialRender) {{\n"));
     out.push_str(&format!(
-        "{inner}        let componentCall = new {name}(this, {}, undefined, elmtId, () => {{ }}, {{ page: \"{page}\", line: {line}, col: {col} }});\n",
+        "{inner}        let componentCall = new {name}({}, {}, undefined, elmtId, () => {{ }}, {{ page: \"{page}\", line: {line}, col: {col} }});\n",
+        context.view_context(),
         params.constructor
     ));
     out.push_str(&format!("{inner}        ViewPU.create(componentCall);\n"));
@@ -734,7 +850,8 @@ fn emit_custom_component_call(
     ));
     out.push_str(&format!("{inner}    }} else {{\n"));
     out.push_str(&format!(
-        "{inner}        this.updateStateVarsOfChildByElmtId(elmtId, {});\n",
+        "{inner}        {}.updateStateVarsOfChildByElmtId(elmtId, {});\n",
+        context.view_context(),
         params.update
     ));
     out.push_str(&format!("{inner}    }}\n"));
@@ -750,6 +867,7 @@ fn emit_reusable_custom_component_call(
     span: Span,
     source_text: &str,
     source_id: &str,
+    context: BuildContext,
     indent: &str,
     out: &mut String,
     span_hints: &mut Vec<SpanHint>,
@@ -767,21 +885,24 @@ fn emit_reusable_custom_component_call(
     let reuse_id = reuse_id.unwrap_or_else(|| format!("'{name}'"));
 
     out.push_str(&format!(
-        "{indent}this.observeComponentCreation2((elmtId, isInitialRender) => {{\n"
+        "{indent}{}.observeComponentCreation2((elmtId, isInitialRender) => {{\n",
+        context.view_context()
     ));
     out.push_str(&format!("{indent}    __Recycle__.create();\n"));
     out.push_str(&format!("{indent}}}, __Recycle__);\n"));
     out.push_str(&format!("{indent}{{\n"));
     let inner = format!("{indent}    ");
     out.push_str(&format!(
-        "{inner}this.observeRecycleComponentCreation({reuse_id}, (elmtId, isInitialRender, recycleNode = null) => {{\n"
+        "{inner}{}.observeRecycleComponentCreation({reuse_id}, (elmtId, isInitialRender, recycleNode = null) => {{\n",
+        context.view_context()
     ));
     out.push_str(&format!(
         "{inner}    ViewStackProcessor.StartGetAccessRecordingFor(elmtId);\n"
     ));
     out.push_str(&format!("{inner}    if (isInitialRender) {{\n"));
     out.push_str(&format!(
-        "{inner}        let componentCall = recycleNode ? recycleNode : new {name}(this, {}, undefined, elmtId, () => {{ }}, {{ page: \"{page}\", line: {line}, col: {col} }});\n",
+        "{inner}        let componentCall = recycleNode ? recycleNode : new {name}({}, {}, undefined, elmtId, () => {{ }}, {{ page: \"{page}\", line: {line}, col: {col} }});\n",
+        context.view_context(),
         params.constructor
     ));
     out.push_str(&format!(
@@ -813,7 +934,8 @@ fn emit_reusable_custom_component_call(
     ));
     out.push_str(&format!("{inner}    }} else {{\n"));
     out.push_str(&format!(
-        "{inner}        this.updateStateVarsOfChildByElmtId(elmtId, {});\n",
+        "{inner}        {}.updateStateVarsOfChildByElmtId(elmtId, {});\n",
+        context.view_context(),
         params.update
     ));
     out.push_str(&format!("{inner}    }}\n"));
@@ -1005,6 +1127,7 @@ fn lower_lazy_list_item(
     builder_methods: &HashSet<String>,
     custom_component_update_props: &CustomComponentUpdateProps,
     component_metadata: &ComponentMetadata,
+    context: BuildContext,
     indent: &str,
     out: &mut String,
     span_hints: &mut Vec<SpanHint>,
@@ -1059,6 +1182,7 @@ fn lower_lazy_list_item(
                     builder_methods,
                     custom_component_update_props,
                     component_metadata,
+                    context,
                     &format!("{inner}        "),
                     out,
                     span_hints,
@@ -1073,6 +1197,7 @@ fn lower_lazy_list_item(
                     builder_methods,
                     custom_component_update_props,
                     component_metadata,
+                    context,
                     &format!("{inner}        "),
                     out,
                     span_hints,
@@ -1087,6 +1212,7 @@ fn lower_lazy_list_item(
                     builder_methods,
                     custom_component_update_props,
                     component_metadata,
+                    context,
                     &format!("{inner}        "),
                     out,
                     span_hints,
@@ -1097,7 +1223,8 @@ fn lower_lazy_list_item(
     out.push_str(&format!("{inner}    ListItem.pop();\n"));
     out.push_str(&format!("{inner}}};\n"));
     out.push_str(&format!(
-        "{inner}this.observeComponentCreation2(itemCreation2, ListItem);\n"
+        "{inner}{}.observeComponentCreation2(itemCreation2, ListItem);\n",
+        context.view_context()
     ));
     out.push_str(&format!("{inner}ListItem.pop();\n"));
     out.push_str(&format!("{indent}}}\n"));
@@ -1112,6 +1239,7 @@ fn lower_for_each(
     builder_methods: &HashSet<String>,
     custom_component_update_props: &CustomComponentUpdateProps,
     component_metadata: &ComponentMetadata,
+    context: BuildContext,
     indent: &str,
     out: &mut String,
     span_hints: &mut Vec<SpanHint>,
@@ -1138,7 +1266,8 @@ fn lower_for_each(
     };
 
     out.push_str(&format!(
-        "{indent}this.observeComponentCreation2((elmtId, isInitialRender) => {{\n"
+        "{indent}{}.observeComponentCreation2((elmtId, isInitialRender) => {{\n",
+        context.view_context()
     ));
     out.push_str(&format!("{indent}    ForEach.create();\n"));
     out.push_str(&format!(
@@ -1158,6 +1287,7 @@ fn lower_for_each(
         builder_methods,
         custom_component_update_props,
         component_metadata,
+        context,
         &format!("{indent}        "),
         out,
         span_hints,
@@ -1172,16 +1302,19 @@ fn lower_for_each(
                 .and_then(|arrow| arrow.params.items.get(1))
                 .is_some();
             out.push_str(&format!(
-            "{indent}    this.forEachUpdateFunction(elmtId, {data}, forEachItemGenFunction, {key}, {item_gen_uses_index}, {key_uses_index});\n"
+            "{indent}    {}.forEachUpdateFunction(elmtId, {data}, forEachItemGenFunction, {key}, {item_gen_uses_index}, {key_uses_index});\n",
+            context.view_context()
         ));
         } else {
             out.push_str(&format!(
-                "{indent}    this.forEachUpdateFunction(elmtId, {data}, forEachItemGenFunction);\n"
+                "{indent}    {}.forEachUpdateFunction(elmtId, {data}, forEachItemGenFunction);\n",
+                context.view_context()
             ));
         }
     } else {
         out.push_str(&format!(
-            "{indent}    this.forEachUpdateFunction(elmtId, {data}, forEachItemGenFunction);\n"
+            "{indent}    {}.forEachUpdateFunction(elmtId, {data}, forEachItemGenFunction);\n",
+            context.view_context()
         ));
     }
 
@@ -1198,6 +1331,7 @@ fn lower_lazy_for_each(
     builder_methods: &HashSet<String>,
     custom_component_update_props: &CustomComponentUpdateProps,
     component_metadata: &ComponentMetadata,
+    context: BuildContext,
     indent: &str,
     out: &mut String,
     span_hints: &mut Vec<SpanHint>,
@@ -1225,6 +1359,7 @@ fn lower_lazy_for_each(
         builder_methods,
         custom_component_update_props,
         component_metadata,
+        context,
         &format!("{indent}    "),
         out,
         span_hints,
@@ -1237,11 +1372,13 @@ fn lower_lazy_for_each(
             "{indent}const __lazyForEachItemIdFunc = {id_func};\n"
         ));
         out.push_str(&format!(
-            "{indent}LazyForEach.create(\"1\", this, {data}, __lazyForEachItemGenFunction, __lazyForEachItemIdFunc);\n"
+            "{indent}LazyForEach.create(\"1\", {}, {data}, __lazyForEachItemGenFunction, __lazyForEachItemIdFunc);\n",
+            context.view_context()
         ));
     } else {
         out.push_str(&format!(
-            "{indent}LazyForEach.create(\"1\", this, {data}, __lazyForEachItemGenFunction);\n"
+            "{indent}LazyForEach.create(\"1\", {}, {data}, __lazyForEachItemGenFunction);\n",
+            context.view_context()
         ));
     }
     out.push_str(&format!("{indent}LazyForEach.pop();\n"));
@@ -1256,6 +1393,7 @@ fn lower_lazy_arrow_body(
     builder_methods: &HashSet<String>,
     custom_component_update_props: &CustomComponentUpdateProps,
     component_metadata: &ComponentMetadata,
+    context: BuildContext,
     indent: &str,
     out: &mut String,
     span_hints: &mut Vec<SpanHint>,
@@ -1273,6 +1411,7 @@ fn lower_lazy_arrow_body(
             builder_methods,
             custom_component_update_props,
             component_metadata,
+            context,
             indent,
             out,
             span_hints,
@@ -1802,7 +1941,10 @@ struct Foo {
   }
 }"#;
         let out = parse_and_lower(source).unwrap();
-        assert!(out.contains("Button.create(\"OK\");"), "got:\n{out}");
+        assert!(
+            out.contains("Button.createWithLabel(\"OK\");"),
+            "got:\n{out}"
+        );
         assert!(out.contains("Button.width(100);"), "got:\n{out}");
         assert!(out.contains("Button.height(40);"), "got:\n{out}");
         assert!(out.contains("Button.borderRadius(8);"), "got:\n{out}");
@@ -1810,6 +1952,24 @@ struct Foo {
         let create_pos = out.find("Button.create").unwrap();
         let pop_pos = out.find("Button.pop").unwrap();
         assert!(create_pos < pop_pos, "create must precede pop");
+    }
+
+    #[test]
+    fn lowers_button_with_children_using_create_with_child() {
+        let source = r#"@Component
+struct Foo {
+  build() {
+    Button("OK") {
+      Text("child")
+    }
+  }
+}"#;
+        let out = parse_and_lower(source).unwrap();
+        assert!(
+            out.contains("Button.createWithChild(\"OK\");"),
+            "got:\n{out}"
+        );
+        assert!(out.contains("Text.create(\"child\");"), "got:\n{out}");
     }
 
     #[test]

@@ -180,7 +180,7 @@ mode (API >= 9).
 | `@Event` / `@Require` | (regular member metadata)              | decorator stripped, member emitted as TypeScript             | —                       |
 | `@Watch`            | (no backing field; adds `declareWatch`)  | `this.declareWatch("x", this.handlerName)` after field inits | —                       |
 | `@Computed` / `@Monitor` / lifecycle decorators | (regular method metadata) | decorator stripped, method emitted as TypeScript | —                       |
-| `@Builder`          | ✅ Class method, body lowered via `lower_build_body_or_raw` | —                                         | —                       |
+| `@Builder`          | ✅ Class method, body lowered through OXC ArkUI AST with upstream parent context | —                       | —                       |
 | `@Styles`           | ✅ `private` class method, `.attr(x)` → `this.attr(x)` in body | —                                     | —                       |
 | `@BuilderParam`     | `WrappedBuilder<Parameters<T>>`          | `this.x = init` (direct, no `__` prefix in ctor)            | Yes                     |
 
@@ -189,6 +189,16 @@ mode (API >= 9).
 > `string`, `number`, or `boolean`).  The pure-Rust transform defaults to the `Simple`
 > variants for all types as a conservative choice.  A future enhancement can add type
 > heuristics to select `Object` variants for non-primitive types.
+
+> **Update-state-vars note**: upstream
+> `process_component_member.js::createStateVarsBody()` emits direct
+> `this.__x.reset(params.x)` for `@Prop`-style slots. It does not wrap that reset
+> in `params.x !== undefined`.
+
+> **Button create note**: upstream
+> `process_component_build.js::createComponent()` maps `Button(label)` without
+> children to `Button.createWithLabel(label)`, and `Button(label) { ... }` to
+> `Button.createWithChild(label)`.
 
 ### @Entry
 
@@ -236,37 +246,25 @@ Leaf components (no closing brace children) still get `.pop()` but emit no neste
 
 ### @Builder functions
 
-✅ **Implemented** (`crates/arkdown-plugin-ets-transform/src/transform/`, 2026-05-29)
+✅ **Implemented** (`crates/arkdown-plugin-ets-transform/src/transform/`, 2026-06-01)
 
 Struct methods decorated with `@Builder` remain as class methods with the same
 name (they are NOT renamed to `__method__`). Top-level `@Builder export function`
 is emitted as an exported `function name(...): void`, matching upstream handling
 of builder functions before bundling. The decorator is stripped.
 
-The body is lowered via `lower_build_body_or_raw`:
-
-1. **If the OXC ETS parser emits `ArkUIComponentExpression` nodes** (expected
-   in future parser versions that apply ArkUI rules to `@Builder` bodies as
-   well as `build()`): the body is fully desugared into
-   `observeComponentCreation2` + `.pop()` pairs — identical to `build()`.
-
-2. **Current OXC ETS behaviour**: the parser can expose ArkUI children inside
-   canonical `build()` bodies, nested callbacks, and some builder bodies. When a
-   builder body is parsed as regular TypeScript, the fallback emits statement
-   text as TypeScript instead of guessing missing ArkUI AST.
+The body is lowered through the same OXC ArkUI AST path as `build()`, but with
+upstream builder parent context. Framework calls are emitted on
+`(parent ? parent : this)`, matching SDK
+`process_component_build.js::parentConditionalExpression()`.
 
 ```typescript
 // Input:
 @Builder myBuilder() { Text('hi') }
 
-// Output (current — raw body fallback):
-myBuilder(): void {
-  Text('hi')
-}
-
-// Output (future — full ArkUI desugaring when parser supports it):
-myBuilder(): void {
-  this.observeComponentCreation2((elmtId, isInitialRender) => {
+// Output:
+myBuilder(parent = null): void {
+  (parent ? parent : this).observeComponentCreation2((elmtId, isInitialRender) => {
     Text.create('hi');
   }, Text);
   Text.pop();
@@ -509,7 +507,7 @@ No other public types are exported. `EtsTransformer`, `EtsChecker`, and `ApiTran
 - `@Component struct Counter` with `@State count: number` round-trip: transform output contains `class Counter extends ViewPU` with `__count: ObservedPropertySimplePU<number>`
 - `@Entry` on a component generates `ViewStackProcessor.StartGetAccessRecordingFor` after the class definition
 - `@Prop` field appears in `updateStateVars` method; `@State` field does not
-- ✅ `@Builder myBuilder()` method is preserved as a class method (not lifted to standalone function); decorator stripped; body lowered via `lower_build_body_or_raw` (ArkUI desugaring or raw fallback); output is valid TypeScript
+- ✅ `@Builder myBuilder()` method is preserved as a class method (not lifted to standalone function); decorator stripped; body lowered through the OXC ArkUI AST path; framework calls use upstream `(parent ? parent : this)` parent context; output is valid TypeScript
 - `build()` with `Column { Text("hi") }` → two `observeComponentCreation2` calls with `Column.pop()` and `Text.pop()`
 - Method chains in `build()` (`.onClick(...)`) appear inside the `observeComponentCreation2` callback
 - `etsChecker` rule `missing-build-method`: `@Component struct Foo {}` (no build) → `Err(ArkdownError::EtsCheck)` with rule ID `missing-build-method`
