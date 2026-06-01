@@ -180,7 +180,7 @@ Current HmosWorld artifact status after a clean arkdown rebuild:
 | `modules.cache` entries | 572 | 572 | identical set; order differs at line 3 |
 | `npmEntries.txt` entries | 57 | 57 | identical set; order differs at line 1 |
 | cache TS content hashes | 571 files | 571 files | 81 exact; 64 whitespace/comment-only; 426 semantic-like diffs |
-| `ets/modules.abc` | 2,875,016B | 3,921,068B | not aligned |
+| `ets/modules.abc` | 2,875,016B | 3,921,096B | not aligned |
 | `ets/widgets.abc` | 28,424B | 38,936B | not aligned |
 | ABC file version | `0x0002000c` | `0x0002000c` | aligned |
 
@@ -203,9 +203,13 @@ for `LocalStorageProp` class field initializers, reusable-component
 `isNeedGetRawObject()` wrapping of non-simple observed state fields passed as
 call arguments. The raw-object wrapping is driven by OXC AST call/property nodes
 and the same simple-type classification used for state fields; direct object
-literal params remain unchanged, matching upstream. Remaining cache-source gaps
-are still broad, with known printer/comment/format gaps and additional ViewPU
-custom-component/paramsLambda forms still to audit from upstream source.
+literal params remain unchanged, matching upstream. Custom component constructor
+params also follow upstream `createReference()` for child `@Link` fields:
+constructor params receive the parent backing field (`this.__x`), while
+`paramsLambda` keeps the public getter (`this.x`) and `updateStateVars` skips
+`@Link`. Remaining cache-source gaps are still broad, with known
+printer/comment/format gaps and additional ViewPU custom-component/paramsLambda
+forms still to audit from upstream source.
 
 The struct-transform source map offset is also corrected after final ViewPU
 output normalization. `finalizeConstruction` shim insertion and interface

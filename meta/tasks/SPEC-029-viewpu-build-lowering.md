@@ -270,7 +270,22 @@ such as `{ item: this.item }` remain unchanged; callback params such as
 `() => this.handle(this.item)` become
 `() => this.handle(ObservedObject.GetRawObject(this.item))`.
 
-### 7d. Builder Parent Context
+### 7d. Child @Link Custom Component Params
+
+SDK `process_component_class.ts::createReference()` checks the target child
+component's `linkCollection`. When a custom component object property name maps
+to a child `@Link` field and the initializer is a `this.x` property access:
+
+- constructor params use the parent backing field: `{ value: this.__value }`;
+- `paramsLambda` uses the public getter: `{ value: this.value }`;
+- `updateStateVarsOfChildByElmtId()` does not include that `@Link` field.
+
+This rule is keyed by the child component's collected decorators, not by the
+parent field decorator. Arkdown stores the child component's `@Link` names in
+`CustomComponentInfo` and applies the backing-field rewrite only for constructor
+param generation.
+
+### 7e. Builder Parent Context
 
 SDK `parentConditionalExpression()` is `(parent ? parent : this)`. Top-level
 `@Builder` functions and component `@Builder` methods receive `parent = null`;

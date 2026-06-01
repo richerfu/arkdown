@@ -37,6 +37,7 @@ pub struct SpanHint {
 #[derive(Clone, Debug, Default)]
 pub struct CustomComponentInfo {
     pub update_props: HashSet<String>,
+    pub link_props: HashSet<String>,
     pub reusable: bool,
 }
 
@@ -978,12 +979,7 @@ fn emit_custom_component_call(
     let body_line = out.bytes().filter(|&b| b == b'\n').count();
     push_span_hint(span_hints, body_line, indent.len(), span);
 
-    let params = custom_component_params(
-        arguments,
-        source_text,
-        component_info.map(|info| &info.update_props),
-        &context,
-    );
+    let params = custom_component_params(arguments, source_text, component_info, &context);
     let (line, col) = source_position(source_text, span.start);
     let page = component_page_path(source_id);
     out.push_str(&format!("{indent}{{\n"));
@@ -1032,12 +1028,7 @@ fn emit_reusable_custom_component_call(
     let body_line = out.bytes().filter(|&b| b == b'\n').count();
     push_span_hint(span_hints, body_line, indent.len(), span);
 
-    let params = custom_component_params(
-        arguments,
-        source_text,
-        component_info.map(|info| &info.update_props),
-        &context,
-    );
+    let params = custom_component_params(arguments, source_text, component_info, &context);
     let (line, col) = source_position(source_text, span.start);
     let page = component_page_path(source_id);
     let reuse_id = reuse_id.unwrap_or_else(|| format!("'{name}'"));
@@ -1139,7 +1130,7 @@ struct CustomComponentParams {
 fn custom_component_params(
     arguments: &[Argument<'_>],
     source_text: &str,
-    update_props: Option<&HashSet<String>>,
+    component_info: Option<&CustomComponentInfo>,
     context: &BuildContext,
 ) -> CustomComponentParams {
     let Some(Argument::ObjectExpression(object)) = arguments.first() else {
@@ -1159,21 +1150,21 @@ fn custom_component_params(
         constructor: custom_component_object_text(
             object,
             source_text,
-            update_props,
+            component_info,
             ParamMode::Ctor,
             context,
         ),
         lambda: custom_component_object_text(
             object,
             source_text,
-            update_props,
+            component_info,
             ParamMode::Lambda,
             context,
         ),
         update: custom_component_object_text(
             object,
             source_text,
-            update_props,
+            component_info,
             ParamMode::Update,
             context,
         ),
@@ -1190,7 +1181,7 @@ enum ParamMode {
 fn custom_component_object_text(
     object: &ObjectExpression<'_>,
     source_text: &str,
-    update_props: Option<&HashSet<String>>,
+    component_info: Option<&CustomComponentInfo>,
     mode: ParamMode,
     context: &BuildContext,
 ) -> String {
@@ -1198,7 +1189,7 @@ fn custom_component_object_text(
         .properties
         .iter()
         .filter_map(|property| {
-            custom_component_property_text(property, source_text, update_props, mode, context)
+            custom_component_property_text(property, source_text, component_info, mode, context)
         })
         .collect::<Vec<_>>();
     if properties.is_empty() {
@@ -1211,7 +1202,7 @@ fn custom_component_object_text(
 fn custom_component_property_text(
     property: &ObjectPropertyKind<'_>,
     source_text: &str,
-    update_props: Option<&HashSet<String>>,
+    component_info: Option<&CustomComponentInfo>,
     mode: ParamMode,
     context: &BuildContext,
 ) -> Option<String> {
@@ -1219,14 +1210,21 @@ fn custom_component_property_text(
         ObjectPropertyKind::ObjectProperty(property) => {
             let key_name = property_key_name(&property.key);
             if mode == ParamMode::Update
-                && !key_name.is_some_and(|name| {
-                    update_props.is_some_and(|props| props.contains(name.as_str()))
+                && !key_name.as_deref().is_some_and(|name| {
+                    component_info.is_some_and(|info| info.update_props.contains(name))
                 })
             {
                 return None;
             }
             let key = span_text(&property.key, source_text).trim().to_string();
-            let value = custom_component_value_text(&property.value, source_text, mode, context);
+            let value = custom_component_value_text(
+                &property.value,
+                source_text,
+                key_name.as_deref(),
+                component_info,
+                mode,
+                context,
+            );
             Some(format!("        {key}: {value}"))
         }
         ObjectPropertyKind::SpreadProperty(spread) => {
@@ -1253,6 +1251,8 @@ fn property_key_name(key: &PropertyKey<'_>) -> Option<String> {
 fn custom_component_value_text(
     value: &Expression<'_>,
     source_text: &str,
+    property_name: Option<&str>,
+    component_info: Option<&CustomComponentInfo>,
     mode: ParamMode,
     context: &BuildContext,
 ) -> String {
@@ -1263,12 +1263,28 @@ fn custom_component_value_text(
             ParamMode::Update => span_text(value, source_text).trim().to_string(),
         };
     }
+    if mode == ParamMode::Ctor
+        && property_name
+            .is_some_and(|name| component_info.is_some_and(|info| info.link_props.contains(name)))
+    {
+        if let Some(name) = this_member_name(value) {
+            return format!("this.__{name}");
+        }
+    }
     if matches!(mode, ParamMode::Ctor | ParamMode::Lambda) {
         if let Some(text) = expression_text_with_raw_object_call_args(value, source_text, context) {
             return text;
         }
     }
     span_text(value, source_text).trim().to_string()
+}
+
+fn this_member_name(value: &Expression<'_>) -> Option<String> {
+    let Expression::StaticMemberExpression(member) = value else {
+        return None;
+    };
+    matches!(&member.object, Expression::ThisExpression(_))
+        .then(|| member.property.name.to_string())
 }
 
 fn expression_text_with_raw_object_call_args(

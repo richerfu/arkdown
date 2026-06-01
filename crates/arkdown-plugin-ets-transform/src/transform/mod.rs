@@ -1491,9 +1491,30 @@ fn component_update_prop_names(statement: &StructStatement<'_>) -> HashSet<Strin
     names
 }
 
+fn component_link_prop_names(statement: &StructStatement<'_>) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for element in &statement.body.body {
+        let StructElement::PropertyDefinition(property) = element else {
+            continue;
+        };
+        if !property
+            .decorators
+            .iter()
+            .any(|decorator| decorator_name(decorator) == "Link")
+        {
+            continue;
+        }
+        if let Some(name) = property.key.static_name() {
+            names.insert(name.into_owned());
+        }
+    }
+    names
+}
+
 fn component_info(statement: &StructStatement<'_>) -> CustomComponentInfo {
     CustomComponentInfo {
         update_props: component_update_prop_names(statement),
+        link_props: component_link_prop_names(statement),
         reusable: statement
             .decorators
             .iter()
@@ -3423,6 +3444,43 @@ struct Parent {
         assert!(
             !result.contains("item: ObservedObject.GetRawObject(this.item)"),
             "GetRawObject must be limited to call arguments, got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_custom_component_link_param_constructor_uses_backing_field() {
+        let src = r#"
+@Component
+struct Child {
+  @Link value: string;
+  build() {}
+}
+
+@Component
+struct Parent {
+  @State value: string = "";
+  build() {
+    Child({ value: this.value })
+  }
+}
+"#;
+        let result = transform_ets(&make_source(
+            "products/phone/src/main/ets/pages/Parent.ets",
+            src,
+        ))
+        .unwrap();
+        assert!(
+            result.contains("let componentCall = new Child(this, {\n        value: this.__value"),
+            "expected @Link constructor param to use backing field like upstream createReference(), got:\n{}",
+            result
+        );
+        assert!(
+            result.contains("let paramsLambda = () =>")
+                && result.contains("value: this.value")
+                && !result
+                    .contains("this.updateStateVarsOfChildByElmtId(elmtId, {\n        value:"),
+            "expected paramsLambda to use getter and updateStateVars to skip @Link, got:\n{}",
             result
         );
     }
