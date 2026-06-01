@@ -1,3 +1,16 @@
+use oxc_ast::ast::{Decorator, Expression};
+
+pub(super) fn decorator_name<'a>(decorator: &'a Decorator<'a>) -> &'a str {
+    match &decorator.expression {
+        Expression::Identifier(identifier) => identifier.name.as_str(),
+        Expression::CallExpression(call) => match &call.callee {
+            Expression::Identifier(identifier) => identifier.name.as_str(),
+            _ => "",
+        },
+        _ => "",
+    }
+}
+
 /// Describes how a state-managed field is initialised in the ViewPU constructor.
 ///
 /// The patterns are derived from the hvigor ets-loader `process_component_member.js`
