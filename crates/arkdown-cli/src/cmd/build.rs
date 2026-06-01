@@ -267,15 +267,9 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         let cached_abc = output_dir.join("modules.abc");
         let task_inputs = TaskInputs::compute(&config_arc, loader_json);
         if task_inputs.matches_cached(&cache_dir) && cached_abc.exists() {
-            let stub_graph = ChunkGraph {
-                chunks: Default::default(),
-                full_module_ids: Default::default(),
-                module_to_chunk: Default::default(),
-                entry_module_to_entry_chunk: Default::default(),
-            };
             bundle_outs.push((
                 BundleOutput {
-                    chunk_graph: stub_graph,
+                    chunk_graph: ChunkGraph::default(),
                     output_dir: output_dir.clone(),
                     chunk_files: vec![],
                     modules_abc_path: cached_abc,

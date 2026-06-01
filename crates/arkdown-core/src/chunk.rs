@@ -76,7 +76,7 @@ pub struct ArkChunk {
 }
 
 /// The full chunk assignment for one OHOS module build.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ChunkGraph {
     pub chunks: IndexVec<ChunkIdx, ArkChunk>,
     /// Full Rollup/Rolldown module graph IDs, matching Rollup `getModuleIds()`.
