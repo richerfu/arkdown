@@ -132,6 +132,7 @@ impl EtsTransformPlugin {
         let options = transform::TransformOptions {
             bundle_name: Some(self.config.product.bundle_name.clone()),
             module_name: module_name_from_id(id),
+            project_root: Some(self.config.project_root.clone()),
             module_roots: self
                 .config
                 .modules

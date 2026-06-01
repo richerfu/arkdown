@@ -41,6 +41,7 @@ use crate::transform::global_rewrite::rewrite_global_context_calls_in_function_t
 pub struct TransformOptions {
     pub bundle_name: Option<String>,
     pub module_name: Option<String>,
+    pub project_root: Option<PathBuf>,
     pub module_roots: Vec<(String, PathBuf)>,
     pub component_metadata: ComponentMetadata,
 }
@@ -126,6 +127,7 @@ pub fn transform_ets_with_options(
 
     let simple_type_context =
         SimpleTypeContext::from_program(&parsed.program, &source.id.id, options);
+    let hvigor_source_id = hvigor_source_path(&source.id.id, options);
     let mut custom_components = HashSet::new();
     let mut custom_component_update_props = CustomComponentUpdateProps::new();
     for statement in &parsed.program.body {
@@ -156,6 +158,7 @@ pub fn transform_ets_with_options(
             &custom_components,
             &custom_component_update_props,
             &builder_functions,
+            &hvigor_source_id,
         )? {
             let start = component_replacement_start(statement, content);
             out.push_str(&content[last_end..start]);
@@ -169,6 +172,7 @@ pub fn transform_ets_with_options(
             &custom_components,
             &custom_component_update_props,
             &builder_functions,
+            &hvigor_source_id,
         )? {
             out.push_str(&content[last_end..start]);
             out.push_str(&replacement);
@@ -484,6 +488,7 @@ fn component_from_statement(
     custom_components: &HashSet<String>,
     custom_component_update_props: &CustomComponentUpdateProps,
     builder_functions: &HashSet<String>,
+    hvigor_source_id: &str,
 ) -> Result<Option<ComponentInfo>, EtsTransformError> {
     match statement {
         Statement::StructStatement(statement) => component_from_struct(
@@ -497,6 +502,7 @@ fn component_from_statement(
             custom_components,
             custom_component_update_props,
             builder_functions,
+            hvigor_source_id,
         ),
         Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref() {
             Some(Declaration::StructStatement(statement)) => component_from_struct(
@@ -510,6 +516,7 @@ fn component_from_statement(
                 custom_components,
                 custom_component_update_props,
                 builder_functions,
+                hvigor_source_id,
             ),
             _ => Ok(None),
         },
@@ -525,6 +532,7 @@ fn component_from_statement(
                 custom_components,
                 custom_component_update_props,
                 builder_functions,
+                hvigor_source_id,
             ),
             _ => Ok(None),
         },
@@ -540,6 +548,7 @@ fn transform_non_component_statement(
     custom_components: &HashSet<String>,
     custom_component_update_props: &CustomComponentUpdateProps,
     builder_functions: &HashSet<String>,
+    hvigor_source_id: &str,
 ) -> Result<Option<(usize, String)>, EtsTransformError> {
     let replacement = match statement {
         _ if is_orphan_arkui_decorator_statement(statement, source_text) => {
@@ -564,6 +573,7 @@ fn transform_non_component_statement(
             &options.component_metadata,
             false,
             &[],
+            hvigor_source_id,
         )?,
         Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref() {
             Some(Declaration::FunctionDeclaration(function)) => {
@@ -577,6 +587,7 @@ fn transform_non_component_statement(
                     &options.component_metadata,
                     true,
                     &export.decorators,
+                    hvigor_source_id,
                 )?
                 .ok_or_else(|| EtsTransformError::Fatal {
                     file: id.to_string(),
@@ -645,6 +656,7 @@ fn transform_decorated_function(
     component_metadata: &ComponentMetadata,
     exported: bool,
     extra_decorators: &[Decorator<'_>],
+    hvigor_source_id: &str,
 ) -> Result<Option<(usize, String)>, EtsTransformError> {
     let decorators = function.decorators.iter().chain(extra_decorators.iter());
     let decorator_kind = decorators
@@ -705,7 +717,7 @@ fn transform_decorated_function(
             lower_build_body_with_custom_components(
                 function.body.as_deref(),
                 source_text,
-                id,
+                hvigor_source_id,
                 custom_components,
                 builder_functions,
                 custom_component_update_props,
@@ -1266,6 +1278,7 @@ fn component_from_struct(
     custom_components: &HashSet<String>,
     custom_component_update_props: &CustomComponentUpdateProps,
     builder_functions: &HashSet<String>,
+    hvigor_source_id: &str,
 ) -> Result<Option<ComponentInfo>, EtsTransformError> {
     if !is_component_struct(statement) {
         return Ok(None);
@@ -1389,7 +1402,7 @@ fn component_from_struct(
                 let (body, hints) = lower_build_body_with_custom_components(
                     method.value.body.as_deref(),
                     source_text,
-                    id,
+                    hvigor_source_id,
                     custom_components,
                     &visible_builder_methods,
                     custom_component_update_props,
@@ -1419,7 +1432,7 @@ fn component_from_struct(
                 let (lowered_body, _) = lower_build_body_with_custom_components(
                     method.value.body.as_deref(),
                     source_text,
-                    id,
+                    hvigor_source_id,
                     custom_components,
                     &visible_builder_methods,
                     custom_component_update_props,
@@ -1500,7 +1513,7 @@ fn component_from_struct(
                 .iter()
                 .find(|decorator| decorator_name(decorator) == "Entry")
                 .and_then(|decorator| decorator_arg_text(decorator, source_text));
-            entry_registration(id, options, storage)
+            entry_registration(hvigor_source_id, options, storage)
         }),
         builder_methods,
         styles_methods,
@@ -1728,6 +1741,7 @@ pub fn transform_ets_viewpu_with_source_map(
     }
     let simple_type_context =
         SimpleTypeContext::from_program(&parsed.program, &source.id.id, options);
+    let hvigor_source_id = hvigor_source_path(&source.id.id, options);
     let mut custom_components = HashSet::new();
     let mut custom_component_update_props = CustomComponentUpdateProps::new();
     for statement in &parsed.program.body {
@@ -1769,6 +1783,7 @@ pub fn transform_ets_viewpu_with_source_map(
             &custom_components,
             &custom_component_update_props,
             &builder_functions,
+            &hvigor_source_id,
         )? {
             let start = component_replacement_start(statement, content);
             out.push_str(&content[last_end..start]);
@@ -1797,6 +1812,7 @@ pub fn transform_ets_viewpu_with_source_map(
             &custom_components,
             &custom_component_update_props,
             &builder_functions,
+            &hvigor_source_id,
         )? {
             out.push_str(&content[last_end..start]);
             out.push_str(&replacement);
@@ -1882,6 +1898,7 @@ fn component_with_struct_from_statement<'a>(
     custom_components: &HashSet<String>,
     custom_component_update_props: &CustomComponentUpdateProps,
     builder_functions: &HashSet<String>,
+    hvigor_source_id: &str,
 ) -> Result<Option<(ComponentInfo, &'a StructStatement<'a>)>, EtsTransformError> {
     match statement {
         Statement::StructStatement(statement) => Ok(component_from_struct(
@@ -1895,6 +1912,7 @@ fn component_with_struct_from_statement<'a>(
             custom_components,
             custom_component_update_props,
             builder_functions,
+            hvigor_source_id,
         )?
         .map(|component| (component, statement.as_ref()))),
         Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref() {
@@ -1909,6 +1927,7 @@ fn component_with_struct_from_statement<'a>(
                 custom_components,
                 custom_component_update_props,
                 builder_functions,
+                hvigor_source_id,
             )?
             .map(|component| (component, statement.as_ref()))),
             _ => Ok(None),
@@ -1925,6 +1944,7 @@ fn component_with_struct_from_statement<'a>(
                 custom_components,
                 custom_component_update_props,
                 builder_functions,
+                hvigor_source_id,
             )?
             .map(|component| (component, statement.as_ref()))),
             _ => Ok(None),
@@ -2155,11 +2175,7 @@ fn entry_registration(
         .unwrap_or(id)
         .trim_end_matches(".ets")
         .to_string();
-    let page_full_path = if id.contains("/src/main/ets/") {
-        format!("{module_name}/src/main/ets/{page_path}")
-    } else {
-        id.trim_end_matches(".ets").to_string()
-    };
+    let page_full_path = id.trim_end_matches(".ets").to_string();
 
     EntryRegistrationInfo {
         bundle_name: options.bundle_name.clone().unwrap_or_default(),
@@ -2170,6 +2186,29 @@ fn entry_registration(
         module_type: "followWithHap".to_string(),
         storage,
     }
+}
+
+fn hvigor_source_path(id: &str, options: &TransformOptions) -> String {
+    id.find("products/")
+        .or_else(|| id.find("features/"))
+        .or_else(|| id.find("commons/"))
+        .map(|idx| id[idx..].to_string())
+        .unwrap_or_else(|| {
+            let path = Path::new(id);
+            if let Some(project_root) = &options.project_root {
+                if let Ok(relative) = path.strip_prefix(project_root) {
+                    return slash_path(relative).trim_start_matches('/').to_string();
+                }
+            }
+            id.to_string()
+        })
+}
+
+fn slash_path(path: &Path) -> String {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn decorator_name<'a>(decorator: &'a Decorator<'a>) -> &'a str {
@@ -2971,12 +3010,13 @@ export function PhotoConfirmBuilder() {
         let src = "@Entry\n@Component\nstruct Page {\n  build() {}\n}";
         let options = TransformOptions {
             bundle_name: Some("com.example.arkdown.test".to_string()),
-            module_name: Some("entry".to_string()),
+            module_name: Some("phone".to_string()),
+            project_root: None,
             module_roots: Vec::new(),
             component_metadata: ComponentMetadata::default(),
         };
         let result = transform_ets_with_options(
-            &make_source("entry/src/main/ets/pages/Page.ets", src),
+            &make_source("products/phone/src/main/ets/pages/Page.ets", src),
             &options,
         )
         .unwrap();
@@ -2984,6 +3024,7 @@ export function PhotoConfirmBuilder() {
         assert!(result.contains("registerNamedRoute(() => new Page(undefined, {})"));
         assert!(result.contains("bundleName: \"com.example.arkdown.test\""));
         assert!(result.contains("pagePath: \"pages/Page\""));
+        assert!(result.contains("pageFullPath: \"products/phone/src/main/ets/pages/Page\""));
         assert!(!result.contains("@Entry"));
         assert!(!result.contains("struct Page"));
     }
@@ -3342,6 +3383,7 @@ struct WidgetCard {
             &TransformOptions {
                 bundle_name: Some("com.example.hmosworld".to_string()),
                 module_name: Some("phone".to_string()),
+                project_root: None,
                 module_roots: vec![],
                 component_metadata: ComponentMetadata::default(),
             },
