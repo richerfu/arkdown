@@ -20,6 +20,7 @@ oxc_transformer = { workspace = true }
 # Rolldown plugin API
 rolldown_plugin    = "1.0.3"
 rolldown_sourcemap = "1.0.3"
+string_wizard      = { version = "1.0.3", features = ["sourcemap"] }
 
 # Error handling
 anyhow    = { workspace = true }

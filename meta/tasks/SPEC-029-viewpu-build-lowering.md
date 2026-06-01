@@ -39,6 +39,10 @@ source strings. The key source path is TypeScript AST based:
   rewrites static import/export and dynamic import specifiers with a TypeScript
   transformer. `MagicString` is reserved for localized source patches and source
   map fallback behavior, not the main ViewPU semantic lowering.
+- Rolldown follows the same split on the Rust side: OXC codegen owns AST render
+  source maps, `rolldown_sourcemap` joins and collapses map chains, and
+  `string_wizard::MagicString` is used when code is changed without a plugin
+  supplied source map or when localized post-render mutations need remapping.
 
 `arkdown` must follow the same boundary. Build lowering decisions are made from
 OXC ArkUI AST nodes. Original source nodes that are not semantically changed are
@@ -49,6 +53,9 @@ instead of ad hoc `out.push_str(format!(...))` at each lowering site. This is a
 transition layer: the long-term backend should replace `ViewpuWriter`'s textual
 sink with a ViewPU IR or direct OXC AST construction, then print through OXC
 codegen in the same way Rolldown renders modules from OXC codegen output.
+Source map encoding already uses Rolldown's Rust sourcemap stack rather than a
+local VLQ/JSON writer; the remaining gap is replacing the ViewPU textual sink
+itself with AST construction and OXC codegen maps.
 
 ---
 
