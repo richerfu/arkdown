@@ -3,6 +3,7 @@ pub mod builder;
 pub(super) mod bytecode_metrics;
 pub(super) mod debug_lnp;
 pub(super) mod function_records;
+pub(super) mod lowering_context;
 pub(super) mod module_lexical;
 pub(super) mod module_record;
 pub mod opcodes;

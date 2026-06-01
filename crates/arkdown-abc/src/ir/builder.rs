@@ -24,10 +24,9 @@ use crate::ir::debug_lnp::{argument_span_start, col_at, line_at, LineTracker, So
 use crate::ir::function_records::{
     collect_function_records, FunctionNameAllocator, FunctionRecord, FunctionRecordNode,
 };
+use crate::ir::lowering_context::LoweringContext;
 use crate::ir::module_lexical::collect_module_lexical_bindings;
-use crate::ir::module_record::{
-    collect_module_record, module_record_literal_array, ModuleRecordInfo,
-};
+use crate::ir::module_record::{collect_module_record, module_record_literal_array};
 use crate::ir::opcodes::Insn;
 use crate::ir::record_layout::RecordLayout;
 
@@ -266,66 +265,6 @@ pub fn build_record_with_debug_and_source_map(
         module_requests: module_record.module_requests,
         fields: module_fields,
     })
-}
-
-#[derive(Debug, Default)]
-struct LoweringContext {
-    import_indices: HashMap<String, u8>,
-    export_indices: HashMap<String, u8>,
-    lexical_indices: HashMap<String, u8>,
-    lexical_names: Vec<String>,
-}
-
-impl LoweringContext {
-    fn from_module_record(module_record: &ModuleRecordInfo, lexical_names: Vec<String>) -> Self {
-        let mut import_indices: HashMap<String, u8> = module_record
-            .regular_imports
-            .iter()
-            .filter_map(|import| {
-                u8::try_from(import.module_request_idx)
-                    .ok()
-                    .map(|idx| (import.local_name.clone(), idx))
-            })
-            .collect();
-        for ns in &module_record.namespace_imports {
-            if let Ok(idx) = u8::try_from(ns.module_request_idx) {
-                import_indices.entry(ns.local_name.clone()).or_insert(idx);
-            }
-        }
-        let export_indices = module_record
-            .local_exports
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, export)| {
-                u8::try_from(idx)
-                    .ok()
-                    .map(|idx| (export.local_name.clone(), idx))
-            })
-            .collect();
-        let lexical_indices = lexical_names
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, name)| u8::try_from(idx).ok().map(|idx| (name.clone(), idx)))
-            .collect();
-        Self {
-            import_indices,
-            export_indices,
-            lexical_indices,
-            lexical_names,
-        }
-    }
-
-    fn import_index(&self, name: &str) -> Option<u8> {
-        self.import_indices.get(name).copied()
-    }
-
-    fn export_index(&self, name: &str) -> Option<u8> {
-        self.export_indices.get(name).copied()
-    }
-
-    fn lexical_index(&self, name: &str) -> Option<u8> {
-        self.lexical_indices.get(name).copied()
-    }
 }
 
 fn lexical_names_literal_array(names: &[String]) -> LiteralArray {
