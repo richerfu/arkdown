@@ -611,6 +611,7 @@ fn add_loader_out_ets_assets<W: std::io::Write + std::io::Seek>(
         if rel_text == "modules.abc"
             || rel_text == "sourceMaps.map"
             || rel_text.starts_with("cache/")
+            || path.extension().and_then(|e| e.to_str()) == Some("js")
         {
             continue;
         }

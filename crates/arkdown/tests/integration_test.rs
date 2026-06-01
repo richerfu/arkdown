@@ -345,7 +345,7 @@ fn make_minimal_loader_json(
     let root_str = module_root.to_string_lossy().into_owned();
     let out_str = output_dir.to_string_lossy().into_owned();
     LoaderJson {
-        module_path_map: HashMap::new(),
+        module_path_map: Default::default(),
         compile_mode: "esmodule".to_string(),
         project_root_path: root_str.clone(),
         node_modules_path: format!("{}/node_modules", root_str),
@@ -357,7 +357,7 @@ fn make_minimal_loader_json(
         package_manager_type: "ohpm".to_string(),
         hvigor_compile_entry: vec![],
         other_compile_files: vec![],
-        dynamic_import_lib_info: HashMap::new(),
+        dynamic_import_lib_info: Default::default(),
         router_map: vec![],
         hsp_resources_map: HashMap::new(),
         update_version_info: HashMap::new(),

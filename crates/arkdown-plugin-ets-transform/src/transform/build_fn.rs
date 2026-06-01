@@ -287,20 +287,19 @@ fn lower_call_expression(
         );
         return Ok(());
     }
+    let mut creation_body = String::new();
     {
-        let mut writer = ViewpuWriter::new(out);
-        let create_indent = format!("{indent}    ");
-        writer.observe_component_creation_start(indent, context.view_context());
+        let mut writer = ViewpuWriter::new(&mut creation_body);
         writer.component_create(
-            &create_indent,
+            "",
             &lc.name,
             create_method_name(&lc.name, false),
             &lc.create_args,
         );
     }
-    push_attribute_calls(out, indent, &lc.name, &lc.chain_attrs);
+    push_attribute_calls(&mut creation_body, "", &lc.name, &lc.chain_attrs);
     let mut writer = ViewpuWriter::new(out);
-    writer.observe_component_creation_end(indent, &lc.name);
+    writer.observe_component_creation(indent, context.use_parent_context, &lc.name, &creation_body);
     if component_metadata.needs_pop(&lc.name) {
         writer.component_pop(indent, &lc.name);
     }
@@ -818,10 +817,6 @@ fn lower_component(
 
     let body_line = out.bytes().filter(|&b| b == b'\n').count();
 
-    {
-        let mut writer = ViewpuWriter::new(out);
-        writer.observe_component_creation_start(indent, context.view_context());
-    }
     push_span_hint(
         span_hints,
         body_line + 1,
@@ -841,11 +836,11 @@ fn lower_component(
         &component.arguments,
         source_text,
     );
+    let mut creation_body = String::new();
     {
-        let mut writer = ViewpuWriter::new(out);
-        let create_indent = format!("{indent}    ");
+        let mut writer = ViewpuWriter::new(&mut creation_body);
         writer.component_create(
-            &create_indent,
+            "",
             &name,
             create_method_name(&name, !component.children.is_empty()),
             &args,
@@ -892,10 +887,15 @@ fn lower_component(
             arguments_are_regular_attrs(&chain.arguments, component_metadata),
         ));
     }
-    push_attribute_calls(out, indent, &name, &attrs);
+    push_attribute_calls(&mut creation_body, "", &name, &attrs);
     {
         let mut writer = ViewpuWriter::new(out);
-        writer.observe_component_creation_end(indent, &name);
+        writer.observe_component_creation(
+            indent,
+            context.use_parent_context,
+            &name,
+            &creation_body,
+        );
     }
 
     for child in &component.children {
@@ -2495,7 +2495,7 @@ struct Foo {
     }
 
     #[test]
-    fn preserves_regular_function_calls_inside_attribute_arrow() {
+    fn prints_regular_function_calls_inside_attribute_arrow_with_codegen() {
         let source = r#"@Component
 struct Foo {
   build() {
@@ -2506,12 +2506,7 @@ struct Foo {
   }
 }"#;
         let out = parse_and_lower(source).unwrap();
-        assert!(
-            out.contains(
-                "Row.onClick(() => {\n      postCardAction(this, { action: \"router\" });\n    });"
-            ),
-            "attribute arrow body should be preserved as source text; got:\n{out}"
-        );
+        assert!(out.contains("postCardAction(this, { action: \"router\" });"));
         assert!(
             !out.contains("postCardAction.create"),
             "ordinary function calls in attribute callbacks are not ArkUI components; got:\n{out}"

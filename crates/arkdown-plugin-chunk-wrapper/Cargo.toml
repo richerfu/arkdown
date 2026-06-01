@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-rolldown_plugin = "1.0.3"
+rolldown_plugin = { workspace = true }
 oxc_allocator = { workspace = true }
 oxc_parser = { workspace = true }
 oxc_ast = { workspace = true }

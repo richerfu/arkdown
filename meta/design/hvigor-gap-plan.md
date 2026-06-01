@@ -219,10 +219,14 @@ printed by `ts.createPrinter()`, while Rolldown renders modules from OXC codegen
 output, joins maps with `rolldown_sourcemap`, and uses
 `string_wizard::MagicString` only for changed-code fallback maps and localized
 post-render mutations. `arkdown` now centralizes unchanged original AST fragments
-in `source_emit::original_node_text()` and generated ViewPU statement output in
-`viewpu_emit::ViewpuWriter`. Source-map JSON/VLQ emission has been moved to
-Rolldown's Rust sourcemap stack; the next required step is replacing the
-remaining textual ViewPU sink with a ViewPU IR or direct OXC AST generator.
+in `source_emit::original_node_text()` and generated ViewPU output in
+`viewpu_emit::ViewpuWriter` with an internal `ViewpuAstEmitter` for standard
+component creation closures and ViewPU call statements. The emitter builds OXC
+AST nodes and prints them with OXC codegen, while keeping parser/codegen state
+localized in the emitter object. Source-map JSON/VLQ emission has been moved to
+Rolldown's Rust sourcemap stack; the next required step is replacing remaining
+custom-component/recycle blocks, `If` control-flow blocks, and ViewPU
+class/member generation with a ViewPU IR or direct OXC AST generator.
 
 The struct-transform source map offset is also corrected after final ViewPU
 output normalization. `finalizeConstruction` shim insertion and interface

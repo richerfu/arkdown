@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-arkdown-core = { path = "../arkdown-core" }
+arkdown-core = { workspace = true }
 notify = { workspace = true }
 tokio = { workspace = true }
 crossbeam-channel = { workspace = true }

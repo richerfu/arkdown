@@ -18,7 +18,7 @@
 //! reference implementations.
 
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -75,46 +75,7 @@ impl Bundler {
     /// The output remains ESM so the Rust ABC backend compiles the same
     /// CompileArkTS-stage module shape that hvigor sends to es2abc.
     pub async fn bundle(&self, loader_json: &LoaderJson) -> Result<BundleOutput, ArkdownError> {
-        // ── 1. Build rolldown input entries ──────────────────────────────────
-        // module_root_path may be relative and may contain `./` segments
-        // (e.g. `tests/fixtures/minimal-hap/./entry/src/main`).  Canonicalize
-        // produces an absolute, clean path that rolldown's resolver can use.
-        let module_root =
-            std::fs::canonicalize(&loader_json.module_root_path).unwrap_or_else(|_| {
-                // Fallback: manual `./` removal + join with process cwd
-                let normalized = normalize_path(&loader_json.module_root_path);
-                std::env::current_dir()
-                    .unwrap_or_else(|_| PathBuf::from("."))
-                    .join(normalized)
-            });
-
-        let rollup_entries = rollup_input_entries(loader_json);
-        let chunk_name_counts = compile_entry_stem_counts(&rollup_entries);
-        let input: Vec<InputItem> = rollup_entries
-            .iter()
-            .enumerate()
-            .map(|(i, entry)| {
-                let import_path = if entry.starts_with('/') || entry.starts_with('@') {
-                    // Already absolute or an OHM URL — pass through.
-                    entry.clone()
-                } else {
-                    // Build the candidate path, then canonicalize to get an
-                    // absolute path without any `.` or `..` components.
-                    let candidate = module_root.join(entry.trim_start_matches("./"));
-                    std::fs::canonicalize(&candidate)
-                        .map(|p| p.to_string_lossy().to_string())
-                        .unwrap_or_else(|_| candidate.to_string_lossy().to_string())
-                };
-                // Derive chunk name from the compile_entry file stem so rolldown
-                // writes "EntryAbility.js" instead of "entry_0.js".  This keeps
-                // the ABC record_name_map lookup (stem → OHM class path) working.
-                let chunk_name = compile_entry_chunk_name(entry, i, &chunk_name_counts);
-                InputItem {
-                    name: Some(chunk_name),
-                    import: import_path,
-                }
-            })
-            .collect();
+        let plan = BundlePlan::from_loader_json(loader_json);
 
         // ── 2. Pass plugins directly to rolldown ─────────────────────────────
         let parsed_modules = Arc::new(Mutex::new(Vec::new()));
@@ -171,7 +132,7 @@ impl Bundler {
         };
 
         let options = BundlerOptions {
-            input: Some(input),
+            input: Some(plan.input_items()),
             cwd: Some(cwd),
             format: Some(OutputFormat::Esm),
             module_types: Some(module_types),
@@ -211,23 +172,11 @@ impl Bundler {
         // ── 6. Write loader_out/default/ets artifacts to disk ────────────────
         let output_dir = PathBuf::from(&loader_json.ace_module_build);
 
-        // Build the chunk_name → source_file map from compile_entry so that
-        // write_output can emit the hvigor per-file sourceMaps.map format.
-        let chunk_source_files: FxHashMap<String, String> = rollup_entries
-            .iter()
-            .enumerate()
-            .map(|(i, entry)| {
-                let chunk_name = compile_entry_chunk_name(entry, i, &chunk_name_counts);
-                let source_file = entry.trim_start_matches("./").to_string();
-                (chunk_name, source_file)
-            })
-            .collect();
-
         let source_map_opts = output::SourceMapOptions {
             module_name: loader_json.module_name.clone(),
             package_name: loader_json.module_name.clone(),
             version: "1.0.0".to_string(),
-            chunk_source_files: chunk_source_files.into_iter().collect(),
+            chunk_source_files: plan.chunk_source_files(),
         };
 
         let written_output =
@@ -248,67 +197,139 @@ impl Bundler {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-fn compile_entry_stem_counts(entries: &[String]) -> FxHashMap<String, usize> {
-    let mut counts = FxHashMap::default();
-    for entry in entries {
-        if let Some(stem) = std::path::Path::new(entry.as_str())
+struct BundlePlan {
+    module_root: PathBuf,
+    entries: Vec<String>,
+    stem_counts: FxHashMap<String, usize>,
+}
+
+impl BundlePlan {
+    fn from_loader_json(loader_json: &LoaderJson) -> Self {
+        let module_root = Self::canonical_module_root(&loader_json.module_root_path);
+        let entries = Self::rollup_input_entries(loader_json);
+        let stem_counts = Self::compile_entry_stem_counts(&entries);
+        Self {
+            module_root,
+            entries,
+            stem_counts,
+        }
+    }
+
+    fn input_items(&self) -> Vec<InputItem> {
+        self.entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| InputItem {
+                name: Some(self.chunk_name(entry, index)),
+                import: self.import_path(entry),
+            })
+            .collect()
+    }
+
+    fn chunk_source_files(&self) -> HashMap<String, String> {
+        self.entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                (
+                    self.chunk_name(entry, index),
+                    entry.trim_start_matches("./").to_string(),
+                )
+            })
+            .collect()
+    }
+
+    fn import_path(&self, entry: &str) -> String {
+        if entry.starts_with('/') || entry.starts_with('@') {
+            return entry.to_string();
+        }
+
+        let candidate = self.module_root.join(entry.trim_start_matches("./"));
+        std::fs::canonicalize(&candidate)
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_else(|_| candidate.to_string_lossy().to_string())
+    }
+
+    fn chunk_name(&self, entry: &str, index: usize) -> String {
+        let Some(stem) = std::path::Path::new(entry)
             .file_stem()
             .and_then(|s| s.to_str())
-        {
-            *counts.entry(stem.to_string()).or_insert(0) += 1;
+        else {
+            return format!("entry_{index}");
+        };
+
+        if self.stem_counts.get(stem).copied().unwrap_or(0) <= 1 {
+            return stem.to_string();
         }
-    }
-    counts
-}
 
-fn rollup_input_entries(loader_json: &LoaderJson) -> Vec<String> {
-    let mut entries = Vec::new();
-    let mut seen = HashSet::new();
-    for entry in loader_json
-        .hvigor_compile_entry
-        .iter()
-        .chain(loader_json.compile_entry.iter())
-    {
-        if seen.insert(entry.clone()) {
-            entries.push(entry.clone());
-        }
-    }
-    entries
-}
-
-fn compile_entry_chunk_name(
-    entry: &str,
-    index: usize,
-    stem_counts: &FxHashMap<String, usize>,
-) -> String {
-    let Some(stem) = std::path::Path::new(entry)
-        .file_stem()
-        .and_then(|s| s.to_str())
-    else {
-        return format!("entry_{index}");
-    };
-
-    if stem_counts.get(stem).copied().unwrap_or(0) <= 1 {
-        return stem.to_string();
-    }
-
-    let stripped = entry
-        .trim_start_matches("./")
-        .trim_end_matches(".ets")
-        .trim_end_matches(".ts")
-        .trim_end_matches(".js");
-    let mut name = String::with_capacity(stripped.len());
-    for ch in stripped.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '$' {
-            name.push(ch);
+        let stripped = entry
+            .trim_start_matches("./")
+            .trim_end_matches(".ets")
+            .trim_end_matches(".ts")
+            .trim_end_matches(".js");
+        let name = stripped
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() || ch == '_' || ch == '$' {
+                    ch
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>();
+        if name.is_empty() {
+            format!("entry_{index}")
         } else {
-            name.push('_');
+            name
         }
     }
-    if name.is_empty() {
-        format!("entry_{index}")
-    } else {
-        name
+
+    fn compile_entry_stem_counts(entries: &[String]) -> FxHashMap<String, usize> {
+        let mut counts = FxHashMap::default();
+        for entry in entries {
+            if let Some(stem) = std::path::Path::new(entry.as_str())
+                .file_stem()
+                .and_then(|s| s.to_str())
+            {
+                *counts.entry(stem.to_string()).or_insert(0) += 1;
+            }
+        }
+        counts
+    }
+
+    fn rollup_input_entries(loader_json: &LoaderJson) -> Vec<String> {
+        let mut entries = Vec::new();
+        let mut seen = HashSet::new();
+        for entry in loader_json
+            .hvigor_compile_entry
+            .iter()
+            .chain(loader_json.compile_entry.iter())
+        {
+            if seen.insert(entry.clone()) {
+                entries.push(entry.clone());
+            }
+        }
+        entries
+    }
+
+    fn canonical_module_root(path: &str) -> PathBuf {
+        std::fs::canonicalize(path).unwrap_or_else(|_| {
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(Self::normalize_path(path))
+        })
+    }
+
+    fn normalize_path(path: &str) -> String {
+        use std::path::Component;
+        let mut out = PathBuf::new();
+        for comp in PathBuf::from(path).components() {
+            match comp {
+                Component::CurDir => {}
+                other => out.push(other),
+            }
+        }
+        out.to_string_lossy().to_string()
     }
 }
 
@@ -457,22 +478,4 @@ fn build_manual_code_splitting_options() -> Result<ManualCodeSplittingOptions, A
         groups: Some(vec![commons_group, vendors_group]),
         ..Default::default()
     })
-}
-
-/// Normalize a file-system path by resolving `./` (current-dir) components.
-///
-/// `build-profile.json5` often has `srcPath: "./entry"` which, when joined,
-/// produces paths like `project/./entry/src/main/…` that confuse rolldown's
-/// file resolver.  This removes all `CurDir` components without touching the
-/// rest of the path (no symlink resolution, no allocation if already clean).
-fn normalize_path(path: &str) -> String {
-    use std::path::Component;
-    let mut out = PathBuf::new();
-    for comp in PathBuf::from(path).components() {
-        match comp {
-            Component::CurDir => {} // drop `.` segments
-            other => out.push(other),
-        }
-    }
-    out.to_string_lossy().to_string()
 }

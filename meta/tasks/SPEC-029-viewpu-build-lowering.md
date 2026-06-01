@@ -45,14 +45,19 @@ source strings. The key source path is TypeScript AST based:
   supplied source map or when localized post-render mutations need remapping.
 
 `arkdown` must follow the same boundary. Build lowering decisions are made from
-OXC ArkUI AST nodes. Original source nodes that are not semantically changed are
-emitted through the centralized `source_emit::original_node_text()` helper so
-their hvigor-observed source shape, quote style, and callback body formatting are
-preserved. Newly generated ViewPU statements go through `viewpu_emit::ViewpuWriter`
-instead of ad hoc `out.push_str(format!(...))` at each lowering site. This is a
-transition layer: the long-term backend should replace `ViewpuWriter`'s textual
-sink with a ViewPU IR or direct OXC AST construction, then print through OXC
-codegen in the same way Rolldown renders modules from OXC codegen output.
+OXC ArkUI AST nodes. Standard generated ViewPU component creation closures and
+call statements now go through `viewpu_emit::ViewpuAstEmitter`: it builds OXC AST
+nodes with `AstBuilder`, clones argument/body AST through `CloneIn`, and prints
+with `oxc_codegen`. This matches the Rolldown/OXC style of keeping render state
+inside an emitter object instead of spreading formatting helpers across the
+lowering code.
+
+This is still a transition layer. Existing lowering paths still pass some
+original expressions as parsed argument fragments, and custom/recycle component
+blocks, class/member generation, and several control-flow
+forms still need to move from textual assembly to a ViewPU IR or direct OXC AST
+construction. Those remaining forms should be printed through OXC codegen in the
+same way Rolldown renders modules from OXC codegen output.
 Source map encoding already uses Rolldown's Rust sourcemap stack rather than a
 local VLQ/JSON writer; the remaining gap is replacing the ViewPU textual sink
 itself with AST construction and OXC codegen maps.

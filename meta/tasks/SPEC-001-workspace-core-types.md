@@ -46,16 +46,25 @@ members = [
 ]
 
 [workspace.dependencies]
-# Parser — ohos-rs/oxc fork, pinned to the rev used by ohos-rs/oxc-ark.
+# Workspace crates are declared here and used from crate manifests with
+# `{ workspace = true }`.
+arkdown-core = { path = "crates/arkdown-core" }
+arkdown-resolver = { path = "crates/arkdown-resolver" }
+arkdown-loader = { path = "crates/arkdown-loader" }
+
+# Parser — ohos-rs/oxc fork, pinned to the rev used by the workspace.
 # DO NOT use floating branch refs; always pin the rev.
-# ohos-rs/oxc-ark (the ArkTS lint/format CLI) is NOT a dep — only the parser fork is used.
-oxc = { git = "https://github.com/ohos-rs/oxc", rev = "5caa6d54ae977b8a76ed68b8aba06b38e1c6a614", features = ["full"] }
-oxc_allocator = { git = "https://github.com/ohos-rs/oxc", rev = "5caa6d54ae977b8a76ed68b8aba06b38e1c6a614" }
-oxc_parser = { git = "https://github.com/ohos-rs/oxc", rev = "5caa6d54ae977b8a76ed68b8aba06b38e1c6a614" }
-oxc_semantic = { git = "https://github.com/ohos-rs/oxc", rev = "5caa6d54ae977b8a76ed68b8aba06b38e1c6a614" }
-oxc_transformer = { git = "https://github.com/ohos-rs/oxc", rev = "5caa6d54ae977b8a76ed68b8aba06b38e1c6a614" }
-oxc_codegen = { git = "https://github.com/ohos-rs/oxc", rev = "5caa6d54ae977b8a76ed68b8aba06b38e1c6a614" }
-oxc_minifier = { git = "https://github.com/ohos-rs/oxc", rev = "5caa6d54ae977b8a76ed68b8aba06b38e1c6a614" }
+oxc = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee", features = ["full"] }
+oxc_allocator = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
+oxc_parser = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
+oxc_semantic = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
+oxc_transformer = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
+oxc_codegen = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
+oxc_minifier = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
+
+# Rolldown versions are centralized here as well.
+rolldown = { version = "1.0.3", default-features = false }
+rolldown_plugin = "1.0.3"
 
 # Async
 tokio = { version = "1", features = ["full"] }

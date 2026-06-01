@@ -416,7 +416,7 @@ crates/arkdown-plugin-ets-transform/
 
 ```toml
 [dependencies]
-arkdown-core = { path = "../arkdown-core" }
+arkdown-core = { workspace = true }
 
 # Parser, transformer, codegen — ohos-rs fork only
 oxc_allocator  = { workspace = true }

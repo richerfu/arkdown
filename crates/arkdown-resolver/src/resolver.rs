@@ -67,8 +67,8 @@ struct PackageRoot {
 impl OhosResolver {
     /// Create a new resolver with the given configuration.
     pub fn new(config: ResolverConfig) -> Self {
-        let fs_resolver = OxcResolver::new(oxc_resolve_options(&config));
-        let package_roots = build_package_roots(&config);
+        let fs_resolver = OxcResolver::new(Self::oxc_resolve_options(&config));
+        let package_roots = PackageRootIndex::build(&config).into_roots();
         OhosResolver {
             config,
             fs_resolver,
@@ -193,7 +193,7 @@ impl OhosResolver {
             return None;
         }
 
-        for candidate in package_candidates(specifier) {
+        for candidate in PackageCandidate::for_specifier(specifier) {
             if let Some(pkg_root) = self.package_root_for(&candidate.package_name, importer) {
                 if let Some(resolved) = self.resolve_package_entry(
                     &candidate.package_name,
@@ -281,12 +281,7 @@ impl OhosResolver {
             .or_else(|| self.resolve_package_path(&pkg_root.path, "index"))?;
         let module_type = infer_module_type(&resolved);
 
-        Some(remote_or_local_package_module(
-            resolved,
-            module_type,
-            package_name,
-            pkg_root,
-        ))
+        Some(pkg_root.to_resolved_module(resolved, module_type, package_name))
     }
 
     fn resolve_package_path(&self, package_root: &Path, request: &str) -> Option<PathBuf> {
@@ -304,176 +299,222 @@ impl OhosResolver {
                 try_extensions(&package_root.join(request)).map(canonicalize_existing)
             })
     }
+
+    fn oxc_resolve_options(config: &ResolverConfig) -> OxcResolveOptions {
+        let mut modules: Vec<String> = Vec::new();
+        for root in &config.oh_modules_roots {
+            modules.push(root.to_string_lossy().into_owned());
+            modules.push(root.join(".ohpm/oh_modules").to_string_lossy().into_owned());
+        }
+        if modules.is_empty() {
+            modules.push("oh_modules".to_string());
+        }
+
+        OxcResolveOptions {
+            cwd: Some(config.project_root.clone()),
+            extensions: [
+                ".ets", ".ts", ".js", ".mjs", ".cjs", ".json", ".d.ets", ".d.ts",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+            condition_names: vec!["import".to_string()],
+            main_fields: vec!["main".to_string(), "module".to_string()],
+            main_files: vec!["index".to_string()],
+            modules,
+            node_path: false,
+            enforce_extension: EnforceExtension::Disabled,
+            symlinks: true,
+            ..OxcResolveOptions::default()
+        }
+    }
 }
 
-fn remote_or_local_package_module(
-    path: PathBuf,
-    module_type: ModuleType,
-    package_name: &str,
-    pkg_root: &PackageRoot,
-) -> OhosResolvedModule {
-    if pkg_root.local_source {
-        return OhosResolvedModule::LocalSource {
+impl PackageRoot {
+    fn to_resolved_module(
+        &self,
+        path: PathBuf,
+        module_type: ModuleType,
+        package_name: &str,
+    ) -> OhosResolvedModule {
+        if self.local_source {
+            return OhosResolvedModule::LocalSource {
+                path,
+                module_type,
+                pkg_context: Some(PkgContext {
+                    package_name: self.package_name.clone(),
+                    bundle_name: String::new(),
+                    module_name: String::new(),
+                    version: read_package_version_field(&self.path),
+                    pkg_path: self.path.clone(),
+                    entry_path: None,
+                }),
+            };
+        }
+
+        OhosResolvedModule::RemotePackage {
             path,
             module_type,
-            pkg_context: Some(PkgContext {
-                package_name: pkg_root.package_name.clone(),
-                bundle_name: String::new(),
-                module_name: String::new(),
-                version: read_package_version_field(&pkg_root.path),
-                pkg_path: pkg_root.path.clone(),
-                entry_path: None,
-            }),
+            pkg_name: package_name.to_string(),
+            pkg_version: read_package_version_field(&self.path),
+            ohm_url: None,
+        }
+    }
+}
+
+struct PackageRootIndex {
+    roots: HashMap<String, PackageRoot>,
+}
+
+impl PackageRootIndex {
+    fn build(config: &ResolverConfig) -> Self {
+        let mut index = Self {
+            roots: HashMap::new(),
         };
+
+        for (name, info) in &config.pkg_name_to_pkg_info {
+            index.roots.insert(
+                name.clone(),
+                PackageRoot {
+                    path: canonicalize_existing(info.pkg_root.clone()),
+                    package_name: info.pkg_name.clone(),
+                    local_source: true,
+                },
+            );
+        }
+
+        index.collect_project_file_dependencies(&config.project_root);
+
+        for root in &config.oh_modules_roots {
+            index.collect_oh_modules_package_roots(root);
+        }
+
+        index
     }
 
-    OhosResolvedModule::RemotePackage {
-        path,
-        module_type,
-        pkg_name: package_name.to_string(),
-        pkg_version: read_package_version_field(&pkg_root.path),
-        ohm_url: None,
+    fn into_roots(self) -> HashMap<String, PackageRoot> {
+        self.roots
+    }
+
+    fn collect_project_file_dependencies(&mut self, project_root: &Path) {
+        let mut visited = HashSet::new();
+        self.collect_project_file_dependencies_inner(project_root, &mut visited);
+    }
+
+    fn collect_project_file_dependencies_inner(
+        &mut self,
+        dir: &Path,
+        visited: &mut HashSet<PathBuf>,
+    ) {
+        let Ok(real_dir) = std::fs::canonicalize(dir) else {
+            return;
+        };
+        if !visited.insert(real_dir.clone()) {
+            return;
+        }
+
+        let package_path = dir.join("oh-package.json5");
+        if package_path.is_file() {
+            for (name, path) in read_file_dependencies(&package_path) {
+                let real_path = canonicalize_existing(path);
+                self.roots.entry(name.clone()).or_insert(PackageRoot {
+                    path: real_path,
+                    package_name: name,
+                    local_source: true,
+                });
+            }
+        }
+
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if matches!(
+                name.as_ref(),
+                ".git" | "oh_modules" | "node_modules" | "build" | "target"
+            ) {
+                continue;
+            }
+            if path.is_dir() {
+                self.collect_project_file_dependencies_inner(&path, visited);
+            }
+        }
+    }
+
+    fn collect_oh_modules_package_roots(&mut self, root: &Path) {
+        self.collect_package_manifest_roots(root, false, 0, 8);
+        self.collect_package_manifest_roots(&root.join(".ohpm"), false, 0, 6);
+    }
+
+    fn collect_package_manifest_roots(
+        &mut self,
+        dir: &Path,
+        local_source: bool,
+        depth: usize,
+        max_depth: usize,
+    ) {
+        if depth > max_depth || !dir.is_dir() {
+            return;
+        }
+
+        let package_path = dir.join("oh-package.json5");
+        if package_path.is_file() {
+            if let Some(package_name) = read_name_field(&package_path) {
+                self.roots
+                    .entry(package_name.clone())
+                    .or_insert(PackageRoot {
+                        path: canonicalize_existing(dir.to_path_buf()),
+                        package_name,
+                        local_source,
+                    });
+            }
+        }
+
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                self.collect_package_manifest_roots(&path, local_source, depth + 1, max_depth);
+            }
+        }
     }
 }
 
-fn oxc_resolve_options(config: &ResolverConfig) -> OxcResolveOptions {
-    let mut modules: Vec<String> = Vec::new();
-    for root in &config.oh_modules_roots {
-        modules.push(root.to_string_lossy().into_owned());
-        modules.push(root.join(".ohpm/oh_modules").to_string_lossy().into_owned());
-    }
-    if modules.is_empty() {
-        modules.push("oh_modules".to_string());
-    }
-
-    OxcResolveOptions {
-        cwd: Some(config.project_root.clone()),
-        extensions: [
-            ".ets", ".ts", ".js", ".mjs", ".cjs", ".json", ".d.ets", ".d.ts",
-        ]
-        .into_iter()
-        .map(str::to_string)
-        .collect(),
-        condition_names: vec!["import".to_string()],
-        main_fields: vec!["main".to_string(), "module".to_string()],
-        main_files: vec!["index".to_string()],
-        modules,
-        node_path: false,
-        enforce_extension: EnforceExtension::Disabled,
-        symlinks: true,
-        ..OxcResolveOptions::default()
-    }
+#[derive(Debug)]
+struct PackageCandidate {
+    package_name: String,
+    subpath: String,
 }
 
-fn build_package_roots(config: &ResolverConfig) -> HashMap<String, PackageRoot> {
-    let mut roots = HashMap::new();
+impl PackageCandidate {
+    fn for_specifier(specifier: &str) -> Vec<Self> {
+        if specifier.starts_with("./")
+            || specifier.starts_with("../")
+            || specifier.starts_with('/')
+            || specifier.starts_with('@') && !specifier.contains('/')
+        {
+            return Vec::new();
+        }
 
-    for (name, info) in &config.pkg_name_to_pkg_info {
-        roots.insert(
-            name.clone(),
-            PackageRoot {
-                path: canonicalize_existing(info.pkg_root.clone()),
-                package_name: info.pkg_name.clone(),
-                local_source: true,
-            },
-        );
-    }
+        let parts: Vec<&str> = specifier.split('/').collect();
+        let min_parts = if specifier.starts_with('@') { 2 } else { 1 };
+        if parts.len() < min_parts {
+            return Vec::new();
+        }
 
-    collect_project_file_dependencies(&config.project_root, &mut roots);
-
-    for root in &config.oh_modules_roots {
-        collect_oh_modules_package_roots(root, &mut roots);
-    }
-
-    roots
-}
-
-fn collect_project_file_dependencies(
-    project_root: &Path,
-    roots: &mut HashMap<String, PackageRoot>,
-) {
-    let mut visited = HashSet::new();
-    collect_project_file_dependencies_inner(project_root, roots, &mut visited);
-}
-
-fn collect_project_file_dependencies_inner(
-    dir: &Path,
-    roots: &mut HashMap<String, PackageRoot>,
-    visited: &mut HashSet<PathBuf>,
-) {
-    let Ok(real_dir) = std::fs::canonicalize(dir) else {
-        return;
-    };
-    if !visited.insert(real_dir.clone()) {
-        return;
-    }
-
-    let package_path = dir.join("oh-package.json5");
-    if package_path.is_file() {
-        for (name, path) in read_file_dependencies(&package_path) {
-            let real_path = canonicalize_existing(path);
-            roots.entry(name.clone()).or_insert(PackageRoot {
-                path: real_path,
-                package_name: name,
-                local_source: true,
+        let mut candidates = Vec::new();
+        for end in (min_parts..=parts.len()).rev() {
+            candidates.push(Self {
+                package_name: parts[..end].join("/"),
+                subpath: parts[end..].join("/"),
             });
         }
-    }
-
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if matches!(
-            name.as_ref(),
-            ".git" | "oh_modules" | "node_modules" | "build" | "target"
-        ) {
-            continue;
-        }
-        if path.is_dir() {
-            collect_project_file_dependencies_inner(&path, roots, visited);
-        }
-    }
-}
-
-fn collect_oh_modules_package_roots(root: &Path, roots: &mut HashMap<String, PackageRoot>) {
-    collect_package_manifest_roots(root, roots, false, 0, 8);
-    collect_package_manifest_roots(&root.join(".ohpm"), roots, false, 0, 6);
-}
-
-fn collect_package_manifest_roots(
-    dir: &Path,
-    roots: &mut HashMap<String, PackageRoot>,
-    local_source: bool,
-    depth: usize,
-    max_depth: usize,
-) {
-    if depth > max_depth || !dir.is_dir() {
-        return;
-    }
-
-    let package_path = dir.join("oh-package.json5");
-    if package_path.is_file() {
-        if let Some(package_name) = read_name_field(&package_path) {
-            roots.entry(package_name.clone()).or_insert(PackageRoot {
-                path: canonicalize_existing(dir.to_path_buf()),
-                package_name,
-                local_source,
-            });
-        }
-    }
-
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_package_manifest_roots(&path, roots, local_source, depth + 1, max_depth);
-        }
+        candidates
     }
 }
 
@@ -486,37 +527,6 @@ fn package_root_in_oh_modules(root: &Path, package_name: &str) -> Option<PathBuf
         .into_iter()
         .find(|path| path.join("oh-package.json5").is_file() || path.join("package.json").is_file())
         .map(canonicalize_existing)
-}
-
-#[derive(Debug)]
-struct PackageCandidate {
-    package_name: String,
-    subpath: String,
-}
-
-fn package_candidates(specifier: &str) -> Vec<PackageCandidate> {
-    if specifier.starts_with("./")
-        || specifier.starts_with("../")
-        || specifier.starts_with('/')
-        || specifier.starts_with('@') && !specifier.contains('/')
-    {
-        return Vec::new();
-    }
-
-    let parts: Vec<&str> = specifier.split('/').collect();
-    let min_parts = if specifier.starts_with('@') { 2 } else { 1 };
-    if parts.len() < min_parts {
-        return Vec::new();
-    }
-
-    let mut candidates = Vec::new();
-    for end in (min_parts..=parts.len()).rev() {
-        candidates.push(PackageCandidate {
-            package_name: parts[..end].join("/"),
-            subpath: parts[end..].join("/"),
-        });
-    }
-    candidates
 }
 
 fn canonicalize_existing(path: PathBuf) -> PathBuf {

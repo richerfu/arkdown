@@ -59,7 +59,7 @@ struct MyCard {
         result
     );
     assert!(
-        result.contains("Text.create('header');"),
+        result.contains("Text.create(\"header\");"),
         "builder body must be lowered through ArkUI AST; got:\n{}",
         result
     );
@@ -229,14 +229,14 @@ struct Page {
         "second @Builder method missing; got:\n{}",
         result
     );
-    // Both methods' body content appears: Text('Header') and Text('Footer').
+    // Both methods' body content appears: Text("Header") and Text("Footer").
     assert!(
-        result.contains("'Header'"),
+        result.contains("\"Header\""),
         "header body content missing; got:\n{}",
         result
     );
     assert!(
-        result.contains("'Footer'"),
+        result.contains("\"Footer\""),
         "footer body content missing; got:\n{}",
         result
     );

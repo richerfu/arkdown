@@ -4,5 +4,5 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-rolldown_plugin = "1.0.3"
+rolldown_plugin = { workspace = true }
 anyhow = { workspace = true }

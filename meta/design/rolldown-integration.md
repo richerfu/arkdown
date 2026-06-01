@@ -62,44 +62,42 @@ oxc_index       = { version = "4" }        # separate project
 
 ---
 
-## Option (i): Add rolldown as crate dependency + `[patch]`
+## Option (i): Add rolldown as workspace dependency
 
 **Previous verdict (0.129 vs 0.133): ✗ NOT FEASIBLE**
-**Updated verdict (both 0.133.0): ✅ NOW FEASIBLE — RECOMMENDED**
+**Updated verdict (both 0.133.0): ✅ NOW FEASIBLE — CURRENT IMPLEMENTATION**
 
 ### Implementation
 
-**Root `Cargo.toml` — add `[patch.crates-io]`:**
+**Root `Cargo.toml` — centralize dependency declarations:**
 
 ```toml
-[patch.crates-io]
-# Redirect oxc crates from crates.io → ohos-rs fork (same 0.133.0 API)
-oxc             = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
-oxc_allocator   = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
-oxc_ast         = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
-oxc_ecmascript  = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
-oxc_traverse    = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
-oxc_parser      = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
-oxc_codegen     = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
+[workspace.dependencies]
+oxc = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee", features = ["full"] }
+oxc_allocator = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
+oxc_ast = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
+oxc_parser = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
+oxc_codegen = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
 oxc_transformer = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
-oxc_minifier    = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
-oxc_semantic    = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
-oxc_span        = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
-# Note: oxc_resolver, oxc_sourcemap, oxc_index are NOT in ohos-rs fork — use upstream
+rolldown = { version = "1.0.3", default-features = false }
+rolldown_plugin = "1.0.3"
+rolldown_common = "1.0.3"
 ```
 
 **`crates/arkdown/Cargo.toml`:**
 
 ```toml
 [dependencies]
-rolldown = { version = "1.0.3", default-features = false }
+rolldown = { workspace = true }
 ```
 
 **Key notes:**
 
-- `oxc_resolver`, `oxc_sourcemap`, `oxc_index` are separate projects not
-  in the ohos-rs fork — use their upstream crates.io versions (no ArkTS
-  customisation needed for these)
+- No `[patch.crates-io]` is used. arkdown crates consume the pinned
+  `ohos-rs/oxc` fork through `[workspace.dependencies]`; rolldown keeps its own
+  upstream OXC dependency graph behind the plugin API boundary.
+- All crates under `crates/*` reference internal crates and third-party crates
+  with `{ workspace = true }`.
 - `default-features = false` excludes NAPI bindings and Vite plugins
 
 ### Assessment

@@ -67,12 +67,6 @@ impl HarDeduplicatePlugin {
         Ok(None)
     }
 
-    pub(crate) fn record_module(&self, module_id: &str) {
-        if matches!(self.mode, HarDedupMode::CollectPass) && module_id.contains("oh_modules") {
-            self.collected.lock().unwrap().push(module_id.to_owned());
-        }
-    }
-
     pub(crate) fn flush_collect(&self) -> Result<(), HarDedupError> {
         if matches!(self.mode, HarDedupMode::CollectPass) {
             let files = self.collected.lock().unwrap().clone();

@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-arkdown-core = { path = "../arkdown-core" }
-arkdown-resolver = { path = "../arkdown-resolver" }
+arkdown-core = { workspace = true }
+arkdown-resolver = { workspace = true }
 oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }
 oxc_parser = { workspace = true }
@@ -15,3 +15,4 @@ async-trait = { workspace = true }
 rayon = { workspace = true }
 thiserror = { workspace = true }
 fs-err = { workspace = true }
+tracing = { workspace = true }

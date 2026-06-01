@@ -4,15 +4,15 @@ version = "0.1.0"
 edition = "2021"
 
 [dev-dependencies]
-arkdown-core = { path = "../arkdown-core" }
-tempfile = "3"
+arkdown-core = { workspace = true }
+tempfile = { workspace = true }
 
 [dependencies]
-arkdown-core = { path = "../arkdown-core" }
-arkdown-config = { path = "../arkdown-config" }
+arkdown-core = { workspace = true }
+arkdown-config = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 json5 = { workspace = true }
 thiserror = { workspace = true }
 fs-err = { workspace = true }
-indexmap = { version = "2", features = ["serde"] }
+indexmap = { workspace = true }
