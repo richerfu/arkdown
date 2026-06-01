@@ -204,8 +204,7 @@ const VIEWPU_FINALIZE_CONSTRUCTION_SHIM: &str = concat!(
 );
 
 fn finalize_viewpu_output(source: &str) -> String {
-    let out = strip_orphan_arkui_decorator_lines(source);
-    let out = strip_leading_file_comments(&out);
+    let out = strip_leading_file_comments(source);
     let out = ensure_viewpu_finalize_construction_shim(&out);
     hoist_viewpu_params_interfaces(&out)
 }
@@ -316,52 +315,6 @@ fn hoist_viewpu_params_interfaces(source: &str) -> String {
     out
 }
 
-fn strip_orphan_arkui_decorator_lines(source: &str) -> String {
-    let mut out = String::with_capacity(source.len());
-    for line in source.lines() {
-        let trimmed = line.trim();
-        if is_known_arkui_decorator_line(trimmed) {
-            continue;
-        }
-        if let Some(stripped) = strip_known_arkui_decorator_prefix(line) {
-            out.push_str(&stripped);
-            out.push('\n');
-            continue;
-        }
-        out.push_str(line);
-        out.push('\n');
-    }
-    out
-}
-
-fn strip_known_arkui_decorator_prefix(line: &str) -> Option<String> {
-    let indent_len = line.len() - line.trim_start().len();
-    let (indent, trimmed) = line.split_at(indent_len);
-    if !trimmed.starts_with('@') {
-        return None;
-    }
-
-    for name in KNOWN_ARKUI_DECORATORS {
-        let bare = format!("@{name}");
-        if let Some(rest) = trimmed.strip_prefix(&bare) {
-            if rest.starts_with(char::is_whitespace) {
-                return Some(format!("{indent}{}", rest.trim_start()));
-            }
-        }
-
-        let call = format!("@{name}(");
-        if trimmed.starts_with(&call) {
-            let close = trimmed.find(')')?;
-            let rest = trimmed[close + 1..].trim_start();
-            if !rest.is_empty() {
-                return Some(format!("{indent}{rest}"));
-            }
-        }
-    }
-
-    None
-}
-
 const KNOWN_ARKUI_DECORATORS: &[&str] = &[
     "Component",
     "Entry",
@@ -411,20 +364,6 @@ const KNOWN_ARKUI_DECORATORS: &[&str] = &[
     "ComponentActive",
     "ComponentInactive",
 ];
-
-fn is_known_arkui_decorator_line(trimmed: &str) -> bool {
-    if KNOWN_ARKUI_DECORATORS
-        .iter()
-        .any(|name| trimmed == format!("@{name}"))
-    {
-        return true;
-    }
-
-    KNOWN_ARKUI_DECORATORS.iter().any(|name| {
-        let prefix = format!("@{name}(");
-        trimmed.starts_with(&prefix) && trimmed.ends_with(')')
-    })
-}
 
 pub(crate) fn has_arkts_transform_syntax(content: &str, id: &str) -> bool {
     let allocator = Allocator::default();
@@ -551,9 +490,6 @@ fn transform_non_component_statement(
     hvigor_source_id: &str,
 ) -> Result<Option<(usize, String)>, EtsTransformError> {
     let replacement = match statement {
-        _ if is_orphan_arkui_decorator_statement(statement, source_text) => {
-            Some((statement.span().start as usize, String::new()))
-        }
         Statement::AnnotationDeclaration(annotation) => Some((
             annotation.span.start as usize,
             annotation_to_interface(annotation, source_text),
@@ -617,14 +553,6 @@ fn transform_non_component_statement(
         _ => None,
     };
     Ok(replacement)
-}
-
-fn is_orphan_arkui_decorator_statement(statement: &Statement<'_>, source_text: &str) -> bool {
-    let text = span_text(statement.span(), source_text).trim();
-    matches!(
-        text,
-        "@Component" | "@Entry" | "@CustomDialog" | "@Reusable" | "@ComponentV2" | "@ReusableV2"
-    )
 }
 
 fn annotation_to_interface(annotation: &AnnotationDeclaration<'_>, source_text: &str) -> String {
@@ -1340,9 +1268,15 @@ fn component_from_struct(
                             optional: property.optional,
                         });
                     } else {
-                        regular_members.push(strip_orphan_arkui_decorator_lines(
-                            span_text(element.span(), source_text).trim(),
-                        ));
+                        regular_members.push(
+                            member_text_without_decorators(
+                                source_text,
+                                element.span(),
+                                &property.decorators,
+                            )
+                            .trim()
+                            .to_string(),
+                        );
                     }
                     continue;
                 };
@@ -1490,7 +1424,7 @@ fn component_from_struct(
                     member_start,
                     &member_text,
                 );
-                regular_members.push(strip_orphan_arkui_decorator_lines(member_text.trim()));
+                regular_members.push(member_text.trim().to_string());
             }
         }
     }
@@ -1605,6 +1539,61 @@ fn append_builder_parent_param(params: String) -> String {
     } else {
         format!("{params}, parent = null")
     }
+}
+
+fn member_text_without_decorators(
+    source_text: &str,
+    member_span: Span,
+    decorators: &[Decorator<'_>],
+) -> String {
+    if decorators.is_empty() {
+        return span_text(member_span, source_text).to_string();
+    }
+
+    let start = member_span.start as usize;
+    let end = member_span.end as usize;
+    let mut ranges = decorators
+        .iter()
+        .filter_map(|decorator| {
+            let mut remove_start = decorator.span.start as usize;
+            let mut remove_end = decorator.span.end as usize;
+            if remove_end <= start || remove_start >= end {
+                return None;
+            }
+
+            let line_start = source_text[..remove_start]
+                .rfind('\n')
+                .map(|index| index + 1)
+                .unwrap_or(0);
+            if source_text[line_start..remove_start].trim().is_empty() {
+                remove_start = line_start;
+            }
+
+            let after = &source_text[remove_end..end];
+            let whitespace_len = after
+                .char_indices()
+                .take_while(|(_, ch)| ch.is_whitespace())
+                .last()
+                .map_or(0, |(index, ch)| index + ch.len_utf8());
+            remove_end += whitespace_len;
+
+            Some((remove_start.max(start), remove_end.min(end)))
+        })
+        .collect::<Vec<_>>();
+    ranges.sort_unstable();
+
+    let mut out = String::with_capacity(end - start);
+    let mut cursor = start;
+    for (remove_start, remove_end) in ranges {
+        if remove_start > cursor {
+            out.push_str(&source_text[cursor..remove_start]);
+        }
+        cursor = cursor.max(remove_end);
+    }
+    if cursor < end {
+        out.push_str(&source_text[cursor..end]);
+    }
+    out
 }
 
 fn balanced_method_text(
@@ -1828,7 +1817,7 @@ pub fn transform_ets_viewpu_with_source_map(
 
     if struct_results.is_empty() {
         return if transformed_any {
-            Ok((strip_orphan_arkui_decorator_lines(&out), None))
+            Ok((out, None))
         } else {
             Ok((content.clone(), None))
         };
