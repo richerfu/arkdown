@@ -7,5 +7,6 @@
 pub mod plugin;
 pub mod registry;
 pub mod rewrite;
+mod source_edit;
 
 pub use plugin::ChunkWrapperPlugin;
