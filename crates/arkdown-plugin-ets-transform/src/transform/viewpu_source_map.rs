@@ -296,12 +296,13 @@ fn collect_component_static_span_hints(
 ) -> Vec<SpanHint> {
     let mut hints = Vec::new();
     let lines: Vec<&str> = viewpu_code.lines().collect();
+    let generated = GeneratedViewPuLines::new(&lines);
 
-    if let Some(line) = find_line(&lines, |line| line.trim_start().starts_with("class ")) {
+    if let Some(line) = generated.class_declaration() {
         push_hint_for_text(&mut hints, &lines, line, &component.name, statement.id.span);
     }
 
-    if let Some(line) = find_line(&lines, |line| line.trim_start().starts_with("constructor(")) {
+    if let Some(line) = generated.constructor() {
         push_hint(
             &mut hints,
             line,
@@ -310,7 +311,8 @@ fn collect_component_static_span_hints(
         );
     }
 
-    if let Some(line) = find_line(&lines, |line| line.contains("this.finalizeConstruction()"))
+    if let Some(line) = generated
+        .finalize_construction()
         .and_then(|line| find_next_line(&lines, line + 1, |line| line.trim() == "}"))
     {
         push_hint(
@@ -321,9 +323,7 @@ fn collect_component_static_span_hints(
         );
     }
 
-    if let Some(line) = find_line(&lines, |line| {
-        line.trim_start().starts_with("initialRender()")
-    }) {
+    if let Some(line) = generated.initial_render() {
         if let Some(build_span) = build_method_span(statement) {
             push_hint(&mut hints, line, leading_spaces(lines[line]), build_span);
             if let Some(close_line) = find_next_line(&lines, line + 1, |line| line.trim() == "}") {
@@ -359,7 +359,7 @@ fn collect_component_static_span_hints(
             .map(|annotation| annotation.span());
         let init_span = property.value.as_ref().map(|value| value.span());
 
-        if let Some(line) = find_line(&lines, |line| line.trim_start().starts_with(name)) {
+        if let Some(line) = generated.field_declaration(name) {
             push_hint_for_text(&mut hints, &lines, line, name, name_span);
             if let Some(type_span) = type_span {
                 push_hint_for_text(
@@ -371,15 +371,13 @@ fn collect_component_static_span_hints(
                 );
             }
         }
-        if let Some(line) = find_line(&lines, |line| {
-            line.contains(&format!("this.__{name} = new "))
-        }) {
+        if let Some(line) = generated.field_initializer(name) {
             if let Some(init_span) = init_span {
                 let initializer = span_text(init_span, source_text).trim();
                 push_hint_for_text(&mut hints, &lines, line, initializer, init_span);
             }
         }
-        if let Some(line) = find_line(&lines, |line| line.contains(&format!("private __{name}:"))) {
+        if let Some(line) = generated.backing_field(name) {
             push_hint(
                 &mut hints,
                 line,
@@ -402,14 +400,10 @@ fn collect_component_static_span_hints(
                 end_span(property.span()),
             );
         }
-        if let Some(line) = find_line(&lines, |line| {
-            line.trim_start().starts_with(&format!("get {name}("))
-        }) {
+        if let Some(line) = generated.getter(name) {
             push_hint_for_text(&mut hints, &lines, line, name, name_span);
         }
-        if let Some(line) = find_line(&lines, |line| {
-            line.trim_start().starts_with(&format!("set {name}("))
-        }) {
+        if let Some(line) = generated.setter(name) {
             push_hint_for_text(&mut hints, &lines, line, name, name_span);
             if let Some(type_span) = type_span {
                 push_hint_for_text(
@@ -426,8 +420,78 @@ fn collect_component_static_span_hints(
     hints
 }
 
-fn find_line(lines: &[&str], pred: impl Fn(&str) -> bool) -> Option<usize> {
-    lines.iter().position(|line| pred(line))
+struct GeneratedViewPuLines<'a> {
+    lines: &'a [&'a str],
+}
+
+impl<'a> GeneratedViewPuLines<'a> {
+    fn new(lines: &'a [&'a str]) -> Self {
+        Self { lines }
+    }
+
+    fn class_declaration(&self) -> Option<usize> {
+        self.find(|line| line.trim_start().starts_with("class "))
+    }
+
+    fn constructor(&self) -> Option<usize> {
+        self.find(|line| line.trim_start().starts_with("constructor("))
+    }
+
+    fn finalize_construction(&self) -> Option<usize> {
+        self.find(|line| line.contains("this.finalizeConstruction()"))
+    }
+
+    fn initial_render(&self) -> Option<usize> {
+        self.find(|line| line.trim_start().starts_with("initialRender()"))
+    }
+
+    fn field_declaration(&self, name: &str) -> Option<usize> {
+        self.find(|line| line.trim_start().starts_with(name))
+    }
+
+    fn field_initializer(&self, name: &str) -> Option<usize> {
+        let needle = GeneratedFieldNeedle::initializer(name);
+        self.find(|line| line.contains(&needle))
+    }
+
+    fn backing_field(&self, name: &str) -> Option<usize> {
+        let needle = GeneratedFieldNeedle::backing_field(name);
+        self.find(|line| line.contains(&needle))
+    }
+
+    fn getter(&self, name: &str) -> Option<usize> {
+        let needle = GeneratedFieldNeedle::getter(name);
+        self.find(|line| line.trim_start().starts_with(&needle))
+    }
+
+    fn setter(&self, name: &str) -> Option<usize> {
+        let needle = GeneratedFieldNeedle::setter(name);
+        self.find(|line| line.trim_start().starts_with(&needle))
+    }
+
+    fn find(&self, pred: impl Fn(&str) -> bool) -> Option<usize> {
+        self.lines.iter().position(|line| pred(line))
+    }
+}
+
+struct GeneratedFieldNeedle;
+
+impl GeneratedFieldNeedle {
+    fn initializer(name: &str) -> String {
+        format!("this.__{name} = new ")
+    }
+
+    fn backing_field(name: &str) -> String {
+        format!("private __{name}:")
+    }
+
+    fn getter(name: &str) -> String {
+        format!("get {name}(")
+    }
+
+    fn setter(name: &str) -> String {
+        format!("set {name}(")
+    }
 }
 
 fn find_next_line(lines: &[&str], start: usize, pred: impl Fn(&str) -> bool) -> Option<usize> {
