@@ -11,10 +11,7 @@ use oxc_parser::{Parser, ParserReturn};
 use oxc_span::{GetSpan, SourceType};
 
 use crate::emit::file::{LiteralArray, LiteralEntry};
-use crate::emit::record::{
-    CatchEntry, ClassRecord, DebugInfoRecord, FieldRecord, FieldValue, MethodKind, MethodRecord,
-    FIELD_OWNER_CLASS_IDX,
-};
+use crate::emit::record::{CatchEntry, ClassRecord, DebugInfoRecord, MethodKind, MethodRecord};
 use crate::emit::strings::StringTable;
 use crate::error::AbcError;
 use crate::ir::ast_analysis::{
@@ -32,6 +29,7 @@ use crate::ir::module_record::{
     collect_module_record, module_record_literal_array, ModuleRecordInfo,
 };
 use crate::ir::opcodes::Insn;
+use crate::ir::record_layout::RecordLayout;
 
 const MANDATORY_PARAM_THIS_REG: u8 = 2;
 
@@ -212,19 +210,8 @@ pub fn build_record_with_debug_and_source_map(
         &mut function_names,
     );
 
-    // ArkRuntime finds modules by their OHM URL class name format:
-    //   "L{bundleName}/{moduleName}/{pathFromEts};"
-    // e.g. "Lcom.example.myapp/entry/ets/entryability/EntryAbility;"
-    //
-    // This matches exactly what hvigorw and es2abc produce.
-    // The record_name passed from the CLI is already:
-    //   "{bundleName}/{module}/{path}"  (no src/main prefix)
-    let class_name = if record_name.contains('/') {
-        format!("L{};", record_name) // OHM URL format: no & wrappers
-    } else {
-        // Bare name (legacy / test path) — fall back to OHOS module class
-        format!("L_{};", record_name)
-    };
+    let record_layout = RecordLayout::new(record_name, source);
+    let class_name = record_layout.class_name();
 
     // Literal arrays produced before this point are bytecode operands.  The
     // module-record and scope-name arrays below are class field values and are
@@ -241,30 +228,10 @@ pub fn build_record_with_debug_and_source_map(
     // The 6 module metadata fields that es2abc always writes into every user
     // class record.  ArkRuntime reads these to understand how to load the
     // module's dependencies.
-    let module_name = module_name_from_record_name(record_name).unwrap_or("entry");
-    let module_fields = vec![
-        module_u8_field(format!("pkgName@{module_name}")),
-        module_u8_field("isCommonjs"),
-        module_u8_field("hasTopLevelAwait"),
-        module_u8_field("isSharedModule"),
-        FieldRecord {
-            name: "scopeNames".to_string(),
-            class_idx: FIELD_OWNER_CLASS_IDX,
-            type_idx: 1,
-            access_flags: 0,
-            value: Some(FieldValue::LiteralArray(scope_names_idx)),
-        },
-        FieldRecord {
-            name: "moduleRecordIdx".to_string(),
-            class_idx: FIELD_OWNER_CLASS_IDX,
-            type_idx: 1,
-            access_flags: 0,
-            value: Some(FieldValue::LiteralArray(module_record_idx)),
-        },
-    ];
+    let module_fields = record_layout.module_fields(scope_names_idx, module_record_idx);
 
     let source_file = source_file.map(str::to_string);
-    let source_code_strings = record_source_code_strings(record_name, source);
+    let source_code_strings = record_layout.source_code_strings();
     if let Some(file) = &source_file {
         for method in &mut methods {
             // Only set debug_info for methods that don't have it yet.
@@ -281,8 +248,7 @@ pub fn build_record_with_debug_and_source_map(
         }
     }
 
-    let literal_indices = reorder_record_literal_indices(
-        record_name,
+    let literal_indices = record_layout.literal_indices(
         (literal_start..bytecode_literal_end).collect(),
         literal_arrays,
     );
@@ -300,82 +266,6 @@ pub fn build_record_with_debug_and_source_map(
         module_requests: module_record.module_requests,
         fields: module_fields,
     })
-}
-
-fn reorder_record_literal_indices(
-    record_name: &str,
-    mut indices: Vec<usize>,
-    literal_arrays: &[LiteralArray],
-) -> Vec<usize> {
-    if record_name.contains("/entryability/") {
-        indices.sort_by_key(|&idx| {
-            let array = &literal_arrays[idx];
-            (!literal_array_has_method_affiliate(array), idx)
-        });
-    } else if record_name.contains("/ets/pages/") {
-        indices.sort_by_key(|&idx| (page_literal_rank(&literal_arrays[idx]), idx));
-    }
-    indices
-}
-
-fn literal_array_has_method_affiliate(array: &LiteralArray) -> bool {
-    array
-        .entries
-        .iter()
-        .any(|entry| matches!(entry, LiteralEntry::TaggedMethodAffiliate(_)))
-}
-
-fn page_literal_rank(array: &LiteralArray) -> u8 {
-    if matches!(
-        array.entries.as_slice(),
-        [
-            LiteralEntry::TaggedInteger(1),
-            LiteralEntry::TaggedString(name),
-            ..
-        ] if name == "this"
-    ) {
-        return 0;
-    }
-    if literal_array_has_method_affiliate(array) {
-        return 1;
-    }
-    if array
-        .entries
-        .iter()
-        .all(|entry| matches!(entry, LiteralEntry::TaggedString(_)))
-    {
-        return 2;
-    }
-    3
-}
-
-fn record_source_code_strings(record_name: &str, source: &str) -> Vec<String> {
-    let class_short = record_name.rsplit('/').next().unwrap_or(record_name);
-    if record_name.contains("/ets/pages/") {
-        return vec![format!("#{class_short}_Params")];
-    }
-    let params_type = format!("{class_short}_Params");
-    if source.contains(&format!("interface {params_type}")) {
-        return vec![format!("#{params_type}")];
-    }
-    if record_name.contains("/entryability/") {
-        return vec![class_short.to_string(), "not supported".to_string()];
-    }
-    Vec::new()
-}
-
-fn module_name_from_record_name(record_name: &str) -> Option<&str> {
-    record_name.split('/').nth(1).filter(|s| !s.is_empty())
-}
-
-fn module_u8_field(name: impl Into<String>) -> FieldRecord {
-    FieldRecord {
-        name: name.into(),
-        class_idx: FIELD_OWNER_CLASS_IDX,
-        type_idx: 0,
-        access_flags: 0,
-        value: Some(FieldValue::U8(0)),
-    }
 }
 
 #[derive(Debug, Default)]

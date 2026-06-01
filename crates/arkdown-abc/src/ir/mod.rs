@@ -6,3 +6,4 @@ pub(super) mod function_records;
 pub(super) mod module_lexical;
 pub(super) mod module_record;
 pub mod opcodes;
+pub(super) mod record_layout;
