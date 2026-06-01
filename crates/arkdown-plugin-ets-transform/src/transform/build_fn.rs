@@ -64,7 +64,7 @@ impl BuildContext {
 struct LeafComponent {
     name: String,
     create_args: String,
-    chain_attrs: Vec<(String, String)>,
+    chain_attrs: Vec<(String, String, bool)>,
 }
 
 fn create_method_name(component_name: &str, has_children: bool) -> &'static str {
@@ -76,6 +76,81 @@ fn create_method_name(component_name: &str, has_children: bool) -> &'static str 
         }
     } else {
         "create"
+    }
+}
+
+fn push_attribute_calls(
+    out: &mut String,
+    indent: &str,
+    component_name: &str,
+    attrs: &[(String, String, bool)],
+) {
+    for (attr_name, attr_args, initial_only) in attrs {
+        if !initial_only {
+            out.push_str(&format!(
+                "{indent}    {component_name}.{attr_name}({attr_args});\n"
+            ));
+        }
+    }
+
+    let initial_attrs = attrs
+        .iter()
+        .filter(|(_, _, initial_only)| *initial_only)
+        .collect::<Vec<_>>();
+    if initial_attrs.is_empty() {
+        return;
+    }
+    out.push_str(&format!("{indent}    if (isInitialRender) {{\n"));
+    for (attr_name, attr_args, _) in initial_attrs {
+        out.push_str(&format!(
+            "{indent}        {component_name}.{attr_name}({attr_args});\n"
+        ));
+    }
+    out.push_str(&format!("{indent}    }}\n"));
+}
+
+fn arguments_are_regular_attrs(
+    arguments: &[Argument<'_>],
+    component_metadata: &ComponentMetadata,
+) -> bool {
+    arguments.iter().all(|argument| {
+        argument
+            .as_expression()
+            .is_some_and(|expression| is_regular_attr_expression(expression, component_metadata))
+    })
+}
+
+fn is_regular_attr_expression(
+    expression: &Expression<'_>,
+    component_metadata: &ComponentMetadata,
+) -> bool {
+    match expression {
+        Expression::ObjectExpression(object) => object.properties.iter().all(|property| {
+            matches!(
+                property,
+                ObjectPropertyKind::ObjectProperty(property)
+                    if is_regular_attr_expression(&property.value, component_metadata)
+            )
+        }),
+        Expression::ArrayExpression(array) => array.elements.iter().all(|element| {
+            element.as_expression().is_some_and(|expression| {
+                is_regular_attr_expression(expression, component_metadata)
+            })
+        }),
+        Expression::StringLiteral(_)
+        | Expression::NumericLiteral(_)
+        | Expression::BooleanLiteral(_)
+        | Expression::ArrowFunctionExpression(_) => true,
+        Expression::StaticMemberExpression(member) => {
+            matches!(
+                &member.object,
+                Expression::Identifier(identifier) if component_metadata.is_known_enum(identifier.name.as_str())
+            )
+        }
+        Expression::ParenthesizedExpression(parenthesized) => {
+            is_regular_attr_expression(&parenthesized.expression, component_metadata)
+        }
+        _ => false,
     }
 }
 
@@ -91,6 +166,7 @@ fn extract_leaf_component(
     source_id: &str,
     custom_components: &HashSet<String>,
     builder_methods: &HashSet<String>,
+    component_metadata: &ComponentMetadata,
 ) -> Result<LeafComponent, BuildLoweringError> {
     match &call.callee {
         Expression::Identifier(_) => {
@@ -114,8 +190,13 @@ fn extract_leaf_component(
                         source_id,
                         custom_components,
                         builder_methods,
+                        component_metadata,
                     )?;
-                    lc.chain_attrs.push((attr_name, attr_args));
+                    lc.chain_attrs.push((
+                        attr_name,
+                        attr_args,
+                        arguments_are_regular_attrs(&call.arguments, component_metadata),
+                    ));
                     Ok(lc)
                 }
                 _ => Err(BuildLoweringError::UnsupportedCallee(
@@ -171,13 +252,14 @@ fn lower_call_expression(
         source_id,
         custom_components,
         builder_methods,
+        component_metadata,
     )?;
     if custom_components.contains(&lc.name)
         && (lc.chain_attrs.is_empty()
             || custom_component_update_props
                 .get(&lc.name)
                 .is_some_and(|info| {
-                    info.reusable && lc.chain_attrs.iter().all(|(name, _)| name == "reuseId")
+                    info.reusable && lc.chain_attrs.iter().all(|(name, _, _)| name == "reuseId")
                 }))
     {
         let base_call = base_component_call(call);
@@ -206,12 +288,7 @@ fn lower_call_expression(
         create_method_name(&lc.name, false),
         lc.create_args
     ));
-    for (attr_name, attr_args) in &lc.chain_attrs {
-        out.push_str(&format!(
-            "{indent}    {}.{attr_name}({attr_args});\n",
-            lc.name
-        ));
-    }
+    push_attribute_calls(out, indent, &lc.name, &lc.chain_attrs);
     out.push_str(&format!("{indent}}}, {});\n", lc.name));
     if component_metadata.needs_pop(&lc.name) {
         out.push_str(&format!("{indent}{}.pop();\n", lc.name));
@@ -692,6 +769,7 @@ fn lower_component(
         "{indent}    {name}.{}({args});\n",
         create_method_name(&name, !component.children.is_empty())
     ));
+    let mut attrs = Vec::new();
     for (index, chain) in component.chain_expressions.iter().enumerate() {
         let chain_name = chain_name(chain)?;
         let chain_args =
@@ -721,8 +799,13 @@ fn lower_component(
             &chain.arguments,
             source_text,
         );
-        out.push_str(&format!("{indent}    {name}.{chain_name}({chain_args});\n"));
+        attrs.push((
+            chain_name,
+            chain_args,
+            arguments_are_regular_attrs(&chain.arguments, component_metadata),
+        ));
     }
+    push_attribute_calls(out, indent, &name, &attrs);
     out.push_str(&format!("{indent}}}, {name});\n"));
 
     for child in &component.children {
@@ -947,11 +1030,11 @@ fn emit_reusable_custom_component_call(
     out.push_str(&format!("{indent}__Recycle__.pop();\n"));
 }
 
-fn custom_reuse_id_from_leaf_attrs(attrs: &[(String, String)]) -> Option<String> {
+fn custom_reuse_id_from_leaf_attrs(attrs: &[(String, String, bool)]) -> Option<String> {
     attrs
         .iter()
-        .find(|(name, _)| name == "reuseId")
-        .map(|(_, args)| args.trim().to_string())
+        .find(|(name, _, _)| name == "reuseId")
+        .map(|(_, args, _)| args.trim().to_string())
 }
 
 fn custom_reuse_id_from_component_attrs(
@@ -2206,7 +2289,16 @@ struct Index {
             })
             .expect("expected build method");
 
-        let (out, span_hints) = lower_build_body(build.value.body.as_deref(), source).unwrap();
+        let (out, span_hints) = lower_build_body_with_custom_components(
+            build.value.body.as_deref(),
+            source,
+            "",
+            &HashSet::new(),
+            &HashSet::new(),
+            &CustomComponentUpdateProps::new(),
+            &test_component_metadata(),
+        )
+        .unwrap();
         assert!(
             span_hints.len() >= 18,
             "expected token-level span hints for Row, Column, and Text"
@@ -2214,16 +2306,22 @@ struct Index {
         let expected = concat!(
             "        this.observeComponentCreation2((elmtId, isInitialRender) => {\n",
             "            Row.create();\n",
-            "            Row.height(\"100%\");\n",
+            "            if (isInitialRender) {\n",
+            "                Row.height(\"100%\");\n",
+            "            }\n",
             "        }, Row);\n",
             "        this.observeComponentCreation2((elmtId, isInitialRender) => {\n",
             "            Column.create();\n",
-            "            Column.width(\"100%\");\n",
+            "            if (isInitialRender) {\n",
+            "                Column.width(\"100%\");\n",
+            "            }\n",
             "        }, Column);\n",
             "        this.observeComponentCreation2((elmtId, isInitialRender) => {\n",
             "            Text.create(this.message);\n",
-            "            Text.fontSize(50);\n",
-            "            Text.fontWeight(FontWeight.Bold);\n",
+            "            if (isInitialRender) {\n",
+            "                Text.fontSize(50);\n",
+            "                Text.fontWeight(FontWeight.Bold);\n",
+            "            }\n",
             "        }, Text);\n",
             "        Text.pop();\n",
             "        Column.pop();\n",

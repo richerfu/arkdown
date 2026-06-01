@@ -175,8 +175,10 @@ becomes:
 ```javascript
 this.observeComponentCreation2((elmtId, isInitialRender) => {
   ComponentName.create(args);
-  ComponentName.attr1(v1);
-  ComponentName.attr2(v2);
+  if (isInitialRender) {
+    ComponentName.attr1(v1);
+    ComponentName.attr2(v2);
+  }
 }, ComponentName);
 // children lowered recursively
 ComponentName.pop();
@@ -190,10 +192,19 @@ becomes:
 ```javascript
 this.observeComponentCreation2((elmtId, isInitialRender) => {
   Text.create(this.message);
-  Text.fontSize(50);
+  if (isInitialRender) {
+    Text.fontSize(50);
+  }
 }, Text);
 Text.pop();
 ```
+
+Literal/regular attribute arguments follow upstream
+`process_component_build.js::filterRegularAttrNode()` and are emitted in the
+`if (isInitialRender)` block appended after dynamic attributes. The Rust port
+uses OXC AST node kinds for the check: literals, object/array literals composed
+only of regular values, arrow functions, and SDK enum member expressions loaded
+from `ets-loader/declarations/enums.d.ts` / `ets/component/enums.d.ts`.
 
 **Attribute chain ordering**: attribute calls on the parent appear **before** children are
 lowered; `.pop()` appears **after** all children.

@@ -1709,6 +1709,16 @@ fn primary_state_decorator(names: &[&str]) -> Option<&'static str> {
 /// Returns `(viewpu_code, Some(source_map_json))` when at least one component was
 /// transformed, `(original_code, None)` when the file contains no `@Component`
 /// struct.
+struct StructResult {
+    viewpu_code: String,
+    span_hints: Vec<crate::transform::build_fn::SpanHint>,
+    static_span_hints: Vec<crate::transform::build_fn::SpanHint>,
+    /// Byte range in the pre-finalized `out` string where this struct's ViewPU code starts.
+    out_offset: usize,
+    class_line_in_viewpu: usize,
+    class_line_text: String,
+}
+
 pub fn transform_ets_viewpu_with_source_map(
     source: &ModuleSource,
     options: &TransformOptions,
@@ -1746,16 +1756,6 @@ pub fn transform_ets_viewpu_with_source_map(
     );
     let builder_functions = collect_builder_function_names(&parsed.program, &source.id.id, options);
 
-    // Collect (viewpu_code, span_hints) per transformed struct so we can
-    // compute absolute line numbers after the full output is assembled.
-    struct StructResult {
-        viewpu_code: String,
-        span_hints: Vec<crate::transform::build_fn::SpanHint>,
-        static_span_hints: Vec<crate::transform::build_fn::SpanHint>,
-        /// Byte range in the `out` string where this struct's ViewPU code starts.
-        out_offset: usize,
-    }
-
     let mut out = String::with_capacity(content.len() + 512);
     let mut last_end = 0usize;
     let mut struct_results: Vec<StructResult> = Vec::new();
@@ -1779,6 +1779,8 @@ pub fn transform_ets_viewpu_with_source_map(
             let out_offset = out.len();
             let span_hints = component.initial_render_span_hints.clone();
             let viewpu_code = generate_view_pu_class(&component);
+            let (class_line_in_viewpu, class_line_text) =
+                viewpu_class_line_marker(&viewpu_code).unwrap_or((0, String::new()));
             let static_span_hints = collect_component_static_span_hints(
                 &component,
                 struct_statement,
@@ -1791,6 +1793,8 @@ pub fn transform_ets_viewpu_with_source_map(
                 span_hints,
                 static_span_hints,
                 out_offset,
+                class_line_in_viewpu,
+                class_line_text,
             });
             transformed_any = true;
         } else if let Some((start, replacement)) = transform_non_component_statement(
@@ -1834,7 +1838,8 @@ pub fn transform_ets_viewpu_with_source_map(
 
     for sr in &struct_results {
         // Line offset of this struct's ViewPU code within the full output.
-        let struct_line_start = out[..sr.out_offset].bytes().filter(|&b| b == b'\n').count();
+        let struct_line_start = final_struct_line_start(&out, sr)
+            .unwrap_or_else(|| out[..sr.out_offset].bytes().filter(|&b| b == b'\n').count());
 
         for hint in &sr.static_span_hints {
             let abs_gen_line = struct_line_start + hint.body_line;
@@ -1876,6 +1881,27 @@ pub fn transform_ets_viewpu_with_source_map(
     let source_map = build_ets_source_map(&source.id.id, total_lines.max(1), &entries);
 
     Ok((out, Some(source_map)))
+}
+
+fn viewpu_class_line_marker(viewpu_code: &str) -> Option<(usize, String)> {
+    viewpu_code.lines().enumerate().find_map(|(index, line)| {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("class ") && trimmed.contains(" extends ViewPU") {
+            Some((index, trimmed.to_string()))
+        } else {
+            None
+        }
+    })
+}
+
+fn final_struct_line_start(out: &str, sr: &StructResult) -> Option<usize> {
+    if sr.class_line_text.is_empty() {
+        return None;
+    }
+    out.lines().enumerate().find_map(|(index, line)| {
+        (line.trim_start() == sr.class_line_text)
+            .then_some(index.saturating_sub(sr.class_line_in_viewpu))
+    })
 }
 
 fn component_with_struct_from_statement<'a>(

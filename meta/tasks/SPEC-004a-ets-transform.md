@@ -257,6 +257,9 @@ The body is lowered through the same OXC ArkUI AST path as `build()`, but with
 upstream builder parent context. Framework calls are emitted on
 `(parent ? parent : this)`, matching SDK
 `process_component_build.js::parentConditionalExpression()`.
+Regular/literal attribute arguments in builder bodies use the same upstream
+`filterRegularAttrNode()` split as `build()`: dynamic attributes stay in the
+creation closure body, while regular attrs are grouped in `if (isInitialRender)`.
 
 ```typescript
 // Input:

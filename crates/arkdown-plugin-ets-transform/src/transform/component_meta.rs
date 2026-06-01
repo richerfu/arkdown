@@ -1,9 +1,13 @@
-use std::{collections::HashSet, fs, path::Path};
+use std::{
+    collections::HashSet,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    Argument, ArrayExpressionElement, AssignmentTarget, BindingPattern, Expression, Program,
-    Statement,
+    Argument, ArrayExpressionElement, AssignmentTarget, BindingPattern, Declaration, Expression,
+    Program, Statement,
 };
 use oxc_parser::Parser;
 use oxc_span::SourceType;
@@ -13,6 +17,7 @@ use serde_json::Value;
 pub struct ComponentMetadata {
     atomic_components: HashSet<String>,
     need_pop_components: HashSet<String>,
+    enum_names: HashSet<String>,
 }
 
 impl ComponentMetadata {
@@ -36,16 +41,88 @@ impl ComponentMetadata {
 
         let need_pop_components =
             load_need_pop_components(&ets_loader_path.join("lib/component_map.js"))?;
+        let enum_names = load_sdk_enum_names(ets_loader_path)?;
 
         Ok(Self {
             atomic_components,
             need_pop_components,
+            enum_names,
         })
     }
 
     pub fn needs_pop(&self, name: &str) -> bool {
         !self.atomic_components.contains(name) || self.need_pop_components.contains(name)
     }
+
+    pub fn is_known_enum(&self, name: &str) -> bool {
+        self.enum_names.contains(name)
+    }
+}
+
+fn load_sdk_enum_names(ets_loader_path: &Path) -> anyhow::Result<HashSet<String>> {
+    let roots = [
+        ets_loader_path.join("declarations"),
+        ets_loader_path.join("../../component"),
+    ];
+    let mut paths = Vec::new();
+    for root in roots {
+        collect_declaration_files(&root, &mut paths)?;
+    }
+    paths.sort();
+
+    let mut names = HashSet::new();
+    for path in paths {
+        let source = fs::read_to_string(&path)?;
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, &source, SourceType::ts()).parse();
+        if !parsed.errors.is_empty() {
+            anyhow::bail!(
+                "failed to parse SDK enum declarations at {}",
+                path.display()
+            );
+        }
+        names.extend(enum_names_from_program(&parsed.program));
+    }
+    Ok(names)
+}
+
+fn collect_declaration_files(root: &Path, paths: &mut Vec<PathBuf>) -> anyhow::Result<()> {
+    if !root.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_declaration_files(&path, paths)?;
+        } else if path.extension().and_then(|ext| ext.to_str()) == Some("ts")
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".d.ts"))
+        {
+            paths.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn enum_names_from_program(program: &Program<'_>) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for statement in &program.body {
+        match statement {
+            Statement::TSEnumDeclaration(declaration) => {
+                names.insert(declaration.id.name.to_string());
+            }
+            Statement::ExportNamedDeclaration(export) => {
+                if let Some(Declaration::TSEnumDeclaration(declaration)) = &export.declaration {
+                    names.insert(declaration.id.name.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    names
 }
 
 fn load_need_pop_components(component_map_path: &Path) -> anyhow::Result<HashSet<String>> {
@@ -189,5 +266,16 @@ mod tests {
         assert!(values.contains("Blank"));
         assert!(values.contains("Search"));
         assert_eq!(values.len(), 2);
+    }
+
+    #[test]
+    fn loads_sdk_enum_names_from_declarations() {
+        let metadata = ComponentMetadata::from_ets_loader_path(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/ets-loader"
+        )))
+        .expect("test ets-loader metadata");
+        assert!(metadata.is_known_enum("FontWeight"));
+        assert!(metadata.is_known_enum("ImageInterpolation"));
     }
 }

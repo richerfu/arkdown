@@ -22,7 +22,7 @@ mod typescript_emit;
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use arkdown_core::{ArkdownConfig, ModuleSource, ModuleType, ResolvedId};
 use oxc_allocator::Allocator;
@@ -53,6 +53,7 @@ pub use sys_resource::load_system_resource_references;
 pub struct EtsTransformPlugin {
     pub config: Arc<ArkdownConfig>,
     resource_refs: Arc<HashMap<String, ResourceReference>>,
+    component_metadata: Arc<Mutex<Option<transform::component_meta::ComponentMetadata>>>,
 }
 
 impl std::fmt::Debug for EtsTransformPlugin {
@@ -66,6 +67,7 @@ impl EtsTransformPlugin {
         EtsTransformPlugin {
             config,
             resource_refs: Arc::new(HashMap::new()),
+            component_metadata: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -76,7 +78,23 @@ impl EtsTransformPlugin {
         EtsTransformPlugin {
             config,
             resource_refs: Arc::new(resource_refs),
+            component_metadata: Arc::new(Mutex::new(None)),
         }
+    }
+
+    fn component_metadata(&self) -> anyhow::Result<transform::component_meta::ComponentMetadata> {
+        let mut guard = self
+            .component_metadata
+            .lock()
+            .map_err(|_| anyhow::anyhow!("component metadata cache poisoned"))?;
+        if let Some(metadata) = guard.as_ref() {
+            return Ok(metadata.clone());
+        }
+        let metadata = transform::component_meta::ComponentMetadata::from_ets_loader_path(
+            &self.config.sdk_config.ets_loader_path,
+        )?;
+        *guard = Some(metadata.clone());
+        Ok(metadata)
     }
 
     pub fn do_transform(
@@ -139,9 +157,7 @@ impl EtsTransformPlugin {
                 .iter()
                 .map(|module| (module.name.clone(), module.src_path.clone()))
                 .collect(),
-            component_metadata: transform::component_meta::ComponentMetadata::from_ets_loader_path(
-                &self.config.sdk_config.ets_loader_path,
-            )?,
+            component_metadata: self.component_metadata()?,
         };
 
         let transformed = transform::transform_ets_with_options(&source, &options).map_err(|e| {
@@ -274,6 +290,7 @@ impl Plugin for EtsTransformPlugin {
         let id = args.id.to_owned();
         let config = Arc::clone(&self.config);
         let resource_refs = Arc::clone(&self.resource_refs);
+        let component_metadata = Arc::clone(&self.component_metadata);
         async move {
             if !id.ends_with(".ets") {
                 return Ok(None);
@@ -288,6 +305,7 @@ impl Plugin for EtsTransformPlugin {
             let output = EtsTransformPlugin {
                 config,
                 resource_refs,
+                component_metadata,
             }
             .do_transform(&code, &id)?;
             Ok(output.map(|output| HookLoadOutput {
@@ -306,10 +324,12 @@ impl Plugin for EtsTransformPlugin {
         let id = args.id.to_owned();
         let config = Arc::clone(&self.config);
         let resource_refs = Arc::clone(&self.resource_refs);
+        let component_metadata = Arc::clone(&self.component_metadata);
         async move {
             EtsTransformPlugin {
                 config,
                 resource_refs,
+                component_metadata,
             }
             .do_transform(&code, &id)
         }

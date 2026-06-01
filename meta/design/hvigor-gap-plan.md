@@ -179,9 +179,9 @@ Current HmosWorld artifact status after a clean arkdown rebuild:
 | `filesInfo.txt` record set | 571 | 571 | identical set; order differs at line 3 |
 | `modules.cache` entries | 572 | 572 | identical set; order differs at line 3 |
 | `npmEntries.txt` entries | 57 | 57 | identical set; order differs at line 1 |
-| cache TS content hashes | 571 files | 571 files | 490 files still differ |
-| `ets/modules.abc` | 2,875,016B | 3,914,216B | not aligned |
-| `ets/widgets.abc` | 28,424B | 38,864B | not aligned |
+| cache TS content hashes | 571 files | 571 files | 81 exact; 62 whitespace/comment-only; 428 semantic-like diffs |
+| `ets/modules.abc` | 2,875,016B | 3,917,592B | not aligned |
+| `ets/widgets.abc` | 28,424B | 38,936B | not aligned |
 | ABC file version | `0x0002000c` | `0x0002000c` | aligned |
 
 The ABC byte delta is therefore not caused by missing app/sys resource objects
@@ -192,21 +192,31 @@ in the generated TypeScript cache or by missing CompileArkTS handoff modules.
 the same SDK namespace classes, and collects function/arrow records with the
 upstream `Binder::LegacyBuildFunction()` FNV-1a naming model. The ETS transform
 now follows upstream `process_component_build.js` for `ListItem` lazy create
-blocks, `Button.createWithLabel/createWithChild`, and builder parent-context
-framework calls, upstream `process_component_member.js` for direct `@Prop`
+blocks, `Button.createWithLabel/createWithChild`, builder parent-context
+framework calls, and `filterRegularAttrNode()` literal/enum attribute hoisting
+into `if (isInitialRender)`. The regular-attribute split uses OXC AST nodes and
+SDK enum declarations instead of source-string matching. Component member
+lowering follows upstream `process_component_member.js` for direct `@Prop`
 `updateStateVars().reset(params.x)`, and upstream `process_component_class.js`
 for `LocalStorageProp` class field initializers. Remaining cache-source gaps are
-still broad: 490 of 571 HmosWorld cache TS files differ after path
-normalization, with known printer/comment/format gaps and additional ViewPU
+still broad, with known printer/comment/format gaps and additional ViewPU
 custom-component/paramsLambda forms still to audit from upstream source.
+
+The struct-transform source map offset is also corrected after final ViewPU
+output normalization. `finalizeConstruction` shim insertion and interface
+hoisting can move generated lines; mappings now locate the final
+`class ... extends ViewPU` line instead of reusing the pre-finalization offset.
 
 Rollup/Rolldown order note: hvigor's SDK Rollup plugin context exposes
 `getModuleIds()` as `graph.modulesById.keys()` over a JavaScript `Map`; Rolldown
 1.0.3 exposes `get_module_ids()` from a `DashMap` iterator. Arkdown therefore
 tracks Rolldown `ModuleIdx` as the closest currently available stable graph
 order, but exact hvigor insertion order is still not proven. This order affects
-CompileArkTS handoff files and byte-for-byte ABC/HAP parity even when runtime
-semantics are otherwise unchanged.
+CompileArkTS handoff files and can affect byte-for-byte ABC/HAP parity whenever
+the order is consumed by `filesInfo.txt`, `modules.cache`, `npmEntries.txt`, or
+record/source-map metadata. If the same module set is compiled with an order
+that does not enter those final compiler inputs, it is only an intermediate
+cache ordering difference and can be ignored for runtime behavior.
 
 ## Major Remaining Capabilities Beyond Minimal-HAP
 
@@ -226,10 +236,13 @@ Priority order from the current 2026-06-01 state:
 
 1. **[HmosWorld ABC delta] Diff hvigor and arkdown CompileArkTS bytes.** The HAP
    entry list, `$r/$rawfile` cache check, `filesInfo.txt`, `modules.cache`, and
-   `npmEntries.txt` now align and npm-entry records are lowered, but
-   `modules.abc` is still much smaller. Next compare transformed TS/JS bytes and
-   then port the native `--cache-file @modules.cache` ProgramCache/protoBin merge
-   behavior from upstream C++.
+   `npmEntries.txt` now align by set and npm-entry records are lowered, but
+   `modules.abc` remains larger in arkdown. Next compare transformed TS/JS bytes
+   by upstream transform area, starting with custom-component recycle/update
+   hooks, `ObservedObject.GetRawObject(...)` wrapping in params lambdas, and
+   TypeScript printer/comment preservation, then continue into native
+   `--cache-file @modules.cache` ProgramCache/protoBin merge behavior from
+   upstream C++.
 2. **[Parity harness] Add a stable ABC diff helper.** It should compare
    CodeItems, DebugInfo/LNP, method records, indexes, literal arrays, and final
    bytes separately so future regressions are localized immediately.
