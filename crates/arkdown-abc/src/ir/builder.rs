@@ -4,8 +4,8 @@ use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     Argument, AssignmentOperator, AssignmentTarget, BindingPattern, ClassElement, Declaration,
     ExportDefaultDeclarationKind, Expression, ForInStatement, ForOfStatement, ForStatementLeft,
-    FormalParameter, FunctionBody, LogicalOperator, MethodDefinition, MethodDefinitionKind,
-    PrivateFieldExpression, Program, PropertyKey, Statement, UnaryOperator, YieldExpression,
+    FormalParameter, FunctionBody, LogicalOperator, MethodDefinitionKind, PrivateFieldExpression,
+    Program, PropertyKey, Statement, UnaryOperator, YieldExpression,
 };
 use oxc_parser::{Parser, ParserReturn};
 use oxc_span::{GetSpan, SourceType};
@@ -20,6 +20,10 @@ use crate::ir::ast_analysis::{
     stmts_capture_this_in_arrow, ArrowCaptures,
 };
 use crate::ir::bytecode_metrics::estimate_vregs;
+use crate::ir::class_layout::{
+    class_buffer_literal_array, class_method_num_args, class_method_record_name,
+    constructor_required_param_count, is_class_buffer_method, method_key_name,
+};
 use crate::ir::debug_lnp::{argument_span_start, col_at, line_at, LineTracker, SourceMapper};
 use crate::ir::function_records::{
     collect_function_records, FunctionNameAllocator, FunctionRecord, FunctionRecordNode,
@@ -810,23 +814,6 @@ fn compile_class_elements(
     }
 }
 
-fn class_method_record_name(
-    method: &MethodDefinition<'_>,
-    class_name: &str,
-    function_names: &mut FunctionNameAllocator<'_>,
-) -> Option<String> {
-    let name = if method.kind == MethodDefinitionKind::Constructor {
-        class_name.to_string()
-    } else {
-        method_key_name(&method.key)?
-    };
-    Some(function_names.bind(method.value.span.start, method.value.span.end, Some(&name)))
-}
-
-fn class_method_num_args(method: &MethodDefinition<'_>) -> u16 {
-    method.value.params.items.len() as u16 + 3
-}
-
 fn prepend_function_argument_copies(
     mut bytecode: Vec<u8>,
     num_vregs: u16,
@@ -904,75 +891,6 @@ fn prepend_module_argument_copies(mut bytecode: Vec<u8>, num_vregs: u16, num_arg
 
     prologue.append(&mut bytecode);
     prologue
-}
-
-fn method_key_name(key: &PropertyKey<'_>) -> Option<String> {
-    match key {
-        PropertyKey::StaticIdentifier(id) => Some(id.name.as_str().to_string()),
-        PropertyKey::StringLiteral(s) => Some(s.value.as_str().to_string()),
-        _ => None,
-    }
-}
-
-fn class_buffer_literal_array(_class_name: &str, elements: &[ClassElement<'_>]) -> LiteralArray {
-    let mut entries = Vec::new();
-    let mut instance_method_count = 0u32;
-
-    for element in elements {
-        let ClassElement::MethodDefinition(method) = element else {
-            continue;
-        };
-
-        if !is_class_buffer_method(method) {
-            continue;
-        }
-        let Some(public_name) = method_key_name(&method.key) else {
-            continue;
-        };
-
-        entries.push(LiteralEntry::TaggedString(public_name.clone()));
-        entries.push(LiteralEntry::TaggedMethodName(public_name));
-        entries.push(LiteralEntry::TaggedMethodAffiliate(
-            method.value.params.items.len() as u16,
-        ));
-        instance_method_count += 1;
-    }
-
-    entries.push(LiteralEntry::TaggedInteger(instance_method_count));
-    LiteralArray { entries }
-}
-
-fn is_class_buffer_method(method: &MethodDefinition<'_>) -> bool {
-    if method.kind == MethodDefinitionKind::Constructor || method.kind.is_accessor() {
-        return false;
-    }
-    if method.r#static {
-        return false;
-    }
-    let Some(key) = method_key_name(&method.key) else {
-        return false;
-    };
-    !matches!(key.as_str(), "initialRender" | "rerender")
-}
-
-fn constructor_required_param_count(elements: &[ClassElement<'_>]) -> u16 {
-    elements
-        .iter()
-        .find_map(|element| {
-            let ClassElement::MethodDefinition(method) = element else {
-                return None;
-            };
-            (method.kind == MethodDefinitionKind::Constructor).then(|| {
-                method
-                    .value
-                    .params
-                    .items
-                    .iter()
-                    .take_while(|param| param.initializer.is_none())
-                    .count() as u16
-            })
-        })
-        .unwrap_or(0)
 }
 
 /// Compile the top-level program body into bytecode for the `main` method.
