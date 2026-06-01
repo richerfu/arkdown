@@ -220,7 +220,7 @@ impl<'a> ViewpuAstEmitter<'a> {
             return OxcVec::new_in(allocator);
         }
 
-        let source = format!("__arkdown__({args});");
+        let source = CallArgumentsSnippet::new(args).emit();
         let parse_allocator = Allocator::default();
         let source_type = SourceType::ts().with_module(true);
         let parsed = Parser::new(&parse_allocator, &source, source_type).parse();
@@ -249,7 +249,7 @@ impl<'a> ViewpuAstEmitter<'a> {
             return OxcVec::new_in(allocator);
         }
 
-        let source = format!("function __arkdown__() {{\n{body}\n}}");
+        let source = FunctionBodySnippet::new(body).emit();
         let parse_allocator = Allocator::default();
         let source_type = SourceType::ts().with_module(true);
         let parsed = Parser::new(&parse_allocator, &source, source_type).parse();
@@ -296,5 +296,38 @@ impl<'a> ViewpuAstEmitter<'a> {
             })
             .build(program)
             .code
+    }
+}
+
+struct CallArgumentsSnippet<'a> {
+    args: &'a str,
+}
+
+impl<'a> CallArgumentsSnippet<'a> {
+    fn new(args: &'a str) -> Self {
+        Self { args }
+    }
+
+    fn emit(&self) -> String {
+        let mut source = String::new();
+        write!(source, "__arkdown__({});", self.args).expect("writing to String cannot fail");
+        source
+    }
+}
+
+struct FunctionBodySnippet<'a> {
+    body: &'a str,
+}
+
+impl<'a> FunctionBodySnippet<'a> {
+    fn new(body: &'a str) -> Self {
+        Self { body }
+    }
+
+    fn emit(&self) -> String {
+        let mut source = String::new();
+        write!(source, "function __arkdown__() {{\n{}\n}}", self.body)
+            .expect("writing to String cannot fail");
+        source
     }
 }
