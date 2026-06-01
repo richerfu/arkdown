@@ -17,9 +17,9 @@
 //! produced by `arkdown` where the AST complexity is bounded.
 
 use oxc_allocator::Allocator;
-use oxc_ast::ast::{BindingPattern, Statement};
+use oxc_ast::ast::{BindingPattern, Expression, Statement};
 use oxc_parser::{Parser, ParserReturn};
-use oxc_span::SourceType;
+use oxc_span::{GetSpan, SourceType, Span};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::rename::NameAllocator;
@@ -223,21 +223,80 @@ fn is_ident_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
 }
 
-/// Remove lines that are bare `console.{log,warn,error,debug}(...)` calls.
-///
-/// This is a line-level heuristic sufficient for IIFE-wrapped bundles where
-/// console calls typically occupy one line each.  A full AST-based removal
-/// would be added in a follow-up if multi-line calls need to be handled.
+#[derive(Debug)]
+struct SourcePatch {
+    start: usize,
+    end: usize,
+    replacement: String,
+}
+
+/// Remove expression statements that are bare `console.{log,warn,error,debug}(...)` calls.
 fn remove_console_log(source: &str) -> String {
-    let result: Vec<&str> = source
-        .lines()
-        .filter(|line| {
-            let t = line.trim_start();
-            !(t.starts_with("console.log(")
-                || t.starts_with("console.warn(")
-                || t.starts_with("console.error(")
-                || t.starts_with("console.debug("))
-        })
-        .collect();
-    result.join("\n")
+    let alloc = Allocator::default();
+    let parsed = Parser::new(&alloc, source, SourceType::default().with_module(true)).parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return source.to_owned();
+    }
+
+    let patches = parsed
+        .program
+        .body
+        .iter()
+        .filter(is_console_log_statement)
+        .map(|statement| removal_patch(source, statement.span()))
+        .collect::<Vec<_>>();
+    apply_source_patches(source, patches)
+}
+
+fn is_console_log_statement(statement: &&Statement<'_>) -> bool {
+    let Statement::ExpressionStatement(statement) = statement else {
+        return false;
+    };
+    let Expression::CallExpression(call) = &statement.expression else {
+        return false;
+    };
+    let Expression::StaticMemberExpression(member) = &call.callee else {
+        return false;
+    };
+    matches!(&member.object, Expression::Identifier(identifier) if identifier.name.as_str() == "console")
+        && matches!(
+            member.property.name.as_str(),
+            "log" | "warn" | "error" | "debug"
+        )
+}
+
+fn removal_patch(source: &str, span: Span) -> SourcePatch {
+    let mut end = span.end as usize;
+    if source
+        .as_bytes()
+        .get(end)
+        .is_some_and(|byte| *byte == b'\n')
+    {
+        end += 1;
+    }
+    SourcePatch {
+        start: span.start as usize,
+        end,
+        replacement: String::new(),
+    }
+}
+
+fn apply_source_patches(source: &str, mut patches: Vec<SourcePatch>) -> String {
+    if patches.is_empty() {
+        return source.to_owned();
+    }
+    patches.sort_by_key(|patch| patch.start);
+
+    let mut out = String::with_capacity(source.len());
+    let mut last_end = 0usize;
+    for patch in patches {
+        if patch.start < last_end {
+            continue;
+        }
+        out.push_str(&source[last_end..patch.start]);
+        out.push_str(&patch.replacement);
+        last_end = patch.end;
+    }
+    out.push_str(&source[last_end..]);
+    out
 }
