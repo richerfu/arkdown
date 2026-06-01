@@ -179,9 +179,9 @@ Current HmosWorld artifact status after a clean arkdown rebuild:
 | `filesInfo.txt` record set | 571 | 571 | identical set; order differs at line 3 |
 | `modules.cache` entries | 572 | 572 | identical set; order differs at line 3 |
 | `npmEntries.txt` entries | 57 | 57 | identical set; order differs at line 1 |
-| cache TS content hashes | 571 files | 571 files | 81 exact; 64 whitespace/comment-only; 426 semantic-like diffs |
-| `ets/modules.abc` | 2,875,016B | 3,921,096B | not aligned |
-| `ets/widgets.abc` | 28,424B | 38,936B | not aligned |
+| cache TS content hashes | 571 files | 571 files | 81 exact; 71 whitespace/comment-only; 419 semantic-like diffs |
+| `ets/modules.abc` | 2,875,016B | 3,917,672B | not aligned |
+| `ets/widgets.abc` | 28,424B | 38,864B | not aligned |
 | ABC file version | `0x0002000c` | `0x0002000c` | aligned |
 
 The ABC byte delta is therefore not caused by missing app/sys resource objects
@@ -194,8 +194,10 @@ upstream `Binder::LegacyBuildFunction()` FNV-1a naming model. The ETS transform
 now follows upstream `process_component_build.js` for `ListItem` lazy create
 blocks, `Button.createWithLabel/createWithChild`, builder parent-context
 framework calls, and `filterRegularAttrNode()` literal/enum attribute hoisting
-into `if (isInitialRender)`. The regular-attribute split uses OXC AST nodes and
-SDK enum declarations instead of source-string matching. Component member
+into `if (isInitialRender)` only for the upstream recycle/reuse-V2 immutable
+attribute path; ordinary component attributes stay in the update path. The
+regular-attribute predicate uses OXC AST nodes and SDK enum declarations instead
+of source-string matching. Component member
 lowering follows upstream `process_component_member.js` for direct `@Prop`
 `updateStateVars().reset(params.x)`, and upstream `process_component_class.js`
 for `LocalStorageProp` class field initializers, reusable-component

@@ -240,7 +240,29 @@ SDK `process_component_build.js::createComponent()` special-cases `Button`:
 - `Button(label) { ... }` lowers to `Button.createWithChild(label)`.
 - Other built-in components use `.create(...)`.
 
-### 7b. Reusable Component Element-Id Update
+### 7b. Regular Attribute Predicate Scope
+
+SDK `process_component_build.ts::filterRegularAttrNode()` recognizes literal,
+array/object literal, arrow-function, enum, and regular-property expressions as
+regular attribute arguments. That predicate does not by itself move ordinary
+component attributes into an `isInitialRender` block. Upstream only pushes those
+statements into the immutable/initial path when
+`isRecycleComponent || isReuseComponentInV2` and the target is not a gesture
+type. Ordinary component attributes stay in the update path:
+
+```javascript
+Image.onClick(() => this.onBack());
+```
+
+They must not become:
+
+```javascript
+if (isInitialRender) {
+  Image.onClick(() => this.onBack());
+}
+```
+
+### 7c. Reusable Component Element-Id Update
 
 When a struct is collected as reusable, SDK
 `process_component_class.ts::addDeleteParamsFunc(..., true)` emits
@@ -248,7 +270,7 @@ When a struct is collected as reusable, SDK
 `this.__field.updateElmtId(oldElmtId, newElmtId)` for non-regular state
 backing fields and skips regular properties and `@BuilderParam`.
 
-### 7c. Raw Observed Object Call Arguments
+### 7d. Raw Observed Object Call Arguments
 
 SDK `process_component_class.ts::processBuildMember()` wraps a non-simple V1
 observed state field with `ObservedObject.GetRawObject(...)` when that field is
@@ -270,7 +292,7 @@ such as `{ item: this.item }` remain unchanged; callback params such as
 `() => this.handle(this.item)` become
 `() => this.handle(ObservedObject.GetRawObject(this.item))`.
 
-### 7d. Child @Link Custom Component Params
+### 7e. Child @Link Custom Component Params
 
 SDK `process_component_class.ts::createReference()` checks the target child
 component's `linkCollection`. When a custom component object property name maps
@@ -285,7 +307,7 @@ parent field decorator. Arkdown stores the child component's `@Link` names in
 `CustomComponentInfo` and applies the backing-field rewrite only for constructor
 param generation.
 
-### 7e. Builder Parent Context
+### 7f. Builder Parent Context
 
 SDK `parentConditionalExpression()` is `(parent ? parent : this)`. Top-level
 `@Builder` functions and component `@Builder` methods receive `parent = null`;

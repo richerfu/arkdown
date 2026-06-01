@@ -100,28 +100,11 @@ fn push_attribute_calls(
     component_name: &str,
     attrs: &[(String, String, bool)],
 ) {
-    for (attr_name, attr_args, initial_only) in attrs {
-        if !initial_only {
-            out.push_str(&format!(
-                "{indent}    {component_name}.{attr_name}({attr_args});\n"
-            ));
-        }
-    }
-
-    let initial_attrs = attrs
-        .iter()
-        .filter(|(_, _, initial_only)| *initial_only)
-        .collect::<Vec<_>>();
-    if initial_attrs.is_empty() {
-        return;
-    }
-    out.push_str(&format!("{indent}    if (isInitialRender) {{\n"));
-    for (attr_name, attr_args, _) in initial_attrs {
+    for (attr_name, attr_args, _) in attrs {
         out.push_str(&format!(
-            "{indent}        {component_name}.{attr_name}({attr_args});\n"
+            "{indent}    {component_name}.{attr_name}({attr_args});\n"
         ));
     }
-    out.push_str(&format!("{indent}    }}\n"));
 }
 
 fn arguments_are_regular_attrs(
@@ -2642,22 +2625,16 @@ struct Index {
         let expected = concat!(
             "        this.observeComponentCreation2((elmtId, isInitialRender) => {\n",
             "            Row.create();\n",
-            "            if (isInitialRender) {\n",
-            "                Row.height(\"100%\");\n",
-            "            }\n",
+            "            Row.height(\"100%\");\n",
             "        }, Row);\n",
             "        this.observeComponentCreation2((elmtId, isInitialRender) => {\n",
             "            Column.create();\n",
-            "            if (isInitialRender) {\n",
-            "                Column.width(\"100%\");\n",
-            "            }\n",
+            "            Column.width(\"100%\");\n",
             "        }, Column);\n",
             "        this.observeComponentCreation2((elmtId, isInitialRender) => {\n",
             "            Text.create(this.message);\n",
-            "            if (isInitialRender) {\n",
-            "                Text.fontSize(50);\n",
-            "                Text.fontWeight(FontWeight.Bold);\n",
-            "            }\n",
+            "            Text.fontSize(50);\n",
+            "            Text.fontWeight(FontWeight.Bold);\n",
             "        }, Text);\n",
             "        Text.pop();\n",
             "        Column.pop();\n",
