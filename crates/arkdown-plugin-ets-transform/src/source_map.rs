@@ -99,10 +99,11 @@ mod tests {
             json.contains("\"sources\":[\"src/main/ets/pages/Index.ets\"]"),
             "must have source path"
         );
-        assert!(json.contains("\"mappings\":"), "must have mappings");
-        let mappings_start = json.find("\"mappings\":\"").unwrap() + 12;
-        let mappings_end = json.rfind('"').unwrap();
-        let mappings = &json[mappings_start..mappings_end];
+        let value: serde_json::Value = serde_json::from_str(&json).expect("source map json");
+        let mappings = value
+            .get("mappings")
+            .and_then(serde_json::Value::as_str)
+            .expect("mappings");
         assert_eq!(mappings.chars().filter(|&c| c == ';').count(), 2);
         let groups: Vec<&str> = mappings.split(';').collect();
         assert_eq!(groups.len(), 3);
