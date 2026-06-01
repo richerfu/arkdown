@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::fmt::Write;
 
 use oxc_ast::ast::{
     Argument, ArkUIChild, ArkUIComponentExpression, ArrowFunctionExpression, BindingPattern,
@@ -41,8 +42,9 @@ pub(super) fn lower_lazy_list_item(
 ) -> Result<(), BuildLoweringError> {
     let mut writer = ViewpuWriter::new(out);
     writer.line(indent, format_args!("{{"));
-    let inner = format!("{indent}    ");
-    let child_indent = format!("{inner}        ");
+    let indent_scope = IterationIndent::new(indent);
+    let inner = indent_scope.level(1);
+    let child_indent = indent_scope.level(3);
     writer.line(
         &inner,
         format_args!("const itemCreation = (elmtId, isInitialRender) => {{"),
@@ -186,13 +188,7 @@ pub(super) fn lower_for_each(
         .unwrap_or_else(|| raw_argument_text(data_arg, source_text));
     let item_param = item_gen.params.items.first();
     let index_param = item_gen.params.items.get(1);
-    let generator_params = match (item_param, index_param) {
-        (None, _) => "()".to_string(),
-        (Some(_), Some(index_param)) => {
-            format!("(_item, {})", original_node_text(index_param, source_text))
-        }
-        (Some(_), None) => "_item".to_string(),
-    };
+    let generator_params = ForEachGeneratorParams::new(item_param, index_param, source_text).emit();
 
     {
         let mut writer = ViewpuWriter::new(out);
@@ -215,7 +211,7 @@ pub(super) fn lower_for_each(
             writer.line(indent, format_args!("        const {item_name} = _item;"));
         }
     }
-    let body_indent = format!("{indent}        ");
+    let body_indent = IterationIndent::new(indent).level(2);
     lower_lazy_arrow_body(
         item_gen,
         source_text,
@@ -303,7 +299,7 @@ pub(super) fn lower_lazy_for_each(
             format_args!("const __lazyForEachItemGenFunction = {item_params} => {{"),
         );
     }
-    let body_indent = format!("{indent}    ");
+    let body_indent = IterationIndent::new(indent).level(1);
     lower_lazy_arrow_body(
         item_gen,
         source_text,
@@ -392,5 +388,60 @@ fn binding_parameter_name<'a>(parameter: &'a FormalParameter<'a>) -> Option<&'a 
     match &parameter.pattern {
         BindingPattern::BindingIdentifier(identifier) => Some(identifier.name.as_str()),
         _ => None,
+    }
+}
+
+struct IterationIndent<'a> {
+    base: &'a str,
+}
+
+impl<'a> IterationIndent<'a> {
+    fn new(base: &'a str) -> Self {
+        Self { base }
+    }
+
+    fn level(&self, depth: usize) -> String {
+        let mut out = String::from(self.base);
+        for _ in 0..depth {
+            out.push_str("    ");
+        }
+        out
+    }
+}
+
+struct ForEachGeneratorParams<'a> {
+    item: Option<&'a FormalParameter<'a>>,
+    index: Option<&'a FormalParameter<'a>>,
+    source_text: &'a str,
+}
+
+impl<'a> ForEachGeneratorParams<'a> {
+    fn new(
+        item: Option<&'a FormalParameter<'a>>,
+        index: Option<&'a FormalParameter<'a>>,
+        source_text: &'a str,
+    ) -> Self {
+        Self {
+            item,
+            index,
+            source_text,
+        }
+    }
+
+    fn emit(&self) -> String {
+        match (self.item, self.index) {
+            (None, _) => "()".to_string(),
+            (Some(_), Some(index_param)) => {
+                let mut out = String::new();
+                write!(
+                    out,
+                    "(_item, {})",
+                    original_node_text(index_param, self.source_text)
+                )
+                .expect("writing to String cannot fail");
+                out
+            }
+            (Some(_), None) => "_item".to_string(),
+        }
     }
 }
