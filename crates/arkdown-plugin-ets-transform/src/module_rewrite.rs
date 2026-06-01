@@ -9,13 +9,11 @@ use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
 use oxc_span::SourceType;
 
+use crate::module_emit::{
+    ExportBinding, ImportSplitEmitter, ModuleBindingName, ModuleStringLiteral, NamedImportBinding,
+    ReExportSplitEmitter, ValueImportBinding,
+};
 use crate::{apply_source_patches, module_export_name_text, SourcePatch};
-
-#[derive(Debug)]
-struct ImportSpecText {
-    text: String,
-    is_type_only: bool,
-}
 
 pub(super) fn split_type_only_named_imports(source: &str, id: &str) -> String {
     let allocator = Allocator::default();
@@ -58,16 +56,18 @@ fn split_import_declaration(
         return None;
     }
     let specifiers = import.specifiers.as_ref()?;
-    let source_text = import.source.value.as_str();
-    let quote = string_literal_quote(&import.source);
-    let mut default_or_namespace = Vec::new();
-    let mut named = Vec::new();
+    let source = ModuleStringLiteral::from_string_literal(&import.source);
+    let mut value_bindings = Vec::new();
+    let mut type_bindings = Vec::new();
     let mut has_type_only_named = false;
 
     for specifier in specifiers {
         match specifier {
             ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
-                let text = import_specifier_text(specifier);
+                let named = NamedImportBinding {
+                    imported: ModuleBindingName::from_module_export_name(&specifier.imported),
+                    local: specifier.local.name.to_string(),
+                };
                 let is_type_only = specifier.import_kind.is_type()
                     || specifier.local.symbol_id.get().is_some_and(|symbol_id| {
                         !scoping
@@ -75,13 +75,21 @@ fn split_import_declaration(
                             .any(|reference| reference.flags().is_value())
                     });
                 has_type_only_named |= is_type_only;
-                named.push(ImportSpecText { text, is_type_only });
+                if is_type_only {
+                    type_bindings.push(named);
+                } else {
+                    value_bindings.push(ValueImportBinding::Named(named));
+                }
             }
             ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
-                default_or_namespace.push(specifier.local.name.to_string());
+                value_bindings.push(ValueImportBinding::Default(
+                    specifier.local.name.to_string(),
+                ));
             }
             ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
-                default_or_namespace.push(format!("* as {}", specifier.local.name));
+                value_bindings.push(ValueImportBinding::Namespace(
+                    specifier.local.name.to_string(),
+                ));
             }
         }
     }
@@ -90,62 +98,7 @@ fn split_import_declaration(
         return None;
     }
 
-    let value_named = named
-        .iter()
-        .filter(|specifier| !specifier.is_type_only)
-        .map(|specifier| specifier.text.as_str())
-        .collect::<Vec<_>>();
-    let type_named = named
-        .iter()
-        .filter(|specifier| specifier.is_type_only)
-        .map(|specifier| specifier.text.as_str())
-        .collect::<Vec<_>>();
-
-    let mut out = String::new();
-    if !default_or_namespace.is_empty() || !value_named.is_empty() {
-        out.push_str("import ");
-        out.push_str(&default_or_namespace.join(", "));
-        if !default_or_namespace.is_empty() && !value_named.is_empty() {
-            out.push_str(", ");
-        }
-        if !value_named.is_empty() {
-            out.push_str("{ ");
-            out.push_str(&value_named.join(", "));
-            out.push_str(" }");
-        }
-        out.push_str(" from ");
-        out.push(quote);
-        out.push_str(source_text);
-        out.push(quote);
-        out.push_str(";\n");
-    }
-    out.push_str("import type { ");
-    out.push_str(&type_named.join(", "));
-    out.push_str(" } from ");
-    out.push(quote);
-    out.push_str(source_text);
-    out.push(quote);
-    out.push(';');
-    Some(out)
-}
-
-fn string_literal_quote(literal: &StringLiteral<'_>) -> char {
-    literal
-        .raw
-        .as_ref()
-        .and_then(|raw| raw.chars().next())
-        .filter(|quote| *quote == '\'' || *quote == '"')
-        .unwrap_or('"')
-}
-
-fn import_specifier_text(specifier: &oxc_ast::ast::ImportSpecifier<'_>) -> String {
-    let imported = module_export_name_text(&specifier.imported);
-    let local = specifier.local.name.to_string();
-    if imported == local {
-        local
-    } else {
-        format!("{imported} as {local}")
-    }
+    Some(ImportSplitEmitter::new(source, value_bindings, type_bindings).emit())
 }
 
 /// Rewrites static `import` / `export ... from` module specifiers using OXC AST
@@ -252,15 +205,15 @@ fn rewrite_type_only_reexport(export: &ExportNamedDeclaration<'_>, id: &str) -> 
 
     for specifier in &export.specifiers {
         let local_name = module_export_name_text(&specifier.local);
-        let specifier_text = export_specifier_text(specifier);
+        let binding = export_specifier_binding(specifier);
         let is_type = specifier.export_kind.is_type()
             || target_exports
                 .get(&local_name)
                 .is_some_and(|kind| *kind == ExportBindingKind::Type);
         if is_type {
-            type_specifiers.push(specifier_text);
+            type_specifiers.push(binding);
         } else {
-            value_specifiers.push(specifier_text);
+            value_specifiers.push(binding);
         }
     }
 
@@ -268,21 +221,14 @@ fn rewrite_type_only_reexport(export: &ExportNamedDeclaration<'_>, id: &str) -> 
         return None;
     }
 
-    let module_source = module_source_text(source);
-    let mut replacement = String::new();
-    if !value_specifiers.is_empty() {
-        replacement.push_str("export { ");
-        replacement.push_str(&value_specifiers.join(", "));
-        replacement.push_str(" } from ");
-        replacement.push_str(&module_source);
-        replacement.push_str(";\n");
-    }
-    replacement.push_str("export type { ");
-    replacement.push_str(&type_specifiers.join(", "));
-    replacement.push_str(" } from ");
-    replacement.push_str(&module_source);
-    replacement.push(';');
-    Some(replacement)
+    Some(
+        ReExportSplitEmitter::new(
+            ModuleStringLiteral::from_string_literal(source),
+            value_specifiers,
+            type_specifiers,
+        )
+        .emit(),
+    )
 }
 
 fn resolve_relative_source(id: &str, specifier: &str) -> Option<std::path::PathBuf> {
@@ -418,19 +364,6 @@ fn collect_binding_names(
     }
 }
 
-fn export_specifier_text(specifier: &ExportSpecifier<'_>) -> String {
-    let local = module_export_name_text(&specifier.local);
-    let exported = module_export_name_text(&specifier.exported);
-    if local == exported {
-        local
-    } else {
-        format!("{local} as {exported}")
-    }
-}
-
-fn module_source_text(source: &oxc_ast::ast::StringLiteral<'_>) -> String {
-    source.raw.as_ref().map_or_else(
-        || format!("{:?}", source.value.as_str()),
-        ToString::to_string,
-    )
+fn export_specifier_binding(specifier: &ExportSpecifier<'_>) -> ExportBinding {
+    ExportBinding::from_export_specifier(specifier)
 }

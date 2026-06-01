@@ -15,6 +15,7 @@ pub mod checker;
 pub mod error;
 mod hvigor_format;
 pub mod kit_map;
+mod module_emit;
 mod module_rewrite;
 mod resource_transform;
 mod source_edit;
