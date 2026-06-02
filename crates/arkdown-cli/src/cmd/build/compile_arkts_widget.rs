@@ -3,9 +3,7 @@ use super::compile_arkts_modules::{
     compile_module_info, compile_source_passthrough, rewrite_compile_module_imports_to_ohm,
     slash_path,
 };
-use super::compile_arkts_package_entries::{
-    add_dynamic_import_package_entries, add_native_package_entries, PackageEntryInfos,
-};
+use super::compile_arkts_package_entries::PackageEntryInfos;
 use super::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -123,9 +121,9 @@ pub(super) fn compile_widget_pass(
     compile_infos.sort_by(|a, b| a.source_file.cmp(&b.source_file));
     let mut pkg_entries = PackageEntryInfos::default();
     if !loader_json.use_normalized_ohm_url {
-        add_dynamic_import_package_entries(&mut pkg_entries, loader_json, config);
+        pkg_entries.add_dynamic_imports(loader_json, config);
     }
-    add_native_package_entries(&mut pkg_entries);
+    pkg_entries.add_native_entries();
     let handoff = write_compile_arkts_abc_handoff(&cache_root, &compile_infos, &pkg_entries)?;
 
     let collection_value = serde_json::Value::Object(component_collection);

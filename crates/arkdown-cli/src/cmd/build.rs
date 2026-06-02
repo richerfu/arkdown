@@ -52,10 +52,7 @@ use compile_arkts_output::{
     format_unresolved_import_errors, write_hvigor_source_maps, ChunkCompileMeta,
 };
 mod compile_arkts_package_entries;
-use compile_arkts_package_entries::{
-    add_dynamic_import_package_entries, add_graph_package_entry, add_native_package_entries,
-    is_package_entry_file, PackageEntryInfos,
-};
+use compile_arkts_package_entries::{is_package_entry_file, PackageEntryInfos};
 mod compile_arkts_widget;
 use compile_arkts_widget::compile_widget_pass;
 mod intermediates;

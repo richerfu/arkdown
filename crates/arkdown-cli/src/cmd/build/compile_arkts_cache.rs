@@ -99,7 +99,7 @@ impl<'a> CompileArktsCacheWriter<'a> {
         if !self.loader_json.use_normalized_ohm_url
             && is_package_entry_file(&entry_info.source_path)
         {
-            add_graph_package_entry(pkg_entries, &entry_info, self.loader_json);
+            pkg_entries.add_from_module_info(&entry_info, self.loader_json);
         }
 
         if let Some(source_map) = transformed.and_then(|output| output.map.into_sourcemap()) {
@@ -215,9 +215,9 @@ impl<'a> CompileArktsCacheWriter<'a> {
 
     fn populate_package_entries(&self, pkg_entries: &mut PackageEntryInfos) {
         if !self.loader_json.use_normalized_ohm_url {
-            add_dynamic_import_package_entries(pkg_entries, self.loader_json, self.config);
+            pkg_entries.add_dynamic_imports(self.loader_json, self.config);
         }
-        add_native_package_entries(pkg_entries);
+        pkg_entries.add_native_entries();
     }
 
     fn mode_dir(build_mode: BuildMode) -> &'static str {

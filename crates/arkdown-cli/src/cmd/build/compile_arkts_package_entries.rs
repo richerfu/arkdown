@@ -22,85 +22,127 @@ impl PackageEntryInfos {
     pub(super) fn iter(&self) -> impl Iterator<Item = &(String, String)> {
         self.entries.iter()
     }
-}
 
-pub(super) fn add_graph_package_entry(
-    entries: &mut PackageEntryInfos,
-    info: &CompileModuleInfo,
-    loader_json: &arkdown_profile::LoaderJson,
-) {
-    if is_local_compile_module(&info.source_path, loader_json) {
-        add_local_dynamic_entry_aliases(entries, info, loader_json);
-        return;
+    /// Add package entry metadata for a module that is part of the compiled graph.
+    pub(super) fn add_from_module_info(
+        &mut self,
+        info: &CompileModuleInfo,
+        loader_json: &arkdown_profile::LoaderJson,
+    ) {
+        if is_local_compile_module(&info.source_path, loader_json) {
+            self.add_local_dynamic_aliases(info, loader_json);
+            return;
+        }
+        self.add_remote_package_entry(&info.source_path, loader_json);
     }
 
-    add_remote_package_entry(entries, &info.source_path, loader_json);
-}
-
-pub(super) fn add_dynamic_import_package_entries(
-    entries: &mut PackageEntryInfos,
-    loader_json: &arkdown_profile::LoaderJson,
-    config: &ArkdownConfig,
-) {
-    for (dep_name, value) in &loader_json.dynamic_import_lib_info {
-        if let Some(app_path) = native_shared_object_entry(dep_name, loader_json, config) {
-            entries.insert(dep_name.clone(), app_path);
-            continue;
-        }
-
-        let is_local = value
-            .get("isLocalDependency")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let entry_file = value
-            .get("entryFilePath")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        if entry_file.is_empty() {
-            continue;
-        }
-        let entry_path = canonical_or_owned(Path::new(entry_file));
-
-        if is_local {
-            if let Some(local_info) =
-                local_compile_info_for_dynamic_entry(&entry_path, loader_json, config)
-            {
-                add_local_dynamic_entry_aliases(entries, &local_info, loader_json);
+    /// Add package entries for all dynamic-import dependencies in the loader manifest.
+    pub(super) fn add_dynamic_imports(
+        &mut self,
+        loader_json: &arkdown_profile::LoaderJson,
+        config: &ArkdownConfig,
+    ) {
+        for (dep_name, value) in &loader_json.dynamic_import_lib_info {
+            if let Some(app_path) = native_shared_object_entry(dep_name, loader_json, config) {
+                self.insert(dep_name.clone(), app_path);
+                continue;
             }
-        } else {
-            add_remote_package_entry(entries, &entry_path, loader_json);
+
+            let is_local = value
+                .get("isLocalDependency")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let entry_file = value
+                .get("entryFilePath")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if entry_file.is_empty() {
+                continue;
+            }
+            let entry_path = canonical_or_owned(Path::new(entry_file));
+
+            if is_local {
+                if let Some(local_info) =
+                    local_compile_info_for_dynamic_entry(&entry_path, loader_json, config)
+                {
+                    self.add_local_dynamic_aliases(&local_info, loader_json);
+                }
+            } else {
+                self.add_remote_package_entry(&entry_path, loader_json);
+            }
         }
     }
-}
 
-fn add_local_dynamic_entry_aliases(
-    entries: &mut PackageEntryInfos,
-    info: &CompileModuleInfo,
-    loader_json: &arkdown_profile::LoaderJson,
-) {
-    let Some(host_infos) = dynamic_host_infos_for_entry(&info.source_path, loader_json) else {
-        return;
-    };
-    for host in host_infos {
-        let host_dependency_name = host
-            .get("hostDependencyName")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        let host_module_name = host
-            .get("hostModuleName")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        if host_dependency_name.is_empty() || host_module_name.is_empty() {
-            continue;
+    /// Add static native system entries (e.g. `@system.app`, `@ohos.curves`).
+    pub(super) fn add_native_entries(&mut self) {
+        for name in [
+            "system.app",
+            "ohos.app",
+            "system.router",
+            "system.curves",
+            "ohos.curves",
+            "system.matrix4",
+            "ohos.matrix4",
+        ] {
+            self.insert(format!("@{name}"), format!("@native.{name}"));
         }
-        entries.insert(
-            format!("pkg_modules@{host_module_name}/{host_dependency_name}"),
-            info.record_name.clone(),
+    }
+
+    fn add_local_dynamic_aliases(
+        &mut self,
+        info: &CompileModuleInfo,
+        loader_json: &arkdown_profile::LoaderJson,
+    ) {
+        let Some(host_infos) = dynamic_host_infos_for_entry(&info.source_path, loader_json) else {
+            return;
+        };
+        for host in host_infos {
+            let host_dependency_name = host
+                .get("hostDependencyName")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let host_module_name = host
+                .get("hostModuleName")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if host_dependency_name.is_empty() || host_module_name.is_empty() {
+                continue;
+            }
+            self.insert(
+                format!("pkg_modules@{host_module_name}/{host_dependency_name}"),
+                info.record_name.clone(),
+            );
+            self.insert(
+                host_dependency_name.to_string(),
+                format!("@bundle.{}", info.record_name),
+            );
+        }
+    }
+
+    fn add_remote_package_entry(
+        &mut self,
+        source_path: &Path,
+        loader_json: &arkdown_profile::LoaderJson,
+    ) {
+        let Some(package_root) = find_package_root(source_path) else {
+            return;
+        };
+        let Some(package_entry_name) = pkg_modules_package_name(&package_root, loader_json) else {
+            return;
+        };
+        let Ok(rel_to_pkg) = source_path.strip_prefix(&package_root) else {
+            return;
+        };
+        let build_path = format!(
+            "{}/{}",
+            package_entry_name,
+            strip_source_extension(&slash_path(rel_to_pkg))
         );
-        entries.insert(
-            host_dependency_name.to_string(),
-            format!("@bundle.{}", info.record_name),
-        );
+        self.insert(package_entry_name.clone(), build_path);
+
+        for alias in symlink_pkg_module_aliases(&package_root, loader_json) {
+            self.insert(alias, package_entry_name.clone());
+        }
     }
 }
 
@@ -137,32 +179,6 @@ fn local_compile_info_for_dynamic_entry(
     compile_module_info(entry_path, &cache_root, loader_json, config)
 }
 
-fn add_remote_package_entry(
-    entries: &mut PackageEntryInfos,
-    source_path: &Path,
-    loader_json: &arkdown_profile::LoaderJson,
-) {
-    let Some(package_root) = find_package_root(source_path) else {
-        return;
-    };
-    let Some(package_entry_name) = pkg_modules_package_name(&package_root, loader_json) else {
-        return;
-    };
-    let Ok(rel_to_pkg) = source_path.strip_prefix(&package_root) else {
-        return;
-    };
-    let build_path = format!(
-        "{}/{}",
-        package_entry_name,
-        strip_source_extension(&slash_path(rel_to_pkg))
-    );
-    entries.insert(package_entry_name.clone(), build_path);
-
-    for alias in symlink_pkg_module_aliases(&package_root, loader_json) {
-        entries.insert(alias, package_entry_name.clone());
-    }
-}
-
 fn native_shared_object_entry(
     dep_name: &str,
     loader_json: &arkdown_profile::LoaderJson,
@@ -173,20 +189,6 @@ fn native_shared_object_entry(
         "@app.{}/{}/{}",
         config.product.bundle_name, loader_json.module_name, stem
     ))
-}
-
-pub(super) fn add_native_package_entries(entries: &mut PackageEntryInfos) {
-    for name in [
-        "system.app",
-        "ohos.app",
-        "system.router",
-        "system.curves",
-        "ohos.curves",
-        "system.matrix4",
-        "ohos.matrix4",
-    ] {
-        entries.insert(format!("@{name}"), format!("@native.{name}"));
-    }
 }
 
 fn is_local_compile_module(source_path: &Path, loader_json: &arkdown_profile::LoaderJson) -> bool {
