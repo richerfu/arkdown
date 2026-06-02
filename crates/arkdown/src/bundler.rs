@@ -37,7 +37,7 @@ use rolldown_common::{
 use rolldown_plugin::{__inner::SharedPluginable, HookUsage, Plugin, PluginContext};
 use rolldown_utils::js_regex::HybridRegex;
 
-use crate::compile_entry::{compile_entry_chunk_name, compile_entry_stem_counts};
+use crate::compile_entry::CompileEntryNamer;
 use crate::output;
 
 /// The top-level bundler for one OHOS module build.
@@ -200,18 +200,17 @@ impl Bundler {
 struct BundlePlan {
     module_root: PathBuf,
     entries: Vec<String>,
-    stem_counts: FxHashMap<String, usize>,
+    namer: CompileEntryNamer,
 }
 
 impl BundlePlan {
     fn from_loader_json(loader_json: &LoaderJson) -> Self {
         let module_root = Self::canonical_module_root(&loader_json.module_root_path);
         let entries = Self::rollup_input_entries(loader_json);
-        let stem_counts = compile_entry_stem_counts(&entries);
         Self {
             module_root,
+            namer: CompileEntryNamer::new(&entries),
             entries,
-            stem_counts,
         }
     }
 
@@ -220,7 +219,7 @@ impl BundlePlan {
             .iter()
             .enumerate()
             .map(|(index, entry)| InputItem {
-                name: Some(compile_entry_chunk_name(entry, index, &self.stem_counts)),
+                name: Some(self.namer.chunk_name(entry, index)),
                 import: self.import_path(entry),
             })
             .collect()
@@ -232,7 +231,7 @@ impl BundlePlan {
             .enumerate()
             .map(|(index, entry)| {
                 (
-                    compile_entry_chunk_name(entry, index, &self.stem_counts),
+                    self.namer.chunk_name(entry, index),
                     entry.trim_start_matches("./").to_string(),
                 )
             })

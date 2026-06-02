@@ -2,7 +2,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-pub(super) use arkdown::compile_entry::{compile_entry_chunk_name, compile_entry_stem_counts};
+
 use arkdown::BundleOutput;
 use arkdown_core::{
     hvigor_source_maps_json, ArkdownConfig, HvigorSourceMapEntry, HvigorSourceMapOptions,

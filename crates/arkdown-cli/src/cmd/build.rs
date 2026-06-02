@@ -6,7 +6,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use clap::Args;
 
-use arkdown::{BundleOutput, Bundler};
+use arkdown::{compile_entry::CompileEntryNamer, BundleOutput, Bundler};
 use arkdown_config::load_config;
 use arkdown_core::{
     ArkdownConfig, BuildMode, ChunkGraph, ExtensionAbilityEntry, ModuleConfig, ModuleJson5,
@@ -48,7 +48,7 @@ use compile_arkts_modules::{
 };
 mod compile_arkts_output;
 use compile_arkts_output::{
-    collect_unresolved_external_imports, compile_entry_chunk_name, compile_entry_stem_counts,
+    collect_unresolved_external_imports,
     format_unresolved_import_errors, write_hvigor_source_maps, ChunkCompileMeta,
 };
 mod compile_arkts_package_entries;
@@ -491,7 +491,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         // Format matches es2abc/hvigorw: "{bundleName}/{moduleName}/{pathFromEts}"
         // e.g. "com.example.arkdown.test/entry/ets/entryability/EntryAbility"
         // The ABC class is "L{record_name};" (no src/main, no & wrappers).
-        let chunk_name_counts = compile_entry_stem_counts(&loader_json.compile_entry);
+        let namer = CompileEntryNamer::new(&loader_json.compile_entry);
         let record_name_map: FxHashMap<String, ChunkCompileMeta> = loader_json
             .compile_entry
             .iter()
@@ -499,7 +499,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             .filter_map(|(index, entry_path)| {
                 let path = std::path::Path::new(entry_path);
                 path.file_stem()?.to_str()?;
-                let chunk_name = compile_entry_chunk_name(entry_path, index, &chunk_name_counts);
+                let chunk_name = namer.chunk_name(entry_path, index);
                 Some((
                     chunk_name,
                     ChunkCompileMeta {
