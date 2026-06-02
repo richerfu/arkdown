@@ -195,7 +195,7 @@ impl BuildCache {
 
     /// Insert or update a cache entry both in memory and on disk.
     pub fn insert(&mut self, entry: CachedEntry) -> Result<(), CacheError> {
-        let file_name = format!("{}.json", hash_id(&entry.id));
+        let file_name = format!("{}.json", Self::hash_id(&entry.id));
         let cache_file = self.cache_dir.join(file_name);
         fs_err::create_dir_all(&self.cache_dir)?;
         let json = serde_json::to_string_pretty(&entry)?;
@@ -252,6 +252,10 @@ impl BuildCache {
     pub fn is_empty(&self) -> bool {
         self.memory.is_empty()
     }
+
+    fn hash_id(id: &str) -> String {
+        format!("{:016x}", arkdown_utils::fnv1a_hash(id))
+    }
 }
 
 /// Compute a deterministic content hash from source text.
@@ -263,9 +267,6 @@ pub fn compute_content_hash(content: &str) -> String {
 }
 
 /// Derive a stable file-system safe name from a module ID.
-fn hash_id(id: &str) -> String {
-    format!("{:016x}", arkdown_utils::fnv1a_hash(id))
-}
 
 #[cfg(test)]
 mod tests {

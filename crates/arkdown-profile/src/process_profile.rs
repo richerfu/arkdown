@@ -14,7 +14,7 @@ pub fn process_profile(
     _bundle_name: &str,
     compile_mode: CompileMode,
 ) -> HapManifest {
-    let ark_vm_version = fallback_ark_vm_version(compile_api_version);
+    let ark_vm_version = format!("{}.0.1.0", compile_api_version);
     process_profile_with_ark_vm_version(module_json5, &ark_vm_version, _bundle_name, compile_mode)
 }
 
@@ -83,10 +83,6 @@ pub fn ark_virtual_machine_from_version(ark_vm_version: &str) -> String {
     } else {
         format!("ark{}", ark_vm_version)
     }
-}
-
-fn fallback_ark_vm_version(compile_api_version: u32) -> String {
-    format!("{}.0.1.0", compile_api_version)
 }
 
 #[cfg(test)]
