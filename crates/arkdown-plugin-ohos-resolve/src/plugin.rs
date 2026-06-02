@@ -143,6 +143,8 @@ fn resolved_module_to_hook_output(resolved: OhosResolvedModule) -> HookResolveId
 
 fn is_builtin_external_specifier(specifier: &str) -> bool {
     specifier.starts_with("@ohos:")
+        || specifier.starts_with("@hms:")
+        || specifier.starts_with("@hms.")
         || specifier.starts_with("@system.")
         || specifier.starts_with("@native:")
 }

@@ -177,6 +177,7 @@ fn is_external_specifier(s: &str) -> bool {
         || s.starts_with("@bundle:")
         || s.starts_with("@system.")
         || s.starts_with("@hms.")
+        || s.starts_with("@hms:")
 }
 
 /// Convert an `ArkChunk` to an OHM URL string.

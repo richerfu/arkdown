@@ -37,6 +37,7 @@ pub(super) fn collect_unresolved_external_imports(bundle_out: &BundleOutput) -> 
                 || specifier.starts_with("@ohos.")
                 || specifier.starts_with("@kit.")
                 || specifier.starts_with("@hms.")
+                || specifier.starts_with("@hms:")
                 || specifier.starts_with("@system.")
                 || specifier.starts_with("@native:")
                 || specifier.ends_with(".so"));
