@@ -10,6 +10,33 @@ pub(super) fn push_state_constructor_init(out: &mut String, field: &StateField) 
     ComponentFieldEmitter::new(out).push_state_constructor_init(field);
 }
 
+/// Emit the `@Prop` default-value fallback block in the constructor.
+///
+/// Upstream hvigor `createUpdateParamsWithIf(e, t=true, r=initializer)` in
+/// `process_component_member.js` — only emitted when:
+/// 1. The decorator is `@Prop` (partialUpdate mode).
+/// 2. The field has an initializer expression.
+///
+/// Generated code:
+/// ```typescript
+/// if (params.fieldName === undefined) {
+///     this.__fieldName.set(defaultValue);
+/// }
+/// ```
+pub(super) fn push_prop_default_fallback(out: &mut String, field: &StateField) {
+    if field.decorator != "Prop" {
+        return;
+    }
+    let Some(init) = field.initializer.as_deref() else {
+        return;
+    };
+    let _ = writeln!(
+        out,
+        "        if (params.{} === undefined) {{\n            this.__{}.set({});\n        }}",
+        field.name, field.name, init
+    );
+}
+
 /// Emit `this.addProvidedVar(...)` registration call(s) for a `@Provide` field.
 ///
 /// Upstream hvigor `addAddProvidedVar` (process_component_member.js):

@@ -2,8 +2,8 @@ use std::fmt::Write;
 
 use crate::transform::build_fn::SpanHint;
 use crate::transform::component_field::{
-    push_provide_var_registration, push_regular_field_declaration, push_state_constructor_init,
-    push_state_field_declaration,
+    push_prop_default_fallback, push_provide_var_registration, push_regular_field_declaration,
+    push_state_constructor_init, push_state_field_declaration,
 };
 use crate::transform::decorator::{has_initially_provided_value_slot, has_update_state_vars_slot};
 use crate::transform::entry::{generate_entry_registration, EntryRegistrationInfo};
@@ -242,6 +242,7 @@ impl<'a> ViewPuClassEmitter<'a> {
             } else if let Some(field) = self.info.find_state_field(name) {
                 push_state_constructor_init(&mut self.out, field);
                 push_provide_var_registration(&mut self.out, field);
+                push_prop_default_fallback(&mut self.out, field);
             }
         }
         self.out
