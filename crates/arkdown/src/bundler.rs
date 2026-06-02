@@ -126,7 +126,7 @@ impl Bundler {
         // manualChunks for supportChunks=true: mirrors hvigor's arkts-pack.js logic.
         // oh_modules/node_modules → "commons"; non-entry local modules → "vendors".
         let manual_code_splitting = if loader_json.support_chunks {
-            Some(build_manual_code_splitting_options()?)
+            Some(Self::build_manual_code_splitting_options()?)
         } else {
             None
         };
@@ -167,7 +167,7 @@ impl Bundler {
             .map(|(_, id)| id)
             .filter(|id| seen_module_ids.insert(id.clone()))
             .collect::<Vec<_>>();
-        let chunk_graph = build_chunk_graph(rd_output, collected_module_ids)?;
+        let chunk_graph = Self::build_chunk_graph(rd_output, collected_module_ids)?;
 
         // ── 6. Write loader_out/default/ets artifacts to disk ────────────────
         let output_dir = PathBuf::from(&loader_json.ace_module_build);
@@ -180,8 +180,8 @@ impl Bundler {
         };
 
         let written_output =
-            output::write_output(&chunk_graph, &output_dir, Some(&source_map_opts))?;
-        let modules_abc_path = output::modules_abc_path(&output_dir);
+            output::WrittenOutput::write(&chunk_graph, &output_dir, Some(&source_map_opts))?;
+        let modules_abc_path = output::WrittenOutput::abc_path_in(&output_dir);
 
         Ok(BundleOutput {
             chunk_graph,
@@ -189,6 +189,118 @@ impl Bundler {
             chunk_files: written_output.chunk_files,
             modules_abc_path,
             source_maps_path: written_output.source_maps_path,
+        })
+    }
+
+    fn build_chunk_graph(
+        rd_output: rolldown::BundleOutput,
+        full_module_ids: Vec<String>,
+    ) -> Result<ChunkGraph, ArkdownError> {
+        use arkdown_core::ChunkIdx;
+
+        let mut chunks: IndexVec<ChunkIdx, ArkChunk> = IndexVec::new();
+
+        for asset in rd_output.assets {
+            if let Output::Chunk(chunk) = asset {
+                let chunk_name = std::path::Path::new(chunk.filename.as_str())
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(chunk.name.as_str())
+                    .to_string();
+                let ark_chunk = ArkChunk {
+                    name: chunk_name,
+                    code: chunk.code.clone(),
+                    source_map: chunk.map.as_ref().map(|map| map.to_json_string()),
+                    is_entry: chunk.is_entry,
+                    is_dynamic_entry: chunk.is_dynamic_entry,
+                    facade_module_id: chunk
+                        .facade_module_id
+                        .as_ref()
+                        .map(|id| id.as_str().to_owned()),
+                    module_ids: chunk
+                        .module_ids
+                        .iter()
+                        .map(|id| id.as_str().to_owned())
+                        .collect(),
+                    exports: chunk.exports.iter().map(|e| e.to_string()).collect(),
+                    imports: chunk.imports.iter().map(|i| i.to_string()).collect(),
+                    dynamic_imports: chunk
+                        .dynamic_imports
+                        .iter()
+                        .map(|d| d.to_string())
+                        .collect(),
+                    ..ArkChunk::default()
+                };
+                chunks.push(ark_chunk);
+            }
+        }
+
+        Ok(ChunkGraph {
+            chunks,
+            full_module_ids,
+            // module_to_chunk and entry_module_to_entry_chunk are not populated
+            // from rolldown output because rolldown uses its own module index space.
+            // Callers that need module→chunk mapping (e.g. arkdown-abc) must use
+            // ArkChunk.facade_module_id / ArkChunk.module_ids instead.
+            module_to_chunk: IndexVec::new(),
+            entry_module_to_entry_chunk: FxHashMap::default(),
+        })
+    }
+
+
+    /// Build `ManualCodeSplittingOptions` that mirrors hvigor's `manualChunks` callback.
+    ///
+    /// Group 1 (`commons`): modules whose path contains `oh_modules` or `node_modules`.
+    /// Group 2 (`vendors`): all remaining non-entry modules.
+    ///
+    /// This matches the hvigor `arkts-pack.js` logic:
+    /// ```js
+    /// function manualChunks(id, { getModuleInfo }) {
+    ///   if (id.includes(NODE_MODULES) || id.includes(OH_NODE_MODULES)) return "commons";
+    ///   const info = getModuleInfo(id);
+    ///   return info && !info.isEntry ? "vendors" : undefined;
+    /// }
+    /// ```
+    fn build_manual_code_splitting_options() -> Result<ManualCodeSplittingOptions, ArkdownError> {
+        let commons_regex = HybridRegex::new("oh_modules|node_modules")
+            .map_err(|e| ArkdownError::Bundler(format!("invalid manualChunks regex: {e}")))?;
+
+        let commons_group = MatchGroup {
+            name: MatchGroupName::Static("commons".to_string()),
+            test: Some(MatchGroupTest::Regex(commons_regex)),
+            ..Default::default()
+        };
+
+        // Dynamic name function: returns "vendors" for non-entry modules, None for entries.
+        // The function captures no state; it queries `is_entry` via ChunkingContext.
+        let vendors_name_fn: Arc<
+            dyn Fn(
+                    &str,
+                    &ChunkingContext,
+                )
+                    -> Pin<Box<dyn Future<Output = anyhow::Result<Option<String>>> + Send + 'static>>
+                + Send
+                + Sync,
+        > = Arc::new(|module_id: &str, ctx: &ChunkingContext| {
+            let result = ctx.get_module_info(module_id).and_then(|info| {
+                if !info.is_entry {
+                    Some("vendors".to_string())
+                } else {
+                    None
+                }
+            });
+            Box::pin(async move { Ok(result) })
+        });
+
+        let vendors_group = MatchGroup {
+            name: MatchGroupName::Dynamic(vendors_name_fn),
+            test: None,
+            ..Default::default()
+        };
+
+        Ok(ManualCodeSplittingOptions {
+            groups: Some(vec![commons_group, vendors_group]),
+            ..Default::default()
         })
     }
 }
@@ -319,115 +431,4 @@ impl Plugin for ModuleIdCollectorPlugin {
             Ok(())
         }
     }
-}
-
-fn build_chunk_graph(
-    rd_output: rolldown::BundleOutput,
-    full_module_ids: Vec<String>,
-) -> Result<ChunkGraph, ArkdownError> {
-    use arkdown_core::ChunkIdx;
-
-    let mut chunks: IndexVec<ChunkIdx, ArkChunk> = IndexVec::new();
-
-    for asset in rd_output.assets {
-        if let Output::Chunk(chunk) = asset {
-            let chunk_name = std::path::Path::new(chunk.filename.as_str())
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or(chunk.name.as_str())
-                .to_string();
-            let ark_chunk = ArkChunk {
-                name: chunk_name,
-                code: chunk.code.clone(),
-                source_map: chunk.map.as_ref().map(|map| map.to_json_string()),
-                is_entry: chunk.is_entry,
-                is_dynamic_entry: chunk.is_dynamic_entry,
-                facade_module_id: chunk
-                    .facade_module_id
-                    .as_ref()
-                    .map(|id| id.as_str().to_owned()),
-                module_ids: chunk
-                    .module_ids
-                    .iter()
-                    .map(|id| id.as_str().to_owned())
-                    .collect(),
-                exports: chunk.exports.iter().map(|e| e.to_string()).collect(),
-                imports: chunk.imports.iter().map(|i| i.to_string()).collect(),
-                dynamic_imports: chunk
-                    .dynamic_imports
-                    .iter()
-                    .map(|d| d.to_string())
-                    .collect(),
-                ..ArkChunk::default()
-            };
-            chunks.push(ark_chunk);
-        }
-    }
-
-    Ok(ChunkGraph {
-        chunks,
-        full_module_ids,
-        // module_to_chunk and entry_module_to_entry_chunk are not populated
-        // from rolldown output because rolldown uses its own module index space.
-        // Callers that need module→chunk mapping (e.g. arkdown-abc) must use
-        // ArkChunk.facade_module_id / ArkChunk.module_ids instead.
-        module_to_chunk: IndexVec::new(),
-        entry_module_to_entry_chunk: FxHashMap::default(),
-    })
-}
-
-/// Build `ManualCodeSplittingOptions` that mirrors hvigor's `manualChunks` callback.
-///
-/// Group 1 (`commons`): modules whose path contains `oh_modules` or `node_modules`.
-/// Group 2 (`vendors`): all remaining non-entry modules.
-///
-/// This matches the hvigor `arkts-pack.js` logic:
-/// ```js
-/// function manualChunks(id, { getModuleInfo }) {
-///   if (id.includes(NODE_MODULES) || id.includes(OH_NODE_MODULES)) return "commons";
-///   const info = getModuleInfo(id);
-///   return info && !info.isEntry ? "vendors" : undefined;
-/// }
-/// ```
-fn build_manual_code_splitting_options() -> Result<ManualCodeSplittingOptions, ArkdownError> {
-    let commons_regex = HybridRegex::new("oh_modules|node_modules")
-        .map_err(|e| ArkdownError::Bundler(format!("invalid manualChunks regex: {e}")))?;
-
-    let commons_group = MatchGroup {
-        name: MatchGroupName::Static("commons".to_string()),
-        test: Some(MatchGroupTest::Regex(commons_regex)),
-        ..Default::default()
-    };
-
-    // Dynamic name function: returns "vendors" for non-entry modules, None for entries.
-    // The function captures no state; it queries `is_entry` via ChunkingContext.
-    let vendors_name_fn: Arc<
-        dyn Fn(
-                &str,
-                &ChunkingContext,
-            )
-                -> Pin<Box<dyn Future<Output = anyhow::Result<Option<String>>> + Send + 'static>>
-            + Send
-            + Sync,
-    > = Arc::new(|module_id: &str, ctx: &ChunkingContext| {
-        let result = ctx.get_module_info(module_id).and_then(|info| {
-            if !info.is_entry {
-                Some("vendors".to_string())
-            } else {
-                None
-            }
-        });
-        Box::pin(async move { Ok(result) })
-    });
-
-    let vendors_group = MatchGroup {
-        name: MatchGroupName::Dynamic(vendors_name_fn),
-        test: None,
-        ..Default::default()
-    };
-
-    Ok(ManualCodeSplittingOptions {
-        groups: Some(vec![commons_group, vendors_group]),
-        ..Default::default()
-    })
 }

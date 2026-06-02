@@ -17,6 +17,37 @@ pub struct WrittenOutput {
     pub source_maps_path: Option<PathBuf>,
 }
 
+impl WrittenOutput {
+    /// Write JavaScript chunks from `chunk_graph` to `output_dir`.
+    ///
+    /// Returns a `WrittenOutput` with chunk file paths and optional source map path.
+    pub fn write(
+        chunk_graph: &ChunkGraph,
+        output_dir: &Path,
+        source_map_opts: Option<&SourceMapOptions>,
+    ) -> Result<Self, ArkdownError> {
+        write_output(chunk_graph, output_dir, source_map_opts)
+    }
+
+    /// Write chunks without source map metadata; returns just the file list.
+    pub fn write_chunks_only(
+        chunk_graph: &ChunkGraph,
+        output_dir: &Path,
+    ) -> Result<Vec<(String, PathBuf)>, ArkdownError> {
+        Ok(Self::write(chunk_graph, output_dir, None)?.chunk_files)
+    }
+
+    /// Path for the merged module ABC file within `loader_out_ets_dir`.
+    pub fn abc_path_in(loader_out_ets_dir: &Path) -> PathBuf {
+        loader_out_ets_dir.join(MODULES_ABC_FILE_NAME)
+    }
+
+    /// Path for the hvigor-format source map file within `loader_out_ets_dir`.
+    pub fn source_maps_path_in(loader_out_ets_dir: &Path) -> PathBuf {
+        loader_out_ets_dir.join(SOURCE_MAPS_FILE_NAME)
+    }
+}
+
 /// Module-level metadata needed to emit the hvigor per-file `sourceMaps.map` format.
 ///
 /// The golden format uses keys of the form

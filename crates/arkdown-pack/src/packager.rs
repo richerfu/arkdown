@@ -511,7 +511,7 @@ impl Packager {
         // Additional ETS-side assets copied by CompileArkTS/loader, such as
         // `src/main/ets/common/**/*.json`, are packaged under `ets/`.
         if let Some(ets_dir) = input.abc_path.parent() {
-            add_loader_out_ets_assets(&mut writer, ets_dir)?;
+            Self::add_loader_out_ets_assets(&mut writer, ets_dir)?;
         }
 
         // Native .so libraries — stored, placed under libs/arm64-v8a/
@@ -535,7 +535,7 @@ impl Packager {
             }
         }
 
-        add_profile_guided_ap(&mut writer, &input)?;
+        Self::add_profile_guided_ap(&mut writer, &input)?;
 
         // pack.info — bundle metadata (deflated JSON), written last by hvigor
         // for a normal HAP.
@@ -595,58 +595,61 @@ impl Packager {
     }
 }
 
-fn add_loader_out_ets_assets<W: std::io::Write + std::io::Seek>(
-    writer: &mut zip::ZipWriter<W>,
-    ets_dir: &std::path::Path,
-) -> Result<(), PackError> {
-    for entry in walkdir::WalkDir::new(ets_dir)
-        .min_depth(1)
-        .into_iter()
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.file_type().is_file())
-    {
-        let path = entry.path();
-        let rel = path.strip_prefix(ets_dir).unwrap_or(path);
-        let rel_text = rel.to_string_lossy().replace('\\', "/");
-        if rel_text == "modules.abc"
-            || rel_text == "sourceMaps.map"
-            || rel_text.starts_with("cache/")
-            || path.extension().and_then(|e| e.to_str()) == Some("js")
+// Private helpers for HAP/HSP assembly
+impl Packager {
+    fn add_loader_out_ets_assets<W: std::io::Write + std::io::Seek>(
+        writer: &mut zip::ZipWriter<W>,
+        ets_dir: &std::path::Path,
+    ) -> Result<(), PackError> {
+        for entry in walkdir::WalkDir::new(ets_dir)
+            .min_depth(1)
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_type().is_file())
         {
-            continue;
+            let path = entry.path();
+            let rel = path.strip_prefix(ets_dir).unwrap_or(path);
+            let rel_text = rel.to_string_lossy().replace('\\', "/");
+            if rel_text == "modules.abc"
+                || rel_text == "sourceMaps.map"
+                || rel_text.starts_with("cache/")
+                || path.extension().and_then(|e| e.to_str()) == Some("js")
+            {
+                continue;
+            }
+            let dest = ArchivePath::ets(&rel_text);
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if ext == "json" {
+                add_json_resource_deflate(writer, &dest, path)?;
+            } else if matches!(ext, "json5" | "xml" | "txt" | "html") {
+                zip_writer::add_file_deflate(writer, &dest, path)?;
+            } else {
+                zip_writer::add_file_stored(writer, &dest, path)?;
+            }
         }
-        let dest = ArchivePath::ets(&rel_text);
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if ext == "json" {
-            add_json_resource_deflate(writer, &dest, path)?;
-        } else if matches!(ext, "json5" | "xml" | "txt" | "html") {
-            zip_writer::add_file_deflate(writer, &dest, path)?;
-        } else {
-            zip_writer::add_file_stored(writer, &dest, path)?;
-        }
+        Ok(())
     }
-    Ok(())
-}
 
-fn add_profile_guided_ap<W: std::io::Write + std::io::Seek>(
-    writer: &mut zip::ZipWriter<W>,
-    input: &PackInput,
-) -> Result<(), PackError> {
-    let Some(output_parent) = input.output_path.parent() else {
-        return Ok(());
-    };
-    let Some(module_root) = output_parent.ancestors().nth(4) else {
-        return Ok(());
-    };
-    let ap_path = module_root.join(ArchivePath::profile_guided_ap_file(&input.module_name));
-    if ap_path.exists() {
-        zip_writer::add_file_stored(
-            writer,
-            &ArchivePath::profile_guided_ap(&input.module_name),
-            &ap_path,
-        )?;
+    fn add_profile_guided_ap<W: std::io::Write + std::io::Seek>(
+        writer: &mut zip::ZipWriter<W>,
+        input: &PackInput,
+    ) -> Result<(), PackError> {
+        let Some(output_parent) = input.output_path.parent() else {
+            return Ok(());
+        };
+        let Some(module_root) = output_parent.ancestors().nth(4) else {
+            return Ok(());
+        };
+        let ap_path = module_root.join(ArchivePath::profile_guided_ap_file(&input.module_name));
+        if ap_path.exists() {
+            zip_writer::add_file_stored(
+                writer,
+                &ArchivePath::profile_guided_ap(&input.module_name),
+                &ap_path,
+            )?;
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 struct ArchivePath;
