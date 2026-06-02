@@ -7,6 +7,7 @@ edition = "2021"
 tempfile = { workspace = true }
 
 [dependencies]
+rustc-hash    = { workspace = true }
 arkdown-core  = { workspace = true }
 oxc_allocator = { workspace = true }
 oxc_parser    = { workspace = true }

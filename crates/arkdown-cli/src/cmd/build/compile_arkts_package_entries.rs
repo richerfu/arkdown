@@ -3,11 +3,12 @@ use super::compile_arkts_modules::{
     slash_path, strip_source_extension, symlink_pkg_module_aliases, CompileModuleInfo,
 };
 use super::*;
+use rustc_hash::FxHashSet;
 
 #[derive(Default)]
 pub(super) struct PackageEntryInfos {
     entries: Vec<(String, String)>,
-    seen: HashSet<String>,
+    seen: FxHashSet<String>,
 }
 
 impl PackageEntryInfos {

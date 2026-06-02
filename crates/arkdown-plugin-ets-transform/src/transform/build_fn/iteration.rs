@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use rustc_hash::FxHashSet;
 use std::fmt::Write;
 
 use oxc_ast::ast::{
@@ -31,8 +31,8 @@ pub(super) fn lower_lazy_list_item(
     component: &ArkUIComponentExpression<'_>,
     source_text: &str,
     source_id: &str,
-    custom_components: &HashSet<String>,
-    builder_methods: &HashSet<String>,
+    custom_components: &FxHashSet<String>,
+    builder_methods: &FxHashSet<String>,
     custom_component_update_props: &CustomComponentUpdateProps,
     component_metadata: &ComponentMetadata,
     context: BuildContext,
@@ -165,8 +165,8 @@ pub(super) fn lower_for_each(
     arguments: &[Argument<'_>],
     source_text: &str,
     source_id: &str,
-    custom_components: &HashSet<String>,
-    builder_methods: &HashSet<String>,
+    custom_components: &FxHashSet<String>,
+    builder_methods: &FxHashSet<String>,
     custom_component_update_props: &CustomComponentUpdateProps,
     component_metadata: &ComponentMetadata,
     context: BuildContext,
@@ -270,8 +270,8 @@ pub(super) fn lower_lazy_for_each(
     component: &ArkUIComponentExpression<'_>,
     source_text: &str,
     source_id: &str,
-    custom_components: &HashSet<String>,
-    builder_methods: &HashSet<String>,
+    custom_components: &FxHashSet<String>,
+    builder_methods: &FxHashSet<String>,
     custom_component_update_props: &CustomComponentUpdateProps,
     component_metadata: &ComponentMetadata,
     context: BuildContext,
@@ -346,8 +346,8 @@ fn lower_lazy_arrow_body(
     arrow: &ArrowFunctionExpression<'_>,
     source_text: &str,
     source_id: &str,
-    custom_components: &HashSet<String>,
-    builder_methods: &HashSet<String>,
+    custom_components: &FxHashSet<String>,
+    builder_methods: &FxHashSet<String>,
     custom_component_update_props: &CustomComponentUpdateProps,
     component_metadata: &ComponentMetadata,
     context: BuildContext,

@@ -18,14 +18,13 @@
 //! reference implementations.
 
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use index_vec::IndexVec;
-use rustc_hash::FxHashMap;
 
 use arkdown_core::{ArkChunk, ArkdownConfig, ArkdownError, BuildMode, ChunkGraph};
 use arkdown_profile::LoaderJson;
@@ -162,7 +161,7 @@ impl Bundler {
             .map(|modules| modules.clone())
             .unwrap_or_default();
         parsed_modules.sort_by_key(|(idx, _)| *idx);
-        let mut seen_module_ids = HashSet::new();
+        let mut seen_module_ids = FxHashSet::default();
         let collected_module_ids = parsed_modules
             .into_iter()
             .map(|(_, id)| id)
@@ -201,7 +200,7 @@ impl Bundler {
 struct BundlePlan {
     module_root: PathBuf,
     entries: Vec<String>,
-    stem_counts: HashMap<String, usize>,
+    stem_counts: FxHashMap<String, usize>,
 }
 
 impl BundlePlan {
@@ -227,7 +226,7 @@ impl BundlePlan {
             .collect()
     }
 
-    fn chunk_source_files(&self) -> HashMap<String, String> {
+    fn chunk_source_files(&self) -> FxHashMap<String, String> {
         self.entries
             .iter()
             .enumerate()
@@ -253,7 +252,7 @@ impl BundlePlan {
 
     fn rollup_input_entries(loader_json: &LoaderJson) -> Vec<String> {
         let mut entries = Vec::new();
-        let mut seen = HashSet::new();
+        let mut seen = FxHashSet::default();
         for entry in loader_json
             .hvigor_compile_entry
             .iter()

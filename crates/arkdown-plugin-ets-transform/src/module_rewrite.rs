@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
@@ -255,7 +255,7 @@ pub(crate) enum ExportBindingKind {
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn exported_binding_kinds(
     path: &std::path::Path,
-) -> Option<HashMap<String, ExportBindingKind>> {
+) -> Option<FxHashMap<String, ExportBindingKind>> {
     let Ok(content) = std::fs::read_to_string(path) else {
         return None;
     };
@@ -267,7 +267,7 @@ pub(crate) fn exported_binding_kinds(
         return None;
     }
 
-    let mut exports = HashMap::new();
+    let mut exports = FxHashMap::default();
     for statement in &parsed.program.body {
         let Statement::ExportNamedDeclaration(export) = statement else {
             continue;
@@ -294,7 +294,7 @@ pub(crate) fn exported_binding_kinds(
 
 fn collect_exported_declaration(
     declaration: &Declaration<'_>,
-    exports: &mut HashMap<String, ExportBindingKind>,
+    exports: &mut FxHashMap<String, ExportBindingKind>,
 ) {
     match declaration {
         Declaration::TSInterfaceDeclaration(declaration) => {
@@ -336,7 +336,7 @@ fn collect_exported_declaration(
 
 fn collect_binding_names(
     pattern: &BindingPattern<'_>,
-    exports: &mut HashMap<String, ExportBindingKind>,
+    exports: &mut FxHashMap<String, ExportBindingKind>,
 ) {
     match pattern {
         BindingPattern::BindingIdentifier(identifier) => {

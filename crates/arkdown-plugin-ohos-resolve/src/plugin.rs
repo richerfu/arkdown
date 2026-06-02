@@ -224,7 +224,7 @@ fn unresolved_external_output(specifier: &str) -> HookResolveIdOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use rustc_hash::FxHashMap;
 
     fn make_plugin() -> OhosResolvePlugin {
         OhosResolvePlugin::new(
@@ -232,7 +232,7 @@ mod tests {
                 project_root: PathBuf::from("/tmp"),
                 sdk_api_dirs: vec![],
                 sdk_kits_dirs: vec![],
-                pkg_name_to_pkg_info: HashMap::new(),
+                pkg_name_to_pkg_info: FxHashMap::default(),
                 use_normalized_ohm_url: false,
                 case_sensitive_check: false,
                 oh_modules_roots: vec![],

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use rustc_hash::FxHashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -92,7 +92,7 @@ fn collect_changes(rx: &Receiver<notify::Result<Event>>, debounce: Duration) -> 
         _ => return vec![],
     };
 
-    let mut paths: HashSet<PathBuf> = paths_from_event(first);
+    let mut paths: FxHashSet<PathBuf> = paths_from_event(first);
 
     // Collect additional events within the debounce window
     let deadline = Instant::now() + debounce;
@@ -119,7 +119,7 @@ fn collect_changes(rx: &Receiver<notify::Result<Event>>, debounce: Duration) -> 
         .collect()
 }
 
-fn paths_from_event(evt: Event) -> HashSet<PathBuf> {
+fn paths_from_event(evt: Event) -> FxHashSet<PathBuf> {
     evt.paths.into_iter().collect()
 }
 

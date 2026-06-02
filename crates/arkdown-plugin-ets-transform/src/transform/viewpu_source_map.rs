@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use rustc_hash::FxHashSet;
 
 use arkdown_core::ModuleSource;
 use oxc_allocator::Allocator;
@@ -71,8 +71,8 @@ pub fn transform_ets_viewpu_with_source_map(
     let simple_type_context =
         SimpleTypeContext::from_program(&parsed.program, &source.id.id, options);
     let hvigor_source_id = hvigor_source_path(&source.id.id, options);
-    let mut custom_components = HashSet::new();
-    let mut custom_component_update_props = CustomComponentUpdateProps::new();
+    let mut custom_components = FxHashSet::default();
+    let mut custom_component_update_props = CustomComponentUpdateProps::default();
     for statement in &parsed.program.body {
         collect_custom_component_names(statement, &mut custom_components);
         collect_local_component_update_props(statement, &mut custom_component_update_props);
@@ -241,9 +241,9 @@ fn component_with_struct_from_statement<'a>(
     id: &str,
     options: &TransformOptions,
     simple_type_context: &SimpleTypeContext,
-    custom_components: &HashSet<String>,
+    custom_components: &FxHashSet<String>,
     custom_component_update_props: &CustomComponentUpdateProps,
-    builder_functions: &HashSet<String>,
+    builder_functions: &FxHashSet<String>,
     hvigor_source_id: &str,
 ) -> Result<Option<(ComponentInfo, &'a StructStatement<'a>)>, EtsTransformError> {
     match statement {

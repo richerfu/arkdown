@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+rustc-hash = { workspace = true }
 arkdown-core = { workspace = true }
 
 # Parser and codegen — ohos-rs fork only

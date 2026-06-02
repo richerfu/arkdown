@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 use arkdown_core::{HostModuleInfo, Module};
 
@@ -7,8 +7,8 @@ use arkdown_core::{HostModuleInfo, Module};
 /// For each module in `modules`, every import edge is recorded so that we
 /// know which modules (and which packages/OHOS-modules they belong to) depend
 /// on a given module id.
-pub fn build_reverse_map(modules: &[&Module]) -> HashMap<String, Vec<HostModuleInfo>> {
-    let mut map: HashMap<String, Vec<HostModuleInfo>> = HashMap::new();
+pub fn build_reverse_map(modules: &[&Module]) -> FxHashMap<String, Vec<HostModuleInfo>> {
+    let mut map: FxHashMap<String, Vec<HostModuleInfo>> = FxHashMap::default();
 
     for module in modules {
         // Only normal (non-external) modules contribute to the reverse map.

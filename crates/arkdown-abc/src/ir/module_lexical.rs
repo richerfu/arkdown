@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use rustc_hash::FxHashSet;
 
 use oxc_ast::ast::{BindingPattern, Expression, FunctionBody, Program, Statement};
 
@@ -68,8 +68,8 @@ pub(super) fn collect_module_lexical_bindings(
 /// expressions (i.e. arrow functions appearing as call-expression arguments
 /// at module scope).  These are the variables that need lexical slots so
 /// inner arrow bodies can access them via `ldlexvar`.
-fn collect_top_level_arrow_refs(stmts: &[Statement<'_>]) -> HashSet<String> {
-    let mut referenced = HashSet::new();
+fn collect_top_level_arrow_refs(stmts: &[Statement<'_>]) -> FxHashSet<String> {
+    let mut referenced = FxHashSet::default();
     for stmt in stmts {
         if let Statement::ExpressionStatement(es) = stmt {
             collect_arrow_refs_from_expr(&es.expression, &mut referenced);
@@ -78,7 +78,7 @@ fn collect_top_level_arrow_refs(stmts: &[Statement<'_>]) -> HashSet<String> {
     referenced
 }
 
-fn collect_arrow_refs_from_expr(expr: &Expression<'_>, out: &mut HashSet<String>) {
+fn collect_arrow_refs_from_expr(expr: &Expression<'_>, out: &mut FxHashSet<String>) {
     match expr {
         Expression::CallExpression(call) => {
             for arg in &call.arguments {
@@ -99,13 +99,13 @@ fn collect_arrow_refs_from_expr(expr: &Expression<'_>, out: &mut HashSet<String>
     }
 }
 
-fn collect_idents_in_arrow_body(body: &FunctionBody<'_>, out: &mut HashSet<String>) {
+fn collect_idents_in_arrow_body(body: &FunctionBody<'_>, out: &mut FxHashSet<String>) {
     for stmt in &body.statements {
         collect_idents_in_stmt(stmt, out);
     }
 }
 
-fn collect_idents_in_stmt(stmt: &Statement<'_>, out: &mut HashSet<String>) {
+fn collect_idents_in_stmt(stmt: &Statement<'_>, out: &mut FxHashSet<String>) {
     match stmt {
         Statement::ExpressionStatement(es) => collect_idents_in_expr(&es.expression, out),
         Statement::ReturnStatement(ret) => {
@@ -129,7 +129,7 @@ fn collect_idents_in_stmt(stmt: &Statement<'_>, out: &mut HashSet<String>) {
     }
 }
 
-fn collect_idents_in_expr(expr: &Expression<'_>, out: &mut HashSet<String>) {
+fn collect_idents_in_expr(expr: &Expression<'_>, out: &mut FxHashSet<String>) {
     match expr {
         Expression::Identifier(id) => {
             out.insert(id.name.as_str().to_string());

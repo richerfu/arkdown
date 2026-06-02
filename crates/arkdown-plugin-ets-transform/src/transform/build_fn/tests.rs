@@ -4,6 +4,7 @@ use oxc_ast::ast::{Declaration, StructElement};
 use oxc_parser::Parser;
 use oxc_span::SourceType;
 use std::path::Path;
+use rustc_hash::FxHashSet;
 
 fn test_component_metadata() -> ComponentMetadata {
     ComponentMetadata::from_ets_loader_path(Path::new(concat!(
@@ -51,9 +52,9 @@ fn parse_and_lower(source: &str) -> Result<String, BuildLoweringError> {
         build.value.body.as_deref(),
         source,
         "",
-        &HashSet::new(),
-        &HashSet::new(),
-        &CustomComponentUpdateProps::new(),
+        &FxHashSet::default(),
+        &FxHashSet::default(),
+        &CustomComponentUpdateProps::default(),
         &test_component_metadata(),
     )
     .map(|(code, _)| code)
@@ -444,9 +445,9 @@ struct Index {
         build.value.body.as_deref(),
         source,
         "",
-        &HashSet::new(),
-        &HashSet::new(),
-        &CustomComponentUpdateProps::new(),
+        &FxHashSet::default(),
+        &FxHashSet::default(),
+        &CustomComponentUpdateProps::default(),
         &test_component_metadata(),
     )
     .unwrap();

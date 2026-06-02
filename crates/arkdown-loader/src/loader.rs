@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::{Arc, Mutex};
 
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
@@ -16,15 +16,15 @@ pub struct ModuleLoader {
 }
 
 struct LoadState {
-    visited: Arc<Mutex<HashSet<String>>>,
-    modules: Arc<Mutex<HashMap<String, Module>>>,
+    visited: Arc<Mutex<FxHashSet<String>>>,
+    modules: Arc<Mutex<FxHashMap<String, Module>>>,
 }
 
 impl LoadState {
     fn new() -> Self {
         Self {
-            visited: Arc::new(Mutex::new(HashSet::new())),
-            modules: Arc::new(Mutex::new(HashMap::new())),
+            visited: Arc::new(Mutex::new(FxHashSet::default())),
+            modules: Arc::new(Mutex::new(FxHashMap::default())),
         }
     }
 
@@ -82,7 +82,7 @@ impl LoadState {
         next_wave
     }
 
-    fn into_modules(self) -> HashMap<String, Module> {
+    fn into_modules(self) -> FxHashMap<String, Module> {
         self.modules.lock().unwrap().clone()
     }
 }
@@ -117,7 +117,7 @@ impl ModuleLoader {
     pub fn load_all(
         &self,
         entry_ids: Vec<ResolvedId>,
-    ) -> Result<HashMap<String, Module>, ArkdownError> {
+    ) -> Result<FxHashMap<String, Module>, ArkdownError> {
         let state = LoadState::new();
         let mut queue: Vec<ResolvedId> = entry_ids;
 

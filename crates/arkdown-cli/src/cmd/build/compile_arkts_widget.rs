@@ -7,6 +7,7 @@ use super::compile_arkts_package_entries::{
     add_dynamic_import_package_entries, add_native_package_entries, PackageEntryInfos,
 };
 use super::*;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 #[derive(Debug, serde::Deserialize)]
 struct FormConfigFile {
@@ -26,7 +27,7 @@ pub(super) fn compile_widget_pass(
     manifest: &arkdown_core::HapManifest,
     loader_json: &arkdown_profile::LoaderJson,
     config: &Arc<ArkdownConfig>,
-    resource_refs: &HashMap<String, ResourceReference>,
+    resource_refs: &FxHashMap<String, ResourceReference>,
 ) -> Result<()> {
     if matches!(module.module_type, OhosModuleType::Har) {
         return Ok(());
@@ -180,7 +181,7 @@ fn widget_sources(
     extension_abilities: &[ExtensionAbilityEntry],
 ) -> Result<Vec<PathBuf>> {
     let mut sources = Vec::new();
-    let mut seen = HashSet::new();
+    let mut seen = FxHashSet::default();
     for ability in extension_abilities {
         let extension_type = ability.extension_type.to_ascii_lowercase();
         if extension_type != "form" && extension_type != "formextension" {

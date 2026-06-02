@@ -1,7 +1,5 @@
-use std::{
-    collections::{HashMap, HashSet},
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
@@ -17,7 +15,7 @@ use crate::transform::build_fn::{CustomComponentInfo, CustomComponentUpdateProps
 
 pub(super) fn collect_custom_component_names(
     statement: &Statement<'_>,
-    names: &mut HashSet<String>,
+    names: &mut FxHashSet<String>,
 ) {
     match statement {
         Statement::StructStatement(statement) => {
@@ -67,7 +65,7 @@ pub(super) fn collect_imported_component_names(
     program: &Program<'_>,
     id: &str,
     options: &TransformOptions,
-    names: &mut HashSet<String>,
+    names: &mut FxHashSet<String>,
     update_props: &mut CustomComponentUpdateProps,
 ) {
     let importer = Path::new(id);
@@ -82,7 +80,7 @@ pub(super) fn collect_imported_component_names(
         else {
             continue;
         };
-        let target_components = exported_component_names(&target, &mut HashSet::new());
+        let target_components = exported_component_names(&target, &mut FxHashSet::default());
         if target_components.is_empty() {
             continue;
         }
@@ -120,8 +118,8 @@ pub(super) fn collect_builder_function_names(
     program: &Program<'_>,
     id: &str,
     options: &TransformOptions,
-) -> HashSet<String> {
-    let mut names = HashSet::new();
+) -> FxHashSet<String> {
+    let mut names = FxHashSet::default();
     for statement in &program.body {
         match statement {
             Statement::FunctionDeclaration(function)
@@ -161,7 +159,7 @@ pub(super) fn collect_builder_function_names(
         else {
             continue;
         };
-        let target_builders = exported_builder_function_names(&target, &mut HashSet::new());
+        let target_builders = exported_builder_function_names(&target, &mut FxHashSet::default());
         if target_builders.is_empty() {
             continue;
         }
@@ -185,8 +183,8 @@ fn function_has_decorator(function: &Function<'_>, name: &str) -> bool {
         .any(|decorator| decorator_name(decorator) == name)
 }
 
-fn component_update_prop_names(statement: &StructStatement<'_>) -> HashSet<String> {
-    let mut names = HashSet::new();
+fn component_update_prop_names(statement: &StructStatement<'_>) -> FxHashSet<String> {
+    let mut names = FxHashSet::default();
     for element in &statement.body.body {
         let StructElement::PropertyDefinition(property) = element else {
             continue;
@@ -205,8 +203,8 @@ fn component_update_prop_names(statement: &StructStatement<'_>) -> HashSet<Strin
     names
 }
 
-fn component_link_prop_names(statement: &StructStatement<'_>) -> HashSet<String> {
-    let mut names = HashSet::new();
+fn component_link_prop_names(statement: &StructStatement<'_>) -> FxHashSet<String> {
+    let mut names = FxHashSet::default();
     for element in &statement.body.body {
         let StructElement::PropertyDefinition(property) = element else {
             continue;
@@ -238,8 +236,8 @@ fn component_info(statement: &StructStatement<'_>) -> CustomComponentInfo {
 
 pub(super) fn collect_struct_builder_method_names(
     statement: &StructStatement<'_>,
-) -> HashSet<String> {
-    let mut names = HashSet::new();
+) -> FxHashSet<String> {
+    let mut names = FxHashSet::default();
     for element in &statement.body.body {
         let StructElement::MethodDefinition(method) = element else {
             continue;
@@ -260,8 +258,8 @@ pub(super) fn collect_struct_builder_method_names(
 
 pub(super) fn collect_struct_builder_param_names(
     statement: &StructStatement<'_>,
-) -> HashSet<String> {
-    let mut names = HashSet::new();
+) -> FxHashSet<String> {
+    let mut names = FxHashSet::default();
     for element in &statement.body.body {
         let StructElement::PropertyDefinition(property) = element else {
             continue;
@@ -281,7 +279,7 @@ pub(super) fn collect_struct_builder_param_names(
 }
 
 pub(super) struct SimpleTypeContext {
-    enum_names: HashSet<String>,
+    enum_names: FxHashSet<String>,
 }
 
 impl SimpleTypeContext {
@@ -308,7 +306,7 @@ impl SimpleTypeContext {
             else {
                 continue;
             };
-            let target_enums = exported_enum_names(&target, &mut HashSet::new());
+            let target_enums = exported_enum_names(&target, &mut FxHashSet::default());
             if target_enums.is_empty() {
                 continue;
             }
@@ -356,8 +354,8 @@ impl SimpleTypeContext {
     }
 }
 
-fn local_enum_names(program: &Program<'_>) -> HashSet<String> {
-    let mut enums = HashSet::new();
+fn local_enum_names(program: &Program<'_>) -> FxHashSet<String> {
+    let mut enums = FxHashSet::default();
     for statement in &program.body {
         match statement {
             Statement::TSEnumDeclaration(declaration) => {
@@ -374,23 +372,23 @@ fn local_enum_names(program: &Program<'_>) -> HashSet<String> {
     enums
 }
 
-fn exported_enum_names(path: &Path, visited: &mut HashSet<PathBuf>) -> HashSet<String> {
+fn exported_enum_names(path: &Path, visited: &mut FxHashSet<PathBuf>) -> FxHashSet<String> {
     let path = normalize_existing_path(path);
     if !visited.insert(path.clone()) {
-        return HashSet::new();
+        return FxHashSet::default();
     }
 
     let Ok(content) = std::fs::read_to_string(&path) else {
-        return HashSet::new();
+        return FxHashSet::default();
     };
     let allocator = Allocator::default();
     let source_type = SourceType::from_path(&path).unwrap_or_else(|_| SourceType::ets());
     let parsed = Parser::new(&allocator, &content, source_type).parse();
     if !parsed.errors.is_empty() {
-        return HashSet::new();
+        return FxHashSet::default();
     }
 
-    let mut exports = HashSet::new();
+    let mut exports = FxHashSet::default();
     for statement in &parsed.program.body {
         match statement {
             Statement::ExportNamedDeclaration(export) => {
@@ -428,23 +426,23 @@ fn exported_enum_names(path: &Path, visited: &mut HashSet<PathBuf>) -> HashSet<S
     exports
 }
 
-fn exported_builder_function_names(path: &Path, visited: &mut HashSet<PathBuf>) -> HashSet<String> {
+fn exported_builder_function_names(path: &Path, visited: &mut FxHashSet<PathBuf>) -> FxHashSet<String> {
     let path = normalize_existing_path(path);
     if !visited.insert(path.clone()) {
-        return HashSet::new();
+        return FxHashSet::default();
     }
 
     let Ok(content) = std::fs::read_to_string(&path) else {
-        return HashSet::new();
+        return FxHashSet::default();
     };
     let allocator = Allocator::default();
     let source_type = SourceType::from_path(&path).unwrap_or_else(|_| SourceType::ets());
     let parsed = Parser::new(&allocator, &content, source_type).parse();
     if !parsed.errors.is_empty() {
-        return HashSet::new();
+        return FxHashSet::default();
     }
 
-    let mut exports = HashSet::new();
+    let mut exports = FxHashSet::default();
     for statement in &parsed.program.body {
         match statement {
             Statement::FunctionDeclaration(function)
@@ -500,7 +498,7 @@ fn exported_builder_function_names(path: &Path, visited: &mut HashSet<PathBuf>) 
 
 #[derive(Default)]
 struct ExportedComponentNames {
-    named: HashMap<String, CustomComponentInfo>,
+    named: FxHashMap<String, CustomComponentInfo>,
     has_default: bool,
     default_info: CustomComponentInfo,
 }
@@ -519,7 +517,7 @@ impl ExportedComponentNames {
     }
 }
 
-fn exported_component_names(path: &Path, visited: &mut HashSet<PathBuf>) -> ExportedComponentNames {
+fn exported_component_names(path: &Path, visited: &mut FxHashSet<PathBuf>) -> ExportedComponentNames {
     let path = normalize_existing_path(path);
     if !visited.insert(path.clone()) {
         return ExportedComponentNames::default();
@@ -535,7 +533,7 @@ fn exported_component_names(path: &Path, visited: &mut HashSet<PathBuf>) -> Expo
         return ExportedComponentNames::default();
     }
 
-    let mut local_components = CustomComponentUpdateProps::new();
+    let mut local_components = CustomComponentUpdateProps::default();
     for statement in &parsed.program.body {
         collect_local_component_exports(statement, &mut local_components);
     }

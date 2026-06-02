@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 /// Encode `value` as an unsigned LEB-128 (ULEB128) byte sequence.
 ///
@@ -46,7 +46,7 @@ fn uleb128(mut value: u64) -> Vec<u8> {
 #[derive(Debug, Default)]
 pub struct StringTable {
     strings: Vec<String>,
-    index: HashMap<String, u32>,
+    index: FxHashMap<String, u32>,
 }
 
 impl StringTable {

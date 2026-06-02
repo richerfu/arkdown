@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -303,13 +303,13 @@ pub struct OhPackageJson5 {
     pub main: Option<String>,
     pub types: Option<String>,
     #[serde(default)]
-    pub dependencies: HashMap<String, String>,
+    pub dependencies: FxHashMap<String, String>,
     #[serde(default)]
-    pub dev_dependencies: HashMap<String, String>,
+    pub dev_dependencies: FxHashMap<String, String>,
     #[serde(default)]
-    pub dynamic_dependencies: HashMap<String, String>,
+    pub dynamic_dependencies: FxHashMap<String, String>,
     #[serde(default)]
-    pub overrides: HashMap<String, String>,
+    pub overrides: FxHashMap<String, String>,
     /// Internal metadata (used by SDK, ByteCode HAR metadata).
     pub metadata: Option<PackageMetadata>,
 }
@@ -324,5 +324,5 @@ pub struct PackageMetadata {
     #[serde(default)]
     pub workers: Vec<String>,
     #[serde(default)]
-    pub dependency_pkg_version: HashMap<String, String>,
+    pub dependency_pkg_version: FxHashMap<String, String>,
 }

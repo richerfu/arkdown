@@ -1,12 +1,12 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 use crate::ir::module_record::ModuleRecordInfo;
 
 #[derive(Debug, Default)]
 pub(super) struct LoweringContext {
-    import_indices: HashMap<String, u8>,
-    export_indices: HashMap<String, u8>,
-    lexical_indices: HashMap<String, u8>,
+    import_indices: FxHashMap<String, u8>,
+    export_indices: FxHashMap<String, u8>,
+    lexical_indices: FxHashMap<String, u8>,
     pub(super) lexical_names: Vec<String>,
 }
 
@@ -15,7 +15,7 @@ impl LoweringContext {
         module_record: &ModuleRecordInfo,
         lexical_names: Vec<String>,
     ) -> Self {
-        let mut import_indices: HashMap<String, u8> = module_record
+        let mut import_indices: FxHashMap<String, u8> = module_record
             .regular_imports
             .iter()
             .filter_map(|import| {

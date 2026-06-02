@@ -7,6 +7,7 @@ use oxc_parser::{Parser, ParserReturn};
 use oxc_span::SourceType;
 
 use crate::error::{DiagnosticSeverity, EtsTransformError};
+use rustc_hash::FxHashSet;
 
 /// Extract the simple name string from a decorator expression.
 /// Handles both `@Foo` (identifier) and `@Foo(...)` (call expression) forms.
@@ -35,7 +36,7 @@ pub fn check(source: &str, file: &str) -> Vec<EtsTransformError> {
     let ParserReturn { program, .. } = Parser::new(&allocator, source, source_type).parse();
 
     let mut errors: Vec<EtsTransformError> = Vec::new();
-    let mut seen_component_names: std::collections::HashSet<String> = Default::default();
+    let mut seen_component_names: FxHashSet<String> = Default::default();
 
     for stmt in &program.body {
         match stmt {
@@ -237,7 +238,7 @@ pub fn check(source: &str, file: &str) -> Vec<EtsTransformError> {
 fn check_struct_component(
     statement: &StructStatement<'_>,
     file: &str,
-    seen_component_names: &mut std::collections::HashSet<String>,
+    seen_component_names: &mut FxHashSet<String>,
     errors: &mut Vec<EtsTransformError>,
 ) {
     let component_name = statement.id.name.as_str();

@@ -21,7 +21,7 @@
 //! <module_root>/build/default/intermediates/share_config/default/temp-share-config.json
 //! ```
 
-use std::collections::HashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::{Path, PathBuf};
 
 use arkdown_core::CrossAppSharedConfigEntry;
@@ -195,7 +195,7 @@ fn read_cross_app_shared_config_from_pkg(
 /// optional config files are handled elsewhere in the pipeline.
 fn check_duplicate_uris(entries: &[CrossAppSharedConfigEntry]) {
     // Map URI → list of package names that declare it.
-    let mut uri_to_packages: HashMap<&str, Vec<&str>> = HashMap::new();
+    let mut uri_to_packages: FxHashMap<&str, Vec<&str>> = FxHashMap::default();
     for entry in entries {
         uri_to_packages
             .entry(entry.uri.as_str())
@@ -208,7 +208,7 @@ fn check_duplicate_uris(entries: &[CrossAppSharedConfigEntry]) {
             // Deduplicate package names before emitting the warning.
             let mut unique: Vec<&&str> = packages
                 .iter()
-                .collect::<std::collections::HashSet<_>>()
+                .collect::<FxHashSet<_>>()
                 .into_iter()
                 .collect();
             unique.sort();

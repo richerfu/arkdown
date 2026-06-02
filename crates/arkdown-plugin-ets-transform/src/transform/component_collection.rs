@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use rustc_hash::FxHashSet;
 
 use oxc_ast::ast::{
     Argument, ArkUIChild, ArkUIComponentExpression, CallExpression, Declaration,
@@ -10,9 +10,9 @@ use super::decorator_name;
 
 pub(super) fn collect_statement_component_names(
     statement: &Statement<'_>,
-    custom_components: &HashSet<String>,
+    custom_components: &FxHashSet<String>,
     names: &mut Vec<String>,
-    seen: &mut HashSet<String>,
+    seen: &mut FxHashSet<String>,
 ) {
     match statement {
         Statement::StructStatement(statement) => {
@@ -34,9 +34,9 @@ pub(super) fn collect_statement_component_names(
 
 fn collect_struct_component_names(
     statement: &StructStatement<'_>,
-    custom_components: &HashSet<String>,
+    custom_components: &FxHashSet<String>,
     names: &mut Vec<String>,
-    seen: &mut HashSet<String>,
+    seen: &mut FxHashSet<String>,
 ) {
     for element in &statement.body.body {
         let StructElement::MethodDefinition(method) = element else {
@@ -59,7 +59,7 @@ fn collect_struct_component_names(
 pub(super) fn collect_statement_if_component_names(
     statement: &Statement<'_>,
     names: &mut Vec<String>,
-    seen: &mut HashSet<String>,
+    seen: &mut FxHashSet<String>,
 ) {
     match statement {
         Statement::StructStatement(statement) => {
@@ -82,7 +82,7 @@ pub(super) fn collect_statement_if_component_names(
 fn collect_struct_if_component_names(
     statement: &StructStatement<'_>,
     names: &mut Vec<String>,
-    seen: &mut HashSet<String>,
+    seen: &mut FxHashSet<String>,
 ) {
     for element in &statement.body.body {
         let StructElement::MethodDefinition(method) = element else {
@@ -98,7 +98,7 @@ fn collect_struct_if_component_names(
 fn collect_body_if_component_names(
     body: &FunctionBody<'_>,
     names: &mut Vec<String>,
-    seen: &mut HashSet<String>,
+    seen: &mut FxHashSet<String>,
 ) {
     for statement in &body.statements {
         collect_if_statement_component_names(statement, names, seen);
@@ -108,7 +108,7 @@ fn collect_body_if_component_names(
 fn collect_if_statement_component_names(
     statement: &Statement<'_>,
     names: &mut Vec<String>,
-    seen: &mut HashSet<String>,
+    seen: &mut FxHashSet<String>,
 ) {
     match statement {
         Statement::BlockStatement(block) => {
@@ -117,7 +117,7 @@ fn collect_if_statement_component_names(
             }
         }
         Statement::IfStatement(statement) => {
-            push_component_name("If", &HashSet::new(), names, seen);
+            push_component_name("If", &FxHashSet::default(), names, seen);
             collect_if_statement_component_names(&statement.consequent, names, seen);
             if let Some(alternate) = &statement.alternate {
                 collect_if_statement_component_names(alternate, names, seen);
@@ -129,9 +129,9 @@ fn collect_if_statement_component_names(
 
 fn collect_body_component_names(
     body: &FunctionBody<'_>,
-    custom_components: &HashSet<String>,
+    custom_components: &FxHashSet<String>,
     names: &mut Vec<String>,
-    seen: &mut HashSet<String>,
+    seen: &mut FxHashSet<String>,
 ) {
     for statement in &body.statements {
         collect_ui_statement_component_names(statement, custom_components, names, seen);
@@ -140,9 +140,9 @@ fn collect_body_component_names(
 
 fn collect_ui_statement_component_names(
     statement: &Statement<'_>,
-    custom_components: &HashSet<String>,
+    custom_components: &FxHashSet<String>,
     names: &mut Vec<String>,
-    seen: &mut HashSet<String>,
+    seen: &mut FxHashSet<String>,
 ) {
     match statement {
         Statement::BlockStatement(block) => {
@@ -176,9 +176,9 @@ fn collect_ui_statement_component_names(
 
 fn collect_ui_expression_component_names(
     expression: &Expression<'_>,
-    custom_components: &HashSet<String>,
+    custom_components: &FxHashSet<String>,
     names: &mut Vec<String>,
-    seen: &mut HashSet<String>,
+    seen: &mut FxHashSet<String>,
 ) {
     match expression {
         Expression::ArkUIComponentExpression(component) => {
@@ -193,9 +193,9 @@ fn collect_ui_expression_component_names(
 
 fn collect_arkui_component_expression_names(
     component: &ArkUIComponentExpression<'_>,
-    custom_components: &HashSet<String>,
+    custom_components: &FxHashSet<String>,
     names: &mut Vec<String>,
-    seen: &mut HashSet<String>,
+    seen: &mut FxHashSet<String>,
 ) {
     if let Expression::Identifier(identifier) = &component.callee {
         push_component_name(identifier.name.as_str(), custom_components, names, seen);
@@ -220,9 +220,9 @@ fn collect_arkui_component_expression_names(
 
 fn collect_argument_component_names(
     argument: &Argument<'_>,
-    custom_components: &HashSet<String>,
+    custom_components: &FxHashSet<String>,
     names: &mut Vec<String>,
-    seen: &mut HashSet<String>,
+    seen: &mut FxHashSet<String>,
 ) {
     let Some(expression) = argument.as_expression() else {
         return;
@@ -234,9 +234,9 @@ fn collect_argument_component_names(
 
 fn collect_call_expression_component_names(
     call: &CallExpression<'_>,
-    custom_components: &HashSet<String>,
+    custom_components: &FxHashSet<String>,
     names: &mut Vec<String>,
-    seen: &mut HashSet<String>,
+    seen: &mut FxHashSet<String>,
 ) {
     match &call.callee {
         Expression::Identifier(identifier) => {
@@ -261,9 +261,9 @@ fn collect_call_expression_component_names(
 
 fn push_component_name(
     name: &str,
-    custom_components: &HashSet<String>,
+    custom_components: &FxHashSet<String>,
     names: &mut Vec<String>,
-    seen: &mut HashSet<String>,
+    seen: &mut FxHashSet<String>,
 ) {
     if custom_components.contains(name) {
         return;

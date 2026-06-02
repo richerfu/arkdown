@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::path::Path;
 
 use crate::meta_compute::find_pkg_root;
@@ -26,8 +26,8 @@ pub struct PkgBriefInfo {
 pub fn build_pkg_brief_info(
     module_paths: &[String],
     _project_root: &Path,
-) -> HashMap<String, PkgBriefInfo> {
-    let mut map: HashMap<String, PkgBriefInfo> = HashMap::new();
+) -> FxHashMap<String, PkgBriefInfo> {
+    let mut map: FxHashMap<String, PkgBriefInfo> = FxHashMap::default();
 
     for id in module_paths {
         if id.starts_with("@bundle:") || id.starts_with("@shared:") {

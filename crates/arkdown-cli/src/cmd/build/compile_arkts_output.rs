@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -18,7 +18,7 @@ pub(super) struct ChunkCompileMeta {
 
 pub(super) fn collect_unresolved_external_imports(bundle_out: &BundleOutput) -> Vec<String> {
     let mut imports = Vec::new();
-    let internal_files: HashSet<String> = bundle_out
+    let internal_files: FxHashSet<String> = bundle_out
         .chunk_files
         .iter()
         .filter_map(|(_, path)| path.file_name()?.to_str().map(str::to_string))
@@ -71,7 +71,7 @@ pub(super) fn write_hvigor_source_maps(
     module: &ModuleConfig,
     loader_json: &arkdown_profile::LoaderJson,
     config: &Arc<ArkdownConfig>,
-    record_name_map: &HashMap<String, ChunkCompileMeta>,
+    record_name_map: &FxHashMap<String, ChunkCompileMeta>,
 ) -> Result<()> {
     let Some(source_maps_path) = &bundle_out.source_maps_path else {
         return Ok(());
@@ -115,7 +115,7 @@ pub(super) fn write_hvigor_source_maps(
                 module_name: loader_json.module_name.clone(),
                 package_name: loader_json.module_name.clone(),
                 version: "1.0.0".to_string(),
-                chunk_source_files: HashMap::new(),
+                chunk_source_files: FxHashMap::default(),
             },
         )
         .context("failed to serialize hvigor sourceMaps.map")?;

@@ -1,8 +1,8 @@
 use std::{
-    collections::{HashMap, HashSet},
     fmt::Write,
     sync::Arc,
 };
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use oxc_ast::ast::{
     Argument, ArkUIChild, ArkUIComponentExpression, BlockStatement, CallExpression, Expression,
@@ -52,17 +52,17 @@ pub struct SpanHint {
 
 #[derive(Clone, Debug, Default)]
 pub struct CustomComponentInfo {
-    pub update_props: HashSet<String>,
-    pub link_props: HashSet<String>,
+    pub update_props: FxHashSet<String>,
+    pub link_props: FxHashSet<String>,
     pub reusable: bool,
 }
 
-pub type CustomComponentUpdateProps = HashMap<String, CustomComponentInfo>;
+pub type CustomComponentUpdateProps = FxHashMap<String, CustomComponentInfo>;
 
 #[derive(Clone, Debug, Default)]
 struct BuildContext {
     use_parent_context: bool,
-    raw_object_fields: Arc<HashSet<String>>,
+    raw_object_fields: Arc<FxHashSet<String>>,
 }
 
 impl BuildContext {
@@ -81,7 +81,7 @@ impl BuildContext {
         }
     }
 
-    fn with_raw_object_fields(mut self, raw_object_fields: &HashSet<String>) -> Self {
+    fn with_raw_object_fields(mut self, raw_object_fields: &FxHashSet<String>) -> Self {
         self.raw_object_fields = Arc::new(raw_object_fields.clone());
         self
     }
@@ -178,8 +178,8 @@ fn extract_leaf_component(
     call: &CallExpression<'_>,
     source_text: &str,
     source_id: &str,
-    custom_components: &HashSet<String>,
-    builder_methods: &HashSet<String>,
+    custom_components: &FxHashSet<String>,
+    builder_methods: &FxHashSet<String>,
     component_metadata: &ComponentMetadata,
     context: &BuildContext,
 ) -> Result<LeafComponent, BuildLoweringError> {
@@ -243,8 +243,8 @@ fn lower_call_expression(
     call: &CallExpression<'_>,
     source_text: &str,
     source_id: &str,
-    custom_components: &HashSet<String>,
-    builder_methods: &HashSet<String>,
+    custom_components: &FxHashSet<String>,
+    builder_methods: &FxHashSet<String>,
     custom_component_update_props: &CustomComponentUpdateProps,
     component_metadata: &ComponentMetadata,
     context: BuildContext,
@@ -350,9 +350,9 @@ pub fn lower_build_body(
         body,
         source_text,
         "",
-        &HashSet::new(),
-        &HashSet::new(),
-        &CustomComponentUpdateProps::new(),
+        &FxHashSet::default(),
+        &FxHashSet::default(),
+        &CustomComponentUpdateProps::default(),
         &ComponentMetadata::default(),
     )
 }
@@ -361,8 +361,8 @@ pub fn lower_build_body_with_custom_components(
     body: Option<&FunctionBody<'_>>,
     source_text: &str,
     source_id: &str,
-    custom_components: &HashSet<String>,
-    builder_methods: &HashSet<String>,
+    custom_components: &FxHashSet<String>,
+    builder_methods: &FxHashSet<String>,
     custom_component_update_props: &CustomComponentUpdateProps,
     component_metadata: &ComponentMetadata,
 ) -> Result<(String, Vec<SpanHint>), BuildLoweringError> {
@@ -382,11 +382,11 @@ pub fn lower_build_body_with_component_context(
     body: Option<&FunctionBody<'_>>,
     source_text: &str,
     source_id: &str,
-    custom_components: &HashSet<String>,
-    builder_methods: &HashSet<String>,
+    custom_components: &FxHashSet<String>,
+    builder_methods: &FxHashSet<String>,
     custom_component_update_props: &CustomComponentUpdateProps,
     component_metadata: &ComponentMetadata,
-    raw_object_fields: &HashSet<String>,
+    raw_object_fields: &FxHashSet<String>,
 ) -> Result<(String, Vec<SpanHint>), BuildLoweringError> {
     lower_build_body_with_context(
         body,
@@ -404,8 +404,8 @@ pub fn lower_builder_body_with_custom_components(
     body: Option<&FunctionBody<'_>>,
     source_text: &str,
     source_id: &str,
-    custom_components: &HashSet<String>,
-    builder_methods: &HashSet<String>,
+    custom_components: &FxHashSet<String>,
+    builder_methods: &FxHashSet<String>,
     custom_component_update_props: &CustomComponentUpdateProps,
     component_metadata: &ComponentMetadata,
 ) -> Result<(String, Vec<SpanHint>), BuildLoweringError> {
@@ -425,11 +425,11 @@ pub fn lower_builder_body_with_component_context(
     body: Option<&FunctionBody<'_>>,
     source_text: &str,
     source_id: &str,
-    custom_components: &HashSet<String>,
-    builder_methods: &HashSet<String>,
+    custom_components: &FxHashSet<String>,
+    builder_methods: &FxHashSet<String>,
     custom_component_update_props: &CustomComponentUpdateProps,
     component_metadata: &ComponentMetadata,
-    raw_object_fields: &HashSet<String>,
+    raw_object_fields: &FxHashSet<String>,
 ) -> Result<(String, Vec<SpanHint>), BuildLoweringError> {
     lower_build_body_with_context(
         body,
@@ -447,8 +447,8 @@ fn lower_build_body_with_context(
     body: Option<&FunctionBody<'_>>,
     source_text: &str,
     source_id: &str,
-    custom_components: &HashSet<String>,
-    builder_methods: &HashSet<String>,
+    custom_components: &FxHashSet<String>,
+    builder_methods: &FxHashSet<String>,
     custom_component_update_props: &CustomComponentUpdateProps,
     component_metadata: &ComponentMetadata,
     context: BuildContext,
@@ -482,8 +482,8 @@ fn lower_statement(
     statement: &Statement<'_>,
     source_text: &str,
     source_id: &str,
-    custom_components: &HashSet<String>,
-    builder_methods: &HashSet<String>,
+    custom_components: &FxHashSet<String>,
+    builder_methods: &FxHashSet<String>,
     custom_component_update_props: &CustomComponentUpdateProps,
     component_metadata: &ComponentMetadata,
     context: BuildContext,
@@ -540,8 +540,8 @@ fn lower_block(
     block: &BlockStatement<'_>,
     source_text: &str,
     source_id: &str,
-    custom_components: &HashSet<String>,
-    builder_methods: &HashSet<String>,
+    custom_components: &FxHashSet<String>,
+    builder_methods: &FxHashSet<String>,
     custom_component_update_props: &CustomComponentUpdateProps,
     component_metadata: &ComponentMetadata,
     context: BuildContext,
@@ -571,8 +571,8 @@ fn lower_expression(
     expression: &Expression<'_>,
     source_text: &str,
     source_id: &str,
-    custom_components: &HashSet<String>,
-    builder_methods: &HashSet<String>,
+    custom_components: &FxHashSet<String>,
+    builder_methods: &FxHashSet<String>,
     custom_component_update_props: &CustomComponentUpdateProps,
     component_metadata: &ComponentMetadata,
     context: BuildContext,
@@ -622,8 +622,8 @@ fn lower_if_statement(
     statement: &IfStatement<'_>,
     source_text: &str,
     source_id: &str,
-    custom_components: &HashSet<String>,
-    builder_methods: &HashSet<String>,
+    custom_components: &FxHashSet<String>,
+    builder_methods: &FxHashSet<String>,
     custom_component_update_props: &CustomComponentUpdateProps,
     component_metadata: &ComponentMetadata,
     context: BuildContext,
@@ -741,8 +741,8 @@ fn lower_component(
     component: &ArkUIComponentExpression<'_>,
     source_text: &str,
     source_id: &str,
-    custom_components: &HashSet<String>,
-    builder_methods: &HashSet<String>,
+    custom_components: &FxHashSet<String>,
+    builder_methods: &FxHashSet<String>,
     custom_component_update_props: &CustomComponentUpdateProps,
     component_metadata: &ComponentMetadata,
     context: BuildContext,
@@ -1117,7 +1117,7 @@ fn attribute_arguments_text(
     attr_name: &str,
     arguments: &[Argument<'_>],
     source_text: &str,
-    builder_methods: &HashSet<String>,
+    builder_methods: &FxHashSet<String>,
     context: &BuildContext,
 ) -> String {
     if is_builder_attribute(attr_name) && arguments.len() == 1 {
@@ -1183,7 +1183,7 @@ fn is_builder_attribute(name: &str) -> bool {
 
 fn argument_builder_method_name<'a>(
     argument: &'a Argument<'a>,
-    builder_methods: &HashSet<String>,
+    builder_methods: &FxHashSet<String>,
 ) -> Option<String> {
     let expr = argument.as_expression()?;
     builder_method_member_name(expr, builder_methods)
@@ -1191,7 +1191,7 @@ fn argument_builder_method_name<'a>(
 
 fn builder_method_member_name(
     expression: &Expression<'_>,
-    builder_methods: &HashSet<String>,
+    builder_methods: &FxHashSet<String>,
 ) -> Option<String> {
     let Expression::StaticMemberExpression(member) = expression else {
         return None;
@@ -1228,7 +1228,7 @@ fn raw_argument_text_with_context(
 fn lower_builder_method_call(
     call: &CallExpression<'_>,
     source_text: &str,
-    builder_methods: &HashSet<String>,
+    builder_methods: &FxHashSet<String>,
     context: &BuildContext,
     indent: &str,
     out: &mut String,

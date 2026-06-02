@@ -1,6 +1,7 @@
 //! End-to-end integration tests — validates complete HAP, HAR, and HSP artifacts
 //! produced by the full pipeline.
 
+use rustc_hash::FxHashMap;
 use std::path::PathBuf;
 
 fn fixture_root() -> PathBuf {
@@ -75,7 +76,6 @@ fn copy_fixture_dir(src: &std::path::Path, dst: &std::path::Path) {
 
 fn run_build(fixture: &PathBuf) -> PathBuf {
     let fixture = isolated_fixture(fixture);
-    use std::collections::HashMap;
     use std::sync::Arc;
 
     use arkdown::Bundler;
@@ -148,7 +148,7 @@ fn run_build(fixture: &PathBuf) -> PathBuf {
                 project_root: fixture.clone(),
                 sdk_api_dirs: vec![],
                 sdk_kits_dirs: vec![],
-                pkg_name_to_pkg_info: HashMap::new(),
+                pkg_name_to_pkg_info: FxHashMap::default(),
                 use_normalized_ohm_url: false,
                 case_sensitive_check: false,
                 oh_modules_roots: vec![],
@@ -183,7 +183,7 @@ fn run_build(fixture: &PathBuf) -> PathBuf {
     // Compute OHM URL module paths: "{bundleName}/{moduleName}/{pathFromEts}"
     // Matches es2abc/hvigorw format: "com.example.app/entry/ets/entryability/EntryAbility"
     let bundle_name = &config.product.bundle_name;
-    let record_name_map: std::collections::HashMap<String, ChunkCompileMeta> = loader_json
+    let record_name_map: FxHashMap<String, ChunkCompileMeta> = loader_json
         .compile_entry
         .iter()
         .filter_map(|ep| {
@@ -273,7 +273,7 @@ struct ChunkCompileMeta {
 
 fn collect_js_chunks_from_output(
     chunk_files: &[(String, PathBuf)],
-    record_name_map: &std::collections::HashMap<String, ChunkCompileMeta>,
+    record_name_map: &FxHashMap<String, ChunkCompileMeta>,
 ) -> Vec<arkdown_ts2abc::Ts2abcInput> {
     chunk_files
         .iter()
@@ -327,8 +327,7 @@ fn run_build_har(fixture: &PathBuf) -> PathBuf {
 
 fn run_build_hsp(fixture: &PathBuf) -> PathBuf {
     let fixture = isolated_fixture(fixture);
-    use std::collections::HashMap;
-    use std::sync::Arc;
+        use std::sync::Arc;
 
     use arkdown::Bundler;
     use arkdown_config::load_config;
@@ -396,7 +395,7 @@ fn run_build_hsp(fixture: &PathBuf) -> PathBuf {
                 project_root: fixture.clone(),
                 sdk_api_dirs: vec![],
                 sdk_kits_dirs: vec![],
-                pkg_name_to_pkg_info: HashMap::new(),
+                pkg_name_to_pkg_info: FxHashMap::default(),
                 use_normalized_ohm_url: false,
                 case_sensitive_check: false,
                 oh_modules_roots: vec![],
@@ -427,7 +426,7 @@ fn run_build_hsp(fixture: &PathBuf) -> PathBuf {
 
     let modules_abc = bundle_out.modules_abc_path.clone();
     let bundle_name = &config.product.bundle_name;
-    let record_name_map: std::collections::HashMap<String, ChunkCompileMeta> = loader_json
+    let record_name_map: FxHashMap<String, ChunkCompileMeta> = loader_json
         .compile_entry
         .iter()
         .filter_map(|ep| {
@@ -906,8 +905,7 @@ fn test_hsp_golden_entry_list() {
 #[test]
 fn test_non_entry_importees_populated_with_har_dep() {
     use index_vec::IndexVec;
-    use rustc_hash::FxHashMap;
-
+    
     use arkdown_core::{ArkChunk, ChunkGraph, ChunkIdx};
     use arkdown_plugin_ohos_resolve::{process_importees, ProcessImporteeConfig};
 
@@ -1002,8 +1000,7 @@ fn bc_har_fixture_root() -> PathBuf {
 /// Returns `(modules_abc_path, importee_json_path)`.
 fn run_build_bc_har(fixture_src: &PathBuf) -> (PathBuf, PathBuf) {
     let fixture = isolated_fixture(fixture_src);
-    use std::collections::HashMap;
-    use std::sync::Arc;
+        use std::sync::Arc;
 
     use arkdown::Bundler;
     use arkdown_config::load_config;
@@ -1078,7 +1075,7 @@ fn run_build_bc_har(fixture_src: &PathBuf) -> (PathBuf, PathBuf) {
                 project_root: fixture.clone(),
                 sdk_api_dirs: vec![],
                 sdk_kits_dirs: vec![],
-                pkg_name_to_pkg_info: HashMap::new(),
+                pkg_name_to_pkg_info: FxHashMap::default(),
                 use_normalized_ohm_url: false,
                 case_sensitive_check: false,
                 oh_modules_roots: vec![],
@@ -1147,7 +1144,7 @@ fn run_build_bc_har(fixture_src: &PathBuf) -> (PathBuf, PathBuf) {
     // ABC compilation
     let modules_abc = bundle_out.modules_abc_path.clone();
     let bundle_name = &config.product.bundle_name;
-    let record_name_map: std::collections::HashMap<String, ChunkCompileMeta> = loader_json
+    let record_name_map: FxHashMap<String, ChunkCompileMeta> = loader_json
         .compile_entry
         .iter()
         .filter_map(|ep| {

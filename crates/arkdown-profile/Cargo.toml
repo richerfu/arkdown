@@ -8,6 +8,7 @@ arkdown-core = { workspace = true }
 tempfile = { workspace = true }
 
 [dependencies]
+rustc-hash = { workspace = true }
 arkdown-core = { workspace = true }
 arkdown-config = { workspace = true }
 serde = { workspace = true }

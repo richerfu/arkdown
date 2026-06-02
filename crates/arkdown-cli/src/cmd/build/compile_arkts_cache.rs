@@ -1,4 +1,5 @@
 use super::*;
+use rustc_hash::FxHashMap;
 
 pub(super) struct CompileArktsCacheWriter<'a> {
     loader_json: &'a arkdown_profile::LoaderJson,
@@ -12,7 +13,7 @@ impl<'a> CompileArktsCacheWriter<'a> {
         module: &ModuleConfig,
         loader_json: &'a arkdown_profile::LoaderJson,
         config: &'a Arc<ArkdownConfig>,
-        resource_refs: &HashMap<String, ResourceReference>,
+        resource_refs: &FxHashMap<String, ResourceReference>,
     ) -> Self {
         let cache_root = module
             .src_path

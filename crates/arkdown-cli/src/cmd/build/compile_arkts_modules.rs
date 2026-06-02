@@ -29,7 +29,7 @@ impl CompileModuleInfo {
 }
 
 pub(super) fn compile_module_ids(chunk_graph: &ChunkGraph) -> Vec<String> {
-    let mut seen = HashSet::new();
+    let mut seen = FxHashSet::default();
     let mut ids = Vec::new();
 
     if !chunk_graph.full_module_ids.is_empty() {

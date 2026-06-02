@@ -1,11 +1,11 @@
 use std::{
-    collections::HashMap,
     path::{Path, PathBuf},
 };
 
 use arkdown_core::{ArkdownConfig, ModuleConfig};
 
 use super::{to_absolute_path_string, to_unix_path};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 pub(super) fn collect_dynamic_import_dep_names(
     config: &ArkdownConfig,
@@ -26,7 +26,7 @@ pub(super) fn collect_dynamic_import_dep_names(
         module_root,
         &config.project_root,
     ));
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = FxHashSet::default();
     names.retain(|name| seen.insert(name.clone()));
     names
 }
@@ -44,7 +44,7 @@ fn read_dynamic_dep_names(module_root: &Path) -> Vec<String> {
     #[serde(rename_all = "camelCase")]
     struct PkgDynDeps {
         #[serde(default)]
-        dynamic_dependencies: HashMap<String, String>,
+        dynamic_dependencies: FxHashMap<String, String>,
     }
 
     json5::from_str::<PkgDynDeps>(&content)
@@ -127,7 +127,7 @@ fn read_package_dep_names(module_root: &Path) -> Vec<String> {
     #[serde(rename_all = "camelCase")]
     struct PkgDeps {
         #[serde(default)]
-        dependencies: HashMap<String, String>,
+        dependencies: FxHashMap<String, String>,
     }
 
     json5::from_str::<PkgDeps>(&content)
@@ -231,7 +231,7 @@ pub(super) fn collect_runtime_only_source_files(
         }
     }
 
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = FxHashSet::default();
     files.retain(|path| seen.insert(to_unix_path(path)));
     files
 }
@@ -313,7 +313,7 @@ fn collect_dynamic_import_source_files(root: &Path) -> Vec<PathBuf> {
 }
 
 pub(super) fn dedupe_paths(files: &mut Vec<PathBuf>) {
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = FxHashSet::default();
     files.retain(|path| seen.insert(to_absolute_path_string(path)));
 }
 

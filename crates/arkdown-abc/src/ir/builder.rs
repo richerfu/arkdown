@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
@@ -1331,7 +1331,7 @@ struct CodeGen<'a> {
     /// Raw bytecode bytes accumulated so far.
     insns: Vec<u8>,
     /// Maps JS binding name → virtual register number.
-    var_regs: HashMap<String, u8>,
+    var_regs: FxHashMap<String, u8>,
     /// Next free register index.
     next_reg: u8,
     /// Set to `true` after a `return` or `returnundefined` is emitted so that
@@ -1373,7 +1373,7 @@ impl<'a> CodeGen<'a> {
             literal_arrays,
             lowering,
             insns: Vec::new(),
-            var_regs: HashMap::new(),
+            var_regs: FxHashMap::default(),
             next_reg: 0,
             returned: false,
             arrow_captures: ArrowCaptures::default(),

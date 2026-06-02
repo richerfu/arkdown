@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -160,8 +160,8 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 res_dirs.push(module_res_dir);
             }
         }
-        let mut resource_refs = HashMap::new();
-        let resource_ids: HashMap<String, u32> = if !res_dirs.is_empty() {
+        let mut resource_refs = FxHashMap::default();
+        let resource_ids: FxHashMap<String, u32> = if !res_dirs.is_empty() {
             match resource_compiler.compile(ResourceCompileInput {
                 resources_dirs: res_dirs,
                 output_dir: res_out.clone(),
@@ -186,11 +186,11 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "resource compilation failed");
-                    HashMap::new()
+                    FxHashMap::default()
                 }
             }
         } else {
-            HashMap::new()
+            FxHashMap::default()
         };
         resource_refs.extend(load_system_resource_references(
             &config_arc.sdk_config.ets_loader_path,
@@ -321,7 +321,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                     project_root: project_root.clone(),
                     sdk_api_dirs: sdk_api_dirs(&config_arc),
                     sdk_kits_dirs: sdk_kits_dirs(&config_arc),
-                    pkg_name_to_pkg_info: HashMap::new(),
+                    pkg_name_to_pkg_info: FxHashMap::default(),
                     use_normalized_ohm_url: config_arc
                         .product
                         .build_option
@@ -495,7 +495,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         // e.g. "com.example.arkdown.test/entry/ets/entryability/EntryAbility"
         // The ABC class is "L{record_name};" (no src/main, no & wrappers).
         let chunk_name_counts = compile_entry_stem_counts(&loader_json.compile_entry);
-        let record_name_map: HashMap<String, ChunkCompileMeta> = loader_json
+        let record_name_map: FxHashMap<String, ChunkCompileMeta> = loader_json
             .compile_entry
             .iter()
             .enumerate()
@@ -804,7 +804,7 @@ fn read_module_json5(path: &std::path::Path) -> Result<ModuleJson5> {
 
 fn collect_native_libs(project_root: &Path, module: &ModuleConfig) -> Vec<PathBuf> {
     let mut libs = Vec::new();
-    let mut seen = HashSet::new();
+    let mut seen = FxHashSet::default();
     for root in [
         module.src_path.join("src/main/libs"),
         module.src_path.join("libs"),
@@ -843,7 +843,7 @@ fn write_compile_arkts_cache(
     loader_json: &arkdown_profile::LoaderJson,
     config: &Arc<ArkdownConfig>,
     chunk_graph: &ChunkGraph,
-    resource_refs: &HashMap<String, ResourceReference>,
+    resource_refs: &FxHashMap<String, ResourceReference>,
 ) -> Result<CompileArkTsHandoff> {
     CompileArktsCacheWriter::new(module, loader_json, config, resource_refs).write(chunk_graph)
 }

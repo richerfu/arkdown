@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+rustc-hash = { workspace = true }
 arkdown-core = { workspace = true }
 arkdown-resolver = { workspace = true }
 rolldown_plugin = { workspace = true }
@@ -15,4 +16,3 @@ serde_json = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 index_vec = { workspace = true }
-rustc-hash = { workspace = true }

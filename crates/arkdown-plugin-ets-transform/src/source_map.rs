@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use rolldown_sourcemap::SourceMapBuilder;
 use string_wizard::{Hires, MagicString, SourceMapOptions};
+use rustc_hash::FxHashMap;
 
 /// Source Map helpers used by the ETS transforms.
 ///
@@ -358,16 +359,16 @@ fn consume_blank_lines(source: &str, mut offset: usize) -> usize {
 fn collect_original_kit_bindings(
     source: &str,
     id: &str,
-) -> std::collections::HashMap<String, (u32, u32)> {
+) -> FxHashMap<String, (u32, u32)> {
     let allocator = Allocator::default();
     let source_type =
         SourceType::from_path(id).unwrap_or_else(|_| SourceType::ts().with_module(true));
     let parsed = Parser::new(&allocator, source, source_type).parse();
     if !parsed.errors.is_empty() {
-        return std::collections::HashMap::new();
+        return FxHashMap::default();
     }
 
-    let mut bindings = std::collections::HashMap::new();
+    let mut bindings = FxHashMap::default();
     for statement in &parsed.program.body {
         let Statement::ImportDeclaration(import) = statement else {
             continue;

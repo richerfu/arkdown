@@ -24,7 +24,7 @@
 //! <module_root>/build/default/intermediates/startup_config/default/temp-startup-config.json
 //! ```
 
-use std::collections::HashSet;
+use rustc_hash::FxHashSet;
 use std::path::{Path, PathBuf};
 
 use arkdown_core::{AppStartupProfile, MergedStartupConfig, StartupTask};
@@ -274,7 +274,7 @@ fn find_startup_profile_in_pkg(pkg_dir: &Path, profile_name: &str) -> Option<Pat
 /// Hvigor calls `printErrorExit` here; arkdown downgrades to a non-fatal
 /// warning so the build can continue.
 fn check_duplicate_task_names(tasks: &[StartupTask], category: &str) {
-    let mut seen: HashSet<&str> = HashSet::new();
+    let mut seen: FxHashSet<&str> = FxHashSet::default();
     for task in tasks {
         if !seen.insert(task.name.as_str()) {
             tracing::warn!(

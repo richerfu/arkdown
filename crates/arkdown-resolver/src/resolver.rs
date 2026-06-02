@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::{Path, PathBuf};
 
 use arkdown_core::{ModuleType, OhosResolvedModule, PkgContext};
@@ -22,7 +22,7 @@ pub struct ResolverConfig {
     /// Paths to SDK `kits/` directories (for `@kit.*` specifiers).
     pub sdk_kits_dirs: Vec<PathBuf>,
     /// Map from package name → `PkgBriefInfo` (from `loader.json` `pkgBriefInfo`).
-    pub pkg_name_to_pkg_info: HashMap<String, PkgBriefInfo>,
+    pub pkg_name_to_pkg_info: FxHashMap<String, PkgBriefInfo>,
     /// Whether to use normalized OHM URLs as module identifiers.
     pub use_normalized_ohm_url: bool,
     /// Whether to enforce case-sensitive import checks.
@@ -49,7 +49,7 @@ pub struct PkgBriefInfo {
 pub struct OhosResolver {
     config: ResolverConfig,
     fs_resolver: OxcResolver,
-    package_roots: HashMap<String, PackageRoot>,
+    package_roots: FxHashMap<String, PackageRoot>,
 }
 
 #[derive(Debug, Clone)]
@@ -344,13 +344,13 @@ impl PackageRoot {
 }
 
 struct PackageRootIndex {
-    roots: HashMap<String, PackageRoot>,
+    roots: FxHashMap<String, PackageRoot>,
 }
 
 impl PackageRootIndex {
     fn build(config: &ResolverConfig) -> Self {
         let mut index = Self {
-            roots: HashMap::new(),
+            roots: FxHashMap::default(),
         };
 
         for (name, info) in &config.pkg_name_to_pkg_info {
@@ -373,19 +373,19 @@ impl PackageRootIndex {
         index
     }
 
-    fn into_roots(self) -> HashMap<String, PackageRoot> {
+    fn into_roots(self) -> FxHashMap<String, PackageRoot> {
         self.roots
     }
 
     fn collect_project_file_dependencies(&mut self, project_root: &Path) {
-        let mut visited = HashSet::new();
+        let mut visited = FxHashSet::default();
         self.collect_project_file_dependencies_inner(project_root, &mut visited);
     }
 
     fn collect_project_file_dependencies_inner(
         &mut self,
         dir: &Path,
-        visited: &mut HashSet<PathBuf>,
+        visited: &mut FxHashSet<PathBuf>,
     ) {
         let Ok(real_dir) = std::fs::canonicalize(dir) else {
             return;
@@ -540,7 +540,7 @@ mod tests {
             project_root,
             sdk_api_dirs,
             sdk_kits_dirs,
-            pkg_name_to_pkg_info: HashMap::new(),
+            pkg_name_to_pkg_info: FxHashMap::default(),
             use_normalized_ohm_url: true,
             case_sensitive_check: false,
             oh_modules_roots,

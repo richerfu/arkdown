@@ -39,6 +39,17 @@ pub enum OhosModuleType {
     Har,
 }
 
+impl std::fmt::Display for OhosModuleType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            OhosModuleType::Entry => "entry",
+            OhosModuleType::Feature => "feature",
+            OhosModuleType::Shared => "shared",
+            OhosModuleType::Har => "har",
+        })
+    }
+}
+
 /// Compilation mode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CompileMode {
@@ -46,6 +57,15 @@ pub enum CompileMode {
     EsModule,
     /// JS bundle mode (legacy FA model).
     JsBundle,
+}
+
+impl std::fmt::Display for CompileMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            CompileMode::EsModule => "esmodule",
+            CompileMode::JsBundle => "jsbundle",
+        })
+    }
 }
 
 /// Top-level arkdown configuration (parsed from `build-profile.json5` and related files).

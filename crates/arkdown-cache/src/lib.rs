@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -154,7 +154,7 @@ const COMPILE_ENV_FILE: &str = ".compile_env";
 pub struct BuildCache {
     cache_dir: PathBuf,
     /// In-memory store for this build session (populated on first access).
-    memory: HashMap<String, CachedEntry>,
+    memory: FxHashMap<String, CachedEntry>,
 }
 
 impl BuildCache {
@@ -163,7 +163,7 @@ impl BuildCache {
     pub fn new(cache_dir: PathBuf) -> Self {
         BuildCache {
             cache_dir,
-            memory: HashMap::new(),
+            memory: FxHashMap::default(),
         }
     }
 

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -19,11 +19,11 @@ pub struct RawOhPackage {
     #[serde(default)]
     pub version: String,
     #[serde(default)]
-    pub dependencies: HashMap<String, String>,
+    pub dependencies: FxHashMap<String, String>,
     #[serde(default)]
-    pub dev_dependencies: HashMap<String, String>,
+    pub dev_dependencies: FxHashMap<String, String>,
     #[serde(default)]
-    pub dynamic_dependencies: HashMap<String, String>,
+    pub dynamic_dependencies: FxHashMap<String, String>,
 }
 
 // ---------------------------------------------------------------------------

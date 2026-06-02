@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -12,7 +12,7 @@ use crate::meta_compute;
 pub struct ModuleMetaPlugin {
     project_root: PathBuf,
     module_name: String,
-    reverse_map: Arc<Mutex<HashMap<String, Vec<HostModuleInfo>>>>,
+    reverse_map: Arc<Mutex<FxHashMap<String, Vec<HostModuleInfo>>>>,
 }
 
 impl std::fmt::Debug for ModuleMetaPlugin {
@@ -28,11 +28,11 @@ impl ModuleMetaPlugin {
         ModuleMetaPlugin {
             project_root,
             module_name: module_name.into(),
-            reverse_map: Arc::new(Mutex::new(HashMap::new())),
+            reverse_map: Arc::new(Mutex::new(FxHashMap::default())),
         }
     }
 
-    pub fn reverse_map_snapshot(&self) -> HashMap<String, Vec<HostModuleInfo>> {
+    pub fn reverse_map_snapshot(&self) -> FxHashMap<String, Vec<HostModuleInfo>> {
         self.reverse_map
             .lock()
             .map(|g| g.clone())

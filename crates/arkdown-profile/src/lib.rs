@@ -39,7 +39,7 @@ pub use process_startup_config::{
 };
 pub use router_map::{collect_router_entries, RouterMapEntry};
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -123,7 +123,7 @@ impl ProfileProcessor {
         &self,
         manifest: &HapManifest,
         output_path: &Path,
-        resource_ids: Option<&HashMap<String, u32>>,
+        resource_ids: Option<&FxHashMap<String, u32>>,
     ) -> Result<(), ArkdownError> {
         // Read AppScope/app.json5 for the app section
         let app_json5_path = self.config.project_root.join("AppScope/app.json5");
@@ -187,7 +187,7 @@ impl ProfileProcessor {
 /// to a numeric resource ID by looking up the name part in `resource_ids`.
 ///
 /// Returns `None` if `value` is not a `$type:name` reference or the name is not found.
-fn resolve_res_ref(value: &str, resource_ids: &HashMap<String, u32>) -> Option<u32> {
+fn resolve_res_ref(value: &str, resource_ids: &FxHashMap<String, u32>) -> Option<u32> {
     if !value.starts_with('$') {
         return None;
     }
@@ -213,7 +213,7 @@ fn build_app_section(
     is_debug: bool,
     compile_sdk_version: &str,
     bundle_name_fallback: &str,
-    resource_ids: Option<&HashMap<String, u32>>,
+    resource_ids: Option<&FxHashMap<String, u32>>,
 ) -> serde_json::Map<String, serde_json::Value> {
     let icon_ref = src
         .get("icon")
@@ -329,7 +329,7 @@ fn compile_mode_str(m: &CompileMode) -> &'static str {
 ///   descriptionId, labelId, startWindowBackground, name
 fn manifest_to_json(
     manifest: &HapManifest,
-    resource_ids: Option<&HashMap<String, u32>>,
+    resource_ids: Option<&FxHashMap<String, u32>>,
 ) -> serde_json::Value {
     let abilities: Vec<serde_json::Value> = manifest
         .abilities
@@ -771,7 +771,7 @@ fi
         let _ = module_cfg; // silence unused warning
 
         // Resource IDs from the golden.
-        let mut resource_ids = HashMap::new();
+        let mut resource_ids = FxHashMap::default();
         resource_ids.insert("layered_image".to_string(), 16777219u32);
         resource_ids.insert("app_name".to_string(), 16777216u32);
         resource_ids.insert("EntryAbility_desc".to_string(), 16777220u32);

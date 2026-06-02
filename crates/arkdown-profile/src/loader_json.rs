@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::{Component, Path, PathBuf};
 
 use indexmap::IndexMap;
@@ -35,15 +35,15 @@ pub struct LoaderJson {
     /// hvigor node_modules sandbox path under `intermediates/loader_out`.
     pub node_modules_path: String,
     /// ByteCode HAR dependency metadata.
-    pub byte_code_har_info: HashMap<String, ByteCodeHarEntry>,
+    pub byte_code_har_info: FxHashMap<String, ByteCodeHarEntry>,
     /// ByteCode HAR declaration entries. Empty for the minimal HAP fixture.
     pub declaration_entry: Vec<String>,
     /// The OHOS module name (e.g. `"entry"`).
     pub module_name: String,
     /// HSP package name → OHM URL map.
-    pub hsp_name_ohm_map: HashMap<String, String>,
+    pub hsp_name_ohm_map: FxHashMap<String, String>,
     /// HAR package name → OHM URL map.
-    pub har_name_ohm_map: HashMap<String, String>,
+    pub har_name_ohm_map: FxHashMap<String, String>,
     /// Package manager type — `"ohpm"` for OHOS projects.
     pub package_manager_type: String,
     /// hvigor's serialized compile entries. Empty for the minimal HAP fixture.
@@ -56,9 +56,9 @@ pub struct LoaderJson {
     /// Router map entries. Empty for the minimal fixture.
     pub router_map: Vec<serde_json::Value>,
     /// HSP resource table map. Empty for the minimal fixture.
-    pub hsp_resources_map: HashMap<String, String>,
+    pub hsp_resources_map: FxHashMap<String, String>,
     /// Incremental update metadata. Empty for the minimal fixture.
-    pub update_version_info: HashMap<String, serde_json::Value>,
+    pub update_version_info: FxHashMap<String, serde_json::Value>,
     /// Ark Native output path emitted by hvigor.
     pub an_build_out_put: String,
     /// Ark Native build mode emitted by hvigor.
@@ -107,7 +107,7 @@ pub struct LoaderJson {
     pub fallback_an_build: bool,
     /// Map of package name → brief package info (source roots, etc.).
     #[serde(skip)]
-    pub pkg_name_to_pkg_brief_info: HashMap<String, PkgBriefInfo>,
+    pub pkg_name_to_pkg_brief_info: FxHashMap<String, PkgBriefInfo>,
     /// WebWorker source file paths. hvigor reads this field when present and
     /// expects filesystem paths to `.ets`, `.ts`, or `.js` worker sources.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -299,7 +299,7 @@ pub fn generate_loader_json(
 
     // Deduplicate while preserving order.
     {
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = FxHashSet::default();
         compile_entry.retain(|e| seen.insert(e.clone()));
     }
 
@@ -337,7 +337,7 @@ pub fn generate_loader_json(
     // --- TASK-LOADER-01: scan oh_modules/ for ByteCode HAR dependencies ---
     let bytecode_har_deps = scan_bytecode_har_deps(&module_cfg.src_path, &config.project_root);
 
-    let byte_code_har_info: HashMap<String, ByteCodeHarEntry> = bytecode_har_deps
+    let byte_code_har_info: FxHashMap<String, ByteCodeHarEntry> = bytecode_har_deps
         .iter()
         .cloned()
         .map(|e| e.into_loader_entry())
@@ -348,7 +348,7 @@ pub fn generate_loader_json(
             .iter()
             .flat_map(|dep| dep.declaration_entry.iter().cloned())
             .collect();
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = FxHashSet::default();
         entries.retain(|entry| seen.insert(entry.clone()));
         entries
     } else {
@@ -381,15 +381,15 @@ pub fn generate_loader_json(
         byte_code_har_info,
         declaration_entry,
         module_name: module_cfg.name.clone(),
-        hsp_name_ohm_map: HashMap::new(),
-        har_name_ohm_map: HashMap::new(),
+        hsp_name_ohm_map: FxHashMap::default(),
+        har_name_ohm_map: FxHashMap::default(),
         package_manager_type: "ohpm".to_string(),
         hvigor_compile_entry,
         other_compile_files: vec![],
         dynamic_import_lib_info,
         router_map,
-        hsp_resources_map: HashMap::new(),
-        update_version_info: HashMap::new(),
+        hsp_resources_map: FxHashMap::default(),
+        update_version_info: FxHashMap::default(),
         an_build_out_put: format!(
             "{}/build/default/intermediates/loader_out/default/an/arm64-v8a",
             module_root
@@ -583,8 +583,8 @@ fn collect_dependency_router_map_source_files(
 fn build_pkg_brief_info(
     _config: &ArkdownConfig,
     module_cfg: &ModuleConfig,
-) -> HashMap<String, PkgBriefInfo> {
-    let mut map = HashMap::new();
+) -> FxHashMap<String, PkgBriefInfo> {
+    let mut map = FxHashMap::default();
     let module_root = to_absolute_path_string(&module_cfg.src_path);
     let ets_src = format!("{}/src/main/ets", module_root);
 

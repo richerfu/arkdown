@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::loader_json::ByteCodeHarEntry;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 // ---------------------------------------------------------------------------
 // oh-package.json5 subset for ByteCode HAR detection
@@ -113,7 +114,7 @@ pub fn scan_bytecode_har_deps(
     project_root: &Path,
 ) -> Vec<ByteCodeHarScanEntry> {
     let mut results = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = FxHashSet::default();
 
     for base in &[
         module_root.join("oh_modules"),
@@ -130,7 +131,7 @@ pub fn scan_bytecode_har_deps(
 
 fn scan_oh_modules_dir(
     oh_modules: &Path,
-    seen: &mut std::collections::HashSet<String>,
+    seen: &mut FxHashSet<String>,
     out: &mut Vec<ByteCodeHarScanEntry>,
 ) {
     for entry in read_dir_sorted(oh_modules) {
@@ -174,7 +175,7 @@ fn read_dir_sorted(dir: &Path) -> Vec<std::fs::DirEntry> {
 fn try_collect_bytecode_har(
     pkg_dir: &Path,
     pkg_name: &str,
-    seen: &mut std::collections::HashSet<String>,
+    seen: &mut FxHashSet<String>,
     out: &mut Vec<ByteCodeHarScanEntry>,
 ) {
     if seen.contains(pkg_name) {
@@ -379,9 +380,9 @@ fn is_local_dependency(dep_name: &str, module_root: &Path) -> bool {
     #[serde(rename_all = "camelCase")]
     struct PkgDeps {
         #[serde(default)]
-        dependencies: std::collections::HashMap<String, String>,
+        dependencies: FxHashMap<String, String>,
         #[serde(default)]
-        dynamic_dependencies: std::collections::HashMap<String, String>,
+        dynamic_dependencies: FxHashMap<String, String>,
     }
 
     let Ok(parsed) = json5::from_str::<PkgDeps>(&content) else {

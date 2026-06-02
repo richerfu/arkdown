@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::path::Path;
 
 use rolldown_common::Output;
@@ -27,7 +27,7 @@ impl Plugin for DuplicateCheckPlugin {
         _ctx: &PluginContext,
         args: &mut HookGenerateBundleArgs<'_>,
     ) -> impl std::future::Future<Output = HookNoopReturn> + Send {
-        let mut seen: HashMap<String, String> = HashMap::new();
+        let mut seen: FxHashMap<String, String> = FxHashMap::default();
         for output in args.bundle.iter() {
             if let Output::Chunk(chunk) = output {
                 let filename = chunk.filename.to_string();
@@ -49,7 +49,7 @@ impl Plugin for DuplicateCheckPlugin {
 /// Check duplicate file stems from a list of module IDs (file paths).
 /// Called by the bundler after building the module graph.
 pub fn check_duplicate_module_ids(module_ids: &[String]) -> anyhow::Result<()> {
-    let mut seen: HashMap<String, String> = HashMap::new();
+    let mut seen: FxHashMap<String, String> = FxHashMap::default();
     for id in module_ids {
         let path = Path::new(id);
         let id_lower = id.to_lowercase();

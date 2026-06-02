@@ -15,10 +15,8 @@ pub mod viewpu_emit;
 mod viewpu_finalize;
 mod viewpu_source_map;
 
-use std::{
-    collections::HashSet,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
+use rustc_hash::FxHashSet;
 
 use arkdown_core::ModuleSource;
 use oxc_allocator::Allocator;
@@ -104,8 +102,8 @@ pub fn collect_arkui_component_names(
     }
 
     let mut names = Vec::new();
-    let mut seen = HashSet::new();
-    let mut custom_components = HashSet::new();
+    let mut seen = FxHashSet::default();
+    let mut custom_components = FxHashSet::default();
     for statement in &parsed.program.body {
         collect_custom_component_names(statement, &mut custom_components);
     }
@@ -157,8 +155,8 @@ pub fn transform_ets_with_options(
     let simple_type_context =
         SimpleTypeContext::from_program(&parsed.program, &source.id.id, options);
     let hvigor_source_id = hvigor_source_path(&source.id.id, options);
-    let mut custom_components = HashSet::new();
-    let mut custom_component_update_props = CustomComponentUpdateProps::new();
+    let mut custom_components = FxHashSet::default();
+    let mut custom_component_update_props = CustomComponentUpdateProps::default();
     for statement in &parsed.program.body {
         collect_custom_component_names(statement, &mut custom_components);
         collect_local_component_update_props(statement, &mut custom_component_update_props);
@@ -231,9 +229,9 @@ fn component_from_statement(
     id: &str,
     options: &TransformOptions,
     simple_type_context: &SimpleTypeContext,
-    custom_components: &HashSet<String>,
+    custom_components: &FxHashSet<String>,
     custom_component_update_props: &CustomComponentUpdateProps,
-    builder_functions: &HashSet<String>,
+    builder_functions: &FxHashSet<String>,
     hvigor_source_id: &str,
 ) -> Result<Option<ComponentInfo>, EtsTransformError> {
     match statement {
@@ -291,9 +289,9 @@ fn transform_non_component_statement(
     source_text: &str,
     id: &str,
     options: &TransformOptions,
-    custom_components: &HashSet<String>,
+    custom_components: &FxHashSet<String>,
     custom_component_update_props: &CustomComponentUpdateProps,
-    builder_functions: &HashSet<String>,
+    builder_functions: &FxHashSet<String>,
     hvigor_source_id: &str,
 ) -> Result<Option<(usize, String)>, EtsTransformError> {
     let replacement = match statement {
@@ -363,9 +361,9 @@ fn transform_decorated_function(
     function: &Function<'_>,
     source_text: &str,
     id: &str,
-    custom_components: &HashSet<String>,
+    custom_components: &FxHashSet<String>,
     custom_component_update_props: &CustomComponentUpdateProps,
-    builder_functions: &HashSet<String>,
+    builder_functions: &FxHashSet<String>,
     component_metadata: &ComponentMetadata,
     exported: bool,
     extra_decorators: &[Decorator<'_>],
@@ -457,9 +455,9 @@ fn component_from_struct(
     is_exported: bool,
     is_default_export: bool,
     simple_type_context: &SimpleTypeContext,
-    custom_components: &HashSet<String>,
+    custom_components: &FxHashSet<String>,
     custom_component_update_props: &CustomComponentUpdateProps,
-    builder_functions: &HashSet<String>,
+    builder_functions: &FxHashSet<String>,
     hvigor_source_id: &str,
 ) -> Result<Option<ComponentInfo>, EtsTransformError> {
     if !is_component_struct(statement) {
@@ -757,8 +755,8 @@ fn primary_state_decorator(names: &[&str]) -> Option<&'static str> {
 fn component_raw_object_field_names(
     statement: &StructStatement<'_>,
     simple_type_context: &SimpleTypeContext,
-) -> HashSet<String> {
-    let mut names = HashSet::new();
+) -> FxHashSet<String> {
+    let mut names = FxHashSet::default();
     for element in &statement.body.body {
         let StructElement::PropertyDefinition(property) = element else {
             continue;

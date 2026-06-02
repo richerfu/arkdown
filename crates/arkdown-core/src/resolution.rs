@@ -46,6 +46,46 @@ pub enum OhosResolvedModule {
     },
 }
 
+impl OhosResolvedModule {
+    /// Returns the external module ID string for variants that are resolved as
+    /// external (bundle refs, HSP refs, SDK declarations, bytecode HARs).
+    ///
+    /// Returns `None` for local source files and remote packages that are
+    /// bundled normally.
+    pub fn external_id(&self) -> Option<std::borrow::Cow<'_, str>> {
+        match self {
+            OhosResolvedModule::ExternalBundle { ohm_url } => {
+                Some(std::borrow::Cow::Borrowed(ohm_url.as_str()))
+            }
+            OhosResolvedModule::ExternalHsp {
+                bundle_name,
+                module_name,
+                entry_path,
+            } => Some(std::borrow::Cow::Owned(format!(
+                "@shared:{bundle_name}/{module_name}/{entry_path}"
+            ))),
+            OhosResolvedModule::SdkDeclaration { path, .. } => {
+                Some(std::borrow::Cow::Owned(path.to_string_lossy().into_owned()))
+            }
+            OhosResolvedModule::BytecodeHar { ohm_url, .. } => {
+                Some(std::borrow::Cow::Borrowed(ohm_url.as_str()))
+            }
+            OhosResolvedModule::LocalSource { .. }
+            | OhosResolvedModule::RemotePackage { .. } => None,
+        }
+    }
+
+    /// Returns the resolved file path for variants that resolve to a local file
+    /// (local source and remote packages).
+    pub fn local_path(&self) -> Option<&std::path::PathBuf> {
+        match self {
+            OhosResolvedModule::LocalSource { path, .. }
+            | OhosResolvedModule::RemotePackage { path, .. } => Some(path),
+            _ => None,
+        }
+    }
+}
+
 /// Package context information used for OHM URL generation.
 #[derive(Debug, Clone)]
 pub struct PkgContext {

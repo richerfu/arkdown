@@ -108,8 +108,7 @@ fn is_js_reserved(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustc_hash::FxHashSet;
-
+    
     #[test]
     fn test_sequence() {
         let mut alloc = NameAllocator::new(FxHashSet::default());

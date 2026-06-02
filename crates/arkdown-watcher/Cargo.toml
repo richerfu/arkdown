@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+rustc-hash = { workspace = true }
 arkdown-core = { workspace = true }
 notify = { workspace = true }
 tokio = { workspace = true }

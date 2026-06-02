@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::path::Path;
 
 const DEFAULT_VERSION: &str = "1.0.0";
@@ -85,7 +85,7 @@ pub struct HvigorSourceMapOptions {
     pub module_name: String,
     pub package_name: String,
     pub version: String,
-    pub chunk_source_files: HashMap<String, String>,
+    pub chunk_source_files: FxHashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]

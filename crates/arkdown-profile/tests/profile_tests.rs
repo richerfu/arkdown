@@ -384,7 +384,7 @@ fn test_write_module_json_emits_virtual_machine_and_compile_mode() {
 #[test]
 fn test_write_module_json_resolves_resource_ids_into_abilities() {
     use arkdown_core::{AbilityEntry, CompileMode, HapManifest, OhosModuleType};
-    use std::collections::HashMap;
+    use rustc_hash::FxHashMap;
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let mut config = (*default_config()).clone();
@@ -417,7 +417,7 @@ fn test_write_module_json_resolves_resource_ids_into_abilities() {
         description: None,
     };
 
-    let mut resource_ids: HashMap<String, u32> = HashMap::new();
+    let mut resource_ids: FxHashMap<String, u32> = FxHashMap::default();
     resource_ids.insert("icon".to_string(), 16777219);
     resource_ids.insert("EntryAbility_label".to_string(), 16777216);
     resource_ids.insert("EntryAbility_desc".to_string(), 16777217);

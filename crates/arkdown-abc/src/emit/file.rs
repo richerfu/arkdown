@@ -10,6 +10,7 @@ use crate::emit::record::{
     FIELD_OWNER_CLASS_IDX,
 };
 use crate::emit::strings::StringTable;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 // ── LiteralArray types (Task 1) ───────────────────────────────────────────────
 
@@ -340,7 +341,7 @@ impl AbcFile {
         // Physical ClassItem order follows libpandafile ItemContainer insertion:
         // annotation records, user records, then fixed SDK stubs.  The top-level
         // class index is sorted separately below.
-        let record_names: std::collections::HashSet<&str> = self
+        let record_names: FxHashSet<&str> = self
             .records
             .iter()
             .map(|record| record.name.as_str())
@@ -418,7 +419,7 @@ impl AbcFile {
         };
 
         // Build a map from class name → ClassItem file offset (for the class index).
-        let name_to_class_offset: std::collections::HashMap<&str, u32> = all_classes
+        let name_to_class_offset: FxHashMap<&str, u32> = all_classes
             .iter()
             .zip(class_item_offsets.iter())
             .map(|(c, &off)| (c.name.as_str(), off))
@@ -444,7 +445,7 @@ impl AbcFile {
         let mut bytecode_string_offsets = vec![0u32; self.strings.len()];
         let mut emitted_bytecode_strings = vec![false; self.strings.len()];
         let mut supplemental_string_offsets =
-            std::collections::HashMap::<(usize, String), u32>::new();
+            FxHashMap::<(usize, String), u32>::default();
         let mut method_string_offsets: Vec<Vec<u32>> = all_classes
             .iter()
             .map(|class| vec![0; class.methods.len()])
@@ -637,7 +638,7 @@ impl AbcFile {
         let slot_number_str_off = string_items.get_or_create("SlotNumber");
         let mut cur = string_items.cur();
 
-        let mut method_name_offsets = std::collections::HashMap::new();
+        let mut method_name_offsets = FxHashMap::default();
         for (class, &class_off) in all_classes.iter().zip(class_item_offsets.iter()) {
             for (method, method_off) in class
                 .methods
@@ -655,7 +656,7 @@ impl AbcFile {
         // in the top-level class index but not in this typed class table.
         let mut index_class_offsets = Vec::with_capacity(index_class_count as usize);
         index_class_offsets.extend_from_slice(&[2, 6]);
-        let mut name_to_index_class_idx = std::collections::HashMap::new();
+        let mut name_to_index_class_idx = FxHashMap::default();
         for (i, class) in std::iter::once(&annotation_stubs[1])
             .chain(self.records.iter())
             .chain(sdk_stubs.iter())
@@ -1312,9 +1313,9 @@ fn class_with_upstream_method_order(mut class: ClassRecord) -> ClassRecord {
 #[derive(Debug, Default)]
 struct MethodPoolLayout {
     string_refs: Vec<MethodIndexStringRef>,
-    string_pool_indices: std::collections::HashMap<u16, u16>,
-    literal_pool_indices: std::collections::HashMap<u16, u16>,
-    definemethod_pool_indices_by_name: std::collections::HashMap<u16, u16>,
+    string_pool_indices: FxHashMap<u16, u16>,
+    literal_pool_indices: FxHashMap<u16, u16>,
+    definemethod_pool_indices_by_name: FxHashMap<u16, u16>,
     method_indices: Vec<usize>,
     definefunc_pool_indices: Vec<u16>,
     ctor_pool_index: u16,
@@ -1322,7 +1323,7 @@ struct MethodPoolLayout {
 
 pub(super) struct StringItemWriter {
     cur: u32,
-    offsets: std::collections::HashMap<String, u32>,
+    offsets: FxHashMap<String, u32>,
     items: Vec<Vec<u8>>,
 }
 
@@ -1330,7 +1331,7 @@ impl StringItemWriter {
     fn new(start: u32) -> Self {
         Self {
             cur: start,
-            offsets: std::collections::HashMap::new(),
+            offsets: FxHashMap::default(),
             items: Vec::new(),
         }
     }
@@ -1401,7 +1402,7 @@ fn build_method_pool_layouts(
     strings: &StringTable,
 ) -> Vec<MethodPoolLayout> {
     let mut next_pool_index = 0u16;
-    let mut global_string_pool_indices = std::collections::HashMap::<u16, u16>::new();
+    let mut global_string_pool_indices = FxHashMap::<u16, u16>::default();
     classes
         .iter()
         .map(|class| {

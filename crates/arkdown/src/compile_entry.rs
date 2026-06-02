@@ -1,8 +1,8 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::path::Path;
 
-pub fn compile_entry_stem_counts(entries: &[String]) -> HashMap<String, usize> {
-    let mut counts = HashMap::new();
+pub fn compile_entry_stem_counts(entries: &[String]) -> FxHashMap<String, usize> {
+    let mut counts = FxHashMap::default();
     for entry in entries {
         if let Some(stem) = Path::new(entry.as_str())
             .file_stem()
@@ -17,7 +17,7 @@ pub fn compile_entry_stem_counts(entries: &[String]) -> HashMap<String, usize> {
 pub fn compile_entry_chunk_name(
     entry: &str,
     index: usize,
-    stem_counts: &HashMap<String, usize>,
+    stem_counts: &FxHashMap<String, usize>,
 ) -> String {
     let Some(stem) = Path::new(entry).file_stem().and_then(|s| s.to_str()) else {
         return format!("entry_{index}");

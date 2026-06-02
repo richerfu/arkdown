@@ -1,12 +1,12 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 pub(super) fn patch_bytecode_index_operands(
     bytecode: &[u8],
-    string_pool_indices: &HashMap<u16, u16>,
-    literal_pool_indices: &HashMap<u16, u16>,
+    string_pool_indices: &FxHashMap<u16, u16>,
+    literal_pool_indices: &FxHashMap<u16, u16>,
     ctor_pool_index: u16,
     definefunc_pool_indices: &[u16],
-    definemethod_pool_indices_by_name: &HashMap<u16, u16>,
+    definemethod_pool_indices_by_name: &FxHashMap<u16, u16>,
     definefunc_cursor: &mut usize,
 ) -> Vec<u8> {
     let mut patched = bytecode.to_vec();
@@ -155,7 +155,7 @@ fn inline_cache_slot_operand(bytecode: &[u8], pos: usize, opcode: u8) -> Option<
     Some((operand_pos, inc))
 }
 
-fn rewrite_u16_operand(patched: &mut [u8], operand_pos: usize, pool_indices: &HashMap<u16, u16>) {
+fn rewrite_u16_operand(patched: &mut [u8], operand_pos: usize, pool_indices: &FxHashMap<u16, u16>) {
     let old = u16::from_le_bytes([patched[operand_pos], patched[operand_pos + 1]]);
     if let Some(&new) = pool_indices.get(&old) {
         patched[operand_pos..operand_pos + 2].copy_from_slice(&new.to_le_bytes());

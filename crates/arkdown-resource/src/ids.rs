@@ -1,17 +1,17 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 #[derive(Debug)]
 pub(crate) struct ResourceIdAllocator {
-    assigned_ids: HashMap<(u32, String), u32>,
-    resource_ids: HashMap<String, u32>,
+    assigned_ids: FxHashMap<(u32, String), u32>,
+    resource_ids: FxHashMap<String, u32>,
     next_id: u32,
 }
 
 impl ResourceIdAllocator {
     pub(crate) fn new(module_name: &str, module_names: &[String]) -> Self {
         Self {
-            assigned_ids: HashMap::new(),
-            resource_ids: HashMap::new(),
+            assigned_ids: FxHashMap::default(),
+            resource_ids: FxHashMap::default(),
             next_id: Self::start_id(module_name, module_names),
         }
     }
@@ -28,11 +28,11 @@ impl ResourceIdAllocator {
         id
     }
 
-    pub(crate) fn resource_ids(&self) -> &HashMap<String, u32> {
+    pub(crate) fn resource_ids(&self) -> &FxHashMap<String, u32> {
         &self.resource_ids
     }
 
-    pub(crate) fn into_resource_ids(self) -> HashMap<String, u32> {
+    pub(crate) fn into_resource_ids(self) -> FxHashMap<String, u32> {
         self.resource_ids
     }
 

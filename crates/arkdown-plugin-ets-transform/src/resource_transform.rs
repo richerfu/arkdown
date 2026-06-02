@@ -6,7 +6,7 @@
 //! the field order and static names stay centralized instead of being assembled
 //! ad hoc at call sites.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{CallExpression, Expression};
@@ -88,7 +88,7 @@ struct ResourceNames {
 }
 
 impl ResourceNames {
-    fn from_refs(resource_refs: &HashMap<String, ResourceReference>) -> Self {
+    fn from_refs(resource_refs: &FxHashMap<String, ResourceReference>) -> Self {
         resource_refs
             .values()
             .next()
@@ -103,7 +103,7 @@ impl ResourceNames {
 pub(crate) fn rewrite_resource_references(
     source: &str,
     id: &str,
-    resource_refs: &HashMap<String, ResourceReference>,
+    resource_refs: &FxHashMap<String, ResourceReference>,
 ) -> String {
     let allocator = Allocator::default();
     let source_type =
@@ -122,7 +122,7 @@ pub(crate) fn rewrite_resource_references(
 
 struct ResourceReferenceVisitor<'a> {
     source: &'a str,
-    resource_refs: &'a HashMap<String, ResourceReference>,
+    resource_refs: &'a FxHashMap<String, ResourceReference>,
     names: ResourceNames,
     patches: Vec<SourcePatch>,
 }

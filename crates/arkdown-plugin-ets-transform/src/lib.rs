@@ -25,7 +25,7 @@ pub mod transform;
 mod typescript_emit;
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::sync::{Arc, Mutex};
 
 use arkdown_core::{ArkdownConfig, ModuleSource, ModuleType, ResolvedId};
@@ -62,7 +62,7 @@ pub use sys_resource::load_system_resource_references;
 /// so that `.ets` modules are converted to `.ts` before downstream processing begins.
 pub struct EtsTransformPlugin {
     pub config: Arc<ArkdownConfig>,
-    resource_refs: Arc<HashMap<String, ResourceReference>>,
+    resource_refs: Arc<FxHashMap<String, ResourceReference>>,
     component_metadata: Arc<Mutex<Option<transform::component_meta::ComponentMetadata>>>,
 }
 
@@ -76,14 +76,14 @@ impl EtsTransformPlugin {
     pub fn new(config: Arc<ArkdownConfig>) -> Self {
         EtsTransformPlugin {
             config,
-            resource_refs: Arc::new(HashMap::new()),
+            resource_refs: Arc::new(FxHashMap::default()),
             component_metadata: Arc::new(Mutex::new(None)),
         }
     }
 
     pub fn with_resource_references(
         config: Arc<ArkdownConfig>,
-        resource_refs: HashMap<String, ResourceReference>,
+        resource_refs: FxHashMap<String, ResourceReference>,
     ) -> Self {
         EtsTransformPlugin {
             config,
@@ -578,7 +578,7 @@ mod tests {
     fn test_plugin_lowers_resource_calls_from_ast() {
         let plugin = EtsTransformPlugin::with_resource_references(
             make_config(12),
-            HashMap::from([
+            FxHashMap::from_iter([
                 (
                     "app.string.title".to_string(),
                     ResourceReference {

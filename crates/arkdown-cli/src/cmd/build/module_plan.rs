@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use rustc_hash::FxHashSet;
 
 use arkdown_config::resolve::module_matches_output_target;
 use arkdown_core::{ArkdownConfig, ModuleConfig, OutputTarget};
@@ -41,7 +41,7 @@ pub(super) fn resource_modules_for_build<'a>(
     match config.output_target {
         OutputTarget::Hap | OutputTarget::Hsp => {
             let mut modules = vec![output_module];
-            let mut seen = HashSet::from([output_module.name.clone()]);
+            let mut seen = FxHashSet::from_iter([output_module.name.clone()]);
             let mut queue = ordered_local_dependency_modules(config, output_module);
             for dep in &queue {
                 if seen.insert(dep.name.clone()) {

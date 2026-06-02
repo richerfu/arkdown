@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
 
 use arkdown_core::{
@@ -33,7 +33,7 @@ pub struct SourceMapOptions {
     /// Map from chunk stem (e.g. `"EntryAbility"`) to the compile-entry source
     /// path relative to `src/main` (e.g. `"ets/entryability/EntryAbility.ets"`).
     /// Used to build the per-file key and the `sources` / `file` fields.
-    pub chunk_source_files: HashMap<String, String>,
+    pub chunk_source_files: FxHashMap<String, String>,
 }
 
 impl From<&SourceMapOptions> for HvigorSourceMapOptions {
@@ -242,8 +242,7 @@ mod tests {
     use super::*;
     use arkdown_core::ArkChunk;
     use index_vec::IndexVec;
-    use rustc_hash::FxHashMap;
-    use std::time::{SystemTime, UNIX_EPOCH};
+        use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_output_dir(test_name: &str) -> PathBuf {
         let nonce = SystemTime::now()
@@ -373,7 +372,7 @@ mod tests {
                 ..ArkChunk::default()
             },
         ]);
-        let mut chunk_source_files = HashMap::new();
+        let mut chunk_source_files = FxHashMap::default();
         chunk_source_files.insert(
             "EntryAbility".to_string(),
             "ets/entryability/EntryAbility.ets".to_string(),

@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::HashSet;
+use rustc_hash::FxHashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HarDedupMode {
     CollectPass,
-    RealBuild { excluded_files: HashSet<PathBuf> },
+    RealBuild { excluded_files: FxHashSet<PathBuf> },
 }
 
 pub struct HarDeduplicatePlugin {
@@ -139,9 +139,9 @@ fn write_collect_file(path: &Path, files: &[String]) -> Result<(), HarDedupError
     Ok(())
 }
 
-fn read_collect_file(path: &Path) -> Result<HashSet<PathBuf>, HarDedupError> {
+fn read_collect_file(path: &Path) -> Result<FxHashSet<PathBuf>, HarDedupError> {
     if !path.exists() {
-        return Ok(HashSet::new());
+        return Ok(FxHashSet::default());
     }
     let content = fs_err::read_to_string(path)?;
     let data: CollectFile = serde_json::from_str(&content)?;

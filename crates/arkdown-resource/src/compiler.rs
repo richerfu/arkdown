@@ -4,7 +4,8 @@
 //! element JSON files, copies media and profile files, and writes
 //! `resources.index` and `ResourceTable.txt` to the output directory.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -58,10 +59,10 @@ pub struct ResourceCompileOutput {
     ///
     /// These IDs are used by the profile processor to write `iconId`, `labelId`, and
     /// `descriptionId` into `module.json`.
-    pub resource_ids: HashMap<String, u32>,
+    pub resource_ids: FxHashMap<String, u32>,
     /// Map of `"type.name"` → runtime resource info used by ets-loader's
     /// `$r()` transform, e.g. `"string.app_name"` or `"media.icon"`.
-    pub resource_infos: HashMap<String, ResourceInfo>,
+    pub resource_infos: FxHashMap<String, ResourceInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,15 +129,15 @@ impl ResourceCompiler {
         let mut all_entries: Vec<CompiledEntry> = Vec::new();
         let mut profiles: Vec<(String, PathBuf)> = Vec::new();
         let mut resource_copies: Vec<ResourceCopy> = Vec::new();
-        let mut emitted_resources: HashSet<(String, u32, String)> = HashSet::new();
+        let mut emitted_resources: FxHashSet<(String, u32, String)> = FxHashSet::default();
         let mut id_allocator =
             ResourceIdAllocator::new(&self.config.module_name, &self.config.module_names);
-        let mut resource_infos: HashMap<String, ResourceInfo> = HashMap::new();
+        let mut resource_infos: FxHashMap<String, ResourceInfo> = FxHashMap::default();
 
         for res_dir in &input.resources_dirs {
             let mut files = scan::scan_resources(res_dir);
             files.sort_by(|a, b| a.path.cmp(&b.path));
-            let mut seen_in_module: HashSet<(String, u32, String)> = HashSet::new();
+            let mut seen_in_module: FxHashSet<(String, u32, String)> = FxHashSet::default();
             let mut element_entries: BTreeMap<(u32, String), Vec<PendingEntry>> = BTreeMap::new();
             let mut media_entries: BTreeMap<(u32, String), Vec<PendingEntry>> = BTreeMap::new();
             let mut profile_entries: BTreeMap<(u32, String), Vec<PendingEntry>> = BTreeMap::new();
@@ -315,8 +316,8 @@ impl ResourceCompiler {
 fn commit_pending_entries(
     groups: &BTreeMap<(u32, String), Vec<PendingEntry>>,
     id_allocator: &mut ResourceIdAllocator,
-    resource_infos: &mut HashMap<String, ResourceInfo>,
-    emitted_resources: &mut HashSet<(String, u32, String)>,
+    resource_infos: &mut FxHashMap<String, ResourceInfo>,
+    emitted_resources: &mut FxHashSet<(String, u32, String)>,
     all_entries: &mut Vec<CompiledEntry>,
 ) {
     for ((entry_type, id_name), entries) in groups {
@@ -390,7 +391,7 @@ fn resource_value_path(module_name: &str, relative_path: &Path) -> String {
 fn copy_resource_files(
     copies: &[ResourceCopy],
     resources_dir: &Path,
-    resource_ids: &HashMap<String, u32>,
+    resource_ids: &FxHashMap<String, u32>,
 ) -> Result<(), ResourceError> {
     fs_err::create_dir_all(resources_dir)?;
     for copy in copies {
@@ -420,7 +421,7 @@ fn copy_resource_files(
     Ok(())
 }
 
-fn rewrite_media_refs(value: &mut Value, resource_ids: &HashMap<String, u32>) {
+fn rewrite_media_refs(value: &mut Value, resource_ids: &FxHashMap<String, u32>) {
     match value {
         Value::String(s) => {
             if let Some(name) = s.strip_prefix("$media:") {

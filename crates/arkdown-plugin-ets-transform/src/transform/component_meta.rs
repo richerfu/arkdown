@@ -1,8 +1,8 @@
 use std::{
-    collections::HashSet,
     fs,
     path::{Path, PathBuf},
 };
+use rustc_hash::FxHashSet;
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
@@ -15,15 +15,15 @@ use serde_json::Value;
 
 #[derive(Debug, Clone, Default)]
 pub struct ComponentMetadata {
-    atomic_components: HashSet<String>,
-    need_pop_components: HashSet<String>,
-    enum_names: HashSet<String>,
+    atomic_components: FxHashSet<String>,
+    need_pop_components: FxHashSet<String>,
+    enum_names: FxHashSet<String>,
 }
 
 impl ComponentMetadata {
     pub fn from_ets_loader_path(ets_loader_path: &Path) -> anyhow::Result<Self> {
         let components_dir = ets_loader_path.join("components");
-        let mut atomic_components = HashSet::new();
+        let mut atomic_components = FxHashSet::default();
         for entry in fs::read_dir(&components_dir)? {
             let entry = entry?;
             let path = entry.path();
@@ -59,7 +59,7 @@ impl ComponentMetadata {
     }
 }
 
-fn load_sdk_enum_names(ets_loader_path: &Path) -> anyhow::Result<HashSet<String>> {
+fn load_sdk_enum_names(ets_loader_path: &Path) -> anyhow::Result<FxHashSet<String>> {
     let roots = [
         ets_loader_path.join("declarations"),
         ets_loader_path.join("../../component"),
@@ -70,7 +70,7 @@ fn load_sdk_enum_names(ets_loader_path: &Path) -> anyhow::Result<HashSet<String>
     }
     paths.sort();
 
-    let mut names = HashSet::new();
+    let mut names = FxHashSet::default();
     for path in paths {
         let source = fs::read_to_string(&path)?;
         let allocator = Allocator::default();
@@ -107,8 +107,8 @@ fn collect_declaration_files(root: &Path, paths: &mut Vec<PathBuf>) -> anyhow::R
     Ok(())
 }
 
-fn enum_names_from_program(program: &Program<'_>) -> HashSet<String> {
-    let mut names = HashSet::new();
+fn enum_names_from_program(program: &Program<'_>) -> FxHashSet<String> {
+    let mut names = FxHashSet::default();
     for statement in &program.body {
         match statement {
             Statement::TSEnumDeclaration(declaration) => {
@@ -125,7 +125,7 @@ fn enum_names_from_program(program: &Program<'_>) -> HashSet<String> {
     names
 }
 
-fn load_need_pop_components(component_map_path: &Path) -> anyhow::Result<HashSet<String>> {
+fn load_need_pop_components(component_map_path: &Path) -> anyhow::Result<FxHashSet<String>> {
     let source = fs::read_to_string(component_map_path)?;
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, &source, SourceType::cjs()).parse();
@@ -143,7 +143,7 @@ fn load_need_pop_components(component_map_path: &Path) -> anyhow::Result<HashSet
     })
 }
 
-fn extract_need_pop_components(program: &Program<'_>) -> Option<HashSet<String>> {
+fn extract_need_pop_components(program: &Program<'_>) -> Option<FxHashSet<String>> {
     for statement in &program.body {
         let Statement::VariableDeclaration(declaration) = statement else {
             continue;
@@ -165,7 +165,7 @@ fn extract_need_pop_components(program: &Program<'_>) -> Option<HashSet<String>>
     None
 }
 
-fn extract_need_pop_components_from_expression(expr: &Expression<'_>) -> Option<HashSet<String>> {
+fn extract_need_pop_components_from_expression(expr: &Expression<'_>) -> Option<FxHashSet<String>> {
     match expr {
         Expression::AssignmentExpression(assignment) => {
             if assignment_target_name(&assignment.left).as_deref() == Some("NEEDPOP_COMPONENT") {
@@ -200,7 +200,7 @@ fn assignment_target_name(target: &AssignmentTarget<'_>) -> Option<String> {
     }
 }
 
-fn set_literal_strings(expr: &Expression<'_>) -> Option<HashSet<String>> {
+fn set_literal_strings(expr: &Expression<'_>) -> Option<FxHashSet<String>> {
     if let Expression::ParenthesizedExpression(parenthesized) = expr {
         return set_literal_strings(&parenthesized.expression);
     }
@@ -213,7 +213,7 @@ fn set_literal_strings(expr: &Expression<'_>) -> Option<HashSet<String>> {
         .and_then(set_literal_strings_from_new_set)
 }
 
-fn set_literal_strings_from_new_set(expr: &Expression<'_>) -> Option<HashSet<String>> {
+fn set_literal_strings_from_new_set(expr: &Expression<'_>) -> Option<FxHashSet<String>> {
     let Expression::NewExpression(new_expr) = expr else {
         return None;
     };
@@ -226,7 +226,7 @@ fn set_literal_strings_from_new_set(expr: &Expression<'_>) -> Option<HashSet<Str
     let Some(Argument::ArrayExpression(array)) = new_expr.arguments.first() else {
         return None;
     };
-    let mut out = HashSet::new();
+    let mut out = FxHashSet::default();
     for element in &array.elements {
         let ArrayExpressionElement::StringLiteral(literal) = element else {
             return None;
@@ -241,7 +241,7 @@ mod tests {
     use super::*;
     use oxc_allocator::Allocator;
 
-    fn parse_need_pop(source: &str) -> HashSet<String> {
+    fn parse_need_pop(source: &str) -> FxHashSet<String> {
         let allocator = Allocator::default();
         let parsed = Parser::new(&allocator, source, SourceType::cjs()).parse();
         assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
