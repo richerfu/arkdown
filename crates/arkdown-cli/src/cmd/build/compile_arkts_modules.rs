@@ -40,7 +40,7 @@ impl CompileModuleInfo {
             .and_then(|ext| ext.to_str())
             .unwrap_or("")
             .to_string();
-        let output_ext = compile_output_extension(&source_path, &source_ext)?;
+        let output_ext = Self::compile_output_extension(&source_path, &source_ext)?;
 
         let mut module_roots: Vec<(&str, PathBuf)> = loader_json
             .module_path_map
@@ -63,7 +63,7 @@ impl CompileModuleInfo {
 
             let out_rel = with_extension(&source_file, output_ext);
             let ts_path = cache_root.join(module_name).join(&out_rel);
-            let record_rel = record_relative_path(&out_rel);
+            let record_rel = Self::record_relative_path(&out_rel);
             let record_name = if module_name == loader_json.module_name {
                 format!(
                     "{}/{}/{}",
@@ -76,7 +76,7 @@ impl CompileModuleInfo {
                 )
             };
             let version = package_version_or_default(&module_root);
-            let module_type = module_type_for_source(&source_path, &source_ext);
+            let module_type = Self::module_type_for_source(&source_path, &source_ext);
 
             return Some(CompileModuleInfo {
                 source_path,
@@ -89,7 +89,7 @@ impl CompileModuleInfo {
                 record_name,
                 package_name: module_name.to_string(),
                 module_type,
-                origin_source_lang: origin_source_lang(&source_ext),
+                origin_source_lang: Self::origin_source_lang(&source_ext),
                 source_ext,
                 output_ext: output_ext.to_string(),
             });
@@ -108,7 +108,7 @@ impl CompileModuleInfo {
             .and_then(|ext| ext.to_str())
             .unwrap_or("")
             .to_string();
-        let output_ext = compile_output_extension(&source_path, &source_ext)?;
+        let output_ext = Self::compile_output_extension(&source_path, &source_ext)?;
         let package_root = find_package_root(source_path)?;
         let package_name = package_name_or_dir(&package_root);
         let package_version = package_version_or_default(&package_root);
@@ -138,11 +138,97 @@ impl CompileModuleInfo {
             ts_path,
             record_name,
             package_name: package_entry_name,
-            module_type: module_type_for_source(source_path, &source_ext),
-            origin_source_lang: origin_source_lang(&source_ext),
+            module_type: Self::module_type_for_source(source_path, &source_ext),
+            origin_source_lang: Self::origin_source_lang(&source_ext),
             source_ext,
             output_ext: output_ext.to_string(),
         })
+    }
+}
+
+impl CompileModuleInfo {
+    fn compile_output_extension(source_path: &Path, source_ext: &str) -> Option<&'static str> {
+        match source_ext {
+            "ets" => Some(if Self::should_emit_js_for_ts_or_ets(source_path) {
+                "js"
+            } else {
+                "ts"
+            }),
+            "ts" => Some(if Self::should_emit_js_for_ts_or_ets(source_path) {
+                "js"
+            } else {
+                "ts"
+            }),
+            "js" | "mjs" | "cjs" => Some("js"),
+            "json" | "json5" => Some("json"),
+            _ => None,
+        }
+    }
+
+    fn should_emit_js_for_ts_or_ets(source_path: &Path) -> bool {
+        let Ok(source) = fs_err::read_to_string(source_path) else {
+            return false;
+        };
+        if Self::has_keep_ts_comment(&source) {
+            return false;
+        }
+        Self::has_ts_no_check_or_ignore_comment(&source)
+    }
+
+    fn has_keep_ts_comment(source: &str) -> bool {
+        source
+            .lines()
+            .next()
+            .is_some_and(|line| line.trim() == "// @keepTs")
+    }
+
+    fn has_ts_no_check_or_ignore_comment(source: &str) -> bool {
+        source
+            .lines()
+            .any(|line| line.contains("@ts-nocheck") || line.contains("@ts-ignore"))
+    }
+
+    fn module_type_for_source(source_path: &Path, source_ext: &str) -> String {
+        let is_commonjs = match source_ext {
+            "cjs" => true,
+            "mjs" | "ets" | "ts" => false,
+            "js" => fs_err::read_to_string(source_path)
+                .map(|source| {
+                    let package_has_module_field = find_package_root(source_path)
+                        .and_then(|root| {
+                            OhPackage::load_from_root(&root)
+                                .and_then(|p| p.module.as_deref().map(str::to_string))
+                        })
+                        .is_some();
+                    !package_has_module_field
+                        && (source.contains("module.exports")
+                            || source.contains("exports.")
+                            || source.contains("= exports")
+                            || source.contains("require("))
+                })
+                .unwrap_or(false),
+            _ => false,
+        };
+        if is_commonjs { "commonjs" } else { "esm" }.to_string()
+    }
+
+    fn origin_source_lang(source_ext: &str) -> String {
+        match source_ext {
+            "ets" => "ets",
+            "ts" => "ts",
+            "js" | "mjs" | "cjs" => "js",
+            _ => "",
+        }
+        .to_string()
+    }
+
+    fn record_relative_path(ts_rel: &str) -> String {
+        let rel = ts_rel
+            .trim_start_matches("src/main/")
+            .trim_end_matches(".ets")
+            .trim_end_matches(".ts")
+            .trim_end_matches(".js");
+        rel.to_string()
     }
 }
 
@@ -170,71 +256,6 @@ pub(super) fn module_id_to_source_path(module_id: &str) -> Option<PathBuf> {
         return None;
     }
     Some(canonical_or_owned(path))
-}
-
-fn compile_output_extension(source_path: &Path, source_ext: &str) -> Option<&'static str> {
-    match source_ext {
-        "ets" => Some(if should_emit_js_for_ts_or_ets(source_path) {
-            "js"
-        } else {
-            "ts"
-        }),
-        "ts" => Some(if should_emit_js_for_ts_or_ets(source_path) {
-            "js"
-        } else {
-            "ts"
-        }),
-        "js" | "mjs" | "cjs" => Some("js"),
-        "json" | "json5" => Some("json"),
-        _ => None,
-    }
-}
-
-fn should_emit_js_for_ts_or_ets(source_path: &Path) -> bool {
-    let Ok(source) = fs_err::read_to_string(source_path) else {
-        return false;
-    };
-    if has_keep_ts_comment(&source) {
-        return false;
-    }
-    has_ts_no_check_or_ignore_comment(&source)
-}
-
-fn has_keep_ts_comment(source: &str) -> bool {
-    source
-        .lines()
-        .next()
-        .is_some_and(|line| line.trim() == "// @keepTs")
-}
-
-fn has_ts_no_check_or_ignore_comment(source: &str) -> bool {
-    source
-        .lines()
-        .any(|line| line.contains("@ts-nocheck") || line.contains("@ts-ignore"))
-}
-
-fn module_type_for_source(source_path: &Path, source_ext: &str) -> String {
-    let is_commonjs = match source_ext {
-        "cjs" => true,
-        "mjs" | "ets" | "ts" => false,
-        "js" => fs_err::read_to_string(source_path)
-            .map(|source| {
-                let package_has_module_field = find_package_root(source_path)
-                    .and_then(|root| {
-                        OhPackage::load_from_root(&root)
-                            .and_then(|p| p.module.as_deref().map(str::to_string))
-                    })
-                    .is_some();
-                !package_has_module_field
-                    && (source.contains("module.exports")
-                        || source.contains("exports.")
-                        || source.contains("= exports")
-                        || source.contains("require("))
-            })
-            .unwrap_or(false),
-        _ => false,
-    };
-    if is_commonjs { "commonjs" } else { "esm" }.to_string()
 }
 
 pub(super) fn rewrite_compile_module_imports_to_ohm(
@@ -342,16 +363,6 @@ pub(super) fn resolve_source_request(base_dir: &Path, request: &str) -> Option<P
         }
     }
     None
-}
-
-fn origin_source_lang(source_ext: &str) -> String {
-    match source_ext {
-        "ets" => "ets",
-        "ts" => "ts",
-        "js" | "mjs" | "cjs" => "js",
-        _ => "",
-    }
-    .to_string()
 }
 
 pub(super) fn compile_source_passthrough(source: &str, source_ext: &str) -> String {
@@ -470,15 +481,6 @@ pub(super) fn pkg_modules_package_name(
     }
 
     None
-}
-
-fn record_relative_path(ts_rel: &str) -> String {
-    let rel = ts_rel
-        .trim_start_matches("src/main/")
-        .trim_end_matches(".ets")
-        .trim_end_matches(".ts")
-        .trim_end_matches(".js");
-    rel.to_string()
 }
 
 pub(super) fn slash_path(path: &Path) -> String {

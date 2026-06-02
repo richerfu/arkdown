@@ -14,16 +14,20 @@ const DEFAULT_BINDING: &str = "__json_default";
 /// Top-level object keys that are valid JS identifiers become named exports.
 /// The whole value is always the default export.
 pub fn generate_esm_from_json(value: &serde_json::Value) -> String {
-    JsonModuleEmitter::new(value).emit()
+    JsonModuleEmitter::emit_for(value)
 }
 
-struct JsonModuleEmitter<'a> {
+pub(crate) struct JsonModuleEmitter<'a> {
     value: &'a serde_json::Value,
 }
 
 impl<'a> JsonModuleEmitter<'a> {
     fn new(value: &'a serde_json::Value) -> Self {
         Self { value }
+    }
+
+    pub fn emit_for(value: &'a serde_json::Value) -> String {
+        Self::new(value).emit()
     }
 
     fn emit(&self) -> String {
@@ -38,7 +42,7 @@ impl<'a> JsonModuleEmitter<'a> {
             serde_json::Value::Object(map) => {
                 let mut statements = ast.vec();
                 statements.push(self.default_binding_statement(ast));
-                for key in map.keys().filter(|key| is_valid_js_identifier(key)) {
+                for key in map.keys().filter(|key| Self::is_valid_js_identifier(key)) {
                     statements.push(self.named_export_statement(ast, key));
                 }
                 statements.push(self.default_export_statement(ast));
@@ -67,7 +71,7 @@ impl<'a> JsonModuleEmitter<'a> {
                 VariableDeclarationKind::Var,
                 ast.binding_pattern_binding_identifier(SPAN, DEFAULT_BINDING),
                 NONE,
-                Some(json_value_expression(self.value, ast)),
+                Some(Self::json_value_expression(self.value, ast)),
                 false,
             )),
             false,
@@ -101,7 +105,7 @@ impl<'a> JsonModuleEmitter<'a> {
     }
 
     fn default_member_expression<'b>(&self, ast: AstBuilder<'b>, key: &str) -> Expression<'b> {
-        member_expression_to_expression(ast.member_expression_computed(
+        Self::member_expression_to_expression(ast.member_expression_computed(
             SPAN,
             ast.expression_identifier(SPAN, DEFAULT_BINDING),
             ast.expression_string_literal(SPAN, ast.str(key), None),
@@ -125,117 +129,117 @@ impl<'a> JsonModuleEmitter<'a> {
         {
             ast.expression_identifier(SPAN, DEFAULT_BINDING)
         } else {
-            json_value_expression(value, ast)
+            Self::json_value_expression(value, ast)
         };
         Statement::from(ast.module_declaration_export_default_declaration(
             SPAN,
             ExportDefaultDeclarationKind::from(expression),
         ))
     }
-}
 
-fn member_expression_to_expression<'a>(member: MemberExpression<'a>) -> Expression<'a> {
-    match member {
-        MemberExpression::ComputedMemberExpression(member) => {
-            Expression::ComputedMemberExpression(member)
-        }
-        MemberExpression::StaticMemberExpression(member) => {
-            Expression::StaticMemberExpression(member)
-        }
-        MemberExpression::PrivateFieldExpression(member) => {
-            Expression::PrivateFieldExpression(member)
+    fn member_expression_to_expression<'b>(member: MemberExpression<'b>) -> Expression<'b> {
+        match member {
+            MemberExpression::ComputedMemberExpression(member) => {
+                Expression::ComputedMemberExpression(member)
+            }
+            MemberExpression::StaticMemberExpression(member) => {
+                Expression::StaticMemberExpression(member)
+            }
+            MemberExpression::PrivateFieldExpression(member) => {
+                Expression::PrivateFieldExpression(member)
+            }
         }
     }
-}
 
-fn json_value_expression<'a>(value: &serde_json::Value, ast: AstBuilder<'a>) -> Expression<'a> {
-    match value {
-        serde_json::Value::Null => ast.expression_null_literal(SPAN),
-        serde_json::Value::Bool(value) => ast.expression_boolean_literal(SPAN, *value),
-        serde_json::Value::Number(value) => {
-            let raw = value.to_string();
-            ast.expression_numeric_literal(
-                SPAN,
-                value
-                    .as_f64()
-                    .expect("JSON numbers are representable as f64"),
-                Some(ast.str(&raw)),
-                NumberBase::Decimal,
-            )
-        }
-        serde_json::Value::String(value) => {
-            ast.expression_string_literal(SPAN, ast.str(value), None)
-        }
-        serde_json::Value::Array(values) => ast.expression_array(
-            SPAN,
-            ast.vec_from_iter(
-                values
-                    .iter()
-                    .map(|value| ArrayExpressionElement::from(json_value_expression(value, ast))),
-            ),
-        ),
-        serde_json::Value::Object(values) => ast.expression_object(
-            SPAN,
-            ast.vec_from_iter(values.iter().map(|(key, value)| {
-                let property_key =
-                    PropertyKey::from(ast.expression_string_literal(SPAN, ast.str(key), None));
-                let property_value = json_value_expression(value, ast);
-                ObjectPropertyKind::from(ast.object_property_kind_object_property(
+    fn json_value_expression<'b>(value: &serde_json::Value, ast: AstBuilder<'b>) -> Expression<'b> {
+        match value {
+            serde_json::Value::Null => ast.expression_null_literal(SPAN),
+            serde_json::Value::Bool(value) => ast.expression_boolean_literal(SPAN, *value),
+            serde_json::Value::Number(value) => {
+                let raw = value.to_string();
+                ast.expression_numeric_literal(
                     SPAN,
-                    PropertyKind::Init,
-                    property_key,
-                    property_value,
-                    false,
-                    false,
-                    false,
-                ))
-            })),
-        ),
+                    value
+                        .as_f64()
+                        .expect("JSON numbers are representable as f64"),
+                    Some(ast.str(&raw)),
+                    NumberBase::Decimal,
+                )
+            }
+            serde_json::Value::String(value) => {
+                ast.expression_string_literal(SPAN, ast.str(value), None)
+            }
+            serde_json::Value::Array(values) => ast.expression_array(
+                SPAN,
+                ast.vec_from_iter(
+                    values
+                        .iter()
+                        .map(|value| ArrayExpressionElement::from(Self::json_value_expression(value, ast))),
+                ),
+            ),
+            serde_json::Value::Object(values) => ast.expression_object(
+                SPAN,
+                ast.vec_from_iter(values.iter().map(|(key, value)| {
+                    let property_key =
+                        PropertyKey::from(ast.expression_string_literal(SPAN, ast.str(key), None));
+                    let property_value = Self::json_value_expression(value, ast);
+                    ObjectPropertyKind::from(ast.object_property_kind_object_property(
+                        SPAN,
+                        PropertyKind::Init,
+                        property_key,
+                        property_value,
+                        false,
+                        false,
+                        false,
+                    ))
+                })),
+            ),
+        }
     }
-}
 
-pub(crate) fn is_valid_js_identifier(s: &str) -> bool {
-    if s.is_empty() {
-        return false;
+    pub(crate) fn is_valid_js_identifier(s: &str) -> bool {
+        if s.is_empty() {
+            return false;
+        }
+        let mut chars = s.chars();
+        let first = chars.next().unwrap();
+        if !first.is_alphabetic() && first != '_' && first != '$' {
+            return false;
+        }
+        !matches!(
+            s,
+            "import"
+                | "export"
+                | "default"
+                | "class"
+                | "function"
+                | "return"
+                | "var"
+                | "let"
+                | "const"
+                | "if"
+                | "else"
+                | "for"
+                | "while"
+                | "do"
+                | "switch"
+                | "case"
+                | "break"
+                | "continue"
+                | "new"
+                | "delete"
+                | "typeof"
+                | "void"
+                | "in"
+                | "of"
+                | "this"
+                | "super"
+                | "null"
+                | "undefined"
+                | "true"
+                | "false"
+        )
     }
-    let mut chars = s.chars();
-    let first = chars.next().unwrap();
-    if !first.is_alphabetic() && first != '_' && first != '$' {
-        return false;
-    }
-    !matches!(
-        s,
-        "import"
-            | "export"
-            | "default"
-            | "class"
-            | "function"
-            | "return"
-            | "var"
-            | "let"
-            | "const"
-            | "if"
-            | "else"
-            | "for"
-            | "while"
-            | "do"
-            | "switch"
-            | "case"
-            | "break"
-            | "continue"
-            | "new"
-            | "delete"
-            | "typeof"
-            | "void"
-            | "in"
-            | "of"
-            | "this"
-            | "super"
-            | "null"
-            | "undefined"
-            | "true"
-            | "false"
-    )
 }
 
 #[cfg(test)]

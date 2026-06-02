@@ -530,6 +530,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "arkdown-utils"
+version = "0.1.0"
+
+[[package]]
 name = "arkdown-watcher"
 version = "0.1.0"
 dependencies = [

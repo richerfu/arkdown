@@ -26,83 +26,83 @@ impl NameAllocator {
     /// Return the next available short name and advance the counter.
     pub fn next(&mut self) -> String {
         loop {
-            let name = encode_name(self.counter);
+            let name = Self::encode_name(self.counter);
             self.counter += 1;
-            if !self.reserved.contains(&name) && !is_js_reserved(&name) {
+            if !self.reserved.contains(&name) && !Self::is_js_reserved(&name) {
                 return name;
             }
         }
     }
-}
 
-/// Encode `n` as a base-26 lowercase string (a, b, …, z, aa, ab, …).
-fn encode_name(mut n: usize) -> String {
-    const CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
-    let base = CHARS.len();
-    let mut result = Vec::new();
-    result.push(CHARS[n % base]);
-    n /= base;
-    while n > 0 {
-        n -= 1;
+    /// Encode `n` as a base-26 lowercase string (a, b, …, z, aa, ab, …).
+    fn encode_name(mut n: usize) -> String {
+        const CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
+        let base = CHARS.len();
+        let mut result = Vec::new();
         result.push(CHARS[n % base]);
         n /= base;
+        while n > 0 {
+            n -= 1;
+            result.push(CHARS[n % base]);
+            n /= base;
+        }
+        result.reverse();
+        // SAFETY: only ASCII lowercase letters in result
+        String::from_utf8(result).expect("encode_name produced non-UTF8")
     }
-    result.reverse();
-    // SAFETY: only ASCII lowercase letters in result
-    String::from_utf8(result).expect("encode_name produced non-UTF8")
-}
 
-/// Return `true` if `name` is a JavaScript / TypeScript reserved word that
-/// must not be used as an identifier.
-fn is_js_reserved(name: &str) -> bool {
-    matches!(
-        name,
-        "break"
-            | "case"
-            | "catch"
-            | "continue"
-            | "debugger"
-            | "default"
-            | "delete"
-            | "do"
-            | "else"
-            | "finally"
-            | "for"
-            | "function"
-            | "if"
-            | "in"
-            | "instanceof"
-            | "new"
-            | "return"
-            | "switch"
-            | "this"
-            | "throw"
-            | "try"
-            | "typeof"
-            | "var"
-            | "void"
-            | "while"
-            | "with"
-            | "class"
-            | "const"
-            | "enum"
-            | "export"
-            | "extends"
-            | "import"
-            | "super"
-            | "implements"
-            | "interface"
-            | "let"
-            | "package"
-            | "private"
-            | "protected"
-            | "public"
-            | "static"
-            | "yield"
-            | "null"
-            | "true"
-            | "false"
-    )
+    /// Return `true` if `name` is a JavaScript / TypeScript reserved word that
+    /// must not be used as an identifier.
+    fn is_js_reserved(name: &str) -> bool {
+        matches!(
+            name,
+            "break"
+                | "case"
+                | "catch"
+                | "continue"
+                | "debugger"
+                | "default"
+                | "delete"
+                | "do"
+                | "else"
+                | "finally"
+                | "for"
+                | "function"
+                | "if"
+                | "in"
+                | "instanceof"
+                | "new"
+                | "return"
+                | "switch"
+                | "this"
+                | "throw"
+                | "try"
+                | "typeof"
+                | "var"
+                | "void"
+                | "while"
+                | "with"
+                | "class"
+                | "const"
+                | "enum"
+                | "export"
+                | "extends"
+                | "import"
+                | "super"
+                | "implements"
+                | "interface"
+                | "let"
+                | "package"
+                | "private"
+                | "protected"
+                | "public"
+                | "static"
+                | "yield"
+                | "null"
+                | "true"
+                | "false"
+        )
+    }
 }
 
 #[cfg(test)]

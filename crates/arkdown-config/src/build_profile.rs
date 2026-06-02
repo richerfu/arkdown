@@ -75,7 +75,7 @@ impl RawAppJson5 {
     }
 
     fn validate(app: &Self, path: &std::path::Path) -> Result<(), ConfigError> {
-        if app.app.bundle_name.is_empty() || is_valid_hvigor_bundle_name(&app.app.bundle_name) {
+        if app.app.bundle_name.is_empty() || Self::is_valid_hvigor_bundle_name(&app.app.bundle_name) {
             return Ok(());
         }
 
@@ -86,6 +86,49 @@ impl RawAppJson5 {
                 app.app.bundle_name
             ),
         })
+    }
+
+    fn is_valid_hvigor_bundle_name(value: &str) -> bool {
+        let mut segments = value.split('.');
+        let Some(first) = segments.next() else {
+            return false;
+        };
+        if !Self::is_valid_bundle_segment(first, true) {
+            return false;
+        }
+
+        let mut suffix_count = 0;
+        for segment in segments {
+            suffix_count += 1;
+            if !Self::is_valid_bundle_segment(segment, false) {
+                return false;
+            }
+        }
+        suffix_count >= 2
+    }
+
+    fn is_valid_bundle_segment(segment: &str, first_segment: bool) -> bool {
+        let bytes = segment.as_bytes();
+        let Some((&first, rest)) = bytes.split_first() else {
+            return false;
+        };
+        let first_ok = if first_segment {
+            first.is_ascii_alphabetic()
+        } else {
+            first.is_ascii_alphanumeric()
+        };
+        if !first_ok {
+            return false;
+        }
+        if !rest
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        {
+            return false;
+        }
+        bytes
+            .last()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
     }
 }
 
@@ -266,49 +309,6 @@ pub struct RawTarget {
 ///
 /// Returns a default (all-empty) value if the file does not exist, so callers
 /// can use it without failing on older-layout projects.
-
-fn is_valid_hvigor_bundle_name(value: &str) -> bool {
-    let mut segments = value.split('.');
-    let Some(first) = segments.next() else {
-        return false;
-    };
-    if !is_valid_bundle_segment(first, true) {
-        return false;
-    }
-
-    let mut suffix_count = 0;
-    for segment in segments {
-        suffix_count += 1;
-        if !is_valid_bundle_segment(segment, false) {
-            return false;
-        }
-    }
-    suffix_count >= 2
-}
-
-fn is_valid_bundle_segment(segment: &str, first_segment: bool) -> bool {
-    let bytes = segment.as_bytes();
-    let Some((&first, rest)) = bytes.split_first() else {
-        return false;
-    };
-    let first_ok = if first_segment {
-        first.is_ascii_alphabetic()
-    } else {
-        first.is_ascii_alphanumeric()
-    };
-    if !first_ok {
-        return false;
-    }
-    if !rest
-        .iter()
-        .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
-    {
-        return false;
-    }
-    bytes
-        .last()
-        .is_some_and(|byte| byte.is_ascii_alphanumeric())
-}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -652,15 +652,15 @@ mod tests {
 
     #[test]
     fn test_hvigor_bundle_name_pattern() {
-        assert!(is_valid_hvigor_bundle_name("com.example.myapplication"));
-        assert!(is_valid_hvigor_bundle_name("a.b.c"));
-        assert!(is_valid_hvigor_bundle_name("com.example_1.app2"));
+        assert!(RawAppJson5::is_valid_hvigor_bundle_name("com.example.myapplication"));
+        assert!(RawAppJson5::is_valid_hvigor_bundle_name("a.b.c"));
+        assert!(RawAppJson5::is_valid_hvigor_bundle_name("com.example_1.app2"));
 
-        assert!(!is_valid_hvigor_bundle_name("Bundle name"));
-        assert!(!is_valid_hvigor_bundle_name("com.example"));
-        assert!(!is_valid_hvigor_bundle_name("1com.example.app"));
-        assert!(!is_valid_hvigor_bundle_name("com._example.app"));
-        assert!(!is_valid_hvigor_bundle_name("com.example_.app"));
-        assert!(!is_valid_hvigor_bundle_name("com.example.app_"));
+        assert!(!RawAppJson5::is_valid_hvigor_bundle_name("Bundle name"));
+        assert!(!RawAppJson5::is_valid_hvigor_bundle_name("com.example"));
+        assert!(!RawAppJson5::is_valid_hvigor_bundle_name("1com.example.app"));
+        assert!(!RawAppJson5::is_valid_hvigor_bundle_name("com._example.app"));
+        assert!(!RawAppJson5::is_valid_hvigor_bundle_name("com.example_.app"));
+        assert!(!RawAppJson5::is_valid_hvigor_bundle_name("com.example.app_"));
     }
 }

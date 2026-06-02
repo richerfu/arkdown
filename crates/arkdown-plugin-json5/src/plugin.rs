@@ -99,7 +99,7 @@ fn resolve_relative_path(specifier: &str, importer: Option<&str>) -> anyhow::Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::module_emit::is_valid_js_identifier;
+    use crate::module_emit::JsonModuleEmitter;
 
     #[test]
     fn test_generate_esm_object() {
@@ -128,11 +128,11 @@ mod tests {
 
     #[test]
     fn test_is_valid_js_identifier() {
-        assert!(is_valid_js_identifier("foo"));
-        assert!(is_valid_js_identifier("_bar"));
-        assert!(!is_valid_js_identifier("123"));
-        assert!(!is_valid_js_identifier(""));
-        assert!(!is_valid_js_identifier("class"));
+        assert!(JsonModuleEmitter::is_valid_js_identifier("foo"));
+        assert!(JsonModuleEmitter::is_valid_js_identifier("_bar"));
+        assert!(!JsonModuleEmitter::is_valid_js_identifier("123"));
+        assert!(!JsonModuleEmitter::is_valid_js_identifier(""));
+        assert!(!JsonModuleEmitter::is_valid_js_identifier("class"));
     }
 
     #[test]

@@ -23,6 +23,7 @@ members = [
     "crates/arkdown-sign",
     "crates/arkdown-cli",
     "crates/arkdown-obfuscate",
+    "crates/arkdown-utils",
     "crates/arkdown-watcher",
 ]
 
@@ -47,6 +48,7 @@ arkdown-resolver = { path = "crates/arkdown-resolver" }
 arkdown-resource = { path = "crates/arkdown-resource" }
 arkdown-sign = { path = "crates/arkdown-sign" }
 arkdown-ts2abc = { path = "crates/arkdown-ts2abc" }
+arkdown-utils = { path = "crates/arkdown-utils" }
 arkdown-watcher = { path = "crates/arkdown-watcher" }
 
 # Parser — ohos-rs/oxc fork pinned rev (DO NOT use floating branch or crates.io oxc)

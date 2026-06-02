@@ -20,6 +20,69 @@ struct OhPkgMinimal {
     metadata: Option<OhPkgMetadata>,
 }
 
+impl OhPkgMinimal {
+    fn load(pkg_dir: &Path) -> Option<Self> {
+        let pkg_json = pkg_dir.join("oh-package.json5");
+        if !pkg_json.exists() {
+            return None;
+        }
+        let content = std::fs::read_to_string(&pkg_json).ok()?;
+        json5::from_str::<Self>(&content).ok()
+    }
+
+    fn resolve_abc_path(&self, pkg_dir: &Path) -> Option<PathBuf> {
+        if self
+            .metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.byte_code_har)
+        {
+            let abc_path = pkg_dir.join("ets").join("modules.abc");
+            if abc_path.exists() {
+                return Some(abc_path);
+            }
+        }
+
+        if let Some(path) = self
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.abc_path.as_deref())
+        {
+            let abc_path = pkg_dir.join(path);
+            if abc_path.exists() {
+                return Some(abc_path);
+            }
+        }
+
+        if let Some(main) = self.main.as_deref().filter(|main| main.ends_with(".abc")) {
+            let abc_path = pkg_dir.join(main);
+            if abc_path.exists() {
+                return Some(abc_path);
+            }
+        }
+
+        let abc_path = pkg_dir.join("index.abc");
+        abc_path.exists().then_some(abc_path)
+    }
+
+    fn resolve_source_maps_path(&self, pkg_dir: &Path) -> Option<PathBuf> {
+        if let Some(path) = self
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.source_maps_path.as_deref())
+        {
+            return Some(pkg_dir.join(path));
+        }
+
+        let candidate = pkg_dir.join("ets").join("sourceMaps.map");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+
+        let candidate = pkg_dir.join("src").join("sourceMaps.map");
+        candidate.exists().then_some(candidate)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct OhPkgMetadata {
@@ -182,11 +245,11 @@ fn try_collect_bytecode_har(
         return;
     }
 
-    let Some(pkg) = read_oh_package(pkg_dir) else {
+    let Some(pkg) = OhPkgMinimal::load(pkg_dir) else {
         return;
     };
 
-    let Some(abc_path) = resolve_bytecode_abc_path(pkg_dir, &pkg) else {
+    let Some(abc_path) = pkg.resolve_abc_path(pkg_dir) else {
         return;
     };
 
@@ -195,7 +258,7 @@ fn try_collect_bytecode_har(
         .as_ref()
         .map(CompatibleSdkVersionField::as_string)
         .unwrap_or_default();
-    let source_maps_path = resolve_source_maps_path(pkg_dir, &pkg);
+    let source_maps_path = pkg.resolve_source_maps_path(pkg_dir);
     let insight_intent = pkg
         .metadata
         .as_ref()
@@ -216,67 +279,6 @@ fn try_collect_bytecode_har(
         insight_intent,
         declaration_entry,
     });
-}
-
-fn read_oh_package(pkg_dir: &Path) -> Option<OhPkgMinimal> {
-    let pkg_json = pkg_dir.join("oh-package.json5");
-    if !pkg_json.exists() {
-        return None;
-    }
-    let content = std::fs::read_to_string(&pkg_json).ok()?;
-    json5::from_str::<OhPkgMinimal>(&content).ok()
-}
-
-fn resolve_bytecode_abc_path(pkg_dir: &Path, pkg: &OhPkgMinimal) -> Option<PathBuf> {
-    if pkg
-        .metadata
-        .as_ref()
-        .is_some_and(|metadata| metadata.byte_code_har)
-    {
-        let abc_path = pkg_dir.join("ets").join("modules.abc");
-        if abc_path.exists() {
-            return Some(abc_path);
-        }
-    }
-
-    if let Some(path) = pkg
-        .metadata
-        .as_ref()
-        .and_then(|metadata| metadata.abc_path.as_deref())
-    {
-        let abc_path = pkg_dir.join(path);
-        if abc_path.exists() {
-            return Some(abc_path);
-        }
-    }
-
-    if let Some(main) = pkg.main.as_deref().filter(|main| main.ends_with(".abc")) {
-        let abc_path = pkg_dir.join(main);
-        if abc_path.exists() {
-            return Some(abc_path);
-        }
-    }
-
-    let abc_path = pkg_dir.join("index.abc");
-    abc_path.exists().then_some(abc_path)
-}
-
-fn resolve_source_maps_path(pkg_dir: &Path, pkg: &OhPkgMinimal) -> Option<PathBuf> {
-    if let Some(path) = pkg
-        .metadata
-        .as_ref()
-        .and_then(|metadata| metadata.source_maps_path.as_deref())
-    {
-        return Some(pkg_dir.join(path));
-    }
-
-    let candidate = pkg_dir.join("ets").join("sourceMaps.map");
-    if candidate.exists() {
-        return Some(candidate);
-    }
-
-    let candidate = pkg_dir.join("src").join("sourceMaps.map");
-    candidate.exists().then_some(candidate)
 }
 
 // ---------------------------------------------------------------------------
