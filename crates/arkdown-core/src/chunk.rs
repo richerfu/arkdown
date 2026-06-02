@@ -1,7 +1,5 @@
-use std::ops::Range;
-
 use index_vec::IndexVec;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::graph::ModuleIdx;
 use crate::module::SourceMap;
@@ -78,7 +76,7 @@ pub struct ArkChunk {
 }
 
 /// The full chunk assignment for one OHOS module build.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ChunkGraph {
     pub chunks: IndexVec<ChunkIdx, ArkChunk>,
     /// Full Rollup/Rolldown module graph IDs, matching Rollup `getModuleIds()`.
@@ -94,28 +92,38 @@ pub struct ChunkGraph {
     pub entry_module_to_entry_chunk: FxHashMap<ModuleIdx, ChunkIdx>,
 }
 
-/// Legacy IIFE-wrapped chunk metadata produced by `arkdown-plugin-chunk-wrapper`.
-/// Current module-mode ABC compilation does not require this wrapper shape.
-#[derive(Debug, Clone)]
-pub struct IifeChunk {
-    pub chunk: ArkChunk,
-    /// Cross-chunk import replacements made by the chunk-wrapper plugin.
-    /// Maps `"chunkId"` → `"globalThis['chunkId_hash']"`.
-    pub require_replacements: Vec<RequireReplacement>,
-    /// Global registry export appended at end of chunk:
-    /// `"globalThis['fileName_hash'] = { export1: exports.export1, ... }"`.
-    pub registry_export: Option<String>,
-}
+impl ChunkGraph {
+    /// Return the deduplicated list of all module IDs in the graph.
+    ///
+    /// Prefers [`ChunkGraph::full_module_ids`] (the complete Rolldown module
+    /// graph) when populated; falls back to collecting IDs from every chunk.
+    /// Order is stable: IDs appear in the order they are first encountered.
+    ///
+    /// hvigor's `CompileArkTS` stage compiles the full module graph
+    /// (`getModuleIds()`), not just the entry chunks, so this method must be
+    /// used wherever the ABC compiler cache is written.
+    pub fn all_module_ids(&self) -> Vec<String> {
+        let mut seen = FxHashSet::default();
+        let mut ids = Vec::new();
 
-/// One `require(...)` → `globalThis[...]` replacement performed by the chunk-wrapper plugin.
-#[derive(Debug, Clone)]
-pub struct RequireReplacement {
-    /// Original call, e.g. `require('chunkId')`.
-    pub original: String,
-    /// Replacement expression, e.g. `globalThis['chunkId_hash']`.
-    pub replacement: String,
-    /// Byte range of the original text in the chunk source.
-    pub byte_range: Range<usize>,
+        if !self.full_module_ids.is_empty() {
+            for id in &self.full_module_ids {
+                if seen.insert(id.clone()) {
+                    ids.push(id.clone());
+                }
+            }
+            return ids;
+        }
+
+        for chunk in &self.chunks {
+            for id in &chunk.module_ids {
+                if seen.insert(id.clone()) {
+                    ids.push(id.clone());
+                }
+            }
+        }
+        ids
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -260,32 +268,5 @@ mod tests {
         };
         assert_eq!(graph.chunks.len(), 1);
         assert_eq!(graph.chunks[ChunkIdx::from_usize(0)].name, "commons");
-    }
-
-    // ── IifeChunk and RequireReplacement ─────────────────────────────────────
-
-    #[test]
-    fn test_require_replacement_construction() {
-        let r = RequireReplacement {
-            original: "require('commons')".to_string(),
-            replacement: "globalThis['commons_abcd']".to_string(),
-            byte_range: 42..60,
-        };
-        assert_eq!(r.original, "require('commons')");
-        assert_eq!(r.replacement, "globalThis['commons_abcd']");
-        assert_eq!(r.byte_range, 42..60);
-    }
-
-    #[test]
-    fn test_iife_chunk_construction() {
-        let iife = IifeChunk {
-            chunk: ArkChunk::default(),
-            require_replacements: vec![],
-            registry_export: Some(
-                "globalThis['entry_hash'] = { default: exports.default }".to_string(),
-            ),
-        };
-        assert!(iife.require_replacements.is_empty());
-        assert!(iife.registry_export.is_some());
     }
 }

@@ -1,7 +1,6 @@
 use std::io;
 use std::path::Path;
 
-use arkdown_cache::compute_compile_env;
 use arkdown_core::ArkdownConfig;
 use arkdown_profile::LoaderJson;
 
@@ -28,10 +27,10 @@ const TASK_INPUTS_FILE: &str = ".task_inputs";
 impl TaskInputs {
     /// Compute current task inputs from config and loader data.
     pub fn compute(config: &ArkdownConfig, loader: &LoaderJson) -> Self {
-        let source_hash = hash_source_files(&loader.compile_entry);
-        let obfuscation_hash = compute_obfuscation_hash(config);
+        let source_hash = Self::hash_source_files(&loader.compile_entry);
+        let obfuscation_hash = Self::compute_obfuscation_hash(config);
         let sdk_version = config.sdk_config.compile_sdk_version.clone();
-        let compile_env = compute_compile_env(config, &loader.cache_path);
+        let compile_env = arkdown_cache::CompileEnv::from_config(config, &loader.cache_path).to_key_string();
         TaskInputs {
             source_hash,
             obfuscation_hash,
@@ -81,48 +80,47 @@ struct StoredTaskInputs {
     compile_env: String,
 }
 
-/// FNV-1a 64-bit hash of all source file paths in declaration order.
-fn hash_source_files(compile_entry: &[String]) -> u64 {
-    let mut h: u64 = 0xcbf29ce484222325;
-    for path in compile_entry {
-        // Hash the path string itself; a content-hash would require disk I/O
-        // here but the source_hash in CacheKey already covers content.
-        for b in path.bytes() {
+impl TaskInputs {
+    /// FNV-1a 64-bit hash of all source file paths in declaration order.
+    fn hash_source_files(compile_entry: &[String]) -> u64 {
+        let mut h: u64 = 0xcbf29ce484222325;
+        for path in compile_entry {
+            for b in path.bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+            h ^= b'|' as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        h
+    }
+
+    /// Derive a stable obfuscation hash from the config's obfuscation settings.
+    ///
+    /// Returns 0 when obfuscation is disabled (no rules file to hash).
+    fn compute_obfuscation_hash(config: &ArkdownConfig) -> u64 {
+        let Some(ark) = config.product.build_option.ark_options.as_ref() else {
+            return 0;
+        };
+        let Some(obf) = ark.obfuscation.as_ref() else {
+            return 0;
+        };
+        if !obf.enable_obfuscation {
+            return 0;
+        }
+        let Some(rules_path) = obf.rule_files.first() else {
+            return 0;
+        };
+        let Ok(content) = std::fs::read(rules_path) else {
+            return 0;
+        };
+        let mut h: u64 = 0xcbf29ce484222325;
+        for b in content {
             h ^= b as u64;
             h = h.wrapping_mul(0x100000001b3);
         }
-        // Separator between paths
-        h ^= b'|' as u64;
-        h = h.wrapping_mul(0x100000001b3);
+        h
     }
-    h
-}
-
-/// Derive a stable obfuscation hash from the config's obfuscation settings.
-///
-/// Returns 0 when obfuscation is disabled (no rules file to hash).
-fn compute_obfuscation_hash(config: &ArkdownConfig) -> u64 {
-    let Some(ark) = config.product.build_option.ark_options.as_ref() else {
-        return 0;
-    };
-    let Some(obf) = ark.obfuscation.as_ref() else {
-        return 0;
-    };
-    if !obf.enable_obfuscation {
-        return 0;
-    }
-    let Some(rules_path) = obf.rule_files.first() else {
-        return 0;
-    };
-    let Ok(content) = std::fs::read(rules_path) else {
-        return 0;
-    };
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in content {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    h
 }
 
 #[cfg(test)]

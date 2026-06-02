@@ -21,14 +21,14 @@ pub enum EntryType {
 impl EntryType {
     /// Maps to the resource type ID used in `resources.index`.
     ///
-    /// Values match the constants observed in real `restool 6.0` output:
-    /// `STRING = 0x09`, `COLOR = 0x0E`, `FLOAT = 0x06`, `INTEGER = 0x05`.
+    /// Values mirror OpenHarmony restool `ResType`:
+    /// `STRING = 9`, `COLOR = 14`, `FLOAT = 18`, `INTEGER = 8`.
     pub fn resource_type_id(self) -> u32 {
         match self {
             EntryType::String => 0x09,
             EntryType::Color => 0x0E,
-            EntryType::Float => 0x06,
-            EntryType::Integer => 0x05,
+            EntryType::Float => 0x12,
+            EntryType::Integer => 0x08,
         }
     }
 }

@@ -2,9 +2,7 @@ use std::path::PathBuf;
 
 use crate::driver::{default_record_name, Ts2abcInput, Ts2abcOptions};
 use crate::error::Ts2abcError;
-use crate::version::{
-    ts2abc_script_target_bc_version, BytecodeVersion, DEFAULT_TARGET_API_VERSION,
-};
+use crate::version::{BytecodeVersion, DEFAULT_TARGET_API_VERSION};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VersionQuery {
@@ -20,13 +18,16 @@ pub enum Ts2abcCommand {
     Compile(Ts2abcOptions),
 }
 
-pub fn parse_ts2abc_args<I, S>(args: I) -> Result<Ts2abcCommand, Ts2abcError>
-where
-    I: IntoIterator<Item = S>,
-    S: Into<String>,
-{
-    let mut parser = ArgParser::new(args.into_iter().map(Into::into).collect());
-    parser.parse()
+impl Ts2abcCommand {
+    /// Parse ts2abc command-line arguments.
+    pub fn parse<I, S>(args: I) -> Result<Self, Ts2abcError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut parser = ArgParser::new(args.into_iter().map(Into::into).collect());
+        parser.parse()
+    }
 }
 
 struct ArgParser {
@@ -82,7 +83,7 @@ impl ArgParser {
         }
 
         if self.print_target_bc_version {
-            let version = ts2abc_script_target_bc_version(
+            let version = BytecodeVersion::for_ts2abc_script(
                 self.target_api_version,
                 self.target_api_sub_version.as_deref(),
             );

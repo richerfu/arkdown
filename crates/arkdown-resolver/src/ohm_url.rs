@@ -5,16 +5,7 @@ use arkdown_core::PkgContext;
 /// Strips the `pkg_path` prefix and file extension, then formats as:
 /// `@bundle:<bundle_name>/<module_name>/<rel_path>`
 pub fn generate_ohm_url(path: &std::path::Path, pkg_ctx: &PkgContext) -> String {
-    let rel = path.strip_prefix(&pkg_ctx.pkg_path).unwrap_or(path);
-    let rel_str = rel.to_string_lossy();
-    let rel_no_ext = rel_str
-        .trim_end_matches(".ets")
-        .trim_end_matches(".ts")
-        .trim_end_matches(".js");
-    format!(
-        "@bundle:{}/{}/{}",
-        pkg_ctx.bundle_name, pkg_ctx.module_name, rel_no_ext
-    )
+    pkg_ctx.to_ohm_url(path)
 }
 
 /// Parse an OHM URL into (bundle, module, path) components.

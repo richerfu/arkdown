@@ -145,7 +145,7 @@ pub struct ModuleIdx(u32);
 pub struct ArkChunk {
     /// Chunk file name (e.g., "EntryAbility", "commons", "vendors").
     pub name: String,
-    /// Content hash for the globalThis registry key.
+    /// Content hash / fingerprint from rolldown metadata.
     pub chunk_hash: String,
     /// Modules included in this chunk.
     pub modules: Vec<ModuleIdx>,
@@ -153,7 +153,7 @@ pub struct ArkChunk {
     pub is_entry: bool,
     /// Entry module index (for entry chunks).
     pub entry_module: Option<ModuleIdx>,
-    /// IIFE-wrapped JavaScript source (after renderChunk).
+    /// Final JavaScript source emitted by rolldown render hooks.
     pub code: String,
     /// Source map for this chunk.
     pub source_map: Option<SourceMap>,
@@ -170,23 +170,6 @@ pub struct ChunkGraph {
 
 pub struct ChunkIdx(u32);
 
-/// The final IIFE-wrapped chunk as produced by wrapper-chunk-plugin.
-/// This is the direct input to es2abc.
-pub struct IifeChunk {
-    pub chunk: ArkChunk,
-    /// Cross-chunk import replacements made by wrapper-chunk-plugin.
-    /// Maps: "chunkId" → "globalThis['chunkId_hash']"
-    pub require_replacements: Vec<RequireReplacement>,
-    /// Global registry exports appended at end of chunk.
-    /// "globalThis['fileName_hash'] = { export1: exports.export1, ... }"
-    pub registry_export: Option<String>,
-}
-
-pub struct RequireReplacement {
-    pub original: String,       // require('chunkId')
-    pub replacement: String,    // globalThis['chunkId_hash']
-    pub byte_range: Range<usize>,
-}
 ```
 
 ---
@@ -360,7 +343,7 @@ pub trait ArkdownPlugin: Send + Sync {
         error: Option<&BuildError>,
     ) -> PluginResult<()> { Ok(()) }
 
-    /// Transform a rendered chunk's code. Used by wrapper-chunk-plugin.
+    /// Transform a rendered chunk's code.
     async fn render_chunk(
         &self,
         ctx: &RenderChunkContext,
@@ -570,7 +553,7 @@ pub struct SigningConfig {
 ## Cross-Reference
 
 - [pipeline.md](pipeline.md) — how these types flow through the pipeline stages
-- [chunk-model.md](chunk-model.md) — ArkChunk, IifeChunk, ChunkGraph details
+- [chunk-model.md](chunk-model.md) — legacy chunk-wrapper background and ChunkGraph details
 - [abc-pipeline.md](abc-pipeline.md) — AbcArtifact usage
 - [module-resolution.md](module-resolution.md) — OhosResolvedModule
 - [plugins.md](plugins.md) — ArkdownPlugin trait implementations

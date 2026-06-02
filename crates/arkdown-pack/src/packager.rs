@@ -7,74 +7,6 @@ use crate::error::PackError;
 use crate::integrated_hsp::IntegratedHspEntry;
 use crate::zip_writer;
 
-fn generate_pack_info(config: &ArkdownConfig, input: &PackInput) -> String {
-    let abilities_json: Vec<serde_json::Value> = input
-        .abilities
-        .iter()
-        .map(|a| {
-            let mut obj = serde_json::json!({"name": a.name});
-            if let Some(label) = &a.label {
-                obj["label"] = serde_json::json!(label);
-            }
-            obj
-        })
-        .collect();
-
-    let main_ability = input
-        .abilities
-        .first()
-        .map(|a| a.name.as_str())
-        .unwrap_or("EntryAbility");
-
-    // HSP uses bundle_type "shared"; all other module types use "entry" as the
-    // distro moduleType (HAP entry modules) unless extended in future.
-    let module_type = if input.bundle_type == "shared" {
-        "shared"
-    } else {
-        "entry"
-    };
-
-    serde_json::json!({
-        "summary": {
-            "app": {
-                "bundleName": config.product.bundle_name,
-                "bundleType": input.bundle_type,
-                "version": {
-                    "code": input.bundle_version_code,
-                    "name": input.bundle_version_name
-                }
-            },
-            "modules": [
-                {
-                    "mainAbility": main_ability,
-                    "deviceType": ["phone"],
-                    "abilities": abilities_json,
-                    "distro": {
-                        "moduleType": module_type,
-                        "installationFree": false,
-                        "deliveryWithInstall": true,
-                        "moduleName": input.module_name
-                    },
-                    "apiVersion": {
-                        "compatible": config.sdk_config.compile_api_version,
-                        "releaseType": "Release",
-                        "target": config.sdk_config.compile_api_version
-                    }
-                }
-            ]
-        },
-        "packages": [
-            {
-                "deviceType": ["phone"],
-                "moduleType": module_type,
-                "deliveryWithInstall": true,
-                "name": format!("{}-default", input.module_name)
-            }
-        ]
-    })
-    .to_string()
-}
-
 fn minify_hap_module_json(content: &str) -> Result<String, serde_json::Error> {
     let value: serde_json::Value = serde_json::from_str(content)?;
     serde_json::to_string(&order_hap_module_json(value))
@@ -439,6 +371,75 @@ impl Packager {
     /// ets/modules.abc       (stored, API >= 9)  or  modules.abc  (stored, API < 9)
     /// libs/arm64-v8a/*.so   (stored, optional)
     /// ```
+
+    fn generate_pack_info(&self, input: &PackInput) -> String {
+        let abilities_json: Vec<serde_json::Value> = input
+            .abilities
+            .iter()
+            .map(|a| {
+                let mut obj = serde_json::json!({"name": a.name});
+                if let Some(label) = &a.label {
+                    obj["label"] = serde_json::json!(label);
+                }
+                obj
+            })
+            .collect();
+
+        let main_ability = input
+            .abilities
+            .first()
+            .map(|a| a.name.as_str())
+            .unwrap_or("EntryAbility");
+
+        // HSP uses bundle_type "shared"; all other module types use "entry" as the
+        // distro moduleType (HAP entry modules) unless extended in future.
+        let module_type = if input.bundle_type == "shared" {
+            "shared"
+        } else {
+            "entry"
+        };
+
+        serde_json::json!({
+            "summary": {
+                "app": {
+                    "bundleName": self.config.product.bundle_name,
+                    "bundleType": input.bundle_type,
+                    "version": {
+                        "code": input.bundle_version_code,
+                        "name": input.bundle_version_name
+                    }
+                },
+                "modules": [
+                    {
+                        "mainAbility": main_ability,
+                        "deviceType": ["phone"],
+                        "abilities": abilities_json,
+                        "distro": {
+                            "moduleType": module_type,
+                            "installationFree": false,
+                            "deliveryWithInstall": true,
+                            "moduleName": input.module_name
+                        },
+                        "apiVersion": {
+                            "compatible": self.config.sdk_config.compile_api_version,
+                            "releaseType": "Release",
+                            "target": self.config.sdk_config.compile_api_version
+                        }
+                    }
+                ]
+            },
+            "packages": [
+                {
+                    "deviceType": ["phone"],
+                    "moduleType": module_type,
+                    "deliveryWithInstall": true,
+                    "name": format!("{}-default", input.module_name)
+                }
+            ]
+        })
+        .to_string()
+    }
+
     pub fn pack_hap(&self, input: PackInput) -> Result<PathBuf, PackError> {
         if let Some(parent) = input.output_path.parent() {
             fs_err::create_dir_all(parent)?;
@@ -471,7 +472,7 @@ impl Packager {
                     .filter(|e| e.file_type().is_file())
                 {
                     let rel = entry.path().strip_prefix(res_src).unwrap_or(entry.path());
-                    let dest = format!("resources/{}", rel.to_string_lossy().replace('\\', "/"));
+                    let dest = ArchivePath::resources(rel);
                     let ext = entry
                         .path()
                         .extension()
@@ -510,18 +511,17 @@ impl Packager {
         // Additional ETS-side assets copied by CompileArkTS/loader, such as
         // `src/main/ets/common/**/*.json`, are packaged under `ets/`.
         if let Some(ets_dir) = input.abc_path.parent() {
-            add_loader_out_ets_assets(&mut writer, ets_dir)?;
+            Self::add_loader_out_ets_assets(&mut writer, ets_dir)?;
         }
 
         // Native .so libraries — stored, placed under libs/arm64-v8a/
         for so_path in &input.native_libs {
             if so_path.exists() {
-                let arch_dir = "libs/arm64-v8a";
                 let filename = so_path
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("unknown.so");
-                let dest = format!("{}/{}", arch_dir, filename);
+                let dest = ArchivePath::native_lib(filename);
                 zip_writer::add_file_stored(&mut writer, &dest, so_path)?;
             }
         }
@@ -530,16 +530,16 @@ impl Packager {
         // Each HSP must have been normalized via `normalize_integrated_hsps()` before packing.
         for hsp in &input.integrated_hsps {
             if hsp.hsp_path.exists() {
-                let dest = format!("libs/{}/{}", hsp.hsp_dir_name, hsp.hsp_file_name);
+                let dest = ArchivePath::integrated_hsp(&hsp.hsp_dir_name, &hsp.hsp_file_name);
                 zip_writer::add_file_stored(&mut writer, &dest, &hsp.hsp_path)?;
             }
         }
 
-        add_profile_guided_ap(&mut writer, &input)?;
+        Self::add_profile_guided_ap(&mut writer, &input)?;
 
         // pack.info — bundle metadata (deflated JSON), written last by hvigor
         // for a normal HAP.
-        let mut pack_info = generate_pack_info(&self.config, &input);
+        let mut pack_info = self.generate_pack_info(&input);
         pack_info.push('\n');
         zip_writer::add_bytes_deflate(&mut writer, "pack.info", pack_info.as_bytes())?;
 
@@ -585,7 +585,7 @@ impl Packager {
                     .path()
                     .strip_prefix(&input.source_dir)
                     .unwrap_or(entry.path());
-                let dest = format!("src/main/ets/{}", rel.to_string_lossy().replace('\\', "/"));
+                let dest = ArchivePath::har_ets(rel);
                 zip_writer::add_file_deflate(&mut writer, &dest, entry.path())?;
             }
         }
@@ -595,53 +595,93 @@ impl Packager {
     }
 }
 
-fn add_loader_out_ets_assets<W: std::io::Write + std::io::Seek>(
-    writer: &mut zip::ZipWriter<W>,
-    ets_dir: &std::path::Path,
-) -> Result<(), PackError> {
-    for entry in walkdir::WalkDir::new(ets_dir)
-        .min_depth(1)
-        .into_iter()
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.file_type().is_file())
-    {
-        let path = entry.path();
-        let rel = path.strip_prefix(ets_dir).unwrap_or(path);
-        let rel_text = rel.to_string_lossy().replace('\\', "/");
-        if rel_text == "modules.abc"
-            || rel_text == "sourceMaps.map"
-            || rel_text.starts_with("cache/")
+// Private helpers for HAP/HSP assembly
+impl Packager {
+    fn add_loader_out_ets_assets<W: std::io::Write + std::io::Seek>(
+        writer: &mut zip::ZipWriter<W>,
+        ets_dir: &std::path::Path,
+    ) -> Result<(), PackError> {
+        for entry in walkdir::WalkDir::new(ets_dir)
+            .min_depth(1)
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_type().is_file())
         {
-            continue;
+            let path = entry.path();
+            let rel = path.strip_prefix(ets_dir).unwrap_or(path);
+            let rel_text = rel.to_string_lossy().replace('\\', "/");
+            if rel_text == "modules.abc"
+                || rel_text == "sourceMaps.map"
+                || rel_text.starts_with("cache/")
+                || path.extension().and_then(|e| e.to_str()) == Some("js")
+            {
+                continue;
+            }
+            let dest = ArchivePath::ets(&rel_text);
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if ext == "json" {
+                add_json_resource_deflate(writer, &dest, path)?;
+            } else if matches!(ext, "json5" | "xml" | "txt" | "html") {
+                zip_writer::add_file_deflate(writer, &dest, path)?;
+            } else {
+                zip_writer::add_file_stored(writer, &dest, path)?;
+            }
         }
-        let dest = format!("ets/{rel_text}");
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if ext == "json" {
-            add_json_resource_deflate(writer, &dest, path)?;
-        } else if matches!(ext, "json5" | "xml" | "txt" | "html") {
-            zip_writer::add_file_deflate(writer, &dest, path)?;
-        } else {
-            zip_writer::add_file_stored(writer, &dest, path)?;
-        }
+        Ok(())
     }
-    Ok(())
+
+    fn add_profile_guided_ap<W: std::io::Write + std::io::Seek>(
+        writer: &mut zip::ZipWriter<W>,
+        input: &PackInput,
+    ) -> Result<(), PackError> {
+        let Some(output_parent) = input.output_path.parent() else {
+            return Ok(());
+        };
+        let Some(module_root) = output_parent.ancestors().nth(4) else {
+            return Ok(());
+        };
+        let ap_path = module_root.join(ArchivePath::profile_guided_ap_file(&input.module_name));
+        if ap_path.exists() {
+            zip_writer::add_file_stored(
+                writer,
+                &ArchivePath::profile_guided_ap(&input.module_name),
+                &ap_path,
+            )?;
+        }
+        Ok(())
+    }
 }
 
-fn add_profile_guided_ap<W: std::io::Write + std::io::Seek>(
-    writer: &mut zip::ZipWriter<W>,
-    input: &PackInput,
-) -> Result<(), PackError> {
-    let Some(output_parent) = input.output_path.parent() else {
-        return Ok(());
-    };
-    let Some(module_root) = output_parent.ancestors().nth(4) else {
-        return Ok(());
-    };
-    let ap_path = module_root.join(format!("{}.ap", input.module_name));
-    if ap_path.exists() {
-        zip_writer::add_file_stored(writer, &format!("ap/{}.ap", input.module_name), &ap_path)?;
+struct ArchivePath;
+
+impl ArchivePath {
+    fn resources(rel: &std::path::Path) -> String {
+        format!("resources/{}", arkdown_utils::to_unix_path(rel))
     }
-    Ok(())
+
+    fn native_lib(filename: &str) -> String {
+        format!("libs/arm64-v8a/{filename}")
+    }
+
+    fn integrated_hsp(dir_name: &str, file_name: &str) -> String {
+        format!("libs/{dir_name}/{file_name}")
+    }
+
+    fn har_ets(rel: &std::path::Path) -> String {
+        format!("src/main/ets/{}", arkdown_utils::to_unix_path(rel))
+    }
+
+    fn ets(rel_text: &str) -> String {
+        format!("ets/{rel_text}")
+    }
+
+    fn profile_guided_ap(module_name: &str) -> String {
+        format!("ap/{}", Self::profile_guided_ap_file(module_name))
+    }
+
+    fn profile_guided_ap_file(module_name: &str) -> String {
+        format!("{module_name}.ap")
+    }
 }
 
 fn add_json_resource_deflate<W: std::io::Write + std::io::Seek>(

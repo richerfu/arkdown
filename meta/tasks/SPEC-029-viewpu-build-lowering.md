@@ -25,6 +25,43 @@ depends on this transform.
 The current `arkdown-plugin-ets-transform` stubs out `build()` bodies and transforms state
 decorators but does not perform ViewPU lowering. This SPEC defines the full lowering.
 
+## Implementation Architecture
+
+Upstream `ets-loader` does not implement ViewPU lowering by concatenating large
+source strings. The key source path is TypeScript AST based:
+
+- `process_component_build.ts`, `process_component_class.ts`, and
+  `process_custom_component.ts` create or update `ts.Node` values with
+  `ts.factory.create*` / `ts.factory.update*`.
+- `fast_build/ets_ui/rollup-plugin-ets-typescript.ts::printSourceFile()` prints
+  the transformed tree with `ts.createPrinter({ newLine: LineFeed })`.
+- `fast_build/ark_compiler/module/module_source_file.ts::processTransformedTsModuleRequest()`
+  rewrites static import/export and dynamic import specifiers with a TypeScript
+  transformer. `MagicString` is reserved for localized source patches and source
+  map fallback behavior, not the main ViewPU semantic lowering.
+- Rolldown follows the same split on the Rust side: OXC codegen owns AST render
+  source maps, `rolldown_sourcemap` joins and collapses map chains, and
+  `string_wizard::MagicString` is used when code is changed without a plugin
+  supplied source map or when localized post-render mutations need remapping.
+
+`arkdown` must follow the same boundary. Build lowering decisions are made from
+OXC ArkUI AST nodes. Standard generated ViewPU component creation closures and
+call statements now go through `viewpu_emit::ViewpuAstEmitter`: it builds OXC AST
+nodes with `AstBuilder`, clones argument/body AST through `CloneIn`, and prints
+with `oxc_codegen`. This matches the Rolldown/OXC style of keeping render state
+inside an emitter object instead of spreading formatting helpers across the
+lowering code.
+
+This is still a transition layer. Existing lowering paths still pass some
+original expressions as parsed argument fragments, and custom/recycle component
+blocks, class/member generation, and several control-flow
+forms still need to move from textual assembly to a ViewPU IR or direct OXC AST
+construction. Those remaining forms should be printed through OXC codegen in the
+same way Rolldown renders modules from OXC codegen output.
+Source map encoding already uses Rolldown's Rust sourcemap stack rather than a
+local VLQ/JSON writer; the remaining gap is replacing the ViewPU textual sink
+itself with AST construction and OXC codegen maps.
+
 ---
 
 ## ArkUI DSL → ViewPU Lowering Contract
@@ -175,8 +212,10 @@ becomes:
 ```javascript
 this.observeComponentCreation2((elmtId, isInitialRender) => {
   ComponentName.create(args);
-  ComponentName.attr1(v1);
-  ComponentName.attr2(v2);
+  if (isInitialRender) {
+    ComponentName.attr1(v1);
+    ComponentName.attr2(v2);
+  }
 }, ComponentName);
 // children lowered recursively
 ComponentName.pop();
@@ -190,10 +229,19 @@ becomes:
 ```javascript
 this.observeComponentCreation2((elmtId, isInitialRender) => {
   Text.create(this.message);
-  Text.fontSize(50);
+  if (isInitialRender) {
+    Text.fontSize(50);
+  }
 }, Text);
 Text.pop();
 ```
+
+Literal/regular attribute arguments follow upstream
+`process_component_build.js::filterRegularAttrNode()` and are emitted in the
+`if (isInitialRender)` block appended after dynamic attributes. The Rust port
+uses OXC AST node kinds for the check: literals, object/array literals composed
+only of regular values, arrow functions, and SDK enum member expressions loaded
+from `ets-loader/declarations/enums.d.ts` / `ets/component/enums.d.ts`.
 
 **Attribute chain ordering**: attribute calls on the parent appear **before** children are
 lowered; `.pop()` appears **after** all children.
@@ -209,13 +257,102 @@ rerender() {
 
 ### 7. updateStateVars() Method
 
-Always emitted. Body: update any `@Prop` fields from params if present:
+Always emitted. In PU / partial-update mode this follows SDK
+`ets-loader/lib/process_component_member.js`: `validatePropDecorator()` adds a
+`createStateVarsBody()` statement, which directly calls `reset(params.x)`.
 ```javascript
 updateStateVars(params) {
-  if (params.propField !== undefined) {
-    this.__propField.set(params.propField);
-  }
+  this.__propField.reset(params.propField);
 }
+```
+
+`@State` state-vars paths, when emitted for lazy/advanced modes, keep the SDK
+truthiness guard before `.set(...)`.
+
+### 7a. Button Create Method
+
+SDK `process_component_build.js::createComponent()` special-cases `Button`:
+
+- `Button(label)` without children lowers to `Button.createWithLabel(label)`.
+- `Button(label) { ... }` lowers to `Button.createWithChild(label)`.
+- Other built-in components use `.create(...)`.
+
+### 7b. Regular Attribute Predicate Scope
+
+SDK `process_component_build.ts::filterRegularAttrNode()` recognizes literal,
+array/object literal, arrow-function, enum, and regular-property expressions as
+regular attribute arguments. That predicate does not by itself move ordinary
+component attributes into an `isInitialRender` block. Upstream only pushes those
+statements into the immutable/initial path when
+`isRecycleComponent || isReuseComponentInV2` and the target is not a gesture
+type. Ordinary component attributes stay in the update path:
+
+```javascript
+Image.onClick(() => this.onBack());
+```
+
+They must not become:
+
+```javascript
+if (isInitialRender) {
+  Image.onClick(() => this.onBack());
+}
+```
+
+### 7c. Reusable Component Element-Id Update
+
+When a struct is collected as reusable, SDK
+`process_component_class.ts::addDeleteParamsFunc(..., true)` emits
+`updateRecycleElmtId(oldElmtId, newElmtId)`. The method calls
+`this.__field.updateElmtId(oldElmtId, newElmtId)` for non-regular state
+backing fields and skips regular properties and `@BuilderParam`.
+
+### 7d. Raw Observed Object Call Arguments
+
+SDK `process_component_class.ts::processBuildMember()` wraps a non-simple V1
+observed state field with `ObservedObject.GetRawObject(...)` when that field is
+used as a call argument inside `build()` / `@Builder` lowering. The upstream
+predicate is `isNeedGetRawObject()`:
+
+- disabled in ComponentV2 compatibility / make-v1-observed contexts;
+- requires a `PropertyAccessExpression` like `this.item`;
+- the property name must be present in `stateObjectCollection`;
+- the parent must be a `CallExpression`;
+- the property access must not be the call callee and must not already call
+  `ObservedObject.GetRawObject`.
+
+`stateObjectCollection` is populated from decorated component fields whose type
+is not simple, excluding `@BuilderParam`. Arkdown mirrors this with OXC AST
+nodes: it collects non-simple state fields from the component struct and applies
+the wrapper only while generating call arguments. Direct object-literal params
+such as `{ item: this.item }` remain unchanged; callback params such as
+`() => this.handle(this.item)` become
+`() => this.handle(ObservedObject.GetRawObject(this.item))`.
+
+### 7e. Child @Link Custom Component Params
+
+SDK `process_component_class.ts::createReference()` checks the target child
+component's `linkCollection`. When a custom component object property name maps
+to a child `@Link` field and the initializer is a `this.x` property access:
+
+- constructor params use the parent backing field: `{ value: this.__value }`;
+- `paramsLambda` uses the public getter: `{ value: this.value }`;
+- `updateStateVarsOfChildByElmtId()` does not include that `@Link` field.
+
+This rule is keyed by the child component's collected decorators, not by the
+parent field decorator. Arkdown stores the child component's `@Link` names in
+`CustomComponentInfo` and applies the backing-field rewrite only for constructor
+param generation.
+
+### 7f. Builder Parent Context
+
+SDK `parentConditionalExpression()` is `(parent ? parent : this)`. Top-level
+`@Builder` functions and component `@Builder` methods receive `parent = null`;
+their lowered ArkUI framework calls use that parent context:
+
+```javascript
+(parent ? parent : this).observeComponentCreation2(...)
+(parent ? parent : this).ifElseBranchUpdateFunction(...)
 ```
 
 ### 8. purgeVariableDependenciesOnElmtId()
@@ -397,7 +534,7 @@ pub fn transform_viewpu(
 - Input: `@Prop count: number`
 - Assert: backing type is `SynchedPropertySimpleOneWay`
 - Assert: `setInitiallyProvidedValue` contains the prop update
-- Assert: `updateStateVars` contains the prop update
+- Assert: `updateStateVars` contains direct `this.__count.reset(params.count)` with no `undefined` guard
 
 ### Lifecycle Preservation
 

@@ -1,9 +1,13 @@
-use std::{collections::HashSet, fs, path::Path};
+use rustc_hash::FxHashSet;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    Argument, ArrayExpressionElement, AssignmentTarget, BindingPattern, Expression, Program,
-    Statement,
+    Argument, ArrayExpressionElement, AssignmentTarget, BindingPattern, Declaration, Expression,
+    Program, Statement,
 };
 use oxc_parser::Parser;
 use oxc_span::SourceType;
@@ -11,14 +15,15 @@ use serde_json::Value;
 
 #[derive(Debug, Clone, Default)]
 pub struct ComponentMetadata {
-    atomic_components: HashSet<String>,
-    need_pop_components: HashSet<String>,
+    atomic_components: FxHashSet<String>,
+    need_pop_components: FxHashSet<String>,
+    enum_names: FxHashSet<String>,
 }
 
 impl ComponentMetadata {
     pub fn from_ets_loader_path(ets_loader_path: &Path) -> anyhow::Result<Self> {
         let components_dir = ets_loader_path.join("components");
-        let mut atomic_components = HashSet::new();
+        let mut atomic_components = FxHashSet::default();
         for entry in fs::read_dir(&components_dir)? {
             let entry = entry?;
             let path = entry.path();
@@ -36,19 +41,91 @@ impl ComponentMetadata {
 
         let need_pop_components =
             load_need_pop_components(&ets_loader_path.join("lib/component_map.js"))?;
+        let enum_names = load_sdk_enum_names(ets_loader_path)?;
 
         Ok(Self {
             atomic_components,
             need_pop_components,
+            enum_names,
         })
     }
 
     pub fn needs_pop(&self, name: &str) -> bool {
         !self.atomic_components.contains(name) || self.need_pop_components.contains(name)
     }
+
+    pub fn is_known_enum(&self, name: &str) -> bool {
+        self.enum_names.contains(name)
+    }
 }
 
-fn load_need_pop_components(component_map_path: &Path) -> anyhow::Result<HashSet<String>> {
+fn load_sdk_enum_names(ets_loader_path: &Path) -> anyhow::Result<FxHashSet<String>> {
+    let roots = [
+        ets_loader_path.join("declarations"),
+        ets_loader_path.join("../../component"),
+    ];
+    let mut paths = Vec::new();
+    for root in roots {
+        collect_declaration_files(&root, &mut paths)?;
+    }
+    paths.sort();
+
+    let mut names = FxHashSet::default();
+    for path in paths {
+        let source = fs::read_to_string(&path)?;
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, &source, SourceType::ts()).parse();
+        if !parsed.errors.is_empty() {
+            anyhow::bail!(
+                "failed to parse SDK enum declarations at {}",
+                path.display()
+            );
+        }
+        names.extend(enum_names_from_program(&parsed.program));
+    }
+    Ok(names)
+}
+
+fn collect_declaration_files(root: &Path, paths: &mut Vec<PathBuf>) -> anyhow::Result<()> {
+    if !root.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_declaration_files(&path, paths)?;
+        } else if path.extension().and_then(|ext| ext.to_str()) == Some("ts")
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".d.ts"))
+        {
+            paths.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn enum_names_from_program(program: &Program<'_>) -> FxHashSet<String> {
+    let mut names = FxHashSet::default();
+    for statement in &program.body {
+        match statement {
+            Statement::TSEnumDeclaration(declaration) => {
+                names.insert(declaration.id.name.to_string());
+            }
+            Statement::ExportNamedDeclaration(export) => {
+                if let Some(Declaration::TSEnumDeclaration(declaration)) = &export.declaration {
+                    names.insert(declaration.id.name.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
+fn load_need_pop_components(component_map_path: &Path) -> anyhow::Result<FxHashSet<String>> {
     let source = fs::read_to_string(component_map_path)?;
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, &source, SourceType::cjs()).parse();
@@ -66,7 +143,7 @@ fn load_need_pop_components(component_map_path: &Path) -> anyhow::Result<HashSet
     })
 }
 
-fn extract_need_pop_components(program: &Program<'_>) -> Option<HashSet<String>> {
+fn extract_need_pop_components(program: &Program<'_>) -> Option<FxHashSet<String>> {
     for statement in &program.body {
         let Statement::VariableDeclaration(declaration) = statement else {
             continue;
@@ -88,7 +165,7 @@ fn extract_need_pop_components(program: &Program<'_>) -> Option<HashSet<String>>
     None
 }
 
-fn extract_need_pop_components_from_expression(expr: &Expression<'_>) -> Option<HashSet<String>> {
+fn extract_need_pop_components_from_expression(expr: &Expression<'_>) -> Option<FxHashSet<String>> {
     match expr {
         Expression::AssignmentExpression(assignment) => {
             if assignment_target_name(&assignment.left).as_deref() == Some("NEEDPOP_COMPONENT") {
@@ -123,7 +200,7 @@ fn assignment_target_name(target: &AssignmentTarget<'_>) -> Option<String> {
     }
 }
 
-fn set_literal_strings(expr: &Expression<'_>) -> Option<HashSet<String>> {
+fn set_literal_strings(expr: &Expression<'_>) -> Option<FxHashSet<String>> {
     if let Expression::ParenthesizedExpression(parenthesized) = expr {
         return set_literal_strings(&parenthesized.expression);
     }
@@ -136,7 +213,7 @@ fn set_literal_strings(expr: &Expression<'_>) -> Option<HashSet<String>> {
         .and_then(set_literal_strings_from_new_set)
 }
 
-fn set_literal_strings_from_new_set(expr: &Expression<'_>) -> Option<HashSet<String>> {
+fn set_literal_strings_from_new_set(expr: &Expression<'_>) -> Option<FxHashSet<String>> {
     let Expression::NewExpression(new_expr) = expr else {
         return None;
     };
@@ -149,7 +226,7 @@ fn set_literal_strings_from_new_set(expr: &Expression<'_>) -> Option<HashSet<Str
     let Some(Argument::ArrayExpression(array)) = new_expr.arguments.first() else {
         return None;
     };
-    let mut out = HashSet::new();
+    let mut out = FxHashSet::default();
     for element in &array.elements {
         let ArrayExpressionElement::StringLiteral(literal) = element else {
             return None;
@@ -164,7 +241,7 @@ mod tests {
     use super::*;
     use oxc_allocator::Allocator;
 
-    fn parse_need_pop(source: &str) -> HashSet<String> {
+    fn parse_need_pop(source: &str) -> FxHashSet<String> {
         let allocator = Allocator::default();
         let parsed = Parser::new(&allocator, source, SourceType::cjs()).parse();
         assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
@@ -189,5 +266,16 @@ mod tests {
         assert!(values.contains("Blank"));
         assert!(values.contains("Search"));
         assert_eq!(values.len(), 2);
+    }
+
+    #[test]
+    fn loads_sdk_enum_names_from_declarations() {
+        let metadata = ComponentMetadata::from_ets_loader_path(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/ets-loader"
+        )))
+        .expect("test ets-loader metadata");
+        assert!(metadata.is_known_enum("FontWeight"));
+        assert!(metadata.is_known_enum("ImageInterpolation"));
     }
 }

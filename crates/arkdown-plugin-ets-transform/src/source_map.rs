@@ -1,12 +1,14 @@
-/// Minimal Source Map v3 builder for the ETS→ViewPU cross-transform source map.
+use std::sync::Arc;
+
+use rolldown_sourcemap::SourceMapBuilder;
+use rustc_hash::FxHashMap;
+use string_wizard::{Hires, MagicString, SourceMapOptions};
+
+/// Source Map helpers used by the ETS transforms.
 ///
-/// Encodes a set of per-line `(generated_line, src_line, src_col)` entries into
-/// a VLQ-encoded `mappings` string and wraps the result in a Source Map v3 JSON
-/// object.  One segment is emitted per generated line at column 0; generated
-/// lines without an entry get an empty group (no source reference).
-///
-/// This module is intentionally dependency-free (no serde_json) to avoid adding
-/// a production dependency just for JSON serialisation.
+/// Keep source-map encoding delegated to Rolldown's Rust sourcemap stack
+/// (`string_wizard`/`rolldown_sourcemap`). This matches Rolldown's transform
+/// pipeline and avoids locally maintaining VLQ or Source Map JSON writers.
 
 /// Convert a byte `offset` in `source` to a `(0-based line, 0-based col)` pair.
 pub fn offset_to_line_col(source: &str, offset: u32) -> (u32, u32) {
@@ -19,34 +21,6 @@ pub fn offset_to_line_col(source: &str, offset: u32) -> (u32, u32) {
         .map(|pos| clamped - pos - 1)
         .unwrap_or(clamped) as u32;
     (line, col)
-}
-
-/// VLQ-encode a single signed integer according to the Source Map v3 spec.
-///
-/// Bit layout: sign is stored in bit 0 (LSB) of the continuation-group value;
-/// magnitude occupies the remaining bits, least-significant group first.
-/// Each 5-bit group is offset into the base-64 alphabet, with bit 5 as the
-/// continuation flag.
-pub fn encode_vlq(value: i32) -> String {
-    const BASE64: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut vlq: u32 = if value < 0 {
-        ((-value as u32) << 1) | 1
-    } else {
-        (value as u32) << 1
-    };
-    let mut result = String::new();
-    loop {
-        let mut digit = vlq & 0x1f;
-        vlq >>= 5;
-        if vlq > 0 {
-            digit |= 0x20;
-        }
-        result.push(BASE64[digit as usize] as char);
-        if vlq == 0 {
-            break;
-        }
-    }
-    result
 }
 
 /// A single source map entry mapping one generated line back to an original source position.
@@ -62,59 +36,34 @@ pub struct MapEntry {
     pub src_col: u32,
 }
 
-/// Build a Source Map v3 JSON string from a list of per-line entries.
+/// Build a Source Map v3 JSON string from a list of generated/source entries.
 ///
 /// `source_path` is placed verbatim in `sources[0]`.  `generated_line_count` is
-/// the total number of lines in the generated code (controls how many `;`
-/// separators appear in `mappings`).  Entries must not need to be sorted — the
-/// function sorts by `generated_line` internally.
-///
-/// Lines without an entry receive an empty group (`;` only) which tells consumers
-/// that no source position is available for those lines.
+/// retained for API compatibility with callers that compute line coverage; the
+/// underlying Rolldown/OXC builder emits only mapped tokens.
 pub fn build_ets_source_map(
     source_path: &str,
-    generated_line_count: usize,
+    _generated_line_count: usize,
     entries: &[MapEntry],
 ) -> String {
     let mut sorted = entries.to_vec();
     sorted.sort_by_key(|e| (e.generated_line, e.generated_col));
 
-    let mut mappings = String::new();
-    let mut entry_idx = 0usize;
-    let mut prev_src_line = 0i32;
-    let mut prev_src_col = 0i32;
-
-    for gen_line in 0..generated_line_count {
-        if gen_line > 0 {
-            mappings.push(';');
-        }
-        let mut prev_gen_col = 0i32;
-        let mut first_on_line = true;
-        while entry_idx < sorted.len() && sorted[entry_idx].generated_line == gen_line {
-            let e = &sorted[entry_idx];
-            if !first_on_line {
-                mappings.push(',');
-            }
-            first_on_line = false;
-            let gen_col_delta = e.generated_col as i32 - prev_gen_col;
-            let src_line_delta = e.src_line as i32 - prev_src_line;
-            let src_col_delta = e.src_col as i32 - prev_src_col;
-            prev_gen_col = e.generated_col as i32;
-            prev_src_line = e.src_line as i32;
-            prev_src_col = e.src_col as i32;
-            // Segment: generated_col_delta, source_idx=0, orig_line_delta, orig_col_delta
-            mappings.push_str(&encode_vlq(gen_col_delta));
-            mappings.push_str(&encode_vlq(0));
-            mappings.push_str(&encode_vlq(src_line_delta));
-            mappings.push_str(&encode_vlq(src_col_delta));
-            entry_idx += 1;
-        }
+    let mut builder = SourceMapBuilder::default();
+    let source_id = builder.set_source_and_content(&source_path.replace('\\', "/"), "");
+    for entry in sorted {
+        builder.add_token(
+            entry.generated_line as u32,
+            entry.generated_col,
+            entry.src_line,
+            entry.src_col,
+            Some(source_id),
+            None,
+        );
     }
-
-    let escaped_path = source_path.replace('\\', "/").replace('"', "\\\"");
-    format!(
-        "{{\"version\":3,\"sources\":[\"{escaped_path}\"],\"sourcesContent\":[null],\"mappings\":\"{mappings}\"}}"
-    )
+    let mut source_map = builder.into_sourcemap();
+    source_map.set_source_contents(vec![None]);
+    source_map.to_json_string()
 }
 
 #[cfg(test)]
@@ -138,23 +87,6 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_vlq_zero() {
-        assert_eq!(encode_vlq(0), "A");
-    }
-
-    #[test]
-    fn test_encode_vlq_positive() {
-        assert_eq!(encode_vlq(1), "C");
-        assert_eq!(encode_vlq(15), "e");
-    }
-
-    #[test]
-    fn test_encode_vlq_negative() {
-        assert_eq!(encode_vlq(-1), "D");
-        assert_eq!(encode_vlq(-15), "f");
-    }
-
-    #[test]
     fn test_build_source_map_json_structure() {
         let entries = vec![MapEntry {
             generated_line: 2,
@@ -168,22 +100,17 @@ mod tests {
             json.contains("\"sources\":[\"src/main/ets/pages/Index.ets\"]"),
             "must have source path"
         );
-        assert!(json.contains("\"mappings\":"), "must have mappings");
-        // Lines 0,1 have no entries → empty groups; line 2 has entry; lines 3,4 empty
-        // mappings = ";;AAAK;;"  (roughly — exact encoding depends on src_line/col)
-        let mappings_start = json.find("\"mappings\":\"").unwrap() + 12;
-        let mappings_end = json.rfind('"').unwrap();
-        let mappings = &json[mappings_start..mappings_end];
-        // 5 lines → 4 semicolons total in mappings
-        assert_eq!(mappings.chars().filter(|&c| c == ';').count(), 4);
-        // Line 2 (index 2) has a segment (non-empty between semicolons 1 and 2)
+        let value: serde_json::Value = serde_json::from_str(&json).expect("source map json");
+        let mappings = value
+            .get("mappings")
+            .and_then(serde_json::Value::as_str)
+            .expect("mappings");
+        assert_eq!(mappings.chars().filter(|&c| c == ';').count(), 2);
         let groups: Vec<&str> = mappings.split(';').collect();
-        assert_eq!(groups.len(), 5);
+        assert_eq!(groups.len(), 3);
         assert!(groups[0].is_empty(), "line 0 must be empty");
         assert!(groups[1].is_empty(), "line 1 must be empty");
         assert!(!groups[2].is_empty(), "line 2 must have a segment");
-        assert!(groups[3].is_empty(), "line 3 must be empty");
-        assert!(groups[4].is_empty(), "line 4 must be empty");
     }
 }
 
@@ -196,55 +123,22 @@ use oxc_span::{GetSpan, SourceType};
 /// Build a per-token source map for `source` (identity mapping).
 /// Emits one 4-field VLQ segment per non-whitespace/comment token.
 pub fn build_token_source_map(source: &str, id: &str) -> Option<String> {
-    let allocator = Allocator::default();
     let source_type =
         SourceType::from_path(id).unwrap_or_else(|_| SourceType::ts().with_module(true));
-    let parsed = Parser::new(&allocator, source, source_type)
-        .with_config(TokensParserConfig)
-        .parse();
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, source, source_type).parse();
     if !parsed.errors.is_empty() {
         return None;
     }
-    let line_offsets = build_line_offsets_table(source);
-    let mut prev_src_line = 0i32;
-    let mut prev_src_col = 0i32;
-    let mut mappings = String::new();
-    let mut cur_gen_line = 0u32;
-    let mut prev_gen_col = 0i32;
-    let mut first_on_line = true;
-    for tok in &parsed.tokens {
-        use oxc_parser::Kind;
-        if matches!(
-            tok.kind(),
-            Kind::Eof | Kind::Undetermined | Kind::Skip | Kind::HashbangComment
-        ) {
-            continue;
-        }
-        let start = tok.start();
-        let (line, col) = offset_to_line_col_table(&line_offsets, start);
-        while cur_gen_line < line {
-            mappings.push(';');
-            cur_gen_line += 1;
-            prev_gen_col = 0;
-            first_on_line = true;
-        }
-        if !first_on_line {
-            mappings.push(',');
-        }
-        first_on_line = false;
-        let gen_col = col as i32;
-        mappings.push_str(&encode_vlq(gen_col - prev_gen_col));
-        prev_gen_col = gen_col;
-        mappings.push_str(&encode_vlq(0));
-        mappings.push_str(&encode_vlq(line as i32 - prev_src_line));
-        mappings.push_str(&encode_vlq(col as i32 - prev_src_col));
-        prev_src_line = line as i32;
-        prev_src_col = col as i32;
-    }
-    let escaped = id.replace('\\', "/").replace('"', "\\\"");
-    Some(format!(
-        r#"{{"version":3,"sources":["{escaped}"],"sourcesContent":[null],"names":[],"mappings":"{mappings}"}}"#
-    ))
+
+    let magic_string = MagicString::new(source);
+    let mut source_map = magic_string.source_map(SourceMapOptions {
+        include_content: false,
+        source: Arc::from(id.replace('\\', "/")),
+        hires: Hires::Boundary,
+    });
+    source_map.set_source_contents(vec![None]);
+    Some(source_map.to_json_string())
 }
 
 /// Build a source map for standard non-`@Component` ETS files after hvigor-style
@@ -462,19 +356,16 @@ fn consume_blank_lines(source: &str, mut offset: usize) -> usize {
     offset
 }
 
-fn collect_original_kit_bindings(
-    source: &str,
-    id: &str,
-) -> std::collections::HashMap<String, (u32, u32)> {
+fn collect_original_kit_bindings(source: &str, id: &str) -> FxHashMap<String, (u32, u32)> {
     let allocator = Allocator::default();
     let source_type =
         SourceType::from_path(id).unwrap_or_else(|_| SourceType::ts().with_module(true));
     let parsed = Parser::new(&allocator, source, source_type).parse();
     if !parsed.errors.is_empty() {
-        return std::collections::HashMap::new();
+        return FxHashMap::default();
     }
 
-    let mut bindings = std::collections::HashMap::new();
+    let mut bindings = FxHashMap::default();
     for statement in &parsed.program.body {
         let Statement::ImportDeclaration(import) = statement else {
             continue;

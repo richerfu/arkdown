@@ -1,4 +1,5 @@
-use std::collections::{HashMap, HashSet};
+use crate::parse::ParsedModule;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::{Arc, Mutex};
 
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
@@ -8,11 +9,82 @@ use arkdown_core::{
     ResolvedId,
 };
 
-use crate::parse::parse_module;
 use crate::plugin_driver::PluginDriver;
 
 pub struct ModuleLoader {
     pub driver: Arc<PluginDriver>,
+}
+
+struct LoadState {
+    visited: Arc<Mutex<FxHashSet<String>>>,
+    modules: Arc<Mutex<FxHashMap<String, Module>>>,
+}
+
+impl LoadState {
+    fn new() -> Self {
+        Self {
+            visited: Arc::new(Mutex::new(FxHashSet::default())),
+            modules: Arc::new(Mutex::new(FxHashMap::default())),
+        }
+    }
+
+    fn take_batch(&self, queue: &mut Vec<ResolvedId>) -> Vec<ResolvedId> {
+        let mut visited = self.visited.lock().unwrap();
+        queue
+            .drain(..)
+            .filter(|id| visited.insert(id.id.clone()))
+            .collect()
+    }
+
+    fn load_batch(batch: Vec<ResolvedId>) -> Vec<(String, Module)> {
+        batch
+            .into_par_iter()
+            .filter_map(|resolved_id| {
+                if resolved_id.external {
+                    return None;
+                }
+                match ModuleLoader::load_single(&resolved_id) {
+                    Ok(module) => Some((resolved_id.id.clone(), module)),
+                    Err(error) => {
+                        tracing::warn!(
+                            module = %resolved_id.id,
+                            error = %error,
+                            "failed to load module"
+                        );
+                        None
+                    }
+                }
+            })
+            .collect()
+    }
+
+    fn commit_batch(&self, new_modules: Vec<(String, Module)>) -> Vec<ResolvedId> {
+        let visited = self.visited.lock().unwrap();
+        let mut modules = self.modules.lock().unwrap();
+        let mut next_wave = Vec::new();
+
+        for (id, module) in new_modules {
+            for import in module.imports() {
+                if !visited.contains(&import.resolved.id) {
+                    next_wave.push(import.resolved.clone());
+                }
+            }
+            if let Module::Normal(normal) = &module {
+                for dynamic_import in &normal.dynamic_imports {
+                    if !visited.contains(&dynamic_import.resolved.id) {
+                        next_wave.push(dynamic_import.resolved.clone());
+                    }
+                }
+            }
+            modules.insert(id, module);
+        }
+
+        next_wave
+    }
+
+    fn into_modules(self) -> FxHashMap<String, Module> {
+        self.modules.lock().unwrap().clone()
+    }
 }
 
 impl ModuleLoader {
@@ -45,75 +117,20 @@ impl ModuleLoader {
     pub fn load_all(
         &self,
         entry_ids: Vec<ResolvedId>,
-    ) -> Result<HashMap<String, Module>, ArkdownError> {
-        let visited: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
-        let results: Arc<Mutex<HashMap<String, Module>>> = Arc::new(Mutex::new(HashMap::new()));
-
-        // BFS queue — start with entries.
+    ) -> Result<FxHashMap<String, Module>, ArkdownError> {
+        let state = LoadState::new();
         let mut queue: Vec<ResolvedId> = entry_ids;
 
         while !queue.is_empty() {
-            // Mark all pending IDs as visited BEFORE loading to prevent
-            // double-enqueue when two modules in the same wave import the
-            // same dependency.
-            let batch: Vec<ResolvedId> = {
-                let mut v = visited.lock().unwrap();
-                queue
-                    .drain(..)
-                    .filter(|id| v.insert(id.id.clone()))
-                    .collect()
-            };
-
+            let batch = state.take_batch(&mut queue);
             if batch.is_empty() {
                 break;
             }
 
-            // Load this wave in parallel.
-            let new_modules: Vec<(String, Module)> = batch
-                .into_par_iter()
-                .filter_map(|resolved_id| {
-                    // External modules (OHM URLs, SDK APIs) are never read from disk.
-                    if resolved_id.external {
-                        return None;
-                    }
-                    match Self::load_single(&resolved_id) {
-                        Ok(module) => Some((resolved_id.id.clone(), module)),
-                        Err(e) => {
-                            eprintln!("Warning: failed to load {}: {}", resolved_id.id, e);
-                            None
-                        }
-                    }
-                })
-                .collect();
-
-            // Enqueue imports discovered in this wave for the next BFS round.
-            let mut next_wave: Vec<ResolvedId> = Vec::new();
-            {
-                let v = visited.lock().unwrap();
-                let mut r = results.lock().unwrap();
-                for (id, module) in new_modules {
-                    // Enqueue static imports not yet visited.
-                    for imp in module.imports() {
-                        if !v.contains(&imp.resolved.id) {
-                            next_wave.push(imp.resolved.clone());
-                        }
-                    }
-                    // Enqueue dynamic imports not yet visited.
-                    if let Module::Normal(nm) = &module {
-                        for dyn_imp in &nm.dynamic_imports {
-                            if !v.contains(&dyn_imp.resolved.id) {
-                                next_wave.push(dyn_imp.resolved.clone());
-                            }
-                        }
-                    }
-                    r.insert(id, module);
-                }
-            }
-            queue = next_wave;
+            queue = state.commit_batch(LoadState::load_batch(batch));
         }
 
-        let r = results.lock().unwrap().clone();
-        Ok(r)
+        Ok(state.into_modules())
     }
 
     /// Load and parse a single module from disk using the default file loader.
@@ -131,7 +148,7 @@ impl ModuleLoader {
             source_map: None,
         };
 
-        let parsed = parse_module(&source);
+        let parsed = ParsedModule::parse(&source);
 
         Ok(Module::Normal(Box::new(NormalModule {
             idx: ModuleIdx(0), // placeholder; updated by bundler after insertion

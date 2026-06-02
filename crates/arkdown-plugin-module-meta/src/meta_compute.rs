@@ -1,46 +1,16 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use arkdown_core::ModuleMeta;
-
-/// Parsed representation of an `oh-package.json5` file.
-#[derive(Debug, Clone)]
-pub struct OhPackageInfo {
-    pub name: Option<String>,
-    pub version: Option<String>,
-    pub main: Option<String>,
-    pub pkg_path: PathBuf,
-}
-
-/// Read `oh-package.json5` from a directory, returning `None` on any error.
-pub fn read_oh_package(dir: &Path) -> Option<OhPackageInfo> {
-    let path = dir.join("oh-package.json5");
-    let content = fs_err::read_to_string(&path).ok()?;
-    let v: serde_json::Value = json5::from_str(&content).ok()?;
-    Some(OhPackageInfo {
-        name: v
-            .get("name")
-            .and_then(|n| n.as_str())
-            .map(|s| s.to_string()),
-        version: v
-            .get("version")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-        main: v
-            .get("main")
-            .and_then(|m| m.as_str())
-            .map(|s| s.to_string()),
-        pkg_path: dir.to_path_buf(),
-    })
-}
+use arkdown_resolver::OhPackage;
 
 /// Walk up from `file_path` looking for an `oh-package.json5`.
 ///
 /// Searches up to `max_depth` parent directories. Returns `None` if not found.
-pub fn find_pkg_root(file_path: &Path, max_depth: usize) -> Option<OhPackageInfo> {
+pub fn find_pkg_root(file_path: &Path, max_depth: usize) -> Option<OhPackage> {
     let mut dir = file_path.parent()?;
     for _ in 0..max_depth {
-        if let Some(info) = read_oh_package(dir) {
-            return Some(info);
+        if let Some(pkg) = OhPackage::load_from_root(dir) {
+            return Some(pkg);
         }
         match dir.parent() {
             Some(parent) => dir = parent,
@@ -65,7 +35,7 @@ pub fn compute_meta(module_id: &str, project_root: &Path, module_name: &str) -> 
 
     let is_node_entry_file = pkg_info
         .as_ref()
-        .and_then(|info| info.main.as_deref())
+        .and_then(|info| info.main_field())
         .map(|main| {
             // Treat the module as the entry file when its path ends with the
             // `main` field declared in `oh-package.json5`.
@@ -75,9 +45,9 @@ pub fn compute_meta(module_id: &str, project_root: &Path, module_name: &str) -> 
 
     let (pkg_name, pkg_version, pkg_path) = if let Some(ref info) = pkg_info {
         (
-            info.name.clone(),
-            info.version.clone(),
-            Some(info.pkg_path.clone()),
+            info.name().map(str::to_string),
+            Some(info.version().to_string()).filter(|v| !v.is_empty()),
+            Some(info.pkg_path().to_path_buf()),
         )
     } else {
         (None, None, None)
@@ -141,8 +111,8 @@ mod tests {
         std::fs::write(&src_file, "export {}").unwrap();
 
         let info = find_pkg_root(&src_file, 4).expect("should find oh-package.json5");
-        assert_eq!(info.name.as_deref(), Some("my-pkg"));
-        assert_eq!(info.version.as_deref(), Some("1.0.0"));
+        assert_eq!(info.name(), Some("my-pkg"));
+        assert_eq!(info.version(), "1.0.0");
     }
 
     #[test]

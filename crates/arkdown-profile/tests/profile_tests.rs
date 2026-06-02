@@ -7,7 +7,7 @@ use arkdown_core::{
     AbilityConfig, ArkdownConfig, BuildMode, BuildOption, ModuleConfig, ModuleJson5,
     ModuleJson5Module, OhosModuleType, OutputTarget, ProductConfig, SdkConfig, StrictModeConfig,
 };
-use arkdown_profile::{generate_loader_json, process_profile, ProfileProcessor};
+use arkdown_profile::{process_profile, LoaderJson, ProfileProcessor};
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -253,7 +253,7 @@ fn test_generate_loader_json_has_compile_entry() {
     let json5 = single_ability_json5("feature");
     let manifest = process_profile(&json5, 12, "com.example", CompileMode::EsModule);
     let module_cfg = make_module_cfg("feature");
-    let loader = generate_loader_json(&config, &module_cfg, &manifest);
+    let loader = LoaderJson::generate(&config, &module_cfg, &manifest);
 
     assert!(
         !loader.compile_entry.is_empty(),
@@ -268,7 +268,7 @@ fn test_generate_loader_json_use_normalized_ohm_url_propagated() {
     let json5 = single_ability_json5("entry");
     let manifest = process_profile(&json5, 12, "com.example", CompileMode::EsModule);
     let module_cfg = make_module_cfg("entry");
-    let loader = generate_loader_json(&config, &module_cfg, &manifest);
+    let loader = LoaderJson::generate(&config, &module_cfg, &manifest);
 
     assert!(
         loader.use_normalized_ohm_url,
@@ -384,7 +384,7 @@ fn test_write_module_json_emits_virtual_machine_and_compile_mode() {
 #[test]
 fn test_write_module_json_resolves_resource_ids_into_abilities() {
     use arkdown_core::{AbilityEntry, CompileMode, HapManifest, OhosModuleType};
-    use std::collections::HashMap;
+    use rustc_hash::FxHashMap;
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let mut config = (*default_config()).clone();
@@ -417,7 +417,7 @@ fn test_write_module_json_resolves_resource_ids_into_abilities() {
         description: None,
     };
 
-    let mut resource_ids: HashMap<String, u32> = HashMap::new();
+    let mut resource_ids: FxHashMap<String, u32> = FxHashMap::default();
     resource_ids.insert("icon".to_string(), 16777219);
     resource_ids.insert("EntryAbility_label".to_string(), 16777216);
     resource_ids.insert("EntryAbility_desc".to_string(), 16777217);

@@ -13,27 +13,31 @@
 pub mod api_transform;
 pub mod checker;
 pub mod error;
+mod hvigor_format;
 pub mod kit_map;
+mod module_emit;
+mod module_rewrite;
 mod resource_transform;
+mod source_edit;
 pub mod source_map;
 mod sys_resource;
 pub mod transform;
 mod typescript_emit;
 
+use rustc_hash::FxHashMap;
 use std::borrow::Cow;
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use arkdown_core::{ArkdownConfig, ModuleSource, ModuleType, ResolvedId};
+use hvigor_format::{format_hvigor_standard_ts, module_name_from_id};
+use module_rewrite::{rewrite_type_only_reexports, split_type_only_named_imports};
+#[cfg(test)]
 use oxc_allocator::Allocator;
-use oxc_ast::ast::{
-    BindingPattern, Declaration, ExportNamedDeclaration, ExportSpecifier, ImportDeclaration,
-    ImportDeclarationSpecifier, ModuleExportName, Statement, StringLiteral,
-};
 #[cfg(test)]
 use oxc_codegen::{Codegen, CodegenOptions};
+#[cfg(test)]
 use oxc_parser::Parser;
-use oxc_semantic::SemanticBuilder;
+#[cfg(test)]
 use oxc_span::SourceType;
 use resource_transform::rewrite_resource_references;
 use rolldown_plugin::{
@@ -43,7 +47,13 @@ use rolldown_plugin::{
 };
 use rolldown_sourcemap::SourceMap as RolldownSourceMap;
 
+pub use module_rewrite::rewrite_static_module_specifiers_with;
+#[cfg(test)]
+pub(crate) use module_rewrite::{exported_binding_kinds, ExportBindingKind};
 pub use resource_transform::ResourceReference;
+pub(crate) use source_edit::{
+    apply_source_patches, apply_source_patches_with_offsets, module_export_name_text, SourcePatch,
+};
 pub use sys_resource::load_system_resource_references;
 
 /// ArkTS transform plugin — desugars `.ets` files into TypeScript.
@@ -52,7 +62,8 @@ pub use sys_resource::load_system_resource_references;
 /// so that `.ets` modules are converted to `.ts` before downstream processing begins.
 pub struct EtsTransformPlugin {
     pub config: Arc<ArkdownConfig>,
-    resource_refs: Arc<HashMap<String, ResourceReference>>,
+    resource_refs: Arc<FxHashMap<String, ResourceReference>>,
+    component_metadata: Arc<Mutex<Option<transform::component_meta::ComponentMetadata>>>,
 }
 
 impl std::fmt::Debug for EtsTransformPlugin {
@@ -65,18 +76,35 @@ impl EtsTransformPlugin {
     pub fn new(config: Arc<ArkdownConfig>) -> Self {
         EtsTransformPlugin {
             config,
-            resource_refs: Arc::new(HashMap::new()),
+            resource_refs: Arc::new(FxHashMap::default()),
+            component_metadata: Arc::new(Mutex::new(None)),
         }
     }
 
     pub fn with_resource_references(
         config: Arc<ArkdownConfig>,
-        resource_refs: HashMap<String, ResourceReference>,
+        resource_refs: FxHashMap<String, ResourceReference>,
     ) -> Self {
         EtsTransformPlugin {
             config,
             resource_refs: Arc::new(resource_refs),
+            component_metadata: Arc::new(Mutex::new(None)),
         }
+    }
+
+    fn component_metadata(&self) -> anyhow::Result<transform::component_meta::ComponentMetadata> {
+        let mut guard = self
+            .component_metadata
+            .lock()
+            .map_err(|_| anyhow::anyhow!("component metadata cache poisoned"))?;
+        if let Some(metadata) = guard.as_ref() {
+            return Ok(metadata.clone());
+        }
+        let metadata = transform::component_meta::ComponentMetadata::from_ets_loader_path(
+            &self.config.sdk_config.ets_loader_path,
+        )?;
+        *guard = Some(metadata.clone());
+        Ok(metadata)
     }
 
     pub fn do_transform(
@@ -139,9 +167,7 @@ impl EtsTransformPlugin {
                 .iter()
                 .map(|module| (module.name.clone(), module.src_path.clone()))
                 .collect(),
-            component_metadata: transform::component_meta::ComponentMetadata::from_ets_loader_path(
-                &self.config.sdk_config.ets_loader_path,
-            )?,
+            component_metadata: self.component_metadata()?,
         };
 
         let transformed = transform::transform_ets_with_options(&source, &options).map_err(|e| {
@@ -274,6 +300,7 @@ impl Plugin for EtsTransformPlugin {
         let id = args.id.to_owned();
         let config = Arc::clone(&self.config);
         let resource_refs = Arc::clone(&self.resource_refs);
+        let component_metadata = Arc::clone(&self.component_metadata);
         async move {
             if !id.ends_with(".ets") {
                 return Ok(None);
@@ -288,6 +315,7 @@ impl Plugin for EtsTransformPlugin {
             let output = EtsTransformPlugin {
                 config,
                 resource_refs,
+                component_metadata,
             }
             .do_transform(&code, &id)?;
             Ok(output.map(|output| HookLoadOutput {
@@ -306,231 +334,16 @@ impl Plugin for EtsTransformPlugin {
         let id = args.id.to_owned();
         let config = Arc::clone(&self.config);
         let resource_refs = Arc::clone(&self.resource_refs);
+        let component_metadata = Arc::clone(&self.component_metadata);
         async move {
             EtsTransformPlugin {
                 config,
                 resource_refs,
+                component_metadata,
             }
             .do_transform(&code, &id)
         }
     }
-}
-
-#[derive(Debug)]
-pub(crate) struct SourcePatch {
-    pub(crate) start: usize,
-    pub(crate) end: usize,
-    pub(crate) replacement: String,
-}
-
-#[derive(Debug)]
-struct ImportSpecText {
-    text: String,
-    is_type_only: bool,
-}
-
-fn split_type_only_named_imports(source: &str, id: &str) -> String {
-    let allocator = Allocator::default();
-    let source_type =
-        SourceType::from_path(id).unwrap_or_else(|_| SourceType::ts().with_module(true));
-    let parsed = Parser::new(&allocator, source, source_type).parse();
-    if !parsed.errors.is_empty() {
-        return source.to_string();
-    }
-
-    let semantic_ret = SemanticBuilder::new().build(&parsed.program);
-    if !semantic_ret.errors.is_empty() {
-        return source.to_string();
-    }
-    let scoping = semantic_ret.semantic.scoping();
-    let mut patches = Vec::new();
-
-    for statement in &parsed.program.body {
-        let Statement::ImportDeclaration(import) = statement else {
-            continue;
-        };
-        let Some(replacement) = split_import_declaration(import, scoping) else {
-            continue;
-        };
-        patches.push(SourcePatch {
-            start: import.span.start as usize,
-            end: import.span.end as usize,
-            replacement,
-        });
-    }
-
-    apply_source_patches(source, patches)
-}
-
-fn split_import_declaration(
-    import: &ImportDeclaration<'_>,
-    scoping: &oxc_semantic::Scoping,
-) -> Option<String> {
-    if import.import_kind.is_type() {
-        return None;
-    }
-    let specifiers = import.specifiers.as_ref()?;
-    let source_text = import.source.value.as_str();
-    let mut default_or_namespace = Vec::new();
-    let mut named = Vec::new();
-    let mut has_type_only_named = false;
-
-    for specifier in specifiers {
-        match specifier {
-            ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
-                let text = import_specifier_text(specifier);
-                let is_type_only = specifier.import_kind.is_type()
-                    || specifier.local.symbol_id.get().is_some_and(|symbol_id| {
-                        !scoping
-                            .get_resolved_references(symbol_id)
-                            .any(|reference| reference.flags().is_value())
-                    });
-                has_type_only_named |= is_type_only;
-                named.push(ImportSpecText { text, is_type_only });
-            }
-            ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
-                default_or_namespace.push(specifier.local.name.to_string());
-            }
-            ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
-                default_or_namespace.push(format!("* as {}", specifier.local.name));
-            }
-        }
-    }
-
-    if !has_type_only_named {
-        return None;
-    }
-
-    let value_named = named
-        .iter()
-        .filter(|specifier| !specifier.is_type_only)
-        .map(|specifier| specifier.text.as_str())
-        .collect::<Vec<_>>();
-    let type_named = named
-        .iter()
-        .filter(|specifier| specifier.is_type_only)
-        .map(|specifier| specifier.text.as_str())
-        .collect::<Vec<_>>();
-
-    let mut out = String::new();
-    if !default_or_namespace.is_empty() || !value_named.is_empty() {
-        out.push_str("import ");
-        out.push_str(&default_or_namespace.join(", "));
-        if !default_or_namespace.is_empty() && !value_named.is_empty() {
-            out.push_str(", ");
-        }
-        if !value_named.is_empty() {
-            out.push_str("{ ");
-            out.push_str(&value_named.join(", "));
-            out.push_str(" }");
-        }
-        out.push_str(" from \"");
-        out.push_str(source_text);
-        out.push_str("\";\n");
-    }
-    out.push_str("import type { ");
-    out.push_str(&type_named.join(", "));
-    out.push_str(" } from \"");
-    out.push_str(source_text);
-    out.push_str("\";");
-    Some(out)
-}
-
-fn import_specifier_text(specifier: &oxc_ast::ast::ImportSpecifier<'_>) -> String {
-    let imported = module_export_name_text(&specifier.imported);
-    let local = specifier.local.name.to_string();
-    if imported == local {
-        local
-    } else {
-        format!("{imported} as {local}")
-    }
-}
-
-pub(crate) fn module_export_name_text(name: &ModuleExportName<'_>) -> String {
-    match name {
-        ModuleExportName::IdentifierName(identifier) => identifier.name.to_string(),
-        ModuleExportName::IdentifierReference(identifier) => identifier.name.to_string(),
-        ModuleExportName::StringLiteral(literal) => literal.raw.as_ref().map_or_else(
-            || format!("{:?}", literal.value.as_str()),
-            ToString::to_string,
-        ),
-    }
-}
-
-pub(crate) fn apply_source_patches(source: &str, mut patches: Vec<SourcePatch>) -> String {
-    if patches.is_empty() {
-        return source.to_string();
-    }
-    patches.sort_by_key(|patch| patch.start);
-    let mut out = String::with_capacity(source.len());
-    let mut last_end = 0usize;
-    for patch in patches {
-        if patch.start < last_end {
-            continue;
-        }
-        out.push_str(&source[last_end..patch.start]);
-        out.push_str(&patch.replacement);
-        last_end = patch.end;
-    }
-    out.push_str(&source[last_end..]);
-    out
-}
-
-/// Rewrites static `import` / `export ... from` module specifiers using OXC AST
-/// spans.  This mirrors the TypeScript visitor shape used by hvigor's
-/// `process_import` / `process_kit_import`: only module specifier nodes are
-/// rewritten, while the surrounding declaration syntax is preserved.
-pub fn rewrite_static_module_specifiers_with(
-    source: &str,
-    id: &str,
-    mut rewrite: impl FnMut(&str) -> Option<String>,
-) -> String {
-    let allocator = Allocator::default();
-    let source_type =
-        SourceType::from_path(id).unwrap_or_else(|_| SourceType::ts().with_module(true));
-    let parsed = Parser::new(&allocator, source, source_type).parse();
-    if !parsed.errors.is_empty() {
-        return source.to_string();
-    }
-
-    let mut patches = Vec::new();
-    for statement in &parsed.program.body {
-        match statement {
-            Statement::ImportDeclaration(import) => {
-                push_module_specifier_patch(&import.source, &mut rewrite, &mut patches);
-            }
-            Statement::ExportNamedDeclaration(export) => {
-                if let Some(source) = &export.source {
-                    push_module_specifier_patch(source, &mut rewrite, &mut patches);
-                }
-            }
-            Statement::ExportAllDeclaration(export) => {
-                push_module_specifier_patch(&export.source, &mut rewrite, &mut patches);
-            }
-            _ => {}
-        }
-    }
-
-    apply_source_patches(source, patches)
-}
-
-fn push_module_specifier_patch(
-    literal: &StringLiteral<'_>,
-    rewrite: &mut impl FnMut(&str) -> Option<String>,
-    patches: &mut Vec<SourcePatch>,
-) {
-    let specifier = literal.value.as_str();
-    let Some(replacement) = rewrite(specifier) else {
-        return;
-    };
-    if replacement == specifier {
-        return;
-    }
-    patches.push(SourcePatch {
-        start: literal.span.start as usize,
-        end: literal.span.end as usize,
-        replacement: format!("\"{replacement}\""),
-    });
 }
 
 /// Parse `source` and re-emit it with oxc codegen, returning both the
@@ -579,227 +392,6 @@ fn generate_code_and_source_map(source: &str, id: &str) -> Option<(String, Optio
     Some((result.code, map_json))
 }
 
-fn rewrite_type_only_reexports(source: &str, id: &str) -> String {
-    let allocator = Allocator::default();
-    let source_type =
-        SourceType::from_path(id).unwrap_or_else(|_| SourceType::ts().with_module(true));
-    let parsed = Parser::new(&allocator, source, source_type).parse();
-    if !parsed.errors.is_empty() {
-        return source.to_string();
-    }
-
-    let mut patches = Vec::new();
-    for statement in &parsed.program.body {
-        let Statement::ExportNamedDeclaration(export) = statement else {
-            continue;
-        };
-        let Some(replacement) = rewrite_type_only_reexport(export, id) else {
-            continue;
-        };
-        patches.push(SourcePatch {
-            start: export.span.start as usize,
-            end: export.span.end as usize,
-            replacement,
-        });
-    }
-
-    apply_source_patches(source, patches)
-}
-
-fn rewrite_type_only_reexport(export: &ExportNamedDeclaration<'_>, id: &str) -> Option<String> {
-    if export.export_kind.is_type() || export.specifiers.is_empty() {
-        return None;
-    }
-    let source = export.source.as_ref()?;
-    let specifier = source.value.as_str();
-    let target = resolve_relative_source(id, specifier)?;
-    let target_exports = exported_binding_kinds(&target)?;
-
-    let mut value_specifiers = Vec::new();
-    let mut type_specifiers = Vec::new();
-
-    for specifier in &export.specifiers {
-        let local_name = module_export_name_text(&specifier.local);
-        let specifier_text = export_specifier_text(specifier);
-        let is_type = specifier.export_kind.is_type()
-            || target_exports
-                .get(&local_name)
-                .is_some_and(|kind| *kind == ExportBindingKind::Type);
-        if is_type {
-            type_specifiers.push(specifier_text);
-        } else {
-            value_specifiers.push(specifier_text);
-        }
-    }
-
-    if type_specifiers.is_empty() {
-        return None;
-    }
-
-    let module_source = module_source_text(source);
-    let mut replacement = String::new();
-    if !value_specifiers.is_empty() {
-        replacement.push_str("export { ");
-        replacement.push_str(&value_specifiers.join(", "));
-        replacement.push_str(" } from ");
-        replacement.push_str(&module_source);
-        replacement.push_str(";\n");
-    }
-    replacement.push_str("export type { ");
-    replacement.push_str(&type_specifiers.join(", "));
-    replacement.push_str(" } from ");
-    replacement.push_str(&module_source);
-    replacement.push(';');
-    Some(replacement)
-}
-
-fn resolve_relative_source(id: &str, specifier: &str) -> Option<std::path::PathBuf> {
-    let base = std::path::Path::new(id).parent()?;
-    let candidate = base.join(specifier);
-    let candidates = [
-        candidate.clone(),
-        candidate.with_extension("ets"),
-        candidate.with_extension("ts"),
-        candidate.join("Index.ets"),
-        candidate.join("index.ets"),
-        candidate.join("Index.ts"),
-        candidate.join("index.ts"),
-    ];
-    candidates.into_iter().find(|path| path.is_file())
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ExportBindingKind {
-    Type,
-    Value,
-}
-
-fn exported_binding_kinds(path: &std::path::Path) -> Option<HashMap<String, ExportBindingKind>> {
-    let Ok(content) = std::fs::read_to_string(path) else {
-        return None;
-    };
-    let allocator = Allocator::default();
-    let source_type =
-        SourceType::from_path(path).unwrap_or_else(|_| SourceType::ts().with_module(true));
-    let parsed = Parser::new(&allocator, &content, source_type).parse();
-    if !parsed.errors.is_empty() {
-        return None;
-    }
-
-    let mut exports = HashMap::new();
-    for statement in &parsed.program.body {
-        let Statement::ExportNamedDeclaration(export) = statement else {
-            continue;
-        };
-        if let Some(declaration) = &export.declaration {
-            collect_exported_declaration(declaration, &mut exports);
-        }
-        for specifier in &export.specifiers {
-            let exported_name = module_export_name_text(&specifier.exported);
-            let local_name = module_export_name_text(&specifier.local);
-            if specifier.export_kind.is_type() || export.export_kind.is_type() {
-                exports.insert(exported_name, ExportBindingKind::Type);
-            } else if let Some(kind) = exports.get(&local_name).copied() {
-                exports.insert(exported_name, kind);
-            } else {
-                exports
-                    .entry(exported_name)
-                    .or_insert(ExportBindingKind::Value);
-            }
-        }
-    }
-    Some(exports)
-}
-
-fn collect_exported_declaration(
-    declaration: &Declaration<'_>,
-    exports: &mut HashMap<String, ExportBindingKind>,
-) {
-    match declaration {
-        Declaration::TSInterfaceDeclaration(declaration) => {
-            exports.insert(declaration.id.name.to_string(), ExportBindingKind::Type);
-        }
-        Declaration::TSTypeAliasDeclaration(declaration) => {
-            exports.insert(declaration.id.name.to_string(), ExportBindingKind::Type);
-        }
-        Declaration::TSEnumDeclaration(declaration) if declaration.r#const => {
-            exports.insert(declaration.id.name.to_string(), ExportBindingKind::Type);
-        }
-        Declaration::TSEnumDeclaration(declaration) => {
-            exports.insert(declaration.id.name.to_string(), ExportBindingKind::Value);
-        }
-        Declaration::FunctionDeclaration(declaration) => {
-            if let Some(id) = &declaration.id {
-                exports.insert(id.name.to_string(), ExportBindingKind::Value);
-            }
-        }
-        Declaration::ClassDeclaration(declaration) => {
-            if let Some(id) = &declaration.id {
-                exports.insert(id.name.to_string(), ExportBindingKind::Value);
-            }
-        }
-        Declaration::VariableDeclaration(declaration) => {
-            for declarator in &declaration.declarations {
-                collect_binding_names(&declarator.id, exports);
-            }
-        }
-        Declaration::TSModuleDeclaration(_)
-        | Declaration::TSGlobalDeclaration(_)
-        | Declaration::StructStatement(_)
-        | Declaration::AnnotationDeclaration(_) => {}
-        Declaration::TSImportEqualsDeclaration(declaration) => {
-            exports.insert(declaration.id.name.to_string(), ExportBindingKind::Value);
-        }
-    }
-}
-
-fn collect_binding_names(
-    pattern: &BindingPattern<'_>,
-    exports: &mut HashMap<String, ExportBindingKind>,
-) {
-    match pattern {
-        BindingPattern::BindingIdentifier(identifier) => {
-            exports.insert(identifier.name.to_string(), ExportBindingKind::Value);
-        }
-        BindingPattern::ObjectPattern(pattern) => {
-            for property in &pattern.properties {
-                collect_binding_names(&property.value, exports);
-            }
-            if let Some(rest) = &pattern.rest {
-                collect_binding_names(&rest.argument, exports);
-            }
-        }
-        BindingPattern::ArrayPattern(pattern) => {
-            for element in pattern.elements.iter().flatten() {
-                collect_binding_names(element, exports);
-            }
-            if let Some(rest) = &pattern.rest {
-                collect_binding_names(&rest.argument, exports);
-            }
-        }
-        BindingPattern::AssignmentPattern(pattern) => {
-            collect_binding_names(&pattern.left, exports);
-        }
-    }
-}
-
-fn export_specifier_text(specifier: &ExportSpecifier<'_>) -> String {
-    let local = module_export_name_text(&specifier.local);
-    let exported = module_export_name_text(&specifier.exported);
-    if local == exported {
-        local
-    } else {
-        format!("{local} as {exported}")
-    }
-}
-
-fn module_source_text(source: &oxc_ast::ast::StringLiteral<'_>) -> String {
-    source.raw.as_ref().map_or_else(
-        || format!("{:?}", source.value.as_str()),
-        ToString::to_string,
-    )
-}
-
 /// Ensure the Source Map v3 JSON object contains a `"names"` array.
 ///
 /// hvigor always emits `"names":[]` even when no name mappings are present.
@@ -817,74 +409,6 @@ fn ensure_names_field(json: &str) -> String {
         }
     }
     serde_json::to_string(&value).unwrap_or_else(|_| json.to_string())
-}
-
-fn format_hvigor_standard_ts(source: &str) -> String {
-    let mut lines = Vec::new();
-    let mut iter = source.lines().peekable();
-
-    while let Some(line) = iter.next() {
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        let trimmed = line.trim_start();
-        if trimmed.ends_with('(') && trimmed.contains('.') {
-            let indent = hvigor_indent(line);
-            let mut args = Vec::new();
-            let mut consumed = Vec::new();
-            let mut closed = false;
-            while let Some(arg_line) = iter.peek().copied() {
-                let arg = arg_line.trim();
-                if arg == ");" {
-                    iter.next();
-                    closed = true;
-                    break;
-                }
-                if arg.is_empty() {
-                    break;
-                }
-                consumed.push(arg_line);
-                args.push(arg.trim_end_matches(',').to_string());
-                iter.next();
-            }
-            if closed && !args.is_empty() {
-                let prefix = trimmed.trim_end_matches('(');
-                lines.push(format!("{indent}{prefix}({});", args.join(", ")));
-                continue;
-            }
-            lines.push(format!("{}{}", hvigor_indent(line), trimmed));
-            for consumed_line in consumed {
-                lines.push(format!(
-                    "{}{}",
-                    hvigor_indent(consumed_line),
-                    consumed_line.trim_start()
-                ));
-            }
-            continue;
-        }
-
-        lines.push(format!("{}{}", hvigor_indent(line), trimmed));
-    }
-
-    let mut out = lines.join("\n");
-    out.push('\n');
-    out
-}
-
-fn hvigor_indent(line: &str) -> String {
-    let spaces = line.bytes().take_while(|&b| b == b' ').count();
-    " ".repeat(spaces * 2)
-}
-
-fn module_name_from_id(id: &str) -> Option<String> {
-    id.split("/src/main/ets/").next().and_then(|prefix| {
-        if prefix == id || prefix.is_empty() {
-            None
-        } else {
-            prefix.rsplit('/').next().map(str::to_string)
-        }
-    })
 }
 
 #[cfg(test)]
@@ -1054,7 +578,7 @@ mod tests {
     fn test_plugin_lowers_resource_calls_from_ast() {
         let plugin = EtsTransformPlugin::with_resource_references(
             make_config(12),
-            HashMap::from([
+            FxHashMap::from_iter([
                 (
                     "app.string.title".to_string(),
                     ResourceReference {
@@ -1355,12 +879,45 @@ Runtime.start();
             .expect("TS transform must return Some");
         let output = out.code.unwrap_or_default();
         assert!(
-            output.contains("import { Runtime } from \"./model\";"),
+            output.contains("import { Runtime } from './model';"),
             "value import must remain a value import; got:\n{output}"
         );
         assert!(
-            output.contains("import type { Shape, Alias as AliasType } from \"./model\";"),
+            output.contains("import type { Shape, Alias as AliasType } from './model';"),
             "type-only imports must be split using semantic reference flags; got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn test_static_rewrite_keeps_relative_type_only_imports() {
+        let code = "\
+import type { HomeResources } from './HomeResource';
+import { Runtime } from './Runtime';
+export type { Model } from './Model';
+export { Value } from './Value';
+";
+        let out = rewrite_static_module_specifiers_with(
+            code,
+            "entry/src/main/ets/model/Use.ts",
+            |spec| {
+                spec.starts_with('.')
+                    .then(|| format!("@bundle:com.example/entry/ets/model/{spec}"))
+            },
+        );
+        assert!(
+            out.contains("import type { HomeResources } from './HomeResource';"),
+            "relative type-only imports must stay relative like upstream import_path_expand; got:\n{out}"
+        );
+        assert!(
+            out.contains("export type { Model } from './Model';"),
+            "relative type-only exports must stay relative; got:\n{out}"
+        );
+        assert!(
+            out.contains(
+                "import { Runtime } from \"@bundle:com.example/entry/ets/model/./Runtime\";"
+            ) && out
+                .contains("export { Value } from \"@bundle:com.example/entry/ets/model/./Value\";"),
+            "value imports/exports should still rewrite; got:\n{out}"
         );
     }
 }

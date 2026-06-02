@@ -11,7 +11,7 @@
 
 Initialize the Cargo workspace and implement the `arkdown-core` crate containing all shared type
 definitions. Every other crate depends on this. No business logic here — only type definitions,
-trait declarations, and utility re-exports.
+trait declarations, and small shared format-contract helpers.
 
 ---
 
@@ -28,7 +28,6 @@ members = [
     "crates/arkdown-resolver",
     "crates/arkdown-loader",
     "crates/arkdown",
-    "crates/arkdown-plugin-chunk-wrapper",
     "crates/arkdown-plugin-json5",
     "crates/arkdown-plugin-duplicate-check",
     "crates/arkdown-plugin-module-meta",
@@ -46,16 +45,25 @@ members = [
 ]
 
 [workspace.dependencies]
-# Parser — ohos-rs/oxc fork, pinned to the rev used by ohos-rs/oxc-ark.
+# Workspace crates are declared here and used from crate manifests with
+# `{ workspace = true }`.
+arkdown-core = { path = "crates/arkdown-core" }
+arkdown-resolver = { path = "crates/arkdown-resolver" }
+arkdown-loader = { path = "crates/arkdown-loader" }
+
+# Parser — ohos-rs/oxc fork, pinned to the rev used by the workspace.
 # DO NOT use floating branch refs; always pin the rev.
-# ohos-rs/oxc-ark (the ArkTS lint/format CLI) is NOT a dep — only the parser fork is used.
-oxc = { git = "https://github.com/ohos-rs/oxc", rev = "5caa6d54ae977b8a76ed68b8aba06b38e1c6a614", features = ["full"] }
-oxc_allocator = { git = "https://github.com/ohos-rs/oxc", rev = "5caa6d54ae977b8a76ed68b8aba06b38e1c6a614" }
-oxc_parser = { git = "https://github.com/ohos-rs/oxc", rev = "5caa6d54ae977b8a76ed68b8aba06b38e1c6a614" }
-oxc_semantic = { git = "https://github.com/ohos-rs/oxc", rev = "5caa6d54ae977b8a76ed68b8aba06b38e1c6a614" }
-oxc_transformer = { git = "https://github.com/ohos-rs/oxc", rev = "5caa6d54ae977b8a76ed68b8aba06b38e1c6a614" }
-oxc_codegen = { git = "https://github.com/ohos-rs/oxc", rev = "5caa6d54ae977b8a76ed68b8aba06b38e1c6a614" }
-oxc_minifier = { git = "https://github.com/ohos-rs/oxc", rev = "5caa6d54ae977b8a76ed68b8aba06b38e1c6a614" }
+oxc = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee", features = ["full"] }
+oxc_allocator = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
+oxc_parser = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
+oxc_semantic = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
+oxc_transformer = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
+oxc_codegen = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
+oxc_minifier = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
+
+# Rolldown versions are centralized here as well.
+rolldown = { version = "1.0.3", default-features = false }
+rolldown_plugin = "1.0.3"
 
 # Async
 tokio = { version = "1", features = ["full"] }
@@ -116,8 +124,6 @@ pub struct ModuleIdx(u32);
 pub struct ArkChunk { pub name: String, pub chunk_hash: String, pub modules: Vec<ModuleIdx>,
                       pub is_entry: bool, pub code: String, pub source_map: Option<SourceMap>, ... }
 pub struct ChunkGraph { pub chunks: IndexVec<ChunkIdx, ArkChunk>, ... }
-pub struct IifeChunk { pub chunk: ArkChunk, pub require_replacements: Vec<RequireReplacement>,
-                       pub registry_export: Option<String> }
 ```
 
 ### Build Config (`src/config.rs`)
@@ -198,7 +204,7 @@ crates/arkdown-core/
     ├── lib.rs        (pub mod declarations + re-exports)
     ├── module.rs     (ResolvedId, ModuleSource, ModuleType)
     ├── graph.rs      (Module, ModuleMeta, ModuleGraph, ImportEdge, ExportBinding)
-    ├── chunk.rs      (ArkChunk, ChunkGraph, IifeChunk, RequireReplacement)
+    ├── chunk.rs      (ArkChunk, ChunkGraph)
     ├── config.rs     (ArkdownConfig, BuildMode, OutputTarget, SdkConfig, etc.)
     ├── plugin.rs     (ArkdownPlugin trait, plugin context types)
     ├── resolution.rs (OhosResolvedModule, PkgContext)
@@ -214,7 +220,7 @@ crates/arkdown-core/
 - All types from `meta/design/types.md` are represented
 - `ArkdownPlugin` trait compiles with the full hook signature
 - `ArkdownError` covers all failure modes needed by downstream crates
-- No business logic — only type definitions and the plugin trait
+- Only shared type definitions, plugin traits, and small format-contract helpers
 
 ---
 
@@ -222,7 +228,7 @@ crates/arkdown-core/
 
 - `meta/design/types.md` — canonical type definitions (implement verbatim)
 - `meta/design/pipeline.md` — to understand data flow between types
-- `meta/design/chunk-model.md` — IifeChunk and ChunkGraph details
+- `meta/design/chunk-model.md` — legacy chunk-wrapper background and ChunkGraph details
 
 ---
 
@@ -234,13 +240,12 @@ crates/arkdown-core/
 | `resolve_id` hook                      | `resolve_id(&self, ctx, args: &HookResolveIdArgs)`                | Same semantics: first `Some` wins; arkdown passes `specifier + importer` directly instead of a wrapper args struct                                       |
 | `load` hook                            | `load(&self, ctx, args: &HookLoadArgs)`                           | Same semantics; fallback to fs::read                                                                                                                     |
 | `transform` hook                       | `transform(&self, ctx, args: &HookTransformArgs)`                 | Same; sequential, each plugin may modify source                                                                                                          |
-| `render_chunk` hook                    | `render_chunk(&self, ctx, args)`                                  | Same; used by chunk-wrapper to IIFE-wrap                                                                                                                 |
+| `render_chunk` hook                    | `render_chunk(&self, ctx, args)`                                  | Same hook surface when a plugin needs post-render mutation                                                                                                |
 | `generate_bundle` hook                 | `generate_bundle(&self, ctx, bundle, is_write)`                   | Same; post-render, pre-write                                                                                                                             |
 | `should_invalidate_cache`              | `shouldInvalidCache` (rollup hook)                                | arkdown keeps this as a sync fn returning bool                                                                                                           |
 | `Module` struct                        | `NormalModule` inside `Module::Normal(Box<NormalModule>)`         | arkdown has no `ExternalModule` type; external references are `ResolvedId { external: true }`                                                            |
 | `ModuleGraph`                          | rolldown `ModuleTable` + `IndexVec<NormalModuleId, NormalModule>` | arkdown uses `IndexVec<ModuleIdx, Module>` — same pattern, different index name                                                                          |
 | `ArkChunk`                             | rolldown `Chunk`                                                  | arkdown adds `chunk_hash: String` used for `globalThis` registry keys; rolldown calls this `content_hash`                                                |
-| `IifeChunk`                            | rolldown has no equivalent                                        | OHOS-specific: carries `require_replacements` and `registry_export` produced by wrapper-chunk-plugin                                                     |
 | `ChunkGraph`                           | rolldown `ChunkTable`                                             | same `IndexVec` pattern                                                                                                                                  |
 | `ModuleType`                           | `ModuleType` enum in rolldown (`Js`, `Ts`, `Json`, etc.)          | arkdown adds `Ets`, `BytecodeHar`, `Declaration`, `NativeResource`                                                                                       |
 | `HookResolveIdOutput { external, id }` | `ResolvedId { external, id, module_type }`                        | arkdown merges side-effects into module_type rather than a separate `HookSideEffects` field                                                              |
@@ -250,8 +255,8 @@ crates/arkdown-core/
 
 **Key divergences from rolldown that must always be preserved:**
 
-- No `ModuleDefFormat::Esm` output — always CJS internally, then IIFE-wrapped by chunk-wrapper-plugin
-- `ArkChunk::chunk_hash` used in `globalThis['name_hash']` registry keys, not in file content-hashing
+- Bundler output is ESM for module-mode ABC compilation; do not add an IIFE/CJS wrapper unless a new upstream hvigor path proves it is required
+- `ArkChunk::chunk_hash` is retained for compatibility with older metadata, not for current loader-out JS generation
 - `ModuleType::Ets` triggers mandatory ArkTS desugar before any other transform
 
 ---

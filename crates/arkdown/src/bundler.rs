@@ -17,6 +17,7 @@
 //! and are no longer called from here.  They are retained in the codebase as
 //! reference implementations.
 
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::borrow::Cow;
 use std::future::Future;
 use std::path::PathBuf;
@@ -24,19 +25,19 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use index_vec::IndexVec;
-use rustc_hash::FxHashMap;
 
 use arkdown_core::{ArkChunk, ArkdownConfig, ArkdownError, BuildMode, ChunkGraph};
 use arkdown_profile::LoaderJson;
 use rolldown::{BundlerOptions, InputItem, OutputFormat};
 use rolldown_common::{
     BundlerTransformOptions, ChunkingContext, ManualCodeSplittingOptions, MatchGroup,
-    MatchGroupName, MatchGroupTest, ModuleType as RdModuleType, Output, SourceMapType,
-    TreeshakeOptions, TypeScriptOptions,
+    MatchGroupName, MatchGroupTest, ModuleInfo, ModuleType as RdModuleType, NormalModule, Output,
+    SourceMapType, TreeshakeOptions, TypeScriptOptions,
 };
 use rolldown_plugin::{__inner::SharedPluginable, HookUsage, Plugin, PluginContext};
 use rolldown_utils::js_regex::HybridRegex;
 
+use crate::compile_entry::CompileEntryNamer;
 use crate::output;
 
 /// The top-level bundler for one OHOS module build.
@@ -74,52 +75,13 @@ impl Bundler {
     /// The output remains ESM so the Rust ABC backend compiles the same
     /// CompileArkTS-stage module shape that hvigor sends to es2abc.
     pub async fn bundle(&self, loader_json: &LoaderJson) -> Result<BundleOutput, ArkdownError> {
-        // ── 1. Build rolldown input entries ──────────────────────────────────
-        // module_root_path may be relative and may contain `./` segments
-        // (e.g. `tests/fixtures/minimal-hap/./entry/src/main`).  Canonicalize
-        // produces an absolute, clean path that rolldown's resolver can use.
-        let module_root =
-            std::fs::canonicalize(&loader_json.module_root_path).unwrap_or_else(|_| {
-                // Fallback: manual `./` removal + join with process cwd
-                let normalized = normalize_path(&loader_json.module_root_path);
-                std::env::current_dir()
-                    .unwrap_or_else(|_| PathBuf::from("."))
-                    .join(normalized)
-            });
-
-        let chunk_name_counts = compile_entry_stem_counts(&loader_json.compile_entry);
-        let input: Vec<InputItem> = loader_json
-            .compile_entry
-            .iter()
-            .enumerate()
-            .map(|(i, entry)| {
-                let import_path = if entry.starts_with('/') || entry.starts_with('@') {
-                    // Already absolute or an OHM URL — pass through.
-                    entry.clone()
-                } else {
-                    // Build the candidate path, then canonicalize to get an
-                    // absolute path without any `.` or `..` components.
-                    let candidate = module_root.join(entry.trim_start_matches("./"));
-                    std::fs::canonicalize(&candidate)
-                        .map(|p| p.to_string_lossy().to_string())
-                        .unwrap_or_else(|_| candidate.to_string_lossy().to_string())
-                };
-                // Derive chunk name from the compile_entry file stem so rolldown
-                // writes "EntryAbility.js" instead of "entry_0.js".  This keeps
-                // the ABC record_name_map lookup (stem → OHM class path) working.
-                let chunk_name = compile_entry_chunk_name(entry, i, &chunk_name_counts);
-                InputItem {
-                    name: Some(chunk_name),
-                    import: import_path,
-                }
-            })
-            .collect();
+        let plan = BundlePlan::from_loader_json(loader_json);
 
         // ── 2. Pass plugins directly to rolldown ─────────────────────────────
-        let full_module_ids = Arc::new(Mutex::new(Vec::new()));
+        let parsed_modules = Arc::new(Mutex::new(Vec::new()));
         let mut rd_plugins: Vec<SharedPluginable> = self.plugins.clone();
         rd_plugins.push(Arc::new(ModuleIdCollectorPlugin {
-            ids: Arc::clone(&full_module_ids),
+            modules: Arc::clone(&parsed_modules),
         }) as SharedPluginable);
 
         // ── 3. Build rolldown BundlerOptions ─────────────────────────────────
@@ -164,13 +126,13 @@ impl Bundler {
         // manualChunks for supportChunks=true: mirrors hvigor's arkts-pack.js logic.
         // oh_modules/node_modules → "commons"; non-entry local modules → "vendors".
         let manual_code_splitting = if loader_json.support_chunks {
-            Some(build_manual_code_splitting_options()?)
+            Some(Self::build_manual_code_splitting_options()?)
         } else {
             None
         };
 
         let options = BundlerOptions {
-            input: Some(input),
+            input: Some(plan.input_items()),
             cwd: Some(cwd),
             format: Some(OutputFormat::Esm),
             module_types: Some(module_types),
@@ -194,38 +156,32 @@ impl Bundler {
             .map_err(|e| ArkdownError::Bundler(format!("{e:?}")))?;
 
         // ── 5. Convert rolldown output → ChunkGraph ───────────────────────────
-        let collected_module_ids = full_module_ids
+        let mut parsed_modules = parsed_modules
             .lock()
-            .map(|ids| ids.clone())
+            .map(|modules| modules.clone())
             .unwrap_or_default();
-        let chunk_graph = build_chunk_graph(rd_output, collected_module_ids)?;
+        parsed_modules.sort_by_key(|(idx, _)| *idx);
+        let mut seen_module_ids = FxHashSet::default();
+        let collected_module_ids = parsed_modules
+            .into_iter()
+            .map(|(_, id)| id)
+            .filter(|id| seen_module_ids.insert(id.clone()))
+            .collect::<Vec<_>>();
+        let chunk_graph = Self::build_chunk_graph(rd_output, collected_module_ids)?;
 
         // ── 6. Write loader_out/default/ets artifacts to disk ────────────────
         let output_dir = PathBuf::from(&loader_json.ace_module_build);
-
-        // Build the chunk_name → source_file map from compile_entry so that
-        // write_output can emit the hvigor per-file sourceMaps.map format.
-        let chunk_source_files: FxHashMap<String, String> = loader_json
-            .compile_entry
-            .iter()
-            .enumerate()
-            .map(|(i, entry)| {
-                let chunk_name = compile_entry_chunk_name(entry, i, &chunk_name_counts);
-                let source_file = entry.trim_start_matches("./").to_string();
-                (chunk_name, source_file)
-            })
-            .collect();
 
         let source_map_opts = output::SourceMapOptions {
             module_name: loader_json.module_name.clone(),
             package_name: loader_json.module_name.clone(),
             version: "1.0.0".to_string(),
-            chunk_source_files: chunk_source_files.into_iter().collect(),
+            chunk_source_files: plan.chunk_source_files(),
         };
 
         let written_output =
-            output::write_output(&chunk_graph, &output_dir, Some(&source_map_opts))?;
-        let modules_abc_path = output::modules_abc_path(&output_dir);
+            output::WrittenOutput::write(&chunk_graph, &output_dir, Some(&source_map_opts))?;
+        let modules_abc_path = output::WrittenOutput::abc_path_in(&output_dir);
 
         Ok(BundleOutput {
             chunk_graph,
@@ -235,58 +191,209 @@ impl Bundler {
             source_maps_path: written_output.source_maps_path,
         })
     }
+
+    fn build_chunk_graph(
+        rd_output: rolldown::BundleOutput,
+        full_module_ids: Vec<String>,
+    ) -> Result<ChunkGraph, ArkdownError> {
+        use arkdown_core::ChunkIdx;
+
+        let mut chunks: IndexVec<ChunkIdx, ArkChunk> = IndexVec::new();
+
+        for asset in rd_output.assets {
+            if let Output::Chunk(chunk) = asset {
+                let chunk_name = std::path::Path::new(chunk.filename.as_str())
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(chunk.name.as_str())
+                    .to_string();
+                let ark_chunk = ArkChunk {
+                    name: chunk_name,
+                    code: chunk.code.clone(),
+                    source_map: chunk.map.as_ref().map(|map| map.to_json_string()),
+                    is_entry: chunk.is_entry,
+                    is_dynamic_entry: chunk.is_dynamic_entry,
+                    facade_module_id: chunk
+                        .facade_module_id
+                        .as_ref()
+                        .map(|id| id.as_str().to_owned()),
+                    module_ids: chunk
+                        .module_ids
+                        .iter()
+                        .map(|id| id.as_str().to_owned())
+                        .collect(),
+                    exports: chunk.exports.iter().map(|e| e.to_string()).collect(),
+                    imports: chunk.imports.iter().map(|i| i.to_string()).collect(),
+                    dynamic_imports: chunk
+                        .dynamic_imports
+                        .iter()
+                        .map(|d| d.to_string())
+                        .collect(),
+                    ..ArkChunk::default()
+                };
+                chunks.push(ark_chunk);
+            }
+        }
+
+        Ok(ChunkGraph {
+            chunks,
+            full_module_ids,
+            // module_to_chunk and entry_module_to_entry_chunk are not populated
+            // from rolldown output because rolldown uses its own module index space.
+            // Callers that need module→chunk mapping (e.g. arkdown-abc) must use
+            // ArkChunk.facade_module_id / ArkChunk.module_ids instead.
+            module_to_chunk: IndexVec::new(),
+            entry_module_to_entry_chunk: FxHashMap::default(),
+        })
+    }
+
+
+    /// Build `ManualCodeSplittingOptions` that mirrors hvigor's `manualChunks` callback.
+    ///
+    /// Group 1 (`commons`): modules whose path contains `oh_modules` or `node_modules`.
+    /// Group 2 (`vendors`): all remaining non-entry modules.
+    ///
+    /// This matches the hvigor `arkts-pack.js` logic:
+    /// ```js
+    /// function manualChunks(id, { getModuleInfo }) {
+    ///   if (id.includes(NODE_MODULES) || id.includes(OH_NODE_MODULES)) return "commons";
+    ///   const info = getModuleInfo(id);
+    ///   return info && !info.isEntry ? "vendors" : undefined;
+    /// }
+    /// ```
+    fn build_manual_code_splitting_options() -> Result<ManualCodeSplittingOptions, ArkdownError> {
+        let commons_regex = HybridRegex::new("oh_modules|node_modules")
+            .map_err(|e| ArkdownError::Bundler(format!("invalid manualChunks regex: {e}")))?;
+
+        let commons_group = MatchGroup {
+            name: MatchGroupName::Static("commons".to_string()),
+            test: Some(MatchGroupTest::Regex(commons_regex)),
+            ..Default::default()
+        };
+
+        // Dynamic name function: returns "vendors" for non-entry modules, None for entries.
+        // The function captures no state; it queries `is_entry` via ChunkingContext.
+        let vendors_name_fn: Arc<
+            dyn Fn(
+                    &str,
+                    &ChunkingContext,
+                )
+                    -> Pin<Box<dyn Future<Output = anyhow::Result<Option<String>>> + Send + 'static>>
+                + Send
+                + Sync,
+        > = Arc::new(|module_id: &str, ctx: &ChunkingContext| {
+            let result = ctx.get_module_info(module_id).and_then(|info| {
+                if !info.is_entry {
+                    Some("vendors".to_string())
+                } else {
+                    None
+                }
+            });
+            Box::pin(async move { Ok(result) })
+        });
+
+        let vendors_group = MatchGroup {
+            name: MatchGroupName::Dynamic(vendors_name_fn),
+            test: None,
+            ..Default::default()
+        };
+
+        Ok(ManualCodeSplittingOptions {
+            groups: Some(vec![commons_group, vendors_group]),
+            ..Default::default()
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-fn compile_entry_stem_counts(entries: &[String]) -> FxHashMap<String, usize> {
-    let mut counts = FxHashMap::default();
-    for entry in entries {
-        if let Some(stem) = std::path::Path::new(entry.as_str())
-            .file_stem()
-            .and_then(|s| s.to_str())
-        {
-            *counts.entry(stem.to_string()).or_insert(0) += 1;
-        }
-    }
-    counts
+struct BundlePlan {
+    module_root: PathBuf,
+    entries: Vec<String>,
+    namer: CompileEntryNamer,
 }
 
-fn compile_entry_chunk_name(
-    entry: &str,
-    index: usize,
-    stem_counts: &FxHashMap<String, usize>,
-) -> String {
-    let Some(stem) = std::path::Path::new(entry)
-        .file_stem()
-        .and_then(|s| s.to_str())
-    else {
-        return format!("entry_{index}");
-    };
-
-    if stem_counts.get(stem).copied().unwrap_or(0) <= 1 {
-        return stem.to_string();
-    }
-
-    let stripped = entry
-        .trim_start_matches("./")
-        .trim_end_matches(".ets")
-        .trim_end_matches(".ts")
-        .trim_end_matches(".js");
-    let mut name = String::with_capacity(stripped.len());
-    for ch in stripped.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '$' {
-            name.push(ch);
-        } else {
-            name.push('_');
+impl BundlePlan {
+    fn from_loader_json(loader_json: &LoaderJson) -> Self {
+        let module_root = Self::canonical_module_root(&loader_json.module_root_path);
+        let entries = Self::rollup_input_entries(loader_json);
+        Self {
+            module_root,
+            namer: CompileEntryNamer::new(&entries),
+            entries,
         }
     }
-    if name.is_empty() {
-        format!("entry_{index}")
-    } else {
-        name
+
+    fn input_items(&self) -> Vec<InputItem> {
+        self.entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| InputItem {
+                name: Some(self.namer.chunk_name(entry, index)),
+                import: self.import_path(entry),
+            })
+            .collect()
+    }
+
+    fn chunk_source_files(&self) -> FxHashMap<String, String> {
+        self.entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                (
+                    self.namer.chunk_name(entry, index),
+                    entry.trim_start_matches("./").to_string(),
+                )
+            })
+            .collect()
+    }
+
+    fn import_path(&self, entry: &str) -> String {
+        if entry.starts_with('/') || entry.starts_with('@') {
+            return entry.to_string();
+        }
+
+        let candidate = self.module_root.join(entry.trim_start_matches("./"));
+        std::fs::canonicalize(&candidate)
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_else(|_| candidate.to_string_lossy().to_string())
+    }
+
+    fn rollup_input_entries(loader_json: &LoaderJson) -> Vec<String> {
+        let mut entries = Vec::new();
+        let mut seen = FxHashSet::default();
+        for entry in loader_json
+            .hvigor_compile_entry
+            .iter()
+            .chain(loader_json.compile_entry.iter())
+        {
+            if seen.insert(entry.clone()) {
+                entries.push(entry.clone());
+            }
+        }
+        entries
+    }
+
+    fn canonical_module_root(path: &str) -> PathBuf {
+        std::fs::canonicalize(path).unwrap_or_else(|_| {
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(Self::normalize_path(path))
+        })
+    }
+
+    fn normalize_path(path: &str) -> String {
+        use std::path::Component;
+        let mut out = PathBuf::new();
+        for comp in PathBuf::from(path).components() {
+            match comp {
+                Component::CurDir => {}
+                other => out.push(other),
+            }
+        }
+        out.to_string_lossy().to_string()
     }
 }
 
@@ -296,7 +403,7 @@ fn compile_entry_chunk_name(
 /// entries are included in the chunk graph.
 #[derive(Debug)]
 struct ModuleIdCollectorPlugin {
-    ids: Arc<Mutex<Vec<String>>>,
+    modules: Arc<Mutex<Vec<(usize, String)>>>,
 }
 
 impl Plugin for ModuleIdCollectorPlugin {
@@ -305,154 +412,23 @@ impl Plugin for ModuleIdCollectorPlugin {
     }
 
     fn register_hook_usage(&self) -> HookUsage {
-        HookUsage::GenerateBundle
+        HookUsage::ModuleParsed
     }
 
-    fn generate_bundle(
+    fn module_parsed(
         &self,
-        ctx: &PluginContext,
-        _args: &mut rolldown_plugin::HookGenerateBundleArgs<'_>,
+        _ctx: &PluginContext,
+        _module_info: Arc<ModuleInfo>,
+        normal_module: &NormalModule,
     ) -> impl Future<Output = anyhow::Result<()>> + Send {
-        let ids = ctx
-            .get_module_ids()
-            .into_iter()
-            .map(|id| id.to_string())
-            .collect::<Vec<_>>();
-        let slot = Arc::clone(&self.ids);
+        let idx = normal_module.idx.index();
+        let id = normal_module.id.to_string();
+        let slot = Arc::clone(&self.modules);
         async move {
             if let Ok(mut slot) = slot.lock() {
-                *slot = ids;
+                slot.push((idx, id));
             }
             Ok(())
         }
     }
-}
-
-fn build_chunk_graph(
-    rd_output: rolldown::BundleOutput,
-    full_module_ids: Vec<String>,
-) -> Result<ChunkGraph, ArkdownError> {
-    use arkdown_core::ChunkIdx;
-
-    let mut chunks: IndexVec<ChunkIdx, ArkChunk> = IndexVec::new();
-
-    for asset in rd_output.assets {
-        if let Output::Chunk(chunk) = asset {
-            let chunk_name = std::path::Path::new(chunk.filename.as_str())
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or(chunk.name.as_str())
-                .to_string();
-            let ark_chunk = ArkChunk {
-                name: chunk_name,
-                code: chunk.code.clone(),
-                source_map: chunk.map.as_ref().map(|map| map.to_json_string()),
-                is_entry: chunk.is_entry,
-                is_dynamic_entry: chunk.is_dynamic_entry,
-                facade_module_id: chunk
-                    .facade_module_id
-                    .as_ref()
-                    .map(|id| id.as_str().to_owned()),
-                module_ids: chunk
-                    .module_ids
-                    .iter()
-                    .map(|id| id.as_str().to_owned())
-                    .collect(),
-                exports: chunk.exports.iter().map(|e| e.to_string()).collect(),
-                imports: chunk.imports.iter().map(|i| i.to_string()).collect(),
-                dynamic_imports: chunk
-                    .dynamic_imports
-                    .iter()
-                    .map(|d| d.to_string())
-                    .collect(),
-                ..ArkChunk::default()
-            };
-            chunks.push(ark_chunk);
-        }
-    }
-
-    Ok(ChunkGraph {
-        chunks,
-        full_module_ids,
-        // module_to_chunk and entry_module_to_entry_chunk are not populated
-        // from rolldown output because rolldown uses its own module index space.
-        // Callers that need module→chunk mapping (e.g. arkdown-abc) must use
-        // ArkChunk.facade_module_id / ArkChunk.module_ids instead.
-        module_to_chunk: IndexVec::new(),
-        entry_module_to_entry_chunk: FxHashMap::default(),
-    })
-}
-
-/// Build `ManualCodeSplittingOptions` that mirrors hvigor's `manualChunks` callback.
-///
-/// Group 1 (`commons`): modules whose path contains `oh_modules` or `node_modules`.
-/// Group 2 (`vendors`): all remaining non-entry modules.
-///
-/// This matches the hvigor `arkts-pack.js` logic:
-/// ```js
-/// function manualChunks(id, { getModuleInfo }) {
-///   if (id.includes(NODE_MODULES) || id.includes(OH_NODE_MODULES)) return "commons";
-///   const info = getModuleInfo(id);
-///   return info && !info.isEntry ? "vendors" : undefined;
-/// }
-/// ```
-fn build_manual_code_splitting_options() -> Result<ManualCodeSplittingOptions, ArkdownError> {
-    let commons_regex = HybridRegex::new("oh_modules|node_modules")
-        .map_err(|e| ArkdownError::Bundler(format!("invalid manualChunks regex: {e}")))?;
-
-    let commons_group = MatchGroup {
-        name: MatchGroupName::Static("commons".to_string()),
-        test: Some(MatchGroupTest::Regex(commons_regex)),
-        ..Default::default()
-    };
-
-    // Dynamic name function: returns "vendors" for non-entry modules, None for entries.
-    // The function captures no state; it queries `is_entry` via ChunkingContext.
-    let vendors_name_fn: Arc<
-        dyn Fn(
-                &str,
-                &ChunkingContext,
-            )
-                -> Pin<Box<dyn Future<Output = anyhow::Result<Option<String>>> + Send + 'static>>
-            + Send
-            + Sync,
-    > = Arc::new(|module_id: &str, ctx: &ChunkingContext| {
-        let result = ctx.get_module_info(module_id).and_then(|info| {
-            if !info.is_entry {
-                Some("vendors".to_string())
-            } else {
-                None
-            }
-        });
-        Box::pin(async move { Ok(result) })
-    });
-
-    let vendors_group = MatchGroup {
-        name: MatchGroupName::Dynamic(vendors_name_fn),
-        test: None,
-        ..Default::default()
-    };
-
-    Ok(ManualCodeSplittingOptions {
-        groups: Some(vec![commons_group, vendors_group]),
-        ..Default::default()
-    })
-}
-
-/// Normalize a file-system path by resolving `./` (current-dir) components.
-///
-/// `build-profile.json5` often has `srcPath: "./entry"` which, when joined,
-/// produces paths like `project/./entry/src/main/…` that confuse rolldown's
-/// file resolver.  This removes all `CurDir` components without touching the
-/// rest of the path (no symlink resolution, no allocation if already clean).
-fn normalize_path(path: &str) -> String {
-    use std::path::Component;
-    let mut out = PathBuf::new();
-    for comp in PathBuf::from(path).components() {
-        match comp {
-            Component::CurDir => {} // drop `.` segments
-            other => out.push(other),
-        }
-    }
-    out.to_string_lossy().to_string()
 }

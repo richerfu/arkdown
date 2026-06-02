@@ -11,27 +11,27 @@ name = "arkdown"
 path = "src/main.rs"
 
 [dependencies]
-arkdown-core = { path = "../arkdown-core" }
-arkdown-cache = { path = "../arkdown-cache" }
-arkdown-config = { path = "../arkdown-config" }
-arkdown-profile = { path = "../arkdown-profile" }
-arkdown-resource = { path = "../arkdown-resource" }
-arkdown = { path = "../arkdown" }
-arkdown-abc = { path = "../arkdown-abc" }
-arkdown-ts2abc = { path = "../arkdown-ts2abc" }
-arkdown-pack = { path = "../arkdown-pack" }
-arkdown-sign = { path = "../arkdown-sign" }
-arkdown-obfuscate = { path = "../arkdown-obfuscate" }
-arkdown-plugin-ets-transform = { path = "../arkdown-plugin-ets-transform" }
-arkdown-plugin-chunk-wrapper = { path = "../arkdown-plugin-chunk-wrapper" }
-arkdown-plugin-ohos-resolve = { path = "../arkdown-plugin-ohos-resolve" }
-arkdown-plugin-module-meta = { path = "../arkdown-plugin-module-meta" }
-arkdown-plugin-duplicate-check = { path = "../arkdown-plugin-duplicate-check" }
-arkdown-plugin-json5 = { path = "../arkdown-plugin-json5" }
-arkdown-plugin-router-map = { path = "../arkdown-plugin-router-map" }
-arkdown-resolver = { path = "../arkdown-resolver" }
-arkdown-watcher = { path = "../arkdown-watcher" }
-rolldown_plugin = "1.0.3"
+arkdown-core = { workspace = true }
+arkdown-cache = { workspace = true }
+arkdown-config = { workspace = true }
+arkdown-profile = { workspace = true }
+arkdown-resource = { workspace = true }
+arkdown = { workspace = true }
+arkdown-abc = { workspace = true }
+arkdown-ts2abc = { workspace = true }
+arkdown-pack = { workspace = true }
+arkdown-sign = { workspace = true }
+arkdown-obfuscate = { workspace = true }
+arkdown-utils = { workspace = true }
+arkdown-plugin-ets-transform = { workspace = true }
+arkdown-plugin-ohos-resolve = { workspace = true }
+arkdown-plugin-module-meta = { workspace = true }
+arkdown-plugin-duplicate-check = { workspace = true }
+arkdown-plugin-json5 = { workspace = true }
+arkdown-plugin-router-map = { workspace = true }
+arkdown-resolver = { workspace = true }
+arkdown-watcher = { workspace = true }
+rolldown_plugin = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
@@ -47,4 +47,4 @@ index_vec = { workspace = true }
 rustc-hash = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = { workspace = true }

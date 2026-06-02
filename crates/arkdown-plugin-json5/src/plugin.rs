@@ -6,6 +6,8 @@ use rolldown_plugin::{
     HookResolveIdReturn, HookUsage, Plugin, SharedLoadPluginContext,
 };
 
+use crate::module_emit::generate_esm_from_json;
+
 pub struct Json5Plugin;
 
 impl std::fmt::Debug for Json5Plugin {
@@ -50,11 +52,17 @@ impl Plugin for Json5Plugin {
         args: &HookLoadArgs<'_>,
     ) -> impl std::future::Future<Output = HookLoadReturn> + Send {
         let id = args.id.to_owned();
-        async move { load_json_file(&id) }
+        async move { Json5Plugin::load_json_file_impl(&id) }
     }
 }
 
+// Keep pub(crate) wrapper for tests
 pub(crate) fn load_json_file(id: &str) -> HookLoadReturn {
+    Json5Plugin::load_json_file_impl(id)
+}
+
+impl Json5Plugin {
+    fn load_json_file_impl(id: &str) -> HookLoadReturn {
     if !id.ends_with(".json") && !id.ends_with(".json5") {
         return Ok(None);
     }
@@ -74,6 +82,8 @@ pub(crate) fn load_json_file(id: &str) -> HookLoadReturn {
     }))
 }
 
+}
+
 fn resolve_relative_path(specifier: &str, importer: Option<&str>) -> anyhow::Result<PathBuf> {
     if let Some(imp) = importer {
         let base = Path::new(imp).parent().unwrap_or(Path::new("."));
@@ -86,78 +96,10 @@ fn resolve_relative_path(specifier: &str, importer: Option<&str>) -> anyhow::Res
     }
 }
 
-/// Generate a synthetic ES module from a JSON value.
-/// Top-level object keys that are valid JS identifiers become named exports.
-/// The whole value is always the default export.
-pub fn generate_esm_from_json(value: &serde_json::Value) -> String {
-    let default_json = serde_json::to_string(value).unwrap_or_else(|_| "null".to_string());
-    let mut code = String::new();
-
-    if let serde_json::Value::Object(map) = value {
-        code.push_str(&format!("var __json_default = {};\n", default_json));
-        for key in map.keys() {
-            if is_valid_js_identifier(key) {
-                code.push_str(&format!(
-                    "export var {} = __json_default[{:?}];\n",
-                    key, key
-                ));
-            }
-        }
-        code.push_str("export default __json_default;\n");
-    } else {
-        code.push_str(&format!("export default {};\n", default_json));
-    }
-
-    code
-}
-
-fn is_valid_js_identifier(s: &str) -> bool {
-    if s.is_empty() {
-        return false;
-    }
-    let mut chars = s.chars();
-    let first = chars.next().unwrap();
-    if !first.is_alphabetic() && first != '_' && first != '$' {
-        return false;
-    }
-    !matches!(
-        s,
-        "import"
-            | "export"
-            | "default"
-            | "class"
-            | "function"
-            | "return"
-            | "var"
-            | "let"
-            | "const"
-            | "if"
-            | "else"
-            | "for"
-            | "while"
-            | "do"
-            | "switch"
-            | "case"
-            | "break"
-            | "continue"
-            | "new"
-            | "delete"
-            | "typeof"
-            | "void"
-            | "in"
-            | "of"
-            | "this"
-            | "super"
-            | "null"
-            | "undefined"
-            | "true"
-            | "false"
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::module_emit::JsonModuleEmitter;
 
     #[test]
     fn test_generate_esm_object() {
@@ -186,11 +128,11 @@ mod tests {
 
     #[test]
     fn test_is_valid_js_identifier() {
-        assert!(is_valid_js_identifier("foo"));
-        assert!(is_valid_js_identifier("_bar"));
-        assert!(!is_valid_js_identifier("123"));
-        assert!(!is_valid_js_identifier(""));
-        assert!(!is_valid_js_identifier("class"));
+        assert!(JsonModuleEmitter::is_valid_js_identifier("foo"));
+        assert!(JsonModuleEmitter::is_valid_js_identifier("_bar"));
+        assert!(!JsonModuleEmitter::is_valid_js_identifier("123"));
+        assert!(!JsonModuleEmitter::is_valid_js_identifier(""));
+        assert!(!JsonModuleEmitter::is_valid_js_identifier("class"));
     }
 
     #[test]

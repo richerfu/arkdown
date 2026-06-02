@@ -14,7 +14,7 @@ pub fn process_profile(
     _bundle_name: &str,
     compile_mode: CompileMode,
 ) -> HapManifest {
-    let ark_vm_version = fallback_ark_vm_version(compile_api_version);
+    let ark_vm_version = format!("{}.0.1.0", compile_api_version);
     process_profile_with_ark_vm_version(module_json5, &ark_vm_version, _bundle_name, compile_mode)
 }
 
@@ -61,7 +61,7 @@ pub fn process_profile_with_ark_vm_version(
 
     HapManifest {
         module_name: module_json5.module.name.clone(),
-        module_type: map_module_type(&module_json5.module.type_),
+        module_type: OhosModuleType::from_type_str(&module_json5.module.type_),
         device_types: module_json5.module.device_types.clone(),
         virtual_machine: ark_virtual_machine_from_version(ark_vm_version),
         compile_mode,
@@ -82,19 +82,6 @@ pub fn ark_virtual_machine_from_version(ark_vm_version: &str) -> String {
         ark_vm_version.to_string()
     } else {
         format!("ark{}", ark_vm_version)
-    }
-}
-
-fn fallback_ark_vm_version(compile_api_version: u32) -> String {
-    format!("{}.0.1.0", compile_api_version)
-}
-
-fn map_module_type(t: &str) -> OhosModuleType {
-    match t {
-        "feature" => OhosModuleType::Feature,
-        "shared" => OhosModuleType::Shared,
-        "har" => OhosModuleType::Har,
-        _ => OhosModuleType::Entry,
     }
 }
 

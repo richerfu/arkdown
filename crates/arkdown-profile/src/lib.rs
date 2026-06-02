@@ -17,17 +17,19 @@
 pub mod bytecode_har;
 pub mod har_abilities;
 pub mod loader_json;
+pub(crate) mod module_json_writer;
 pub mod process_profile;
 pub mod process_share_config;
 pub mod process_startup_config;
 pub mod router_map;
 
+pub use arkdown_core::PkgBriefInfo;
 pub use bytecode_har::{
     collect_dynamic_import_lib_info, scan_bytecode_har_deps, ByteCodeHarScanEntry,
     DynamicImportLibEntry, HostModuleInfo,
 };
 pub use har_abilities::{collect_har_abilities, HarAbility};
-pub use loader_json::{generate_loader_json, ByteCodeHarEntry, LoaderJson, PkgBriefInfo};
+pub use loader_json::{ByteCodeHarEntry, LoaderJson};
 pub use process_profile::{
     ark_virtual_machine_from_version, process_profile, process_profile_with_ark_vm_version,
 };
@@ -39,14 +41,13 @@ pub use process_startup_config::{
 };
 pub use router_map::{collect_router_entries, RouterMapEntry};
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::path::Path;
 use std::sync::Arc;
 
 use arkdown_config::sdk::discover_ark_vm_version;
 use arkdown_core::{
     ArkdownConfig, ArkdownError, CompileMode, HapManifest, ModuleConfig, ModuleJson5,
-    OhosModuleType,
 };
 
 /// Top-level driver for profile processing and loader.json generation.
@@ -93,7 +94,7 @@ impl ProfileProcessor {
                 CompileMode::EsModule,
             )
         };
-        let loader = generate_loader_json(&self.config, module_cfg, &manifest);
+        let loader = LoaderJson::generate(&self.config, module_cfg, &manifest);
         Ok((manifest, loader))
     }
 
@@ -123,382 +124,10 @@ impl ProfileProcessor {
         &self,
         manifest: &HapManifest,
         output_path: &Path,
-        resource_ids: Option<&HashMap<String, u32>>,
+        resource_ids: Option<&FxHashMap<String, u32>>,
     ) -> Result<(), ArkdownError> {
-        // Read AppScope/app.json5 for the app section
-        let app_json5_path = self.config.project_root.join("AppScope/app.json5");
-        let app_json5_fields: serde_json::Map<String, serde_json::Value> =
-            if app_json5_path.exists() {
-                let content = fs_err::read_to_string(&app_json5_path)
-                    .map_err(|e| ArkdownError::Io(e.into()))?;
-                let raw: serde_json::Value = json5::from_str(&content)
-                    .map_err(|e| ArkdownError::Io(std::io::Error::other(e.to_string())))?;
-                raw.get("app")
-                    .and_then(|v| v.as_object())
-                    .cloned()
-                    .unwrap_or_default()
-            } else {
-                let mut m = serde_json::Map::new();
-                m.insert(
-                    "bundleName".into(),
-                    self.config.product.bundle_name.clone().into(),
-                );
-                m.insert("versionCode".into(), 1000000u64.into());
-                m.insert("versionName".into(), "1.0.0".into());
-                m
-            };
-
-        let numeric_api = compute_numeric_api_version(&self.config.product.compatible_sdk_version);
-        let is_debug = matches!(self.config.build_mode, arkdown_core::BuildMode::Debug);
-
-        // Build app section in hvigor's canonical field order.
-        // hvigor emits: iconId, debug, targetPatchAPIVersion, minAPIVersion, icon,
-        // buildMode, label, bundleType, versionName, versionCode, appEnvironments,
-        // compileSdkType, labelId, compileSdkVersion, targetAPIVersion, vendor,
-        // bundleName, apiReleaseType, targetMinorAPIVersion.
-        let app_section = build_app_section(
-            &app_json5_fields,
-            numeric_api,
-            is_debug,
-            &self.config.sdk_config.compile_sdk_version,
-            &self.config.product.bundle_name,
-            resource_ids,
-        );
-
-        let module_section = manifest_to_json(manifest, resource_ids);
-
-        let mut combined = serde_json::Map::new();
-        combined.insert("app".into(), serde_json::Value::Object(app_section));
-        combined.insert("module".into(), module_section);
-
-        if let Some(parent) = output_path.parent() {
-            fs_err::create_dir_all(parent).map_err(|e| ArkdownError::Io(e.into()))?;
-        }
-
-        let json_str = serde_json::to_string_pretty(&serde_json::Value::Object(combined))
-            .map_err(|e| ArkdownError::Io(std::io::Error::other(e.to_string())))?;
-        fs_err::write(output_path, json_str.as_bytes()).map_err(|e| ArkdownError::Io(e.into()))?;
-
-        Ok(())
+        module_json_writer::write_module_json(manifest, &self.config, output_path, resource_ids)
     }
-}
-
-/// Resolve a resource reference string like `"$media:icon"` or `"$string:app_name"`
-/// to a numeric resource ID by looking up the name part in `resource_ids`.
-///
-/// Returns `None` if `value` is not a `$type:name` reference or the name is not found.
-fn resolve_res_ref(value: &str, resource_ids: &HashMap<String, u32>) -> Option<u32> {
-    if !value.starts_with('$') {
-        return None;
-    }
-    // Format: "$type:name" — take everything after the ':'
-    let name = value.splitn(2, ':').nth(1)?;
-    resource_ids.get(name).copied()
-}
-
-/// Build the `app` JSON object in hvigor's canonical field order.
-///
-/// hvigor emits fields in this order (verified against golden):
-///   iconId, debug, targetPatchAPIVersion, minAPIVersion, icon, buildMode, label,
-///   bundleType, versionName, versionCode, appEnvironments, compileSdkType, labelId,
-///   compileSdkVersion, targetAPIVersion, vendor, bundleName, apiReleaseType,
-///   targetMinorAPIVersion
-///
-/// Fields that come from `app.json5` (icon, label, bundleType, versionName,
-/// versionCode, vendor, bundleName, appEnvironments) are read from `src_fields`.
-/// Computed/injected fields are provided as arguments.
-fn build_app_section(
-    src: &serde_json::Map<String, serde_json::Value>,
-    numeric_api: u64,
-    is_debug: bool,
-    compile_sdk_version: &str,
-    bundle_name_fallback: &str,
-    resource_ids: Option<&HashMap<String, u32>>,
-) -> serde_json::Map<String, serde_json::Value> {
-    let icon_ref = src
-        .get("icon")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let label_ref = src
-        .get("label")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-
-    let icon_id = resource_ids
-        .zip(icon_ref.as_deref())
-        .and_then(|(ids, r)| resolve_res_ref(r, ids));
-    let label_id = resource_ids
-        .zip(label_ref.as_deref())
-        .and_then(|(ids, r)| resolve_res_ref(r, ids));
-
-    let mut obj = serde_json::Map::new();
-
-    // iconId — only present when resource IDs are available
-    if let Some(id) = icon_id {
-        obj.insert("iconId".into(), (id as u64).into());
-    }
-    obj.insert("debug".into(), is_debug.into());
-    obj.insert("targetPatchAPIVersion".into(), 0u64.into());
-    obj.insert("minAPIVersion".into(), numeric_api.into());
-    // icon — from app.json5
-    if let Some(v) = src.get("icon") {
-        obj.insert("icon".into(), v.clone());
-    }
-    obj.insert(
-        "buildMode".into(),
-        if is_debug { "debug" } else { "release" }.into(),
-    );
-    // label — from app.json5
-    if let Some(v) = src.get("label") {
-        obj.insert("label".into(), v.clone());
-    }
-    // bundleType — from app.json5, fallback "app"
-    obj.insert(
-        "bundleType".into(),
-        src.get("bundleType")
-            .cloned()
-            .unwrap_or_else(|| "app".into()),
-    );
-    // versionName — from app.json5
-    if let Some(v) = src.get("versionName") {
-        obj.insert("versionName".into(), v.clone());
-    }
-    // versionCode — from app.json5
-    if let Some(v) = src.get("versionCode") {
-        obj.insert("versionCode".into(), v.clone());
-    }
-    // appEnvironments — from app.json5 or empty array
-    obj.insert(
-        "appEnvironments".into(),
-        src.get("appEnvironments")
-            .cloned()
-            .unwrap_or_else(|| serde_json::Value::Array(vec![])),
-    );
-    obj.insert("compileSdkType".into(), "HarmonyOS".into());
-    // labelId — only present when resource IDs are available
-    if let Some(id) = label_id {
-        obj.insert("labelId".into(), (id as u64).into());
-    }
-    obj.insert("compileSdkVersion".into(), compile_sdk_version.into());
-    obj.insert("targetAPIVersion".into(), numeric_api.into());
-    // vendor — from app.json5
-    if let Some(v) = src.get("vendor") {
-        obj.insert("vendor".into(), v.clone());
-    }
-    // bundleName — from app.json5, fallback from config
-    obj.insert(
-        "bundleName".into(),
-        src.get("bundleName")
-            .cloned()
-            .unwrap_or_else(|| bundle_name_fallback.into()),
-    );
-    obj.insert("apiReleaseType".into(), "Release".into());
-    obj.insert("targetMinorAPIVersion".into(), 0u64.into());
-
-    obj
-}
-
-/// Convert an [`OhosModuleType`] to its lowercase string representation.
-fn module_type_str(t: &OhosModuleType) -> &'static str {
-    match t {
-        OhosModuleType::Entry => "entry",
-        OhosModuleType::Feature => "feature",
-        OhosModuleType::Shared => "shared",
-        OhosModuleType::Har => "har",
-    }
-}
-
-/// Convert a [`CompileMode`] to its string representation for `module.json`.
-fn compile_mode_str(m: &CompileMode) -> &'static str {
-    match m {
-        CompileMode::EsModule => "esmodule",
-        CompileMode::JsBundle => "jsbundle",
-    }
-}
-
-/// Build the `module` JSON object from a processed [`HapManifest`].
-///
-/// Field order matches hvigor's canonical output (verified against golden):
-///   virtualMachine, mainElement, installationFree, deliveryWithInstall, description,
-///   compileMode, type, dependencies, abilities, deviceTypes, pages, descriptionId,
-///   name, packageName
-///
-/// Ability field order:
-///   exported, iconId, startWindowIconId, icon, startWindowIcon,
-///   startWindowBackgroundId, description, label, skills, srcEntry,
-///   descriptionId, labelId, startWindowBackground, name
-fn manifest_to_json(
-    manifest: &HapManifest,
-    resource_ids: Option<&HashMap<String, u32>>,
-) -> serde_json::Value {
-    let abilities: Vec<serde_json::Value> = manifest
-        .abilities
-        .iter()
-        .map(|a| {
-            // Pre-compute resource IDs for this ability.
-            let icon_id = resource_ids
-                .zip(a.icon.as_deref())
-                .and_then(|(ids, r)| resolve_res_ref(r, ids));
-            let label_id = resource_ids
-                .zip(a.label.as_deref())
-                .and_then(|(ids, r)| resolve_res_ref(r, ids));
-            let description_id = resource_ids
-                .zip(a.description.as_deref())
-                .and_then(|(ids, r)| resolve_res_ref(r, ids));
-            let start_window_icon_id = resource_ids
-                .zip(a.start_window_icon.as_deref())
-                .and_then(|(ids, r)| resolve_res_ref(r, ids));
-            let start_window_background_id = resource_ids
-                .zip(a.start_window_background.as_deref())
-                .and_then(|(ids, r)| resolve_res_ref(r, ids));
-
-            // Build ability object in hvigor's canonical order.
-            let mut obj = serde_json::Map::new();
-            obj.insert("exported".into(), a.exported.into());
-            if let Some(id) = icon_id {
-                obj.insert("iconId".into(), (id as u64).into());
-            }
-            if let Some(id) = start_window_icon_id {
-                obj.insert("startWindowIconId".into(), (id as u64).into());
-            }
-            if let Some(v) = &a.icon {
-                obj.insert("icon".into(), v.clone().into());
-            }
-            if let Some(v) = &a.start_window_icon {
-                obj.insert("startWindowIcon".into(), v.clone().into());
-            }
-            if let Some(id) = start_window_background_id {
-                obj.insert("startWindowBackgroundId".into(), (id as u64).into());
-            }
-            if let Some(v) = &a.description {
-                obj.insert("description".into(), v.clone().into());
-            }
-            if let Some(v) = &a.label {
-                obj.insert("label".into(), v.clone().into());
-            }
-            if !a.skills.is_empty() {
-                obj.insert("skills".into(), serde_json::json!(a.skills));
-            }
-            obj.insert("srcEntry".into(), a.src_entry.clone().into());
-            if let Some(id) = description_id {
-                obj.insert("descriptionId".into(), (id as u64).into());
-            }
-            if let Some(id) = label_id {
-                obj.insert("labelId".into(), (id as u64).into());
-            }
-            if let Some(v) = &a.start_window_background {
-                obj.insert("startWindowBackground".into(), v.clone().into());
-            }
-            obj.insert("name".into(), a.name.clone().into());
-
-            serde_json::Value::Object(obj)
-        })
-        .collect();
-    let extension_abilities: Vec<serde_json::Value> = manifest
-        .extension_abilities
-        .iter()
-        .map(|a| {
-            let label_id = resource_ids
-                .zip(a.label.as_deref())
-                .and_then(|(ids, r)| resolve_res_ref(r, ids));
-            let description_id = resource_ids
-                .zip(a.description.as_deref())
-                .and_then(|(ids, r)| resolve_res_ref(r, ids));
-
-            let metadata: Vec<serde_json::Value> = a
-                .metadata
-                .iter()
-                .map(|entry| {
-                    let mut obj = serde_json::Map::new();
-                    obj.insert("name".into(), entry.name.clone().into());
-                    if let Some(value) = &entry.value {
-                        obj.insert("value".into(), value.clone().into());
-                    }
-                    if let Some(resource) = &entry.resource {
-                        obj.insert("resource".into(), resource.clone().into());
-                        if let Some(id) =
-                            resource_ids.and_then(|ids| resolve_res_ref(resource, ids))
-                        {
-                            obj.insert("resourceId".into(), (id as u64).into());
-                        }
-                    }
-                    serde_json::Value::Object(obj)
-                })
-                .collect();
-
-            let mut obj = serde_json::Map::new();
-            obj.insert("name".into(), a.name.clone().into());
-            obj.insert("srcEntry".into(), a.src_entry.clone().into());
-            if let Some(label) = &a.label {
-                obj.insert("label".into(), label.clone().into());
-            }
-            if let Some(description) = &a.description {
-                obj.insert("description".into(), description.clone().into());
-            }
-            obj.insert("type".into(), a.extension_type.clone().into());
-            if !metadata.is_empty() {
-                obj.insert("metadata".into(), serde_json::Value::Array(metadata));
-            }
-            if let Some(id) = label_id {
-                obj.insert("labelId".into(), (id as u64).into());
-            }
-            if let Some(id) = description_id {
-                obj.insert("descriptionId".into(), (id as u64).into());
-            }
-            serde_json::Value::Object(obj)
-        })
-        .collect();
-
-    // Build module object in hvigor's canonical order.
-    let mut obj = serde_json::Map::new();
-    obj.insert(
-        "virtualMachine".into(),
-        manifest.virtual_machine.clone().into(),
-    );
-    if let Some(main_el) = &manifest.main_element {
-        obj.insert("mainElement".into(), main_el.clone().into());
-    }
-    obj.insert("installationFree".into(), false.into());
-    obj.insert("deliveryWithInstall".into(), true.into());
-    if let Some(desc) = &manifest.description {
-        obj.insert("description".into(), desc.clone().into());
-    }
-    obj.insert(
-        "compileMode".into(),
-        compile_mode_str(&manifest.compile_mode).into(),
-    );
-    obj.insert("type".into(), module_type_str(&manifest.module_type).into());
-    obj.insert("dependencies".into(), serde_json::Value::Array(vec![]));
-    obj.insert("abilities".into(), serde_json::Value::Array(abilities));
-    if !extension_abilities.is_empty() {
-        obj.insert(
-            "extensionAbilities".into(),
-            serde_json::Value::Array(extension_abilities),
-        );
-    }
-    obj.insert(
-        "deviceTypes".into(),
-        serde_json::Value::Array(
-            manifest
-                .device_types
-                .iter()
-                .map(|s| serde_json::Value::String(s.clone()))
-                .collect(),
-        ),
-    );
-    if let Some(pages) = &manifest.pages {
-        obj.insert("pages".into(), pages.clone().into());
-    }
-    // Resolve module-level description resource reference to a numeric ID.
-    if let (Some(desc_ref), Some(ids)) = (manifest.description.as_deref(), resource_ids) {
-        if let Some(id) = resolve_res_ref(desc_ref, ids) {
-            obj.insert("descriptionId".into(), (id as u64).into());
-        }
-    }
-    obj.insert("name".into(), manifest.module_name.clone().into());
-    obj.insert("packageName".into(), manifest.module_name.clone().into());
-
-    serde_json::Value::Object(obj)
 }
 
 // ---------------------------------------------------------------------------
@@ -771,7 +400,7 @@ fi
         let _ = module_cfg; // silence unused warning
 
         // Resource IDs from the golden.
-        let mut resource_ids = HashMap::new();
+        let mut resource_ids = FxHashMap::default();
         resource_ids.insert("layered_image".to_string(), 16777219u32);
         resource_ids.insert("app_name".to_string(), 16777216u32);
         resource_ids.insert("EntryAbility_desc".to_string(), 16777220u32);
@@ -886,31 +515,4 @@ fi
         // Cleanup
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
-}
-
-/// Convert a version string like `"5.0.5(17)"` to the numeric API version
-/// that the HAP module.json requires: `A*1e7 + B*1e5 + C*1e3 + D`.
-/// Falls back to the digit-in-parens value for simple strings like `"12"`.
-fn compute_numeric_api_version(version: &str) -> u64 {
-    // Extract the part in parentheses, e.g. "5.0.5(17)" → "17"
-    let api_int: u64 = if let Some(start) = version.find('(') {
-        let rest = &version[start + 1..];
-        let end = rest.find(')').unwrap_or(rest.len());
-        rest[..end].parse().unwrap_or(0)
-    } else {
-        version.parse().unwrap_or(0)
-    };
-
-    // Extract major.minor.patch prefix, e.g. "5.0.5(17)" → [5, 0, 5]
-    let prefix = version
-        .split('(')
-        .next()
-        .unwrap_or("")
-        .trim_end_matches('.');
-    let parts: Vec<u64> = prefix.split('.').filter_map(|s| s.parse().ok()).collect();
-    let major = parts.first().copied().unwrap_or(0);
-    let minor = parts.get(1).copied().unwrap_or(0);
-    let patch = parts.get(2).copied().unwrap_or(0);
-
-    major * 10_000_000 + minor * 100_000 + patch * 1_000 + api_int
 }

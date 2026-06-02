@@ -4,9 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-arkdown-core = { path = "../arkdown-core" }
+rustc-hash = { workspace = true }
+arkdown-core = { workspace = true }
 notify = { workspace = true }
 tokio = { workspace = true }
 crossbeam-channel = { workspace = true }
 thiserror = { workspace = true }
 fs-err = { workspace = true }
+tracing = { workspace = true }

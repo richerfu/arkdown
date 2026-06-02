@@ -6,7 +6,6 @@ members = [
     "crates/arkdown-resolver",
     "crates/arkdown-loader",
     "crates/arkdown",
-    "crates/arkdown-plugin-chunk-wrapper",
     "crates/arkdown-plugin-json5",
     "crates/arkdown-plugin-duplicate-check",
     "crates/arkdown-plugin-module-meta",
@@ -24,10 +23,34 @@ members = [
     "crates/arkdown-sign",
     "crates/arkdown-cli",
     "crates/arkdown-obfuscate",
+    "crates/arkdown-utils",
     "crates/arkdown-watcher",
 ]
 
 [workspace.dependencies]
+# Workspace crates
+arkdown = { path = "crates/arkdown" }
+arkdown-abc = { path = "crates/arkdown-abc" }
+arkdown-cache = { path = "crates/arkdown-cache" }
+arkdown-config = { path = "crates/arkdown-config" }
+arkdown-core = { path = "crates/arkdown-core" }
+arkdown-loader = { path = "crates/arkdown-loader" }
+arkdown-obfuscate = { path = "crates/arkdown-obfuscate" }
+arkdown-pack = { path = "crates/arkdown-pack" }
+arkdown-plugin-duplicate-check = { path = "crates/arkdown-plugin-duplicate-check" }
+arkdown-plugin-ets-transform = { path = "crates/arkdown-plugin-ets-transform" }
+arkdown-plugin-json5 = { path = "crates/arkdown-plugin-json5" }
+arkdown-plugin-module-meta = { path = "crates/arkdown-plugin-module-meta" }
+arkdown-plugin-ohos-resolve = { path = "crates/arkdown-plugin-ohos-resolve" }
+arkdown-plugin-router-map = { path = "crates/arkdown-plugin-router-map" }
+arkdown-profile = { path = "crates/arkdown-profile" }
+arkdown-resolver = { path = "crates/arkdown-resolver" }
+arkdown-resource = { path = "crates/arkdown-resource" }
+arkdown-sign = { path = "crates/arkdown-sign" }
+arkdown-ts2abc = { path = "crates/arkdown-ts2abc" }
+arkdown-utils = { path = "crates/arkdown-utils" }
+arkdown-watcher = { path = "crates/arkdown-watcher" }
+
 # Parser — ohos-rs/oxc fork pinned rev (DO NOT use floating branch or crates.io oxc)
 oxc = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee", features = ["full"] }
 oxc_allocator = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
@@ -42,6 +65,14 @@ oxc_codegen = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e15995
 oxc_minifier = { git = "https://github.com/ohos-rs/oxc", rev = "c8d02452469e159952f0181b022c1f304e77abee" }
 oxc_resolver = "11.20.0"
 
+# Rolldown
+rolldown = { version = "1.0.3", default-features = false }
+rolldown_common = "1.0.3"
+rolldown_plugin = "1.0.3"
+rolldown_sourcemap = "1.0.3"
+rolldown_utils = "1.0.3"
+string_wizard = { version = "1.0.3", features = ["sourcemap"] }
+
 # Async
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
@@ -50,6 +81,7 @@ async-trait = "0.1"
 rustc-hash = "2"
 index_vec = "0.1"
 bitflags = "2"
+indexmap = { version = "2", features = ["serde"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -107,6 +139,8 @@ aes         = { version = "0.8", features = ["zeroize"] }
 cbc         = "0.1"
 pbkdf2      = { version = "0.12", default-features = false, features = ["hmac"] }
 hex         = "0.4"
+hex-literal = "0.4"
+tempfile = "3"
 
 [profile.release]
 lto = true

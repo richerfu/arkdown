@@ -15,8 +15,8 @@ Read these documents before working in a covered area. Keep them in sync with im
 | [hvigor-gap-plan.md](hvigor-gap-plan.md)     | Current implementation gap analysis against the locally installed hvigor pipeline, with a staged plan for compile-stage and full-artifact parity                                                       |
 | [module-resolution.md](module-resolution.md) | OHOS module resolution deep dive: all specifier forms (@ohos/_, @kit/_, @bundle:, bare ohpm), oh-package.json5 dependency types, oxc-resolver integration, OHM URL normalization, SDK path conventions |
 | [abc-pipeline.md](abc-pipeline.md)           | es2abc compilation step: why ABC is required, module-mode input contract, DebugInfo coordinate source, incremental cache, worker pool parallelism                                                     |
-| [chunk-model.md](chunk-model.md)             | OHOS chunk architecture: why ArkRuntime forbids native ESM, the IIFE/globalThis registry pattern, @Entry entry points, supportChunks flag, per-module bundle layouts (HAP/HSP/HAR), HAR deduplication  |
-| [types.md](types.md)                         | Canonical shared type definitions: ResolvedId, Module, ModuleGraph, ArkChunk, ChunkGraph, IifeChunk, AbcArtifact, HapManifest, OhPackageJson5, ArkdownPlugin trait, enums                              |
+| [chunk-model.md](chunk-model.md)             | Legacy chunk-wrapper background plus current module-mode chunk notes; current CompileArkTS output remains ESM for `es2abc --module`                                                                     |
+| [types.md](types.md)                         | Canonical shared type definitions: ResolvedId, Module, ModuleGraph, ArkChunk, ChunkGraph, AbcArtifact, HapManifest, OhPackageJson5, ArkdownPlugin trait, enums                                         |
 | [compat.md](compat.md)                       | hvigorw compatibility layer: command mapping, hvigorw wrapper script, build-profile.json5 field mapping, plugin API differences, unsupported features, migration guide                                 |
 | [plugins.md](plugins.md)                     | Complete plugin inventory: all JS plugins from hvigor-arkts-compose and hvigor-arkts-base, what each does, P0/P1/P2 priority, arkdown Rust crate replacement, complexity estimate                      |
 | [hvigor-full-gap-analysis.md](hvigor-full-gap-analysis.md) | Comprehensive mapping of all 95 hvigor pipeline steps against current arkdown status; implementation tasks TASK-ABC-01 through TASK-WATCH-01 with priority ordering and upstream refs |
@@ -35,7 +35,7 @@ Read these documents before working in a covered area. Keep them in sync with im
 
 **The loader.json interface**: The `GenerateLoaderJson` task produces `loader.json` which is the contract between the hvigor task pipeline and the rollup compilation pipeline. arkdown must write this file to the same path in the same format. See [hvigorw-analysis.md](hvigorw-analysis.md).
 
-**P0 plugins** (must implement first): `wrapper-chunk-plugin`, OHOS resolve, `module-meta-info-plugin`, `check-duplicate-filenames-plugin`, JSON5 import, commonjs. See [plugins.md](plugins.md).
+**P0 plugins** (must implement first): OHOS resolve, `module-meta-info-plugin`, `check-duplicate-filenames-plugin`, JSON5 import, commonjs/ESM handling through rolldown. See [plugins.md](plugins.md).
 
 ---
 

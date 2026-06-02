@@ -180,7 +180,7 @@ mode (API >= 9).
 | `@Event` / `@Require` | (regular member metadata)              | decorator stripped, member emitted as TypeScript             | —                       |
 | `@Watch`            | (no backing field; adds `declareWatch`)  | `this.declareWatch("x", this.handlerName)` after field inits | —                       |
 | `@Computed` / `@Monitor` / lifecycle decorators | (regular method metadata) | decorator stripped, method emitted as TypeScript | —                       |
-| `@Builder`          | ✅ Class method, body lowered via `lower_build_body_or_raw` | —                                         | —                       |
+| `@Builder`          | ✅ Class method, body lowered through OXC ArkUI AST with upstream parent context | —                       | —                       |
 | `@Styles`           | ✅ `private` class method, `.attr(x)` → `this.attr(x)` in body | —                                     | —                       |
 | `@BuilderParam`     | `WrappedBuilder<Parameters<T>>`          | `this.x = init` (direct, no `__` prefix in ctor)            | Yes                     |
 
@@ -189,6 +189,16 @@ mode (API >= 9).
 > `string`, `number`, or `boolean`).  The pure-Rust transform defaults to the `Simple`
 > variants for all types as a conservative choice.  A future enhancement can add type
 > heuristics to select `Object` variants for non-primitive types.
+
+> **Update-state-vars note**: upstream
+> `process_component_member.js::createStateVarsBody()` emits direct
+> `this.__x.reset(params.x)` for `@Prop`-style slots. It does not wrap that reset
+> in `params.x !== undefined`.
+
+> **Button create note**: upstream
+> `process_component_build.js::createComponent()` maps `Button(label)` without
+> children to `Button.createWithLabel(label)`, and `Button(label) { ... }` to
+> `Button.createWithChild(label)`.
 
 ### @Entry
 
@@ -236,37 +246,28 @@ Leaf components (no closing brace children) still get `.pop()` but emit no neste
 
 ### @Builder functions
 
-✅ **Implemented** (`crates/arkdown-plugin-ets-transform/src/transform/`, 2026-05-29)
+✅ **Implemented** (`crates/arkdown-plugin-ets-transform/src/transform/`, 2026-06-01)
 
 Struct methods decorated with `@Builder` remain as class methods with the same
 name (they are NOT renamed to `__method__`). Top-level `@Builder export function`
 is emitted as an exported `function name(...): void`, matching upstream handling
 of builder functions before bundling. The decorator is stripped.
 
-The body is lowered via `lower_build_body_or_raw`:
-
-1. **If the OXC ETS parser emits `ArkUIComponentExpression` nodes** (expected
-   in future parser versions that apply ArkUI rules to `@Builder` bodies as
-   well as `build()`): the body is fully desugared into
-   `observeComponentCreation2` + `.pop()` pairs — identical to `build()`.
-
-2. **Current OXC ETS behaviour**: the parser can expose ArkUI children inside
-   canonical `build()` bodies, nested callbacks, and some builder bodies. When a
-   builder body is parsed as regular TypeScript, the fallback emits statement
-   text as TypeScript instead of guessing missing ArkUI AST.
+The body is lowered through the same OXC ArkUI AST path as `build()`, but with
+upstream builder parent context. Framework calls are emitted on
+`(parent ? parent : this)`, matching SDK
+`process_component_build.js::parentConditionalExpression()`.
+Regular/literal attribute arguments in builder bodies use the same upstream
+`filterRegularAttrNode()` split as `build()`: dynamic attributes stay in the
+creation closure body, while regular attrs are grouped in `if (isInitialRender)`.
 
 ```typescript
 // Input:
 @Builder myBuilder() { Text('hi') }
 
-// Output (current — raw body fallback):
-myBuilder(): void {
-  Text('hi')
-}
-
-// Output (future — full ArkUI desugaring when parser supports it):
-myBuilder(): void {
-  this.observeComponentCreation2((elmtId, isInitialRender) => {
+// Output:
+myBuilder(parent = null): void {
+  (parent ? parent : this).observeComponentCreation2((elmtId, isInitialRender) => {
     Text.create('hi');
   }, Text);
   Text.pop();
@@ -357,6 +358,11 @@ Rewrites deprecated or version-gated OHOS API calls based on
 
 All API rewrites are driven by a static version table baked into the crate (derived from
 `sdk/default/openharmony/ets/api/` declaration structure). No runtime SDK path lookup.
+The generated `@kit.*` replacement imports are emitted as OXC import-declaration AST
+nodes and printed with OXC codegen, matching the upstream `ets2bundle` pattern of
+mutating TypeScript AST and printing with `ts.createPrinter({ newLine: LineFeed })`
+(`developtools_ace_ets2bundle/compiler/src/process_module_files.ts` and
+`process_lazy_import.ts`).
 
 ---
 
@@ -365,15 +371,18 @@ All API rewrites are driven by a static version table baked into the crate (deri
 The transform produces a source map anchored to the **pre-transform** source, not to the
 generated ViewPU/TypeScript output.  Specifically:
 
-- For `.ets` files (struct components): the source map is generated by `oxc_codegen` from
-  the **kit-rewritten** `.ets` source (after `@kit.*` import expansion, before struct
-  desugaring).  This keeps source positions in the map pointing to the short original
-  struct source (15 lines) rather than the expanded ViewPU class (100+ lines).  hvigor's
-  `ets-loader` generates a similarly sparse map via its struct-position tracking.
+- For `.ets` files (struct components): current ViewPU lowering records generated/source
+  span entries during OXC ArkUI AST traversal and serializes them through
+  `rolldown_sourcemap::SourceMapBuilder`. This keeps source positions pointing to the
+  short original struct source rather than the expanded ViewPU class. Upstream hvigor's
+  main ArkUI lowering path is TypeScript AST + `ts.createPrinter()` source-map output;
+  `MagicString` is only used by upstream as a fallback/localized patch remapper.
+  Remaining parity work is to replace the ViewPU textual sink with OXC AST/codegen so
+  the map is produced by the renderer instead of span hints.
 
-- For `.ts` files: the source map is generated from the **kit-rewritten** TypeScript
-  source (before the version-gated `@ohos` rewrite).  The expanded individual imports
-  give `oxc_codegen` more lines to generate mapping segments for.
+- For `.ts` files: the identity/fallback map is generated through
+  `string_wizard::MagicString`, matching Rolldown's native MagicString path when a
+  transform changes or preserves code without a dedicated plugin map.
 
 This source map is forwarded to rolldown as `HookTransformOutputMap::Sourcemap` and then
 used by `write_hvigor_source_maps` in the CLI to build the final `sourceMaps.map` file.
@@ -412,7 +421,7 @@ crates/arkdown-plugin-ets-transform/
 
 ```toml
 [dependencies]
-arkdown-core = { path = "../arkdown-core" }
+arkdown-core = { workspace = true }
 
 # Parser, transformer, codegen — ohos-rs fork only
 oxc_allocator  = { workspace = true }
@@ -509,7 +518,7 @@ No other public types are exported. `EtsTransformer`, `EtsChecker`, and `ApiTran
 - `@Component struct Counter` with `@State count: number` round-trip: transform output contains `class Counter extends ViewPU` with `__count: ObservedPropertySimplePU<number>`
 - `@Entry` on a component generates `ViewStackProcessor.StartGetAccessRecordingFor` after the class definition
 - `@Prop` field appears in `updateStateVars` method; `@State` field does not
-- ✅ `@Builder myBuilder()` method is preserved as a class method (not lifted to standalone function); decorator stripped; body lowered via `lower_build_body_or_raw` (ArkUI desugaring or raw fallback); output is valid TypeScript
+- ✅ `@Builder myBuilder()` method is preserved as a class method (not lifted to standalone function); decorator stripped; body lowered through the OXC ArkUI AST path; framework calls use upstream `(parent ? parent : this)` parent context; output is valid TypeScript
 - `build()` with `Column { Text("hi") }` → two `observeComponentCreation2` calls with `Column.pop()` and `Text.pop()`
 - Method chains in `build()` (`.onClick(...)`) appear inside the `observeComponentCreation2` callback
 - `etsChecker` rule `missing-build-method`: `@Component struct Foo {}` (no build) → `Err(ArkdownError::EtsCheck)` with rule ID `missing-build-method`

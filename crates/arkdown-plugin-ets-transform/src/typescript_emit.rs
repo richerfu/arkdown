@@ -5,7 +5,7 @@
 //! the transform crate: first lower imported const-enum member reads, then let
 //! OXC's TypeScript transformer strip types and local const enums.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
 
 use oxc_allocator::Allocator;
@@ -30,14 +30,14 @@ enum EnumValue {
 
 #[derive(Debug, Clone, Default)]
 struct ConstEnumExports {
-    enums: HashMap<String, HashMap<String, EnumValue>>,
-    namespaces: HashMap<String, HashMap<String, HashMap<String, EnumValue>>>,
+    enums: FxHashMap<String, FxHashMap<String, EnumValue>>,
+    namespaces: FxHashMap<String, FxHashMap<String, FxHashMap<String, EnumValue>>>,
 }
 
 #[derive(Debug, Clone)]
 enum ConstEnumImport {
-    Enum(HashMap<String, EnumValue>),
-    Namespace(HashMap<String, HashMap<String, EnumValue>>),
+    Enum(FxHashMap<String, EnumValue>),
+    Namespace(FxHashMap<String, FxHashMap<String, EnumValue>>),
 }
 
 pub(crate) fn emit_javascript(source: &str, id: &str) -> Option<String> {
@@ -106,8 +106,8 @@ pub(crate) fn rewrite_imported_const_enums(source: &str, id: &str) -> String {
 fn collect_const_enum_imports(
     statements: &[Statement<'_>],
     id: &str,
-) -> HashMap<String, ConstEnumImport> {
-    let mut imports = HashMap::new();
+) -> FxHashMap<String, ConstEnumImport> {
+    let mut imports = FxHashMap::default();
     for statement in statements {
         let Statement::ImportDeclaration(import) = statement else {
             continue;
@@ -120,7 +120,7 @@ fn collect_const_enum_imports(
 fn collect_const_enum_import(
     import: &ImportDeclaration<'_>,
     id: &str,
-    imports: &mut HashMap<String, ConstEnumImport>,
+    imports: &mut FxHashMap<String, ConstEnumImport>,
 ) {
     if import.import_kind.is_type() {
         return;
@@ -204,14 +204,14 @@ fn const_enum_exports(path: &Path) -> Option<ConstEnumExports> {
 fn collect_namespace_enums(
     declaration: &oxc_ast::ast::TSModuleDeclaration<'_>,
     scoping: &oxc_semantic::Scoping,
-) -> Option<(String, HashMap<String, HashMap<String, EnumValue>>)> {
+) -> Option<(String, FxHashMap<String, FxHashMap<String, EnumValue>>)> {
     let TSModuleDeclarationName::Identifier(name) = &declaration.id else {
         return None;
     };
     let Some(TSModuleDeclarationBody::TSModuleBlock(block)) = &declaration.body else {
         return None;
     };
-    let mut enums = HashMap::new();
+    let mut enums = FxHashMap::default();
     for statement in &block.body {
         let Statement::ExportNamedDeclaration(export) = statement else {
             continue;
@@ -231,13 +231,13 @@ fn collect_namespace_enums(
 fn collect_enum_members(
     declaration: &oxc_ast::ast::TSEnumDeclaration<'_>,
     scoping: &oxc_semantic::Scoping,
-) -> Option<HashMap<String, EnumValue>> {
+) -> Option<FxHashMap<String, EnumValue>> {
     let enum_symbol = declaration.id.symbol_id();
     let enum_scope = scoping
         .get_enum_body_scopes(enum_symbol)?
         .first()
         .copied()?;
-    let mut members = HashMap::new();
+    let mut members = FxHashMap::default();
     for member in &declaration.body.members {
         let member_name = member.id.static_name().to_string();
         let symbol = scoping.get_binding(enum_scope, member_name.as_str().into())?;
@@ -254,7 +254,7 @@ fn collect_enum_members(
 }
 
 struct ConstEnumInlineVisitor {
-    imports: HashMap<String, ConstEnumImport>,
+    imports: FxHashMap<String, ConstEnumImport>,
     patches: Vec<SourcePatch>,
 }
 

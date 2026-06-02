@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use oxc_ast::ast::{
     Argument, ArrowFunctionExpression, AssignmentTarget, BindingPattern, ClassElement, Declaration,
@@ -28,7 +28,7 @@ pub(super) fn collect_function_records<'a>(
     let mut collector = FunctionRecordCollector {
         names,
         records: Vec::new(),
-        seen_spans: HashSet::new(),
+        seen_spans: FxHashSet::default(),
     };
 
     // func_main_0 is represented by the Program scope and is emitted by the caller.
@@ -46,21 +46,21 @@ pub(super) fn collect_function_records<'a>(
 struct FunctionRecordCollector<'a, 'names> {
     names: &'names mut FunctionNameAllocator<'a>,
     records: Vec<FunctionRecord<'a>>,
-    seen_spans: HashSet<(u32, u32)>,
+    seen_spans: FxHashSet<(u32, u32)>,
 }
 
 #[derive(Debug, Default)]
 pub(super) struct FunctionNameAllocator<'a> {
-    normal_names: HashSet<String>,
-    duplicate_names: HashMap<String, u16>,
+    normal_names: FxHashSet<String>,
+    duplicate_names: FxHashMap<String, u16>,
     source: Option<&'a str>,
 }
 
 impl<'a> FunctionNameAllocator<'a> {
     pub(super) fn new(source: &'a str) -> Self {
         Self {
-            normal_names: HashSet::new(),
-            duplicate_names: HashMap::new(),
+            normal_names: FxHashSet::default(),
+            duplicate_names: FxHashMap::default(),
             source: Some(source),
         }
     }

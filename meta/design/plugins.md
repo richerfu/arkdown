@@ -12,34 +12,6 @@ Priority levels:
 
 ## 1. `@ohos/hvigor-arkts-compose` — OHOS-Specific Plugins (Highest Priority)
 
-### `wrapper-chunk-plugin`
-
-**Source**: `dist/src/plugins/wrapper-chunk-plugin.js`
-
-**What it does in hvigor**:
-Implements the `renderChunk` rollup hook. Wraps every output chunk in an IIFE:
-
-```javascript
-(function () {
-  // ... chunk code ...
-})();
-```
-
-When `supportChunks` is true, additionally:
-
-1. Replaces `var x = require('./chunkId')` with `var x = globalThis['chunkId_hash']` using MagicString
-2. Removes bare side-effect `require('./chunkId')` calls (no binding)
-3. Appends `globalThis['fileName_hash'] = globalThis['fileName_hash'] || { export1: exports.export1, ... }` to each exporting chunk
-
-The `globalThis` registry is how OHOS modules find each other at runtime since ArkRuntime does not support native ESM.
-
-**arkdown Rust crate**: `arkdown-plugin-chunk-wrapper`
-**Priority**: P0
-**Complexity**: Medium
-**Notes**: MagicString is replaceable with a simple AST-based or regex-based pattern since the input is already CJS from rolldown. The chunk hash is computed by rolldown's existing chunk hashing.
-
----
-
 ### `resolve/index` + `import-resolver` + `resolveImportSpecifiers`
 
 **Source**: `dist/src/plugins/resolve/index.js`, `import-resolver.js`, `resolveImportSpecifiers.js`
@@ -422,7 +394,6 @@ Minification via terser (same as `plugins/terser-plugin` above; this is the roll
 
 | Plugin / Source                              | arkdown Crate                    | Priority | Complexity |
 | -------------------------------------------- | -------------------------------- | -------- | ---------- |
-| `wrapper-chunk-plugin`                       | `arkdown-plugin-chunk-wrapper`   | P0       | Medium     |
 | `resolve/index` + `import-resolver`          | `arkdown-plugin-ohos-resolve`    | P0       | High       |
 | `module-meta-info-plugin`                    | `arkdown-plugin-module-meta`     | P0       | High       |
 | `check-duplicate-filenames-plugin`           | `arkdown-plugin-duplicate-check` | P0       | Low        |
@@ -453,7 +424,6 @@ Minification via terser (same as `plugins/terser-plugin` above; this is the roll
 ## Cross-Reference
 
 - [pipeline.md](pipeline.md) — when each plugin runs in the pipeline
-- [chunk-model.md](chunk-model.md) — `wrapper-chunk-plugin` details
 - [module-resolution.md](module-resolution.md) — resolve plugin algorithm
 - [types.md](types.md) — `ArkdownPlugin` trait
 - [hvigorw-analysis.md](hvigorw-analysis.md) — task context for plugins

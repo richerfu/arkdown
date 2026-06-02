@@ -6,9 +6,9 @@ use arkdown_core::{
     StrictModeConfig,
 };
 
-use crate::build_profile::{load_app_json5, load_build_profile, parse_api_version};
+use crate::build_profile::{parse_api_version, RawAppJson5, RawBuildProfile};
 use crate::error::ConfigError;
-use crate::module_json::{load_module_json, map_module_type};
+use crate::module_json::RawModuleJson;
 use crate::sdk::discover_sdk;
 
 /// Parse the project at `root` and return a fully resolved [`ArkdownConfig`].
@@ -29,8 +29,8 @@ pub fn load_config(
     // -----------------------------------------------------------------------
     // 1. Parse build-profile.json5 and AppScope/app.json5
     // -----------------------------------------------------------------------
-    let profile = load_build_profile(root)?;
-    let app_json5 = load_app_json5(root)?;
+    let profile = RawBuildProfile::load(root)?;
+    let app_json5 = RawAppJson5::load(root)?;
 
     // -----------------------------------------------------------------------
     // 2. Destructure app-level fields before consuming products
@@ -207,8 +207,8 @@ pub fn load_config(
         let module_root = root.join(&raw_mod.src_path);
 
         // module.json5 is optional — if absent we fall back to Entry.
-        let module_type = match load_module_json(&module_root) {
-            Ok(mj) => map_module_type(&mj.module.module_type),
+        let module_type = match RawModuleJson::load(&module_root) {
+            Ok(mj) => OhosModuleType::from_type_str(&mj.module.module_type),
             Err(ConfigError::FileNotFound(_)) => arkdown_core::OhosModuleType::Entry,
             Err(e) => return Err(e),
         };
@@ -243,17 +243,6 @@ pub fn load_config(
         modules,
         sdk_config,
     })
-}
-
-pub fn module_matches_output_target(module_type: &OhosModuleType, target: &OutputTarget) -> bool {
-    match target {
-        OutputTarget::Hap => {
-            matches!(module_type, OhosModuleType::Entry | OhosModuleType::Feature)
-        }
-        OutputTarget::Hsp => matches!(module_type, OhosModuleType::Shared),
-        OutputTarget::Har => matches!(module_type, OhosModuleType::Har),
-        OutputTarget::Preview | OutputTarget::Test => true,
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -480,25 +469,11 @@ mod tests {
 
     #[test]
     fn test_module_type_matches_output_target() {
-        assert!(module_matches_output_target(
-            &arkdown_core::OhosModuleType::Entry,
-            &OutputTarget::Hap
-        ));
-        assert!(module_matches_output_target(
-            &arkdown_core::OhosModuleType::Feature,
-            &OutputTarget::Hap
-        ));
-        assert!(!module_matches_output_target(
-            &arkdown_core::OhosModuleType::Har,
-            &OutputTarget::Hap
-        ));
-        assert!(module_matches_output_target(
-            &arkdown_core::OhosModuleType::Har,
-            &OutputTarget::Har
-        ));
-        assert!(module_matches_output_target(
-            &arkdown_core::OhosModuleType::Shared,
-            &OutputTarget::Hsp
-        ));
+        use arkdown_core::OhosModuleType;
+        assert!(OhosModuleType::Entry.matches_output_target(&OutputTarget::Hap));
+        assert!(OhosModuleType::Feature.matches_output_target(&OutputTarget::Hap));
+        assert!(!OhosModuleType::Har.matches_output_target(&OutputTarget::Hap));
+        assert!(OhosModuleType::Har.matches_output_target(&OutputTarget::Har));
+        assert!(OhosModuleType::Shared.matches_output_target(&OutputTarget::Hsp));
     }
 }

@@ -267,40 +267,36 @@ impl SigningKey {
     /// The PEM private key must be PKCS#8 (`BEGIN PRIVATE KEY`) format.
     /// The PEM certificate must be X.509 (`BEGIN CERTIFICATE`) format.
     pub fn from_pem(private_key_pem: &str, cert_pem: &str) -> Result<Self, SignError> {
-        let private_key_der = pkcs8_der_from_pem(private_key_pem)?;
-        let cert_der = cert_der_from_pem(cert_pem)?;
+        let private_key_der = Self::pkcs8_der_from_pem(private_key_pem)?;
+        let cert_der = Self::cert_der_from_pem(cert_pem)?;
 
         Ok(SigningKey {
             private_key_der,
             cert_chain: vec![cert_der],
         })
     }
-}
 
-// ---------------------------------------------------------------------------
-// PEM helpers
-// ---------------------------------------------------------------------------
+    /// Extract PKCS#8 DER bytes from a PEM-encoded private key string.
+    fn pkcs8_der_from_pem(pem: &str) -> Result<Vec<u8>, SignError> {
+        let pem = pem.trim();
+        let b64 = pem
+            .lines()
+            .filter(|l| !l.starts_with("-----"))
+            .collect::<Vec<_>>()
+            .join("");
+        base64_decode(&b64).map_err(|e| SignError::PemError(format!("base64 decode: {e}")))
+    }
 
-/// Extract PKCS#8 DER bytes from a PEM-encoded private key string.
-fn pkcs8_der_from_pem(pem: &str) -> Result<Vec<u8>, SignError> {
-    let pem = pem.trim();
-    let b64 = pem
-        .lines()
-        .filter(|l| !l.starts_with("-----"))
-        .collect::<Vec<_>>()
-        .join("");
-    base64_decode(&b64).map_err(|e| SignError::PemError(format!("base64 decode: {e}")))
-}
-
-/// Extract DER bytes from a PEM-encoded certificate string.
-fn cert_der_from_pem(pem: &str) -> Result<Vec<u8>, SignError> {
-    let pem = pem.trim();
-    let b64 = pem
-        .lines()
-        .filter(|l| !l.starts_with("-----"))
-        .collect::<Vec<_>>()
-        .join("");
-    base64_decode(&b64).map_err(|e| SignError::PemError(format!("base64 decode: {e}")))
+    /// Extract DER bytes from a PEM-encoded certificate string.
+    fn cert_der_from_pem(pem: &str) -> Result<Vec<u8>, SignError> {
+        let pem = pem.trim();
+        let b64 = pem
+            .lines()
+            .filter(|l| !l.starts_with("-----"))
+            .collect::<Vec<_>>()
+            .join("");
+        base64_decode(&b64).map_err(|e| SignError::PemError(format!("base64 decode: {e}")))
+    }
 }
 
 // ---------------------------------------------------------------------------

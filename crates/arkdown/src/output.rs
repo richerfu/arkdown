@@ -1,7 +1,9 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
 
-use arkdown_core::{ArkdownError, ChunkGraph};
+use arkdown_core::{
+    hvigor_source_maps_json, ArkdownError, ChunkGraph, HvigorSourceMapEntry, HvigorSourceMapOptions,
+};
 
 pub const MODULES_ABC_FILE_NAME: &str = "modules.abc";
 pub const SOURCE_MAPS_FILE_NAME: &str = "sourceMaps.map";
@@ -13,6 +15,37 @@ pub struct WrittenOutput {
     pub chunk_files: Vec<(String, PathBuf)>,
     /// `sourceMaps.map` path if a real source map was produced.
     pub source_maps_path: Option<PathBuf>,
+}
+
+impl WrittenOutput {
+    /// Write JavaScript chunks from `chunk_graph` to `output_dir`.
+    ///
+    /// Returns a `WrittenOutput` with chunk file paths and optional source map path.
+    pub fn write(
+        chunk_graph: &ChunkGraph,
+        output_dir: &Path,
+        source_map_opts: Option<&SourceMapOptions>,
+    ) -> Result<Self, ArkdownError> {
+        Self::write_output(chunk_graph, output_dir, source_map_opts)
+    }
+
+    /// Write chunks without source map metadata; returns just the file list.
+    pub fn write_chunks_only(
+        chunk_graph: &ChunkGraph,
+        output_dir: &Path,
+    ) -> Result<Vec<(String, PathBuf)>, ArkdownError> {
+        Ok(Self::write(chunk_graph, output_dir, None)?.chunk_files)
+    }
+
+    /// Path for the merged module ABC file within `loader_out_ets_dir`.
+    pub fn abc_path_in(loader_out_ets_dir: &Path) -> PathBuf {
+        loader_out_ets_dir.join(MODULES_ABC_FILE_NAME)
+    }
+
+    /// Path for the hvigor-format source map file within `loader_out_ets_dir`.
+    pub fn source_maps_path_in(loader_out_ets_dir: &Path) -> PathBuf {
+        loader_out_ets_dir.join(SOURCE_MAPS_FILE_NAME)
+    }
 }
 
 /// Module-level metadata needed to emit the hvigor per-file `sourceMaps.map` format.
@@ -31,28 +64,18 @@ pub struct SourceMapOptions {
     /// Map from chunk stem (e.g. `"EntryAbility"`) to the compile-entry source
     /// path relative to `src/main` (e.g. `"ets/entryability/EntryAbility.ets"`).
     /// Used to build the per-file key and the `sources` / `file` fields.
-    pub chunk_source_files: HashMap<String, String>,
+    pub chunk_source_files: FxHashMap<String, String>,
 }
 
-/// Path used by native ABC compilation and packaging for the merged module ABC.
-pub fn modules_abc_path(loader_out_ets_dir: &Path) -> PathBuf {
-    loader_out_ets_dir.join(MODULES_ABC_FILE_NAME)
-}
-
-/// Path used by native ABC compilation and packaging for debug source maps.
-pub fn source_maps_path(loader_out_ets_dir: &Path) -> PathBuf {
-    loader_out_ets_dir.join(SOURCE_MAPS_FILE_NAME)
-}
-
-/// Write every chunk in `chunk_graph` to `output_dir` as `<name>.js`.
-///
-/// Creates the output directory (and any missing parents) if it does not exist.
-/// Returns a list of `(chunk_name, absolute_output_path)` pairs.
-pub fn write_chunks(
-    chunk_graph: &ChunkGraph,
-    output_dir: &Path,
-) -> Result<Vec<(String, PathBuf)>, ArkdownError> {
-    Ok(write_output(chunk_graph, output_dir, None)?.chunk_files)
+impl From<&SourceMapOptions> for HvigorSourceMapOptions {
+    fn from(value: &SourceMapOptions) -> Self {
+        Self {
+            module_name: value.module_name.clone(),
+            package_name: value.package_name.clone(),
+            version: value.version.clone(),
+            chunk_source_files: value.chunk_source_files.clone(),
+        }
+    }
 }
 
 /// Write JavaScript chunks and the hvigor-compatible source map artifact.
@@ -66,51 +89,6 @@ pub fn write_chunks(
 /// hvigor per-file dict format (keyed by `{module}|{pkg}|{ver}|src/main/{path}.ts`)
 /// that matches the golden reference.  When `None`, the raw rolldown source map
 /// is written as-is (single chunk) or omitted (multiple chunks without metadata).
-pub fn write_output(
-    chunk_graph: &ChunkGraph,
-    output_dir: &Path,
-    source_map_opts: Option<&SourceMapOptions>,
-) -> Result<WrittenOutput, ArkdownError> {
-    fs_err::create_dir_all(output_dir).map_err(|e| ArkdownError::Io(e.into()))?;
-
-    let mut files = Vec::new();
-    let mut source_maps = Vec::new();
-
-    for chunk in chunk_graph.chunks.iter() {
-        let filename = format!("{}.js", chunk.name);
-        let path = output_dir.join(&filename);
-        fs_err::write(&path, &chunk.code).map_err(|e| ArkdownError::Io(e.into()))?;
-        files.push((chunk.name.clone(), path));
-
-        if let Some(ref map) = chunk.source_map {
-            let value = validate_real_source_map(map)?;
-            source_maps.push(ChunkSourceMap {
-                chunk_name: chunk.name.clone(),
-                generated_line_count: chunk.code.lines().count(),
-                raw_map: map.as_str(),
-                value,
-            });
-        }
-    }
-
-    let source_maps_path = if !source_maps.is_empty() {
-        let path = source_maps_path(output_dir);
-        let content = if let Some(opts) = source_map_opts {
-            hvigor_source_maps_content(&source_maps, opts)?
-        } else {
-            source_maps_map_content(&source_maps)?
-        };
-        fs_err::write(&path, content).map_err(|e| ArkdownError::Io(e.into()))?;
-        Some(path)
-    } else {
-        None
-    };
-
-    Ok(WrittenOutput {
-        chunk_files: files,
-        source_maps_path,
-    })
-}
 
 struct ChunkSourceMap<'a> {
     chunk_name: String,
@@ -119,146 +97,162 @@ struct ChunkSourceMap<'a> {
     value: serde_json::Value,
 }
 
-fn validate_real_source_map(map: &str) -> Result<serde_json::Value, ArkdownError> {
-    let value: serde_json::Value = serde_json::from_str(map).map_err(|e| {
-        ArkdownError::Bundler(format!(
-            "source map is not valid JSON; keep sourceMaps.map unwritten until real map wiring is available: {e}"
-        ))
-    })?;
-    let Some(object) = value.as_object() else {
-        return Err(ArkdownError::Bundler(
-            "source map must be a JSON object generated from compile inputs".to_string(),
-        ));
-    };
-    if object.is_empty() {
-        return Err(ArkdownError::Bundler(
-            "refusing to emit fake empty sourceMaps.map".to_string(),
-        ));
-    }
-
-    let has_sources = value
-        .get("sources")
-        .and_then(|sources| sources.as_array())
-        .is_some_and(|sources| !sources.is_empty());
-    let has_mappings = value
-        .get("mappings")
-        .and_then(|mappings| mappings.as_str())
-        .is_some_and(|mappings| !mappings.is_empty());
-    if !has_sources && !has_mappings {
-        return Err(ArkdownError::Bundler(
-            "refusing to emit sourceMaps.map without compile input sources or mappings".to_string(),
-        ));
-    }
-
-    Ok(value)
-}
-
-fn source_maps_map_content(source_maps: &[ChunkSourceMap<'_>]) -> Result<String, ArkdownError> {
-    if let [source_map] = source_maps {
-        return Ok(source_map.raw_map.to_string());
-    }
-
-    let mut next_line_offset = 0usize;
-    let sections = source_maps
-        .iter()
-        .map(|source_map| {
-            let section = serde_json::json!({
-                "offset": {
-                    "line": next_line_offset,
-                    "column": 0,
-                },
-                "map": source_map.value,
-            });
-            next_line_offset += source_map.generated_line_count + 1;
-            section
-        })
-        .collect::<Vec<_>>();
-    let chunk_names = source_maps
-        .iter()
-        .map(|source_map| source_map.chunk_name.as_str())
-        .collect::<Vec<_>>();
-
-    serde_json::to_string(&serde_json::json!({
-        "version": 3,
-        "file": MODULES_ABC_FILE_NAME,
-        "sections": sections,
-        "x_arkdown_chunks": chunk_names,
-    }))
-    .map_err(|e| ArkdownError::Bundler(format!("failed to serialize sourceMaps.map: {e}")))
-}
-
 /// Emit the hvigor per-file dict `sourceMaps.map` format.
 ///
 /// The output is a JSON object whose keys are
 /// `{module_name}|{package_name}|{version}|src/main/{path}.ts`
 /// and whose values are individual source map objects with an extra
 /// `"entry-package-info"` field, matching the hvigor golden reference.
-fn hvigor_source_maps_content(
-    source_maps: &[ChunkSourceMap<'_>],
-    opts: &SourceMapOptions,
-) -> Result<String, ArkdownError> {
-    let mut map = serde_json::Map::new();
 
-    for sm in source_maps {
-        let source_file = match opts.chunk_source_files.get(&sm.chunk_name) {
-            Some(sf) => sf.trim_start_matches("./").to_string(),
-            None => {
-                // Fall back to deriving source_file from the raw map's sources array.
-                sm.value
-                    .get("sources")
-                    .and_then(|s| s.as_array())
-                    .and_then(|arr| arr.first())
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(&sm.chunk_name)
-                    .to_string()
-            }
-        };
-
-        let key = format!(
-            "{}|{}|{}|src/main/{}",
-            opts.module_name,
-            opts.package_name,
-            opts.version,
-            with_ts_extension(&source_file),
-        );
-
-        let file = std::path::Path::new(&source_file)
-            .file_name()
-            .and_then(|f| f.to_str())
-            .unwrap_or(&source_file)
-            .to_string();
-
-        let source = format!("{}/src/main/{}", opts.module_name, source_file);
-
-        let mappings = sm
-            .value
-            .get("mappings")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-
-        map.insert(
-            key,
-            serde_json::json!({
-                "version": 3,
-                "file": file,
-                "sourceRoot": "",
-                "sources": [source],
-                "names": [],
-                "mappings": mappings,
-                "entry-package-info": format!("{}|{}", opts.module_name, opts.version),
-            }),
-        );
+impl WrittenOutput {
+    fn source_maps_path(loader_out_ets_dir: &Path) -> PathBuf {
+        loader_out_ets_dir.join(SOURCE_MAPS_FILE_NAME)
     }
 
-    serde_json::to_string_pretty(&map)
-        .map_err(|e| ArkdownError::Bundler(format!("failed to serialize sourceMaps.map: {e}")))
-}
+    fn write_output(
+        chunk_graph: &ChunkGraph,
+        output_dir: &Path,
+        source_map_opts: Option<&SourceMapOptions>,
+    ) -> Result<WrittenOutput, ArkdownError> {
+        fs_err::create_dir_all(output_dir).map_err(|e| ArkdownError::Io(e.into()))?;
 
-/// Replace the file extension with `.ts`, preserving the rest of the path.
-fn with_ts_extension(path: &str) -> String {
-    path.rsplit_once('.')
-        .map(|(stem, _)| format!("{stem}.ts"))
-        .unwrap_or_else(|| format!("{path}.ts"))
+        let mut files = Vec::new();
+        let mut source_maps = Vec::new();
+
+        for chunk in chunk_graph.chunks.iter() {
+            let filename = format!("{}.js", chunk.name);
+            let path = output_dir.join(&filename);
+            fs_err::write(&path, &chunk.code).map_err(|e| ArkdownError::Io(e.into()))?;
+            files.push((chunk.name.clone(), path));
+
+            if let Some(ref map) = chunk.source_map {
+                let value = Self::validate_real_source_map(map)?;
+                source_maps.push(ChunkSourceMap {
+                    chunk_name: chunk.name.clone(),
+                    generated_line_count: chunk.code.lines().count(),
+                    raw_map: map.as_str(),
+                    value,
+                });
+            }
+        }
+
+        let source_maps_path = if !source_maps.is_empty() {
+            let path = Self::source_maps_path(output_dir);
+            let content = if let Some(opts) = source_map_opts {
+                Self::hvigor_source_maps_content(&source_maps, opts)?
+            } else {
+                Self::source_maps_map_content(&source_maps)?
+            };
+            fs_err::write(&path, content).map_err(|e| ArkdownError::Io(e.into()))?;
+            Some(path)
+        } else {
+            None
+        };
+
+        Ok(WrittenOutput {
+            chunk_files: files,
+            source_maps_path,
+        })
+    }
+
+    fn validate_real_source_map(map: &str) -> Result<serde_json::Value, ArkdownError> {
+        let value: serde_json::Value = serde_json::from_str(map).map_err(|e| {
+            ArkdownError::Bundler(format!(
+                "source map is not valid JSON; keep sourceMaps.map unwritten until real map wiring is available: {e}"
+            ))
+        })?;
+        let Some(object) = value.as_object() else {
+            return Err(ArkdownError::Bundler(
+                "source map must be a JSON object generated from compile inputs".to_string(),
+            ));
+        };
+        if object.is_empty() {
+            return Err(ArkdownError::Bundler(
+                "refusing to emit fake empty sourceMaps.map".to_string(),
+            ));
+        }
+
+        let has_sources = value
+            .get("sources")
+            .and_then(|sources| sources.as_array())
+            .is_some_and(|sources| !sources.is_empty());
+        let has_mappings = value
+            .get("mappings")
+            .and_then(|mappings| mappings.as_str())
+            .is_some_and(|mappings| !mappings.is_empty());
+        if !has_sources && !has_mappings {
+            return Err(ArkdownError::Bundler(
+                "refusing to emit sourceMaps.map without compile input sources or mappings".to_string(),
+            ));
+        }
+
+        Ok(value)
+    }
+
+    fn source_maps_map_content(source_maps: &[ChunkSourceMap<'_>]) -> Result<String, ArkdownError> {
+        if let [source_map] = source_maps {
+            return Ok(source_map.raw_map.to_string());
+        }
+
+        let mut next_line_offset = 0usize;
+        let sections = source_maps
+            .iter()
+            .map(|source_map| {
+                let section = serde_json::json!({
+                    "offset": {
+                        "line": next_line_offset,
+                        "column": 0,
+                    },
+                    "map": source_map.value,
+                });
+                next_line_offset += source_map.generated_line_count + 1;
+                section
+            })
+            .collect::<Vec<_>>();
+        let chunk_names = source_maps
+            .iter()
+            .map(|source_map| source_map.chunk_name.as_str())
+            .collect::<Vec<_>>();
+
+        serde_json::to_string(&serde_json::json!({
+            "version": 3,
+            "file": MODULES_ABC_FILE_NAME,
+            "sections": sections,
+            "x_arkdown_chunks": chunk_names,
+        }))
+        .map_err(|e| ArkdownError::Bundler(format!("failed to serialize sourceMaps.map: {e}")))
+    }
+
+    fn hvigor_source_maps_content(
+        source_maps: &[ChunkSourceMap<'_>],
+        opts: &SourceMapOptions,
+    ) -> Result<String, ArkdownError> {
+        let entries = source_maps
+            .iter()
+            .map(|source_map| {
+                let mappings = source_map
+                    .value
+                    .get("mappings")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default();
+                let source_map_source_file = source_map
+                    .value
+                    .get("sources")
+                    .and_then(|sources| sources.as_array())
+                    .and_then(|sources| sources.first())
+                    .and_then(|source| source.as_str())
+                    .map(str::to_string);
+                HvigorSourceMapEntry {
+                    chunk_name: source_map.chunk_name.clone(),
+                    mappings: mappings.to_string(),
+                    source_file: None,
+                    source_map_source_file,
+                }
+            })
+            .collect::<Vec<_>>();
+        HvigorSourceMapOptions::from(opts).to_json(&entries)
+            .map_err(|e| ArkdownError::Bundler(format!("failed to serialize sourceMaps.map: {e}")))
+    }
 }
 
 #[cfg(test)]
@@ -266,7 +260,6 @@ mod tests {
     use super::*;
     use arkdown_core::ArkChunk;
     use index_vec::IndexVec;
-    use rustc_hash::FxHashMap;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_output_dir(test_name: &str) -> PathBuf {
@@ -290,9 +283,9 @@ mod tests {
     fn layout_helpers_point_to_loader_out_ets_artifacts() {
         let loader_out = Path::new("build/default/intermediates/loader_out/default/ets");
 
-        assert_eq!(modules_abc_path(loader_out), loader_out.join("modules.abc"));
+        assert_eq!(WrittenOutput::abc_path_in(loader_out), loader_out.join("modules.abc"));
         assert_eq!(
-            source_maps_path(loader_out),
+            WrittenOutput::source_maps_path_in(loader_out),
             loader_out.join("sourceMaps.map")
         );
     }
@@ -309,7 +302,7 @@ mod tests {
             ..ArkChunk::default()
         }]);
 
-        let written = write_output(&chunk_graph, &output_dir, None).expect("write output");
+        let written = WrittenOutput::write_output(&chunk_graph, &output_dir, None).expect("write output");
 
         let source_maps = output_dir.join("sourceMaps.map");
         assert_eq!(written.source_maps_path, Some(source_maps.clone()));
@@ -350,7 +343,7 @@ mod tests {
             },
         ]);
 
-        let written = write_output(&chunk_graph, &output_dir, None).expect("write output");
+        let written = WrittenOutput::write_output(&chunk_graph, &output_dir, None).expect("write output");
 
         let source_maps = written.source_maps_path.expect("sourceMaps.map path");
         let value: serde_json::Value = serde_json::from_str(
@@ -397,7 +390,7 @@ mod tests {
                 ..ArkChunk::default()
             },
         ]);
-        let mut chunk_source_files = HashMap::new();
+        let mut chunk_source_files = FxHashMap::default();
         chunk_source_files.insert(
             "EntryAbility".to_string(),
             "ets/entryability/EntryAbility.ets".to_string(),
@@ -410,7 +403,7 @@ mod tests {
             chunk_source_files,
         };
 
-        let written = write_output(&chunk_graph, &output_dir, Some(&opts)).expect("write output");
+        let written = WrittenOutput::write_output(&chunk_graph, &output_dir, Some(&opts)).expect("write output");
 
         let source_maps = written.source_maps_path.expect("sourceMaps.map path");
         let value: serde_json::Value = serde_json::from_str(
@@ -453,7 +446,7 @@ mod tests {
         }]);
 
         let err =
-            write_output(&chunk_graph, &output_dir, None).expect_err("empty source map rejected");
+            WrittenOutput::write_output(&chunk_graph, &output_dir, None).expect_err("empty source map rejected");
         assert!(err.to_string().contains("fake empty sourceMaps.map"));
 
         let _ = fs_err::remove_dir_all(output_dir);

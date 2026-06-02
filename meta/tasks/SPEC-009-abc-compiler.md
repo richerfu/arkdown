@@ -2,7 +2,7 @@
 
 **Crate**: `arkdown-abc`
 **Priority**: P0
-**Blocked by**: SPEC-005, SPEC-006
+**Blocked by**: SPEC-005
 **Blocks**: SPEC-012, SPEC-027
 
 ---

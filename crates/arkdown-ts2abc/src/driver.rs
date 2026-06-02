@@ -27,6 +27,13 @@ pub struct Ts2abcOptions {
     pub npm_module_entry_list: Option<PathBuf>,
 }
 
+impl Ts2abcOptions {
+    /// Compile this set of inputs using the pure-Rust ABC backend.
+    pub fn compile(self) -> Result<Ts2abcOutput, Ts2abcError> {
+        ArkdownAbcBackend.compile(&self)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ts2abcOutput {
     pub abc_path: PathBuf,
@@ -87,7 +94,7 @@ impl BytecodeBackend for ArkdownAbcBackend {
 }
 
 pub fn compile_to_abc(options: Ts2abcOptions) -> Result<Ts2abcOutput, Ts2abcError> {
-    ArkdownAbcBackend.compile(&options)
+    options.compile()
 }
 
 pub(crate) fn default_record_name(path: &Path) -> String {

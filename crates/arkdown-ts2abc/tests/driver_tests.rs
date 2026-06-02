@@ -7,7 +7,7 @@ fn compile_to_abc_uses_rust_backend_and_writes_panda_file() {
     let output = tmp.path().join("modules.abc");
     fs_err::write(&source, "(function () { var x = 1; return x; })();").unwrap();
 
-    let result = compile_to_abc(Ts2abcOptions {
+    let result = Ts2abcOptions {
         inputs: vec![Ts2abcInput {
             path: source,
             record_name: "entry|entry|1.0.0|src/main/ets/pages/Index".to_string(),
@@ -24,7 +24,7 @@ fn compile_to_abc_uses_rust_backend_and_writes_panda_file() {
         commonjs: false,
         cache_file: None,
         npm_module_entry_list: None,
-    })
+    }.compile()
     .unwrap();
 
     assert_eq!(result.abc_path, output);
@@ -40,7 +40,7 @@ fn compile_to_abc_accepts_module_source_without_iife_wrapper() {
     let output = tmp.path().join("modules.abc");
     fs_err::write(&source, "export const value = 1;").unwrap();
 
-    let result = compile_to_abc(Ts2abcOptions {
+    let result = Ts2abcOptions {
         inputs: vec![Ts2abcInput {
             path: source,
             record_name: "entry/main".into(),
@@ -57,7 +57,7 @@ fn compile_to_abc_accepts_module_source_without_iife_wrapper() {
         commonjs: false,
         cache_file: None,
         npm_module_entry_list: None,
-    })
+    }.compile()
     .unwrap();
 
     let bytes = fs_err::read(result.abc_path).unwrap();
@@ -77,7 +77,7 @@ fn compile_to_abc_lowers_npm_module_entry_list_records() {
     )
     .unwrap();
 
-    let result = compile_to_abc(Ts2abcOptions {
+    let result = Ts2abcOptions {
         inputs: vec![Ts2abcInput {
             path: source,
             record_name: "entry/main".into(),
@@ -94,7 +94,7 @@ fn compile_to_abc_lowers_npm_module_entry_list_records() {
         commonjs: false,
         cache_file: None,
         npm_module_entry_list: Some(entries),
-    })
+    }.compile()
     .unwrap();
 
     let bytes = fs_err::read(result.abc_path).unwrap();
@@ -121,7 +121,7 @@ fn check_minimal_hap_num_lit() {
     }
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("modules.abc");
-    compile_to_abc(Ts2abcOptions {
+    Ts2abcOptions {
         inputs: vec![
             Ts2abcInput {
                 path: ea_js,
@@ -147,7 +147,7 @@ fn check_minimal_hap_num_lit() {
         commonjs: false,
         cache_file: None,
         npm_module_entry_list: None,
-    })
+    }.compile()
     .unwrap();
     let data = std::fs::read(&out).unwrap();
     let num_lit = u32::from_le_bytes(data[0x2C..0x30].try_into().unwrap());

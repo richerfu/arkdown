@@ -1,23 +1,9 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::path::Path;
 
-use crate::meta_compute::find_pkg_root;
+pub use arkdown_core::PkgBriefInfo;
 
-/// Summary information about an ohpm package, keyed by package name.
-///
-/// Consumed by `arkdown-profile` when generating `loader.json`'s
-/// `pkgNameToPkgBriefInfo` map.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct PkgBriefInfo {
-    /// Absolute path to the directory containing `oh-package.json5`.
-    pub pkg_root: String,
-    /// The `name` field from `oh-package.json5`.
-    pub pkg_name: String,
-    /// Source root directories relative to `pkg_root` (default: `["src/main/ets"]`).
-    pub source_roots: Vec<String>,
-    /// Original (pre-remapping) source roots — empty for most packages.
-    pub original_source_roots: Vec<String>,
-}
+use crate::meta_compute::find_pkg_root;
 
 /// Build the `pkg_name → PkgBriefInfo` map from a list of resolved module IDs.
 ///
@@ -26,8 +12,8 @@ pub struct PkgBriefInfo {
 pub fn build_pkg_brief_info(
     module_paths: &[String],
     _project_root: &Path,
-) -> HashMap<String, PkgBriefInfo> {
-    let mut map: HashMap<String, PkgBriefInfo> = HashMap::new();
+) -> FxHashMap<String, PkgBriefInfo> {
+    let mut map: FxHashMap<String, PkgBriefInfo> = FxHashMap::default();
 
     for id in module_paths {
         if id.starts_with("@bundle:") || id.starts_with("@shared:") {
@@ -35,8 +21,8 @@ pub fn build_pkg_brief_info(
         }
 
         if let Some(pkg) = find_pkg_root(Path::new(id), 6) {
-            let pkg_name = pkg.name.clone().unwrap_or_else(|| {
-                pkg.pkg_path
+            let pkg_name = pkg.name().map(str::to_string).unwrap_or_else(|| {
+                pkg.pkg_path()
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("unknown")
@@ -44,7 +30,7 @@ pub fn build_pkg_brief_info(
             });
 
             map.entry(pkg_name.clone()).or_insert_with(|| PkgBriefInfo {
-                pkg_root: pkg.pkg_path.to_string_lossy().to_string(),
+                pkg_root: pkg.pkg_path().to_string_lossy().to_string(),
                 pkg_name,
                 source_roots: vec!["src/main/ets".to_string()],
                 original_source_roots: vec![],

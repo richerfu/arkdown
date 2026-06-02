@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-arkdown-core  = { path = "../arkdown-core" }
+arkdown-utils = { workspace = true }
+arkdown-core  = { workspace = true }
 thiserror     = { workspace = true }
 walkdir       = { workspace = true }
 rustc-hash    = { workspace = true }
@@ -16,4 +17,4 @@ oxc_codegen   = { workspace = true }
 oxc_minifier  = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = { workspace = true }

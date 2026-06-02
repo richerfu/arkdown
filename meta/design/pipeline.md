@@ -262,26 +262,6 @@ rolldown's `generate_chunks()` in `code_splitting.rs`: BitSet-based reachability
 
 ### hvigor behavior
 
-Legacy hvigor plugin stacks include `wrapperChunkPlugin` (`wrapper-chunk-plugin.js`) for
-CommonJS chunk registry rewriting:
-
-```javascript
-function renderChunk(code, chunk, options, {chunks}) {
-    const s = new MagicStringReplacement(code);
-    if (projectConfig.supportChunks) {
-        analyzeImportAndExport(this.parse, chunk, code, s, chunks);
-    }
-    s.appendLeft(0, "(function () {\n");
-    s.append("\n})()");
-    return { code: s.toString(), map: ... };
-}
-```
-
-When `supportChunks` is enabled:
-
-- `require('chunkId')` calls are replaced with `globalThis['chunkFileName_chunkHash']`
-- Each chunk exports via: `globalThis['fileName_chunkHash'] = globalThis['fileName_chunkHash'] || { export1: exports.export1, ... }`
-
 For the bytecode compiler entry itself, upstream `es2abc` accepts normal source files and
 uses `--module` to parse ECMAScript modules. Do not introduce an IIFE/CommonJS wrapper only
 to satisfy `es2abc`; keep this path aligned with the actual hvigor output for the module
@@ -289,7 +269,8 @@ being compiled.
 
 ### rolldown equivalent
 
-rolldown's `render_chunk` plugin hook. arkdown implements `arkdown-plugin-chunk-wrapper` as a built-in Rust plugin implementing this hook.
+rolldown's normal chunk rendering. arkdown keeps this stage as ESM and does not maintain a
+separate chunk-wrapper plugin.
 
 ### OHOS divergences
 
@@ -455,7 +436,7 @@ PreBuild               ──── GeneratePkgContextInfo, MergeProfile
     │       depends on: ProcessResource
     │
     ▼
-ArkCompile             ──── rollup (rolldown in arkdown) + wrapper-chunk-plugin
+ArkCompile             ──── rollup (rolldown in arkdown)
     │   depends on: GenerateLoaderJson, CompileResource, CreateBuildProfile
     │
     ├─► [rollup phases: load → transform → graph → link → chunk → renderChunk]
@@ -480,7 +461,7 @@ AssembleHap            ──── hook task (entry point for `hvigorw assemble
 ## Cross-Reference
 
 - [hvigorw-analysis.md](hvigorw-analysis.md) — full task dependency graph
-- [chunk-model.md](chunk-model.md) — legacy IIFE chunk architecture
+- [chunk-model.md](chunk-model.md) — legacy IIFE chunk-wrapper background
 - [abc-pipeline.md](abc-pipeline.md) — es2abc compilation details
 - [module-resolution.md](module-resolution.md) — OHOS module resolution
 - [plugins.md](plugins.md) — plugin inventory and Rust replacements

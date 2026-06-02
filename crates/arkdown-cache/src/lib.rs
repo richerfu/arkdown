@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -21,41 +21,37 @@ pub struct CompileEnv {
     pub cache_path: String,
 }
 
-/// Compute the `compileEnv` string from an [`ArkdownConfig`] and a cache path.
-///
-/// The returned string is the `#`-joined representation used as the cache
-/// discriminator, matching hvigor's `getCompileEnv()` implementation.
-pub fn compute_compile_env(config: &ArkdownConfig, cache_path: &str) -> String {
-    let obfuscation_enabled = config
-        .product
-        .build_option
-        .ark_options
-        .as_ref()
-        .and_then(|o| o.obfuscation.as_ref())
-        .map(|o| o.enable_obfuscation)
-        .unwrap_or(false);
-    let module_type = config
-        .modules
-        .first()
-        .map(|m| format!("{:?}", m.module_type))
-        .unwrap_or_default();
-    CompileEnv {
-        compile_sdk_version: config.sdk_config.compile_sdk_version.clone(),
-        compatible_sdk_version: config.product.compatible_sdk_version.clone(),
-        runtime_os: config.product.runtime_os.clone(),
-        ets_loader_path: config
-            .sdk_config
-            .ets_loader_path
-            .to_string_lossy()
-            .into_owned(),
-        obfuscation_enabled,
-        module_type,
-        cache_path: cache_path.to_string(),
-    }
-    .to_key_string()
-}
-
 impl CompileEnv {
+    /// Build a `CompileEnv` from an [`ArkdownConfig`] and cache path.
+    pub fn from_config(config: &ArkdownConfig, cache_path: &str) -> Self {
+        let obfuscation_enabled = config
+            .product
+            .build_option
+            .ark_options
+            .as_ref()
+            .and_then(|o| o.obfuscation.as_ref())
+            .map(|o| o.enable_obfuscation)
+            .unwrap_or(false);
+        let module_type = config
+            .modules
+            .first()
+            .map(|m| format!("{:?}", m.module_type))
+            .unwrap_or_default();
+        CompileEnv {
+            compile_sdk_version: config.sdk_config.compile_sdk_version.clone(),
+            compatible_sdk_version: config.product.compatible_sdk_version.clone(),
+            runtime_os: config.product.runtime_os.clone(),
+            ets_loader_path: config
+                .sdk_config
+                .ets_loader_path
+                .to_string_lossy()
+                .into_owned(),
+            obfuscation_enabled,
+            module_type,
+            cache_path: cache_path.to_string(),
+        }
+    }
+
     /// Produce the `#`-joined key string used for cache invalidation.
     pub fn to_key_string(&self) -> String {
         format!(
@@ -154,7 +150,7 @@ const COMPILE_ENV_FILE: &str = ".compile_env";
 pub struct BuildCache {
     cache_dir: PathBuf,
     /// In-memory store for this build session (populated on first access).
-    memory: HashMap<String, CachedEntry>,
+    memory: FxHashMap<String, CachedEntry>,
 }
 
 impl BuildCache {
@@ -163,7 +159,7 @@ impl BuildCache {
     pub fn new(cache_dir: PathBuf) -> Self {
         BuildCache {
             cache_dir,
-            memory: HashMap::new(),
+            memory: FxHashMap::default(),
         }
     }
 
@@ -199,7 +195,7 @@ impl BuildCache {
 
     /// Insert or update a cache entry both in memory and on disk.
     pub fn insert(&mut self, entry: CachedEntry) -> Result<(), CacheError> {
-        let file_name = format!("{}.json", hash_id(&entry.id));
+        let file_name = format!("{}.json", Self::hash_id(&entry.id));
         let cache_file = self.cache_dir.join(file_name);
         fs_err::create_dir_all(&self.cache_dir)?;
         let json = serde_json::to_string_pretty(&entry)?;
@@ -256,6 +252,10 @@ impl BuildCache {
     pub fn is_empty(&self) -> bool {
         self.memory.is_empty()
     }
+
+    fn hash_id(id: &str) -> String {
+        format!("{:016x}", arkdown_utils::fnv1a_hash(id))
+    }
 }
 
 /// Compute a deterministic content hash from source text.
@@ -263,22 +263,10 @@ impl BuildCache {
 /// Uses FNV-1a 64-bit to avoid adding a SHA-256 dependency; the hex string
 /// is stored in [`CacheKey::content_hash`].
 pub fn compute_content_hash(content: &str) -> String {
-    format!("{:016x}", fnv1a_hash(content))
+    format!("{:016x}", arkdown_utils::fnv1a_hash(content))
 }
 
 /// Derive a stable file-system safe name from a module ID.
-fn hash_id(id: &str) -> String {
-    format!("{:016x}", fnv1a_hash(id))
-}
-
-fn fnv1a_hash(s: &str) -> u64 {
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in s.bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    h
-}
 
 #[cfg(test)]
 mod tests {

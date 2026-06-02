@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -141,14 +141,13 @@ async fn test_build_minimal_hap_fixture() {
                 project_root: project_root.clone(),
                 sdk_api_dirs: vec![],
                 sdk_kits_dirs: vec![],
-                pkg_name_to_pkg_info: HashMap::new(),
+                pkg_name_to_pkg_info: FxHashMap::default(),
                 use_normalized_ohm_url: false,
                 case_sensitive_check: false,
                 oh_modules_roots: vec![
                     module.src_path.join("oh_modules"),
                     project_root.join("oh_modules"),
                 ],
-                module_src_roots: vec![module.src_path.join("src/main/ets")],
             },
             project_root.clone(),
             false,
@@ -345,22 +344,22 @@ fn make_minimal_loader_json(
     let root_str = module_root.to_string_lossy().into_owned();
     let out_str = output_dir.to_string_lossy().into_owned();
     LoaderJson {
-        module_path_map: HashMap::new(),
+        module_path_map: Default::default(),
         compile_mode: "esmodule".to_string(),
         project_root_path: root_str.clone(),
         node_modules_path: format!("{}/node_modules", root_str),
-        byte_code_har_info: HashMap::new(),
+        byte_code_har_info: FxHashMap::default(),
         declaration_entry: vec![],
         module_name: "entry".to_string(),
-        hsp_name_ohm_map: HashMap::new(),
-        har_name_ohm_map: HashMap::new(),
+        hsp_name_ohm_map: FxHashMap::default(),
+        har_name_ohm_map: FxHashMap::default(),
         package_manager_type: "ohpm".to_string(),
         hvigor_compile_entry: vec![],
         other_compile_files: vec![],
-        dynamic_import_lib_info: HashMap::new(),
+        dynamic_import_lib_info: Default::default(),
         router_map: vec![],
-        hsp_resources_map: HashMap::new(),
-        update_version_info: HashMap::new(),
+        hsp_resources_map: FxHashMap::default(),
+        update_version_info: FxHashMap::default(),
         an_build_out_put: format!("{}/an", root_str),
         an_build_mode: "type".to_string(),
         non_entry_importees: vec![],
@@ -374,7 +373,7 @@ fn make_minimal_loader_json(
         use_normalized_ohm_url: false,
         api_version: 12,
         fallback_an_build: false,
-        pkg_name_to_pkg_brief_info: HashMap::new(),
+        pkg_name_to_pkg_brief_info: FxHashMap::default(),
         workers: vec![],
     }
 }

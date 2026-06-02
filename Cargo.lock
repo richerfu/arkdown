@@ -144,7 +144,6 @@ dependencies = [
  "arkdown-config",
  "arkdown-core",
  "arkdown-loader",
- "arkdown-plugin-chunk-wrapper",
  "arkdown-plugin-duplicate-check",
  "arkdown-plugin-ets-transform",
  "arkdown-plugin-json5",
@@ -179,6 +178,7 @@ dependencies = [
 name = "arkdown-abc"
 version = "0.1.0"
 dependencies = [
+ "arkdown-core",
  "fs-err",
  "hex",
  "oxc_allocator 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
@@ -187,6 +187,7 @@ dependencies = [
  "oxc_parser 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
  "oxc_span 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
  "rayon",
+ "rustc-hash",
  "serde",
  "serde_json",
  "sha2",
@@ -200,7 +201,9 @@ name = "arkdown-cache"
 version = "0.1.0"
 dependencies = [
  "arkdown-core",
+ "arkdown-utils",
  "fs-err",
+ "rustc-hash",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -218,7 +221,6 @@ dependencies = [
  "arkdown-core",
  "arkdown-obfuscate",
  "arkdown-pack",
- "arkdown-plugin-chunk-wrapper",
  "arkdown-plugin-duplicate-check",
  "arkdown-plugin-ets-transform",
  "arkdown-plugin-json5",
@@ -230,6 +232,7 @@ dependencies = [
  "arkdown-resource",
  "arkdown-sign",
  "arkdown-ts2abc",
+ "arkdown-utils",
  "arkdown-watcher",
  "clap",
  "fs-err",
@@ -255,6 +258,7 @@ dependencies = [
  "arkdown-core",
  "fs-err",
  "json5",
+ "rustc-hash",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -269,6 +273,7 @@ dependencies = [
  "index_vec",
  "rustc-hash",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
 ]
 
@@ -285,8 +290,10 @@ dependencies = [
  "oxc_parser 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
  "oxc_span 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
  "rayon",
+ "rustc-hash",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -294,6 +301,7 @@ name = "arkdown-obfuscate"
 version = "0.1.0"
 dependencies = [
  "arkdown-core",
+ "arkdown-utils",
  "oxc_allocator 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
  "oxc_ast 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
  "oxc_codegen 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
@@ -311,6 +319,7 @@ name = "arkdown-pack"
 version = "0.1.0"
 dependencies = [
  "arkdown-core",
+ "arkdown-utils",
  "fs-err",
  "serde",
  "serde_json",
@@ -321,24 +330,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "arkdown-plugin-chunk-wrapper"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "oxc_allocator 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
- "oxc_ast 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
- "oxc_parser 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
- "oxc_span 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
- "rolldown_plugin",
-]
-
-[[package]]
 name = "arkdown-plugin-duplicate-check"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "rolldown_common",
  "rolldown_plugin",
+ "rustc-hash",
 ]
 
 [[package]]
@@ -347,6 +345,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arkdown-core",
+ "arkdown-utils",
  "oxc_allocator 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
  "oxc_ast 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
  "oxc_ast_visit 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
@@ -358,7 +357,9 @@ dependencies = [
  "oxc_transformer 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
  "rolldown_plugin",
  "rolldown_sourcemap",
+ "rustc-hash",
  "serde_json",
+ "string_wizard",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -373,6 +374,7 @@ dependencies = [
  "fs-err",
  "rolldown_common",
  "rolldown_plugin",
+ "rustc-hash",
  "serde",
  "serde_json",
  "tempfile",
@@ -386,7 +388,10 @@ dependencies = [
  "anyhow",
  "fs-err",
  "json5",
- "rolldown_common",
+ "oxc_allocator 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
+ "oxc_ast 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
+ "oxc_codegen 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
+ "oxc_span 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
  "rolldown_plugin",
  "serde_json",
  "tempfile",
@@ -398,10 +403,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arkdown-core",
+ "arkdown-resolver",
  "fs-err",
  "json5",
  "rolldown_common",
  "rolldown_plugin",
+ "rustc-hash",
  "serde",
  "serde_json",
  "tempfile",
@@ -428,6 +435,7 @@ dependencies = [
 name = "arkdown-plugin-router-map"
 version = "0.1.0"
 dependencies = [
+ "arkdown-utils",
  "tempfile",
 ]
 
@@ -445,12 +453,16 @@ version = "0.1.0"
 dependencies = [
  "arkdown-config",
  "arkdown-core",
+ "arkdown-utils",
  "fs-err",
+ "indexmap",
  "json5",
+ "rustc-hash",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
@@ -458,9 +470,11 @@ name = "arkdown-resolver"
 version = "0.1.0"
 dependencies = [
  "arkdown-core",
+ "arkdown-utils",
  "fs-err",
  "json5",
  "oxc_resolver",
+ "rustc-hash",
  "serde",
  "serde_json",
  "tempfile",
@@ -472,6 +486,7 @@ name = "arkdown-resource"
 version = "0.1.0"
 dependencies = [
  "fs-err",
+ "rustc-hash",
  "serde",
  "serde_json",
  "tempfile",
@@ -506,6 +521,7 @@ dependencies = [
  "spki",
  "tempfile",
  "thiserror 2.0.18",
+ "tracing",
  "x509-cert",
  "zip",
 ]
@@ -522,6 +538,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "arkdown-utils"
+version = "0.1.0"
+
+[[package]]
 name = "arkdown-watcher"
 version = "0.1.0"
 dependencies = [
@@ -529,8 +549,10 @@ dependencies = [
  "crossbeam-channel",
  "fs-err",
  "notify",
+ "rustc-hash",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

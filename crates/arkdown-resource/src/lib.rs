@@ -14,6 +14,7 @@
 //! let compiler = ResourceCompiler::new(ResourceCompileConfig {
 //!     package_name: "com.example.myapp".into(),
 //!     module_name: "entry".into(),
+//!     module_names: vec![],
 //!     device_types: vec!["phone".into()],
 //!     is_debug: false,
 //! });
@@ -33,9 +34,12 @@ pub mod profile;
 pub mod scan;
 pub mod table;
 
+mod ids;
+mod layout;
+
 // Re-export the primary public API at crate root.
 pub use compiler::{
     CompiledEntry, ResourceCompileConfig, ResourceCompileInput, ResourceCompileOutput,
-    ResourceCompiler, ResourceInfo,
+    ResourceCompiler, ResourceInfo, ResourceTypeCode,
 };
 pub use error::ResourceError;

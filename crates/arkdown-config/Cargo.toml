@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-arkdown-core = { path = "../arkdown-core" }
+rustc-hash = { workspace = true }
+arkdown-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 json5 = { workspace = true }

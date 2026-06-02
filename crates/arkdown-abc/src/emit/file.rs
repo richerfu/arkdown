@@ -1,12 +1,16 @@
+use crate::emit::bytecode::{
+    assign_inline_cache_slots, collect_bytecode_string_indices, patch_bytecode_index_operands,
+};
+use crate::emit::debug_info::{
+    append_line_ops_with_mid_locals, debug_scope_start_pc, encode_debug_info_with_cp,
+    encode_sleb128_bytes, infer_func_main_class_local_events,
+};
 use crate::emit::record::{
     encode_code_item, inline_string, uleb128, ClassRecord, FieldRecord, FieldValue, MethodKind,
-    MethodRecord, FIELD_OWNER_CLASS_IDX,
+    FIELD_OWNER_CLASS_IDX,
 };
 use crate::emit::strings::StringTable;
-
-const MANDATORY_PARAM_THIS_REG: u8 = 2;
-const LNP_LINE_BASE: i32 = -4;
-const LNP_LINE_RANGE: u32 = 15;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 // ── LiteralArray types (Task 1) ───────────────────────────────────────────────
 
@@ -37,6 +41,54 @@ pub enum LiteralEntry {
 pub struct LiteralArray {
     /// Entries serialised into the literal-array section.
     pub entries: Vec<LiteralEntry>,
+}
+
+impl LiteralArray {
+    /// Returns `true` if any entry is a `TaggedMethodAffiliate`.
+    ///
+    /// Used by both the emit stage and the IR record-layout stage to classify
+    /// literal arrays that contain method-affiliate metadata.
+    pub fn has_method_affiliate(&self) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| matches!(entry, LiteralEntry::TaggedMethodAffiliate(_)))
+    }
+
+    /// Returns `true` when this literal array is page route metadata.
+    ///
+    /// Heuristic: contains a `TaggedString("pageFullPath")` entry.
+    pub(super) fn is_page_route_metadata(&self) -> bool {
+        self.entries.iter().any(|entry| {
+            matches!(
+                entry,
+                LiteralEntry::TaggedString(value) | LiteralEntry::RawString(value) if value == "pageFullPath"
+            )
+        })
+    }
+
+    /// Returns `true` when this literal array is a `this` object stub.
+    pub(super) fn is_this_object(&self) -> bool {
+        matches!(
+            self.entries.as_slice(),
+            [
+                LiteralEntry::TaggedInteger(1),
+                LiteralEntry::TaggedString(name),
+                ..
+            ] if name == "this"
+        )
+    }
+
+    /// Returns `true` when this literal array is a page `Index` stub.
+    pub(super) fn is_page_index_stub(&self) -> bool {
+        matches!(
+            self.entries.as_slice(),
+            [
+                LiteralEntry::TaggedInteger(1),
+                LiteralEntry::TaggedString(name),
+                ..
+            ] if name == "Index"
+        )
+    }
 }
 
 impl LiteralEntry {
@@ -105,16 +157,6 @@ pub struct AbcFile {
     /// used in the `DefineClassWithBuffer` opcode.  The section is appended
     /// to the file after all CodeItems.
     pub literal_arrays: Vec<LiteralArray>,
-}
-
-fn sdk_native_field(name: &str) -> FieldRecord {
-    FieldRecord {
-        name: name.to_string(),
-        class_idx: FIELD_OWNER_CLASS_IDX,
-        type_idx: 0,
-        access_flags: 0,
-        value: Some(FieldValue::U8(0)),
-    }
 }
 
 impl AbcFile {
@@ -220,7 +262,7 @@ impl AbcFile {
                 source_lang: SOURCE_LANG_ECMASCRIPT,
                 source_file: None,
                 module_requests: vec![],
-                fields: vec![sdk_native_field("@native.ohos.app")],
+                fields: vec![Self::sdk_native_field("@native.ohos.app")],
             },
             ClassRecord {
                 name: "L@ohos.curves;".to_string(),
@@ -233,7 +275,7 @@ impl AbcFile {
                 source_lang: SOURCE_LANG_ECMASCRIPT,
                 source_file: None,
                 module_requests: vec![],
-                fields: vec![sdk_native_field("@native.ohos.curves")],
+                fields: vec![Self::sdk_native_field("@native.ohos.curves")],
             },
             ClassRecord {
                 name: "L@ohos.matrix4;".to_string(),
@@ -246,7 +288,7 @@ impl AbcFile {
                 source_lang: SOURCE_LANG_ECMASCRIPT,
                 source_file: None,
                 module_requests: vec![],
-                fields: vec![sdk_native_field("@native.ohos.matrix4")],
+                fields: vec![Self::sdk_native_field("@native.ohos.matrix4")],
             },
             ClassRecord {
                 name: "L@system.app;".to_string(),
@@ -259,7 +301,7 @@ impl AbcFile {
                 source_lang: SOURCE_LANG_ECMASCRIPT,
                 source_file: None,
                 module_requests: vec![],
-                fields: vec![sdk_native_field("@native.system.app")],
+                fields: vec![Self::sdk_native_field("@native.system.app")],
             },
             ClassRecord {
                 name: "L@system.curves;".to_string(),
@@ -272,7 +314,7 @@ impl AbcFile {
                 source_lang: SOURCE_LANG_ECMASCRIPT,
                 source_file: None,
                 module_requests: vec![],
-                fields: vec![sdk_native_field("@native.system.curves")],
+                fields: vec![Self::sdk_native_field("@native.system.curves")],
             },
             ClassRecord {
                 name: "L@system.matrix4;".to_string(),
@@ -285,7 +327,7 @@ impl AbcFile {
                 source_lang: SOURCE_LANG_ECMASCRIPT,
                 source_file: None,
                 module_requests: vec![],
-                fields: vec![sdk_native_field("@native.system.matrix4")],
+                fields: vec![Self::sdk_native_field("@native.system.matrix4")],
             },
             ClassRecord {
                 name: "L@system.router;".to_string(),
@@ -298,7 +340,7 @@ impl AbcFile {
                 source_lang: SOURCE_LANG_ECMASCRIPT,
                 source_file: None,
                 module_requests: vec![],
-                fields: vec![sdk_native_field("@native.system.router")],
+                fields: vec![Self::sdk_native_field("@native.system.router")],
             },
         ];
 
@@ -337,7 +379,7 @@ impl AbcFile {
         // Physical ClassItem order follows libpandafile ItemContainer insertion:
         // annotation records, user records, then fixed SDK stubs.  The top-level
         // class index is sorted separately below.
-        let record_names: std::collections::HashSet<&str> = self
+        let record_names: FxHashSet<&str> = self
             .records
             .iter()
             .map(|record| record.name.as_str())
@@ -353,7 +395,7 @@ impl AbcFile {
             .cloned()
             .chain(self.records.iter().cloned())
             .chain(sdk_stubs.iter().cloned())
-            .map(class_with_upstream_method_order)
+            .map(|cls| cls.with_upstream_method_order())
             .collect();
         let all_classes: Vec<&ClassRecord> = all_classes_owned.iter().collect();
         let mut class_index_classes = all_classes.clone();
@@ -365,7 +407,7 @@ impl AbcFile {
             .iter()
             .map(|class| {
                 method_index_string_refs(class, &self.strings).len()
-                    + method_index_method_indices(class).len()
+                    + class.method_pool_entry_indices().len()
                     + class.literal_indices.len()
             })
             .sum::<usize>() as u32;
@@ -415,7 +457,7 @@ impl AbcFile {
         };
 
         // Build a map from class name → ClassItem file offset (for the class index).
-        let name_to_class_offset: std::collections::HashMap<&str, u32> = all_classes
+        let name_to_class_offset: FxHashMap<&str, u32> = all_classes
             .iter()
             .zip(class_item_offsets.iter())
             .map(|(c, &off)| (c.name.as_str(), off))
@@ -440,8 +482,7 @@ impl AbcFile {
 
         let mut bytecode_string_offsets = vec![0u32; self.strings.len()];
         let mut emitted_bytecode_strings = vec![false; self.strings.len()];
-        let mut supplemental_string_offsets =
-            std::collections::HashMap::<(usize, String), u32>::new();
+        let mut supplemental_string_offsets = FxHashMap::<(usize, String), u32>::default();
         let mut method_string_offsets: Vec<Vec<u32>> = all_classes
             .iter()
             .map(|class| vec![0; class.methods.len()])
@@ -478,7 +519,7 @@ impl AbcFile {
                 class_pool_strings.push(PoolStringItem::MethodIndex(string_ref));
             }
             let ohm_url = &class_ohm_urls[class_idx];
-            for method_idx in method_index_method_indices(class) {
+            for method_idx in class.method_pool_entry_indices() {
                 class_pool_strings.push(PoolStringItem::FullMethodName(format!(
                     "{ohm_url}.{}",
                     class.methods[method_idx].name
@@ -634,7 +675,7 @@ impl AbcFile {
         let slot_number_str_off = string_items.get_or_create("SlotNumber");
         let mut cur = string_items.cur();
 
-        let mut method_name_offsets = std::collections::HashMap::new();
+        let mut method_name_offsets = FxHashMap::default();
         for (class, &class_off) in all_classes.iter().zip(class_item_offsets.iter()) {
             for (method, method_off) in class
                 .methods
@@ -652,7 +693,7 @@ impl AbcFile {
         // in the top-level class index but not in this typed class table.
         let mut index_class_offsets = Vec::with_capacity(index_class_count as usize);
         index_class_offsets.extend_from_slice(&[2, 6]);
-        let mut name_to_index_class_idx = std::collections::HashMap::new();
+        let mut name_to_index_class_idx = FxHashMap::default();
         for (i, class) in std::iter::once(&annotation_stubs[1])
             .chain(self.records.iter())
             .chain(sdk_stubs.iter())
@@ -667,9 +708,9 @@ impl AbcFile {
         }
         debug_assert_eq!(index_class_offsets.len() as u32, index_class_count);
 
-        let method_pool_layouts = build_method_pool_layouts(&all_classes, &self.strings);
-        let literal_emit_order = build_literal_emit_order(&all_classes, self.literal_arrays.len());
-        let literal_header_order = build_literal_header_order(&all_classes, &self.literal_arrays);
+        let method_pool_layouts = Self::build_method_pool_layouts(&all_classes, &self.strings);
+        let literal_emit_order = Self::build_literal_emit_order(&all_classes, self.literal_arrays.len());
+        let literal_header_order = Self::build_literal_header_order(&all_classes, &self.literal_arrays);
 
         // ── 3. Pre-compute LiteralArray section bytes ─────────────────────────
         //
@@ -1290,205 +1331,27 @@ impl AbcFile {
         file[0x10..0x14].copy_from_slice(&file_size.to_le_bytes());
 
         // ── Compute Adler-32 checksum over file[12..] and patch offset 0x08 ───
-        let checksum = adler32(&file[12..]);
+        let checksum = Self::adler32(&file[12..]);
         file[0x08..0x0C].copy_from_slice(&checksum.to_le_bytes());
 
         file
     }
 }
 
-fn patch_bytecode_index_operands(
-    bytecode: &[u8],
-    string_pool_indices: &std::collections::HashMap<u16, u16>,
-    literal_pool_indices: &std::collections::HashMap<u16, u16>,
-    ctor_pool_index: u16,
-    definefunc_pool_indices: &[u16],
-    definemethod_pool_indices_by_name: &std::collections::HashMap<u16, u16>,
-    definefunc_cursor: &mut usize,
-) -> Vec<u8> {
-    let mut patched = bytecode.to_vec();
-    let mut pos = 0;
-    while pos < patched.len() {
-        let Some(opcode) = patched.get(pos).copied() else {
-            break;
-        };
-        match opcode {
-            0x3e if pos + 2 < patched.len() => {
-                rewrite_u16_operand(&mut patched, pos + 1, string_pool_indices);
-                pos += 3;
-                continue;
-            }
-            0x3f | 0x40 | 0x42 if pos + 3 < patched.len() => {
-                rewrite_u16_operand(&mut patched, pos + 2, string_pool_indices);
-                pos += 4;
-                continue;
-            }
-            0x43 | 0x7a if pos + 4 < patched.len() => {
-                rewrite_u16_operand(&mut patched, pos + 2, string_pool_indices);
-                pos += 5;
-                continue;
-            }
-            0xfe if patched.get(pos + 1) == Some(&0x09) && pos + 3 < patched.len() => {
-                rewrite_u16_operand(&mut patched, pos + 2, string_pool_indices);
-                pos += 4;
-                continue;
-            }
-            _ => {}
-        }
-        if opcode == 0x33 && pos + 4 < patched.len() {
-            let method_pos = pos + 2;
-            let method_index = if let Some(&index) = definefunc_pool_indices.get(*definefunc_cursor)
-            {
-                *definefunc_cursor += 1;
-                index
-            } else {
-                ctor_pool_index
-            };
-            patched[method_pos..method_pos + 2].copy_from_slice(&method_index.to_le_bytes());
-            pos += 5;
-            continue;
-        }
-        if opcode == 0x34 && pos + 4 < patched.len() {
-            let method_pos = pos + 2;
-            let method_name_id = u16::from_le_bytes([patched[method_pos], patched[method_pos + 1]]);
-            if let Some(&method_index) = definemethod_pool_indices_by_name.get(&method_name_id) {
-                patched[method_pos..method_pos + 2].copy_from_slice(&method_index.to_le_bytes());
-            }
-            pos += 5;
-            continue;
-        }
-        if opcode == 0x35 && pos + 8 < patched.len() {
-            let ctor_pos = pos + 2;
-            patched[ctor_pos..ctor_pos + 2].copy_from_slice(&ctor_pool_index.to_le_bytes());
-            let buf_pos = pos + 4;
-            let old_buf = u16::from_le_bytes([patched[buf_pos], patched[buf_pos + 1]]);
-            let new_buf = literal_pool_indices
-                .get(&old_buf)
-                .copied()
-                .unwrap_or(old_buf);
-            patched[buf_pos..buf_pos + 2].copy_from_slice(&new_buf.to_le_bytes());
-            pos += 9;
-            continue;
-        }
-        if opcode == 0xb6 && pos + 3 < patched.len() {
-            let literal_pos = pos + 2;
-            let old_literal = u16::from_le_bytes([patched[literal_pos], patched[literal_pos + 1]]);
-            let new_literal = literal_pool_indices
-                .get(&old_literal)
-                .copied()
-                .unwrap_or(old_literal);
-            patched[literal_pos..literal_pos + 2].copy_from_slice(&new_literal.to_le_bytes());
-            pos += 4;
-            continue;
-        }
-        if opcode == 0x07 && pos + 3 < patched.len() {
-            let literal_pos = pos + 2;
-            let old_literal = u16::from_le_bytes([patched[literal_pos], patched[literal_pos + 1]]);
-            let new_literal = literal_pool_indices
-                .get(&old_literal)
-                .copied()
-                .unwrap_or(old_literal);
-            patched[literal_pos..literal_pos + 2].copy_from_slice(&new_literal.to_le_bytes());
-            pos += 4;
-            continue;
-        }
-        pos += instruction_len(opcode, patched.get(pos + 1).copied());
-    }
-    patched
-}
-
-fn assign_inline_cache_slots(bytecode: &mut [u8]) -> u32 {
-    let mut current_slot = 0u32;
-    let mut pos = 0usize;
-    while pos < bytecode.len() {
-        let Some(opcode) = bytecode.get(pos).copied() else {
-            break;
-        };
-        if let Some((operand_pos, inc)) = inline_cache_slot_operand(bytecode, pos, opcode) {
-            if let Some(slot) = bytecode.get_mut(operand_pos) {
-                *slot = current_slot.min(u8::MAX as u32) as u8;
-            }
-            current_slot += inc as u32;
-        }
-        pos += instruction_len(opcode, bytecode.get(pos + 1).copied()).max(1);
-    }
-    current_slot
-}
-
-fn inline_cache_slot_operand(bytecode: &[u8], pos: usize, opcode: u8) -> Option<(usize, u8)> {
-    if opcode == 0xfb {
-        let sub_opcode = bytecode.get(pos + 1).copied()?;
-        let operand_pos = pos + 2;
-        if operand_pos >= bytecode.len() {
-            return None;
-        }
-        let inc = match sub_opcode {
-            // callruntime.istrue / callruntime.isfalse are one-slot IC users.
-            0x13 | 0x14 => 1,
-            _ => return None,
-        };
-        return Some((operand_pos, inc));
-    }
-
-    let operand_pos = pos + 1;
-    if operand_pos >= bytecode.len() {
-        return None;
-    }
-    let inc = match opcode {
-        // one_slot IC instructions, from arkcompiler_runtime_core/isa/isa.yaml.
-        0x05
-        | 0x07
-        | 0x0a..=0x1a
-        | 0x1f..=0x22
-        | 0x25
-        | 0x27
-        | 0x28
-        | 0x34
-        | 0x33
-        | 0x35
-        | 0x3f
-        | 0x40 => 1,
-        // two_slot IC instructions.
-        0x08 | 0x1c | 0x29..=0x32 | 0x42 | 0x43 | 0x73 | 0x79 | 0x7a | 0xb9 => 2,
-        _ => return None,
-    };
-    Some((operand_pos, inc))
-}
-
-fn class_with_upstream_method_order(mut class: ClassRecord) -> ClassRecord {
-    class.methods.sort_by(|a, b| {
-        let a_len = a.name.encode_utf16().count();
-        let b_len = b.name.encode_utf16().count();
-        a_len.cmp(&b_len).then_with(|| a.name.cmp(&b.name))
-    });
-    class
-}
-
-fn rewrite_u16_operand(
-    patched: &mut [u8],
-    operand_pos: usize,
-    pool_indices: &std::collections::HashMap<u16, u16>,
-) {
-    let old = u16::from_le_bytes([patched[operand_pos], patched[operand_pos + 1]]);
-    if let Some(&new) = pool_indices.get(&old) {
-        patched[operand_pos..operand_pos + 2].copy_from_slice(&new.to_le_bytes());
-    }
-}
-
 #[derive(Debug, Default)]
 struct MethodPoolLayout {
     string_refs: Vec<MethodIndexStringRef>,
-    string_pool_indices: std::collections::HashMap<u16, u16>,
-    literal_pool_indices: std::collections::HashMap<u16, u16>,
-    definemethod_pool_indices_by_name: std::collections::HashMap<u16, u16>,
+    string_pool_indices: FxHashMap<u16, u16>,
+    literal_pool_indices: FxHashMap<u16, u16>,
+    definemethod_pool_indices_by_name: FxHashMap<u16, u16>,
     method_indices: Vec<usize>,
     definefunc_pool_indices: Vec<u16>,
     ctor_pool_index: u16,
 }
 
-struct StringItemWriter {
+pub(super) struct StringItemWriter {
     cur: u32,
-    offsets: std::collections::HashMap<String, u32>,
+    offsets: FxHashMap<String, u32>,
     items: Vec<Vec<u8>>,
 }
 
@@ -1496,7 +1359,7 @@ impl StringItemWriter {
     fn new(start: u32) -> Self {
         Self {
             cur: start,
-            offsets: std::collections::HashMap::new(),
+            offsets: FxHashMap::default(),
             items: Vec::new(),
         }
     }
@@ -1513,7 +1376,7 @@ impl StringItemWriter {
         off
     }
 
-    fn id_of(&self, value: &str) -> Option<u32> {
+    pub(super) fn id_of(&self, value: &str) -> Option<u32> {
         self.offsets.get(value).copied()
     }
 
@@ -1562,186 +1425,15 @@ impl PoolStringItem {
     }
 }
 
-fn build_method_pool_layouts(
-    classes: &[&ClassRecord],
-    strings: &StringTable,
-) -> Vec<MethodPoolLayout> {
-    let mut next_pool_index = 0u16;
-    let mut global_string_pool_indices = std::collections::HashMap::<u16, u16>::new();
-    classes
-        .iter()
-        .map(|class| {
-            let mut layout = MethodPoolLayout::default();
-            let mut all_bytecode_string_indices = Vec::new();
-            for method in &class.methods {
-                collect_bytecode_string_indices(&method.bytecode, &mut all_bytecode_string_indices);
-            }
-            all_bytecode_string_indices.sort_unstable();
-            all_bytecode_string_indices.dedup();
-
-            layout.string_refs = method_index_string_refs(class, strings);
-            for string_ref in &layout.string_refs {
-                if let MethodIndexStringRef::Bytecode(string_idx) = string_ref {
-                    let string_idx = *string_idx as u16;
-                    layout
-                        .string_pool_indices
-                        .insert(string_idx, next_pool_index);
-                    global_string_pool_indices
-                        .entry(string_idx)
-                        .or_insert(next_pool_index);
-                }
-                next_pool_index = next_pool_index.saturating_add(1);
-            }
-            for string_idx in all_bytecode_string_indices {
-                let string_idx = string_idx as u16;
-                if layout.string_pool_indices.contains_key(&string_idx) {
-                    continue;
-                }
-                if let Some(&pool_index) = global_string_pool_indices.get(&string_idx) {
-                    layout.string_pool_indices.insert(string_idx, pool_index);
-                }
-            }
-
-            layout.method_indices = method_index_method_indices(class);
-            for &method_idx in &layout.method_indices {
-                let pool_index = next_pool_index;
-                let method = &class.methods[method_idx];
-                if method.kind == MethodKind::Constructor {
-                    layout.ctor_pool_index = pool_index;
-                } else if method.kind == MethodKind::Anonymous {
-                    layout.definefunc_pool_indices.push(pool_index);
-                }
-                if let Some(name_id) = strings.id_of(&method.name) {
-                    layout
-                        .definemethod_pool_indices_by_name
-                        .insert(name_id as u16, pool_index);
-                }
-                next_pool_index = next_pool_index.saturating_add(1);
-            }
-
-            for &literal_idx in &class.literal_indices {
-                layout
-                    .literal_pool_indices
-                    .insert(literal_idx as u16, next_pool_index);
-                next_pool_index = next_pool_index.saturating_add(1);
-            }
-
-            layout
-        })
-        .collect()
+impl ClassRecord {
+fn with_upstream_method_order(mut self) -> Self {
+    self.methods.sort_by(|a, b| {
+        let a_len = a.name.encode_utf16().count();
+        let b_len = b.name.encode_utf16().count();
+        a_len.cmp(&b_len).then_with(|| a.name.cmp(&b.name))
+    });
+    self
 }
-
-fn build_literal_emit_order(classes: &[&ClassRecord], literal_count: usize) -> Vec<usize> {
-    let mut seen = vec![false; literal_count];
-    let mut order = Vec::with_capacity(literal_count);
-    for class in classes {
-        for &literal_idx in class
-            .module_literal_indices
-            .iter()
-            .chain(class.literal_indices.iter())
-        {
-            if literal_idx < literal_count && !seen[literal_idx] {
-                seen[literal_idx] = true;
-                order.push(literal_idx);
-            }
-        }
-    }
-    for (idx, was_seen) in seen.into_iter().enumerate() {
-        if !was_seen {
-            order.push(idx);
-        }
-    }
-    order
-}
-
-fn build_literal_header_order(
-    classes: &[&ClassRecord],
-    literal_arrays: &[LiteralArray],
-) -> Vec<usize> {
-    let mut rank = vec![u16::MAX; literal_arrays.len()];
-
-    for class in classes {
-        let is_entry = class.name.contains("/entryability/");
-        let is_page = class.name.contains("/ets/pages/");
-
-        for (pos, &literal_idx) in class.module_literal_indices.iter().enumerate() {
-            if literal_idx >= literal_arrays.len() {
-                continue;
-            }
-            rank[literal_idx] = match (is_page, is_entry, pos) {
-                // module_literal_indices are [scopeNames, moduleRecordIdx].
-                (true, _, 0) => 7,
-                (true, _, 1) => 2,
-                (_, true, 0) => 9,
-                (_, true, 1) => 5,
-                _ => 80,
-            };
-        }
-
-        for &literal_idx in &class.literal_indices {
-            if literal_idx >= literal_arrays.len() {
-                continue;
-            }
-            let array = &literal_arrays[literal_idx];
-            rank[literal_idx] = if is_page && literal_array_has_method_affiliate_emit(array) {
-                0
-            } else if is_page && literal_array_is_page_route_metadata(array) {
-                4
-            } else if is_page && literal_array_is_this_object(array) {
-                6
-            } else if is_page && literal_array_is_page_index_stub(array) {
-                1
-            } else if is_entry && literal_array_has_method_affiliate_emit(array) {
-                3
-            } else if is_entry {
-                8
-            } else {
-                80
-            };
-        }
-    }
-
-    let mut order: Vec<usize> = (0..literal_arrays.len()).collect();
-    order.sort_by_key(|idx| (rank[*idx], *idx));
-    order
-}
-
-fn literal_array_has_method_affiliate_emit(array: &LiteralArray) -> bool {
-    array
-        .entries
-        .iter()
-        .any(|entry| matches!(entry, LiteralEntry::TaggedMethodAffiliate(_)))
-}
-
-fn literal_array_is_page_route_metadata(array: &LiteralArray) -> bool {
-    array.entries.iter().any(|entry| {
-        matches!(
-            entry,
-            LiteralEntry::TaggedString(value) | LiteralEntry::RawString(value) if value == "pageFullPath"
-        )
-    })
-}
-
-fn literal_array_is_this_object(array: &LiteralArray) -> bool {
-    matches!(
-        array.entries.as_slice(),
-        [
-            LiteralEntry::TaggedInteger(1),
-            LiteralEntry::TaggedString(name),
-            ..
-        ] if name == "this"
-    )
-}
-
-fn literal_array_is_page_index_stub(array: &LiteralArray) -> bool {
-    matches!(
-        array.entries.as_slice(),
-        [
-            LiteralEntry::TaggedInteger(1),
-            LiteralEntry::TaggedString(name),
-            ..
-        ] if name == "Index"
-    )
 }
 
 fn method_index_string_refs(
@@ -1794,602 +1486,179 @@ fn method_index_string_refs(
     refs
 }
 
-fn collect_bytecode_string_indices(bytecode: &[u8], indices: &mut Vec<u32>) {
-    let mut pos = 0usize;
-    while pos < bytecode.len() {
-        let Some(opcode) = bytecode.get(pos).copied() else {
-            break;
-        };
-        match opcode {
-            0x3e if pos + 2 < bytecode.len() => {
-                indices.push(u16::from_le_bytes([bytecode[pos + 1], bytecode[pos + 2]]) as u32);
-                pos += 3;
-                continue;
-            }
-            0x3f | 0x40 | 0x42 if pos + 3 < bytecode.len() => {
-                indices.push(u16::from_le_bytes([bytecode[pos + 2], bytecode[pos + 3]]) as u32);
-                pos += 4;
-                continue;
-            }
-            0x43 | 0x7a if pos + 4 < bytecode.len() => {
-                indices.push(u16::from_le_bytes([bytecode[pos + 2], bytecode[pos + 3]]) as u32);
-                pos += 5;
-                continue;
-            }
-            0xfe if bytecode.get(pos + 1) == Some(&0x09) && pos + 3 < bytecode.len() => {
-                indices.push(u16::from_le_bytes([bytecode[pos + 2], bytecode[pos + 3]]) as u32);
-                pos += 4;
-                continue;
-            }
-            _ => {}
-        }
-
-        let next = bytecode.get(pos + 1).copied();
-        pos += instruction_len(opcode, next).max(1);
-    }
-}
-
-fn method_index_method_indices(class: &ClassRecord) -> Vec<usize> {
-    let mut indices: Vec<usize> = class
-        .methods
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, method)| method.method_pool_entry.then_some(idx))
-        .collect();
-    indices.sort_by(|&a, &b| class.methods[a].name.cmp(&class.methods[b].name));
-    indices
-}
-
-fn instruction_len(opcode: u8, next: Option<u8>) -> usize {
-    match opcode {
-        0x00..=0x03 | 0x64 | 0x65 => 1,
-        0x1c | 0x29 | 0x3c | 0x3d | 0x44 | 0x4d | 0x4f | 0x51 | 0x60 | 0x61 | 0x7c | 0x7e => 2,
-        0x2a | 0x2d | 0x3e | 0x45 | 0x50 | 0x9b | 0x4e | 0xb9 => 3,
-        0x0a..=0x1a | 0x25 | 0x27 | 0x28 => 3,
-        0x1f..=0x22 => 2,
-        0x07 | 0x08 | 0x2b | 0x2e | 0x31 | 0x32 | 0x3f | 0x40 | 0x42 | 0x73 | 0xb6 => 4,
-        0x2c | 0x33 | 0x34 | 0x43 | 0x62 | 0x7a | 0x8f | 0x98 | 0x9a | 0x9c | 0xbc => 5,
-        0x2f => 5,
-        0x30 => 6,
-        0x35 | 0x63 => 9,
-        0xcf => 2,
-        0xfe if next == Some(0x00) => 2,
-        0xfe if next == Some(0x07) => 3,
-        0xfe if next == Some(0x09) => 4,
-        0xfb if matches!(next, Some(0x13 | 0x14)) => 3,
-        _ => 1,
-    }
-}
-
 /// Compute Adler-32 checksum of `data`.
 ///
 /// Used for the ABC file checksum field at offset 0x08.
 /// Verified against: `es2abc` output for API 9 SDK.
-fn adler32(data: &[u8]) -> u32 {
-    const MOD: u32 = 65521;
-    let (mut a, mut b) = (1u32, 0u32);
-    for &byte in data {
-        a = (a + byte as u32) % MOD;
-        b = (b + a) % MOD;
-    }
-    (b << 16) | a
-}
-
-/// Encode a SLEB128 value as a byte vector.
-fn encode_sleb128_bytes(mut value: i32) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut more = true;
-    while more {
-        let byte = (value & 0x7F) as u8;
-        value >>= 7;
-        more = !(((value == 0) && (byte & 0x40 == 0)) || ((value == -1) && (byte & 0x40 != 0)));
-        out.push(if more { byte | 0x80 } else { byte });
-    }
-    out
-}
-
-#[derive(Debug, Clone)]
-struct MidLocalEvent {
-    pc: u32,
-    kind: MidLocalKind,
-    reg: i32,
-    name_off: u32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MidLocalKind {
-    Start,
-    End,
-}
-
-fn infer_func_main_class_local_events(
-    method: &MethodRecord,
-    class: &ClassRecord,
-    string_items: &StringItemWriter,
-) -> Vec<MidLocalEvent> {
-    if method.name != "func_main_0" {
-        return Vec::new();
-    }
-    let Some(short_name) = class_short_name(&class.name) else {
-        return Vec::new();
-    };
-    let Some(name_off) = string_items.id_of(&short_name) else {
-        return Vec::new();
-    };
-
-    let has_params_shape = class
-        .source_code_strings
-        .iter()
-        .any(|name| name.starts_with('#') && name.ends_with("_Params"));
-    let reg = if has_params_shape { 6 } else { 5 };
-    let base_pc = debug_scope_start_pc(method);
-    let start_pc = if has_params_shape {
-        infer_first_large_line_change_pc(method.line_ops.as_slice(), base_pc)
-    } else {
-        infer_second_line_change_pc(method.line_ops.as_slice(), base_pc)
-    };
-    let Some(start_pc) = start_pc else {
-        return Vec::new();
-    };
-    let Some(end_pc) = infer_class_local_end_pc(method.bytecode.as_slice(), has_params_shape)
-    else {
-        return Vec::new();
-    };
-    if end_pc <= start_pc {
-        return Vec::new();
-    }
-
-    vec![
-        MidLocalEvent {
-            pc: start_pc,
-            kind: MidLocalKind::Start,
-            reg,
-            name_off,
-        },
-        MidLocalEvent {
-            pc: end_pc,
-            kind: MidLocalKind::End,
-            reg,
-            name_off,
-        },
-    ]
-}
-
-fn class_short_name(class_name: &str) -> Option<String> {
-    let trimmed = class_name.strip_prefix('L').unwrap_or(class_name);
-    let trimmed = trimmed.strip_suffix(';').unwrap_or(trimmed);
-    trimmed
-        .rsplit('/')
-        .next()
-        .filter(|name| !name.is_empty())
-        .map(str::to_string)
-}
-
-fn infer_second_line_change_pc(method_ops: &[u8], base_pc: u32) -> Option<u32> {
-    infer_nth_line_change_pc(method_ops, base_pc, 2, 1)
-}
-
-fn infer_first_large_line_change_pc(method_ops: &[u8], base_pc: u32) -> Option<u32> {
-    infer_nth_line_change_pc(method_ops, base_pc, 1, 2)
-}
-
-fn infer_nth_line_change_pc(
-    method_ops: &[u8],
-    base_pc: u32,
-    target_change: u8,
-    min_abs_delta: i32,
-) -> Option<u32> {
-    let (ops, cp) = split_line_ops(method_ops)?;
-    let mut cp_pos = 0usize;
-    let mut op_pos = 0usize;
-    let mut pc = base_pc;
-    let mut line_changes = 0u8;
-    while op_pos < ops.len() {
-        let op = ops[op_pos];
-        op_pos += 1;
-        match op {
-            0x01 => {
-                let (delta, next) = read_uleb128_from(cp, cp_pos)?;
-                cp_pos = next;
-                pc = pc.saturating_add(delta as u32);
-            }
-            0x02 => {
-                let (line_delta, next) = read_sleb128_from(cp, cp_pos)?;
-                cp_pos = next;
-                if line_delta.unsigned_abs() >= min_abs_delta as u32 {
-                    line_changes += 1;
-                    if line_changes == target_change {
-                        return Some(pc);
-                    }
-                }
-            }
-            0x04 => {
-                let (_, next_op) = read_sleb128_from(ops, op_pos)?;
-                op_pos = next_op;
-                for _ in 0..3 {
-                    let (_, next_cp) = read_uleb128_from(cp, cp_pos)?;
-                    cp_pos = next_cp;
-                }
-            }
-            0x05 | 0x06 => {
-                let (_, next_op) = read_sleb128_from(ops, op_pos)?;
-                op_pos = next_op;
-            }
-            0x09 | 0x0a | 0x0b => {
-                let (_, next) = read_uleb128_from(cp, cp_pos)?;
-                cp_pos = next;
-            }
-            op if op >= 0x0c => {
-                let adjusted = (op as u32).saturating_sub(0x0c);
-                let pc_delta = adjusted / LNP_LINE_RANGE;
-                let line_delta = (adjusted % LNP_LINE_RANGE) as i32 + LNP_LINE_BASE;
-                pc = pc.saturating_add(pc_delta);
-                if line_delta.unsigned_abs() >= min_abs_delta as u32 {
-                    line_changes += 1;
-                    if line_changes == target_change {
-                        return Some(pc);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn infer_class_local_end_pc(bytecode: &[u8], has_params_shape: bool) -> Option<u32> {
-    if has_params_shape {
-        for (idx, window) in bytecode.windows(5).enumerate() {
-            if window[0] == 0x61 && window[2] == 0x60 && window[4] == 0x3d {
-                return Some(idx as u32);
-            }
-        }
-    } else {
-        if let Some(idx) = bytecode.iter().position(|&b| b == 0x7c) {
-            return Some(idx as u32);
-        }
-    }
-    None
-}
-
-fn append_line_ops_with_mid_locals(
-    method_ops: &[u8],
-    base_pc: u32,
-    mid_locals: &[MidLocalEvent],
-    any_type_off: u32,
-    lnp_data: &mut Vec<u8>,
-    cp: &mut Vec<u8>,
-) {
-    let Some((ops, method_cp)) = split_line_ops(method_ops) else {
-        lnp_data.extend_from_slice(method_ops);
-        return;
-    };
-    let mut events = mid_locals.to_vec();
-    events.sort_by_key(|event| {
-        (
-            event.pc,
-            match event.kind {
-                MidLocalKind::Start => 0u8,
-                MidLocalKind::End => 1u8,
-            },
-        )
-    });
-    let mut event_pos = 0usize;
-    let mut pc = base_pc;
-    let mut op_pos = 0usize;
-    let mut cp_pos = 0usize;
-
-    while op_pos < ops.len() {
-        emit_mid_local_events_at_pc(pc, &events, &mut event_pos, any_type_off, lnp_data, cp);
-
-        let op = ops[op_pos];
-        op_pos += 1;
-        match op {
-            0x01 => {
-                let (delta, next) = read_uleb128_from(method_cp, cp_pos).unwrap_or((0, cp_pos));
-                cp_pos = next;
-                append_pc_advance_with_events(
-                    delta as u32,
-                    &mut pc,
-                    &events,
-                    &mut event_pos,
-                    any_type_off,
-                    lnp_data,
-                    cp,
-                );
-            }
-            0x02 => {
-                let (delta, next) = read_sleb128_from(method_cp, cp_pos).unwrap_or((0, cp_pos));
-                cp_pos = next;
-                lnp_data.push(0x02);
-                cp.extend_from_slice(&encode_sleb128_bytes(delta));
-            }
-            0x04 => {
-                let reg_start = op_pos;
-                let (_, next_op) = read_sleb128_from(ops, op_pos).unwrap_or((0, op_pos));
-                op_pos = next_op;
-                lnp_data.push(0x04);
-                lnp_data.extend_from_slice(&ops[reg_start..next_op]);
-                for _ in 0..3 {
-                    let (value, next_cp) =
-                        read_uleb128_from(method_cp, cp_pos).unwrap_or((0, cp_pos));
-                    cp_pos = next_cp;
-                    cp.extend_from_slice(&uleb128(value));
-                }
-            }
-            0x05 | 0x06 => {
-                let reg_start = op_pos;
-                let (_, next_op) = read_sleb128_from(ops, op_pos).unwrap_or((0, op_pos));
-                op_pos = next_op;
-                lnp_data.push(op);
-                lnp_data.extend_from_slice(&ops[reg_start..next_op]);
-            }
-            0x09 | 0x0a | 0x0b => {
-                let (value, next) = read_uleb128_from(method_cp, cp_pos).unwrap_or((0, cp_pos));
-                cp_pos = next;
-                lnp_data.push(op);
-                cp.extend_from_slice(&uleb128(value));
-            }
-            op if op >= 0x0c => {
-                let adjusted = (op as u32).saturating_sub(0x0c);
-                let pc_delta = adjusted / LNP_LINE_RANGE;
-                let line_delta = (adjusted % LNP_LINE_RANGE) as i32 + LNP_LINE_BASE;
-                if has_mid_local_event_between(pc, pc.saturating_add(pc_delta), &events, event_pos)
-                {
-                    append_pc_advance_with_events(
-                        pc_delta,
-                        &mut pc,
-                        &events,
-                        &mut event_pos,
-                        any_type_off,
-                        lnp_data,
-                        cp,
-                    );
-                    emit_special_opcode(0, line_delta, lnp_data, cp);
-                } else {
-                    lnp_data.push(op);
-                    pc = pc.saturating_add(pc_delta);
-                }
-            }
-            _ => lnp_data.push(op),
-        }
-    }
-    emit_mid_local_events_at_pc(pc, &events, &mut event_pos, any_type_off, lnp_data, cp);
-}
-
-fn split_line_ops(method_ops: &[u8]) -> Option<(&[u8], &[u8])> {
-    let end_pos = method_ops.iter().position(|&b| b == 0x00)?;
-    let after = end_pos + 1;
-    if after + 4 > method_ops.len() {
-        return Some((&method_ops[..end_pos], &[]));
-    }
-    let cp_len = u32::from_le_bytes(method_ops[after..after + 4].try_into().ok()?) as usize;
-    let cp_start = after + 4;
-    let cp_end = cp_start.checked_add(cp_len)?;
-    if cp_end > method_ops.len() {
-        return Some((&method_ops[..end_pos], &[]));
-    }
-    Some((&method_ops[..end_pos], &method_ops[cp_start..cp_end]))
-}
-
-fn append_pc_advance_with_events(
-    delta: u32,
-    pc: &mut u32,
-    events: &[MidLocalEvent],
-    event_pos: &mut usize,
-    any_type_off: u32,
-    lnp_data: &mut Vec<u8>,
-    cp: &mut Vec<u8>,
-) {
-    let target = pc.saturating_add(delta);
-    while *event_pos < events.len() && events[*event_pos].pc <= target {
-        let event_pc = events[*event_pos].pc;
-        if event_pc > *pc {
-            emit_adv_pc(event_pc - *pc, lnp_data, cp);
-            *pc = event_pc;
-        }
-        emit_mid_local_events_at_pc(event_pc, events, event_pos, any_type_off, lnp_data, cp);
-    }
-    if target > *pc {
-        emit_adv_pc(target - *pc, lnp_data, cp);
-        *pc = target;
-    }
-}
-
-fn emit_adv_pc(delta: u32, lnp_data: &mut Vec<u8>, cp: &mut Vec<u8>) {
-    if delta == 0 {
-        return;
-    }
-    lnp_data.push(0x01);
-    cp.extend_from_slice(&uleb128(delta as u64));
-}
-
-fn emit_special_opcode(pc_delta: u32, line_delta: i32, lnp_data: &mut Vec<u8>, cp: &mut Vec<u8>) {
-    let adjusted_line = line_delta - LNP_LINE_BASE;
-    if pc_delta < LNP_LINE_RANGE && adjusted_line >= 0 && (adjusted_line as u32) < LNP_LINE_RANGE {
-        let op = pc_delta * LNP_LINE_RANGE + adjusted_line as u32 + 0x0c;
-        if op <= u8::MAX as u32 {
-            lnp_data.push(op as u8);
-            return;
-        }
-    }
-    if pc_delta > 0 {
-        emit_adv_pc(pc_delta, lnp_data, cp);
-    }
-    lnp_data.push(0x02);
-    cp.extend_from_slice(&encode_sleb128_bytes(line_delta));
-    lnp_data.push(0x0c);
-}
-
-fn has_mid_local_event_between(
-    start_pc: u32,
-    end_pc: u32,
-    events: &[MidLocalEvent],
-    event_pos: usize,
-) -> bool {
-    events
-        .get(event_pos)
-        .is_some_and(|event| event.pc > start_pc && event.pc <= end_pc)
-}
-
-fn emit_mid_local_events_at_pc(
-    pc: u32,
-    events: &[MidLocalEvent],
-    event_pos: &mut usize,
-    any_type_off: u32,
-    lnp_data: &mut Vec<u8>,
-    cp: &mut Vec<u8>,
-) {
-    while *event_pos < events.len() && events[*event_pos].pc == pc {
-        let event = &events[*event_pos];
-        match event.kind {
-            MidLocalKind::Start => {
-                lnp_data.push(0x04);
-                lnp_data.extend_from_slice(&encode_sleb128_bytes(event.reg));
-                cp.extend_from_slice(&uleb128(event.name_off as u64));
-                cp.extend_from_slice(&uleb128(any_type_off as u64));
-                cp.extend_from_slice(&uleb128(any_type_off as u64));
-            }
-            MidLocalKind::End => {
-                lnp_data.push(0x05);
-                lnp_data.extend_from_slice(&encode_sleb128_bytes(event.reg));
-            }
-        }
-        *event_pos += 1;
-    }
-}
-
-fn read_uleb128_from(bytes: &[u8], mut pos: usize) -> Option<(u64, usize)> {
-    let mut result = 0u64;
-    let mut shift = 0u32;
-    loop {
-        let byte = *bytes.get(pos)?;
-        pos += 1;
-        result |= ((byte & 0x7f) as u64) << shift;
-        if byte & 0x80 == 0 {
-            return Some((result, pos));
-        }
-        shift += 7;
-    }
-}
-
-fn read_sleb128_from(bytes: &[u8], mut pos: usize) -> Option<(i32, usize)> {
-    let mut result = 0i32;
-    let mut shift = 0u32;
-    let byte = loop {
-        let byte = *bytes.get(pos)?;
-        pos += 1;
-        result |= ((byte & 0x7f) as i32) << shift;
-        shift += 7;
-        if byte & 0x80 == 0 {
-            break byte;
-        }
-    };
-    if shift < 32 && byte & 0x40 != 0 {
-        result |= !0 << shift;
-    }
-    Some((result, pos))
-}
-
-/// Encode a Panda `DebugInfoItem` with a pre-built constant_pool.
-///
-/// libpandafile `DebugInfoItem::Write` format:
-/// ```text
-/// line_num:           ULEB128        (1-based source line, or 0xFFFFFFFF sentinel)
-/// num_parameters:     ULEB128        (number of formal parameters)
-/// [param_off: ULEB128] * num_params  (file offset of each parameter name StringItem)
-/// constant_pool_size: ULEB128        (byte count of the constant pool)
-/// constant_pool:      raw bytes      (operands for LNP opcodes in the LNP data_ stream)
-/// lnp_index:          ULEB128        (index into the LNP index table)
-/// ```
-///
-/// The `constant_pool` contains ULEB128-encoded operands for opcodes in the LNP
-/// data_ stream that need them (SET_FILE src_off, START_LOCAL_EXTENDED operands,
-/// ADVANCE_PC delta, ADVANCE_LINE delta, etc.).
-fn encode_debug_info_with_cp(
-    _line_start: u32,
-    param_name_offsets: &[u32],
-    constant_pool: &[u8],
-    lnp_index: u32,
-) -> Vec<u8> {
-    let mut out = Vec::with_capacity(8 + constant_pool.len());
-    // es2abc leaves the source line in the LineNumberProgram and writes the
-    // DebugInfo line_num field as NO_LINE_NUMBER.
-    out.extend_from_slice(&uleb128(u32::MAX as u64));
-    out.extend_from_slice(&uleb128(param_name_offsets.len() as u64));
-    for &off in param_name_offsets {
-        out.extend_from_slice(&uleb128(off as u64));
-    }
-    // constant_pool_size = byte count (not item count).
-    out.extend_from_slice(&uleb128(constant_pool.len() as u64));
-    out.extend_from_slice(constant_pool);
-    out.extend_from_slice(&uleb128(lnp_index as u64));
-    out
-}
-
-/// Encode a Panda `DebugInfoItem` with a minimal constant_pool containing only
-/// the SET_FILE operand. Used as a fallback when no LNP tracking is available.
-#[allow(dead_code)]
-fn encode_debug_info(
-    line_start: u32,
-    param_name_offsets: &[u32],
-    source_file_offset: u32,
-    lnp_index: u32,
-) -> Vec<u8> {
-    // Minimal constant_pool: just the SET_FILE operand (ULEB128 source file offset).
-    let cp = uleb128(source_file_offset as u64);
-    encode_debug_info_with_cp(line_start, param_name_offsets, &cp, lnp_index)
-}
-
-fn debug_scope_start_pc(method: &MethodRecord) -> u32 {
-    let mut pc = argument_copy_prologue_size(method);
-
-    // `prepend_module_argument_copies` preserves a leading NewLexEnvWithName
-    // before the copied parameters.  Upstream local-variable ranges start after
-    // that hidden scope setup.
-    if method.name == "func_main_0" && method.bytecode.first() == Some(&0xb6) {
-        pc += 4;
-    }
-
-    // Function bodies that capture `this` in an arrow start with the function
-    // `this` lexenv, then copied args, then a hidden `lda this; stlexvar`.
-    if method.name != "func_main_0"
-        && method.bytecode.first() == Some(&0xb6)
-        && method.bytecode.get(1) == Some(&1)
-    {
-        pc += 4; // NewLexEnvWithName
-        let this_src = method.num_vregs + MANDATORY_PARAM_THIS_REG as u16;
-        if this_src <= u8::MAX as u16 {
-            pc += 4; // lda v(this_src) + stlexvar 0, 0
-        }
-    }
-
-    pc
-}
-
-fn argument_copy_prologue_size(method: &MethodRecord) -> u32 {
-    let has_this_lexenv = method.name != "func_main_0"
-        && method.bytecode.first() == Some(&0xb6)
-        && method.bytecode.get(1) == Some(&1);
-    let mut size = 0u32;
-    for dst in 0..method.num_args {
-        if has_this_lexenv && dst == MANDATORY_PARAM_THIS_REG as u16 {
-            continue;
-        }
-        let src = method.num_vregs + dst;
-        size += if dst <= 0x0f && src <= 0x0f {
-            2
-        } else if src <= u8::MAX as u16 {
-            3
-        } else {
-            5
-        };
-    }
-    size
-}
 
 impl Default for AbcFile {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl AbcFile {
+    fn sdk_native_field(name: &str) -> FieldRecord {
+        FieldRecord {
+            name: name.to_string(),
+            class_idx: FIELD_OWNER_CLASS_IDX,
+            type_idx: 0,
+            access_flags: 0,
+            value: Some(FieldValue::U8(0)),
+        }
+    }
+
+    fn build_method_pool_layouts(
+        classes: &[&ClassRecord],
+        strings: &StringTable,
+    ) -> Vec<MethodPoolLayout> {
+        let mut next_pool_index = 0u16;
+        let mut global_string_pool_indices = FxHashMap::<u16, u16>::default();
+        classes
+            .iter()
+            .map(|class| {
+                let mut layout = MethodPoolLayout::default();
+                let mut all_bytecode_string_indices = Vec::new();
+                for method in &class.methods {
+                    collect_bytecode_string_indices(&method.bytecode, &mut all_bytecode_string_indices);
+                }
+                all_bytecode_string_indices.sort_unstable();
+                all_bytecode_string_indices.dedup();
+
+                layout.string_refs = method_index_string_refs(class, strings);
+                for string_ref in &layout.string_refs {
+                    if let MethodIndexStringRef::Bytecode(string_idx) = string_ref {
+                        let string_idx = *string_idx as u16;
+                        layout
+                            .string_pool_indices
+                            .insert(string_idx, next_pool_index);
+                        global_string_pool_indices
+                            .entry(string_idx)
+                            .or_insert(next_pool_index);
+                    }
+                    next_pool_index = next_pool_index.saturating_add(1);
+                }
+                for string_idx in all_bytecode_string_indices {
+                    let string_idx = string_idx as u16;
+                    if layout.string_pool_indices.contains_key(&string_idx) {
+                        continue;
+                    }
+                    if let Some(&pool_index) = global_string_pool_indices.get(&string_idx) {
+                        layout.string_pool_indices.insert(string_idx, pool_index);
+                    }
+                }
+
+                layout.method_indices = class.method_pool_entry_indices();
+                for &method_idx in &layout.method_indices {
+                    let pool_index = next_pool_index;
+                    let method = &class.methods[method_idx];
+                    if method.kind == MethodKind::Constructor {
+                        layout.ctor_pool_index = pool_index;
+                    } else if method.kind == MethodKind::Anonymous {
+                        layout.definefunc_pool_indices.push(pool_index);
+                    }
+                    if let Some(name_id) = strings.id_of(&method.name) {
+                        layout
+                            .definemethod_pool_indices_by_name
+                            .insert(name_id as u16, pool_index);
+                    }
+                    next_pool_index = next_pool_index.saturating_add(1);
+                }
+
+                for &literal_idx in &class.literal_indices {
+                    layout
+                        .literal_pool_indices
+                        .insert(literal_idx as u16, next_pool_index);
+                    next_pool_index = next_pool_index.saturating_add(1);
+                }
+
+                layout
+            })
+            .collect()
+    }
+
+    fn build_literal_emit_order(classes: &[&ClassRecord], literal_count: usize) -> Vec<usize> {
+        let mut seen = vec![false; literal_count];
+        let mut order = Vec::with_capacity(literal_count);
+        for class in classes {
+            for &literal_idx in class
+                .module_literal_indices
+                .iter()
+                .chain(class.literal_indices.iter())
+            {
+                if literal_idx < literal_count && !seen[literal_idx] {
+                    seen[literal_idx] = true;
+                    order.push(literal_idx);
+                }
+            }
+        }
+        for (idx, was_seen) in seen.into_iter().enumerate() {
+            if !was_seen {
+                order.push(idx);
+            }
+        }
+        order
+    }
+
+    fn build_literal_header_order(
+        classes: &[&ClassRecord],
+        literal_arrays: &[LiteralArray],
+    ) -> Vec<usize> {
+        let mut rank = vec![u16::MAX; literal_arrays.len()];
+
+        for class in classes {
+            let is_entry = class.name.contains("/entryability/");
+            let is_page = class.name.contains("/ets/pages/");
+
+            for (pos, &literal_idx) in class.module_literal_indices.iter().enumerate() {
+                if literal_idx >= literal_arrays.len() {
+                    continue;
+                }
+                rank[literal_idx] = match (is_page, is_entry, pos) {
+                    // module_literal_indices are [scopeNames, moduleRecordIdx].
+                    (true, _, 0) => 7,
+                    (true, _, 1) => 2,
+                    (_, true, 0) => 9,
+                    (_, true, 1) => 5,
+                    _ => 80,
+                };
+            }
+
+            for &literal_idx in &class.literal_indices {
+                if literal_idx >= literal_arrays.len() {
+                    continue;
+                }
+                let array = &literal_arrays[literal_idx];
+                rank[literal_idx] = if is_page && array.has_method_affiliate() {
+                    0
+                } else if is_page && array.is_page_route_metadata() {
+                    4
+                } else if is_page && array.is_this_object() {
+                    6
+                } else if is_page && array.is_page_index_stub() {
+                    1
+                } else if is_entry && array.has_method_affiliate() {
+                    3
+                } else if is_entry {
+                    8
+                } else {
+                    80
+                };
+            }
+        }
+
+        let mut order: Vec<usize> = (0..literal_arrays.len()).collect();
+        order.sort_by_key(|idx| (rank[*idx], *idx));
+        order
+    }
+
+    fn adler32(data: &[u8]) -> u32 {
+        const MOD: u32 = 65521;
+        let (mut a, mut b) = (1u32, 0u32);
+        for &byte in data {
+            a = (a + byte as u32) % MOD;
+            b = (b + a) % MOD;
+        }
+        (b << 16) | a
     }
 }

@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-arkdown-core = { path = "../arkdown-core" }
-arkdown-loader = { path = "../arkdown-loader" }
-arkdown-profile = { path = "../arkdown-profile" }
+arkdown-core = { workspace = true }
+arkdown-loader = { workspace = true }
+arkdown-profile = { workspace = true }
 oxc_allocator = { workspace = true }
 oxc_parser = { workspace = true }
 oxc_codegen = { workspace = true }
@@ -24,24 +24,23 @@ index_vec = { workspace = true }
 rustc-hash = { workspace = true }
 # rolldown 1.0.3 — core bundling engine replaces the custom link/tree-shake/chunk-split/codegen stages.
 # default-features = false skips NAPI bindings and Vite-specific plugins.
-# [patch.crates-io] in the workspace root redirects rolldown's oxc deps to the ohos-rs fork.
-rolldown           = { version = "1.0.3", default-features = false }
-rolldown_plugin    = { version = "1.0.3" }
-rolldown_common    = { version = "1.0.3" }
-rolldown_sourcemap = { version = "1.0.3" }
-rolldown_utils     = { version = "1.0.3" }
+# Workspace-level dependency metadata keeps rolldown versions centralized.
+rolldown           = { workspace = true }
+rolldown_plugin    = { workspace = true }
+rolldown_common    = { workspace = true }
+rolldown_sourcemap = { workspace = true }
+rolldown_utils     = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
-arkdown-config = { path = "../arkdown-config" }
-arkdown-profile = { path = "../arkdown-profile" }
-arkdown-plugin-ets-transform = { path = "../arkdown-plugin-ets-transform" }
-arkdown-plugin-chunk-wrapper = { path = "../arkdown-plugin-chunk-wrapper" }
-arkdown-plugin-ohos-resolve  = { path = "../arkdown-plugin-ohos-resolve" }
-arkdown-plugin-module-meta   = { path = "../arkdown-plugin-module-meta" }
-arkdown-plugin-duplicate-check = { path = "../arkdown-plugin-duplicate-check" }
-arkdown-plugin-json5         = { path = "../arkdown-plugin-json5" }
-arkdown-resolver             = { path = "../arkdown-resolver" }
+arkdown-config = { workspace = true }
+arkdown-profile = { workspace = true }
+arkdown-plugin-ets-transform = { workspace = true }
+arkdown-plugin-ohos-resolve  = { workspace = true }
+arkdown-plugin-module-meta   = { workspace = true }
+arkdown-plugin-duplicate-check = { workspace = true }
+arkdown-plugin-json5         = { workspace = true }
+arkdown-resolver             = { workspace = true }
 json5 = { workspace = true }
 fs-err = { workspace = true }
-tempfile = "3"
+tempfile = { workspace = true }

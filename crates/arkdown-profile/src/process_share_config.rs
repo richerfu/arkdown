@@ -21,7 +21,7 @@
 //! <module_root>/build/default/intermediates/share_config/default/temp-share-config.json
 //! ```
 
-use std::collections::HashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::{Path, PathBuf};
 
 use arkdown_core::CrossAppSharedConfigEntry;
@@ -39,6 +39,37 @@ pub struct ShareConfigInput<'a> {
     pub self_entries: Vec<CrossAppSharedConfigEntry>,
 }
 
+impl ShareConfigInput<'_> {
+    /// Scan `oh_modules/` under `module_root`, collect `crossAppSharedConfig` entries
+    /// from every HSP dependency, merge them with `self_entries`, validate for
+    /// duplicate URIs, and return the merged list.
+    ///
+    /// Errors are returned for I/O failures only; missing or malformed `module.json5`
+    /// files in individual dependencies are silently skipped (matching hvigor behaviour
+    /// where non-HSP packages simply have no `crossAppSharedConfig`).
+    pub fn merge(self) -> ShareConfigOutput {
+        let mut all_entries: Vec<CrossAppSharedConfigEntry> = Vec::new();
+
+        // Include the module's own entries first (for HSP modules that export shared components).
+        all_entries.extend(self.self_entries);
+
+        // Walk oh_modules/ to find installed HSP packages.
+        let oh_modules_dir = self.module_root.join("oh_modules");
+        if oh_modules_dir.is_dir() {
+            ShareConfigInput::collect_from_oh_modules(&oh_modules_dir, &mut all_entries);
+        }
+
+        // Validate: no two entries from different packages may share the same URI.
+        // (Duplicate URIs within the same package are allowed — hvigor only errors
+        // on cross-package URI collisions.)
+        ShareConfigInput::check_duplicate_uris(&all_entries);
+
+        ShareConfigOutput {
+            entries: all_entries,
+        }
+    }
+}
+
 /// Merged `crossAppSharedConfig` result.
 #[derive(Debug, Clone)]
 pub struct ShareConfigOutput {
@@ -54,25 +85,7 @@ pub struct ShareConfigOutput {
 /// files in individual dependencies are silently skipped (matching hvigor behaviour
 /// where non-HSP packages simply have no `crossAppSharedConfig`).
 pub fn merge_share_config(input: ShareConfigInput<'_>) -> ShareConfigOutput {
-    let mut all_entries: Vec<CrossAppSharedConfigEntry> = Vec::new();
-
-    // Include the module's own entries first (for HSP modules that export shared components).
-    all_entries.extend(input.self_entries);
-
-    // Walk oh_modules/ to find installed HSP packages.
-    let oh_modules_dir = input.module_root.join("oh_modules");
-    if oh_modules_dir.is_dir() {
-        collect_from_oh_modules(&oh_modules_dir, &mut all_entries);
-    }
-
-    // Validate: no two entries from different packages may share the same URI.
-    // (Duplicate URIs within the same package are allowed — hvigor only errors
-    // on cross-package URI collisions.)
-    check_duplicate_uris(&all_entries);
-
-    ShareConfigOutput {
-        entries: all_entries,
-    }
+    input.merge()
 }
 
 /// Write the merged share config to `output_path` as
@@ -93,129 +106,132 @@ pub fn write_share_config(
 }
 
 // ---------------------------------------------------------------------------
-// Internal helpers
+// Private associated functions on ShareConfigInput
 // ---------------------------------------------------------------------------
 
-/// Walk `oh_modules_dir`, find HSP packages (those whose `module.json5` or
-/// `module.json` declares `module.type == "shared"`), and collect their
-/// `crossAppSharedConfig` entries.
-fn collect_from_oh_modules(
-    oh_modules_dir: &Path,
-    all_entries: &mut Vec<CrossAppSharedConfigEntry>,
-) {
-    let Ok(read_dir) = std::fs::read_dir(oh_modules_dir) else {
-        return;
-    };
-
-    for entry in read_dir.flatten() {
-        let pkg_dir = entry.path();
-        if !pkg_dir.is_dir() {
-            continue;
-        }
-
-        // Derive the package name from the directory name.
-        let pkg_name = pkg_dir
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_string();
-
-        // Try `module.json5` first, then fall back to the pre-processed `module.json`.
-        let entries = read_cross_app_shared_config_from_pkg(&pkg_dir, &pkg_name);
-        all_entries.extend(entries);
-    }
-}
-
-/// Read `crossAppSharedConfig` from a single installed package directory.
-///
-/// Tries `src/main/module.json5` first (source layout), then `module.json`
-/// (pre-built layout) at the package root.
-fn read_cross_app_shared_config_from_pkg(
-    pkg_dir: &Path,
-    pkg_name: &str,
-) -> Vec<CrossAppSharedConfigEntry> {
-    // Candidate paths in priority order.
-    let candidates: &[PathBuf] = &[
-        pkg_dir.join("src/main/module.json5"),
-        pkg_dir.join("module.json5"),
-        pkg_dir.join("module.json"),
-    ];
-
-    for candidate in candidates {
-        if !candidate.exists() {
-            continue;
-        }
-        let Ok(content) = std::fs::read_to_string(candidate) else {
-            continue;
-        };
-        // Parse as JSON5 (also valid for plain JSON).
-        let Ok(raw): Result<serde_json::Value, _> = json5::from_str(&content) else {
-            continue;
+impl ShareConfigInput<'_> {
+    /// Walk `oh_modules_dir`, find HSP packages (those whose `module.json5` or
+    /// `module.json` declares `module.type == "shared"`), and collect their
+    /// `crossAppSharedConfig` entries.
+    fn collect_from_oh_modules(
+        oh_modules_dir: &Path,
+        all_entries: &mut Vec<CrossAppSharedConfigEntry>,
+    ) {
+        let Ok(read_dir) = std::fs::read_dir(oh_modules_dir) else {
+            return;
         };
 
-        // Only process HSP modules (type == "shared").
-        let module_type = raw
-            .pointer("/module/type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if module_type != "shared" {
-            return vec![];
-        }
-
-        let Some(arr) = raw
-            .pointer("/module/crossAppSharedConfig")
-            .and_then(|v| v.as_array())
-        else {
-            return vec![];
-        };
-
-        let mut entries: Vec<CrossAppSharedConfigEntry> = arr
-            .iter()
-            .filter_map(|item| {
-                serde_json::from_value::<CrossAppSharedConfigEntry>(item.clone()).ok()
-            })
-            .collect();
-
-        // Fill in packageName from the directory name when absent.
-        for entry in &mut entries {
-            if entry.package_name.is_empty() {
-                entry.package_name = pkg_name.to_string();
+        for entry in read_dir.flatten() {
+            let pkg_dir = entry.path();
+            if !pkg_dir.is_dir() {
+                continue;
             }
+
+            // Derive the package name from the directory name.
+            let pkg_name = pkg_dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+
+            // Try `module.json5` first, then fall back to the pre-processed `module.json`.
+            let entries = Self::read_cross_app_shared_config_from_pkg(&pkg_dir, &pkg_name);
+            all_entries.extend(entries);
+        }
+    }
+
+    /// Read `crossAppSharedConfig` from a single installed package directory.
+    ///
+    /// Tries `src/main/module.json5` first (source layout), then `module.json`
+    /// (pre-built layout) at the package root.
+    fn read_cross_app_shared_config_from_pkg(
+        pkg_dir: &Path,
+        pkg_name: &str,
+    ) -> Vec<CrossAppSharedConfigEntry> {
+        // Candidate paths in priority order.
+        let candidates: &[PathBuf] = &[
+            pkg_dir.join("src/main/module.json5"),
+            pkg_dir.join("module.json5"),
+            pkg_dir.join("module.json"),
+        ];
+
+        for candidate in candidates {
+            if !candidate.exists() {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(candidate) else {
+                continue;
+            };
+            // Parse as JSON5 (also valid for plain JSON).
+            let Ok(raw): Result<serde_json::Value, _> = json5::from_str(&content) else {
+                continue;
+            };
+
+            // Only process HSP modules (type == "shared").
+            let module_type = raw
+                .pointer("/module/type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if module_type != "shared" {
+                return vec![];
+            }
+
+            let Some(arr) = raw
+                .pointer("/module/crossAppSharedConfig")
+                .and_then(|v| v.as_array())
+            else {
+                return vec![];
+            };
+
+            let mut entries: Vec<CrossAppSharedConfigEntry> = arr
+                .iter()
+                .filter_map(|item| {
+                    serde_json::from_value::<CrossAppSharedConfigEntry>(item.clone()).ok()
+                })
+                .collect();
+
+            // Fill in packageName from the directory name when absent.
+            for entry in &mut entries {
+                if entry.package_name.is_empty() {
+                    entry.package_name = pkg_name.to_string();
+                }
+            }
+
+            return entries;
         }
 
-        return entries;
+        vec![]
     }
 
-    vec![]
-}
+    /// Log a warning (but do not abort) when two entries from different packages
+    /// share the same URI.  Hvigor calls `printErrorExit` here; arkdown downgrades
+    /// to a non-fatal warning so the build continues in the same way that missing
+    /// optional config files are handled elsewhere in the pipeline.
+    fn check_duplicate_uris(entries: &[CrossAppSharedConfigEntry]) {
+        // Map URI → list of package names that declare it.
+        let mut uri_to_packages: FxHashMap<&str, Vec<&str>> = FxHashMap::default();
+        for entry in entries {
+            uri_to_packages
+                .entry(entry.uri.as_str())
+                .or_default()
+                .push(entry.package_name.as_str());
+        }
 
-/// Log a warning (but do not abort) when two entries from different packages
-/// share the same URI.  Hvigor calls `printErrorExit` here; arkdown downgrades
-/// to a non-fatal warning so the build continues in the same way that missing
-/// optional config files are handled elsewhere in the pipeline.
-fn check_duplicate_uris(entries: &[CrossAppSharedConfigEntry]) {
-    // Map URI → list of package names that declare it.
-    let mut uri_to_packages: HashMap<&str, Vec<&str>> = HashMap::new();
-    for entry in entries {
-        uri_to_packages
-            .entry(entry.uri.as_str())
-            .or_default()
-            .push(entry.package_name.as_str());
-    }
-
-    for (uri, packages) in &uri_to_packages {
-        if packages.len() > 1 {
-            // Deduplicate package names before emitting the warning.
-            let mut unique: Vec<&&str> = packages
-                .iter()
-                .collect::<std::collections::HashSet<_>>()
-                .into_iter()
-                .collect();
-            unique.sort();
-            eprintln!(
-                "[warn] crossAppSharedConfig: duplicate URI '{}' declared by packages: {:?}",
-                uri, unique
-            );
+        for (uri, packages) in &uri_to_packages {
+            if packages.len() > 1 {
+                // Deduplicate package names before emitting the warning.
+                let mut unique: Vec<&&str> = packages
+                    .iter()
+                    .collect::<FxHashSet<_>>()
+                    .into_iter()
+                    .collect();
+                unique.sort();
+                tracing::warn!(
+                    uri,
+                    packages = ?unique,
+                    "crossAppSharedConfig duplicate URI declared by multiple packages"
+                );
+            }
         }
     }
 }

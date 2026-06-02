@@ -5,7 +5,7 @@
 //! This module reads the same JavaScript assignment through OXC AST and exposes
 //! the resource references consumed by the `$r(...)` lowering pass.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -22,8 +22,8 @@ pub fn load_system_resource_references(
     ets_loader_path: &Path,
     bundle_name: &str,
     module_name: &str,
-) -> Result<HashMap<String, ResourceReference>> {
-    let mut refs = HashMap::new();
+) -> Result<FxHashMap<String, ResourceReference>> {
+    let mut refs = FxHashMap::default();
 
     for path in system_resource_paths(ets_loader_path) {
         if !path.exists() {
@@ -58,14 +58,14 @@ fn parse_system_resource_source(
     source: &str,
     bundle_name: &str,
     module_name: &str,
-) -> HashMap<String, ResourceReference> {
+) -> FxHashMap<String, ResourceReference> {
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::default()).parse();
     let Some(sys_object) = find_system_resource_object(&parsed.program) else {
-        return HashMap::new();
+        return FxHashMap::default();
     };
 
-    let mut refs = HashMap::new();
+    let mut refs = FxHashMap::default();
     collect_system_resources(sys_object, bundle_name, module_name, &mut refs);
     refs
 }
@@ -113,7 +113,7 @@ fn collect_system_resources(
     sys_object: &ObjectExpression<'_>,
     bundle_name: &str,
     module_name: &str,
-    refs: &mut HashMap<String, ResourceReference>,
+    refs: &mut FxHashMap<String, ResourceReference>,
 ) {
     for type_property in &sys_object.properties {
         let ObjectPropertyKind::ObjectProperty(type_property) = type_property else {

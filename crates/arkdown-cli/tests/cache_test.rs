@@ -7,7 +7,7 @@
 //! 3. A second build on the same fixture directory produces an identical
 //!    `ets/modules.abc` (deterministic output / cache correctness).
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -26,10 +26,9 @@ use arkdown_plugin_ohos_resolve::OhosResolvePlugin;
 use arkdown_profile::ProfileProcessor;
 use arkdown_resolver::ResolverConfig;
 use arkdown_resource::{ResourceCompileConfig, ResourceCompileInput, ResourceCompiler};
-use arkdown_ts2abc::{compile_to_abc, Ts2abcInput, Ts2abcOptions};
+use arkdown_ts2abc::{Ts2abcInput, Ts2abcOptions};
 use index_vec::IndexVec;
 use rolldown_plugin::__inner::SharedPluginable;
-use rustc_hash::FxHashMap;
 
 fn fixture_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -85,7 +84,7 @@ struct ChunkCompileMeta {
 
 fn collect_js_chunks(
     chunk_files: &[(String, PathBuf)],
-    record_name_map: &HashMap<String, ChunkCompileMeta>,
+    record_name_map: &FxHashMap<String, ChunkCompileMeta>,
 ) -> Vec<Ts2abcInput> {
     chunk_files
         .iter()
@@ -135,11 +134,10 @@ fn run_bundle_miss(
                 project_root: fixture.to_path_buf(),
                 sdk_api_dirs: vec![],
                 sdk_kits_dirs: vec![],
-                pkg_name_to_pkg_info: HashMap::new(),
+                pkg_name_to_pkg_info: FxHashMap::default(),
                 use_normalized_ohm_url: false,
                 case_sensitive_check: false,
                 oh_modules_roots: vec![],
-                module_src_roots: vec![module.src_path.join("src/main/ets")],
             },
             fixture.to_path_buf(),
             false,
@@ -199,6 +197,7 @@ fn run_pipeline(fixture: &Path) -> PathBuf {
         let rc = ResourceCompiler::new(ResourceCompileConfig {
             package_name: config.product.bundle_name.clone(),
             module_name: module.name.clone(),
+            module_names: vec![],
             device_types: vec!["phone".to_string()],
             is_debug: true,
         });
@@ -269,7 +268,7 @@ fn run_pipeline(fixture: &Path) -> PathBuf {
 
     // ABC compilation — wire the incremental cache exactly as build.rs does.
     let bundle_name = &config.product.bundle_name;
-    let record_name_map: HashMap<String, ChunkCompileMeta> = loader_json
+    let record_name_map: FxHashMap<String, ChunkCompileMeta> = loader_json
         .compile_entry
         .iter()
         .filter_map(|ep| {
@@ -345,7 +344,7 @@ fn run_pipeline(fixture: &Path) -> PathBuf {
             });
 
         if !can_skip {
-            compile_to_abc(Ts2abcOptions {
+            Ts2abcOptions {
                 inputs: ts2abc_inputs,
                 output: modules_abc.clone(),
                 target_api_version: config.sdk_config.compile_api_version,
@@ -357,7 +356,7 @@ fn run_pipeline(fixture: &Path) -> PathBuf {
                 commonjs: false,
                 cache_file: Some(abc_cache_file),
                 npm_module_entry_list: None,
-            })
+            }.compile()
             .expect("abc compile");
 
             // Update module cache entries.

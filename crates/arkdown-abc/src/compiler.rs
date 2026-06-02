@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use arkdown_core::HvigorSourceMapScope;
 use oxc_allocator::Allocator;
 use oxc_codegen::Codegen;
 use oxc_parser::Parser;
@@ -95,59 +96,13 @@ fn strip_typescript_types(source: &str) -> String {
     Codegen::new().build(&parse_ret.program).code
 }
 
-/// Build the source file string in es2panda format:
-/// `"<moduleName>|<moduleName>|1.0.0|src/main/ets/<relpath>.ts"`
-///
-/// From golden binary analysis: "entry|entry|1.0.0|src/main/ets/pages/Index.ts"
-/// The format matches es2panda's SourceFile() output for OHOS modules.
 fn source_file_from_record_name(record_name: &str) -> String {
-    // record_name = "com.example.app/entry/ets/pages/Index"
-    // or "@bundle:com.example.app/entry/ets/pages/Index"
-    let rn = record_name.strip_prefix("@bundle:").unwrap_or(record_name);
-    // Split: "com.example.app/entry/ets/pages/Index"
-    // parts[0] = bundleName, parts[1] = moduleName, rest = ets path
-    let parts: Vec<&str> = rn.splitn(3, '/').collect();
-    if parts.len() >= 3 {
-        let module_name = parts[1];
-        let ets_rel = parts[2]; // "ets/pages/Index"
-                                // Convert "ets/pages/Index" → "src/main/ets/pages/Index.ts"
-        let src_path = if ets_rel.starts_with("ets/") {
-            format!("src/main/{}.ts", ets_rel)
-        } else {
-            format!("src/main/ets/{}.ts", ets_rel)
-        };
-        format!("{module_name}|{module_name}|1.0.0|{src_path}")
-    } else {
-        rn.to_string()
-    }
-}
-
-fn normalize_source_file(record_name: &str, source_file: String) -> String {
-    if source_file.contains('|') {
-        return source_file;
-    }
-    let source_file = source_file.trim_start_matches("./");
-    if !(source_file.starts_with("ets/") || source_file.starts_with("src/main/ets/")) {
-        return source_file.to_string();
-    }
-
-    let rn = record_name.strip_prefix("@bundle:").unwrap_or(record_name);
-    let parts: Vec<&str> = rn.splitn(3, '/').collect();
-    let module_name = parts.get(1).copied().unwrap_or("entry");
-    let src_path = if source_file.starts_with("src/main/") {
-        with_ts_extension(source_file)
-    } else {
-        format!("src/main/{}", with_ts_extension(source_file))
-    };
-    format!("{module_name}|{module_name}|1.0.0|{src_path}")
-}
-
-fn with_ts_extension(path: &str) -> String {
-    path.trim_end_matches(".ets")
-        .trim_end_matches(".js")
-        .trim_end_matches(".ts")
-        .to_string()
-        + ".ts"
+    HvigorSourceMapScope::source_file_from_record_name(record_name).unwrap_or_else(|| {
+        record_name
+            .strip_prefix("@bundle:")
+            .unwrap_or(record_name)
+            .to_string()
+    })
 }
 
 fn cache_key_inputs(
@@ -376,7 +331,7 @@ impl AbcCompiler {
                 .source_file
                 .as_deref()
                 .map(|source_file| {
-                    normalize_source_file(&module.record_name, source_file.to_string())
+                    Self::normalize_source_file(&module.record_name, source_file.to_string())
                 })
                 .or_else(|| {
                     self.options
@@ -439,5 +394,9 @@ impl AbcCompiler {
             api_version: self.options.target_api_version,
             has_debug_info,
         })
+    }
+
+    fn normalize_source_file(record_name: &str, source_file: String) -> String {
+        HvigorSourceMapScope::normalize_debug_source_file(record_name, &source_file)
     }
 }

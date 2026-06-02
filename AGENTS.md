@@ -25,6 +25,10 @@ Rust code uses `rustfmt` defaults and four-space indentation. Crates and modules
 
 Prefer small crate-local helpers over cross-crate abstractions unless a pattern already exists. Keep generated artifacts and local SDK paths out of committed docs and source.
 
+All dependency declarations must be centralized in the root `[workspace.dependencies]`. Crates under `crates/*` should reference both internal crates and third-party crates with `{ workspace = true }`; do not add direct `path`, `version`, or `git` dependency declarations inside crate manifests.
+
+For implementation style, follow OXC/Rolldown patterns: keep behavior close to the owning type or module, prefer small state objects over long chains of free functions, and use OXC/Rolldown APIs for parsing, resolving, source maps, and code generation whenever available. Generated JavaScript/TypeScript should be produced through AST/codegen or structured serializers; use raw string assembly only when the upstream implementation does the same or no structured API exists.
+
 ## Testing Guidelines
 
 Place unit tests near the code or in crate-level `tests/` directories, matching the existing `*_tests.rs` pattern. Async plugin tests use `#[tokio::test]`. Shared fixtures belong in `tests/fixtures/`; keep generated build output out of version control.

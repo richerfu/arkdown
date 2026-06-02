@@ -39,6 +39,48 @@ pub enum OhosModuleType {
     Har,
 }
 
+impl std::fmt::Display for OhosModuleType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            OhosModuleType::Entry => "entry",
+            OhosModuleType::Feature => "feature",
+            OhosModuleType::Shared => "shared",
+            OhosModuleType::Har => "har",
+        })
+    }
+}
+
+impl OhosModuleType {
+    /// Parse the module type from the `module.json5` `type` field string.
+    ///
+    /// Mirrors hvigor's type mapping: unknown strings fall back to `Entry`.
+    pub fn from_type_str(s: &str) -> Self {
+        match s {
+            "feature" => OhosModuleType::Feature,
+            "shared" => OhosModuleType::Shared,
+            "har" => OhosModuleType::Har,
+            _ => OhosModuleType::Entry, // "entry" or unknown → Entry
+        }
+    }
+
+    /// Returns `true` if this module type should be included when building
+    /// for the given `target` artifact type.
+    ///
+    /// Mirrors hvigor's `module.modules` filter in `CompileArkTS`:
+    /// - HAP builds include `entry` and `feature` modules.
+    /// - HSP builds include `shared` modules only.
+    /// - HAR builds include `har` modules only.
+    /// - Preview/Test builds include all module types.
+    pub fn matches_output_target(&self, target: &OutputTarget) -> bool {
+        match target {
+            OutputTarget::Hap => matches!(self, OhosModuleType::Entry | OhosModuleType::Feature),
+            OutputTarget::Hsp => matches!(self, OhosModuleType::Shared),
+            OutputTarget::Har => matches!(self, OhosModuleType::Har),
+            OutputTarget::Preview | OutputTarget::Test => true,
+        }
+    }
+}
+
 /// Compilation mode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CompileMode {
@@ -46,6 +88,15 @@ pub enum CompileMode {
     EsModule,
     /// JS bundle mode (legacy FA model).
     JsBundle,
+}
+
+impl std::fmt::Display for CompileMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            CompileMode::EsModule => "esmodule",
+            CompileMode::JsBundle => "jsbundle",
+        })
+    }
 }
 
 /// Top-level arkdown configuration (parsed from `build-profile.json5` and related files).
@@ -114,6 +165,16 @@ pub struct ObfuscationConfig {
     pub rule_files: Vec<PathBuf>,
 }
 
+impl ObfuscationConfig {
+    /// Returns `true` when obfuscation should run for the given build mode.
+    ///
+    /// Obfuscation is only active in `Release` builds with
+    /// `enable_obfuscation = true`.
+    pub fn is_enabled_for_mode(&self, build_mode: &BuildMode) -> bool {
+        matches!(build_mode, BuildMode::Release) && self.enable_obfuscation
+    }
+}
+
 /// Resource compiler options.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResOptions {
@@ -153,6 +214,39 @@ pub struct SdkConfig {
 
 fn default_compile_sdk_version() -> String {
     "6.0.0.47".to_string()
+}
+
+impl SdkConfig {
+    /// Derive the `ets/` root directory from `ets_loader_path`.
+    ///
+    /// `ets_loader_path` is e.g. `<sdk>/ets/build-tools/ets-loader`, so the
+    /// ETS root is two levels up: `<sdk>/ets`.
+    fn ets_root(&self) -> Option<&std::path::Path> {
+        self.ets_loader_path.parent()?.parent()
+    }
+
+    /// Candidate directories containing `@ohos/*` API declaration files.
+    ///
+    /// Returns `["<sdk>/ets/api", "<sdk>/js/api"]` in priority order.
+    pub fn ets_api_dirs(&self) -> Vec<std::path::PathBuf> {
+        let Some(ets_root) = self.ets_root() else {
+            return vec![];
+        };
+        let mut dirs = vec![ets_root.join("api")];
+        if let Some(sdk_root) = ets_root.parent() {
+            dirs.push(sdk_root.join("js/api"));
+        }
+        dirs
+    }
+
+    /// Candidate directories containing `@kit.*` declaration files.
+    ///
+    /// Returns `["<sdk>/ets/kits"]`.
+    pub fn ets_kits_dirs(&self) -> Vec<std::path::PathBuf> {
+        self.ets_root()
+            .map(|ets_root| vec![ets_root.join("kits")])
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

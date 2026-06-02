@@ -97,19 +97,15 @@ hvigorw assembleHap
 │     │  ⑥ invalid-cache          (build hooks) cache invalidation
 │     │  ⑦ router-map             (build hooks) router entry collection
 │     │  ⑧ har-dedup              (build hooks) HAR deduplication (HSP)
-│     │  ⑨ wrapper-chunk          renderChunk() IIFE + globalThis registry
+│     │  ⑨ renderChunk hooks      final Rollup chunk rendering
 │     │
 │     │  Output per chunk:
-│     │  (function () {
-│     │    "use strict";
-│     │    /* ... bundled CJS code ... */
-│     │    globalThis["chunkName_hash"] = { export1: ... };
-│     │  })();
+│     │  ESM JavaScript suitable for es2abc --module
 │     │
-│     └── Output: *.js IIFE-wrapped chunks in loader_out/
+│     └── Output: *.js module chunks in loader_out/
 │
 ├─[6] ES2ABC COMPILATION  (bytecode)
-│     Input:   IIFE-wrapped .js chunks
+│     Input:   module-mode .js chunks
 │     Binary:  DevEco SDK es2abc
 │     Process:
 │       1. Parse JS with oxc (TypeScript mode)
@@ -201,7 +197,6 @@ entry/build/default/intermediates/
 | ----------------------------------- | ----------- | -------------------------------- | ------------------------------------------------------- |
 | `resolve/index` + `import-resolver` | custom      | `arkdown-plugin-ohos-resolve`    | Most complex; handles OHM URLs, ByteCode HAR, SDK paths |
 | `module-meta-info-plugin`           | custom      | `arkdown-plugin-module-meta`     | pkgName, isLocalDep, OHM identity                       |
-| `wrapper-chunk-plugin`              | custom      | `arkdown-plugin-chunk-wrapper`   | IIFE wrap, globalThis registry                          |
 | `check-duplicate-filenames-plugin`  | custom      | `arkdown-plugin-duplicate-check` | Prevent ABC record name collisions                      |
 | `invalid-cache-plugin`              | custom      | `arkdown-cache`                  | Incremental build cache invalidation                    |
 | `@rollup/plugin-commonjs`           | 24.1.0      | **rolldown built-in**            | CJS→ESM; use rolldown's native support                  |

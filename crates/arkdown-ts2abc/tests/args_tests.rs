@@ -1,12 +1,13 @@
 use std::path::PathBuf;
 
 use arkdown_ts2abc::{
-    parse_ts2abc_args, ts2abc_script_target_bc_version, BytecodeVersion, Ts2abcCommand, Ts2abcError,
+    ts2abc_script_target_bc_version, BytecodeVersion, Ts2abcCommand, Ts2abcError,
 };
 
 #[test]
 fn target_bc_version_matches_ts2abc_wrapper_api8_compat() {
-    let command = parse_ts2abc_args(["--target-bc-version", "--target-api-version", "8"]).unwrap();
+    let command =
+        Ts2abcCommand::parse(["--target-bc-version", "--target-api-version", "8"]).unwrap();
 
     match command {
         Ts2abcCommand::PrintTargetBcVersion(query) => {
@@ -34,7 +35,7 @@ fn target_bc_version_matches_api18_current_generation() {
 
 #[test]
 fn parses_minimal_compile_command() {
-    let command = parse_ts2abc_args([
+    let command = Ts2abcCommand::parse([
         "--module",
         "--merge-abc",
         "--debug-info",
@@ -77,7 +78,7 @@ fn parses_minimal_compile_command() {
 
 #[test]
 fn parses_npm_module_entry_list_flag() {
-    let command = parse_ts2abc_args([
+    let command = Ts2abcCommand::parse([
         "--module",
         "--merge-abc",
         "--npm-module-entry-list",
@@ -101,12 +102,12 @@ fn parses_npm_module_entry_list_flag() {
 
 #[test]
 fn rejects_unknown_native_backend_flag_explicitly() {
-    let err = parse_ts2abc_args(["--dump-assembly"]).unwrap_err();
+    let err = Ts2abcCommand::parse(["--dump-assembly"]).unwrap_err();
     assert!(matches!(err, Ts2abcError::UnsupportedFlag(flag) if flag == "--dump-assembly"));
 }
 
 #[test]
 fn rejects_missing_output_for_compile() {
-    let err = parse_ts2abc_args(["input.js"]).unwrap_err();
+    let err = Ts2abcCommand::parse(["input.js"]).unwrap_err();
     assert!(matches!(err, Ts2abcError::MissingOutput));
 }

@@ -1,9 +1,10 @@
+use std::fmt::Write;
+
 use crate::transform::build_fn::SpanHint;
-use crate::transform::decorator::{
-    constructor_init_kind, has_initially_provided_value_slot, has_update_state_vars_slot,
-    is_state_decorator, state_decorator_class_for, state_decorator_decl_class_for,
-    ConstructorInitKind,
+use crate::transform::component_field::{
+    push_regular_field_declaration, push_state_constructor_init, push_state_field_declaration,
 };
+use crate::transform::decorator::{has_initially_provided_value_slot, has_update_state_vars_slot};
 use crate::transform::entry::{generate_entry_registration, EntryRegistrationInfo};
 
 /// A `@Builder` method extracted from a `@Component` struct.
@@ -87,6 +88,7 @@ pub struct ComponentInfo {
     pub is_entry: bool,
     pub is_exported: bool,
     pub is_default_export: bool,
+    pub is_reusable: bool,
     pub state_fields: Vec<StateField>,
     /// All struct properties in source order. hvigor adds every property to
     /// the generated `*_Params` interface from `createVariableInitStatement`,
@@ -115,370 +117,338 @@ pub struct ComponentInfo {
     pub styles_methods: Vec<StylesMethodInfo>,
 }
 
+impl ComponentInfo {
+    /// Resolved property order: uses `property_order` if set, otherwise derives
+    /// from state_fields + regular_fields.
+    pub fn resolved_property_order(&self) -> Vec<String> {
+        if self.property_order.is_empty() {
+            self.state_fields
+                .iter()
+                .map(|f| f.name.clone())
+                .chain(self.regular_fields.iter().map(|f| f.name.clone()))
+                .collect()
+        } else {
+            self.property_order.clone()
+        }
+    }
+
+    /// Resolved params fields: uses `params_fields` if set, otherwise derives
+    /// from state_fields.
+    pub fn resolved_params_fields(&self) -> Vec<ParamField> {
+        if self.params_fields.is_empty() {
+            self.state_fields
+                .iter()
+                .map(|f| ParamField {
+                    name: f.name.clone(),
+                    type_annotation: f.type_annotation.clone(),
+                })
+                .collect()
+        } else {
+            self.params_fields.clone()
+        }
+    }
+
+    pub fn find_regular_field(&self, name: &str) -> Option<&RegularField> {
+        self.regular_fields.iter().find(|f| f.name == name)
+    }
+
+    pub fn find_state_field(&self, name: &str) -> Option<&StateField> {
+        self.state_fields.iter().find(|f| f.name == name)
+    }
+}
+
 /// Generate the full ViewPU class text for a component.
 ///
 /// The output is standard TypeScript that the downstream `arkdown-loader`
 /// can parse and bundle without any ArkTS grammar extensions.
 pub fn generate_view_pu_class(info: &ComponentInfo) -> String {
-    let mut out = String::with_capacity(512);
-    let fallback_property_order;
-    let property_order = if info.property_order.is_empty() {
-        fallback_property_order = info
-            .state_fields
-            .iter()
-            .map(|field| field.name.clone())
-            .chain(info.regular_fields.iter().map(|field| field.name.clone()))
-            .collect::<Vec<_>>();
-        &fallback_property_order
-    } else {
-        &info.property_order
-    };
-
-    let params_type = format!("{}_Params", info.name);
-    out.push_str(&format!("interface {params_type} {{\n"));
-    let state_params;
-    let params_fields = if info.params_fields.is_empty() {
-        state_params = info
-            .state_fields
-            .iter()
-            .map(|field| ParamField {
-                name: field.name.clone(),
-                type_annotation: field.type_annotation.clone(),
-            })
-            .collect::<Vec<_>>();
-        &state_params
-    } else {
-        &info.params_fields
-    };
-    for field in params_fields {
-        if field.type_annotation.is_empty() {
-            out.push_str(&format!("    {}?;\n", field.name));
-        } else {
-            out.push_str(&format!(
-                "    {}?: {};\n",
-                field.name, field.type_annotation
-            ));
-        }
-    }
-    out.push_str("}\n");
-
-    let export_prefix = if info.is_default_export {
-        "export default "
-    } else if info.is_exported {
-        "export "
-    } else {
-        ""
-    };
-    out.push_str(&format!(
-        "{export_prefix}class {} extends ViewPU {{\n",
-        info.name
-    ));
-
-    out.push_str(concat!(
-        "    constructor(parent, params, __localStorage, elmtId = -1, paramsLambda = undefined, extraInfo) {\n",
-        "        super(parent, __localStorage, elmtId, extraInfo);\n",
-        "        if (typeof paramsLambda === \"function\") {\n",
-        "            this.paramsGenerator_ = paramsLambda;\n",
-        "        }\n",
-    ));
-    for name in property_order {
-        if let Some(field) = find_regular_field(info, name) {
-            let init = field.initializer.as_deref().unwrap_or("undefined");
-            out.push_str(&format!("        this.{name} = {init};\n"));
-        } else if let Some(field) = find_state_field(info, name) {
-            push_state_constructor_init(&mut out, field);
-        }
-    }
-    out.push_str("        this.setInitiallyProvidedValue(params);\n");
-    // @Watch — hvigor appends declareWatch calls after setInitiallyProvidedValue.
-    for field in &info.state_fields {
-        if let Some(handler) = &field.watch_handler {
-            out.push_str(&format!(
-                "        this.declareWatch(\"{name}\", this.{handler});\n",
-                name = field.name,
-                handler = handler,
-            ));
-        }
-    }
-    out.push_str("        this.finalizeConstruction();\n    }\n");
-
-    out.push_str(&format!(
-        "    setInitiallyProvidedValue(params: {params_type}) {{\n"
-    ));
-    for name in property_order {
-        if find_regular_field(info, name).is_some()
-            || find_state_field(info, name)
-                .is_some_and(|field| has_initially_provided_value_slot(&field.decorator))
-        {
-            out.push_str(&format!(
-                "        if (params.{name} !== undefined) {{\n            this.{name} = params.{name};\n        }}\n",
-            ));
-        }
-    }
-    out.push_str("    }\n");
-
-    let prop_fields: Vec<&StateField> = info
-        .state_fields
-        .iter()
-        .filter(|f| has_update_state_vars_slot(&f.decorator))
-        .collect();
-
-    out.push_str(&format!("    updateStateVars(params: {params_type}) {{\n"));
-    for field in &prop_fields {
-        let update_api = match field.decorator.as_str() {
-            "Prop" | "Param" | "Once" | "PropRef" => "reset",
-            _ => "set",
-        };
-        out.push_str(&format!(
-            "        if (params.{name} !== undefined) {{\n            this.__{name}.{update_api}(params.{name});\n        }}\n",
-            name = field.name,
-            update_api = update_api,
-        ));
-    }
-    out.push_str("    }\n");
-
-    out.push_str("    purgeVariableDependenciesOnElmtId(rmElmtId) {\n");
-    for field in &info.state_fields {
-        if field.decorator == "BuilderParam" {
-            continue;
-        }
-        out.push_str(&format!(
-            "        this.__{name}.purgeDependencyOnElmtId(rmElmtId);\n",
-            name = field.name,
-        ));
-    }
-    out.push_str("    }\n");
-
-    out.push_str("    aboutToBeDeleted() {\n");
-    for field in &info.state_fields {
-        if field.decorator == "BuilderParam" {
-            continue;
-        }
-        out.push_str(&format!(
-            "        this.__{name}.aboutToBeDeleted();\n",
-            name = field.name,
-        ));
-    }
-    out.push_str(concat!(
-        "        SubscriberManager.Get().delete(this.id__());\n",
-        "        this.aboutToBeDeletedInternal();\n",
-        "    }\n",
-    ));
-
-    for name in property_order {
-        if let Some(field) = find_regular_field(info, name) {
-            push_regular_field_declaration(&mut out, field);
-        } else if let Some(field) = find_state_field(info, name) {
-            push_state_field_declaration(&mut out, field);
-        }
-    }
-
-    for member in &info.regular_members {
-        out.push_str(&render_regular_member(member));
-    }
-
-    out.push_str("    initialRender() {\n");
-    out.push_str(&info.initial_render_body);
-    out.push_str("    }\n");
-
-    // ── @Builder methods ─────────────────────────────────────────────────────
-    // Each @Builder method stays as a class method with the same name and its
-    // ArkUI build() DSL body desugared to observeComponentCreation2 calls.
-    for method in &info.builder_methods {
-        let params = if method.params.is_empty() {
-            String::new()
-        } else {
-            method.params.clone()
-        };
-        out.push_str(&format!(
-            "    {}({}){} {{\n",
-            method.name, params, method.return_annotation
-        ));
-        out.push_str(&method.lowered_body);
-        out.push_str("    }\n");
-    }
-
-    // ── @Styles methods ──────────────────────────────────────────────────────
-    // Each @Styles method becomes a private class method with the decorator
-    // stripped.  The attribute chain body is lowered: `.attr(x)` → `this.attr(x)`.
-    for method in &info.styles_methods {
-        let params = if method.params.is_empty() {
-            String::new()
-        } else {
-            method.params.clone()
-        };
-        out.push_str(&format!(
-            "    private {}({}): void {{\n",
-            method.name, params
-        ));
-        out.push_str(&method.lowered_body);
-        out.push_str("    }\n");
-    }
-
-    out.push_str("    rerender() {\n        this.updateDirtyElements();\n    }\n");
-
-    if info.is_entry {
-        out.push_str("    static getEntryName(): string {\n");
-        out.push_str(&format!("        return \"{}\";\n", info.name));
-        out.push_str("    }\n");
-    }
-
-    out.push_str("}\n");
-
-    // ── @Entry registration ───────────────────────────────────────────────────
-    if info.is_entry {
-        out.push_str(&generate_entry_registration(
-            &info.name,
-            info.entry_registration.as_ref(),
-        ));
-    }
-
-    out
+    ViewPuClassEmitter::new(info).emit()
 }
 
-fn find_regular_field<'a>(info: &'a ComponentInfo, name: &str) -> Option<&'a RegularField> {
-    info.regular_fields.iter().find(|field| field.name == name)
+struct ViewPuClassEmitter<'a> {
+    info: &'a ComponentInfo,
+    out: String,
+    params_type: String,
+    property_order: Vec<String>,
+    params_fields: Vec<ParamField>,
 }
 
-fn find_state_field<'a>(info: &'a ComponentInfo, name: &str) -> Option<&'a StateField> {
-    info.state_fields.iter().find(|field| field.name == name)
-}
+impl<'a> ViewPuClassEmitter<'a> {
+    fn new(info: &'a ComponentInfo) -> Self {
+        Self {
+            info,
+            out: String::with_capacity(512),
+            params_type: format!("{}_Params", info.name),
+            property_order: info.resolved_property_order(),
+            params_fields: info.resolved_params_fields(),
+        }
+    }
 
-fn push_state_constructor_init(out: &mut String, field: &StateField) {
-    let backing = state_decorator_class_for(&field.decorator, field.is_simple_type);
-    let local_init = field.initializer.as_deref().unwrap_or("undefined");
-    match constructor_init_kind(&field.decorator) {
-        ConstructorInitKind::NewWithLocalInit => {
-            out.push_str(&format!(
-                "        this.__{name} = new {backing}({init}, this, \"{name}\");\n",
-                name = field.name,
-                backing = backing,
-                init = local_init,
-            ));
-        }
-        ConstructorInitKind::NewWithParamInit => {
-            out.push_str(&format!(
-                "        this.__{name} = new {backing}(params.{name}, this, \"{name}\");\n",
-                name = field.name,
-                backing = backing,
-            ));
-        }
-        ConstructorInitKind::ConsumeInit => {
-            let key = field.alias.as_deref().unwrap_or(field.name.as_str());
-            out.push_str(&format!(
-                "        this.__{name} = this.initializeConsume(\"{key}\", \"{name}\");\n",
-                name = field.name,
-                key = key,
-            ));
-        }
-        ConstructorInitKind::BuilderParamInit => {
-            out.push_str(&format!(
-                "        this.{name} = {init};\n",
-                name = field.name,
-                init = local_init,
-            ));
-        }
-        ConstructorInitKind::StorageInit => {
-            if matches!(
-                field.decorator.as_str(),
-                "LocalStorageLink" | "LocalStorageProp" | "LocalStoragePropRef"
-            ) {
-                return;
+    fn emit(mut self) -> String {
+        self.push_params_interface();
+        self.push_class_header();
+        self.push_constructor();
+        self.push_set_initially_provided_value();
+        self.push_update_state_vars();
+        self.push_purge_variable_dependencies();
+        self.push_about_to_be_deleted();
+        self.push_update_recycle_elmt_id();
+        self.push_field_declarations();
+        self.push_regular_members();
+        self.push_initial_render();
+        self.push_builder_methods();
+        self.push_styles_methods();
+        self.push_rerender();
+        self.push_entry_name();
+        self.out.push_str("}\n");
+        self.push_entry_registration();
+        self.out
+    }
+
+    fn push_params_interface(&mut self) {
+        let _ = writeln!(self.out, "interface {} {{", self.params_type);
+        for field in &self.params_fields {
+            if field.type_annotation.is_empty() {
+                let _ = writeln!(self.out, "    {}?;", field.name);
+            } else {
+                let _ = writeln!(self.out, "    {}?: {};", field.name, field.type_annotation);
             }
-            let key = field
-                .decorator_arg
-                .as_deref()
-                .map(str::trim)
-                .filter(|arg| !arg.is_empty())
-                .map(str::to_string)
-                .unwrap_or_else(|| format!("\"{}\"", field.name));
-            let api = match field.decorator.as_str() {
-                "StorageLink" | "LocalStorageLink" => "createStorageLink",
-                _ => "createStorageProp",
-            };
-            out.push_str(&format!(
-                "        this.__{name} = this.{api}({key}, {init}, \"{name}\");\n",
-                name = field.name,
-                api = api,
-                key = key,
-                init = local_init,
+        }
+        self.out.push_str("}\n");
+    }
+
+    fn push_class_header(&mut self) {
+        let _ = writeln!(
+            self.out,
+            "{}class {} extends ViewPU {{",
+            self.export_prefix(),
+            self.info.name
+        );
+    }
+
+    fn push_constructor(&mut self) {
+        self.out.push_str(concat!(
+            "    constructor(parent, params, __localStorage, elmtId = -1, paramsLambda = undefined, extraInfo) {\n",
+            "        super(parent, __localStorage, elmtId, extraInfo);\n",
+            "        if (typeof paramsLambda === \"function\") {\n",
+            "            this.paramsGenerator_ = paramsLambda;\n",
+            "        }\n",
+        ));
+        for name in &self.property_order {
+            if let Some(field) = self.info.find_regular_field(name) {
+                let init = field.initializer.as_deref().unwrap_or("undefined");
+                let _ = writeln!(self.out, "        this.{name} = {init};");
+            } else if let Some(field) = self.info.find_state_field(name) {
+                push_state_constructor_init(&mut self.out, field);
+            }
+        }
+        self.out
+            .push_str("        this.setInitiallyProvidedValue(params);\n");
+        self.push_watch_declarations();
+        self.out
+            .push_str("        this.finalizeConstruction();\n    }\n");
+    }
+
+    fn push_watch_declarations(&mut self) {
+        for field in &self.info.state_fields {
+            if let Some(handler) = &field.watch_handler {
+                let _ = writeln!(
+                    self.out,
+                    "        this.declareWatch(\"{}\", this.{});",
+                    field.name, handler
+                );
+            }
+        }
+    }
+
+    fn push_set_initially_provided_value(&mut self) {
+        let _ = writeln!(
+            self.out,
+            "    setInitiallyProvidedValue(params: {}) {{",
+            self.params_type
+        );
+        for name in &self.property_order {
+            if self.has_initially_provided_value_slot(name) {
+                let _ = writeln!(
+                    self.out,
+                    "        if (params.{name} !== undefined) {{\n            this.{name} = params.{name};\n        }}"
+                );
+            }
+        }
+        self.out.push_str("    }\n");
+    }
+
+    fn push_update_state_vars(&mut self) {
+        let _ = writeln!(
+            self.out,
+            "    updateStateVars(params: {}) {{",
+            self.params_type
+        );
+        for field in self
+            .info
+            .state_fields
+            .iter()
+            .filter(|field| has_update_state_vars_slot(&field.decorator))
+        {
+            if field.decorator == "State" {
+                let _ = writeln!(
+                    self.out,
+                    "        if (params.{name}) {{\n            this.__{name}.set(params.{name});\n        }}",
+                    name = field.name
+                );
+            } else {
+                let _ = writeln!(
+                    self.out,
+                    "        this.__{}.{}(params.{});",
+                    field.name,
+                    update_state_vars_api(field),
+                    field.name
+                );
+            }
+        }
+        self.out.push_str("    }\n");
+    }
+
+    fn push_purge_variable_dependencies(&mut self) {
+        self.out
+            .push_str("    purgeVariableDependenciesOnElmtId(rmElmtId) {\n");
+        for name in self.backing_field_names() {
+            let _ = writeln!(
+                self.out,
+                "        this.__{name}.purgeDependencyOnElmtId(rmElmtId);"
+            );
+        }
+        self.out.push_str("    }\n");
+    }
+
+    fn push_about_to_be_deleted(&mut self) {
+        self.out.push_str("    aboutToBeDeleted() {\n");
+        for name in self.backing_field_names() {
+            let _ = writeln!(self.out, "        this.__{name}.aboutToBeDeleted();");
+        }
+        self.out.push_str(concat!(
+            "        SubscriberManager.Get().delete(this.id__());\n",
+            "        this.aboutToBeDeletedInternal();\n",
+            "    }\n",
+        ));
+    }
+
+    fn push_update_recycle_elmt_id(&mut self) {
+        if !self.info.is_reusable {
+            return;
+        }
+        self.out
+            .push_str("    updateRecycleElmtId(oldElmtId, newElmtId) {\n");
+        for name in self.backing_field_names() {
+            let _ = writeln!(
+                self.out,
+                "        this.__{name}.updateElmtId(oldElmtId, newElmtId);"
+            );
+        }
+        self.out.push_str("    }\n");
+    }
+
+    fn push_field_declarations(&mut self) {
+        for name in &self.property_order {
+            if let Some(field) = self.info.find_regular_field(name) {
+                push_regular_field_declaration(&mut self.out, field);
+            } else if let Some(field) = self.info.find_state_field(name) {
+                push_state_field_declaration(&mut self.out, field);
+            }
+        }
+    }
+
+    fn push_regular_members(&mut self) {
+        for member in &self.info.regular_members {
+            self.out.push_str(&render_regular_member(member));
+        }
+    }
+
+    fn push_initial_render(&mut self) {
+        self.out.push_str("    initialRender() {\n");
+        self.out.push_str(&self.info.initial_render_body);
+        self.out.push_str("    }\n");
+    }
+
+    fn push_builder_methods(&mut self) {
+        for method in &self.info.builder_methods {
+            let _ = writeln!(
+                self.out,
+                "    {}({}){} {{",
+                method.name, method.params, method.return_annotation
+            );
+            self.out.push_str(&method.lowered_body);
+            self.out.push_str("    }\n");
+        }
+    }
+
+    fn push_styles_methods(&mut self) {
+        for method in &self.info.styles_methods {
+            let _ = writeln!(
+                self.out,
+                "    private {}({}): void {{",
+                method.name, method.params
+            );
+            self.out.push_str(&method.lowered_body);
+            self.out.push_str("    }\n");
+        }
+    }
+
+    fn push_rerender(&mut self) {
+        self.out
+            .push_str("    rerender() {\n        this.updateDirtyElements();\n    }\n");
+    }
+
+    fn push_entry_name(&mut self) {
+        if !self.info.is_entry {
+            return;
+        }
+        self.out.push_str("    static getEntryName(): string {\n");
+        let _ = writeln!(self.out, "        return \"{}\";", self.info.name);
+        self.out.push_str("    }\n");
+    }
+
+    fn push_entry_registration(&mut self) {
+        if self.info.is_entry {
+            self.out.push_str(&generate_entry_registration(
+                &self.info.name,
+                self.info.entry_registration.as_ref(),
             ));
         }
     }
-}
 
-fn push_regular_field_declaration(out: &mut String, field: &RegularField) {
-    out.push_str("    private ");
-    out.push_str(&field.name);
-    if field.optional {
-        out.push('?');
-    }
-    if !field.type_annotation.is_empty() {
-        out.push_str(": ");
-        out.push_str(&field.type_annotation);
-    }
-    out.push_str(";\n");
-}
-
-fn push_state_field_declaration(out: &mut String, field: &StateField) {
-    if field.decorator == "BuilderParam" {
-        out.push_str(&format!("    private __{}?;\n", field.name));
-        return;
-    }
-
-    let backing = state_decorator_decl_class_for(&field.decorator, field.is_simple_type);
-    let type_param = if field.type_annotation.is_empty() {
-        String::new()
-    } else {
-        format!("<{}>", field.type_annotation)
-    };
-    out.push_str(&format!(
-        "    private __{name}: {backing}{type_param}",
-        name = field.name,
-        backing = backing,
-        type_param = type_param,
-    ));
-    if matches!(
-        field.decorator.as_str(),
-        "LocalStorageLink" | "LocalStorageProp" | "LocalStoragePropRef"
-    ) {
-        let local_init = field.initializer.as_deref().unwrap_or("undefined");
-        let key = field
-            .decorator_arg
-            .as_deref()
-            .map(str::trim)
-            .filter(|arg| !arg.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("\"{}\"", field.name));
-        let api = match field.decorator.as_str() {
-            "LocalStorageLink" => "createLocalStorageLink",
-            _ => "createLocalStorageProp",
-        };
-        out.push_str(&format!(
-            " = this.{api}{type_param}({key}, {init}, \"{name}\")",
-            name = field.name,
-            api = api,
-            type_param = type_param,
-            key = key,
-            init = local_init,
-        ));
-    }
-    out.push_str(";\n");
-    if is_state_decorator(&field.decorator) {
-        let ty = if field.type_annotation.is_empty() {
-            "unknown"
+    fn export_prefix(&self) -> &'static str {
+        if self.info.is_default_export {
+            "export default "
+        } else if self.info.is_exported {
+            "export "
         } else {
-            field.type_annotation.as_str()
-        };
-        out.push_str(&format!(
-            "    get {name}() {{\n        return this.__{name}.get();\n    }}\n",
-            name = field.name,
-        ));
-        out.push_str(&format!(
-            "    set {name}(newValue: {ty}) {{\n        this.__{name}.set(newValue);\n    }}\n",
-            name = field.name,
-            ty = ty,
-        ));
+            ""
+        }
+    }
+
+    fn has_initially_provided_value_slot(&self, name: &str) -> bool {
+        self.info.find_regular_field(name).is_some()
+            || self
+                .info
+                .find_state_field(name)
+                .is_some_and(|field| has_initially_provided_value_slot(&field.decorator))
+    }
+
+    fn backing_field_names(&self) -> Vec<String> {
+        self.info
+            .state_fields
+            .iter()
+            .filter(|field| field.decorator != "BuilderParam")
+            .map(|field| field.name.clone())
+            .collect()
+    }
+}
+
+fn update_state_vars_api(field: &StateField) -> &'static str {
+    match field.decorator.as_str() {
+        "Prop" | "Param" | "Once" | "PropRef" => "reset",
+        _ => "set",
     }
 }
 
@@ -525,6 +495,7 @@ mod tests {
             is_entry: false,
             is_exported: false,
             is_default_export: false,
+            is_reusable: false,
             state_fields: vec![StateField {
                 name: "count".to_string(),
                 type_annotation: "number".to_string(),
@@ -616,6 +587,7 @@ mod tests {
             is_entry: false,
             is_exported: false,
             is_default_export: false,
+            is_reusable: false,
             state_fields: vec![StateField {
                 name: "value".to_string(),
                 type_annotation: "string".to_string(),
@@ -639,8 +611,12 @@ mod tests {
         let out = generate_view_pu_class(&info);
         assert!(out.contains("private __value: SynchedPropertySimpleOneWayPU<string>"));
         assert!(
-            out.contains("params.__value") || out.contains("params.value"),
-            "updateStateVars should reference prop field"
+            out.contains("this.__value.reset(params.value);"),
+            "updateStateVars should directly reset @Prop like hvigor, got:\n{out}"
+        );
+        assert!(
+            !out.contains("if (params.value !== undefined)"),
+            "@Prop updateStateVars must not guard reset in hvigor PU output"
         );
     }
 
@@ -651,6 +627,7 @@ mod tests {
             is_entry: false,
             is_exported: false,
             is_default_export: false,
+            is_reusable: false,
             state_fields: vec![],
             params_fields: vec![],
             property_order: vec![],
@@ -676,6 +653,7 @@ mod tests {
             is_entry: false,
             is_exported: false,
             is_default_export: false,
+            is_reusable: false,
             state_fields: vec![StateField {
                 name: "items".to_string(),
                 type_annotation: "string[]".to_string(),
@@ -721,6 +699,7 @@ mod tests {
             is_entry: false,
             is_exported: false,
             is_default_export: false,
+            is_reusable: false,
             state_fields: vec![StateField {
                 name: "item".to_string(),
                 type_annotation: "Item".to_string(),
@@ -752,6 +731,70 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_reusable_component_generates_update_recycle_elmt_id() {
+        let info = ComponentInfo {
+            name: "ReusableRow".to_string(),
+            is_entry: false,
+            is_exported: false,
+            is_default_export: false,
+            is_reusable: true,
+            state_fields: vec![
+                StateField {
+                    name: "item".to_string(),
+                    type_annotation: "Item".to_string(),
+                    decorator: "ObjectLink".to_string(),
+                    initializer: None,
+                    watch_handler: None,
+                    alias: None,
+                    decorator_arg: None,
+                    is_simple_type: false,
+                },
+                StateField {
+                    name: "content".to_string(),
+                    type_annotation: "() => void".to_string(),
+                    decorator: "BuilderParam".to_string(),
+                    initializer: None,
+                    watch_handler: None,
+                    alias: None,
+                    decorator_arg: None,
+                    is_simple_type: true,
+                },
+            ],
+            params_fields: vec![],
+            property_order: vec![],
+            regular_fields: vec![RegularField {
+                name: "local".to_string(),
+                type_annotation: "number".to_string(),
+                initializer: Some("1".to_string()),
+                optional: false,
+            }],
+            regular_members: vec![],
+            initial_render_body: String::new(),
+            initial_render_span_hints: vec![],
+            builder_methods: vec![],
+            styles_methods: vec![],
+            entry_registration: None,
+        };
+        let out = generate_view_pu_class(&info);
+        assert!(
+            out.contains("updateRecycleElmtId(oldElmtId, newElmtId)"),
+            "reusable component should emit updateRecycleElmtId, got:\n{out}"
+        );
+        assert!(
+            out.contains("this.__item.updateElmtId(oldElmtId, newElmtId);"),
+            "non-regular state fields should update element id"
+        );
+        assert!(
+            !out.contains("this.__content.updateElmtId"),
+            "@BuilderParam is immutable and should not update element id"
+        );
+        assert!(
+            !out.contains("this.__local.updateElmtId"),
+            "regular fields should not update element id"
+        );
+    }
+
     // ── @Provide ──────────────────────────────────────────────────────────────
 
     #[test]
@@ -761,6 +804,7 @@ mod tests {
             is_entry: false,
             is_exported: false,
             is_default_export: false,
+            is_reusable: false,
             state_fields: vec![StateField {
                 name: "theme".to_string(),
                 type_annotation: "string".to_string(),
@@ -801,6 +845,7 @@ mod tests {
             is_entry: false,
             is_exported: false,
             is_default_export: false,
+            is_reusable: false,
             state_fields: vec![StateField {
                 name: "theme".to_string(),
                 type_annotation: "string".to_string(),
@@ -839,6 +884,7 @@ mod tests {
             is_entry: false,
             is_exported: false,
             is_default_export: false,
+            is_reusable: false,
             state_fields: vec![StateField {
                 name: "currentTheme".to_string(),
                 type_annotation: "string".to_string(),
@@ -875,6 +921,7 @@ mod tests {
             is_entry: false,
             is_exported: false,
             is_default_export: false,
+            is_reusable: false,
             state_fields: vec![StateField {
                 name: "count".to_string(),
                 type_annotation: "number".to_string(),
@@ -936,6 +983,7 @@ mod tests {
             is_entry: false,
             is_exported: false,
             is_default_export: false,
+            is_reusable: false,
             state_fields: vec![StateField {
                 name: "content".to_string(),
                 type_annotation: "() => void".to_string(),
@@ -981,6 +1029,7 @@ mod tests {
             is_entry: false,
             is_exported: false,
             is_default_export: false,
+            is_reusable: false,
             state_fields: vec![StateField {
                 name: "title".to_string(),
                 type_annotation: "string".to_string(),
@@ -1027,6 +1076,7 @@ mod tests {
                 is_entry: false,
                 is_exported: false,
                 is_default_export: false,
+                is_reusable: false,
                 state_fields: vec![StateField {
                     name: "setting".to_string(),
                     type_annotation: "string".to_string(),

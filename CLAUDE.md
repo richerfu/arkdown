@@ -55,7 +55,6 @@ arkdown/
 │   ├── arkdown-resolver/     ← OHOS module resolution library (SPEC-003)
 │   ├── arkdown-loader/       ← parallel module loading + plugin pipeline (SPEC-004)
 │   ├── arkdown/              ← bundler core: link, tree-shake, chunk-split (SPEC-005)
-│   ├── arkdown-plugin-chunk-wrapper/  ← legacy IIFE/globalThis registry (SPEC-006, not used in ESM pipeline)
 │   ├── arkdown-plugin-json5/          ← JSON/JSON5 import (SPEC-007)
 │   ├── arkdown-plugin-duplicate-check/ ← filename uniqueness check (SPEC-008)
 │   ├── arkdown-plugin-module-meta/    ← per-module OHOS metadata (SPEC-014)

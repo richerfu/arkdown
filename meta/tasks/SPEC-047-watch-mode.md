@@ -123,10 +123,11 @@ arkdown matches all three of these parameters.
 
 ## Dependency Changes
 
-`crates/arkdown-cli/Cargo.toml` adds:
+`crates/arkdown-cli/Cargo.toml` references the watcher through the workspace
+dependency table:
 
 ```toml
-arkdown-watcher = { path = "../arkdown-watcher" }
+arkdown-watcher = { workspace = true }
 ```
 
 ---

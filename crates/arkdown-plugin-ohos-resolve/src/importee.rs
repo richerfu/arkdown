@@ -8,7 +8,7 @@
 // The results are written to loader.json and to an importee cache JSON file under
 // `intermediates/importee/default/{module_name}/importee.json`.
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::{Path, PathBuf};
 
 use arkdown_core::{ArkChunk, ChunkGraph};
@@ -84,14 +84,14 @@ pub fn process_importees(
     config: &ProcessImporteeConfig,
 ) -> std::io::Result<ProcessImporteeResult> {
     // ── 1. Build name → chunk lookup ─────────────────────────────────────────
-    let chunk_by_name: HashMap<&str, &ArkChunk> = chunk_graph
+    let chunk_by_name: FxHashMap<&str, &ArkChunk> = chunk_graph
         .chunks
         .iter()
         .map(|c| (c.name.as_str(), c))
         .collect();
 
     // ── 2. Identify entry chunk names ────────────────────────────────────────
-    let entry_names: HashSet<&str> = chunk_graph
+    let entry_names: FxHashSet<&str> = chunk_graph
         .chunks
         .iter()
         .filter(|c| c.is_entry || c.is_dynamic_entry)
@@ -99,7 +99,7 @@ pub fn process_importees(
         .collect();
 
     // ── 3. BFS to find all chunks reachable from entry chunks ────────────────
-    let mut reachable: HashSet<&str> = HashSet::new();
+    let mut reachable: FxHashSet<&str> = FxHashSet::default();
     let mut queue: Vec<&str> = entry_names.iter().copied().collect();
 
     while let Some(name) = queue.pop() {
@@ -249,15 +249,6 @@ fn write_importee_cache(
     Ok(())
 }
 
-/// Rewrite `@bundle:` references in chunk code to point at pre-compiled `.abc` paths.
-///
-/// Currently a no-op stub; the full implementation is deferred until
-/// `ChunkGraph` exposes the per-import metadata needed to perform the rewrite.
-pub fn rewrite_bytecode_har_imports(_chunk_code: &str) -> String {
-    // TODO: rewrite @bundle: references to point to pre-compiled .abc paths
-    _chunk_code.to_string()
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -268,7 +259,6 @@ mod tests {
 
     use arkdown_core::{ArkChunk, ChunkGraph};
     use index_vec::IndexVec;
-    use rustc_hash::FxHashMap;
 
     use super::*;
 

@@ -23,7 +23,6 @@ exact behavioral parity cases derived from reading the original source.
 | [TEST-003](TEST-003-resolver.md)          | `arkdown-resolver`                                                 | All OHOS specifier forms                                |
 | [TEST-004](TEST-004-loader.md)            | `arkdown-loader`                                                   | Plugin chain, parallel load                             |
 | [TEST-005](TEST-005-bundler.md)           | `arkdown`                                                          | Link, tree-shake, chunk split                           |
-| [TEST-006](TEST-006-chunk-wrapper.md)     | `arkdown-plugin-chunk-wrapper`                                     | **Original behavioral parity**                          |
 | [TEST-007](TEST-007-json5.md)             | `arkdown-plugin-json5`                                             | **Original behavioral parity**                          |
 | [TEST-008](TEST-008-duplicate-check.md)   | `arkdown-plugin-duplicate-check`                                   | **Original behavioral parity**                          |
 | [TEST-009](TEST-009-abc-compiler.md)      | `arkdown-abc`                                                      | **Original behavioral parity** (Rust ABC compiler)      |
@@ -62,7 +61,6 @@ the ground truth — passing all of them is equivalent to passing the original p
 
 Original source locations:
 
-- `wrapper-chunk-plugin` → hvigor-arkts-compose `dist/src/plugins/wrapper-chunk-plugin.js`
 - `resolve/index` → hvigor-arkts-compose `dist/src/plugins/resolve/`
 - `module-meta-info-plugin` → hvigor-arkts-compose `dist/src/plugins/module-meta-info-plugin.js`
 - `har-deduplicate` → hvigor-arkts-compose `dist/src/plugins/har-deduplicate/`
