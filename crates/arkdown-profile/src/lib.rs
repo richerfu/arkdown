@@ -47,7 +47,6 @@ use std::sync::Arc;
 use arkdown_config::sdk::discover_ark_vm_version;
 use arkdown_core::{
     ArkdownConfig, ArkdownError, CompileMode, HapManifest, ModuleConfig, ModuleJson5,
-    OhosModuleType,
 };
 
 /// Top-level driver for profile processing and loader.json generation.
