@@ -78,27 +78,6 @@ impl From<&SourceMapOptions> for HvigorSourceMapOptions {
     }
 }
 
-/// Path used by native ABC compilation and packaging for the merged module ABC.
-pub fn modules_abc_path(loader_out_ets_dir: &Path) -> PathBuf {
-    loader_out_ets_dir.join(MODULES_ABC_FILE_NAME)
-}
-
-/// Path used by native ABC compilation and packaging for debug source maps.
-pub fn source_maps_path(loader_out_ets_dir: &Path) -> PathBuf {
-    loader_out_ets_dir.join(SOURCE_MAPS_FILE_NAME)
-}
-
-/// Write every chunk in `chunk_graph` to `output_dir` as `<name>.js`.
-///
-/// Creates the output directory (and any missing parents) if it does not exist.
-/// Returns a list of `(chunk_name, absolute_output_path)` pairs.
-pub fn write_chunks(
-    chunk_graph: &ChunkGraph,
-    output_dir: &Path,
-) -> Result<Vec<(String, PathBuf)>, ArkdownError> {
-    Ok(write_output(chunk_graph, output_dir, None)?.chunk_files)
-}
-
 /// Write JavaScript chunks and the hvigor-compatible source map artifact.
 ///
 /// The native CompileArkTS contract keeps all loader outputs under
@@ -110,7 +89,11 @@ pub fn write_chunks(
 /// hvigor per-file dict format (keyed by `{module}|{pkg}|{ver}|src/main/{path}.ts`)
 /// that matches the golden reference.  When `None`, the raw rolldown source map
 /// is written as-is (single chunk) or omitted (multiple chunks without metadata).
-pub fn write_output(
+fn source_maps_path(loader_out_ets_dir: &Path) -> PathBuf {
+    loader_out_ets_dir.join(SOURCE_MAPS_FILE_NAME)
+}
+
+fn write_output(
     chunk_graph: &ChunkGraph,
     output_dir: &Path,
     source_map_opts: Option<&SourceMapOptions>,
@@ -296,9 +279,9 @@ mod tests {
     fn layout_helpers_point_to_loader_out_ets_artifacts() {
         let loader_out = Path::new("build/default/intermediates/loader_out/default/ets");
 
-        assert_eq!(modules_abc_path(loader_out), loader_out.join("modules.abc"));
+        assert_eq!(WrittenOutput::abc_path_in(loader_out), loader_out.join("modules.abc"));
         assert_eq!(
-            source_maps_path(loader_out),
+            WrittenOutput::source_maps_path_in(loader_out),
             loader_out.join("sourceMaps.map")
         );
     }

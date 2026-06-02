@@ -26,7 +26,7 @@ use arkdown_plugin_ohos_resolve::OhosResolvePlugin;
 use arkdown_profile::ProfileProcessor;
 use arkdown_resolver::ResolverConfig;
 use arkdown_resource::{ResourceCompileConfig, ResourceCompileInput, ResourceCompiler};
-use arkdown_ts2abc::{compile_to_abc, Ts2abcInput, Ts2abcOptions};
+use arkdown_ts2abc::{Ts2abcInput, Ts2abcOptions};
 use index_vec::IndexVec;
 use rolldown_plugin::__inner::SharedPluginable;
 
@@ -344,7 +344,7 @@ fn run_pipeline(fixture: &Path) -> PathBuf {
             });
 
         if !can_skip {
-            compile_to_abc(Ts2abcOptions {
+            Ts2abcOptions {
                 inputs: ts2abc_inputs,
                 output: modules_abc.clone(),
                 target_api_version: config.sdk_config.compile_api_version,
@@ -356,7 +356,7 @@ fn run_pipeline(fixture: &Path) -> PathBuf {
                 commonjs: false,
                 cache_file: Some(abc_cache_file),
                 npm_module_entry_list: None,
-            })
+            }.compile()
             .expect("abc compile");
 
             // Update module cache entries.
