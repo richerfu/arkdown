@@ -474,7 +474,7 @@ fn write_id_defined(entries: &[CompiledEntry], output: &Path) -> Result<(), Reso
         .iter()
         .map(|entry| {
             serde_json::json!({
-                "type": table::type_name(entry.entry_type),
+                "type": ResourceTypeCode(entry.entry_type).type_name(),
                 "name": entry.name,
                 "id": format!("0x{:08X}", entry.id),
             })

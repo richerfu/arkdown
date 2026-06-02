@@ -94,7 +94,7 @@ impl ProfileProcessor {
                 CompileMode::EsModule,
             )
         };
-        let loader = generate_loader_json(&self.config, module_cfg, &manifest);
+        let loader = LoaderJson::generate(&self.config, module_cfg, &manifest);
         Ok((manifest, loader))
     }
 

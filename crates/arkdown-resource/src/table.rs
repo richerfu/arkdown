@@ -4,7 +4,7 @@
 //! and name.  It is consumed by developer tools and by the compiler for symbol
 //! resolution; it is NOT included in the final HAP archive.
 
-use crate::compiler::CompiledEntry;
+use crate::compiler::{CompiledEntry, ResourceTypeCode};
 use std::path::Path;
 
 /// Write a `ResourceTable.txt` file listing every entry in `entries`.
@@ -25,25 +25,13 @@ pub fn write_resource_table(
     for e in sorted {
         lines.push(format!(
             "{} {} 0x{:08x}",
-            type_name(e.entry_type),
+            ResourceTypeCode(e.entry_type).type_name(),
             e.name,
             e.id
         ));
     }
     fs_err::write(output, lines.join("\n"))?;
     Ok(())
-}
-
-pub(crate) fn type_name(t: u32) -> &'static str {
-    match t {
-        0x08 => "integer",
-        0x12 => "float",
-        0x09 => "string",
-        0x0E => "color",
-        0x13 => "media",
-        0x14 => "profile",
-        _ => "unknown",
-    }
 }
 
 fn type_sort_order(t: u32) -> u8 {

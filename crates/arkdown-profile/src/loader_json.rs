@@ -114,77 +114,16 @@ pub struct LoaderJson {
     pub workers: Vec<String>,
 }
 
-/// Metadata for a bytecode-compiled HAR dependency.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ByteCodeHarEntry {
-    /// Package name of the HAR.
-    pub package_name: String,
-    /// Absolute path to the compiled `.abc` file.
-    pub abc_path: String,
-    /// Compatible SDK version string (e.g. `"5.0.0(12)"`).
-    pub compatible_sdk_version: String,
-    /// Absolute path to the `sourceMaps.map` file, if present.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_maps_path: Option<String>,
-    /// Absolute path to the insight intent metadata, if present.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub insight_intent: Option<String>,
-}
-
-fn default_build_mode() -> String {
-    "debug".to_string()
-}
-
-fn collect_form_src_entries(module_cfg: &ModuleConfig) -> Vec<String> {
-    let profile_dir = module_cfg.src_path.join("src/main/resources/base/profile");
-    let Ok(entries) = std::fs::read_dir(profile_dir) else {
-        return Vec::new();
-    };
-
-    let mut form_entries = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-            continue;
-        }
-        let Ok(content) = std::fs::read_to_string(path) else {
-            continue;
-        };
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {
-            continue;
-        };
-        let Some(forms) = value.get("forms").and_then(|forms| forms.as_array()) else {
-            continue;
-        };
-        for form in forms {
-            if let Some(src) = form.get("src").and_then(|src| src.as_str()) {
-                form_entries.push(src.to_string());
-            }
-        }
-    }
-    form_entries
-}
-
-// ---------------------------------------------------------------------------
-// Generation
-// ---------------------------------------------------------------------------
-
-/// Generate a [`LoaderJson`] from the project config, module config, and
-/// processed manifest.
-///
-/// Entry points are collected from:
-/// 1. Each ability's `src_entry` path in the manifest
-/// 2. The module-level `src_entry` from the module.json5 (if recorded)
-///
-/// When `useNormalizedOHMUrl` is `true`, callers are expected to convert the
-/// `src_entry` paths to OHM URLs (`@bundle:…`) before passing the manifest —
-/// this function records whatever values are in `manifest.abilities[].src_entry`.
-pub fn generate_loader_json(
-    config: &ArkdownConfig,
-    module_cfg: &ModuleConfig,
-    manifest: &HapManifest,
-) -> LoaderJson {
+impl LoaderJson {
+    /// Build a [`LoaderJson`] from the processed profile data.
+    ///
+    /// Mirrors hvigor's `GenerateLoaderJson` task, which produces the manifest
+    /// the bundler reads for entry points, module paths, and dependency metadata.
+    pub fn generate(
+        config: &ArkdownConfig,
+        module_cfg: &ModuleConfig,
+        manifest: &HapManifest,
+    ) -> Self {
     // Collect compile_entry from abilities' srcEntry values.
     let mut compile_entry: Vec<String> = manifest
         .abilities
@@ -402,7 +341,88 @@ pub fn generate_loader_json(
         pkg_name_to_pkg_brief_info: build_pkg_brief_info(config, module_cfg),
         workers: discovered_workers,
     }
+    }
 }
+
+
+
+/// Metadata for a bytecode-compiled HAR dependency.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ByteCodeHarEntry {
+    /// Package name of the HAR.
+    pub package_name: String,
+    /// Absolute path to the compiled `.abc` file.
+    pub abc_path: String,
+    /// Compatible SDK version string (e.g. `"5.0.0(12)"`).
+    pub compatible_sdk_version: String,
+    /// Absolute path to the `sourceMaps.map` file, if present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_maps_path: Option<String>,
+    /// Absolute path to the insight intent metadata, if present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub insight_intent: Option<String>,
+}
+
+fn default_build_mode() -> String {
+    "debug".to_string()
+}
+
+fn collect_form_src_entries(module_cfg: &ModuleConfig) -> Vec<String> {
+    let profile_dir = module_cfg.src_path.join("src/main/resources/base/profile");
+    let Ok(entries) = std::fs::read_dir(profile_dir) else {
+        return Vec::new();
+    };
+
+    let mut form_entries = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {
+            continue;
+        };
+        let Some(forms) = value.get("forms").and_then(|forms| forms.as_array()) else {
+            continue;
+        };
+        for form in forms {
+            if let Some(src) = form.get("src").and_then(|src| src.as_str()) {
+                form_entries.push(src.to_string());
+            }
+        }
+    }
+    form_entries
+}
+
+// ---------------------------------------------------------------------------
+// Generation
+// ---------------------------------------------------------------------------
+
+/// Generate a [`LoaderJson`] from the project config, module config, and
+/// processed manifest.
+///
+/// Entry points are collected from:
+/// 1. Each ability's `src_entry` path in the manifest
+/// 2. The module-level `src_entry` from the module.json5 (if recorded)
+///
+/// When `useNormalizedOHMUrl` is `true`, callers are expected to convert the
+/// `src_entry` paths to OHM URLs (`@bundle:…`) before passing the manifest —
+/// this function records whatever values are in `manifest.abilities[].src_entry`.
+/// Build a [`LoaderJson`] from the processed profile data.
+///
+/// This is a compatibility shim; prefer [`LoaderJson::generate`] in new code.
+pub fn generate_loader_json(
+    config: &ArkdownConfig,
+    module_cfg: &ModuleConfig,
+    manifest: &HapManifest,
+) -> LoaderJson {
+    LoaderJson::generate(config, module_cfg, manifest)
+}
+
 fn read_package_main(module_root: &Path) -> Option<String> {
     let path = module_root.join("oh-package.json5");
     let content = std::fs::read_to_string(path).ok()?;
