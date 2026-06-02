@@ -43,7 +43,7 @@ use compile_arkts_handoff::{
 };
 mod compile_arkts_modules;
 use compile_arkts_modules::{
-    compile_module_ids, compile_module_info, compile_source_passthrough, module_id_to_source_path,
+    compile_module_ids, compile_source_passthrough, module_id_to_source_path,
     rewrite_compile_module_imports_to_ohm, CompileModuleInfo,
 };
 mod compile_arkts_output;

@@ -1,6 +1,6 @@
 use super::compile_arkts_handoff::{write_compile_arkts_abc_handoff, CompileArkTsInfo};
 use super::compile_arkts_modules::{
-    compile_module_info, compile_source_passthrough, rewrite_compile_module_imports_to_ohm,
+    compile_source_passthrough, rewrite_compile_module_imports_to_ohm,
     slash_path,
 };
 use super::compile_arkts_package_entries::PackageEntryInfos;
@@ -51,7 +51,7 @@ pub(super) fn compile_widget_pass(
 
     for source_path in widget_sources {
         let source_path = canonical_or_owned(&source_path);
-        let Some(entry_info) = compile_module_info(&source_path, &cache_root, loader_json, config)
+        let Some(entry_info) = CompileModuleInfo::compute(&source_path, &cache_root, loader_json, config)
         else {
             continue;
         };

@@ -27,6 +27,124 @@ impl CompileModuleInfo {
             abc_cache_path: None,
         }
     }
+
+
+    pub(super) fn compute(
+        source_path: &Path,
+        cache_root: &Path,
+        loader_json: &arkdown_profile::LoaderJson,
+        config: &ArkdownConfig,
+    ) -> Option<CompileModuleInfo> {
+        let source_path = canonical_or_owned(&source_path);
+        let source_ext = source_path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("")
+            .to_string();
+        let output_ext = compile_output_extension(&source_path, &source_ext)?;
+    
+        let mut module_roots: Vec<(&str, PathBuf)> = loader_json
+            .module_path_map
+            .iter()
+            .map(|(module_name, module_root)| (module_name.as_str(), PathBuf::from(module_root)))
+            .collect();
+        module_roots.sort_by(|a, b| b.1.components().count().cmp(&a.1.components().count()));
+    
+        for (module_name, module_root) in module_roots {
+            let module_root = canonical_or_owned(&module_root);
+            let src_main = module_root.join("src/main");
+    
+            let source_file = if let Ok(rel) = source_path.strip_prefix(&src_main) {
+                format!("src/main/{}", slash_path(rel))
+            } else if let Ok(rel) = source_path.strip_prefix(&module_root) {
+                slash_path(rel)
+            } else {
+                continue;
+            };
+    
+            let out_rel = with_extension(&source_file, output_ext);
+            let ts_path = cache_root.join(module_name).join(&out_rel);
+            let record_rel = record_relative_path(&out_rel);
+            let record_name = if module_name == loader_json.module_name {
+                format!(
+                    "{}/{}/{}",
+                    config.product.bundle_name, loader_json.module_name, record_rel
+                )
+            } else {
+                format!(
+                    "{}/{}@{}/{}",
+                    config.product.bundle_name, loader_json.module_name, module_name, record_rel
+                )
+            };
+            let version = package_version_or_default(&module_root);
+            let module_type = module_type_for_source(&source_path, &source_ext);
+    
+            return Some(CompileModuleInfo {
+                source_path,
+                source_file: source_file.clone(),
+                source_file_info: format!(
+                    "{}|{}|{}|{}",
+                    loader_json.module_name, module_name, version, out_rel
+                ),
+                ts_path,
+                record_name,
+                package_name: module_name.to_string(),
+                module_type,
+                origin_source_lang: origin_source_lang(&source_ext),
+                source_ext,
+                output_ext: output_ext.to_string(),
+            });
+        }
+    
+        Self::compute_remote(&source_path, cache_root, loader_json)
+    }
+
+    fn compute_remote(
+        source_path: &Path,
+        cache_root: &Path,
+        loader_json: &arkdown_profile::LoaderJson,
+    ) -> Option<CompileModuleInfo> {
+        let source_ext = source_path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("")
+            .to_string();
+        let output_ext = compile_output_extension(&source_path, &source_ext)?;
+        let package_root = find_package_root(source_path)?;
+        let package_name = package_name_or_dir(&package_root);
+        let package_version = package_version_or_default(&package_root);
+        let package_entry_name = pkg_modules_package_name(&package_root, loader_json)?;
+        let rel_to_pkg = slash_path(source_path.strip_prefix(&package_root).ok()?);
+        let out_rel = with_extension(&rel_to_pkg, output_ext);
+    
+        let project_root = canonical_or_owned(Path::new(&loader_json.project_root_path));
+        let cache_rel = source_path.strip_prefix(&project_root).ok()?;
+        let ts_path = cache_root.join(with_extension(&slash_path(cache_rel), output_ext));
+        let record_name = format!(
+            "{}/{}",
+            package_entry_name,
+            out_rel
+                .trim_end_matches(".ets")
+                .trim_end_matches(".ts")
+                .trim_end_matches(".js")
+        );
+    
+        Some(CompileModuleInfo {
+            source_path: source_path.to_path_buf(),
+            source_file: rel_to_pkg,
+            source_file_info: format!(
+                "{}|{}|{}|{}",
+                loader_json.module_name, package_name, package_version, out_rel
+            ),
+            ts_path,
+            record_name,
+            package_name: package_entry_name,
+            module_type: module_type_for_source(source_path, &source_ext),
+            origin_source_lang: origin_source_lang(&source_ext),
+            source_ext,
+            output_ext: output_ext.to_string(),
+        })
+    }
 }
 
 pub(super) fn compile_module_ids(chunk_graph: &ChunkGraph) -> Vec<String> {
@@ -78,122 +196,7 @@ pub(super) fn module_id_to_source_path(module_id: &str) -> Option<PathBuf> {
     Some(canonical_or_owned(path))
 }
 
-pub(super) fn compile_module_info(
-    source_path: &Path,
-    cache_root: &Path,
-    loader_json: &arkdown_profile::LoaderJson,
-    config: &ArkdownConfig,
-) -> Option<CompileModuleInfo> {
-    let source_path = canonical_or_owned(&source_path);
-    let source_ext = source_path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .unwrap_or("")
-        .to_string();
-    let output_ext = compile_output_extension(&source_path, &source_ext)?;
 
-    let mut module_roots: Vec<(&str, PathBuf)> = loader_json
-        .module_path_map
-        .iter()
-        .map(|(module_name, module_root)| (module_name.as_str(), PathBuf::from(module_root)))
-        .collect();
-    module_roots.sort_by(|a, b| b.1.components().count().cmp(&a.1.components().count()));
-
-    for (module_name, module_root) in module_roots {
-        let module_root = canonical_or_owned(&module_root);
-        let src_main = module_root.join("src/main");
-
-        let source_file = if let Ok(rel) = source_path.strip_prefix(&src_main) {
-            format!("src/main/{}", slash_path(rel))
-        } else if let Ok(rel) = source_path.strip_prefix(&module_root) {
-            slash_path(rel)
-        } else {
-            continue;
-        };
-
-        let out_rel = with_extension(&source_file, output_ext);
-        let ts_path = cache_root.join(module_name).join(&out_rel);
-        let record_rel = record_relative_path(&out_rel);
-        let record_name = if module_name == loader_json.module_name {
-            format!(
-                "{}/{}/{}",
-                config.product.bundle_name, loader_json.module_name, record_rel
-            )
-        } else {
-            format!(
-                "{}/{}@{}/{}",
-                config.product.bundle_name, loader_json.module_name, module_name, record_rel
-            )
-        };
-        let version = package_version_or_default(&module_root);
-        let module_type = module_type_for_source(&source_path, &source_ext);
-
-        return Some(CompileModuleInfo {
-            source_path,
-            source_file: source_file.clone(),
-            source_file_info: format!(
-                "{}|{}|{}|{}",
-                loader_json.module_name, module_name, version, out_rel
-            ),
-            ts_path,
-            record_name,
-            package_name: module_name.to_string(),
-            module_type,
-            origin_source_lang: origin_source_lang(&source_ext),
-            source_ext,
-            output_ext: output_ext.to_string(),
-        });
-    }
-
-    remote_compile_module_info(&source_path, cache_root, loader_json)
-}
-
-fn remote_compile_module_info(
-    source_path: &Path,
-    cache_root: &Path,
-    loader_json: &arkdown_profile::LoaderJson,
-) -> Option<CompileModuleInfo> {
-    let source_ext = source_path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .unwrap_or("")
-        .to_string();
-    let output_ext = compile_output_extension(&source_path, &source_ext)?;
-    let package_root = find_package_root(source_path)?;
-    let package_name = package_name_or_dir(&package_root);
-    let package_version = package_version_or_default(&package_root);
-    let package_entry_name = pkg_modules_package_name(&package_root, loader_json)?;
-    let rel_to_pkg = slash_path(source_path.strip_prefix(&package_root).ok()?);
-    let out_rel = with_extension(&rel_to_pkg, output_ext);
-
-    let project_root = canonical_or_owned(Path::new(&loader_json.project_root_path));
-    let cache_rel = source_path.strip_prefix(&project_root).ok()?;
-    let ts_path = cache_root.join(with_extension(&slash_path(cache_rel), output_ext));
-    let record_name = format!(
-        "{}/{}",
-        package_entry_name,
-        out_rel
-            .trim_end_matches(".ets")
-            .trim_end_matches(".ts")
-            .trim_end_matches(".js")
-    );
-
-    Some(CompileModuleInfo {
-        source_path: source_path.to_path_buf(),
-        source_file: rel_to_pkg,
-        source_file_info: format!(
-            "{}|{}|{}|{}",
-            loader_json.module_name, package_name, package_version, out_rel
-        ),
-        ts_path,
-        record_name,
-        package_name: package_entry_name,
-        module_type: module_type_for_source(source_path, &source_ext),
-        origin_source_lang: origin_source_lang(&source_ext),
-        source_ext,
-        output_ext: output_ext.to_string(),
-    })
-}
 
 fn compile_output_extension(source_path: &Path, source_ext: &str) -> Option<&'static str> {
     match source_ext {
@@ -293,7 +296,7 @@ fn compile_module_ohm_for_specifier(
     } else {
         local_entry_for_package_specifier(specifier, importer, loader_json)?
     };
-    let info = compile_module_info(&resolved, cache_root, loader_json, config)?;
+    let info = CompileModuleInfo::compute(&resolved, cache_root, loader_json, config)?;
     Some(format!("@bundle:{}", info.record_name))
 }
 

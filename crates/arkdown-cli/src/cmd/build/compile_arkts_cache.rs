@@ -72,7 +72,7 @@ impl<'a> CompileArktsCacheWriter<'a> {
         let Some(source_path) = module_id_to_source_path(module_id) else {
             return Ok(());
         };
-        let Some(entry_info) = compile_module_info(
+        let Some(entry_info) = CompileModuleInfo::compute(
             &source_path,
             &self.cache_root,
             self.loader_json,

@@ -1,5 +1,5 @@
 use super::compile_arkts_modules::{
-    compile_module_info, find_package_root, package_entry_path, pkg_modules_package_name,
+    find_package_root, package_entry_path, pkg_modules_package_name,
     slash_path, strip_source_extension, symlink_pkg_module_aliases, CompileModuleInfo,
 };
 use super::*;
@@ -176,7 +176,7 @@ fn local_compile_info_for_dynamic_entry(
     let cache_root = Path::new(module_root)
         .join("build/default/cache/default/default@CompileArkTS/esmodule")
         .join(mode_dir);
-    compile_module_info(entry_path, &cache_root, loader_json, config)
+    CompileModuleInfo::compute(entry_path, &cache_root, loader_json, config)
 }
 
 fn native_shared_object_entry(
