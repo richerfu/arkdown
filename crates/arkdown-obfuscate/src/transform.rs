@@ -35,17 +35,13 @@ pub struct ObfuscationOutput {
     pub source_map: Option<String>,
 }
 
-/// Obfuscate `source` according to `rules`.
-///
-/// Returns the original source unchanged when `rules.enable_obfuscation` is
-/// `false` (callers should check [`crate::should_obfuscate`] before calling,
-/// but this function is safe to call unconditionally).
-pub fn obfuscate_source(
-    source: &str,
-    filename: &str,
-    rules: &ObfuscationRules,
-) -> Result<ObfuscationOutput, ObfuscationError> {
-    if !rules.enable_obfuscation && !rules.compact {
+impl ObfuscationRules {
+    /// Apply these obfuscation rules to `source` text.
+    ///
+    /// Returns the original source unchanged when neither
+    /// `enable_obfuscation` nor `compact` is set.
+    pub fn apply(&self, source: &str, filename: &str) -> Result<ObfuscationOutput, ObfuscationError> {
+    if !self.enable_obfuscation && !self.compact {
         return Ok(ObfuscationOutput {
             code: source.to_string(),
             source_map: None,
@@ -53,7 +49,7 @@ pub fn obfuscate_source(
     }
 
     // --- Identifier renaming (only when -enable-obfuscation is set) ----------
-    let code = if rules.enable_obfuscation {
+    let code = if self.enable_obfuscation {
         let alloc = Allocator::default();
         let source_type = SourceType::default().with_module(true);
         let ParserReturn {
@@ -67,10 +63,10 @@ pub fn obfuscate_source(
             });
         }
 
-        let reserved: FxHashSet<String> = rules
+        let reserved: FxHashSet<String> = self
             .keep_global_names
             .iter()
-            .chain(rules.keep_property_names.iter())
+            .chain(self.keep_property_names.iter())
             .cloned()
             .collect();
 
@@ -120,7 +116,7 @@ pub fn obfuscate_source(
             apply_renames(source, &rename_map)
         };
 
-        if rules.remove_log {
+        if self.remove_log {
             remove_console_log(&renamed)
         } else {
             renamed
@@ -130,7 +126,7 @@ pub fn obfuscate_source(
     };
 
     // --- Minify if -compact is requested ------------------------------------
-    let code = if rules.compact {
+    let code = if self.compact {
         crate::minifier::minify_source(&code, filename)?
     } else {
         code
@@ -141,6 +137,20 @@ pub fn obfuscate_source(
         source_map: None,
     })
 }
+}
+
+
+/// Obfuscate `source` according to `rules`.
+///
+/// Prefer [`ObfuscationRules::apply`] in new code.
+pub fn obfuscate_source(
+    source: &str,
+    filename: &str,
+    rules: &ObfuscationRules,
+) -> Result<ObfuscationOutput, ObfuscationError> {
+    rules.apply(source, filename)
+}
+
 
 /// Apply all renames from `rename_map` to `source` using whole-word, non-
 /// property-access matching.

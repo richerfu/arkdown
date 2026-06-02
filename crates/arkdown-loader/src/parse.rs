@@ -13,6 +13,17 @@ pub struct ParsedModule {
     pub has_side_effects: bool,
 }
 
+impl ParsedModule {
+    /// Parse a module's source text and extract static import edges and export bindings.
+    ///
+    /// Uses the ohos-rs/oxc fork parser so that `.ets` ArkTS syntax is handled correctly.
+    /// Returns conservative `has_side_effects = true` for any file that produces parse errors.
+    pub fn parse(source: &ModuleSource) -> Self {
+        ModuleParser::new(source).parse()
+    }
+}
+
+
 struct ModuleParser<'a> {
     source: &'a ModuleSource,
     imports: Vec<ImportEdge>,
@@ -176,8 +187,7 @@ impl<'a> ModuleParser<'a> {
 
 /// Parse a module's source text and extract static import edges and export bindings.
 ///
-/// Uses the ohos-rs/oxc fork parser so that `.ets` ArkTS syntax is handled correctly.
-/// Returns conservative `has_side_effects = true` for any file that produces parse errors.
+/// Prefer [`ParsedModule::parse`] in new code.
 pub fn parse_module(source: &ModuleSource) -> ParsedModule {
-    ModuleParser::new(source).parse()
+    ParsedModule::parse(source)
 }

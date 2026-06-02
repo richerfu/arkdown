@@ -20,13 +20,24 @@ pub enum Ts2abcCommand {
     Compile(Ts2abcOptions),
 }
 
+impl Ts2abcCommand {
+    /// Parse ts2abc command-line arguments.
+    pub fn parse<I, S>(args: I) -> Result<Self, Ts2abcError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut parser = ArgParser::new(args.into_iter().map(Into::into).collect());
+        parser.parse()
+    }
+}
+
 pub fn parse_ts2abc_args<I, S>(args: I) -> Result<Ts2abcCommand, Ts2abcError>
 where
     I: IntoIterator<Item = S>,
     S: Into<String>,
 {
-    let mut parser = ArgParser::new(args.into_iter().map(Into::into).collect());
-    parser.parse()
+    Ts2abcCommand::parse(args)
 }
 
 struct ArgParser {

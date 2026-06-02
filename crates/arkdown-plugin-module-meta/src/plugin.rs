@@ -40,7 +40,15 @@ impl ModuleMetaPlugin {
     }
 
     pub fn meta_for(&self, module_id: &str) -> ModuleMeta {
-        meta_compute::compute_meta(module_id, &self.project_root, &self.module_name)
+        Self::compute_meta(module_id, &self.project_root, &self.module_name)
+    }
+
+    /// Compute [`ModuleMeta`] from module path and project context.
+    ///
+    /// This is the underlying computation also used by
+    /// [`meta_for`](Self::meta_for) and the public `compute_module_meta` shim.
+    pub fn compute_meta(module_id: &str, project_root: &Path, module_name: &str) -> ModuleMeta {
+        meta_compute::compute_meta(module_id, project_root, module_name)
     }
 }
 
@@ -75,7 +83,7 @@ impl Plugin for ModuleMetaPlugin {
         let reverse_map = Arc::clone(&self.reverse_map);
 
         async move {
-            let meta = meta_compute::compute_meta(&id_str, &project_root, &module_name);
+            let meta = ModuleMetaPlugin::compute_meta(&id_str, &project_root, &module_name);
             let host_dep = meta.pkg_name.unwrap_or_default();
             let host_mod = meta.module_name.unwrap_or_default();
 
@@ -111,5 +119,5 @@ impl Plugin for ModuleMetaPlugin {
 }
 
 pub fn compute_module_meta(module_id: &str, project_root: &Path, module_name: &str) -> ModuleMeta {
-    meta_compute::compute_meta(module_id, project_root, module_name)
+    ModuleMetaPlugin::compute_meta(module_id, project_root, module_name)
 }

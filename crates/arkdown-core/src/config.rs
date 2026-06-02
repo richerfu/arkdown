@@ -165,6 +165,16 @@ pub struct ObfuscationConfig {
     pub rule_files: Vec<PathBuf>,
 }
 
+impl ObfuscationConfig {
+    /// Returns `true` when obfuscation should run for the given build mode.
+    ///
+    /// Obfuscation is only active in `Release` builds with
+    /// `enable_obfuscation = true`.
+    pub fn is_enabled_for_mode(&self, build_mode: &BuildMode) -> bool {
+        matches!(build_mode, BuildMode::Release) && self.enable_obfuscation
+    }
+}
+
 /// Resource compiler options.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResOptions {

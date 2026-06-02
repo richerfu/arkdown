@@ -180,10 +180,7 @@ pub fn compute_rule_hash(rule_files: &[PathBuf]) -> u64 {
 /// Obfuscation is only performed in `Release` mode and when
 /// `config.enable_obfuscation` is set to `true`.
 pub fn should_obfuscate(build_mode: &BuildMode, config: Option<&ObfuscationConfig>) -> bool {
-    if !matches!(build_mode, BuildMode::Release) {
-        return false;
-    }
-    config.map(|c| c.enable_obfuscation).unwrap_or(false)
+    config.map(|c| c.is_enabled_for_mode(build_mode)).unwrap_or(false)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
