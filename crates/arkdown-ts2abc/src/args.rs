@@ -2,9 +2,7 @@ use std::path::PathBuf;
 
 use crate::driver::{default_record_name, Ts2abcInput, Ts2abcOptions};
 use crate::error::Ts2abcError;
-use crate::version::{
-    ts2abc_script_target_bc_version, BytecodeVersion, DEFAULT_TARGET_API_VERSION,
-};
+use crate::version::{BytecodeVersion, DEFAULT_TARGET_API_VERSION};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VersionQuery {
@@ -85,7 +83,7 @@ impl ArgParser {
         }
 
         if self.print_target_bc_version {
-            let version = ts2abc_script_target_bc_version(
+            let version = BytecodeVersion::for_ts2abc_script(
                 self.target_api_version,
                 self.target_api_sub_version.as_deref(),
             );
