@@ -105,10 +105,6 @@ fn source_file_from_record_name(record_name: &str) -> String {
     })
 }
 
-fn normalize_source_file(record_name: &str, source_file: String) -> String {
-    HvigorSourceMapScope::normalize_debug_source_file(record_name, &source_file)
-}
-
 fn cache_key_inputs(
     modules: &[AbcModule],
     npm_entries_source: Option<&str>,
@@ -335,7 +331,7 @@ impl AbcCompiler {
                 .source_file
                 .as_deref()
                 .map(|source_file| {
-                    normalize_source_file(&module.record_name, source_file.to_string())
+                    Self::normalize_source_file(&module.record_name, source_file.to_string())
                 })
                 .or_else(|| {
                     self.options
@@ -398,5 +394,9 @@ impl AbcCompiler {
             api_version: self.options.target_api_version,
             has_debug_info,
         })
+    }
+
+    fn normalize_source_file(record_name: &str, source_file: String) -> String {
+        HvigorSourceMapScope::normalize_debug_source_file(record_name, &source_file)
     }
 }

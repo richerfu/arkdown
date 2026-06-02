@@ -159,16 +159,6 @@ pub struct AbcFile {
     pub literal_arrays: Vec<LiteralArray>,
 }
 
-fn sdk_native_field(name: &str) -> FieldRecord {
-    FieldRecord {
-        name: name.to_string(),
-        class_idx: FIELD_OWNER_CLASS_IDX,
-        type_idx: 0,
-        access_flags: 0,
-        value: Some(FieldValue::U8(0)),
-    }
-}
-
 impl AbcFile {
     /// Create an empty `AbcFile`.
     pub fn new() -> Self {
@@ -272,7 +262,7 @@ impl AbcFile {
                 source_lang: SOURCE_LANG_ECMASCRIPT,
                 source_file: None,
                 module_requests: vec![],
-                fields: vec![sdk_native_field("@native.ohos.app")],
+                fields: vec![Self::sdk_native_field("@native.ohos.app")],
             },
             ClassRecord {
                 name: "L@ohos.curves;".to_string(),
@@ -285,7 +275,7 @@ impl AbcFile {
                 source_lang: SOURCE_LANG_ECMASCRIPT,
                 source_file: None,
                 module_requests: vec![],
-                fields: vec![sdk_native_field("@native.ohos.curves")],
+                fields: vec![Self::sdk_native_field("@native.ohos.curves")],
             },
             ClassRecord {
                 name: "L@ohos.matrix4;".to_string(),
@@ -298,7 +288,7 @@ impl AbcFile {
                 source_lang: SOURCE_LANG_ECMASCRIPT,
                 source_file: None,
                 module_requests: vec![],
-                fields: vec![sdk_native_field("@native.ohos.matrix4")],
+                fields: vec![Self::sdk_native_field("@native.ohos.matrix4")],
             },
             ClassRecord {
                 name: "L@system.app;".to_string(),
@@ -311,7 +301,7 @@ impl AbcFile {
                 source_lang: SOURCE_LANG_ECMASCRIPT,
                 source_file: None,
                 module_requests: vec![],
-                fields: vec![sdk_native_field("@native.system.app")],
+                fields: vec![Self::sdk_native_field("@native.system.app")],
             },
             ClassRecord {
                 name: "L@system.curves;".to_string(),
@@ -324,7 +314,7 @@ impl AbcFile {
                 source_lang: SOURCE_LANG_ECMASCRIPT,
                 source_file: None,
                 module_requests: vec![],
-                fields: vec![sdk_native_field("@native.system.curves")],
+                fields: vec![Self::sdk_native_field("@native.system.curves")],
             },
             ClassRecord {
                 name: "L@system.matrix4;".to_string(),
@@ -337,7 +327,7 @@ impl AbcFile {
                 source_lang: SOURCE_LANG_ECMASCRIPT,
                 source_file: None,
                 module_requests: vec![],
-                fields: vec![sdk_native_field("@native.system.matrix4")],
+                fields: vec![Self::sdk_native_field("@native.system.matrix4")],
             },
             ClassRecord {
                 name: "L@system.router;".to_string(),
@@ -350,7 +340,7 @@ impl AbcFile {
                 source_lang: SOURCE_LANG_ECMASCRIPT,
                 source_file: None,
                 module_requests: vec![],
-                fields: vec![sdk_native_field("@native.system.router")],
+                fields: vec![Self::sdk_native_field("@native.system.router")],
             },
         ];
 
@@ -718,9 +708,9 @@ impl AbcFile {
         }
         debug_assert_eq!(index_class_offsets.len() as u32, index_class_count);
 
-        let method_pool_layouts = build_method_pool_layouts(&all_classes, &self.strings);
-        let literal_emit_order = build_literal_emit_order(&all_classes, self.literal_arrays.len());
-        let literal_header_order = build_literal_header_order(&all_classes, &self.literal_arrays);
+        let method_pool_layouts = Self::build_method_pool_layouts(&all_classes, &self.strings);
+        let literal_emit_order = Self::build_literal_emit_order(&all_classes, self.literal_arrays.len());
+        let literal_header_order = Self::build_literal_header_order(&all_classes, &self.literal_arrays);
 
         // ── 3. Pre-compute LiteralArray section bytes ─────────────────────────
         //
@@ -1341,7 +1331,7 @@ impl AbcFile {
         file[0x10..0x14].copy_from_slice(&file_size.to_le_bytes());
 
         // ── Compute Adler-32 checksum over file[12..] and patch offset 0x08 ───
-        let checksum = adler32(&file[12..]);
+        let checksum = Self::adler32(&file[12..]);
         file[0x08..0x0C].copy_from_slice(&checksum.to_le_bytes());
 
         file
@@ -1446,150 +1436,6 @@ fn with_upstream_method_order(mut self) -> Self {
 }
 }
 
-fn build_method_pool_layouts(
-    classes: &[&ClassRecord],
-    strings: &StringTable,
-) -> Vec<MethodPoolLayout> {
-    let mut next_pool_index = 0u16;
-    let mut global_string_pool_indices = FxHashMap::<u16, u16>::default();
-    classes
-        .iter()
-        .map(|class| {
-            let mut layout = MethodPoolLayout::default();
-            let mut all_bytecode_string_indices = Vec::new();
-            for method in &class.methods {
-                collect_bytecode_string_indices(&method.bytecode, &mut all_bytecode_string_indices);
-            }
-            all_bytecode_string_indices.sort_unstable();
-            all_bytecode_string_indices.dedup();
-
-            layout.string_refs = method_index_string_refs(class, strings);
-            for string_ref in &layout.string_refs {
-                if let MethodIndexStringRef::Bytecode(string_idx) = string_ref {
-                    let string_idx = *string_idx as u16;
-                    layout
-                        .string_pool_indices
-                        .insert(string_idx, next_pool_index);
-                    global_string_pool_indices
-                        .entry(string_idx)
-                        .or_insert(next_pool_index);
-                }
-                next_pool_index = next_pool_index.saturating_add(1);
-            }
-            for string_idx in all_bytecode_string_indices {
-                let string_idx = string_idx as u16;
-                if layout.string_pool_indices.contains_key(&string_idx) {
-                    continue;
-                }
-                if let Some(&pool_index) = global_string_pool_indices.get(&string_idx) {
-                    layout.string_pool_indices.insert(string_idx, pool_index);
-                }
-            }
-
-            layout.method_indices = class.method_pool_entry_indices();
-            for &method_idx in &layout.method_indices {
-                let pool_index = next_pool_index;
-                let method = &class.methods[method_idx];
-                if method.kind == MethodKind::Constructor {
-                    layout.ctor_pool_index = pool_index;
-                } else if method.kind == MethodKind::Anonymous {
-                    layout.definefunc_pool_indices.push(pool_index);
-                }
-                if let Some(name_id) = strings.id_of(&method.name) {
-                    layout
-                        .definemethod_pool_indices_by_name
-                        .insert(name_id as u16, pool_index);
-                }
-                next_pool_index = next_pool_index.saturating_add(1);
-            }
-
-            for &literal_idx in &class.literal_indices {
-                layout
-                    .literal_pool_indices
-                    .insert(literal_idx as u16, next_pool_index);
-                next_pool_index = next_pool_index.saturating_add(1);
-            }
-
-            layout
-        })
-        .collect()
-}
-
-fn build_literal_emit_order(classes: &[&ClassRecord], literal_count: usize) -> Vec<usize> {
-    let mut seen = vec![false; literal_count];
-    let mut order = Vec::with_capacity(literal_count);
-    for class in classes {
-        for &literal_idx in class
-            .module_literal_indices
-            .iter()
-            .chain(class.literal_indices.iter())
-        {
-            if literal_idx < literal_count && !seen[literal_idx] {
-                seen[literal_idx] = true;
-                order.push(literal_idx);
-            }
-        }
-    }
-    for (idx, was_seen) in seen.into_iter().enumerate() {
-        if !was_seen {
-            order.push(idx);
-        }
-    }
-    order
-}
-
-fn build_literal_header_order(
-    classes: &[&ClassRecord],
-    literal_arrays: &[LiteralArray],
-) -> Vec<usize> {
-    let mut rank = vec![u16::MAX; literal_arrays.len()];
-
-    for class in classes {
-        let is_entry = class.name.contains("/entryability/");
-        let is_page = class.name.contains("/ets/pages/");
-
-        for (pos, &literal_idx) in class.module_literal_indices.iter().enumerate() {
-            if literal_idx >= literal_arrays.len() {
-                continue;
-            }
-            rank[literal_idx] = match (is_page, is_entry, pos) {
-                // module_literal_indices are [scopeNames, moduleRecordIdx].
-                (true, _, 0) => 7,
-                (true, _, 1) => 2,
-                (_, true, 0) => 9,
-                (_, true, 1) => 5,
-                _ => 80,
-            };
-        }
-
-        for &literal_idx in &class.literal_indices {
-            if literal_idx >= literal_arrays.len() {
-                continue;
-            }
-            let array = &literal_arrays[literal_idx];
-            rank[literal_idx] = if is_page && array.has_method_affiliate() {
-                0
-            } else if is_page && array.is_page_route_metadata() {
-                4
-            } else if is_page && array.is_this_object() {
-                6
-            } else if is_page && array.is_page_index_stub() {
-                1
-            } else if is_entry && array.has_method_affiliate() {
-                3
-            } else if is_entry {
-                8
-            } else {
-                80
-            };
-        }
-    }
-
-    let mut order: Vec<usize> = (0..literal_arrays.len()).collect();
-    order.sort_by_key(|idx| (rank[*idx], *idx));
-    order
-}
-
 fn method_index_string_refs(
     class: &ClassRecord,
     strings: &StringTable,
@@ -1644,18 +1490,175 @@ fn method_index_string_refs(
 ///
 /// Used for the ABC file checksum field at offset 0x08.
 /// Verified against: `es2abc` output for API 9 SDK.
-fn adler32(data: &[u8]) -> u32 {
-    const MOD: u32 = 65521;
-    let (mut a, mut b) = (1u32, 0u32);
-    for &byte in data {
-        a = (a + byte as u32) % MOD;
-        b = (b + a) % MOD;
-    }
-    (b << 16) | a
-}
 
 impl Default for AbcFile {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl AbcFile {
+    fn sdk_native_field(name: &str) -> FieldRecord {
+        FieldRecord {
+            name: name.to_string(),
+            class_idx: FIELD_OWNER_CLASS_IDX,
+            type_idx: 0,
+            access_flags: 0,
+            value: Some(FieldValue::U8(0)),
+        }
+    }
+
+    fn build_method_pool_layouts(
+        classes: &[&ClassRecord],
+        strings: &StringTable,
+    ) -> Vec<MethodPoolLayout> {
+        let mut next_pool_index = 0u16;
+        let mut global_string_pool_indices = FxHashMap::<u16, u16>::default();
+        classes
+            .iter()
+            .map(|class| {
+                let mut layout = MethodPoolLayout::default();
+                let mut all_bytecode_string_indices = Vec::new();
+                for method in &class.methods {
+                    collect_bytecode_string_indices(&method.bytecode, &mut all_bytecode_string_indices);
+                }
+                all_bytecode_string_indices.sort_unstable();
+                all_bytecode_string_indices.dedup();
+
+                layout.string_refs = method_index_string_refs(class, strings);
+                for string_ref in &layout.string_refs {
+                    if let MethodIndexStringRef::Bytecode(string_idx) = string_ref {
+                        let string_idx = *string_idx as u16;
+                        layout
+                            .string_pool_indices
+                            .insert(string_idx, next_pool_index);
+                        global_string_pool_indices
+                            .entry(string_idx)
+                            .or_insert(next_pool_index);
+                    }
+                    next_pool_index = next_pool_index.saturating_add(1);
+                }
+                for string_idx in all_bytecode_string_indices {
+                    let string_idx = string_idx as u16;
+                    if layout.string_pool_indices.contains_key(&string_idx) {
+                        continue;
+                    }
+                    if let Some(&pool_index) = global_string_pool_indices.get(&string_idx) {
+                        layout.string_pool_indices.insert(string_idx, pool_index);
+                    }
+                }
+
+                layout.method_indices = class.method_pool_entry_indices();
+                for &method_idx in &layout.method_indices {
+                    let pool_index = next_pool_index;
+                    let method = &class.methods[method_idx];
+                    if method.kind == MethodKind::Constructor {
+                        layout.ctor_pool_index = pool_index;
+                    } else if method.kind == MethodKind::Anonymous {
+                        layout.definefunc_pool_indices.push(pool_index);
+                    }
+                    if let Some(name_id) = strings.id_of(&method.name) {
+                        layout
+                            .definemethod_pool_indices_by_name
+                            .insert(name_id as u16, pool_index);
+                    }
+                    next_pool_index = next_pool_index.saturating_add(1);
+                }
+
+                for &literal_idx in &class.literal_indices {
+                    layout
+                        .literal_pool_indices
+                        .insert(literal_idx as u16, next_pool_index);
+                    next_pool_index = next_pool_index.saturating_add(1);
+                }
+
+                layout
+            })
+            .collect()
+    }
+
+    fn build_literal_emit_order(classes: &[&ClassRecord], literal_count: usize) -> Vec<usize> {
+        let mut seen = vec![false; literal_count];
+        let mut order = Vec::with_capacity(literal_count);
+        for class in classes {
+            for &literal_idx in class
+                .module_literal_indices
+                .iter()
+                .chain(class.literal_indices.iter())
+            {
+                if literal_idx < literal_count && !seen[literal_idx] {
+                    seen[literal_idx] = true;
+                    order.push(literal_idx);
+                }
+            }
+        }
+        for (idx, was_seen) in seen.into_iter().enumerate() {
+            if !was_seen {
+                order.push(idx);
+            }
+        }
+        order
+    }
+
+    fn build_literal_header_order(
+        classes: &[&ClassRecord],
+        literal_arrays: &[LiteralArray],
+    ) -> Vec<usize> {
+        let mut rank = vec![u16::MAX; literal_arrays.len()];
+
+        for class in classes {
+            let is_entry = class.name.contains("/entryability/");
+            let is_page = class.name.contains("/ets/pages/");
+
+            for (pos, &literal_idx) in class.module_literal_indices.iter().enumerate() {
+                if literal_idx >= literal_arrays.len() {
+                    continue;
+                }
+                rank[literal_idx] = match (is_page, is_entry, pos) {
+                    // module_literal_indices are [scopeNames, moduleRecordIdx].
+                    (true, _, 0) => 7,
+                    (true, _, 1) => 2,
+                    (_, true, 0) => 9,
+                    (_, true, 1) => 5,
+                    _ => 80,
+                };
+            }
+
+            for &literal_idx in &class.literal_indices {
+                if literal_idx >= literal_arrays.len() {
+                    continue;
+                }
+                let array = &literal_arrays[literal_idx];
+                rank[literal_idx] = if is_page && array.has_method_affiliate() {
+                    0
+                } else if is_page && array.is_page_route_metadata() {
+                    4
+                } else if is_page && array.is_this_object() {
+                    6
+                } else if is_page && array.is_page_index_stub() {
+                    1
+                } else if is_entry && array.has_method_affiliate() {
+                    3
+                } else if is_entry {
+                    8
+                } else {
+                    80
+                };
+            }
+        }
+
+        let mut order: Vec<usize> = (0..literal_arrays.len()).collect();
+        order.sort_by_key(|idx| (rank[*idx], *idx));
+        order
+    }
+
+    fn adler32(data: &[u8]) -> u32 {
+        const MOD: u32 = 65521;
+        let (mut a, mut b) = (1u32, 0u32);
+        for &byte in data {
+            a = (a + byte as u32) % MOD;
+            b = (b + a) % MOD;
+        }
+        (b << 16) | a
     }
 }
