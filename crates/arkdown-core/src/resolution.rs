@@ -98,6 +98,22 @@ pub struct PkgContext {
     pub entry_path: Option<PathBuf>,
 }
 
+impl PkgContext {
+    /// Build the OHM URL for a source file within this package.
+    ///
+    /// Strips `pkg_path` from `path`, removes the source extension, and
+    /// formats as `@bundle:<bundle_name>/<module_name>/<rel_path>`.
+    pub fn to_ohm_url(&self, path: &std::path::Path) -> String {
+        let rel = path.strip_prefix(&self.pkg_path).unwrap_or(path);
+        let rel_str = rel.to_string_lossy();
+        let rel_no_ext = rel_str
+            .trim_end_matches(".ets")
+            .trim_end_matches(".ts")
+            .trim_end_matches(".js");
+        format!("@bundle:{}/{}/{}", self.bundle_name, self.module_name, rel_no_ext)
+    }
+}
+
 /// Brief package information for `loader.json` and module-meta plugin.
 ///
 /// Represents a resolved ohpm package summary using String paths (as opposed to

@@ -52,11 +52,17 @@ impl Plugin for Json5Plugin {
         args: &HookLoadArgs<'_>,
     ) -> impl std::future::Future<Output = HookLoadReturn> + Send {
         let id = args.id.to_owned();
-        async move { load_json_file(&id) }
+        async move { Json5Plugin::load_json_file_impl(&id) }
     }
 }
 
+// Keep pub(crate) wrapper for tests
 pub(crate) fn load_json_file(id: &str) -> HookLoadReturn {
+    Json5Plugin::load_json_file_impl(id)
+}
+
+impl Json5Plugin {
+    fn load_json_file_impl(id: &str) -> HookLoadReturn {
     if !id.ends_with(".json") && !id.ends_with(".json5") {
         return Ok(None);
     }
@@ -74,6 +80,8 @@ pub(crate) fn load_json_file(id: &str) -> HookLoadReturn {
         code: code.into(),
         ..Default::default()
     }))
+}
+
 }
 
 fn resolve_relative_path(specifier: &str, importer: Option<&str>) -> anyhow::Result<PathBuf> {
