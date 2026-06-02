@@ -117,6 +117,46 @@ pub struct ComponentInfo {
     pub styles_methods: Vec<StylesMethodInfo>,
 }
 
+impl ComponentInfo {
+    /// Resolved property order: uses `property_order` if set, otherwise derives
+    /// from state_fields + regular_fields.
+    pub fn resolved_property_order(&self) -> Vec<String> {
+        if self.property_order.is_empty() {
+            self.state_fields
+                .iter()
+                .map(|f| f.name.clone())
+                .chain(self.regular_fields.iter().map(|f| f.name.clone()))
+                .collect()
+        } else {
+            self.property_order.clone()
+        }
+    }
+
+    /// Resolved params fields: uses `params_fields` if set, otherwise derives
+    /// from state_fields.
+    pub fn resolved_params_fields(&self) -> Vec<ParamField> {
+        if self.params_fields.is_empty() {
+            self.state_fields
+                .iter()
+                .map(|f| ParamField {
+                    name: f.name.clone(),
+                    type_annotation: f.type_annotation.clone(),
+                })
+                .collect()
+        } else {
+            self.params_fields.clone()
+        }
+    }
+
+    pub fn find_regular_field(&self, name: &str) -> Option<&RegularField> {
+        self.regular_fields.iter().find(|f| f.name == name)
+    }
+
+    pub fn find_state_field(&self, name: &str) -> Option<&StateField> {
+        self.state_fields.iter().find(|f| f.name == name)
+    }
+}
+
 /// Generate the full ViewPU class text for a component.
 ///
 /// The output is standard TypeScript that the downstream `arkdown-loader`
@@ -139,8 +179,8 @@ impl<'a> ViewPuClassEmitter<'a> {
             info,
             out: String::with_capacity(512),
             params_type: format!("{}_Params", info.name),
-            property_order: component_property_order(info),
-            params_fields: component_params_fields(info),
+            property_order: info.resolved_property_order(),
+            params_fields: info.resolved_params_fields(),
         }
     }
 
@@ -195,10 +235,10 @@ impl<'a> ViewPuClassEmitter<'a> {
             "        }\n",
         ));
         for name in &self.property_order {
-            if let Some(field) = find_regular_field(self.info, name) {
+            if let Some(field) = self.info.find_regular_field(name) {
                 let init = field.initializer.as_deref().unwrap_or("undefined");
                 let _ = writeln!(self.out, "        this.{name} = {init};");
-            } else if let Some(field) = find_state_field(self.info, name) {
+            } else if let Some(field) = self.info.find_state_field(name) {
                 push_state_constructor_init(&mut self.out, field);
             }
         }
@@ -310,9 +350,9 @@ impl<'a> ViewPuClassEmitter<'a> {
 
     fn push_field_declarations(&mut self) {
         for name in &self.property_order {
-            if let Some(field) = find_regular_field(self.info, name) {
+            if let Some(field) = self.info.find_regular_field(name) {
                 push_regular_field_declaration(&mut self.out, field);
-            } else if let Some(field) = find_state_field(self.info, name) {
+            } else if let Some(field) = self.info.find_state_field(name) {
                 push_state_field_declaration(&mut self.out, field);
             }
         }
@@ -388,8 +428,8 @@ impl<'a> ViewPuClassEmitter<'a> {
     }
 
     fn has_initially_provided_value_slot(&self, name: &str) -> bool {
-        find_regular_field(self.info, name).is_some()
-            || find_state_field(self.info, name)
+        self.info.find_regular_field(name).is_some()
+            || self.info.find_state_field(name)
                 .is_some_and(|field| has_initially_provided_value_slot(&field.decorator))
     }
 
@@ -403,45 +443,11 @@ impl<'a> ViewPuClassEmitter<'a> {
     }
 }
 
-fn component_property_order(info: &ComponentInfo) -> Vec<String> {
-    if info.property_order.is_empty() {
-        info.state_fields
-            .iter()
-            .map(|field| field.name.clone())
-            .chain(info.regular_fields.iter().map(|field| field.name.clone()))
-            .collect()
-    } else {
-        info.property_order.clone()
-    }
-}
-
-fn component_params_fields(info: &ComponentInfo) -> Vec<ParamField> {
-    if info.params_fields.is_empty() {
-        info.state_fields
-            .iter()
-            .map(|field| ParamField {
-                name: field.name.clone(),
-                type_annotation: field.type_annotation.clone(),
-            })
-            .collect()
-    } else {
-        info.params_fields.clone()
-    }
-}
-
 fn update_state_vars_api(field: &StateField) -> &'static str {
     match field.decorator.as_str() {
         "Prop" | "Param" | "Once" | "PropRef" => "reset",
         _ => "set",
     }
-}
-
-fn find_regular_field<'a>(info: &'a ComponentInfo, name: &str) -> Option<&'a RegularField> {
-    info.regular_fields.iter().find(|field| field.name == name)
-}
-
-fn find_state_field<'a>(info: &'a ComponentInfo, name: &str) -> Option<&'a StateField> {
-    info.state_fields.iter().find(|field| field.name == name)
 }
 
 fn render_regular_member(member: &str) -> String {
