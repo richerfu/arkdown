@@ -1,23 +1,9 @@
 use rustc_hash::FxHashMap;
 use std::path::Path;
 
-use crate::meta_compute::find_pkg_root;
+pub use arkdown_core::PkgBriefInfo;
 
-/// Summary information about an ohpm package, keyed by package name.
-///
-/// Consumed by `arkdown-profile` when generating `loader.json`'s
-/// `pkgNameToPkgBriefInfo` map.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct PkgBriefInfo {
-    /// Absolute path to the directory containing `oh-package.json5`.
-    pub pkg_root: String,
-    /// The `name` field from `oh-package.json5`.
-    pub pkg_name: String,
-    /// Source root directories relative to `pkg_root` (default: `["src/main/ets"]`).
-    pub source_roots: Vec<String>,
-    /// Original (pre-remapping) source roots — empty for most packages.
-    pub original_source_roots: Vec<String>,
-}
+use crate::meta_compute::find_pkg_root;
 
 /// Build the `pkg_name → PkgBriefInfo` map from a list of resolved module IDs.
 ///

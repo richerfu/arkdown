@@ -96,3 +96,23 @@ pub struct PkgContext {
     pub pkg_path: PathBuf,
     pub entry_path: Option<PathBuf>,
 }
+
+/// Brief package information for `loader.json` and module-meta plugin.
+///
+/// Represents a resolved ohpm package summary using String paths (as opposed to
+/// the resolver-internal [`arkdown_resolver::PkgBriefInfo`] which uses PathBuf).
+/// This is the type written into `loader.json`'s `pkgNameToPkgBriefInfo` field
+/// and consumed by the module-meta plugin.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PkgBriefInfo {
+    /// Absolute path to the directory containing `oh-package.json5`.
+    pub pkg_root: String,
+    /// The `name` field from `oh-package.json5`.
+    pub pkg_name: String,
+    /// Source root directories relative to `pkg_root` (default: `["src/main/ets"]`).
+    pub source_roots: Vec<String>,
+    /// Original (pre-remapping) source roots — empty for most packages.
+    #[serde(default)]
+    pub original_source_roots: Vec<String>,
+}

@@ -4,7 +4,7 @@ use std::path::{Component, Path, PathBuf};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
-use arkdown_core::{ArkdownConfig, BuildMode, HapManifest, ModuleConfig, OhosModuleType};
+use arkdown_core::{ArkdownConfig, BuildMode, HapManifest, ModuleConfig, OhosModuleType, PkgBriefInfo};
 
 use crate::bytecode_har::{collect_dynamic_import_lib_info, scan_bytecode_har_deps};
 
@@ -112,20 +112,6 @@ pub struct LoaderJson {
     /// expects filesystem paths to `.ets`, `.ts`, or `.js` worker sources.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workers: Vec<String>,
-}
-
-/// Concise metadata about an OHOS package referenced in the bundle.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PkgBriefInfo {
-    /// Absolute path to the package root directory.
-    pub pkg_root: String,
-    /// Package name from `oh-package.json5` / `build-profile.json5`.
-    pub pkg_name: String,
-    /// Transformed source root directories (may differ from originals after path mapping).
-    pub source_roots: Vec<String>,
-    /// Original source root directories as declared in the project.
-    pub original_source_roots: Vec<String>,
 }
 
 /// Metadata for a bytecode-compiled HAR dependency.

@@ -27,7 +27,8 @@ pub use bytecode_har::{
     DynamicImportLibEntry, HostModuleInfo,
 };
 pub use har_abilities::{collect_har_abilities, HarAbility};
-pub use loader_json::{generate_loader_json, ByteCodeHarEntry, LoaderJson, PkgBriefInfo};
+pub use loader_json::{generate_loader_json, ByteCodeHarEntry, LoaderJson};
+pub use arkdown_core::PkgBriefInfo;
 pub use process_profile::{
     ark_virtual_machine_from_version, process_profile, process_profile_with_ark_vm_version,
 };
