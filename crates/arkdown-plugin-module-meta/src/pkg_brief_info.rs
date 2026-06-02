@@ -21,8 +21,8 @@ pub fn build_pkg_brief_info(
         }
 
         if let Some(pkg) = find_pkg_root(Path::new(id), 6) {
-            let pkg_name = pkg.name.clone().unwrap_or_else(|| {
-                pkg.pkg_path
+            let pkg_name = pkg.name().map(str::to_string).unwrap_or_else(|| {
+                pkg.pkg_path()
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("unknown")
@@ -30,7 +30,7 @@ pub fn build_pkg_brief_info(
             });
 
             map.entry(pkg_name.clone()).or_insert_with(|| PkgBriefInfo {
-                pkg_root: pkg.pkg_path.to_string_lossy().to_string(),
+                pkg_root: pkg.pkg_path().to_string_lossy().to_string(),
                 pkg_name,
                 source_roots: vec!["src/main/ets".to_string()],
                 original_source_roots: vec![],

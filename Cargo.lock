@@ -398,6 +398,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arkdown-core",
+ "arkdown-resolver",
  "fs-err",
  "json5",
  "rolldown_common",

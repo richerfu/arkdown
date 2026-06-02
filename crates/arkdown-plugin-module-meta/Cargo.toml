@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 rustc-hash = { workspace = true }
 arkdown-core = { workspace = true }
+arkdown-resolver = { workspace = true }
 rolldown_plugin = { workspace = true }
 rolldown_common = { workspace = true }
 serde = { workspace = true }

@@ -196,6 +196,11 @@ impl OhPackage {
         deps
     }
 
+    /// Absolute path to the directory that contains `oh-package.json5`.
+    pub fn pkg_path(&self) -> &std::path::Path {
+        &self.pkg_dir
+    }
+
     /// Look up a raw dependency value by specifier across all dependency maps.
     ///
     /// Checks `dependencies` then `dynamicDependencies`.
