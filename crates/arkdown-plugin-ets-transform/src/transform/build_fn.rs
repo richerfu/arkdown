@@ -60,6 +60,7 @@ pub type CustomComponentUpdateProps = FxHashMap<String, CustomComponentInfo>;
 struct BuildContext {
     use_parent_context: bool,
     raw_object_fields: Arc<FxHashSet<String>>,
+    module_name: Arc<str>,
 }
 
 impl BuildContext {
@@ -80,6 +81,11 @@ impl BuildContext {
 
     fn with_raw_object_fields(mut self, raw_object_fields: &FxHashSet<String>) -> Self {
         self.raw_object_fields = Arc::new(raw_object_fields.clone());
+        self
+    }
+
+    fn with_module_name(mut self, module_name: &str) -> Self {
+        self.module_name = Arc::from(module_name);
         self
     }
 
@@ -385,6 +391,34 @@ pub fn lower_build_body_with_component_context(
     component_metadata: &ComponentMetadata,
     raw_object_fields: &FxHashSet<String>,
 ) -> Result<(String, Vec<SpanHint>), BuildLoweringError> {
+    lower_build_body_with_component_context_and_module(
+        body,
+        source_text,
+        source_id,
+        custom_components,
+        builder_methods,
+        custom_component_update_props,
+        component_metadata,
+        raw_object_fields,
+        None,
+    )
+}
+
+pub fn lower_build_body_with_component_context_and_module(
+    body: Option<&FunctionBody<'_>>,
+    source_text: &str,
+    source_id: &str,
+    custom_components: &FxHashSet<String>,
+    builder_methods: &FxHashSet<String>,
+    custom_component_update_props: &CustomComponentUpdateProps,
+    component_metadata: &ComponentMetadata,
+    raw_object_fields: &FxHashSet<String>,
+    module_name: Option<&str>,
+) -> Result<(String, Vec<SpanHint>), BuildLoweringError> {
+    let mut ctx = BuildContext::default().with_raw_object_fields(raw_object_fields);
+    if let Some(m) = module_name {
+        ctx = ctx.with_module_name(m);
+    }
     lower_build_body_with_context(
         body,
         source_text,
@@ -393,7 +427,7 @@ pub fn lower_build_body_with_component_context(
         builder_methods,
         custom_component_update_props,
         component_metadata,
-        BuildContext::default().with_raw_object_fields(raw_object_fields),
+        ctx,
     )
 }
 
@@ -428,6 +462,34 @@ pub fn lower_builder_body_with_component_context(
     component_metadata: &ComponentMetadata,
     raw_object_fields: &FxHashSet<String>,
 ) -> Result<(String, Vec<SpanHint>), BuildLoweringError> {
+    lower_builder_body_with_component_context_and_module(
+        body,
+        source_text,
+        source_id,
+        custom_components,
+        builder_methods,
+        custom_component_update_props,
+        component_metadata,
+        raw_object_fields,
+        None,
+    )
+}
+
+pub fn lower_builder_body_with_component_context_and_module(
+    body: Option<&FunctionBody<'_>>,
+    source_text: &str,
+    source_id: &str,
+    custom_components: &FxHashSet<String>,
+    builder_methods: &FxHashSet<String>,
+    custom_component_update_props: &CustomComponentUpdateProps,
+    component_metadata: &ComponentMetadata,
+    raw_object_fields: &FxHashSet<String>,
+    module_name: Option<&str>,
+) -> Result<(String, Vec<SpanHint>), BuildLoweringError> {
+    let mut ctx = BuildContext::builder().with_raw_object_fields(raw_object_fields);
+    if let Some(m) = module_name {
+        ctx = ctx.with_module_name(m);
+    }
     lower_build_body_with_context(
         body,
         source_text,
@@ -436,7 +498,7 @@ pub fn lower_builder_body_with_component_context(
         builder_methods,
         custom_component_update_props,
         component_metadata,
-        BuildContext::builder().with_raw_object_fields(raw_object_fields),
+        ctx,
     )
 }
 
@@ -826,6 +888,24 @@ fn lower_component(
         );
     }
 
+    if is_nav_router_component(&name) {
+        return lower_nav_component(
+            component,
+            &name,
+            &args,
+            source_text,
+            source_id,
+            custom_components,
+            builder_methods,
+            custom_component_update_props,
+            component_metadata,
+            context,
+            indent,
+            out,
+            span_hints,
+        );
+    }
+
     let body_line = out.bytes().filter(|&b| b == b'\n').count();
 
     push_span_hint(
@@ -970,6 +1050,167 @@ fn lower_component(
         );
         let mut writer = ViewpuWriter::new(out);
         writer.component_pop(indent, &name);
+    }
+    Ok(())
+}
+
+/// Returns true for components that require the `{ moduleName, pagePath }` metadata
+/// second argument: `NavDestination` and `Navigation`.
+fn is_nav_router_component(name: &str) -> bool {
+    matches!(name, "NavDestination" | "Navigation")
+}
+
+/// Compute the `pagePath` value for NavDestination/Navigation metadata.
+///
+/// Uses the hvigor source id (relative path like
+/// `features/challenge/ChallengeDetailView.ets`) and strips the `.ets`
+/// extension, matching the upstream `ets-loader` behaviour.
+fn nav_page_path(source_id: &str) -> String {
+    source_id.trim_end_matches(".ets").to_string()
+}
+
+/// Lower a `NavDestination` or `Navigation` component with the full
+/// builder-closure + metadata form that hvigor emits:
+///
+/// ```js
+/// NavDestination.create(() => { ...children... }, { moduleName: "...", pagePath: "..." });
+/// ```
+///
+/// For `Navigation`, an additional `isUserCreateStack` boolean property is
+/// appended to the metadata object.
+#[allow(clippy::too_many_arguments)]
+fn lower_nav_component(
+    component: &ArkUIComponentExpression<'_>,
+    name: &str,
+    create_args: &str,
+    source_text: &str,
+    source_id: &str,
+    custom_components: &FxHashSet<String>,
+    builder_methods: &FxHashSet<String>,
+    custom_component_update_props: &CustomComponentUpdateProps,
+    component_metadata: &ComponentMetadata,
+    context: BuildContext,
+    indent: &str,
+    out: &mut String,
+    span_hints: &mut Vec<SpanHint>,
+) -> Result<(), BuildLoweringError> {
+    let module_name = context.module_name.as_ref();
+    let page_path = nav_page_path(source_id);
+    let has_children = !component.children.is_empty();
+
+    // Build the metadata object literal.
+    let meta = if name == "Navigation" {
+        let is_user_create_stack = has_children;
+        format!(
+            "{{ moduleName: \"{module_name}\", pagePath: \"{page_path}\", isUserCreateStack: {is_user_create_stack} }}"
+        )
+    } else {
+        format!("{{ moduleName: \"{module_name}\", pagePath: \"{page_path}\" }}")
+    };
+
+    // Build the create call arguments.
+    // NavDestination.create(() => { ...body... }, meta)
+    // The first positional arg from the source (e.g. a NavPathStack for Navigation)
+    // is passed through unchanged, then the builder closure, then the meta.
+    //
+    // Upstream ets-loader passes the builder closure as the *first* argument for
+    // NavDestination (which takes no user-visible constructor arg), and for
+    // Navigation the existing first arg is kept and the meta is appended.
+    let full_create_args = if create_args.is_empty() {
+        // NavDestination has no user-visible first arg; closure is first arg.
+        format!("() => {{}}, {meta}")
+    } else {
+        // Navigation passes its first arg (e.g. new NavPathStack()) then meta.
+        format!("{create_args}, {meta}")
+    };
+
+    // Build the observeComponentCreation2 wrapper with the create call.
+    let mut creation_body = String::new();
+    {
+        let mut writer = ViewpuWriter::new(&mut creation_body);
+        writer.component_create("", name, "create", &full_create_args);
+    }
+    let mut attrs = Vec::new();
+    for chain in &component.chain_expressions {
+        let chain_name = chain_name(chain)?;
+        let chain_args = attribute_arguments_text(
+            &chain_name,
+            &chain.arguments,
+            source_text,
+            builder_methods,
+            &context,
+        );
+        attrs.push((
+            chain_name,
+            chain_args,
+            arguments_are_regular_attrs(&chain.arguments, component_metadata),
+        ));
+    }
+    push_attribute_calls(&mut creation_body, "", name, &attrs);
+    {
+        let mut writer = ViewpuWriter::new(out);
+        writer.observe_component_creation(indent, context.use_parent_context, name, &creation_body);
+    }
+
+    // Lower children into the builder closure body.
+    // For NavDestination with children we need to emit a real closure body.
+    // Upstream wraps the children in an arrow function passed as the first arg.
+    // Since we already emitted the create call with `() => {}` as placeholder,
+    // we need to emit children *outside* the observeComponentCreation2 but
+    // *before* the pop, which is the standard pattern for container components.
+    for child in &component.children {
+        match child {
+            ArkUIChild::Component(child) => {
+                lower_component(
+                    child,
+                    source_text,
+                    source_id,
+                    custom_components,
+                    builder_methods,
+                    custom_component_update_props,
+                    component_metadata,
+                    context.clone(),
+                    indent,
+                    out,
+                    span_hints,
+                )?;
+            }
+            ArkUIChild::Expression(expression) => {
+                lower_expression(
+                    expression,
+                    source_text,
+                    source_id,
+                    custom_components,
+                    builder_methods,
+                    custom_component_update_props,
+                    component_metadata,
+                    context.clone(),
+                    indent,
+                    out,
+                    span_hints,
+                )?;
+            }
+            ArkUIChild::Statement(statement) => {
+                lower_statement(
+                    statement,
+                    source_text,
+                    source_id,
+                    custom_components,
+                    builder_methods,
+                    custom_component_update_props,
+                    component_metadata,
+                    context.clone(),
+                    indent,
+                    out,
+                    span_hints,
+                )?;
+            }
+        }
+    }
+
+    if component_metadata.needs_pop(name) {
+        let mut writer = ViewpuWriter::new(out);
+        writer.component_pop(indent, name);
     }
     Ok(())
 }

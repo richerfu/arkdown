@@ -277,6 +277,16 @@ Priority order from the current 2026-06-01 state:
 2. **[Parity harness] Add a stable ABC diff helper.** It should compare
    CodeItems, DebugInfo/LNP, method records, indexes, literal arrays, and final
    bytes separately so future regressions are localized immediately.
+3. **[ETS transform] Remaining execution gaps identified 2026-06-02** — the
+   following ViewPU lowering forms produce incorrect or missing output in the
+   HmosWorld cache TS comparison; fix in priority order:
+   - `@Prop` default value fallback: **FIXED** — `if (params.X === undefined) { this.__X.set(default) }` now emitted correctly.
+   - `NavDestination.create` builder+metadata: 12 files affected; fix in progress.
+   - `__Common__.create` call emission: 11 files affected.
+   - `ifElseBranchUpdateFunction` wrapper: 7 files affected.
+   - `forEachUpdateFunction` wrapper: 4 files affected.
+   - Gesture `.pop()` calls: 4 files affected.
+   - `@CustomDialog` controller assignment: 3 files affected.
 
 ## SPEC Coverage Map
 

@@ -90,6 +90,12 @@ pub struct ComponentInfo {
     pub is_exported: bool,
     pub is_default_export: bool,
     pub is_reusable: bool,
+    /// True when the struct is decorated with `@CustomDialog`.
+    ///
+    /// When set, the emitter generates a `setController(ctr: CustomDialogController)` method
+    /// on the class (after field declarations, before `initialRender()`), for every regular
+    /// field whose type annotation is exactly `"CustomDialogController"`.
+    pub is_custom_dialog: bool,
     pub state_fields: Vec<StateField>,
     /// All struct properties in source order. hvigor adds every property to
     /// the generated `*_Params` interface from `createVariableInitStatement`,
@@ -195,6 +201,7 @@ impl<'a> ViewPuClassEmitter<'a> {
         self.push_about_to_be_deleted();
         self.push_update_recycle_elmt_id();
         self.push_field_declarations();
+        self.push_set_controller();
         self.push_regular_members();
         self.push_initial_render();
         self.push_builder_methods();
@@ -361,6 +368,26 @@ impl<'a> ViewPuClassEmitter<'a> {
         }
     }
 
+    /// Emit `setController(ctr: CustomDialogController) { this.<field> = ctr; }` for every
+    /// regular field whose type annotation is exactly `"CustomDialogController"`, but only
+    /// when the component is decorated with `@CustomDialog`.
+    ///
+    /// Mirrors `createControllerSet` in upstream `process_component_member.js`.
+    fn push_set_controller(&mut self) {
+        if !self.info.is_custom_dialog {
+            return;
+        }
+        for field in &self.info.regular_fields {
+            if field.type_annotation == "CustomDialogController" {
+                let _ = writeln!(
+                    self.out,
+                    "    setController(ctr: CustomDialogController) {{\n        this.{} = ctr;\n    }}",
+                    field.name
+                );
+            }
+        }
+    }
+
     fn push_regular_members(&mut self) {
         for member in &self.info.regular_members {
             self.out.push_str(&render_regular_member(member));
@@ -499,6 +526,7 @@ mod tests {
             is_exported: false,
             is_default_export: false,
             is_reusable: false,
+            is_custom_dialog: false,
             state_fields: vec![StateField {
                 name: "count".to_string(),
                 type_annotation: "number".to_string(),
@@ -591,6 +619,7 @@ mod tests {
             is_exported: false,
             is_default_export: false,
             is_reusable: false,
+            is_custom_dialog: false,
             state_fields: vec![StateField {
                 name: "value".to_string(),
                 type_annotation: "string".to_string(),
@@ -631,6 +660,7 @@ mod tests {
             is_exported: false,
             is_default_export: false,
             is_reusable: false,
+            is_custom_dialog: false,
             state_fields: vec![],
             params_fields: vec![],
             property_order: vec![],
@@ -657,6 +687,7 @@ mod tests {
             is_exported: false,
             is_default_export: false,
             is_reusable: false,
+            is_custom_dialog: false,
             state_fields: vec![StateField {
                 name: "items".to_string(),
                 type_annotation: "string[]".to_string(),
@@ -703,6 +734,7 @@ mod tests {
             is_exported: false,
             is_default_export: false,
             is_reusable: false,
+            is_custom_dialog: false,
             state_fields: vec![StateField {
                 name: "item".to_string(),
                 type_annotation: "Item".to_string(),
@@ -742,6 +774,7 @@ mod tests {
             is_exported: false,
             is_default_export: false,
             is_reusable: true,
+            is_custom_dialog: false,
             state_fields: vec![
                 StateField {
                     name: "item".to_string(),
@@ -808,6 +841,7 @@ mod tests {
             is_exported: false,
             is_default_export: false,
             is_reusable: false,
+            is_custom_dialog: false,
             state_fields: vec![StateField {
                 name: "theme".to_string(),
                 type_annotation: "string".to_string(),
@@ -847,6 +881,7 @@ mod tests {
             is_exported: false,
             is_default_export: false,
             is_reusable: false,
+            is_custom_dialog: false,
             state_fields: vec![StateField {
                 name: "theme".to_string(),
                 type_annotation: "string".to_string(),
@@ -895,6 +930,7 @@ mod tests {
             is_exported: false,
             is_default_export: false,
             is_reusable: false,
+            is_custom_dialog: false,
             state_fields: vec![StateField {
                 name: "appPathStack".to_string(),
                 type_annotation: "NavPathStack".to_string(),
@@ -937,6 +973,7 @@ mod tests {
             is_exported: false,
             is_default_export: false,
             is_reusable: false,
+            is_custom_dialog: false,
             state_fields: vec![StateField {
                 name: "theme".to_string(),
                 type_annotation: "string".to_string(),
@@ -975,6 +1012,139 @@ mod tests {
         );
     }
 
+    // ── @CustomDialog setController ───────────────────────────────────────────
+
+    #[test]
+    fn test_custom_dialog_emits_set_controller_after_field_declarations() {
+        let info = ComponentInfo {
+            name: "ImageSaveDialog".to_string(),
+            is_entry: false,
+            is_exported: true,
+            is_default_export: false,
+            is_reusable: false,
+            is_custom_dialog: true,
+            state_fields: vec![],
+            params_fields: vec![],
+            property_order: vec!["share".to_string(), "save".to_string(), "controller".to_string()],
+            regular_fields: vec![
+                RegularField {
+                    name: "share".to_string(),
+                    type_annotation: "() => void".to_string(),
+                    initializer: None,
+                    optional: true,
+                },
+                RegularField {
+                    name: "save".to_string(),
+                    type_annotation: "() => void".to_string(),
+                    initializer: None,
+                    optional: true,
+                },
+                RegularField {
+                    name: "controller".to_string(),
+                    type_annotation: "CustomDialogController".to_string(),
+                    initializer: None,
+                    optional: false,
+                },
+            ],
+            regular_members: vec![],
+            initial_render_body: String::new(),
+            initial_render_span_hints: vec![],
+            builder_methods: vec![],
+            styles_methods: vec![],
+            entry_registration: None,
+        };
+        let out = generate_view_pu_class(&info);
+        // setController method must be present
+        assert!(
+            out.contains("setController(ctr: CustomDialogController)"),
+            "missing setController method, got:\n{out}"
+        );
+        assert!(
+            out.contains("this.controller = ctr;"),
+            "missing controller assignment in setController, got:\n{out}"
+        );
+        // setController must come after field declarations and before initialRender
+        let field_pos = out
+            .find("private controller: CustomDialogController")
+            .expect("missing field declaration");
+        let set_ctrl_pos = out
+            .find("setController(ctr: CustomDialogController)")
+            .expect("missing setController");
+        let render_pos = out.find("initialRender()").expect("missing initialRender");
+        assert!(
+            field_pos < set_ctrl_pos,
+            "setController must come after field declaration"
+        );
+        assert!(
+            set_ctrl_pos < render_pos,
+            "setController must come before initialRender"
+        );
+    }
+
+    #[test]
+    fn test_non_custom_dialog_does_not_emit_set_controller() {
+        let info = ComponentInfo {
+            name: "MyDialog".to_string(),
+            is_entry: false,
+            is_exported: false,
+            is_default_export: false,
+            is_reusable: false,
+            is_custom_dialog: false,
+            state_fields: vec![],
+            params_fields: vec![],
+            property_order: vec!["controller".to_string()],
+            regular_fields: vec![RegularField {
+                name: "controller".to_string(),
+                type_annotation: "CustomDialogController".to_string(),
+                initializer: None,
+                optional: false,
+            }],
+            regular_members: vec![],
+            initial_render_body: String::new(),
+            initial_render_span_hints: vec![],
+            builder_methods: vec![],
+            styles_methods: vec![],
+            entry_registration: None,
+        };
+        let out = generate_view_pu_class(&info);
+        assert!(
+            !out.contains("setController"),
+            "@Component (non-@CustomDialog) must not emit setController, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn test_custom_dialog_without_controller_field_emits_no_set_controller() {
+        let info = ComponentInfo {
+            name: "AlertDialog".to_string(),
+            is_entry: false,
+            is_exported: false,
+            is_default_export: false,
+            is_reusable: false,
+            is_custom_dialog: true,
+            state_fields: vec![],
+            params_fields: vec![],
+            property_order: vec!["message".to_string()],
+            regular_fields: vec![RegularField {
+                name: "message".to_string(),
+                type_annotation: "string".to_string(),
+                initializer: None,
+                optional: false,
+            }],
+            regular_members: vec![],
+            initial_render_body: String::new(),
+            initial_render_span_hints: vec![],
+            builder_methods: vec![],
+            styles_methods: vec![],
+            entry_registration: None,
+        };
+        let out = generate_view_pu_class(&info);
+        assert!(
+            !out.contains("setController"),
+            "@CustomDialog without CustomDialogController field must not emit setController"
+        );
+    }
+
     // ── @Consume ──────────────────────────────────────────────────────────────
 
     #[test]
@@ -985,6 +1155,7 @@ mod tests {
             is_exported: false,
             is_default_export: false,
             is_reusable: false,
+            is_custom_dialog: false,
             state_fields: vec![StateField {
                 name: "theme".to_string(),
                 type_annotation: "string".to_string(),
@@ -1024,6 +1195,7 @@ mod tests {
             is_exported: false,
             is_default_export: false,
             is_reusable: false,
+            is_custom_dialog: false,
             state_fields: vec![StateField {
                 name: "currentTheme".to_string(),
                 type_annotation: "string".to_string(),
@@ -1061,6 +1233,7 @@ mod tests {
             is_exported: false,
             is_default_export: false,
             is_reusable: false,
+            is_custom_dialog: false,
             state_fields: vec![StateField {
                 name: "count".to_string(),
                 type_annotation: "number".to_string(),
@@ -1123,6 +1296,7 @@ mod tests {
             is_exported: false,
             is_default_export: false,
             is_reusable: false,
+            is_custom_dialog: false,
             state_fields: vec![StateField {
                 name: "content".to_string(),
                 type_annotation: "() => void".to_string(),
@@ -1169,6 +1343,7 @@ mod tests {
             is_exported: false,
             is_default_export: false,
             is_reusable: false,
+            is_custom_dialog: false,
             state_fields: vec![StateField {
                 name: "title".to_string(),
                 type_annotation: "string".to_string(),
@@ -1216,6 +1391,7 @@ mod tests {
                 is_exported: false,
                 is_default_export: false,
                 is_reusable: false,
+                is_custom_dialog: false,
                 state_fields: vec![StateField {
                     name: "setting".to_string(),
                     type_annotation: "string".to_string(),

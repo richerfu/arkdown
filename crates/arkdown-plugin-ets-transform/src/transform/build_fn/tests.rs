@@ -475,3 +475,125 @@ struct Index {
     );
     assert_eq!(out, expected);
 }
+
+fn parse_and_lower_with_module(
+    source: &str,
+    source_id: &str,
+    module_name: &str,
+) -> Result<String, BuildLoweringError> {
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, source, SourceType::ets()).parse();
+    assert!(
+        parsed.errors.is_empty(),
+        "parse errors: {:?}",
+        parsed.errors
+    );
+    let struct_statement = parsed
+        .program
+        .body
+        .iter()
+        .find_map(|s| match s {
+            Statement::StructStatement(st) => Some(st.as_ref()),
+            Statement::ExportNamedDeclaration(e) => match e.declaration.as_ref() {
+                Some(Declaration::StructStatement(st)) => Some(st.as_ref()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("expected struct");
+    let build = struct_statement
+        .body
+        .body
+        .iter()
+        .find_map(|el| match el {
+            StructElement::MethodDefinition(m)
+                if m.key.static_name().is_some_and(|n| n == "build") =>
+            {
+                Some(m)
+            }
+            _ => None,
+        })
+        .expect("expected build method");
+    lower_build_body_with_component_context_and_module(
+        build.value.body.as_deref(),
+        source,
+        source_id,
+        &FxHashSet::default(),
+        &FxHashSet::default(),
+        &CustomComponentUpdateProps::default(),
+        &test_component_metadata(),
+        &FxHashSet::default(),
+        Some(module_name),
+    )
+    .map(|(code, _)| code)
+}
+
+#[test]
+fn nav_destination_emits_builder_closure_and_metadata() {
+    let source = r#"@Component
+struct Foo {
+  build() {
+    NavDestination() {
+      Text("content")
+    }
+  }
+}"#;
+    let out = parse_and_lower_with_module(
+        source,
+        "features/challenge/ChallengeDetailView.ets",
+        "phone",
+    )
+    .unwrap();
+    // create() must include the builder closure placeholder and metadata object
+    assert!(
+        out.contains("NavDestination.create("),
+        "missing NavDestination.create; got:\n{out}"
+    );
+    assert!(
+        out.contains("moduleName: \"phone\""),
+        "missing moduleName; got:\n{out}"
+    );
+    assert!(
+        out.contains("pagePath: \"features/challenge/ChallengeDetailView\""),
+        "missing pagePath (ets stripped); got:\n{out}"
+    );
+    // Children must still be lowered
+    assert!(
+        out.contains("Text.create(\"content\")"),
+        "children not lowered; got:\n{out}"
+    );
+}
+
+#[test]
+fn navigation_emits_builder_closure_and_metadata_with_is_user_create_stack() {
+    let source = r#"@Component
+struct Foo {
+  build() {
+    Navigation(new NavPathStack()) {
+      Column() {}
+    }
+  }
+}"#;
+    let out = parse_and_lower_with_module(
+        source,
+        "features/nav/NavPage.ets",
+        "entry",
+    )
+    .unwrap();
+    assert!(
+        out.contains("Navigation.create("),
+        "missing Navigation.create; got:\n{out}"
+    );
+    assert!(
+        out.contains("moduleName: \"entry\""),
+        "missing moduleName; got:\n{out}"
+    );
+    assert!(
+        out.contains("pagePath: \"features/nav/NavPage\""),
+        "missing pagePath; got:\n{out}"
+    );
+    assert!(
+        out.contains("isUserCreateStack:"),
+        "missing isUserCreateStack; got:\n{out}"
+    );
+}

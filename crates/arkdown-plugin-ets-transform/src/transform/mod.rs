@@ -29,7 +29,8 @@ use oxc_span::{GetSpan, SourceType};
 
 use crate::error::EtsTransformError;
 use crate::transform::build_fn::{
-    lower_build_body_with_component_context, lower_builder_body_with_component_context,
+    lower_build_body_with_component_context_and_module,
+    lower_builder_body_with_component_context_and_module,
     lower_builder_body_with_custom_components, lower_styles_body, CustomComponentUpdateProps,
 };
 use crate::transform::component::{
@@ -586,7 +587,7 @@ fn component_from_struct(
             StructElement::MethodDefinition(method)
                 if method.key.static_name().is_some_and(|name| name == "build") =>
             {
-                let (body, hints) = lower_build_body_with_component_context(
+                let (body, hints) = lower_build_body_with_component_context_and_module(
                     method.value.body.as_deref(),
                     source_text,
                     hvigor_source_id,
@@ -595,6 +596,7 @@ fn component_from_struct(
                     custom_component_update_props,
                     &options.component_metadata,
                     &raw_object_fields,
+                    options.module_name.as_deref(),
                 )
                 .map_err(|err| EtsTransformError::Fatal {
                     file: id.to_string(),
@@ -617,7 +619,7 @@ fn component_from_struct(
                     method.value.params.span(),
                     source_text,
                 ));
-                let (lowered_body, _) = lower_builder_body_with_component_context(
+                let (lowered_body, _) = lower_builder_body_with_component_context_and_module(
                     method.value.body.as_deref(),
                     source_text,
                     hvigor_source_id,
@@ -626,6 +628,7 @@ fn component_from_struct(
                     custom_component_update_props,
                     &options.component_metadata,
                     &raw_object_fields,
+                    options.module_name.as_deref(),
                 )
                 .map_err(|err| EtsTransformError::Fatal {
                     file: id.to_string(),
@@ -693,6 +696,10 @@ fn component_from_struct(
             .decorators
             .iter()
             .any(|decorator| decorator_name(decorator) == "Reusable"),
+        is_custom_dialog: statement
+            .decorators
+            .iter()
+            .any(|decorator| decorator_name(decorator) == "CustomDialog"),
         state_fields,
         params_fields,
         property_order,
