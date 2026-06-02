@@ -22,6 +22,7 @@ arkdown-ts2abc = { workspace = true }
 arkdown-pack = { workspace = true }
 arkdown-sign = { workspace = true }
 arkdown-obfuscate = { workspace = true }
+arkdown-utils = { workspace = true }
 arkdown-plugin-ets-transform = { workspace = true }
 arkdown-plugin-ohos-resolve = { workspace = true }
 arkdown-plugin-module-meta = { workspace = true }

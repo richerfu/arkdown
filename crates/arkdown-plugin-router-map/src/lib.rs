@@ -15,7 +15,7 @@ pub fn should_invalidate(router_map_path: &Path, cache_path: &Path) -> bool {
         Err(_) => return false,
     };
 
-    let current_hash = fnv1a_hash(&content);
+    let current_hash = arkdown_utils::fnv1a_hash(&content);
 
     let cached: u64 = match std::fs::read_to_string(cache_path) {
         Ok(s) => s.trim().parse().unwrap_or(0),
@@ -30,7 +30,7 @@ pub fn should_invalidate(router_map_path: &Path, cache_path: &Path) -> bool {
 /// Call this after a successful build to mark the cache as up-to-date.
 pub fn update_cache(router_map_path: &Path, cache_path: &Path) -> std::io::Result<()> {
     let content = std::fs::read_to_string(router_map_path)?;
-    let hash = fnv1a_hash(&content);
+    let hash = arkdown_utils::fnv1a_hash(&content);
     if let Some(parent) = cache_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -38,14 +38,6 @@ pub fn update_cache(router_map_path: &Path, cache_path: &Path) -> std::io::Resul
     Ok(())
 }
 
-fn fnv1a_hash(s: &str) -> u64 {
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in s.bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    h
-}
 
 #[cfg(test)]
 mod tests {
@@ -75,7 +67,7 @@ mod tests {
         let mut router_map = tempfile::NamedTempFile::new().unwrap();
         writeln!(router_map, r#"{{"routerMap":[]}}"#).unwrap();
         let content = std::fs::read_to_string(router_map.path()).unwrap();
-        let hash = fnv1a_hash(&content);
+        let hash = arkdown_utils::fnv1a_hash(&content);
 
         let mut cache = tempfile::NamedTempFile::new().unwrap();
         write!(cache, "{}", hash).unwrap();
@@ -100,8 +92,8 @@ mod tests {
 
     #[test]
     fn test_fnv1a_hash_deterministic() {
-        assert_eq!(fnv1a_hash("hello"), fnv1a_hash("hello"));
-        assert_ne!(fnv1a_hash("hello"), fnv1a_hash("world"));
+        assert_eq!(arkdown_utils::fnv1a_hash("hello"), arkdown_utils::fnv1a_hash("hello"));
+        assert_ne!(arkdown_utils::fnv1a_hash("hello"), arkdown_utils::fnv1a_hash("world"));
     }
 
     #[test]

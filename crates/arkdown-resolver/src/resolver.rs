@@ -147,7 +147,8 @@ impl OhosResolver {
         // 5. Relative imports
         if specifier.starts_with("./") || specifier.starts_with("../") {
             if let Ok(resolution) = self.fs_resolver.resolve_file(importer, specifier) {
-                let resolved = canonicalize_existing(resolution.into_path_buf());
+                let resolved_buf = resolution.into_path_buf();
+                let resolved = arkdown_utils::canonicalize_or_owned(&resolved_buf);
                 let module_type = ModuleType::infer(&resolved);
                 return Ok(OhosResolvedModule::LocalSource {
                     path: resolved,
@@ -191,7 +192,8 @@ impl OhosResolver {
             .resolve(importer_dir, specifier)
             .ok()
             .map(|resolution| {
-                let resolved = canonicalize_existing(resolution.into_path_buf());
+                let resolved_buf = resolution.into_path_buf();
+                let resolved = arkdown_utils::canonicalize_or_owned(&resolved_buf);
                 let module_type = ModuleType::infer(&resolved);
                 OhosResolvedModule::RemotePackage {
                     path: resolved,
@@ -283,7 +285,10 @@ impl OhosResolver {
         self.fs_resolver
             .resolve(package_root, &request)
             .ok()
-            .map(|resolution| canonicalize_existing(resolution.into_path_buf()))
+            .map(|resolution| {
+                let buf = resolution.into_path_buf();
+                arkdown_utils::canonicalize_or_owned(&buf)
+            })
     }
 
     fn oxc_resolve_options(config: &ResolverConfig) -> OxcResolveOptions {
@@ -366,7 +371,7 @@ impl PackageRootIndex {
             index.roots.insert(
                 name.clone(),
                 PackageRoot {
-                    path: canonicalize_existing(info.pkg_root.clone()),
+                    path: arkdown_utils::canonicalize_or_owned(&info.pkg_root),
                     package_name: info.pkg_name.clone(),
                     local_source: true,
                 },
@@ -405,7 +410,7 @@ impl PackageRootIndex {
 
         if let Some(pkg) = OhPackage::load_from_root(dir) {
             for (name, path) in pkg.file_dependencies() {
-                let real_path = canonicalize_existing(path);
+                let real_path = arkdown_utils::canonicalize_or_owned(&path);
                 self.roots.entry(name.clone()).or_insert(PackageRoot {
                     path: real_path,
                     package_name: name,
@@ -454,7 +459,7 @@ impl PackageRootIndex {
                 self.roots
                     .entry(package_name.clone())
                     .or_insert(PackageRoot {
-                        path: canonicalize_existing(dir.to_path_buf()),
+                        path: arkdown_utils::canonicalize_or_owned(dir),
                         package_name,
                         local_source,
                     });
@@ -506,9 +511,6 @@ impl PackageCandidate {
     }
 }
 
-fn canonicalize_existing(path: PathBuf) -> PathBuf {
-    std::fs::canonicalize(&path).unwrap_or(path)
-}
 
 #[cfg(test)]
 mod tests {

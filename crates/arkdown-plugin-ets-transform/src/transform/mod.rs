@@ -823,19 +823,13 @@ fn hvigor_source_path(id: &str, options: &TransformOptions) -> String {
             let path = Path::new(id);
             if let Some(project_root) = &options.project_root {
                 if let Ok(relative) = path.strip_prefix(project_root) {
-                    return slash_path(relative).trim_start_matches('/').to_string();
+                    return arkdown_utils::to_unix_path(relative).trim_start_matches('/').to_string();
                 }
             }
             id.to_string()
         })
 }
 
-fn slash_path(path: &Path) -> String {
-    path.components()
-        .map(|component| component.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/")
-}
 
 #[cfg(test)]
 mod tests;

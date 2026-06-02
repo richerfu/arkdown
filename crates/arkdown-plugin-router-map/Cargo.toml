@@ -3,5 +3,8 @@ name = "arkdown-plugin-router-map"
 version = "0.1.0"
 edition = "2021"
 
+[dependencies]
+arkdown-utils = { workspace = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }

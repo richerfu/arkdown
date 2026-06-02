@@ -656,7 +656,7 @@ struct ArchivePath;
 
 impl ArchivePath {
     fn resources(rel: &std::path::Path) -> String {
-        format!("resources/{}", slash_path(rel))
+        format!("resources/{}", arkdown_utils::to_unix_path(rel))
     }
 
     fn native_lib(filename: &str) -> String {
@@ -668,7 +668,7 @@ impl ArchivePath {
     }
 
     fn har_ets(rel: &std::path::Path) -> String {
-        format!("src/main/ets/{}", slash_path(rel))
+        format!("src/main/ets/{}", arkdown_utils::to_unix_path(rel))
     }
 
     fn ets(rel_text: &str) -> String {
@@ -682,10 +682,6 @@ impl ArchivePath {
     fn profile_guided_ap_file(module_name: &str) -> String {
         format!("{module_name}.ap")
     }
-}
-
-fn slash_path(path: &std::path::Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
 }
 
 fn add_json_resource_deflate<W: std::io::Write + std::io::Seek>(

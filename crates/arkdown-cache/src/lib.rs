@@ -259,21 +259,12 @@ impl BuildCache {
 /// Uses FNV-1a 64-bit to avoid adding a SHA-256 dependency; the hex string
 /// is stored in [`CacheKey::content_hash`].
 pub fn compute_content_hash(content: &str) -> String {
-    format!("{:016x}", fnv1a_hash(content))
+    format!("{:016x}", arkdown_utils::fnv1a_hash(content))
 }
 
 /// Derive a stable file-system safe name from a module ID.
 fn hash_id(id: &str) -> String {
-    format!("{:016x}", fnv1a_hash(id))
-}
-
-fn fnv1a_hash(s: &str) -> u64 {
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in s.bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    h
+    format!("{:016x}", arkdown_utils::fnv1a_hash(id))
 }
 
 #[cfg(test)]

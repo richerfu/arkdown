@@ -23,6 +23,8 @@ rolldown_plugin    = { workspace = true }
 rolldown_sourcemap = { workspace = true }
 string_wizard      = { workspace = true }
 
+arkdown-utils = { workspace = true }
+
 # Error handling
 anyhow    = { workspace = true }
 thiserror = { workspace = true }

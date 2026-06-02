@@ -201,6 +201,7 @@ name = "arkdown-cache"
 version = "0.1.0"
 dependencies = [
  "arkdown-core",
+ "arkdown-utils",
  "fs-err",
  "rustc-hash",
  "serde",
@@ -231,6 +232,7 @@ dependencies = [
  "arkdown-resource",
  "arkdown-sign",
  "arkdown-ts2abc",
+ "arkdown-utils",
  "arkdown-watcher",
  "clap",
  "fs-err",
@@ -299,6 +301,7 @@ name = "arkdown-obfuscate"
 version = "0.1.0"
 dependencies = [
  "arkdown-core",
+ "arkdown-utils",
  "oxc_allocator 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
  "oxc_ast 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
  "oxc_codegen 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
@@ -316,6 +319,7 @@ name = "arkdown-pack"
 version = "0.1.0"
 dependencies = [
  "arkdown-core",
+ "arkdown-utils",
  "fs-err",
  "serde",
  "serde_json",
@@ -341,6 +345,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arkdown-core",
+ "arkdown-utils",
  "oxc_allocator 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
  "oxc_ast 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
  "oxc_ast_visit 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
@@ -430,6 +435,7 @@ dependencies = [
 name = "arkdown-plugin-router-map"
 version = "0.1.0"
 dependencies = [
+ "arkdown-utils",
  "tempfile",
 ]
 
@@ -463,6 +469,7 @@ name = "arkdown-resolver"
 version = "0.1.0"
 dependencies = [
  "arkdown-core",
+ "arkdown-utils",
  "fs-err",
  "json5",
  "oxc_resolver",

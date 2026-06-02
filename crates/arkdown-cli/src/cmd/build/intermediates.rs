@@ -296,9 +296,7 @@ pub(super) fn rewrite_package_intermediate_module_json(path: &Path) -> Result<()
     Ok(())
 }
 
-pub(super) fn canonical_or_owned(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
-}
+pub(super) use arkdown_utils::canonicalize_or_owned as canonical_or_owned;
 
 fn resource_toolchains_dir(restool_path: &Path) -> PathBuf {
     let Some(toolchains_dir) = restool_path.parent() else {
