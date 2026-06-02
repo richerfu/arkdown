@@ -7,73 +7,7 @@ use crate::error::PackError;
 use crate::integrated_hsp::IntegratedHspEntry;
 use crate::zip_writer;
 
-fn generate_pack_info(config: &ArkdownConfig, input: &PackInput) -> String {
-    let abilities_json: Vec<serde_json::Value> = input
-        .abilities
-        .iter()
-        .map(|a| {
-            let mut obj = serde_json::json!({"name": a.name});
-            if let Some(label) = &a.label {
-                obj["label"] = serde_json::json!(label);
-            }
-            obj
-        })
-        .collect();
 
-    let main_ability = input
-        .abilities
-        .first()
-        .map(|a| a.name.as_str())
-        .unwrap_or("EntryAbility");
-
-    // HSP uses bundle_type "shared"; all other module types use "entry" as the
-    // distro moduleType (HAP entry modules) unless extended in future.
-    let module_type = if input.bundle_type == "shared" {
-        "shared"
-    } else {
-        "entry"
-    };
-
-    serde_json::json!({
-        "summary": {
-            "app": {
-                "bundleName": config.product.bundle_name,
-                "bundleType": input.bundle_type,
-                "version": {
-                    "code": input.bundle_version_code,
-                    "name": input.bundle_version_name
-                }
-            },
-            "modules": [
-                {
-                    "mainAbility": main_ability,
-                    "deviceType": ["phone"],
-                    "abilities": abilities_json,
-                    "distro": {
-                        "moduleType": module_type,
-                        "installationFree": false,
-                        "deliveryWithInstall": true,
-                        "moduleName": input.module_name
-                    },
-                    "apiVersion": {
-                        "compatible": config.sdk_config.compile_api_version,
-                        "releaseType": "Release",
-                        "target": config.sdk_config.compile_api_version
-                    }
-                }
-            ]
-        },
-        "packages": [
-            {
-                "deviceType": ["phone"],
-                "moduleType": module_type,
-                "deliveryWithInstall": true,
-                "name": format!("{}-default", input.module_name)
-            }
-        ]
-    })
-    .to_string()
-}
 
 fn minify_hap_module_json(content: &str) -> Result<String, serde_json::Error> {
     let value: serde_json::Value = serde_json::from_str(content)?;
@@ -439,6 +373,75 @@ impl Packager {
     /// ets/modules.abc       (stored, API >= 9)  or  modules.abc  (stored, API < 9)
     /// libs/arm64-v8a/*.so   (stored, optional)
     /// ```
+
+    fn generate_pack_info(&self, input: &PackInput) -> String {
+    let abilities_json: Vec<serde_json::Value> = input
+        .abilities
+        .iter()
+        .map(|a| {
+            let mut obj = serde_json::json!({"name": a.name});
+            if let Some(label) = &a.label {
+                obj["label"] = serde_json::json!(label);
+            }
+            obj
+        })
+        .collect();
+
+    let main_ability = input
+        .abilities
+        .first()
+        .map(|a| a.name.as_str())
+        .unwrap_or("EntryAbility");
+
+    // HSP uses bundle_type "shared"; all other module types use "entry" as the
+    // distro moduleType (HAP entry modules) unless extended in future.
+    let module_type = if input.bundle_type == "shared" {
+        "shared"
+    } else {
+        "entry"
+    };
+
+    serde_json::json!({
+        "summary": {
+            "app": {
+                "bundleName": self.config.product.bundle_name,
+                "bundleType": input.bundle_type,
+                "version": {
+                    "code": input.bundle_version_code,
+                    "name": input.bundle_version_name
+                }
+            },
+            "modules": [
+                {
+                    "mainAbility": main_ability,
+                    "deviceType": ["phone"],
+                    "abilities": abilities_json,
+                    "distro": {
+                        "moduleType": module_type,
+                        "installationFree": false,
+                        "deliveryWithInstall": true,
+                        "moduleName": input.module_name
+                    },
+                    "apiVersion": {
+                        "compatible": self.config.sdk_config.compile_api_version,
+                        "releaseType": "Release",
+                        "target": self.config.sdk_config.compile_api_version
+                    }
+                }
+            ]
+        },
+        "packages": [
+            {
+                "deviceType": ["phone"],
+                "moduleType": module_type,
+                "deliveryWithInstall": true,
+                "name": format!("{}-default", input.module_name)
+            }
+        ]
+    })
+    .to_string()
+}
+
     pub fn pack_hap(&self, input: PackInput) -> Result<PathBuf, PackError> {
         if let Some(parent) = input.output_path.parent() {
             fs_err::create_dir_all(parent)?;
@@ -538,7 +541,7 @@ impl Packager {
 
         // pack.info — bundle metadata (deflated JSON), written last by hvigor
         // for a normal HAP.
-        let mut pack_info = generate_pack_info(&self.config, &input);
+        let mut pack_info = self.generate_pack_info(&input);
         pack_info.push('\n');
         zip_writer::add_bytes_deflate(&mut writer, "pack.info", pack_info.as_bytes())?;
 
