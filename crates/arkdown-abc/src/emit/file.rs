@@ -53,6 +53,42 @@ impl LiteralArray {
             .iter()
             .any(|entry| matches!(entry, LiteralEntry::TaggedMethodAffiliate(_)))
     }
+
+    /// Returns `true` when this literal array is page route metadata.
+    ///
+    /// Heuristic: contains a `TaggedString("pageFullPath")` entry.
+    pub(super) fn is_page_route_metadata(&self) -> bool {
+        self.entries.iter().any(|entry| {
+            matches!(
+                entry,
+                LiteralEntry::TaggedString(value) | LiteralEntry::RawString(value) if value == "pageFullPath"
+            )
+        })
+    }
+
+    /// Returns `true` when this literal array is a `this` object stub.
+    pub(super) fn is_this_object(&self) -> bool {
+        matches!(
+            self.entries.as_slice(),
+            [
+                LiteralEntry::TaggedInteger(1),
+                LiteralEntry::TaggedString(name),
+                ..
+            ] if name == "this"
+        )
+    }
+
+    /// Returns `true` when this literal array is a page `Index` stub.
+    pub(super) fn is_page_index_stub(&self) -> bool {
+        matches!(
+            self.entries.as_slice(),
+            [
+                LiteralEntry::TaggedInteger(1),
+                LiteralEntry::TaggedString(name),
+                ..
+            ] if name == "Index"
+        )
+    }
 }
 
 impl LiteralEntry {
@@ -369,7 +405,7 @@ impl AbcFile {
             .cloned()
             .chain(self.records.iter().cloned())
             .chain(sdk_stubs.iter().cloned())
-            .map(class_with_upstream_method_order)
+            .map(|cls| cls.with_upstream_method_order())
             .collect();
         let all_classes: Vec<&ClassRecord> = all_classes_owned.iter().collect();
         let mut class_index_classes = all_classes.clone();
@@ -1312,15 +1348,6 @@ impl AbcFile {
     }
 }
 
-fn class_with_upstream_method_order(mut class: ClassRecord) -> ClassRecord {
-    class.methods.sort_by(|a, b| {
-        let a_len = a.name.encode_utf16().count();
-        let b_len = b.name.encode_utf16().count();
-        a_len.cmp(&b_len).then_with(|| a.name.cmp(&b.name))
-    });
-    class
-}
-
 #[derive(Debug, Default)]
 struct MethodPoolLayout {
     string_refs: Vec<MethodIndexStringRef>,
@@ -1406,6 +1433,17 @@ impl PoolStringItem {
             PoolStringItem::FullMethodName(_) => 1,
         }
     }
+}
+
+impl ClassRecord {
+fn with_upstream_method_order(mut self) -> Self {
+    self.methods.sort_by(|a, b| {
+        let a_len = a.name.encode_utf16().count();
+        let b_len = b.name.encode_utf16().count();
+        a_len.cmp(&b_len).then_with(|| a.name.cmp(&b.name))
+    });
+    self
+}
 }
 
 fn build_method_pool_layouts(
@@ -1531,11 +1569,11 @@ fn build_literal_header_order(
             let array = &literal_arrays[literal_idx];
             rank[literal_idx] = if is_page && array.has_method_affiliate() {
                 0
-            } else if is_page && literal_array_is_page_route_metadata(array) {
+            } else if is_page && array.is_page_route_metadata() {
                 4
-            } else if is_page && literal_array_is_this_object(array) {
+            } else if is_page && array.is_this_object() {
                 6
-            } else if is_page && literal_array_is_page_index_stub(array) {
+            } else if is_page && array.is_page_index_stub() {
                 1
             } else if is_entry && array.has_method_affiliate() {
                 3
@@ -1550,37 +1588,6 @@ fn build_literal_header_order(
     let mut order: Vec<usize> = (0..literal_arrays.len()).collect();
     order.sort_by_key(|idx| (rank[*idx], *idx));
     order
-}
-
-fn literal_array_is_page_route_metadata(array: &LiteralArray) -> bool {
-    array.entries.iter().any(|entry| {
-        matches!(
-            entry,
-            LiteralEntry::TaggedString(value) | LiteralEntry::RawString(value) if value == "pageFullPath"
-        )
-    })
-}
-
-fn literal_array_is_this_object(array: &LiteralArray) -> bool {
-    matches!(
-        array.entries.as_slice(),
-        [
-            LiteralEntry::TaggedInteger(1),
-            LiteralEntry::TaggedString(name),
-            ..
-        ] if name == "this"
-    )
-}
-
-fn literal_array_is_page_index_stub(array: &LiteralArray) -> bool {
-    matches!(
-        array.entries.as_slice(),
-        [
-            LiteralEntry::TaggedInteger(1),
-            LiteralEntry::TaggedString(name),
-            ..
-        ] if name == "Index"
-    )
 }
 
 fn method_index_string_refs(
