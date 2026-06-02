@@ -318,32 +318,6 @@ fn resource_toolchains_dir(restool_path: &Path) -> PathBuf {
     toolchains_dir.to_path_buf()
 }
 
-pub(super) fn sdk_api_dirs(config: &ArkdownConfig) -> Vec<PathBuf> {
-    let Some(ets_root) = sdk_ets_root(config) else {
-        return vec![];
-    };
-    let mut dirs = vec![ets_root.join("api")];
-    if let Some(ohos_root) = ets_root.parent() {
-        dirs.push(ohos_root.join("js/api"));
-    }
-    dirs
-}
-
-pub(super) fn sdk_kits_dirs(config: &ArkdownConfig) -> Vec<PathBuf> {
-    sdk_ets_root(config)
-        .map(|ets_root| vec![ets_root.join("kits")])
-        .unwrap_or_default()
-}
-
-fn sdk_ets_root(config: &ArkdownConfig) -> Option<PathBuf> {
-    config
-        .sdk_config
-        .ets_loader_path
-        .parent()
-        .and_then(Path::parent)
-        .map(Path::to_path_buf)
-}
-
 pub(super) fn path_string(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }

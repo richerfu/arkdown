@@ -1,5 +1,5 @@
 use index_vec::IndexVec;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::graph::ModuleIdx;
 use crate::module::SourceMap;
@@ -90,6 +90,40 @@ pub struct ChunkGraph {
     pub module_to_chunk: IndexVec<ModuleIdx, Option<ChunkIdx>>,
     /// Maps entry [`ModuleIdx`] → entry [`ChunkIdx`].
     pub entry_module_to_entry_chunk: FxHashMap<ModuleIdx, ChunkIdx>,
+}
+
+impl ChunkGraph {
+    /// Return the deduplicated list of all module IDs in the graph.
+    ///
+    /// Prefers [`ChunkGraph::full_module_ids`] (the complete Rolldown module
+    /// graph) when populated; falls back to collecting IDs from every chunk.
+    /// Order is stable: IDs appear in the order they are first encountered.
+    ///
+    /// hvigor's `CompileArkTS` stage compiles the full module graph
+    /// (`getModuleIds()`), not just the entry chunks, so this method must be
+    /// used wherever the ABC compiler cache is written.
+    pub fn all_module_ids(&self) -> Vec<String> {
+        let mut seen = FxHashSet::default();
+        let mut ids = Vec::new();
+
+        if !self.full_module_ids.is_empty() {
+            for id in &self.full_module_ids {
+                if seen.insert(id.clone()) {
+                    ids.push(id.clone());
+                }
+            }
+            return ids;
+        }
+
+        for chunk in &self.chunks {
+            for id in &chunk.module_ids {
+                if seen.insert(id.clone()) {
+                    ids.push(id.clone());
+                }
+            }
+        }
+        ids
+    }
 }
 
 // ---------------------------------------------------------------------------

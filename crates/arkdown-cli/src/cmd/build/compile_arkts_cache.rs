@@ -31,7 +31,7 @@ impl<'a> CompileArktsCacheWriter<'a> {
     }
 
     pub(super) fn write(&self, chunk_graph: &ChunkGraph) -> Result<CompileArkTsHandoff> {
-        let module_ids = compile_module_ids(chunk_graph);
+        let module_ids = chunk_graph.all_module_ids();
         if module_ids.is_empty() {
             return Err(anyhow::anyhow!(
                 "CompileArkTS module graph is empty; hvigor compiles Rollup getModuleIds(), so arkdown cannot continue without rolldown module_ids"

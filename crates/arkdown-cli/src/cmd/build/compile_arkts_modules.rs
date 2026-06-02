@@ -147,29 +147,6 @@ impl CompileModuleInfo {
     }
 }
 
-pub(super) fn compile_module_ids(chunk_graph: &ChunkGraph) -> Vec<String> {
-    let mut seen = FxHashSet::default();
-    let mut ids = Vec::new();
-
-    if !chunk_graph.full_module_ids.is_empty() {
-        for module_id in &chunk_graph.full_module_ids {
-            if seen.insert(module_id.clone()) {
-                ids.push(module_id.clone());
-            }
-        }
-        return ids;
-    }
-
-    for chunk in &chunk_graph.chunks {
-        for module_id in &chunk.module_ids {
-            if seen.insert(module_id.clone()) {
-                ids.push(module_id.clone());
-            }
-        }
-    }
-    ids
-}
-
 pub(super) fn module_id_to_source_path(module_id: &str) -> Option<PathBuf> {
     if module_id.starts_with('\0') || module_id.starts_with("virtual:") {
         return None;
@@ -610,10 +587,9 @@ mod tests {
     use index_vec::IndexVec;
     use rustc_hash::FxHashMap;
 
-    use super::compile_module_ids;
-
+    
     #[test]
-    fn compile_module_ids_prefers_full_rolldown_module_graph() {
+    fn all_module_ids_prefers_full_rolldown_module_graph() {
         let graph = ChunkGraph {
             chunks: vec![ArkChunk {
                 module_ids: vec!["/project/entry/src/main/ets/Index.ets".to_string()],
@@ -630,7 +606,7 @@ mod tests {
         };
 
         assert_eq!(
-            compile_module_ids(&graph),
+            graph.all_module_ids(),
             vec![
                 "/project/entry/src/main/ets/Index.ets".to_string(),
                 "/project/entry/src/main/ets/PureReexport.ts".to_string(),

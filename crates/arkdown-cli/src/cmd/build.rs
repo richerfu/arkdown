@@ -43,7 +43,7 @@ use compile_arkts_handoff::{
 };
 mod compile_arkts_modules;
 use compile_arkts_modules::{
-    compile_module_ids, compile_source_passthrough, module_id_to_source_path,
+    compile_source_passthrough, module_id_to_source_path,
     rewrite_compile_module_imports_to_ohm, CompileModuleInfo,
 };
 mod compile_arkts_output;
@@ -58,7 +58,7 @@ use compile_arkts_widget::compile_widget_pass;
 mod intermediates;
 use intermediates::{
     canonical_or_owned, copy_ets_assets_to_loader_out, copy_if_exists, extract_zip_entry,
-    path_string, rewrite_package_intermediate_module_json, sdk_api_dirs, sdk_kits_dirs,
+    path_string, rewrite_package_intermediate_module_json,
     write_bytes, write_hap_metadata, write_json_pretty, write_profile_intermediates,
     write_resource_config_files, write_router_map_intermediates, write_static_intermediate_files,
 };
@@ -316,8 +316,8 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             Arc::new(OhosResolvePlugin::new(
                 ResolverConfig {
                     project_root: project_root.clone(),
-                    sdk_api_dirs: sdk_api_dirs(&config_arc),
-                    sdk_kits_dirs: sdk_kits_dirs(&config_arc),
+                    sdk_api_dirs: config_arc.sdk_config.ets_api_dirs(),
+                    sdk_kits_dirs: config_arc.sdk_config.ets_kits_dirs(),
                     pkg_name_to_pkg_info: FxHashMap::default(),
                     use_normalized_ohm_url: config_arc
                         .product
