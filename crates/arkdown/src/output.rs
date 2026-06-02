@@ -182,7 +182,8 @@ impl WrittenOutput {
             .is_some_and(|mappings| !mappings.is_empty());
         if !has_sources && !has_mappings {
             return Err(ArkdownError::Bundler(
-                "refusing to emit sourceMaps.map without compile input sources or mappings".to_string(),
+                "refusing to emit sourceMaps.map without compile input sources or mappings"
+                    .to_string(),
             ));
         }
 
@@ -250,7 +251,8 @@ impl WrittenOutput {
                 }
             })
             .collect::<Vec<_>>();
-        HvigorSourceMapOptions::from(opts).to_json(&entries)
+        HvigorSourceMapOptions::from(opts)
+            .to_json(&entries)
             .map_err(|e| ArkdownError::Bundler(format!("failed to serialize sourceMaps.map: {e}")))
     }
 }
@@ -283,7 +285,10 @@ mod tests {
     fn layout_helpers_point_to_loader_out_ets_artifacts() {
         let loader_out = Path::new("build/default/intermediates/loader_out/default/ets");
 
-        assert_eq!(WrittenOutput::abc_path_in(loader_out), loader_out.join("modules.abc"));
+        assert_eq!(
+            WrittenOutput::abc_path_in(loader_out),
+            loader_out.join("modules.abc")
+        );
         assert_eq!(
             WrittenOutput::source_maps_path_in(loader_out),
             loader_out.join("sourceMaps.map")
@@ -302,7 +307,8 @@ mod tests {
             ..ArkChunk::default()
         }]);
 
-        let written = WrittenOutput::write_output(&chunk_graph, &output_dir, None).expect("write output");
+        let written =
+            WrittenOutput::write_output(&chunk_graph, &output_dir, None).expect("write output");
 
         let source_maps = output_dir.join("sourceMaps.map");
         assert_eq!(written.source_maps_path, Some(source_maps.clone()));
@@ -343,7 +349,8 @@ mod tests {
             },
         ]);
 
-        let written = WrittenOutput::write_output(&chunk_graph, &output_dir, None).expect("write output");
+        let written =
+            WrittenOutput::write_output(&chunk_graph, &output_dir, None).expect("write output");
 
         let source_maps = written.source_maps_path.expect("sourceMaps.map path");
         let value: serde_json::Value = serde_json::from_str(
@@ -403,7 +410,8 @@ mod tests {
             chunk_source_files,
         };
 
-        let written = WrittenOutput::write_output(&chunk_graph, &output_dir, Some(&opts)).expect("write output");
+        let written = WrittenOutput::write_output(&chunk_graph, &output_dir, Some(&opts))
+            .expect("write output");
 
         let source_maps = written.source_maps_path.expect("sourceMaps.map path");
         let value: serde_json::Value = serde_json::from_str(
@@ -445,8 +453,8 @@ mod tests {
             ..ArkChunk::default()
         }]);
 
-        let err =
-            WrittenOutput::write_output(&chunk_graph, &output_dir, None).expect_err("empty source map rejected");
+        let err = WrittenOutput::write_output(&chunk_graph, &output_dir, None)
+            .expect_err("empty source map rejected");
         assert!(err.to_string().contains("fake empty sourceMaps.map"));
 
         let _ = fs_err::remove_dir_all(output_dir);

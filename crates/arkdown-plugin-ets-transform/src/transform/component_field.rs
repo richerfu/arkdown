@@ -10,7 +10,7 @@ pub(super) fn push_state_constructor_init(out: &mut String, field: &StateField) 
     ComponentFieldEmitter::new(out).push_state_constructor_init(field);
 }
 
-/// Emit the `@Prop` default-value fallback block in the constructor.
+/// Emit the `@Prop` default-value fallback block in `setInitiallyProvidedValue`.
 ///
 /// Upstream hvigor `createUpdateParamsWithIf(e, t=true, r=initializer)` in
 /// `process_component_member.js` — only emitted when:
@@ -146,11 +146,11 @@ impl<'a> ComponentFieldEmitter<'a> {
 
         let backing = state_decorator_decl_class_for(&field.decorator, field.is_simple_type);
         let type_param = field.state_type_param();
-        let _ = write!(
-            self.out,
-            "    private __{}: {}{}",
-            field.name, backing, type_param
-        );
+        let _ = write!(self.out, "    private __{}", field.name);
+        if field.optional {
+            self.out.push('?');
+        }
+        let _ = write!(self.out, ": {backing}{type_param}");
         if field.uses_local_storage() {
             self.push_local_storage_initializer(field, &type_param);
         }

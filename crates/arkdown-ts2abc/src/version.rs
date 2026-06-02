@@ -42,9 +42,7 @@ impl BytecodeVersion {
         match api {
             9 | 10 => Self::new(9, 0, 0, 0),
             11 => Self::new(11, 0, 2, 0),
-            12 if matches!(sub_api, None | Some("beta1") | Some("beta2")) => {
-                Self::new(12, 0, 2, 0)
-            }
+            12 if matches!(sub_api, None | Some("beta1") | Some("beta2")) => Self::new(12, 0, 2, 0),
             12..=17 => Self::new(12, 0, 6, 0),
             _ => Self::new(13, 0, 1, 0),
         }

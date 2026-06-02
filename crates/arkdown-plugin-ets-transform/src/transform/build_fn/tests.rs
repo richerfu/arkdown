@@ -15,6 +15,21 @@ fn test_component_metadata() -> ComponentMetadata {
 }
 
 fn parse_and_lower(source: &str) -> Result<String, BuildLoweringError> {
+    parse_and_lower_with_raw_object_fields(source, &FxHashSet::default())
+}
+
+fn parse_and_lower_with_raw_object_fields(
+    source: &str,
+    raw_object_fields: &FxHashSet<String>,
+) -> Result<String, BuildLoweringError> {
+    parse_and_lower_with_raw_object_fields_and_reusable(source, raw_object_fields, false)
+}
+
+fn parse_and_lower_with_raw_object_fields_and_reusable(
+    source: &str,
+    raw_object_fields: &FxHashSet<String>,
+    current_component_reusable: bool,
+) -> Result<String, BuildLoweringError> {
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::ets()).parse();
     assert!(
@@ -48,7 +63,7 @@ fn parse_and_lower(source: &str) -> Result<String, BuildLoweringError> {
             _ => None,
         })
         .expect("expected build method");
-    lower_build_body_with_custom_components(
+    lower_build_body_with_component_context(
         build.value.body.as_deref(),
         source,
         "",
@@ -56,6 +71,8 @@ fn parse_and_lower(source: &str) -> Result<String, BuildLoweringError> {
         &FxHashSet::default(),
         &CustomComponentUpdateProps::default(),
         &test_component_metadata(),
+        raw_object_fields,
+        current_component_reusable,
     )
     .map(|(code, _)| code)
 }
@@ -167,6 +184,44 @@ fn lowers_component_with_member_expression_arg() {
     let source = "@Component\nstruct Foo {\n  @State msg: string = \"hi\";\n  build() {\n    Text(this.msg)\n  }\n}";
     let out = parse_and_lower(source).unwrap();
     assert!(out.contains("Text.create(this.msg);"), "got:\n{out}");
+}
+
+#[test]
+fn lowers_component_create_keeps_raw_object_top_level_arg() {
+    let source = r#"class Item {}
+@Component
+struct Foo {
+  @State item: Item = new Item();
+  build() {
+    Image(this.item)
+  }
+}"#;
+    let raw_object_fields = FxHashSet::from_iter(["item".to_string()]);
+    let out = parse_and_lower_with_raw_object_fields(source, &raw_object_fields).unwrap();
+    assert!(out.contains("Image.create(this.item);"), "got:\n{out}");
+    assert!(
+        !out.contains("Image.create(ObservedObject.GetRawObject(this.item));"),
+        "component create arg must match hvigor and stay unwrapped; got:\n{out}"
+    );
+}
+
+#[test]
+fn lowers_attribute_callback_wraps_raw_object_call_arg() {
+    let source = r#"class Item {}
+@Component
+struct Foo {
+  @State item: Item = new Item();
+  handle(item: Item) {}
+  build() {
+    Button("OK").onClick(() => this.handle(this.item))
+  }
+}"#;
+    let raw_object_fields = FxHashSet::from_iter(["item".to_string()]);
+    let out = parse_and_lower_with_raw_object_fields(source, &raw_object_fields).unwrap();
+    assert!(
+        out.contains("Button.onClick(() => this.handle(ObservedObject.GetRawObject(this.item)));"),
+        "attribute callback call argument should still match upstream raw-object lowering; got:\n{out}"
+    );
 }
 
 #[test]
@@ -293,6 +348,40 @@ struct Foo {
         "got:\n{out}"
     );
     assert!(!out.contains("Image.pop();"), "got:\n{out}");
+}
+
+#[test]
+fn lowers_reusable_regular_attrs_into_initial_render_block() {
+    let source = r#"@Reusable
+@Component
+struct Foo {
+  build() {
+    Row() {
+    }
+      .width($r("app.float.card_width"))
+      .alignItems(VerticalAlign.Top)
+      .height(100)
+      .linearGradient(this.selected ? { angle: "90deg" } : { colors: [] })
+  }
+}"#;
+    let out =
+        parse_and_lower_with_raw_object_fields_and_reusable(source, &FxHashSet::default(), true)
+            .unwrap();
+    let width = out
+        .find("Row.width($r(\"app.float.card_width\"));")
+        .unwrap();
+    let gradient = out.find("Row.linearGradient(").unwrap();
+    let initial = out.find("if (isInitialRender) {").unwrap();
+    let align = out.find("Row.alignItems(VerticalAlign.Top);").unwrap();
+    let height = out.find("Row.height(100);").unwrap();
+    assert!(
+        width < initial && gradient < initial,
+        "dynamic/non-regular attrs stay in update path; got:\n{out}"
+    );
+    assert!(
+        initial < align && align < height,
+        "regular reusable attrs move into initial render block in source order; got:\n{out}"
+    );
 }
 
 #[test]
@@ -524,6 +613,7 @@ fn parse_and_lower_with_module(
         &test_component_metadata(),
         &FxHashSet::default(),
         Some(module_name),
+        false,
     )
     .map(|(code, _)| code)
 }
@@ -695,12 +785,7 @@ struct Foo {
     }
   }
 }"#;
-    let out = parse_and_lower_with_module(
-        source,
-        "features/nav/NavPage.ets",
-        "entry",
-    )
-    .unwrap();
+    let out = parse_and_lower_with_module(source, "features/nav/NavPage.ets", "entry").unwrap();
     assert!(
         out.contains("Navigation.create("),
         "missing Navigation.create; got:\n{out}"
@@ -764,7 +849,10 @@ struct Foo {
     );
     let inner_pop = out.find("LongPressGesture.pop();").unwrap();
     let outer_pop = out.find("Gesture.pop();").unwrap();
-    assert!(inner_pop < outer_pop, "LongPressGesture.pop must precede Gesture.pop; got:\n{out}");
+    assert!(
+        inner_pop < outer_pop,
+        "LongPressGesture.pop must precede Gesture.pop; got:\n{out}"
+    );
     // The raw .gesture() call must NOT appear in the output.
     assert!(
         !out.contains("Image.gesture("),
@@ -784,13 +872,154 @@ struct Foo {
   }
 }"#;
     let out = parse_and_lower(source).unwrap();
-    let pinch_create = out.find("PinchGesture.create(").expect("PinchGesture.create");
+    let pinch_create = out
+        .find("PinchGesture.create(")
+        .expect("PinchGesture.create");
     let pan_create = out.find("PanGesture.create(").expect("PanGesture.create");
     let vis = out.find("Row.visibility(").expect("Row.visibility");
-    assert!(pinch_create < pan_create, "PinchGesture before PanGesture; got:\n{out}");
-    assert!(pan_create < vis, "gestures before visibility attr; got:\n{out}");
-    assert_eq!(out.matches("Gesture.create(GesturePriority.Low);").count(), 2, "two Gesture.create; got:\n{out}");
+    assert!(
+        pinch_create < pan_create,
+        "PinchGesture before PanGesture; got:\n{out}"
+    );
+    assert!(
+        pan_create < vis,
+        "gestures before visibility attr; got:\n{out}"
+    );
+    assert_eq!(
+        out.matches("Gesture.create(GesturePriority.Low);").count(),
+        2,
+        "two Gesture.create; got:\n{out}"
+    );
     // Count only standalone "Gesture.pop()" lines, not "XxxGesture.pop()".
     let gesture_pop_count = out.match_indices("\n            Gesture.pop();").count();
-    assert_eq!(gesture_pop_count, 2, "two standalone Gesture.pop; got:\n{out}");
+    assert_eq!(
+        gesture_pop_count, 2,
+        "two standalone Gesture.pop; got:\n{out}"
+    );
+}
+
+#[test]
+fn lowers_gesture_group_with_child_gestures() {
+    // GestureGroup(mode, child1, child2) must expand each child gesture into
+    // its own create/attrs/pop sequence between GestureGroup.create and
+    // GestureGroup.pop.  The outer Gesture.create/Gesture.pop wrapper is still
+    // emitted once for the whole group.
+    let source = r#"@Component
+struct Foo {
+  build() {
+    Column() {}
+      .gesture(
+        GestureGroup(GestureMode.Parallel,
+          SwipeGesture({ direction: SwipeDirection.Vertical })
+            .onAction((event) => {}),
+          PanGesture({ direction: PanDirection.Vertical })
+            .onActionStart(() => {})
+            .onActionEnd((event) => {})
+        )
+      )
+  }
+}"#;
+    let out = parse_and_lower(source).unwrap();
+    // Outer wrapper.
+    assert!(
+        out.contains("Gesture.create(GesturePriority.Low);"),
+        "Gesture.create missing; got:\n{out}"
+    );
+    assert!(
+        out.contains("Gesture.pop();"),
+        "Gesture.pop missing; got:\n{out}"
+    );
+    // GestureGroup create must only contain the mode arg, not the child gestures.
+    assert!(
+        out.contains("GestureGroup.create(GestureMode.Parallel);"),
+        "GestureGroup.create(mode) missing; got:\n{out}"
+    );
+    assert!(
+        out.contains("GestureGroup.pop();"),
+        "GestureGroup.pop missing; got:\n{out}"
+    );
+    // SwipeGesture child.
+    assert!(
+        out.contains("SwipeGesture.create("),
+        "SwipeGesture.create missing; got:\n{out}"
+    );
+    assert!(
+        out.contains("SwipeGesture.onAction("),
+        "SwipeGesture.onAction missing; got:\n{out}"
+    );
+    assert!(
+        out.contains("SwipeGesture.pop();"),
+        "SwipeGesture.pop missing; got:\n{out}"
+    );
+    // PanGesture child.
+    assert!(
+        out.contains("PanGesture.create("),
+        "PanGesture.create missing; got:\n{out}"
+    );
+    assert!(
+        out.contains("PanGesture.onActionStart("),
+        "PanGesture.onActionStart missing; got:\n{out}"
+    );
+    assert!(
+        out.contains("PanGesture.onActionEnd("),
+        "PanGesture.onActionEnd missing; got:\n{out}"
+    );
+    assert!(
+        out.contains("PanGesture.pop();"),
+        "PanGesture.pop missing; got:\n{out}"
+    );
+    // Order: GestureGroup.create -> SwipeGesture.create -> SwipeGesture.pop ->
+    //        PanGesture.create -> PanGesture.pop -> GestureGroup.pop -> Gesture.pop
+    let gg_create = out.find("GestureGroup.create(").unwrap();
+    let swipe_create = out.find("SwipeGesture.create(").unwrap();
+    let swipe_pop = out.find("SwipeGesture.pop();").unwrap();
+    let pan_create = out.find("PanGesture.create(").unwrap();
+    let pan_pop = out.find("PanGesture.pop();").unwrap();
+    let gg_pop = out.find("GestureGroup.pop();").unwrap();
+    // Find the standalone "Gesture.pop();" that is NOT part of "GestureGroup.pop();"
+    let gesture_pop = out
+        .match_indices("Gesture.pop();")
+        .find(|(pos, _)| {
+            // Ensure the character before "Gesture" is not a word char (i.e. not "Group")
+            pos.checked_sub(1)
+                .map(|p| !out.as_bytes()[p].is_ascii_alphabetic())
+                .unwrap_or(true)
+        })
+        .map(|(pos, _)| pos)
+        .expect("standalone Gesture.pop() not found");
+    assert!(
+        gg_create < swipe_create,
+        "GestureGroup.create before SwipeGesture.create; got:\n{out}"
+    );
+    assert!(
+        swipe_create < swipe_pop,
+        "SwipeGesture.create before SwipeGesture.pop; got:\n{out}"
+    );
+    assert!(
+        swipe_pop < pan_create,
+        "SwipeGesture.pop before PanGesture.create; got:\n{out}"
+    );
+    assert!(
+        pan_create < pan_pop,
+        "PanGesture.create before PanGesture.pop; got:\n{out}"
+    );
+    assert!(
+        pan_pop < gg_pop,
+        "PanGesture.pop before GestureGroup.pop; got:\n{out}"
+    );
+    assert!(
+        gg_pop < gesture_pop,
+        "GestureGroup.pop before Gesture.pop; got:\n{out}"
+    );
+    // Only one Gesture.create/Gesture.pop pair (not one per child).
+    assert_eq!(
+        out.matches("Gesture.create(GesturePriority.Low);").count(),
+        1,
+        "one Gesture.create; got:\n{out}"
+    );
+    // The raw .gesture() call must not appear verbatim.
+    assert!(
+        !out.contains("Column.gesture("),
+        "Column.gesture() must not appear verbatim; got:\n{out}"
+    );
 }

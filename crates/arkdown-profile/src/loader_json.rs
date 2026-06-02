@@ -395,7 +395,6 @@ pub struct ByteCodeHarEntry {
 ///    - If `path` is already absolute: normalize `.`/`..` segments in place.
 ///    - If `path` is relative: join it onto the current working directory, then
 ///      normalize.
-
 pub(super) use arkdown_utils::to_unix_path;
 
 pub(super) fn to_absolute_path_string(path: &Path) -> String {
@@ -436,7 +435,6 @@ pub(super) fn normalize_path_string(path: &Path) -> String {
 }
 
 impl LoaderJson {
-
     fn collect_form_src_entries(module_cfg: &ModuleConfig) -> Vec<String> {
         let profile_dir = module_cfg.src_path.join("src/main/resources/base/profile");
         let Ok(entries) = std::fs::read_dir(profile_dir) else {

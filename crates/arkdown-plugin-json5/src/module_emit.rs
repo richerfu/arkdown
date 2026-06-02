@@ -171,11 +171,9 @@ impl<'a> JsonModuleEmitter<'a> {
             }
             serde_json::Value::Array(values) => ast.expression_array(
                 SPAN,
-                ast.vec_from_iter(
-                    values
-                        .iter()
-                        .map(|value| ArrayExpressionElement::from(Self::json_value_expression(value, ast))),
-                ),
+                ast.vec_from_iter(values.iter().map(|value| {
+                    ArrayExpressionElement::from(Self::json_value_expression(value, ast))
+                })),
             ),
             serde_json::Value::Object(values) => ast.expression_object(
                 SPAN,

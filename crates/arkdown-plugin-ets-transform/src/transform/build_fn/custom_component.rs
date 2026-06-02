@@ -56,7 +56,12 @@ pub(super) fn emit_common_wrapped_custom_component_call(
     }
     {
         let mut writer = crate::transform::viewpu_emit::ViewpuWriter::new(out);
-        writer.observe_component_creation(indent, context.use_parent_context, "__Common__", &common_body);
+        writer.observe_component_creation(
+            indent,
+            context.use_parent_context,
+            "__Common__",
+            &common_body,
+        );
     }
     // Emit the custom component call inside a block.
     out.push_str(indent);

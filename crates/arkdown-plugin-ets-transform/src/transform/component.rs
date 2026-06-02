@@ -47,6 +47,8 @@ pub struct StateField {
     pub name: String,
     /// TypeScript type annotation text, e.g. `"number"` or `"string[]"`.
     pub type_annotation: String,
+    /// Whether the source property used `?`.
+    pub optional: bool,
     /// Decorator name: `"State"`, `"Prop"`, `"Link"`, etc.
     pub decorator: String,
     /// Initializer expression text (may be empty string if absent).
@@ -249,7 +251,6 @@ impl<'a> ViewPuClassEmitter<'a> {
             } else if let Some(field) = self.info.find_state_field(name) {
                 push_state_constructor_init(&mut self.out, field);
                 push_provide_var_registration(&mut self.out, field);
-                push_prop_default_fallback(&mut self.out, field);
             }
         }
         self.out
@@ -283,6 +284,9 @@ impl<'a> ViewPuClassEmitter<'a> {
                     self.out,
                     "        if (params.{name} !== undefined) {{\n            this.{name} = params.{name};\n        }}"
                 );
+            }
+            if let Some(field) = self.info.find_state_field(name) {
+                push_prop_default_fallback(&mut self.out, field);
             }
         }
         self.out.push_str("    }\n");
@@ -530,6 +534,7 @@ mod tests {
             state_fields: vec![StateField {
                 name: "count".to_string(),
                 type_annotation: "number".to_string(),
+                optional: false,
                 decorator: "State".to_string(),
                 initializer: Some("0".to_string()),
                 watch_handler: None,
@@ -597,6 +602,29 @@ mod tests {
     }
 
     #[test]
+    fn test_optional_state_field_preserves_question_mark() {
+        let mut info = make_counter_component();
+        info.state_fields = vec![StateField {
+            name: "webViewController".to_string(),
+            type_annotation: "WebviewController".to_string(),
+            optional: true,
+            decorator: "State".to_string(),
+            initializer: Some("undefined".to_string()),
+            watch_handler: None,
+            alias: None,
+            decorator_arg: None,
+            is_simple_type: false,
+        }];
+        let out = generate_view_pu_class(&info);
+        assert!(
+            out.contains(
+                "private __webViewController?: ObservedPropertyObjectPU<WebviewController>;"
+            ),
+            "optional @State backing field should preserve source `?`; got:\n{out}"
+        );
+    }
+
+    #[test]
     fn test_entry_generates_registration() {
         let mut info = make_counter_component();
         info.is_entry = true;
@@ -623,6 +651,7 @@ mod tests {
             state_fields: vec![StateField {
                 name: "value".to_string(),
                 type_annotation: "string".to_string(),
+                optional: false,
                 decorator: "Prop".to_string(),
                 initializer: None,
                 watch_handler: None,
@@ -691,6 +720,7 @@ mod tests {
             state_fields: vec![StateField {
                 name: "items".to_string(),
                 type_annotation: "string[]".to_string(),
+                optional: false,
                 decorator: "Link".to_string(),
                 initializer: None,
                 watch_handler: None,
@@ -738,6 +768,7 @@ mod tests {
             state_fields: vec![StateField {
                 name: "item".to_string(),
                 type_annotation: "Item".to_string(),
+                optional: false,
                 decorator: "ObjectLink".to_string(),
                 initializer: None,
                 watch_handler: None,
@@ -779,6 +810,7 @@ mod tests {
                 StateField {
                     name: "item".to_string(),
                     type_annotation: "Item".to_string(),
+                    optional: false,
                     decorator: "ObjectLink".to_string(),
                     initializer: None,
                     watch_handler: None,
@@ -789,6 +821,7 @@ mod tests {
                 StateField {
                     name: "content".to_string(),
                     type_annotation: "() => void".to_string(),
+                    optional: false,
                     decorator: "BuilderParam".to_string(),
                     initializer: None,
                     watch_handler: None,
@@ -845,6 +878,7 @@ mod tests {
             state_fields: vec![StateField {
                 name: "theme".to_string(),
                 type_annotation: "string".to_string(),
+                optional: false,
                 decorator: "Provide".to_string(),
                 initializer: Some("\"dark\"".to_string()),
                 watch_handler: None,
@@ -885,6 +919,7 @@ mod tests {
             state_fields: vec![StateField {
                 name: "theme".to_string(),
                 type_annotation: "string".to_string(),
+                optional: false,
                 decorator: "Provide".to_string(),
                 initializer: Some("\"dark\"".to_string()),
                 watch_handler: None,
@@ -916,7 +951,8 @@ mod tests {
         );
         // Only one call (no alias)
         assert_eq!(
-            out.matches("this.addProvidedVar(\"theme\", this.__theme, false)").count(),
+            out.matches("this.addProvidedVar(\"theme\", this.__theme, false)")
+                .count(),
             1,
             "@Provide without alias must emit exactly one addProvidedVar call"
         );
@@ -934,6 +970,7 @@ mod tests {
             state_fields: vec![StateField {
                 name: "appPathStack".to_string(),
                 type_annotation: "NavPathStack".to_string(),
+                optional: false,
                 decorator: "Provide".to_string(),
                 initializer: Some("new NavPathStack()".to_string()),
                 watch_handler: None,
@@ -977,6 +1014,7 @@ mod tests {
             state_fields: vec![StateField {
                 name: "theme".to_string(),
                 type_annotation: "string".to_string(),
+                optional: false,
                 decorator: "Provide".to_string(),
                 initializer: Some("\"dark\"".to_string()),
                 watch_handler: None,
@@ -996,7 +1034,8 @@ mod tests {
         };
         let out = generate_view_pu_class(&info);
         assert_eq!(
-            out.matches("this.addProvidedVar(\"theme\", this.__theme, false)").count(),
+            out.matches("this.addProvidedVar(\"theme\", this.__theme, false)")
+                .count(),
             1,
             "@Provide(\"theme\") theme must emit exactly one addProvidedVar call"
         );
@@ -1025,7 +1064,11 @@ mod tests {
             is_custom_dialog: true,
             state_fields: vec![],
             params_fields: vec![],
-            property_order: vec!["share".to_string(), "save".to_string(), "controller".to_string()],
+            property_order: vec![
+                "share".to_string(),
+                "save".to_string(),
+                "controller".to_string(),
+            ],
             regular_fields: vec![
                 RegularField {
                     name: "share".to_string(),
@@ -1159,6 +1202,7 @@ mod tests {
             state_fields: vec![StateField {
                 name: "theme".to_string(),
                 type_annotation: "string".to_string(),
+                optional: false,
                 decorator: "Consume".to_string(),
                 initializer: None,
                 watch_handler: None,
@@ -1199,6 +1243,7 @@ mod tests {
             state_fields: vec![StateField {
                 name: "currentTheme".to_string(),
                 type_annotation: "string".to_string(),
+                optional: false,
                 decorator: "Consume".to_string(),
                 initializer: None,
                 watch_handler: None,
@@ -1237,6 +1282,7 @@ mod tests {
             state_fields: vec![StateField {
                 name: "count".to_string(),
                 type_annotation: "number".to_string(),
+                optional: false,
                 decorator: "State".to_string(),
                 initializer: Some("0".to_string()),
                 watch_handler: Some("onCountChange".to_string()),
@@ -1300,6 +1346,7 @@ mod tests {
             state_fields: vec![StateField {
                 name: "content".to_string(),
                 type_annotation: "() => void".to_string(),
+                optional: false,
                 decorator: "BuilderParam".to_string(),
                 initializer: None,
                 watch_handler: None,
@@ -1347,6 +1394,7 @@ mod tests {
             state_fields: vec![StateField {
                 name: "title".to_string(),
                 type_annotation: "string".to_string(),
+                optional: false,
                 decorator: "Prop".to_string(),
                 initializer: Some("\"default\"".to_string()),
                 watch_handler: None,
@@ -1373,6 +1421,16 @@ mod tests {
             !out.contains("new SynchedPropertySimpleOneWayPU(\"default\""),
             "@Prop must not use the local initializer in the constructor"
         );
+        let set_initially = out
+            .find("setInitiallyProvidedValue(params")
+            .expect("setInitiallyProvidedValue");
+        let fallback = out
+            .find("if (params.title === undefined)")
+            .expect("@Prop default fallback");
+        assert!(
+            set_initially < fallback,
+            "@Prop default fallback belongs in setInitiallyProvidedValue, got:\n{out}"
+        );
     }
 
     // ── Storage decorators ─────────────────────────────────────────────────────
@@ -1395,6 +1453,7 @@ mod tests {
                 state_fields: vec![StateField {
                     name: "setting".to_string(),
                     type_annotation: "string".to_string(),
+                    optional: false,
                     decorator: decorator.to_string(),
                     initializer: None,
                     watch_handler: None,

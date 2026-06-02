@@ -75,7 +75,8 @@ impl RawAppJson5 {
     }
 
     fn validate(app: &Self, path: &std::path::Path) -> Result<(), ConfigError> {
-        if app.app.bundle_name.is_empty() || Self::is_valid_hvigor_bundle_name(&app.app.bundle_name) {
+        if app.app.bundle_name.is_empty() || Self::is_valid_hvigor_bundle_name(&app.app.bundle_name)
+        {
             return Ok(());
         }
 
@@ -652,15 +653,27 @@ mod tests {
 
     #[test]
     fn test_hvigor_bundle_name_pattern() {
-        assert!(RawAppJson5::is_valid_hvigor_bundle_name("com.example.myapplication"));
+        assert!(RawAppJson5::is_valid_hvigor_bundle_name(
+            "com.example.myapplication"
+        ));
         assert!(RawAppJson5::is_valid_hvigor_bundle_name("a.b.c"));
-        assert!(RawAppJson5::is_valid_hvigor_bundle_name("com.example_1.app2"));
+        assert!(RawAppJson5::is_valid_hvigor_bundle_name(
+            "com.example_1.app2"
+        ));
 
         assert!(!RawAppJson5::is_valid_hvigor_bundle_name("Bundle name"));
         assert!(!RawAppJson5::is_valid_hvigor_bundle_name("com.example"));
-        assert!(!RawAppJson5::is_valid_hvigor_bundle_name("1com.example.app"));
-        assert!(!RawAppJson5::is_valid_hvigor_bundle_name("com._example.app"));
-        assert!(!RawAppJson5::is_valid_hvigor_bundle_name("com.example_.app"));
-        assert!(!RawAppJson5::is_valid_hvigor_bundle_name("com.example.app_"));
+        assert!(!RawAppJson5::is_valid_hvigor_bundle_name(
+            "1com.example.app"
+        ));
+        assert!(!RawAppJson5::is_valid_hvigor_bundle_name(
+            "com._example.app"
+        ));
+        assert!(!RawAppJson5::is_valid_hvigor_bundle_name(
+            "com.example_.app"
+        ));
+        assert!(!RawAppJson5::is_valid_hvigor_bundle_name(
+            "com.example.app_"
+        ));
     }
 }

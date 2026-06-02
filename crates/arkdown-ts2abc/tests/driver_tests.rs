@@ -24,7 +24,8 @@ fn compile_to_abc_uses_rust_backend_and_writes_panda_file() {
         commonjs: false,
         cache_file: None,
         npm_module_entry_list: None,
-    }.compile()
+    }
+    .compile()
     .unwrap();
 
     assert_eq!(result.abc_path, output);
@@ -57,7 +58,8 @@ fn compile_to_abc_accepts_module_source_without_iife_wrapper() {
         commonjs: false,
         cache_file: None,
         npm_module_entry_list: None,
-    }.compile()
+    }
+    .compile()
     .unwrap();
 
     let bytes = fs_err::read(result.abc_path).unwrap();
@@ -94,7 +96,8 @@ fn compile_to_abc_lowers_npm_module_entry_list_records() {
         commonjs: false,
         cache_file: None,
         npm_module_entry_list: Some(entries),
-    }.compile()
+    }
+    .compile()
     .unwrap();
 
     let bytes = fs_err::read(result.abc_path).unwrap();
@@ -147,7 +150,8 @@ fn check_minimal_hap_num_lit() {
         commonjs: false,
         cache_file: None,
         npm_module_entry_list: None,
-    }.compile()
+    }
+    .compile()
     .unwrap();
     let data = std::fs::read(&out).unwrap();
     let num_lit = u32::from_le_bytes(data[0x2C..0x30].try_into().unwrap());

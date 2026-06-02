@@ -300,8 +300,10 @@ pub fn build_cms_signed_data(
     // 2. encapContentInfo
     // -----------------------------------------------------------------------
     // ContentInfo { OID(id-data), [0] EXPLICIT { OCTET STRING(content) } }
-    let econtent_inner =
-        Der::concat(&[OID_ID_DATA, &Der::explicit_ctx(0, &Der::octet_string(content))]);
+    let econtent_inner = Der::concat(&[
+        OID_ID_DATA,
+        &Der::explicit_ctx(0, &Der::octet_string(content)),
+    ]);
     let encap_content_info = Der::sequence(&econtent_inner);
 
     // -----------------------------------------------------------------------
@@ -323,7 +325,8 @@ pub fn build_cms_signed_data(
     };
 
     // Attribute: contentType = id-data
-    let attr_content_type = Der::sequence(&Der::concat(&[OID_CONTENT_TYPE, &Der::set(OID_ID_DATA)]));
+    let attr_content_type =
+        Der::sequence(&Der::concat(&[OID_CONTENT_TYPE, &Der::set(OID_ID_DATA)]));
 
     // Attribute: signingTime = UTCTime(now)
     let signing_time = Der::current_utctime_der();
@@ -402,7 +405,8 @@ pub fn build_cms_signed_data(
     // -----------------------------------------------------------------------
     // 10. ContentInfo wrapping
     // -----------------------------------------------------------------------
-    let content_info_inner = Der::concat(&[OID_ID_SIGNED_DATA, &Der::explicit_ctx(0, &signed_data)]);
+    let content_info_inner =
+        Der::concat(&[OID_ID_SIGNED_DATA, &Der::explicit_ctx(0, &signed_data)]);
     let content_info = Der::sequence(&content_info_inner);
 
     Ok(content_info)

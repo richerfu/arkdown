@@ -61,6 +61,7 @@ pub type CustomComponentUpdateProps = FxHashMap<String, CustomComponentInfo>;
 #[derive(Clone, Debug, Default)]
 struct BuildContext {
     use_parent_context: bool,
+    current_component_reusable: bool,
     raw_object_fields: Arc<FxHashSet<String>>,
     module_name: Arc<str>,
 }
@@ -91,6 +92,11 @@ impl BuildContext {
         self
     }
 
+    fn with_current_component_reusable(mut self, reusable: bool) -> Self {
+        self.current_component_reusable = reusable;
+        self
+    }
+
     fn is_raw_object_field(&self, name: &str) -> bool {
         self.raw_object_fields.contains(name)
     }
@@ -115,10 +121,16 @@ fn is_gesture_type(name: &str) -> bool {
 /// Extracted representation of a gesture call and its attribute chain.
 /// Used to emit `Gesture.create(priority)` / `XxxGesture.create(args)` /
 /// `XxxGesture.onX(...)` / `XxxGesture.pop()` / `Gesture.pop()` sequences.
+///
+/// For `GestureGroup`, `create_args` holds only the first argument (the
+/// `GestureMode`) and `children` holds the expanded child gesture chains.
 struct GestureChain {
     gesture_type: String,
     create_args: String,
     attrs: Vec<(String, String)>,
+    /// Child gestures for `GestureGroup(mode, child1, child2, ...)`.
+    /// Empty for all other gesture types.
+    children: Vec<GestureChain>,
 }
 
 /// Extract a `GestureChain` from a chained `CallExpression` like
@@ -147,11 +159,47 @@ fn extract_gesture_chain_inner<'a>(
             if !is_gesture_type(&name) {
                 return None;
             }
-            let create_args = raw_arguments_text_with_context(&call.arguments, source_text, context);
+            // GestureGroup: first arg is the GestureMode; remaining args are
+            // child gesture expressions that must be expanded recursively.
+            if name == "GestureGroup" {
+                let create_args = call
+                    .arguments
+                    .first()
+                    .map(|a| {
+                        raw_arguments_text_with_context(
+                            std::slice::from_ref(a),
+                            source_text,
+                            context,
+                        )
+                    })
+                    .unwrap_or_default();
+                let children = call
+                    .arguments
+                    .iter()
+                    .skip(1)
+                    .filter_map(|arg| arg.as_expression())
+                    .filter_map(|expr| {
+                        if let Expression::CallExpression(child_call) = expr {
+                            extract_gesture_chain_inner(child_call, source_text, context)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                return Some(GestureChain {
+                    gesture_type: name,
+                    create_args,
+                    attrs: vec![],
+                    children,
+                });
+            }
+            let create_args =
+                raw_arguments_text_with_context(&call.arguments, source_text, context);
             Some(GestureChain {
                 gesture_type: name,
                 create_args,
                 attrs: vec![],
+                children: vec![],
             })
         }
         Expression::StaticMemberExpression(member) => {
@@ -170,6 +218,23 @@ fn extract_gesture_chain_inner<'a>(
     }
 }
 
+/// Emit one gesture node (create / attrs / children / pop) without the outer
+/// `Gesture.create` / `Gesture.pop` wrapper.  Used for both top-level gestures
+/// and child gestures inside a `GestureGroup`.
+fn emit_gesture_node(out: &mut String, indent: &str, gc: &GestureChain) {
+    let mut writer = ViewpuWriter::new(out);
+    writer.component_create(indent, &gc.gesture_type, "create", &gc.create_args);
+    for (attr_name, attr_args) in &gc.attrs {
+        writer.component_attribute(indent, &gc.gesture_type, attr_name, attr_args);
+    }
+    // Recursively emit child gestures (GestureGroup only).
+    for child in &gc.children {
+        emit_gesture_node(out, indent, child);
+    }
+    let mut writer = ViewpuWriter::new(out);
+    writer.component_pop(indent, &gc.gesture_type);
+}
+
 /// Emit a full gesture sequence into `out`:
 /// ```text
 /// Gesture.create(GesturePriority.Low);
@@ -179,15 +244,15 @@ fn extract_gesture_chain_inner<'a>(
 /// XxxGesture.pop();
 /// Gesture.pop();
 /// ```
+///
+/// For `GestureGroup`, child gestures are expanded between
+/// `GestureGroup.create(mode)` and `GestureGroup.pop()`.
 fn emit_gesture_sequence(out: &mut String, indent: &str, gc: &GestureChain) {
     let attr_indent = format!("{indent}    ");
     let mut writer = ViewpuWriter::new(out);
     writer.component_create(&attr_indent, "Gesture", "create", "GesturePriority.Low");
-    writer.component_create(&attr_indent, &gc.gesture_type, "create", &gc.create_args);
-    for (attr_name, attr_args) in &gc.attrs {
-        writer.component_attribute(&attr_indent, &gc.gesture_type, attr_name, attr_args);
-    }
-    writer.component_pop(&attr_indent, &gc.gesture_type);
+    emit_gesture_node(out, &attr_indent, gc);
+    let mut writer = ViewpuWriter::new(out);
     writer.component_pop(&attr_indent, "Gesture");
 }
 
@@ -333,7 +398,7 @@ fn extract_leaf_component(
         Expression::Identifier(_) => {
             let name = component_name(&call.callee)?;
             let create_args =
-                raw_arguments_text_with_context(&call.arguments, source_text, context);
+                component_create_arguments_text(&call.arguments, source_text, context);
             Ok(LeafComponent {
                 name,
                 create_args,
@@ -425,12 +490,13 @@ fn lower_call_expression(
     )?;
     if custom_components.contains(&lc.name) {
         let base_call = base_component_call(call);
-        let is_reusable_reuseId_only = custom_component_update_props
-            .get(&lc.name)
-            .is_some_and(|info| {
-                info.reusable && lc.chain_attrs.iter().all(|(name, _, _)| name == "reuseId")
-            });
-        if lc.chain_attrs.is_empty() || is_reusable_reuseId_only {
+        let is_reusable_reuse_id_only =
+            custom_component_update_props
+                .get(&lc.name)
+                .is_some_and(|info| {
+                    info.reusable && lc.chain_attrs.iter().all(|(name, _, _)| name == "reuseId")
+                });
+        if lc.chain_attrs.is_empty() || is_reusable_reuse_id_only {
             emit_custom_component_call(
                 &lc.name,
                 &base_call.arguments,
@@ -548,6 +614,7 @@ pub fn lower_build_body_with_component_context(
     custom_component_update_props: &CustomComponentUpdateProps,
     component_metadata: &ComponentMetadata,
     raw_object_fields: &FxHashSet<String>,
+    current_component_reusable: bool,
 ) -> Result<(String, Vec<SpanHint>), BuildLoweringError> {
     lower_build_body_with_component_context_and_module(
         body,
@@ -559,6 +626,7 @@ pub fn lower_build_body_with_component_context(
         component_metadata,
         raw_object_fields,
         None,
+        current_component_reusable,
     )
 }
 
@@ -572,8 +640,11 @@ pub fn lower_build_body_with_component_context_and_module(
     component_metadata: &ComponentMetadata,
     raw_object_fields: &FxHashSet<String>,
     module_name: Option<&str>,
+    current_component_reusable: bool,
 ) -> Result<(String, Vec<SpanHint>), BuildLoweringError> {
-    let mut ctx = BuildContext::default().with_raw_object_fields(raw_object_fields);
+    let mut ctx = BuildContext::default()
+        .with_raw_object_fields(raw_object_fields)
+        .with_current_component_reusable(current_component_reusable);
     if let Some(m) = module_name {
         ctx = ctx.with_module_name(m);
     }
@@ -1121,7 +1192,7 @@ fn lower_component(
         );
     }
 
-    let args = raw_arguments_text_with_context(&component.arguments, source_text, &context);
+    let args = component_create_arguments_text(&component.arguments, source_text, &context);
     if name == "ListItem"
         && !component.children.is_empty()
         && is_lazy_list_item(component, source_text)
@@ -1194,7 +1265,11 @@ fn lower_component(
     // than as regular attribute calls.  Each chain expression is either a
     // regular attribute or a gesture attribute; they are emitted in source order.
     enum AttrOrGesture {
-        Regular(String, String),
+        Regular {
+            name: String,
+            args: String,
+            immutable: bool,
+        },
         Gesture(GestureChain),
     }
     let mut ordered_attrs: Vec<AttrOrGesture> = Vec::new();
@@ -1243,21 +1318,41 @@ fn lower_component(
             &chain.arguments,
             source_text,
         );
-        ordered_attrs.push(AttrOrGesture::Regular(chain_name, chain_args));
+        let immutable = context.current_component_reusable
+            && arguments_are_regular_attrs(&chain.arguments, component_metadata);
+        ordered_attrs.push(AttrOrGesture::Regular {
+            name: chain_name,
+            args: chain_args,
+            immutable,
+        });
     }
     // Emit attrs and gesture sequences in source order into creation_body.
     {
         let attr_indent = "    ";
+        let mut immutable_body = String::new();
         for entry in &ordered_attrs {
             match entry {
-                AttrOrGesture::Regular(attr_name, attr_args) => {
-                    let mut writer = ViewpuWriter::new(&mut creation_body);
+                AttrOrGesture::Regular {
+                    name: attr_name,
+                    args: attr_args,
+                    immutable,
+                } => {
+                    let target = if *immutable {
+                        &mut immutable_body
+                    } else {
+                        &mut creation_body
+                    };
+                    let mut writer = ViewpuWriter::new(target);
                     writer.component_attribute(attr_indent, &name, attr_name, attr_args);
                 }
                 AttrOrGesture::Gesture(gc) => {
                     emit_gesture_sequence(&mut creation_body, "", gc);
                 }
             }
+        }
+        if !immutable_body.is_empty() {
+            let mut writer = ViewpuWriter::new(&mut creation_body);
+            writer.if_initial_render(attr_indent, &immutable_body);
         }
     }
     {
@@ -1630,6 +1725,31 @@ fn raw_arguments_text_with_context(
         .map(|argument| raw_argument_text_with_context(argument, source_text, context))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn component_create_arguments_text(
+    arguments: &[Argument<'_>],
+    source_text: &str,
+    context: &BuildContext,
+) -> String {
+    arguments
+        .iter()
+        .map(|argument| component_create_argument_text(argument, source_text, context))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn component_create_argument_text(
+    argument: &Argument<'_>,
+    source_text: &str,
+    context: &BuildContext,
+) -> String {
+    argument
+        .as_expression()
+        .and_then(|expression| {
+            expression_text_with_raw_object_call_args(expression, source_text, context)
+        })
+        .unwrap_or_else(|| raw_argument_text(argument, source_text))
 }
 
 fn attribute_arguments_text(

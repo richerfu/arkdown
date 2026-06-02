@@ -511,7 +511,6 @@ impl PackageCandidate {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

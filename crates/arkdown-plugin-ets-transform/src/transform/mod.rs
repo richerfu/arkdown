@@ -469,6 +469,10 @@ fn component_from_struct(
         .decorators
         .iter()
         .any(|decorator| decorator_name(decorator) == "Entry");
+    let is_reusable = statement
+        .decorators
+        .iter()
+        .any(|decorator| decorator_name(decorator) == "Reusable");
     let mut state_fields = Vec::new();
     let mut initial_render_body = String::new();
     let mut initial_render_span_hints = Vec::new();
@@ -575,6 +579,7 @@ fn component_from_struct(
                 state_fields.push(StateField {
                     name: name.into_owned(),
                     type_annotation,
+                    optional: property.optional,
                     decorator: decorator.to_string(),
                     initializer,
                     watch_handler,
@@ -597,6 +602,7 @@ fn component_from_struct(
                     &options.component_metadata,
                     &raw_object_fields,
                     options.module_name.as_deref(),
+                    is_reusable,
                 )
                 .map_err(|err| EtsTransformError::Fatal {
                     file: id.to_string(),
@@ -692,10 +698,7 @@ fn component_from_struct(
         is_entry,
         is_exported,
         is_default_export,
-        is_reusable: statement
-            .decorators
-            .iter()
-            .any(|decorator| decorator_name(decorator) == "Reusable"),
+        is_reusable,
         is_custom_dialog: statement
             .decorators
             .iter()
@@ -830,13 +833,14 @@ fn hvigor_source_path(id: &str, options: &TransformOptions) -> String {
             let path = Path::new(id);
             if let Some(project_root) = &options.project_root {
                 if let Ok(relative) = path.strip_prefix(project_root) {
-                    return arkdown_utils::to_unix_path(relative).trim_start_matches('/').to_string();
+                    return arkdown_utils::to_unix_path(relative)
+                        .trim_start_matches('/')
+                        .to_string();
                 }
             }
             id.to_string()
         })
 }
-
 
 #[cfg(test)]
 mod tests;

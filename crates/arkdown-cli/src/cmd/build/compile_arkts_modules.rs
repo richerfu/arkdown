@@ -118,7 +118,10 @@ impl CompileModuleInfo {
 
         let project_root = canonical_or_owned(Path::new(&loader_json.project_root_path));
         let cache_rel = source_path.strip_prefix(&project_root).ok()?;
-        let ts_path = cache_root.join(with_extension(&arkdown_utils::to_unix_path(cache_rel), output_ext));
+        let ts_path = cache_root.join(with_extension(
+            &arkdown_utils::to_unix_path(cache_rel),
+            output_ext,
+        ));
         let record_name = format!(
             "{}/{}",
             package_entry_name,

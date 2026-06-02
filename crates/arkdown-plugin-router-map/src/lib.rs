@@ -38,7 +38,6 @@ pub fn update_cache(router_map_path: &Path, cache_path: &Path) -> std::io::Resul
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,8 +91,14 @@ mod tests {
 
     #[test]
     fn test_fnv1a_hash_deterministic() {
-        assert_eq!(arkdown_utils::fnv1a_hash("hello"), arkdown_utils::fnv1a_hash("hello"));
-        assert_ne!(arkdown_utils::fnv1a_hash("hello"), arkdown_utils::fnv1a_hash("world"));
+        assert_eq!(
+            arkdown_utils::fnv1a_hash("hello"),
+            arkdown_utils::fnv1a_hash("hello")
+        );
+        assert_ne!(
+            arkdown_utils::fnv1a_hash("hello"),
+            arkdown_utils::fnv1a_hash("world")
+        );
     }
 
     #[test]

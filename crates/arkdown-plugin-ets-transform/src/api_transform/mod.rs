@@ -189,14 +189,12 @@ impl KitImportEmitter {
                 } else {
                     ast.module_export_name_identifier_name(SPAN, local_name)
                 };
-                ImportDeclarationSpecifier::ImportSpecifier(
-                    ast.alloc_import_specifier(
-                        SPAN,
-                        imported,
-                        ast.binding_identifier(SPAN, local_name),
-                        ImportOrExportKind::Value,
-                    ),
-                )
+                ImportDeclarationSpecifier::ImportSpecifier(ast.alloc_import_specifier(
+                    SPAN,
+                    imported,
+                    ast.binding_identifier(SPAN, local_name),
+                    ImportOrExportKind::Value,
+                ))
             }
         };
         Statement::from(ast.module_declaration_import_declaration(
@@ -302,7 +300,10 @@ const c = new Callee();"#;
             out.contains("import { Callee } from \"@ohos:app.ability.UIAbility\""),
             "named import without alias; got: {out}"
         );
-        assert!(!out.contains("@kit.AbilityKit"), "kit specifier must be gone; got: {out}");
+        assert!(
+            !out.contains("@kit.AbilityKit"),
+            "kit specifier must be gone; got: {out}"
+        );
     }
 
     #[test]
@@ -317,7 +318,10 @@ const c = new MyCallee();"#;
             out.contains("import { Callee as MyCallee } from \"@ohos:app.ability.UIAbility\""),
             "named import with alias; got: {out}"
         );
-        assert!(!out.contains("@kit.AbilityKit"), "kit specifier must be gone; got: {out}");
+        assert!(
+            !out.contains("@kit.AbilityKit"),
+            "kit specifier must be gone; got: {out}"
+        );
     }
 
     #[test]

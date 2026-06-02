@@ -247,7 +247,6 @@ impl Bundler {
         })
     }
 
-
     /// Build `ManualCodeSplittingOptions` that mirrors hvigor's `manualChunks` callback.
     ///
     /// Group 1 (`commons`): modules whose path contains `oh_modules` or `node_modules`.

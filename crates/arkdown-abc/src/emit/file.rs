@@ -709,8 +709,10 @@ impl AbcFile {
         debug_assert_eq!(index_class_offsets.len() as u32, index_class_count);
 
         let method_pool_layouts = Self::build_method_pool_layouts(&all_classes, &self.strings);
-        let literal_emit_order = Self::build_literal_emit_order(&all_classes, self.literal_arrays.len());
-        let literal_header_order = Self::build_literal_header_order(&all_classes, &self.literal_arrays);
+        let literal_emit_order =
+            Self::build_literal_emit_order(&all_classes, self.literal_arrays.len());
+        let literal_header_order =
+            Self::build_literal_header_order(&all_classes, &self.literal_arrays);
 
         // ── 3. Pre-compute LiteralArray section bytes ─────────────────────────
         //
@@ -1426,14 +1428,14 @@ impl PoolStringItem {
 }
 
 impl ClassRecord {
-fn with_upstream_method_order(mut self) -> Self {
-    self.methods.sort_by(|a, b| {
-        let a_len = a.name.encode_utf16().count();
-        let b_len = b.name.encode_utf16().count();
-        a_len.cmp(&b_len).then_with(|| a.name.cmp(&b.name))
-    });
-    self
-}
+    fn with_upstream_method_order(mut self) -> Self {
+        self.methods.sort_by(|a, b| {
+            let a_len = a.name.encode_utf16().count();
+            let b_len = b.name.encode_utf16().count();
+            a_len.cmp(&b_len).then_with(|| a.name.cmp(&b.name))
+        });
+        self
+    }
 }
 
 fn method_index_string_refs(
@@ -1520,7 +1522,10 @@ impl AbcFile {
                 let mut layout = MethodPoolLayout::default();
                 let mut all_bytecode_string_indices = Vec::new();
                 for method in &class.methods {
-                    collect_bytecode_string_indices(&method.bytecode, &mut all_bytecode_string_indices);
+                    collect_bytecode_string_indices(
+                        &method.bytecode,
+                        &mut all_bytecode_string_indices,
+                    );
                 }
                 all_bytecode_string_indices.sort_unstable();
                 all_bytecode_string_indices.dedup();
