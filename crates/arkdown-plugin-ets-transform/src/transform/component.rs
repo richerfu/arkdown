@@ -2,7 +2,8 @@ use std::fmt::Write;
 
 use crate::transform::build_fn::SpanHint;
 use crate::transform::component_field::{
-    push_regular_field_declaration, push_state_constructor_init, push_state_field_declaration,
+    push_provide_var_registration, push_regular_field_declaration, push_state_constructor_init,
+    push_state_field_declaration,
 };
 use crate::transform::decorator::{has_initially_provided_value_slot, has_update_state_vars_slot};
 use crate::transform::entry::{generate_entry_registration, EntryRegistrationInfo};
@@ -240,6 +241,7 @@ impl<'a> ViewPuClassEmitter<'a> {
                 let _ = writeln!(self.out, "        this.{name} = {init};");
             } else if let Some(field) = self.info.find_state_field(name) {
                 push_state_constructor_init(&mut self.out, field);
+                push_provide_var_registration(&mut self.out, field);
             }
         }
         self.out
@@ -833,6 +835,142 @@ mod tests {
         assert!(
             out.contains("new ObservedPropertySimplePU(\"dark\", this, \"theme\")"),
             "@Provide must be initialised with the field's own initializer"
+        );
+    }
+
+    #[test]
+    fn test_provide_field_emits_add_provided_var_no_alias() {
+        let info = ComponentInfo {
+            name: "Parent".to_string(),
+            is_entry: false,
+            is_exported: false,
+            is_default_export: false,
+            is_reusable: false,
+            state_fields: vec![StateField {
+                name: "theme".to_string(),
+                type_annotation: "string".to_string(),
+                decorator: "Provide".to_string(),
+                initializer: Some("\"dark\"".to_string()),
+                watch_handler: None,
+                alias: None,
+                decorator_arg: None,
+                is_simple_type: true,
+            }],
+            params_fields: vec![],
+            property_order: vec![],
+            regular_fields: vec![],
+            regular_members: vec![],
+            initial_render_body: String::new(),
+            initial_render_span_hints: vec![],
+            builder_methods: vec![],
+            styles_methods: vec![],
+            entry_registration: None,
+        };
+        let out = generate_view_pu_class(&info);
+        // Backing field init must come before addProvidedVar
+        let init_pos = out
+            .find("new ObservedPropertySimplePU(\"dark\", this, \"theme\")")
+            .expect("missing backing field init");
+        let reg_pos = out
+            .find("this.addProvidedVar(\"theme\", this.__theme, false)")
+            .expect("missing addProvidedVar call");
+        assert!(
+            init_pos < reg_pos,
+            "addProvidedVar must come after backing field init"
+        );
+        // Only one call (no alias)
+        assert_eq!(
+            out.matches("this.addProvidedVar(\"theme\", this.__theme, false)").count(),
+            1,
+            "@Provide without alias must emit exactly one addProvidedVar call"
+        );
+    }
+
+    #[test]
+    fn test_provide_field_emits_two_add_provided_var_calls_when_alias_differs() {
+        let info = ComponentInfo {
+            name: "Parent".to_string(),
+            is_entry: false,
+            is_exported: false,
+            is_default_export: false,
+            is_reusable: false,
+            state_fields: vec![StateField {
+                name: "appPathStack".to_string(),
+                type_annotation: "NavPathStack".to_string(),
+                decorator: "Provide".to_string(),
+                initializer: Some("new NavPathStack()".to_string()),
+                watch_handler: None,
+                alias: Some("pathStack".to_string()),
+                decorator_arg: None,
+                is_simple_type: false,
+            }],
+            params_fields: vec![],
+            property_order: vec![],
+            regular_fields: vec![],
+            regular_members: vec![],
+            initial_render_body: String::new(),
+            initial_render_span_hints: vec![],
+            builder_methods: vec![],
+            styles_methods: vec![],
+            entry_registration: None,
+        };
+        let out = generate_view_pu_class(&info);
+        // Alias call must come before field-name call
+        let alias_pos = out
+            .find("this.addProvidedVar(\"pathStack\", this.__appPathStack, false)")
+            .expect("missing alias addProvidedVar call");
+        let name_pos = out
+            .find("this.addProvidedVar(\"appPathStack\", this.__appPathStack, false)")
+            .expect("missing field-name addProvidedVar call");
+        assert!(
+            alias_pos < name_pos,
+            "alias addProvidedVar call must come before field-name call"
+        );
+    }
+
+    #[test]
+    fn test_provide_field_emits_one_add_provided_var_call_when_alias_equals_name() {
+        let info = ComponentInfo {
+            name: "Parent".to_string(),
+            is_entry: false,
+            is_exported: false,
+            is_default_export: false,
+            is_reusable: false,
+            state_fields: vec![StateField {
+                name: "theme".to_string(),
+                type_annotation: "string".to_string(),
+                decorator: "Provide".to_string(),
+                initializer: Some("\"dark\"".to_string()),
+                watch_handler: None,
+                alias: Some("theme".to_string()),
+                decorator_arg: None,
+                is_simple_type: true,
+            }],
+            params_fields: vec![],
+            property_order: vec![],
+            regular_fields: vec![],
+            regular_members: vec![],
+            initial_render_body: String::new(),
+            initial_render_span_hints: vec![],
+            builder_methods: vec![],
+            styles_methods: vec![],
+            entry_registration: None,
+        };
+        let out = generate_view_pu_class(&info);
+        assert_eq!(
+            out.matches("this.addProvidedVar(\"theme\", this.__theme, false)").count(),
+            1,
+            "@Provide(\"theme\") theme must emit exactly one addProvidedVar call"
+        );
+    }
+
+    #[test]
+    fn test_state_field_does_not_emit_add_provided_var() {
+        let info = make_counter_component();
+        let out = generate_view_pu_class(&info);
+        assert!(
+            !out.contains("addProvidedVar"),
+            "@State must not emit addProvidedVar"
         );
     }
 

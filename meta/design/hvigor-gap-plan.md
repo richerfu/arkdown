@@ -183,6 +183,9 @@ Current HmosWorld artifact status after a clean arkdown rebuild:
 | `ets/modules.abc` | 2,875,016B | 3,917,672B | not aligned |
 | `ets/widgets.abc` | 28,424B | 38,864B | not aligned |
 | ABC file version | `0x0002000c` | `0x0002000c` | aligned |
+| kit import binding type (default vs named) | correct | correct | fixed: `@kit.*` replacements now emit default imports where the kit re-exports a default and named imports otherwise |
+| HMS kit configs in kit map | present | present | fixed: `@kit.MapKit`, `@kit.AccountKit`, `@kit.PushKit`, `@kit.ServiceCollaborationKit`, `@kit.CoreSpeechKit`, `@kit.CoreVisionKit` now included |
+| `@Provide` constructor calls | `this.addProvidedVar(...)` | `this.addProvidedVar(...)` | fixed: `@Provide` fields now generate `addProvidedVar` calls in the class constructor |
 
 The ABC byte delta is therefore not caused by missing app/sys resource objects
 in the generated TypeScript cache or by missing CompileArkTS handoff modules.

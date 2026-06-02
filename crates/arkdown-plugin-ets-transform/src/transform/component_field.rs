@@ -10,6 +10,33 @@ pub(super) fn push_state_constructor_init(out: &mut String, field: &StateField) 
     ComponentFieldEmitter::new(out).push_state_constructor_init(field);
 }
 
+/// Emit `this.addProvidedVar(...)` registration call(s) for a `@Provide` field.
+///
+/// Upstream hvigor `addAddProvidedVar` (process_component_member.js):
+/// - No alias: one call with the field name.
+/// - Alias != field name: two calls — alias first, then field name.
+/// - Alias == field name: one call with that name.
+pub(super) fn push_provide_var_registration(out: &mut String, field: &StateField) {
+    if field.decorator != "Provide" {
+        return;
+    }
+    let var_name = &field.name;
+    if let Some(alias) = &field.alias {
+        if alias != var_name {
+            let _ = writeln!(
+                out,
+                "        this.addProvidedVar(\"{}\", this.__{}, false);",
+                alias, var_name
+            );
+        }
+    }
+    let _ = writeln!(
+        out,
+        "        this.addProvidedVar(\"{}\", this.__{}, false);",
+        var_name, var_name
+    );
+}
+
 pub(super) fn push_regular_field_declaration(out: &mut String, field: &RegularField) {
     ComponentFieldEmitter::new(out).push_regular_field_declaration(field);
 }
