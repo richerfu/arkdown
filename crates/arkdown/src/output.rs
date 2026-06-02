@@ -247,7 +247,7 @@ fn hvigor_source_maps_content(
             }
         })
         .collect::<Vec<_>>();
-    hvigor_source_maps_json(&entries, &HvigorSourceMapOptions::from(opts))
+    HvigorSourceMapOptions::from(opts).to_json(&entries)
         .map_err(|e| ArkdownError::Bundler(format!("failed to serialize sourceMaps.map: {e}")))
 }
 

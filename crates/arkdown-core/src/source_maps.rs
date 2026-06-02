@@ -88,18 +88,13 @@ pub struct HvigorSourceMapOptions {
     pub chunk_source_files: FxHashMap<String, String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct HvigorSourceMapEntry {
-    pub chunk_name: String,
-    pub mappings: String,
-    pub source_file: Option<String>,
-    pub source_map_source_file: Option<String>,
-}
-
-pub fn hvigor_source_maps_json(
-    source_maps: &[HvigorSourceMapEntry],
-    opts: &HvigorSourceMapOptions,
-) -> Result<String, serde_json::Error> {
+impl HvigorSourceMapOptions {
+/// Serialize source map entries to the hvigor per-file JSON format.
+    pub fn to_json(
+        &self,
+        source_maps: &[HvigorSourceMapEntry],
+    ) -> Result<String, serde_json::Error> {
+        let opts = self;
     let mut map = serde_json::Map::new();
     let scope = HvigorSourceMapScope::new(
         opts.module_name.clone(),
@@ -146,6 +141,22 @@ pub fn hvigor_source_maps_json(
     }
 
     serde_json::to_string_pretty(&map)
+}
+}
+
+#[derive(Debug, Clone)]
+pub struct HvigorSourceMapEntry {
+    pub chunk_name: String,
+    pub mappings: String,
+    pub source_file: Option<String>,
+    pub source_map_source_file: Option<String>,
+}
+
+pub fn hvigor_source_maps_json(
+    source_maps: &[HvigorSourceMapEntry],
+    opts: &HvigorSourceMapOptions,
+) -> Result<String, serde_json::Error> {
+    opts.to_json(source_maps)
 }
 
 struct RecordNameParts<'a> {
