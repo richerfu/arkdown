@@ -63,7 +63,7 @@ impl HapSigner {
         )?;
 
         let profile = fs_err::read(&config.profile_path)?;
-        let alg_id = parse_alg_id(&config.sign_alg);
+        let alg_id = Self::parse_alg_id(&config.sign_alg);
 
         Ok(HapSigner {
             signing_key,
@@ -141,14 +141,15 @@ impl HapSigner {
             }
         }
     }
-}
 
-fn parse_alg_id(sign_alg: &str) -> u32 {
-    match sign_alg {
-        "SHA256withECDSA" | "ECDSA_WITH_SHA256" => signing_block::ALG_ECDSA_SHA256,
-        "SHA256withRSA/PSS" | "SHA256withRSA" => signing_block::ALG_RSA_PSS_SHA256,
-        _ => signing_block::ALG_ECDSA_SHA256, // default
+    fn parse_alg_id(sign_alg: &str) -> u32 {
+        match sign_alg {
+            "SHA256withECDSA" | "ECDSA_WITH_SHA256" => signing_block::ALG_ECDSA_SHA256,
+            "SHA256withRSA/PSS" | "SHA256withRSA" => signing_block::ALG_RSA_PSS_SHA256,
+            _ => signing_block::ALG_ECDSA_SHA256, // default
+        }
     }
+
 }
 
 // ---------------------------------------------------------------------------

@@ -26,36 +26,36 @@ pub struct CompileEnv {
 /// The returned string is the `#`-joined representation used as the cache
 /// discriminator, matching hvigor's `getCompileEnv()` implementation.
 pub fn compute_compile_env(config: &ArkdownConfig, cache_path: &str) -> String {
-    let obfuscation_enabled = config
-        .product
-        .build_option
-        .ark_options
-        .as_ref()
-        .and_then(|o| o.obfuscation.as_ref())
-        .map(|o| o.enable_obfuscation)
-        .unwrap_or(false);
-    let module_type = config
-        .modules
-        .first()
-        .map(|m| format!("{:?}", m.module_type))
-        .unwrap_or_default();
-    CompileEnv {
-        compile_sdk_version: config.sdk_config.compile_sdk_version.clone(),
-        compatible_sdk_version: config.product.compatible_sdk_version.clone(),
-        runtime_os: config.product.runtime_os.clone(),
-        ets_loader_path: config
-            .sdk_config
-            .ets_loader_path
-            .to_string_lossy()
-            .into_owned(),
-        obfuscation_enabled,
-        module_type,
-        cache_path: cache_path.to_string(),
-    }
-    .to_key_string()
+    CompileEnv::from_config(config, cache_path).to_key_string()
 }
 
 impl CompileEnv {
+    /// Build a `CompileEnv` from an [`ArkdownConfig`] and cache path.
+    pub fn from_config(config: &ArkdownConfig, cache_path: &str) -> Self {
+        let obfuscation_enabled = config
+            .product
+            .build_option
+            .ark_options
+            .as_ref()
+            .and_then(|o| o.obfuscation.as_ref())
+            .map(|o| o.enable_obfuscation)
+            .unwrap_or(false);
+        let module_type = config
+            .modules
+            .first()
+            .map(|m| format!("{:?}", m.module_type))
+            .unwrap_or_default();
+        CompileEnv {
+            compile_sdk_version: config.sdk_config.compile_sdk_version.clone(),
+            compatible_sdk_version: config.product.compatible_sdk_version.clone(),
+            runtime_os: config.product.runtime_os.clone(),
+            ets_loader_path: config.sdk_config.ets_loader_path.to_string_lossy().into_owned(),
+            obfuscation_enabled,
+            module_type,
+            cache_path: cache_path.to_string(),
+        }
+    }
+
     /// Produce the `#`-joined key string used for cache invalidation.
     pub fn to_key_string(&self) -> String {
         format!(

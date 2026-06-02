@@ -40,7 +40,7 @@ impl HarDeduplicatePlugin {
     }
 
     pub fn real_build(collect_file_path: PathBuf) -> Result<Self, HarDedupError> {
-        let excluded = read_collect_file(&collect_file_path)?;
+        let excluded = CollectFile::read(&collect_file_path)?;
         Ok(HarDeduplicatePlugin {
             mode: HarDedupMode::RealBuild {
                 excluded_files: excluded,
@@ -70,7 +70,7 @@ impl HarDeduplicatePlugin {
     pub(crate) fn flush_collect(&self) -> Result<(), HarDedupError> {
         if matches!(self.mode, HarDedupMode::CollectPass) {
             let files = self.collected.lock().unwrap().clone();
-            write_collect_file(&self.collect_file_path, &files)?;
+            CollectFile::write(&self.collect_file_path, &files)?;
         }
         Ok(())
     }
@@ -127,29 +127,31 @@ struct CollectFile {
     source_har_files: Vec<String>,
 }
 
-fn write_collect_file(path: &Path, files: &[String]) -> Result<(), HarDedupError> {
-    let data = CollectFile {
-        source_har_files: files.to_vec(),
-    };
-    let json = serde_json::to_string_pretty(&data)?;
-    if let Some(parent) = path.parent() {
-        fs_err::create_dir_all(parent)?;
+impl CollectFile {
+    fn write(path: &Path, files: &[String]) -> Result<(), HarDedupError> {
+        let data = CollectFile {
+            source_har_files: files.to_vec(),
+        };
+        let json = serde_json::to_string_pretty(&data)?;
+        if let Some(parent) = path.parent() {
+            fs_err::create_dir_all(parent)?;
+        }
+        fs_err::write(path, json)?;
+        Ok(())
     }
-    fs_err::write(path, json)?;
-    Ok(())
-}
 
-fn read_collect_file(path: &Path) -> Result<FxHashSet<PathBuf>, HarDedupError> {
-    if !path.exists() {
-        return Ok(FxHashSet::default());
+    fn read(path: &Path) -> Result<FxHashSet<PathBuf>, HarDedupError> {
+        if !path.exists() {
+            return Ok(FxHashSet::default());
+        }
+        let content = fs_err::read_to_string(path)?;
+        let data: CollectFile = serde_json::from_str(&content)?;
+        Ok(data
+            .source_har_files
+            .into_iter()
+            .map(PathBuf::from)
+            .collect())
     }
-    let content = fs_err::read_to_string(path)?;
-    let data: CollectFile = serde_json::from_str(&content)?;
-    Ok(data
-        .source_har_files
-        .into_iter()
-        .map(PathBuf::from)
-        .collect())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -171,16 +173,16 @@ mod tests {
         drop(tmp);
 
         let files = vec!["a.ts".to_string(), "b.ets".to_string()];
-        write_collect_file(&path, &files).unwrap();
+        CollectFile::write(&path, &files).unwrap();
 
-        let read = read_collect_file(&path).unwrap();
+        let read = CollectFile::read(&path).unwrap();
         assert!(read.contains(&PathBuf::from("a.ts")));
         assert!(read.contains(&PathBuf::from("b.ets")));
     }
 
     #[test]
     fn test_empty_when_missing() {
-        let result = read_collect_file(Path::new(
+        let result = CollectFile::read(Path::new(
             "/nonexistent/arkdown-test-path-that-never-exists.json",
         ))
         .unwrap();
@@ -192,7 +194,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("collect.json");
 
-        write_collect_file(&path, &["/project/oh_modules/lib/index.ets".to_string()]).unwrap();
+        CollectFile::write(&path, &["/project/oh_modules/lib/index.ets".to_string()]).unwrap();
 
         let plugin = HarDeduplicatePlugin::real_build(path).unwrap();
         let result = plugin
@@ -211,7 +213,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("collect.json");
 
-        write_collect_file(&path, &["/other/file.ets".to_string()]).unwrap();
+        CollectFile::write(&path, &["/other/file.ets".to_string()]).unwrap();
 
         let plugin = HarDeduplicatePlugin::real_build(path).unwrap();
         let result = plugin

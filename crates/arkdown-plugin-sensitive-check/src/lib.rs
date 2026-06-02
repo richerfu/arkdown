@@ -27,6 +27,20 @@ impl SensitiveCheckPlugin {
         SensitiveCheckPlugin { enabled }
     }
 
+    fn check_case_sensitive(id: &str) -> HookLoadReturn {
+        // On Linux the FS is already case-sensitive — skip the check entirely.
+        #[cfg(target_os = "linux")]
+        let _ = id;
+        #[cfg(target_os = "linux")]
+        return Ok(None);
+
+        #[cfg(not(target_os = "linux"))]
+        if let Some(err) = Self::check_case(id) {
+            return Err(anyhow::anyhow!("{err}"));
+        }
+        Ok(None)
+    }
+
     fn check_case(id: &str) -> Option<CaseMismatchError> {
         let path = Path::new(id);
         let parent = path.parent().filter(|p| !p.as_os_str().is_empty())?;
@@ -55,20 +69,6 @@ impl Default for SensitiveCheckPlugin {
     }
 }
 
-fn check_case_sensitive(id: &str) -> HookLoadReturn {
-    // On Linux the FS is already case-sensitive — skip the check entirely.
-    #[cfg(target_os = "linux")]
-    let _ = id;
-    #[cfg(target_os = "linux")]
-    return Ok(None);
-
-    #[cfg(not(target_os = "linux"))]
-    if let Some(err) = SensitiveCheckPlugin::check_case(id) {
-        return Err(anyhow::anyhow!("{err}"));
-    }
-    Ok(None)
-}
-
 impl Plugin for SensitiveCheckPlugin {
     fn name(&self) -> Cow<'static, str> {
         Cow::Borrowed("sensitive-check")
@@ -89,7 +89,7 @@ impl Plugin for SensitiveCheckPlugin {
             if !enabled {
                 return Ok(None);
             }
-            check_case_sensitive(&id)
+            SensitiveCheckPlugin::check_case_sensitive(&id)
         }
     }
 }
