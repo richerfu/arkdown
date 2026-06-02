@@ -298,24 +298,6 @@ fn build_app_section(
     obj
 }
 
-/// Convert an [`OhosModuleType`] to its lowercase string representation.
-fn module_type_str(t: &OhosModuleType) -> &'static str {
-    match t {
-        OhosModuleType::Entry => "entry",
-        OhosModuleType::Feature => "feature",
-        OhosModuleType::Shared => "shared",
-        OhosModuleType::Har => "har",
-    }
-}
-
-/// Convert a [`CompileMode`] to its string representation for `module.json`.
-fn compile_mode_str(m: &CompileMode) -> &'static str {
-    match m {
-        CompileMode::EsModule => "esmodule",
-        CompileMode::JsBundle => "jsbundle",
-    }
-}
-
 /// Build the `module` JSON object from a processed [`HapManifest`].
 ///
 /// Field order matches hvigor's canonical output (verified against golden):
@@ -465,9 +447,9 @@ fn manifest_to_json(
     }
     obj.insert(
         "compileMode".into(),
-        compile_mode_str(&manifest.compile_mode).into(),
+        manifest.compile_mode.to_string().into(),
     );
-    obj.insert("type".into(), module_type_str(&manifest.module_type).into());
+    obj.insert("type".into(), manifest.module_type.to_string().into());
     obj.insert("dependencies".into(), serde_json::Value::Array(vec![]));
     obj.insert("abilities".into(), serde_json::Value::Array(abilities));
     if !extension_abilities.is_empty() {

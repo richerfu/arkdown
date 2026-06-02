@@ -43,15 +43,10 @@ impl OhosResolvePlugin {
         specifier: &str,
         importer: Option<&str>,
     ) -> anyhow::Result<Option<HookResolveIdOutput>> {
-        let s = specifier;
-        if is_builtin_external_specifier(s) {
-            return Ok(Some(HookResolveIdOutput {
-                id: s.into(),
-                external: Some(ResolvedExternal::Bool(true)),
-                ..Default::default()
-            }));
+        if is_builtin_external_specifier(specifier) {
+            return Ok(Some(unresolved_external_output(specifier)));
         }
-        if Path::new(s).is_absolute() {
+        if Path::new(specifier).is_absolute() {
             return Ok(None);
         }
 
@@ -65,50 +60,13 @@ impl OhosResolvePlugin {
 
         let resolved = match self.resolver.resolve(specifier, importer_path) {
             Ok(resolved) => resolved,
-            Err(_) if should_externalize_unresolved(s) => {
-                return Ok(Some(unresolved_external_output(s)));
+            Err(_) if should_externalize_unresolved(specifier) => {
+                return Ok(Some(unresolved_external_output(specifier)));
             }
             Err(err) => return Err(err.into()),
         };
 
-        let output = match resolved {
-            OhosResolvedModule::ExternalBundle { ohm_url } => HookResolveIdOutput {
-                id: ohm_url.into(),
-                external: Some(ResolvedExternal::Bool(true)),
-                ..Default::default()
-            },
-            OhosResolvedModule::ExternalHsp {
-                bundle_name,
-                module_name,
-                entry_path,
-            } => HookResolveIdOutput {
-                id: format!("@shared:{}/{}/{}", bundle_name, module_name, entry_path).into(),
-                external: Some(ResolvedExternal::Bool(true)),
-                ..Default::default()
-            },
-            OhosResolvedModule::SdkDeclaration { path, .. } => HookResolveIdOutput {
-                id: path.to_string_lossy().as_ref().into(),
-                external: Some(ResolvedExternal::Bool(true)),
-                ..Default::default()
-            },
-            OhosResolvedModule::BytecodeHar { ohm_url, .. } => HookResolveIdOutput {
-                id: ohm_url.into(),
-                external: Some(ResolvedExternal::Bool(true)),
-                ..Default::default()
-            },
-            OhosResolvedModule::LocalSource { path, .. } => HookResolveIdOutput {
-                id: path.to_string_lossy().as_ref().into(),
-                external: None,
-                ..Default::default()
-            },
-            OhosResolvedModule::RemotePackage { path, .. } => HookResolveIdOutput {
-                id: path.to_string_lossy().as_ref().into(),
-                external: None,
-                ..Default::default()
-            },
-        };
-
-        Ok(Some(output))
+        Ok(Some(resolved_module_to_hook_output(resolved)))
     }
 }
 
@@ -133,11 +91,7 @@ impl Plugin for OhosResolvePlugin {
         async move {
             let s = specifier.as_str();
             if is_builtin_external_specifier(s) {
-                return Ok(Some(HookResolveIdOutput {
-                    id: s.into(),
-                    external: Some(ResolvedExternal::Bool(true)),
-                    ..Default::default()
-                }));
+                return Ok(Some(unresolved_external_output(s)));
             }
             if Path::new(s).is_absolute() {
                 return Ok(None);
@@ -159,45 +113,31 @@ impl Plugin for OhosResolvePlugin {
                 Err(err) => return Err(err.into()),
             };
 
-            let output = match resolved {
-                OhosResolvedModule::ExternalBundle { ohm_url } => HookResolveIdOutput {
-                    id: ohm_url.into(),
-                    external: Some(ResolvedExternal::Bool(true)),
-                    ..Default::default()
-                },
-                OhosResolvedModule::ExternalHsp {
-                    bundle_name,
-                    module_name,
-                    entry_path,
-                } => HookResolveIdOutput {
-                    id: format!("@shared:{}/{}/{}", bundle_name, module_name, entry_path).into(),
-                    external: Some(ResolvedExternal::Bool(true)),
-                    ..Default::default()
-                },
-                OhosResolvedModule::SdkDeclaration { path, .. } => HookResolveIdOutput {
-                    id: path.to_string_lossy().as_ref().into(),
-                    external: Some(ResolvedExternal::Bool(true)),
-                    ..Default::default()
-                },
-                OhosResolvedModule::BytecodeHar { ohm_url, .. } => HookResolveIdOutput {
-                    id: ohm_url.into(),
-                    external: Some(ResolvedExternal::Bool(true)),
-                    ..Default::default()
-                },
-                OhosResolvedModule::LocalSource { path, .. } => HookResolveIdOutput {
-                    id: path.to_string_lossy().as_ref().into(),
-                    external: None,
-                    ..Default::default()
-                },
-                OhosResolvedModule::RemotePackage { path, .. } => HookResolveIdOutput {
-                    id: path.to_string_lossy().as_ref().into(),
-                    external: None,
-                    ..Default::default()
-                },
-            };
-
-            Ok(Some(output))
+            Ok(Some(resolved_module_to_hook_output(resolved)))
         }
+    }
+}
+
+/// Convert a resolved OHOS module into a rolldown [`HookResolveIdOutput`].
+///
+/// External variants (bundle refs, HSP refs, SDK declarations, bytecode HARs)
+/// are marked `external = true`; local source and remote packages are bundled
+/// normally (`external = None`).
+fn resolved_module_to_hook_output(resolved: OhosResolvedModule) -> HookResolveIdOutput {
+    if let Some(ext_id) = resolved.external_id() {
+        return HookResolveIdOutput {
+            id: ext_id.into_owned().into(),
+            external: Some(ResolvedExternal::Bool(true)),
+            ..Default::default()
+        };
+    }
+    let path = resolved
+        .local_path()
+        .expect("non-external OhosResolvedModule must have a local path");
+    HookResolveIdOutput {
+        id: path.to_string_lossy().as_ref().into(),
+        external: None,
+        ..Default::default()
     }
 }
 
@@ -285,5 +225,16 @@ mod tests {
         let id = result.unwrap();
         assert!(matches!(id.external, Some(ResolvedExternal::Bool(true))));
         assert!(id.id.starts_with("@shared:"));
+    }
+
+    #[test]
+    fn test_builtin_ohos_specifier_is_external() {
+        let plugin = make_plugin();
+        let result = plugin
+            .resolve_sync("@ohos:hilog", Some("/tmp/main.ets"))
+            .unwrap()
+            .unwrap();
+        assert!(matches!(result.external, Some(ResolvedExternal::Bool(true))));
+        assert_eq!(result.id.as_str(), "@ohos:hilog");
     }
 }
