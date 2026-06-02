@@ -1,6 +1,5 @@
 use rustc_hash::FxHashSet;
 
-use arkdown_config::resolve::module_matches_output_target;
 use arkdown_core::{ArkdownConfig, ModuleConfig, OutputTarget};
 
 use super::canonical_or_owned;
@@ -17,7 +16,7 @@ pub(super) fn build_modules_for_target<'a>(
                 .map(|selected| module.name == selected)
                 .unwrap_or(true)
         })
-        .filter(|module| module_matches_output_target(&module.module_type, &config.output_target))
+        .filter(|module| module.module_type.matches_output_target(&config.output_target))
         .collect();
     if matching.is_empty() {
         config

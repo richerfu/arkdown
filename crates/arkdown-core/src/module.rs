@@ -64,6 +64,21 @@ pub enum ModuleType {
     Declaration,
 }
 
+impl ModuleType {
+    /// Infer the module type from a file path's extension.
+    ///
+    /// Used by the resolver and loader to classify source files without
+    /// reading their content.
+    pub fn infer(path: &std::path::Path) -> Self {
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("ets") => ModuleType::Ets,
+            Some("ts") => ModuleType::Ts,
+            Some("js") | Some("mjs") | Some("cjs") => ModuleType::Js,
+            _ => ModuleType::Js,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

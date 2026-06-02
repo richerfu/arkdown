@@ -14,4 +14,4 @@ pub mod sdk;
 
 pub use error::ResolveError;
 pub use ohm_url::{generate_ohm_url, parse_ohm_url};
-pub use resolver::{infer_module_type, OhosResolver, PkgBriefInfo, ResolverConfig};
+pub use resolver::{OhosResolver, PkgBriefInfo, ResolverConfig};

@@ -2,7 +2,7 @@ use std::path::Path;
 
 use arkdown_core::{
     ArkOptions, ArkdownConfig, BuildMode, BuildOption, ModuleConfig, ObfuscationConfig,
-    OhosModuleType, OutputTarget, ProductConfig, RuntimeOnlyConfig, SigningConfig,
+    OutputTarget, ProductConfig, RuntimeOnlyConfig, SigningConfig,
     StrictModeConfig,
 };
 
@@ -245,17 +245,6 @@ pub fn load_config(
     })
 }
 
-pub fn module_matches_output_target(module_type: &OhosModuleType, target: &OutputTarget) -> bool {
-    match target {
-        OutputTarget::Hap => {
-            matches!(module_type, OhosModuleType::Entry | OhosModuleType::Feature)
-        }
-        OutputTarget::Hsp => matches!(module_type, OhosModuleType::Shared),
-        OutputTarget::Har => matches!(module_type, OhosModuleType::Har),
-        OutputTarget::Preview | OutputTarget::Test => true,
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -480,25 +469,11 @@ mod tests {
 
     #[test]
     fn test_module_type_matches_output_target() {
-        assert!(module_matches_output_target(
-            &arkdown_core::OhosModuleType::Entry,
-            &OutputTarget::Hap
-        ));
-        assert!(module_matches_output_target(
-            &arkdown_core::OhosModuleType::Feature,
-            &OutputTarget::Hap
-        ));
-        assert!(!module_matches_output_target(
-            &arkdown_core::OhosModuleType::Har,
-            &OutputTarget::Hap
-        ));
-        assert!(module_matches_output_target(
-            &arkdown_core::OhosModuleType::Har,
-            &OutputTarget::Har
-        ));
-        assert!(module_matches_output_target(
-            &arkdown_core::OhosModuleType::Shared,
-            &OutputTarget::Hsp
-        ));
+        use arkdown_core::OhosModuleType;
+        assert!(OhosModuleType::Entry.matches_output_target(&OutputTarget::Hap));
+        assert!(OhosModuleType::Feature.matches_output_target(&OutputTarget::Hap));
+        assert!(!OhosModuleType::Har.matches_output_target(&OutputTarget::Hap));
+        assert!(OhosModuleType::Har.matches_output_target(&OutputTarget::Har));
+        assert!(OhosModuleType::Shared.matches_output_target(&OutputTarget::Hsp));
     }
 }

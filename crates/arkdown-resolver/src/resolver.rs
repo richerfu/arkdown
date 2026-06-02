@@ -8,9 +8,9 @@ use oxc_resolver::{
 
 use crate::error::ResolveError;
 use crate::oh_modules::{
-    is_bytecode_har, read_bytecode_abc_path, read_declaration_entry, read_file_dependencies,
-    read_name_field, read_package_exports_import_field, read_package_main_field,
-    read_package_version_field,
+    is_bytecode_har, package_root_in_oh_modules, read_bytecode_abc_path,
+    read_declaration_entry, read_file_dependencies, read_name_field,
+    read_package_exports_import_field, read_package_main_field, read_package_version_field,
 };
 
 /// Configuration for the OHOS module resolver.
@@ -152,7 +152,7 @@ impl OhosResolver {
         if specifier.starts_with("./") || specifier.starts_with("../") {
             if let Ok(resolution) = self.fs_resolver.resolve_file(importer, specifier) {
                 let resolved = canonicalize_existing(resolution.into_path_buf());
-                let module_type = infer_module_type(&resolved);
+                let module_type = ModuleType::infer(&resolved);
                 return Ok(OhosResolvedModule::LocalSource {
                     path: resolved,
                     module_type,
@@ -196,7 +196,7 @@ impl OhosResolver {
             .ok()
             .map(|resolution| {
                 let resolved = canonicalize_existing(resolution.into_path_buf());
-                let module_type = infer_module_type(&resolved);
+                let module_type = ModuleType::infer(&resolved);
                 OhosResolvedModule::RemotePackage {
                     path: resolved,
                     module_type,
@@ -264,7 +264,7 @@ impl OhosResolver {
         let resolved = self
             .resolve_package_path(&pkg_root.path, &requested)
             .or_else(|| self.resolve_package_path(&pkg_root.path, "index"))?;
-        let module_type = infer_module_type(&resolved);
+        let module_type = ModuleType::infer(&resolved);
 
         Some(pkg_root.to_resolved_module(resolved, module_type, package_name))
     }
@@ -499,30 +499,10 @@ impl PackageCandidate {
     }
 }
 
-fn package_root_in_oh_modules(root: &Path, package_name: &str) -> Option<PathBuf> {
-    let candidates = [
-        root.join(package_name),
-        root.join(".ohpm/oh_modules").join(package_name),
-    ];
-    candidates
-        .into_iter()
-        .find(|path| path.join("oh-package.json5").is_file() || path.join("package.json").is_file())
-        .map(canonicalize_existing)
-}
-
 fn canonicalize_existing(path: PathBuf) -> PathBuf {
     std::fs::canonicalize(&path).unwrap_or(path)
 }
 
-/// Infer the [`ModuleType`] from a file extension.
-pub fn infer_module_type(path: &Path) -> ModuleType {
-    match path.extension().and_then(|e| e.to_str()) {
-        Some("ets") => ModuleType::Ets,
-        Some("ts") => ModuleType::Ts,
-        Some("js") | Some("mjs") | Some("cjs") => ModuleType::Js,
-        _ => ModuleType::Js,
-    }
-}
 
 #[cfg(test)]
 mod tests {

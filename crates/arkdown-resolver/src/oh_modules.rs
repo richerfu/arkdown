@@ -190,6 +190,22 @@ pub fn read_declaration_entry(oh_package_path: &Path) -> Option<PathBuf> {
     Some(pkg_dir.join("index.d.ets"))
 }
 
+/// Find the root directory of a named package within an `oh_modules/` directory.
+///
+/// Checks two locations:
+/// - `root/<package_name>/oh-package.json5` (direct install)
+/// - `root/.ohpm/oh_modules/<package_name>/oh-package.json5` (ohpm registry)
+pub fn package_root_in_oh_modules(root: &std::path::Path, package_name: &str) -> Option<std::path::PathBuf> {
+    let candidates = [
+        root.join(package_name),
+        root.join(".ohpm/oh_modules").join(package_name),
+    ];
+    candidates
+        .into_iter()
+        .find(|path| path.join("oh-package.json5").is_file() || path.join("package.json").is_file())
+        .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -50,6 +50,25 @@ impl std::fmt::Display for OhosModuleType {
     }
 }
 
+impl OhosModuleType {
+    /// Returns `true` if this module type should be included when building
+    /// for the given `target` artifact type.
+    ///
+    /// Mirrors hvigor's `module.modules` filter in `CompileArkTS`:
+    /// - HAP builds include `entry` and `feature` modules.
+    /// - HSP builds include `shared` modules only.
+    /// - HAR builds include `har` modules only.
+    /// - Preview/Test builds include all module types.
+    pub fn matches_output_target(&self, target: &OutputTarget) -> bool {
+        match target {
+            OutputTarget::Hap => matches!(self, OhosModuleType::Entry | OhosModuleType::Feature),
+            OutputTarget::Hsp => matches!(self, OhosModuleType::Shared),
+            OutputTarget::Har => matches!(self, OhosModuleType::Har),
+            OutputTarget::Preview | OutputTarget::Test => true,
+        }
+    }
+}
+
 /// Compilation mode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CompileMode {
