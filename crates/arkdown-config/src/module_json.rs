@@ -59,15 +59,6 @@ pub fn load_module_json(module_root: &Path) -> Result<RawModuleJson, ConfigError
 }
 
 /// Map the raw `module.type` string to [`arkdown_core::OhosModuleType`].
-pub fn map_module_type(raw: &str) -> arkdown_core::OhosModuleType {
-    match raw {
-        "feature" => arkdown_core::OhosModuleType::Feature,
-        "shared" => arkdown_core::OhosModuleType::Shared,
-        "har" => arkdown_core::OhosModuleType::Har,
-        _ => arkdown_core::OhosModuleType::Entry, // "entry" or unknown → Entry
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -131,7 +122,7 @@ mod tests {
         let m = parse_module_json(json, Path::new("module.json5")).unwrap();
         assert_eq!(m.module.module_type, "har");
         assert_eq!(
-            map_module_type(&m.module.module_type),
+            arkdown_core::OhosModuleType::from_type_str(&m.module.module_type),
             arkdown_core::OhosModuleType::Har
         );
     }
@@ -149,21 +140,21 @@ mod tests {
     #[test]
     fn test_map_module_type() {
         assert_eq!(
-            map_module_type("entry"),
+            arkdown_core::OhosModuleType::from_type_str("entry"),
             arkdown_core::OhosModuleType::Entry
         );
         assert_eq!(
-            map_module_type("feature"),
+            arkdown_core::OhosModuleType::from_type_str("feature"),
             arkdown_core::OhosModuleType::Feature
         );
         assert_eq!(
-            map_module_type("shared"),
+            arkdown_core::OhosModuleType::from_type_str("shared"),
             arkdown_core::OhosModuleType::Shared
         );
-        assert_eq!(map_module_type("har"), arkdown_core::OhosModuleType::Har);
+        assert_eq!(arkdown_core::OhosModuleType::from_type_str("har"), arkdown_core::OhosModuleType::Har);
         // Unknown falls back to Entry
         assert_eq!(
-            map_module_type("unknown"),
+            arkdown_core::OhosModuleType::from_type_str("unknown"),
             arkdown_core::OhosModuleType::Entry
         );
     }

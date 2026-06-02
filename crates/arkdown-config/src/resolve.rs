@@ -2,13 +2,13 @@ use std::path::Path;
 
 use arkdown_core::{
     ArkOptions, ArkdownConfig, BuildMode, BuildOption, ModuleConfig, ObfuscationConfig,
-    OutputTarget, ProductConfig, RuntimeOnlyConfig, SigningConfig,
+    OhosModuleType, OutputTarget, ProductConfig, RuntimeOnlyConfig, SigningConfig,
     StrictModeConfig,
 };
 
 use crate::build_profile::{load_app_json5, load_build_profile, parse_api_version};
 use crate::error::ConfigError;
-use crate::module_json::{load_module_json, map_module_type};
+use crate::module_json::load_module_json;
 use crate::sdk::discover_sdk;
 
 /// Parse the project at `root` and return a fully resolved [`ArkdownConfig`].
@@ -208,7 +208,7 @@ pub fn load_config(
 
         // module.json5 is optional — if absent we fall back to Entry.
         let module_type = match load_module_json(&module_root) {
-            Ok(mj) => map_module_type(&mj.module.module_type),
+            Ok(mj) => OhosModuleType::from_type_str(&mj.module.module_type),
             Err(ConfigError::FileNotFound(_)) => arkdown_core::OhosModuleType::Entry,
             Err(e) => return Err(e),
         };

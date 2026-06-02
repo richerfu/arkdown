@@ -51,6 +51,18 @@ impl std::fmt::Display for OhosModuleType {
 }
 
 impl OhosModuleType {
+    /// Parse the module type from the `module.json5` `type` field string.
+    ///
+    /// Mirrors hvigor's type mapping: unknown strings fall back to `Entry`.
+    pub fn from_type_str(s: &str) -> Self {
+        match s {
+            "feature" => OhosModuleType::Feature,
+            "shared" => OhosModuleType::Shared,
+            "har" => OhosModuleType::Har,
+            _ => OhosModuleType::Entry, // "entry" or unknown → Entry
+        }
+    }
+
     /// Returns `true` if this module type should be included when building
     /// for the given `target` artifact type.
     ///
