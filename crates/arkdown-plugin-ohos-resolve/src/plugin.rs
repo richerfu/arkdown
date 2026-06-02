@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use arkdown_core::OhosResolvedModule;
 use arkdown_resolver::{OhosResolver, ResolverConfig};
@@ -8,12 +8,16 @@ use rolldown_common::ResolvedExternal;
 use rolldown_plugin::{
     HookResolveIdArgs, HookResolveIdOutput, HookResolveIdReturn, HookUsage, Plugin, PluginContext,
 };
+use rustc_hash::FxHashMap;
+
+pub type ResolvedImportMap = FxHashMap<String, FxHashMap<String, String>>;
 
 pub struct OhosResolvePlugin {
     resolver: Arc<OhosResolver>,
     project_root: PathBuf,
     #[allow(dead_code)]
     case_sensitive: bool,
+    resolved_imports: Arc<Mutex<ResolvedImportMap>>,
 }
 
 impl std::fmt::Debug for OhosResolvePlugin {
@@ -34,7 +38,15 @@ impl OhosResolvePlugin {
             resolver: Arc::new(OhosResolver::new(resolver_config)),
             project_root,
             case_sensitive,
+            resolved_imports: Arc::new(Mutex::new(FxHashMap::default())),
         }
+    }
+
+    pub fn resolved_import_map_snapshot(&self) -> ResolvedImportMap {
+        self.resolved_imports
+            .lock()
+            .map(|map| map.clone())
+            .unwrap_or_default()
     }
 
     #[cfg(test)]
@@ -66,7 +78,16 @@ impl OhosResolvePlugin {
             Err(err) => return Err(err.into()),
         };
 
-        Ok(Some(resolved_module_to_hook_output(resolved)))
+        let output = resolved_module_to_hook_output(resolved);
+        if let Some(importer) = importer {
+            record_resolved_import(
+                &self.resolved_imports,
+                &importer,
+                specifier,
+                output.id.as_str(),
+            );
+        }
+        Ok(Some(output))
     }
 }
 
@@ -88,6 +109,7 @@ impl Plugin for OhosResolvePlugin {
         let importer = args.importer.map(str::to_owned);
         let resolver = Arc::clone(&self.resolver);
         let project_root = self.project_root.clone();
+        let resolved_imports = Arc::clone(&self.resolved_imports);
         async move {
             let s = specifier.as_str();
             if is_builtin_external_specifier(s) {
@@ -113,8 +135,30 @@ impl Plugin for OhosResolvePlugin {
                 Err(err) => return Err(err.into()),
             };
 
-            Ok(Some(resolved_module_to_hook_output(resolved)))
+            let output = resolved_module_to_hook_output(resolved);
+            if let Some(importer) = importer {
+                record_resolved_import(
+                    &resolved_imports,
+                    &importer,
+                    &specifier,
+                    output.id.as_str(),
+                );
+            }
+            Ok(Some(output))
         }
+    }
+}
+
+fn record_resolved_import(
+    resolved_imports: &Arc<Mutex<ResolvedImportMap>>,
+    importer: &str,
+    specifier: &str,
+    resolved_id: &str,
+) {
+    if let Ok(mut map) = resolved_imports.lock() {
+        map.entry(importer.to_string())
+            .or_default()
+            .insert(specifier.to_string(), resolved_id.to_string());
     }
 }
 

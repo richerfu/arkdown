@@ -45,6 +45,7 @@ pub(super) fn compile_widget_pass(
         .join(mode_dir);
     let transformer =
         EtsTransformPlugin::with_resource_references(config.clone(), resource_refs.clone());
+    let resolved_imports = Default::default();
     let mut compile_infos = Vec::new();
     let mut component_collection = serde_json::Map::new();
 
@@ -79,6 +80,7 @@ pub(super) fn compile_widget_pass(
             &cache_root,
             loader_json,
             config,
+            &resolved_imports,
         );
         if let Some(parent) = entry_info.ts_path.parent() {
             fs_err::create_dir_all(parent)?;

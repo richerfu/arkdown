@@ -3,4 +3,4 @@ pub mod importee;
 pub mod plugin;
 
 pub use importee::{process_importees, ProcessImporteeConfig, ProcessImporteeResult};
-pub use plugin::OhosResolvePlugin;
+pub use plugin::{OhosResolvePlugin, ResolvedImportMap};

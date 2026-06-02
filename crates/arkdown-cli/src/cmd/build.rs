@@ -21,7 +21,9 @@ use arkdown_plugin_ets_transform::{
 };
 use arkdown_plugin_json5::Json5Plugin;
 use arkdown_plugin_module_meta::ModuleMetaPlugin;
-use arkdown_plugin_ohos_resolve::{process_importees, OhosResolvePlugin, ProcessImporteeConfig};
+use arkdown_plugin_ohos_resolve::{
+    process_importees, OhosResolvePlugin, ProcessImporteeConfig, ResolvedImportMap,
+};
 use arkdown_plugin_router_map;
 use arkdown_profile::{
     scan_bytecode_har_deps, ByteCodeHarEntry, ByteCodeHarScanEntry, ProfileProcessor,
@@ -306,6 +308,34 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         }
 
         // Bundling
+        let ohos_resolve_plugin = Arc::new(OhosResolvePlugin::new(
+            ResolverConfig {
+                project_root: project_root.clone(),
+                sdk_api_dirs: config_arc.sdk_config.ets_api_dirs(),
+                sdk_kits_dirs: config_arc.sdk_config.ets_kits_dirs(),
+                pkg_name_to_pkg_info: FxHashMap::default(),
+                use_normalized_ohm_url: config_arc
+                    .product
+                    .build_option
+                    .strict_mode
+                    .use_normalized_ohm_url,
+                case_sensitive_check: config_arc
+                    .product
+                    .build_option
+                    .strict_mode
+                    .case_sensitive_check,
+                oh_modules_roots: vec![
+                    module.src_path.join("oh_modules"),
+                    project_root.join("oh_modules"),
+                ],
+            },
+            project_root.clone(),
+            config_arc
+                .product
+                .build_option
+                .strict_mode
+                .case_sensitive_check,
+        ));
         let plugins: Vec<SharedPluginable> = vec![
             // 1. ETS transform — must be first, desugars .ets before any other plugin sees it
             Arc::new(EtsTransformPlugin::with_resource_references(
@@ -313,34 +343,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 resource_refs.clone(),
             )) as SharedPluginable,
             // 2. OHOS module resolver — maps specifiers to OHM URLs / local paths
-            Arc::new(OhosResolvePlugin::new(
-                ResolverConfig {
-                    project_root: project_root.clone(),
-                    sdk_api_dirs: config_arc.sdk_config.ets_api_dirs(),
-                    sdk_kits_dirs: config_arc.sdk_config.ets_kits_dirs(),
-                    pkg_name_to_pkg_info: FxHashMap::default(),
-                    use_normalized_ohm_url: config_arc
-                        .product
-                        .build_option
-                        .strict_mode
-                        .use_normalized_ohm_url,
-                    case_sensitive_check: config_arc
-                        .product
-                        .build_option
-                        .strict_mode
-                        .case_sensitive_check,
-                    oh_modules_roots: vec![
-                        module.src_path.join("oh_modules"),
-                        project_root.join("oh_modules"),
-                    ],
-                },
-                project_root.clone(),
-                config_arc
-                    .product
-                    .build_option
-                    .strict_mode
-                    .case_sensitive_check,
-            )) as SharedPluginable,
+            ohos_resolve_plugin.clone() as SharedPluginable,
             // 3. Module metadata — annotates each module with OHOS package context
             Arc::new(ModuleMetaPlugin::new(
                 project_root.clone(),
@@ -356,12 +359,14 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             .bundle(loader_json)
             .await
             .map_err(|e| anyhow::anyhow!("Bundle failed: {}", e))?;
+        let resolved_imports = ohos_resolve_plugin.resolved_import_map_snapshot();
         let compile_arkts_handoff = write_compile_arkts_cache(
             module,
             loader_json,
             &config_arc,
             &bundle_out.chunk_graph,
             resource_refs,
+            &resolved_imports,
         )?;
         bundle_outs.push((bundle_out, false));
         compile_arkts_handoffs_by_bundle.push(compile_arkts_handoff);
@@ -841,6 +846,8 @@ fn write_compile_arkts_cache(
     config: &Arc<ArkdownConfig>,
     chunk_graph: &ChunkGraph,
     resource_refs: &FxHashMap<String, ResourceReference>,
+    resolved_imports: &ResolvedImportMap,
 ) -> Result<CompileArkTsHandoff> {
-    CompileArktsCacheWriter::new(module, loader_json, config, resource_refs).write(chunk_graph)
+    CompileArktsCacheWriter::new(module, loader_json, config, resource_refs, resolved_imports)
+        .write(chunk_graph)
 }

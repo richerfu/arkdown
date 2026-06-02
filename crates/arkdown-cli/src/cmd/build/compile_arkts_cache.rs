@@ -4,6 +4,7 @@ use rustc_hash::FxHashMap;
 pub(super) struct CompileArktsCacheWriter<'a> {
     loader_json: &'a arkdown_profile::LoaderJson,
     config: &'a Arc<ArkdownConfig>,
+    resolved_imports: &'a arkdown_plugin_ohos_resolve::ResolvedImportMap,
     cache_root: PathBuf,
     transformer: EtsTransformPlugin,
 }
@@ -14,6 +15,7 @@ impl<'a> CompileArktsCacheWriter<'a> {
         loader_json: &'a arkdown_profile::LoaderJson,
         config: &'a Arc<ArkdownConfig>,
         resource_refs: &FxHashMap<String, ResourceReference>,
+        resolved_imports: &'a arkdown_plugin_ohos_resolve::ResolvedImportMap,
     ) -> Self {
         let cache_root = module
             .src_path
@@ -25,6 +27,7 @@ impl<'a> CompileArktsCacheWriter<'a> {
         Self {
             loader_json,
             config,
+            resolved_imports,
             cache_root,
             transformer,
         }
@@ -150,6 +153,7 @@ impl<'a> CompileArktsCacheWriter<'a> {
                 &self.cache_root,
                 self.loader_json,
                 self.config,
+                self.resolved_imports,
             )
         } else {
             code
