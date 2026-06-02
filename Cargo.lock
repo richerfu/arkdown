@@ -453,6 +453,7 @@ version = "0.1.0"
 dependencies = [
  "arkdown-config",
  "arkdown-core",
+ "arkdown-utils",
  "fs-err",
  "indexmap",
  "json5",

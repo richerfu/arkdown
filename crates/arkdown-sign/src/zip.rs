@@ -69,23 +69,23 @@ pub struct HapZip {
 // Parsing
 // ---------------------------------------------------------------------------
 
-/// Read a little-endian u16 from `buf` at `offset`.
-#[inline]
-fn read_u16(buf: &[u8], offset: usize) -> Result<u16, SignError> {
-    buf.get(offset..offset + 2)
-        .map(|b| u16::from_le_bytes([b[0], b[1]]))
-        .ok_or(SignError::InvalidZip("unexpected EOF reading u16"))
-}
-
-/// Read a little-endian u32 from `buf` at `offset`.
-#[inline]
-fn read_u32(buf: &[u8], offset: usize) -> Result<u32, SignError> {
-    buf.get(offset..offset + 4)
-        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-        .ok_or(SignError::InvalidZip("unexpected EOF reading u32"))
-}
-
 impl HapZip {
+    /// Read a little-endian u16 from `buf` at `offset`.
+    #[inline]
+    fn read_u16(buf: &[u8], offset: usize) -> Result<u16, SignError> {
+        buf.get(offset..offset + 2)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]))
+            .ok_or(SignError::InvalidZip("unexpected EOF reading u16"))
+    }
+
+    /// Read a little-endian u32 from `buf` at `offset`.
+    #[inline]
+    fn read_u32(buf: &[u8], offset: usize) -> Result<u32, SignError> {
+        buf.get(offset..offset + 4)
+            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .ok_or(SignError::InvalidZip("unexpected EOF reading u32"))
+    }
+
     /// Parse an unsigned HAP (raw bytes).
     pub fn parse(bytes: &[u8]) -> Result<Self, SignError> {
         let eocd = find_eocd(bytes)?;
@@ -106,18 +106,18 @@ impl HapZip {
             if pos + 46 > bytes.len() {
                 return Err(SignError::InvalidZip("central directory entry too short"));
             }
-            let sig = read_u32(bytes, pos)?;
+            let sig = Self::read_u32(bytes, pos)?;
             if sig != CENTRAL_DIR_SIG {
                 return Err(SignError::InvalidZip(
                     "central directory signature mismatch",
                 ));
             }
 
-            let method = read_u16(bytes, pos + 10)?;
-            let fn_len = read_u16(bytes, pos + 28)? as usize;
-            let ef_len = read_u16(bytes, pos + 30)? as usize;
-            let cm_len = read_u16(bytes, pos + 32)? as usize;
-            let local_offset = read_u32(bytes, pos + 42)?;
+            let method = Self::read_u16(bytes, pos + 10)?;
+            let fn_len = Self::read_u16(bytes, pos + 28)? as usize;
+            let ef_len = Self::read_u16(bytes, pos + 30)? as usize;
+            let cm_len = Self::read_u16(bytes, pos + 32)? as usize;
+            let local_offset = Self::read_u32(bytes, pos + 42)?;
 
             let cd_entry_len = 46 + fn_len + ef_len + cm_len;
             if pos + cd_entry_len > bytes.len() {
@@ -137,15 +137,15 @@ impl HapZip {
             if lh_pos + LOCAL_HEADER_FIXED > bytes.len() {
                 return Err(SignError::InvalidZip("local header offset out of bounds"));
             }
-            let lh_sig = read_u32(bytes, lh_pos)?;
+            let lh_sig = Self::read_u32(bytes, lh_pos)?;
             if lh_sig != LOCAL_FILE_HEADER_SIG {
                 return Err(SignError::InvalidZip(
                     "local file header signature mismatch",
                 ));
             }
 
-            let lh_fn_len = read_u16(bytes, lh_pos + 26)? as usize;
-            let lh_ef_len = read_u16(bytes, lh_pos + 28)? as usize;
+            let lh_fn_len = Self::read_u16(bytes, lh_pos + 26)? as usize;
+            let lh_ef_len = Self::read_u16(bytes, lh_pos + 28)? as usize;
 
             let mut local_header_fixed = [0u8; LOCAL_HEADER_FIXED];
             local_header_fixed.copy_from_slice(&bytes[lh_pos..lh_pos + LOCAL_HEADER_FIXED]);
@@ -160,9 +160,9 @@ impl HapZip {
             let data_start = lh_pos + LOCAL_HEADER_FIXED + lh_fn_len + lh_ef_len;
 
             // Compressed size comes from CD (more reliable, handles data descriptor).
-            let compressed_size = read_u32(bytes, pos - cd_entry_len + 46 - 4 + 4 + 4)?;
+            let compressed_size = Self::read_u32(bytes, pos - cd_entry_len + 46 - 4 + 4 + 4)?;
             // Actually read from local header: bytes 18..22
-            let local_comp_size = read_u32(bytes, lh_pos + 18)? as usize;
+            let local_comp_size = Self::read_u32(bytes, lh_pos + 18)? as usize;
             // Use whichever is non-zero
             let actual_comp_size = if local_comp_size > 0 {
                 local_comp_size
@@ -171,7 +171,7 @@ impl HapZip {
             };
 
             // Recalculate from cd entry: bytes 20..24 of cd entry = compressed size
-            let cd_comp_size = read_u32(&cd_entry, 20)? as usize;
+            let cd_comp_size = Self::read_u32(&cd_entry, 20)? as usize;
             let data_size = if cd_comp_size > 0 {
                 cd_comp_size
             } else {

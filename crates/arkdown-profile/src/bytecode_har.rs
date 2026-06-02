@@ -153,6 +153,99 @@ impl ByteCodeHarScanEntry {
         };
         (self.package_name, entry)
     }
+
+    // -----------------------------------------------------------------------
+    // Private scan helpers
+    // -----------------------------------------------------------------------
+
+    fn scan_oh_modules_dir(
+        oh_modules: &Path,
+        seen: &mut FxHashSet<String>,
+        out: &mut Vec<Self>,
+    ) {
+        for entry in Self::read_dir_sorted(oh_modules) {
+            let pkg_dir = entry.path();
+            if !pkg_dir.is_dir() {
+                continue;
+            }
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+
+            // Handle scoped packages: `@scope/pkg` lives as `oh_modules/@scope/pkg`.
+            if name_str.starts_with('@') {
+                // Recurse one level for scoped packages.
+                for scoped_entry in Self::read_dir_sorted(&pkg_dir) {
+                    let scoped_dir = scoped_entry.path();
+                    if !scoped_dir.is_dir() {
+                        continue;
+                    }
+                    let pkg_name = format!(
+                        "{}/{}",
+                        name_str,
+                        scoped_entry.file_name().to_string_lossy()
+                    );
+                    Self::try_collect(scoped_dir, &pkg_name, seen, out);
+                }
+            } else {
+                Self::try_collect(pkg_dir, &name_str, seen, out);
+            }
+        }
+    }
+
+    fn read_dir_sorted(dir: &Path) -> Vec<std::fs::DirEntry> {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        let mut entries: Vec<_> = entries.flatten().collect();
+        entries.sort_by_key(|entry| entry.file_name());
+        entries
+    }
+
+    fn try_collect(
+        pkg_dir: PathBuf,
+        pkg_name: &str,
+        seen: &mut FxHashSet<String>,
+        out: &mut Vec<Self>,
+    ) {
+        if seen.contains(pkg_name) {
+            return;
+        }
+
+        let Some(pkg) = OhPkgMinimal::load(&pkg_dir) else {
+            return;
+        };
+
+        let Some(abc_path) = pkg.resolve_abc_path(&pkg_dir) else {
+            return;
+        };
+
+        let compatible_sdk_version = pkg
+            .compatible_sdk_version
+            .as_ref()
+            .map(CompatibleSdkVersionField::as_string)
+            .unwrap_or_default();
+        let source_maps_path = pkg.resolve_source_maps_path(&pkg_dir);
+        let insight_intent = pkg
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.insight_intent_path.as_deref())
+            .map(|path| pkg_dir.join(path));
+        let declaration_entry = pkg
+            .metadata
+            .as_ref()
+            .map(|metadata| metadata.declaration_entry.clone())
+            .unwrap_or_default();
+
+        seen.insert(pkg_name.to_string());
+        out.push(Self {
+            package_name: pkg_name.to_string(),
+            abc_path,
+            compatible_sdk_version,
+            source_maps_path,
+            insight_intent,
+            declaration_entry,
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -186,99 +279,10 @@ pub fn scan_bytecode_har_deps(
         if !base.exists() {
             continue;
         }
-        scan_oh_modules_dir(base, &mut seen, &mut results);
+        ByteCodeHarScanEntry::scan_oh_modules_dir(base, &mut seen, &mut results);
     }
 
     results
-}
-
-fn scan_oh_modules_dir(
-    oh_modules: &Path,
-    seen: &mut FxHashSet<String>,
-    out: &mut Vec<ByteCodeHarScanEntry>,
-) {
-    for entry in read_dir_sorted(oh_modules) {
-        let pkg_dir = entry.path();
-        if !pkg_dir.is_dir() {
-            continue;
-        }
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-
-        // Handle scoped packages: `@scope/pkg` lives as `oh_modules/@scope/pkg`.
-        if name_str.starts_with('@') {
-            // Recurse one level for scoped packages.
-            for scoped_entry in read_dir_sorted(&pkg_dir) {
-                let scoped_dir = scoped_entry.path();
-                if !scoped_dir.is_dir() {
-                    continue;
-                }
-                let pkg_name = format!(
-                    "{}/{}",
-                    name_str,
-                    scoped_entry.file_name().to_string_lossy()
-                );
-                try_collect_bytecode_har(&scoped_dir, &pkg_name, seen, out);
-            }
-        } else {
-            try_collect_bytecode_har(&pkg_dir, &name_str, seen, out);
-        }
-    }
-}
-
-fn read_dir_sorted(dir: &Path) -> Vec<std::fs::DirEntry> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut entries: Vec<_> = entries.flatten().collect();
-    entries.sort_by_key(|entry| entry.file_name());
-    entries
-}
-
-fn try_collect_bytecode_har(
-    pkg_dir: &Path,
-    pkg_name: &str,
-    seen: &mut FxHashSet<String>,
-    out: &mut Vec<ByteCodeHarScanEntry>,
-) {
-    if seen.contains(pkg_name) {
-        return;
-    }
-
-    let Some(pkg) = OhPkgMinimal::load(pkg_dir) else {
-        return;
-    };
-
-    let Some(abc_path) = pkg.resolve_abc_path(pkg_dir) else {
-        return;
-    };
-
-    let compatible_sdk_version = pkg
-        .compatible_sdk_version
-        .as_ref()
-        .map(CompatibleSdkVersionField::as_string)
-        .unwrap_or_default();
-    let source_maps_path = pkg.resolve_source_maps_path(pkg_dir);
-    let insight_intent = pkg
-        .metadata
-        .as_ref()
-        .and_then(|metadata| metadata.insight_intent_path.as_deref())
-        .map(|path| pkg_dir.join(path));
-    let declaration_entry = pkg
-        .metadata
-        .as_ref()
-        .map(|metadata| metadata.declaration_entry.clone())
-        .unwrap_or_default();
-
-    seen.insert(pkg_name.to_string());
-    out.push(ByteCodeHarScanEntry {
-        package_name: pkg_name.to_string(),
-        abc_path,
-        compatible_sdk_version,
-        source_maps_path,
-        insight_intent,
-        declaration_entry,
-    });
 }
 
 // ---------------------------------------------------------------------------
@@ -309,6 +313,122 @@ pub struct HostModuleInfo {
     pub host_module_name: String,
 }
 
+impl DynamicImportLibEntry {
+    // -----------------------------------------------------------------------
+    // Private resolution helpers
+    // -----------------------------------------------------------------------
+
+    fn resolve_oh_module_dir(
+        dep_name: &str,
+        module_root: &Path,
+        project_root: &Path,
+    ) -> Option<PathBuf> {
+        for base in &[
+            module_root.join("oh_modules"),
+            project_root.join("oh_modules"),
+        ] {
+            let candidate = base.join(dep_name);
+            if candidate.exists() && candidate.is_dir() {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
+    fn is_local_dependency(dep_name: &str, module_root: &Path) -> bool {
+        let pkg_json = module_root.join("oh-package.json5");
+        let Ok(content) = std::fs::read_to_string(&pkg_json) else {
+            return false;
+        };
+
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct PkgDeps {
+            #[serde(default)]
+            dependencies: FxHashMap<String, String>,
+            #[serde(default)]
+            dynamic_dependencies: FxHashMap<String, String>,
+        }
+
+        let Ok(parsed) = json5::from_str::<PkgDeps>(&content) else {
+            return false;
+        };
+
+        parsed
+            .dynamic_dependencies
+            .get(dep_name)
+            .or_else(|| parsed.dependencies.get(dep_name))
+            .map(|v| v.starts_with("file:"))
+            .unwrap_or(false)
+    }
+
+    fn find_entry_file(pkg_dir: &Path) -> String {
+        let pkg_json = pkg_dir.join("oh-package.json5");
+        if let Ok(content) = std::fs::read_to_string(&pkg_json) {
+            #[derive(Deserialize)]
+            struct PkgEntry {
+                #[serde(default)]
+                main: Option<String>,
+                #[serde(default)]
+                types: Option<String>,
+            }
+            if let Ok(parsed) = json5::from_str::<PkgEntry>(&content) {
+                if let Some(main) = parsed.main.filter(|s| !s.is_empty()) {
+                    let candidate = pkg_dir.join(&main);
+                    if candidate.exists() {
+                        return candidate.to_string_lossy().into_owned();
+                    }
+                }
+                if let Some(types) = parsed.types.filter(|s| !s.is_empty()) {
+                    let candidate = pkg_dir.join(&types);
+                    if candidate.exists() {
+                        return candidate.to_string_lossy().into_owned();
+                    }
+                }
+            }
+        }
+
+        // Fall back to conventional entry points.
+        for candidate_name in &["index.ets", "index.ts", "index.js"] {
+            let candidate = pkg_dir.join("src/main/ets").join(candidate_name);
+            if candidate.exists() {
+                return candidate.to_string_lossy().into_owned();
+            }
+            let candidate = pkg_dir.join(candidate_name);
+            if candidate.exists() {
+                return candidate.to_string_lossy().into_owned();
+            }
+        }
+
+        String::new()
+    }
+
+    fn read_module_name_from_pkg(pkg_dir: &Path, fallback: &str) -> String {
+        // Try module.json first (compiled HAR), then module.json5 (source HAR).
+        for json_name in &["src/main/module.json", "src/main/module.json5"] {
+            let path = pkg_dir.join(json_name);
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                #[derive(Deserialize)]
+                struct ModuleJson {
+                    module: ModuleSection,
+                }
+                #[derive(Deserialize)]
+                struct ModuleSection {
+                    name: Option<String>,
+                }
+                if let Ok(parsed) = json5::from_str::<ModuleJson>(&content) {
+                    if let Some(name) = parsed.module.name.filter(|s| !s.is_empty()) {
+                        return name;
+                    }
+                }
+            }
+        }
+
+        // Fallback: use the last path segment of the package name.
+        fallback.rsplit('/').next().unwrap_or(fallback).to_string()
+    }
+}
+
 /// Scan `dynamicDependencies` from `oh-package.json5` and resolve each dep
 /// under `oh_modules/` to produce `dynamicImportLibInfo` entries.
 ///
@@ -325,19 +445,21 @@ pub fn collect_dynamic_import_lib_info(
 
     for dep_name in dynamic_dep_names {
         // Resolve the package directory under oh_modules.
-        let pkg_dir = resolve_oh_module_dir(dep_name, module_root, project_root);
+        let pkg_dir =
+            DynamicImportLibEntry::resolve_oh_module_dir(dep_name, module_root, project_root);
         let Some(pkg_dir) = pkg_dir else {
             continue;
         };
 
-        let is_local = is_local_dependency(dep_name, module_root);
+        let is_local = DynamicImportLibEntry::is_local_dependency(dep_name, module_root);
         let pkg_dir = if is_local {
             std::fs::canonicalize(&pkg_dir).unwrap_or(pkg_dir)
         } else {
             pkg_dir
         };
-        let entry_file = find_entry_file(&pkg_dir);
-        let pkg_module_name = read_module_name_from_pkg(&pkg_dir, dep_name);
+        let entry_file = DynamicImportLibEntry::find_entry_file(&pkg_dir);
+        let pkg_module_name =
+            DynamicImportLibEntry::read_module_name_from_pkg(&pkg_dir, dep_name);
 
         let entry = DynamicImportLibEntry {
             entry_file_path: entry_file,
@@ -353,116 +475,6 @@ pub fn collect_dynamic_import_lib_info(
     }
 
     results
-}
-
-fn resolve_oh_module_dir(
-    dep_name: &str,
-    module_root: &Path,
-    project_root: &Path,
-) -> Option<PathBuf> {
-    for base in &[
-        module_root.join("oh_modules"),
-        project_root.join("oh_modules"),
-    ] {
-        let candidate = base.join(dep_name);
-        if candidate.exists() && candidate.is_dir() {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
-fn is_local_dependency(dep_name: &str, module_root: &Path) -> bool {
-    let pkg_json = module_root.join("oh-package.json5");
-    let Ok(content) = std::fs::read_to_string(&pkg_json) else {
-        return false;
-    };
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct PkgDeps {
-        #[serde(default)]
-        dependencies: FxHashMap<String, String>,
-        #[serde(default)]
-        dynamic_dependencies: FxHashMap<String, String>,
-    }
-
-    let Ok(parsed) = json5::from_str::<PkgDeps>(&content) else {
-        return false;
-    };
-
-    parsed
-        .dynamic_dependencies
-        .get(dep_name)
-        .or_else(|| parsed.dependencies.get(dep_name))
-        .map(|v| v.starts_with("file:"))
-        .unwrap_or(false)
-}
-
-fn find_entry_file(pkg_dir: &Path) -> String {
-    let pkg_json = pkg_dir.join("oh-package.json5");
-    if let Ok(content) = std::fs::read_to_string(&pkg_json) {
-        #[derive(Deserialize)]
-        struct PkgEntry {
-            #[serde(default)]
-            main: Option<String>,
-            #[serde(default)]
-            types: Option<String>,
-        }
-        if let Ok(parsed) = json5::from_str::<PkgEntry>(&content) {
-            if let Some(main) = parsed.main.filter(|s| !s.is_empty()) {
-                let candidate = pkg_dir.join(&main);
-                if candidate.exists() {
-                    return candidate.to_string_lossy().into_owned();
-                }
-            }
-            if let Some(types) = parsed.types.filter(|s| !s.is_empty()) {
-                let candidate = pkg_dir.join(&types);
-                if candidate.exists() {
-                    return candidate.to_string_lossy().into_owned();
-                }
-            }
-        }
-    }
-
-    // Fall back to conventional entry points.
-    for candidate_name in &["index.ets", "index.ts", "index.js"] {
-        let candidate = pkg_dir.join("src/main/ets").join(candidate_name);
-        if candidate.exists() {
-            return candidate.to_string_lossy().into_owned();
-        }
-        let candidate = pkg_dir.join(candidate_name);
-        if candidate.exists() {
-            return candidate.to_string_lossy().into_owned();
-        }
-    }
-
-    String::new()
-}
-
-fn read_module_name_from_pkg(pkg_dir: &Path, fallback: &str) -> String {
-    // Try module.json first (compiled HAR), then module.json5 (source HAR).
-    for json_name in &["src/main/module.json", "src/main/module.json5"] {
-        let path = pkg_dir.join(json_name);
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            #[derive(Deserialize)]
-            struct ModuleJson {
-                module: ModuleSection,
-            }
-            #[derive(Deserialize)]
-            struct ModuleSection {
-                name: Option<String>,
-            }
-            if let Ok(parsed) = json5::from_str::<ModuleJson>(&content) {
-                if let Some(name) = parsed.module.name.filter(|s| !s.is_empty()) {
-                    return name;
-                }
-            }
-        }
-    }
-
-    // Fallback: use the last path segment of the package name.
-    fallback.rsplit('/').next().unwrap_or(fallback).to_string()
 }
 
 // ---------------------------------------------------------------------------

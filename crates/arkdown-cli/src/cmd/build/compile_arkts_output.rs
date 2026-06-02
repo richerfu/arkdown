@@ -28,27 +28,24 @@ pub(super) fn collect_unresolved_external_imports(bundle_out: &BundleOutput) -> 
             if internal_files.contains(specifier.trim_start_matches("./")) {
                 continue;
             }
-            if is_compile_unresolved_external(specifier) && !imports.contains(specifier) {
+            let is_external = !(specifier.starts_with("./")
+                || specifier.starts_with("../")
+                || specifier.starts_with('/')
+                || specifier.starts_with("@bundle:")
+                || specifier.starts_with("@shared:")
+                || specifier.starts_with("@ohos:")
+                || specifier.starts_with("@ohos.")
+                || specifier.starts_with("@kit.")
+                || specifier.starts_with("@hms.")
+                || specifier.starts_with("@system.")
+                || specifier.starts_with("@native:")
+                || specifier.ends_with(".so"));
+            if is_external && !imports.contains(specifier) {
                 imports.push(specifier.clone());
             }
         }
     }
     imports
-}
-
-fn is_compile_unresolved_external(specifier: &str) -> bool {
-    !(specifier.starts_with("./")
-        || specifier.starts_with("../")
-        || specifier.starts_with('/')
-        || specifier.starts_with("@bundle:")
-        || specifier.starts_with("@shared:")
-        || specifier.starts_with("@ohos:")
-        || specifier.starts_with("@ohos.")
-        || specifier.starts_with("@kit.")
-        || specifier.starts_with("@hms.")
-        || specifier.starts_with("@system.")
-        || specifier.starts_with("@native:")
-        || specifier.ends_with(".so"))
 }
 
 pub(super) fn format_unresolved_import_errors(imports: &[String]) -> String {

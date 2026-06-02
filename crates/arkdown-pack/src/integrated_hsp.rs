@@ -36,6 +36,86 @@ pub struct IntegratedHspEntry {
     pub hsp_path: PathBuf,
 }
 
+impl IntegratedHspEntry {
+    /// Normalize this HSP: patch `pack.info` and write the result to
+    /// `output_dir/<hsp_dir_name>/<hsp_file_name>`.
+    fn normalize(&self, bundle_name: &str, version_code: u64, output_dir: &Path) -> Result<PathBuf, PackError> {
+        // --- open source HSP ---
+        let src_file = fs_err::File::open(&self.hsp_path)?;
+        let mut src_archive = zip::ZipArchive::new(src_file)?;
+
+        // --- locate pack.info ---
+        // We need to verify it exists before we start writing the output.
+        let has_pack_info = (0..src_archive.len()).any(|i| {
+            src_archive
+                .by_index(i)
+                .map(|e| e.name() == "pack.info")
+                .unwrap_or(false)
+        });
+        if !has_pack_info {
+            return Err(PackError::MissingInput("pack.info".to_string()));
+        }
+
+        // --- create output directory and file ---
+        let out_dir = output_dir.join(&self.hsp_dir_name);
+        fs_err::create_dir_all(&out_dir)?;
+        let out_path = out_dir.join(&self.hsp_file_name);
+        let out_file = fs_err::File::create(&out_path)?;
+        let mut writer = zip::ZipWriter::new(out_file);
+
+        // --- copy entries, patching pack.info ---
+        for i in 0..src_archive.len() {
+            let mut src_entry = src_archive.by_index(i)?;
+            let name = src_entry.name().to_owned();
+            let compression = src_entry.compression();
+
+            if name == "pack.info" {
+                // Read, parse, patch, re-serialize.
+                let mut raw = Vec::new();
+                src_entry.read_to_end(&mut raw)?;
+                let patched = Self::patch_pack_info(&raw, bundle_name, version_code)?;
+                let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+                writer.start_file(&name, opts)?;
+                writer.write_all(&patched)?;
+            } else {
+                // Copy verbatim, preserving the original compression method.
+                let opts = SimpleFileOptions::default().compression_method(compression);
+                writer.start_file(&name, opts)?;
+                let mut buf = Vec::new();
+                src_entry.read_to_end(&mut buf)?;
+                writer.write_all(&buf)?;
+            }
+        }
+
+        writer.finish()?;
+        Ok(out_path)
+    }
+
+    /// Patch `pack.info` JSON bytes:
+    /// - `summary.app.bundleName` → `bundle_name`
+    /// - `summary.app.version.code` → `version_code`
+    ///
+    /// Returns the patched JSON as compact bytes with a trailing newline (matching hvigor output).
+    fn patch_pack_info(raw: &[u8], bundle_name: &str, version_code: u64) -> Result<Vec<u8>, PackError> {
+        let mut value: serde_json::Value =
+            serde_json::from_slice(raw).map_err(|e| PackError::MalformedPackInfo(e.to_string()))?;
+
+        if let Some(summary) = value.get_mut("summary") {
+            if let Some(app) = summary.get_mut("app") {
+                app["bundleName"] = serde_json::json!(bundle_name);
+                if let Some(version) = app.get_mut("version") {
+                    version["code"] = serde_json::json!(version_code);
+                }
+            }
+        }
+
+        let mut out =
+            serde_json::to_vec(&value).map_err(|e| PackError::MalformedPackInfo(e.to_string()))?;
+        out.push(b'\n');
+        Ok(out)
+    }
+}
+
 /// Processes a list of remote HSPs for integration into a HAP.
 ///
 /// For each entry:
@@ -57,93 +137,10 @@ pub fn normalize_integrated_hsps(
 ) -> Result<Vec<PathBuf>, PackError> {
     let mut output_paths = Vec::with_capacity(entries.len());
     for entry in entries {
-        let out_path = normalize_single_hsp(entry, bundle_name, version_code, output_dir)?;
+        let out_path = entry.normalize(bundle_name, version_code, output_dir)?;
         output_paths.push(out_path);
     }
     Ok(output_paths)
-}
-
-/// Normalize a single HSP: patch `pack.info` and write the result to
-/// `output_dir/<hsp_dir_name>/<hsp_file_name>`.
-fn normalize_single_hsp(
-    entry: &IntegratedHspEntry,
-    bundle_name: &str,
-    version_code: u64,
-    output_dir: &Path,
-) -> Result<PathBuf, PackError> {
-    // --- open source HSP ---
-    let src_file = fs_err::File::open(&entry.hsp_path)?;
-    let mut src_archive = zip::ZipArchive::new(src_file)?;
-
-    // --- locate pack.info ---
-    // We need to verify it exists before we start writing the output.
-    let has_pack_info = (0..src_archive.len()).any(|i| {
-        src_archive
-            .by_index(i)
-            .map(|e| e.name() == "pack.info")
-            .unwrap_or(false)
-    });
-    if !has_pack_info {
-        return Err(PackError::MissingInput("pack.info".to_string()));
-    }
-
-    // --- create output directory and file ---
-    let out_dir = output_dir.join(&entry.hsp_dir_name);
-    fs_err::create_dir_all(&out_dir)?;
-    let out_path = out_dir.join(&entry.hsp_file_name);
-    let out_file = fs_err::File::create(&out_path)?;
-    let mut writer = zip::ZipWriter::new(out_file);
-
-    // --- copy entries, patching pack.info ---
-    for i in 0..src_archive.len() {
-        let mut src_entry = src_archive.by_index(i)?;
-        let name = src_entry.name().to_owned();
-        let compression = src_entry.compression();
-
-        if name == "pack.info" {
-            // Read, parse, patch, re-serialize.
-            let mut raw = Vec::new();
-            src_entry.read_to_end(&mut raw)?;
-            let patched = patch_pack_info(&raw, bundle_name, version_code)?;
-            let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
-            writer.start_file(&name, opts)?;
-            writer.write_all(&patched)?;
-        } else {
-            // Copy verbatim, preserving the original compression method.
-            let opts = SimpleFileOptions::default().compression_method(compression);
-            writer.start_file(&name, opts)?;
-            let mut buf = Vec::new();
-            src_entry.read_to_end(&mut buf)?;
-            writer.write_all(&buf)?;
-        }
-    }
-
-    writer.finish()?;
-    Ok(out_path)
-}
-
-/// Patch `pack.info` JSON bytes:
-/// - `summary.app.bundleName` → `bundle_name`
-/// - `summary.app.version.code` → `version_code`
-///
-/// Returns the patched JSON as compact bytes with a trailing newline (matching hvigor output).
-fn patch_pack_info(raw: &[u8], bundle_name: &str, version_code: u64) -> Result<Vec<u8>, PackError> {
-    let mut value: serde_json::Value =
-        serde_json::from_slice(raw).map_err(|e| PackError::MalformedPackInfo(e.to_string()))?;
-
-    if let Some(summary) = value.get_mut("summary") {
-        if let Some(app) = summary.get_mut("app") {
-            app["bundleName"] = serde_json::json!(bundle_name);
-            if let Some(version) = app.get_mut("version") {
-                version["code"] = serde_json::json!(version_code);
-            }
-        }
-    }
-
-    let mut out =
-        serde_json::to_vec(&value).map_err(|e| PackError::MalformedPackInfo(e.to_string()))?;
-    out.push(b'\n');
-    Ok(out)
 }
 
 #[cfg(test)]

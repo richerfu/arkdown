@@ -63,13 +63,18 @@ pub fn merge_startup_config(input: StartupConfigInput<'_>) -> StartupConfigOutpu
 
     // 1. Process the module's own startup config.
     if let Some(app_startup_ref) = &input.app_startup {
-        if let Some(profile_name) = parse_profile_name(app_startup_ref) {
+        if let Some(profile_name) = StartupConfigInput::parse_profile_name(app_startup_ref) {
             let profile_path = input
                 .module_root
                 .join("src/main/resources/base/profile")
                 .join(format!("{}.json", profile_name));
-            if let Some(profile) = read_startup_profile(&profile_path) {
-                merge_tasks_from_profile(&profile, input.module_name, &profile_path, &mut merged);
+            if let Some(profile) = StartupConfigInput::read_startup_profile(&profile_path) {
+                StartupConfigInput::merge_tasks_from_profile(
+                    &profile,
+                    input.module_name,
+                    &profile_path,
+                    &mut merged,
+                );
                 found_any = true;
             }
         }
@@ -78,7 +83,7 @@ pub fn merge_startup_config(input: StartupConfigInput<'_>) -> StartupConfigOutpu
     // 2. Walk oh_modules/ to find HAR/HSP dependencies with startup configs.
     let oh_modules_dir = input.module_root.join("oh_modules");
     if oh_modules_dir.is_dir() {
-        collect_from_oh_modules(&oh_modules_dir, &mut merged, &mut found_any);
+        StartupConfigInput::collect_from_oh_modules(&oh_modules_dir, &mut merged, &mut found_any);
     }
 
     if !found_any {
@@ -86,8 +91,8 @@ pub fn merge_startup_config(input: StartupConfigInput<'_>) -> StartupConfigOutpu
     }
 
     // 3. Validate: no two tasks in the same category may share the same name.
-    check_duplicate_task_names(&merged.startup_tasks, "startupTask");
-    check_duplicate_task_names(
+    StartupConfigInput::check_duplicate_task_names(&merged.startup_tasks, "startupTask");
+    StartupConfigInput::check_duplicate_task_names(
         &merged.app_preload_hint_startup_tasks,
         "appPreloadHintStartupTask",
     );
@@ -128,161 +133,165 @@ pub fn write_startup_config(
 }
 
 // ---------------------------------------------------------------------------
-// Internal helpers
+// Private helpers — grouped on StartupConfigInput
 // ---------------------------------------------------------------------------
 
-/// Parse a `$profile:<name>` reference and return the bare profile name.
-///
-/// Returns `None` for values that are not `$profile:` references.
-fn parse_profile_name(value: &str) -> Option<&str> {
-    value.strip_prefix("$profile:")
-}
-
-/// Read and parse a startup profile JSON file.
-///
-/// Returns `None` when the file does not exist or cannot be parsed.
-fn read_startup_profile(path: &Path) -> Option<AppStartupProfile> {
-    let content = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str::<AppStartupProfile>(&content).ok()
-}
-
-/// Merge tasks from a parsed profile into `merged`, annotating each task with
-/// `module_name` and `startup_config_path`.
-fn merge_tasks_from_profile(
-    profile: &AppStartupProfile,
-    module_name: &str,
-    profile_path: &Path,
-    merged: &mut MergedStartupConfig,
-) {
-    let config_path_str = profile_path.to_string_lossy().into_owned();
-
-    for task in &profile.startup_tasks {
-        let mut t = task.clone();
-        t.module_name = Some(module_name.to_string());
-        t.startup_config_path = Some(config_path_str.clone());
-        merged.startup_tasks.push(t);
+impl<'a> StartupConfigInput<'a> {
+    /// Parse a `$profile:<name>` reference and return the bare profile name.
+    ///
+    /// Returns `None` for values that are not `$profile:` references.
+    fn parse_profile_name(value: &str) -> Option<&str> {
+        value.strip_prefix("$profile:")
     }
 
-    for task in &profile.app_preload_hint_startup_tasks {
-        let mut t = task.clone();
-        t.module_name = Some(module_name.to_string());
-        t.startup_config_path = Some(config_path_str.clone());
-        merged.app_preload_hint_startup_tasks.push(t);
+    /// Read and parse a startup profile JSON file.
+    ///
+    /// Returns `None` when the file does not exist or cannot be parsed.
+    fn read_startup_profile(path: &Path) -> Option<AppStartupProfile> {
+        let content = std::fs::read_to_string(path).ok()?;
+        serde_json::from_str::<AppStartupProfile>(&content).ok()
     }
-}
 
-/// Walk `oh_modules_dir`, find packages with `appStartup` declared in their
-/// `module.json5`, and merge their startup tasks.
-fn collect_from_oh_modules(
-    oh_modules_dir: &Path,
-    merged: &mut MergedStartupConfig,
-    found_any: &mut bool,
-) {
-    let Ok(read_dir) = std::fs::read_dir(oh_modules_dir) else {
-        return;
-    };
+    /// Merge tasks from a parsed profile into `merged`, annotating each task with
+    /// `module_name` and `startup_config_path`.
+    fn merge_tasks_from_profile(
+        profile: &AppStartupProfile,
+        module_name: &str,
+        profile_path: &Path,
+        merged: &mut MergedStartupConfig,
+    ) {
+        let config_path_str = profile_path.to_string_lossy().into_owned();
 
-    for entry in read_dir.flatten() {
-        let pkg_dir = entry.path();
-        if !pkg_dir.is_dir() {
-            continue;
+        for task in &profile.startup_tasks {
+            let mut t = task.clone();
+            t.module_name = Some(module_name.to_string());
+            t.startup_config_path = Some(config_path_str.clone());
+            merged.startup_tasks.push(t);
         }
 
-        let pkg_name = pkg_dir
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_string();
+        for task in &profile.app_preload_hint_startup_tasks {
+            let mut t = task.clone();
+            t.module_name = Some(module_name.to_string());
+            t.startup_config_path = Some(config_path_str.clone());
+            merged.app_preload_hint_startup_tasks.push(t);
+        }
+    }
 
-        if let Some((profile_name, module_name)) = read_app_startup_from_pkg(&pkg_dir, &pkg_name) {
-            // Locate the startup profile JSON.
-            let profile_path = find_startup_profile_in_pkg(&pkg_dir, &profile_name);
-            if let Some(path) = profile_path {
-                if let Some(profile) = read_startup_profile(&path) {
-                    merge_tasks_from_profile(&profile, &module_name, &path, merged);
-                    *found_any = true;
+    /// Walk `oh_modules_dir`, find packages with `appStartup` declared in their
+    /// `module.json5`, and merge their startup tasks.
+    fn collect_from_oh_modules(
+        oh_modules_dir: &Path,
+        merged: &mut MergedStartupConfig,
+        found_any: &mut bool,
+    ) {
+        let Ok(read_dir) = std::fs::read_dir(oh_modules_dir) else {
+            return;
+        };
+
+        for entry in read_dir.flatten() {
+            let pkg_dir = entry.path();
+            if !pkg_dir.is_dir() {
+                continue;
+            }
+
+            let pkg_name = pkg_dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+
+            if let Some((profile_name, module_name)) =
+                Self::read_app_startup_from_pkg(&pkg_dir, &pkg_name)
+            {
+                // Locate the startup profile JSON.
+                let profile_path = Self::find_startup_profile_in_pkg(&pkg_dir, &profile_name);
+                if let Some(path) = profile_path {
+                    if let Some(profile) = Self::read_startup_profile(&path) {
+                        Self::merge_tasks_from_profile(&profile, &module_name, &path, merged);
+                        *found_any = true;
+                    }
                 }
             }
         }
     }
-}
 
-/// Read the `appStartup` reference and module name from an installed package's
-/// `module.json5` (or `module.json`).
-///
-/// Returns `(profile_name, module_name)` when the package declares `appStartup`,
-/// or `None` otherwise.
-fn read_app_startup_from_pkg(pkg_dir: &Path, pkg_name: &str) -> Option<(String, String)> {
-    let candidates: &[PathBuf] = &[
-        pkg_dir.join("src/main/module.json5"),
-        pkg_dir.join("module.json5"),
-        pkg_dir.join("module.json"),
-    ];
+    /// Read the `appStartup` reference and module name from an installed package's
+    /// `module.json5` (or `module.json`).
+    ///
+    /// Returns `(profile_name, module_name)` when the package declares `appStartup`,
+    /// or `None` otherwise.
+    fn read_app_startup_from_pkg(pkg_dir: &Path, pkg_name: &str) -> Option<(String, String)> {
+        let candidates: &[PathBuf] = &[
+            pkg_dir.join("src/main/module.json5"),
+            pkg_dir.join("module.json5"),
+            pkg_dir.join("module.json"),
+        ];
 
-    for candidate in candidates {
-        if !candidate.exists() {
-            continue;
+        for candidate in candidates {
+            if !candidate.exists() {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(candidate) else {
+                continue;
+            };
+            let Ok(raw): Result<serde_json::Value, _> = json5::from_str(&content) else {
+                continue;
+            };
+
+            let app_startup = raw
+                .pointer("/module/appStartup")
+                .and_then(|v| v.as_str())?
+                .to_string();
+
+            let profile_name = Self::parse_profile_name(&app_startup)?.to_string();
+            let module_name = raw
+                .pointer("/module/name")
+                .and_then(|v| v.as_str())
+                .unwrap_or(pkg_name)
+                .to_string();
+
+            return Some((profile_name, module_name));
         }
-        let Ok(content) = std::fs::read_to_string(candidate) else {
-            continue;
-        };
-        let Ok(raw): Result<serde_json::Value, _> = json5::from_str(&content) else {
-            continue;
-        };
 
-        let app_startup = raw
-            .pointer("/module/appStartup")
-            .and_then(|v| v.as_str())?
-            .to_string();
-
-        let profile_name = parse_profile_name(&app_startup)?.to_string();
-        let module_name = raw
-            .pointer("/module/name")
-            .and_then(|v| v.as_str())
-            .unwrap_or(pkg_name)
-            .to_string();
-
-        return Some((profile_name, module_name));
+        None
     }
 
-    None
-}
-
-/// Find the startup profile JSON file within an installed package.
-///
-/// Tries the source layout (`src/main/resources/base/profile/<name>.json`) and
-/// the pre-built layout (`resources/base/profile/<name>.json`).
-fn find_startup_profile_in_pkg(pkg_dir: &Path, profile_name: &str) -> Option<PathBuf> {
-    let candidates = [
-        pkg_dir
-            .join("src/main/resources/base/profile")
-            .join(format!("{}.json", profile_name)),
-        pkg_dir
-            .join("resources/base/profile")
-            .join(format!("{}.json", profile_name)),
-    ];
-    for candidate in &candidates {
-        if candidate.exists() {
-            return Some(candidate.clone());
+    /// Find the startup profile JSON file within an installed package.
+    ///
+    /// Tries the source layout (`src/main/resources/base/profile/<name>.json`) and
+    /// the pre-built layout (`resources/base/profile/<name>.json`).
+    fn find_startup_profile_in_pkg(pkg_dir: &Path, profile_name: &str) -> Option<PathBuf> {
+        let candidates = [
+            pkg_dir
+                .join("src/main/resources/base/profile")
+                .join(format!("{}.json", profile_name)),
+            pkg_dir
+                .join("resources/base/profile")
+                .join(format!("{}.json", profile_name)),
+        ];
+        for candidate in &candidates {
+            if candidate.exists() {
+                return Some(candidate.clone());
+            }
         }
+        None
     }
-    None
-}
 
-/// Emit a warning when two tasks in the same category share the same name.
-///
-/// Hvigor calls `printErrorExit` here; arkdown downgrades to a non-fatal
-/// warning so the build can continue.
-fn check_duplicate_task_names(tasks: &[StartupTask], category: &str) {
-    let mut seen: FxHashSet<&str> = FxHashSet::default();
-    for task in tasks {
-        if !seen.insert(task.name.as_str()) {
-            tracing::warn!(
-                category,
-                name = task.name,
-                module_name = ?task.module_name,
-                "startup config duplicate task name"
-            );
+    /// Emit a warning when two tasks in the same category share the same name.
+    ///
+    /// Hvigor calls `printErrorExit` here; arkdown downgrades to a non-fatal
+    /// warning so the build can continue.
+    fn check_duplicate_task_names(tasks: &[StartupTask], category: &str) {
+        let mut seen: FxHashSet<&str> = FxHashSet::default();
+        for task in tasks {
+            if !seen.insert(task.name.as_str()) {
+                tracing::warn!(
+                    category,
+                    name = task.name,
+                    module_name = ?task.module_name,
+                    "startup config duplicate task name"
+                );
+            }
         }
     }
 }
@@ -481,12 +490,15 @@ mod tests {
     #[test]
     fn test_parse_profile_name() {
         assert_eq!(
-            parse_profile_name("$profile:startup_config"),
+            StartupConfigInput::parse_profile_name("$profile:startup_config"),
             Some("startup_config")
         );
-        assert_eq!(parse_profile_name("$profile:my_config"), Some("my_config"));
-        assert_eq!(parse_profile_name("not_a_profile"), None);
-        assert_eq!(parse_profile_name(""), None);
+        assert_eq!(
+            StartupConfigInput::parse_profile_name("$profile:my_config"),
+            Some("my_config")
+        );
+        assert_eq!(StartupConfigInput::parse_profile_name("not_a_profile"), None);
+        assert_eq!(StartupConfigInput::parse_profile_name(""), None);
     }
 
     #[test]

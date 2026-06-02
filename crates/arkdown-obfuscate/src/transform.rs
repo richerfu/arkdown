@@ -117,11 +117,11 @@ impl ObfuscationRules {
             let renamed = if rename_map.is_empty() {
                 source.to_string()
             } else {
-                apply_renames(source, &rename_map)
+                Self::apply_renames(source, &rename_map)
             };
 
             if self.remove_log {
-                remove_console_log(&renamed)
+                Self::remove_console_log(&renamed)
             } else {
                 renamed
             }
@@ -143,85 +143,123 @@ impl ObfuscationRules {
     }
 }
 
-/// Apply all renames from `rename_map` to `source` using whole-word, non-
-/// property-access matching.
-fn apply_renames(source: &str, rename_map: &FxHashMap<String, String>) -> String {
-    // Collect (start, end, new_name) tuples for every occurrence.
-    let mut replacements: Vec<(usize, usize, String)> = Vec::new();
+impl ObfuscationRules {
+    /// Apply all renames from `rename_map` to `source` using whole-word, non-
+    /// property-access matching.
+    fn apply_renames(source: &str, rename_map: &FxHashMap<String, String>) -> String {
+        // Collect (start, end, new_name) tuples for every occurrence.
+        let mut replacements: Vec<(usize, usize, String)> = Vec::new();
 
-    for (original, new_name) in rename_map {
-        for (start, end) in find_identifier_occurrences(source, original) {
-            replacements.push((start, end, new_name.clone()));
-        }
-    }
-
-    if replacements.is_empty() {
-        return source.to_string();
-    }
-
-    // Sort descending by start so we can splice without invalidating offsets.
-    replacements.sort_by(|a, b| b.0.cmp(&a.0));
-    // Remove duplicates at the same offset (keep one arbitrarily).
-    replacements.dedup_by(|a, b| a.0 == b.0);
-
-    let mut result = source.to_string();
-    for (start, end, new_name) in replacements {
-        if end <= result.len() {
-            result.replace_range(start..end, &new_name);
-        }
-    }
-    result
-}
-
-/// Return the `(start, end)` byte ranges of all whole-word, non-property-access
-/// occurrences of `name` in `source`.
-///
-/// An occurrence is excluded when:
-/// - the byte immediately before it is `.` (property access: `obj.name`)
-/// - the byte immediately before or after it is an identifier continuation
-///   character (`[A-Za-z0-9_$]`), which would make it a different identifier
-fn find_identifier_occurrences(source: &str, name: &str) -> Vec<(usize, usize)> {
-    let name_len = name.len();
-    if name_len == 0 {
-        return Vec::new();
-    }
-
-    let source_bytes = source.as_bytes();
-    let mut result = Vec::new();
-    let mut search_from = 0usize;
-
-    while search_from + name_len <= source.len() {
-        match source[search_from..].find(name) {
-            None => break,
-            Some(rel_pos) => {
-                let abs_start = search_from + rel_pos;
-                let abs_end = abs_start + name_len;
-
-                // Boundary check: character before must not be an ident char or '.'
-                let before_ok = abs_start == 0 || {
-                    let prev = source_bytes[abs_start - 1];
-                    !is_ident_char(prev) && prev != b'.'
-                };
-
-                // Boundary check: character after must not be an ident char
-                let after_ok = abs_end >= source.len() || !is_ident_char(source_bytes[abs_end]);
-
-                if before_ok && after_ok {
-                    result.push((abs_start, abs_end));
-                }
-
-                // Advance by 1 to catch adjacent non-overlapping matches.
-                search_from = abs_start + 1;
+        for (original, new_name) in rename_map {
+            for (start, end) in Self::find_identifier_occurrences(source, original) {
+                replacements.push((start, end, new_name.clone()));
             }
         }
-    }
-    result
-}
 
-/// Return `true` if `b` can be an interior byte of a JS identifier.
-#[inline]
-fn is_ident_char(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
+        if replacements.is_empty() {
+            return source.to_string();
+        }
+
+        // Sort descending by start so we can splice without invalidating offsets.
+        replacements.sort_by(|a, b| b.0.cmp(&a.0));
+        // Remove duplicates at the same offset (keep one arbitrarily).
+        replacements.dedup_by(|a, b| a.0 == b.0);
+
+        let mut result = source.to_string();
+        for (start, end, new_name) in replacements {
+            if end <= result.len() {
+                result.replace_range(start..end, &new_name);
+            }
+        }
+        result
+    }
+
+    /// Return the `(start, end)` byte ranges of all whole-word, non-property-access
+    /// occurrences of `name` in `source`.
+    ///
+    /// An occurrence is excluded when:
+    /// - the byte immediately before it is `.` (property access: `obj.name`)
+    /// - the byte immediately before or after it is an identifier continuation
+    ///   character (`[A-Za-z0-9_$]`), which would make it a different identifier
+    fn find_identifier_occurrences(source: &str, name: &str) -> Vec<(usize, usize)> {
+        let name_len = name.len();
+        if name_len == 0 {
+            return Vec::new();
+        }
+
+        let source_bytes = source.as_bytes();
+        let mut result = Vec::new();
+        let mut search_from = 0usize;
+
+        while search_from + name_len <= source.len() {
+            match source[search_from..].find(name) {
+                None => break,
+                Some(rel_pos) => {
+                    let abs_start = search_from + rel_pos;
+                    let abs_end = abs_start + name_len;
+
+                    // Boundary check: character before must not be an ident char or '.'
+                    let before_ok = abs_start == 0 || {
+                        let prev = source_bytes[abs_start - 1];
+                        !Self::is_ident_char(prev) && prev != b'.'
+                    };
+
+                    // Boundary check: character after must not be an ident char
+                    let after_ok =
+                        abs_end >= source.len() || !Self::is_ident_char(source_bytes[abs_end]);
+
+                    if before_ok && after_ok {
+                        result.push((abs_start, abs_end));
+                    }
+
+                    // Advance by 1 to catch adjacent non-overlapping matches.
+                    search_from = abs_start + 1;
+                }
+            }
+        }
+        result
+    }
+
+    /// Return `true` if `b` can be an interior byte of a JS identifier.
+    #[inline]
+    fn is_ident_char(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
+    }
+
+    /// Remove expression statements that are bare `console.{log,warn,error,debug}(...)` calls.
+    fn remove_console_log(source: &str) -> String {
+        let alloc = Allocator::default();
+        let parsed = Parser::new(&alloc, source, SourceType::default().with_module(true)).parse();
+        if parsed.panicked || !parsed.errors.is_empty() {
+            return source.to_owned();
+        }
+
+        let patches = parsed
+            .program
+            .body
+            .iter()
+            .filter(Self::is_console_log_statement)
+            .map(|statement| SourcePatch::removal(source, statement.span()))
+            .collect::<Vec<_>>();
+        SourcePatch::apply_all(source, patches)
+    }
+
+    fn is_console_log_statement(statement: &&Statement<'_>) -> bool {
+        let Statement::ExpressionStatement(statement) = statement else {
+            return false;
+        };
+        let Expression::CallExpression(call) = &statement.expression else {
+            return false;
+        };
+        let Expression::StaticMemberExpression(member) = &call.callee else {
+            return false;
+        };
+        matches!(&member.object, Expression::Identifier(identifier) if identifier.name.as_str() == "console")
+            && matches!(
+                member.property.name.as_str(),
+                "log" | "warn" | "error" | "debug"
+            )
+    }
 }
 
 #[derive(Debug)]
@@ -231,73 +269,40 @@ struct SourcePatch {
     replacement: String,
 }
 
-/// Remove expression statements that are bare `console.{log,warn,error,debug}(...)` calls.
-fn remove_console_log(source: &str) -> String {
-    let alloc = Allocator::default();
-    let parsed = Parser::new(&alloc, source, SourceType::default().with_module(true)).parse();
-    if parsed.panicked || !parsed.errors.is_empty() {
-        return source.to_owned();
-    }
-
-    let patches = parsed
-        .program
-        .body
-        .iter()
-        .filter(is_console_log_statement)
-        .map(|statement| removal_patch(source, statement.span()))
-        .collect::<Vec<_>>();
-    apply_source_patches(source, patches)
-}
-
-fn is_console_log_statement(statement: &&Statement<'_>) -> bool {
-    let Statement::ExpressionStatement(statement) = statement else {
-        return false;
-    };
-    let Expression::CallExpression(call) = &statement.expression else {
-        return false;
-    };
-    let Expression::StaticMemberExpression(member) = &call.callee else {
-        return false;
-    };
-    matches!(&member.object, Expression::Identifier(identifier) if identifier.name.as_str() == "console")
-        && matches!(
-            member.property.name.as_str(),
-            "log" | "warn" | "error" | "debug"
-        )
-}
-
-fn removal_patch(source: &str, span: Span) -> SourcePatch {
-    let mut end = span.end as usize;
-    if source
-        .as_bytes()
-        .get(end)
-        .is_some_and(|byte| *byte == b'\n')
-    {
-        end += 1;
-    }
-    SourcePatch {
-        start: span.start as usize,
-        end,
-        replacement: String::new(),
-    }
-}
-
-fn apply_source_patches(source: &str, mut patches: Vec<SourcePatch>) -> String {
-    if patches.is_empty() {
-        return source.to_owned();
-    }
-    patches.sort_by_key(|patch| patch.start);
-
-    let mut out = String::with_capacity(source.len());
-    let mut last_end = 0usize;
-    for patch in patches {
-        if patch.start < last_end {
-            continue;
+impl SourcePatch {
+    fn removal(source: &str, span: Span) -> Self {
+        let mut end = span.end as usize;
+        if source
+            .as_bytes()
+            .get(end)
+            .is_some_and(|byte| *byte == b'\n')
+        {
+            end += 1;
         }
-        out.push_str(&source[last_end..patch.start]);
-        out.push_str(&patch.replacement);
-        last_end = patch.end;
+        Self {
+            start: span.start as usize,
+            end,
+            replacement: String::new(),
+        }
     }
-    out.push_str(&source[last_end..]);
-    out
+
+    fn apply_all(source: &str, mut patches: Vec<Self>) -> String {
+        if patches.is_empty() {
+            return source.to_owned();
+        }
+        patches.sort_by_key(|patch| patch.start);
+
+        let mut out = String::with_capacity(source.len());
+        let mut last_end = 0usize;
+        for patch in patches {
+            if patch.start < last_end {
+                continue;
+            }
+            out.push_str(&source[last_end..patch.start]);
+            out.push_str(&patch.replacement);
+            last_end = patch.end;
+        }
+        out.push_str(&source[last_end..]);
+        out
+    }
 }

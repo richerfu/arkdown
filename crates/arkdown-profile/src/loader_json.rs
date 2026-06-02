@@ -396,9 +396,7 @@ pub struct ByteCodeHarEntry {
 ///    - If `path` is relative: join it onto the current working directory, then
 ///      normalize.
 
-pub(super) fn to_unix_path(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
-}
+pub(super) use arkdown_utils::to_unix_path;
 
 pub(super) fn to_absolute_path_string(path: &Path) -> String {
     // Fast path: canonicalize works for real, existing paths.
@@ -646,10 +644,6 @@ impl LoaderJson {
             },
         );
         map
-    }
-
-    fn to_unix_path(path: &Path) -> String {
-        path.to_string_lossy().replace('\\', "/")
     }
 
     fn normalize_path_string(path: &Path) -> String {
