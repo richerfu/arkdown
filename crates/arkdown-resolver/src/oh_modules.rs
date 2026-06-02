@@ -43,6 +43,8 @@ pub struct OhPackage {
     pub types: Option<String>,
     /// ESM exports map.
     pub exports: Option<serde_json::Value>,
+    /// ESM module entry (npm `module` field convention).
+    pub module: Option<String>,
     pub dependencies: FxHashMap<String, String>,
     pub dynamic_dependencies: FxHashMap<String, String>,
     pub metadata: OhPackageMetadata,
@@ -57,6 +59,7 @@ impl Default for OhPackage {
             main: None,
             types: None,
             exports: None,
+            module: None,
             dependencies: FxHashMap::default(),
             dynamic_dependencies: FxHashMap::default(),
             metadata: OhPackageMetadata::default(),
@@ -191,6 +194,17 @@ impl OhPackage {
             }
         }
         deps
+    }
+
+    /// Look up a raw dependency value by specifier across all dependency maps.
+    ///
+    /// Checks `dependencies` then `dynamicDependencies`.
+    /// Returns the raw value string (e.g. `"^1.0.0"` or `"file:../lib"`).
+    pub fn dependency_value(&self, specifier: &str) -> Option<&str> {
+        self.dependencies
+            .get(specifier)
+            .or_else(|| self.dynamic_dependencies.get(specifier))
+            .map(String::as_str)
     }
 }
 
