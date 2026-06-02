@@ -21,14 +21,6 @@ pub struct CompileEnv {
     pub cache_path: String,
 }
 
-/// Compute the `compileEnv` string from an [`ArkdownConfig`] and a cache path.
-///
-/// The returned string is the `#`-joined representation used as the cache
-/// discriminator, matching hvigor's `getCompileEnv()` implementation.
-pub fn compute_compile_env(config: &ArkdownConfig, cache_path: &str) -> String {
-    CompileEnv::from_config(config, cache_path).to_key_string()
-}
-
 impl CompileEnv {
     /// Build a `CompileEnv` from an [`ArkdownConfig`] and cache path.
     pub fn from_config(config: &ArkdownConfig, cache_path: &str) -> Self {

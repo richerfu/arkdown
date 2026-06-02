@@ -1,7 +1,6 @@
 use std::io;
 use std::path::Path;
 
-use arkdown_cache::compute_compile_env;
 use arkdown_core::ArkdownConfig;
 use arkdown_profile::LoaderJson;
 
@@ -31,7 +30,7 @@ impl TaskInputs {
         let source_hash = hash_source_files(&loader.compile_entry);
         let obfuscation_hash = compute_obfuscation_hash(config);
         let sdk_version = config.sdk_config.compile_sdk_version.clone();
-        let compile_env = compute_compile_env(config, &loader.cache_path);
+        let compile_env = arkdown_cache::CompileEnv::from_config(config, &loader.cache_path).to_key_string();
         TaskInputs {
             source_hash,
             obfuscation_hash,
