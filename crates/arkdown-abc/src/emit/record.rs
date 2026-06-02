@@ -32,29 +32,6 @@ pub enum MethodKind {
 }
 
 /// Return the correct `access_flags` value for a method based on its IR role.
-pub(crate) fn method_access_flags_for(method: &MethodRecord) -> u32 {
-    match method.kind {
-        MethodKind::Module => method_access::MODULE_OR_CTOR,
-        MethodKind::Constructor if is_generated_default_derived_constructor(method) => {
-            method_access::MODULE_OR_CTOR
-        }
-        MethodKind::Anonymous => method_access::ANON,
-        MethodKind::Function | MethodKind::Constructor => method_access::INSTANCE,
-    }
-}
-
-fn is_generated_default_derived_constructor(method: &MethodRecord) -> bool {
-    // GENERATED_CONSTRUCTOR follows upstream es2panda's default derived class
-    // path: FunctionEnter, CopyRestArgs, SuperCallSpread, implicit this checks.
-    method.bytecode.starts_with(&[
-        0x44, 0x60, // mov v0, v6
-        0x44, 0x71, // mov v1, v7
-        0x44, 0x82, // mov v2, v8
-        0x44, 0x93, // mov v3, v9
-        0xcf, 0x00, // copyrestargs 0
-    ])
-}
-
 /// Encode a Panda `StringItem` as an inline ULEB128-prefixed null-terminated string.
 ///
 /// Panda wire format (from `libpandafile/file_items.h`):
@@ -475,7 +452,7 @@ impl ClassRecord {
             // name_off: u32 LE (file offset to method's StringItem)
             buf.extend_from_slice(&name_off.to_le_bytes());
             // access_flags: ULEB128 — per-method type (INSTANCE=0x008, MODULE_OR_CTOR=0x108, ANON=0x208)
-            buf.extend_from_slice(&uleb128(method_access_flags_for(method) as u64));
+            buf.extend_from_slice(&uleb128(method.access_flags() as u64));
             // MethodTag::CODE = 0x01
             buf.push(0x01);
             // code_off: u32 LE (file offset to CodeItem)
@@ -500,13 +477,42 @@ impl ClassRecord {
 }
 
 impl MethodRecord {
+    /// Compute the Panda access flags for this method.
+    ///
+    /// Matches upstream es2panda's access flag assignment:
+    /// - `MODULE` / `CONSTRUCTOR` → `MODULE_OR_CTOR` (0x108)
+    /// - `ANONYMOUS` → `ANON` (0x208)
+    /// - `INSTANCE` / other → `INSTANCE` (0x008)
+    pub(crate) fn access_flags(&self) -> u32 {
+        match self.kind {
+            MethodKind::Module => method_access::MODULE_OR_CTOR,
+            MethodKind::Constructor if self.is_generated_default_derived_constructor() => {
+                method_access::MODULE_OR_CTOR
+            }
+            MethodKind::Anonymous => method_access::ANON,
+            MethodKind::Function | MethodKind::Constructor => method_access::INSTANCE,
+        }
+    }
+
+    fn is_generated_default_derived_constructor(&self) -> bool {
+        // GENERATED_CONSTRUCTOR follows upstream es2panda's default derived class
+        // path: FunctionEnter, CopyRestArgs, SuperCallSpread, implicit this checks.
+        self.bytecode.starts_with(&[
+            0x44, 0x60, // mov v0, v6
+            0x44, 0x71, // mov v1, v7
+            0x44, 0x82, // mov v2, v8
+            0x44, 0x93, // mov v3, v9
+            0xcf, 0x00, // copyrestargs 0
+        ])
+    }
+
     pub(crate) fn method_item_byte_size(&self) -> usize {
         // class_idx(2) + proto_idx(2) + name_off(4) + access_flags(variable)
         // + MethodTag::CODE(1) + code_off(4) + MethodTag::SOURCE_LANG(1) + lang(1)
         // + MethodTag::ANNOTATION(1) + ann_off(4)  ← always emitted
         // + MethodTag::DEBUG_INFO(1) + debug_off(4) ← only when debug_info present
         // + MethodTag::NOTHING(1)
-        let access_flags_len = uleb128(method_access_flags_for(self) as u64).len();
+        let access_flags_len = uleb128(self.access_flags() as u64).len();
         16 + access_flags_len
             + (1 + 4) // MethodTag::ANNOTATION always emitted
             + self.debug_info.as_ref().map_or(0, |_| 1 + 4)
