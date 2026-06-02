@@ -216,7 +216,7 @@ impl ResourceCompiler {
 
                     ResourceCategory::Media => {
                         let filename = file.path.file_name().expect("media file has no filename");
-                        let qualifier = qualifier_dir(&file.qualifier.0);
+                        let qualifier = Self::qualifier_dir(&file.qualifier.0);
                         let entry_type = ResourceTypeCode(0x13); // MEDIA type (matches restool 6.0)
                         if !seen_in_module.insert((
                             file.qualifier.0.clone(),
@@ -237,7 +237,7 @@ impl ResourceCompiler {
                             .push(PendingEntry {
                                 entry_type,
                                 name: file.name.clone(),
-                                value: resource_value_path(
+                                value: Self::resource_value_path(
                                     &self.config.module_name,
                                     &relative_path,
                                 ),
@@ -249,7 +249,7 @@ impl ResourceCompiler {
 
                     ResourceCategory::Profile => {
                         let filename = file.path.file_name().expect("profile file has no filename");
-                        let qualifier = qualifier_dir(&file.qualifier.0);
+                        let qualifier = Self::qualifier_dir(&file.qualifier.0);
                         let entry_type = ResourceTypeCode(0x14); // PROFILE type (matches restool 6.0)
                         if !seen_in_module.insert((
                             file.qualifier.0.clone(),
@@ -272,7 +272,7 @@ impl ResourceCompiler {
                             .push(PendingEntry {
                                 entry_type,
                                 name: file.name.clone(),
-                                value: resource_value_path(
+                                value: Self::resource_value_path(
                                     &self.config.module_name,
                                     &relative_path,
                                 ),
@@ -302,21 +302,21 @@ impl ResourceCompiler {
                 }
             }
 
-            commit_pending_entries(
+            Self::commit_pending_entries(
                 &element_entries,
                 &mut id_allocator,
                 &mut resource_infos,
                 &mut emitted_resources,
                 &mut all_entries,
             );
-            commit_pending_entries(
+            Self::commit_pending_entries(
                 &media_entries,
                 &mut id_allocator,
                 &mut resource_infos,
                 &mut emitted_resources,
                 &mut all_entries,
             );
-            commit_pending_entries(
+            Self::commit_pending_entries(
                 &profile_entries,
                 &mut id_allocator,
                 &mut resource_infos,
@@ -326,7 +326,7 @@ impl ResourceCompiler {
         }
 
         let resources_dir = layout.resources_dir();
-        copy_resource_files(
+        Self::copy_resource_files(
             &resource_copies,
             &resources_dir,
             id_allocator.resource_ids(),
@@ -341,7 +341,7 @@ impl ResourceCompiler {
         table::write_resource_table(&all_entries, &table_path)?;
 
         let ids_defined_path = layout.ids_defined();
-        write_id_defined(&all_entries, &ids_defined_path)?;
+        Self::write_id_defined(&all_entries, &ids_defined_path)?;
 
         Ok(ResourceCompileOutput {
             resources_index: index_path,
@@ -355,135 +355,138 @@ impl ResourceCompiler {
     }
 }
 
-fn commit_pending_entries(
-    groups: &BTreeMap<(u32, String), Vec<PendingEntry>>,
-    id_allocator: &mut ResourceIdAllocator,
-    resource_infos: &mut FxHashMap<String, ResourceInfo>,
-    emitted_resources: &mut FxHashSet<(String, u32, String)>,
-    all_entries: &mut Vec<CompiledEntry>,
-) {
-    for ((entry_type, id_name), entries) in groups {
-        let id = id_allocator.assign(*entry_type, id_name);
-        for entry in entries {
-            if let Some(resource_key) = &entry.resource_key {
-                resource_infos
-                    .entry(resource_key.clone())
-                    .or_insert(ResourceInfo {
-                        id,
-                        runtime_type: entry.runtime_type,
-                    });
+// Private helpers for ResourceCompiler::compile.
+impl ResourceCompiler {
+    fn commit_pending_entries(
+        groups: &BTreeMap<(u32, String), Vec<PendingEntry>>,
+        id_allocator: &mut ResourceIdAllocator,
+        resource_infos: &mut FxHashMap<String, ResourceInfo>,
+        emitted_resources: &mut FxHashSet<(String, u32, String)>,
+        all_entries: &mut Vec<CompiledEntry>,
+    ) {
+        for ((entry_type, id_name), entries) in groups {
+            let id = id_allocator.assign(*entry_type, id_name);
+            for entry in entries {
+                if let Some(resource_key) = &entry.resource_key {
+                    resource_infos
+                        .entry(resource_key.clone())
+                        .or_insert(ResourceInfo {
+                            id,
+                            runtime_type: entry.runtime_type,
+                        });
+                }
+                if !emitted_resources.insert((
+                    entry.qualifier.clone(),
+                    entry.entry_type.0,
+                    entry.name.clone(),
+                )) {
+                    continue;
+                }
+                all_entries.push(CompiledEntry {
+                    id,
+                    entry_type: entry.entry_type.0,
+                    name: entry.name.clone(),
+                    value: entry.value.clone(),
+                    qualifier: entry.qualifier.clone(),
+                });
             }
-            if !emitted_resources.insert((
-                entry.qualifier.clone(),
-                entry.entry_type.0,
-                entry.name.clone(),
-            )) {
+        }
+    }
+
+    fn qualifier_dir(qualifier: &str) -> &str {
+        if qualifier.is_empty() {
+            "base"
+        } else {
+            qualifier
+        }
+    }
+
+    fn resource_value_path(module_name: &str, relative_path: &Path) -> String {
+        format!(
+            "{}/resources/{}",
+            module_name,
+            relative_path.to_string_lossy().replace('\\', "/")
+        )
+    }
+
+    fn copy_resource_files(
+        copies: &[ResourceCopy],
+        resources_dir: &Path,
+        resource_ids: &FxHashMap<String, u32>,
+    ) -> Result<(), ResourceError> {
+        fs_err::create_dir_all(resources_dir)?;
+        for copy in copies {
+            let out_path = resources_dir.join(&copy.relative_path);
+            if let Some(parent) = out_path.parent() {
+                fs_err::create_dir_all(parent)?;
+            }
+            if out_path.exists() {
                 continue;
             }
-            all_entries.push(CompiledEntry {
-                id,
-                entry_type: entry.entry_type.0,
-                name: entry.name.clone(),
-                value: entry.value.clone(),
-                qualifier: entry.qualifier.clone(),
-            });
-        }
-    }
-}
 
-fn qualifier_dir(qualifier: &str) -> &str {
-    if qualifier.is_empty() {
-        "base"
-    } else {
-        qualifier
-    }
-}
-
-fn resource_value_path(module_name: &str, relative_path: &Path) -> String {
-    format!(
-        "{}/resources/{}",
-        module_name,
-        relative_path.to_string_lossy().replace('\\', "/")
-    )
-}
-
-fn copy_resource_files(
-    copies: &[ResourceCopy],
-    resources_dir: &Path,
-    resource_ids: &FxHashMap<String, u32>,
-) -> Result<(), ResourceError> {
-    fs_err::create_dir_all(resources_dir)?;
-    for copy in copies {
-        let out_path = resources_dir.join(&copy.relative_path);
-        if let Some(parent) = out_path.parent() {
-            fs_err::create_dir_all(parent)?;
-        }
-        if out_path.exists() {
-            continue;
-        }
-
-        if copy.category == ResourceCategory::Media
-            && copy.source.extension().and_then(|e| e.to_str()) == Some("json")
-        {
-            let content = fs_err::read_to_string(&copy.source)?;
-            if let Ok(mut json) = serde_json::from_str::<Value>(&content) {
-                rewrite_media_refs(&mut json, resource_ids);
-                let bytes =
-                    serde_json::to_vec_pretty(&json).unwrap_or_else(|_| content.into_bytes());
-                fs_err::write(&out_path, bytes)?;
-                continue;
-            }
-        }
-
-        fs_err::copy(&copy.source, &out_path)?;
-    }
-    Ok(())
-}
-
-fn rewrite_media_refs(value: &mut Value, resource_ids: &FxHashMap<String, u32>) {
-    match value {
-        Value::String(s) => {
-            if let Some(name) = s.strip_prefix("$media:") {
-                if let Some(id) = resource_ids.get(name) {
-                    *s = format!("$media:{id}");
+            if copy.category == ResourceCategory::Media
+                && copy.source.extension().and_then(|e| e.to_str()) == Some("json")
+            {
+                let content = fs_err::read_to_string(&copy.source)?;
+                if let Ok(mut json) = serde_json::from_str::<Value>(&content) {
+                    Self::rewrite_media_refs(&mut json, resource_ids);
+                    let bytes =
+                        serde_json::to_vec_pretty(&json).unwrap_or_else(|_| content.into_bytes());
+                    fs_err::write(&out_path, bytes)?;
+                    continue;
                 }
             }
-        }
-        Value::Array(items) => {
-            for item in items {
-                rewrite_media_refs(item, resource_ids);
-            }
-        }
-        Value::Object(map) => {
-            for item in map.values_mut() {
-                rewrite_media_refs(item, resource_ids);
-            }
-        }
-        _ => {}
-    }
-}
 
-fn write_id_defined(entries: &[CompiledEntry], output: &Path) -> Result<(), ResourceError> {
-    if let Some(parent) = output.parent() {
-        fs_err::create_dir_all(parent)?;
+            fs_err::copy(&copy.source, &out_path)?;
+        }
+        Ok(())
     }
-    let mut unique = entries.iter().collect::<Vec<_>>();
-    unique.sort_by(|a, b| a.id.cmp(&b.id));
-    unique.dedup_by(|a, b| a.id == b.id);
-    let records = unique
-        .iter()
-        .map(|entry| {
-            serde_json::json!({
-                "type": ResourceTypeCode(entry.entry_type).type_name(),
-                "name": entry.name,
-                "id": format!("0x{:08X}", entry.id),
+
+    fn rewrite_media_refs(value: &mut Value, resource_ids: &FxHashMap<String, u32>) {
+        match value {
+            Value::String(s) => {
+                if let Some(name) = s.strip_prefix("$media:") {
+                    if let Some(id) = resource_ids.get(name) {
+                        *s = format!("$media:{id}");
+                    }
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    Self::rewrite_media_refs(item, resource_ids);
+                }
+            }
+            Value::Object(map) => {
+                for item in map.values_mut() {
+                    Self::rewrite_media_refs(item, resource_ids);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn write_id_defined(entries: &[CompiledEntry], output: &Path) -> Result<(), ResourceError> {
+        if let Some(parent) = output.parent() {
+            fs_err::create_dir_all(parent)?;
+        }
+        let mut unique = entries.iter().collect::<Vec<_>>();
+        unique.sort_by(|a, b| a.id.cmp(&b.id));
+        unique.dedup_by(|a, b| a.id == b.id);
+        let records = unique
+            .iter()
+            .map(|entry| {
+                serde_json::json!({
+                    "type": ResourceTypeCode(entry.entry_type).type_name(),
+                    "name": entry.name,
+                    "id": format!("0x{:08X}", entry.id),
+                })
             })
-        })
-        .collect::<Vec<_>>();
-    let content = serde_json::to_vec_pretty(&serde_json::json!({ "record": records }))
-        .expect("serializing id_defined.json should not fail");
-    fs_err::write(output, content)?;
-    Ok(())
+            .collect::<Vec<_>>();
+        let content = serde_json::to_vec_pretty(&serde_json::json!({ "record": records }))
+            .expect("serializing id_defined.json should not fail");
+        fs_err::write(output, content)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
