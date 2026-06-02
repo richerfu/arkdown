@@ -89,6 +89,48 @@ pub struct CompiledEntry {
     pub qualifier: String,
 }
 
+/// Newtype wrapper around a raw resource type code (`u32`).
+///
+/// Provides named methods for the two common mappings:
+/// - [`type_name`](ResourceTypeCode::type_name) — human-readable name used in
+///   `ResourceTable.txt` and `id_defined.json`.
+/// - [`runtime_type`](ResourceTypeCode::runtime_type) — numeric runtime type
+///   used by the `$r()` transform in ets-loader.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResourceTypeCode(pub u32);
+
+impl ResourceTypeCode {
+    /// Map this type code to its human-readable name.
+    ///
+    /// Returns `"unknown"` for unrecognised codes.
+    pub fn type_name(self) -> &'static str {
+        match self.0 {
+            0x08 => "integer",
+            0x12 => "float",
+            0x09 => "string",
+            0x0E => "color",
+            0x13 => "media",
+            0x14 => "profile",
+            _ => "unknown",
+        }
+    }
+
+    /// Map this type code to the runtime resource type integer consumed by the
+    /// ArkTS `$r()` transform.
+    ///
+    /// Returns `0` for unrecognised codes.
+    pub fn runtime_type(self) -> u32 {
+        match self.0 {
+            0x0E => 10001,
+            0x12 => 10002,
+            0x09 => 10003,
+            0x08 => 10007,
+            0x13 => 20000,
+            _ => 0,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct ResourceCopy {
     source: PathBuf,
@@ -98,7 +140,7 @@ struct ResourceCopy {
 
 #[derive(Debug, Clone)]
 struct PendingEntry {
-    entry_type: u32,
+    entry_type: ResourceTypeCode,
     name: String,
     value: String,
     qualifier: String,
@@ -147,19 +189,19 @@ impl ResourceCompiler {
                     ResourceCategory::Element => {
                         let entries = element::parse_element_file(&file.path);
                         for e in entries {
-                            let entry_type = e.entry_type.resource_type_id();
+                            let entry_type = ResourceTypeCode(e.entry_type.resource_type_id());
                             if !seen_in_module.insert((
                                 file.qualifier.0.clone(),
-                                entry_type,
+                                entry_type.0,
                                 e.name.clone(),
                             )) {
                                 continue;
                             }
-                            let runtime_type = runtime_resource_type(entry_type);
+                            let runtime_type = entry_type.runtime_type();
                             let resource_key =
-                                format!("{}.{}", resource_type_name(entry_type), e.name.clone());
+                                format!("{}.{}", entry_type.type_name(), e.name.clone());
                             element_entries
-                                .entry((entry_type, e.name.clone()))
+                                .entry((entry_type.0, e.name.clone()))
                                 .or_default()
                                 .push(PendingEntry {
                                     entry_type,
@@ -175,10 +217,10 @@ impl ResourceCompiler {
                     ResourceCategory::Media => {
                         let filename = file.path.file_name().expect("media file has no filename");
                         let qualifier = qualifier_dir(&file.qualifier.0);
-                        let entry_type = 0x13; // MEDIA type (matches restool 6.0)
+                        let entry_type = ResourceTypeCode(0x13); // MEDIA type (matches restool 6.0)
                         if !seen_in_module.insert((
                             file.qualifier.0.clone(),
-                            entry_type,
+                            entry_type.0,
                             file.name.clone(),
                         )) {
                             continue;
@@ -190,7 +232,7 @@ impl ResourceCompiler {
                             category: file.category.clone(),
                         });
                         media_entries
-                            .entry((entry_type, file.name.clone()))
+                            .entry((entry_type.0, file.name.clone()))
                             .or_default()
                             .push(PendingEntry {
                                 entry_type,
@@ -201,17 +243,17 @@ impl ResourceCompiler {
                                 ),
                                 qualifier: file.qualifier.0.clone(),
                                 resource_key: Some(format!("media.{}", file.name)),
-                                runtime_type: runtime_resource_type(entry_type),
+                                runtime_type: entry_type.runtime_type(),
                             });
                     }
 
                     ResourceCategory::Profile => {
                         let filename = file.path.file_name().expect("profile file has no filename");
                         let qualifier = qualifier_dir(&file.qualifier.0);
-                        let entry_type = 0x14; // PROFILE type (matches restool 6.0)
+                        let entry_type = ResourceTypeCode(0x14); // PROFILE type (matches restool 6.0)
                         if !seen_in_module.insert((
                             file.qualifier.0.clone(),
-                            entry_type,
+                            entry_type.0,
                             file.name.clone(),
                         )) {
                             continue;
@@ -225,7 +267,7 @@ impl ResourceCompiler {
                         let out_path = layout.resource_path(&relative_path);
                         profiles.push((file.name.clone(), out_path));
                         profile_entries
-                            .entry((entry_type, file.name.clone()))
+                            .entry((entry_type.0, file.name.clone()))
                             .or_default()
                             .push(PendingEntry {
                                 entry_type,
@@ -236,7 +278,7 @@ impl ResourceCompiler {
                                 ),
                                 qualifier: file.qualifier.0.clone(),
                                 resource_key: None,
-                                runtime_type: runtime_resource_type(entry_type),
+                                runtime_type: entry_type.runtime_type(),
                             });
                     }
 
@@ -333,42 +375,19 @@ fn commit_pending_entries(
             }
             if !emitted_resources.insert((
                 entry.qualifier.clone(),
-                entry.entry_type,
+                entry.entry_type.0,
                 entry.name.clone(),
             )) {
                 continue;
             }
             all_entries.push(CompiledEntry {
                 id,
-                entry_type: entry.entry_type,
+                entry_type: entry.entry_type.0,
                 name: entry.name.clone(),
                 value: entry.value.clone(),
                 qualifier: entry.qualifier.clone(),
             });
         }
-    }
-}
-
-fn resource_type_name(entry_type: u32) -> &'static str {
-    match entry_type {
-        0x08 => "integer",
-        0x12 => "float",
-        0x09 => "string",
-        0x0E => "color",
-        0x13 => "media",
-        0x14 => "profile",
-        _ => "unknown",
-    }
-}
-
-fn runtime_resource_type(entry_type: u32) -> u32 {
-    match entry_type {
-        0x0E => 10001,
-        0x12 => 10002,
-        0x09 => 10003,
-        0x08 => 10007,
-        0x13 => 20000,
-        _ => 0,
     }
 }
 

@@ -1,5 +1,6 @@
 use super::compile_arkts_handoff::CompileArkTsInfo;
 use super::*;
+use arkdown_resolver::OhPackage;
 
 pub(super) struct CompileModuleInfo {
     pub(super) source_path: PathBuf,
@@ -242,7 +243,10 @@ fn module_type_for_source(source_path: &Path, source_ext: &str) -> String {
         "js" => fs_err::read_to_string(source_path)
             .map(|source| {
                 let package_has_module_field = find_package_root(source_path)
-                    .and_then(|root| read_manifest_string(&root, "oh-package.json5", "module"))
+                    .and_then(|root| {
+                        OhPackage::load_from_root(&root)
+                            .and_then(|p| p.module.as_deref().map(str::to_string))
+                    })
                     .is_some();
                 !package_has_module_field
                     && (source.contains("module.exports")
@@ -332,28 +336,8 @@ pub(super) fn read_manifest_dependency_value(
     package_root: &Path,
     specifier: &str,
 ) -> Option<String> {
-    for file_name in ["oh-package.json5", "package.json"] {
-        let path = package_root.join(file_name);
-        if !path.is_file() {
-            continue;
-        }
-        let content = fs_err::read_to_string(&path).ok()?;
-        let value: serde_json::Value = if file_name.ends_with(".json5") {
-            json5::from_str(&content).ok()?
-        } else {
-            serde_json::from_str(&content).ok()?
-        };
-        for field in ["dependencies", "dynamicDependencies", "devDependencies"] {
-            if let Some(dep) = value
-                .get(field)
-                .and_then(|deps| deps.get(specifier))
-                .and_then(|dep| dep.as_str())
-            {
-                return Some(dep.to_string());
-            }
-        }
-    }
-    None
+    OhPackage::load_from_root(package_root)
+        .and_then(|p| p.dependency_value(specifier).map(str::to_string))
 }
 
 pub(super) fn resolve_source_request(base_dir: &Path, request: &str) -> Option<PathBuf> {
@@ -457,36 +441,22 @@ fn package_root_from_modules_dir(source_path: &Path) -> Option<PathBuf> {
 }
 
 pub(super) fn package_name_or_dir(package_root: &Path) -> String {
-    read_manifest_string(package_root, "oh-package.json5", "name")
-        .or_else(|| read_manifest_string(package_root, "package.json", "name"))
+    OhPackage::load_from_root(package_root)
+        .and_then(|pkg| pkg.name().map(str::to_string))
         .unwrap_or_else(|| {
             package_root
                 .file_name()
-                .and_then(|name| name.to_str())
+                .and_then(|n| n.to_str())
                 .unwrap_or("")
                 .to_string()
         })
 }
 
 pub(super) fn package_version_or_default(package_root: &Path) -> String {
-    read_manifest_string(package_root, "oh-package.json5", "version")
-        .or_else(|| read_manifest_string(package_root, "package.json", "version"))
-        .filter(|version| !version.is_empty())
-        .unwrap_or_else(|| "1.0.0".to_string())
-}
-
-pub(super) fn read_manifest_string(
-    package_root: &Path,
-    file_name: &str,
-    field: &str,
-) -> Option<String> {
-    let content = fs_err::read_to_string(package_root.join(file_name)).ok()?;
-    let value: serde_json::Value = if file_name.ends_with(".json5") {
-        json5::from_str(&content).ok()?
-    } else {
-        serde_json::from_str(&content).ok()?
-    };
-    value.get(field)?.as_str().map(str::to_string)
+    let v = OhPackage::load_from_root(package_root)
+        .map(|p| p.version().to_string())
+        .unwrap_or_default();
+    if v.is_empty() { "1.0.0".to_string() } else { v }
 }
 
 pub(super) fn pkg_modules_package_name(
@@ -535,31 +505,14 @@ pub(super) fn slash_path(path: &Path) -> String {
 }
 
 pub(super) fn package_entry_path(package_root: &Path) -> Option<PathBuf> {
-    let request = read_package_exports_import_field_local(package_root)
-        .or_else(|| read_manifest_string(package_root, "oh-package.json5", "main"))
-        .or_else(|| read_manifest_string(package_root, "package.json", "main"))
+    let pkg = OhPackage::load_from_root(package_root);
+    let request = pkg
+        .as_ref()
+        .and_then(|p| p.exports_import_field())
+        .or_else(|| pkg.as_ref().and_then(|p| p.main_field().map(str::to_string)))
         .unwrap_or_else(|| "index".to_string());
     resolve_package_request(package_root, &request)
         .or_else(|| resolve_package_request(package_root, "index"))
-}
-
-fn read_package_exports_import_field_local(package_root: &Path) -> Option<String> {
-    for file_name in ["oh-package.json5", "package.json"] {
-        let content = fs_err::read_to_string(package_root.join(file_name)).ok()?;
-        let value: serde_json::Value = if file_name.ends_with(".json5") {
-            json5::from_str(&content).ok()?
-        } else {
-            serde_json::from_str(&content).ok()?
-        };
-        let dot = value.get("exports")?.get(".")?;
-        if let Some(import) = dot.get("import").and_then(|v| v.as_str()) {
-            return Some(import.to_string());
-        }
-        if let Some(default) = dot.get("default").and_then(|v| v.as_str()) {
-            return Some(default.to_string());
-        }
-    }
-    None
 }
 
 fn resolve_package_request(package_root: &Path, request: &str) -> Option<PathBuf> {

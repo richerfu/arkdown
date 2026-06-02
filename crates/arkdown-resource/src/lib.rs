@@ -40,6 +40,6 @@ mod layout;
 // Re-export the primary public API at crate root.
 pub use compiler::{
     CompiledEntry, ResourceCompileConfig, ResourceCompileInput, ResourceCompileOutput,
-    ResourceCompiler, ResourceInfo,
+    ResourceCompiler, ResourceInfo, ResourceTypeCode,
 };
 pub use error::ResourceError;
