@@ -33,7 +33,7 @@ use crate::ir::function_records::{
 };
 use crate::ir::lowering_context::LoweringContext;
 use crate::ir::module_lexical::collect_module_lexical_bindings;
-use crate::ir::module_record::{collect_module_record, module_record_literal_array};
+use crate::ir::module_record::collect_module_record;
 use crate::ir::opcodes::Insn;
 use crate::ir::record_layout::RecordLayout;
 
@@ -227,7 +227,7 @@ pub fn build_record_with_debug_and_source_map(
     // Collect module import/export records so that the ABC serializer can emit
     // the compact libpandafile module record buffer used by hvigor/es2abc.
     let module_record_idx = literal_arrays.len();
-    literal_arrays.push(module_record_literal_array(&module_record));
+    literal_arrays.push(module_record.to_literal_array());
     let scope_names_idx = literal_arrays.len();
     literal_arrays.push(scope_names_literal_array(scan_stmts, record_name));
 
