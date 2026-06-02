@@ -277,16 +277,19 @@ Priority order from the current 2026-06-01 state:
 2. **[Parity harness] Add a stable ABC diff helper.** It should compare
    CodeItems, DebugInfo/LNP, method records, indexes, literal arrays, and final
    bytes separately so future regressions are localized immediately.
-3. **[ETS transform] Remaining execution gaps identified 2026-06-02** — the
-   following ViewPU lowering forms produce incorrect or missing output in the
-   HmosWorld cache TS comparison; fix in priority order:
-   - `@Prop` default value fallback: **FIXED** — `if (params.X === undefined) { this.__X.set(default) }` now emitted correctly.
-   - `NavDestination.create` builder+metadata: 12 files affected; fix in progress.
-   - `__Common__.create` call emission: 11 files affected.
-   - `ifElseBranchUpdateFunction` wrapper: 7 files affected.
-   - `forEachUpdateFunction` wrapper: 4 files affected.
-   - Gesture `.pop()` calls: 4 files affected.
-   - `@CustomDialog` controller assignment: 3 files affected.
+3. **[ETS transform] Execution gaps from 2026-06-02 session — ALL FIXED on branch feat/hmosworld-gap-closure:**
+   - `@Prop` default value fallback: **FIXED** — `if (params.X === undefined) { this.__X.set(default) }`
+   - `NavDestination.create` builder+metadata: **FIXED** — emits `({ moduleName, pagePath })` second arg
+   - `__Common__.create` call emission: **FIXED** — emitted for custom components with chained attributes
+   - `ifElseBranchUpdateFunction` wrapper: **FIXED** — each if/else branch now registers update fn
+   - `forEachUpdateFunction` wrapper: **FIXED** — ForEach now registers key/diff update fn
+   - Gesture `.pop()` calls: **FIXED** — PanGesture, LongPressGesture etc. emit `.pop()`
+   - `@CustomDialog` `setController` method: **FIXED** — emitted after field declarations
+   - Kit import binding types (default vs named): **FIXED** — `KitEntry::Named` uses `import { X }`
+   - HMS kit configs: **FIXED** — `@kit.MapKit`, `@kit.AccountKit`, `@kit.PushKit` etc. added
+   - `@Provide` `addProvidedVar` calls: **FIXED** — emitted in constructor after backing field init
+   - ABC size vs hvigor: arkdown ABC is ~36% larger when built in debug mode vs hvigor release mode;
+     comment-induced LNP line shifts are the primary cause — needs fresh release-mode comparison.
 
 ## SPEC Coverage Map
 
