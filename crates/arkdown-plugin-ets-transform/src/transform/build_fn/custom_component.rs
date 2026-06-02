@@ -15,6 +15,72 @@ use super::{
     BuildContext, CustomComponentInfo, SpanHint,
 };
 
+/// Emit a custom component wrapped in `__Common__` for chained attribute calls.
+///
+/// This is emitted when a custom component call has chained attribute calls
+/// (`.width(...)`, `.height(...)`, etc.). The pattern is:
+///
+/// ```ts
+/// this.observeComponentCreation2((elmtId, isInitialRender) => {
+///     __Common__.create();
+///     __Common__.width(...);
+///     // ... more attribute calls ...
+/// }, __Common__);
+/// {
+///     // custom component observeComponentCreation2 block
+/// }
+/// __Common__.pop();
+/// ```
+#[allow(clippy::too_many_arguments)]
+pub(super) fn emit_common_wrapped_custom_component_call(
+    name: &str,
+    arguments: &[Argument<'_>],
+    component_info: Option<&CustomComponentInfo>,
+    span: Span,
+    chain_attrs: &[(String, String, bool)],
+    source_text: &str,
+    source_id: &str,
+    context: BuildContext,
+    indent: &str,
+    out: &mut String,
+    span_hints: &mut Vec<SpanHint>,
+) {
+    // Build the __Common__ observeComponentCreation2 body.
+    let mut common_body = String::new();
+    {
+        let mut writer = crate::transform::viewpu_emit::ViewpuWriter::new(&mut common_body);
+        writer.component_create("", "__Common__", "create", "");
+        for (attr_name, attr_args, _) in chain_attrs {
+            writer.component_attribute("", "__Common__", attr_name, attr_args);
+        }
+    }
+    {
+        let mut writer = crate::transform::viewpu_emit::ViewpuWriter::new(out);
+        writer.observe_component_creation(indent, context.use_parent_context, "__Common__", &common_body);
+    }
+    // Emit the custom component call inside a block.
+    out.push_str(indent);
+    out.push_str("{\n");
+    emit_custom_component_call(
+        name,
+        arguments,
+        component_info,
+        None,
+        span,
+        source_text,
+        source_id,
+        context.clone(),
+        &format!("{indent}    "),
+        out,
+        span_hints,
+    );
+    out.push_str(indent);
+    out.push_str("}\n");
+    // Emit __Common__.pop().
+    let mut writer = crate::transform::viewpu_emit::ViewpuWriter::new(out);
+    writer.component_pop(indent, "__Common__");
+}
+
 pub(super) fn emit_custom_component_call(
     name: &str,
     arguments: &[Argument<'_>],

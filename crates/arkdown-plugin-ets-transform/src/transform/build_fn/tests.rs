@@ -564,6 +564,127 @@ struct Foo {
     );
 }
 
+fn parse_and_lower_with_custom_components(
+    source: &str,
+    custom_components: &[&str],
+) -> Result<String, BuildLoweringError> {
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, source, SourceType::ets()).parse();
+    assert!(
+        parsed.errors.is_empty(),
+        "parse errors: {:?}",
+        parsed.errors
+    );
+    let struct_statement = parsed
+        .program
+        .body
+        .iter()
+        .find_map(|s| match s {
+            Statement::StructStatement(st) => Some(st.as_ref()),
+            Statement::ExportNamedDeclaration(e) => match e.declaration.as_ref() {
+                Some(Declaration::StructStatement(st)) => Some(st.as_ref()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("expected struct");
+    let build = struct_statement
+        .body
+        .body
+        .iter()
+        .find_map(|el| match el {
+            StructElement::MethodDefinition(m)
+                if m.key.static_name().is_some_and(|n| n == "build") =>
+            {
+                Some(m)
+            }
+            _ => None,
+        })
+        .expect("expected build method");
+    let cc_set: FxHashSet<String> = custom_components.iter().map(|s| s.to_string()).collect();
+    lower_build_body_with_custom_components(
+        build.value.body.as_deref(),
+        source,
+        "",
+        &cc_set,
+        &FxHashSet::default(),
+        &CustomComponentUpdateProps::default(),
+        &test_component_metadata(),
+    )
+    .map(|(code, _)| code)
+}
+
+#[test]
+fn custom_component_with_chain_attrs_emits_common_wrapper() {
+    // CallExpression path: leaf custom component with chained attributes.
+    let source = r#"@Component
+struct Foo {
+  build() {
+    MyCard({ title: "hello" })
+      .width("100%")
+      .height(200)
+  }
+}"#;
+    let out = parse_and_lower_with_custom_components(source, &["MyCard"]).unwrap();
+    // __Common__.create() must be emitted in an observeComponentCreation2 block.
+    assert!(
+        out.contains("__Common__.create();"),
+        "missing __Common__.create; got:\n{out}"
+    );
+    // Attribute calls must be on __Common__, not MyCard.
+    assert!(
+        out.contains("__Common__.width(\"100%\");"),
+        "missing __Common__.width; got:\n{out}"
+    );
+    assert!(
+        out.contains("__Common__.height(200);"),
+        "missing __Common__.height; got:\n{out}"
+    );
+    // Must be wrapped with observeComponentCreation2 closing with __Common__.
+    assert!(
+        out.contains("}, __Common__);"),
+        "missing }}, __Common__); got:\n{out}"
+    );
+    // The custom component itself must still be emitted.
+    assert!(
+        out.contains("new MyCard("),
+        "missing MyCard constructor; got:\n{out}"
+    );
+    // __Common__.pop() must be emitted after the custom component.
+    assert!(
+        out.contains("__Common__.pop();"),
+        "missing __Common__.pop; got:\n{out}"
+    );
+    // Order: __Common__.create before MyCard constructor before __Common__.pop.
+    let common_create = out.find("__Common__.create();").unwrap();
+    let my_card = out.find("new MyCard(").unwrap();
+    let common_pop = out.find("__Common__.pop();").unwrap();
+    assert!(
+        common_create < my_card,
+        "__Common__.create must precede MyCard constructor; got:\n{out}"
+    );
+    assert!(
+        my_card < common_pop,
+        "MyCard constructor must precede __Common__.pop; got:\n{out}"
+    );
+}
+
+#[test]
+fn custom_component_without_chain_attrs_does_not_emit_common_wrapper() {
+    // Custom component with no chained attributes must NOT emit __Common__.
+    let source = r#"@Component
+struct Foo {
+  build() {
+    MyCard({ title: "hello" })
+  }
+}"#;
+    let out = parse_and_lower_with_custom_components(source, &["MyCard"]).unwrap();
+    assert!(
+        !out.contains("__Common__"),
+        "__Common__ must not be emitted when there are no chain attrs; got:\n{out}"
+    );
+}
+
 #[test]
 fn navigation_emits_builder_closure_and_metadata_with_is_user_create_stack() {
     let source = r#"@Component
@@ -596,4 +717,80 @@ struct Foo {
         out.contains("isUserCreateStack:"),
         "missing isUserCreateStack; got:\n{out}"
     );
+}
+
+#[test]
+fn lowers_gesture_attr_to_gesture_create_pop_sequence() {
+    let source = r#"@Component
+struct Foo {
+  build() {
+    Image($r("app.media.photo"))
+      .objectFit(ImageFit.Contain)
+      .gesture(
+        LongPressGesture({ duration: 500 })
+          .onAction((event) => {})
+      )
+  }
+}"#;
+    let out = parse_and_lower(source).unwrap();
+    // Regular attribute must still be emitted.
+    assert!(
+        out.contains("Image.objectFit(ImageFit.Contain);"),
+        "objectFit missing; got:\n{out}"
+    );
+    // Gesture wrapper must be emitted.
+    assert!(
+        out.contains("Gesture.create(GesturePriority.Low);"),
+        "Gesture.create missing; got:\n{out}"
+    );
+    // Inner gesture type must be emitted.
+    assert!(
+        out.contains("LongPressGesture.create("),
+        "LongPressGesture.create missing; got:\n{out}"
+    );
+    // Gesture attribute call must be emitted.
+    assert!(
+        out.contains("LongPressGesture.onAction("),
+        "LongPressGesture.onAction missing; got:\n{out}"
+    );
+    // Inner pop must come before outer pop.
+    assert!(
+        out.contains("LongPressGesture.pop();"),
+        "LongPressGesture.pop missing; got:\n{out}"
+    );
+    assert!(
+        out.contains("Gesture.pop();"),
+        "Gesture.pop missing; got:\n{out}"
+    );
+    let inner_pop = out.find("LongPressGesture.pop();").unwrap();
+    let outer_pop = out.find("Gesture.pop();").unwrap();
+    assert!(inner_pop < outer_pop, "LongPressGesture.pop must precede Gesture.pop; got:\n{out}");
+    // The raw .gesture() call must NOT appear in the output.
+    assert!(
+        !out.contains("Image.gesture("),
+        "Image.gesture() must not appear verbatim; got:\n{out}"
+    );
+}
+
+#[test]
+fn lowers_multiple_gesture_attrs_in_source_order() {
+    let source = r#"@Component
+struct Foo {
+  build() {
+    Row() {}
+      .gesture(PinchGesture().onActionEnd(() => {}))
+      .gesture(PanGesture().onActionUpdate((e) => {}))
+      .visibility(Visibility.Visible)
+  }
+}"#;
+    let out = parse_and_lower(source).unwrap();
+    let pinch_create = out.find("PinchGesture.create(").expect("PinchGesture.create");
+    let pan_create = out.find("PanGesture.create(").expect("PanGesture.create");
+    let vis = out.find("Row.visibility(").expect("Row.visibility");
+    assert!(pinch_create < pan_create, "PinchGesture before PanGesture; got:\n{out}");
+    assert!(pan_create < vis, "gestures before visibility attr; got:\n{out}");
+    assert_eq!(out.matches("Gesture.create(GesturePriority.Low);").count(), 2, "two Gesture.create; got:\n{out}");
+    // Count only standalone "Gesture.pop()" lines, not "XxxGesture.pop()".
+    let gesture_pop_count = out.match_indices("\n            Gesture.pop();").count();
+    assert_eq!(gesture_pop_count, 2, "two standalone Gesture.pop; got:\n{out}");
 }

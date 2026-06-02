@@ -754,6 +754,37 @@ struct Parent {
 }
 
 #[test]
+fn test_for_each_item_and_index_no_keyfn_emits_six_arg_update() {
+    // When itemFn uses (item, index) but no keyFn is provided,
+    // forEachUpdateFunction must be called with (elmtId, data, fn, undefined, true, false).
+    let src = r#"
+class Item {}
+
+@Component
+struct Parent {
+  @State items: Item[] = [];
+  build() {
+    ForEach(this.items, (item: Item, index: number) => {
+      Text("item")
+    })
+  }
+}
+"#;
+    let result = transform_ets(&make_source(
+        "products/phone/src/main/ets/pages/Parent.ets",
+        src,
+    ))
+    .unwrap();
+    assert!(
+        result.contains(
+            "this.forEachUpdateFunction(elmtId, ObservedObject.GetRawObject(this.items), forEachItemGenFunction, undefined, true, false)"
+        ),
+        "expected 6-arg forEachUpdateFunction with undefined keyFn when itemFn uses index, got:\n{}",
+        result
+    );
+}
+
+#[test]
 fn test_reusable_component_reuseid_uses_recycle_creation() {
     let src = r#"
 @Reusable

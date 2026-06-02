@@ -242,7 +242,17 @@ pub(super) fn lower_for_each(
                     context.view_context()
                 ),
             );
+        } else if index_param.is_some() {
+            // itemFn uses index but no keyFn: emit 6-arg with undefined key, isDisableDiff=true, isDisableHighFrequencyUpdate=false
+            writer.line(
+                indent,
+                format_args!(
+                    "    {}.forEachUpdateFunction(elmtId, {data}, forEachItemGenFunction, undefined, true, false);",
+                    context.view_context()
+                ),
+            );
         } else {
+            // itemFn has item param but no index param, no keyFn: 3-arg form
             writer.line(
                 indent,
                 format_args!(
