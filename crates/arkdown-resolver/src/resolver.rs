@@ -7,11 +7,7 @@ use oxc_resolver::{
 };
 
 use crate::error::ResolveError;
-use crate::oh_modules::{
-    is_bytecode_har, package_root_in_oh_modules, read_bytecode_abc_path,
-    read_declaration_entry, read_file_dependencies, read_name_field,
-    read_package_exports_import_field, read_package_main_field, read_package_version_field,
-};
+use crate::oh_modules::{OhPackage, package_root_in_oh_modules};
 
 /// Configuration for the OHOS module resolver.
 pub struct ResolverConfig {
@@ -240,23 +236,29 @@ impl OhosResolver {
         subpath: &str,
         pkg_root: &PackageRoot,
     ) -> Option<OhosResolvedModule> {
-        let oh_package_path = pkg_root.path.join("oh-package.json5");
-        if oh_package_path.is_file() && is_bytecode_har(&oh_package_path) {
-            let abc_path = read_bytecode_abc_path(&oh_package_path)
-                .unwrap_or_else(|| pkg_root.path.join("ets/modules.abc"));
-            let declaration_path = read_declaration_entry(&oh_package_path)
-                .unwrap_or_else(|| pkg_root.path.join("index.d.ets"));
-            return Some(OhosResolvedModule::BytecodeHar {
-                abc_path,
-                declaration_path,
-                pkg_name: package_name.to_string(),
-                ohm_url: format!("@bundle:{}", package_name),
-            });
+        let pkg = OhPackage::load_from_root(&pkg_root.path);
+
+        if let Some(ref pkg) = pkg {
+            if pkg.is_bytecode_har() {
+                let abc_path = pkg
+                    .bytecode_abc_path()
+                    .unwrap_or_else(|| pkg_root.path.join("ets/modules.abc"));
+                let declaration_path = pkg
+                    .declaration_entry()
+                    .unwrap_or_else(|| pkg_root.path.join("index.d.ets"));
+                return Some(OhosResolvedModule::BytecodeHar {
+                    abc_path,
+                    declaration_path,
+                    pkg_name: package_name.to_string(),
+                    ohm_url: format!("@bundle:{}", package_name),
+                });
+            }
         }
 
         let requested = if subpath.is_empty() {
-            read_package_exports_import_field(&pkg_root.path)
-                .or_else(|| read_package_main_field(&pkg_root.path))
+            pkg.as_ref()
+                .and_then(|p| p.exports_import_field())
+                .or_else(|| pkg.as_ref().and_then(|p| p.main_field().map(str::to_string)))
                 .unwrap_or_else(|| "index".to_string())
         } else {
             subpath.to_string()
@@ -326,7 +328,9 @@ impl PackageRoot {
                     package_name: self.package_name.clone(),
                     bundle_name: String::new(),
                     module_name: String::new(),
-                    version: read_package_version_field(&self.path),
+                    version: OhPackage::load_from_root(&self.path)
+                    .map(|p| p.version().to_string())
+                    .unwrap_or_default(),
                     pkg_path: self.path.clone(),
                     entry_path: None,
                 }),
@@ -337,7 +341,9 @@ impl PackageRoot {
             path,
             module_type,
             pkg_name: package_name.to_string(),
-            pkg_version: read_package_version_field(&self.path),
+            pkg_version: OhPackage::load_from_root(&self.path)
+                    .map(|p| p.version().to_string())
+                    .unwrap_or_default(),
             ohm_url: None,
         }
     }
@@ -394,9 +400,8 @@ impl PackageRootIndex {
             return;
         }
 
-        let package_path = dir.join("oh-package.json5");
-        if package_path.is_file() {
-            for (name, path) in read_file_dependencies(&package_path) {
+        if let Some(pkg) = OhPackage::load_from_root(dir) {
+            for (name, path) in pkg.file_dependencies() {
                 let real_path = canonicalize_existing(path);
                 self.roots.entry(name.clone()).or_insert(PackageRoot {
                     path: real_path,
@@ -441,9 +446,8 @@ impl PackageRootIndex {
             return;
         }
 
-        let package_path = dir.join("oh-package.json5");
-        if package_path.is_file() {
-            if let Some(package_name) = read_name_field(&package_path) {
+        if let Some(pkg) = OhPackage::load_from_root(dir) {
+            if let Some(package_name) = pkg.name().map(str::to_string) {
                 self.roots
                     .entry(package_name.clone())
                     .or_insert(PackageRoot {
