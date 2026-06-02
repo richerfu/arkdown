@@ -87,7 +87,7 @@ impl<'a> RecordLayout<'a> {
         if self.record_name.contains("/entryability/") {
             indices.sort_by_key(|&idx| {
                 let array = &literal_arrays[idx];
-                (!literal_array_has_method_affiliate(array), idx)
+                (!array.has_method_affiliate(), idx)
             });
         } else if self.record_name.contains("/ets/pages/") {
             indices.sort_by_key(|&idx| (page_literal_rank(&literal_arrays[idx]), idx));
@@ -106,13 +106,6 @@ fn module_u8_field(name: impl Into<String>) -> FieldRecord {
     }
 }
 
-fn literal_array_has_method_affiliate(array: &LiteralArray) -> bool {
-    array
-        .entries
-        .iter()
-        .any(|entry| matches!(entry, LiteralEntry::TaggedMethodAffiliate(_)))
-}
-
 fn page_literal_rank(array: &LiteralArray) -> u8 {
     if matches!(
         array.entries.as_slice(),
@@ -124,7 +117,7 @@ fn page_literal_rank(array: &LiteralArray) -> u8 {
     ) {
         return 0;
     }
-    if literal_array_has_method_affiliate(array) {
+    if array.has_method_affiliate() {
         return 1;
     }
     if array

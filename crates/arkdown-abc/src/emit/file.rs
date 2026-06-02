@@ -43,6 +43,18 @@ pub struct LiteralArray {
     pub entries: Vec<LiteralEntry>,
 }
 
+impl LiteralArray {
+    /// Returns `true` if any entry is a `TaggedMethodAffiliate`.
+    ///
+    /// Used by both the emit stage and the IR record-layout stage to classify
+    /// literal arrays that contain method-affiliate metadata.
+    pub fn has_method_affiliate(&self) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| matches!(entry, LiteralEntry::TaggedMethodAffiliate(_)))
+    }
+}
+
 impl LiteralEntry {
     fn item_count(&self) -> u32 {
         match self {
@@ -1518,7 +1530,7 @@ fn build_literal_header_order(
                 continue;
             }
             let array = &literal_arrays[literal_idx];
-            rank[literal_idx] = if is_page && literal_array_has_method_affiliate_emit(array) {
+            rank[literal_idx] = if is_page && array.has_method_affiliate() {
                 0
             } else if is_page && literal_array_is_page_route_metadata(array) {
                 4
@@ -1526,7 +1538,7 @@ fn build_literal_header_order(
                 6
             } else if is_page && literal_array_is_page_index_stub(array) {
                 1
-            } else if is_entry && literal_array_has_method_affiliate_emit(array) {
+            } else if is_entry && array.has_method_affiliate() {
                 3
             } else if is_entry {
                 8
@@ -1539,13 +1551,6 @@ fn build_literal_header_order(
     let mut order: Vec<usize> = (0..literal_arrays.len()).collect();
     order.sort_by_key(|idx| (rank[*idx], *idx));
     order
-}
-
-fn literal_array_has_method_affiliate_emit(array: &LiteralArray) -> bool {
-    array
-        .entries
-        .iter()
-        .any(|entry| matches!(entry, LiteralEntry::TaggedMethodAffiliate(_)))
 }
 
 fn literal_array_is_page_route_metadata(array: &LiteralArray) -> bool {
