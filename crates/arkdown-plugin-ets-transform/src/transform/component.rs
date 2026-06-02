@@ -429,7 +429,9 @@ impl<'a> ViewPuClassEmitter<'a> {
 
     fn has_initially_provided_value_slot(&self, name: &str) -> bool {
         self.info.find_regular_field(name).is_some()
-            || self.info.find_state_field(name)
+            || self
+                .info
+                .find_state_field(name)
                 .is_some_and(|field| has_initially_provided_value_slot(&field.decorator))
     }
 

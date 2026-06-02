@@ -111,7 +111,7 @@ fn test_loader_json_collects_bytecode_har_declaration_entry() {
     config.project_root = project_root;
     let mut module_cfg = make_module_cfg();
     module_cfg.src_path = module_root;
-    let loader = generate_loader_json(&config, &module_cfg, &make_manifest());
+    let loader = LoaderJson::generate(&config, &module_cfg, &make_manifest());
 
     assert_eq!(
         loader.declaration_entry,
@@ -134,7 +134,7 @@ fn test_loader_json_serialization() {
     let module_cfg = make_module_cfg();
     let manifest = make_manifest();
 
-    let loader = generate_loader_json(&config, &module_cfg, &manifest);
+    let loader = LoaderJson::generate(&config, &module_cfg, &manifest);
 
     // Serialize to JSON string
     let json_str = serde_json::to_string_pretty(&loader).expect("serialization failed");
@@ -165,7 +165,7 @@ fn test_loader_json_uses_normalized_ohm_url() {
     let module_cfg = make_module_cfg();
     let manifest = make_manifest();
 
-    let loader = generate_loader_json(&config, &module_cfg, &manifest);
+    let loader = LoaderJson::generate(&config, &module_cfg, &manifest);
     assert!(loader.use_normalized_ohm_url);
 }
 
@@ -175,7 +175,7 @@ fn test_loader_json_hvigor_keys() {
     let module_cfg = make_module_cfg();
     let manifest = make_manifest();
 
-    let loader = generate_loader_json(&config, &module_cfg, &manifest);
+    let loader = LoaderJson::generate(&config, &module_cfg, &manifest);
     let value = serde_json::to_value(&loader).expect("serialization failed");
     // serde_json::to_value produces a BTreeMap (alphabetical) without the
     // preserve_order feature, so compare key *sets* rather than ordered vecs.
@@ -225,7 +225,7 @@ fn test_loader_json_serializes_minimal_hvigor_shape() {
     let module_cfg = make_module_cfg();
     let manifest = make_manifest();
 
-    let loader = generate_loader_json(&config, &module_cfg, &manifest);
+    let loader = LoaderJson::generate(&config, &module_cfg, &manifest);
     let json = serde_json::to_string_pretty(&loader).expect("serialization failed");
 
     assert_eq!(
@@ -261,7 +261,7 @@ fn test_loader_json_pkg_brief_info_populated() {
     let module_cfg = make_module_cfg();
     let manifest = make_manifest();
 
-    let loader = generate_loader_json(&config, &module_cfg, &manifest);
+    let loader = LoaderJson::generate(&config, &module_cfg, &manifest);
     assert!(
         loader.pkg_name_to_pkg_brief_info.contains_key("entry"),
         "expected 'entry' key in pkgNameToPkgBriefInfo"
@@ -277,7 +277,7 @@ fn test_loader_json_cache_and_build_paths() {
     let module_cfg = make_module_cfg();
     let manifest = make_manifest();
 
-    let loader = generate_loader_json(&config, &module_cfg, &manifest);
+    let loader = LoaderJson::generate(&config, &module_cfg, &manifest);
     assert!(
         loader.cache_path.starts_with("/project/entry"),
         "cache_path should be under module root"
@@ -298,7 +298,7 @@ fn test_loader_json_module_root_path_is_src_main() {
     let module_cfg = make_module_cfg();
     let manifest = make_manifest();
 
-    let loader = generate_loader_json(&config, &module_cfg, &manifest);
+    let loader = LoaderJson::generate(&config, &module_cfg, &manifest);
     assert_eq!(
         loader.module_root_path, "/project/entry/src/main",
         "module_root_path must point to src/main, not the module root"
@@ -311,7 +311,7 @@ fn test_loader_json_module_name_populated() {
     let module_cfg = make_module_cfg();
     let manifest = make_manifest();
 
-    let loader = generate_loader_json(&config, &module_cfg, &manifest);
+    let loader = LoaderJson::generate(&config, &module_cfg, &manifest);
     assert_eq!(loader.module_name, "entry");
 }
 
@@ -321,7 +321,7 @@ fn test_loader_json_api_version() {
     let module_cfg = make_module_cfg();
     let manifest = make_manifest();
 
-    let loader = generate_loader_json(&config, &module_cfg, &manifest);
+    let loader = LoaderJson::generate(&config, &module_cfg, &manifest);
     assert_eq!(loader.api_version, 12);
 }
 
@@ -331,7 +331,7 @@ fn test_loader_json_module_path_map() {
     let module_cfg = make_module_cfg();
     let manifest = make_manifest();
 
-    let loader = generate_loader_json(&config, &module_cfg, &manifest);
+    let loader = LoaderJson::generate(&config, &module_cfg, &manifest);
     assert!(
         loader.module_path_map.contains_key("entry"),
         "modulePathMap must contain the module name key"
@@ -354,7 +354,7 @@ fn test_loader_json_normalizes_dot_segments_in_hvigor_paths() {
     };
     let manifest = make_manifest();
 
-    let loader = generate_loader_json(&config, &module_cfg, &manifest);
+    let loader = LoaderJson::generate(&config, &module_cfg, &manifest);
     assert_eq!(loader.project_root_path, "/project/app");
     assert_eq!(loader.module_path_map["entry"], "/project/app/entry");
     assert_eq!(
@@ -373,7 +373,7 @@ fn test_loader_json_fallback_an_build_is_false() {
     let module_cfg = make_module_cfg();
     let manifest = make_manifest();
 
-    let loader = generate_loader_json(&config, &module_cfg, &manifest);
+    let loader = LoaderJson::generate(&config, &module_cfg, &manifest);
     assert!(!loader.fallback_an_build);
 }
 
@@ -393,7 +393,7 @@ fn test_loader_json_relative_paths_become_absolute() {
     };
     let manifest = make_manifest();
 
-    let loader = generate_loader_json(&config, &module_cfg, &manifest);
+    let loader = LoaderJson::generate(&config, &module_cfg, &manifest);
 
     let expected_project = cwd.join("relative_proj_root_test");
     let expected_module = cwd.join("relative_proj_root_test/entry");
@@ -465,7 +465,7 @@ fn test_loader_json_golden_hvigor_key_set() {
     let module_cfg = make_module_cfg();
     let manifest = make_manifest();
 
-    let loader = generate_loader_json(&config, &module_cfg, &manifest);
+    let loader = LoaderJson::generate(&config, &module_cfg, &manifest);
     let value = serde_json::to_value(&loader).expect("serialization failed");
     let actual_keys: std::collections::BTreeSet<&str> = value
         .as_object()
@@ -487,7 +487,7 @@ fn test_loader_json_serialized_paths_are_absolute() {
     let module_cfg = make_module_cfg(); // src_path = /project/entry
     let manifest = make_manifest();
 
-    let loader = generate_loader_json(&config, &module_cfg, &manifest);
+    let loader = LoaderJson::generate(&config, &module_cfg, &manifest);
     let value = serde_json::to_value(&loader).expect("serialization failed");
 
     let project_root = value["projectRootPath"].as_str().unwrap();
@@ -534,7 +534,7 @@ fn test_loader_json_serializes_recursive_workers_when_present() {
     module_cfg.src_path = module_root.clone();
     let manifest = make_manifest();
 
-    let loader = generate_loader_json(&config, &module_cfg, &manifest);
+    let loader = LoaderJson::generate(&config, &module_cfg, &manifest);
     assert_eq!(
         loader.workers,
         vec![
@@ -567,7 +567,7 @@ fn test_loader_json_serialized_compile_entry_is_separate_from_internal_entries()
     let module_cfg = make_module_cfg();
     let manifest = make_manifest();
 
-    let loader = generate_loader_json(&config, &module_cfg, &manifest);
+    let loader = LoaderJson::generate(&config, &module_cfg, &manifest);
     assert_eq!(
         loader.compile_entry,
         vec!["./ets/entryability/EntryAbility.ets".to_string()]
@@ -609,7 +609,7 @@ fn test_har_uses_oh_package_main_as_internal_entry() {
     manifest.abilities.clear();
     manifest.pages = None;
 
-    let loader = generate_loader_json(&config, &module_cfg, &manifest);
+    let loader = LoaderJson::generate(&config, &module_cfg, &manifest);
     assert_eq!(
         loader.compile_entry,
         vec![to_absolute_path_string(&module_root.join("Index.ets"))]
@@ -639,7 +639,7 @@ fn test_router_map_metadata_does_not_become_compile_entry() {
     manifest.pages = None;
     manifest.router_map = Some("$profile:router_map".to_string());
 
-    let loader = generate_loader_json(&config, &module_cfg, &manifest);
+    let loader = LoaderJson::generate(&config, &module_cfg, &manifest);
     assert_eq!(
         loader.compile_entry,
         vec!["./ets/entryability/EntryAbility.ets".to_string()]
@@ -694,7 +694,7 @@ fn test_loader_json_dynamic_import_lib_info_populated_from_oh_modules() {
     };
     let manifest = make_manifest();
 
-    let loader = generate_loader_json(&config, &module_cfg, &manifest);
+    let loader = LoaderJson::generate(&config, &module_cfg, &manifest);
 
     assert!(
         loader
@@ -751,7 +751,7 @@ fn test_loader_json_dynamic_import_lib_info_uses_runtime_only_packages() {
         module_type: OhosModuleType::Entry,
     };
 
-    let loader = generate_loader_json(&config, &module_cfg, &make_manifest());
+    let loader = LoaderJson::generate(&config, &module_cfg, &make_manifest());
 
     assert!(
         loader
@@ -801,7 +801,7 @@ fn test_loader_json_compile_entry_uses_runtime_only_sources() {
         module_type: OhosModuleType::Entry,
     };
 
-    let loader = generate_loader_json(&config, &module_cfg, &make_manifest());
+    let loader = LoaderJson::generate(&config, &module_cfg, &make_manifest());
 
     assert_eq!(
         loader.hvigor_compile_entry,
@@ -886,7 +886,7 @@ fn test_loader_json_dynamic_import_lib_info_uses_dependency_runtime_only_package
         module_type: OhosModuleType::Entry,
     };
 
-    let loader = generate_loader_json(&config, &module_cfg, &make_manifest());
+    let loader = LoaderJson::generate(&config, &module_cfg, &make_manifest());
 
     assert!(
         loader
@@ -925,7 +925,7 @@ fn test_loader_json_byte_code_har_info_populated_from_oh_modules() {
     };
     let manifest = make_manifest();
 
-    let loader = generate_loader_json(&config, &module_cfg, &manifest);
+    let loader = LoaderJson::generate(&config, &module_cfg, &manifest);
 
     assert!(
         loader.byte_code_har_info.contains_key("@ohos/abc-lib"),

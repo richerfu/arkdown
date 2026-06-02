@@ -137,68 +137,55 @@ impl ModuleRecordInfo {
             .push(StarExportEntry { module_request_idx });
     }
 
-/// Serialize this module record as a Panda `LiteralArray`.
+    /// Serialize this module record as a Panda `LiteralArray`.
     ///
     /// The format follows the libpandafile module-record layout expected by
     /// `es2abc`: counts then entries for each section (requests, imports, exports).
     pub(super) fn to_literal_array(&self) -> LiteralArray {
-    let mut entries = Vec::new();
+        let mut entries = Vec::new();
 
-    entries.push(LiteralEntry::RawU32(
-        self.module_requests.len() as u32
-    ));
-    entries.extend(
-        self
-            .module_requests
-            .iter()
-            .cloned()
-            .map(LiteralEntry::RawString),
-    );
+        entries.push(LiteralEntry::RawU32(self.module_requests.len() as u32));
+        entries.extend(
+            self.module_requests
+                .iter()
+                .cloned()
+                .map(LiteralEntry::RawString),
+        );
 
-    entries.push(LiteralEntry::RawU32(
-        self.regular_imports.len() as u32
-    ));
-    for import in &self.regular_imports {
-        entries.push(LiteralEntry::RawString(import.local_name.clone()));
-        entries.push(LiteralEntry::RawString(import.import_name.clone()));
-        entries.push(LiteralEntry::RawU16(import.module_request_idx));
+        entries.push(LiteralEntry::RawU32(self.regular_imports.len() as u32));
+        for import in &self.regular_imports {
+            entries.push(LiteralEntry::RawString(import.local_name.clone()));
+            entries.push(LiteralEntry::RawString(import.import_name.clone()));
+            entries.push(LiteralEntry::RawU16(import.module_request_idx));
+        }
+
+        entries.push(LiteralEntry::RawU32(self.namespace_imports.len() as u32));
+        for ns in &self.namespace_imports {
+            entries.push(LiteralEntry::RawU16(ns.module_request_idx));
+            entries.push(LiteralEntry::RawString(ns.local_name.clone()));
+        }
+
+        entries.push(LiteralEntry::RawU32(self.local_exports.len() as u32));
+        for export in &self.local_exports {
+            entries.push(LiteralEntry::RawString(export.local_name.clone()));
+            entries.push(LiteralEntry::RawString(export.export_name.clone()));
+        }
+
+        entries.push(LiteralEntry::RawU32(self.indirect_exports.len() as u32));
+        for export in &self.indirect_exports {
+            entries.push(LiteralEntry::RawU16(export.module_request_idx));
+            entries.push(LiteralEntry::RawString(export.import_name.clone()));
+            entries.push(LiteralEntry::RawString(export.export_name.clone()));
+        }
+
+        entries.push(LiteralEntry::RawU32(self.star_exports.len() as u32));
+        for export in &self.star_exports {
+            entries.push(LiteralEntry::RawU16(export.module_request_idx));
+        }
+
+        LiteralArray { entries }
     }
-
-    entries.push(LiteralEntry::RawU32(
-        self.namespace_imports.len() as u32
-    ));
-    for ns in &self.namespace_imports {
-        entries.push(LiteralEntry::RawU16(ns.module_request_idx));
-        entries.push(LiteralEntry::RawString(ns.local_name.clone()));
-    }
-
-    entries.push(LiteralEntry::RawU32(
-        self.local_exports.len() as u32
-    ));
-    for export in &self.local_exports {
-        entries.push(LiteralEntry::RawString(export.local_name.clone()));
-        entries.push(LiteralEntry::RawString(export.export_name.clone()));
-    }
-
-    entries.push(LiteralEntry::RawU32(
-        self.indirect_exports.len() as u32
-    ));
-    for export in &self.indirect_exports {
-        entries.push(LiteralEntry::RawU16(export.module_request_idx));
-        entries.push(LiteralEntry::RawString(export.import_name.clone()));
-        entries.push(LiteralEntry::RawString(export.export_name.clone()));
-    }
-
-    entries.push(LiteralEntry::RawU32(self.star_exports.len() as u32));
-    for export in &self.star_exports {
-        entries.push(LiteralEntry::RawU16(export.module_request_idx));
-    }
-
-    LiteralArray { entries }
 }
-
-}
-
 
 /// Collect libpandafile module-record data from `program`.
 ///

@@ -234,7 +234,10 @@ mod tests {
             .resolve_sync("@ohos:hilog", Some("/tmp/main.ets"))
             .unwrap()
             .unwrap();
-        assert!(matches!(result.external, Some(ResolvedExternal::Bool(true))));
+        assert!(matches!(
+            result.external,
+            Some(ResolvedExternal::Bool(true))
+        ));
         assert_eq!(result.id.as_str(), "@ohos:hilog");
     }
 }

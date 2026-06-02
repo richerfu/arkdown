@@ -32,14 +32,6 @@ impl Ts2abcCommand {
     }
 }
 
-pub fn parse_ts2abc_args<I, S>(args: I) -> Result<Ts2abcCommand, Ts2abcError>
-where
-    I: IntoIterator<Item = S>,
-    S: Into<String>,
-{
-    Ts2abcCommand::parse(args)
-}
-
 struct ArgParser {
     args: Vec<String>,
     index: usize,

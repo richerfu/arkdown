@@ -7,7 +7,7 @@ use oxc_resolver::{
 };
 
 use crate::error::ResolveError;
-use crate::oh_modules::{OhPackage, package_root_in_oh_modules};
+use crate::oh_modules::{package_root_in_oh_modules, OhPackage};
 
 /// Configuration for the OHOS module resolver.
 pub struct ResolverConfig {
@@ -258,7 +258,10 @@ impl OhosResolver {
         let requested = if subpath.is_empty() {
             pkg.as_ref()
                 .and_then(|p| p.exports_import_field())
-                .or_else(|| pkg.as_ref().and_then(|p| p.main_field().map(str::to_string)))
+                .or_else(|| {
+                    pkg.as_ref()
+                        .and_then(|p| p.main_field().map(str::to_string))
+                })
                 .unwrap_or_else(|| "index".to_string())
         } else {
             subpath.to_string()
@@ -329,8 +332,8 @@ impl PackageRoot {
                     bundle_name: String::new(),
                     module_name: String::new(),
                     version: OhPackage::load_from_root(&self.path)
-                    .map(|p| p.version().to_string())
-                    .unwrap_or_default(),
+                        .map(|p| p.version().to_string())
+                        .unwrap_or_default(),
                     pkg_path: self.path.clone(),
                     entry_path: None,
                 }),
@@ -342,8 +345,8 @@ impl PackageRoot {
             module_type,
             pkg_name: package_name.to_string(),
             pkg_version: OhPackage::load_from_root(&self.path)
-                    .map(|p| p.version().to_string())
-                    .unwrap_or_default(),
+                .map(|p| p.version().to_string())
+                .unwrap_or_default(),
             ohm_url: None,
         }
     }
@@ -506,7 +509,6 @@ impl PackageCandidate {
 fn canonicalize_existing(path: PathBuf) -> PathBuf {
     std::fs::canonicalize(&path).unwrap_or(path)
 }
-
 
 #[cfg(test)]
 mod tests {

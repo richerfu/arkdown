@@ -1,5 +1,5 @@
-use std::borrow::Cow;
 use rustc_hash::FxHashSet;
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 

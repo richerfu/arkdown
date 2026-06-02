@@ -327,7 +327,7 @@ fn run_build_har(fixture: &PathBuf) -> PathBuf {
 
 fn run_build_hsp(fixture: &PathBuf) -> PathBuf {
     let fixture = isolated_fixture(fixture);
-        use std::sync::Arc;
+    use std::sync::Arc;
 
     use arkdown::Bundler;
     use arkdown_config::load_config;
@@ -905,7 +905,7 @@ fn test_hsp_golden_entry_list() {
 #[test]
 fn test_non_entry_importees_populated_with_har_dep() {
     use index_vec::IndexVec;
-    
+
     use arkdown_core::{ArkChunk, ChunkGraph, ChunkIdx};
     use arkdown_plugin_ohos_resolve::{process_importees, ProcessImporteeConfig};
 
@@ -1000,7 +1000,7 @@ fn bc_har_fixture_root() -> PathBuf {
 /// Returns `(modules_abc_path, importee_json_path)`.
 fn run_build_bc_har(fixture_src: &PathBuf) -> (PathBuf, PathBuf) {
     let fixture = isolated_fixture(fixture_src);
-        use std::sync::Arc;
+    use std::sync::Arc;
 
     use arkdown::Bundler;
     use arkdown_config::load_config;

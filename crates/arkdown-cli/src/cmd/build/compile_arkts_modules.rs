@@ -28,7 +28,6 @@ impl CompileModuleInfo {
         }
     }
 
-
     pub(super) fn compute(
         source_path: &Path,
         cache_root: &Path,
@@ -42,18 +41,18 @@ impl CompileModuleInfo {
             .unwrap_or("")
             .to_string();
         let output_ext = compile_output_extension(&source_path, &source_ext)?;
-    
+
         let mut module_roots: Vec<(&str, PathBuf)> = loader_json
             .module_path_map
             .iter()
             .map(|(module_name, module_root)| (module_name.as_str(), PathBuf::from(module_root)))
             .collect();
         module_roots.sort_by(|a, b| b.1.components().count().cmp(&a.1.components().count()));
-    
+
         for (module_name, module_root) in module_roots {
             let module_root = canonical_or_owned(&module_root);
             let src_main = module_root.join("src/main");
-    
+
             let source_file = if let Ok(rel) = source_path.strip_prefix(&src_main) {
                 format!("src/main/{}", slash_path(rel))
             } else if let Ok(rel) = source_path.strip_prefix(&module_root) {
@@ -61,7 +60,7 @@ impl CompileModuleInfo {
             } else {
                 continue;
             };
-    
+
             let out_rel = with_extension(&source_file, output_ext);
             let ts_path = cache_root.join(module_name).join(&out_rel);
             let record_rel = record_relative_path(&out_rel);
@@ -78,7 +77,7 @@ impl CompileModuleInfo {
             };
             let version = package_version_or_default(&module_root);
             let module_type = module_type_for_source(&source_path, &source_ext);
-    
+
             return Some(CompileModuleInfo {
                 source_path,
                 source_file: source_file.clone(),
@@ -95,7 +94,7 @@ impl CompileModuleInfo {
                 output_ext: output_ext.to_string(),
             });
         }
-    
+
         Self::compute_remote(&source_path, cache_root, loader_json)
     }
 
@@ -116,7 +115,7 @@ impl CompileModuleInfo {
         let package_entry_name = pkg_modules_package_name(&package_root, loader_json)?;
         let rel_to_pkg = slash_path(source_path.strip_prefix(&package_root).ok()?);
         let out_rel = with_extension(&rel_to_pkg, output_ext);
-    
+
         let project_root = canonical_or_owned(Path::new(&loader_json.project_root_path));
         let cache_rel = source_path.strip_prefix(&project_root).ok()?;
         let ts_path = cache_root.join(with_extension(&slash_path(cache_rel), output_ext));
@@ -128,7 +127,7 @@ impl CompileModuleInfo {
                 .trim_end_matches(".ts")
                 .trim_end_matches(".js")
         );
-    
+
         Some(CompileModuleInfo {
             source_path: source_path.to_path_buf(),
             source_file: rel_to_pkg,
@@ -172,8 +171,6 @@ pub(super) fn module_id_to_source_path(module_id: &str) -> Option<PathBuf> {
     }
     Some(canonical_or_owned(path))
 }
-
-
 
 fn compile_output_extension(source_path: &Path, source_ext: &str) -> Option<&'static str> {
     match source_ext {
@@ -436,7 +433,11 @@ pub(super) fn package_version_or_default(package_root: &Path) -> String {
     let v = OhPackage::load_from_root(package_root)
         .map(|p| p.version().to_string())
         .unwrap_or_default();
-    if v.is_empty() { "1.0.0".to_string() } else { v }
+    if v.is_empty() {
+        "1.0.0".to_string()
+    } else {
+        v
+    }
 }
 
 pub(super) fn pkg_modules_package_name(
@@ -489,7 +490,10 @@ pub(super) fn package_entry_path(package_root: &Path) -> Option<PathBuf> {
     let request = pkg
         .as_ref()
         .and_then(|p| p.exports_import_field())
-        .or_else(|| pkg.as_ref().and_then(|p| p.main_field().map(str::to_string)))
+        .or_else(|| {
+            pkg.as_ref()
+                .and_then(|p| p.main_field().map(str::to_string))
+        })
         .unwrap_or_else(|| "index".to_string());
     resolve_package_request(package_root, &request)
         .or_else(|| resolve_package_request(package_root, "index"))
@@ -587,7 +591,6 @@ mod tests {
     use index_vec::IndexVec;
     use rustc_hash::FxHashMap;
 
-    
     #[test]
     fn all_module_ids_prefers_full_rolldown_module_graph() {
         let graph = ChunkGraph {

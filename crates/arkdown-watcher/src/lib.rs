@@ -129,7 +129,6 @@ impl FileWatcher {
             module_src_path.join("src/main/resources"),
         ]
     }
-
 }
 
 #[cfg(test)]

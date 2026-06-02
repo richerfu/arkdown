@@ -259,7 +259,7 @@ mod tests {
 
     use arkdown_core::{ArkChunk, ChunkGraph};
     use index_vec::IndexVec;
-    
+
     use super::*;
 
     fn make_config(tmp_dir: &Path) -> ProcessImporteeConfig {

@@ -40,117 +40,108 @@ impl ObfuscationRules {
     ///
     /// Returns the original source unchanged when neither
     /// `enable_obfuscation` nor `compact` is set.
-    pub fn apply(&self, source: &str, filename: &str) -> Result<ObfuscationOutput, ObfuscationError> {
-    if !self.enable_obfuscation && !self.compact {
-        return Ok(ObfuscationOutput {
-            code: source.to_string(),
-            source_map: None,
-        });
-    }
-
-    // --- Identifier renaming (only when -enable-obfuscation is set) ----------
-    let code = if self.enable_obfuscation {
-        let alloc = Allocator::default();
-        let source_type = SourceType::default().with_module(true);
-        let ParserReturn {
-            program, errors, ..
-        } = Parser::new(&alloc, source, source_type).parse();
-
-        if !errors.is_empty() {
-            return Err(ObfuscationError::ParseError {
-                file: filename.to_string(),
-                message: errors[0].message.to_string(),
+    pub fn apply(
+        &self,
+        source: &str,
+        filename: &str,
+    ) -> Result<ObfuscationOutput, ObfuscationError> {
+        if !self.enable_obfuscation && !self.compact {
+            return Ok(ObfuscationOutput {
+                code: source.to_string(),
+                source_map: None,
             });
         }
 
-        let reserved: FxHashSet<String> = self
-            .keep_global_names
-            .iter()
-            .chain(self.keep_property_names.iter())
-            .cloned()
-            .collect();
+        // --- Identifier renaming (only when -enable-obfuscation is set) ----------
+        let code = if self.enable_obfuscation {
+            let alloc = Allocator::default();
+            let source_type = SourceType::default().with_module(true);
+            let ParserReturn {
+                program, errors, ..
+            } = Parser::new(&alloc, source, source_type).parse();
 
-        let mut binding_names: Vec<String> = Vec::new();
+            if !errors.is_empty() {
+                return Err(ObfuscationError::ParseError {
+                    file: filename.to_string(),
+                    message: errors[0].message.to_string(),
+                });
+            }
 
-        for stmt in &program.body {
-            match stmt {
-                Statement::VariableDeclaration(decl) => {
-                    for declarator in &decl.declarations {
-                        if let BindingPattern::BindingIdentifier(bi) = &declarator.id {
-                            let name = bi.name.as_str().to_string();
+            let reserved: FxHashSet<String> = self
+                .keep_global_names
+                .iter()
+                .chain(self.keep_property_names.iter())
+                .cloned()
+                .collect();
+
+            let mut binding_names: Vec<String> = Vec::new();
+
+            for stmt in &program.body {
+                match stmt {
+                    Statement::VariableDeclaration(decl) => {
+                        for declarator in &decl.declarations {
+                            if let BindingPattern::BindingIdentifier(bi) = &declarator.id {
+                                let name = bi.name.as_str().to_string();
+                                if !reserved.contains(&name) && !binding_names.contains(&name) {
+                                    binding_names.push(name);
+                                }
+                            }
+                        }
+                    }
+                    Statement::FunctionDeclaration(func) => {
+                        if let Some(id) = &func.id {
+                            let name = id.name.as_str().to_string();
                             if !reserved.contains(&name) && !binding_names.contains(&name) {
                                 binding_names.push(name);
                             }
                         }
                     }
-                }
-                Statement::FunctionDeclaration(func) => {
-                    if let Some(id) = &func.id {
-                        let name = id.name.as_str().to_string();
-                        if !reserved.contains(&name) && !binding_names.contains(&name) {
-                            binding_names.push(name);
+                    Statement::ClassDeclaration(class) => {
+                        if let Some(id) = &class.id {
+                            let name = id.name.as_str().to_string();
+                            if !reserved.contains(&name) && !binding_names.contains(&name) {
+                                binding_names.push(name);
+                            }
                         }
                     }
+                    _ => {}
                 }
-                Statement::ClassDeclaration(class) => {
-                    if let Some(id) = &class.id {
-                        let name = id.name.as_str().to_string();
-                        if !reserved.contains(&name) && !binding_names.contains(&name) {
-                            binding_names.push(name);
-                        }
-                    }
-                }
-                _ => {}
             }
-        }
 
-        let mut name_alloc = NameAllocator::new(reserved);
-        let mut rename_map: FxHashMap<String, String> = FxHashMap::default();
-        for name in binding_names {
-            rename_map.insert(name, name_alloc.next());
-        }
+            let mut name_alloc = NameAllocator::new(reserved);
+            let mut rename_map: FxHashMap<String, String> = FxHashMap::default();
+            for name in binding_names {
+                rename_map.insert(name, name_alloc.next());
+            }
 
-        let renamed = if rename_map.is_empty() {
-            source.to_string()
+            let renamed = if rename_map.is_empty() {
+                source.to_string()
+            } else {
+                apply_renames(source, &rename_map)
+            };
+
+            if self.remove_log {
+                remove_console_log(&renamed)
+            } else {
+                renamed
+            }
         } else {
-            apply_renames(source, &rename_map)
+            source.to_string()
         };
 
-        if self.remove_log {
-            remove_console_log(&renamed)
+        // --- Minify if -compact is requested ------------------------------------
+        let code = if self.compact {
+            crate::minifier::minify_source(&code, filename)?
         } else {
-            renamed
-        }
-    } else {
-        source.to_string()
-    };
+            code
+        };
 
-    // --- Minify if -compact is requested ------------------------------------
-    let code = if self.compact {
-        crate::minifier::minify_source(&code, filename)?
-    } else {
-        code
-    };
-
-    Ok(ObfuscationOutput {
-        code,
-        source_map: None,
-    })
+        Ok(ObfuscationOutput {
+            code,
+            source_map: None,
+        })
+    }
 }
-}
-
-
-/// Obfuscate `source` according to `rules`.
-///
-/// Prefer [`ObfuscationRules::apply`] in new code.
-pub fn obfuscate_source(
-    source: &str,
-    filename: &str,
-    rules: &ObfuscationRules,
-) -> Result<ObfuscationOutput, ObfuscationError> {
-    rules.apply(source, filename)
-}
-
 
 /// Apply all renames from `rename_map` to `source` using whole-word, non-
 /// property-access matching.

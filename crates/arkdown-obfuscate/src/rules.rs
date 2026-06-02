@@ -42,7 +42,6 @@ enum Section {
     KeepGlobal,
 }
 
-
 impl ObfuscationRules {
     /// Parse rule file content from a string.
     pub fn parse(content: &str) -> Self {
@@ -55,19 +54,51 @@ impl ObfuscationRules {
                 continue;
             }
             match line {
-                "-enable-obfuscation" => { rules.enable_obfuscation = true; section = Section::None; }
-                "-disable-obfuscation" => { rules.enable_obfuscation = false; section = Section::None; }
-                "-enable-property-obfuscation" => { rules.enable_property_obfuscation = true; section = Section::None; }
-                "-disable-property-obfuscation" => { rules.enable_property_obfuscation = false; section = Section::None; }
-                "-enable-toplevel-obfuscation" => { rules.enable_toplevel_obfuscation = true; section = Section::None; }
-                "-disable-toplevel-obfuscation" => { rules.enable_toplevel_obfuscation = false; section = Section::None; }
-                "-compact" => { rules.compact = true; section = Section::None; }
-                "-remove-log" => { rules.remove_log = true; section = Section::None; }
-                "-keep-property-name" => { section = Section::KeepProperty; }
-                "-keep-global-name" => { section = Section::KeepGlobal; }
+                "-enable-obfuscation" => {
+                    rules.enable_obfuscation = true;
+                    section = Section::None;
+                }
+                "-disable-obfuscation" => {
+                    rules.enable_obfuscation = false;
+                    section = Section::None;
+                }
+                "-enable-property-obfuscation" => {
+                    rules.enable_property_obfuscation = true;
+                    section = Section::None;
+                }
+                "-disable-property-obfuscation" => {
+                    rules.enable_property_obfuscation = false;
+                    section = Section::None;
+                }
+                "-enable-toplevel-obfuscation" => {
+                    rules.enable_toplevel_obfuscation = true;
+                    section = Section::None;
+                }
+                "-disable-toplevel-obfuscation" => {
+                    rules.enable_toplevel_obfuscation = false;
+                    section = Section::None;
+                }
+                "-compact" => {
+                    rules.compact = true;
+                    section = Section::None;
+                }
+                "-remove-log" => {
+                    rules.remove_log = true;
+                    section = Section::None;
+                }
+                "-keep-property-name" => {
+                    section = Section::KeepProperty;
+                }
+                "-keep-global-name" => {
+                    section = Section::KeepGlobal;
+                }
                 name => match section {
-                    Section::KeepProperty => { rules.keep_property_names.insert(name.to_string()); }
-                    Section::KeepGlobal => { rules.keep_global_names.insert(name.to_string()); }
+                    Section::KeepProperty => {
+                        rules.keep_property_names.insert(name.to_string());
+                    }
+                    Section::KeepGlobal => {
+                        rules.keep_global_names.insert(name.to_string());
+                    }
                     Section::None => {}
                 },
             }
@@ -85,33 +116,22 @@ impl ObfuscationRules {
     pub fn merge(self, other: Self) -> Self {
         ObfuscationRules {
             enable_obfuscation: self.enable_obfuscation || other.enable_obfuscation,
-            enable_property_obfuscation: self.enable_property_obfuscation || other.enable_property_obfuscation,
-            enable_toplevel_obfuscation: self.enable_toplevel_obfuscation || other.enable_toplevel_obfuscation,
+            enable_property_obfuscation: self.enable_property_obfuscation
+                || other.enable_property_obfuscation,
+            enable_toplevel_obfuscation: self.enable_toplevel_obfuscation
+                || other.enable_toplevel_obfuscation,
             compact: self.compact || other.compact,
             remove_log: self.remove_log || other.remove_log,
-            keep_property_names: self.keep_property_names.into_iter().chain(other.keep_property_names).collect(),
-            keep_global_names: self.keep_global_names.into_iter().chain(other.keep_global_names).collect(),
+            keep_property_names: self
+                .keep_property_names
+                .into_iter()
+                .chain(other.keep_property_names)
+                .collect(),
+            keep_global_names: self
+                .keep_global_names
+                .into_iter()
+                .chain(other.keep_global_names)
+                .collect(),
         }
     }
-}
-
-/// Parse a rule file from its string content.
-///
-/// Prefer [`ObfuscationRules::parse`] in new code.
-pub fn parse_rules_str(content: &str) -> ObfuscationRules {
-    ObfuscationRules::parse(content)
-}
-
-/// Parse a rule file from disk.
-///
-/// Prefer [`ObfuscationRules::from_file`] in new code.
-pub fn parse_rules_file(path: &std::path::Path) -> std::io::Result<ObfuscationRules> {
-    ObfuscationRules::from_file(path)
-}
-
-/// Merge two rule sets.
-///
-/// Prefer [`ObfuscationRules::merge`] in new code.
-pub fn merge_rules(base: ObfuscationRules, extra: ObfuscationRules) -> ObfuscationRules {
-    base.merge(extra)
 }

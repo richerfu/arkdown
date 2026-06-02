@@ -49,7 +49,11 @@ impl CompileEnv {
             compile_sdk_version: config.sdk_config.compile_sdk_version.clone(),
             compatible_sdk_version: config.product.compatible_sdk_version.clone(),
             runtime_os: config.product.runtime_os.clone(),
-            ets_loader_path: config.sdk_config.ets_loader_path.to_string_lossy().into_owned(),
+            ets_loader_path: config
+                .sdk_config
+                .ets_loader_path
+                .to_string_lossy()
+                .into_owned(),
             obfuscation_enabled,
             module_type,
             cache_path: cache_path.to_string(),

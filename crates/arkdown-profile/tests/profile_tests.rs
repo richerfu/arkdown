@@ -7,7 +7,7 @@ use arkdown_core::{
     AbilityConfig, ArkdownConfig, BuildMode, BuildOption, ModuleConfig, ModuleJson5,
     ModuleJson5Module, OhosModuleType, OutputTarget, ProductConfig, SdkConfig, StrictModeConfig,
 };
-use arkdown_profile::{generate_loader_json, process_profile, ProfileProcessor};
+use arkdown_profile::{process_profile, LoaderJson, ProfileProcessor};
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -253,7 +253,7 @@ fn test_generate_loader_json_has_compile_entry() {
     let json5 = single_ability_json5("feature");
     let manifest = process_profile(&json5, 12, "com.example", CompileMode::EsModule);
     let module_cfg = make_module_cfg("feature");
-    let loader = generate_loader_json(&config, &module_cfg, &manifest);
+    let loader = LoaderJson::generate(&config, &module_cfg, &manifest);
 
     assert!(
         !loader.compile_entry.is_empty(),
@@ -268,7 +268,7 @@ fn test_generate_loader_json_use_normalized_ohm_url_propagated() {
     let json5 = single_ability_json5("entry");
     let manifest = process_profile(&json5, 12, "com.example", CompileMode::EsModule);
     let module_cfg = make_module_cfg("entry");
-    let loader = generate_loader_json(&config, &module_cfg, &manifest);
+    let loader = LoaderJson::generate(&config, &module_cfg, &manifest);
 
     assert!(
         loader.use_normalized_ohm_url,

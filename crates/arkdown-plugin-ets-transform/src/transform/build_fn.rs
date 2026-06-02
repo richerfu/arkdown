@@ -1,8 +1,5 @@
-use std::{
-    fmt::Write,
-    sync::Arc,
-};
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::{fmt::Write, sync::Arc};
 
 use oxc_ast::ast::{
     Argument, ArkUIChild, ArkUIComponentExpression, BlockStatement, CallExpression, Expression,

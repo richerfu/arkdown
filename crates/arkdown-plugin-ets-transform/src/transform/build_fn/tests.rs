@@ -3,8 +3,8 @@ use oxc_allocator::Allocator;
 use oxc_ast::ast::{Declaration, StructElement};
 use oxc_parser::Parser;
 use oxc_span::SourceType;
-use std::path::Path;
 use rustc_hash::FxHashSet;
+use std::path::Path;
 
 fn test_component_metadata() -> ComponentMetadata {
     ComponentMetadata::from_ets_loader_path(Path::new(concat!(

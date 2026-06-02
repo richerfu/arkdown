@@ -4,8 +4,8 @@
 //! element JSON files, copies media and profile files, and writes
 //! `resources.index` and `ResourceTable.txt` to the output directory.
 
-use std::collections::BTreeMap;
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;

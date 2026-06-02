@@ -1,5 +1,5 @@
-use std::borrow::Cow;
 use rustc_hash::FxHashMap;
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -116,8 +116,4 @@ impl Plugin for ModuleMetaPlugin {
             Ok(())
         }
     }
-}
-
-pub fn compute_module_meta(module_id: &str, project_root: &Path, module_name: &str) -> ModuleMeta {
-    ModuleMetaPlugin::compute_meta(module_id, project_root, module_name)
 }

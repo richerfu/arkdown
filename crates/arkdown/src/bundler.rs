@@ -17,8 +17,8 @@
 //! and are no longer called from here.  They are retained in the codebase as
 //! reference implementations.
 
-use std::borrow::Cow;
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::borrow::Cow;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;

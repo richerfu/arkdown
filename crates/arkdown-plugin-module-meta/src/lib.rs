@@ -22,4 +22,4 @@ pub mod pkg_brief_info;
 pub mod plugin;
 
 pub use pkg_brief_info::{build_pkg_brief_info, PkgBriefInfo};
-pub use plugin::{compute_module_meta, ModuleMetaPlugin};
+pub use plugin::ModuleMetaPlugin;

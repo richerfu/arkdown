@@ -1,3 +1,4 @@
+use crate::parse::ParsedModule;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::{Arc, Mutex};
 
@@ -8,7 +9,6 @@ use arkdown_core::{
     ResolvedId,
 };
 
-use crate::parse::parse_module;
 use crate::plugin_driver::PluginDriver;
 
 pub struct ModuleLoader {
@@ -148,7 +148,7 @@ impl ModuleLoader {
             source_map: None,
         };
 
-        let parsed = parse_module(&source);
+        let parsed = ParsedModule::parse(&source);
 
         Ok(Module::Normal(Box::new(NormalModule {
             idx: ModuleIdx(0), // placeholder; updated by bundler after insertion

@@ -1,5 +1,5 @@
-use std::path::{Path, PathBuf};
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::path::{Path, PathBuf};
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
@@ -426,7 +426,10 @@ fn exported_enum_names(path: &Path, visited: &mut FxHashSet<PathBuf>) -> FxHashS
     exports
 }
 
-fn exported_builder_function_names(path: &Path, visited: &mut FxHashSet<PathBuf>) -> FxHashSet<String> {
+fn exported_builder_function_names(
+    path: &Path,
+    visited: &mut FxHashSet<PathBuf>,
+) -> FxHashSet<String> {
     let path = normalize_existing_path(path);
     if !visited.insert(path.clone()) {
         return FxHashSet::default();
@@ -517,7 +520,10 @@ impl ExportedComponentNames {
     }
 }
 
-fn exported_component_names(path: &Path, visited: &mut FxHashSet<PathBuf>) -> ExportedComponentNames {
+fn exported_component_names(
+    path: &Path,
+    visited: &mut FxHashSet<PathBuf>,
+) -> ExportedComponentNames {
     let path = normalize_existing_path(path);
     if !visited.insert(path.clone()) {
         return ExportedComponentNames::default();

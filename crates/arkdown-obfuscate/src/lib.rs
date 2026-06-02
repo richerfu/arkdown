@@ -26,7 +26,7 @@ mod rename;
 mod rules;
 mod transform;
 
-pub use rules::{merge_rules, parse_rules_file, parse_rules_str, ObfuscationRules};
+pub use rules::ObfuscationRules;
 pub use transform::ObfuscationOutput;
 
 use std::path::{Path, PathBuf};
@@ -89,8 +89,8 @@ impl Obfuscator {
         let merged = options.rule_files.iter().try_fold(
             ObfuscationRules::default(),
             |acc, path| -> Result<ObfuscationRules, ObfuscationError> {
-                let r = parse_rules_file(path)?;
-                Ok(merge_rules(acc, r))
+                let r = ObfuscationRules::from_file(path)?;
+                Ok(acc.merge(r))
             },
         )?;
 
@@ -111,7 +111,7 @@ impl Obfuscator {
         source: &str,
         filename: &str,
     ) -> Result<ObfuscationOutput, ObfuscationError> {
-        transform::obfuscate_source(source, filename, &self.rules)
+        self.rules.apply(source, filename)
     }
 
     /// Obfuscate a single `.js` file.
@@ -180,7 +180,9 @@ pub fn compute_rule_hash(rule_files: &[PathBuf]) -> u64 {
 /// Obfuscation is only performed in `Release` mode and when
 /// `config.enable_obfuscation` is set to `true`.
 pub fn should_obfuscate(build_mode: &BuildMode, config: Option<&ObfuscationConfig>) -> bool {
-    config.map(|c| c.is_enabled_for_mode(build_mode)).unwrap_or(false)
+    config
+        .map(|c| c.is_enabled_for_mode(build_mode))
+        .unwrap_or(false)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -239,11 +241,11 @@ mod tests {
         assert_ne!(h1, h2);
     }
 
-    // -- parse_rules_str -------------------------------------------------------
+    // -- ObfuscationRules::parse -----------------------------------------------
 
     #[test]
     fn test_rule_parser_enable_flags() {
-        let rules = parse_rules_str(
+        let rules = ObfuscationRules::parse(
             "-enable-obfuscation\n-enable-property-obfuscation\n-compact\n-remove-log\n",
         );
         assert!(rules.enable_obfuscation);
@@ -255,27 +257,27 @@ mod tests {
 
     #[test]
     fn test_keep_global_name_parsed() {
-        let rules = parse_rules_str("-keep-global-name\nMyClass\nhelperFn\n");
+        let rules = ObfuscationRules::parse("-keep-global-name\nMyClass\nhelperFn\n");
         assert!(rules.keep_global_names.contains("MyClass"));
         assert!(rules.keep_global_names.contains("helperFn"));
     }
 
     #[test]
     fn test_keep_property_name_parsed() {
-        let rules = parse_rules_str("-keep-property-name\npublicMethod\nonCreate\n");
+        let rules = ObfuscationRules::parse("-keep-property-name\npublicMethod\nonCreate\n");
         assert!(rules.keep_property_names.contains("publicMethod"));
         assert!(rules.keep_property_names.contains("onCreate"));
     }
 
     #[test]
     fn test_comment_and_blank_lines_ignored() {
-        let rules = parse_rules_str("# this is a comment\n\n-enable-obfuscation\n\n");
+        let rules = ObfuscationRules::parse("# this is a comment\n\n-enable-obfuscation\n\n");
         assert!(rules.enable_obfuscation);
     }
 
     #[test]
     fn test_disable_directive_overrides_enable() {
-        let rules = parse_rules_str("-enable-obfuscation\n-disable-obfuscation\n");
+        let rules = ObfuscationRules::parse("-enable-obfuscation\n-disable-obfuscation\n");
         assert!(!rules.enable_obfuscation);
     }
 

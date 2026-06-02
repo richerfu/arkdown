@@ -9,7 +9,7 @@ pub mod driver;
 pub mod error;
 pub mod version;
 
-pub use args::{parse_ts2abc_args, Ts2abcCommand, VersionQuery};
+pub use args::{Ts2abcCommand, VersionQuery};
 pub use driver::{
     compile_to_abc, ArkdownAbcBackend, BytecodeBackend, Ts2abcInput, Ts2abcOptions, Ts2abcOutput,
 };

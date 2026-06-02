@@ -15,21 +15,21 @@
 //! ```
 
 pub mod bytecode_har;
-pub(crate) mod module_json_writer;
 pub mod har_abilities;
 pub mod loader_json;
+pub(crate) mod module_json_writer;
 pub mod process_profile;
 pub mod process_share_config;
 pub mod process_startup_config;
 pub mod router_map;
 
+pub use arkdown_core::PkgBriefInfo;
 pub use bytecode_har::{
     collect_dynamic_import_lib_info, scan_bytecode_har_deps, ByteCodeHarScanEntry,
     DynamicImportLibEntry, HostModuleInfo,
 };
 pub use har_abilities::{collect_har_abilities, HarAbility};
-pub use loader_json::{generate_loader_json, ByteCodeHarEntry, LoaderJson};
-pub use arkdown_core::PkgBriefInfo;
+pub use loader_json::{ByteCodeHarEntry, LoaderJson};
 pub use process_profile::{
     ark_virtual_machine_from_version, process_profile, process_profile_with_ark_vm_version,
 };
@@ -129,7 +129,6 @@ impl ProfileProcessor {
         module_json_writer::write_module_json(manifest, &self.config, output_path, resource_ids)
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -517,4 +516,3 @@ fi
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 }
-

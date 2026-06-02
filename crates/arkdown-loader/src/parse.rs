@@ -23,7 +23,6 @@ impl ParsedModule {
     }
 }
 
-
 struct ModuleParser<'a> {
     source: &'a ModuleSource,
     imports: Vec<ImportEdge>,
@@ -183,11 +182,4 @@ impl<'a> ModuleParser<'a> {
             ModuleExportName::StringLiteral(lit) => lit.value.as_ref().to_owned(),
         }
     }
-}
-
-/// Parse a module's source text and extract static import edges and export bindings.
-///
-/// Prefer [`ParsedModule::parse`] in new code.
-pub fn parse_module(source: &ModuleSource) -> ParsedModule {
-    ParsedModule::parse(source)
 }

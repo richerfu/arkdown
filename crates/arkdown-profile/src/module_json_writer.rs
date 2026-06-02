@@ -60,8 +60,8 @@ fn read_app_json5_fields(
 ) -> Result<serde_json::Map<String, serde_json::Value>, ArkdownError> {
     let app_json5_path = config.project_root.join("AppScope/app.json5");
     if app_json5_path.exists() {
-        let content = fs_err::read_to_string(&app_json5_path)
-            .map_err(|e| ArkdownError::Io(e.into()))?;
+        let content =
+            fs_err::read_to_string(&app_json5_path).map_err(|e| ArkdownError::Io(e.into()))?;
         let raw: serde_json::Value = json5::from_str(&content)
             .map_err(|e| ArkdownError::Io(std::io::Error::other(e.to_string())))?;
         Ok(raw

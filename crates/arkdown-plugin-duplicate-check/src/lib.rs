@@ -1,5 +1,5 @@
-use std::borrow::Cow;
 use rustc_hash::FxHashMap;
+use std::borrow::Cow;
 use std::path::Path;
 
 use rolldown_common::Output;

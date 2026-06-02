@@ -4,7 +4,9 @@ use std::path::{Component, Path, PathBuf};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
-use arkdown_core::{ArkdownConfig, BuildMode, HapManifest, ModuleConfig, OhosModuleType, PkgBriefInfo};
+use arkdown_core::{
+    ArkdownConfig, BuildMode, HapManifest, ModuleConfig, OhosModuleType, PkgBriefInfo,
+};
 
 use crate::bytecode_har::{collect_dynamic_import_lib_info, scan_bytecode_har_deps};
 
@@ -124,227 +126,226 @@ impl LoaderJson {
         module_cfg: &ModuleConfig,
         manifest: &HapManifest,
     ) -> Self {
-    // Collect compile_entry from abilities' srcEntry values.
-    let mut compile_entry: Vec<String> = manifest
-        .abilities
-        .iter()
-        .map(|a| a.src_entry.clone())
-        .collect();
+        // Collect compile_entry from abilities' srcEntry values.
+        let mut compile_entry: Vec<String> = manifest
+            .abilities
+            .iter()
+            .map(|a| a.src_entry.clone())
+            .collect();
 
-    // Also collect from extension abilities.
-    for ext in &manifest.extension_abilities {
-        compile_entry.push(ext.src_entry.clone());
-    }
-    compile_entry.extend(collect_form_src_entries(module_cfg));
-
-    // Module-level srcEntry (used by HSP shared packages that export a single file
-    // without declaring abilities).
-    if let Some(src_entry) = &manifest.src_entry {
-        compile_entry.push(src_entry.clone());
-    }
-    if compile_entry.is_empty()
-        && matches!(
-            manifest.module_type,
-            OhosModuleType::Har | OhosModuleType::Shared
-        )
-    {
-        if let Some(main) = read_package_main(&module_cfg.src_path) {
-            compile_entry.push(to_absolute_path_string(&module_cfg.src_path.join(main)));
+        // Also collect from extension abilities.
+        for ext in &manifest.extension_abilities {
+            compile_entry.push(ext.src_entry.clone());
         }
-    }
+        compile_entry.extend(collect_form_src_entries(module_cfg));
 
-    // Include pages from $profile:main_pages so that page components are
-    // compiled alongside ability entry points.  The EtsTransformPlugin stubs
-    // out ArkUI build() DSL bodies before the bundler parses the TypeScript,
-    // so page files can now be processed safely.
-    if let Some(pages_ref) = &manifest.pages {
-        // pages_ref is typically "$profile:main_pages"; strip the "$profile:" prefix
-        // to get the profile file name.
-        if let Some(profile_name) = pages_ref.strip_prefix("$profile:") {
-            let profile_path = module_cfg
-                .src_path
-                .join("src/main/resources/base/profile")
-                .join(format!("{}.json", profile_name));
+        // Module-level srcEntry (used by HSP shared packages that export a single file
+        // without declaring abilities).
+        if let Some(src_entry) = &manifest.src_entry {
+            compile_entry.push(src_entry.clone());
+        }
+        if compile_entry.is_empty()
+            && matches!(
+                manifest.module_type,
+                OhosModuleType::Har | OhosModuleType::Shared
+            )
+        {
+            if let Some(main) = read_package_main(&module_cfg.src_path) {
+                compile_entry.push(to_absolute_path_string(&module_cfg.src_path.join(main)));
+            }
+        }
 
-            if let Ok(content) = std::fs::read_to_string(&profile_path) {
-                #[derive(serde::Deserialize)]
-                struct MainPages {
-                    src: Vec<String>,
-                }
-                if let Ok(pages) = serde_json::from_str::<MainPages>(&content) {
-                    for page in &pages.src {
-                        // page is e.g. "pages/Index"; map to "./ets/pages/Index.ets"
-                        let entry = format!("./ets/{}.ets", page);
-                        compile_entry.push(entry);
+        // Include pages from $profile:main_pages so that page components are
+        // compiled alongside ability entry points.  The EtsTransformPlugin stubs
+        // out ArkUI build() DSL bodies before the bundler parses the TypeScript,
+        // so page files can now be processed safely.
+        if let Some(pages_ref) = &manifest.pages {
+            // pages_ref is typically "$profile:main_pages"; strip the "$profile:" prefix
+            // to get the profile file name.
+            if let Some(profile_name) = pages_ref.strip_prefix("$profile:") {
+                let profile_path = module_cfg
+                    .src_path
+                    .join("src/main/resources/base/profile")
+                    .join(format!("{}.json", profile_name));
+
+                if let Ok(content) = std::fs::read_to_string(&profile_path) {
+                    #[derive(serde::Deserialize)]
+                    struct MainPages {
+                        src: Vec<String>,
+                    }
+                    if let Ok(pages) = serde_json::from_str::<MainPages>(&content) {
+                        for page in &pages.src {
+                            // page is e.g. "pages/Index"; map to "./ets/pages/Index.ets"
+                            let entry = format!("./ets/{}.ets", page);
+                            compile_entry.push(entry);
+                        }
                     }
                 }
             }
         }
-    }
 
-    // Discover WebWorker files from src/main/ets/workers. Upstream
-    // `main.js::readWorkerFile()` accepts explicit loader.json `workers` entries
-    // with .ets/.ts/.js suffixes; `loadWorker()` otherwise scans this directory
-    // recursively. Keep both surfaces aligned: serialize absolute worker paths
-    // for loader consumers and add relative `./ets/...` entries for arkdown's
-    // in-process bundler.
-    let worker_files = discover_worker_files(&module_cfg.src_path);
-    let mut discovered_workers: Vec<String> = vec![];
-    let ets_root = module_cfg.src_path.join("src/main/ets");
-    for path in &worker_files {
-        if let Ok(rel) = path.strip_prefix(&ets_root) {
-            compile_entry.push(format!("./ets/{}", to_unix_path(rel)));
+        // Discover WebWorker files from src/main/ets/workers. Upstream
+        // `main.js::readWorkerFile()` accepts explicit loader.json `workers` entries
+        // with .ets/.ts/.js suffixes; `loadWorker()` otherwise scans this directory
+        // recursively. Keep both surfaces aligned: serialize absolute worker paths
+        // for loader consumers and add relative `./ets/...` entries for arkdown's
+        // in-process bundler.
+        let worker_files = discover_worker_files(&module_cfg.src_path);
+        let mut discovered_workers: Vec<String> = vec![];
+        let ets_root = module_cfg.src_path.join("src/main/ets");
+        for path in &worker_files {
+            if let Ok(rel) = path.strip_prefix(&ets_root) {
+                compile_entry.push(format!("./ets/{}", to_unix_path(rel)));
+            }
+            discovered_workers.push(to_absolute_path_string(path));
         }
-        discovered_workers.push(to_absolute_path_string(path));
-    }
 
-    let router_map = read_loader_router_maps(config, module_cfg, manifest.router_map.as_deref());
+        let router_map =
+            read_loader_router_maps(config, module_cfg, manifest.router_map.as_deref());
 
-    let mut serialized_compile_entry = collect_runtime_only_source_files(config, module_cfg);
-    serialized_compile_entry.extend(collect_runtime_only_package_source_files(
-        config, module_cfg,
-    ));
-    serialized_compile_entry.extend(collect_dependency_router_map_source_files(
-        config, module_cfg,
-    ));
-    dedupe_paths(&mut serialized_compile_entry);
+        let mut serialized_compile_entry = collect_runtime_only_source_files(config, module_cfg);
+        serialized_compile_entry.extend(collect_runtime_only_package_source_files(
+            config, module_cfg,
+        ));
+        serialized_compile_entry.extend(collect_dependency_router_map_source_files(
+            config, module_cfg,
+        ));
+        dedupe_paths(&mut serialized_compile_entry);
 
-    let hvigor_compile_entry: Vec<String> = serialized_compile_entry
-        .iter()
-        .map(|path| to_absolute_path_string(path))
-        .collect();
-    let src_main_root = module_cfg.src_path.join("src/main");
-    for path in &serialized_compile_entry {
-        if let Ok(rel) = path.strip_prefix(&src_main_root) {
-            compile_entry.push(format!("./{}", to_unix_path(rel)));
-        } else {
-            compile_entry.push(to_absolute_path_string(path));
-        }
-    }
-
-    // Deduplicate while preserving order.
-    {
-        let mut seen = FxHashSet::default();
-        compile_entry.retain(|e| seen.insert(e.clone()));
-    }
-
-    let module_root = to_absolute_path_string(&module_cfg.src_path);
-    let project_root = to_absolute_path_string(&config.project_root);
-    let src_main = format!("{}/src/main", module_root);
-
-    let build_mode_str = match config.build_mode {
-        BuildMode::Debug => "debug".to_string(),
-        BuildMode::Release => "release".to_string(),
-    };
-
-    let compile_mode = match manifest.compile_mode {
-        arkdown_core::CompileMode::EsModule => "esmodule",
-        arkdown_core::CompileMode::JsBundle => "jsbundle",
-    }
-    .to_string();
-
-    let use_normalized_ohm_url = config
-        .product
-        .build_option
-        .strict_mode
-        .use_normalized_ohm_url;
-    let mut module_path_map = IndexMap::new();
-    for project_module in &config.modules {
-        module_path_map.insert(
-            project_module.name.clone(),
-            to_absolute_path_string(&project_module.src_path),
-        );
-    }
-    if module_path_map.is_empty() {
-        module_path_map.insert(module_cfg.name.clone(), module_root.clone());
-    }
-
-    // --- TASK-LOADER-01: scan oh_modules/ for ByteCode HAR dependencies ---
-    let bytecode_har_deps = scan_bytecode_har_deps(&module_cfg.src_path, &config.project_root);
-
-    let byte_code_har_info: FxHashMap<String, ByteCodeHarEntry> = bytecode_har_deps
-        .iter()
-        .cloned()
-        .map(|e| e.into_loader_entry())
-        .collect();
-
-    let declaration_entry = if use_normalized_ohm_url {
-        let mut entries: Vec<String> = bytecode_har_deps
+        let hvigor_compile_entry: Vec<String> = serialized_compile_entry
             .iter()
-            .flat_map(|dep| dep.declaration_entry.iter().cloned())
+            .map(|path| to_absolute_path_string(path))
             .collect();
-        let mut seen = FxHashSet::default();
-        entries.retain(|entry| seen.insert(entry.clone()));
-        entries
-    } else {
-        Vec::new()
-    };
+        let src_main_root = module_cfg.src_path.join("src/main");
+        for path in &serialized_compile_entry {
+            if let Ok(rel) = path.strip_prefix(&src_main_root) {
+                compile_entry.push(format!("./{}", to_unix_path(rel)));
+            } else {
+                compile_entry.push(to_absolute_path_string(path));
+            }
+        }
 
-    // --- TASK-LOADER-02: populate dynamicImportLibInfo from oh-package.json5 ---
-    let dynamic_import_lib_info: IndexMap<String, serde_json::Value> = {
-        let dynamic_dep_names = collect_dynamic_import_dep_names(config, &module_cfg.src_path);
-        let entries = collect_dynamic_import_lib_info(
-            &module_cfg.name,
-            &dynamic_dep_names,
-            &module_cfg.src_path,
-            &config.project_root,
-        );
-        entries
-            .into_iter()
-            .filter_map(|(k, v)| serde_json::to_value(v).ok().map(|json| (k, json)))
-            .collect()
-    };
+        // Deduplicate while preserving order.
+        {
+            let mut seen = FxHashSet::default();
+            compile_entry.retain(|e| seen.insert(e.clone()));
+        }
 
-    LoaderJson {
-        module_path_map,
-        compile_mode,
-        project_root_path: project_root.clone(),
-        node_modules_path: format!(
-            "{}/build/default/intermediates/loader_out/default/node_modules",
-            module_root
-        ),
-        byte_code_har_info,
-        declaration_entry,
-        module_name: module_cfg.name.clone(),
-        hsp_name_ohm_map: FxHashMap::default(),
-        har_name_ohm_map: FxHashMap::default(),
-        package_manager_type: "ohpm".to_string(),
-        hvigor_compile_entry,
-        other_compile_files: vec![],
-        dynamic_import_lib_info,
-        router_map,
-        hsp_resources_map: FxHashMap::default(),
-        update_version_info: FxHashMap::default(),
-        an_build_out_put: format!(
-            "{}/build/default/intermediates/loader_out/default/an/arm64-v8a",
-            module_root
-        ),
-        an_build_mode: "type".to_string(),
-        non_entry_importees: vec![],
-        compiled_importees: vec![],
+        let module_root = to_absolute_path_string(&module_cfg.src_path);
+        let project_root = to_absolute_path_string(&config.project_root);
+        let src_main = format!("{}/src/main", module_root);
 
-        compile_entry,
-        module_root_path: src_main.clone(),
-        cache_path: format!(
-            "{}/build/default/intermediates/loader_out/default/ets/cache/",
-            module_root
-        ),
-        ace_module_build: format!(
-            "{}/build/default/intermediates/loader_out/default/ets/",
-            module_root
-        ),
-        build_mode: build_mode_str,
-        support_chunks: false,
-        use_normalized_ohm_url,
-        api_version: config.sdk_config.compile_api_version,
-        fallback_an_build: false,
-        pkg_name_to_pkg_brief_info: build_pkg_brief_info(config, module_cfg),
-        workers: discovered_workers,
-    }
+        let build_mode_str = match config.build_mode {
+            BuildMode::Debug => "debug".to_string(),
+            BuildMode::Release => "release".to_string(),
+        };
+
+        let compile_mode = match manifest.compile_mode {
+            arkdown_core::CompileMode::EsModule => "esmodule",
+            arkdown_core::CompileMode::JsBundle => "jsbundle",
+        }
+        .to_string();
+
+        let use_normalized_ohm_url = config
+            .product
+            .build_option
+            .strict_mode
+            .use_normalized_ohm_url;
+        let mut module_path_map = IndexMap::new();
+        for project_module in &config.modules {
+            module_path_map.insert(
+                project_module.name.clone(),
+                to_absolute_path_string(&project_module.src_path),
+            );
+        }
+        if module_path_map.is_empty() {
+            module_path_map.insert(module_cfg.name.clone(), module_root.clone());
+        }
+
+        // --- TASK-LOADER-01: scan oh_modules/ for ByteCode HAR dependencies ---
+        let bytecode_har_deps = scan_bytecode_har_deps(&module_cfg.src_path, &config.project_root);
+
+        let byte_code_har_info: FxHashMap<String, ByteCodeHarEntry> = bytecode_har_deps
+            .iter()
+            .cloned()
+            .map(|e| e.into_loader_entry())
+            .collect();
+
+        let declaration_entry = if use_normalized_ohm_url {
+            let mut entries: Vec<String> = bytecode_har_deps
+                .iter()
+                .flat_map(|dep| dep.declaration_entry.iter().cloned())
+                .collect();
+            let mut seen = FxHashSet::default();
+            entries.retain(|entry| seen.insert(entry.clone()));
+            entries
+        } else {
+            Vec::new()
+        };
+
+        // --- TASK-LOADER-02: populate dynamicImportLibInfo from oh-package.json5 ---
+        let dynamic_import_lib_info: IndexMap<String, serde_json::Value> = {
+            let dynamic_dep_names = collect_dynamic_import_dep_names(config, &module_cfg.src_path);
+            let entries = collect_dynamic_import_lib_info(
+                &module_cfg.name,
+                &dynamic_dep_names,
+                &module_cfg.src_path,
+                &config.project_root,
+            );
+            entries
+                .into_iter()
+                .filter_map(|(k, v)| serde_json::to_value(v).ok().map(|json| (k, json)))
+                .collect()
+        };
+
+        LoaderJson {
+            module_path_map,
+            compile_mode,
+            project_root_path: project_root.clone(),
+            node_modules_path: format!(
+                "{}/build/default/intermediates/loader_out/default/node_modules",
+                module_root
+            ),
+            byte_code_har_info,
+            declaration_entry,
+            module_name: module_cfg.name.clone(),
+            hsp_name_ohm_map: FxHashMap::default(),
+            har_name_ohm_map: FxHashMap::default(),
+            package_manager_type: "ohpm".to_string(),
+            hvigor_compile_entry,
+            other_compile_files: vec![],
+            dynamic_import_lib_info,
+            router_map,
+            hsp_resources_map: FxHashMap::default(),
+            update_version_info: FxHashMap::default(),
+            an_build_out_put: format!(
+                "{}/build/default/intermediates/loader_out/default/an/arm64-v8a",
+                module_root
+            ),
+            an_build_mode: "type".to_string(),
+            non_entry_importees: vec![],
+            compiled_importees: vec![],
+
+            compile_entry,
+            module_root_path: src_main.clone(),
+            cache_path: format!(
+                "{}/build/default/intermediates/loader_out/default/ets/cache/",
+                module_root
+            ),
+            ace_module_build: format!(
+                "{}/build/default/intermediates/loader_out/default/ets/",
+                module_root
+            ),
+            build_mode: build_mode_str,
+            support_chunks: false,
+            use_normalized_ohm_url,
+            api_version: config.sdk_config.compile_api_version,
+            fallback_an_build: false,
+            pkg_name_to_pkg_brief_info: build_pkg_brief_info(config, module_cfg),
+            workers: discovered_workers,
+        }
     }
 }
-
-
 
 /// Metadata for a bytecode-compiled HAR dependency.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -412,16 +413,6 @@ fn collect_form_src_entries(module_cfg: &ModuleConfig) -> Vec<String> {
 /// When `useNormalizedOHMUrl` is `true`, callers are expected to convert the
 /// `src_entry` paths to OHM URLs (`@bundle:…`) before passing the manifest —
 /// this function records whatever values are in `manifest.abilities[].src_entry`.
-/// Build a [`LoaderJson`] from the processed profile data.
-///
-/// This is a compatibility shim; prefer [`LoaderJson::generate`] in new code.
-pub fn generate_loader_json(
-    config: &ArkdownConfig,
-    module_cfg: &ModuleConfig,
-    manifest: &HapManifest,
-) -> LoaderJson {
-    LoaderJson::generate(config, module_cfg, manifest)
-}
 
 fn read_package_main(module_root: &Path) -> Option<String> {
     let path = module_root.join("oh-package.json5");

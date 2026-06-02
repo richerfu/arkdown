@@ -15,8 +15,8 @@ pub mod viewpu_emit;
 mod viewpu_finalize;
 mod viewpu_source_map;
 
-use std::path::{Path, PathBuf};
 use rustc_hash::FxHashSet;
+use std::path::{Path, PathBuf};
 
 use arkdown_core::ModuleSource;
 use oxc_allocator::Allocator;

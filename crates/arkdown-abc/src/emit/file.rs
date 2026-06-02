@@ -456,8 +456,7 @@ impl AbcFile {
 
         let mut bytecode_string_offsets = vec![0u32; self.strings.len()];
         let mut emitted_bytecode_strings = vec![false; self.strings.len()];
-        let mut supplemental_string_offsets =
-            FxHashMap::<(usize, String), u32>::default();
+        let mut supplemental_string_offsets = FxHashMap::<(usize, String), u32>::default();
         let mut method_string_offsets: Vec<Vec<u32>> = all_classes
             .iter()
             .map(|class| vec![0; class.methods.len()])

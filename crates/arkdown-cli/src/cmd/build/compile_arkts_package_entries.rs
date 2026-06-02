@@ -1,6 +1,6 @@
 use super::compile_arkts_modules::{
-    find_package_root, package_entry_path, pkg_modules_package_name,
-    slash_path, strip_source_extension, symlink_pkg_module_aliases, CompileModuleInfo,
+    find_package_root, package_entry_path, pkg_modules_package_name, slash_path,
+    strip_source_extension, symlink_pkg_module_aliases, CompileModuleInfo,
 };
 use super::*;
 use rustc_hash::FxHashSet;

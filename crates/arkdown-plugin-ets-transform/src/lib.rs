@@ -24,8 +24,8 @@ mod sys_resource;
 pub mod transform;
 mod typescript_emit;
 
-use std::borrow::Cow;
 use rustc_hash::FxHashMap;
+use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
 
 use arkdown_core::{ArkdownConfig, ModuleSource, ModuleType, ResolvedId};

@@ -16,7 +16,11 @@ pub(super) fn build_modules_for_target<'a>(
                 .map(|selected| module.name == selected)
                 .unwrap_or(true)
         })
-        .filter(|module| module.module_type.matches_output_target(&config.output_target))
+        .filter(|module| {
+            module
+                .module_type
+                .matches_output_target(&config.output_target)
+        })
         .collect();
     if matching.is_empty() {
         config

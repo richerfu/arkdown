@@ -487,7 +487,6 @@ impl ClassRecord {
         indices.sort_by(|&a, &b| self.methods[a].name.cmp(&self.methods[b].name));
         indices
     }
-
 }
 
 impl MethodRecord {

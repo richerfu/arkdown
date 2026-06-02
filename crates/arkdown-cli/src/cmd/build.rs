@@ -43,13 +43,13 @@ use compile_arkts_handoff::{
 };
 mod compile_arkts_modules;
 use compile_arkts_modules::{
-    compile_source_passthrough, module_id_to_source_path,
-    rewrite_compile_module_imports_to_ohm, CompileModuleInfo,
+    compile_source_passthrough, module_id_to_source_path, rewrite_compile_module_imports_to_ohm,
+    CompileModuleInfo,
 };
 mod compile_arkts_output;
 use compile_arkts_output::{
-    collect_unresolved_external_imports,
-    format_unresolved_import_errors, write_hvigor_source_maps, ChunkCompileMeta,
+    collect_unresolved_external_imports, format_unresolved_import_errors, write_hvigor_source_maps,
+    ChunkCompileMeta,
 };
 mod compile_arkts_package_entries;
 use compile_arkts_package_entries::{is_package_entry_file, PackageEntryInfos};
@@ -58,9 +58,9 @@ use compile_arkts_widget::compile_widget_pass;
 mod intermediates;
 use intermediates::{
     canonical_or_owned, copy_ets_assets_to_loader_out, copy_if_exists, extract_zip_entry,
-    path_string, rewrite_package_intermediate_module_json,
-    write_bytes, write_hap_metadata, write_json_pretty, write_profile_intermediates,
-    write_resource_config_files, write_router_map_intermediates, write_static_intermediate_files,
+    path_string, rewrite_package_intermediate_module_json, write_bytes, write_hap_metadata,
+    write_json_pretty, write_profile_intermediates, write_resource_config_files,
+    write_router_map_intermediates, write_static_intermediate_files,
 };
 mod module_plan;
 use module_plan::{build_modules_for_target, resource_modules_for_build};

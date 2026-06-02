@@ -14,6 +14,24 @@ pub struct RawModuleJson {
     pub module: RawModuleEntry,
 }
 
+impl RawModuleJson {
+    pub fn parse(content: &str, file: &Path) -> Result<RawModuleJson, ConfigError> {
+        json5::from_str::<RawModuleJson>(content).map_err(|e| ConfigError::ParseError {
+            file: file.to_path_buf(),
+            message: e.to_string(),
+        })
+    }
+
+    pub fn load(module_root: &Path) -> Result<RawModuleJson, ConfigError> {
+        let path: PathBuf = module_root.join("src").join("main").join("module.json5");
+        if !path.exists() {
+            return Err(ConfigError::FileNotFound(path));
+        }
+        let content = fs_err::read_to_string(&path)?;
+        Self::parse(&content, &path)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RawModuleEntry {
@@ -38,25 +56,11 @@ pub struct RawModuleEntry {
 // ---------------------------------------------------------------------------
 
 /// Parse the contents of a `module.json5` file.
-pub fn parse_module_json(content: &str, file: &Path) -> Result<RawModuleJson, ConfigError> {
-    json5::from_str::<RawModuleJson>(content).map_err(|e| ConfigError::ParseError {
-        file: file.to_path_buf(),
-        message: e.to_string(),
-    })
-}
 
 /// Load and parse `module.json5` from the given path.
 ///
 /// `module_root` is the module directory (e.g. `{project}/entry/`).
 /// The file is expected at `{module_root}/src/main/module.json5`.
-pub fn load_module_json(module_root: &Path) -> Result<RawModuleJson, ConfigError> {
-    let path: PathBuf = module_root.join("src").join("main").join("module.json5");
-    if !path.exists() {
-        return Err(ConfigError::FileNotFound(path));
-    }
-    let content = fs_err::read_to_string(&path)?;
-    parse_module_json(&content, &path)
-}
 
 /// Map the raw `module.type` string to [`arkdown_core::OhosModuleType`].
 // ---------------------------------------------------------------------------
@@ -79,7 +83,7 @@ mod tests {
                 extensionAbilities: []
             }
         }"#;
-        let m = parse_module_json(json, Path::new("module.json5")).unwrap();
+        let m = RawModuleJson::parse(json, Path::new("module.json5")).unwrap();
         assert_eq!(m.module.name, "entry");
         assert_eq!(m.module.module_type, "entry");
         assert_eq!(m.module.src_entry, "./ets/entryability/EntryAbility.ets");
@@ -102,7 +106,7 @@ mod tests {
                 }]
             }
         }"#;
-        let m = parse_module_json(json, Path::new("module.json5")).unwrap();
+        let m = RawModuleJson::parse(json, Path::new("module.json5")).unwrap();
         assert_eq!(m.module.abilities.len(), 1);
         let ability = &m.module.abilities[0];
         assert_eq!(ability["name"], "EntryAbility");
@@ -119,7 +123,7 @@ mod tests {
                 deviceTypes: ["phone", "tablet"]
             }
         }"#;
-        let m = parse_module_json(json, Path::new("module.json5")).unwrap();
+        let m = RawModuleJson::parse(json, Path::new("module.json5")).unwrap();
         assert_eq!(m.module.module_type, "har");
         assert_eq!(
             arkdown_core::OhosModuleType::from_type_str(&m.module.module_type),
@@ -131,7 +135,7 @@ mod tests {
     fn test_parse_module_json_missing_optional_fields() {
         // Only required: `module` key. All inner fields have defaults.
         let json = r#"{ module: {} }"#;
-        let m = parse_module_json(json, Path::new("module.json5")).unwrap();
+        let m = RawModuleJson::parse(json, Path::new("module.json5")).unwrap();
         assert!(m.module.name.is_empty());
         assert!(m.module.device_types.is_empty());
         assert!(m.module.abilities.is_empty());
@@ -151,7 +155,10 @@ mod tests {
             arkdown_core::OhosModuleType::from_type_str("shared"),
             arkdown_core::OhosModuleType::Shared
         );
-        assert_eq!(arkdown_core::OhosModuleType::from_type_str("har"), arkdown_core::OhosModuleType::Har);
+        assert_eq!(
+            arkdown_core::OhosModuleType::from_type_str("har"),
+            arkdown_core::OhosModuleType::Har
+        );
         // Unknown falls back to Entry
         assert_eq!(
             arkdown_core::OhosModuleType::from_type_str("unknown"),

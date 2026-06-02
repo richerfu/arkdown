@@ -1,8 +1,8 @@
+use rustc_hash::FxHashSet;
 use std::{
     fs,
     path::{Path, PathBuf},
 };
-use rustc_hash::FxHashSet;
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{

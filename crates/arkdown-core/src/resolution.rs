@@ -70,8 +70,9 @@ impl OhosResolvedModule {
             OhosResolvedModule::BytecodeHar { ohm_url, .. } => {
                 Some(std::borrow::Cow::Borrowed(ohm_url.as_str()))
             }
-            OhosResolvedModule::LocalSource { .. }
-            | OhosResolvedModule::RemotePackage { .. } => None,
+            OhosResolvedModule::LocalSource { .. } | OhosResolvedModule::RemotePackage { .. } => {
+                None
+            }
         }
     }
 

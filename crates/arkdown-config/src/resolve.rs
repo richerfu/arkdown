@@ -6,9 +6,9 @@ use arkdown_core::{
     StrictModeConfig,
 };
 
-use crate::build_profile::{load_app_json5, load_build_profile, parse_api_version};
+use crate::build_profile::{parse_api_version, RawAppJson5, RawBuildProfile};
 use crate::error::ConfigError;
-use crate::module_json::load_module_json;
+use crate::module_json::RawModuleJson;
 use crate::sdk::discover_sdk;
 
 /// Parse the project at `root` and return a fully resolved [`ArkdownConfig`].
@@ -29,8 +29,8 @@ pub fn load_config(
     // -----------------------------------------------------------------------
     // 1. Parse build-profile.json5 and AppScope/app.json5
     // -----------------------------------------------------------------------
-    let profile = load_build_profile(root)?;
-    let app_json5 = load_app_json5(root)?;
+    let profile = RawBuildProfile::load(root)?;
+    let app_json5 = RawAppJson5::load(root)?;
 
     // -----------------------------------------------------------------------
     // 2. Destructure app-level fields before consuming products
@@ -207,7 +207,7 @@ pub fn load_config(
         let module_root = root.join(&raw_mod.src_path);
 
         // module.json5 is optional — if absent we fall back to Entry.
-        let module_type = match load_module_json(&module_root) {
+        let module_type = match RawModuleJson::load(&module_root) {
             Ok(mj) => OhosModuleType::from_type_str(&mj.module.module_type),
             Err(ConfigError::FileNotFound(_)) => arkdown_core::OhosModuleType::Entry,
             Err(e) => return Err(e),
