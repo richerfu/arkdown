@@ -474,6 +474,20 @@ impl ClassRecord {
 
         buf
     }
+    /// Indices of methods in `self.methods` that have `method_pool_entry` set,
+    /// sorted by method name.  Used when building `method_index` items in the
+    /// ABC file format.
+    pub(crate) fn method_pool_entry_indices(&self) -> Vec<usize> {
+        let mut indices: Vec<usize> = self
+            .methods
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, method)| method.method_pool_entry.then_some(idx))
+            .collect();
+        indices.sort_by(|&a, &b| self.methods[a].name.cmp(&self.methods[b].name));
+        indices
+    }
+
 }
 
 impl MethodRecord {

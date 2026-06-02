@@ -369,7 +369,7 @@ impl AbcFile {
             .iter()
             .map(|class| {
                 method_index_string_refs(class, &self.strings).len()
-                    + method_index_method_indices(class).len()
+                    + class.method_pool_entry_indices().len()
                     + class.literal_indices.len()
             })
             .sum::<usize>() as u32;
@@ -482,7 +482,7 @@ impl AbcFile {
                 class_pool_strings.push(PoolStringItem::MethodIndex(string_ref));
             }
             let ohm_url = &class_ohm_urls[class_idx];
-            for method_idx in method_index_method_indices(class) {
+            for method_idx in class.method_pool_entry_indices() {
                 class_pool_strings.push(PoolStringItem::FullMethodName(format!(
                     "{ohm_url}.{}",
                     class.methods[method_idx].name
@@ -1437,7 +1437,7 @@ fn build_method_pool_layouts(
                 }
             }
 
-            layout.method_indices = method_index_method_indices(class);
+            layout.method_indices = class.method_pool_entry_indices();
             for &method_idx in &layout.method_indices {
                 let pool_index = next_pool_index;
                 let method = &class.methods[method_idx];
@@ -1627,17 +1627,6 @@ fn method_index_string_refs(
     }
     refs.sort_by(|a, b| a.value(strings).cmp(b.value(strings)));
     refs
-}
-
-fn method_index_method_indices(class: &ClassRecord) -> Vec<usize> {
-    let mut indices: Vec<usize> = class
-        .methods
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, method)| method.method_pool_entry.then_some(idx))
-        .collect();
-    indices.sort_by(|&a, &b| class.methods[a].name.cmp(&class.methods[b].name));
-    indices
 }
 
 /// Compute Adler-32 checksum of `data`.
