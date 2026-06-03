@@ -247,6 +247,10 @@ pub enum Insn {
     /// Operands are receiver and arguments array.
     Apply(u8, u8, u8),
 
+    /// `0x76` / `0xC1` — get or create the cached tagged-template object.
+    /// Accumulator holds the template argument array.
+    GetTemplateObject(u16),
+
     // ── Global variable access ────────────────────────────────────────────────
     // Short form (imm=u8): opcode(1) + slot(1) + name_id(2) = 4 bytes.
     /// `0x3F` — load `globalThis.<name>` into accumulator.
@@ -782,6 +786,12 @@ impl Insn {
             Insn::SuperCallThisRange(slot, argc, v_start) => vec![0x32, *slot, *argc, *v_start],
             Insn::SuperCallSpread(slot, args_vreg) => vec![0xb9, *slot, *args_vreg],
             Insn::Apply(slot, this_vreg, args_vreg) => vec![0xba, *slot, *this_vreg, *args_vreg],
+            Insn::GetTemplateObject(slot) if *slot <= u8::MAX as u16 => vec![0x76, *slot as u8],
+            Insn::GetTemplateObject(slot) => {
+                let mut v = vec![0xc1];
+                v.extend_from_slice(&slot.to_le_bytes());
+                v
+            }
 
             // ── global access ────────────────────────────────────────────────
             Insn::TryLdGlobalByName(slot, name_id) => {
@@ -1076,6 +1086,13 @@ impl Insn {
             Insn::SuperCallThisRange(_, _, _) => 4,
             Insn::SuperCallSpread(_, _) => 3,
             Insn::Apply(_, _, _) => 4,
+            Insn::GetTemplateObject(slot) => {
+                if *slot <= u8::MAX as u16 {
+                    2
+                } else {
+                    3
+                }
+            }
             Insn::TryLdGlobalByName(_, _)
             | Insn::TryStGlobalByName(_, _)
             | Insn::LdObjByName(_, _)

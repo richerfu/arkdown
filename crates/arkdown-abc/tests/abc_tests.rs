@@ -2570,6 +2570,45 @@ fn test_ts_assignment_target_wrapper_uses_inner_lreference() {
 }
 
 #[test]
+fn test_tagged_template_uses_upstream_template_object_call_shape() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("tagged_template.abc");
+    let record_name = "test/tagged_template";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"
+function tag(strings, value) { return value; }
+const plain = tag`left${1}right`;
+const receiver = { tag(strings) { return strings; } };
+const method = receiver.tag`only`;
+"#,
+            )],
+            &out,
+        )
+        .expect("compile tagged template source");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x76),
+        "tagged templates must call gettemplateobject"
+    );
+    assert!(
+        bytecode.windows(2).any(|window| window == [0xfb, 0x01]),
+        "tagged templates must populate raw/cooked arrays with definefieldbyvalue"
+    );
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x2b),
+        "tag`left${{expr}}right` must pass template object and expression to callargs2"
+    );
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x2e),
+        "receiver.tag`only` must preserve receiver with callthis1"
+    );
+}
+
+#[test]
 fn test_delete_global_identifier_uses_global_object_delete() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("delete_global.abc");

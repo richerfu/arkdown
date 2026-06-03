@@ -1760,6 +1760,13 @@ impl UnsupportedScanner<'_> {
                 }
                 Ok(())
             }
+            Expression::TaggedTemplateExpression(tagged) => {
+                self.scan_expression(&tagged.tag)?;
+                for expr in &tagged.quasi.expressions {
+                    self.scan_expression(expr)?;
+                }
+                Ok(())
+            }
             Expression::AwaitExpression(expr) => self.scan_expression(&expr.argument),
             Expression::YieldExpression(expr) => {
                 if let Some(arg) = &expr.argument {
@@ -3856,6 +3863,9 @@ impl<'a> CodeGen<'a> {
             Expression::TemplateLiteral(tmpl) => {
                 self.emit_template_literal(tmpl);
             }
+            Expression::TaggedTemplateExpression(tagged) => {
+                self.emit_tagged_template_expr(tagged);
+            }
             Expression::ChainExpression(chain) => {
                 self.emit_chain_expr(chain);
             }
@@ -4656,6 +4666,188 @@ impl<'a> CodeGen<'a> {
         }
 
         self.push(Insn::Lda(left_reg));
+    }
+
+    fn emit_tagged_template_expr(&mut self, tagged: &oxc_ast::ast::TaggedTemplateExpression<'_>) {
+        let saved_next_reg = self.next_reg;
+        let slot = 0u8;
+        let callee_reg = self.alloc_reg();
+        let mut this_reg = None;
+
+        match &tagged.tag {
+            Expression::StaticMemberExpression(mem) => {
+                let reg = self.alloc_reg();
+                this_reg = Some(reg);
+                self.emit_expr(&mem.object);
+                self.set_debug_pos(tagged.tag.span().start);
+                self.push(Insn::Sta(reg));
+                self.set_debug_pos(mem.property.span.start);
+                let name_id = self.intern(mem.property.name.as_str());
+                self.push(Insn::Lda(reg));
+                if matches!(&mem.object, Expression::Super(_)) {
+                    self.push(Insn::LdSuperByName(0, name_id));
+                } else {
+                    self.push(Insn::LdObjByName(0, name_id));
+                }
+            }
+            Expression::ComputedMemberExpression(mem) => {
+                let reg = self.alloc_reg();
+                this_reg = Some(reg);
+                self.emit_expr(&mem.object);
+                self.set_debug_pos(tagged.tag.span().start);
+                self.push(Insn::Sta(reg));
+                self.set_debug_pos(mem.expression.span().start);
+                if let Expression::StringLiteral(key) = &mem.expression {
+                    let name_id = self.intern(key.value.as_str());
+                    self.push(Insn::Lda(reg));
+                    if matches!(&mem.object, Expression::Super(_)) {
+                        self.push(Insn::LdSuperByName(0, name_id));
+                    } else {
+                        self.push(Insn::LdObjByName(0, name_id));
+                    }
+                } else {
+                    self.emit_expr(&mem.expression);
+                    if matches!(&mem.object, Expression::Super(_)) {
+                        self.push(Insn::LdSuperByValue(0, reg));
+                    } else {
+                        self.push(Insn::LdObjByValue(0, reg));
+                    }
+                }
+            }
+            tag => {
+                self.emit_expr(tag);
+            }
+        }
+
+        self.push(Insn::Sta(callee_reg));
+        self.emit_template_object(&tagged.quasi);
+        let live_next_reg = this_reg
+            .map(|reg| reg.saturating_add(1))
+            .unwrap_or_else(|| callee_reg.saturating_add(1));
+        self.next_reg = live_next_reg;
+
+        let arg0 = self.alloc_reg();
+        self.push(Insn::Sta(arg0));
+        let mut arg_regs = vec![arg0];
+        for expr in &tagged.quasi.expressions {
+            self.emit_expr(expr);
+            let arg_reg = self.alloc_reg();
+            self.push(Insn::Sta(arg_reg));
+            arg_regs.push(arg_reg);
+        }
+
+        let argc = arg_regs.len();
+        if let Some(this_reg) = this_reg {
+            self.push(Insn::Lda(callee_reg));
+            match argc {
+                1 => self.push(Insn::CallThis1(slot, this_reg, arg_regs[0])),
+                2 => self.push(Insn::CallThis2(slot, this_reg, arg_regs[0], arg_regs[1])),
+                3 => self.push(Insn::CallThis3(
+                    slot,
+                    this_reg,
+                    arg_regs[0],
+                    arg_regs[1],
+                    arg_regs[2],
+                )),
+                n => {
+                    let first_arg = this_reg.saturating_add(1);
+                    self.move_args_to_contiguous_range(&arg_regs, first_arg);
+                    self.push(Insn::Lda(callee_reg));
+                    self.push(Insn::CallThisRange(slot, n as u8, this_reg));
+                }
+            }
+        } else {
+            self.push(Insn::Lda(callee_reg));
+            match argc {
+                1 => self.push(Insn::CallArg1(slot, arg_regs[0])),
+                2 => self.push(Insn::CallArgs2(slot, arg_regs[0], arg_regs[1])),
+                3 => self.push(Insn::CallArgs3(slot, arg_regs[0], arg_regs[1], arg_regs[2])),
+                n => {
+                    let first_arg = callee_reg.saturating_add(1);
+                    self.move_args_to_contiguous_range(&arg_regs, first_arg);
+                    self.push(Insn::Lda(callee_reg));
+                    self.push(Insn::CallRange(slot, n as u8, first_arg));
+                }
+            }
+        }
+
+        self.next_reg = saved_next_reg;
+    }
+
+    fn emit_template_object(&mut self, tmpl: &oxc_ast::ast::TemplateLiteral<'_>) {
+        let saved_next_reg = self.next_reg;
+        let template_arg_reg = self.alloc_reg();
+        let index_reg = self.alloc_reg();
+        let raw_arr_reg = self.alloc_reg();
+        let cooked_arr_reg = self.alloc_reg();
+
+        self.push(Insn::CreateEmptyArray(0));
+        self.push(Insn::Sta(raw_arr_reg));
+        self.push(Insn::CreateEmptyArray(0));
+        self.push(Insn::Sta(cooked_arr_reg));
+
+        for (idx, element) in tmpl.quasis.iter().enumerate() {
+            self.push(Insn::LdAi(idx as i32));
+            self.push(Insn::Sta(index_reg));
+
+            let raw_id = self.intern(element.value.raw.as_str());
+            self.push(Insn::LdaStr(raw_id));
+            self.push(Insn::CallRuntimeDefineFieldByValue(
+                0,
+                index_reg,
+                raw_arr_reg,
+            ));
+
+            if let Some(cooked) = &element.value.cooked {
+                let cooked_id = self.intern(cooked.as_str());
+                self.push(Insn::LdaStr(cooked_id));
+            } else {
+                self.push(Insn::LdUndefined);
+            }
+            self.push(Insn::CallRuntimeDefineFieldByValue(
+                0,
+                index_reg,
+                cooked_arr_reg,
+            ));
+        }
+
+        self.push(Insn::CreateEmptyArray(0));
+        self.push(Insn::Sta(template_arg_reg));
+
+        self.push(Insn::LdAi(0));
+        self.push(Insn::Sta(index_reg));
+        self.push(Insn::Lda(raw_arr_reg));
+        self.push(Insn::CallRuntimeDefineFieldByValue(
+            0,
+            index_reg,
+            template_arg_reg,
+        ));
+
+        self.push(Insn::LdAi(1));
+        self.push(Insn::Sta(index_reg));
+        self.push(Insn::Lda(cooked_arr_reg));
+        self.push(Insn::CallRuntimeDefineFieldByValue(
+            0,
+            index_reg,
+            template_arg_reg,
+        ));
+
+        self.push(Insn::Lda(template_arg_reg));
+        self.push(Insn::GetTemplateObject(0));
+        self.next_reg = saved_next_reg;
+    }
+
+    fn move_args_to_contiguous_range(&mut self, arg_regs: &[u8], first_arg: u8) {
+        for (idx, &arg_reg) in arg_regs.iter().enumerate() {
+            let target = first_arg.saturating_add(idx as u8);
+            if arg_reg != target {
+                self.push(Insn::Lda(arg_reg));
+                self.push(Insn::Sta(target));
+                if self.next_reg <= target {
+                    self.next_reg = target.saturating_add(1);
+                }
+            }
+        }
     }
 
     // ── Class definition ──────────────────────────────────────────────────────
