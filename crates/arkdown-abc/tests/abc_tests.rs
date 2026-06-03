@@ -3961,6 +3961,41 @@ fn test_default_export_uninitialized_static_class_field_defines_undefined_proper
 }
 
 #[test]
+fn test_static_block_runs_static_initializer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("static_block.abc");
+    let record_name = "test/static_block";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"class Box { static { this.value = 1; } }
+const value = Box.value;"#,
+            )],
+            &out,
+        )
+        .expect("static block source must compile through the static initializer path");
+
+    let bytes = std::fs::read(&out).unwrap();
+    let main = module_func_main_bytecode(&bytes, record_name);
+    assert!(
+        bytecode_contains_opcode(&main, 0x2d),
+        "class definition must call the generated static block initializer with callthis0"
+    );
+    let (_, initializer) =
+        module_method_bytecode_by_suffix(&bytes, record_name, "static_initializer#")
+            .expect("static block initializer method exists");
+    assert!(
+        bytecode_contains_opcode(&initializer, 0x6f),
+        "static block initializer must load this like upstream CompileClassInitializer"
+    );
+    assert!(
+        bytecode_contains_opcode(&initializer, 0x43),
+        "static block body must compile its this.value assignment"
+    );
+}
+
+#[test]
 fn test_computed_static_class_field_is_rejected_until_class_key_lowering_is_supported() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("computed_static_class_field.abc");

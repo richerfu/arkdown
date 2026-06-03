@@ -64,15 +64,22 @@ pub(super) fn static_initializer_record_name(
     class_name: &str,
     elements: &[ClassElement<'_>],
 ) -> Option<String> {
-    let first_static_field_start = elements.iter().find_map(|element| {
-        let ClassElement::PropertyDefinition(property) = element else {
-            return None;
-        };
-        (property.r#static && !property.computed && method_key_name(&property.key).is_some())
-            .then(|| property.key.span().start)
-    })?;
+    let first_initializer_start = elements
+        .iter()
+        .filter_map(|element| match element {
+            ClassElement::PropertyDefinition(property)
+                if property.r#static
+                    && !property.computed
+                    && method_key_name(&property.key).is_some() =>
+            {
+                Some(property.key.span().start)
+            }
+            ClassElement::StaticBlock(block) => Some(block.span.start),
+            _ => None,
+        })
+        .min()?;
     Some(format!(
-        "#{class_name}_{first_static_field_start}_static_initializer#"
+        "#{class_name}_{first_initializer_start}_static_initializer#"
     ))
 }
 

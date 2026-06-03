@@ -363,6 +363,11 @@ impl<'a, 'names> FunctionRecordCollector<'a, 'names> {
                         self.scan_expr(value, property_key_name(&property.key));
                     }
                 }
+                ClassElement::StaticBlock(block) => {
+                    for stmt in &block.body {
+                        self.scan_stmt(stmt);
+                    }
+                }
                 _ => {}
             }
         }

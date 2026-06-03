@@ -1398,22 +1398,35 @@ fn compile_static_class_initializer<'src>(
     cg.push(Insn::LdThis);
     cg.push(Insn::Sta(this_reg));
     for element in elements {
-        let ClassElement::PropertyDefinition(property) = element else {
-            continue;
-        };
-        if !property.r#static || property.computed {
-            continue;
+        match element {
+            ClassElement::PropertyDefinition(property) => {
+                if !property.r#static || property.computed {
+                    continue;
+                }
+                let Some(name) = method_key_name(&property.key) else {
+                    continue;
+                };
+                if let Some(init_expr) = &property.value {
+                    cg.emit_expr(init_expr);
+                } else {
+                    cg.push(Insn::LdUndefined);
+                }
+                let name_id = cg.intern(&name);
+                cg.define_own_property_by_name(name_id, this_reg);
+            }
+            ClassElement::StaticBlock(block) => {
+                for stmt in &block.body {
+                    cg.emit_stmt(stmt);
+                    if cg.returned {
+                        break;
+                    }
+                }
+            }
+            _ => {}
         }
-        let Some(name) = method_key_name(&property.key) else {
-            continue;
-        };
-        if let Some(init_expr) = &property.value {
-            cg.emit_expr(init_expr);
-        } else {
-            cg.push(Insn::LdUndefined);
+        if cg.returned {
+            break;
         }
-        let name_id = cg.intern(&name);
-        cg.define_own_property_by_name(name_id, this_reg);
     }
     cg.finish_with_line_ops_and_catches()
 }
@@ -2116,7 +2129,7 @@ impl UnsupportedScanner<'_> {
                 ClassElement::AccessorProperty(_) => {
                     return Err(self.unsupported("AccessorClassField"));
                 }
-                ClassElement::StaticBlock(_) => return Err(self.unsupported("ClassStaticBlock")),
+                ClassElement::StaticBlock(block) => self.scan_statements(&block.body)?,
                 ClassElement::TSIndexSignature(_) => {}
             }
         }

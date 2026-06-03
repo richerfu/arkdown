@@ -19,13 +19,14 @@ gap is either implemented with focused tests or rejected with
   initializer or `undefined`, followed by own-property definition.
 - [x] Lower public non-computed static class fields through upstream static
   initializer functions.
-- [ ] Port computed fields, accessors, and static blocks through their upstream
+- [x] Lower static blocks through upstream static initializer functions.
+- [ ] Port computed fields and accessors through their upstream
   class-environment lowering.
 - [x] Reject unsupported `with`, destructuring bindings/assignments, private
   names, JSX, V8 intrinsics, `import.meta`, and generator/yield lowering.
 - [ ] Port full destructuring binding and assignment lowering.
 - [ ] Port private field/private-in lowering with private environment support.
-- [ ] Port computed class keys, accessors, private elements, and static blocks.
+- [ ] Port computed class keys, accessors, and private elements.
 - [ ] Port generator and async-generator state-machine lowering.
 - [ ] Port TypeScript runtime declarations beyond the existing module-record
   enum export metadata path.
