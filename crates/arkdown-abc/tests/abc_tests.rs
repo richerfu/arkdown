@@ -1913,6 +1913,58 @@ fn test_runtime_ts_namespace_declaration_lowers_through_transformer() {
 }
 
 #[test]
+fn test_commonjs_ts_export_assignment_lowers_to_module_exports() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("ts_export_assignment_cjs.abc");
+    let record_name = "test/ts_export_assignment_cjs";
+    module_compiler()
+        .compile(
+            vec![commonjs_module_record(
+                record_name,
+                r#"const value = 7; export = value;"#,
+            )],
+            &out,
+        )
+        .expect("CommonJS TS export assignment must lower through TypeScript transform");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x43),
+        "export = must lower to module.exports property store"
+    );
+    assert!(
+        bytes_contain_ascii(&bytes, "module") && bytes_contain_ascii(&bytes, "exports"),
+        "transformed module.exports names must be present in ABC strings"
+    );
+}
+
+#[test]
+fn test_esm_ts_export_assignment_reports_transformer_diagnostic() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("ts_export_assignment_esm.abc");
+    let err = match module_compiler().compile(
+        vec![module_record(
+            "test/ts_export_assignment_esm",
+            r#"export = value;"#,
+        )],
+        &out,
+    ) {
+        Ok(_) => panic!("ESM TS export assignment must not silently compile"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(
+            err,
+            AbcError::Parse {
+                ref message,
+                ..
+            } if message.contains("export =") || message.contains("Export assignment")
+        ),
+        "ESM export assignment must report the TypeScript transformer diagnostic, got {err:?}"
+    );
+}
+
+#[test]
 fn test_ts_namespace_export_declaration_is_type_only() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("ts_namespace_export.abc");
@@ -2471,6 +2523,17 @@ fn module_record(record_name: &str, source: &str) -> AbcModule {
         source_file: None,
         package_name: None,
         is_commonjs: false,
+    }
+}
+
+fn commonjs_module_record(record_name: &str, source: &str) -> AbcModule {
+    AbcModule {
+        record_name: record_name.to_string(),
+        source: source.to_string(),
+        source_map: None,
+        source_file: None,
+        package_name: None,
+        is_commonjs: true,
     }
 }
 

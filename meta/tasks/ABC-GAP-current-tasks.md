@@ -50,6 +50,8 @@ gap is either implemented with focused tests or rejected with
   declarations, including exported ambient classes.
 - [x] Lower non-declare TypeScript namespace/module runtime declarations through
   the TypeScript transformer's upstream-shaped namespace IIFE form.
+- [x] Lower CommonJS TypeScript `export =` assignments through the TypeScript
+  transformer's `module.exports = ...` form, while reporting ESM diagnostics.
 - [ ] Port remaining TypeScript runtime declaration edge cases beyond enum and
   namespace lowering.
 - [ ] Broaden upstream bytecode parity coverage for for-of, try-finally,

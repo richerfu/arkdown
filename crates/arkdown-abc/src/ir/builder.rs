@@ -15,7 +15,7 @@ use oxc_parser::{Parser, ParserReturn};
 use oxc_semantic::{Reference, Scoping, SemanticBuilder};
 use oxc_span::{GetSpan, SourceType};
 use oxc_syntax::operator::UpdateOperator;
-use oxc_transformer::{TransformOptions, Transformer};
+use oxc_transformer::{Module as TransformModule, TransformOptions, Transformer};
 
 use crate::emit::file::{LiteralArray, LiteralEntry};
 use crate::emit::record::{CatchEntry, ClassRecord, DebugInfoRecord, MethodKind, MethodRecord};
@@ -237,6 +237,13 @@ pub fn build_record_with_debug_and_source_map_for_target(
             let mut options = TransformOptions::default();
             options.typescript.allow_namespaces = true;
             options.typescript.optimize_const_enums = false;
+            options.env.module = if is_commonjs {
+                TransformModule::CommonJS
+            } else if is_module {
+                TransformModule::Esm
+            } else {
+                TransformModule::Preserve
+            };
             let path = source_file
                 .map(Path::new)
                 .unwrap_or_else(|| Path::new(record_name));
@@ -1670,6 +1677,7 @@ fn needs_typescript_runtime_transform(program: &Program<'_>) -> bool {
 
 fn statement_needs_typescript_runtime_transform(stmt: &Statement<'_>) -> bool {
     match stmt {
+        Statement::TSExportAssignment(_) => true,
         Statement::TSModuleDeclaration(decl) => ts_module_needs_runtime_transform(decl),
         Statement::ExportNamedDeclaration(export) => {
             matches!(
