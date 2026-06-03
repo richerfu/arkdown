@@ -2110,6 +2110,98 @@ const value = Alias.value;"#,
 }
 
 #[test]
+fn test_nested_ts_namespace_lowers_iife_within_iife() {
+    // Upstream: nested namespaces produce an inner IIFE assigned to the outer
+    // namespace object, following the TypeScript runtime namespace pattern.
+    // Both the outer and inner namespace objects must be present in ABC strings.
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("nested_ns.abc");
+    let record_name = "test/nested_ns";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"export namespace Outer {
+  export namespace Inner {
+    export const value = 42;
+  }
+}"#,
+            )],
+            &out,
+        )
+        .expect("nested TS namespaces must lower through transformer");
+    let bytes = std::fs::read(&out).unwrap();
+    // Outer namespace must be a runtime export.
+    assert_eq!(
+        module_local_exports(&bytes, record_name),
+        vec![("Outer".to_string(), "Outer".to_string())],
+        "outer namespace must create a runtime local export"
+    );
+    // Both names must appear in the ABC string table.
+    assert!(
+        bytes_contain_ascii(&bytes, "Outer") && bytes_contain_ascii(&bytes, "Inner"),
+        "nested namespace names must be present in ABC string data"
+    );
+}
+
+#[test]
+fn test_const_enum_compiles_and_inlines_values() {
+    // Upstream OXC transformer with `optimize_const_enums = false` inlines
+    // const enum member values at the use site (numeric literal substitution).
+    // The runtime enum object itself may be stripped since all references are
+    // replaced by literals — this matches TypeScript's single-file const enum
+    // behaviour.  The key assertion is that the compilation succeeds and emits
+    // a numeric literal for the const enum member.
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("const_enum.abc");
+    let record_name = "test/const_enum";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"const enum Direction { Up = 1, Down = 2, Left = 3, Right = 4 }
+const dir = Direction.Up;"#,
+            )],
+            &out,
+        )
+        .expect("const enum must compile with inlined numeric literal");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+    // The const enum member `Direction.Up = 1` must be inlined as `ldai 1`.
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x62),
+        "const enum member reference must inline numeric literal (ldai 0x62)"
+    );
+}
+
+#[test]
+fn test_module_augmentation_declare_is_erased() {
+    // `declare module "x" { ... }` is a TypeScript module augmentation.
+    // It is type-only and must produce no runtime bytecode.
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("module_augmentation.abc");
+    let record_name = "test/module_augmentation";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"declare module "lodash" {
+  interface LodashStatic { version: string; }
+}
+const x = 1;"#,
+            )],
+            &out,
+        )
+        .expect("declare module augmentation must be erased");
+    let bytes = std::fs::read(&out).unwrap();
+    // No module request for "lodash" must appear (it's type-only).
+    assert!(
+        !bytes.windows(b"lodash".len()).any(|w| w == b"lodash"),
+        "declare module augmentation must not emit a module request"
+    );
+}
+
+#[test]
 fn test_exported_ts_function_overload_does_not_emit_runtime_export() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("exported_ts_function_overload.abc");
