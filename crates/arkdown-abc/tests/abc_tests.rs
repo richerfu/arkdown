@@ -3384,7 +3384,11 @@ export default value;"#,
 }
 
 #[test]
-fn test_with_statement_is_rejected_until_scope_object_lowering_is_supported() {
+fn test_with_statement_is_rejected_matching_upstream_behavior() {
+    // Upstream es2panda has NO withStatement.cpp in ir/statements — the `with`
+    // statement has no IR lowering at all.  Since ArkTS modules are always strict
+    // (and `with` is a SyntaxError in strict mode), rejecting it is the correct
+    // upstream-aligned behavior.
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("with_statement.abc");
     let err = match module_compiler().compile(
@@ -3395,7 +3399,7 @@ with (obj) { value = 2; }"#,
         )],
         &out,
     ) {
-        Ok(_) => panic!("with statement must not be silently ignored"),
+        Ok(_) => panic!("with statement must not compile in strict/module mode"),
         Err(err) => err,
     };
 
@@ -3407,7 +3411,7 @@ with (obj) { value = 2; }"#,
                 ..
             } if construct == "WithStatement"
         ),
-        "with statement must be rejected until scope-object lowering is implemented, got {err:?}"
+        "with statement must be rejected (matches upstream — no IR lowering exists), got {err:?}"
     );
 }
 

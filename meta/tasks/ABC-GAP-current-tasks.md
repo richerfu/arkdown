@@ -37,10 +37,16 @@ gap is either implemented with focused tests or rejected with
 - [x] Port full destructuring binding and assignment lowering (array via iterator
   protocol, object via property loads, defaults via undefined check, rest,
   nested patterns, for-of left-side, function parameters, assignment forms).
-- [ ] Port auto-accessor properties through upstream getter/setter/backing-field
-  lowering with DefineGetterSetterByValue.
-- [ ] Port private field/private-in lowering with private environment support.
-- [ ] Port `with` statement scope-object lowering (non-module mode only).
+- [x] Port auto-accessor properties: synthesized private backing field slot,
+  getter/setter MethodRecords, DefineGetterSetterByValue (0xbc) installation.
+- [x] Port private field/private-in lowering: LdPrivateProperty (0xd8),
+  StPrivateProperty (0xd9), TestIn (0xda),
+  CallRuntimeCreatePrivateProperty (0xfb04),
+  CallRuntimeDefinePrivateProperty (0xfb05); private slot map threaded
+  through class method compilation; private backing slots for AccessorProperty.
+- [x] `with` statement: rejection IS the correct upstream behavior — es2panda has
+  no `withStatement.cpp` in ir/statements; `with` is a SyntaxError in strict
+  mode (all ArkTS modules are strict).
 - [x] Port generator and async-generator state-machine lowering:
   CreateGeneratorObj + initial SuspendGenerator/ResumeGenerator
   prologue; emit_yield_expr with GetResumeMode for return/throw/next
