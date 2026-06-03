@@ -38,6 +38,8 @@ pub enum Insn {
     LdFalse,
     /// `0x70` `op_none` — load the internal hole value into accumulator.
     LdHole,
+    /// `0x6D` `op_none` — load the global object into accumulator.
+    LdGlobal,
 
     // ── Integer / float immediates ────────────────────────────────────────────
     /// `0x62` `op_imm_32` — load signed 32-bit integer into accumulator.
@@ -123,6 +125,8 @@ pub enum Insn {
     // Format: `op_imm_8` — opcode(1) + slot(1) = 2 bytes. Operand is acc.
     /// `0x1C` — `acc = typeof acc` (returns a string like `"function"`).
     TypeOf(u8),
+    /// `0x1D` — `acc = ToNumber(acc)`.
+    ToNumber(u8),
     /// `0x1F` — `acc = -acc`.
     Neg(u8),
     /// `0x20` — `acc = ~acc` (bitwise NOT).
@@ -365,6 +369,10 @@ pub enum Insn {
     /// Encoding: `[0xC5] [dst_vreg: u8]` = 2 bytes.
     CopyDataProperties(u8),
 
+    /// `0xC2` — delete property `acc` from object register.
+    /// Encoding: `[0xC2] [obj_vreg: u8]` = 2 bytes.
+    DelObjProp(u8),
+
     /// `0xB3` / `0xFD 0x00` — create object excluding keys from a source object.
     /// Encoding: `[0xB3] [arg_count: u8] [obj_vreg: u8] [keys_start_vreg: u8]` = 4 bytes,
     /// or `[0xFD] [0x00] [arg_count: u16 LE] [obj_vreg: u8] [keys_start_vreg: u8]` = 6 bytes.
@@ -595,7 +603,7 @@ impl Insn {
             | Insn::StObjByValue(_, _, _)
             | Insn::StOwnByValue(_, _, _)
             | Insn::StOwnByValueWithNameSet(_, _, _) => &[2, 3],
-            Insn::CopyDataProperties(_) => &[1],
+            Insn::CopyDataProperties(_) | Insn::DelObjProp(_) => &[1],
             Insn::CreateObjectWithExcludedKeys(count, _, _) if *count <= u8::MAX as u16 => &[2, 3],
             Insn::CreateObjectWithExcludedKeys(_, _, _) => &[4, 5],
             Insn::SetObjectWithProto(_, _) => &[2],
@@ -638,6 +646,7 @@ impl Insn {
             Insn::LdTrue => vec![0x02],
             Insn::LdFalse => vec![0x03],
             Insn::LdHole => vec![0x70],
+            Insn::LdGlobal => vec![0x6d],
 
             // ── immediates ───────────────────────────────────────────────────
             Insn::LdAi(n) => {
@@ -701,6 +710,7 @@ impl Insn {
 
             // ── unary operators ───────────────────────────────────────────────
             Insn::TypeOf(slot) => vec![0x1C, *slot],
+            Insn::ToNumber(slot) => vec![0x1d, *slot],
             Insn::Neg(slot) => vec![0x1F, *slot],
             Insn::BitNot(slot) => vec![0x20, *slot],
             Insn::Inc(slot) => vec![0x21, *slot],
@@ -866,6 +876,7 @@ impl Insn {
             Insn::StOwnByValueWithNameSet(slot, obj, key) => vec![0x99, *slot, *obj, *key],
             Insn::StOwnByValue(slot, obj, key) => vec![0x78, *slot, *obj, *key],
             Insn::CopyDataProperties(dst) => vec![0xc5, *dst],
+            Insn::DelObjProp(obj) => vec![0xc2, *obj],
             Insn::CreateObjectWithExcludedKeys(arg_count, obj, keys_start)
                 if *arg_count <= u8::MAX as u16 =>
             {
@@ -957,7 +968,12 @@ impl Insn {
     /// Return the encoded byte length of this instruction without encoding it.
     pub fn byte_len(&self) -> usize {
         match self {
-            Insn::LdUndefined | Insn::LdNull | Insn::LdTrue | Insn::LdFalse | Insn::LdHole => 1,
+            Insn::LdUndefined
+            | Insn::LdNull
+            | Insn::LdTrue
+            | Insn::LdFalse
+            | Insn::LdHole
+            | Insn::LdGlobal => 1,
             Insn::LdAi(_) => 5,
             Insn::FLdAi(_) => 9,
             Insn::LdaStr(_) => 3,
@@ -987,7 +1003,12 @@ impl Insn {
             | Insn::InstanceOf(_, _)
             | Insn::StrictNotEq(_, _)
             | Insn::StrictEq(_, _) => 3,
-            Insn::TypeOf(_) | Insn::Neg(_) | Insn::BitNot(_) | Insn::Inc(_) | Insn::Dec(_) => 2,
+            Insn::TypeOf(_)
+            | Insn::ToNumber(_)
+            | Insn::Neg(_)
+            | Insn::BitNot(_)
+            | Insn::Inc(_)
+            | Insn::Dec(_) => 2,
             Insn::IsTrue | Insn::IsFalse => 1,
             Insn::CallRuntimeIsTrue(_) | Insn::CallRuntimeIsFalse(_) => 3,
             Insn::LdThis => 1,
@@ -1048,7 +1069,7 @@ impl Insn {
             Insn::StObjByValue(_, _, _) => 4,
             Insn::StOwnByName(_, _, _) => 5,
             Insn::StOwnByValue(_, _, _) | Insn::StOwnByValueWithNameSet(_, _, _) => 4,
-            Insn::CopyDataProperties(_) => 2,
+            Insn::CopyDataProperties(_) | Insn::DelObjProp(_) => 2,
             Insn::CreateObjectWithExcludedKeys(arg_count, _, _) if *arg_count <= u8::MAX as u16 => {
                 4
             }
@@ -1100,6 +1121,26 @@ mod tests {
         );
         assert_eq!(wide.byte_len(), 6);
         assert_eq!(wide.register_operand_offsets(), &[4, 5]);
+    }
+
+    #[test]
+    fn unary_and_delete_support_opcodes_use_isa_encodings() {
+        let mut strings = StringTable::default();
+
+        let ldglobal = Insn::LdGlobal;
+        assert_eq!(ldglobal.encode(&mut strings), vec![0x6d]);
+        assert_eq!(ldglobal.byte_len(), 1);
+        assert!(ldglobal.register_operand_offsets().is_empty());
+
+        let tonumber = Insn::ToNumber(0);
+        assert_eq!(tonumber.encode(&mut strings), vec![0x1d, 0]);
+        assert_eq!(tonumber.byte_len(), 2);
+        assert!(tonumber.register_operand_offsets().is_empty());
+
+        let delete = Insn::DelObjProp(7);
+        assert_eq!(delete.encode(&mut strings), vec![0xc2, 7]);
+        assert_eq!(delete.byte_len(), 2);
+        assert_eq!(delete.register_operand_offsets(), &[1]);
     }
 
     #[test]

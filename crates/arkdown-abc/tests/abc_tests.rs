@@ -351,7 +351,7 @@ fn bytecode_contains_opcode(bytecode: &[u8], target: u8) -> bool {
             0x37 => 3,
             0x38 => 4,
             0x3e => 3,
-            0x36 | 0x67 | 0xc5 => 2,
+            0x36 | 0x67 | 0xc2 | 0xc5 => 2,
             0x68 | 0x77 | 0xb4 | 0xb9 | 0xc6 => 3,
             0x3f | 0x40 | 0x42 => 4,
             0x43 | 0x8e | 0xbc | 0xdb | 0xdc => 5,
@@ -360,7 +360,8 @@ fn bytecode_contains_opcode(bytecode: &[u8], target: u8) -> bool {
             0x79 => 5,
             0x8a | 0x8b => 3,
             0x44 | 0x60 | 0x61 | 0x7c | 0x7d | 0x3c | 0x3d | 0xb1 | 0xc3 | 0xc4 | 0xcd | 0xce => 2,
-            0xbf | 0xc0 => 1,
+            0x1d => 2,
+            0x6d | 0xbf | 0xc0 => 1,
             0xfe if bytecode.get(pos + 1) == Some(&0x09) => 4,
             0xfe if matches!(bytecode.get(pos + 1), Some(0x05 | 0x07)) => 3,
             0xfe => 2,
@@ -2338,6 +2339,107 @@ fn test_ts_assignment_target_wrapper_uses_inner_lreference() {
     assert!(
         bytecode_contains_opcode(&bytecode, 0x0a),
         "TS assignment target wrappers must use the inner lreference for compound assignment"
+    );
+}
+
+#[test]
+fn test_delete_global_identifier_uses_global_object_delete() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("delete_global.abc");
+    let record_name = "test/delete_global";
+    module_compiler()
+        .compile(
+            vec![module_record(record_name, r#"const ok = delete missing;"#)],
+            &out,
+        )
+        .expect("compile delete global identifier source");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x6d) && bytecode_contains_opcode(&bytecode, 0xc2),
+        "delete of an unresolved identifier must load the global object and emit delobjprop"
+    );
+}
+
+#[test]
+fn test_delete_local_identifier_returns_false_without_delete_opcode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("delete_local.abc");
+    let record_name = "test/delete_local";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"let local = 1; const ok = delete local;"#,
+            )],
+            &out,
+        )
+        .expect("compile delete local identifier source");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x03) && !bytecode_contains_opcode(&bytecode, 0xc2),
+        "delete of a bound local identifier must lower to false without delobjprop"
+    );
+}
+
+#[test]
+fn test_delete_member_expression_uses_delete_property_opcode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("delete_member.abc");
+    let record_name = "test/delete_member";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"const obj = { value: 1 }; delete obj.value; delete obj[key];"#,
+            )],
+            &out,
+        )
+        .expect("compile delete member source");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0xc2),
+        "delete of a member expression must emit delobjprop instead of loading the property"
+    );
+}
+
+#[test]
+fn test_unary_plus_uses_tonumber_opcode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("unary_plus.abc");
+    let record_name = "test/unary_plus";
+    module_compiler()
+        .compile(
+            vec![module_record(record_name, r#"const value = +input;"#)],
+            &out,
+        )
+        .expect("compile unary plus source");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x1d),
+        "unary plus must call ToNumber like upstream PandaGen::Unary"
+    );
+}
+
+#[test]
+fn test_void_expression_still_compiles_operand() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("void_operand.abc");
+    let record_name = "test/void_operand";
+    module_compiler()
+        .compile(
+            vec![module_record(record_name, r#"const value = void 0;"#)],
+            &out,
+        )
+        .expect("compile void source");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x62) && bytecode_contains_opcode(&bytecode, 0x00),
+        "void must compile its operand before loading undefined"
     );
 }
 

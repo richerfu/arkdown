@@ -5681,11 +5681,11 @@ impl<'a> CodeGen<'a> {
 
     fn emit_unary_expr(&mut self, unary: &oxc_ast::ast::UnaryExpression<'_>) {
         match unary.operator {
+            UnaryOperator::Delete => {
+                self.emit_delete_expr(&unary.argument);
+            }
             UnaryOperator::Void => {
-                // `void expr` evaluates expr for side-effects, then yields undefined.
-                if !matches!(&unary.argument, Expression::NumericLiteral(num) if num.value == 0.0) {
-                    self.emit_expr(&unary.argument);
-                }
+                self.emit_expr(&unary.argument);
                 self.push(Insn::LdUndefined);
             }
             UnaryOperator::Typeof => {
@@ -5694,26 +5694,85 @@ impl<'a> CodeGen<'a> {
                 self.push(Insn::TypeOf(0));
             }
             UnaryOperator::UnaryNegation => {
-                self.emit_expr(&unary.argument);
+                let operand_reg = self.emit_unary_operand_to_reg(&unary.argument);
+                self.push(Insn::Lda(operand_reg));
                 self.push(Insn::Neg(0));
             }
             UnaryOperator::BitwiseNot => {
-                self.emit_expr(&unary.argument);
+                let operand_reg = self.emit_unary_operand_to_reg(&unary.argument);
+                self.push(Insn::Lda(operand_reg));
                 self.push(Insn::BitNot(0));
             }
             UnaryOperator::LogicalNot => {
-                self.emit_expr(&unary.argument);
+                self.emit_unary_operand_to_reg(&unary.argument);
                 self.set_debug_pos(unary.span.start);
                 self.emit_negate_acc();
             }
             UnaryOperator::UnaryPlus => {
-                // Unary `+x` — just evaluate (converts to number conceptually).
-                self.emit_expr(&unary.argument);
-            }
-            _ => {
-                self.emit_expr(&unary.argument);
+                let operand_reg = self.emit_unary_operand_to_reg(&unary.argument);
+                self.push(Insn::Lda(operand_reg));
+                self.push(Insn::ToNumber(0));
             }
         }
+    }
+
+    fn emit_unary_operand_to_reg(&mut self, argument: &Expression<'_>) -> u8 {
+        self.emit_expr(argument);
+        let operand_reg = self.alloc_reg();
+        self.push(Insn::Sta(operand_reg));
+        operand_reg
+    }
+
+    fn emit_delete_expr(&mut self, argument: &Expression<'_>) {
+        match argument {
+            Expression::Identifier(id) => {
+                let name = id.name.as_str();
+                if self.is_bound_identifier(name) {
+                    self.push(Insn::LdFalse);
+                    return;
+                }
+
+                let global_reg = self.alloc_reg();
+                self.push(Insn::LdGlobal);
+                self.push(Insn::Sta(global_reg));
+                let name_id = self.intern(name);
+                self.push(Insn::LdaStr(name_id));
+                self.push(Insn::DelObjProp(global_reg));
+            }
+            Expression::StaticMemberExpression(mem) => {
+                let saved_next_reg = self.next_reg;
+                let obj_reg = self.alloc_reg();
+                self.emit_expr(&mem.object);
+                self.set_debug_pos(mem.span.start);
+                self.push(Insn::Sta(obj_reg));
+                let name_id = self.intern(mem.property.name.as_str());
+                self.set_debug_pos(mem.property.span.start);
+                self.push(Insn::LdaStr(name_id));
+                self.push(Insn::DelObjProp(obj_reg));
+                self.next_reg = saved_next_reg;
+            }
+            Expression::ComputedMemberExpression(mem) => {
+                let saved_next_reg = self.next_reg;
+                let obj_reg = self.alloc_reg();
+                self.emit_expr(&mem.object);
+                self.set_debug_pos(mem.span.start);
+                self.push(Insn::Sta(obj_reg));
+                self.emit_expr(&mem.expression);
+                self.push(Insn::DelObjProp(obj_reg));
+                self.next_reg = saved_next_reg;
+            }
+            _ => {
+                self.emit_expr(argument);
+                self.push(Insn::LdTrue);
+            }
+        }
+    }
+
+    fn is_bound_identifier(&self, name: &str) -> bool {
+        self.var_regs.contains_key(name)
+            || self.lexical_lookup(name).is_some()
+            || self.lowering.import_index(name).is_some()
+            || self.lowering.export_index(name).is_some()
     }
 
     // ── Logical expression: left && right / left || right ─────────────────────
