@@ -41,7 +41,12 @@ gap is either implemented with focused tests or rejected with
   lowering with DefineGetterSetterByValue.
 - [ ] Port private field/private-in lowering with private environment support.
 - [ ] Port `with` statement scope-object lowering (non-module mode only).
-- [ ] Port generator and async-generator state-machine lowering.
+- [x] Port generator and async-generator state-machine lowering:
+  CreateGeneratorObj + initial SuspendGenerator/ResumeGenerator
+  prologue; emit_yield_expr with GetResumeMode for return/throw/next
+  mode-checking; compile_generator_body route in compile_function_record.
+- [x] Implement top-level await (TLA): detect top-level await in module
+  body and emit asyncfunctionenter prologue.
 - [x] Lower TypeScript enum runtime declarations with upstream transformer
   semantics for name/value and numeric reverse mappings.
 - [x] Erase `declare` TypeScript module/namespace declarations as type-only.

@@ -324,7 +324,12 @@ impl AbcCompiler {
                 .iter()
                 .map(|(record_name, source)| (record_name.as_str(), source.as_str()))
                 .collect();
-            let key = derive_key(&key_inputs, self.options.module, self.options.debug_info);
+            let key = derive_key(
+                &key_inputs,
+                self.options.module,
+                self.options.debug_info,
+                self.options.target_api_version,
+            );
 
             let cache = CacheFile::load(cache_dir);
             if let Some(cached_bytes) = cache.lookup(&key) {
@@ -418,7 +423,12 @@ impl AbcCompiler {
                 .iter()
                 .map(|(record_name, source)| (record_name.as_str(), source.as_str()))
                 .collect();
-            let key = derive_key(&key_inputs, self.options.module, self.options.debug_info);
+            let key = derive_key(
+                &key_inputs,
+                self.options.module,
+                self.options.debug_info,
+                self.options.target_api_version,
+            );
             let mut cache = CacheFile::load(cache_dir);
             cache.upsert(key, &bytes);
             // Ignore cache write errors — they are non-fatal.

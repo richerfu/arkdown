@@ -105,7 +105,13 @@ impl CacheFile {
 /// - All record names and source texts (in order)
 /// - `module` flag
 /// - `debug_info` flag
-pub fn derive_key(modules: &[(&str, &str)], module_mode: bool, debug_info: bool) -> String {
+/// - `target_api_version` (to avoid reusing stale cache across API bumps)
+pub fn derive_key(
+    modules: &[(&str, &str)],
+    module_mode: bool,
+    debug_info: bool,
+    target_api_version: u32,
+) -> String {
     let mut hasher = Sha256::new();
     for (record_name, source) in modules {
         hasher.update(record_name.as_bytes());
@@ -119,6 +125,8 @@ pub fn derive_key(modules: &[(&str, &str)], module_mode: bool, debug_info: bool)
         b"module=0"
     });
     hasher.update(if debug_info { b"debug=1" } else { b"debug=0" });
+    // Include target API version so cache entries are not shared across API bumps.
+    hasher.update(format!("api={target_api_version}").as_bytes());
     hex::encode(hasher.finalize())
 }
 
@@ -129,8 +137,8 @@ mod tests {
     #[test]
     fn test_derive_key_deterministic() {
         let modules = vec![("entry/main", "export const x = 1;")];
-        let k1 = derive_key(&modules, true, false);
-        let k2 = derive_key(&modules, true, false);
+        let k1 = derive_key(&modules, true, false, 12);
+        let k2 = derive_key(&modules, true, false, 12);
         assert_eq!(k1, k2, "key must be deterministic");
     }
 
@@ -138,9 +146,20 @@ mod tests {
     fn test_derive_key_changes_on_source_change() {
         let m1 = vec![("entry/main", "export const x = 1;")];
         let m2 = vec![("entry/main", "export const x = 2;")];
-        let k1 = derive_key(&m1, true, false);
-        let k2 = derive_key(&m2, true, false);
+        let k1 = derive_key(&m1, true, false, 12);
+        let k2 = derive_key(&m2, true, false, 12);
         assert_ne!(k1, k2, "key must change when source changes");
+    }
+
+    #[test]
+    fn test_derive_key_changes_on_api_version_change() {
+        let modules = vec![("entry/main", "export const x = 1;")];
+        let k_v12 = derive_key(&modules, true, false, 12);
+        let k_v13 = derive_key(&modules, true, false, 13);
+        assert_ne!(
+            k_v12, k_v13,
+            "key must change when target_api_version changes"
+        );
     }
 
     #[test]
