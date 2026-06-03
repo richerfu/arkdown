@@ -737,8 +737,8 @@ fn compile_class_elements(
 ) {
     let class_name = class_name.unwrap_or("_");
 
-    // Collect non-static instance field initializers for injection into the constructor.
-    let instance_fields: Vec<(String, &Expression<'_>)> = elements
+    // Collect non-static instance fields for injection into the constructor.
+    let instance_fields: Vec<(String, Option<&Expression<'_>>)> = elements
         .iter()
         .filter_map(|e| {
             let ClassElement::PropertyDefinition(prop) = e else {
@@ -748,8 +748,7 @@ fn compile_class_elements(
                 return None;
             }
             let name = method_key_name(&prop.key)?;
-            let value = prop.value.as_ref()?;
-            Some((name, value))
+            Some((name, prop.value.as_ref()))
         })
         .collect();
 
@@ -1238,14 +1237,13 @@ fn default_derived_constructor_line_ops() -> Vec<u8> {
 
 /// Compile a constructor body, prepending instance field initializer code.
 ///
-/// For each `(field_name, init_expr)` in `fields`, emits:
-///   `lda v2; sta this_reg; emit_expr(init); stobjbyname(name, this_reg)`
-/// before the normal constructor statements.
+/// Mirrors upstream `CompileField`: load the initializer value, or `undefined`
+/// when absent, then `DefineOwnProperty` on `this`.
 fn compile_constructor_with_fields<'src>(
     body: Option<&FunctionBody<'src>>,
     params: &[FormalParameter<'src>],
     function_span_start: u32,
-    fields: &[(String, &Expression<'src>)],
+    fields: &[(String, Option<&Expression<'src>>)],
     strings: &mut StringTable,
     literal_arrays: &mut Vec<LiteralArray>,
     lowering: &LoweringContext,
@@ -1269,9 +1267,13 @@ fn compile_constructor_with_fields<'src>(
         let this_reg = cg.alloc_reg();
         cg.push(Insn::Sta(this_reg));
         for (name, init_expr) in fields {
-            cg.emit_expr(init_expr);
+            if let Some(init_expr) = init_expr {
+                cg.emit_expr(init_expr);
+            } else {
+                cg.push(Insn::LdUndefined);
+            }
             let name_id = cg.intern(name);
-            cg.push(Insn::StObjByName(0, name_id, this_reg));
+            cg.define_own_property_by_name(name_id, this_reg);
         }
     }
     for stmt in stmts {
@@ -1294,7 +1296,7 @@ fn compile_constructor_with_fields_tracked<'src>(
     params: &[FormalParameter<'src>],
     function_span_start: u32,
     function_span_end: u32,
-    fields: &[(String, &Expression<'src>)],
+    fields: &[(String, Option<&Expression<'src>>)],
     strings: &mut StringTable,
     literal_arrays: &mut Vec<LiteralArray>,
     lowering: &LoweringContext,
@@ -1320,9 +1322,13 @@ fn compile_constructor_with_fields_tracked<'src>(
         let this_reg = cg.alloc_reg();
         cg.push(Insn::Sta(this_reg));
         for (name, init_expr) in fields {
-            cg.emit_expr(init_expr);
+            if let Some(init_expr) = init_expr {
+                cg.emit_expr(init_expr);
+            } else {
+                cg.push(Insn::LdUndefined);
+            }
             let name_id = cg.intern(name);
-            cg.push(Insn::StObjByName(0, name_id, this_reg));
+            cg.define_own_property_by_name(name_id, this_reg);
         }
     }
     for stmt in stmts {
@@ -2033,9 +2039,6 @@ impl UnsupportedScanner<'_> {
                     }
                     if property.computed {
                         return Err(self.unsupported("ComputedClassField"));
-                    }
-                    if property.value.is_none() {
-                        return Err(self.unsupported("UninitializedClassField"));
                     }
                     if method_key_name(&property.key).is_none() {
                         return Err(self.unsupported("UnsupportedClassFieldKey"));

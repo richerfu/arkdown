@@ -2110,6 +2110,26 @@ fn module_func_main_bytecode(bytes: &[u8], record_name: &str) -> Vec<u8> {
     code_item_bytecode(bytes, code_off).to_vec()
 }
 
+fn module_method_bytecode_by_suffix(
+    bytes: &[u8],
+    record_name: &str,
+    suffix: &str,
+) -> Option<(String, Vec<u8>)> {
+    let class_name = format!("L{record_name};");
+    let class_off = class_offsets(bytes)
+        .into_iter()
+        .map(|off| off as usize)
+        .find(|&off| class_name_at(bytes, off) == class_name)
+        .expect("module class must exist");
+    class_method_items(bytes, class_off)
+        .into_iter()
+        .find_map(|(_, name, code_off)| {
+            let code_off = code_off? as usize;
+            name.ends_with(suffix)
+                .then(|| (name, code_item_bytecode(bytes, code_off).to_vec()))
+        })
+}
+
 fn module_local_exports(bytes: &[u8], record_name: &str) -> Vec<(String, String)> {
     let class_name = format!("L{record_name};");
     let class_off = class_offsets(bytes)
@@ -3828,10 +3848,11 @@ fn test_generator_function_is_rejected_until_state_machine_lowering_is_supported
 fn test_instance_class_field_initializer_still_compiles() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("class_field.abc");
+    let record_name = "test/class_field";
     module_compiler()
         .compile(
             vec![module_record(
-                "test/class_field",
+                record_name,
                 r#"class Box { value = 1; }
 const box = new Box();"#,
             )],
@@ -3840,6 +3861,40 @@ const box = new Box();"#,
         .expect("initialized instance class field source must compile");
     let bytes = std::fs::read(&out).unwrap();
     assert!(bytes.starts_with(b"PANDA\0\0\0"));
+    let (_, bytecode) = module_method_bytecode_by_suffix(&bytes, record_name, "Box")
+        .expect("class constructor bytecode exists");
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0xdb),
+        "instance class fields must use definefieldbyname like upstream CompileField"
+    );
+}
+
+#[test]
+fn test_uninitialized_instance_class_field_defines_undefined_property() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("uninitialized_class_field.abc");
+    let record_name = "test/uninitialized_class_field";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"class Box { value; }
+const box = new Box();"#,
+            )],
+            &out,
+        )
+        .expect("uninitialized instance class field source must compile");
+    let bytes = std::fs::read(&out).unwrap();
+    let (_, bytecode) = module_method_bytecode_by_suffix(&bytes, record_name, "Box")
+        .expect("class constructor bytecode exists");
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x00),
+        "uninitialized instance class fields must load undefined like upstream CompileField"
+    );
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0xdb),
+        "uninitialized instance class fields must define the own property"
+    );
 }
 
 #[test]
