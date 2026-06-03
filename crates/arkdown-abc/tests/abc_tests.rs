@@ -1928,6 +1928,46 @@ const value = 1;"#,
 }
 
 #[test]
+fn test_declare_class_and_value_declarations_are_type_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("declare_runtime_declarations.abc");
+    let record_name = "test/declare_runtime_declarations";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"declare class AmbientClass {
+  field: string;
+  method(): number;
+}
+export declare class ExportedAmbient {}
+declare const ambientValue: number;
+declare enum AmbientEnum { A = 1 }
+const runtime = 1;"#,
+            )],
+            &out,
+        )
+        .expect("declare class/var/enum declarations must be erased as type-only");
+    let bytes = std::fs::read(&out).unwrap();
+    assert_eq!(
+        module_local_exports(&bytes, record_name),
+        Vec::<(String, String)>::new(),
+        "declare runtime-shaped declarations must not create module local exports"
+    );
+    for name in [
+        "AmbientClass",
+        "ExportedAmbient",
+        "ambientValue",
+        "AmbientEnum",
+    ] {
+        assert!(
+            !bytes_contain_ascii(&bytes, name),
+            "declare runtime-shaped declaration name {name} must not be serialized into runtime ABC data"
+        );
+    }
+}
+
+#[test]
 fn test_type_only_ts_import_equals_declarations_are_erased() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("type_only_ts_import_equals.abc");

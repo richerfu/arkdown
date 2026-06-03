@@ -433,12 +433,18 @@ fn first_scope_names_owner_method(stmts: &[Statement<'_>]) -> Option<String> {
     for stmt in stmts {
         match stmt {
             Statement::ClassDeclaration(class) => {
+                if class.declare {
+                    continue;
+                }
                 if let Some(name) = first_scope_names_owner_in_class(&class.body.body) {
                     return Some(name);
                 }
             }
             Statement::ExportDefaultDeclaration(export) => {
                 if let ExportDefaultDeclarationKind::ClassDeclaration(class) = &export.declaration {
+                    if class.declare {
+                        continue;
+                    }
                     if let Some(name) = first_scope_names_owner_in_class(&class.body.body) {
                         return Some(name);
                     }
@@ -446,6 +452,9 @@ fn first_scope_names_owner_method(stmts: &[Statement<'_>]) -> Option<String> {
             }
             Statement::ExportNamedDeclaration(export) => {
                 if let Some(Declaration::ClassDeclaration(class)) = &export.declaration {
+                    if class.declare {
+                        continue;
+                    }
                     if let Some(name) = first_scope_names_owner_in_class(&class.body.body) {
                         return Some(name);
                     }
@@ -639,6 +648,9 @@ fn compile_class_method_bodies(
     for stmt in stmts {
         // Handle `class Foo { ... }` (ClassDeclaration)
         if let Statement::ClassDeclaration(cls) = stmt {
+            if cls.declare {
+                continue;
+            }
             let class_name = cls.id.as_ref().map(|id| id.name.as_str());
             compile_class_elements(
                 class_name,
@@ -657,6 +669,9 @@ fn compile_class_method_bodies(
         }
         if let Statement::ExportDefaultDeclaration(export) = stmt {
             if let ExportDefaultDeclarationKind::ClassDeclaration(cls) = &export.declaration {
+                if cls.declare {
+                    continue;
+                }
                 let class_name = cls
                     .id
                     .as_ref()
@@ -679,6 +694,9 @@ fn compile_class_method_bodies(
         }
         if let Statement::ExportNamedDeclaration(export) = stmt {
             if let Some(Declaration::ClassDeclaration(cls)) = &export.declaration {
+                if cls.declare {
+                    continue;
+                }
                 let class_name = cls.id.as_ref().map(|id| id.name.as_str());
                 compile_class_elements(
                     class_name,
@@ -1799,6 +1817,9 @@ impl UnsupportedScanner<'_> {
                 Ok(())
             }
             Statement::ClassDeclaration(class) => {
+                if class.declare {
+                    return Ok(());
+                }
                 if let Some(super_class) = &class.super_class {
                     self.scan_expression(super_class)?;
                 }
@@ -1810,6 +1831,9 @@ impl UnsupportedScanner<'_> {
                         self.scan_function(func)?;
                     }
                     ExportDefaultDeclarationKind::ClassDeclaration(class) => {
+                        if class.declare {
+                            return Ok(());
+                        }
                         if let Some(super_class) = &class.super_class {
                             self.scan_expression(super_class)?;
                         }
@@ -1852,6 +1876,9 @@ impl UnsupportedScanner<'_> {
             Declaration::VariableDeclaration(decl) => self.scan_variable_declaration(decl),
             Declaration::FunctionDeclaration(func) => self.scan_function(func),
             Declaration::ClassDeclaration(class) => {
+                if class.declare {
+                    return Ok(());
+                }
                 if let Some(super_class) = &class.super_class {
                     self.scan_expression(super_class)?;
                 }
@@ -2906,6 +2933,9 @@ impl<'a> CodeGen<'a> {
                 self.returned = true;
             }
             Statement::ClassDeclaration(cls) => {
+                if cls.declare {
+                    return;
+                }
                 let super_class = cls.super_class.as_ref();
                 let class_name = cls.id.as_ref().map(|id| id.name.as_str());
                 if let Some(id) = &cls.id {
@@ -3038,6 +3068,9 @@ impl<'a> CodeGen<'a> {
             }
             Statement::ExportDefaultDeclaration(export) => {
                 if let ExportDefaultDeclarationKind::ClassDeclaration(cls) = &export.declaration {
+                    if cls.declare {
+                        return;
+                    }
                     let local_name = cls.id.as_ref().map(|id| id.name.as_str());
                     let class_name = local_name.unwrap_or(DEFAULT_LOCAL_NAME);
                     let class_reg = self.alloc_reg();
@@ -3134,6 +3167,9 @@ impl<'a> CodeGen<'a> {
                             self.emit_ts_import_equals_declaration(decl);
                         }
                         Declaration::ClassDeclaration(cls) => {
+                            if cls.declare {
+                                return;
+                            }
                             let super_class = cls.super_class.as_ref();
                             let class_name = cls.id.as_ref().map(|id| id.name.as_str());
                             if let Some(id) = &cls.id {
@@ -4204,6 +4240,9 @@ impl<'a> CodeGen<'a> {
     }
 
     fn emit_var_decl(&mut self, decl: &oxc_ast::ast::VariableDeclaration<'_>) {
+        if decl.declare {
+            return;
+        }
         for declarator in &decl.declarations {
             match &declarator.id {
                 BindingPattern::BindingIdentifier(id) => {

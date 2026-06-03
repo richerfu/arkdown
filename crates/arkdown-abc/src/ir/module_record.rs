@@ -249,6 +249,9 @@ fn scan_stmt_for_module_record(
             scan_expr_for_module_record(&es.expression, info);
         }
         Statement::VariableDeclaration(decl) => {
+            if decl.declare {
+                return;
+            }
             for declarator in &decl.declarations {
                 let local_name = match &declarator.id {
                     BindingPattern::BindingIdentifier(id) => Some(id.name.as_str()),
@@ -325,6 +328,9 @@ fn scan_stmt_for_module_record(
         }
         Statement::ExportDefaultDeclaration(export) => match &export.declaration {
             ExportDefaultDeclarationKind::ClassDeclaration(cls) => {
+                if cls.declare {
+                    return;
+                }
                 let local_name = cls
                     .id
                     .as_ref()
@@ -373,6 +379,9 @@ fn scan_stmt_for_module_record(
                 if let Some(declaration) = &export.declaration {
                     match declaration {
                         Declaration::VariableDeclaration(variable) => {
+                            if variable.declare {
+                                return;
+                            }
                             for declarator in &variable.declarations {
                                 for local_name in collect_binding_names(&declarator.id) {
                                     info.add_local_export(local_name.clone(), &local_name);
@@ -380,6 +389,9 @@ fn scan_stmt_for_module_record(
                             }
                         }
                         Declaration::ClassDeclaration(cls) => {
+                            if cls.declare {
+                                return;
+                            }
                             if let Some(id) = &cls.id {
                                 info.add_local_export(
                                     id.name.as_str().to_string(),
@@ -398,10 +410,12 @@ fn scan_stmt_for_module_record(
                             }
                         }
                         Declaration::TSEnumDeclaration(decl) => {
-                            info.add_local_export(
-                                decl.id.name.as_str().to_string(),
-                                decl.id.name.as_str(),
-                            );
+                            if !decl.declare {
+                                info.add_local_export(
+                                    decl.id.name.as_str().to_string(),
+                                    decl.id.name.as_str(),
+                                );
+                            }
                         }
                         Declaration::TSImportEqualsDeclaration(decl) => {
                             if scan_ts_import_equals_for_module_record(decl, info, scoping) {

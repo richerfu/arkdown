@@ -79,24 +79,42 @@ fn collect_top_level_decl_names(stmt: &Statement<'_>, out: &mut FxHashSet<String
     match stmt {
         Statement::FunctionDeclaration(func) => push_function_name(func, out),
         Statement::ClassDeclaration(cls) => {
+            if cls.declare {
+                return;
+            }
             if let Some(id) = &cls.id {
                 out.insert(id.name.as_str().to_string());
             }
         }
-        Statement::VariableDeclaration(decl) => push_variable_decl_names(decl, out),
+        Statement::VariableDeclaration(decl) => {
+            if !decl.declare {
+                push_variable_decl_names(decl, out);
+            }
+        }
         Statement::TSEnumDeclaration(decl) => {
-            out.insert(decl.id.name.as_str().to_string());
+            if !decl.declare {
+                out.insert(decl.id.name.as_str().to_string());
+            }
         }
         Statement::ExportNamedDeclaration(export) => match &export.declaration {
             Some(Declaration::FunctionDeclaration(func)) => push_function_name(func, out),
             Some(Declaration::ClassDeclaration(cls)) => {
+                if cls.declare {
+                    return;
+                }
                 if let Some(id) = &cls.id {
                     out.insert(id.name.as_str().to_string());
                 }
             }
-            Some(Declaration::VariableDeclaration(decl)) => push_variable_decl_names(decl, out),
+            Some(Declaration::VariableDeclaration(decl)) => {
+                if !decl.declare {
+                    push_variable_decl_names(decl, out);
+                }
+            }
             Some(Declaration::TSEnumDeclaration(decl)) => {
-                out.insert(decl.id.name.as_str().to_string());
+                if !decl.declare {
+                    out.insert(decl.id.name.as_str().to_string());
+                }
             }
             _ => {}
         },
@@ -105,6 +123,9 @@ fn collect_top_level_decl_names(stmt: &Statement<'_>, out: &mut FxHashSet<String
                 push_function_name(func, out)
             }
             ExportDefaultDeclarationKind::ClassDeclaration(cls) => {
+                if cls.declare {
+                    return;
+                }
                 if let Some(id) = &cls.id {
                     out.insert(id.name.as_str().to_string());
                 }

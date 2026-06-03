@@ -46,6 +46,8 @@ gap is either implemented with focused tests or rejected with
   aliases, while erasing aliases used only in type positions.
 - [x] Erase TypeScript `export as namespace ...` declarations as declaration
   file/type-only syntax.
+- [x] Erase TypeScript `declare` class/var/enum declarations as type-only
+  declarations, including exported ambient classes.
 - [ ] Port remaining TypeScript runtime declarations beyond enum lowering,
   including non-declare namespace/module lowering.
 - [ ] Broaden upstream bytecode parity coverage for for-of, try-finally,
