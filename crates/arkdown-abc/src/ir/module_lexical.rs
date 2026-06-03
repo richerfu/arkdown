@@ -110,9 +110,16 @@ fn collect_top_level_decl_names(stmt: &Statement<'_>, out: &mut FxHashSet<String
 }
 
 fn push_function_name(func: &Function<'_>, out: &mut FxHashSet<String>) {
+    if is_type_only_function(func) {
+        return;
+    }
     if let Some(id) = &func.id {
         out.insert(id.name.as_str().to_string());
     }
+}
+
+fn is_type_only_function(func: &Function<'_>) -> bool {
+    func.declare || func.body.is_none()
 }
 
 fn push_variable_decl_names(decl: &VariableDeclaration<'_>, out: &mut FxHashSet<String>) {

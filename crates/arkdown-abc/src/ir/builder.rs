@@ -42,6 +42,10 @@ const MANDATORY_PARAM_NEW_TARGET_REG: u8 = ARG_PLACEHOLDER_BASE + 1;
 const MANDATORY_PARAM_THIS_REG: u8 = ARG_PLACEHOLDER_BASE + 2;
 const MAX_RANGE_CALL_ARG: usize = 128;
 
+fn is_type_only_function(func: &Function<'_>) -> bool {
+    func.declare || func.body.is_none()
+}
+
 // ── Public entry point ────────────────────────────────────────────────────────
 
 /// Parse `source` and build a [`ClassRecord`] named `record_name`.
@@ -2194,6 +2198,9 @@ impl<'a> CodeGen<'a> {
     }
 
     fn emit_function_declaration(&mut self, func: &Function<'_>) {
+        if is_type_only_function(func) {
+            return;
+        }
         if let Some(id) = &func.id {
             let name_id = self.intern(id.name.as_str());
             let length = func.params.items.len() as u8;
@@ -2214,6 +2221,9 @@ impl<'a> CodeGen<'a> {
     }
 
     fn emit_default_function_declaration(&mut self, func: &Function<'_>) {
+        if is_type_only_function(func) {
+            return;
+        }
         if func.id.is_some() {
             self.emit_function_declaration(func);
             return;

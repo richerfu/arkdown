@@ -377,6 +377,9 @@ impl<'a, 'names> FunctionRecordCollector<'a, 'names> {
     }
 
     fn push_function(&mut self, function: &'a Function<'a>, inferred_name: Option<&'a str>) {
+        if is_type_only_function(function) {
+            return;
+        }
         let span = (function.span.start, function.span.end);
         if !self.seen_spans.insert(span) {
             return;
@@ -410,6 +413,10 @@ impl<'a, 'names> FunctionRecordCollector<'a, 'names> {
             node: FunctionRecordNode::Arrow(arrow),
         });
     }
+}
+
+fn is_type_only_function(function: &Function<'_>) -> bool {
+    function.declare || function.body.is_none()
 }
 
 fn binding_name<'a>(pattern: &'a BindingPattern<'a>) -> Option<&'a str> {

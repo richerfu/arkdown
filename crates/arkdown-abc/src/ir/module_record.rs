@@ -329,6 +329,9 @@ fn scan_stmt_for_module_record(
                 info.add_local_export(local_name.to_string(), "default");
             }
             ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
+                if is_type_only_function(func) {
+                    return;
+                }
                 let local_name = func
                     .id
                     .as_ref()
@@ -382,11 +385,13 @@ fn scan_stmt_for_module_record(
                             }
                         }
                         Declaration::FunctionDeclaration(func) => {
-                            if let Some(id) = &func.id {
-                                info.add_local_export(
-                                    id.name.as_str().to_string(),
-                                    id.name.as_str(),
-                                );
+                            if !is_type_only_function(func) {
+                                if let Some(id) = &func.id {
+                                    info.add_local_export(
+                                        id.name.as_str().to_string(),
+                                        id.name.as_str(),
+                                    );
+                                }
                             }
                         }
                         Declaration::TSEnumDeclaration(decl) => {
@@ -488,6 +493,10 @@ fn collect_binding_names(pattern: &BindingPattern<'_>) -> Vec<String> {
     let mut names = Vec::new();
     collect_binding_names_into(pattern, &mut names);
     names
+}
+
+fn is_type_only_function(func: &oxc_ast::ast::Function<'_>) -> bool {
+    func.declare || func.body.is_none()
 }
 
 fn collect_binding_names_into(pattern: &BindingPattern<'_>, names: &mut Vec<String>) {

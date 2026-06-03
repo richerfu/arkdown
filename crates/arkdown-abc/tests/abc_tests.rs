@@ -1657,6 +1657,50 @@ fn test_default_ts_interface_does_not_emit_local_export() {
     );
 }
 
+#[test]
+fn test_exported_ts_function_overload_does_not_emit_runtime_export() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("exported_ts_function_overload.abc");
+    let record_name = "test/exported_ts_function_overload";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                "export function foo(value: string): string;",
+            )],
+            &out,
+        )
+        .expect("compile exported TS function overload");
+    let bytes = std::fs::read(&out).unwrap();
+
+    assert_eq!(
+        module_local_exports(&bytes, record_name),
+        Vec::<(String, String)>::new(),
+        "upstream skips function overload signatures in module records"
+    );
+
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+    assert!(
+        !bytecode_contains_opcode(&bytecode, 0x33),
+        "function overload signatures must not emit DefineFuncShort"
+    );
+
+    let class_name = format!("L{record_name};");
+    let class_off = class_offsets(&bytes)
+        .into_iter()
+        .map(|off| off as usize)
+        .find(|&off| class_name_at(&bytes, off) == class_name)
+        .expect("module class must exist");
+    let method_names: Vec<_> = class_method_items(&bytes, class_off)
+        .into_iter()
+        .map(|(_, name, _)| name)
+        .collect();
+    assert!(
+        !method_names.iter().any(|name| name == "foo"),
+        "function overload signatures must not emit MethodRecord entries"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // AbcArtifactResult fields
 // ---------------------------------------------------------------------------

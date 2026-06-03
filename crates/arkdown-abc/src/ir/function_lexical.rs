@@ -201,8 +201,10 @@ fn collect_stmt_decl_names(stmt: &Statement<'_>, out: &mut FxHashSet<String>) {
             }
         }
         Statement::FunctionDeclaration(func) => {
-            if let Some(id) = &func.id {
-                out.insert(id.name.as_str().to_string());
+            if !is_type_only_function(func) {
+                if let Some(id) = &func.id {
+                    out.insert(id.name.as_str().to_string());
+                }
             }
         }
         Statement::ClassDeclaration(cls) => {
@@ -246,8 +248,10 @@ fn collect_stmt_decl_names(stmt: &Statement<'_>, out: &mut FxHashSet<String>) {
         }
         Statement::ExportNamedDeclaration(export) => match &export.declaration {
             Some(Declaration::FunctionDeclaration(func)) => {
-                if let Some(id) = &func.id {
-                    out.insert(id.name.as_str().to_string());
+                if !is_type_only_function(func) {
+                    if let Some(id) = &func.id {
+                        out.insert(id.name.as_str().to_string());
+                    }
                 }
             }
             Some(Declaration::ClassDeclaration(cls)) => {
@@ -260,8 +264,10 @@ fn collect_stmt_decl_names(stmt: &Statement<'_>, out: &mut FxHashSet<String>) {
         },
         Statement::ExportDefaultDeclaration(export) => match &export.declaration {
             ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
-                if let Some(id) = &func.id {
-                    out.insert(id.name.as_str().to_string());
+                if !is_type_only_function(func) {
+                    if let Some(id) = &func.id {
+                        out.insert(id.name.as_str().to_string());
+                    }
                 }
             }
             ExportDefaultDeclarationKind::ClassDeclaration(cls) => {
@@ -273,6 +279,10 @@ fn collect_stmt_decl_names(stmt: &Statement<'_>, out: &mut FxHashSet<String>) {
         },
         _ => {}
     }
+}
+
+fn is_type_only_function(func: &Function<'_>) -> bool {
+    func.declare || func.body.is_none()
 }
 
 fn push_variable_decl_names(decl: &VariableDeclaration<'_>, out: &mut FxHashSet<String>) {
