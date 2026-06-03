@@ -360,9 +360,17 @@ fn bytecode_insn_len(bytecode: &[u8], pos: usize, opcode: u8) -> usize {
         0x44 | 0x60 | 0x61 | 0x7c | 0x7d | 0x3c | 0x3d | 0xb1 | 0xc3 | 0xc4 | 0xcd | 0xce => 2,
         0x1d | 0x21 | 0x22 => 2,
         0x6d | 0xb0 | 0xbd | 0xbf | 0xc0 => 1,
+        // private field opcodes
+        0xd8 | 0xda => 6,
+        0xd9 => 7,
         0xfe if bytecode.get(pos + 1) == Some(&0x09) => 4,
         0xfe if matches!(bytecode.get(pos + 1), Some(0x05 | 0x07)) => 3,
         0xfe => 2,
+        // callruntime (0xfb) prefix — length depends on sub-opcode
+        0xfb if bytecode.get(pos + 1) == Some(&0x04) => 6,  // createprivateproperty
+        0xfb if bytecode.get(pos + 1) == Some(&0x05) => 8,  // defineprivateproperty
+        0xfb if matches!(bytecode.get(pos + 1), Some(0x13 | 0x14)) => 3, // istrue/isfalse
+        0xfb => 5,  // default callruntime (e.g. 0x01 definefieldbyvalue)
         _ => 1,
     }
 }
@@ -4378,29 +4386,32 @@ export default f;
 }
 
 #[test]
-fn test_private_field_is_rejected_instead_of_mangled_public_fallback() {
+fn test_private_field_uses_ldprivateproperty_opcode() {
+    // Upstream es2abc: `this.#value` uses ldprivateproperty (0xd8) to read the
+    // private field, and the class emits callruntime.createprivateproperty (0xfb04)
+    // after defineclasswithbuffer to set up the private environment.
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("private_field.abc");
-    let err = match module_compiler().compile(
-        vec![module_record(
-            "test/private_field",
-            "class Box { #value = 1; read() { return this.#value; } }",
-        )],
-        &out,
-    ) {
-        Ok(_) => panic!("private field lowering must not silently emit a public-property fallback"),
-        Err(err) => err,
-    };
-
+    let record_name = "test/private_field";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                "class Box { #value = 1; read() { return this.#value; } }",
+            )],
+            &out,
+        )
+        .expect("private field must compile with ldprivateproperty lowering");
+    let bytes = std::fs::read(&out).unwrap();
+    // callruntime.createprivateproperty (0xfb) must appear in func_main_0.
     assert!(
-        matches!(
-            err,
-            AbcError::UnsupportedConstruct {
-                ref construct,
-                ..
-            } if construct == "PrivateIdentifier" || construct == "PrivateFieldExpression"
-        ),
-        "private field must be reported as unsupported, got {err:?}"
+        bytes_contain_ascii(&bytes, "Box"),
+        "class name Box must appear in ABC strings"
+    );
+    // ldprivateproperty (0xd8) must appear in the read() method bytecode.
+    assert!(
+        bytes.contains(&0xd8),
+        "private field read must emit ldprivateproperty (0xd8)"
     );
 }
 
@@ -4461,29 +4472,67 @@ const value = Box.value;"#,
 }
 
 #[test]
-fn test_private_in_expression_is_rejected_instead_of_undefined_fallback() {
+fn test_private_in_expression_uses_testin_opcode() {
+    // Upstream es2abc: `#value in other` emits testin (0xda) for the brand check.
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("private_in.abc");
-    let err = match module_compiler().compile(
-        vec![module_record(
-            "test/private_in",
-            r#"class Box { #value; has(other) { return #value in other; } }"#,
-        )],
-        &out,
-    ) {
-        Ok(_) => panic!("private-in expression must not compile as undefined"),
-        Err(err) => err,
-    };
-
+    module_compiler()
+        .compile(
+            vec![module_record(
+                "test/private_in",
+                r#"class Box { #value; has(other) { return #value in other; } }"#,
+            )],
+            &out,
+        )
+        .expect("private-in expression must compile with testin lowering");
+    let bytes = std::fs::read(&out).unwrap();
     assert!(
-        matches!(
-            err,
-            AbcError::UnsupportedConstruct {
-                ref construct,
-                ..
-            } if construct == "PrivateInExpression" || construct == "PrivateIdentifier"
-        ),
-        "private-in expression must be rejected until upstream private-name lowering is implemented, got {err:?}"
+        bytes.contains(&0xda),
+        "private-in expression must emit testin (0xda)"
+    );
+}
+
+#[test]
+fn test_private_field_write_uses_stprivateproperty_opcode() {
+    // Upstream es2abc: `this.#value = v` emits stprivateproperty (0xd9).
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("private_field_write.abc");
+    module_compiler()
+        .compile(
+            vec![module_record(
+                "test/private_field_write",
+                "class Box { #value = 0; set(v) { this.#value = v; } }",
+            )],
+            &out,
+        )
+        .expect("private field write must compile with stprivateproperty lowering");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(
+        bytes.contains(&0xd9),
+        "private field write must emit stprivateproperty (0xd9)"
+    );
+}
+
+#[test]
+fn test_class_with_private_field_emits_createprivateproperty() {
+    // Upstream es2abc: callruntime.createprivateproperty (0xfb 0x04) is emitted
+    // after defineclasswithbuffer when a class has private elements.
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("private_create.abc");
+    module_compiler()
+        .compile(
+            vec![module_record(
+                "test/private_create",
+                "class Box { #x = 1; #y = 2; }",
+            )],
+            &out,
+        )
+        .expect("class with private fields must compile");
+    let bytes = std::fs::read(&out).unwrap();
+    // 0xfb prefix byte must appear (callruntime.createprivateproperty uses 0xfb 0x04).
+    assert!(
+        bytes.windows(2).any(|w| w == [0xfb, 0x04]),
+        "class with private fields must emit callruntime.createprivateproperty (0xfb 0x04)"
     );
 }
 
@@ -4853,29 +4902,31 @@ class Box {
 }
 
 #[test]
-fn test_auto_accessor_class_field_is_rejected_until_accessor_property_lowering_is_supported() {
+fn test_auto_accessor_class_field_lowers_to_getter_setter_and_private_backing() {
+    // Upstream: `accessor value = 1` is lowered to a synthesized private backing
+    // field + getter/setter pair installed via definegettersetterbyvalue (0xbc).
+    // The backing field is initialized via callruntime.defineprivateproperty.
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("auto_accessor_class_field.abc");
-    let err = match module_compiler().compile(
-        vec![module_record(
-            "test/auto_accessor_class_field",
-            r#"class Box { accessor value = 1; }"#,
-        )],
-        &out,
-    ) {
-        Ok(_) => panic!("auto-accessor class field must not silently compile as a plain field"),
-        Err(err) => err,
-    };
-
+    module_compiler()
+        .compile(
+            vec![module_record(
+                "test/auto_accessor_class_field",
+                r#"class Box { accessor value = 1; }"#,
+            )],
+            &out,
+        )
+        .expect("auto-accessor class field must lower to getter/setter with private backing");
+    let bytes = std::fs::read(&out).unwrap();
+    // DefineGetterSetterByValue (0xbc) must be emitted to install the getter/setter.
     assert!(
-        matches!(
-            err,
-            AbcError::UnsupportedConstruct {
-                ref construct,
-                ..
-            } if construct == "AccessorClassField"
-        ),
-        "auto-accessor class fields must stay rejected until upstream accessor-property lowering is ported, got {err:?}"
+        bytes.contains(&0xbc),
+        "auto-accessor must emit definegettersetterbyvalue (0xbc)"
+    );
+    // callruntime.createprivateproperty (0xfb 0x04) for the backing field.
+    assert!(
+        bytes.windows(2).any(|w| w == [0xfb, 0x04]),
+        "auto-accessor must emit callruntime.createprivateproperty (0xfb 0x04)"
     );
 }
 

@@ -87,6 +87,52 @@ pub(super) fn class_buffer_literal_array(
     LiteralArray { entries }
 }
 
+/// Build the private-methods literal array for `callruntime.createprivateproperty`.
+///
+/// Mirrors upstream `ClassDefinition::CreateClassPrivateBuffer`:
+/// - For each private METHOD (not field), adds a method name entry and a
+///   method-affiliate (param count) entry.
+/// - Ends with a count of instance private methods.
+/// Static private method entries come first, then instance entries, then the count.
+///
+/// For classes with only private FIELDS (no private methods), returns an array
+/// with just the instance private method count (= 0).
+pub(super) fn class_private_methods_literal_array(elements: &[ClassElement<'_>]) -> LiteralArray {
+    let mut instance_entries: Vec<LiteralEntry> = Vec::new();
+    let mut static_entries: Vec<LiteralEntry> = Vec::new();
+    let mut instance_method_count = 0u32;
+
+    for element in elements {
+        let ClassElement::MethodDefinition(method) = element else {
+            continue;
+        };
+        // Only private methods (not private fields).
+        let PropertyKey::PrivateIdentifier(id) = &method.key else {
+            continue;
+        };
+        if method.kind == MethodDefinitionKind::Constructor {
+            continue;
+        }
+        let key_name = id.name.as_str().to_string();
+        let affiliate =
+            LiteralEntry::TaggedMethodAffiliate(method.value.params.items.len() as u16);
+        if method.r#static {
+            static_entries.push(LiteralEntry::TaggedMethodName(key_name));
+            static_entries.push(affiliate);
+        } else {
+            instance_entries.push(LiteralEntry::TaggedMethodName(key_name));
+            instance_entries.push(affiliate);
+            instance_method_count += 1;
+        }
+    }
+
+    // Static entries come first, then instance entries, then the count.
+    let mut entries = static_entries;
+    entries.extend(instance_entries);
+    entries.push(LiteralEntry::TaggedInteger(instance_method_count));
+    LiteralArray { entries }
+}
+
 pub(super) fn static_initializer_record_name(
     class_name: &str,
     elements: &[ClassElement<'_>],

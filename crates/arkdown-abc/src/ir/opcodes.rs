@@ -338,6 +338,71 @@ pub enum Insn {
     /// Encoding: `[0xFB] [0x01] [slot: u8] [key_vreg: u8] [obj_vreg: u8]` = 5 bytes.
     CallRuntimeDefineFieldByValue(u8, u8, u8),
 
+    // ── Private class field access ────────────────────────────────────────────
+    //
+    // Private fields use a two-dimensional address: `(level, slot)` where
+    // `level` is the lexical class-scope depth (0 = current class) and `slot`
+    // is the field's zero-based index within that class's private environment.
+    // The first immediate (`imm1`) is the IC slot, always 0 at compile time.
+    //
+    // Reference: `pandagen.cpp` `LoadPrivateProperty` / `StorePrivateProperty` /
+    // `DefineClassPrivateField` / `TestIn`.
+
+    /// `0xD8` `op_imm1_8_imm2_16_imm3_16` — load private field `(level, slot)`
+    /// from the object in the accumulator.
+    ///
+    /// Encoding: `[0xD8] [ic:u8=0] [level:u16 LE] [slot:u16 LE]` = 6 bytes.
+    ///
+    /// Source: `isa.yaml` — `ldprivateproperty imm1:u8, imm2:u16, imm3:u16`,
+    /// `opcode_idx: [0xd8]`.
+    LdPrivateProperty(u8, u16, u16),
+
+    /// `0xD9` `op_imm1_8_imm2_16_imm3_16_v_8` — store accumulator to private
+    /// field `(level, slot)` on the object in `obj_vreg`.
+    ///
+    /// Encoding: `[0xD9] [ic:u8=0] [level:u16 LE] [slot:u16 LE] [obj:u8]` = 7 bytes.
+    ///
+    /// Source: `isa.yaml` — `stprivateproperty imm1:u8, imm2:u16, imm3:u16, v`,
+    /// `opcode_idx: [0xd9]`.
+    StPrivateProperty(u8, u16, u16, u8),
+
+    /// `0xDA` `op_imm1_8_imm2_16_imm3_16` — brand-check: `#name in obj`.
+    ///
+    /// Object is in the accumulator; result (bool) is written back to acc.
+    ///
+    /// Encoding: `[0xDA] [ic:u8=0] [level:u16 LE] [slot:u16 LE]` = 6 bytes.
+    ///
+    /// Source: `isa.yaml` — `testin imm1:u8, imm2:u16, imm3:u16`,
+    /// `opcode_idx: [0xda]`.
+    TestIn(u8, u16, u16),
+
+    /// `0xFB 0x04` — initialise the private environment for a class.
+    ///
+    /// Must be emitted **after** `DefineClassWithBuffer` for any class that has
+    /// private elements.  `num` is the total count of private field slots.
+    /// `lit_id` points to the private-methods literal array (contains
+    /// METHOD/GETTER/SETTER entries for private methods; empty or zero-count for
+    /// pure private-field classes).
+    ///
+    /// Encoding: `[0xFB] [0x04] [num:u16 LE] [lit_id:u16 LE]` = 6 bytes.
+    ///
+    /// Source: `pandagen.cpp` `CreatePrivateProperty`;
+    /// `isa.yaml` — `callruntime.createprivateproperty imm:u16, literalarray_id`,
+    /// `opcode_idx: [0x04]`, `prefix: callruntime`.
+    CallRuntimeCreatePrivateProperty(u16, u16),
+
+    /// `0xFB 0x05` — define (initialise) a private field instance slot.
+    ///
+    /// Called once per private field in the constructor / instance initializer.
+    /// The initial value must be in the accumulator; `obj_vreg` holds `this`.
+    ///
+    /// Encoding: `[0xFB] [0x05] [ic:u8=0] [level:u16 LE] [slot:u16 LE] [obj:u8]` = 8 bytes.
+    ///
+    /// Source: `pandagen.cpp` `DefineClassPrivateField`;
+    /// `isa.yaml` — `callruntime.defineprivateproperty imm1:u8, imm2:u16, imm3:u16, v`,
+    /// `opcode_idx: [0x05]`, `prefix: callruntime`.
+    CallRuntimeDefinePrivateProperty(u8, u16, u16, u8),
+
     // ── Definition instructions ───────────────────────────────────────────────
     /// `0x33` — define function literal.
     /// `slot` = IC slot; `method_id` = 16-bit method literal index;
@@ -652,6 +717,10 @@ impl Insn {
             Insn::SetObjectWithProto(_, _) => &[2],
             Insn::DefineGetterSetterByValue(_, _, _, _) => &[1, 2, 3, 4],
             Insn::CallRuntimeDefineFieldByValue(_, _, _) => &[3, 4],
+            // Private property: obj operand is at byte offset 6 within the encoded instruction.
+            Insn::StPrivateProperty(_, _, _, _) => &[6],
+            // callruntime.defineprivateproperty: obj operand at byte offset 7.
+            Insn::CallRuntimeDefinePrivateProperty(_, _, _, _) => &[7],
             Insn::CallArgs3(_, _, _, _) | Insn::CallThis2(_, _, _, _) => &[2, 3, 4],
             Insn::CallThis3(_, _, _, _, _) => &[2, 3, 4, 5],
             Insn::CallRange(_, _, _)
@@ -878,6 +947,38 @@ impl Insn {
             }
             Insn::CallRuntimeDefineFieldByValue(slot, key, obj) => {
                 vec![0xfb, 0x01, *slot, *key, *obj]
+            }
+            Insn::LdPrivateProperty(ic, level, slot) => {
+                let mut v = vec![0xd8, *ic];
+                v.extend_from_slice(&level.to_le_bytes());
+                v.extend_from_slice(&slot.to_le_bytes());
+                v
+            }
+            Insn::StPrivateProperty(ic, level, slot, obj) => {
+                let mut v = vec![0xd9, *ic];
+                v.extend_from_slice(&level.to_le_bytes());
+                v.extend_from_slice(&slot.to_le_bytes());
+                v.push(*obj);
+                v
+            }
+            Insn::TestIn(ic, level, slot) => {
+                let mut v = vec![0xda, *ic];
+                v.extend_from_slice(&level.to_le_bytes());
+                v.extend_from_slice(&slot.to_le_bytes());
+                v
+            }
+            Insn::CallRuntimeCreatePrivateProperty(num, lit_id) => {
+                let mut v = vec![0xfb, 0x04];
+                v.extend_from_slice(&num.to_le_bytes());
+                v.extend_from_slice(&lit_id.to_le_bytes());
+                v
+            }
+            Insn::CallRuntimeDefinePrivateProperty(ic, level, slot, obj) => {
+                let mut v = vec![0xfb, 0x05, *ic];
+                v.extend_from_slice(&level.to_le_bytes());
+                v.extend_from_slice(&slot.to_le_bytes());
+                v.push(*obj);
+                v
             }
 
             // ── definition ───────────────────────────────────────────────────
@@ -1129,6 +1230,10 @@ impl Insn {
             | Insn::DefineFieldByName(_, _, _)
             | Insn::StOwnByNameWithNameSet(_, _, _) => 5,
             Insn::CallRuntimeDefineFieldByValue(_, _, _) => 5,
+            Insn::LdPrivateProperty(_, _, _) | Insn::TestIn(_, _, _) => 6,
+            Insn::StPrivateProperty(_, _, _, _) => 7,
+            Insn::CallRuntimeCreatePrivateProperty(_, _) => 6,
+            Insn::CallRuntimeDefinePrivateProperty(_, _, _, _) => 8,
             Insn::DefineFuncShort(_, _, _) | Insn::DefineMethodShort(_, _, _) => 5,
             Insn::DefineClassWithBuffer(_, _, _, _, _) => 9,
             Insn::DefineGetterSetterByValue(_, _, _, _) => 5,

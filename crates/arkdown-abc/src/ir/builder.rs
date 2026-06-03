@@ -29,7 +29,7 @@ use crate::ir::ast_analysis::{
 };
 use crate::ir::class_layout::{
     class_buffer_literal_array, class_method_inferred_name, class_method_num_args,
-    class_method_record_name, computed_class_method_record_name,
+    class_method_record_name, class_private_methods_literal_array, computed_class_method_record_name,
     computed_instance_class_field_key_name, constructor_required_param_count,
     is_class_buffer_method, method_key_name, static_initializer_record_name,
 };
@@ -852,6 +852,35 @@ fn compile_class_elements(
         })
         .collect();
 
+    // Collect private field slot map and instance private field initializers.
+    let (private_field_slots, _private_field_count) = collect_class_private_slots(elements);
+    let private_instance_fields: Vec<ClassPrivateFieldInit<'_>> = elements
+        .iter()
+        .filter_map(|e| {
+            match e {
+                ClassElement::PropertyDefinition(prop) => {
+                    if prop.r#static {
+                        return None;
+                    }
+                    let PropertyKey::PrivateIdentifier(id) = &prop.key else {
+                        return None;
+                    };
+                    let slot = *private_field_slots.get(id.name.as_str())?;
+                    Some(ClassPrivateFieldInit { slot, value: prop.value.as_ref() })
+                }
+                ClassElement::AccessorProperty(accessor) => {
+                    if accessor.r#static {
+                        return None;
+                    }
+                    let backing_name = accessor_backing_field_name(accessor);
+                    let slot = *private_field_slots.get(&backing_name)?;
+                    Some(ClassPrivateFieldInit { slot, value: accessor.value.as_ref() })
+                }
+                _ => None,
+            }
+        })
+        .collect();
+
     let has_constructor = elements.iter().any(|element| {
         matches!(
             element,
@@ -861,7 +890,7 @@ fn compile_class_elements(
     });
     if !has_constructor {
         // Synthesize a default constructor that still runs field initializers.
-        let is_default_derived_constructor = has_super_class && instance_fields.is_empty();
+        let is_default_derived_constructor = has_super_class && instance_fields.is_empty() && private_instance_fields.is_empty();
         let compiled = if is_default_derived_constructor {
             let (bytecode, catches) = compile_default_derived_constructor();
             let line_ops = if source.is_some() {
@@ -882,6 +911,8 @@ fn compile_class_elements(
                 &[],
                 has_super_class,
                 None,
+                &private_instance_fields,
+                private_field_slots.clone(),
             )
         };
         methods.push(MethodRecord {
@@ -974,6 +1005,8 @@ fn compile_class_elements(
                         src,
                         source_mapper,
                         Some((method.value.span.start, method.value.span.end)),
+                        &private_instance_fields,
+                        private_field_slots.clone(),
                     )
                 } else {
                     compile_constructor_with_fields(
@@ -987,38 +1020,29 @@ fn compile_class_elements(
                         &param_names,
                         has_super_class,
                         Some((method.value.span.start, method.value.span.end)),
+                        &private_instance_fields,
+                        private_field_slots.clone(),
                     )
                 }
-            } else if rest_info.is_some() || is_method_async {
-                if let Some(src) = source {
-                    compile_function_body_ext_tracked(
-                        method.value.body.as_deref(),
-                        rest_info,
-                        is_method_async,
-                        strings,
-                        literal_arrays,
-                        lowering,
-                        &param_names,
-                        Some(src),
-                        source_mapper,
-                        Some((method.value.span.start, method.value.span.end)),
-                    )
-                    .unwrap_or_else(BodyCompileResult::empty)
-                } else {
-                    compile_function_body_ext(
-                        method.value.body.as_deref(),
-                        rest_info,
-                        is_method_async,
-                        strings,
-                        literal_arrays,
-                        lowering,
-                        &param_names,
-                        Some((method.value.span.start, method.value.span.end)),
-                    )
-                }
-            } else if let Some(src) = source {
-                compile_function_body_tracked_with_end(
+            } else if rest_info.is_some() || is_method_async || method.value.generator {
+                compile_function_body_ext_tracked_with_private(
                     method.value.body.as_deref(),
+                    rest_info,
+                    is_method_async,
+                    method.value.generator,
+                    strings,
+                    literal_arrays,
+                    lowering,
+                    &param_names,
+                    source,
+                    source_mapper,
+                    Some((method.value.span.start, method.value.span.end)),
+                    private_field_slots.clone(),
+                )
+                .unwrap_or_else(BodyCompileResult::empty)
+            } else if let Some(src) = source {
+                compile_body_stmts_tracked_with_private(
+                    method.value.body.as_deref().map(|fb| fb.statements.as_slice()).unwrap_or(&[]),
                     strings,
                     literal_arrays,
                     lowering,
@@ -1027,15 +1051,19 @@ fn compile_class_elements(
                     source_mapper,
                     Some(method.span.end),
                     Some((method.value.span.start, method.value.span.end)),
+                    &FxHashSet::default(),
+                    private_field_slots.clone(),
                 )
             } else {
-                compile_function_body(
-                    method.value.body.as_deref(),
+                // No source tracking but private slots still need to be set.
+                compile_body_stmts_with_private(
+                    method.value.body.as_deref().map(|fb| fb.statements.as_slice()).unwrap_or(&[]),
                     strings,
                     literal_arrays,
                     lowering,
                     &param_names,
                     Some((method.value.span.start, method.value.span.end)),
+                    private_field_slots.clone(),
                 )
             };
             let num_vregs = compiled.vregs;
@@ -1063,6 +1091,80 @@ fn compile_class_elements(
                 } else {
                     MethodKind::Function
                 },
+                method_pool_entry: true,
+                definefunc_order: None,
+            });
+        }
+
+        // Compile getter/setter MethodRecords for each auto-accessor property.
+        // Mirrors upstream Transformer::ProcessAutoAccessorProperty: the backing field
+        // is a synthesized private field; the getter reads it; the setter writes it.
+        for element in elements {
+            let ClassElement::AccessorProperty(accessor) = element else {
+                continue;
+            };
+            let backing_name = accessor_backing_field_name(accessor);
+            let Some(&slot) = private_field_slots.get(&backing_name) else {
+                continue;
+            };
+            let key_name = match &accessor.key {
+                PropertyKey::StaticIdentifier(id) => id.name.as_str().to_string(),
+                PropertyKey::StringLiteral(s) => s.value.as_str().to_string(),
+                _ => continue, // skip computed accessors for now
+            };
+
+            // Getter: `get <key>() { return this.#backing; }`
+            let getter_name = format!("#{class_name}_get_{key_name}#");
+            let getter_compiled = {
+                let mut cg = CodeGen::new(strings, literal_arrays, lowering);
+                cg.private_field_slots = private_field_slots.clone();
+                cg.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
+                cg.push(Insn::LdPrivateProperty(0, 0, slot));
+                cg.push_with_epilogue(Insn::Return);
+                cg.returned = true;
+                cg.finish_with_catches()
+            };
+            methods.push(MethodRecord {
+                name: getter_name,
+                bytecode: getter_compiled.bytecode,
+                num_vregs: getter_compiled.vregs,
+                num_args: 3,
+                debug_info: None,
+                line_ops: Vec::new(),
+                catch_entries: getter_compiled.catches,
+                kind: MethodKind::Function,
+                method_pool_entry: true,
+                definefunc_order: None,
+            });
+
+            // Setter: `set <key>(v) { this.#backing = v; }`
+            let setter_name = format!("#{class_name}_set_{key_name}#");
+            let setter_compiled = {
+                let mut cg = CodeGen::new(strings, literal_arrays, lowering);
+                cg.private_field_slots = private_field_slots.clone();
+                let val_reg = cg.alloc_reg();
+                let this_reg = cg.alloc_reg();
+                // Load the value argument (first user param = arg index 3 = placeholder).
+                cg.push(Insn::Lda(function_arg_placeholder(3)));
+                cg.push(Insn::Sta(val_reg));
+                cg.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
+                cg.push(Insn::Sta(this_reg));
+                // Load value, then store to private field.
+                cg.push(Insn::Lda(val_reg));
+                cg.push(Insn::StPrivateProperty(0, 0, slot, this_reg));
+                cg.push_with_epilogue(Insn::ReturnUndefined);
+                cg.returned = true;
+                cg.finish_with_catches()
+            };
+            methods.push(MethodRecord {
+                name: setter_name,
+                bytecode: setter_compiled.bytecode,
+                num_vregs: setter_compiled.vregs,
+                num_args: 4, // 3 mandatory + 1 value param
+                debug_info: None,
+                line_ops: Vec::new(),
+                catch_entries: setter_compiled.catches,
+                kind: MethodKind::Function,
                 method_pool_entry: true,
                 definefunc_order: None,
             });
@@ -1506,6 +1608,8 @@ fn compile_constructor_with_fields<'src>(
     param_names: &[String],
     has_super_class: bool,
     current_function_span: Option<(u32, u32)>,
+    private_fields: &[ClassPrivateFieldInit<'src>],
+    private_field_slots: FxHashMap<String, u16>,
 ) -> BodyCompileResult {
     let stmts: &[_] = match body {
         Some(fb) => fb.statements.as_slice(),
@@ -1513,6 +1617,7 @@ fn compile_constructor_with_fields<'src>(
     };
     let mut cg = CodeGen::new(strings, literal_arrays, lowering);
     cg.derived_constructor = has_super_class;
+    cg.private_field_slots = private_field_slots;
     cg.use_function_lexical_env(current_function_span);
     if current_function_span.is_none() {
         cg.use_module_outer_lexical_env();
@@ -1521,13 +1626,22 @@ fn compile_constructor_with_fields<'src>(
     cg.bind_function_mandatory_lexical_names();
     cg.bind_function_param_names(param_names);
     cg.emit_default_parameters(params, Some(function_span_start));
+    let this_reg = cg.alloc_reg();
+    cg.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
+    cg.push(Insn::Sta(this_reg));
     if !fields.is_empty() {
-        cg.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
-        let this_reg = cg.alloc_reg();
-        cg.push(Insn::Sta(this_reg));
         for field in fields {
             cg.emit_class_field_definition(field, this_reg, None);
         }
+    }
+    // Emit private field initializations via callruntime.defineprivateproperty.
+    for pf in private_fields {
+        if let Some(value) = pf.value {
+            cg.emit_expr(value);
+        } else {
+            cg.push(Insn::LdUndefined);
+        }
+        cg.push(Insn::CallRuntimeDefinePrivateProperty(0, 0, pf.slot, this_reg));
     }
     for stmt in stmts {
         cg.emit_stmt(stmt);
@@ -1558,6 +1672,8 @@ fn compile_constructor_with_fields_tracked<'src>(
     source: &'src str,
     source_mapper: Option<&'src SourceMapper>,
     current_function_span: Option<(u32, u32)>,
+    private_fields: &[ClassPrivateFieldInit<'src>],
+    private_field_slots: FxHashMap<String, u16>,
 ) -> BodyCompileResult {
     let stmts: &[_] = match body {
         Some(fb) => fb.statements.as_slice(),
@@ -1565,6 +1681,7 @@ fn compile_constructor_with_fields_tracked<'src>(
     };
     let mut cg = CodeGen::new_with_source(strings, literal_arrays, lowering, source, source_mapper);
     cg.derived_constructor = has_super_class;
+    cg.private_field_slots = private_field_slots;
     cg.use_function_lexical_env(current_function_span);
     if current_function_span.is_none() {
         cg.use_module_outer_lexical_env();
@@ -1573,13 +1690,22 @@ fn compile_constructor_with_fields_tracked<'src>(
     cg.bind_function_mandatory_lexical_names();
     cg.bind_function_param_names(param_names);
     cg.emit_default_parameters(params, Some(function_span_start));
+    let this_reg = cg.alloc_reg();
+    cg.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
+    cg.push(Insn::Sta(this_reg));
     if !fields.is_empty() {
-        cg.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
-        let this_reg = cg.alloc_reg();
-        cg.push(Insn::Sta(this_reg));
         for field in fields {
             cg.emit_class_field_definition(field, this_reg, None);
         }
+    }
+    // Emit private field initializations.
+    for pf in private_fields {
+        if let Some(value) = pf.value {
+            cg.emit_expr(value);
+        } else {
+            cg.push(Insn::LdUndefined);
+        }
+        cg.push(Insn::CallRuntimeDefinePrivateProperty(0, 0, pf.slot, this_reg));
     }
     for stmt in stmts {
         cg.emit_stmt(stmt);
@@ -1800,6 +1926,132 @@ fn expr_has_await(expr: &Expression<'_>) -> bool {
     }
 }
 
+/// Like `compile_body_stmts` but injects a private field slot map.
+#[allow(clippy::too_many_arguments)]
+fn compile_body_stmts_with_private(
+    stmts: &[Statement<'_>],
+    strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
+    lowering: &LoweringContext,
+    param_names: &[String],
+    current_function_span: Option<(u32, u32)>,
+    private_field_slots: FxHashMap<String, u16>,
+) -> BodyCompileResult {
+    let mut cg = CodeGen::new(strings, literal_arrays, lowering);
+    cg.private_field_slots = private_field_slots;
+    cg.use_function_lexical_env(current_function_span);
+    cg.emit_function_lex_env_prologue();
+    cg.bind_function_mandatory_lexical_names();
+    cg.bind_function_param_names(param_names);
+    cg.emit_function_hoists(stmts);
+    for stmt in stmts {
+        if is_hoisted_function_declaration(stmt) {
+            continue;
+        }
+        cg.emit_stmt(stmt);
+        if cg.returned {
+            break;
+        }
+    }
+    cg.finish_with_catches()
+}
+
+/// Like `compile_body_stmts_tracked` but injects a private field slot map into
+/// the CodeGen before compiling the body.  Used for class method bodies that
+/// access private fields.
+#[allow(clippy::too_many_arguments)]
+fn compile_body_stmts_tracked_with_private(
+    stmts: &[Statement<'_>],
+    strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
+    lowering: &LoweringContext,
+    param_names: &[String],
+    source: &str,
+    source_mapper: Option<&SourceMapper>,
+    function_end: Option<u32>,
+    current_function_span: Option<(u32, u32)>,
+    runtime_ts_import_equals: &FxHashSet<(u32, u32)>,
+    private_field_slots: FxHashMap<String, u16>,
+) -> BodyCompileResult {
+    let mut cg = CodeGen::new_with_source(strings, literal_arrays, lowering, source, source_mapper);
+    cg.function_end = function_end;
+    cg.runtime_ts_import_equals = runtime_ts_import_equals.clone();
+    cg.private_field_slots = private_field_slots;
+    cg.module_body = false;
+    cg.use_function_lexical_env(current_function_span);
+    cg.emit_function_lex_env_prologue();
+    cg.bind_function_mandatory_lexical_names();
+    cg.bind_function_param_names(param_names);
+    cg.emit_function_hoists(stmts);
+    for stmt in stmts {
+        if is_hoisted_function_declaration(stmt) {
+            continue;
+        }
+        cg.emit_stmt(stmt);
+        if cg.returned {
+            break;
+        }
+    }
+    cg.finish_with_line_ops_and_catches()
+}
+
+/// Like `compile_function_body_ext_tracked` but injects a private field slot map.
+#[allow(clippy::too_many_arguments)]
+fn compile_function_body_ext_tracked_with_private<'src>(
+    body: Option<&FunctionBody<'src>>,
+    rest_param: Option<(String, u8)>,
+    is_async: bool,
+    is_generator: bool,
+    strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
+    lowering: &LoweringContext,
+    param_names: &[String],
+    source: Option<&str>,
+    source_mapper: Option<&SourceMapper>,
+    current_function_span: Option<(u32, u32)>,
+    private_field_slots: FxHashMap<String, u16>,
+) -> Option<BodyCompileResult> {
+    let stmts: &[_] = match body {
+        Some(fb) => fb.statements.as_slice(),
+        None => {
+            let mut st = StringTable::default();
+            let bc = Insn::ReturnUndefined.encode(&mut st);
+            return Some(BodyCompileResult::new(bc, vec![], vec![], 0));
+        }
+    };
+    let mut cg = if let Some(src) = source {
+        CodeGen::new_with_source(strings, literal_arrays, lowering, src, source_mapper)
+    } else {
+        CodeGen::new(strings, literal_arrays, lowering)
+    };
+    cg.is_async = is_async;
+    cg.is_generator = is_generator;
+    cg.private_field_slots = private_field_slots;
+    cg.use_function_lexical_env(current_function_span);
+    cg.emit_function_lex_env_prologue();
+    cg.bind_function_mandatory_lexical_names();
+    if is_async {
+        cg.emit_async_function_prologue();
+    }
+    if is_generator {
+        cg.emit_generator_prologue();
+    }
+    cg.bind_function_param_names(param_names);
+    if let Some((name, count)) = rest_param {
+        let reg = cg.alloc_reg();
+        cg.push(Insn::CopyRestArgs(count));
+        cg.push(Insn::Sta(reg));
+        cg.var_regs.insert(name, reg);
+    }
+    for stmt in stmts {
+        cg.emit_stmt(stmt);
+        if cg.returned {
+            break;
+        }
+    }
+    Some(cg.finish_with_line_ops_and_catches())
+}
+
 fn is_hoisted_function_declaration(stmt: &Statement<'_>) -> bool {
     matches!(stmt, Statement::FunctionDeclaration(_))
         || matches!(
@@ -1865,6 +2117,70 @@ fn function_param_names(function: &oxc_ast::ast::Function<'_>) -> Vec<String> {
             _ => None,
         })
         .collect()
+}
+
+/// Build a private field name → slot map for a class.
+///
+/// Private fields (#name) are assigned slots 0, 1, 2... in declaration order.
+/// Private methods (including getters/setters) get slots after private fields
+/// (matching upstream `ClassScope::AddPrivateName`).
+/// Returns `(field_slots, field_count)` where `field_count` is the number of
+/// private *fields* (not methods).
+/// Synthesized backing-field name for an `accessor` property.
+/// Format: `__accessor_<key>_<span_start>` (the leading `#` is implicit).
+fn accessor_backing_field_name(accessor: &oxc_ast::ast::AccessorProperty<'_>) -> String {
+    let key_part = match &accessor.key {
+        PropertyKey::StaticIdentifier(id) => id.name.as_str().to_string(),
+        PropertyKey::StringLiteral(s) => s.value.as_str().to_string(),
+        _ => format!("computed_{}", accessor.span.start),
+    };
+    format!("__accessor_{key_part}_{}", accessor.span.start)
+}
+
+fn collect_class_private_slots(
+    elements: &[ClassElement<'_>],
+) -> (FxHashMap<String, u16>, u16) {
+    let mut slots: FxHashMap<String, u16> = FxHashMap::default();
+    let mut slot = 0u16;
+    // Private fields first.
+    for element in elements {
+        match element {
+            ClassElement::PropertyDefinition(prop) => {
+                if let PropertyKey::PrivateIdentifier(id) = &prop.key {
+                    slots.entry(id.name.as_str().to_string()).or_insert_with(|| {
+                        let s = slot;
+                        slot += 1;
+                        s
+                    });
+                }
+            }
+            ClassElement::AccessorProperty(accessor) => {
+                // auto-accessor: allocate a slot for the synthesized backing field.
+                let backing_name = accessor_backing_field_name(accessor);
+                slots.entry(backing_name).or_insert_with(|| {
+                    let s = slot;
+                    slot += 1;
+                    s
+                });
+            }
+            _ => {}
+        }
+    }
+    let field_count = slot;
+    // Private methods after fields.
+    for element in elements {
+        let ClassElement::MethodDefinition(method) = element else {
+            continue;
+        };
+        if let PropertyKey::PrivateIdentifier(id) = &method.key {
+            slots.entry(id.name.as_str().to_string()).or_insert_with(|| {
+                let s = slot;
+                slot += 1;
+                s
+            });
+        }
+    }
+    (slots, field_count)
 }
 
 /// Returns true if any function parameter uses a destructuring binding pattern.
@@ -2050,8 +2366,8 @@ impl UnsupportedScanner<'_> {
                                 self.scan_expression(expr)?;
                             }
                         }
-                        ForStatementInit::PrivateFieldExpression(_) => {
-                            return Err(self.unsupported("PrivateFieldExpression"));
+                        ForStatementInit::PrivateFieldExpression(expr) => {
+                            self.scan_expression(&expr.object)?;
                         }
                         _ => {}
                     }
@@ -2213,10 +2529,14 @@ impl UnsupportedScanner<'_> {
 
     fn scan_expression(&mut self, expr: &Expression<'_>) -> Result<(), AbcError> {
         match expr {
-            Expression::PrivateFieldExpression(_) => {
-                Err(self.unsupported("PrivateFieldExpression"))
+            Expression::PrivateFieldExpression(expr) => {
+                // Scan the object; the private field name (#name) is a class-scope identifier.
+                self.scan_expression(&expr.object)
             }
-            Expression::PrivateInExpression(_) => Err(self.unsupported("PrivateInExpression")),
+            Expression::PrivateInExpression(expr) => {
+                // Scan the object; the private name (#x) on the left is a class-scope identifier.
+                self.scan_expression(&expr.right)
+            }
             Expression::JSXElement(_) => Err(self.unsupported("JSXElement")),
             Expression::JSXFragment(_) => Err(self.unsupported("JSXFragment")),
             Expression::V8IntrinsicExpression(_) => Err(self.unsupported("V8IntrinsicExpression")),
@@ -2306,8 +2626,8 @@ impl UnsupportedScanner<'_> {
                     self.scan_expression(&expr.object)?;
                     self.scan_expression(&expr.expression)
                 }
-                oxc_ast::ast::ChainElement::PrivateFieldExpression(_) => {
-                    Err(self.unsupported("PrivateFieldExpression"))
+                oxc_ast::ast::ChainElement::PrivateFieldExpression(expr) => {
+                    self.scan_expression(&expr.object)
                 }
                 oxc_ast::ast::ChainElement::TSNonNullExpression(expr) => {
                     self.scan_expression(&expr.expression)
@@ -2469,8 +2789,9 @@ impl UnsupportedScanner<'_> {
 
     fn scan_assignment_target(&mut self, target: &AssignmentTarget<'_>) -> Result<(), AbcError> {
         match target {
-            AssignmentTarget::PrivateFieldExpression(_) => {
-                Err(self.unsupported("PrivateFieldExpression"))
+            AssignmentTarget::PrivateFieldExpression(expr) => {
+                // Scan the object; the private name (#name) is a class-scope identifier.
+                self.scan_expression(&expr.object)
             }
             AssignmentTarget::ArrayAssignmentTarget(arr) => {
                 // Array assignment destructuring — recurse into elements and rest.
@@ -2549,8 +2870,9 @@ impl UnsupportedScanner<'_> {
         target: &oxc_ast::ast::SimpleAssignmentTarget<'_>,
     ) -> Result<(), AbcError> {
         match target {
-            oxc_ast::ast::SimpleAssignmentTarget::PrivateFieldExpression(_) => {
-                Err(self.unsupported("PrivateFieldExpression"))
+            oxc_ast::ast::SimpleAssignmentTarget::PrivateFieldExpression(expr) => {
+                // Private field in update target — scan the object.
+                self.scan_expression(&expr.object)
             }
             oxc_ast::ast::SimpleAssignmentTarget::ComputedMemberExpression(expr) => {
                 self.scan_expression(&expr.object)?;
@@ -2566,8 +2888,9 @@ impl UnsupportedScanner<'_> {
     fn scan_for_left(&mut self, left: &ForStatementLeft<'_>) -> Result<(), AbcError> {
         match left {
             ForStatementLeft::VariableDeclaration(decl) => self.scan_variable_declaration(decl),
-            ForStatementLeft::PrivateFieldExpression(_) => {
-                Err(self.unsupported("PrivateFieldExpression"))
+            ForStatementLeft::PrivateFieldExpression(expr) => {
+                // Private field on for-left — scan the object expression.
+                self.scan_expression(&expr.object)
             }
             ForStatementLeft::ArrayAssignmentTarget(_)
             | ForStatementLeft::ObjectAssignmentTarget(_) => {
@@ -2584,7 +2907,8 @@ impl UnsupportedScanner<'_> {
 
     fn scan_property_key(&mut self, key: &PropertyKey<'_>) -> Result<(), AbcError> {
         match key {
-            PropertyKey::PrivateIdentifier(_) => Err(self.unsupported("PrivateIdentifier")),
+            // Private identifiers are class-scope names — no sub-expression to scan.
+            PropertyKey::PrivateIdentifier(_) => Ok(()),
             PropertyKey::PrivateFieldExpression(_) => {
                 Err(self.unsupported("PrivateFieldExpression"))
             }
@@ -2601,7 +2925,10 @@ impl UnsupportedScanner<'_> {
             match element {
                 ClassElement::MethodDefinition(method) => {
                     self.scan_property_key(&method.key)?;
-                    if method.kind != MethodDefinitionKind::Constructor
+                    // Allow private identifier keys (#name) for private methods.
+                    let is_private = matches!(&method.key, PropertyKey::PrivateIdentifier(_));
+                    if !is_private
+                        && method.kind != MethodDefinitionKind::Constructor
                         && !method.computed
                         && method_key_name(&method.key).is_none()
                     {
@@ -2614,15 +2941,21 @@ impl UnsupportedScanner<'_> {
                 }
                 ClassElement::PropertyDefinition(property) => {
                     self.scan_property_key(&property.key)?;
-                    if !property.computed && method_key_name(&property.key).is_none() {
+                    // Allow private identifier keys (#name) and computed keys;
+                    // only reject other non-string keys.
+                    let is_private = matches!(&property.key, PropertyKey::PrivateIdentifier(_));
+                    if !is_private && !property.computed && method_key_name(&property.key).is_none() {
                         return Err(self.unsupported("UnsupportedClassFieldKey"));
                     }
                     if let Some(value) = &property.value {
                         self.scan_expression(value)?;
                     }
                 }
-                ClassElement::AccessorProperty(_) => {
-                    return Err(self.unsupported("AccessorClassField"));
+                ClassElement::AccessorProperty(accessor) => {
+                    // auto-accessor is lowered to private backing field + getter/setter.
+                    if let Some(value) = &accessor.value {
+                        self.scan_expression(value)?;
+                    }
                 }
                 ClassElement::StaticBlock(block) => self.scan_statements(&block.body)?,
                 ClassElement::TSIndexSignature(_) => {}
@@ -2694,6 +3027,14 @@ struct ClassFieldInit<'a> {
     value: Option<&'a Expression<'a>>,
 }
 
+/// A private instance field initializer: `#name = value`.
+struct ClassPrivateFieldInit<'a> {
+    /// Private field slot index within the class's private environment.
+    slot: u16,
+    /// The optional initializer expression (None → `undefined`).
+    value: Option<&'a Expression<'a>>,
+}
+
 enum ClassFieldKey<'a> {
     Static(String),
     CapturedComputed {
@@ -2761,6 +3102,10 @@ struct CodeGen<'a> {
     current_lexical_indices: FxHashMap<String, u8>,
     outer_lexical_envs: Vec<FxHashMap<String, u8>>,
     runtime_ts_import_equals: FxHashSet<(u32, u32)>,
+    /// Private field name → slot index for the current class scope.
+    /// Populated before compiling class methods and constructors that have private fields.
+    /// `level` is always 0 (current class scope) in our single-class implementation.
+    private_field_slots: FxHashMap<String, u16>,
 }
 
 struct LabelContext {
@@ -2810,6 +3155,7 @@ impl<'a> CodeGen<'a> {
             current_lexical_indices: FxHashMap::default(),
             outer_lexical_envs: Vec::new(),
             runtime_ts_import_equals: FxHashSet::default(),
+            private_field_slots: FxHashMap::default(),
         }
     }
 
@@ -5771,12 +6117,47 @@ impl<'a> CodeGen<'a> {
             Expression::YieldExpression(yield_expr) => {
                 self.emit_yield_expr(yield_expr);
             }
-            Expression::PrivateFieldExpression(_) => {
-                unreachable!("private fields are rejected before ABC lowering");
+            Expression::PrivateFieldExpression(expr) => {
+                self.emit_private_field_load(&expr.field.name, &expr.object);
+            }
+            Expression::PrivateInExpression(expr) => {
+                // `#x in obj` — brand-check opcode.
+                let name = expr.left.name.as_str();
+                self.emit_expr(&expr.right);
+                if let Some(slot) = self.private_field_slots.get(name).copied() {
+                    self.push(Insn::TestIn(0, 0, slot));
+                }
             }
             _ => {
                 self.push(Insn::LdUndefined);
             }
+        }
+    }
+
+    /// Emit a private field load: object → acc, then `ldprivateproperty`.
+    fn emit_private_field_load(&mut self, field_name: &str, object: &Expression<'_>) {
+        let slot = self.private_field_slots.get(field_name).copied();
+        self.emit_expr(object);
+        if let Some(slot) = slot {
+            self.push(Insn::LdPrivateProperty(0, 0, slot));
+        }
+    }
+
+    /// Emit a private field store: value → acc, object → obj_reg, then
+    /// `stprivateproperty`.
+    fn emit_private_field_store(
+        &mut self,
+        field_name: &str,
+        object: &Expression<'_>,
+        value: &Expression<'_>,
+    ) {
+        let slot = self.private_field_slots.get(field_name).copied();
+        let obj_reg = self.alloc_reg();
+        self.emit_expr(object);
+        self.push(Insn::Sta(obj_reg));
+        self.emit_expr(value);
+        if let Some(slot) = slot {
+            self.push(Insn::StPrivateProperty(0, 0, slot, obj_reg));
         }
     }
 
@@ -7163,7 +7544,7 @@ impl<'a> CodeGen<'a> {
 
     fn emit_class_missing_properties(
         &mut self,
-        _class_name: &str,
+        class_name: &str,
         elements: &[ClassElement<'_>],
         class_reg: u8,
         class_span_start: u32,
@@ -7274,6 +7655,65 @@ impl<'a> CodeGen<'a> {
                 let public_name_id = self.intern(&record_name);
                 self.push(Insn::StOwnByName(0, public_name_id, target_reg));
             }
+        }
+
+        // Emit DefineGetterSetterByValue for each auto-accessor property.
+        // Mirrors upstream ProcessAutoAccessorProperty: after the class is defined,
+        // install getter/setter pairs with the compiled accessor methods.
+        let prototype_id = self.intern("prototype");
+        for element in elements {
+            let ClassElement::AccessorProperty(accessor) = element else {
+                continue;
+            };
+            let key_name = match &accessor.key {
+                PropertyKey::StaticIdentifier(id) => id.name.as_str().to_string(),
+                PropertyKey::StringLiteral(s) => s.value.as_str().to_string(),
+                _ => continue,
+            };
+            let target_reg = if accessor.r#static { class_reg } else {
+                // prototype
+                self.push(Insn::Lda(class_reg));
+                self.push(Insn::LdObjByName(0, prototype_id));
+                let proto_r = self.alloc_reg();
+                self.push(Insn::Sta(proto_r));
+                proto_r
+            };
+            // Load the key into a register.
+            let key_id = self.intern(&key_name);
+            let name_reg = self.alloc_reg();
+            self.push(Insn::LdaStr(key_id));
+            self.push(Insn::Sta(name_reg));
+            // Load the getter method.
+            let getter_method_name = format!("#{class_name}_get_{key_name}#");
+            let getter_name_id = self.intern(&getter_method_name);
+            let getter_reg = self.alloc_reg();
+            self.push(Insn::Lda(target_reg));
+            self.push(Insn::DefineMethodShort(0, getter_name_id, 0));
+            self.push(Insn::Sta(getter_reg));
+            // Load the setter method.
+            let setter_method_name = format!("#{class_name}_set_{key_name}#");
+            let setter_name_id = self.intern(&setter_method_name);
+            let setter_reg = self.alloc_reg();
+            self.push(Insn::Lda(target_reg));
+            self.push(Insn::DefineMethodShort(0, setter_name_id, 1));
+            self.push(Insn::Sta(setter_reg));
+            // Install via DefineGetterSetterByValue.
+            self.push(Insn::LdFalse);
+            self.push(Insn::DefineGetterSetterByValue(
+                target_reg, name_reg, getter_reg, setter_reg,
+            ));
+        }
+
+        // Emit callruntime.createprivateproperty if the class has private elements.
+        // Mirrors upstream classDefinition.cpp: done AFTER CompileMissingProperties,
+        // BEFORE StaticInitializer.
+        let (private_slots, private_field_count) = collect_class_private_slots(elements);
+        if !private_slots.is_empty() {
+            let priv_lit_id = self.literal_arrays.len() as u16;
+            self.literal_arrays.push(class_private_methods_literal_array(elements));
+            self.push(Insn::CallRuntimeCreatePrivateProperty(private_field_count, priv_lit_id));
+            // Reload class_reg into acc (createprivateproperty clobbers it).
+            self.push(Insn::Lda(class_reg));
         }
     }
 
@@ -7399,8 +7839,10 @@ impl<'a> CodeGen<'a> {
             AssignmentTarget::TSTypeAssertion(expr) => {
                 self.emit_assignment_expression_target(&expr.expression, operator, right);
             }
-            AssignmentTarget::PrivateFieldExpression(_) => {
-                unreachable!("private fields are rejected before ABC lowering");
+            AssignmentTarget::PrivateFieldExpression(expr) => {
+                // `this.#x = value` — private field store.
+                let name = expr.field.name.as_str().to_string();
+                self.emit_private_field_store(&name, &expr.object, right);
             }
             AssignmentTarget::ArrayAssignmentTarget(arr) => {
                 // Destructuring assignment: evaluate RHS then bind to pattern.
@@ -7449,8 +7891,9 @@ impl<'a> CodeGen<'a> {
             Expression::TSTypeAssertion(expr) => {
                 self.emit_assignment_expression_target(&expr.expression, operator, right);
             }
-            Expression::PrivateFieldExpression(_) => {
-                unreachable!("private fields are rejected before ABC lowering");
+            Expression::PrivateFieldExpression(expr) => {
+                let name = expr.field.name.as_str().to_string();
+                self.emit_private_field_store(&name, &expr.object, right);
             }
             _ => unreachable!("invalid assignment target reached ABC lowering"),
         }
@@ -7516,8 +7959,24 @@ impl<'a> CodeGen<'a> {
                     update.prefix,
                 );
             }
-            SimpleAssignmentTarget::PrivateFieldExpression(_) => {
-                unreachable!("private fields are rejected before ABC lowering");
+            SimpleAssignmentTarget::PrivateFieldExpression(expr) => {
+                // `this.#x++` — private field update.
+                let name = expr.field.name.as_str().to_string();
+                self.emit_private_field_load(&name, &expr.object);
+                let (original_reg, updated_reg) = self.emit_update_acc(update.operator, update.prefix);
+                let obj_reg = self.alloc_reg();
+                let slot = self.private_field_slots.get(name.as_str()).copied();
+                self.emit_expr(&expr.object);
+                self.push(Insn::Sta(obj_reg));
+                self.push(Insn::Lda(updated_reg));
+                if let Some(slot) = slot {
+                    self.push(Insn::StPrivateProperty(0, 0, slot, obj_reg));
+                }
+                if !update.prefix {
+                    if let Some(orig) = original_reg {
+                        self.push(Insn::Lda(orig));
+                    }
+                }
             }
             SimpleAssignmentTarget::ComputedMemberExpression(mem) => {
                 self.emit_computed_member_update(mem, update.operator, update.prefix);
@@ -7553,8 +8012,24 @@ impl<'a> CodeGen<'a> {
             Expression::TSTypeAssertion(expr) => {
                 self.emit_update_expression_target(&expr.expression, operator, prefix);
             }
-            Expression::PrivateFieldExpression(_) => {
-                unreachable!("private fields are rejected before ABC lowering");
+            Expression::PrivateFieldExpression(expr) => {
+                // `this.#x++` — read-modify-write with private field.
+                let name = expr.field.name.as_str().to_string();
+                self.emit_private_field_load(&name, &expr.object);
+                let (original_reg, updated_reg) = self.emit_update_acc(operator, prefix);
+                let obj_reg = self.alloc_reg();
+                let slot = self.private_field_slots.get(name.as_str()).copied();
+                self.emit_expr(&expr.object);
+                self.push(Insn::Sta(obj_reg));
+                self.push(Insn::Lda(updated_reg));
+                if let Some(slot) = slot {
+                    self.push(Insn::StPrivateProperty(0, 0, slot, obj_reg));
+                }
+                if !prefix {
+                    if let Some(orig) = original_reg {
+                        self.push(Insn::Lda(orig));
+                    }
+                }
             }
             Expression::ComputedMemberExpression(mem) => {
                 self.emit_computed_member_update(mem, operator, prefix);
