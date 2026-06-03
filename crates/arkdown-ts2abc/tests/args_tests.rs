@@ -111,3 +111,115 @@ fn rejects_missing_output_for_compile() {
     let err = Ts2abcCommand::parse(["input.js"]).unwrap_err();
     assert!(matches!(err, Ts2abcError::MissingOutput));
 }
+
+/// Upstream es2abc defaults --target-api-version to 24 (options.cpp:571).
+/// Our previous default was 20, which caused wrong bytecode-version selection.
+#[test]
+fn default_target_api_version_is_24() {
+    let command = Ts2abcCommand::parse([
+        "--module",
+        "--merge-abc",
+        "--output",
+        "modules.abc",
+        "input.js",
+    ])
+    .unwrap();
+    match command {
+        Ts2abcCommand::Compile(opts) => {
+            assert_eq!(
+                opts.target_api_version, 24,
+                "default target API version must be 24 to match upstream es2abc"
+            );
+        }
+        other => panic!("expected compile command, got {other:?}"),
+    }
+}
+
+/// Upstream options.cpp rejects --module and --commonjs together.
+#[test]
+fn rejects_module_and_commonjs_together() {
+    let err = Ts2abcCommand::parse(["--module", "--commonjs", "--output", "x.abc", "x.js"])
+        .unwrap_err();
+    assert!(
+        matches!(err, Ts2abcError::ConflictingFlags),
+        "expected ConflictingFlags, got {err:?}"
+    );
+    // Same if commonjs comes first.
+    let err2 = Ts2abcCommand::parse(["--commonjs", "--module", "--output", "x.abc", "x.js"])
+        .unwrap_err();
+    assert!(
+        matches!(err2, Ts2abcError::ConflictingFlags),
+        "expected ConflictingFlags, got {err2:?}"
+    );
+}
+
+/// @filelist should expand each non-empty line as a source input.
+#[test]
+fn filelist_expands_lines_as_inputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let list_path = dir.path().join("sources.txt");
+    let a = dir.path().join("a.js");
+    let b = dir.path().join("b.js");
+    std::fs::write(&a, "").unwrap();
+    std::fs::write(&b, "").unwrap();
+    std::fs::write(
+        &list_path,
+        format!("{}\n\n{}\n", a.display(), b.display()),
+    )
+    .unwrap();
+
+    let command = Ts2abcCommand::parse([
+        "--module",
+        "--merge-abc",
+        "--output",
+        "modules.abc",
+        &format!("@{}", list_path.display()),
+    ])
+    .unwrap();
+    match command {
+        Ts2abcCommand::Compile(opts) => {
+            assert_eq!(
+                opts.inputs.len(),
+                2,
+                "filelist with 2 paths (and 1 blank line) must produce 2 inputs"
+            );
+            assert_eq!(opts.inputs[0].path, a);
+            assert_eq!(opts.inputs[1].path, b);
+        }
+        other => panic!("expected compile command, got {other:?}"),
+    }
+}
+
+/// @filelist that cannot be read must return an Io error, not UnsupportedFlag.
+#[test]
+fn filelist_missing_file_returns_io_error() {
+    let err =
+        Ts2abcCommand::parse(["@/nonexistent/path/sources.txt", "--output", "x.abc"]).unwrap_err();
+    assert!(
+        matches!(err, Ts2abcError::Io(_)),
+        "missing @filelist must be an Io error, got {err:?}"
+    );
+}
+
+/// Flags added for hvigor compatibility must be accepted without error.
+#[test]
+fn accepts_hvigor_compat_flags() {
+    // These flags must not produce UnsupportedFlag even if their effect is no-op.
+    let result = Ts2abcCommand::parse([
+        "--module",
+        "--merge-abc",
+        "--extension",
+        "ets",
+        "--module-record-field-name",
+        "moduleRecordField",
+        "--enable-release-column",
+        "--use-define-semantic",
+        "--output",
+        "modules.abc",
+        "input.js",
+    ]);
+    assert!(
+        result.is_ok(),
+        "hvigor compat flags must be accepted: {result:?}"
+    );
+}

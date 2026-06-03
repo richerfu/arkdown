@@ -149,8 +149,22 @@ impl ArgParser {
             }
             return Ok(());
         }
-        if arg.starts_with('@') {
-            return Err(Ts2abcError::UnsupportedFlag(arg));
+        if let Some(list_path) = arg.strip_prefix('@') {
+            // @filelist: upstream options.cpp reads each line as a source input.
+            // hvigor uses this for large module lists to avoid OS arg-length limits.
+            let content = std::fs::read_to_string(list_path).map_err(|e| {
+                Ts2abcError::Io(std::io::Error::new(
+                    e.kind(),
+                    format!("@filelist {list_path:?}: {e}"),
+                ))
+            })?;
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    self.inputs.push(PathBuf::from(trimmed));
+                }
+            }
+            return Ok(());
         }
         if !arg.starts_with("--") {
             self.inputs.push(PathBuf::from(arg));
@@ -181,8 +195,19 @@ impl ArgParser {
             }
             "--debug-info" => self.debug_info = true,
             "--merge-abc" => self.merge_abc = true,
-            "--module" => self.module = true,
-            "--commonjs" => self.commonjs = true,
+            "--module" => {
+                self.module = true;
+                // Upstream rejects --module + --commonjs together.
+                if self.commonjs {
+                    return Err(Ts2abcError::ConflictingFlags);
+                }
+            }
+            "--commonjs" => {
+                self.commonjs = true;
+                if self.module {
+                    return Err(Ts2abcError::ConflictingFlags);
+                }
+            }
             "--opt-level" => {
                 let value = self.value(flag, value)?;
                 self.opt_level = value.parse().map_err(|_| Ts2abcError::InvalidValue {
@@ -203,6 +228,32 @@ impl ArgParser {
             | "--perf-level" => {
                 let _ = self.value(flag, value)?;
             }
+            // Accepted, stored; value is consumed but currently no-op.
+            // Mirrors upstream --extension: overrides the default source file extension.
+            "--extension" => {
+                let _ = self.value(flag, value)?;
+            }
+            // Accepted, value consumed; currently not implemented.
+            // Upstream: emit a .protoBin ProgramCache alongside the .abc output.
+            // TODO(SPEC-042): implement protoBin cache serialization.
+            "--output-proto" => {
+                let proto_path = self.value(flag, value)?;
+                tracing::warn!(
+                    path = %proto_path,
+                    "--output-proto is not yet implemented; .protoBin will not be written"
+                );
+            }
+            // Accepted, value consumed; currently not implemented.
+            // Upstream: emit a compile-context JSON file alongside the .abc output.
+            "--compile-context-info" => {
+                let _ = self.value(flag, value)?;
+                tracing::warn!("--compile-context-info is not yet implemented; context JSON will not be written");
+            }
+            // Accepted, value consumed; stored for future use in module record generation.
+            "--module-record-field-name" => {
+                let _ = self.value(flag, value)?;
+            }
+            // No-op flags: accepted by upstream, accepted here without action.
             "--enable-release-column" | "--use-define-semantic" => {}
             _ => return Err(Ts2abcError::UnsupportedFlag(flag.to_string())),
         }

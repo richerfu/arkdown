@@ -18,6 +18,10 @@ pub enum Ts2abcError {
     MissingSource(PathBuf),
     #[error("source-map output is not implemented by the Rust backend yet")]
     SourceMapNotImplemented,
+    /// Upstream es2abc rejects `--module` and `--commonjs` together
+    /// (options.cpp: "cannot use --module and --commonjs at the same time").
+    #[error("cannot use --module and --commonjs at the same time")]
+    ConflictingFlags,
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
