@@ -356,7 +356,7 @@ fn bytecode_insn_len(bytecode: &[u8], pos: usize, opcode: u8) -> usize {
         0x8a | 0x8b => 3,
         0x44 | 0x60 | 0x61 | 0x7c | 0x7d | 0x3c | 0x3d | 0xb1 | 0xc3 | 0xc4 | 0xcd | 0xce => 2,
         0x1d | 0x21 | 0x22 => 2,
-        0x6d | 0xbd | 0xbf | 0xc0 => 1,
+        0x6d | 0xb0 | 0xbd | 0xbf | 0xc0 => 1,
         0xfe if bytecode.get(pos + 1) == Some(&0x09) => 4,
         0xfe if matches!(bytecode.get(pos + 1), Some(0x05 | 0x07)) => 3,
         0xfe => 2,
@@ -2793,6 +2793,43 @@ const promise = import("./dep");
     assert!(
         bytecode_contains_opcode(&bytecode, 0xbd),
         "ImportExpression must emit dynamicimport like upstream DynamicImportCall"
+    );
+}
+
+#[test]
+fn test_debugger_statement_matches_upstream_debug_mode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let normal_out = tmp.path().join("debugger_normal.abc");
+    let record_name = "test/debugger_statement";
+    module_compiler()
+        .compile(
+            vec![module_record(record_name, "debugger;\nconst value = 1;")],
+            &normal_out,
+        )
+        .expect("compile non-debug debugger source");
+    let normal_bytes = std::fs::read(&normal_out).unwrap();
+    let normal_bytecode = module_func_main_bytecode(&normal_bytes, record_name);
+    assert!(
+        !bytecode_contains_opcode(&normal_bytecode, 0xb0),
+        "debugger statement must not emit debugger opcode when debug info is disabled"
+    );
+
+    let debug_out = tmp.path().join("debugger_debug.abc");
+    module_compiler()
+        .compile(
+            vec![module_record_with_source_file(
+                record_name,
+                "debugger;\nconst value = 1;",
+                "entry/src/main/ets/pages/Debugger.ts",
+            )],
+            &debug_out,
+        )
+        .expect("compile debug debugger source");
+    let debug_bytes = std::fs::read(&debug_out).unwrap();
+    let debug_bytecode = module_func_main_bytecode(&debug_bytes, record_name);
+    assert!(
+        bytecode_contains_opcode(&debug_bytecode, 0xb0),
+        "debugger statement must emit debugger opcode in debug mode like upstream GenDebugger"
     );
 }
 

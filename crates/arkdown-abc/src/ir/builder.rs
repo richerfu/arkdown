@@ -2499,6 +2499,11 @@ impl<'a> CodeGen<'a> {
                 // ExpressionStatements).
                 self.next_reg = saved_next_reg;
             }
+            Statement::DebuggerStatement(_) => {
+                if self.line_tracker.is_some() {
+                    self.push(Insn::Debugger);
+                }
+            }
             Statement::ReturnStatement(ret) => {
                 if let Some(arg) = &ret.argument {
                     self.emit_expr(arg);

@@ -62,6 +62,9 @@ pub enum Insn {
     /// `0xBD` `op_none` — perform dynamic import with the specifier in accumulator.
     DynamicImport,
 
+    /// `0xB0` `op_none` — debugger statement marker, emitted only for debug builds.
+    Debugger,
+
     // ── Register moves ───────────────────────────────────────────────────────
     /// `0x60` `op_v_8` — load virtual register `v` into accumulator.
     /// Encoding: `[0x60] [vreg: u8]` = 2 bytes.
@@ -679,6 +682,7 @@ impl Insn {
                 v
             }
             Insn::DynamicImport => vec![0xbd],
+            Insn::Debugger => vec![0xb0],
 
             // ── register moves ───────────────────────────────────────────────
             Insn::Lda(vreg) => vec![0x60, *vreg],
@@ -987,7 +991,8 @@ impl Insn {
             | Insn::LdFalse
             | Insn::LdHole
             | Insn::LdGlobal
-            | Insn::DynamicImport => 1,
+            | Insn::DynamicImport
+            | Insn::Debugger => 1,
             Insn::LdAi(_) => 5,
             Insn::FLdAi(_) => 9,
             Insn::LdaStr(_) | Insn::LdBigInt(_) => 3,
