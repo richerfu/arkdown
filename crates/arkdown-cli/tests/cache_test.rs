@@ -97,6 +97,8 @@ fn collect_js_chunks(
                     .map(|m| m.record_name.clone())
                     .unwrap_or_else(|| name.clone()),
                 source_file: meta.and_then(|m| m.source_file.clone()),
+                package_name: None,
+                is_commonjs: false,
                 source_map: None,
             }
         })

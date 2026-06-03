@@ -841,15 +841,17 @@ impl AbcFile {
             let mut class_code_offs = vec![0u32; class.methods.len()];
             let mut class_code_items = Vec::with_capacity(class.methods.len());
             let layout = &method_pool_layouts[class_idx];
+            let mut defineclass_cursor = 0usize;
             let mut definefunc_cursor = 0usize;
             for method in &class.methods {
                 let bytecode = patch_bytecode_index_operands(
                     &method.bytecode,
                     &layout.string_pool_indices,
                     &layout.literal_pool_indices,
-                    layout.ctor_pool_index,
+                    &layout.ctor_pool_indices,
                     &layout.definefunc_pool_indices,
                     &layout.definemethod_pool_indices_by_name,
+                    &mut defineclass_cursor,
                     &mut definefunc_cursor,
                 );
                 let mut bytecode = bytecode;
@@ -1348,7 +1350,7 @@ struct MethodPoolLayout {
     definemethod_pool_indices_by_name: FxHashMap<u16, u16>,
     method_indices: Vec<usize>,
     definefunc_pool_indices: Vec<u16>,
-    ctor_pool_index: u16,
+    ctor_pool_indices: Vec<u16>,
 }
 
 pub(super) struct StringItemWriter {
@@ -1554,13 +1556,19 @@ impl AbcFile {
                 }
 
                 layout.method_indices = class.method_pool_entry_indices();
+                let mut method_pool_indices_by_method_idx = FxHashMap::<usize, u16>::default();
+                let mut definefunc_methods = Vec::new();
                 for &method_idx in &layout.method_indices {
                     let pool_index = next_pool_index;
                     let method = &class.methods[method_idx];
-                    if method.kind == MethodKind::Constructor {
-                        layout.ctor_pool_index = pool_index;
-                    } else if method.kind == MethodKind::Anonymous {
-                        layout.definefunc_pool_indices.push(pool_index);
+                    method_pool_indices_by_method_idx.insert(method_idx, pool_index);
+                    if matches!(
+                        method.kind,
+                        MethodKind::Anonymous | MethodKind::FunctionLiteral
+                    ) {
+                        if let Some(order) = method.definefunc_order {
+                            definefunc_methods.push((order, pool_index));
+                        }
                     }
                     if let Some(name_id) = strings.id_of(&method.name) {
                         layout
@@ -1569,6 +1577,21 @@ impl AbcFile {
                     }
                     next_pool_index = next_pool_index.saturating_add(1);
                 }
+                definefunc_methods.sort_by_key(|(order, _)| *order);
+                layout.definefunc_pool_indices = definefunc_methods
+                    .into_iter()
+                    .map(|(_, pool_index)| pool_index)
+                    .collect();
+                layout.ctor_pool_indices = class
+                    .methods
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(method_idx, method)| {
+                        (method.kind == MethodKind::Constructor && method.method_pool_entry)
+                            .then(|| method_pool_indices_by_method_idx.get(&method_idx).copied())
+                            .flatten()
+                    })
+                    .collect();
 
                 for &literal_idx in &class.literal_indices {
                     layout

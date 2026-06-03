@@ -9,6 +9,8 @@ pub struct Ts2abcInput {
     pub path: PathBuf,
     pub record_name: String,
     pub source_file: Option<String>,
+    pub package_name: Option<String>,
+    pub is_commonjs: bool,
     pub source_map: Option<String>,
 }
 
@@ -66,6 +68,8 @@ impl BytecodeBackend for ArkdownAbcBackend {
                 source,
                 source_map: input.source_map.clone(),
                 source_file: input.source_file.clone(),
+                package_name: input.package_name.clone(),
+                is_commonjs: input.is_commonjs,
             });
         }
 

@@ -31,6 +31,10 @@ impl CompileModuleInfo {
         }
     }
 
+    pub(super) fn set_rolldown_commonjs(&mut self, is_commonjs: bool) {
+        self.module_type = if is_commonjs { "commonjs" } else { "esm" }.to_string();
+    }
+
     pub(super) fn compute(
         source_path: &Path,
         cache_root: &Path,
@@ -79,7 +83,7 @@ impl CompileModuleInfo {
                 )
             };
             let version = package_version_or_default(&module_root);
-            let module_type = Self::module_type_for_source(&source_path, &source_ext);
+            let module_type = Self::module_type_for_source(&source_ext);
 
             return Some(CompileModuleInfo {
                 source_path,
@@ -144,7 +148,7 @@ impl CompileModuleInfo {
             ts_path,
             record_name,
             package_name: package_entry_name,
-            module_type: Self::module_type_for_source(source_path, &source_ext),
+            module_type: Self::module_type_for_source(&source_ext),
             origin_source_lang: Self::origin_source_lang(&source_ext),
             source_ext,
             output_ext: output_ext.to_string(),
@@ -194,27 +198,8 @@ impl CompileModuleInfo {
             .any(|line| line.contains("@ts-nocheck") || line.contains("@ts-ignore"))
     }
 
-    fn module_type_for_source(source_path: &Path, source_ext: &str) -> String {
-        let is_commonjs = match source_ext {
-            "cjs" => true,
-            "mjs" | "ets" | "ts" => false,
-            "js" => fs_err::read_to_string(source_path)
-                .map(|source| {
-                    let package_has_module_field = find_package_root(source_path)
-                        .and_then(|root| {
-                            OhPackage::load_from_root(&root)
-                                .and_then(|p| p.module.as_deref().map(str::to_string))
-                        })
-                        .is_some();
-                    !package_has_module_field
-                        && (source.contains("module.exports")
-                            || source.contains("exports.")
-                            || source.contains("= exports")
-                            || source.contains("require("))
-                })
-                .unwrap_or(false),
-            _ => false,
-        };
+    fn module_type_for_source(source_ext: &str) -> String {
+        let is_commonjs = source_ext == "cjs";
         if is_commonjs { "commonjs" } else { "esm" }.to_string()
     }
 
@@ -292,13 +277,62 @@ fn compile_module_ohm_for_specifier(
     config: &ArkdownConfig,
     resolved_imports: &ResolvedImportMap,
 ) -> Option<String> {
-    if is_ohm_url_specifier(specifier) || specifier.starts_with("@system.") {
+    if let Some(ohm_url) = system_api_or_lib_ohm_url(specifier, loader_json, config) {
+        return Some(ohm_url);
+    }
+
+    if is_ohm_url_specifier(specifier) {
         return None;
     }
 
     let resolved = resolve_compile_module_specifier(specifier, importer, resolved_imports)?;
     let info = CompileModuleInfo::compute(&resolved, cache_root, loader_json, config)?;
     Some(compile_module_ohm_url(&info))
+}
+
+fn system_api_or_lib_ohm_url(
+    specifier: &str,
+    loader_json: &arkdown_profile::LoaderJson,
+    config: &ArkdownConfig,
+) -> Option<String> {
+    let request = specifier.trim();
+    if let Some(lib_key) = request
+        .strip_prefix("lib")
+        .and_then(|rest| rest.strip_suffix(".so"))
+        .filter(|key| !key.is_empty())
+    {
+        return Some(format!(
+            "@app:{}/{}/{}",
+            config.product.bundle_name, loader_json.module_name, lib_key
+        ));
+    }
+
+    let (module_type, system_key) = request.strip_prefix('@')?.split_once('.')?;
+    if !matches!(module_type, "system" | "ohos" | "arkts" | "arkui-x") || system_key.is_empty() {
+        return None;
+    }
+
+    let system_module = format!("{module_type}.{system_key}");
+    if is_native_system_module(&system_module) {
+        return Some(format!("@native:{system_module}"));
+    }
+    if module_type == "arkts" {
+        return Some(format!("@ohos:{system_module}"));
+    }
+    Some(format!("@ohos:{system_key}"))
+}
+
+fn is_native_system_module(system_module: &str) -> bool {
+    matches!(
+        system_module,
+        "system.app"
+            | "ohos.app"
+            | "system.router"
+            | "system.curves"
+            | "ohos.curves"
+            | "system.matrix4"
+            | "ohos.matrix4"
+    )
 }
 
 fn is_ohm_url_specifier(specifier: &str) -> bool {
@@ -597,6 +631,7 @@ mod tests {
                 "/project/entry/src/main/ets/Index.ets".to_string(),
                 "/project/entry/src/main/ets/PureReexport.ts".to_string(),
             ],
+            full_module_is_commonjs: FxHashMap::default(),
             module_to_chunk: IndexVec::new(),
             entry_module_to_entry_chunk: FxHashMap::default(),
         };
@@ -608,6 +643,31 @@ mod tests {
                 "/project/entry/src/main/ets/PureReexport.ts".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn module_type_uses_rolldown_commonjs_result_not_source_scan() {
+        let temp = TempDir::new().unwrap();
+        let project = temp.path();
+        let phone_root = project.join("phone");
+        let source_path = phone_root.join("src/main/ets/cjsish.js");
+        fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+        fs::write(&source_path, "module.exports = function cjsish() {};\n").unwrap();
+
+        let loader_json = make_loader_json(project, &[("phone", &phone_root)]);
+        let config = make_config(project, &phone_root);
+        let cache_root = project.join("cache");
+
+        let mut info = CompileModuleInfo::compute(&source_path, &cache_root, &loader_json, &config)
+            .expect("module info");
+
+        assert_eq!(
+            info.module_type, "esm",
+            "CompileArkTS must not rescan source text to infer CommonJS"
+        );
+
+        info.set_rolldown_commonjs(true);
+        assert_eq!(info.module_type, "commonjs");
     }
 
     #[test]
@@ -694,6 +754,44 @@ mod tests {
         .unwrap();
 
         assert_eq!(ohm, "@bundle:com.example.hmosworld/phone@utils/ets/Index");
+    }
+
+    #[test]
+    fn compile_module_ohm_rewrites_system_api_and_lib_requests() {
+        let temp = TempDir::new().unwrap();
+        let project = temp.path();
+        let phone_root = project.join("phone");
+        let importer = phone_root.join("src/main/ets/pages/Index.ets");
+        fs::create_dir_all(importer.parent().unwrap()).unwrap();
+        fs::write(&importer, "").unwrap();
+
+        let loader_json = make_loader_json(project, &[("phone", &phone_root)]);
+        let config = make_config(project, &phone_root);
+        let cache_root = project.join("cache");
+        let resolved_imports = ResolvedImportMap::default();
+
+        let cases = [
+            ("@ohos.app.ability.common", "@ohos:app.ability.common"),
+            ("@ohos.hilog", "@ohos:hilog"),
+            ("@system.app", "@native:system.app"),
+            ("@arkts.collections", "@ohos:arkts.collections"),
+            (
+                "libapplication.so",
+                "@app:com.example.hmosworld/phone/application",
+            ),
+        ];
+        for (specifier, expected) in cases {
+            let ohm = compile_module_ohm_for_specifier(
+                specifier,
+                &importer,
+                &cache_root,
+                &loader_json,
+                &config,
+                &resolved_imports,
+            )
+            .unwrap();
+            assert_eq!(ohm, expected, "specifier {specifier}");
+        }
     }
 
     #[test]
@@ -793,6 +891,7 @@ mod tests {
                 name: "default".to_string(),
                 bundle_name: "com.example.hmosworld".to_string(),
                 compatible_sdk_version: "5.0.0(12)".to_string(),
+                compatible_sdk_version_stage: None,
                 runtime_os: "HarmonyOS".to_string(),
                 signing_config: None,
                 build_option: BuildOption {

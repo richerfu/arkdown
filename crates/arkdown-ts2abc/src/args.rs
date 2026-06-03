@@ -120,6 +120,8 @@ impl ArgParser {
                     .clone()
                     .unwrap_or_else(|| default_record_name(path)),
                 source_file: self.source_file.clone(),
+                package_name: None,
+                is_commonjs: self.commonjs,
                 source_map: None,
             })
             .collect();

@@ -158,7 +158,7 @@ pub(super) fn compile_widget_pass(
         inputs: handoff.inputs,
         output: widget_abc,
         target_api_version: config.sdk_config.compile_api_version,
-        target_api_sub_version: None,
+        target_api_sub_version: config.product.compatible_sdk_version_stage.clone(),
         debug_info: matches!(config.build_mode, BuildMode::Debug),
         opt_level: if matches!(config.build_mode, BuildMode::Release) {
             2

@@ -46,8 +46,14 @@ impl<'a> CompileArktsCacheWriter<'a> {
         let mut pkg_entries = PackageEntryInfos::default();
 
         for module_id in module_ids {
+            let is_commonjs = chunk_graph
+                .full_module_is_commonjs
+                .get(&module_id)
+                .copied()
+                .unwrap_or(false);
             self.write_module(
                 &module_id,
+                is_commonjs,
                 &mut compile_infos,
                 &mut pkg_entries,
                 &mut source_map_lines,
@@ -68,6 +74,7 @@ impl<'a> CompileArktsCacheWriter<'a> {
     fn write_module(
         &self,
         module_id: &str,
+        is_commonjs: bool,
         compile_infos: &mut Vec<CompileArkTsInfo>,
         pkg_entries: &mut PackageEntryInfos,
         source_map_lines: &mut Vec<String>,
@@ -75,7 +82,7 @@ impl<'a> CompileArktsCacheWriter<'a> {
         let Some(source_path) = module_id_to_source_path(module_id) else {
             return Ok(());
         };
-        let Some(entry_info) = CompileModuleInfo::compute(
+        let Some(mut entry_info) = CompileModuleInfo::compute(
             &source_path,
             &self.cache_root,
             self.loader_json,
@@ -83,6 +90,7 @@ impl<'a> CompileArktsCacheWriter<'a> {
         ) else {
             return Ok(());
         };
+        entry_info.set_rolldown_commonjs(is_commonjs);
 
         let source = fs_err::read_to_string(&entry_info.source_path).with_context(|| {
             format!(

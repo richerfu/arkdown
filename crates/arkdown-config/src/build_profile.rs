@@ -176,6 +176,8 @@ pub struct RawProduct {
     pub bundle_name: String,
     #[serde(default)]
     pub compatible_sdk_version: String,
+    #[serde(default)]
+    pub compatible_sdk_version_stage: Option<String>,
     /// Real OHOS projects use targetSdkVersion; takes priority over compatibleSdkVersion.
     #[serde(default)]
     pub target_sdk_version: Option<String>,
@@ -336,6 +338,7 @@ mod tests {
                     name: "default",
                     bundleName: "com.example.app",
                     compatibleSdkVersion: "5.0.0(12)",
+                    compatibleSdkVersionStage: "beta3",
                     runtimeOS: "HarmonyOS",
                 }],
             },
@@ -353,6 +356,12 @@ mod tests {
         assert_eq!(
             parse_api_version(&profile.app.products[0].compatible_sdk_version),
             Some(12)
+        );
+        assert_eq!(
+            profile.app.products[0]
+                .compatible_sdk_version_stage
+                .as_deref(),
+            Some("beta3")
         );
         assert_eq!(profile.modules.len(), 1);
         assert_eq!(profile.modules[0].name, "entry");

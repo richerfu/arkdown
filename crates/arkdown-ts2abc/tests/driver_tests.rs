@@ -1,4 +1,4 @@
-use arkdown_ts2abc::{compile_to_abc, Ts2abcInput, Ts2abcOptions};
+use arkdown_ts2abc::{Ts2abcInput, Ts2abcOptions};
 
 #[test]
 fn compile_to_abc_uses_rust_backend_and_writes_panda_file() {
@@ -12,6 +12,8 @@ fn compile_to_abc_uses_rust_backend_and_writes_panda_file() {
             path: source,
             record_name: "entry|entry|1.0.0|src/main/ets/pages/Index".to_string(),
             source_file: Some("entry/src/main/ets/pages/Index.ts".to_string()),
+            package_name: None,
+            is_commonjs: false,
             source_map: None,
         }],
         output: output.clone(),
@@ -46,6 +48,8 @@ fn compile_to_abc_accepts_module_source_without_iife_wrapper() {
             path: source,
             record_name: "entry/main".into(),
             source_file: None,
+            package_name: None,
+            is_commonjs: false,
             source_map: None,
         }],
         output: output.clone(),
@@ -84,6 +88,8 @@ fn compile_to_abc_lowers_npm_module_entry_list_records() {
             path: source,
             record_name: "entry/main".into(),
             source_file: None,
+            package_name: None,
+            is_commonjs: false,
             source_map: None,
         }],
         output: output.clone(),
@@ -131,12 +137,16 @@ fn check_minimal_hap_num_lit() {
                 record_name: "com.example.arkdown.test/entry/ets/entryability/EntryAbility"
                     .to_string(),
                 source_file: Some("entry/src/main/ets/entryability/EntryAbility.ts".to_string()),
+                package_name: None,
+                is_commonjs: false,
                 source_map: None,
             },
             Ts2abcInput {
                 path: idx_js,
                 record_name: "com.example.arkdown.test/entry/ets/pages/Index".to_string(),
                 source_file: Some("entry/src/main/ets/pages/Index.ts".to_string()),
+                package_name: None,
+                is_commonjs: false,
                 source_map: None,
             },
         ],

@@ -26,6 +26,7 @@ pub mod method_access {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MethodKind {
     Module,
+    FunctionLiteral,
     Function,
     Constructor,
     Anonymous,
@@ -74,14 +75,16 @@ pub fn inline_string(s: &str) -> Vec<u8> {
 /// length:   u32 LE   – byte count of the try region
 /// num_catches: u16 LE – number of catch handlers (always 1 here)
 /// CatchBlock:
-///   type_idx:   u16 LE – exception type (0 = catch-all)
-///   handler_pc: u32 LE – byte offset of the catch handler entry
+///   type_idx:   ULEB128 – exception type + 1 (0 = catch-all)
+///   handler_pc: ULEB128 – byte offset of the catch handler entry
+///   code_size:  ULEB128 – byte length of the catch handler
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct CatchEntry {
     pub try_begin: u32,
     pub try_end: u32,
     pub catch_begin: u32,
+    pub catch_end: u32,
 }
 
 /// Encode a Panda `CodeItem`.
@@ -96,15 +99,15 @@ pub struct CatchEntry {
 /// [TryBlock * tries_size]
 /// ```
 ///
-/// Each `TryBlock` is: `start_pc(u32) + length(u32) + num_catches(u16) +
-/// [type_idx(u16) + handler_pc(u32)] * num_catches`.
+/// Each `TryBlock` is ULEB128-encoded:
+/// `start_pc + length + num_catches + [type_idx + handler_pc + code_size]`.
 pub fn encode_code_item(
     num_vregs: u16,
     num_args: u16,
     bytecode: &[u8],
     catch_entries: &[CatchEntry],
 ) -> Vec<u8> {
-    let try_table_len = catch_entries.len() * 14;
+    let try_table_len = catch_entries.len() * 8;
     let mut out = Vec::with_capacity(7 + bytecode.len() + try_table_len);
     out.extend_from_slice(&uleb128(num_vregs as u64));
     out.extend_from_slice(&uleb128(num_args as u64));
@@ -113,11 +116,13 @@ pub fn encode_code_item(
     out.extend_from_slice(bytecode);
     for entry in catch_entries {
         let length = entry.try_end.saturating_sub(entry.try_begin);
-        out.extend_from_slice(&entry.try_begin.to_le_bytes());
-        out.extend_from_slice(&length.to_le_bytes());
-        out.extend_from_slice(&1u16.to_le_bytes());
-        out.extend_from_slice(&0u16.to_le_bytes());
-        out.extend_from_slice(&entry.catch_begin.to_le_bytes());
+        let catch_size = entry.catch_end.saturating_sub(entry.catch_begin);
+        out.extend_from_slice(&uleb128(entry.try_begin as u64));
+        out.extend_from_slice(&uleb128(length as u64));
+        out.extend_from_slice(&uleb128(1));
+        out.extend_from_slice(&uleb128(0));
+        out.extend_from_slice(&uleb128(entry.catch_begin as u64));
+        out.extend_from_slice(&uleb128(catch_size as u64));
     }
     out
 }
@@ -153,6 +158,10 @@ pub struct MethodRecord {
     pub catch_entries: Vec<CatchEntry>,
     pub kind: MethodKind,
     pub method_pool_entry: bool,
+    /// Source-order key for `definefunc` operands. MethodItems may be sorted for
+    /// upstream file layout, but anonymous `definefunc` opcodes are resolved in
+    /// AST discovery order.
+    pub definefunc_order: Option<u32>,
 }
 
 /// Minimal method debug info linked through a Panda LineNumberProgram.
@@ -502,6 +511,7 @@ impl MethodRecord {
             MethodKind::Constructor if self.is_generated_default_derived_constructor() => {
                 method_access::MODULE_OR_CTOR
             }
+            MethodKind::FunctionLiteral => method_access::MODULE_OR_CTOR,
             MethodKind::Anonymous => method_access::ANON,
             MethodKind::Function | MethodKind::Constructor => method_access::INSTANCE,
         }
@@ -629,6 +639,7 @@ mod tests {
                 catch_entries: vec![],
                 kind: MethodKind::Module,
                 method_pool_entry: false,
+                definefunc_order: None,
             }],
             string_indices: vec![],
             literal_indices: vec![],
@@ -665,6 +676,7 @@ mod tests {
                 catch_entries: vec![],
                 kind: MethodKind::Module,
                 method_pool_entry: false,
+                definefunc_order: None,
             }],
             string_indices: vec![],
             literal_indices: vec![],

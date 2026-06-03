@@ -20,6 +20,15 @@ pub(super) struct FunctionRecord<'a> {
     pub(super) node: FunctionRecordNode<'a>,
 }
 
+impl<'a> FunctionRecord<'a> {
+    pub(super) fn span(&self) -> (u32, u32) {
+        match self.node {
+            FunctionRecordNode::Function(function) => (function.span.start, function.span.end),
+            FunctionRecordNode::Arrow(arrow) => (arrow.span.start, arrow.span.end),
+        }
+    }
+}
+
 pub(super) fn collect_function_records<'a>(
     program: &'a Program<'a>,
     stmts: &'a [Statement<'a>],
