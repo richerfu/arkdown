@@ -4385,6 +4385,44 @@ const box = new Box();"#,
 }
 
 #[test]
+fn test_computed_instance_class_field_uses_captured_class_key() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("computed_instance_class_field.abc");
+    let record_name = "test/computed_instance_class_field";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"const key = "value";
+class Box { [key] = 1; }
+const box = new Box();"#,
+            )],
+            &out,
+        )
+        .expect("computed instance class field must compile through captured class key");
+    let bytes = std::fs::read(&out).unwrap();
+    let main = module_func_main_bytecode(&bytes, record_name);
+    assert!(
+        bytecode_contains_opcode(&main, 0x09),
+        "computed instance field keys must allocate a class lexical environment"
+    );
+    assert!(
+        bytecode_contains_opcode(&main, 0x3d) || bytecode_contains_opcode(&main, 0x8b),
+        "computed instance field keys must be saved during class evaluation"
+    );
+    let (_, ctor) = module_method_bytecode_by_suffix(&bytes, record_name, "Box")
+        .expect("class constructor bytecode exists");
+    assert!(
+        bytecode_contains_opcode(&ctor, 0x3c) || bytecode_contains_opcode(&ctor, 0x8a),
+        "constructor must read the precomputed key instead of recomputing it"
+    );
+    assert!(
+        ctor.windows(2).any(|window| window == [0xfb, 0x01]),
+        "computed instance fields must define the property by runtime key value"
+    );
+}
+
+#[test]
 fn test_static_class_field_runs_static_initializer() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("static_class_field.abc");

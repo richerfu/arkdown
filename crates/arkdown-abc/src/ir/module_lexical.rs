@@ -1,12 +1,13 @@
 use rustc_hash::FxHashSet;
 
 use oxc_ast::ast::{
-    BindingPattern, Declaration, ExportDefaultDeclarationKind, Function, Program, Statement,
-    VariableDeclaration,
+    BindingPattern, Class, ClassElement, Declaration, ExportDefaultDeclarationKind, Function,
+    Program, Statement, VariableDeclaration,
 };
 use oxc_ast_visit::{walk, Visit};
 use oxc_syntax::scope::ScopeFlags;
 
+use crate::ir::class_layout::computed_instance_class_field_key_name;
 use crate::ir::module_record::ModuleRecordInfo;
 
 pub(super) fn collect_module_lexical_bindings(
@@ -15,7 +16,8 @@ pub(super) fn collect_module_lexical_bindings(
     module_record: &ModuleRecordInfo,
 ) -> Vec<String> {
     let top_level_bindings = collect_top_level_binding_names(program);
-    if top_level_bindings.is_empty() {
+    let names = collect_top_level_computed_instance_key_names(program);
+    if top_level_bindings.is_empty() && names.is_empty() {
         return Vec::new();
     }
 
@@ -29,7 +31,7 @@ pub(super) fn collect_module_lexical_bindings(
         function_depth: 0,
         top_level_bindings,
         local_exports,
-        names: Vec::new(),
+        names,
     };
     collector.visit_program(program);
     collector.names
@@ -48,6 +50,48 @@ struct NestedRefCollector {
     top_level_bindings: FxHashSet<String>,
     local_exports: FxHashSet<String>,
     names: Vec<String>,
+}
+
+struct TopLevelComputedInstanceKeyCollector {
+    function_depth: usize,
+    names: Vec<String>,
+}
+
+impl<'a> Visit<'a> for TopLevelComputedInstanceKeyCollector {
+    fn visit_program(&mut self, it: &Program<'a>) {
+        walk::walk_program(self, it);
+    }
+
+    fn visit_function(&mut self, it: &Function<'a>, flags: ScopeFlags) {
+        self.function_depth += 1;
+        walk::walk_function(self, it, flags);
+        self.function_depth -= 1;
+    }
+
+    fn visit_class(&mut self, it: &Class<'a>) {
+        if self.function_depth == 0 {
+            for element in &it.body.body {
+                if let ClassElement::PropertyDefinition(property) = element {
+                    if !property.r#static && property.computed {
+                        let name = computed_instance_class_field_key_name(property);
+                        if !self.names.iter().any(|existing| existing == &name) {
+                            self.names.push(name);
+                        }
+                    }
+                }
+            }
+        }
+        walk::walk_class(self, it);
+    }
+}
+
+fn collect_top_level_computed_instance_key_names(program: &Program<'_>) -> Vec<String> {
+    let mut collector = TopLevelComputedInstanceKeyCollector {
+        function_depth: 0,
+        names: Vec::new(),
+    };
+    collector.visit_program(program);
+    collector.names
 }
 
 impl<'a> Visit<'a> for NestedRefCollector {

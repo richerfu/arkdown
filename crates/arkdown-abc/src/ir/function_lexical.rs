@@ -1,13 +1,15 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use oxc_ast::ast::{
-    ArrowFunctionExpression, BindingPattern, Declaration, ExportDefaultDeclarationKind, Function,
-    FunctionBody, MetaProperty, Program, Statement, ThisExpression, VariableDeclaration,
+    ArrowFunctionExpression, BindingPattern, Class, ClassElement, Declaration,
+    ExportDefaultDeclarationKind, Function, FunctionBody, MetaProperty, Program, Statement,
+    ThisExpression, VariableDeclaration,
 };
 use oxc_ast_visit::{walk, Visit};
 use oxc_syntax::scope::ScopeFlags;
 
 use crate::ir::ast_analysis::is_new_target_meta;
+use crate::ir::class_layout::computed_instance_class_field_key_name;
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct FunctionLexicalInfo {
@@ -113,6 +115,15 @@ impl FunctionLexicalCollector {
             _ => {}
         }
     }
+
+    fn record_current_scope_capture(&mut self, name: String) {
+        let Some(frame) = self.stack.last_mut() else {
+            return;
+        };
+        if !frame.captures.iter().any(|existing| existing == &name) {
+            frame.captures.push(name);
+        }
+    }
 }
 
 impl<'a> Visit<'a> for FunctionLexicalCollector {
@@ -132,6 +143,19 @@ impl<'a> Visit<'a> for FunctionLexicalCollector {
         self.push_frame((it.span.start, it.span.end), true, bindings);
         walk::walk_arrow_function_expression(self, it);
         self.pop_frame();
+    }
+
+    fn visit_class(&mut self, it: &Class<'a>) {
+        for element in &it.body.body {
+            if let ClassElement::PropertyDefinition(property) = element {
+                if !property.r#static && property.computed {
+                    self.record_current_scope_capture(computed_instance_class_field_key_name(
+                        property,
+                    ));
+                }
+            }
+        }
+        walk::walk_class(self, it);
     }
 
     fn visit_identifier_reference(&mut self, it: &oxc_ast::ast::IdentifierReference<'a>) {

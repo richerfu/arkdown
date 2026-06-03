@@ -1,4 +1,6 @@
-use oxc_ast::ast::{ClassElement, MethodDefinition, MethodDefinitionKind, PropertyKey};
+use oxc_ast::ast::{
+    ClassElement, MethodDefinition, MethodDefinitionKind, PropertyDefinition, PropertyKey,
+};
 use oxc_span::GetSpan;
 
 use crate::emit::file::{LiteralArray, LiteralEntry};
@@ -31,6 +33,14 @@ pub(super) fn computed_class_method_record_name(method: &MethodDefinition<'_>) -
     format!(
         "#computed_class_method_{}_{}#",
         method.value.span.start, method.value.span.end
+    )
+}
+
+pub(super) fn computed_instance_class_field_key_name(property: &PropertyDefinition<'_>) -> String {
+    format!(
+        "#computed_instance_class_field_key_{}_{}#",
+        property.key.span().start,
+        property.key.span().end
     )
 }
 

@@ -26,8 +26,10 @@ gap is either implemented with focused tests or rejected with
   into upstream-shaped static initializer functions.
 - [x] Lower public computed class methods/accessors through precomputed keys
   and upstream-shaped missing-property definitions.
-- [ ] Port instance computed fields and auto-accessor properties through their
-  upstream class-environment lowering.
+- [x] Port public instance computed fields through class-evaluation key capture
+  and constructor-time own-property definition by value.
+- [ ] Port auto-accessor properties through their upstream class-environment
+  lowering.
 - [x] Reject unsupported `with`, destructuring bindings/assignments, private
   names, JSX, V8 intrinsics, `import.meta`, and generator/yield lowering.
 - [ ] Port full destructuring binding and assignment lowering.

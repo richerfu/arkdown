@@ -28,7 +28,8 @@ use crate::ir::ast_analysis::{
 };
 use crate::ir::class_layout::{
     class_buffer_literal_array, class_method_inferred_name, class_method_num_args,
-    class_method_record_name, computed_class_method_record_name, constructor_required_param_count,
+    class_method_record_name, computed_class_method_record_name,
+    computed_instance_class_field_key_name, constructor_required_param_count,
     is_class_buffer_method, method_key_name, static_initializer_record_name,
 };
 use crate::ir::debug_lnp::{argument_span_start, col_at, line_at, LineTracker, SourceMapper};
@@ -802,7 +803,10 @@ fn compile_class_elements(
                 return None;
             }
             let key = if prop.computed {
-                ClassFieldKey::Computed(&prop.key)
+                ClassFieldKey::CapturedComputed {
+                    key: &prop.key,
+                    capture_name: computed_instance_class_field_key_name(prop),
+                }
             } else {
                 ClassFieldKey::Static(method_key_name(&prop.key)?)
             };
@@ -1365,6 +1369,9 @@ fn compile_constructor_with_fields<'src>(
     let mut cg = CodeGen::new(strings, literal_arrays, lowering);
     cg.derived_constructor = has_super_class;
     cg.use_function_lexical_env(current_function_span);
+    if current_function_span.is_none() {
+        cg.use_module_outer_lexical_env();
+    }
     cg.emit_function_lex_env_prologue();
     cg.bind_function_mandatory_lexical_names();
     cg.bind_function_param_names(param_names);
@@ -1414,6 +1421,9 @@ fn compile_constructor_with_fields_tracked<'src>(
     let mut cg = CodeGen::new_with_source(strings, literal_arrays, lowering, source, source_mapper);
     cg.derived_constructor = has_super_class;
     cg.use_function_lexical_env(current_function_span);
+    if current_function_span.is_none() {
+        cg.use_module_outer_lexical_env();
+    }
     cg.emit_function_lex_env_prologue();
     cg.bind_function_mandatory_lexical_names();
     cg.bind_function_param_names(param_names);
@@ -2308,11 +2318,7 @@ impl UnsupportedScanner<'_> {
                 }
                 ClassElement::PropertyDefinition(property) => {
                     self.scan_property_key(&property.key)?;
-                    if property.computed {
-                        if !property.r#static {
-                            return Err(self.unsupported("ComputedInstanceClassField"));
-                        }
-                    } else if method_key_name(&property.key).is_none() {
+                    if !property.computed && method_key_name(&property.key).is_none() {
                         return Err(self.unsupported("UnsupportedClassFieldKey"));
                     }
                     if let Some(value) = &property.value {
@@ -2394,7 +2400,10 @@ struct ClassFieldInit<'a> {
 
 enum ClassFieldKey<'a> {
     Static(String),
-    Computed(&'a PropertyKey<'a>),
+    CapturedComputed {
+        key: &'a PropertyKey<'a>,
+        capture_name: String,
+    },
 }
 
 enum ClassFieldRuntimeKey {
@@ -2571,6 +2580,18 @@ impl<'a> CodeGen<'a> {
             .into_iter()
             .map(|names| lexical_indices(names.iter().map(String::as_str)))
             .collect();
+    }
+
+    fn use_module_outer_lexical_env(&mut self) {
+        if self.lowering.module_lexical_names.is_empty() {
+            return;
+        }
+        self.outer_lexical_envs = vec![lexical_indices(
+            self.lowering
+                .module_lexical_names
+                .iter()
+                .map(String::as_str),
+        )];
     }
 
     fn set_current_lexical_env(&mut self, names: Vec<String>) {
@@ -5304,11 +5325,28 @@ impl<'a> CodeGen<'a> {
     ) {
         let key = match &field.key {
             ClassFieldKey::Static(name) => ClassFieldRuntimeKey::Static(name.clone()),
-            ClassFieldKey::Computed(key) => ClassFieldRuntimeKey::ComputedReg(
-                precomputed_key_reg.unwrap_or_else(|| self.emit_property_key_to_reg(key)),
-            ),
+            ClassFieldKey::CapturedComputed { key, capture_name } => {
+                ClassFieldRuntimeKey::ComputedReg(
+                    precomputed_key_reg
+                        .unwrap_or_else(|| self.emit_captured_class_key_to_reg(capture_name, key)),
+                )
+            }
         };
         self.emit_class_field_definition_with_key(field.value, key, obj_reg);
+    }
+
+    fn emit_captured_class_key_to_reg(&mut self, capture_name: &str, key: &PropertyKey<'_>) -> u8 {
+        if let Some((level, slot)) = self.lexical_lookup(capture_name) {
+            let key_reg = self.alloc_reg();
+            self.push(Insn::LdLexVar(level, slot));
+            self.push(Insn::Sta(key_reg));
+            return key_reg;
+        }
+        debug_assert!(
+            false,
+            "missing lexical capture for computed instance class field key"
+        );
+        self.emit_property_key_to_reg(key)
     }
 
     fn emit_class_field_definition_with_key(
@@ -6093,6 +6131,16 @@ impl<'a> CodeGen<'a> {
                 {
                     keys.static_field_regs
                         .push(self.emit_property_key_to_reg(&property.key));
+                }
+                ClassElement::PropertyDefinition(property)
+                    if !property.r#static && property.computed =>
+                {
+                    let key_reg = self.emit_property_key_to_reg(&property.key);
+                    let capture_name = computed_instance_class_field_key_name(property);
+                    if let Some(slot) = self.current_lexical_slot(&capture_name) {
+                        self.push(Insn::Lda(key_reg));
+                        self.push(Insn::StLexVar(0, slot));
+                    }
                 }
                 ClassElement::MethodDefinition(method) if method.computed => {
                     keys.method_regs
