@@ -4202,30 +4202,41 @@ const value = Box.value;"#,
 }
 
 #[test]
-fn test_computed_static_class_field_is_rejected_until_class_key_lowering_is_supported() {
+fn test_computed_static_class_field_uses_precomputed_key_in_static_initializer() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("computed_static_class_field.abc");
-    let err = match module_compiler().compile(
-        vec![module_record(
-            "test/computed_static_class_field",
-            r#"const name = "value";
+    let record_name = "test/computed_static_class_field";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"const name = "value";
 class Box { static [name] = 1; }"#,
-        )],
-        &out,
-    ) {
-        Ok(_) => panic!("computed static class field must not be silently lowered"),
-        Err(err) => err,
-    };
+            )],
+            &out,
+        )
+        .expect("computed static class field must lower through the static initializer");
 
+    let bytes = std::fs::read(&out).unwrap();
+    let main = module_func_main_bytecode(&bytes, record_name);
+    let (_, initializer) =
+        module_method_bytecode_by_suffix(&bytes, record_name, "static_initializer#")
+            .expect("computed static field must create a static initializer method");
     assert!(
-        matches!(
-            err,
-            AbcError::UnsupportedConstruct {
-                ref construct,
-                ..
-            } if construct == "ComputedClassField"
-        ),
-        "computed static class fields must stay rejected until upstream computed-key lowering is ported, got {err:?}"
+        bytecode_contains_opcode(&main, 0x2e),
+        "class definition must pass the precomputed key as an argument to the static initializer"
+    );
+    assert!(
+        bytecode_contains_opcode(&initializer, 0x6f),
+        "static initializer must load this like upstream CompileClassInitializer"
+    );
+    assert!(
+        bytecode_contains_opcode(&initializer, 0xfb),
+        "computed static field must define the property by runtime key value"
+    );
+    assert!(
+        !bytecode_contains_opcode(&initializer, 0x3f),
+        "static initializer must use the precomputed key argument instead of recomputing the key expression"
     );
 }
 

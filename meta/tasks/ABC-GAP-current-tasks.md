@@ -22,8 +22,10 @@ gap is either implemented with focused tests or rejected with
 - [x] Lower static blocks through upstream static initializer functions.
 - [x] Lower class method accessors on the upstream `CompileMissingProperties`
   target (`classReg` for static, `protoReg` for instance).
-- [ ] Port computed fields and auto-accessor properties through their upstream
-  class-environment lowering.
+- [x] Lower public static computed class fields through precomputed keys passed
+  into upstream-shaped static initializer functions.
+- [ ] Port instance computed fields and auto-accessor properties through their
+  upstream class-environment lowering.
 - [x] Reject unsupported `with`, destructuring bindings/assignments, private
   names, JSX, V8 intrinsics, `import.meta`, and generator/yield lowering.
 - [ ] Port full destructuring binding and assignment lowering.

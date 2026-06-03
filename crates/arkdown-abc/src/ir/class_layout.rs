@@ -69,8 +69,7 @@ pub(super) fn static_initializer_record_name(
         .filter_map(|element| match element {
             ClassElement::PropertyDefinition(property)
                 if property.r#static
-                    && !property.computed
-                    && method_key_name(&property.key).is_some() =>
+                    && (property.computed || method_key_name(&property.key).is_some()) =>
             {
                 Some(property.key.span().start)
             }
