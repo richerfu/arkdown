@@ -3642,6 +3642,33 @@ const target = {
 }
 
 #[test]
+fn test_private_in_expression_is_rejected_instead_of_undefined_fallback() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("private_in.abc");
+    let err = match module_compiler().compile(
+        vec![module_record(
+            "test/private_in",
+            r#"class Box { #value; has(other) { return #value in other; } }"#,
+        )],
+        &out,
+    ) {
+        Ok(_) => panic!("private-in expression must not compile as undefined"),
+        Err(err) => err,
+    };
+
+    assert!(
+        matches!(
+            err,
+            AbcError::UnsupportedConstruct {
+                ref construct,
+                ..
+            } if construct == "PrivateInExpression" || construct == "PrivateIdentifier"
+        ),
+        "private-in expression must be rejected until upstream private-name lowering is implemented, got {err:?}"
+    );
+}
+
+#[test]
 fn test_object_spread_and_proto_use_upstream_object_ops() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("object_spread_proto.abc");
