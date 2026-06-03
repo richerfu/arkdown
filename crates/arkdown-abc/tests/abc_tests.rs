@@ -360,7 +360,7 @@ fn bytecode_contains_opcode(bytecode: &[u8], target: u8) -> bool {
             0x79 => 5,
             0x8a | 0x8b => 3,
             0x44 | 0x60 | 0x61 | 0x7c | 0x7d | 0x3c | 0x3d | 0xb1 | 0xc3 | 0xc4 | 0xcd | 0xce => 2,
-            0x1d => 2,
+            0x1d | 0x21 | 0x22 => 2,
             0x6d | 0xbf | 0xc0 => 1,
             0xfe if bytecode.get(pos + 1) == Some(&0x09) => 4,
             0xfe if matches!(bytecode.get(pos + 1), Some(0x05 | 0x07)) => 3,
@@ -2603,6 +2603,82 @@ fn test_unary_plus_uses_tonumber_opcode() {
     assert!(
         bytecode_contains_opcode(&bytecode, 0x1d),
         "unary plus must call ToNumber like upstream PandaGen::Unary"
+    );
+}
+
+#[test]
+fn test_update_identifier_uses_inc_dec_and_writes_back() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("update_identifier.abc");
+    let record_name = "test/update_identifier";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"
+let i = 0;
+i++;
+--i;
+"#,
+            )],
+            &out,
+        )
+        .expect("compile update identifier source");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x21),
+        "++ must use inc like upstream PandaGen::Unary"
+    );
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x22),
+        "-- must use dec like upstream PandaGen::Unary"
+    );
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x1d),
+        "postfix update must convert the saved original value to numeric before inc/dec"
+    );
+    let sta_count = bytecode.iter().filter(|&&byte| byte == 0x61).count();
+    assert!(
+        sta_count >= 5,
+        "identifier update must write values through local-register stores"
+    );
+}
+
+#[test]
+fn test_update_member_uses_lreference_read_modify_write() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("update_member.abc");
+    let record_name = "test/update_member";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"
+const obj = { value: 0 };
+const key = "value";
+obj.value++;
+--obj[key];
+"#,
+            )],
+            &out,
+        )
+        .expect("compile update member source");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x21) && bytecode_contains_opcode(&bytecode, 0x22),
+        "member update must use inc/dec like upstream PandaGen::Unary"
+    );
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x42) && bytecode_contains_opcode(&bytecode, 0x43),
+        "static member update must read and write through property lreference"
+    );
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x37) && bytecode_contains_opcode(&bytecode, 0x38),
+        "computed member update must read and write through property lreference"
     );
 }
 

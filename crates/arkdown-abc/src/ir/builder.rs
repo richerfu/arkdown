@@ -5,11 +5,13 @@ use oxc_ast::ast::{
     Argument, AssignmentOperator, AssignmentTarget, BindingPattern, ClassElement, Declaration,
     ExportDefaultDeclarationKind, Expression, ForInStatement, ForOfStatement, ForStatementLeft,
     FormalParameter, Function, FunctionBody, LogicalOperator, MethodDefinitionKind, Program,
-    PropertyKey, Statement, UnaryOperator, YieldExpression,
+    PropertyKey, SimpleAssignmentTarget, Statement, UnaryOperator, UpdateExpression,
+    YieldExpression,
 };
 use oxc_parser::{Parser, ParserReturn};
 use oxc_semantic::SemanticBuilder;
 use oxc_span::{GetSpan, SourceType};
+use oxc_syntax::operator::UpdateOperator;
 
 use crate::emit::file::{LiteralArray, LiteralEntry};
 use crate::emit::record::{CatchEntry, ClassRecord, DebugInfoRecord, MethodKind, MethodRecord};
@@ -3765,6 +3767,9 @@ impl<'a> CodeGen<'a> {
             Expression::UnaryExpression(unary) => {
                 self.emit_unary_expr(unary);
             }
+            Expression::UpdateExpression(update) => {
+                self.emit_update_expr(update);
+            }
             Expression::LogicalExpression(log) => {
                 self.emit_logical_expr(log);
             }
@@ -5052,6 +5057,170 @@ impl<'a> CodeGen<'a> {
             self.emit_expr(right);
         }
         self.emit_identifier_store(name);
+    }
+
+    fn emit_update_expr(&mut self, update: &UpdateExpression<'_>) {
+        match &update.argument {
+            SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => {
+                self.emit_identifier_update(id.name.as_str(), update.operator, update.prefix);
+            }
+            SimpleAssignmentTarget::TSAsExpression(expr) => {
+                self.emit_update_expression_target(
+                    &expr.expression,
+                    update.operator,
+                    update.prefix,
+                );
+            }
+            SimpleAssignmentTarget::TSSatisfiesExpression(expr) => {
+                self.emit_update_expression_target(
+                    &expr.expression,
+                    update.operator,
+                    update.prefix,
+                );
+            }
+            SimpleAssignmentTarget::TSNonNullExpression(expr) => {
+                self.emit_update_expression_target(
+                    &expr.expression,
+                    update.operator,
+                    update.prefix,
+                );
+            }
+            SimpleAssignmentTarget::TSTypeAssertion(expr) => {
+                self.emit_update_expression_target(
+                    &expr.expression,
+                    update.operator,
+                    update.prefix,
+                );
+            }
+            SimpleAssignmentTarget::PrivateFieldExpression(_) => {
+                unreachable!("private fields are rejected before ABC lowering");
+            }
+            SimpleAssignmentTarget::ComputedMemberExpression(mem) => {
+                self.emit_computed_member_update(mem, update.operator, update.prefix);
+            }
+            SimpleAssignmentTarget::StaticMemberExpression(mem) => {
+                self.emit_static_member_update(mem, update.operator, update.prefix);
+            }
+        }
+    }
+
+    fn emit_update_expression_target(
+        &mut self,
+        target: &Expression<'_>,
+        operator: UpdateOperator,
+        prefix: bool,
+    ) {
+        match target {
+            Expression::Identifier(id) => {
+                self.emit_identifier_update(id.name.as_str(), operator, prefix)
+            }
+            Expression::ParenthesizedExpression(expr) => {
+                self.emit_update_expression_target(&expr.expression, operator, prefix);
+            }
+            Expression::TSAsExpression(expr) => {
+                self.emit_update_expression_target(&expr.expression, operator, prefix);
+            }
+            Expression::TSSatisfiesExpression(expr) => {
+                self.emit_update_expression_target(&expr.expression, operator, prefix);
+            }
+            Expression::TSNonNullExpression(expr) => {
+                self.emit_update_expression_target(&expr.expression, operator, prefix);
+            }
+            Expression::TSTypeAssertion(expr) => {
+                self.emit_update_expression_target(&expr.expression, operator, prefix);
+            }
+            Expression::PrivateFieldExpression(_) => {
+                unreachable!("private fields are rejected before ABC lowering");
+            }
+            Expression::ComputedMemberExpression(mem) => {
+                self.emit_computed_member_update(mem, operator, prefix);
+            }
+            Expression::StaticMemberExpression(mem) => {
+                self.emit_static_member_update(mem, operator, prefix);
+            }
+            _ => unreachable!("invalid update target reached ABC lowering"),
+        }
+    }
+
+    fn emit_identifier_update(&mut self, name: &str, operator: UpdateOperator, prefix: bool) {
+        self.emit_identifier_load(name);
+        let (original_reg, updated_reg) = self.emit_update_acc(operator, prefix);
+        self.emit_identifier_store(name);
+        self.emit_update_result(original_reg, updated_reg);
+    }
+
+    fn emit_static_member_update(
+        &mut self,
+        mem: &oxc_ast::ast::StaticMemberExpression<'_>,
+        operator: UpdateOperator,
+        prefix: bool,
+    ) {
+        let saved_next_reg = self.next_reg;
+        let obj_reg = self.alloc_reg();
+        self.emit_expr(&mem.object);
+        self.set_debug_pos(mem.span.start);
+        self.push(Insn::Sta(obj_reg));
+        self.set_debug_pos(mem.property.span.start);
+        let name_id = self.intern(mem.property.name.as_str());
+        self.push(Insn::Lda(obj_reg));
+        self.push(Insn::LdObjByName(0, name_id));
+        let (original_reg, updated_reg) = self.emit_update_acc(operator, prefix);
+        self.push(Insn::StObjByName(0, name_id, obj_reg));
+        self.emit_update_result(original_reg, updated_reg);
+        self.next_reg = saved_next_reg;
+    }
+
+    fn emit_computed_member_update(
+        &mut self,
+        mem: &oxc_ast::ast::ComputedMemberExpression<'_>,
+        operator: UpdateOperator,
+        prefix: bool,
+    ) {
+        let saved_next_reg = self.next_reg;
+        let obj_reg = self.alloc_reg();
+        self.emit_expr(&mem.object);
+        self.set_debug_pos(mem.span.start);
+        self.push(Insn::Sta(obj_reg));
+        self.emit_expr(&mem.expression);
+        let key_reg = self.alloc_reg();
+        self.push(Insn::Sta(key_reg));
+        self.push(Insn::Lda(key_reg));
+        self.push(Insn::LdObjByValue(0, obj_reg));
+        let (original_reg, updated_reg) = self.emit_update_acc(operator, prefix);
+        self.set_debug_pos(mem.span.start);
+        self.push(Insn::StObjByValue(0, obj_reg, key_reg));
+        self.emit_update_result(original_reg, updated_reg);
+        self.next_reg = saved_next_reg;
+    }
+
+    fn emit_update_acc(&mut self, operator: UpdateOperator, prefix: bool) -> (Option<u8>, u8) {
+        let original_reg = if prefix {
+            None
+        } else {
+            let reg = self.alloc_reg();
+            self.push(Insn::Sta(reg));
+            self.push(Insn::ToNumber(0));
+            Some(reg)
+        };
+
+        let operand_reg = self.alloc_reg();
+        self.push(Insn::Sta(operand_reg));
+        match operator {
+            UpdateOperator::Increment => self.push(Insn::Inc(0)),
+            UpdateOperator::Decrement => self.push(Insn::Dec(0)),
+        }
+        let updated_reg = self.alloc_reg();
+        self.push(Insn::Sta(updated_reg));
+        self.push(Insn::Lda(updated_reg));
+        (original_reg, updated_reg)
+    }
+
+    fn emit_update_result(&mut self, original_reg: Option<u8>, updated_reg: u8) {
+        if let Some(original_reg) = original_reg {
+            self.push(Insn::Lda(original_reg));
+        } else {
+            self.push(Insn::Lda(updated_reg));
+        }
     }
 
     fn emit_computed_member_assignment(
