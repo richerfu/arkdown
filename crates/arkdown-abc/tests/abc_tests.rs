@@ -2298,6 +2298,77 @@ fn test_nullish_coalescing_uses_strict_nullish_short_circuit() {
 }
 
 #[test]
+fn test_ts_expression_wrappers_compile_inner_expression() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("ts_expr_wrapper.abc");
+    let record_name = "test/ts_expr_wrapper";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"const result = (true as boolean);"#,
+            )],
+            &out,
+        )
+        .expect("compile TS expression wrapper source");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x02),
+        "TS expression wrappers must compile their inner expression instead of undefined"
+    );
+}
+
+#[test]
+fn test_ts_assignment_target_wrapper_uses_inner_lreference() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("ts_assignment_target.abc");
+    let record_name = "test/ts_assignment_target";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"let value = 1; (value as number) += delta;"#,
+            )],
+            &out,
+        )
+        .expect("compile TS assignment target wrapper source");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x0a),
+        "TS assignment target wrappers must use the inner lreference for compound assignment"
+    );
+}
+
+#[test]
+fn test_destructuring_assignment_is_not_lowered_as_rhs_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("destructuring_assignment.abc");
+    let err = match module_compiler().compile(
+        vec![module_record(
+            "test/destructuring_assignment",
+            r#"let a; [a] = values;"#,
+        )],
+        &out,
+    ) {
+        Ok(_) => panic!("destructuring assignment must not silently compile as rhs-only"),
+        Err(err) => err,
+    };
+
+    assert!(
+        matches!(
+            err,
+            AbcError::UnsupportedConstruct {
+                ref construct,
+                ..
+            } if construct == "DestructuringAssignment"
+        ),
+        "destructuring assignment must be reported as unsupported until full upstream lowering is implemented, got {err:?}"
+    );
+}
+
+#[test]
 fn test_typeof_emits_typeof_opcode() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("test.abc");

@@ -1612,6 +1612,10 @@ impl UnsupportedScanner<'_> {
             Expression::PrivateFieldExpression(_) => {
                 Err(self.unsupported("PrivateFieldExpression"))
             }
+            Expression::TSAsExpression(expr) => self.scan_expression(&expr.expression),
+            Expression::TSSatisfiesExpression(expr) => self.scan_expression(&expr.expression),
+            Expression::TSNonNullExpression(expr) => self.scan_expression(&expr.expression),
+            Expression::TSTypeAssertion(expr) => self.scan_expression(&expr.expression),
             Expression::AssignmentExpression(assign) => {
                 self.scan_assignment_target(&assign.left)?;
                 self.scan_expression(&assign.right)
@@ -1738,6 +1742,14 @@ impl UnsupportedScanner<'_> {
             AssignmentTarget::PrivateFieldExpression(_) => {
                 Err(self.unsupported("PrivateFieldExpression"))
             }
+            AssignmentTarget::ArrayAssignmentTarget(_)
+            | AssignmentTarget::ObjectAssignmentTarget(_) => {
+                Err(self.unsupported("DestructuringAssignment"))
+            }
+            AssignmentTarget::TSAsExpression(expr) => self.scan_expression(&expr.expression),
+            AssignmentTarget::TSSatisfiesExpression(expr) => self.scan_expression(&expr.expression),
+            AssignmentTarget::TSNonNullExpression(expr) => self.scan_expression(&expr.expression),
+            AssignmentTarget::TSTypeAssertion(expr) => self.scan_expression(&expr.expression),
             AssignmentTarget::ComputedMemberExpression(expr) => {
                 self.scan_expression(&expr.object)?;
                 self.scan_expression(&expr.expression)
@@ -3636,6 +3648,18 @@ impl<'a> CodeGen<'a> {
                     _ => self.emit_identifier_load(name),
                 }
             }
+            Expression::TSAsExpression(expr) => {
+                self.emit_expr(&expr.expression);
+            }
+            Expression::TSSatisfiesExpression(expr) => {
+                self.emit_expr(&expr.expression);
+            }
+            Expression::TSNonNullExpression(expr) => {
+                self.emit_expr(&expr.expression);
+            }
+            Expression::TSTypeAssertion(expr) => {
+                self.emit_expr(&expr.expression);
+            }
             Expression::ThisExpression(_) => {
                 if self.arrow_captures.this_slot.is_some() {
                     if let Some((level, slot)) = self.lexical_lookup("this") {
@@ -4867,147 +4891,221 @@ impl<'a> CodeGen<'a> {
     }
 
     fn emit_assignment(&mut self, assign: &oxc_ast::ast::AssignmentExpression<'_>) {
-        // AssignmentTarget inherits variants from SimpleAssignmentTarget via
-        // @inherit, so we match the inherited variants directly.
-        match &assign.left {
+        self.emit_assignment_target(&assign.left, assign.operator, &assign.right);
+    }
+
+    fn emit_assignment_target(
+        &mut self,
+        target: &AssignmentTarget<'_>,
+        operator: AssignmentOperator,
+        right: &Expression<'_>,
+    ) {
+        match target {
             AssignmentTarget::AssignmentTargetIdentifier(id) => {
-                let name = id.name.as_str();
-                if assign.operator.is_logical() {
-                    self.emit_identifier_load(name);
-                    let lhs_reg = self.alloc_reg();
-                    self.push(Insn::Sta(lhs_reg));
-                    self.emit_logical_assignment_after_lhs(
-                        assign.operator,
-                        &assign.right,
-                        lhs_reg,
-                        |this| this.emit_identifier_store(name),
-                    );
-                    return;
-                }
-                if assign.operator != AssignmentOperator::Assign {
-                    self.emit_identifier_load(name);
-                    let lhs_reg = self.alloc_reg();
-                    self.push(Insn::Sta(lhs_reg));
-                    self.emit_expr(&assign.right);
-                    self.emit_assignment_binary(assign.operator, lhs_reg);
-                } else {
-                    self.emit_expr(&assign.right);
-                }
-                self.emit_identifier_store(name);
+                self.emit_identifier_assignment(id.name.as_str(), operator, right);
             }
             AssignmentTarget::ComputedMemberExpression(mem) => {
-                if !assign.operator.is_logical() && is_global_this(&mem.object) {
-                    if let Expression::StringLiteral(key) = &mem.expression {
-                        self.emit_expr(&assign.right);
-                        let name_id = self.intern(key.value.as_str());
-                        self.push(Insn::TryStGlobalByName(0, name_id));
-                        return;
-                    }
-                }
-                let saved_next_reg = self.next_reg;
-                self.emit_expr(&mem.object);
-                let obj_reg = self.alloc_reg();
-                self.set_debug_pos(mem.span.start);
-                self.push(Insn::Sta(obj_reg));
-                if let Expression::StringLiteral(key) = &mem.expression {
-                    let name_id = self.intern(key.value.as_str());
-                    if assign.operator.is_logical() {
-                        self.push(Insn::Lda(obj_reg));
-                        self.push(Insn::LdObjByName(0, name_id));
-                        let lhs_reg = self.alloc_reg();
-                        self.push(Insn::Sta(lhs_reg));
-                        self.emit_logical_assignment_after_lhs(
-                            assign.operator,
-                            &assign.right,
-                            lhs_reg,
-                            |this| this.push(Insn::StObjByName(0, name_id, obj_reg)),
-                        );
-                        self.next_reg = saved_next_reg;
-                        return;
-                    }
-                    if assign.operator != AssignmentOperator::Assign {
-                        self.push(Insn::Lda(obj_reg));
-                        self.push(Insn::LdObjByName(0, name_id));
-                        let lhs_reg = self.alloc_reg();
-                        self.push(Insn::Sta(lhs_reg));
-                        self.emit_expr(&assign.right);
-                        self.emit_assignment_binary(assign.operator, lhs_reg);
-                    } else {
-                        self.emit_expr(&assign.right);
-                    }
-                    self.push(Insn::StObjByName(0, name_id, obj_reg));
-                } else {
-                    self.emit_expr(&mem.expression);
-                    let key_reg = self.alloc_reg();
-                    self.push(Insn::Sta(key_reg));
-                    if assign.operator.is_logical() {
-                        self.push(Insn::Lda(key_reg));
-                        self.push(Insn::LdObjByValue(0, obj_reg));
-                        let lhs_reg = self.alloc_reg();
-                        self.push(Insn::Sta(lhs_reg));
-                        self.emit_logical_assignment_after_lhs(
-                            assign.operator,
-                            &assign.right,
-                            lhs_reg,
-                            |this| this.push(Insn::StObjByValue(0, obj_reg, key_reg)),
-                        );
-                        self.next_reg = saved_next_reg;
-                        return;
-                    }
-                    if assign.operator != AssignmentOperator::Assign {
-                        self.push(Insn::Lda(key_reg));
-                        self.push(Insn::LdObjByValue(0, obj_reg));
-                        let lhs_reg = self.alloc_reg();
-                        self.push(Insn::Sta(lhs_reg));
-                        self.emit_expr(&assign.right);
-                        self.emit_assignment_binary(assign.operator, lhs_reg);
-                    } else {
-                        self.emit_expr(&assign.right);
-                    }
-                    self.set_debug_pos(mem.span.start);
-                    self.push(Insn::StObjByValue(0, obj_reg, key_reg));
-                }
-                self.next_reg = saved_next_reg;
+                self.emit_computed_member_assignment(mem, operator, right);
             }
             AssignmentTarget::StaticMemberExpression(mem) => {
-                self.emit_expr(&mem.object);
-                let obj_reg = self.alloc_reg();
-                self.set_debug_pos(mem.span.start);
-                self.push(Insn::Sta(obj_reg));
-                if assign.operator.is_logical() {
-                    self.push(Insn::Lda(obj_reg));
-                    let name_id = self.intern(mem.property.name.as_str());
-                    self.push(Insn::LdObjByName(0, name_id));
-                    let lhs_reg = self.alloc_reg();
-                    self.push(Insn::Sta(lhs_reg));
-                    self.emit_logical_assignment_after_lhs(
-                        assign.operator,
-                        &assign.right,
-                        lhs_reg,
-                        |this| this.push(Insn::StObjByName(0, name_id, obj_reg)),
-                    );
-                    return;
-                }
-                if assign.operator != AssignmentOperator::Assign {
-                    self.push(Insn::Lda(obj_reg));
-                    let name_id = self.intern(mem.property.name.as_str());
-                    self.push(Insn::LdObjByName(0, name_id));
-                    let lhs_reg = self.alloc_reg();
-                    self.push(Insn::Sta(lhs_reg));
-                    self.emit_expr(&assign.right);
-                    self.emit_assignment_binary(assign.operator, lhs_reg);
-                } else {
-                    self.emit_expr(&assign.right);
-                }
-                self.set_debug_pos(mem.span.start);
-                let name_id = self.intern(mem.property.name.as_str());
-                self.push(Insn::StObjByName(0, name_id, obj_reg));
+                self.emit_static_member_assignment(mem, operator, right);
             }
-            _ => {
-                // Destructuring assignments, TSAs, etc. — TODO.
-                self.emit_expr(&assign.right);
+            AssignmentTarget::TSAsExpression(expr) => {
+                self.emit_assignment_expression_target(&expr.expression, operator, right);
+            }
+            AssignmentTarget::TSSatisfiesExpression(expr) => {
+                self.emit_assignment_expression_target(&expr.expression, operator, right);
+            }
+            AssignmentTarget::TSNonNullExpression(expr) => {
+                self.emit_assignment_expression_target(&expr.expression, operator, right);
+            }
+            AssignmentTarget::TSTypeAssertion(expr) => {
+                self.emit_assignment_expression_target(&expr.expression, operator, right);
+            }
+            AssignmentTarget::PrivateFieldExpression(_) => {
+                unreachable!("private fields are rejected before ABC lowering");
+            }
+            AssignmentTarget::ArrayAssignmentTarget(_)
+            | AssignmentTarget::ObjectAssignmentTarget(_) => {
+                unreachable!("destructuring assignments are rejected before ABC lowering");
             }
         }
+    }
+
+    fn emit_assignment_expression_target(
+        &mut self,
+        target: &Expression<'_>,
+        operator: AssignmentOperator,
+        right: &Expression<'_>,
+    ) {
+        match target {
+            Expression::Identifier(id) => {
+                self.emit_identifier_assignment(id.name.as_str(), operator, right);
+            }
+            Expression::ComputedMemberExpression(mem) => {
+                self.emit_computed_member_assignment(mem, operator, right);
+            }
+            Expression::StaticMemberExpression(mem) => {
+                self.emit_static_member_assignment(mem, operator, right);
+            }
+            Expression::ParenthesizedExpression(expr) => {
+                self.emit_assignment_expression_target(&expr.expression, operator, right);
+            }
+            Expression::TSAsExpression(expr) => {
+                self.emit_assignment_expression_target(&expr.expression, operator, right);
+            }
+            Expression::TSSatisfiesExpression(expr) => {
+                self.emit_assignment_expression_target(&expr.expression, operator, right);
+            }
+            Expression::TSNonNullExpression(expr) => {
+                self.emit_assignment_expression_target(&expr.expression, operator, right);
+            }
+            Expression::TSTypeAssertion(expr) => {
+                self.emit_assignment_expression_target(&expr.expression, operator, right);
+            }
+            Expression::PrivateFieldExpression(_) => {
+                unreachable!("private fields are rejected before ABC lowering");
+            }
+            _ => unreachable!("invalid assignment target reached ABC lowering"),
+        }
+    }
+
+    fn emit_identifier_assignment(
+        &mut self,
+        name: &str,
+        operator: AssignmentOperator,
+        right: &Expression<'_>,
+    ) {
+        if operator.is_logical() {
+            self.emit_identifier_load(name);
+            let lhs_reg = self.alloc_reg();
+            self.push(Insn::Sta(lhs_reg));
+            self.emit_logical_assignment_after_lhs(operator, right, lhs_reg, |this| {
+                this.emit_identifier_store(name);
+            });
+            return;
+        }
+        if operator != AssignmentOperator::Assign {
+            self.emit_identifier_load(name);
+            let lhs_reg = self.alloc_reg();
+            self.push(Insn::Sta(lhs_reg));
+            self.emit_expr(right);
+            self.emit_assignment_binary(operator, lhs_reg);
+        } else {
+            self.emit_expr(right);
+        }
+        self.emit_identifier_store(name);
+    }
+
+    fn emit_computed_member_assignment(
+        &mut self,
+        mem: &oxc_ast::ast::ComputedMemberExpression<'_>,
+        operator: AssignmentOperator,
+        right: &Expression<'_>,
+    ) {
+        if !operator.is_logical() && is_global_this(&mem.object) {
+            if let Expression::StringLiteral(key) = &mem.expression {
+                self.emit_expr(right);
+                let name_id = self.intern(key.value.as_str());
+                self.push(Insn::TryStGlobalByName(0, name_id));
+                return;
+            }
+        }
+        let saved_next_reg = self.next_reg;
+        self.emit_expr(&mem.object);
+        let obj_reg = self.alloc_reg();
+        self.set_debug_pos(mem.span.start);
+        self.push(Insn::Sta(obj_reg));
+        if let Expression::StringLiteral(key) = &mem.expression {
+            let name_id = self.intern(key.value.as_str());
+            if operator.is_logical() {
+                self.push(Insn::Lda(obj_reg));
+                self.push(Insn::LdObjByName(0, name_id));
+                let lhs_reg = self.alloc_reg();
+                self.push(Insn::Sta(lhs_reg));
+                self.emit_logical_assignment_after_lhs(operator, right, lhs_reg, |this| {
+                    this.push(Insn::StObjByName(0, name_id, obj_reg));
+                });
+                self.next_reg = saved_next_reg;
+                return;
+            }
+            if operator != AssignmentOperator::Assign {
+                self.push(Insn::Lda(obj_reg));
+                self.push(Insn::LdObjByName(0, name_id));
+                let lhs_reg = self.alloc_reg();
+                self.push(Insn::Sta(lhs_reg));
+                self.emit_expr(right);
+                self.emit_assignment_binary(operator, lhs_reg);
+            } else {
+                self.emit_expr(right);
+            }
+            self.push(Insn::StObjByName(0, name_id, obj_reg));
+        } else {
+            self.emit_expr(&mem.expression);
+            let key_reg = self.alloc_reg();
+            self.push(Insn::Sta(key_reg));
+            if operator.is_logical() {
+                self.push(Insn::Lda(key_reg));
+                self.push(Insn::LdObjByValue(0, obj_reg));
+                let lhs_reg = self.alloc_reg();
+                self.push(Insn::Sta(lhs_reg));
+                self.emit_logical_assignment_after_lhs(operator, right, lhs_reg, |this| {
+                    this.push(Insn::StObjByValue(0, obj_reg, key_reg));
+                });
+                self.next_reg = saved_next_reg;
+                return;
+            }
+            if operator != AssignmentOperator::Assign {
+                self.push(Insn::Lda(key_reg));
+                self.push(Insn::LdObjByValue(0, obj_reg));
+                let lhs_reg = self.alloc_reg();
+                self.push(Insn::Sta(lhs_reg));
+                self.emit_expr(right);
+                self.emit_assignment_binary(operator, lhs_reg);
+            } else {
+                self.emit_expr(right);
+            }
+            self.set_debug_pos(mem.span.start);
+            self.push(Insn::StObjByValue(0, obj_reg, key_reg));
+        }
+        self.next_reg = saved_next_reg;
+    }
+
+    fn emit_static_member_assignment(
+        &mut self,
+        mem: &oxc_ast::ast::StaticMemberExpression<'_>,
+        operator: AssignmentOperator,
+        right: &Expression<'_>,
+    ) {
+        self.emit_expr(&mem.object);
+        let obj_reg = self.alloc_reg();
+        self.set_debug_pos(mem.span.start);
+        self.push(Insn::Sta(obj_reg));
+        if operator.is_logical() {
+            self.push(Insn::Lda(obj_reg));
+            let name_id = self.intern(mem.property.name.as_str());
+            self.push(Insn::LdObjByName(0, name_id));
+            let lhs_reg = self.alloc_reg();
+            self.push(Insn::Sta(lhs_reg));
+            self.emit_logical_assignment_after_lhs(operator, right, lhs_reg, |this| {
+                this.push(Insn::StObjByName(0, name_id, obj_reg));
+            });
+            return;
+        }
+        if operator != AssignmentOperator::Assign {
+            self.push(Insn::Lda(obj_reg));
+            let name_id = self.intern(mem.property.name.as_str());
+            self.push(Insn::LdObjByName(0, name_id));
+            let lhs_reg = self.alloc_reg();
+            self.push(Insn::Sta(lhs_reg));
+            self.emit_expr(right);
+            self.emit_assignment_binary(operator, lhs_reg);
+        } else {
+            self.emit_expr(right);
+        }
+        self.set_debug_pos(mem.span.start);
+        let name_id = self.intern(mem.property.name.as_str());
+        self.push(Insn::StObjByName(0, name_id, obj_reg));
     }
 
     fn emit_logical_assignment_after_lhs<F>(
