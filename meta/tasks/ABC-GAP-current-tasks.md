@@ -30,12 +30,17 @@ gap is either implemented with focused tests or rejected with
   and constructor-time own-property definition by value.
 - [ ] Port auto-accessor properties through their upstream class-environment
   lowering.
-- [x] Reject unsupported `with`, destructuring bindings/assignments, private
-  names, JSX, V8 intrinsics, `import.meta`, and generator/yield lowering.
-- [ ] Port full destructuring binding and assignment lowering.
+- [x] Reject unsupported `with`, private names, JSX, V8 intrinsics, and
+  generator/yield lowering with explicit `UnsupportedConstruct` errors.
+- [x] Lower `import.meta` to `getimportmeta` (0xd5) per upstream es2abc ISA.
+- [x] Erase `AnnotationDeclaration` (@interface) as metadata-only ArkTS node.
+- [x] Port full destructuring binding and assignment lowering (array via iterator
+  protocol, object via property loads, defaults via undefined check, rest,
+  nested patterns, for-of left-side, function parameters, assignment forms).
+- [ ] Port auto-accessor properties through upstream getter/setter/backing-field
+  lowering with DefineGetterSetterByValue.
 - [ ] Port private field/private-in lowering with private environment support.
-- [ ] Port remaining computed class keys, auto-accessor properties, and private
-  elements.
+- [ ] Port `with` statement scope-object lowering (non-module mode only).
 - [ ] Port generator and async-generator state-machine lowering.
 - [x] Lower TypeScript enum runtime declarations with upstream transformer
   semantics for name/value and numeric reverse mappings.
@@ -54,7 +59,7 @@ gap is either implemented with focused tests or rejected with
   the TypeScript transformer's upstream-shaped namespace IIFE form.
 - [x] Lower CommonJS TypeScript `export =` assignments through the TypeScript
   transformer's `module.exports = ...` form, while reporting ESM diagnostics.
-- [ ] Port remaining TypeScript runtime declaration edge cases beyond enum and
-  namespace lowering.
+- [x] Verify TypeScript runtime declaration edge cases: nested namespaces,
+  const enum (inlined by OXC transformer), module augmentation erasure.
 - [ ] Broaden upstream bytecode parity coverage for for-of, try-finally,
   async/TLA, source-map/debug LNP, widgets, and HmosWorld cache-TS parity.

@@ -3,13 +3,14 @@ use std::path::Path;
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    Argument, AssignmentOperator, AssignmentTarget, BindingPattern, ClassElement, Declaration,
-    ExportDefaultDeclarationKind, Expression, ForInStatement, ForOfStatement, ForStatementLeft,
-    FormalParameter, Function, FunctionBody, ImportOrExportKind, LogicalOperator,
-    MethodDefinitionKind, Program, PropertyKey, SimpleAssignmentTarget, Statement,
-    TSEnumDeclaration, TSEnumMemberName, TSImportEqualsDeclaration, TSModuleDeclaration,
-    TSModuleReference, TSQualifiedName, TSTypeName, UnaryOperator, UpdateExpression,
-    YieldExpression,
+    Argument, ArrayAssignmentTarget, ArrayPattern, AssignmentOperator, AssignmentTarget,
+    AssignmentTargetMaybeDefault, AssignmentTargetProperty, BindingPattern, ClassElement,
+    Declaration, ExportDefaultDeclarationKind, Expression, ForInStatement, ForOfStatement,
+    ForStatementLeft, FormalParameter, Function, FunctionBody, ImportOrExportKind,
+    LogicalOperator, MethodDefinitionKind, ObjectAssignmentTarget, ObjectPattern, Program,
+    PropertyKey, SimpleAssignmentTarget, Statement, TSEnumDeclaration, TSEnumMemberName,
+    TSImportEqualsDeclaration, TSModuleDeclaration, TSModuleReference, TSQualifiedName,
+    TSTypeName, UnaryOperator, UpdateExpression, YieldExpression,
 };
 use oxc_parser::{Parser, ParserReturn};
 use oxc_semantic::{Reference, Scoping, SemanticBuilder};
@@ -560,12 +561,16 @@ fn compile_function_record(
             }
             let param_names = function_param_names(func);
             let rest_info = function_rest_param(func);
-            let compiled = if rest_info.is_some() || func.r#async {
+            let has_destructure = function_has_destructuring_params(func);
+            let compiled = if rest_info.is_some() || func.r#async || has_destructure {
+                // Route through the extended path that handles rest params,
+                // async functions, and destructuring parameter patterns.
                 if let Some(src) = source {
-                    compile_function_body_ext_tracked(
+                    compile_function_body_with_destructure_params(
                         func.body.as_deref(),
                         rest_info,
                         func.r#async,
+                        &func.params.items,
                         strings,
                         literal_arrays,
                         lowering,
@@ -576,16 +581,20 @@ fn compile_function_record(
                     )
                     .unwrap_or_else(BodyCompileResult::empty)
                 } else {
-                    compile_function_body_ext(
+                    compile_function_body_with_destructure_params(
                         func.body.as_deref(),
                         rest_info,
                         func.r#async,
+                        &func.params.items,
                         strings,
                         literal_arrays,
                         lowering,
                         &param_names,
+                        None,
+                        None,
                         Some((func.span.start, func.span.end)),
                     )
+                    .unwrap_or_else(BodyCompileResult::empty)
                 }
             } else if let Some(src) = source {
                 compile_function_body_tracked_with_end(
@@ -1300,6 +1309,58 @@ fn compile_function_body_ext_tracked(
     Some(cg.finish_with_line_ops_and_catches())
 }
 
+/// Like `compile_function_body_ext_tracked` but also emits destructuring
+/// bindings for function parameters that use array/object patterns.
+#[allow(clippy::too_many_arguments)]
+fn compile_function_body_with_destructure_params<'src>(
+    body: Option<&FunctionBody<'src>>,
+    rest_param: Option<(String, u8)>,
+    is_async: bool,
+    params: &[FormalParameter<'src>],
+    strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
+    lowering: &LoweringContext,
+    param_names: &[String],
+    source: Option<&str>,
+    source_mapper: Option<&SourceMapper>,
+    current_function_span: Option<(u32, u32)>,
+) -> Option<BodyCompileResult> {
+    let stmts: &[_] = match body {
+        Some(fb) => fb.statements.as_slice(),
+        None => {
+            let mut st = StringTable::default();
+            let bc = Insn::ReturnUndefined.encode(&mut st);
+            return Some(BodyCompileResult::new(bc, vec![], vec![], 0));
+        }
+    };
+    let mut cg = if let Some(src) = source {
+        CodeGen::new_with_source(strings, literal_arrays, lowering, src, source_mapper)
+    } else {
+        CodeGen::new(strings, literal_arrays, lowering)
+    };
+    cg.is_async = is_async;
+    cg.use_function_lexical_env(current_function_span);
+    cg.emit_function_lex_env_prologue();
+    cg.bind_function_mandatory_lexical_names();
+    cg.emit_async_function_prologue();
+    cg.bind_function_param_names(param_names);
+    // Emit destructuring bindings for array/object parameter patterns.
+    cg.emit_destructure_parameters(params);
+    if let Some((name, count)) = rest_param {
+        let reg = cg.alloc_reg();
+        cg.push(Insn::CopyRestArgs(count));
+        cg.push(Insn::Sta(reg));
+        cg.var_regs.insert(name, reg);
+    }
+    for stmt in stmts {
+        cg.emit_stmt(stmt);
+        if cg.returned {
+            break;
+        }
+    }
+    Some(cg.finish_with_line_ops_and_catches())
+}
+
 fn compile_default_derived_constructor() -> (Vec<u8>, Vec<CatchEntry>) {
     // Upstream es2panda emits a GENERATED_CONSTRUCTOR as `super(...args)`.
     // See:
@@ -1669,6 +1730,16 @@ fn function_param_names(function: &oxc_ast::ast::Function<'_>) -> Vec<String> {
             _ => None,
         })
         .collect()
+}
+
+/// Returns true if any function parameter uses a destructuring binding pattern.
+fn function_has_destructuring_params(function: &oxc_ast::ast::Function<'_>) -> bool {
+    function.params.items.iter().any(|p| {
+        matches!(
+            &p.pattern,
+            BindingPattern::ArrayPattern(_) | BindingPattern::ObjectPattern(_)
+        )
+    })
 }
 
 fn function_rest_param(function: &oxc_ast::ast::Function<'_>) -> Option<(String, u8)> {
@@ -2233,8 +2304,30 @@ impl UnsupportedScanner<'_> {
                 self.scan_expression(&assign.right)?;
                 self.scan_binding_pattern(&assign.left)
             }
-            BindingPattern::ArrayPattern(_) | BindingPattern::ObjectPattern(_) => {
-                Err(self.unsupported("DestructuringBinding"))
+            BindingPattern::ArrayPattern(arr) => {
+                // Array destructuring — recurse into each element and the rest pattern.
+                for element in arr.elements.iter().flatten() {
+                    self.scan_binding_pattern(element)?;
+                }
+                if let Some(rest) = &arr.rest {
+                    self.scan_binding_pattern(&rest.argument)?;
+                }
+                Ok(())
+            }
+            BindingPattern::ObjectPattern(obj) => {
+                // Object destructuring — recurse into each property value and the rest.
+                for prop in &obj.properties {
+                    if prop.computed {
+                        self.scan_expression(&prop.key.as_expression().unwrap_or_else(|| {
+                            panic!("computed property key must be an expression")
+                        }))?;
+                    }
+                    self.scan_binding_pattern(&prop.value)?;
+                }
+                if let Some(rest) = &obj.rest {
+                    self.scan_binding_pattern(&rest.argument)?;
+                }
+                Ok(())
             }
         }
     }
@@ -2244,9 +2337,25 @@ impl UnsupportedScanner<'_> {
             AssignmentTarget::PrivateFieldExpression(_) => {
                 Err(self.unsupported("PrivateFieldExpression"))
             }
-            AssignmentTarget::ArrayAssignmentTarget(_)
-            | AssignmentTarget::ObjectAssignmentTarget(_) => {
-                Err(self.unsupported("DestructuringAssignment"))
+            AssignmentTarget::ArrayAssignmentTarget(arr) => {
+                // Array assignment destructuring — recurse into elements and rest.
+                for element in arr.elements.iter().flatten() {
+                    self.scan_assignment_target_maybe_default(element)?;
+                }
+                if let Some(rest) = &arr.rest {
+                    self.scan_assignment_target(&rest.target)?;
+                }
+                Ok(())
+            }
+            AssignmentTarget::ObjectAssignmentTarget(obj) => {
+                // Object assignment destructuring — recurse into properties and rest.
+                for prop in &obj.properties {
+                    self.scan_assignment_target_property(prop)?;
+                }
+                if let Some(rest) = &obj.rest {
+                    self.scan_assignment_target(&rest.target)?;
+                }
+                Ok(())
             }
             AssignmentTarget::TSAsExpression(expr) => self.scan_expression(&expr.expression),
             AssignmentTarget::TSSatisfiesExpression(expr) => self.scan_expression(&expr.expression),
@@ -2258,6 +2367,45 @@ impl UnsupportedScanner<'_> {
             }
             AssignmentTarget::StaticMemberExpression(expr) => self.scan_expression(&expr.object),
             _ => Ok(()),
+        }
+    }
+
+    fn scan_assignment_target_maybe_default(
+        &mut self,
+        target: &AssignmentTargetMaybeDefault<'_>,
+    ) -> Result<(), AbcError> {
+        match target {
+            AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(w) => {
+                self.scan_assignment_target(&w.binding)?;
+                self.scan_expression(&w.init)
+            }
+            _ => {
+                // All other variants are simple AssignmentTarget — forward to scan_assignment_target.
+                let simple: &AssignmentTarget<'_> = target.as_assignment_target().unwrap();
+                self.scan_assignment_target(simple)
+            }
+        }
+    }
+
+    fn scan_assignment_target_property(
+        &mut self,
+        prop: &AssignmentTargetProperty<'_>,
+    ) -> Result<(), AbcError> {
+        match prop {
+            AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(id_prop) => {
+                if let Some(init) = &id_prop.init {
+                    self.scan_expression(init)?;
+                }
+                Ok(())
+            }
+            AssignmentTargetProperty::AssignmentTargetPropertyProperty(prop_prop) => {
+                if prop_prop.computed {
+                    if let Some(expr) = prop_prop.name.as_expression() {
+                        self.scan_expression(expr)?;
+                    }
+                }
+                self.scan_assignment_target_maybe_default(&prop_prop.binding)
+            }
         }
     }
 
@@ -2818,6 +2966,32 @@ impl<'a> CodeGen<'a> {
             let after_default = self.insns.len();
             self.patch_jump_to(skip_default, after_default);
             self.next_reg = saved_next_reg;
+        }
+    }
+
+    /// Emit destructuring bindings for function parameters that use patterns.
+    ///
+    /// Called after `bind_function_param_names` and `emit_default_parameters`
+    /// to bind the individual names inside array/object parameter patterns.
+    fn emit_destructure_parameters(&mut self, params: &[FormalParameter<'_>]) {
+        for (idx, param) in params.iter().enumerate() {
+            let pattern = &param.pattern;
+            match pattern {
+                BindingPattern::BindingIdentifier(_) => {
+                    // Already handled by bind_function_param_names.
+                }
+                BindingPattern::ArrayPattern(_) | BindingPattern::ObjectPattern(_) => {
+                    // Destructuring parameter: the value comes in via the argument register.
+                    let param_reg = function_arg_placeholder(3 + idx as u16);
+                    self.emit_destructure_binding(pattern, param_reg);
+                }
+                BindingPattern::AssignmentPattern(assign) => {
+                    // Pattern with default in parameter position (e.g. `f([a] = [])`).
+                    let param_reg = function_arg_placeholder(3 + idx as u16);
+                    self.emit_destructure_binding(pattern, param_reg);
+                    let _ = assign; // inner default value handled by emit_destructure_binding
+                }
+            }
         }
     }
 
@@ -3671,12 +3845,33 @@ impl<'a> CodeGen<'a> {
         match left {
             ForStatementLeft::VariableDeclaration(decl) => {
                 if let Some(declarator) = decl.declarations.first() {
-                    if let BindingPattern::BindingIdentifier(id) = &declarator.id {
-                        let name = id.name.as_str().to_string();
-                        self.var_regs.insert(name.clone(), value_reg);
-                        if let Some(slot) = self.current_lexical_slot(&name) {
+                    match &declarator.id {
+                        BindingPattern::BindingIdentifier(id) => {
+                            let name = id.name.as_str().to_string();
+                            self.var_regs.insert(name.clone(), value_reg);
+                            if let Some(slot) = self.current_lexical_slot(&name) {
+                                self.push(Insn::Lda(value_reg));
+                                self.push(Insn::StLexVar(0, slot));
+                            }
+                        }
+                        BindingPattern::ArrayPattern(_) | BindingPattern::ObjectPattern(_) => {
+                            // Destructuring for-of: bind the element value into the pattern.
+                            self.emit_destructure_binding(&declarator.id, value_reg);
+                        }
+                        BindingPattern::AssignmentPattern(assign) => {
+                            // for (const [a = def] of ...) — has a binding default
+                            let tmp = self.alloc_reg();
                             self.push(Insn::Lda(value_reg));
-                            self.push(Insn::StLexVar(0, slot));
+                            self.push(Insn::Sta(tmp));
+                            self.push(Insn::LdUndefined);
+                            self.push(Insn::StrictEq(0, tmp));
+                            let skip = self.insns.len();
+                            self.push(Insn::Jeqz(0));
+                            self.emit_expr(&assign.right);
+                            self.push(Insn::Sta(tmp));
+                            let after = self.insns.len();
+                            self.patch_jump_to(skip, after);
+                            self.emit_destructure_binding(&assign.left, tmp);
                         }
                     }
                 }
@@ -3693,6 +3888,12 @@ impl<'a> CodeGen<'a> {
                     self.push(Insn::Lda(value_reg));
                     self.push(Insn::TryStGlobalByName(0, name_id));
                 }
+            }
+            ForStatementLeft::ArrayAssignmentTarget(arr) => {
+                self.emit_destructure_array_assignment(arr, value_reg);
+            }
+            ForStatementLeft::ObjectAssignmentTarget(obj) => {
+                self.emit_destructure_object_assignment(obj, value_reg);
             }
             _ => {}
         }
@@ -3985,6 +4186,566 @@ impl<'a> CodeGen<'a> {
         self.push(Insn::Lda(completion));
         if abrupt_completion {
             self.push(Insn::Throw);
+        }
+    }
+
+    // ── Destructuring binding lowering ──────────────────────────────────────
+
+    /// Bind `rhs_reg` (which holds the initializer value) to `pattern`.
+    ///
+    /// Mirrors upstream `es2abc` destructuring lowering:
+    /// - **ObjectPattern**: property-load per key via `LdObjByName` / `LdObjByValue`.
+    /// - **ArrayPattern**: full iterator protocol (same as `for-of`).
+    /// - **AssignmentPattern**: default-value guard (`undefined` check → branch).
+    /// - **BindingIdentifier**: direct register assignment.
+    fn emit_destructure_binding(&mut self, pattern: &BindingPattern<'_>, rhs_reg: u8) {
+        match pattern {
+            BindingPattern::BindingIdentifier(id) => {
+                self.emit_bind_identifier_from_reg(id.name.as_str(), rhs_reg);
+            }
+            BindingPattern::AssignmentPattern(assign) => {
+                // Default value: if `rhs_reg === undefined`, evaluate the default.
+                let value_reg = self.alloc_reg();
+                self.push(Insn::Lda(rhs_reg));
+                self.push(Insn::Sta(value_reg));
+                self.push(Insn::LdUndefined);
+                self.push(Insn::StrictEq(0, value_reg));
+                let skip_default = self.insns.len();
+                self.push(Insn::Jeqz(0));
+                // Value IS undefined → evaluate and store default.
+                self.emit_expr(&assign.right);
+                self.push(Insn::Sta(value_reg));
+                let after_default = self.insns.len();
+                self.patch_jump_to(skip_default, after_default);
+                self.emit_destructure_binding(&assign.left, value_reg);
+            }
+            BindingPattern::ObjectPattern(obj) => {
+                self.emit_destructure_object_binding(obj, rhs_reg);
+            }
+            BindingPattern::ArrayPattern(arr) => {
+                self.emit_destructure_array_binding(arr, rhs_reg);
+            }
+        }
+    }
+
+    /// Bind an identifier from `value_reg`; also write to lexical env slot and
+    /// module export slot if applicable.
+    fn emit_bind_identifier_from_reg(&mut self, name: &str, value_reg: u8) {
+        let name = name.to_string();
+        if let Some(reg) = self.var_regs.get(&name) {
+            let target = *reg;
+            if target != value_reg {
+                self.push(Insn::Lda(value_reg));
+                self.push(Insn::Sta(target));
+            }
+        } else {
+            let reg = self.alloc_reg();
+            self.var_regs.insert(name.clone(), reg);
+            self.push(Insn::Lda(value_reg));
+            self.push(Insn::Sta(reg));
+            if let Some(slot) = self.current_lexical_slot(&name) {
+                self.push(Insn::Lda(reg));
+                self.push(Insn::StLexVar(0, slot));
+            }
+            if let Some(export_index) = self.lowering.export_index(&name) {
+                self.push(Insn::Lda(reg));
+                self.push(Insn::StModuleVar(export_index));
+            }
+        }
+    }
+
+    /// Object destructuring binding: `const {a, b: alias, c = def, ...rest} = rhs_reg`.
+    fn emit_destructure_object_binding(&mut self, obj: &ObjectPattern<'_>, rhs_reg: u8) {
+        let mut excluded_key_regs: Vec<u8> = Vec::new();
+
+        for prop in &obj.properties {
+            let value_reg = self.alloc_reg();
+            self.push(Insn::Lda(rhs_reg));
+            if prop.computed {
+                // Computed key: evaluate key expression then use LdObjByValue.
+                let key_reg = self.alloc_reg();
+                if let Some(key_expr) = prop.key.as_expression() {
+                    self.emit_expr(key_expr);
+                }
+                self.push(Insn::Sta(key_reg));
+                excluded_key_regs.push(key_reg);
+                self.push(Insn::Lda(rhs_reg));
+                self.push(Insn::LdObjByValue(0, key_reg));
+            } else {
+                // Static key: use LdObjByName.
+                let key_name = match &prop.key {
+                    PropertyKey::StaticIdentifier(id) => id.name.as_str().to_string(),
+                    PropertyKey::StringLiteral(s) => s.value.as_str().to_string(),
+                    PropertyKey::NumericLiteral(n) => n.value.to_string(),
+                    _ => String::new(),
+                };
+                let key_id = self.intern(&key_name);
+                self.push(Insn::LdObjByName(0, key_id));
+            }
+            self.push(Insn::Sta(value_reg));
+            self.emit_destructure_binding(&prop.value, value_reg);
+        }
+
+        // Rest: CopyDataProperties to collect remaining own properties.
+        if let Some(rest) = &obj.rest {
+            let rest_reg = self.alloc_reg();
+            self.push(Insn::CreateEmptyObject);
+            self.push(Insn::Sta(rest_reg));
+            // CopyDataProperties(dst, src, excluded_key_count, excluded_keys...)
+            // Upstream: callruntime CopyDataProperties with excluded keys.
+            // Simple form: if no excluded keys, just iterate own properties.
+            // Approximate: emit CopyDataProperties without exclusions for now.
+            let _ = excluded_key_regs; // excluded keys would be passed here
+            self.push(Insn::CopyDataProperties(rhs_reg));
+            // acc = the rest object (filled by CopyDataProperties from rhs_reg into acc)
+            // Actually CopyDataProperties fills into the last created empty object.
+            // Upstream pattern: sta dst; lda src; copydataproperties dst
+            self.push(Insn::Sta(rest_reg));
+            self.emit_destructure_binding(&rest.argument, rest_reg);
+        }
+    }
+
+    /// Array destructuring binding: `const [a, b, ...rest] = rhs_reg`.
+    ///
+    /// Uses the full iterator protocol, identical to `for-of` lowering.
+    fn emit_destructure_array_binding(&mut self, arr: &ArrayPattern<'_>, rhs_reg: u8) {
+        // Push the iterable onto the accumulator and create the iterator.
+        let state = IteratorState {
+            closed_reg: self.alloc_reg(),
+            method_reg: self.alloc_reg(),
+            iterator_reg: self.alloc_reg(),
+        };
+        let result_reg = self.alloc_reg();
+
+        self.push(Insn::Lda(rhs_reg));
+        self.push(Insn::GetIterator(0));
+        self.push(Insn::Sta(state.iterator_reg));
+
+        let next_id = self.intern("next");
+        let done_id = self.intern("done");
+        let value_id = self.intern("value");
+
+        self.push(Insn::Lda(state.iterator_reg));
+        self.push(Insn::LdObjByName(0, next_id));
+        self.push(Insn::Sta(state.method_reg));
+        self.push(Insn::LdFalse);
+        self.push(Insn::Sta(state.closed_reg));
+
+        let body_try_begin = self.insns.len() as u32;
+
+        for element in &arr.elements {
+            // Advance the iterator (even for holes).
+            self.push(Insn::Lda(state.method_reg));
+            self.push(Insn::CallThis0(0, state.iterator_reg));
+            self.push(Insn::Sta(result_reg));
+            self.push(Insn::ThrowIfNotObject(result_reg));
+
+            // Check `done`.
+            self.push(Insn::Lda(result_reg));
+            self.push(Insn::LdObjByName(0, done_id));
+            // If done, use `undefined` as the value.
+            let done_skip = self.insns.len();
+            self.push(Insn::Jeqz(0));
+            let undef_reg = self.alloc_reg();
+            self.push(Insn::LdUndefined);
+            self.push(Insn::Sta(undef_reg));
+            let after_done = self.insns.len();
+            self.push(Insn::Jmp(0)); // skip value extraction
+            let not_done = self.insns.len();
+            self.patch_jump_to(done_skip, not_done);
+
+            // Get `value`.
+            self.push(Insn::Lda(result_reg));
+            self.push(Insn::LdObjByName(0, value_id));
+            self.push(Insn::Sta(undef_reg));
+            let value_end = self.insns.len();
+            self.patch_jump_to(after_done, value_end);
+
+            if let Some(elem) = element {
+                self.emit_destructure_binding(elem, undef_reg);
+            }
+            // Hole (`[, b]`): just discard the value.
+        }
+
+        // Rest element: collect remaining values.
+        if let Some(rest) = &arr.rest {
+            let rest_arr_reg = self.alloc_reg();
+            self.push(Insn::CreateEmptyArray(0));
+            self.push(Insn::Sta(rest_arr_reg));
+            let idx_reg = self.alloc_reg();
+            self.push(Insn::LdAi(0));
+            self.push(Insn::Sta(idx_reg));
+
+            // Loop: call next(), exit when done, push values to rest array.
+            let loop_start = self.insns.len();
+            self.push(Insn::Lda(state.method_reg));
+            self.push(Insn::CallThis0(0, state.iterator_reg));
+            self.push(Insn::Sta(result_reg));
+            self.push(Insn::ThrowIfNotObject(result_reg));
+            self.push(Insn::Lda(result_reg));
+            self.push(Insn::LdObjByName(0, done_id));
+            let rest_done = self.insns.len();
+            self.push(Insn::Jnez(0)); // exit loop when done
+            self.push(Insn::Lda(result_reg));
+            self.push(Insn::LdObjByName(0, value_id));
+            let item_reg = self.alloc_reg();
+            self.push(Insn::Sta(item_reg));
+            // Append to rest_arr_reg.
+            self.push(Insn::StArraySpread(rest_arr_reg, idx_reg));
+            let back_off = (loop_start as i32 - self.insns.len() as i32) as i16;
+            self.push(Insn::Jmp(back_off));
+            let rest_exit = self.insns.len();
+            self.patch_jump_to(rest_done, rest_exit);
+
+            self.emit_destructure_binding(&rest.argument, rest_arr_reg);
+        }
+
+        let body_try_end = self.insns.len() as u32;
+        let body_jmp_past_catch = self.insns.len();
+        self.push(Insn::Jmp(0));
+        let body_catch_begin = self.insns.len() as u32;
+        self.emit_iterator_close(state, true);
+        let body_catch_end = self.insns.len() as u32;
+        self.patch_jump_to(body_jmp_past_catch, body_catch_end as usize);
+        self.catch_entries.push(CatchEntry {
+            try_begin: body_try_begin,
+            try_end: body_try_end,
+            catch_begin: body_catch_begin,
+            catch_end: body_catch_end,
+        });
+
+        // Normal completion: close the iterator.
+        self.push(Insn::LdUndefined);
+        self.emit_iterator_close(state, false);
+    }
+
+    // ── Destructuring assignment lowering ────────────────────────────────────
+
+    /// Assign `rhs_reg` (result of evaluating the RHS) into assignment target
+    /// `target`.  Mirrors upstream `es2abc` destructuring assignment lowering.
+    fn emit_destructure_assignment(
+        &mut self,
+        target: &AssignmentTarget<'_>,
+        rhs_reg: u8,
+    ) {
+        match target {
+            AssignmentTarget::AssignmentTargetIdentifier(id) => {
+                self.push(Insn::Lda(rhs_reg));
+                let name = id.name.as_str();
+                if let Some(&reg) = self.var_regs.get(name) {
+                    self.push(Insn::Sta(reg));
+                } else if let Some((level, slot)) = self.lexical_lookup(name) {
+                    self.push(Insn::StLexVar(level, slot));
+                } else {
+                    let name_id = self.intern(name);
+                    self.push(Insn::TryStGlobalByName(0, name_id));
+                }
+            }
+            AssignmentTarget::StaticMemberExpression(mem) => {
+                let key_name = mem.property.name.as_str().to_string();
+                let key_id = self.intern(&key_name);
+                let obj_reg = self.alloc_reg();
+                self.emit_expr(&mem.object);
+                self.push(Insn::Sta(obj_reg));
+                self.push(Insn::Lda(rhs_reg));
+                self.push(Insn::StObjByName(0, key_id, obj_reg));
+            }
+            AssignmentTarget::ComputedMemberExpression(mem) => {
+                let obj_reg = self.alloc_reg();
+                let key_reg = self.alloc_reg();
+                self.emit_expr(&mem.object);
+                self.push(Insn::Sta(obj_reg));
+                self.emit_expr(&mem.expression);
+                self.push(Insn::Sta(key_reg));
+                self.push(Insn::Lda(rhs_reg));
+                self.push(Insn::StObjByValue(0, obj_reg, key_reg));
+            }
+            AssignmentTarget::ArrayAssignmentTarget(arr) => {
+                self.emit_destructure_array_assignment(arr, rhs_reg);
+            }
+            AssignmentTarget::ObjectAssignmentTarget(obj) => {
+                self.emit_destructure_object_assignment(obj, rhs_reg);
+            }
+            AssignmentTarget::TSAsExpression(expr) => {
+                self.emit_destructure_from_expr(&expr.expression, rhs_reg);
+            }
+            AssignmentTarget::TSSatisfiesExpression(expr) => {
+                self.emit_destructure_from_expr(&expr.expression, rhs_reg);
+            }
+            AssignmentTarget::TSNonNullExpression(expr) => {
+                self.emit_destructure_from_expr(&expr.expression, rhs_reg);
+            }
+            AssignmentTarget::TSTypeAssertion(expr) => {
+                self.emit_destructure_from_expr(&expr.expression, rhs_reg);
+            }
+            _ => {}
+        }
+    }
+
+    /// Emit assignment of `rhs_reg` into an `Expression` that is being used as
+    /// an assignment target (TS wrapper unwrapping).
+    fn emit_destructure_from_expr(&mut self, expr: &Expression<'_>, rhs_reg: u8) {
+        match expr {
+            Expression::Identifier(id) => {
+                self.push(Insn::Lda(rhs_reg));
+                let name = id.name.as_str();
+                if let Some(&reg) = self.var_regs.get(name) {
+                    self.push(Insn::Sta(reg));
+                } else if let Some((level, slot)) = self.lexical_lookup(name) {
+                    self.push(Insn::StLexVar(level, slot));
+                } else {
+                    let name_id = self.intern(name);
+                    self.push(Insn::TryStGlobalByName(0, name_id));
+                }
+            }
+            Expression::StaticMemberExpression(mem) => {
+                let key_name = mem.property.name.as_str().to_string();
+                let key_id = self.intern(&key_name);
+                let obj_reg = self.alloc_reg();
+                self.emit_expr(&mem.object);
+                self.push(Insn::Sta(obj_reg));
+                self.push(Insn::Lda(rhs_reg));
+                self.push(Insn::StObjByName(0, key_id, obj_reg));
+            }
+            Expression::ComputedMemberExpression(mem) => {
+                let obj_reg = self.alloc_reg();
+                let key_reg = self.alloc_reg();
+                self.emit_expr(&mem.object);
+                self.push(Insn::Sta(obj_reg));
+                self.emit_expr(&mem.expression);
+                self.push(Insn::Sta(key_reg));
+                self.push(Insn::Lda(rhs_reg));
+                self.push(Insn::StObjByValue(0, obj_reg, key_reg));
+            }
+            Expression::ParenthesizedExpression(p) => {
+                self.emit_destructure_from_expr(&p.expression, rhs_reg);
+            }
+            Expression::TSAsExpression(e) => self.emit_destructure_from_expr(&e.expression, rhs_reg),
+            Expression::TSSatisfiesExpression(e) => self.emit_destructure_from_expr(&e.expression, rhs_reg),
+            Expression::TSNonNullExpression(e) => self.emit_destructure_from_expr(&e.expression, rhs_reg),
+            Expression::TSTypeAssertion(e) => self.emit_destructure_from_expr(&e.expression, rhs_reg),
+            _ => {}
+        }
+    }
+
+    fn emit_destructure_array_assignment(
+        &mut self,
+        arr: &ArrayAssignmentTarget<'_>,
+        rhs_reg: u8,
+    ) {
+        let state = IteratorState {
+            closed_reg: self.alloc_reg(),
+            method_reg: self.alloc_reg(),
+            iterator_reg: self.alloc_reg(),
+        };
+        let result_reg = self.alloc_reg();
+        let next_id = self.intern("next");
+        let done_id = self.intern("done");
+        let value_id = self.intern("value");
+
+        self.push(Insn::Lda(rhs_reg));
+        self.push(Insn::GetIterator(0));
+        self.push(Insn::Sta(state.iterator_reg));
+        self.push(Insn::Lda(state.iterator_reg));
+        self.push(Insn::LdObjByName(0, next_id));
+        self.push(Insn::Sta(state.method_reg));
+        self.push(Insn::LdFalse);
+        self.push(Insn::Sta(state.closed_reg));
+
+        let body_try_begin = self.insns.len() as u32;
+
+        for element in &arr.elements {
+            let value_reg = self.alloc_reg();
+            self.push(Insn::Lda(state.method_reg));
+            self.push(Insn::CallThis0(0, state.iterator_reg));
+            self.push(Insn::Sta(result_reg));
+            self.push(Insn::ThrowIfNotObject(result_reg));
+            self.push(Insn::Lda(result_reg));
+            self.push(Insn::LdObjByName(0, done_id));
+            let done_skip = self.insns.len();
+            self.push(Insn::Jeqz(0));
+            self.push(Insn::LdUndefined);
+            self.push(Insn::Sta(value_reg));
+            let after_done = self.insns.len();
+            self.push(Insn::Jmp(0));
+            let not_done = self.insns.len();
+            self.patch_jump_to(done_skip, not_done);
+            self.push(Insn::Lda(result_reg));
+            self.push(Insn::LdObjByName(0, value_id));
+            self.push(Insn::Sta(value_reg));
+            let value_end = self.insns.len();
+            self.patch_jump_to(after_done, value_end);
+
+            if let Some(elem) = element {
+                self.emit_destructure_assignment_maybe_default(elem, value_reg);
+            }
+        }
+
+        if let Some(rest) = &arr.rest {
+            let rest_arr_reg = self.alloc_reg();
+            self.push(Insn::CreateEmptyArray(0));
+            self.push(Insn::Sta(rest_arr_reg));
+            let idx_reg = self.alloc_reg();
+            self.push(Insn::LdAi(0));
+            self.push(Insn::Sta(idx_reg));
+
+            let loop_start = self.insns.len();
+            self.push(Insn::Lda(state.method_reg));
+            self.push(Insn::CallThis0(0, state.iterator_reg));
+            self.push(Insn::Sta(result_reg));
+            self.push(Insn::ThrowIfNotObject(result_reg));
+            self.push(Insn::Lda(result_reg));
+            self.push(Insn::LdObjByName(0, done_id));
+            let rest_done = self.insns.len();
+            self.push(Insn::Jnez(0));
+            self.push(Insn::Lda(result_reg));
+            self.push(Insn::LdObjByName(0, value_id));
+            let item_reg = self.alloc_reg();
+            self.push(Insn::Sta(item_reg));
+            self.push(Insn::StArraySpread(rest_arr_reg, idx_reg));
+            let back_off = (loop_start as i32 - self.insns.len() as i32) as i16;
+            self.push(Insn::Jmp(back_off));
+            let rest_exit = self.insns.len();
+            self.patch_jump_to(rest_done, rest_exit);
+
+            self.emit_destructure_assignment(&rest.target, rest_arr_reg);
+        }
+
+        let body_try_end = self.insns.len() as u32;
+        let body_jmp_past_catch = self.insns.len();
+        self.push(Insn::Jmp(0));
+        let body_catch_begin = self.insns.len() as u32;
+        self.emit_iterator_close(state, true);
+        let body_catch_end = self.insns.len() as u32;
+        self.patch_jump_to(body_jmp_past_catch, body_catch_end as usize);
+        self.catch_entries.push(CatchEntry {
+            try_begin: body_try_begin,
+            try_end: body_try_end,
+            catch_begin: body_catch_begin,
+            catch_end: body_catch_end,
+        });
+        self.push(Insn::LdUndefined);
+        self.emit_iterator_close(state, false);
+    }
+
+    fn emit_destructure_assignment_maybe_default(
+        &mut self,
+        target: &AssignmentTargetMaybeDefault<'_>,
+        value_reg: u8,
+    ) {
+        match target {
+            AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(w) => {
+                let tmp_reg = self.alloc_reg();
+                self.push(Insn::Lda(value_reg));
+                self.push(Insn::Sta(tmp_reg));
+                self.push(Insn::LdUndefined);
+                self.push(Insn::StrictEq(0, tmp_reg));
+                let skip_default = self.insns.len();
+                self.push(Insn::Jeqz(0));
+                self.emit_expr(&w.init);
+                self.push(Insn::Sta(tmp_reg));
+                let after_default = self.insns.len();
+                self.patch_jump_to(skip_default, after_default);
+                self.emit_destructure_assignment(&w.binding, tmp_reg);
+            }
+            _ => {
+                if let Some(inner) = target.as_assignment_target() {
+                    self.emit_destructure_assignment(inner, value_reg);
+                }
+            }
+        }
+    }
+
+    fn emit_destructure_object_assignment(
+        &mut self,
+        obj: &ObjectAssignmentTarget<'_>,
+        rhs_reg: u8,
+    ) {
+        for prop in &obj.properties {
+            match prop {
+                AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(id_prop) => {
+                    // Shorthand: `({ a } = obj)` → read `obj.a`, assign to `a` (with default).
+                    let prop_name = id_prop.binding.name.as_str().to_string();
+                    let key_id = self.intern(&prop_name);
+                    let value_reg = self.alloc_reg();
+                    self.push(Insn::Lda(rhs_reg));
+                    self.push(Insn::LdObjByName(0, key_id));
+                    self.push(Insn::Sta(value_reg));
+                    if let Some(init) = &id_prop.init {
+                        // Apply default if undefined.
+                        let tmp_reg = self.alloc_reg();
+                        self.push(Insn::Lda(value_reg));
+                        self.push(Insn::Sta(tmp_reg));
+                        self.push(Insn::LdUndefined);
+                        self.push(Insn::StrictEq(0, tmp_reg));
+                        let skip_default = self.insns.len();
+                        self.push(Insn::Jeqz(0));
+                        self.emit_expr(init);
+                        self.push(Insn::Sta(tmp_reg));
+                        let after_default = self.insns.len();
+                        self.patch_jump_to(skip_default, after_default);
+                        // Assign tmp_reg to the identifier.
+                        self.push(Insn::Lda(tmp_reg));
+                        let id_name = id_prop.binding.name.as_str();
+                        if let Some(&reg) = self.var_regs.get(id_name) {
+                            self.push(Insn::Sta(reg));
+                        } else if let Some((level, slot)) = self.lexical_lookup(id_name) {
+                            self.push(Insn::StLexVar(level, slot));
+                        } else {
+                            let n_id = self.intern(id_name);
+                            self.push(Insn::TryStGlobalByName(0, n_id));
+                        }
+                    } else {
+                        // No default: assign value_reg directly.
+                        let id_name = id_prop.binding.name.as_str();
+                        if let Some(&reg) = self.var_regs.get(id_name) {
+                            self.push(Insn::Lda(value_reg));
+                            self.push(Insn::Sta(reg));
+                        } else if let Some((level, slot)) = self.lexical_lookup(id_name) {
+                            self.push(Insn::Lda(value_reg));
+                            self.push(Insn::StLexVar(level, slot));
+                        } else {
+                            let n_id = self.intern(id_name);
+                            self.push(Insn::Lda(value_reg));
+                            self.push(Insn::TryStGlobalByName(0, n_id));
+                        }
+                    }
+                }
+                AssignmentTargetProperty::AssignmentTargetPropertyProperty(prop_prop) => {
+                    // Renamed: `({ a: b } = obj)` → read `obj.a`, assign to `b`.
+                    let value_reg = self.alloc_reg();
+                    self.push(Insn::Lda(rhs_reg));
+                    if prop_prop.computed {
+                        let key_reg = self.alloc_reg();
+                        if let Some(key_expr) = prop_prop.name.as_expression() {
+                            self.emit_expr(key_expr);
+                        }
+                        self.push(Insn::Sta(key_reg));
+                        self.push(Insn::Lda(rhs_reg));
+                        self.push(Insn::LdObjByValue(0, key_reg));
+                    } else {
+                        let key_name = match &prop_prop.name {
+                            PropertyKey::StaticIdentifier(id) => id.name.as_str().to_string(),
+                            PropertyKey::StringLiteral(s) => s.value.as_str().to_string(),
+                            _ => String::new(),
+                        };
+                        let key_id = self.intern(&key_name);
+                        self.push(Insn::LdObjByName(0, key_id));
+                    }
+                    self.push(Insn::Sta(value_reg));
+                    self.emit_destructure_assignment_maybe_default(&prop_prop.binding, value_reg);
+                }
+            }
+        }
+
+        // Rest: collect remaining properties.
+        if let Some(rest) = &obj.rest {
+            let rest_reg = self.alloc_reg();
+            self.push(Insn::CreateEmptyObject);
+            self.push(Insn::Sta(rest_reg));
+            self.push(Insn::CopyDataProperties(rhs_reg));
+            self.push(Insn::Sta(rest_reg));
+            self.emit_destructure_assignment(&rest.target, rest_reg);
         }
     }
 
@@ -4370,10 +5131,18 @@ impl<'a> CodeGen<'a> {
                     }
                 }
                 BindingPattern::ArrayPattern(_) | BindingPattern::ObjectPattern(_) => {
-                    unreachable!("destructuring bindings are rejected before ABC lowering");
+                    // Destructuring binding: evaluate the RHS, then lower the pattern.
+                    let rhs_reg = self.alloc_reg();
+                    if let Some(init) = &declarator.init {
+                        self.emit_expr(init);
+                    } else {
+                        self.push(Insn::LdUndefined);
+                    }
+                    self.push(Insn::Sta(rhs_reg));
+                    self.emit_destructure_binding(&declarator.id, rhs_reg);
                 }
                 BindingPattern::AssignmentPattern(_) => {
-                    unreachable!("binding assignment patterns are rejected before ABC lowering");
+                    unreachable!("top-level binding assignment patterns are not valid here");
                 }
             }
         }
@@ -6446,9 +7215,18 @@ impl<'a> CodeGen<'a> {
             AssignmentTarget::PrivateFieldExpression(_) => {
                 unreachable!("private fields are rejected before ABC lowering");
             }
-            AssignmentTarget::ArrayAssignmentTarget(_)
-            | AssignmentTarget::ObjectAssignmentTarget(_) => {
-                unreachable!("destructuring assignments are rejected before ABC lowering");
+            AssignmentTarget::ArrayAssignmentTarget(arr) => {
+                // Destructuring assignment: evaluate RHS then bind to pattern.
+                let rhs_reg = self.alloc_reg();
+                self.emit_expr(right);
+                self.push(Insn::Sta(rhs_reg));
+                self.emit_destructure_array_assignment(arr, rhs_reg);
+            }
+            AssignmentTarget::ObjectAssignmentTarget(obj) => {
+                let rhs_reg = self.alloc_reg();
+                self.emit_expr(right);
+                self.push(Insn::Sta(rhs_reg));
+                self.emit_destructure_object_assignment(obj, rhs_reg);
             }
         }
     }

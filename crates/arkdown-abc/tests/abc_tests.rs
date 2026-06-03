@@ -3722,137 +3722,156 @@ fn test_void_expression_still_compiles_operand() {
 }
 
 #[test]
-fn test_destructuring_assignment_is_not_lowered_as_rhs_only() {
+fn test_array_destructuring_assignment_uses_iterator_protocol() {
+    // Upstream es2abc: `[a] = values` uses the full iterator protocol —
+    // getiterator (0x67) to create an iterator, then callthis0 (0x2a) for next().
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("destructuring_assignment.abc");
-    let err = match module_compiler().compile(
-        vec![module_record(
-            "test/destructuring_assignment",
-            r#"let a; [a] = values;"#,
-        )],
-        &out,
-    ) {
-        Ok(_) => panic!("destructuring assignment must not silently compile as rhs-only"),
-        Err(err) => err,
-    };
-
+    let record_name = "test/destructuring_assignment";
+    module_compiler()
+        .compile(
+            vec![module_record(record_name, r#"let a; [a] = values;"#)],
+            &out,
+        )
+        .expect("array destructuring assignment must lower via iterator protocol");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
     assert!(
-        matches!(
-            err,
-            AbcError::UnsupportedConstruct {
-                ref construct,
-                ..
-            } if construct == "DestructuringAssignment"
-        ),
-        "destructuring assignment must be reported as unsupported until full upstream lowering is implemented, got {err:?}"
+        bytecode_contains_opcode(&bytecode, 0x67),
+        "array destructuring assignment must emit getiterator (0x67)"
     );
 }
 
 #[test]
-fn test_destructuring_binding_declaration_is_not_lowered_by_local_fallback() {
+fn test_array_destructuring_binding_uses_iterator_protocol() {
+    // Upstream es2abc: `const [a] = values` uses the full iterator protocol.
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("destructuring_binding_decl.abc");
-    let err = match module_compiler().compile(
-        vec![module_record(
-            "test/destructuring_binding_decl",
-            r#"const [a] = values;"#,
-        )],
-        &out,
-    ) {
-        Ok(_) => panic!("destructuring binding must not use index-property fallback lowering"),
-        Err(err) => err,
-    };
-
+    let record_name = "test/destructuring_binding_decl";
+    module_compiler()
+        .compile(
+            vec![module_record(record_name, r#"const [a] = values;"#)],
+            &out,
+        )
+        .expect("array destructuring binding must lower via iterator protocol");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
     assert!(
-        matches!(
-            err,
-            AbcError::UnsupportedConstruct {
-                ref construct,
-                ..
-            } if construct == "DestructuringBinding"
-        ),
-        "destructuring binding must be rejected until the upstream iterator-based lowering is implemented, got {err:?}"
+        bytecode_contains_opcode(&bytecode, 0x67),
+        "array destructuring binding must emit getiterator (0x67)"
     );
 }
 
 #[test]
-fn test_destructuring_binding_in_export_declaration_is_not_silently_ignored() {
+fn test_exported_array_destructuring_binding_lowers() {
+    // Upstream: `export const [a] = values` creates a module export for `a`
+    // AND uses the iterator protocol.
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("destructuring_binding_export.abc");
-    let err = match module_compiler().compile(
-        vec![module_record(
-            "test/destructuring_binding_export",
-            r#"export const [a] = values;"#,
-        )],
-        &out,
-    ) {
-        Ok(_) => panic!("exported destructuring binding must not bypass unsupported scanning"),
-        Err(err) => err,
-    };
-
+    let record_name = "test/destructuring_binding_export";
+    module_compiler()
+        .compile(
+            vec![module_record(record_name, r#"export const [a] = values;"#)],
+            &out,
+        )
+        .expect("exported array destructuring binding must compile");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
     assert!(
-        matches!(
-            err,
-            AbcError::UnsupportedConstruct {
-                ref construct,
-                ..
-            } if construct == "DestructuringBinding"
-        ),
-        "exported destructuring binding must be rejected until upstream lowering is implemented, got {err:?}"
+        bytecode_contains_opcode(&bytecode, 0x67),
+        "exported array destructuring binding must emit getiterator (0x67)"
     );
 }
 
 #[test]
-fn test_destructuring_binding_in_for_left_is_not_lowered_by_local_fallback() {
+fn test_for_left_array_destructuring_uses_nested_iterator() {
+    // Upstream: `for (const [a] of values)` has two layers of iterator usage —
+    // the outer for-of iterator and the inner array-destructure iterator.
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("destructuring_binding_for_left.abc");
-    let err = match module_compiler().compile(
-        vec![module_record(
-            "test/destructuring_binding_for_left",
-            r#"for (const [a] of values) { sink(a); }"#,
-        )],
-        &out,
-    ) {
-        Ok(_) => panic!("for-left destructuring binding must not use local fallback lowering"),
-        Err(err) => err,
-    };
-
+    let record_name = "test/destructuring_binding_for_left";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"for (const [a] of values) { sink(a); }"#,
+            )],
+            &out,
+        )
+        .expect("for-left array destructuring must lower via nested iterator protocol");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+    // Two getiterator calls: one for for-of, one for the inner destructure.
     assert!(
-        matches!(
-            err,
-            AbcError::UnsupportedConstruct {
-                ref construct,
-                ..
-            } if construct == "DestructuringBinding"
-        ),
-        "for-left destructuring binding must be rejected until upstream lowering is implemented, got {err:?}"
+        bytecode_opcode_count(&bytecode, 0x67) >= 2,
+        "for-left array destructuring must emit at least 2 getiterator (0x67) calls"
     );
 }
 
 #[test]
-fn test_destructuring_binding_in_function_param_is_not_silently_ignored() {
+fn test_object_destructuring_in_function_param_uses_property_load() {
+    // Upstream: `function f({ value }) {}` extracts the property from the
+    // parameter object via LdObjByName (0x41) in the function body prologue.
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("destructuring_binding_param.abc");
-    let err = match module_compiler().compile(
-        vec![module_record(
-            "test/destructuring_binding_param",
-            r#"function f({ value }) { return value; }"#,
-        )],
-        &out,
-    ) {
-        Ok(_) => panic!("function parameter destructuring must not be silently ignored"),
-        Err(err) => err,
-    };
-
+    let record_name = "test/destructuring_binding_param";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"function f({ value }) { return value; }"#,
+            )],
+            &out,
+        )
+        .expect("function parameter object destructuring must compile");
+    let bytes = std::fs::read(&out).unwrap();
+    // The function f must emit an LdObjByName (0x41) to extract `value`.
     assert!(
-        matches!(
-            err,
-            AbcError::UnsupportedConstruct {
-                ref construct,
-                ..
-            } if construct == "DestructuringBinding"
-        ),
-        "function parameter destructuring must be rejected until upstream parameter binding lowering is implemented, got {err:?}"
+        bytes_contain_ascii(&bytes, "value"),
+        "destructured parameter name 'value' must appear in ABC string table"
+    );
+}
+
+#[test]
+fn test_object_destructuring_binding_uses_property_load() {
+    // Upstream: `const {a, b} = obj` uses LdObjByName (0x41) for each property.
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("object_destructure.abc");
+    let record_name = "test/object_destructure";
+    module_compiler()
+        .compile(
+            vec![module_record(record_name, r#"const {a, b} = obj;"#)],
+            &out,
+        )
+        .expect("object destructuring binding must compile");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+    // Object destructuring must use LdObjByName (0x42) for property access.
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x42),
+        "object destructuring must emit ldobjbyname (0x42) for property access"
+    );
+}
+
+#[test]
+fn test_destructuring_with_default_uses_undefined_check() {
+    // Upstream: `const [a = 0] = arr` checks if the iterator value is undefined
+    // and applies the default — this requires a StrictEq (0x28) + Jeqz path.
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("destructure_default.abc");
+    let record_name = "test/destructure_default";
+    module_compiler()
+        .compile(
+            vec![module_record(record_name, r#"const [a = 0] = arr;"#)],
+            &out,
+        )
+        .expect("array destructuring with default must compile");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+    // Must use stricteq (0x28) for the undefined check.
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x28),
+        "destructuring default must emit stricteq (0x28) for undefined check"
     );
 }
 
