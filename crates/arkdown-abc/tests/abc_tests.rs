@@ -2513,6 +2513,41 @@ fn test_ts_expression_wrappers_compile_inner_expression() {
 }
 
 #[test]
+fn test_ts_instantiation_expression_compiles_inner_expression() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("ts_instantiation.abc");
+    let record_name = "test/ts_instantiation";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"function identity<T>(value: T): T { return value; }
+const result = identity<number>(1);"#,
+            )],
+            &out,
+        )
+        .expect("compile TS instantiation expression source");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+    let call_pos = bytecode
+        .iter()
+        .position(|opcode| *opcode == 0x2a)
+        .expect("identity<number>(1) must emit callarg1");
+    assert_eq!(
+        bytecode.get(call_pos.saturating_sub(2)..call_pos),
+        Some(&[0x60, bytecode[call_pos - 1]][..]),
+        "callarg1 must reload the callee register"
+    );
+    let callee_reg = bytecode[call_pos - 1];
+    assert!(
+        bytecode[..call_pos]
+            .windows(4)
+            .any(|window| window[0] == 0x60 && window[2] == 0x61 && window[3] == callee_reg),
+        "TS instantiation callee must compile its inner expression before storing the callee register"
+    );
+}
+
+#[test]
 fn test_ts_assignment_target_wrapper_uses_inner_lreference() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("ts_assignment_target.abc");

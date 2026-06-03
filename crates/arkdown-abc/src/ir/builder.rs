@@ -1647,6 +1647,7 @@ impl UnsupportedScanner<'_> {
             Expression::TSSatisfiesExpression(expr) => self.scan_expression(&expr.expression),
             Expression::TSNonNullExpression(expr) => self.scan_expression(&expr.expression),
             Expression::TSTypeAssertion(expr) => self.scan_expression(&expr.expression),
+            Expression::TSInstantiationExpression(expr) => self.scan_expression(&expr.expression),
             Expression::AssignmentExpression(assign) => {
                 self.scan_assignment_target(&assign.left)?;
                 self.scan_expression(&assign.right)
@@ -3740,6 +3741,9 @@ impl<'a> CodeGen<'a> {
                 self.emit_expr(&expr.expression);
             }
             Expression::TSTypeAssertion(expr) => {
+                self.emit_expr(&expr.expression);
+            }
+            Expression::TSInstantiationExpression(expr) => {
                 self.emit_expr(&expr.expression);
             }
             Expression::ThisExpression(_) => {
