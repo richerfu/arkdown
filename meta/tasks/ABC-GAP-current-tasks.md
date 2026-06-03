@@ -14,7 +14,7 @@ gap is either implemented with focused tests or rejected with
 - [x] Replace silent statement fallthrough with explicit scanner coverage for
   nested function bodies and default exports.
 - [x] Lower plain labels and labeled `break` / `continue` for `while`,
-  `do...while`, and `for`.
+  `do...while`, `for`, `for-in`, and `for-of`.
 - [x] Preserve initialized instance class fields; reject static, computed,
   uninitialized, accessor, and static-block class fields until upstream static
   initialization and computed-key lowering are ported.

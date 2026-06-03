@@ -2744,6 +2744,73 @@ export default value;"#,
 }
 
 #[test]
+fn test_labeled_continue_targets_labeled_for_in_loop_next_iteration() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("labeled_continue_for_in.abc");
+    let record_name = "test/labeled_continue_for_in";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"let value = 0;
+const source = { a: 1, b: 2 };
+outer: for (const key in source) {
+  value += 1;
+  continue outer;
+  value = 99;
+}
+export default value;"#,
+            )],
+            &out,
+        )
+        .expect("compile labeled for-in continue source");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x4e),
+        "labeled for-in continue must emit a patched jump to the next property"
+    );
+    assert!(
+        bytecode.windows(2).any(|window| window == [0x7c, 0x00]),
+        "code after the labeled for-in loop must still export the selected value"
+    );
+}
+
+#[test]
+fn test_labeled_continue_targets_labeled_for_of_loop_next_iteration() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("labeled_continue_for_of.abc");
+    let record_name = "test/labeled_continue_for_of";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"let value = 0;
+outer: for (const item of [1, 2]) {
+  value += item;
+  continue outer;
+  value = 99;
+}
+export default value;"#,
+            )],
+            &out,
+        )
+        .expect("compile labeled for-of continue source");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x4e),
+        "labeled for-of continue must emit a patched jump to the iterator next call"
+    );
+    assert!(
+        bytecode.windows(2).any(|window| window == [0x7c, 0x00]),
+        "code after the labeled for-of loop must still export the selected value"
+    );
+}
+
+#[test]
 fn test_with_statement_is_rejected_until_scope_object_lowering_is_supported() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("with_statement.abc");

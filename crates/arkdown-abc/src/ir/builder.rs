@@ -3047,6 +3047,8 @@ impl<'a> CodeGen<'a> {
             Statement::WhileStatement(stmt) => self.emit_while_stmt_labeled(stmt, Some(&name)),
             Statement::DoWhileStatement(stmt) => self.emit_do_while_stmt_labeled(stmt, Some(&name)),
             Statement::ForStatement(stmt) => self.emit_for_stmt_labeled(stmt, Some(&name)),
+            Statement::ForInStatement(stmt) => self.emit_for_in_stmt_labeled(stmt, Some(&name)),
+            Statement::ForOfStatement(stmt) => self.emit_for_of_stmt_labeled(stmt, Some(&name)),
             _ => self.emit_stmt(&labeled.body),
         }
 
@@ -3102,6 +3104,10 @@ impl<'a> CodeGen<'a> {
     // ── While loop ────────────────────────────────────────────────────────────
 
     fn emit_for_in_stmt(&mut self, stmt: &'a ForInStatement<'a>) {
+        self.emit_for_in_stmt_labeled(stmt, None);
+    }
+
+    fn emit_for_in_stmt_labeled(&mut self, stmt: &'a ForInStatement<'a>, label: Option<&str>) {
         self.emit_expr(&stmt.right);
         let try_begin = self.insns.len() as u32;
         self.push(Insn::GetPropIterator);
@@ -3149,6 +3155,8 @@ impl<'a> CodeGen<'a> {
             self.insns[patch + 1] = lo;
             self.insns[patch + 2] = hi;
         }
+        let labeled_continues = self.take_labeled_continue_patches(label);
+        self.patch_jumps_to(labeled_continues, loop_start);
 
         let jmp_pos = self.insns.len();
         let back_off = (loop_start as i32 - jmp_pos as i32) as i16;
@@ -3172,6 +3180,10 @@ impl<'a> CodeGen<'a> {
     }
 
     fn emit_for_of_stmt(&mut self, stmt: &'a ForOfStatement<'a>) {
+        self.emit_for_of_stmt_labeled(stmt, None);
+    }
+
+    fn emit_for_of_stmt_labeled(&mut self, stmt: &'a ForOfStatement<'a>, label: Option<&str>) {
         let init_try_begin = self.insns.len() as u32;
         self.emit_expr(&stmt.right);
         let init_try_end = self.insns.len() as u32;
@@ -3256,6 +3268,8 @@ impl<'a> CodeGen<'a> {
             self.insns[patch + 1] = lo;
             self.insns[patch + 2] = hi;
         }
+        let labeled_continues = self.take_labeled_continue_patches(label);
+        self.patch_jumps_to(labeled_continues, loop_start);
 
         let jmp_pos = self.insns.len();
         let back_off = (loop_start as i32 - jmp_pos as i32) as i16;
