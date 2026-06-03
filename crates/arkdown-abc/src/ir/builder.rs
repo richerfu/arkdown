@@ -562,7 +562,21 @@ fn compile_function_record(
             let param_names = function_param_names(func);
             let rest_info = function_rest_param(func);
             let has_destructure = function_has_destructuring_params(func);
-            let compiled = if rest_info.is_some() || func.r#async || has_destructure {
+            let compiled = if func.generator {
+                // Generator (or async-generator): route through state-machine path.
+                compile_generator_body(
+                    func.body.as_deref(),
+                    func.r#async,
+                    rest_info,
+                    strings,
+                    literal_arrays,
+                    lowering,
+                    &param_names,
+                    source,
+                    source_mapper,
+                    Some((func.span.start, func.span.end)),
+                )
+            } else if rest_info.is_some() || func.r#async || has_destructure {
                 // Route through the extended path that handles rest params,
                 // async functions, and destructuring parameter patterns.
                 if let Some(src) = source {
@@ -1359,6 +1373,64 @@ fn compile_function_body_with_destructure_params<'src>(
         }
     }
     Some(cg.finish_with_line_ops_and_catches())
+}
+
+/// Compile a generator (or async-generator) function body.
+///
+/// Emits the `CreateGeneratorObj` / initial `SuspendGenerator` prologue, then
+/// compiles the body statements.  Yield points use the `emit_yield_expr`
+/// path that emits `SuspendGenerator` + `ResumeGenerator` + mode-check for
+/// `.return()` / `.throw()` handling.
+#[allow(clippy::too_many_arguments)]
+fn compile_generator_body<'src>(
+    body: Option<&FunctionBody<'src>>,
+    is_async: bool,
+    rest_param: Option<(String, u8)>,
+    strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
+    lowering: &LoweringContext,
+    param_names: &[String],
+    source: Option<&str>,
+    source_mapper: Option<&SourceMapper>,
+    current_function_span: Option<(u32, u32)>,
+) -> BodyCompileResult {
+    let stmts: &[_] = match body {
+        Some(fb) => fb.statements.as_slice(),
+        None => {
+            let mut st = StringTable::default();
+            let bc = Insn::ReturnUndefined.encode(&mut st);
+            return BodyCompileResult::new(bc, vec![], vec![], 0);
+        }
+    };
+    let mut cg = if let Some(src) = source {
+        CodeGen::new_with_source(strings, literal_arrays, lowering, src, source_mapper)
+    } else {
+        CodeGen::new(strings, literal_arrays, lowering)
+    };
+    cg.is_generator = true;
+    cg.is_async = is_async;
+    cg.use_function_lexical_env(current_function_span);
+    cg.emit_function_lex_env_prologue();
+    cg.bind_function_mandatory_lexical_names();
+    if is_async {
+        // Async generator: enter async context first, then generator prologue.
+        cg.emit_async_function_prologue();
+    }
+    cg.emit_generator_prologue();
+    cg.bind_function_param_names(param_names);
+    if let Some((name, count)) = rest_param {
+        let reg = cg.alloc_reg();
+        cg.push(Insn::CopyRestArgs(count));
+        cg.push(Insn::Sta(reg));
+        cg.var_regs.insert(name, reg);
+    }
+    for stmt in stmts {
+        cg.emit_stmt(stmt);
+        if cg.returned {
+            break;
+        }
+    }
+    cg.finish_with_line_ops_and_catches()
 }
 
 fn compile_default_derived_constructor() -> (Vec<u8>, Vec<CatchEntry>) {
@@ -2296,10 +2368,11 @@ impl UnsupportedScanner<'_> {
             }
             Expression::AwaitExpression(expr) => self.scan_expression(&expr.argument),
             Expression::YieldExpression(expr) => {
+                // yield is lowered via the generator state machine.
                 if let Some(arg) = &expr.argument {
                     self.scan_expression(arg)?;
                 }
-                Err(self.unsupported("YieldExpression"))
+                Ok(())
             }
             Expression::BooleanLiteral(_)
             | Expression::NullLiteral(_)
@@ -2327,9 +2400,8 @@ impl UnsupportedScanner<'_> {
     }
 
     fn scan_function(&mut self, function: &Function<'_>) -> Result<(), AbcError> {
-        if function.generator {
-            return Err(self.unsupported("GeneratorFunction"));
-        }
+        // Generator functions are lowered via the CreateGeneratorObj/
+        // SuspendGenerator/ResumeGenerator state machine.
         self.scan_formal_parameters(&function.params)?;
         if let Some(body) = &function.body {
             self.scan_statements(&body.statements)?;
@@ -6740,15 +6812,29 @@ impl<'a> CodeGen<'a> {
     /// literal buffer points at those MethodItems by file offset.
     ///
     /// After this call the class constructor is in the accumulator.
-    #[allow(dead_code)]
+    /// Emit the generator function prologue:
+    /// `createGeneratorObj v_func; sta gen_reg; suspendGenerator gen_reg;
+    /// lda gen_reg; resumeGenerator`.
+    ///
+    /// Mirrors upstream es2abc generator function prologue:
+    /// 1. Create the generator object (wraps the function).
+    /// 2. Initial suspend: the `function*` call returns the generator object.
+    /// 3. On first `next()`: execution resumes here.
     fn emit_generator_prologue(&mut self) {
         if !self.is_generator {
             return;
         }
         let reg = self.alloc_reg();
+        // CreateGeneratorObj takes the function object (mandatory arg 0).
         self.push(Insn::CreateGeneratorObj(function_arg_placeholder(0)));
         self.push(Insn::Sta(reg));
         self.gen_reg = Some(reg);
+        // Initial suspension: the function call site gets the generator object.
+        // On first next(), execution resumes after this suspend.
+        self.push(Insn::SuspendGenerator(reg));
+        self.push(Insn::Lda(reg));
+        self.push(Insn::ResumeGenerator);
+        // Discard the initial resume value (it's always undefined for the first call).
     }
 
     /// Emit the async function prologue: `asyncfunctionenter; sta async_reg`.
@@ -6812,15 +6898,53 @@ impl<'a> CodeGen<'a> {
     }
 
     fn emit_yield_expr(&mut self, yield_expr: &YieldExpression<'_>) {
+        // Emit the yielded value (or undefined for bare `yield`).
         match &yield_expr.argument {
             Some(arg) => self.emit_expr(arg),
             None => self.push(Insn::LdUndefined),
         }
-        if let Some(gen_reg) = self.gen_reg {
-            self.push(Insn::SuspendGenerator(gen_reg));
-            self.push(Insn::Lda(gen_reg));
-            self.push(Insn::ResumeGenerator);
+        let Some(gen_reg) = self.gen_reg else {
+            return;
+        };
+        // Upstream es2abc generator yield sequence (mirrors async await pattern):
+        //   SuspendGenerator(gen_reg) — yield the value to the caller
+        //   Lda(gen_reg) + ResumeGenerator — get the value passed to next()
+        //   Sta(completion_value) + Lda(gen_reg) + GetResumeMode → mode
+        //   if mode == 1: return (early return via .return(value))
+        //   if mode == 2: throw (exception via .throw(error))
+        //   acc = completion_value (normal next(value) resume)
+        let completion_value = self.alloc_reg();
+        let resume_mode = self.alloc_reg();
+        self.push(Insn::SuspendGenerator(gen_reg));
+        self.push(Insn::Lda(gen_reg));
+        self.push(Insn::ResumeGenerator);
+        self.push(Insn::Sta(completion_value));
+        self.push(Insn::Lda(gen_reg));
+        self.push(Insn::GetResumeMode);
+        self.push(Insn::Sta(resume_mode));
+        // Mode 1 = return: emit explicit return from the generator.
+        self.push(Insn::LdAi(1));
+        self.push(Insn::Eq(0, resume_mode));
+        let not_return = self.insns.len();
+        self.push(Insn::Jeqz(0));
+        self.push(Insn::Lda(completion_value));
+        self.emit_control_flow_exit(true);
+        if !self.returned {
+            self.push_with_epilogue(Insn::Return);
         }
+        let after_return = self.insns.len();
+        self.patch_jump_to(not_return, after_return);
+        // Mode 2 = throw: re-throw the exception.
+        self.push(Insn::LdAi(2));
+        self.push(Insn::Eq(0, resume_mode));
+        let not_throw = self.insns.len();
+        self.push(Insn::Jeqz(0));
+        self.push(Insn::Lda(completion_value));
+        self.push(Insn::Throw);
+        let after_throw = self.insns.len();
+        self.patch_jump_to(not_throw, after_throw);
+        // Mode 0 = next: acc = the value passed to next().
+        self.push(Insn::Lda(completion_value));
     }
 
     // ── Class definition ──────────────────────────────────────────────────────

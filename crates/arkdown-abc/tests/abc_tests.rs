@@ -4538,30 +4538,48 @@ fn test_annotation_declaration_is_erased() {
 }
 
 #[test]
-fn test_generator_function_is_rejected_until_state_machine_lowering_is_supported() {
+fn test_generator_function_uses_state_machine_opcodes() {
+    // Upstream es2abc: generator functions emit CreateGeneratorObj (0xb1),
+    // SuspendGenerator (0xc3), ResumeGenerator (0xbf), GetResumeMode (0xc0).
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("generator.abc");
-    let err = match module_compiler().compile(
-        vec![module_record(
-            "test/generator",
-            r#"function* ids() { yield 1; }"#,
-        )],
-        &out,
-    ) {
-        Ok(_) => panic!("generator functions must not use partial yield fallback lowering"),
-        Err(err) => err,
-    };
-
-    assert!(
-        matches!(
-            err,
-            AbcError::UnsupportedConstruct {
-                ref construct,
-                ..
-            } if construct == "GeneratorFunction" || construct == "YieldExpression"
-        ),
-        "generators must be rejected until upstream state-machine lowering is implemented, got {err:?}"
-    );
+    let record_name = "test/generator";
+    module_compiler()
+        .compile(
+            vec![module_record(record_name, r#"function* ids() { yield 1; yield 2; }"#)],
+            &out,
+        )
+        .expect("generator function must compile via state-machine lowering");
+    let bytes = std::fs::read(&out).unwrap();
+    // The generator function must be in the class record.
+    let class_name = format!("L{record_name};");
+    let class_off = class_offsets(&bytes)
+        .into_iter()
+        .map(|off| off as usize)
+        .find(|&off| class_name_at(&bytes, off) == class_name)
+        .expect("module class must exist");
+    let methods = class_method_items(&bytes, class_off);
+    let gen_bytecode = methods
+        .iter()
+        .filter_map(|(_, name, code_off)| {
+            let code_off = (*code_off)? as usize;
+            let bc = code_item_bytecode(&bytes, code_off);
+            (name != "func_main_0" && bytecode_contains_opcode(bc, 0xb1)).then_some(bc)
+        })
+        .next()
+        .expect("generator method with createGeneratorObj must exist");
+    for (opcode, name) in [
+        (0xb1, "createGeneratorObj"),
+        (0xc3, "suspendGenerator"),
+        (0xbf, "resumeGenerator"),
+        (0xc0, "getResumeMode"),
+    ] {
+        assert!(
+            bytecode_contains_opcode(gen_bytecode, opcode),
+            "generator must emit {} ({opcode:#x})",
+            name
+        );
+    }
 }
 
 #[test]
