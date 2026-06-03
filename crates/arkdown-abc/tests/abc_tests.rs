@@ -1559,6 +1559,25 @@ export function getGrsConfig() { return VALUE; }"#,
     assert!(exports.contains(&("getGrsConfig".to_string(), "getGrsConfig".to_string())));
 }
 
+#[test]
+fn test_exported_variable_declaration_writes_module_variable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("exported_var_bytecode.abc");
+    let record_name = "test/exported_var_bytecode";
+    module_compiler()
+        .compile(
+            vec![module_record(record_name, "export const VALUE = 1;")],
+            &out,
+        )
+        .expect("compile exported variable declaration");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x7c),
+        "exported variable declarations must store their initializer into the module variable slot"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // AbcArtifactResult fields
 // ---------------------------------------------------------------------------
@@ -2494,6 +2513,33 @@ fn test_destructuring_binding_declaration_is_not_lowered_by_local_fallback() {
             } if construct == "DestructuringBinding"
         ),
         "destructuring binding must be rejected until the upstream iterator-based lowering is implemented, got {err:?}"
+    );
+}
+
+#[test]
+fn test_destructuring_binding_in_export_declaration_is_not_silently_ignored() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("destructuring_binding_export.abc");
+    let err = match module_compiler().compile(
+        vec![module_record(
+            "test/destructuring_binding_export",
+            r#"export const [a] = values;"#,
+        )],
+        &out,
+    ) {
+        Ok(_) => panic!("exported destructuring binding must not bypass unsupported scanning"),
+        Err(err) => err,
+    };
+
+    assert!(
+        matches!(
+            err,
+            AbcError::UnsupportedConstruct {
+                ref construct,
+                ..
+            } if construct == "DestructuringBinding"
+        ),
+        "exported destructuring binding must be rejected until upstream lowering is implemented, got {err:?}"
     );
 }
 

@@ -1596,6 +1596,26 @@ impl UnsupportedScanner<'_> {
                 }
                 self.scan_class_elements(&class.body.body)
             }
+            Statement::ExportNamedDeclaration(export) => {
+                if let Some(decl) = &export.declaration {
+                    self.scan_declaration(decl)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn scan_declaration(&mut self, decl: &Declaration<'_>) -> Result<(), AbcError> {
+        match decl {
+            Declaration::VariableDeclaration(decl) => self.scan_variable_declaration(decl),
+            Declaration::FunctionDeclaration(func) => self.scan_function(func),
+            Declaration::ClassDeclaration(class) => {
+                if let Some(super_class) = &class.super_class {
+                    self.scan_expression(super_class)?;
+                }
+                self.scan_class_elements(&class.body.body)
+            }
             _ => Ok(()),
         }
     }
@@ -2662,32 +2682,40 @@ impl<'a> CodeGen<'a> {
                 }
             }
             Statement::ExportNamedDeclaration(export) => {
-                if let Some(Declaration::ClassDeclaration(cls)) = &export.declaration {
-                    let super_class = cls.super_class.as_ref();
-                    let class_name = cls.id.as_ref().map(|id| id.name.as_str());
-                    if let Some(id) = &cls.id {
-                        let name = id.name.as_str().to_string();
-                        let class_reg = self.alloc_reg();
-                        let var_reg = self.alloc_reg();
-                        self.var_regs.insert(name.clone(), var_reg);
-                        self.emit_class_inner(class_name, &cls.body.body, super_class);
-                        self.push(Insn::Sta(class_reg));
-                        self.set_debug_pos(id.span.start);
-                        self.push(Insn::Sta(var_reg));
-                        self.emit_class_missing_properties(
-                            class_name.unwrap_or(&name),
-                            &cls.body.body,
-                            class_reg,
-                            cls.body.span.start,
-                        );
-                        if let Some(lex_idx) = self.current_lexical_slot(&name) {
-                            self.push(Insn::Lda(class_reg));
-                            self.push(Insn::StLexVar(0, lex_idx));
+                if let Some(decl) = &export.declaration {
+                    match decl {
+                        Declaration::VariableDeclaration(decl) => self.emit_var_decl(decl),
+                        Declaration::FunctionDeclaration(_) | Declaration::TSEnumDeclaration(_) => {
                         }
-                        if let Some(export_index) = self.lowering.export_index(&name) {
-                            self.push(Insn::Lda(class_reg));
-                            self.push(Insn::StModuleVar(export_index));
+                        Declaration::ClassDeclaration(cls) => {
+                            let super_class = cls.super_class.as_ref();
+                            let class_name = cls.id.as_ref().map(|id| id.name.as_str());
+                            if let Some(id) = &cls.id {
+                                let name = id.name.as_str().to_string();
+                                let class_reg = self.alloc_reg();
+                                let var_reg = self.alloc_reg();
+                                self.var_regs.insert(name.clone(), var_reg);
+                                self.emit_class_inner(class_name, &cls.body.body, super_class);
+                                self.push(Insn::Sta(class_reg));
+                                self.set_debug_pos(id.span.start);
+                                self.push(Insn::Sta(var_reg));
+                                self.emit_class_missing_properties(
+                                    class_name.unwrap_or(&name),
+                                    &cls.body.body,
+                                    class_reg,
+                                    cls.body.span.start,
+                                );
+                                if let Some(lex_idx) = self.current_lexical_slot(&name) {
+                                    self.push(Insn::Lda(class_reg));
+                                    self.push(Insn::StLexVar(0, lex_idx));
+                                }
+                                if let Some(export_index) = self.lowering.export_index(&name) {
+                                    self.push(Insn::Lda(class_reg));
+                                    self.push(Insn::StModuleVar(export_index));
+                                }
+                            }
                         }
+                        _ => {}
                     }
                 }
             }
