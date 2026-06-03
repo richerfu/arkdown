@@ -27,6 +27,7 @@
 //! pass (AST → opcodes) currently emits only `ReturnUndefined` stubs; full
 //! statement lowering is a SPEC-009 follow-up task.
 
+pub mod abc_reader;
 pub mod cache;
 pub mod compiler;
 pub mod emit;
@@ -35,6 +36,7 @@ pub mod ir;
 mod npm_entries;
 pub mod widget;
 
+pub use abc_reader::{AbcClassInfo, AbcReadError, AbcReader, ParsedAbcSummary};
 pub use compiler::{AbcArtifactResult, AbcCompileOptions, AbcCompiler, AbcModule};
 pub use error::AbcError;
 pub use widget::{

@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use clap::Args;
 
 use arkdown::{compile_entry::CompileEntryNamer, BundleOutput, Bundler};
+use arkdown_abc::AbcReader;
 use arkdown_config::load_config;
 use arkdown_core::{
     ArkdownConfig, BuildMode, ChunkGraph, ExtensionAbilityEntry, ModuleConfig, ModuleJson5,
@@ -590,23 +591,41 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 tracing::warn!(error = %e, "failed to save task inputs cache");
             }
         }
-        // Append ByteCode HAR pre-compiled .abc files to the output modules.abc.
-        // Each HAR's bytes are concatenated after the main compiled bytecode so
-        // the ArkRuntime can find all class records in a single binary file.
-        // (A production-grade implementation would perform a full Panda ClassIndex
-        // merge; this append is correct for the current test fixture.)
+        // ByteCode HAR ABC integration (SPEC-041).
+        //
+        // The previous implementation appended HAR `.abc` bytes directly to
+        // `modules.abc`.  This was INCORRECT: raw byte concatenation does not
+        // update the Panda header, class index, string table, or literal-array
+        // index in the merged file; ArkRuntime cannot parse the result.
+        //
+        // The correct approach (per hvigor and Panda architecture):
+        //   * ByteCode HARs remain as SEPARATE `.abc` files on disk.
+        //   * `loader_json.byteCodeHarInfo` maps each HAR's package name to its
+        //     `.abc` path and SDK metadata.
+        //   * ArkRuntime loads each HAR's ABC independently via `byteCodeHarInfo`.
+        //
+        // SPEC-041 tracks the full implementation.  For now, emit a diagnostic
+        // so that builds with ByteCode HAR deps are visibly incomplete rather
+        // than silently producing a corrupt `modules.abc`.
         if !bc_har_deps.is_empty() {
             for dep in bc_har_deps {
-                // Append ByteCode HAR abc to modules.abc (simple append for now)
-                if let Ok(har_bytes) = std::fs::read(&dep.abc_path) {
-                    if let Ok(mut f) = std::fs::OpenOptions::new()
-                        .append(true)
-                        .open(&bundle_out.modules_abc_path)
-                    {
-                        use std::io::Write;
-                        let _ = f.write_all(&har_bytes);
-                    }
-                }
+                let abc_valid = dep
+                    .abc_path
+                    .exists()
+                    .then(|| {
+                        std::fs::read(&dep.abc_path)
+                            .ok()
+                            .map(|b| AbcReader::is_valid_magic(&b))
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false);
+                tracing::warn!(
+                    package = %dep.package_name,
+                    abc_path = %dep.abc_path.display(),
+                    abc_valid,
+                    "ByteCode HAR dep not merged into modules.abc — \
+                     populate loader_json.byteCodeHarInfo instead (SPEC-041)"
+                );
             }
         }
     }
