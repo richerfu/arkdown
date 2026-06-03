@@ -2682,29 +2682,64 @@ export default value;"#,
 }
 
 #[test]
-fn test_labeled_break_is_rejected_until_label_targets_are_supported() {
+fn test_labeled_break_targets_label_end() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("labeled_break.abc");
-    let err = match module_compiler().compile(
-        vec![module_record(
-            "test/labeled_break",
-            r#"outer: while (true) { break outer; }"#,
-        )],
-        &out,
-    ) {
-        Ok(_) => panic!("labeled break must not be silently compiled as an unlabeled break"),
-        Err(err) => err,
-    };
+    let record_name = "test/labeled_break";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"let value = 0;
+outer: while (true) {
+  value = 1;
+  break outer;
+  value = 99;
+}
+export default value;"#,
+            )],
+            &out,
+        )
+        .expect("compile labeled break source");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
 
     assert!(
-        matches!(
-            err,
-            AbcError::UnsupportedConstruct {
-                ref construct,
-                ..
-            } if construct == "LabeledBreakStatement"
-        ),
-        "labeled break must be rejected until label target lowering is implemented, got {err:?}"
+        bytecode_contains_opcode(&bytecode, 0x4e),
+        "labeled break must emit a patched forward jump to the label end"
+    );
+    assert!(
+        bytecode.windows(2).any(|window| window == [0x7c, 0x00]),
+        "code after the labeled statement must still export the selected value"
+    );
+}
+
+#[test]
+fn test_labeled_continue_targets_labeled_loop_update() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("labeled_continue.abc");
+    let record_name = "test/labeled_continue";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"let value = 0;
+outer: for (let i = 0; i < 3; i++) {
+  value += 1;
+  continue outer;
+  value = 99;
+}
+export default value;"#,
+            )],
+            &out,
+        )
+        .expect("compile labeled continue source");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x4e),
+        "labeled continue must emit a patched jump to the labeled loop update"
     );
 }
 
@@ -3665,6 +3700,162 @@ fn test_private_in_expression_is_rejected_instead_of_undefined_fallback() {
             } if construct == "PrivateInExpression" || construct == "PrivateIdentifier"
         ),
         "private-in expression must be rejected until upstream private-name lowering is implemented, got {err:?}"
+    );
+}
+
+#[test]
+fn test_import_meta_is_rejected_instead_of_undefined_fallback() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("import_meta.abc");
+    let err = match module_compiler().compile(
+        vec![module_record(
+            "test/import_meta",
+            r#"const url = import.meta.url;"#,
+        )],
+        &out,
+    ) {
+        Ok(_) => panic!("import.meta must not compile as undefined"),
+        Err(err) => err,
+    };
+
+    assert!(
+        matches!(
+            err,
+            AbcError::UnsupportedConstruct {
+                ref construct,
+                ..
+            } if construct == "ImportMeta"
+        ),
+        "import.meta must be rejected until upstream module-meta lowering is implemented, got {err:?}"
+    );
+}
+
+#[test]
+fn test_generator_function_is_rejected_until_state_machine_lowering_is_supported() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("generator.abc");
+    let err = match module_compiler().compile(
+        vec![module_record(
+            "test/generator",
+            r#"function* ids() { yield 1; }"#,
+        )],
+        &out,
+    ) {
+        Ok(_) => panic!("generator functions must not use partial yield fallback lowering"),
+        Err(err) => err,
+    };
+
+    assert!(
+        matches!(
+            err,
+            AbcError::UnsupportedConstruct {
+                ref construct,
+                ..
+            } if construct == "GeneratorFunction" || construct == "YieldExpression"
+        ),
+        "generators must be rejected until upstream state-machine lowering is implemented, got {err:?}"
+    );
+}
+
+#[test]
+fn test_instance_class_field_initializer_still_compiles() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("class_field.abc");
+    module_compiler()
+        .compile(
+            vec![module_record(
+                "test/class_field",
+                r#"class Box { value = 1; }
+const box = new Box();"#,
+            )],
+            &out,
+        )
+        .expect("initialized instance class field source must compile");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+}
+
+#[test]
+fn test_static_class_field_is_rejected_until_static_initialization_is_supported() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("static_class_field.abc");
+    let err = match module_compiler().compile(
+        vec![module_record(
+            "test/static_class_field",
+            r#"class Box { static value = 1; }"#,
+        )],
+        &out,
+    ) {
+        Ok(_) => panic!("static class field must not be silently dropped"),
+        Err(err) => err,
+    };
+
+    assert!(
+        matches!(
+            err,
+            AbcError::UnsupportedConstruct {
+                ref construct,
+                ..
+            } if construct == "StaticClassField"
+        ),
+        "static class fields must be rejected until upstream static initialization is implemented, got {err:?}"
+    );
+}
+
+#[test]
+fn test_default_export_static_class_field_is_rejected_by_pre_scan() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("default_static_class_field.abc");
+    let err = match module_compiler().compile(
+        vec![module_record(
+            "test/default_static_class_field",
+            r#"export default class Box { static value = 1; }"#,
+        )],
+        &out,
+    ) {
+        Ok(_) => {
+            panic!("default-exported static class fields must not bypass unsupported scanning")
+        }
+        Err(err) => err,
+    };
+
+    assert!(
+        matches!(
+            err,
+            AbcError::UnsupportedConstruct {
+                ref construct,
+                ..
+            } if construct == "StaticClassField"
+        ),
+        "default-exported static class fields must be rejected before lowering, got {err:?}"
+    );
+}
+
+#[test]
+fn test_computed_class_method_is_rejected_until_class_key_lowering_is_supported() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("computed_class_method.abc");
+    let err = match module_compiler().compile(
+        vec![module_record(
+            "test/computed_class_method",
+            r#"const name = "run";
+class Box { [name]() { return 1; } }"#,
+        )],
+        &out,
+    ) {
+        Ok(_) => panic!("computed class methods must not be dropped from the class buffer"),
+        Err(err) => err,
+    };
+
+    assert!(
+        matches!(
+            err,
+            AbcError::UnsupportedConstruct {
+                ref construct,
+                ..
+            } if construct == "ComputedClassMethod"
+        ),
+        "computed class methods must be rejected until upstream key lowering is implemented, got {err:?}"
     );
 }
 

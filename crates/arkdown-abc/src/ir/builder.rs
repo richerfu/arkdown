@@ -1528,15 +1528,13 @@ impl UnsupportedScanner<'_> {
 
     fn scan_statement(&mut self, stmt: &Statement<'_>) -> Result<(), AbcError> {
         match stmt {
-            Statement::BreakStatement(brk) if brk.label.is_some() => {
-                Err(self.unsupported("LabeledBreakStatement"))
-            }
-            Statement::ContinueStatement(cont) if cont.label.is_some() => {
-                Err(self.unsupported("LabeledContinueStatement"))
-            }
             Statement::BlockStatement(block) => self.scan_statements(&block.body),
             Statement::ExpressionStatement(expr) => self.scan_expression(&expr.expression),
             Statement::VariableDeclaration(decl) => self.scan_variable_declaration(decl),
+            Statement::EmptyStatement(_)
+            | Statement::DebuggerStatement(_)
+            | Statement::BreakStatement(_)
+            | Statement::ContinueStatement(_) => Ok(()),
             Statement::ReturnStatement(ret) => {
                 if let Some(arg) = &ret.argument {
                     self.scan_expression(arg)?;
@@ -1632,13 +1630,48 @@ impl UnsupportedScanner<'_> {
                 }
                 self.scan_class_elements(&class.body.body)
             }
+            Statement::ExportDefaultDeclaration(export) => {
+                match &export.declaration {
+                    ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
+                        self.scan_function(func)?;
+                    }
+                    ExportDefaultDeclarationKind::ClassDeclaration(class) => {
+                        if let Some(super_class) = &class.super_class {
+                            self.scan_expression(super_class)?;
+                        }
+                        self.scan_class_elements(&class.body.body)?;
+                    }
+                    ExportDefaultDeclarationKind::TSInterfaceDeclaration(_) => {}
+                    kind => {
+                        if let Some(expr) = kind.as_expression() {
+                            self.scan_expression(expr)?;
+                        }
+                    }
+                }
+                Ok(())
+            }
             Statement::ExportNamedDeclaration(export) => {
                 if let Some(decl) = &export.declaration {
                     self.scan_declaration(decl)?;
                 }
                 Ok(())
             }
-            _ => Ok(()),
+            Statement::ImportDeclaration(_) | Statement::ExportAllDeclaration(_) => Ok(()),
+            Statement::TSExportAssignment(_) => Err(self.unsupported("TSExportAssignment")),
+            Statement::TSNamespaceExportDeclaration(_) => {
+                Err(self.unsupported("TSNamespaceExportDeclaration"))
+            }
+            Statement::TSTypeAliasDeclaration(_)
+            | Statement::TSInterfaceDeclaration(_)
+            | Statement::TSGlobalDeclaration(_) => Ok(()),
+            Statement::TSEnumDeclaration(_) => Ok(()),
+            Statement::TSModuleDeclaration(_) => Err(self.unsupported("TSModuleDeclaration")),
+            Statement::TSImportEqualsDeclaration(_) => {
+                Err(self.unsupported("TSImportEqualsDeclaration"))
+            }
+            Statement::StructStatement(_) => Err(self.unsupported("StructStatement")),
+            Statement::AnnotationDeclaration(_) => Err(self.unsupported("AnnotationDeclaration")),
+            Statement::LazyImportDeclaration(_) => Err(self.unsupported("LazyImportDeclaration")),
         }
     }
 
@@ -1652,7 +1685,16 @@ impl UnsupportedScanner<'_> {
                 }
                 self.scan_class_elements(&class.body.body)
             }
-            _ => Ok(()),
+            Declaration::TSTypeAliasDeclaration(_)
+            | Declaration::TSInterfaceDeclaration(_)
+            | Declaration::TSGlobalDeclaration(_) => Ok(()),
+            Declaration::TSEnumDeclaration(_) => Ok(()),
+            Declaration::TSModuleDeclaration(_) => Err(self.unsupported("TSModuleDeclaration")),
+            Declaration::TSImportEqualsDeclaration(_) => {
+                Err(self.unsupported("TSImportEqualsDeclaration"))
+            }
+            Declaration::StructStatement(_) => Err(self.unsupported("StructStatement")),
+            Declaration::AnnotationDeclaration(_) => Err(self.unsupported("AnnotationDeclaration")),
         }
     }
 
@@ -1665,11 +1707,32 @@ impl UnsupportedScanner<'_> {
             Expression::JSXElement(_) => Err(self.unsupported("JSXElement")),
             Expression::JSXFragment(_) => Err(self.unsupported("JSXFragment")),
             Expression::V8IntrinsicExpression(_) => Err(self.unsupported("V8IntrinsicExpression")),
+            Expression::MetaProperty(meta) if !is_new_target_meta(meta) => {
+                Err(self.unsupported("ImportMeta"))
+            }
             Expression::TSAsExpression(expr) => self.scan_expression(&expr.expression),
             Expression::TSSatisfiesExpression(expr) => self.scan_expression(&expr.expression),
             Expression::TSNonNullExpression(expr) => self.scan_expression(&expr.expression),
             Expression::TSTypeAssertion(expr) => self.scan_expression(&expr.expression),
             Expression::TSInstantiationExpression(expr) => self.scan_expression(&expr.expression),
+            Expression::ImportExpression(expr) => {
+                self.scan_expression(&expr.source)?;
+                if let Some(options) = &expr.options {
+                    self.scan_expression(options)?;
+                }
+                Ok(())
+            }
+            Expression::ParenthesizedExpression(expr) => self.scan_expression(&expr.expression),
+            Expression::SequenceExpression(seq) => {
+                for expr in &seq.expressions {
+                    self.scan_expression(expr)?;
+                }
+                Ok(())
+            }
+            Expression::ArkUIComponentExpression(_) => {
+                Err(self.unsupported("ArkUIComponentExpression"))
+            }
+            Expression::LeadingDotExpression(_) => Err(self.unsupported("LeadingDotExpression")),
             Expression::AssignmentExpression(assign) => {
                 self.scan_assignment_target(&assign.left)?;
                 self.scan_expression(&assign.right)
@@ -1734,7 +1797,9 @@ impl UnsupportedScanner<'_> {
                 oxc_ast::ast::ChainElement::PrivateFieldExpression(_) => {
                     Err(self.unsupported("PrivateFieldExpression"))
                 }
-                _ => Ok(()),
+                oxc_ast::ast::ChainElement::TSNonNullExpression(expr) => {
+                    self.scan_expression(&expr.expression)
+                }
             },
             Expression::ObjectExpression(obj) => {
                 use oxc_ast::ast::ObjectPropertyKind;
@@ -1794,9 +1859,18 @@ impl UnsupportedScanner<'_> {
                 if let Some(arg) = &expr.argument {
                     self.scan_expression(arg)?;
                 }
-                Ok(())
+                Err(self.unsupported("YieldExpression"))
             }
-            _ => Ok(()),
+            Expression::BooleanLiteral(_)
+            | Expression::NullLiteral(_)
+            | Expression::NumericLiteral(_)
+            | Expression::BigIntLiteral(_)
+            | Expression::RegExpLiteral(_)
+            | Expression::StringLiteral(_)
+            | Expression::Identifier(_)
+            | Expression::MetaProperty(_)
+            | Expression::Super(_)
+            | Expression::ThisExpression(_) => Ok(()),
         }
     }
 
@@ -1814,7 +1888,14 @@ impl UnsupportedScanner<'_> {
     }
 
     fn scan_function(&mut self, function: &Function<'_>) -> Result<(), AbcError> {
-        self.scan_formal_parameters(&function.params)
+        if function.generator {
+            return Err(self.unsupported("GeneratorFunction"));
+        }
+        self.scan_formal_parameters(&function.params)?;
+        if let Some(body) = &function.body {
+            self.scan_statements(&body.statements)?;
+        }
+        Ok(())
     }
 
     fn scan_formal_parameters(
@@ -1932,6 +2013,14 @@ impl UnsupportedScanner<'_> {
             match element {
                 ClassElement::MethodDefinition(method) => {
                     self.scan_property_key(&method.key)?;
+                    if method.computed {
+                        return Err(self.unsupported("ComputedClassMethod"));
+                    }
+                    if method.kind != MethodDefinitionKind::Constructor
+                        && method_key_name(&method.key).is_none()
+                    {
+                        return Err(self.unsupported("UnsupportedClassMethodKey"));
+                    }
                     self.scan_formal_parameters(&method.value.params)?;
                     if let Some(body) = &method.value.body {
                         self.scan_statements(&body.statements)?;
@@ -1939,17 +2028,26 @@ impl UnsupportedScanner<'_> {
                 }
                 ClassElement::PropertyDefinition(property) => {
                     self.scan_property_key(&property.key)?;
+                    if property.r#static {
+                        return Err(self.unsupported("StaticClassField"));
+                    }
+                    if property.computed {
+                        return Err(self.unsupported("ComputedClassField"));
+                    }
+                    if property.value.is_none() {
+                        return Err(self.unsupported("UninitializedClassField"));
+                    }
+                    if method_key_name(&property.key).is_none() {
+                        return Err(self.unsupported("UnsupportedClassFieldKey"));
+                    }
                     if let Some(value) = &property.value {
                         self.scan_expression(value)?;
                     }
                 }
-                ClassElement::AccessorProperty(property) => {
-                    self.scan_property_key(&property.key)?;
-                    if let Some(value) = &property.value {
-                        self.scan_expression(value)?;
-                    }
+                ClassElement::AccessorProperty(_) => {
+                    return Err(self.unsupported("AccessorClassField"));
                 }
-                ClassElement::StaticBlock(block) => self.scan_statements(&block.body)?,
+                ClassElement::StaticBlock(_) => return Err(self.unsupported("ClassStaticBlock")),
                 ClassElement::TSIndexSignature(_) => {}
             }
         }
@@ -2047,6 +2145,7 @@ struct CodeGen<'a> {
     function_end: Option<u32>,
     break_patches: Vec<usize>,
     continue_patches: Vec<usize>,
+    label_stack: Vec<LabelContext>,
     catch_entries: Vec<CatchEntry>,
     #[allow(dead_code)]
     is_generator: bool,
@@ -2061,6 +2160,12 @@ struct CodeGen<'a> {
     current_lexical_names: Vec<String>,
     current_lexical_indices: FxHashMap<String, u8>,
     outer_lexical_envs: Vec<FxHashMap<String, u8>>,
+}
+
+struct LabelContext {
+    name: String,
+    break_patches: Vec<usize>,
+    continue_patches: Vec<usize>,
 }
 
 impl<'a> CodeGen<'a> {
@@ -2089,6 +2194,7 @@ impl<'a> CodeGen<'a> {
             function_end: None,
             break_patches: Vec::new(),
             continue_patches: Vec::new(),
+            label_stack: Vec::new(),
             catch_entries: Vec::new(),
             is_generator: false,
             gen_reg: None,
@@ -2822,23 +2928,31 @@ impl<'a> CodeGen<'a> {
             Statement::ForStatement(for_stmt) => {
                 self.emit_for_stmt(for_stmt);
             }
-            Statement::BreakStatement(brk) if brk.label.is_none() => {
+            Statement::BreakStatement(brk) => {
                 self.emit_control_flow_exit(true);
                 if self.returned {
                     return;
                 }
                 let jmp_pos = self.insns.len();
                 self.push(Insn::Jmp(0));
-                self.break_patches.push(jmp_pos);
+                if let Some(label) = &brk.label {
+                    self.push_labeled_break(label.name.as_str(), jmp_pos);
+                } else {
+                    self.break_patches.push(jmp_pos);
+                }
             }
-            Statement::ContinueStatement(cont) if cont.label.is_none() => {
+            Statement::ContinueStatement(cont) => {
                 self.emit_control_flow_exit(false);
                 if self.returned {
                     return;
                 }
                 let jmp_pos = self.insns.len();
                 self.push(Insn::Jmp(0));
-                self.continue_patches.push(jmp_pos);
+                if let Some(label) = &cont.label {
+                    self.push_labeled_continue(label.name.as_str(), jmp_pos);
+                } else {
+                    self.continue_patches.push(jmp_pos);
+                }
             }
             Statement::TryStatement(ts) => {
                 self.emit_try_stmt(ts);
@@ -2857,7 +2971,7 @@ impl<'a> CodeGen<'a> {
                 self.emit_switch_stmt(switch);
             }
             Statement::LabeledStatement(labeled) => {
-                self.emit_stmt(&labeled.body);
+                self.emit_labeled_stmt(labeled);
             }
             // Everything else: no bytecode emitted.
             _ => {}
@@ -2919,6 +3033,70 @@ impl<'a> CodeGen<'a> {
         self.patch_jumps_to(breaks, end);
         self.returned = outer_returned;
         self.next_reg = saved_next_reg;
+    }
+
+    fn emit_labeled_stmt(&mut self, labeled: &'a oxc_ast::ast::LabeledStatement<'a>) {
+        let name = labeled.label.name.as_str().to_string();
+        self.label_stack.push(LabelContext {
+            name: name.clone(),
+            break_patches: Vec::new(),
+            continue_patches: Vec::new(),
+        });
+
+        match &labeled.body {
+            Statement::WhileStatement(stmt) => self.emit_while_stmt_labeled(stmt, Some(&name)),
+            Statement::DoWhileStatement(stmt) => self.emit_do_while_stmt_labeled(stmt, Some(&name)),
+            Statement::ForStatement(stmt) => self.emit_for_stmt_labeled(stmt, Some(&name)),
+            _ => self.emit_stmt(&labeled.body),
+        }
+
+        let mut ctx = self
+            .label_stack
+            .pop()
+            .expect("labeled statement context must exist");
+        self.patch_jumps_to_here(std::mem::take(&mut ctx.break_patches));
+        self.patch_jumps_to_here(std::mem::take(&mut ctx.continue_patches));
+    }
+
+    fn push_labeled_break(&mut self, label: &str, patch: usize) {
+        if let Some(ctx) = self
+            .label_stack
+            .iter_mut()
+            .rev()
+            .find(|ctx| ctx.name == label)
+        {
+            ctx.break_patches.push(patch);
+        } else {
+            self.break_patches.push(patch);
+        }
+    }
+
+    fn push_labeled_continue(&mut self, label: &str, patch: usize) {
+        if let Some(ctx) = self
+            .label_stack
+            .iter_mut()
+            .rev()
+            .find(|ctx| ctx.name == label)
+        {
+            ctx.continue_patches.push(patch);
+        } else {
+            self.continue_patches.push(patch);
+        }
+    }
+
+    fn take_labeled_continue_patches(&mut self, label: Option<&str>) -> Vec<usize> {
+        let Some(label) = label else {
+            return Vec::new();
+        };
+        let Some(ctx) = self
+            .label_stack
+            .iter_mut()
+            .rev()
+            .find(|ctx| ctx.name == label)
+        else {
+            return Vec::new();
+        };
+        std::mem::take(&mut ctx.continue_patches)
     }
 
     // ── While loop ────────────────────────────────────────────────────────────
@@ -3449,6 +3627,14 @@ impl<'a> CodeGen<'a> {
     }
 
     fn emit_while_stmt(&mut self, while_stmt: &'a oxc_ast::ast::WhileStatement<'a>) {
+        self.emit_while_stmt_labeled(while_stmt, None);
+    }
+
+    fn emit_while_stmt_labeled(
+        &mut self,
+        while_stmt: &'a oxc_ast::ast::WhileStatement<'a>,
+        label: Option<&str>,
+    ) {
         let loop_start = self.insns.len();
         let false_branch = self.emit_branch_if_false(&while_stmt.test);
 
@@ -3472,9 +3658,19 @@ impl<'a> CodeGen<'a> {
         let continues = std::mem::replace(&mut self.continue_patches, outer_continue);
         self.patch_jumps_to_here(breaks);
         self.patch_jumps_to(continues, loop_start);
+        let labeled_continues = self.take_labeled_continue_patches(label);
+        self.patch_jumps_to(labeled_continues, loop_start);
     }
 
     fn emit_do_while_stmt(&mut self, do_while: &'a oxc_ast::ast::DoWhileStatement<'a>) {
+        self.emit_do_while_stmt_labeled(do_while, None);
+    }
+
+    fn emit_do_while_stmt_labeled(
+        &mut self,
+        do_while: &'a oxc_ast::ast::DoWhileStatement<'a>,
+        label: Option<&str>,
+    ) {
         let loop_start = self.insns.len();
 
         let outer_break = std::mem::take(&mut self.break_patches);
@@ -3494,10 +3690,20 @@ impl<'a> CodeGen<'a> {
         let continues = std::mem::replace(&mut self.continue_patches, outer_continue);
         self.patch_jumps_to_here(breaks);
         self.patch_jumps_to(continues, continue_target);
+        let labeled_continues = self.take_labeled_continue_patches(label);
+        self.patch_jumps_to(labeled_continues, continue_target);
         let _ = loop_exit;
     }
 
     fn emit_for_stmt(&mut self, for_stmt: &'a oxc_ast::ast::ForStatement<'a>) {
+        self.emit_for_stmt_labeled(for_stmt, None);
+    }
+
+    fn emit_for_stmt_labeled(
+        &mut self,
+        for_stmt: &'a oxc_ast::ast::ForStatement<'a>,
+        label: Option<&str>,
+    ) {
         if let Some(init) = &for_stmt.init {
             self.emit_for_init(init);
         }
@@ -3535,6 +3741,8 @@ impl<'a> CodeGen<'a> {
         let continues = std::mem::replace(&mut self.continue_patches, outer_continue);
         self.patch_jumps_to_here(breaks);
         self.patch_jumps_to(continues, continue_target);
+        let labeled_continues = self.take_labeled_continue_patches(label);
+        self.patch_jumps_to(labeled_continues, continue_target);
     }
 
     fn emit_for_init(&mut self, init: &oxc_ast::ast::ForStatementInit<'_>) {
