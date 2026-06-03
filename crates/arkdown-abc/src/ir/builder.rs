@@ -1512,14 +1512,7 @@ impl UnsupportedScanner<'_> {
         match stmt {
             Statement::BlockStatement(block) => self.scan_statements(&block.body),
             Statement::ExpressionStatement(expr) => self.scan_expression(&expr.expression),
-            Statement::VariableDeclaration(decl) => {
-                for declarator in &decl.declarations {
-                    if let Some(init) = &declarator.init {
-                        self.scan_expression(init)?;
-                    }
-                }
-                Ok(())
-            }
+            Statement::VariableDeclaration(decl) => self.scan_variable_declaration(decl),
             Statement::ReturnStatement(ret) => {
                 if let Some(arg) = &ret.argument {
                     self.scan_expression(arg)?;
@@ -1548,11 +1541,7 @@ impl UnsupportedScanner<'_> {
                     use oxc_ast::ast::ForStatementInit;
                     match init {
                         ForStatementInit::VariableDeclaration(decl) => {
-                            for declarator in &decl.declarations {
-                                if let Some(init) = &declarator.init {
-                                    self.scan_expression(init)?;
-                                }
-                            }
+                            self.scan_variable_declaration(decl)?;
                         }
                         ForStatementInit::AssignmentExpression(assign) => {
                             self.scan_assignment_target(&assign.left)?;
@@ -1595,6 +1584,10 @@ impl UnsupportedScanner<'_> {
                 if let Some(finalizer) = &stmt.finalizer {
                     self.scan_statements(&finalizer.body)?;
                 }
+                Ok(())
+            }
+            Statement::FunctionDeclaration(func) => {
+                self.scan_function(func)?;
                 Ok(())
             }
             Statement::ClassDeclaration(class) => {
@@ -1706,12 +1699,14 @@ impl UnsupportedScanner<'_> {
                 Ok(())
             }
             Expression::FunctionExpression(function) => {
+                self.scan_function(function)?;
                 if let Some(body) = &function.body {
                     self.scan_statements(&body.statements)?;
                 }
                 Ok(())
             }
             Expression::ArrowFunctionExpression(function) => {
+                self.scan_formal_parameters(&function.params)?;
                 self.scan_statements(&function.body.statements)
             }
             Expression::ClassExpression(class) => {
@@ -1734,6 +1729,59 @@ impl UnsupportedScanner<'_> {
                 Ok(())
             }
             _ => Ok(()),
+        }
+    }
+
+    fn scan_variable_declaration(
+        &mut self,
+        decl: &oxc_ast::ast::VariableDeclaration<'_>,
+    ) -> Result<(), AbcError> {
+        for declarator in &decl.declarations {
+            self.scan_binding_pattern(&declarator.id)?;
+            if let Some(init) = &declarator.init {
+                self.scan_expression(init)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn scan_function(&mut self, function: &Function<'_>) -> Result<(), AbcError> {
+        self.scan_formal_parameters(&function.params)
+    }
+
+    fn scan_formal_parameters(
+        &mut self,
+        params: &oxc_ast::ast::FormalParameters<'_>,
+    ) -> Result<(), AbcError> {
+        for param in &params.items {
+            self.scan_binding_pattern(&param.pattern)?;
+            if let Some(init) = &param.initializer {
+                self.scan_expression(init)?;
+            }
+        }
+        if let Some(rest) = &params.rest {
+            self.scan_binding_rest_element(&rest.rest)?;
+        }
+        Ok(())
+    }
+
+    fn scan_binding_rest_element(
+        &mut self,
+        rest: &oxc_ast::ast::BindingRestElement<'_>,
+    ) -> Result<(), AbcError> {
+        self.scan_binding_pattern(&rest.argument)
+    }
+
+    fn scan_binding_pattern(&mut self, pattern: &BindingPattern<'_>) -> Result<(), AbcError> {
+        match pattern {
+            BindingPattern::BindingIdentifier(_) => Ok(()),
+            BindingPattern::AssignmentPattern(assign) => {
+                self.scan_expression(&assign.right)?;
+                self.scan_binding_pattern(&assign.left)
+            }
+            BindingPattern::ArrayPattern(_) | BindingPattern::ObjectPattern(_) => {
+                Err(self.unsupported("DestructuringBinding"))
+            }
         }
     }
 
@@ -1780,8 +1828,13 @@ impl UnsupportedScanner<'_> {
 
     fn scan_for_left(&mut self, left: &ForStatementLeft<'_>) -> Result<(), AbcError> {
         match left {
+            ForStatementLeft::VariableDeclaration(decl) => self.scan_variable_declaration(decl),
             ForStatementLeft::PrivateFieldExpression(_) => {
                 Err(self.unsupported("PrivateFieldExpression"))
+            }
+            ForStatementLeft::ArrayAssignmentTarget(_)
+            | ForStatementLeft::ObjectAssignmentTarget(_) => {
+                Err(self.unsupported("DestructuringAssignment"))
             }
             ForStatementLeft::ComputedMemberExpression(expr) => {
                 self.scan_expression(&expr.object)?;
@@ -1811,6 +1864,7 @@ impl UnsupportedScanner<'_> {
             match element {
                 ClassElement::MethodDefinition(method) => {
                     self.scan_property_key(&method.key)?;
+                    self.scan_formal_parameters(&method.value.params)?;
                     if let Some(body) = &method.value.body {
                         self.scan_statements(&body.statements)?;
                     }
@@ -3541,68 +3595,12 @@ impl<'a> CodeGen<'a> {
                         self.push(Insn::StModuleVar(export_index));
                     }
                 }
-                BindingPattern::ArrayPattern(arr_pat) => {
-                    if let Some(init) = &declarator.init {
-                        self.emit_expr(init);
-                    } else {
-                        self.push(Insn::LdUndefined);
-                    }
-                    let tmp_reg = self.alloc_reg();
-                    self.push(Insn::Sta(tmp_reg));
-                    for (i, elem) in arr_pat.elements.iter().enumerate() {
-                        let Some(pat) = elem else { continue };
-                        let BindingPattern::BindingIdentifier(bid) = pat else {
-                            continue;
-                        };
-                        let vname = bid.name.as_str().to_string();
-                        let idx_str = i.to_string();
-                        let name_id = self.intern(&idx_str);
-                        self.push(Insn::Lda(tmp_reg));
-                        self.push(Insn::LdObjByName(0, name_id));
-                        let reg = self.alloc_reg();
-                        self.var_regs.insert(vname.clone(), reg);
-                        self.push(Insn::Sta(reg));
-                        if let Some(slot) = self.current_lexical_slot(&vname) {
-                            self.push(Insn::Lda(reg));
-                            self.push(Insn::StLexVar(0, slot));
-                        }
-                    }
+                BindingPattern::ArrayPattern(_) | BindingPattern::ObjectPattern(_) => {
+                    unreachable!("destructuring bindings are rejected before ABC lowering");
                 }
-                BindingPattern::ObjectPattern(obj_pat) => {
-                    if let Some(init) = &declarator.init {
-                        self.emit_expr(init);
-                    } else {
-                        self.push(Insn::LdUndefined);
-                    }
-                    let tmp_reg = self.alloc_reg();
-                    self.push(Insn::Sta(tmp_reg));
-                    for prop in &obj_pat.properties {
-                        let key_name = match &prop.key {
-                            PropertyKey::StaticIdentifier(id) => id.name.as_str().to_string(),
-                            PropertyKey::StringLiteral(s) => s.value.as_str().to_string(),
-                            _ => continue,
-                        };
-                        let BindingPattern::BindingIdentifier(bid) = &prop.value else {
-                            continue;
-                        };
-                        let vname = bid.name.as_str().to_string();
-                        let name_id = self.intern(&key_name);
-                        self.push(Insn::Lda(tmp_reg));
-                        self.push(Insn::LdObjByName(0, name_id));
-                        let reg = self.alloc_reg();
-                        self.var_regs.insert(vname.clone(), reg);
-                        self.push(Insn::Sta(reg));
-                        if let Some(slot) = self.current_lexical_slot(&vname) {
-                            self.push(Insn::Lda(reg));
-                            self.push(Insn::StLexVar(0, slot));
-                        }
-                        if let Some(export_index) = self.lowering.export_index(&vname) {
-                            self.push(Insn::Lda(reg));
-                            self.push(Insn::StModuleVar(export_index));
-                        }
-                    }
+                BindingPattern::AssignmentPattern(_) => {
+                    unreachable!("binding assignment patterns are rejected before ABC lowering");
                 }
-                _ => {}
             }
         }
     }

@@ -2369,6 +2369,87 @@ fn test_destructuring_assignment_is_not_lowered_as_rhs_only() {
 }
 
 #[test]
+fn test_destructuring_binding_declaration_is_not_lowered_by_local_fallback() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("destructuring_binding_decl.abc");
+    let err = match module_compiler().compile(
+        vec![module_record(
+            "test/destructuring_binding_decl",
+            r#"const [a] = values;"#,
+        )],
+        &out,
+    ) {
+        Ok(_) => panic!("destructuring binding must not use index-property fallback lowering"),
+        Err(err) => err,
+    };
+
+    assert!(
+        matches!(
+            err,
+            AbcError::UnsupportedConstruct {
+                ref construct,
+                ..
+            } if construct == "DestructuringBinding"
+        ),
+        "destructuring binding must be rejected until the upstream iterator-based lowering is implemented, got {err:?}"
+    );
+}
+
+#[test]
+fn test_destructuring_binding_in_for_left_is_not_lowered_by_local_fallback() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("destructuring_binding_for_left.abc");
+    let err = match module_compiler().compile(
+        vec![module_record(
+            "test/destructuring_binding_for_left",
+            r#"for (const [a] of values) { sink(a); }"#,
+        )],
+        &out,
+    ) {
+        Ok(_) => panic!("for-left destructuring binding must not use local fallback lowering"),
+        Err(err) => err,
+    };
+
+    assert!(
+        matches!(
+            err,
+            AbcError::UnsupportedConstruct {
+                ref construct,
+                ..
+            } if construct == "DestructuringBinding"
+        ),
+        "for-left destructuring binding must be rejected until upstream lowering is implemented, got {err:?}"
+    );
+}
+
+#[test]
+fn test_destructuring_binding_in_function_param_is_not_silently_ignored() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("destructuring_binding_param.abc");
+    let err = match module_compiler().compile(
+        vec![module_record(
+            "test/destructuring_binding_param",
+            r#"function f({ value }) { return value; }"#,
+        )],
+        &out,
+    ) {
+        Ok(_) => panic!("function parameter destructuring must not be silently ignored"),
+        Err(err) => err,
+    };
+
+    assert!(
+        matches!(
+            err,
+            AbcError::UnsupportedConstruct {
+                ref construct,
+                ..
+            } if construct == "DestructuringBinding"
+        ),
+        "function parameter destructuring must be rejected until upstream parameter binding lowering is implemented, got {err:?}"
+    );
+}
+
+#[test]
 fn test_typeof_emits_typeof_opcode() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("test.abc");
