@@ -30,7 +30,8 @@ gap is either implemented with focused tests or rejected with
 - [ ] Port private field/private-in lowering with private environment support.
 - [ ] Port computed class keys, auto-accessor properties, and private elements.
 - [ ] Port generator and async-generator state-machine lowering.
-- [ ] Port TypeScript runtime declarations beyond the existing module-record
-  enum export metadata path.
+- [x] Lower TypeScript enum runtime declarations with upstream transformer
+  semantics for name/value and numeric reverse mappings.
+- [ ] Port remaining TypeScript runtime declarations beyond enum lowering.
 - [ ] Broaden upstream bytecode parity coverage for for-of, try-finally,
   async/TLA, source-map/debug LNP, widgets, and HmosWorld cache-TS parity.

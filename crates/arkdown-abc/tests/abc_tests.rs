@@ -348,6 +348,9 @@ fn bytecode_insn_len(bytecode: &[u8], pos: usize, opcode: u8) -> usize {
         0x3e | 0xd3 => 3,
         0x36 | 0x67 | 0xc2 | 0xc5 => 2,
         0x68 | 0x77 | 0xb4 | 0xb9 | 0xc6 => 3,
+        0x4d | 0x4f | 0x51 => 2,
+        0x4e | 0x50 | 0x9b => 3,
+        0x98 | 0x9a | 0x9c => 5,
         0x3f | 0x40 | 0x42 => 4,
         0x43 | 0x8e | 0xbc | 0xdb | 0xdc => 5,
         0x31 | 0x32 | 0x73 | 0x78 | 0x99 | 0xba => 4,
@@ -373,6 +376,18 @@ fn bytecode_contains_opcode(bytecode: &[u8], target: u8) -> bool {
         pos += bytecode_insn_len(bytecode, pos, opcode);
     }
     false
+}
+
+fn bytecode_opcode_count(bytecode: &[u8], target: u8) -> usize {
+    let mut pos = 0usize;
+    let mut count = 0usize;
+    while let Some(&opcode) = bytecode.get(pos) {
+        if opcode == target {
+            count += 1;
+        }
+        pos += bytecode_insn_len(bytecode, pos, opcode);
+    }
+    count
 }
 
 fn first_opcode_position(bytecode: &[u8], target: u8) -> Option<usize> {
@@ -1578,6 +1593,152 @@ export function getGrsConfig() { return VALUE; }"#,
     assert!(exports.contains(&("VALUE".to_string(), "VALUE".to_string())));
     assert!(exports.contains(&("GRS_TYPE".to_string(), "GRS_TYPE".to_string())));
     assert!(exports.contains(&("getGrsConfig".to_string(), "getGrsConfig".to_string())));
+}
+
+#[test]
+fn test_ts_enum_declaration_emits_runtime_object_like_upstream_transform() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("ts_enum_runtime.abc");
+    let record_name = "test/ts_enum_runtime";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"export enum Status { Ready, Done = 3, Label = "label" }
+const ready = Status.Ready;
+const label = Status.Label;"#,
+            )],
+            &out,
+        )
+        .expect("TS enum declaration must compile to a runtime object");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x04),
+        "TS enum lowering must create the runtime enum object"
+    );
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x7c),
+        "exported TS enum must store the runtime object to the module export slot"
+    );
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x43),
+        "TS enum members must assign name -> value properties"
+    );
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x38),
+        "numeric TS enum members must assign value -> name reverse mappings"
+    );
+}
+
+#[test]
+fn test_ts_enum_uninitialized_member_reads_previous_member_like_upstream_transform() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("ts_enum_previous_member.abc");
+    let record_name = "test/ts_enum_previous_member";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"enum Step { Start = 3, Next }
+const next = Step.Next;"#,
+            )],
+            &out,
+        )
+        .expect("TS enum declaration with implicit member must compile");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x42),
+        "implicit enum members after the first must read E.previous before adding one"
+    );
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x0a),
+        "implicit enum members after the first must add one at runtime"
+    );
+}
+
+#[test]
+fn test_ts_enum_string_member_reference_avoids_numeric_reverse_mapping() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("ts_enum_string_ref.abc");
+    let record_name = "test/ts_enum_string_ref";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"enum Labels { A = "a", B = A }
+const label = Labels.B;"#,
+            )],
+            &out,
+        )
+        .expect("TS enum declaration with string member reference must compile");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+    assert_eq!(
+        bytecode_opcode_count(&bytecode, 0x38),
+        0,
+        "string-valued enum members must not emit value -> name reverse mappings"
+    );
+    assert!(
+        bytecode_opcode_count(&bytecode, 0x43) >= 2,
+        "string-valued enum members must still assign name -> value properties"
+    );
+}
+
+#[test]
+fn test_ts_enum_binding_is_hoisted_before_runtime_declaration() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("ts_enum_hoist.abc");
+    let record_name = "test/ts_enum_hoist";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"function readStatus() { return Status; }
+const before = readStatus();
+enum Status { Ready }"#,
+            )],
+            &out,
+        )
+        .expect("TS enum binding must be available before runtime declaration");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+    assert!(
+        !bytecode_contains_opcode(&bytecode, 0x6d),
+        "pre-declaration enum reads must use the local enum binding instead of global fallback"
+    );
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x9b),
+        "enum object initialization must use the upstream logical-or guard"
+    );
+}
+
+#[test]
+fn test_ts_enum_computed_template_member_name_lowers_like_upstream_transform() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("ts_enum_template_key.abc");
+    let record_name = "test/ts_enum_template_key";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"enum Status { [`ready`] = 1 }
+const ready = Status.ready;"#,
+            )],
+            &out,
+        )
+        .expect("TS enum computed template member names must lower to runtime properties");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x43),
+        "computed template enum keys must assign name -> value properties"
+    );
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x38),
+        "numeric computed template enum keys must assign value -> name reverse mappings"
+    );
 }
 
 #[test]

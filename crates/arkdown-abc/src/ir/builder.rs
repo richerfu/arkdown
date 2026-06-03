@@ -1,12 +1,12 @@
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     Argument, AssignmentOperator, AssignmentTarget, BindingPattern, ClassElement, Declaration,
     ExportDefaultDeclarationKind, Expression, ForInStatement, ForOfStatement, ForStatementLeft,
     FormalParameter, Function, FunctionBody, LogicalOperator, MethodDefinitionKind, Program,
-    PropertyKey, SimpleAssignmentTarget, Statement, UnaryOperator, UpdateExpression,
-    YieldExpression,
+    PropertyKey, SimpleAssignmentTarget, Statement, TSEnumDeclaration, TSEnumMemberName,
+    UnaryOperator, UpdateExpression, YieldExpression,
 };
 use oxc_parser::{Parser, ParserReturn};
 use oxc_semantic::SemanticBuilder;
@@ -1449,6 +1449,7 @@ fn compile_body_stmts(
         cg.use_module_lexical_env();
         cg.emit_module_lex_env_prologue();
         cg.bind_param_names(param_names);
+        cg.emit_ts_enum_var_hoists(stmts);
         cg.emit_function_hoists(stmts);
     } else {
         cg.use_function_lexical_env(current_function_span);
@@ -1491,6 +1492,7 @@ fn compile_body_stmts_tracked(
         cg.use_module_lexical_env();
         cg.emit_module_lex_env_prologue();
         cg.bind_param_names(param_names);
+        cg.emit_ts_enum_var_hoists(stmts);
         cg.emit_function_hoists(stmts);
     } else {
         cg.use_function_lexical_env(current_function_span);
@@ -1752,7 +1754,7 @@ impl UnsupportedScanner<'_> {
             Statement::TSTypeAliasDeclaration(_)
             | Statement::TSInterfaceDeclaration(_)
             | Statement::TSGlobalDeclaration(_) => Ok(()),
-            Statement::TSEnumDeclaration(_) => Ok(()),
+            Statement::TSEnumDeclaration(decl) => self.scan_ts_enum_declaration(decl),
             Statement::TSModuleDeclaration(_) => Err(self.unsupported("TSModuleDeclaration")),
             Statement::TSImportEqualsDeclaration(_) => {
                 Err(self.unsupported("TSImportEqualsDeclaration"))
@@ -1776,7 +1778,7 @@ impl UnsupportedScanner<'_> {
             Declaration::TSTypeAliasDeclaration(_)
             | Declaration::TSInterfaceDeclaration(_)
             | Declaration::TSGlobalDeclaration(_) => Ok(()),
-            Declaration::TSEnumDeclaration(_) => Ok(()),
+            Declaration::TSEnumDeclaration(decl) => self.scan_ts_enum_declaration(decl),
             Declaration::TSModuleDeclaration(_) => Err(self.unsupported("TSModuleDeclaration")),
             Declaration::TSImportEqualsDeclaration(_) => {
                 Err(self.unsupported("TSImportEqualsDeclaration"))
@@ -1784,6 +1786,18 @@ impl UnsupportedScanner<'_> {
             Declaration::StructStatement(_) => Err(self.unsupported("StructStatement")),
             Declaration::AnnotationDeclaration(_) => Err(self.unsupported("AnnotationDeclaration")),
         }
+    }
+
+    fn scan_ts_enum_declaration(&mut self, decl: &TSEnumDeclaration<'_>) -> Result<(), AbcError> {
+        if decl.declare {
+            return Ok(());
+        }
+        for member in &decl.body.members {
+            if let Some(initializer) = &member.initializer {
+                self.scan_expression(initializer)?;
+            }
+        }
+        Ok(())
     }
 
     fn scan_expression(&mut self, expr: &Expression<'_>) -> Result<(), AbcError> {
@@ -2705,6 +2719,9 @@ impl<'a> CodeGen<'a> {
             Statement::VariableDeclaration(decl) => {
                 self.emit_var_decl(decl);
             }
+            Statement::TSEnumDeclaration(decl) => {
+                self.emit_ts_enum_declaration(decl);
+            }
             Statement::ExpressionStatement(es) => {
                 // Skip string-literal "use strict" directives — they produce
                 // an expression but generate no bytecode.
@@ -2977,8 +2994,8 @@ impl<'a> CodeGen<'a> {
                 if let Some(decl) = &export.declaration {
                     match decl {
                         Declaration::VariableDeclaration(decl) => self.emit_var_decl(decl),
-                        Declaration::FunctionDeclaration(_) | Declaration::TSEnumDeclaration(_) => {
-                        }
+                        Declaration::FunctionDeclaration(_) => {}
+                        Declaration::TSEnumDeclaration(decl) => self.emit_ts_enum_declaration(decl),
                         Declaration::ClassDeclaration(cls) => {
                             let super_class = cls.super_class.as_ref();
                             let class_name = cls.id.as_ref().map(|id| id.name.as_str());
@@ -4095,6 +4112,238 @@ impl<'a> CodeGen<'a> {
                     unreachable!("binding assignment patterns are rejected before ABC lowering");
                 }
             }
+        }
+    }
+
+    fn emit_ts_enum_var_hoists(&mut self, stmts: &[Statement<'_>]) {
+        let mut seen = FxHashSet::default();
+        for stmt in stmts {
+            let decl = match stmt {
+                Statement::TSEnumDeclaration(decl) => Some(decl),
+                Statement::ExportNamedDeclaration(export) => match &export.declaration {
+                    Some(Declaration::TSEnumDeclaration(decl)) => Some(decl),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let Some(decl) = decl else {
+                continue;
+            };
+            if decl.declare {
+                continue;
+            }
+            let name = decl.id.name.as_str();
+            if !seen.insert(name.to_string()) || self.var_regs.contains_key(name) {
+                continue;
+            }
+            let reg = self.alloc_reg();
+            self.set_debug_pos(decl.id.span.start);
+            self.push(Insn::LdUndefined);
+            self.push(Insn::Sta(reg));
+            self.var_regs.insert(name.to_string(), reg);
+            self.store_ts_enum_binding_from_reg(name, reg);
+        }
+    }
+
+    fn emit_ts_enum_declaration(&mut self, decl: &TSEnumDeclaration<'_>) {
+        if decl.declare {
+            return;
+        }
+        let enum_name = decl.id.name.as_str().to_string();
+        let enum_reg = self.ensure_ts_enum_object(&enum_name, decl.id.span.start);
+        let mut previous_member: Option<String> = None;
+        let enum_members = decl
+            .body
+            .members
+            .iter()
+            .filter_map(|member| Self::ts_enum_member_name(&member.id))
+            .collect::<FxHashSet<_>>();
+        let mut string_members = FxHashSet::default();
+
+        for member in &decl.body.members {
+            let Some(member_name) = Self::ts_enum_member_name(&member.id) else {
+                continue;
+            };
+            self.set_debug_pos(member.span.start);
+            if let Some(initializer) = &member.initializer {
+                if Self::ts_enum_initializer_is_string(initializer, &string_members) {
+                    self.emit_ts_enum_initializer_expr(initializer, enum_reg, &enum_members);
+                    let name_id = self.intern(&member_name);
+                    self.push(Insn::StObjByName(0, name_id, enum_reg));
+                    string_members.insert(member_name.clone());
+                    previous_member = Some(member_name);
+                } else {
+                    self.emit_ts_enum_initializer_expr(initializer, enum_reg, &enum_members);
+                    let value_reg = self.alloc_reg();
+                    self.push(Insn::Sta(value_reg));
+                    self.emit_ts_enum_numeric_member(enum_reg, &member_name, value_reg);
+                    previous_member = Some(member_name);
+                }
+            } else {
+                let value_reg = self.alloc_reg();
+                if let Some(previous_member) = previous_member.as_deref() {
+                    let previous_id = self.intern(previous_member);
+                    self.push(Insn::Lda(enum_reg));
+                    self.push(Insn::LdObjByName(0, previous_id));
+                    let previous_value_reg = self.alloc_reg();
+                    self.push(Insn::Sta(previous_value_reg));
+                    self.push(Insn::LdAi(1));
+                    self.push(Insn::Add2(0, previous_value_reg));
+                } else {
+                    self.push(Insn::LdAi(0));
+                }
+                self.push(Insn::Sta(value_reg));
+                self.emit_ts_enum_numeric_member(enum_reg, &member_name, value_reg);
+                previous_member = Some(member_name);
+            }
+        }
+    }
+
+    fn emit_ts_enum_initializer_expr(
+        &mut self,
+        expr: &Expression<'_>,
+        enum_reg: u8,
+        enum_members: &FxHashSet<String>,
+    ) {
+        match expr {
+            Expression::Identifier(id) if enum_members.contains(id.name.as_str()) => {
+                let name_id = self.intern(id.name.as_str());
+                self.push(Insn::Lda(enum_reg));
+                self.push(Insn::LdObjByName(0, name_id));
+            }
+            Expression::BinaryExpression(bin) => {
+                let saved_next_reg = self.next_reg;
+                let left_reg = self.alloc_reg();
+                self.emit_ts_enum_initializer_expr(&bin.left, enum_reg, enum_members);
+                self.set_debug_pos(bin.right.span().start);
+                self.push(Insn::Sta(left_reg));
+                self.emit_ts_enum_initializer_expr(&bin.right, enum_reg, enum_members);
+                self.set_debug_pos(bin.right.span().start);
+                self.emit_binary_op(bin.operator, left_reg);
+                self.next_reg = saved_next_reg;
+            }
+            Expression::UnaryExpression(unary) => match unary.operator {
+                UnaryOperator::UnaryNegation => {
+                    self.emit_ts_enum_initializer_expr(&unary.argument, enum_reg, enum_members);
+                    self.push(Insn::Neg(0));
+                }
+                UnaryOperator::UnaryPlus => {
+                    self.emit_ts_enum_initializer_expr(&unary.argument, enum_reg, enum_members);
+                    self.push(Insn::ToNumber(0));
+                }
+                UnaryOperator::BitwiseNot => {
+                    self.emit_ts_enum_initializer_expr(&unary.argument, enum_reg, enum_members);
+                    self.push(Insn::BitNot(0));
+                }
+                _ => self.emit_expr(expr),
+            },
+            Expression::ParenthesizedExpression(expr) => {
+                self.emit_ts_enum_initializer_expr(&expr.expression, enum_reg, enum_members);
+            }
+            Expression::TSAsExpression(expr) => {
+                self.emit_ts_enum_initializer_expr(&expr.expression, enum_reg, enum_members);
+            }
+            Expression::TSSatisfiesExpression(expr) => {
+                self.emit_ts_enum_initializer_expr(&expr.expression, enum_reg, enum_members);
+            }
+            Expression::TSNonNullExpression(expr) => {
+                self.emit_ts_enum_initializer_expr(&expr.expression, enum_reg, enum_members);
+            }
+            Expression::TSTypeAssertion(expr) => {
+                self.emit_ts_enum_initializer_expr(&expr.expression, enum_reg, enum_members);
+            }
+            Expression::TSInstantiationExpression(expr) => {
+                self.emit_ts_enum_initializer_expr(&expr.expression, enum_reg, enum_members);
+            }
+            _ => self.emit_expr(expr),
+        }
+    }
+
+    fn ensure_ts_enum_object(&mut self, name: &str, span_start: u32) -> u8 {
+        let reg = if let Some(&reg) = self.var_regs.get(name) {
+            reg
+        } else {
+            let reg = self.alloc_reg();
+            self.push(Insn::LdUndefined);
+            self.push(Insn::Sta(reg));
+            self.var_regs.insert(name.to_string(), reg);
+            self.store_ts_enum_binding_from_reg(name, reg);
+            reg
+        };
+        self.set_debug_pos(span_start);
+        self.push(Insn::Lda(reg));
+        let has_existing_object = self.emit_branch_if_true_from_acc();
+        self.push(Insn::CreateEmptyObject);
+        self.push(Insn::Sta(reg));
+        self.store_ts_enum_binding_from_reg(name, reg);
+        let after_init = self.insns.len();
+        self.patch_jump_to(has_existing_object, after_init);
+        reg
+    }
+
+    fn store_ts_enum_binding_from_reg(&mut self, name: &str, reg: u8) {
+        if let Some(slot) = self.current_lexical_slot(name) {
+            self.push(Insn::Lda(reg));
+            self.push(Insn::StLexVar(0, slot));
+        }
+        if let Some(export_index) = self.lowering.export_index(name) {
+            self.push(Insn::Lda(reg));
+            self.push(Insn::StModuleVar(export_index));
+        }
+    }
+
+    fn emit_ts_enum_numeric_member(&mut self, enum_reg: u8, member_name: &str, value_reg: u8) {
+        let name_id = self.intern(member_name);
+        self.push(Insn::Lda(value_reg));
+        self.push(Insn::StObjByName(0, name_id, enum_reg));
+        self.push(Insn::LdaStr(name_id));
+        self.push(Insn::StObjByValue(0, enum_reg, value_reg));
+    }
+
+    fn ts_enum_member_name(member_name: &TSEnumMemberName<'_>) -> Option<String> {
+        match member_name {
+            TSEnumMemberName::Identifier(id) => Some(id.name.as_str().to_string()),
+            TSEnumMemberName::String(string) | TSEnumMemberName::ComputedString(string) => {
+                Some(string.value.as_str().to_string())
+            }
+            TSEnumMemberName::ComputedTemplateString(template) => template
+                .single_quasi()
+                .map(|name| name.as_str().to_string()),
+        }
+    }
+
+    fn ts_enum_initializer_is_string(
+        expr: &Expression<'_>,
+        string_members: &FxHashSet<String>,
+    ) -> bool {
+        match expr {
+            Expression::StringLiteral(_) | Expression::TemplateLiteral(_) => true,
+            Expression::Identifier(id) => string_members.contains(id.name.as_str()),
+            Expression::BinaryExpression(bin)
+                if bin.operator == oxc_ast::ast::BinaryOperator::Addition =>
+            {
+                Self::ts_enum_initializer_is_string(&bin.left, string_members)
+                    && Self::ts_enum_initializer_is_string(&bin.right, string_members)
+            }
+            Expression::ParenthesizedExpression(expr) => {
+                Self::ts_enum_initializer_is_string(&expr.expression, string_members)
+            }
+            Expression::TSAsExpression(expr) => {
+                Self::ts_enum_initializer_is_string(&expr.expression, string_members)
+            }
+            Expression::TSSatisfiesExpression(expr) => {
+                Self::ts_enum_initializer_is_string(&expr.expression, string_members)
+            }
+            Expression::TSNonNullExpression(expr) => {
+                Self::ts_enum_initializer_is_string(&expr.expression, string_members)
+            }
+            Expression::TSTypeAssertion(expr) => {
+                Self::ts_enum_initializer_is_string(&expr.expression, string_members)
+            }
+            Expression::TSInstantiationExpression(expr) => {
+                Self::ts_enum_initializer_is_string(&expr.expression, string_members)
+            }
+            _ => false,
         }
     }
 

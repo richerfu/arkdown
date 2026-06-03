@@ -84,6 +84,9 @@ fn collect_top_level_decl_names(stmt: &Statement<'_>, out: &mut FxHashSet<String
             }
         }
         Statement::VariableDeclaration(decl) => push_variable_decl_names(decl, out),
+        Statement::TSEnumDeclaration(decl) => {
+            out.insert(decl.id.name.as_str().to_string());
+        }
         Statement::ExportNamedDeclaration(export) => match &export.declaration {
             Some(Declaration::FunctionDeclaration(func)) => push_function_name(func, out),
             Some(Declaration::ClassDeclaration(cls)) => {
@@ -92,6 +95,9 @@ fn collect_top_level_decl_names(stmt: &Statement<'_>, out: &mut FxHashSet<String
                 }
             }
             Some(Declaration::VariableDeclaration(decl)) => push_variable_decl_names(decl, out),
+            Some(Declaration::TSEnumDeclaration(decl)) => {
+                out.insert(decl.id.name.as_str().to_string());
+            }
             _ => {}
         },
         Statement::ExportDefaultDeclaration(export) => match &export.declaration {
