@@ -2709,6 +2709,34 @@ fn test_labeled_break_is_rejected_until_label_targets_are_supported() {
 }
 
 #[test]
+fn test_with_statement_is_rejected_until_scope_object_lowering_is_supported() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("with_statement.abc");
+    let err = match module_compiler().compile(
+        vec![module_record(
+            "test/with_statement",
+            r#"const obj = { value: 1 };
+with (obj) { value = 2; }"#,
+        )],
+        &out,
+    ) {
+        Ok(_) => panic!("with statement must not be silently ignored"),
+        Err(err) => err,
+    };
+
+    assert!(
+        matches!(
+            err,
+            AbcError::UnsupportedConstruct {
+                ref construct,
+                ..
+            } if construct == "WithStatement"
+        ),
+        "with statement must be rejected until scope-object lowering is implemented, got {err:?}"
+    );
+}
+
+#[test]
 fn test_delete_global_identifier_uses_global_object_delete() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("delete_global.abc");

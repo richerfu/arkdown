@@ -1661,6 +1661,10 @@ impl UnsupportedScanner<'_> {
             Expression::PrivateFieldExpression(_) => {
                 Err(self.unsupported("PrivateFieldExpression"))
             }
+            Expression::PrivateInExpression(_) => Err(self.unsupported("PrivateInExpression")),
+            Expression::JSXElement(_) => Err(self.unsupported("JSXElement")),
+            Expression::JSXFragment(_) => Err(self.unsupported("JSXFragment")),
+            Expression::V8IntrinsicExpression(_) => Err(self.unsupported("V8IntrinsicExpression")),
             Expression::TSAsExpression(expr) => self.scan_expression(&expr.expression),
             Expression::TSSatisfiesExpression(expr) => self.scan_expression(&expr.expression),
             Expression::TSNonNullExpression(expr) => self.scan_expression(&expr.expression),
