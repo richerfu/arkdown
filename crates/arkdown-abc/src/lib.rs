@@ -732,4 +732,121 @@ class Counter {
             setters.iter().map(|m| &m.name).collect::<Vec<_>>(),
         );
     }
+
+    // ── opt_level semantics tests ───────────────────────────────────────────
+
+    /// opt_level=0 with debug_info=true should emit debug information.
+    /// opt_level=1 must suppress debug info even when debug_info=true.
+    /// This mirrors upstream es2abc: options.cpp:826 sets
+    ///   compilerOptions_.debugInfo = IsDebugMode() && GetOptLevel() == 0
+    #[test]
+    fn test_opt_level_suppresses_debug_info() {
+        let source = "export const x = 1;".to_string();
+        let tmp_debug = tempfile::NamedTempFile::new().unwrap();
+        let tmp_release = tempfile::NamedTempFile::new().unwrap();
+
+        // opt_level=0 + debug_info=true → has_debug_info must be true.
+        let compiler_debug = AbcCompiler::new(AbcCompileOptions {
+            debug_info: true,
+            opt_level: 0,
+            target_api_version: 12,
+            target_api_sub_version: None,
+            merge_abc: true,
+            module: true,
+            cache_path: None,
+            npm_entries: None,
+        });
+        let result_debug = compiler_debug
+            .compile(
+                vec![AbcModule {
+                    record_name: "test/debug".to_string(),
+                    source: source.clone(),
+                    source_map: None,
+                    source_file: Some("test.js".to_string()),
+                    package_name: None,
+                    is_commonjs: false,
+                }],
+                tmp_debug.path(),
+            )
+            .expect("compile with debug_info=true, opt_level=0");
+        assert!(
+            result_debug.has_debug_info,
+            "opt_level=0 + debug_info=true must produce debug info"
+        );
+
+        // opt_level=1 + debug_info=true → has_debug_info must be false.
+        let compiler_release = AbcCompiler::new(AbcCompileOptions {
+            debug_info: true,
+            opt_level: 1,
+            target_api_version: 12,
+            target_api_sub_version: None,
+            merge_abc: true,
+            module: true,
+            cache_path: None,
+            npm_entries: None,
+        });
+        let result_release = compiler_release
+            .compile(
+                vec![AbcModule {
+                    record_name: "test/debug".to_string(),
+                    source: source.clone(),
+                    source_map: None,
+                    source_file: Some("test.js".to_string()),
+                    package_name: None,
+                    is_commonjs: false,
+                }],
+                tmp_release.path(),
+            )
+            .expect("compile with debug_info=true, opt_level=1");
+        assert!(
+            !result_release.has_debug_info,
+            "opt_level=1 must suppress debug info even when debug_info=true"
+        );
+    }
+
+    /// opt_level must be part of the cache key: a cache entry written at
+    /// opt_level=0 must not be reused when the same source is compiled at
+    /// opt_level=1 (because the resulting binary differs in DebugInfo content).
+    #[test]
+    fn test_opt_level_changes_cache_key() {
+        let cache_dir = tempfile::tempdir().unwrap();
+        let source = "export const y = 2;".to_string();
+        let out1 = cache_dir.path().join("v0.abc");
+        let out2 = cache_dir.path().join("v1.abc");
+
+        let make_opts = |opt_level: u8| AbcCompileOptions {
+            debug_info: true,
+            opt_level,
+            target_api_version: 12,
+            target_api_sub_version: None,
+            merge_abc: true,
+            module: true,
+            cache_path: Some(cache_dir.path().to_path_buf()),
+            npm_entries: None,
+        };
+
+        let module = || AbcModule {
+            record_name: "test/optcache".to_string(),
+            source: source.clone(),
+            source_map: None,
+            source_file: Some("test.js".to_string()),
+            package_name: None,
+            is_commonjs: false,
+        };
+
+        AbcCompiler::new(make_opts(0))
+            .compile(vec![module()], &out1)
+            .expect("compile opt_level=0");
+        AbcCompiler::new(make_opts(1))
+            .compile(vec![module()], &out2)
+            .expect("compile opt_level=1");
+
+        let cache = crate::cache::CacheFile::load(cache_dir.path());
+        assert_eq!(
+            cache.entries.len(),
+            2,
+            "different opt_level must produce different cache entries (found {})",
+            cache.entries.len()
+        );
+    }
 }

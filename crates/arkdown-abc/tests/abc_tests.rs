@@ -23,6 +23,21 @@ fn make_compiler() -> AbcCompiler {
     })
 }
 
+/// Compiler with debug_info=true, opt_level=0 — matches upstream es2abc in debug mode.
+/// Use this when testing DebugInfoSection / LNP emission.
+fn make_debug_compiler() -> AbcCompiler {
+    AbcCompiler::new(AbcCompileOptions {
+        debug_info: true,
+        opt_level: 0,
+        target_api_version: 12,
+        target_api_sub_version: None,
+        merge_abc: true,
+        module: false,
+        cache_path: None,
+        npm_entries: None,
+    })
+}
+
 fn iife_module(record_name: &str, source: &str) -> AbcModule {
     AbcModule {
         record_name: record_name.to_string(),
@@ -2404,10 +2419,12 @@ fn test_compile_source_map_field_ignored_safely() {
 
 #[test]
 fn test_source_file_emits_debug_info_and_lnp() {
+    // Upstream es2abc only emits DebugInfoSection when both debug_info=true AND
+    // opt_level=0.  Use make_debug_compiler() to match that contract.
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = tmp.path().join("sourcemap-debug.abc");
     let source_file = "entry/src/main/ets/pages/Index.ts";
-    let result = make_compiler()
+    let result = make_debug_compiler()
         .compile(
             vec![AbcModule {
                 record_name: "com.example.app/entry/ets/pages/Index".to_string(),
@@ -2597,6 +2614,20 @@ fn test_module_metadata_marks_commonjs_records() {
 
 fn module_compiler() -> AbcCompiler {
     module_compiler_for_target(12, None)
+}
+
+/// Module compiler with debug_info=true for testing DebugInfo / debugger opcode emission.
+fn module_debug_compiler() -> AbcCompiler {
+    AbcCompiler::new(AbcCompileOptions {
+        debug_info: true,
+        opt_level: 0,
+        target_api_version: 12,
+        target_api_sub_version: None,
+        merge_abc: true,
+        module: true,
+        cache_path: None,
+        npm_entries: None,
+    })
 }
 
 fn module_compiler_for_target(
@@ -3695,8 +3726,10 @@ fn test_debugger_statement_matches_upstream_debug_mode() {
         "debugger statement must not emit debugger opcode when debug info is disabled"
     );
 
+    // Upstream: debugger opcode requires debug_info=true (compilerOptions_.debugInfo).
+    // Use module_debug_compiler() to enable debug info emission.
     let debug_out = tmp.path().join("debugger_debug.abc");
-    module_compiler()
+    module_debug_compiler()
         .compile(
             vec![module_record_with_source_file(
                 record_name,
@@ -4574,14 +4607,17 @@ fn test_annotation_declaration_is_erased() {
     // recognises the `@interface` syntax.
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("annotation_decl.abc");
+    // Use a record_name ending in `.ets` so the builder uses ETS-aware parsing.
+    // Previously, the ETS hint came from source_file; with upstream alignment,
+    // source_file is only used when debug_info=true (opt_level=0).  The ETS
+    // detection falls back to record_name, so record_name must end in `.ets`.
     module_compiler()
         .compile(
             vec![AbcModule {
-                record_name: "test/annotation_decl".into(),
+                record_name: "test/annotation_decl.ets".into(),
                 source: "@interface RouteMeta {\n  title: string;\n  count: number;\n}".into(),
                 source_map: None,
-                // `.ets` extension triggers ETS-aware parsing in the abc builder.
-                source_file: Some("test/annotation_decl.ets".into()),
+                source_file: None,
                 package_name: None,
                 is_commonjs: false,
             }],

@@ -138,14 +138,17 @@ fn cache_key_inputs(
     inputs.push((
         "__arkdown_compile_options__".to_string(),
         format!(
-            "target_api_version={}\0target_api_sub_version={}\0module={}\0debug_info={}",
+            "target_api_version={}\0target_api_sub_version={}\0module={}\0debug_info={}\0opt_level={}",
             options.target_api_version,
             options
                 .target_api_sub_version
                 .as_deref()
                 .unwrap_or_default(),
             options.module,
-            options.debug_info
+            options.debug_info,
+            // opt_level affects whether debug info is emitted (>=1 suppresses it)
+            // so it must be part of the cache key to avoid mixing debug/release entries.
+            options.opt_level,
         ),
     ));
     if let Some(source) = npm_entries_source {
@@ -304,10 +307,18 @@ impl AbcCompiler {
             .transpose()
             .map_err(AbcError::Io)?;
 
+        // Upstream es2abc (options.cpp:826): debug info is suppressed at opt_level >= 1.
+        //   compilerOptions_.debugInfo = IsDebugMode() && GetOptLevel() == 0
+        // Computing this once here ensures both the cache-hit return value and the
+        // full-compile path agree on whether debug info was emitted.
+        let effective_debug_info = self.options.debug_info && self.options.opt_level == 0;
+
         tracing::debug!(
             module_count = modules.len(),
             npm_entries = ?self.options.npm_entries,
             debug_info = self.options.debug_info,
+            effective_debug_info,
+            opt_level = self.options.opt_level,
             "abc compile start"
         );
 
@@ -344,13 +355,24 @@ impl AbcCompiler {
                 return Ok(AbcArtifactResult {
                     path: output.to_path_buf(),
                     api_version: self.options.target_api_version,
-                    has_debug_info: self.options.debug_info,
+                    has_debug_info: effective_debug_info,
                 });
             }
             tracing::debug!(cache = %cache_dir.display(), "abc cache miss");
         }
 
         // ── Full compilation ──────────────────────────────────────────────────
+        if self.options.opt_level >= 2 {
+            // TODO(SPEC-009 v3): implement register allocation for opt_level=2.
+            // opt_level=2 should strip debug info (already done via effective_debug_info)
+            // AND apply register allocation improvements, but the latter is not yet
+            // implemented — warn so release builds are visibly aware of the gap.
+            tracing::warn!(
+                opt_level = self.options.opt_level,
+                "opt_level=2: debug info suppressed, but register allocation is not yet applied"
+            );
+        }
+
         let mut abc_file = AbcFile::new();
         let mut has_debug_info = false;
 
@@ -363,17 +385,16 @@ impl AbcCompiler {
             } else {
                 strip_typescript_types(&module.source)
             };
-            let source_file = module
-                .source_file
-                .as_deref()
-                .map(|source_file| {
-                    Self::normalize_source_file(&module.record_name, source_file.to_string())
-                })
-                .or_else(|| {
-                    self.options
-                        .debug_info
-                        .then(|| source_file_from_record_name(&module.record_name))
-                });
+            // When effective_debug_info is false (opt_level >= 1 or debug_info=false),
+            // suppress all debug-info emission by setting source_file to None.
+            // Upstream: compilerOptions_.debugInfo=false disables DebugInfoSection entirely.
+            let source_file = effective_debug_info.then(|| {
+                module
+                    .source_file
+                    .as_deref()
+                    .map(|sf| Self::normalize_source_file(&module.record_name, sf.to_string()))
+                    .unwrap_or_else(|| source_file_from_record_name(&module.record_name))
+            });
             has_debug_info |= source_file.is_some();
             let record = builder::build_record_with_debug_and_package_for_target(
                 &js_source,
