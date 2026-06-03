@@ -2205,6 +2205,74 @@ fn test_exponential_assignment_emits_exp_opcode() {
 }
 
 #[test]
+fn test_logical_and_assignment_uses_short_circuit_store() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("logical_and_assign.abc");
+    let record_name = "test/logical_and_assign";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"let value = true; value &&= next;"#,
+            )],
+            &out,
+        )
+        .expect("compile logical and assignment source");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x24) && bytecode_contains_opcode(&bytecode, 0x9b),
+        "&&= must test lhs falsiness and skip rhs/store when falsy"
+    );
+}
+
+#[test]
+fn test_logical_or_assignment_uses_short_circuit_store() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("logical_or_assign.abc");
+    let record_name = "test/logical_or_assign";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"let value = false; value ||= next;"#,
+            )],
+            &out,
+        )
+        .expect("compile logical or assignment source");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x23) && bytecode_contains_opcode(&bytecode, 0x9b),
+        "||= must test lhs truthiness and skip rhs/store when truthy"
+    );
+}
+
+#[test]
+fn test_logical_nullish_assignment_uses_strict_nullish_short_circuit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("logical_nullish_assign.abc");
+    let record_name = "test/logical_nullish_assign";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"let value = null; value ??= next;"#,
+            )],
+            &out,
+        )
+        .expect("compile logical nullish assignment source");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x28)
+            && bytecode_contains_opcode(&bytecode, 0x9b)
+            && bytecode_contains_opcode(&bytecode, 0x50),
+        "??= must use strict null/undefined checks before deciding whether to store rhs"
+    );
+}
+
+#[test]
 fn test_typeof_emits_typeof_opcode() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("test.abc");

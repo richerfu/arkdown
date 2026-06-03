@@ -4872,6 +4872,18 @@ impl<'a> CodeGen<'a> {
         match &assign.left {
             AssignmentTarget::AssignmentTargetIdentifier(id) => {
                 let name = id.name.as_str();
+                if assign.operator.is_logical() {
+                    self.emit_identifier_load(name);
+                    let lhs_reg = self.alloc_reg();
+                    self.push(Insn::Sta(lhs_reg));
+                    self.emit_logical_assignment_after_lhs(
+                        assign.operator,
+                        &assign.right,
+                        lhs_reg,
+                        |this| this.emit_identifier_store(name),
+                    );
+                    return;
+                }
                 if assign.operator != AssignmentOperator::Assign {
                     self.emit_identifier_load(name);
                     let lhs_reg = self.alloc_reg();
@@ -4884,7 +4896,7 @@ impl<'a> CodeGen<'a> {
                 self.emit_identifier_store(name);
             }
             AssignmentTarget::ComputedMemberExpression(mem) => {
-                if is_global_this(&mem.object) {
+                if !assign.operator.is_logical() && is_global_this(&mem.object) {
                     if let Expression::StringLiteral(key) = &mem.expression {
                         self.emit_expr(&assign.right);
                         let name_id = self.intern(key.value.as_str());
@@ -4899,6 +4911,20 @@ impl<'a> CodeGen<'a> {
                 self.push(Insn::Sta(obj_reg));
                 if let Expression::StringLiteral(key) = &mem.expression {
                     let name_id = self.intern(key.value.as_str());
+                    if assign.operator.is_logical() {
+                        self.push(Insn::Lda(obj_reg));
+                        self.push(Insn::LdObjByName(0, name_id));
+                        let lhs_reg = self.alloc_reg();
+                        self.push(Insn::Sta(lhs_reg));
+                        self.emit_logical_assignment_after_lhs(
+                            assign.operator,
+                            &assign.right,
+                            lhs_reg,
+                            |this| this.push(Insn::StObjByName(0, name_id, obj_reg)),
+                        );
+                        self.next_reg = saved_next_reg;
+                        return;
+                    }
                     if assign.operator != AssignmentOperator::Assign {
                         self.push(Insn::Lda(obj_reg));
                         self.push(Insn::LdObjByName(0, name_id));
@@ -4914,6 +4940,20 @@ impl<'a> CodeGen<'a> {
                     self.emit_expr(&mem.expression);
                     let key_reg = self.alloc_reg();
                     self.push(Insn::Sta(key_reg));
+                    if assign.operator.is_logical() {
+                        self.push(Insn::Lda(key_reg));
+                        self.push(Insn::LdObjByValue(0, obj_reg));
+                        let lhs_reg = self.alloc_reg();
+                        self.push(Insn::Sta(lhs_reg));
+                        self.emit_logical_assignment_after_lhs(
+                            assign.operator,
+                            &assign.right,
+                            lhs_reg,
+                            |this| this.push(Insn::StObjByValue(0, obj_reg, key_reg)),
+                        );
+                        self.next_reg = saved_next_reg;
+                        return;
+                    }
                     if assign.operator != AssignmentOperator::Assign {
                         self.push(Insn::Lda(key_reg));
                         self.push(Insn::LdObjByValue(0, obj_reg));
@@ -4934,6 +4974,20 @@ impl<'a> CodeGen<'a> {
                 let obj_reg = self.alloc_reg();
                 self.set_debug_pos(mem.span.start);
                 self.push(Insn::Sta(obj_reg));
+                if assign.operator.is_logical() {
+                    self.push(Insn::Lda(obj_reg));
+                    let name_id = self.intern(mem.property.name.as_str());
+                    self.push(Insn::LdObjByName(0, name_id));
+                    let lhs_reg = self.alloc_reg();
+                    self.push(Insn::Sta(lhs_reg));
+                    self.emit_logical_assignment_after_lhs(
+                        assign.operator,
+                        &assign.right,
+                        lhs_reg,
+                        |this| this.push(Insn::StObjByName(0, name_id, obj_reg)),
+                    );
+                    return;
+                }
                 if assign.operator != AssignmentOperator::Assign {
                     self.push(Insn::Lda(obj_reg));
                     let name_id = self.intern(mem.property.name.as_str());
@@ -4954,6 +5008,59 @@ impl<'a> CodeGen<'a> {
                 self.emit_expr(&assign.right);
             }
         }
+    }
+
+    fn emit_logical_assignment_after_lhs<F>(
+        &mut self,
+        op: AssignmentOperator,
+        right: &Expression<'_>,
+        lhs_reg: u8,
+        store: F,
+    ) where
+        F: FnOnce(&mut Self),
+    {
+        let skip_right = match op {
+            AssignmentOperator::LogicalAnd => {
+                self.emit_is_false();
+                let branch_pos = self.insns.len();
+                self.push(Insn::Jnez(0));
+                branch_pos
+            }
+            AssignmentOperator::LogicalOr => {
+                self.emit_is_true();
+                let branch_pos = self.insns.len();
+                self.push(Insn::Jnez(0));
+                branch_pos
+            }
+            AssignmentOperator::LogicalNullish => {
+                self.push(Insn::LdNull);
+                self.push(Insn::StrictEq(0, lhs_reg));
+                let nullish_pos = self.insns.len();
+                self.push(Insn::Jnez(0));
+
+                self.push(Insn::LdUndefined);
+                self.push(Insn::StrictEq(0, lhs_reg));
+                let skip_pos = self.insns.len();
+                self.push(Insn::Jeqz(0));
+
+                let nullish_target = self.insns.len();
+                self.patch_jump_to(nullish_pos, nullish_target);
+                skip_pos
+            }
+            _ => unreachable!("logical assignment lowering requires a logical assignment operator"),
+        };
+
+        self.emit_expr(right);
+        store(self);
+        let end_jump = self.insns.len();
+        self.push(Insn::Jmp(0));
+
+        let skip_target = self.insns.len();
+        self.patch_jump_to(skip_right, skip_target);
+        self.push(Insn::Lda(lhs_reg));
+
+        let end = self.insns.len();
+        self.patch_jump_to(end_jump, end);
     }
 
     // ── Call: callee(args) ────────────────────────────────────────────────────
@@ -5457,7 +5564,12 @@ impl<'a> CodeGen<'a> {
             AssignmentOperator::BitwiseAnd => self.push(Insn::And2(0, left_reg)),
             AssignmentOperator::BitwiseOR => self.push(Insn::Or2(0, left_reg)),
             AssignmentOperator::BitwiseXOR => self.push(Insn::Xor2(0, left_reg)),
-            _ => {}
+            AssignmentOperator::Assign
+            | AssignmentOperator::LogicalOr
+            | AssignmentOperator::LogicalAnd
+            | AssignmentOperator::LogicalNullish => {
+                unreachable!("non-binary assignment operator reached binary assignment lowering")
+            }
         }
     }
 
