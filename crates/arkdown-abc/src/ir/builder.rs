@@ -1096,79 +1096,92 @@ fn compile_class_elements(
             });
         }
 
-        // Compile getter/setter MethodRecords for each auto-accessor property.
-        // Mirrors upstream Transformer::ProcessAutoAccessorProperty: the backing field
-        // is a synthesized private field; the getter reads it; the setter writes it.
-        for element in elements {
-            let ClassElement::AccessorProperty(accessor) = element else {
-                continue;
-            };
-            let backing_name = accessor_backing_field_name(accessor);
-            let Some(&slot) = private_field_slots.get(&backing_name) else {
-                continue;
-            };
-            let key_name = match &accessor.key {
-                PropertyKey::StaticIdentifier(id) => id.name.as_str().to_string(),
-                PropertyKey::StringLiteral(s) => s.value.as_str().to_string(),
-                _ => continue, // skip computed accessors for now
-            };
+    }
 
-            // Getter: `get <key>() { return this.#backing; }`
-            let getter_name = format!("#{class_name}_get_{key_name}#");
-            let getter_compiled = {
-                let mut cg = CodeGen::new(strings, literal_arrays, lowering);
-                cg.private_field_slots = private_field_slots.clone();
-                cg.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
-                cg.push(Insn::LdPrivateProperty(0, 0, slot));
-                cg.push_with_epilogue(Insn::Return);
-                cg.returned = true;
-                cg.finish_with_catches()
-            };
-            methods.push(MethodRecord {
-                name: getter_name,
-                bytecode: getter_compiled.bytecode,
-                num_vregs: getter_compiled.vregs,
-                num_args: 3,
-                debug_info: None,
-                line_ops: Vec::new(),
-                catch_entries: getter_compiled.catches,
-                kind: MethodKind::Function,
-                method_pool_entry: true,
-                definefunc_order: None,
-            });
+    // Compile getter/setter MethodRecords for each auto-accessor property.
+    //
+    // Mirrors upstream Transformer::ProcessAutoAccessorProperty: the backing field
+    // is a synthesized private field; the getter reads it; the setter writes it.
+    //
+    // NOTE: this loop must run *outside* the MethodDefinition loop above.
+    // Previously it was nested inside that loop, causing each accessor's
+    // getter+setter pair to be emitted once per class element (N duplicates
+    // instead of 1).  Upstream ProcessAutoAccessorProperty is a single-pass
+    // class-level transform, not a per-method operation.
+    //
+    // Computed accessor keys (`accessor [expr]`) are not yet supported; they
+    // require capturing the computed key in a temp slot at class-definition time.
+    for element in elements {
+        let ClassElement::AccessorProperty(accessor) = element else {
+            continue;
+        };
+        let backing_name = accessor_backing_field_name(accessor);
+        let Some(&slot) = private_field_slots.get(&backing_name) else {
+            continue;
+        };
+        let key_name = match &accessor.key {
+            PropertyKey::StaticIdentifier(id) => id.name.as_str().to_string(),
+            PropertyKey::StringLiteral(s) => s.value.as_str().to_string(),
+            // Computed accessor keys are not yet lowered; silently skip for now.
+            // TODO: capture computed key into a synthetic private slot at class init.
+            _ => continue,
+        };
 
-            // Setter: `set <key>(v) { this.#backing = v; }`
-            let setter_name = format!("#{class_name}_set_{key_name}#");
-            let setter_compiled = {
-                let mut cg = CodeGen::new(strings, literal_arrays, lowering);
-                cg.private_field_slots = private_field_slots.clone();
-                let val_reg = cg.alloc_reg();
-                let this_reg = cg.alloc_reg();
-                // Load the value argument (first user param = arg index 3 = placeholder).
-                cg.push(Insn::Lda(function_arg_placeholder(3)));
-                cg.push(Insn::Sta(val_reg));
-                cg.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
-                cg.push(Insn::Sta(this_reg));
-                // Load value, then store to private field.
-                cg.push(Insn::Lda(val_reg));
-                cg.push(Insn::StPrivateProperty(0, 0, slot, this_reg));
-                cg.push_with_epilogue(Insn::ReturnUndefined);
-                cg.returned = true;
-                cg.finish_with_catches()
-            };
-            methods.push(MethodRecord {
-                name: setter_name,
-                bytecode: setter_compiled.bytecode,
-                num_vregs: setter_compiled.vregs,
-                num_args: 4, // 3 mandatory + 1 value param
-                debug_info: None,
-                line_ops: Vec::new(),
-                catch_entries: setter_compiled.catches,
-                kind: MethodKind::Function,
-                method_pool_entry: true,
-                definefunc_order: None,
-            });
-        }
+        // Getter: `get <key>() { return this.#backing; }`
+        let getter_name = format!("#{class_name}_get_{key_name}#");
+        let getter_compiled = {
+            let mut cg = CodeGen::new(strings, literal_arrays, lowering);
+            cg.private_field_slots = private_field_slots.clone();
+            cg.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
+            cg.push(Insn::LdPrivateProperty(0, 0, slot));
+            cg.push_with_epilogue(Insn::Return);
+            cg.returned = true;
+            cg.finish_with_catches()
+        };
+        methods.push(MethodRecord {
+            name: getter_name,
+            bytecode: getter_compiled.bytecode,
+            num_vregs: getter_compiled.vregs,
+            num_args: 3,
+            debug_info: None,
+            line_ops: Vec::new(),
+            catch_entries: getter_compiled.catches,
+            kind: MethodKind::Function,
+            method_pool_entry: true,
+            definefunc_order: None,
+        });
+
+        // Setter: `set <key>(v) { this.#backing = v; }`
+        let setter_name = format!("#{class_name}_set_{key_name}#");
+        let setter_compiled = {
+            let mut cg = CodeGen::new(strings, literal_arrays, lowering);
+            cg.private_field_slots = private_field_slots.clone();
+            let val_reg = cg.alloc_reg();
+            let this_reg = cg.alloc_reg();
+            // Load the value argument (first user param = arg index 3 = placeholder).
+            cg.push(Insn::Lda(function_arg_placeholder(3)));
+            cg.push(Insn::Sta(val_reg));
+            cg.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
+            cg.push(Insn::Sta(this_reg));
+            // Load value, then store to private field.
+            cg.push(Insn::Lda(val_reg));
+            cg.push(Insn::StPrivateProperty(0, 0, slot, this_reg));
+            cg.push_with_epilogue(Insn::ReturnUndefined);
+            cg.returned = true;
+            cg.finish_with_catches()
+        };
+        methods.push(MethodRecord {
+            name: setter_name,
+            bytecode: setter_compiled.bytecode,
+            num_vregs: setter_compiled.vregs,
+            num_args: 4, // 3 mandatory + 1 value param
+            debug_info: None,
+            line_ops: Vec::new(),
+            catch_entries: setter_compiled.catches,
+            kind: MethodKind::Function,
+            method_pool_entry: true,
+            definefunc_order: None,
+        });
     }
 }
 

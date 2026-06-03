@@ -664,4 +664,72 @@ registerNamedRoute(() => new Index(undefined, {}), "", {});
         let _ = std::fs::remove_file(&out1);
         let _ = std::fs::remove_file(&out2);
     }
+
+    // ── Auto-accessor regression test ───────────────────────────────────────
+
+    /// Regression: auto-accessor getter/setter was emitted once per class
+    /// element (N duplicates) because the accessor loop was nested inside
+    /// the method-definition loop.  This test compiles at the IR level and
+    /// counts MethodRecords directly — not binary substrings — to verify
+    /// exactly one getter and one setter is produced regardless of how many
+    /// other class elements are present.
+    #[test]
+    fn test_auto_accessor_no_duplicate_records() {
+        use crate::emit::strings::StringTable;
+        use crate::ir::builder::build_record_with_debug_and_package_for_target;
+
+        // Class has 4 elements: 1 auto-accessor + 3 regular methods.
+        // Buggy code emitted N getter+setter pairs (N = number of elements);
+        // correct code emits exactly 1 pair for the single auto-accessor.
+        let source = r#"
+class Counter {
+    accessor count = 0;
+    method1() { return 1; }
+    method2() { return 2; }
+    method3() { return 3; }
+}
+"#;
+        let mut strings = StringTable::default();
+        let mut literals = Vec::new();
+        let record = build_record_with_debug_and_package_for_target(
+            source,
+            "test/AutoAccessor",
+            &mut strings,
+            &mut literals,
+            None,  // source_file
+            None,  // package_name
+            false, // is_commonjs
+            false, // is_module
+            12,    // target_api_version
+            None,  // sub_version
+        )
+        .expect("auto-accessor class must compile");
+
+        // Count getter/setter MethodRecords by name pattern.
+        let getters: Vec<_> = record
+            .methods
+            .iter()
+            .filter(|m| m.name.contains("_get_count"))
+            .collect();
+        let setters: Vec<_> = record
+            .methods
+            .iter()
+            .filter(|m| m.name.contains("_set_count"))
+            .collect();
+
+        assert_eq!(
+            getters.len(),
+            1,
+            "expected exactly 1 auto-accessor getter record; found {}: {:?}",
+            getters.len(),
+            getters.iter().map(|m| &m.name).collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            setters.len(),
+            1,
+            "expected exactly 1 auto-accessor setter record; found {}: {:?}",
+            setters.len(),
+            setters.iter().map(|m| &m.name).collect::<Vec<_>>(),
+        );
+    }
 }
