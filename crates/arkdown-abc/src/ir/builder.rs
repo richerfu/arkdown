@@ -1594,6 +1594,16 @@ impl UnsupportedScanner<'_> {
                 self.scan_expression(&stmt.right)?;
                 self.scan_statement(&stmt.body)
             }
+            Statement::SwitchStatement(stmt) => {
+                self.scan_expression(&stmt.discriminant)?;
+                for case in &stmt.cases {
+                    if let Some(test) = &case.test {
+                        self.scan_expression(test)?;
+                    }
+                    self.scan_statements(&case.consequent)?;
+                }
+                Ok(())
+            }
             Statement::TryStatement(stmt) => {
                 self.scan_statements(&stmt.block.body)?;
                 if let Some(handler) = &stmt.handler {
@@ -2831,9 +2841,69 @@ impl<'a> CodeGen<'a> {
             Statement::ForOfStatement(for_of) => {
                 self.emit_for_of_stmt(for_of);
             }
+            Statement::SwitchStatement(switch) => {
+                self.emit_switch_stmt(switch);
+            }
             // Everything else: no bytecode emitted.
             _ => {}
         }
+    }
+
+    fn emit_switch_stmt(&mut self, switch: &'a oxc_ast::ast::SwitchStatement<'a>) {
+        let saved_next_reg = self.next_reg;
+        let tag_reg = self.alloc_reg();
+        self.emit_expr(&switch.discriminant);
+        self.push(Insn::Sta(tag_reg));
+
+        if switch.cases.is_empty() {
+            self.next_reg = saved_next_reg;
+            return;
+        }
+
+        let mut case_jumps = Vec::with_capacity(switch.cases.len());
+        let mut default_index = None;
+        for (idx, case) in switch.cases.iter().enumerate() {
+            if let Some(test) = &case.test {
+                self.emit_expr(test);
+                self.push(Insn::StrictEq(0, tag_reg));
+                let jump_pos = self.insns.len();
+                self.push(Insn::Jnez(0));
+                case_jumps.push((idx, jump_pos));
+            } else {
+                default_index = Some(idx);
+            }
+        }
+
+        let no_match_jump = self.insns.len();
+        self.push(Insn::Jmp(0));
+
+        let outer_breaks = std::mem::take(&mut self.break_patches);
+        let outer_returned = self.returned;
+        self.returned = false;
+
+        let mut case_targets = vec![0usize; switch.cases.len()];
+        for (idx, case) in switch.cases.iter().enumerate() {
+            case_targets[idx] = self.insns.len();
+            for stmt in &case.consequent {
+                self.emit_stmt(stmt);
+                if self.returned {
+                    break;
+                }
+            }
+            self.returned = false;
+        }
+
+        let end = self.insns.len();
+        for (idx, jump_pos) in case_jumps {
+            self.patch_jump_to(jump_pos, case_targets[idx]);
+        }
+        let no_match_target = default_index.map(|idx| case_targets[idx]).unwrap_or(end);
+        self.patch_jump_to(no_match_jump, no_match_target);
+
+        let breaks = std::mem::replace(&mut self.break_patches, outer_breaks);
+        self.patch_jumps_to(breaks, end);
+        self.returned = outer_returned;
+        self.next_reg = saved_next_reg;
     }
 
     // ── While loop ────────────────────────────────────────────────────────────

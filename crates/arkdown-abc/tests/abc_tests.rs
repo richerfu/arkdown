@@ -2609,6 +2609,53 @@ const method = receiver.tag`only`;
 }
 
 #[test]
+fn test_switch_statement_uses_strict_equality_dispatch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("switch_statement.abc");
+    let record_name = "test/switch_statement";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"
+let input = 2;
+let value = 0;
+switch (input) {
+  case 1:
+    value = 10;
+    break;
+  case 2:
+    value = 20;
+  default:
+    value += 1;
+}
+export default value;
+"#,
+            )],
+            &out,
+        )
+        .expect("compile switch statement source");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x28),
+        "switch case tests must use strict equality"
+    );
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x9b),
+        "matching switch cases must branch to their case bodies"
+    );
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x4e),
+        "switch dispatch and break must use patched jumps"
+    );
+    assert!(
+        bytecode.windows(2).any(|window| window == [0x7c, 0x00]),
+        "code after switch must still export the selected value"
+    );
+}
+
+#[test]
 fn test_delete_global_identifier_uses_global_object_delete() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("delete_global.abc");
