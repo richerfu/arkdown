@@ -1528,6 +1528,12 @@ impl UnsupportedScanner<'_> {
 
     fn scan_statement(&mut self, stmt: &Statement<'_>) -> Result<(), AbcError> {
         match stmt {
+            Statement::BreakStatement(brk) if brk.label.is_some() => {
+                Err(self.unsupported("LabeledBreakStatement"))
+            }
+            Statement::ContinueStatement(cont) if cont.label.is_some() => {
+                Err(self.unsupported("LabeledContinueStatement"))
+            }
             Statement::BlockStatement(block) => self.scan_statements(&block.body),
             Statement::ExpressionStatement(expr) => self.scan_expression(&expr.expression),
             Statement::VariableDeclaration(decl) => self.scan_variable_declaration(decl),
@@ -1546,6 +1552,8 @@ impl UnsupportedScanner<'_> {
                 }
                 Ok(())
             }
+            Statement::LabeledStatement(stmt) => self.scan_statement(&stmt.body),
+            Statement::WithStatement(_) => Err(self.unsupported("WithStatement")),
             Statement::WhileStatement(stmt) => {
                 self.scan_expression(&stmt.test)?;
                 self.scan_statement(&stmt.body)
@@ -2843,6 +2851,9 @@ impl<'a> CodeGen<'a> {
             }
             Statement::SwitchStatement(switch) => {
                 self.emit_switch_stmt(switch);
+            }
+            Statement::LabeledStatement(labeled) => {
+                self.emit_stmt(&labeled.body);
             }
             // Everything else: no bytecode emitted.
             _ => {}

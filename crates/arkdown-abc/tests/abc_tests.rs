@@ -2656,6 +2656,59 @@ export default value;
 }
 
 #[test]
+fn test_labeled_statement_emits_body() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("labeled_statement.abc");
+    let record_name = "test/labeled_statement";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"let value = 0;
+label: value = 1;
+export default value;"#,
+            )],
+            &out,
+        )
+        .expect("compile labeled statement source");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+    assert!(
+        bytecode
+            .windows(5)
+            .any(|window| window == [0x62, 0x01, 0x00, 0x00, 0x00]),
+        "plain labels must emit their body instead of dropping it"
+    );
+}
+
+#[test]
+fn test_labeled_break_is_rejected_until_label_targets_are_supported() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("labeled_break.abc");
+    let err = match module_compiler().compile(
+        vec![module_record(
+            "test/labeled_break",
+            r#"outer: while (true) { break outer; }"#,
+        )],
+        &out,
+    ) {
+        Ok(_) => panic!("labeled break must not be silently compiled as an unlabeled break"),
+        Err(err) => err,
+    };
+
+    assert!(
+        matches!(
+            err,
+            AbcError::UnsupportedConstruct {
+                ref construct,
+                ..
+            } if construct == "LabeledBreakStatement"
+        ),
+        "labeled break must be rejected until label target lowering is implemented, got {err:?}"
+    );
+}
+
+#[test]
 fn test_delete_global_identifier_uses_global_object_delete() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("delete_global.abc");
