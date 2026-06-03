@@ -276,7 +276,14 @@ pub fn build_record_with_debug_and_source_map_for_target(
             source_mapper,
         )
     } else {
-        compile_program_body(&program, strings, literal_arrays, &lowering, is_module)
+        compile_program_body(
+            &program,
+            strings,
+            literal_arrays,
+            &lowering,
+            is_module,
+            source,
+        )
     };
     methods.push(MethodRecord {
         name: "func_main_0".to_string(),
@@ -946,6 +953,7 @@ fn compile_program_body(
     literal_arrays: &mut Vec<LiteralArray>,
     lowering: &LoweringContext,
     _is_module: bool,
+    source: &str,
 ) -> BodyCompileResult {
     compile_body_stmts(
         &program.body,
@@ -955,6 +963,7 @@ fn compile_program_body(
         true,
         &[],
         None,
+        Some(source),
     )
 }
 
@@ -976,6 +985,7 @@ fn compile_function_body(
             false,
             param_names,
             current_function_span,
+            None,
         ),
         None => {
             let mut st = StringTable::default();
@@ -1342,8 +1352,10 @@ fn compile_body_stmts(
     module_body: bool,
     param_names: &[String],
     current_function_span: Option<(u32, u32)>,
+    source: Option<&str>,
 ) -> BodyCompileResult {
     let mut cg = CodeGen::new(strings, literal_arrays, lowering);
+    cg.source = source;
     cg.module_body = module_body;
     if module_body {
         cg.use_module_lexical_env();
@@ -3687,6 +3699,9 @@ impl<'a> CodeGen<'a> {
                 let id = self.intern(s.value.as_str());
                 self.push(Insn::LdaStr(id));
             }
+            Expression::RegExpLiteral(regex) => {
+                self.emit_regexp_literal(regex);
+            }
             Expression::BooleanLiteral(b) => {
                 if b.value {
                     self.push(Insn::LdTrue);
@@ -4164,6 +4179,40 @@ impl<'a> CodeGen<'a> {
             }
         }
         self.push(Insn::Lda(arr_reg));
+    }
+
+    // ── RegExp literal: /pattern/flags ───────────────────────────────────────
+
+    fn emit_regexp_literal(&mut self, regex: &oxc_ast::ast::RegExpLiteral<'_>) {
+        let ctor_name = self.intern("RegExp");
+        self.push(Insn::TryLdGlobalByName(0, ctor_name));
+        let ctor_reg = self.alloc_reg();
+        self.push(Insn::Sta(ctor_reg));
+
+        let pattern_id = self.intern(regex.regex.pattern.text.as_str());
+        self.push(Insn::LdaStr(pattern_id));
+        let pattern_reg = self.alloc_reg();
+        self.push(Insn::Sta(pattern_reg));
+
+        let mut arg_count = 2u8;
+        let flags = self
+            .source
+            .and_then(|source| {
+                let literal = source.get(regex.span.start as usize..regex.span.end as usize)?;
+                literal.rsplit_once('/').map(|(_, flags)| flags)
+            })
+            .filter(|flags| !flags.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| regex.regex.flags.to_string());
+        if !flags.is_empty() {
+            let flags_id = self.intern(&flags);
+            self.push(Insn::LdaStr(flags_id));
+            let flags_reg = self.alloc_reg();
+            self.push(Insn::Sta(flags_reg));
+            arg_count = 3;
+        }
+
+        self.push(Insn::NewObjRange(0, arg_count, ctor_reg));
     }
 
     // ── Object literal: { key: value, … } ────────────────────────────────────

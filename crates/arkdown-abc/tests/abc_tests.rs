@@ -335,40 +335,50 @@ fn code_item_tries_size(bytes: &[u8], code_off: usize) -> u64 {
     read_uleb(bytes, &mut pos)
 }
 
+fn bytecode_insn_len(bytecode: &[u8], pos: usize, opcode: u8) -> usize {
+    match opcode {
+        0x05 => 2,
+        0x07 | 0x08 => 4,
+        0x33 | 0x34 => 5,
+        0x35 => 9,
+        0x06 => 4,
+        0x0a..=0x1b | 0x25 | 0x26 | 0x27 | 0x28 => 3,
+        0x37 => 3,
+        0x38 => 4,
+        0x3e => 3,
+        0x36 | 0x67 | 0xc2 | 0xc5 => 2,
+        0x68 | 0x77 | 0xb4 | 0xb9 | 0xc6 => 3,
+        0x3f | 0x40 | 0x42 => 4,
+        0x43 | 0x8e | 0xbc | 0xdb | 0xdc => 5,
+        0x31 | 0x32 | 0x73 | 0x78 | 0x99 | 0xba => 4,
+        0x62 => 5,
+        0x79 => 5,
+        0x8a | 0x8b => 3,
+        0x44 | 0x60 | 0x61 | 0x7c | 0x7d | 0x3c | 0x3d | 0xb1 | 0xc3 | 0xc4 | 0xcd | 0xce => 2,
+        0x1d | 0x21 | 0x22 => 2,
+        0x6d | 0xbf | 0xc0 => 1,
+        0xfe if bytecode.get(pos + 1) == Some(&0x09) => 4,
+        0xfe if matches!(bytecode.get(pos + 1), Some(0x05 | 0x07)) => 3,
+        0xfe => 2,
+        _ => 1,
+    }
+}
+
 fn bytecode_contains_opcode(bytecode: &[u8], target: u8) -> bool {
     let mut pos = 0usize;
     while let Some(&opcode) = bytecode.get(pos) {
         if opcode == target {
             return true;
         }
-        pos += match opcode {
-            0x05 => 2,
-            0x07 => 4,
-            0x33 | 0x34 => 5,
-            0x35 => 9,
-            0x06 => 4,
-            0x0a..=0x1b | 0x25 | 0x26 | 0x27 | 0x28 => 3,
-            0x37 => 3,
-            0x38 => 4,
-            0x3e => 3,
-            0x36 | 0x67 | 0xc2 | 0xc5 => 2,
-            0x68 | 0x77 | 0xb4 | 0xb9 | 0xc6 => 3,
-            0x3f | 0x40 | 0x42 => 4,
-            0x43 | 0x8e | 0xbc | 0xdb | 0xdc => 5,
-            0x31 | 0x32 | 0x73 | 0x78 | 0x99 | 0xba => 4,
-            0x62 => 5,
-            0x79 => 5,
-            0x8a | 0x8b => 3,
-            0x44 | 0x60 | 0x61 | 0x7c | 0x7d | 0x3c | 0x3d | 0xb1 | 0xc3 | 0xc4 | 0xcd | 0xce => 2,
-            0x1d | 0x21 | 0x22 => 2,
-            0x6d | 0xbf | 0xc0 => 1,
-            0xfe if bytecode.get(pos + 1) == Some(&0x09) => 4,
-            0xfe if matches!(bytecode.get(pos + 1), Some(0x05 | 0x07)) => 3,
-            0xfe => 2,
-            _ => 1,
-        };
+        pos += bytecode_insn_len(bytecode, pos, opcode);
     }
     false
+}
+
+fn bytes_contain_ascii(bytes: &[u8], text: &str) -> bool {
+    bytes
+        .windows(text.len())
+        .any(|window| window == text.as_bytes())
 }
 
 // ---------------------------------------------------------------------------
@@ -2679,6 +2689,56 @@ obj.value++;
     assert!(
         bytecode_contains_opcode(&bytecode, 0x37) && bytecode_contains_opcode(&bytecode, 0x38),
         "computed member update must read and write through property lreference"
+    );
+}
+
+#[test]
+fn test_regexp_literal_uses_upstream_regexp_constructor_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("regexp_literal.abc");
+    let record_name = "test/regexp_literal";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"
+const plain = /foo/;
+const flagged = /bar/ig;
+"#,
+            )],
+            &out,
+        )
+        .expect("compile regexp literal source");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x3f),
+        "regexp literal must load global RegExp like upstream TryLoadGlobalByName"
+    );
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x3e),
+        "regexp literal must load pattern and flags with lda.str"
+    );
+    assert!(
+        bytecode
+            .windows(4)
+            .any(|window| window[0] == 0x08 && window[2] == 2 && window[3] == 0),
+        "regexp literal without flags must call newobjrange with [ctor, pattern]"
+    );
+    assert!(
+        bytecode
+            .windows(4)
+            .any(|window| window[0] == 0x08 && window[2] == 3 && window[3] == 3),
+        "regexp literal with flags must call newobjrange with [ctor, pattern, flags]"
+    );
+
+    assert!(bytes_contain_ascii(&bytes, "RegExp"));
+    assert!(bytes_contain_ascii(&bytes, "foo"));
+    assert!(bytes_contain_ascii(&bytes, "bar"));
+    assert!(
+        bytes_contain_ascii(&bytes, "gi"),
+        "regexp flags must be emitted as the constructor flags argument"
     );
 }
 
