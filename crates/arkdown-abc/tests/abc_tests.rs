@@ -347,6 +347,7 @@ fn bytecode_contains_opcode(bytecode: &[u8], target: u8) -> bool {
             0x33 | 0x34 => 5,
             0x35 => 9,
             0x06 => 4,
+            0x0a..=0x1b | 0x25 | 0x26 | 0x27 | 0x28 => 3,
             0x37 => 3,
             0x38 => 4,
             0x3e => 3,
@@ -2134,6 +2135,72 @@ fn test_in_operator_emits_isin_opcode() {
     assert!(
         bytes.contains(&0x25),
         "isin opcode (0x25) must appear for 'in' operator"
+    );
+}
+
+#[test]
+fn test_instanceof_operator_emits_instanceof_opcode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("instanceof.abc");
+    let record_name = "test/instanceof";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"const result = value instanceof Ctor;"#,
+            )],
+            &out,
+        )
+        .expect("compile instanceof source");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x26),
+        "instanceof must emit upstream instanceof opcode (0x26)"
+    );
+}
+
+#[test]
+fn test_exponential_operator_emits_exp_opcode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("exp.abc");
+    let record_name = "test/exp";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"const result = base ** power;"#,
+            )],
+            &out,
+        )
+        .expect("compile exponent source");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x1b),
+        "exponentiation must emit upstream exp opcode (0x1b)"
+    );
+}
+
+#[test]
+fn test_exponential_assignment_emits_exp_opcode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("exp_assign.abc");
+    let record_name = "test/exp_assign";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"let value = 2; value **= power;"#,
+            )],
+            &out,
+        )
+        .expect("compile exponent assignment source");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x1b),
+        "exponentiation assignment must emit upstream exp opcode (0x1b)"
     );
 }
 

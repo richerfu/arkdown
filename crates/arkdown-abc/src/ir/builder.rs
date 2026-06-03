@@ -5419,6 +5419,7 @@ impl<'a> CodeGen<'a> {
             Op::Multiplication => self.push(Insn::Mul2(0, left_reg)),
             Op::Division => self.push(Insn::Div2(0, left_reg)),
             Op::Remainder => self.push(Insn::Mod2(0, left_reg)),
+            Op::Exponential => self.push(Insn::Exp(0, left_reg)),
             Op::Equality => self.push(Insn::Eq(0, left_reg)),
             Op::Inequality => self.push(Insn::NotEq(0, left_reg)),
             Op::StrictEquality => self.push(Insn::StrictEq(0, left_reg)),
@@ -5436,8 +5437,9 @@ impl<'a> CodeGen<'a> {
             Op::In => {
                 self.push(Insn::IsIn(0, left_reg));
             }
-            // instanceof, ** etc. — emit acc for now.
-            _ => {}
+            Op::Instanceof => {
+                self.push(Insn::InstanceOf(0, left_reg));
+            }
         }
     }
 
@@ -5448,6 +5450,7 @@ impl<'a> CodeGen<'a> {
             AssignmentOperator::Multiplication => self.push(Insn::Mul2(0, left_reg)),
             AssignmentOperator::Division => self.push(Insn::Div2(0, left_reg)),
             AssignmentOperator::Remainder => self.push(Insn::Mod2(0, left_reg)),
+            AssignmentOperator::Exponential => self.push(Insn::Exp(0, left_reg)),
             AssignmentOperator::ShiftLeft => self.push(Insn::Shl2(0, left_reg)),
             AssignmentOperator::ShiftRight => self.push(Insn::Shr2(0, left_reg)),
             AssignmentOperator::ShiftRightZeroFill => self.push(Insn::Ashr2(0, left_reg)),

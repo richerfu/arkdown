@@ -116,6 +116,8 @@ pub enum Insn {
     Or2(u8, u8),
     /// `0x1A` — `acc = acc ^ v[vreg]`.
     Xor2(u8, u8),
+    /// `0x1B` — `acc = acc ** v[vreg]`.
+    Exp(u8, u8),
 
     // ── Unary operators ───────────────────────────────────────────────────────
     // Format: `op_imm_8` — opcode(1) + slot(1) = 2 bytes. Operand is acc.
@@ -163,6 +165,10 @@ pub enum Insn {
     /// Semantics: acc holds the property key; v[vreg] holds the object.
     /// Encoding: `[0x25] [slot: u8] [vreg: u8]` = 3 bytes.
     IsIn(u8, u8),
+
+    /// `0x26` `op_imm_8_v_8` — `acc = v[vreg] instanceof acc`.
+    /// Encoding: `[0x26] [slot: u8] [vreg: u8]` = 3 bytes.
+    InstanceOf(u8, u8),
 
     // ── Strict equality / inequality ──────────────────────────────────────────
     /// `0x27` — `acc = acc !== v[vreg]`.
@@ -561,7 +567,9 @@ impl Insn {
             | Insn::And2(_, _)
             | Insn::Or2(_, _)
             | Insn::Xor2(_, _)
+            | Insn::Exp(_, _)
             | Insn::IsIn(_, _)
+            | Insn::InstanceOf(_, _)
             | Insn::StrictNotEq(_, _)
             | Insn::StrictEq(_, _)
             | Insn::CallArg1(_, _)
@@ -678,6 +686,7 @@ impl Insn {
             Insn::And2(slot, vreg) => vec![0x18, *slot, *vreg],
             Insn::Or2(slot, vreg) => vec![0x19, *slot, *vreg],
             Insn::Xor2(slot, vreg) => vec![0x1A, *slot, *vreg],
+            Insn::Exp(slot, vreg) => vec![0x1B, *slot, *vreg],
 
             // ── unary operators ───────────────────────────────────────────────
             Insn::TypeOf(slot) => vec![0x1C, *slot],
@@ -695,6 +704,7 @@ impl Insn {
 
             // ── in operator ───────────────────────────────────────────────────
             Insn::IsIn(slot, vreg) => vec![0x25, *slot, *vreg],
+            Insn::InstanceOf(slot, vreg) => vec![0x26, *slot, *vreg],
 
             // ── strict equality ───────────────────────────────────────────────
             Insn::StrictNotEq(slot, vreg) => vec![0x27, *slot, *vreg],
@@ -948,7 +958,9 @@ impl Insn {
             | Insn::And2(_, _)
             | Insn::Or2(_, _)
             | Insn::Xor2(_, _)
+            | Insn::Exp(_, _)
             | Insn::IsIn(_, _)
+            | Insn::InstanceOf(_, _)
             | Insn::StrictNotEq(_, _)
             | Insn::StrictEq(_, _) => 3,
             Insn::TypeOf(_) | Insn::Neg(_) | Insn::BitNot(_) | Insn::Inc(_) | Insn::Dec(_) => 2,
