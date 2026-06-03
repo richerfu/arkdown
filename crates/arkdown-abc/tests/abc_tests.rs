@@ -4279,6 +4279,105 @@ export default f;
 }
 
 #[test]
+fn test_nested_try_catch_finally_emits_correct_catch_table() {
+    // Upstream: `try { try { } catch(e) { } } finally { }` produces nested
+    // catch entries — inner try-catch + outer try-finally.
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("nested_try_finally.abc");
+    let record_name = "test/nested_try_finally";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"
+function f(val) {
+  try {
+    try { return val; } catch (e) { log(e); }
+  } finally {
+    cleanup();
+  }
+}
+export default f;
+"#,
+            )],
+            &out,
+        )
+        .expect("nested try-catch-finally must compile");
+    let bytes = std::fs::read(&out).unwrap();
+    let (_, tries_size) = first_non_main_method_bytecode_and_tries(&bytes, record_name);
+    // Inner try-catch has 1 entry; outer try-finally adds 2 more (inner + outer).
+    assert!(
+        tries_size >= 3,
+        "nested try-catch-finally must emit at least 3 catch table entries, got {tries_size}"
+    );
+}
+
+#[test]
+fn test_top_level_await_uses_async_function_enter_opcode() {
+    // Top-level await (TLA): module-level `await expr` is supported in module
+    // mode and must emit the asyncfunctionenter (0xbb) prologue at module level.
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("tla.abc");
+    let record_name = "test/tla";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"const x = await Promise.resolve(42);"#,
+            )],
+            &out,
+        )
+        .expect("top-level await must compile in module mode");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+    // TLA wraps the module body in an async context — asyncfunctionenter (0xbb)
+    // must appear in the module's func_main_0.
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0xbb),
+        "top-level await must emit asyncfunctionenter (0xbb) in func_main_0"
+    );
+}
+
+#[test]
+fn test_for_of_continue_calls_iterator_next_on_next_iteration() {
+    // Upstream: `continue` inside for-of does NOT close the iterator; it just
+    // jumps back to the loop header. The catch table must cover the body so
+    // that only abrupt exits close the iterator.
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("for_of_continue.abc");
+    let record_name = "test/for_of_continue";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"
+function f(values) {
+  for (const v of values) {
+    if (cond) continue;
+    use(v);
+  }
+}
+export default f;
+"#,
+            )],
+            &out,
+        )
+        .expect("for-of continue must compile");
+    let bytes = std::fs::read(&out).unwrap();
+    let (bytecode, tries_size) = first_non_main_method_bytecode_and_tries(&bytes, record_name);
+    // Same catch-table shape as for-of return/break: init + body + close.
+    assert!(
+        tries_size >= 3,
+        "for-of continue must have init+body+close catch tables"
+    );
+    // Must call iterator.next (callthis0 = 0x2a).
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x2a),
+        "for-of must call iterator.next via callthis0 (0x2a)"
+    );
+}
+
+#[test]
 fn test_private_field_is_rejected_instead_of_mangled_public_fallback() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("private_field.abc");

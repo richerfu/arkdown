@@ -1601,6 +1601,11 @@ fn compile_body_stmts(
         cg.bind_param_names(param_names);
         cg.emit_ts_enum_var_hoists(stmts);
         cg.emit_function_hoists(stmts);
+        // Top-level await (TLA): emit async prologue so `await` is valid.
+        if stmts_have_top_level_await(stmts) {
+            cg.is_async = true;
+            cg.emit_async_function_prologue();
+        }
     } else {
         cg.use_function_lexical_env(current_function_span);
         cg.emit_function_lex_env_prologue();
@@ -1646,6 +1651,11 @@ fn compile_body_stmts_tracked(
         cg.bind_param_names(param_names);
         cg.emit_ts_enum_var_hoists(stmts);
         cg.emit_function_hoists(stmts);
+        // Top-level await (TLA): emit async prologue so `await` is valid.
+        if stmts_have_top_level_await(stmts) {
+            cg.is_async = true;
+            cg.emit_async_function_prologue();
+        }
     } else {
         cg.use_function_lexical_env(current_function_span);
         cg.emit_function_lex_env_prologue();
@@ -1663,6 +1673,59 @@ fn compile_body_stmts_tracked(
         }
     }
     cg.finish_with_line_ops_and_catches()
+}
+
+/// Returns true if `stmts` contains a top-level `await` expression.
+///
+/// Upstream es2abc wraps the module body in an async context when TLA is
+/// detected, emitting `asyncfunctionenter` and treating the module's
+/// `func_main_0` as async.
+fn stmts_have_top_level_await(stmts: &[Statement<'_>]) -> bool {
+    stmts.iter().any(stmt_has_await)
+}
+
+fn stmt_has_await(stmt: &Statement<'_>) -> bool {
+    match stmt {
+        Statement::ExpressionStatement(es) => expr_has_await(&es.expression),
+        Statement::VariableDeclaration(decl) => decl.declarations.iter().any(|d| {
+            d.init.as_ref().map(|e| expr_has_await(e)).unwrap_or(false)
+        }),
+        Statement::ReturnStatement(ret) => {
+            ret.argument.as_ref().map(|e| expr_has_await(e)).unwrap_or(false)
+        }
+        Statement::BlockStatement(block) => stmts_have_top_level_await(&block.body),
+        Statement::IfStatement(if_) => {
+            expr_has_await(&if_.test)
+                || stmt_has_await(&if_.consequent)
+                || if_.alternate.as_ref().map(|a| stmt_has_await(a)).unwrap_or(false)
+        }
+        _ => false,
+    }
+}
+
+fn expr_has_await(expr: &Expression<'_>) -> bool {
+    match expr {
+        Expression::AwaitExpression(_) => true,
+        Expression::BinaryExpression(b) => expr_has_await(&b.left) || expr_has_await(&b.right),
+        Expression::CallExpression(c) => {
+            expr_has_await(&c.callee)
+                || c.arguments.iter().any(|a| match a {
+                    Argument::SpreadElement(s) => expr_has_await(&s.argument),
+                    _ => {
+                        let e: &Expression<'_> = a.as_expression().unwrap();
+                        expr_has_await(e)
+                    }
+                })
+        }
+        Expression::StaticMemberExpression(m) => expr_has_await(&m.object),
+        Expression::ComputedMemberExpression(m) => expr_has_await(&m.object),
+        Expression::SequenceExpression(s) => s.expressions.iter().any(expr_has_await),
+        Expression::ParenthesizedExpression(p) => expr_has_await(&p.expression),
+        Expression::ConditionalExpression(c) => {
+            expr_has_await(&c.test) || expr_has_await(&c.consequent) || expr_has_await(&c.alternate)
+        }
+        _ => false,
+    }
 }
 
 fn is_hoisted_function_declaration(stmt: &Statement<'_>) -> bool {
