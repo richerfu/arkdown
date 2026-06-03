@@ -24,13 +24,16 @@ gap is either implemented with focused tests or rejected with
   target (`classReg` for static, `protoReg` for instance).
 - [x] Lower public static computed class fields through precomputed keys passed
   into upstream-shaped static initializer functions.
+- [x] Lower public computed class methods/accessors through precomputed keys
+  and upstream-shaped missing-property definitions.
 - [ ] Port instance computed fields and auto-accessor properties through their
   upstream class-environment lowering.
 - [x] Reject unsupported `with`, destructuring bindings/assignments, private
   names, JSX, V8 intrinsics, `import.meta`, and generator/yield lowering.
 - [ ] Port full destructuring binding and assignment lowering.
 - [ ] Port private field/private-in lowering with private environment support.
-- [ ] Port computed class keys, auto-accessor properties, and private elements.
+- [ ] Port remaining computed class keys, auto-accessor properties, and private
+  elements.
 - [ ] Port generator and async-generator state-machine lowering.
 - [x] Lower TypeScript enum runtime declarations with upstream transformer
   semantics for name/value and numeric reverse mappings.

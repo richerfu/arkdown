@@ -4241,30 +4241,44 @@ class Box { static [name] = 1; }"#,
 }
 
 #[test]
-fn test_computed_class_method_is_rejected_until_class_key_lowering_is_supported() {
+fn test_computed_class_methods_use_precomputed_keys_in_missing_properties() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("computed_class_method.abc");
-    let err = match module_compiler().compile(
-        vec![module_record(
-            "test/computed_class_method",
-            r#"const name = "run";
-class Box { [name]() { return 1; } }"#,
-        )],
-        &out,
-    ) {
-        Ok(_) => panic!("computed class methods must not be dropped from the class buffer"),
-        Err(err) => err,
-    };
+    let record_name = "test/computed_class_method";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"const name = "run";
+const staticName = "make";
+const getterName = "value";
+class Box {
+  [name]() { return 1; }
+  static [staticName]() { return 2; }
+  get [getterName]() { return 3; }
+}"#,
+            )],
+            &out,
+        )
+        .expect("computed class methods must lower through missing-properties");
 
+    let bytes = std::fs::read(&out).unwrap();
+    let main = module_func_main_bytecode(&bytes, record_name);
     assert!(
-        matches!(
-            err,
-            AbcError::UnsupportedConstruct {
-                ref construct,
-                ..
-            } if construct == "ComputedClassMethod"
-        ),
-        "computed class methods must be rejected until upstream key lowering is implemented, got {err:?}"
+        bytecode_opcode_count(&main, 0x34) >= 2,
+        "computed class methods must define method functions outside the class buffer"
+    );
+    assert!(
+        bytecode_opcode_count(&main, 0x78) >= 2,
+        "computed class methods must store onto prototype/class by precomputed key value"
+    );
+    assert!(
+        bytecode_contains_opcode(&main, 0xbc),
+        "computed class accessors must define getter/setter pairs by precomputed key value"
+    );
+    assert!(
+        bytes_contain_ascii(&bytes, "computed_class_method"),
+        "computed class methods must still emit callable method records"
     );
 }
 

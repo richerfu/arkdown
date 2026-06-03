@@ -23,9 +23,9 @@ use crate::ir::ast_analysis::{
     stmts_capture_this_in_arrow, ArrowCaptures,
 };
 use crate::ir::class_layout::{
-    class_buffer_literal_array, class_method_num_args, class_method_record_name,
-    constructor_required_param_count, is_class_buffer_method, method_key_name,
-    static_initializer_record_name,
+    class_buffer_literal_array, class_method_inferred_name, class_method_num_args,
+    class_method_record_name, computed_class_method_record_name, constructor_required_param_count,
+    is_class_buffer_method, method_key_name, static_initializer_record_name,
 };
 use crate::ir::debug_lnp::{argument_span_start, col_at, line_at, LineTracker, SourceMapper};
 use crate::ir::function_lexical::collect_function_lexical_bindings;
@@ -473,7 +473,7 @@ fn first_scope_names_owner_in_class(elements: &[ClassElement<'_>]) -> Option<Str
         if !method_body_contains_arrow(method) {
             continue;
         }
-        if let Some(name) = method_key_name(&method.key) {
+        if let Some(name) = class_method_inferred_name(method, "_") {
             return Some(name);
         }
     }
@@ -2126,10 +2126,8 @@ impl UnsupportedScanner<'_> {
             match element {
                 ClassElement::MethodDefinition(method) => {
                     self.scan_property_key(&method.key)?;
-                    if method.computed {
-                        return Err(self.unsupported("ComputedClassMethod"));
-                    }
                     if method.kind != MethodDefinitionKind::Constructor
+                        && !method.computed
                         && method_key_name(&method.key).is_none()
                     {
                         return Err(self.unsupported("UnsupportedClassMethodKey"));
@@ -2233,6 +2231,11 @@ enum ClassFieldKey<'a> {
 enum ClassFieldRuntimeKey {
     Static(String),
     ComputedReg(u8),
+}
+
+struct ClassComputedKeys {
+    method_regs: Vec<u8>,
+    static_field_regs: Vec<u8>,
 }
 
 struct CodeGen<'a> {
@@ -2829,8 +2832,7 @@ impl<'a> CodeGen<'a> {
                             self.push(Insn::Sta(class_reg));
                             class_reg
                         };
-                        let static_key_regs =
-                            self.emit_static_computed_class_field_keys(&cls.body.body);
+                        let computed_keys = self.emit_class_computed_keys(&cls.body.body);
                         let lit_arr_id = self.literal_arrays.len() as u16;
                         self.literal_arrays.push(class_buffer_literal_array(
                             class_name.unwrap_or(&name),
@@ -2854,13 +2856,14 @@ impl<'a> CodeGen<'a> {
                             &cls.body.body,
                             class_reg,
                             cls.body.span.start,
+                            &computed_keys.method_regs,
                         );
                         self.emit_class_static_initializer(
                             class_name.unwrap_or(&name),
                             &cls.body.body,
                             class_reg,
                             cls.body.span.start,
-                            &static_key_regs,
+                            &computed_keys.static_field_regs,
                         );
                         if let Some(lex_idx) = self.current_lexical_slot(&name) {
                             self.push(Insn::Lda(class_reg));
@@ -2889,8 +2892,7 @@ impl<'a> CodeGen<'a> {
                         self.push(Insn::Sta(class_reg));
                         class_reg
                     };
-                    let static_key_regs =
-                        self.emit_static_computed_class_field_keys(&cls.body.body);
+                    let computed_keys = self.emit_class_computed_keys(&cls.body.body);
                     let lit_arr_id = self.literal_arrays.len() as u16;
                     self.literal_arrays.push(class_buffer_literal_array(
                         class_name.unwrap_or(&name),
@@ -2914,13 +2916,14 @@ impl<'a> CodeGen<'a> {
                         &cls.body.body,
                         class_reg,
                         cls.body.span.start,
+                        &computed_keys.method_regs,
                     );
                     self.emit_class_static_initializer(
                         class_name.unwrap_or(&name),
                         &cls.body.body,
                         class_reg,
                         cls.body.span.start,
-                        &static_key_regs,
+                        &computed_keys.static_field_regs,
                     );
                     if let Some(lex_idx) = self.current_lexical_slot(&name) {
                         self.set_debug_pos(cls.body.span.start);
@@ -2960,8 +2963,7 @@ impl<'a> CodeGen<'a> {
                         self.push(Insn::Sta(class_reg));
                         class_reg
                     };
-                    let static_key_regs =
-                        self.emit_static_computed_class_field_keys(&cls.body.body);
+                    let computed_keys = self.emit_class_computed_keys(&cls.body.body);
                     let lit_arr_id = self.literal_arrays.len() as u16;
                     self.literal_arrays
                         .push(class_buffer_literal_array(class_name, &cls.body.body));
@@ -2986,13 +2988,14 @@ impl<'a> CodeGen<'a> {
                             &cls.body.body,
                             class_reg,
                             cls.body.span.start,
+                            &computed_keys.method_regs,
                         );
                         self.emit_class_static_initializer(
                             class_name,
                             &cls.body.body,
                             class_reg,
                             cls.body.span.start,
-                            &static_key_regs,
+                            &computed_keys.static_field_regs,
                         );
                         if let Some(export_index) = self.lowering.export_index(name) {
                             self.push(Insn::Lda(class_reg));
@@ -3007,13 +3010,14 @@ impl<'a> CodeGen<'a> {
                             &cls.body.body,
                             class_reg,
                             cls.body.span.start,
+                            &computed_keys.method_regs,
                         );
                         self.emit_class_static_initializer(
                             class_name,
                             &cls.body.body,
                             class_reg,
                             cls.body.span.start,
-                            &static_key_regs,
+                            &computed_keys.static_field_regs,
                         );
                         if let Some(export_index) = self.lowering.export_index(DEFAULT_LOCAL_NAME) {
                             self.push(Insn::Lda(class_reg));
@@ -5711,7 +5715,7 @@ impl<'a> CodeGen<'a> {
             self.push(Insn::Sta(reg));
             reg
         };
-        let static_key_regs = self.emit_static_computed_class_field_keys(elements);
+        let computed_keys = self.emit_class_computed_keys(elements);
 
         // Register the class literal buffer and use its index as buf_id.
         let lit_arr_id = self.literal_arrays.len() as u16;
@@ -5734,13 +5738,19 @@ impl<'a> CodeGen<'a> {
         ));
         let class_reg = self.alloc_reg();
         self.push(Insn::Sta(class_reg));
-        self.emit_class_missing_properties(class_name.unwrap_or("_"), elements, class_reg, 0);
+        self.emit_class_missing_properties(
+            class_name.unwrap_or("_"),
+            elements,
+            class_reg,
+            0,
+            &computed_keys.method_regs,
+        );
         self.emit_class_static_initializer(
             class_name.unwrap_or("_"),
             elements,
             class_reg,
             0,
-            &static_key_regs,
+            &computed_keys.static_field_regs,
         );
         self.push(Insn::Lda(class_reg));
     }
@@ -5772,7 +5782,7 @@ impl<'a> CodeGen<'a> {
             self.push(Insn::Sta(class_reg));
             class_reg
         };
-        let static_key_regs = self.emit_static_computed_class_field_keys(&cls.body.body);
+        let computed_keys = self.emit_class_computed_keys(&cls.body.body);
 
         let lit_arr_id = self.literal_arrays.len() as u16;
         self.literal_arrays
@@ -5797,13 +5807,14 @@ impl<'a> CodeGen<'a> {
             &cls.body.body,
             class_reg,
             cls.body.span.start,
+            &computed_keys.method_regs,
         );
         self.emit_class_static_initializer(
             class_name,
             &cls.body.body,
             class_reg,
             cls.body.span.start,
-            &static_key_regs,
+            &computed_keys.static_field_regs,
         );
         if let Some(slot) = lexical_slot {
             self.push(Insn::Lda(class_reg));
@@ -5818,17 +5829,27 @@ impl<'a> CodeGen<'a> {
         }
     }
 
-    fn emit_static_computed_class_field_keys(&mut self, elements: &[ClassElement<'_>]) -> Vec<u8> {
-        elements
-            .iter()
-            .filter_map(|element| {
-                let ClassElement::PropertyDefinition(property) = element else {
-                    return None;
-                };
-                (property.r#static && property.computed)
-                    .then(|| self.emit_property_key_to_reg(&property.key))
-            })
-            .collect()
+    fn emit_class_computed_keys(&mut self, elements: &[ClassElement<'_>]) -> ClassComputedKeys {
+        let mut keys = ClassComputedKeys {
+            method_regs: Vec::new(),
+            static_field_regs: Vec::new(),
+        };
+        for element in elements {
+            match element {
+                ClassElement::PropertyDefinition(property)
+                    if property.r#static && property.computed =>
+                {
+                    keys.static_field_regs
+                        .push(self.emit_property_key_to_reg(&property.key));
+                }
+                ClassElement::MethodDefinition(method) if method.computed => {
+                    keys.method_regs
+                        .push(self.emit_property_key_to_reg(&method.key));
+                }
+                _ => {}
+            }
+        }
+        keys
     }
 
     fn emit_class_static_initializer(
@@ -5876,6 +5897,7 @@ impl<'a> CodeGen<'a> {
         elements: &[ClassElement<'_>],
         class_reg: u8,
         class_span_start: u32,
+        computed_method_key_regs: &[u8],
     ) {
         let prototype_id = self.intern("prototype");
         self.set_debug_pos(class_span_start);
@@ -5885,17 +5907,28 @@ impl<'a> CodeGen<'a> {
         self.set_debug_pos(class_span_start);
         self.push(Insn::Sta(prototype_reg));
 
+        let mut computed_method_index = 0usize;
         for element in elements {
             let ClassElement::MethodDefinition(method) = element else {
                 continue;
             };
+            let computed_key_reg = if method.computed {
+                let key = computed_method_key_regs.get(computed_method_index).copied();
+                computed_method_index = computed_method_index.saturating_add(1);
+                key
+            } else {
+                None
+            };
             if method.kind == MethodDefinitionKind::Constructor || is_class_buffer_method(method) {
                 continue;
             }
-            let Some(public_name) = method_key_name(&method.key) else {
+            let record_name = if method.computed {
+                computed_class_method_record_name(method)
+            } else if let Some(public_name) = method_key_name(&method.key) {
+                public_name
+            } else {
                 continue;
             };
-            let record_name = public_name.clone();
             let method_name_id = self.intern(&record_name);
             let length = method.value.params.items.len() as u8;
             let target_reg = if method.r#static {
@@ -5906,14 +5939,16 @@ impl<'a> CodeGen<'a> {
 
             if method.kind.is_accessor() {
                 let saved_next_reg = self.next_reg;
-                let name_reg = self.alloc_reg();
+                let name_reg = computed_key_reg.unwrap_or_else(|| self.alloc_reg());
                 let undefined_reg = self.alloc_reg();
                 let method_reg = self.alloc_reg();
-                let public_name_id = self.intern(&public_name);
-                self.set_debug_pos(method.key.span().start);
-                self.push(Insn::LdaStr(public_name_id));
-                self.set_debug_pos(method.key.span().start);
-                self.push(Insn::Sta(name_reg));
+                if computed_key_reg.is_none() {
+                    let public_name_id = self.intern(&record_name);
+                    self.set_debug_pos(method.key.span().start);
+                    self.push(Insn::LdaStr(public_name_id));
+                    self.set_debug_pos(method.key.span().start);
+                    self.push(Insn::Sta(name_reg));
+                }
                 self.set_debug_pos(class_span_start);
                 if method.kind == MethodDefinitionKind::Get {
                     self.push(Insn::LdUndefined);
@@ -5962,9 +5997,13 @@ impl<'a> CodeGen<'a> {
             self.push(Insn::Lda(target_reg));
             self.set_debug_pos(method.value.span.start);
             self.push(Insn::DefineMethodShort(0, method_name_id, length));
-            let public_name_id = self.intern(&public_name);
             self.set_debug_pos(method.span.start);
-            self.push(Insn::StOwnByName(0, public_name_id, target_reg));
+            if let Some(key_reg) = computed_key_reg {
+                self.push(Insn::StOwnByValue(0, target_reg, key_reg));
+            } else {
+                let public_name_id = self.intern(&record_name);
+                self.push(Insn::StOwnByName(0, public_name_id, target_reg));
+            }
         }
     }
 

@@ -9,12 +9,29 @@ pub(super) fn class_method_record_name(
     class_name: &str,
     function_names: &mut FunctionNameAllocator<'_>,
 ) -> Option<String> {
-    let name = if method.kind == MethodDefinitionKind::Constructor {
-        class_name.to_string()
-    } else {
-        method_key_name(&method.key)?
-    };
+    let name = class_method_inferred_name(method, class_name)?;
     Some(function_names.bind(method.value.span.start, method.value.span.end, Some(&name)))
+}
+
+pub(super) fn class_method_inferred_name(
+    method: &MethodDefinition<'_>,
+    class_name: &str,
+) -> Option<String> {
+    if method.kind == MethodDefinitionKind::Constructor {
+        return Some(class_name.to_string());
+    }
+    method_key_name(&method.key).or_else(|| {
+        method
+            .computed
+            .then(|| computed_class_method_record_name(method))
+    })
+}
+
+pub(super) fn computed_class_method_record_name(method: &MethodDefinition<'_>) -> String {
+    format!(
+        "#computed_class_method_{}_{}#",
+        method.value.span.start, method.value.span.end
+    )
 }
 
 pub(super) fn class_method_num_args(method: &MethodDefinition<'_>) -> u16 {
