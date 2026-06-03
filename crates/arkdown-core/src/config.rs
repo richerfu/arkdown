@@ -123,6 +123,7 @@ pub struct ProductConfig {
     pub name: String,
     pub bundle_name: String,
     pub compatible_sdk_version: String,
+    pub compatible_sdk_version_stage: Option<String>,
     pub runtime_os: String,
     pub signing_config: Option<SigningConfig>,
     pub build_option: BuildOption,

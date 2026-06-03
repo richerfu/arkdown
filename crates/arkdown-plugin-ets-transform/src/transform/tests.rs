@@ -555,6 +555,40 @@ struct CardItem {
 }
 
 #[test]
+fn test_prop_with_default_value_emits_undefined_fallback() {
+    // Upstream ref: process_component_member.js createUpdateParamsWithIf(e, true, initializer)
+    // When @Prop has an initializer, generate:
+    //   if (params.ratio === undefined) { this.__ratio.set(0); }
+    let src = r#"
+@Component
+struct BuildListItem {
+  @Prop buildingImgRatio: number = 0;
+  @Prop title: string;
+  build() {}
+}
+"#;
+    let result = transform_ets(&make_source(
+        "features/challenge/src/main/ets/components/BuildListItem.ets",
+        src,
+    ))
+    .unwrap();
+    // @Prop with initializer: must have undefined fallback
+    assert!(
+        result.contains("if (params.buildingImgRatio === undefined)"),
+        "@Prop with initializer must emit undefined check, got:\n{result}"
+    );
+    assert!(
+        result.contains("this.__buildingImgRatio.set(0)"),
+        "@Prop undefined fallback must call .set(defaultVal), got:\n{result}"
+    );
+    // @Prop without initializer: must NOT have undefined fallback
+    assert!(
+        !result.contains("if (params.title === undefined)"),
+        "@Prop without initializer must NOT emit undefined check, got:\n{result}"
+    );
+}
+
+#[test]
 fn test_custom_component_call_lowers_like_hvigor_partial_update() {
     let src = r#"
 @Component
@@ -717,6 +751,37 @@ struct Parent {
             "expected ForEach data argument to match upstream GetRawObject lowering, got:\n{}",
             result
         );
+}
+
+#[test]
+fn test_for_each_item_and_index_no_keyfn_emits_six_arg_update() {
+    // When itemFn uses (item, index) but no keyFn is provided,
+    // forEachUpdateFunction must be called with (elmtId, data, fn, undefined, true, false).
+    let src = r#"
+class Item {}
+
+@Component
+struct Parent {
+  @State items: Item[] = [];
+  build() {
+    ForEach(this.items, (item: Item, index: number) => {
+      Text("item")
+    })
+  }
+}
+"#;
+    let result = transform_ets(&make_source(
+        "products/phone/src/main/ets/pages/Parent.ets",
+        src,
+    ))
+    .unwrap();
+    assert!(
+        result.contains(
+            "this.forEachUpdateFunction(elmtId, ObservedObject.GetRawObject(this.items), forEachItemGenFunction, undefined, true, false)"
+        ),
+        "expected 6-arg forEachUpdateFunction with undefined keyFn when itemFn uses index, got:\n{}",
+        result
+    );
 }
 
 #[test]

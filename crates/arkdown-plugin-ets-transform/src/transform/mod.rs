@@ -29,7 +29,8 @@ use oxc_span::{GetSpan, SourceType};
 
 use crate::error::EtsTransformError;
 use crate::transform::build_fn::{
-    lower_build_body_with_component_context, lower_builder_body_with_component_context,
+    lower_build_body_with_component_context_and_module,
+    lower_builder_body_with_component_context_and_module,
     lower_builder_body_with_custom_components, lower_styles_body, CustomComponentUpdateProps,
 };
 use crate::transform::component::{
@@ -468,6 +469,10 @@ fn component_from_struct(
         .decorators
         .iter()
         .any(|decorator| decorator_name(decorator) == "Entry");
+    let is_reusable = statement
+        .decorators
+        .iter()
+        .any(|decorator| decorator_name(decorator) == "Reusable");
     let mut state_fields = Vec::new();
     let mut initial_render_body = String::new();
     let mut initial_render_span_hints = Vec::new();
@@ -574,6 +579,7 @@ fn component_from_struct(
                 state_fields.push(StateField {
                     name: name.into_owned(),
                     type_annotation,
+                    optional: property.optional,
                     decorator: decorator.to_string(),
                     initializer,
                     watch_handler,
@@ -586,7 +592,7 @@ fn component_from_struct(
             StructElement::MethodDefinition(method)
                 if method.key.static_name().is_some_and(|name| name == "build") =>
             {
-                let (body, hints) = lower_build_body_with_component_context(
+                let (body, hints) = lower_build_body_with_component_context_and_module(
                     method.value.body.as_deref(),
                     source_text,
                     hvigor_source_id,
@@ -595,6 +601,8 @@ fn component_from_struct(
                     custom_component_update_props,
                     &options.component_metadata,
                     &raw_object_fields,
+                    options.module_name.as_deref(),
+                    is_reusable,
                 )
                 .map_err(|err| EtsTransformError::Fatal {
                     file: id.to_string(),
@@ -617,7 +625,7 @@ fn component_from_struct(
                     method.value.params.span(),
                     source_text,
                 ));
-                let (lowered_body, _) = lower_builder_body_with_component_context(
+                let (lowered_body, _) = lower_builder_body_with_component_context_and_module(
                     method.value.body.as_deref(),
                     source_text,
                     hvigor_source_id,
@@ -626,6 +634,7 @@ fn component_from_struct(
                     custom_component_update_props,
                     &options.component_metadata,
                     &raw_object_fields,
+                    options.module_name.as_deref(),
                 )
                 .map_err(|err| EtsTransformError::Fatal {
                     file: id.to_string(),
@@ -689,10 +698,11 @@ fn component_from_struct(
         is_entry,
         is_exported,
         is_default_export,
-        is_reusable: statement
+        is_reusable,
+        is_custom_dialog: statement
             .decorators
             .iter()
-            .any(|decorator| decorator_name(decorator) == "Reusable"),
+            .any(|decorator| decorator_name(decorator) == "CustomDialog"),
         state_fields,
         params_fields,
         property_order,
@@ -823,13 +833,14 @@ fn hvigor_source_path(id: &str, options: &TransformOptions) -> String {
             let path = Path::new(id);
             if let Some(project_root) = &options.project_root {
                 if let Ok(relative) = path.strip_prefix(project_root) {
-                    return arkdown_utils::to_unix_path(relative).trim_start_matches('/').to_string();
+                    return arkdown_utils::to_unix_path(relative)
+                        .trim_start_matches('/')
+                        .to_string();
                 }
             }
             id.to_string()
         })
 }
-
 
 #[cfg(test)]
 mod tests;

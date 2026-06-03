@@ -242,9 +242,21 @@ fn collect_capture_from_expr(
         Expression::AssignmentExpression(assign) => {
             collect_capture_from_expr(&assign.right, uses_this, uses_new_target);
         }
+        Expression::BinaryExpression(binary) => {
+            collect_capture_from_expr(&binary.left, uses_this, uses_new_target);
+            collect_capture_from_expr(&binary.right, uses_this, uses_new_target);
+        }
         Expression::LogicalExpression(log) => {
             collect_capture_from_expr(&log.left, uses_this, uses_new_target);
             collect_capture_from_expr(&log.right, uses_this, uses_new_target);
+        }
+        Expression::ConditionalExpression(cond) => {
+            collect_capture_from_expr(&cond.test, uses_this, uses_new_target);
+            collect_capture_from_expr(&cond.consequent, uses_this, uses_new_target);
+            collect_capture_from_expr(&cond.alternate, uses_this, uses_new_target);
+        }
+        Expression::UnaryExpression(unary) => {
+            collect_capture_from_expr(&unary.argument, uses_this, uses_new_target);
         }
         Expression::SequenceExpression(seq) => {
             for expr in &seq.expressions {
@@ -271,16 +283,6 @@ pub(super) fn is_new_target_meta(meta: &oxc_ast::ast::MetaProperty<'_>) -> bool 
 pub(super) struct ArrowCaptures {
     pub(super) this_slot: Option<u8>,
     pub(super) new_target_slot: Option<u8>,
-}
-
-impl ArrowCaptures {
-    pub(super) fn len(self) -> u8 {
-        self.this_slot.is_some() as u8 + self.new_target_slot.is_some() as u8
-    }
-
-    pub(super) fn is_empty(self) -> bool {
-        self.this_slot.is_none() && self.new_target_slot.is_none()
-    }
 }
 
 pub(super) fn is_global_this(expr: &Expression<'_>) -> bool {

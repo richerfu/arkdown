@@ -26,7 +26,8 @@ pub fn write_module_json(
     resource_ids: Option<&FxHashMap<String, u32>>,
 ) -> Result<(), ArkdownError> {
     let app_json5_fields = ModuleJsonWriter::read_app_json5_fields(config)?;
-    let numeric_api = ModuleJsonWriter::compute_numeric_api_version(&config.product.compatible_sdk_version);
+    let numeric_api =
+        ModuleJsonWriter::compute_numeric_api_version(&config.product.compatible_sdk_version);
     let is_debug = matches!(config.build_mode, arkdown_core::BuildMode::Debug);
 
     let app_section = ModuleJsonWriter::build_app_section(

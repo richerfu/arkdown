@@ -30,7 +30,8 @@ impl TaskInputs {
         let source_hash = Self::hash_source_files(&loader.compile_entry);
         let obfuscation_hash = Self::compute_obfuscation_hash(config);
         let sdk_version = config.sdk_config.compile_sdk_version.clone();
-        let compile_env = arkdown_cache::CompileEnv::from_config(config, &loader.cache_path).to_key_string();
+        let compile_env =
+            arkdown_cache::CompileEnv::from_config(config, &loader.cache_path).to_key_string();
         TaskInputs {
             source_hash,
             obfuscation_hash,
@@ -174,6 +175,7 @@ mod tests {
                 name: "default".to_string(),
                 bundle_name: "com.example.test".to_string(),
                 compatible_sdk_version: "12".to_string(),
+                compatible_sdk_version_stage: None,
                 runtime_os: "OpenHarmony".to_string(),
                 signing_config: None,
                 build_option: BuildOption {

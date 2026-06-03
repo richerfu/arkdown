@@ -2,7 +2,8 @@ use std::fmt::Write;
 
 use crate::transform::build_fn::SpanHint;
 use crate::transform::component_field::{
-    push_regular_field_declaration, push_state_constructor_init, push_state_field_declaration,
+    push_prop_default_fallback, push_provide_var_registration, push_regular_field_declaration,
+    push_state_constructor_init, push_state_field_declaration,
 };
 use crate::transform::decorator::{has_initially_provided_value_slot, has_update_state_vars_slot};
 use crate::transform::entry::{generate_entry_registration, EntryRegistrationInfo};
@@ -46,6 +47,8 @@ pub struct StateField {
     pub name: String,
     /// TypeScript type annotation text, e.g. `"number"` or `"string[]"`.
     pub type_annotation: String,
+    /// Whether the source property used `?`.
+    pub optional: bool,
     /// Decorator name: `"State"`, `"Prop"`, `"Link"`, etc.
     pub decorator: String,
     /// Initializer expression text (may be empty string if absent).
@@ -89,6 +92,12 @@ pub struct ComponentInfo {
     pub is_exported: bool,
     pub is_default_export: bool,
     pub is_reusable: bool,
+    /// True when the struct is decorated with `@CustomDialog`.
+    ///
+    /// When set, the emitter generates a `setController(ctr: CustomDialogController)` method
+    /// on the class (after field declarations, before `initialRender()`), for every regular
+    /// field whose type annotation is exactly `"CustomDialogController"`.
+    pub is_custom_dialog: bool,
     pub state_fields: Vec<StateField>,
     /// All struct properties in source order. hvigor adds every property to
     /// the generated `*_Params` interface from `createVariableInitStatement`,
@@ -194,6 +203,7 @@ impl<'a> ViewPuClassEmitter<'a> {
         self.push_about_to_be_deleted();
         self.push_update_recycle_elmt_id();
         self.push_field_declarations();
+        self.push_set_controller();
         self.push_regular_members();
         self.push_initial_render();
         self.push_builder_methods();
@@ -240,6 +250,7 @@ impl<'a> ViewPuClassEmitter<'a> {
                 let _ = writeln!(self.out, "        this.{name} = {init};");
             } else if let Some(field) = self.info.find_state_field(name) {
                 push_state_constructor_init(&mut self.out, field);
+                push_provide_var_registration(&mut self.out, field);
             }
         }
         self.out
@@ -273,6 +284,9 @@ impl<'a> ViewPuClassEmitter<'a> {
                     self.out,
                     "        if (params.{name} !== undefined) {{\n            this.{name} = params.{name};\n        }}"
                 );
+            }
+            if let Some(field) = self.info.find_state_field(name) {
+                push_prop_default_fallback(&mut self.out, field);
             }
         }
         self.out.push_str("    }\n");
@@ -354,6 +368,26 @@ impl<'a> ViewPuClassEmitter<'a> {
                 push_regular_field_declaration(&mut self.out, field);
             } else if let Some(field) = self.info.find_state_field(name) {
                 push_state_field_declaration(&mut self.out, field);
+            }
+        }
+    }
+
+    /// Emit `setController(ctr: CustomDialogController) { this.<field> = ctr; }` for every
+    /// regular field whose type annotation is exactly `"CustomDialogController"`, but only
+    /// when the component is decorated with `@CustomDialog`.
+    ///
+    /// Mirrors `createControllerSet` in upstream `process_component_member.js`.
+    fn push_set_controller(&mut self) {
+        if !self.info.is_custom_dialog {
+            return;
+        }
+        for field in &self.info.regular_fields {
+            if field.type_annotation == "CustomDialogController" {
+                let _ = writeln!(
+                    self.out,
+                    "    setController(ctr: CustomDialogController) {{\n        this.{} = ctr;\n    }}",
+                    field.name
+                );
             }
         }
     }
@@ -496,9 +530,11 @@ mod tests {
             is_exported: false,
             is_default_export: false,
             is_reusable: false,
+            is_custom_dialog: false,
             state_fields: vec![StateField {
                 name: "count".to_string(),
                 type_annotation: "number".to_string(),
+                optional: false,
                 decorator: "State".to_string(),
                 initializer: Some("0".to_string()),
                 watch_handler: None,
@@ -566,6 +602,29 @@ mod tests {
     }
 
     #[test]
+    fn test_optional_state_field_preserves_question_mark() {
+        let mut info = make_counter_component();
+        info.state_fields = vec![StateField {
+            name: "webViewController".to_string(),
+            type_annotation: "WebviewController".to_string(),
+            optional: true,
+            decorator: "State".to_string(),
+            initializer: Some("undefined".to_string()),
+            watch_handler: None,
+            alias: None,
+            decorator_arg: None,
+            is_simple_type: false,
+        }];
+        let out = generate_view_pu_class(&info);
+        assert!(
+            out.contains(
+                "private __webViewController?: ObservedPropertyObjectPU<WebviewController>;"
+            ),
+            "optional @State backing field should preserve source `?`; got:\n{out}"
+        );
+    }
+
+    #[test]
     fn test_entry_generates_registration() {
         let mut info = make_counter_component();
         info.is_entry = true;
@@ -588,9 +647,11 @@ mod tests {
             is_exported: false,
             is_default_export: false,
             is_reusable: false,
+            is_custom_dialog: false,
             state_fields: vec![StateField {
                 name: "value".to_string(),
                 type_annotation: "string".to_string(),
+                optional: false,
                 decorator: "Prop".to_string(),
                 initializer: None,
                 watch_handler: None,
@@ -628,6 +689,7 @@ mod tests {
             is_exported: false,
             is_default_export: false,
             is_reusable: false,
+            is_custom_dialog: false,
             state_fields: vec![],
             params_fields: vec![],
             property_order: vec![],
@@ -654,9 +716,11 @@ mod tests {
             is_exported: false,
             is_default_export: false,
             is_reusable: false,
+            is_custom_dialog: false,
             state_fields: vec![StateField {
                 name: "items".to_string(),
                 type_annotation: "string[]".to_string(),
+                optional: false,
                 decorator: "Link".to_string(),
                 initializer: None,
                 watch_handler: None,
@@ -700,9 +764,11 @@ mod tests {
             is_exported: false,
             is_default_export: false,
             is_reusable: false,
+            is_custom_dialog: false,
             state_fields: vec![StateField {
                 name: "item".to_string(),
                 type_annotation: "Item".to_string(),
+                optional: false,
                 decorator: "ObjectLink".to_string(),
                 initializer: None,
                 watch_handler: None,
@@ -739,10 +805,12 @@ mod tests {
             is_exported: false,
             is_default_export: false,
             is_reusable: true,
+            is_custom_dialog: false,
             state_fields: vec![
                 StateField {
                     name: "item".to_string(),
                     type_annotation: "Item".to_string(),
+                    optional: false,
                     decorator: "ObjectLink".to_string(),
                     initializer: None,
                     watch_handler: None,
@@ -753,6 +821,7 @@ mod tests {
                 StateField {
                     name: "content".to_string(),
                     type_annotation: "() => void".to_string(),
+                    optional: false,
                     decorator: "BuilderParam".to_string(),
                     initializer: None,
                     watch_handler: None,
@@ -805,9 +874,11 @@ mod tests {
             is_exported: false,
             is_default_export: false,
             is_reusable: false,
+            is_custom_dialog: false,
             state_fields: vec![StateField {
                 name: "theme".to_string(),
                 type_annotation: "string".to_string(),
+                optional: false,
                 decorator: "Provide".to_string(),
                 initializer: Some("\"dark\"".to_string()),
                 watch_handler: None,
@@ -836,6 +907,287 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_provide_field_emits_add_provided_var_no_alias() {
+        let info = ComponentInfo {
+            name: "Parent".to_string(),
+            is_entry: false,
+            is_exported: false,
+            is_default_export: false,
+            is_reusable: false,
+            is_custom_dialog: false,
+            state_fields: vec![StateField {
+                name: "theme".to_string(),
+                type_annotation: "string".to_string(),
+                optional: false,
+                decorator: "Provide".to_string(),
+                initializer: Some("\"dark\"".to_string()),
+                watch_handler: None,
+                alias: None,
+                decorator_arg: None,
+                is_simple_type: true,
+            }],
+            params_fields: vec![],
+            property_order: vec![],
+            regular_fields: vec![],
+            regular_members: vec![],
+            initial_render_body: String::new(),
+            initial_render_span_hints: vec![],
+            builder_methods: vec![],
+            styles_methods: vec![],
+            entry_registration: None,
+        };
+        let out = generate_view_pu_class(&info);
+        // Backing field init must come before addProvidedVar
+        let init_pos = out
+            .find("new ObservedPropertySimplePU(\"dark\", this, \"theme\")")
+            .expect("missing backing field init");
+        let reg_pos = out
+            .find("this.addProvidedVar(\"theme\", this.__theme, false)")
+            .expect("missing addProvidedVar call");
+        assert!(
+            init_pos < reg_pos,
+            "addProvidedVar must come after backing field init"
+        );
+        // Only one call (no alias)
+        assert_eq!(
+            out.matches("this.addProvidedVar(\"theme\", this.__theme, false)")
+                .count(),
+            1,
+            "@Provide without alias must emit exactly one addProvidedVar call"
+        );
+    }
+
+    #[test]
+    fn test_provide_field_emits_two_add_provided_var_calls_when_alias_differs() {
+        let info = ComponentInfo {
+            name: "Parent".to_string(),
+            is_entry: false,
+            is_exported: false,
+            is_default_export: false,
+            is_reusable: false,
+            is_custom_dialog: false,
+            state_fields: vec![StateField {
+                name: "appPathStack".to_string(),
+                type_annotation: "NavPathStack".to_string(),
+                optional: false,
+                decorator: "Provide".to_string(),
+                initializer: Some("new NavPathStack()".to_string()),
+                watch_handler: None,
+                alias: Some("pathStack".to_string()),
+                decorator_arg: None,
+                is_simple_type: false,
+            }],
+            params_fields: vec![],
+            property_order: vec![],
+            regular_fields: vec![],
+            regular_members: vec![],
+            initial_render_body: String::new(),
+            initial_render_span_hints: vec![],
+            builder_methods: vec![],
+            styles_methods: vec![],
+            entry_registration: None,
+        };
+        let out = generate_view_pu_class(&info);
+        // Alias call must come before field-name call
+        let alias_pos = out
+            .find("this.addProvidedVar(\"pathStack\", this.__appPathStack, false)")
+            .expect("missing alias addProvidedVar call");
+        let name_pos = out
+            .find("this.addProvidedVar(\"appPathStack\", this.__appPathStack, false)")
+            .expect("missing field-name addProvidedVar call");
+        assert!(
+            alias_pos < name_pos,
+            "alias addProvidedVar call must come before field-name call"
+        );
+    }
+
+    #[test]
+    fn test_provide_field_emits_one_add_provided_var_call_when_alias_equals_name() {
+        let info = ComponentInfo {
+            name: "Parent".to_string(),
+            is_entry: false,
+            is_exported: false,
+            is_default_export: false,
+            is_reusable: false,
+            is_custom_dialog: false,
+            state_fields: vec![StateField {
+                name: "theme".to_string(),
+                type_annotation: "string".to_string(),
+                optional: false,
+                decorator: "Provide".to_string(),
+                initializer: Some("\"dark\"".to_string()),
+                watch_handler: None,
+                alias: Some("theme".to_string()),
+                decorator_arg: None,
+                is_simple_type: true,
+            }],
+            params_fields: vec![],
+            property_order: vec![],
+            regular_fields: vec![],
+            regular_members: vec![],
+            initial_render_body: String::new(),
+            initial_render_span_hints: vec![],
+            builder_methods: vec![],
+            styles_methods: vec![],
+            entry_registration: None,
+        };
+        let out = generate_view_pu_class(&info);
+        assert_eq!(
+            out.matches("this.addProvidedVar(\"theme\", this.__theme, false)")
+                .count(),
+            1,
+            "@Provide(\"theme\") theme must emit exactly one addProvidedVar call"
+        );
+    }
+
+    #[test]
+    fn test_state_field_does_not_emit_add_provided_var() {
+        let info = make_counter_component();
+        let out = generate_view_pu_class(&info);
+        assert!(
+            !out.contains("addProvidedVar"),
+            "@State must not emit addProvidedVar"
+        );
+    }
+
+    // ── @CustomDialog setController ───────────────────────────────────────────
+
+    #[test]
+    fn test_custom_dialog_emits_set_controller_after_field_declarations() {
+        let info = ComponentInfo {
+            name: "ImageSaveDialog".to_string(),
+            is_entry: false,
+            is_exported: true,
+            is_default_export: false,
+            is_reusable: false,
+            is_custom_dialog: true,
+            state_fields: vec![],
+            params_fields: vec![],
+            property_order: vec![
+                "share".to_string(),
+                "save".to_string(),
+                "controller".to_string(),
+            ],
+            regular_fields: vec![
+                RegularField {
+                    name: "share".to_string(),
+                    type_annotation: "() => void".to_string(),
+                    initializer: None,
+                    optional: true,
+                },
+                RegularField {
+                    name: "save".to_string(),
+                    type_annotation: "() => void".to_string(),
+                    initializer: None,
+                    optional: true,
+                },
+                RegularField {
+                    name: "controller".to_string(),
+                    type_annotation: "CustomDialogController".to_string(),
+                    initializer: None,
+                    optional: false,
+                },
+            ],
+            regular_members: vec![],
+            initial_render_body: String::new(),
+            initial_render_span_hints: vec![],
+            builder_methods: vec![],
+            styles_methods: vec![],
+            entry_registration: None,
+        };
+        let out = generate_view_pu_class(&info);
+        // setController method must be present
+        assert!(
+            out.contains("setController(ctr: CustomDialogController)"),
+            "missing setController method, got:\n{out}"
+        );
+        assert!(
+            out.contains("this.controller = ctr;"),
+            "missing controller assignment in setController, got:\n{out}"
+        );
+        // setController must come after field declarations and before initialRender
+        let field_pos = out
+            .find("private controller: CustomDialogController")
+            .expect("missing field declaration");
+        let set_ctrl_pos = out
+            .find("setController(ctr: CustomDialogController)")
+            .expect("missing setController");
+        let render_pos = out.find("initialRender()").expect("missing initialRender");
+        assert!(
+            field_pos < set_ctrl_pos,
+            "setController must come after field declaration"
+        );
+        assert!(
+            set_ctrl_pos < render_pos,
+            "setController must come before initialRender"
+        );
+    }
+
+    #[test]
+    fn test_non_custom_dialog_does_not_emit_set_controller() {
+        let info = ComponentInfo {
+            name: "MyDialog".to_string(),
+            is_entry: false,
+            is_exported: false,
+            is_default_export: false,
+            is_reusable: false,
+            is_custom_dialog: false,
+            state_fields: vec![],
+            params_fields: vec![],
+            property_order: vec!["controller".to_string()],
+            regular_fields: vec![RegularField {
+                name: "controller".to_string(),
+                type_annotation: "CustomDialogController".to_string(),
+                initializer: None,
+                optional: false,
+            }],
+            regular_members: vec![],
+            initial_render_body: String::new(),
+            initial_render_span_hints: vec![],
+            builder_methods: vec![],
+            styles_methods: vec![],
+            entry_registration: None,
+        };
+        let out = generate_view_pu_class(&info);
+        assert!(
+            !out.contains("setController"),
+            "@Component (non-@CustomDialog) must not emit setController, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn test_custom_dialog_without_controller_field_emits_no_set_controller() {
+        let info = ComponentInfo {
+            name: "AlertDialog".to_string(),
+            is_entry: false,
+            is_exported: false,
+            is_default_export: false,
+            is_reusable: false,
+            is_custom_dialog: true,
+            state_fields: vec![],
+            params_fields: vec![],
+            property_order: vec!["message".to_string()],
+            regular_fields: vec![RegularField {
+                name: "message".to_string(),
+                type_annotation: "string".to_string(),
+                initializer: None,
+                optional: false,
+            }],
+            regular_members: vec![],
+            initial_render_body: String::new(),
+            initial_render_span_hints: vec![],
+            builder_methods: vec![],
+            styles_methods: vec![],
+            entry_registration: None,
+        };
+        let out = generate_view_pu_class(&info);
+        assert!(
+            !out.contains("setController"),
+            "@CustomDialog without CustomDialogController field must not emit setController"
+        );
+    }
+
     // ── @Consume ──────────────────────────────────────────────────────────────
 
     #[test]
@@ -846,9 +1198,11 @@ mod tests {
             is_exported: false,
             is_default_export: false,
             is_reusable: false,
+            is_custom_dialog: false,
             state_fields: vec![StateField {
                 name: "theme".to_string(),
                 type_annotation: "string".to_string(),
+                optional: false,
                 decorator: "Consume".to_string(),
                 initializer: None,
                 watch_handler: None,
@@ -885,9 +1239,11 @@ mod tests {
             is_exported: false,
             is_default_export: false,
             is_reusable: false,
+            is_custom_dialog: false,
             state_fields: vec![StateField {
                 name: "currentTheme".to_string(),
                 type_annotation: "string".to_string(),
+                optional: false,
                 decorator: "Consume".to_string(),
                 initializer: None,
                 watch_handler: None,
@@ -922,9 +1278,11 @@ mod tests {
             is_exported: false,
             is_default_export: false,
             is_reusable: false,
+            is_custom_dialog: false,
             state_fields: vec![StateField {
                 name: "count".to_string(),
                 type_annotation: "number".to_string(),
+                optional: false,
                 decorator: "State".to_string(),
                 initializer: Some("0".to_string()),
                 watch_handler: Some("onCountChange".to_string()),
@@ -984,9 +1342,11 @@ mod tests {
             is_exported: false,
             is_default_export: false,
             is_reusable: false,
+            is_custom_dialog: false,
             state_fields: vec![StateField {
                 name: "content".to_string(),
                 type_annotation: "() => void".to_string(),
+                optional: false,
                 decorator: "BuilderParam".to_string(),
                 initializer: None,
                 watch_handler: None,
@@ -1030,9 +1390,11 @@ mod tests {
             is_exported: false,
             is_default_export: false,
             is_reusable: false,
+            is_custom_dialog: false,
             state_fields: vec![StateField {
                 name: "title".to_string(),
                 type_annotation: "string".to_string(),
+                optional: false,
                 decorator: "Prop".to_string(),
                 initializer: Some("\"default\"".to_string()),
                 watch_handler: None,
@@ -1059,6 +1421,16 @@ mod tests {
             !out.contains("new SynchedPropertySimpleOneWayPU(\"default\""),
             "@Prop must not use the local initializer in the constructor"
         );
+        let set_initially = out
+            .find("setInitiallyProvidedValue(params")
+            .expect("setInitiallyProvidedValue");
+        let fallback = out
+            .find("if (params.title === undefined)")
+            .expect("@Prop default fallback");
+        assert!(
+            set_initially < fallback,
+            "@Prop default fallback belongs in setInitiallyProvidedValue, got:\n{out}"
+        );
     }
 
     // ── Storage decorators ─────────────────────────────────────────────────────
@@ -1077,9 +1449,11 @@ mod tests {
                 is_exported: false,
                 is_default_export: false,
                 is_reusable: false,
+                is_custom_dialog: false,
                 state_fields: vec![StateField {
                     name: "setting".to_string(),
                     type_annotation: "string".to_string(),
+                    optional: false,
                     decorator: decorator.to_string(),
                     initializer: None,
                     watch_handler: None,

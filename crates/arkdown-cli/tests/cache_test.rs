@@ -97,6 +97,8 @@ fn collect_js_chunks(
                     .map(|m| m.record_name.clone())
                     .unwrap_or_else(|| name.clone()),
                 source_file: meta.and_then(|m| m.source_file.clone()),
+                package_name: None,
+                is_commonjs: false,
                 source_map: None,
             }
         })
@@ -356,7 +358,8 @@ fn run_pipeline(fixture: &Path) -> PathBuf {
                 commonjs: false,
                 cache_file: Some(abc_cache_file),
                 npm_module_entry_list: None,
-            }.compile()
+            }
+            .compile()
             .expect("abc compile");
 
             // Update module cache entries.

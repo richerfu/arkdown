@@ -110,7 +110,10 @@ impl PkgContext {
             .trim_end_matches(".ets")
             .trim_end_matches(".ts")
             .trim_end_matches(".js");
-        format!("@bundle:{}/{}/{}", self.bundle_name, self.module_name, rel_no_ext)
+        format!(
+            "@bundle:{}/{}/{}",
+            self.bundle_name, self.module_name, rel_no_ext
+        )
     }
 }
 

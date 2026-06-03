@@ -10,6 +10,60 @@ pub(super) fn push_state_constructor_init(out: &mut String, field: &StateField) 
     ComponentFieldEmitter::new(out).push_state_constructor_init(field);
 }
 
+/// Emit the `@Prop` default-value fallback block in `setInitiallyProvidedValue`.
+///
+/// Upstream hvigor `createUpdateParamsWithIf(e, t=true, r=initializer)` in
+/// `process_component_member.js` — only emitted when:
+/// 1. The decorator is `@Prop` (partialUpdate mode).
+/// 2. The field has an initializer expression.
+///
+/// Generated code:
+/// ```typescript
+/// if (params.fieldName === undefined) {
+///     this.__fieldName.set(defaultValue);
+/// }
+/// ```
+pub(super) fn push_prop_default_fallback(out: &mut String, field: &StateField) {
+    if field.decorator != "Prop" {
+        return;
+    }
+    let Some(init) = field.initializer.as_deref() else {
+        return;
+    };
+    let _ = writeln!(
+        out,
+        "        if (params.{} === undefined) {{\n            this.__{}.set({});\n        }}",
+        field.name, field.name, init
+    );
+}
+
+/// Emit `this.addProvidedVar(...)` registration call(s) for a `@Provide` field.
+///
+/// Upstream hvigor `addAddProvidedVar` (process_component_member.js):
+/// - No alias: one call with the field name.
+/// - Alias != field name: two calls — alias first, then field name.
+/// - Alias == field name: one call with that name.
+pub(super) fn push_provide_var_registration(out: &mut String, field: &StateField) {
+    if field.decorator != "Provide" {
+        return;
+    }
+    let var_name = &field.name;
+    if let Some(alias) = &field.alias {
+        if alias != var_name {
+            let _ = writeln!(
+                out,
+                "        this.addProvidedVar(\"{}\", this.__{}, false);",
+                alias, var_name
+            );
+        }
+    }
+    let _ = writeln!(
+        out,
+        "        this.addProvidedVar(\"{}\", this.__{}, false);",
+        var_name, var_name
+    );
+}
+
 pub(super) fn push_regular_field_declaration(out: &mut String, field: &RegularField) {
     ComponentFieldEmitter::new(out).push_regular_field_declaration(field);
 }
@@ -92,11 +146,11 @@ impl<'a> ComponentFieldEmitter<'a> {
 
         let backing = state_decorator_decl_class_for(&field.decorator, field.is_simple_type);
         let type_param = field.state_type_param();
-        let _ = write!(
-            self.out,
-            "    private __{}: {}{}",
-            field.name, backing, type_param
-        );
+        let _ = write!(self.out, "    private __{}", field.name);
+        if field.optional {
+            self.out.push('?');
+        }
+        let _ = write!(self.out, ": {backing}{type_param}");
         if field.uses_local_storage() {
             self.push_local_storage_initializer(field, &type_param);
         }

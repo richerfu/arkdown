@@ -45,6 +45,7 @@ pub(super) fn compile_widget_pass(
         .join(mode_dir);
     let transformer =
         EtsTransformPlugin::with_resource_references(config.clone(), resource_refs.clone());
+    let resolved_imports = Default::default();
     let mut compile_infos = Vec::new();
     let mut component_collection = serde_json::Map::new();
 
@@ -79,6 +80,7 @@ pub(super) fn compile_widget_pass(
             &cache_root,
             loader_json,
             config,
+            &resolved_imports,
         );
         if let Some(parent) = entry_info.ts_path.parent() {
             fs_err::create_dir_all(parent)?;
@@ -156,7 +158,7 @@ pub(super) fn compile_widget_pass(
         inputs: handoff.inputs,
         output: widget_abc,
         target_api_version: config.sdk_config.compile_api_version,
-        target_api_sub_version: None,
+        target_api_sub_version: config.product.compatible_sdk_version_stage.clone(),
         debug_info: matches!(config.build_mode, BuildMode::Debug),
         opt_level: if matches!(config.build_mode, BuildMode::Release) {
             2

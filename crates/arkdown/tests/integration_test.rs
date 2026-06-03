@@ -38,6 +38,7 @@ fn make_test_config(fixture: &PathBuf) -> ArkdownConfig {
             name: "default".to_string(),
             bundle_name: "com.example.arkdown.test".to_string(),
             compatible_sdk_version: "5.0.0(12)".to_string(),
+            compatible_sdk_version_stage: None,
             runtime_os: "HarmonyOS".to_string(),
             signing_config: None,
             build_option: BuildOption {
@@ -308,6 +309,7 @@ fn make_minimal_config(project_root: &PathBuf, build_mode: BuildMode) -> Arkdown
             name: "default".to_string(),
             bundle_name: "com.example.test".to_string(),
             compatible_sdk_version: "5.0.0(12)".to_string(),
+            compatible_sdk_version_stage: None,
             runtime_os: "HarmonyOS".to_string(),
             signing_config: None,
             build_option: BuildOption {

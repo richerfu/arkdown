@@ -30,7 +30,7 @@ use arkdown_core::{ArkChunk, ArkdownConfig, ArkdownError, BuildMode, ChunkGraph}
 use arkdown_profile::LoaderJson;
 use rolldown::{BundlerOptions, InputItem, OutputFormat};
 use rolldown_common::{
-    BundlerTransformOptions, ChunkingContext, ManualCodeSplittingOptions, MatchGroup,
+    BundlerTransformOptions, ChunkingContext, ExportsKind, ManualCodeSplittingOptions, MatchGroup,
     MatchGroupName, MatchGroupTest, ModuleInfo, ModuleType as RdModuleType, NormalModule, Output,
     SourceMapType, TreeshakeOptions, TypeScriptOptions,
 };
@@ -160,14 +160,22 @@ impl Bundler {
             .lock()
             .map(|modules| modules.clone())
             .unwrap_or_default();
-        parsed_modules.sort_by_key(|(idx, _)| *idx);
+        parsed_modules.sort_by_key(|module| module.idx);
         let mut seen_module_ids = FxHashSet::default();
+        let mut full_module_is_commonjs = FxHashMap::default();
         let collected_module_ids = parsed_modules
             .into_iter()
-            .map(|(_, id)| id)
-            .filter(|id| seen_module_ids.insert(id.clone()))
+            .filter_map(|module| {
+                full_module_is_commonjs.insert(module.id.clone(), module.is_commonjs);
+                if seen_module_ids.insert(module.id.clone()) {
+                    Some(module.id)
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
-        let chunk_graph = Self::build_chunk_graph(rd_output, collected_module_ids)?;
+        let chunk_graph =
+            Self::build_chunk_graph(rd_output, collected_module_ids, full_module_is_commonjs)?;
 
         // ── 6. Write loader_out/default/ets artifacts to disk ────────────────
         let output_dir = PathBuf::from(&loader_json.ace_module_build);
@@ -195,6 +203,7 @@ impl Bundler {
     fn build_chunk_graph(
         rd_output: rolldown::BundleOutput,
         full_module_ids: Vec<String>,
+        full_module_is_commonjs: FxHashMap<String, bool>,
     ) -> Result<ChunkGraph, ArkdownError> {
         use arkdown_core::ChunkIdx;
 
@@ -238,6 +247,7 @@ impl Bundler {
         Ok(ChunkGraph {
             chunks,
             full_module_ids,
+            full_module_is_commonjs,
             // module_to_chunk and entry_module_to_entry_chunk are not populated
             // from rolldown output because rolldown uses its own module index space.
             // Callers that need module→chunk mapping (e.g. arkdown-abc) must use
@@ -246,7 +256,6 @@ impl Bundler {
             entry_module_to_entry_chunk: FxHashMap::default(),
         })
     }
-
 
     /// Build `ManualCodeSplittingOptions` that mirrors hvigor's `manualChunks` callback.
     ///
@@ -403,7 +412,14 @@ impl BundlePlan {
 /// entries are included in the chunk graph.
 #[derive(Debug)]
 struct ModuleIdCollectorPlugin {
-    modules: Arc<Mutex<Vec<(usize, String)>>>,
+    modules: Arc<Mutex<Vec<ParsedModule>>>,
+}
+
+#[derive(Debug, Clone)]
+struct ParsedModule {
+    idx: usize,
+    id: String,
+    is_commonjs: bool,
 }
 
 impl Plugin for ModuleIdCollectorPlugin {
@@ -423,10 +439,15 @@ impl Plugin for ModuleIdCollectorPlugin {
     ) -> impl Future<Output = anyhow::Result<()>> + Send {
         let idx = normal_module.idx.index();
         let id = normal_module.id.to_string();
+        let is_commonjs = matches!(normal_module.ecma_view.exports_kind, ExportsKind::CommonJs);
         let slot = Arc::clone(&self.modules);
         async move {
             if let Ok(mut slot) = slot.lock() {
-                slot.push((idx, id));
+                slot.push(ParsedModule {
+                    idx,
+                    id,
+                    is_commonjs,
+                });
             }
             Ok(())
         }

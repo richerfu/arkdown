@@ -75,7 +75,8 @@ impl RawAppJson5 {
     }
 
     fn validate(app: &Self, path: &std::path::Path) -> Result<(), ConfigError> {
-        if app.app.bundle_name.is_empty() || Self::is_valid_hvigor_bundle_name(&app.app.bundle_name) {
+        if app.app.bundle_name.is_empty() || Self::is_valid_hvigor_bundle_name(&app.app.bundle_name)
+        {
             return Ok(());
         }
 
@@ -175,6 +176,8 @@ pub struct RawProduct {
     pub bundle_name: String,
     #[serde(default)]
     pub compatible_sdk_version: String,
+    #[serde(default)]
+    pub compatible_sdk_version_stage: Option<String>,
     /// Real OHOS projects use targetSdkVersion; takes priority over compatibleSdkVersion.
     #[serde(default)]
     pub target_sdk_version: Option<String>,
@@ -335,6 +338,7 @@ mod tests {
                     name: "default",
                     bundleName: "com.example.app",
                     compatibleSdkVersion: "5.0.0(12)",
+                    compatibleSdkVersionStage: "beta3",
                     runtimeOS: "HarmonyOS",
                 }],
             },
@@ -352,6 +356,12 @@ mod tests {
         assert_eq!(
             parse_api_version(&profile.app.products[0].compatible_sdk_version),
             Some(12)
+        );
+        assert_eq!(
+            profile.app.products[0]
+                .compatible_sdk_version_stage
+                .as_deref(),
+            Some("beta3")
         );
         assert_eq!(profile.modules.len(), 1);
         assert_eq!(profile.modules[0].name, "entry");
@@ -652,15 +662,27 @@ mod tests {
 
     #[test]
     fn test_hvigor_bundle_name_pattern() {
-        assert!(RawAppJson5::is_valid_hvigor_bundle_name("com.example.myapplication"));
+        assert!(RawAppJson5::is_valid_hvigor_bundle_name(
+            "com.example.myapplication"
+        ));
         assert!(RawAppJson5::is_valid_hvigor_bundle_name("a.b.c"));
-        assert!(RawAppJson5::is_valid_hvigor_bundle_name("com.example_1.app2"));
+        assert!(RawAppJson5::is_valid_hvigor_bundle_name(
+            "com.example_1.app2"
+        ));
 
         assert!(!RawAppJson5::is_valid_hvigor_bundle_name("Bundle name"));
         assert!(!RawAppJson5::is_valid_hvigor_bundle_name("com.example"));
-        assert!(!RawAppJson5::is_valid_hvigor_bundle_name("1com.example.app"));
-        assert!(!RawAppJson5::is_valid_hvigor_bundle_name("com._example.app"));
-        assert!(!RawAppJson5::is_valid_hvigor_bundle_name("com.example_.app"));
-        assert!(!RawAppJson5::is_valid_hvigor_bundle_name("com.example.app_"));
+        assert!(!RawAppJson5::is_valid_hvigor_bundle_name(
+            "1com.example.app"
+        ));
+        assert!(!RawAppJson5::is_valid_hvigor_bundle_name(
+            "com._example.app"
+        ));
+        assert!(!RawAppJson5::is_valid_hvigor_bundle_name(
+            "com.example_.app"
+        ));
+        assert!(!RawAppJson5::is_valid_hvigor_bundle_name(
+            "com.example.app_"
+        ));
     }
 }

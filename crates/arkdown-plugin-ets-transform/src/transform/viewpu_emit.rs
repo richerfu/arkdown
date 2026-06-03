@@ -84,6 +84,11 @@ impl<'a> ViewpuWriter<'a> {
         self.call_statement(indent, component_name, "pop", "");
     }
 
+    pub(crate) fn if_initial_render(&mut self, indent: &str, body: &str) {
+        self.out
+            .push_str(&ViewpuAstEmitter::new(indent).if_initial_render(body));
+    }
+
     fn call_statement(&mut self, indent: &str, object_name: &str, method_name: &str, args: &str) {
         self.out
             .push_str(&ViewpuAstEmitter::new(indent).call_statement(
@@ -113,6 +118,17 @@ impl<'a> ViewpuAstEmitter<'a> {
         let arguments = Self::parse_arguments_in(args, &allocator);
         let call = ast.expression_call(SPAN, callee, NONE, arguments, false);
         let statement = ast.statement_expression(SPAN, call);
+        let program = Self::program_with_statement(ast, statement);
+        self.render_program(&program)
+    }
+
+    fn if_initial_render(&self, body: &str) -> String {
+        let allocator = Allocator::default();
+        let ast = AstBuilder::new(&allocator);
+        let test = ast.expression_identifier(SPAN, "isInitialRender");
+        let body = Self::parse_statements_in(body, &allocator);
+        let consequent = ast.statement_block(SPAN, body);
+        let statement = ast.statement_if(SPAN, test, consequent, None);
         let program = Self::program_with_statement(ast, statement);
         self.render_program(&program)
     }

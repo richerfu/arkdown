@@ -428,6 +428,7 @@ mod tests {
                 name: "test".to_string(),
                 bundle_name: "com.example.test".to_string(),
                 compatible_sdk_version: "12".to_string(),
+                compatible_sdk_version_stage: None,
                 runtime_os: "OpenHarmony".to_string(),
                 signing_config: None,
                 build_option: BuildOption {

@@ -146,6 +146,7 @@ mod tests {
                 name: "default".to_string(),
                 bundle_name: "com.test".to_string(),
                 compatible_sdk_version: "5.0.0(12)".to_string(),
+                compatible_sdk_version_stage: None,
                 runtime_os: "HarmonyOS".to_string(),
                 signing_config: None,
                 build_option: arkdown_core::BuildOption {

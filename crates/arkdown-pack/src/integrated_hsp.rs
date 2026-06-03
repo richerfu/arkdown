@@ -39,7 +39,12 @@ pub struct IntegratedHspEntry {
 impl IntegratedHspEntry {
     /// Normalize this HSP: patch `pack.info` and write the result to
     /// `output_dir/<hsp_dir_name>/<hsp_file_name>`.
-    fn normalize(&self, bundle_name: &str, version_code: u64, output_dir: &Path) -> Result<PathBuf, PackError> {
+    fn normalize(
+        &self,
+        bundle_name: &str,
+        version_code: u64,
+        output_dir: &Path,
+    ) -> Result<PathBuf, PackError> {
         // --- open source HSP ---
         let src_file = fs_err::File::open(&self.hsp_path)?;
         let mut src_archive = zip::ZipArchive::new(src_file)?;
@@ -74,7 +79,8 @@ impl IntegratedHspEntry {
                 let mut raw = Vec::new();
                 src_entry.read_to_end(&mut raw)?;
                 let patched = Self::patch_pack_info(&raw, bundle_name, version_code)?;
-                let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+                let opts =
+                    SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
                 writer.start_file(&name, opts)?;
                 writer.write_all(&patched)?;
             } else {
@@ -96,7 +102,11 @@ impl IntegratedHspEntry {
     /// - `summary.app.version.code` → `version_code`
     ///
     /// Returns the patched JSON as compact bytes with a trailing newline (matching hvigor output).
-    fn patch_pack_info(raw: &[u8], bundle_name: &str, version_code: u64) -> Result<Vec<u8>, PackError> {
+    fn patch_pack_info(
+        raw: &[u8],
+        bundle_name: &str,
+        version_code: u64,
+    ) -> Result<Vec<u8>, PackError> {
         let mut value: serde_json::Value =
             serde_json::from_slice(raw).map_err(|e| PackError::MalformedPackInfo(e.to_string()))?;
 

@@ -428,7 +428,7 @@ impl PackageRootIndex {
             let name = name.to_string_lossy();
             if matches!(
                 name.as_ref(),
-                ".git" | "oh_modules" | "node_modules" | "build" | "target"
+                ".git" | ".hvigor" | "oh_modules" | "node_modules" | "build" | "target"
             ) {
                 continue;
             }
@@ -510,7 +510,6 @@ impl PackageCandidate {
         candidates
     }
 }
-
 
 #[cfg(test)]
 mod tests {

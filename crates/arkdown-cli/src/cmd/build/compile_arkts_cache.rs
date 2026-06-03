@@ -4,6 +4,7 @@ use rustc_hash::FxHashMap;
 pub(super) struct CompileArktsCacheWriter<'a> {
     loader_json: &'a arkdown_profile::LoaderJson,
     config: &'a Arc<ArkdownConfig>,
+    resolved_imports: &'a arkdown_plugin_ohos_resolve::ResolvedImportMap,
     cache_root: PathBuf,
     transformer: EtsTransformPlugin,
 }
@@ -14,6 +15,7 @@ impl<'a> CompileArktsCacheWriter<'a> {
         loader_json: &'a arkdown_profile::LoaderJson,
         config: &'a Arc<ArkdownConfig>,
         resource_refs: &FxHashMap<String, ResourceReference>,
+        resolved_imports: &'a arkdown_plugin_ohos_resolve::ResolvedImportMap,
     ) -> Self {
         let cache_root = module
             .src_path
@@ -25,6 +27,7 @@ impl<'a> CompileArktsCacheWriter<'a> {
         Self {
             loader_json,
             config,
+            resolved_imports,
             cache_root,
             transformer,
         }
@@ -43,8 +46,14 @@ impl<'a> CompileArktsCacheWriter<'a> {
         let mut pkg_entries = PackageEntryInfos::default();
 
         for module_id in module_ids {
+            let is_commonjs = chunk_graph
+                .full_module_is_commonjs
+                .get(&module_id)
+                .copied()
+                .unwrap_or(false);
             self.write_module(
                 &module_id,
+                is_commonjs,
                 &mut compile_infos,
                 &mut pkg_entries,
                 &mut source_map_lines,
@@ -65,6 +74,7 @@ impl<'a> CompileArktsCacheWriter<'a> {
     fn write_module(
         &self,
         module_id: &str,
+        is_commonjs: bool,
         compile_infos: &mut Vec<CompileArkTsInfo>,
         pkg_entries: &mut PackageEntryInfos,
         source_map_lines: &mut Vec<String>,
@@ -72,7 +82,7 @@ impl<'a> CompileArktsCacheWriter<'a> {
         let Some(source_path) = module_id_to_source_path(module_id) else {
             return Ok(());
         };
-        let Some(entry_info) = CompileModuleInfo::compute(
+        let Some(mut entry_info) = CompileModuleInfo::compute(
             &source_path,
             &self.cache_root,
             self.loader_json,
@@ -80,6 +90,7 @@ impl<'a> CompileArktsCacheWriter<'a> {
         ) else {
             return Ok(());
         };
+        entry_info.set_rolldown_commonjs(is_commonjs);
 
         let source = fs_err::read_to_string(&entry_info.source_path).with_context(|| {
             format!(
@@ -150,6 +161,7 @@ impl<'a> CompileArktsCacheWriter<'a> {
                 &self.cache_root,
                 self.loader_json,
                 self.config,
+                self.resolved_imports,
             )
         } else {
             code

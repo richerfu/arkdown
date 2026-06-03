@@ -86,6 +86,12 @@ pub struct ChunkGraph {
     /// graph, so pure re-export/type/const modules that are tree-shaken from
     /// output chunks still need to be preserved here.
     pub full_module_ids: Vec<String>,
+    /// Rolldown module-format classification for each full module ID.
+    ///
+    /// hvigor writes `filesInfo.txt` from Rollup `getModuleIds()` and uses the
+    /// module metadata produced by CommonJS analysis instead of rescanning
+    /// source files.
+    pub full_module_is_commonjs: FxHashMap<String, bool>,
     /// Maps [`ModuleIdx`] → [`ChunkIdx`].
     pub module_to_chunk: IndexVec<ModuleIdx, Option<ChunkIdx>>,
     /// Maps entry [`ModuleIdx`] → entry [`ChunkIdx`].
@@ -243,6 +249,7 @@ mod tests {
         let graph = ChunkGraph {
             chunks: IndexVec::new(),
             full_module_ids: Vec::new(),
+            full_module_is_commonjs: FxHashMap::default(),
             module_to_chunk: IndexVec::new(),
             entry_module_to_entry_chunk: FxHashMap::default(),
         };
@@ -263,6 +270,7 @@ mod tests {
         let graph = ChunkGraph {
             chunks,
             full_module_ids: Vec::new(),
+            full_module_is_commonjs: FxHashMap::default(),
             module_to_chunk: IndexVec::new(),
             entry_module_to_entry_chunk: FxHashMap::default(),
         };

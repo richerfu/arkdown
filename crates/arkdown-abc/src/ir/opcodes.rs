@@ -36,6 +36,10 @@ pub enum Insn {
     LdTrue,
     /// `0x03` `op_none` — load `false` into accumulator.
     LdFalse,
+    /// `0x70` `op_none` — load the internal hole value into accumulator.
+    LdHole,
+    /// `0x6D` `op_none` — load the global object into accumulator.
+    LdGlobal,
 
     // ── Integer / float immediates ────────────────────────────────────────────
     /// `0x62` `op_imm_32` — load signed 32-bit integer into accumulator.
@@ -50,6 +54,27 @@ pub enum Insn {
     /// `0x3E` `op_id_16` — load string (by 16-bit string index) into accumulator.
     /// Encoding: `[0x3E] [string_id: u16 LE]` = 3 bytes.
     LdaStr(u16),
+
+    /// `0xD3` `op_id_16` — load BigInt literal (by 16-bit string index) into accumulator.
+    /// Encoding: `[0xD3] [string_id: u16 LE]` = 3 bytes.
+    LdBigInt(u16),
+
+    /// `0xBD` `op_none` — perform dynamic import with the specifier in accumulator.
+    DynamicImport,
+
+    /// `0xD5` `op_none` — load the `import.meta` object of the current module into accumulator.
+    ///
+    /// In module mode this yields the per-module meta object; its `url` and `resolve`
+    /// properties are populated by the runtime loader.  Only valid inside an ESM module.
+    ///
+    /// Encoding: `[0xD5]` = 1 byte.
+    ///
+    /// Source: `isa.yaml` — `getimportmeta`, format `op_none`,
+    /// `opcode_idx: [0xd5]`.
+    GetImportMeta,
+
+    /// `0xB0` `op_none` — debugger statement marker, emitted only for debug builds.
+    Debugger,
 
     // ── Register moves ───────────────────────────────────────────────────────
     /// `0x60` `op_v_8` — load virtual register `v` into accumulator.
@@ -114,11 +139,15 @@ pub enum Insn {
     Or2(u8, u8),
     /// `0x1A` — `acc = acc ^ v[vreg]`.
     Xor2(u8, u8),
+    /// `0x1B` — `acc = acc ** v[vreg]`.
+    Exp(u8, u8),
 
     // ── Unary operators ───────────────────────────────────────────────────────
     // Format: `op_imm_8` — opcode(1) + slot(1) = 2 bytes. Operand is acc.
     /// `0x1C` — `acc = typeof acc` (returns a string like `"function"`).
     TypeOf(u8),
+    /// `0x1D` — `acc = ToNumber(acc)`.
+    ToNumber(u8),
     /// `0x1F` — `acc = -acc`.
     Neg(u8),
     /// `0x20` — `acc = ~acc` (bitwise NOT).
@@ -128,12 +157,26 @@ pub enum Insn {
     /// `0x22` — `acc = acc - 1`.
     Dec(u8),
 
+    /// `0x23` — `acc = ToBoolean(acc)`.
+    ///
+    /// Upstream emits this compact form when
+    /// `Helpers::IsDefaultApiVersion(targetApiVersion, targetApiSubVersion)`
+    /// returns true.
+    IsTrue,
+
+    /// `0x24` — `acc = !ToBoolean(acc)`.
+    ///
+    /// Upstream emits this compact form when
+    /// `Helpers::IsDefaultApiVersion(targetApiVersion, targetApiSubVersion)`
+    /// returns true.
+    IsFalse,
+
     /// `0xFB 0x13` — `acc = ToBoolean(acc)`.
-    /// Non-default API builds route `istrue` through callruntime and carry an IC slot.
+    /// Upstream emits this runtime form for non-default API builds.
     CallRuntimeIsTrue(u8),
 
     /// `0xFB 0x14` — `acc = !ToBoolean(acc)`.
-    /// Non-default API builds route `isfalse` through callruntime and carry an IC slot.
+    /// Upstream emits this runtime form for non-default API builds.
     CallRuntimeIsFalse(u8),
 
     // ── `this` loader ─────────────────────────────────────────────────────────
@@ -147,6 +190,10 @@ pub enum Insn {
     /// Semantics: acc holds the property key; v[vreg] holds the object.
     /// Encoding: `[0x25] [slot: u8] [vreg: u8]` = 3 bytes.
     IsIn(u8, u8),
+
+    /// `0x26` `op_imm_8_v_8` — `acc = v[vreg] instanceof acc`.
+    /// Encoding: `[0x26] [slot: u8] [vreg: u8]` = 3 bytes.
+    InstanceOf(u8, u8),
 
     // ── Strict equality / inequality ──────────────────────────────────────────
     /// `0x27` — `acc = acc !== v[vreg]`.
@@ -203,6 +250,18 @@ pub enum Insn {
     /// Encoding: `[0x32] [slot: u8] [argc: u8] [first_arg_vreg: u8]` = 4 bytes.
     SuperCallThisRange(u8, u8, u8),
 
+    /// `0xB9` `op_imm_8_v_8` — call superclass constructor with a spread arguments array.
+    /// Accumulator holds the function object; `args_vreg` holds the array object.
+    SuperCallSpread(u8, u8),
+
+    /// `0xBA` `op_imm_8_v1_8_v2_8` — apply-call the function in accumulator.
+    /// Operands are receiver and arguments array.
+    Apply(u8, u8, u8),
+
+    /// `0x76` / `0xC1` — get or create the cached tagged-template object.
+    /// Accumulator holds the template argument array.
+    GetTemplateObject(u16),
+
     // ── Global variable access ────────────────────────────────────────────────
     // Short form (imm=u8): opcode(1) + slot(1) + name_id(2) = 4 bytes.
     /// `0x3F` — load `globalThis.<name>` into accumulator.
@@ -215,13 +274,24 @@ pub enum Insn {
     /// `0x7E` — load an imported module binding by module variable index.
     LdExternalModuleVar(u8),
 
+    /// `0x7D` — load a local exported module binding by module variable index.
+    LdLocalModuleVar(u8),
+
     /// `0x7C` — store accumulator into an exported module binding.
     StModuleVar(u8),
 
-    /// `0x3C` — load a lexical environment binding.
+    /// `0x3C` / `0x8A` — load a lexical environment binding.
+    ///
+    /// es2abc uses the compact imm4/imm4 form (`0x3C`) while both operands fit
+    /// in 4 bits, and the wide form (`0x8A level slot`) once either operand is
+    /// larger.
     LdLexVar(u8, u8),
 
-    /// `0x3D` — store accumulator into a lexical environment binding.
+    /// `0x3D` / `0x8B` — store accumulator into a lexical environment binding.
+    ///
+    /// es2abc uses the compact imm4/imm4 form (`0x3D`) while both operands fit
+    /// in 4 bits, and the wide form (`0x8B level slot`) once either operand is
+    /// larger.
     StLexVar(u8, u8),
 
     /// `0xB6` — create a named lexical environment.
@@ -236,6 +306,9 @@ pub enum Insn {
     /// `0xFE 0x07` — validate super() call state.
     ThrowIfSuperNotCorrectCall(u8),
 
+    /// `0xFE 0x05` — throw if the register does not hold an object.
+    ThrowIfNotObject(u8),
+
     // ── Object property access ────────────────────────────────────────────────
     /// `0x42` — load `acc.<name>` into accumulator (acc is the object).
     /// Short form: `[0x42] [slot: u8] [name_id: u16 LE]` = 4 bytes.
@@ -244,6 +317,91 @@ pub enum Insn {
     /// `0x43` — store accumulator into `obj_vreg.<name>`.
     /// Short form: `[0x43] [slot: u8] [name_id: u16 LE] [obj_vreg: u8]` = 5 bytes.
     StObjByName(u8, u16, u8),
+
+    /// `0x46` — load `super.<name>` into accumulator (acc is this).
+    /// Short form: `[0x46] [slot: u8] [name_id: u16 LE]` = 4 bytes.
+    LdSuperByName(u8, u16),
+
+    /// `0xD0` — store accumulator into `super.<name>`.
+    /// Short form: `[0xD0] [slot: u8] [name_id: u16 LE] [this_vreg: u8]` = 5 bytes.
+    StSuperByName(u8, u16, u8),
+
+    /// `0xDC` — define accumulator as an own named property on `obj_vreg`.
+    /// Short form: `[0xDC] [slot: u8] [name_id: u16 LE] [obj_vreg: u8]` = 5 bytes.
+    DefinePropertyByName(u8, u16, u8),
+
+    /// `0xDB` — define accumulator as an own named field on `obj_vreg`.
+    /// Short form: `[0xDB] [slot: u8] [name_id: u16 LE] [obj_vreg: u8]` = 5 bytes.
+    DefineFieldByName(u8, u16, u8),
+
+    /// `0xFB 0x01` — define accumulator as an own property by value key.
+    /// Encoding: `[0xFB] [0x01] [slot: u8] [key_vreg: u8] [obj_vreg: u8]` = 5 bytes.
+    CallRuntimeDefineFieldByValue(u8, u8, u8),
+
+    // ── Private class field access ────────────────────────────────────────────
+    //
+    // Private fields use a two-dimensional address: `(level, slot)` where
+    // `level` is the lexical class-scope depth (0 = current class) and `slot`
+    // is the field's zero-based index within that class's private environment.
+    // The first immediate (`imm1`) is the IC slot, always 0 at compile time.
+    //
+    // Reference: `pandagen.cpp` `LoadPrivateProperty` / `StorePrivateProperty` /
+    // `DefineClassPrivateField` / `TestIn`.
+
+    /// `0xD8` `op_imm1_8_imm2_16_imm3_16` — load private field `(level, slot)`
+    /// from the object in the accumulator.
+    ///
+    /// Encoding: `[0xD8] [ic:u8=0] [level:u16 LE] [slot:u16 LE]` = 6 bytes.
+    ///
+    /// Source: `isa.yaml` — `ldprivateproperty imm1:u8, imm2:u16, imm3:u16`,
+    /// `opcode_idx: [0xd8]`.
+    LdPrivateProperty(u8, u16, u16),
+
+    /// `0xD9` `op_imm1_8_imm2_16_imm3_16_v_8` — store accumulator to private
+    /// field `(level, slot)` on the object in `obj_vreg`.
+    ///
+    /// Encoding: `[0xD9] [ic:u8=0] [level:u16 LE] [slot:u16 LE] [obj:u8]` = 7 bytes.
+    ///
+    /// Source: `isa.yaml` — `stprivateproperty imm1:u8, imm2:u16, imm3:u16, v`,
+    /// `opcode_idx: [0xd9]`.
+    StPrivateProperty(u8, u16, u16, u8),
+
+    /// `0xDA` `op_imm1_8_imm2_16_imm3_16` — brand-check: `#name in obj`.
+    ///
+    /// Object is in the accumulator; result (bool) is written back to acc.
+    ///
+    /// Encoding: `[0xDA] [ic:u8=0] [level:u16 LE] [slot:u16 LE]` = 6 bytes.
+    ///
+    /// Source: `isa.yaml` — `testin imm1:u8, imm2:u16, imm3:u16`,
+    /// `opcode_idx: [0xda]`.
+    TestIn(u8, u16, u16),
+
+    /// `0xFB 0x04` — initialise the private environment for a class.
+    ///
+    /// Must be emitted **after** `DefineClassWithBuffer` for any class that has
+    /// private elements.  `num` is the total count of private field slots.
+    /// `lit_id` points to the private-methods literal array (contains
+    /// METHOD/GETTER/SETTER entries for private methods; empty or zero-count for
+    /// pure private-field classes).
+    ///
+    /// Encoding: `[0xFB] [0x04] [num:u16 LE] [lit_id:u16 LE]` = 6 bytes.
+    ///
+    /// Source: `pandagen.cpp` `CreatePrivateProperty`;
+    /// `isa.yaml` — `callruntime.createprivateproperty imm:u16, literalarray_id`,
+    /// `opcode_idx: [0x04]`, `prefix: callruntime`.
+    CallRuntimeCreatePrivateProperty(u16, u16),
+
+    /// `0xFB 0x05` — define (initialise) a private field instance slot.
+    ///
+    /// Called once per private field in the constructor / instance initializer.
+    /// The initial value must be in the accumulator; `obj_vreg` holds `this`.
+    ///
+    /// Encoding: `[0xFB] [0x05] [ic:u8=0] [level:u16 LE] [slot:u16 LE] [obj:u8]` = 8 bytes.
+    ///
+    /// Source: `pandagen.cpp` `DefineClassPrivateField`;
+    /// `isa.yaml` — `callruntime.defineprivateproperty imm1:u8, imm2:u16, imm3:u16, v`,
+    /// `opcode_idx: [0x05]`, `prefix: callruntime`.
+    CallRuntimeDefinePrivateProperty(u8, u16, u16, u8),
 
     // ── Definition instructions ───────────────────────────────────────────────
     /// `0x33` — define function literal.
@@ -270,12 +428,65 @@ pub enum Insn {
     /// `0x05` / `0x80` — create an empty array, carrying an IC slot.
     CreateEmptyArray(u16),
 
+    /// `0x06` — create an array from a literal-array buffer.
+    /// Encoding: `[0x06] [slot: u8] [lit_id: u16 LE]` = 4 bytes.
+    CreateArrayWithBuffer(u8, u16),
+
     /// `0x79` / `0xCB` — store accumulator into own array index.
     StOwnByIndex(u16, u8, u16),
+
+    /// `0xC6` — spread accumulator into destination array at index register.
+    /// Encoding: `[0xC6] [array_vreg: u8] [index_vreg: u8]` = 3 bytes.
+    StArraySpread(u8, u8),
+
+    /// `0x37` — load `obj_vreg[acc]` into accumulator.
+    /// Encoding: `[0x37] [slot: u8] [obj_vreg: u8]` = 3 bytes.
+    LdObjByValue(u8, u8),
+
+    /// `0x38` — store accumulator into `obj_vreg[key_vreg]`.
+    /// Encoding: `[0x38] [slot: u8] [obj_vreg: u8] [key_vreg: u8]` = 4 bytes.
+    StObjByValue(u8, u8, u8),
+
+    /// `0x39` — load `super[acc]` into accumulator.
+    /// Encoding: `[0x39] [slot: u8] [this_vreg: u8]` = 3 bytes.
+    LdSuperByValue(u8, u8),
+
+    /// `0xC9` — store accumulator into `super[key_vreg]`.
+    /// Encoding: `[0xC9] [slot: u8] [this_vreg: u8] [key_vreg: u8]` = 4 bytes.
+    StSuperByValue(u8, u8, u8),
 
     /// `0x7A` — store accumulator into own named property.
     /// Encoding: `[0x7A] [slot: u8] [name_id: u16 LE] [obj_vreg: u8]` = 5 bytes.
     StOwnByName(u8, u16, u8),
+
+    /// `0x8E` — store accumulator into own named property and set function/class name.
+    /// Encoding: `[0x8E] [slot: u8] [name_id: u16 LE] [obj_vreg: u8]` = 5 bytes.
+    StOwnByNameWithNameSet(u8, u16, u8),
+
+    /// `0x99` — store accumulator into own property by value key and set function/class name.
+    /// Encoding: `[0x99] [slot: u8] [obj_vreg: u8] [key_vreg: u8]` = 4 bytes.
+    StOwnByValueWithNameSet(u8, u8, u8),
+
+    /// `0x78` — store accumulator into own property by value key.
+    /// Encoding: `[0x78] [slot: u8] [obj_vreg: u8] [key_vreg: u8]` = 4 bytes.
+    StOwnByValue(u8, u8, u8),
+
+    /// `0xC5` — copy enumerable data properties from accumulator into destination object.
+    /// Encoding: `[0xC5] [dst_vreg: u8]` = 2 bytes.
+    CopyDataProperties(u8),
+
+    /// `0xC2` — delete property `acc` from object register.
+    /// Encoding: `[0xC2] [obj_vreg: u8]` = 2 bytes.
+    DelObjProp(u8),
+
+    /// `0xB3` / `0xFD 0x00` — create object excluding keys from a source object.
+    /// Encoding: `[0xB3] [arg_count: u8] [obj_vreg: u8] [keys_start_vreg: u8]` = 4 bytes,
+    /// or `[0xFD] [0x00] [arg_count: u16 LE] [obj_vreg: u8] [keys_start_vreg: u8]` = 6 bytes.
+    CreateObjectWithExcludedKeys(u16, u8, u8),
+
+    /// `0x77` — set object prototype. Accumulator holds the object, operand is proto.
+    /// Encoding: `[0x77] [slot: u8] [proto_vreg: u8]` = 3 bytes.
+    SetObjectWithProto(u8, u8),
 
     // ── Object construction ──────────────────────────────────────────────────
     /// `0x04` `op_none` — create an empty object literal `{}` into accumulator.
@@ -300,6 +511,10 @@ pub enum Insn {
     /// `v_start` = first register (holds the constructor function).
     /// Encoding: `[0x08] [slot: u8] [argc: u8] [v_start: u8]` = 4 bytes.
     NewObjRange(u8, u8, u8),
+
+    /// `0xB4` `op_imm_8_v_8` — construct using the arguments array in accumulator.
+    /// `ctor_vreg` holds the constructor function.
+    NewObjApply(u8, u8),
 
     // ── Returns ──────────────────────────────────────────────────────────────
     /// `0x64` `op_none` — return accumulator value.
@@ -349,6 +564,10 @@ pub enum Insn {
     /// Encoding: `[0xFE] [0x00]` = 2 bytes (prefixed instruction).
     Throw,
 
+    /// `0xFE 0x02` — throw when an object destructuring source is nullish.
+    /// Encoding: `[0xFE] [0x02]` = 2 bytes (prefixed instruction).
+    ThrowPatternNonCoercible,
+
     // ── For-in iteration ─────────────────────────────────────────────────────
     /// `0x66` `op_none` — create a property-iterator for the object in acc.
     ///
@@ -394,15 +613,18 @@ pub enum Insn {
     /// `opcode_idx: [0x68, 0xac]`.
     CloseIterator(u8, u8),
 
-    /// `0xC0` `op_v_8` — create generator object; operand is the vreg to store it.
-    /// Encoding: `[0xC0] [vreg: u8]` = 2 bytes.
+    /// `0xB1` `op_v_8` — create generator object; operand is the function object register.
+    /// Encoding: `[0xB1] [func_obj: u8]` = 2 bytes.
     CreateGeneratorObj(u8),
-    /// `0xC1` `op_imm_8_v_8` — suspend generator; yield value in accumulator.
-    /// Encoding: `[0xC1] [slot: u8] [gen_reg: u8]` = 3 bytes.
-    SuspendGenerator(u8, u8),
-    /// `0xC2` `op_v_8` — resume generator; loads the value passed to `next()`.
-    /// Encoding: `[0xC2] [gen_reg: u8]` = 2 bytes.
-    ResumeGenerator(u8),
+    /// `0xC3` `op_v_8` — suspend generator; yield value in accumulator.
+    /// Encoding: `[0xC3] [gen_reg: u8]` = 2 bytes.
+    SuspendGenerator(u8),
+    /// `0xBF` `op_none` — resume generator; generator object is in accumulator.
+    /// Encoding: `[0xBF]` = 1 byte.
+    ResumeGenerator,
+    /// `0xC0` `op_none` — get resume mode; generator object is in accumulator.
+    /// Encoding: `[0xC0]` = 1 byte.
+    GetResumeMode,
 
     // ── Rest parameters ───────────────────────────────────────────────────────
     /// `0xA1` `op_imm_8` — copy rest arguments into an array in the accumulator.
@@ -430,31 +652,98 @@ pub enum Insn {
     /// `opcode_idx: [0xbb]`.
     AsyncFunctionEnter,
 
-    /// `0xBC` `op_imm_8_v_8` — resolve (return) from an async function.
-    ///
-    /// `slot` = IC slot (pass 0); `async_reg` = vreg holding the async object
-    /// created by `AsyncFunctionEnter`.  The accumulator holds the resolved
-    /// value.
-    ///
-    /// Encoding: `[0xBC] [slot: u8] [async_reg: u8]` = 3 bytes.
-    ///
-    /// Source: `isa.yaml` — `asyncfunctionresolve imm:u8, v:in:top`, format
-    /// `op_imm_8_v_8`, `opcode_idx: [0xbc]`.
-    AsyncFunctionResolve(u8, u8),
+    /// `0xC4` `op_v_8` — await in an async function; async object register operand.
+    /// Encoding: `[0xC4] [async_reg: u8]` = 2 bytes.
+    AsyncFunctionAwaitUncaught(u8),
 
-    /// `0xBD` `op_imm_8_v_8` — reject (throw) from an async function.
-    ///
-    /// `slot` = IC slot (pass 0); `async_reg` = vreg holding the async object.
-    /// The accumulator holds the rejection reason.
-    ///
-    /// Encoding: `[0xBD] [slot: u8] [async_reg: u8]` = 3 bytes.
-    ///
-    /// Source: `isa.yaml` — `asyncfunctionreject imm:u8, v:in:top`, format
-    /// `op_imm_8_v_8`, `opcode_idx: [0xbd]`.
-    AsyncFunctionReject(u8, u8),
+    /// `0xCD` `op_v_8` — resolve (return) from an async function.
+    /// Encoding: `[0xCD] [async_reg: u8]` = 2 bytes.
+    AsyncFunctionResolve(u8),
+
+    /// `0xCE` `op_v_8` — reject (throw) from an async function.
+    /// Encoding: `[0xCE] [async_reg: u8]` = 2 bytes.
+    AsyncFunctionReject(u8),
 }
 
 impl Insn {
+    /// Byte offsets, relative to this instruction's encoded bytes, that carry
+    /// vreg operands.  This lets the lowering layer rewrite late-bound argument
+    /// registers without decoding raw bytecode by opcode.
+    pub fn register_operand_offsets(&self) -> &'static [usize] {
+        match self {
+            Insn::Lda(_) | Insn::Sta(_) => &[1],
+            Insn::MovV8(_, _) => &[1, 2],
+            Insn::Add2(_, _)
+            | Insn::Sub2(_, _)
+            | Insn::Mul2(_, _)
+            | Insn::Div2(_, _)
+            | Insn::Mod2(_, _)
+            | Insn::Eq(_, _)
+            | Insn::NotEq(_, _)
+            | Insn::Less(_, _)
+            | Insn::LessEq(_, _)
+            | Insn::Greater(_, _)
+            | Insn::GreaterEq(_, _)
+            | Insn::Shl2(_, _)
+            | Insn::Shr2(_, _)
+            | Insn::Ashr2(_, _)
+            | Insn::And2(_, _)
+            | Insn::Or2(_, _)
+            | Insn::Xor2(_, _)
+            | Insn::Exp(_, _)
+            | Insn::IsIn(_, _)
+            | Insn::InstanceOf(_, _)
+            | Insn::StrictNotEq(_, _)
+            | Insn::StrictEq(_, _)
+            | Insn::CallArg1(_, _)
+            | Insn::CallThis0(_, _)
+            | Insn::LdObjByValue(_, _)
+            | Insn::LdSuperByValue(_, _)
+            | Insn::CloseIterator(_, _) => &[2],
+            Insn::ThrowIfNotObject(_) => &[2],
+            Insn::SuspendGenerator(_)
+            | Insn::AsyncFunctionAwaitUncaught(_)
+            | Insn::AsyncFunctionResolve(_)
+            | Insn::AsyncFunctionReject(_) => &[1],
+            Insn::CallArgs2(_, _, _)
+            | Insn::CallThis1(_, _, _)
+            | Insn::StObjByValue(_, _, _)
+            | Insn::StSuperByValue(_, _, _)
+            | Insn::StOwnByValue(_, _, _)
+            | Insn::StOwnByValueWithNameSet(_, _, _) => &[2, 3],
+            Insn::CopyDataProperties(_) | Insn::DelObjProp(_) => &[1],
+            Insn::CreateObjectWithExcludedKeys(count, _, _) if *count <= u8::MAX as u16 => &[2, 3],
+            Insn::CreateObjectWithExcludedKeys(_, _, _) => &[4, 5],
+            Insn::SetObjectWithProto(_, _) => &[2],
+            Insn::DefineGetterSetterByValue(_, _, _, _) => &[1, 2, 3, 4],
+            Insn::CallRuntimeDefineFieldByValue(_, _, _) => &[3, 4],
+            // Private property: obj operand is at byte offset 6 within the encoded instruction.
+            Insn::StPrivateProperty(_, _, _, _) => &[6],
+            // callruntime.defineprivateproperty: obj operand at byte offset 7.
+            Insn::CallRuntimeDefinePrivateProperty(_, _, _, _) => &[7],
+            Insn::CallArgs3(_, _, _, _) | Insn::CallThis2(_, _, _, _) => &[2, 3, 4],
+            Insn::CallThis3(_, _, _, _, _) => &[2, 3, 4, 5],
+            Insn::CallRange(_, _, _)
+            | Insn::CallThisRange(_, _, _)
+            | Insn::SuperCallThisRange(_, _, _)
+            | Insn::NewObjRange(_, _, _) => &[3],
+            Insn::SuperCallSpread(_, _) | Insn::NewObjApply(_, _) => &[2],
+            Insn::Apply(_, _, _) => &[2, 3],
+            Insn::StObjByName(_, _, _)
+            | Insn::StSuperByName(_, _, _)
+            | Insn::DefinePropertyByName(_, _, _)
+            | Insn::DefineFieldByName(_, _, _)
+            | Insn::StOwnByName(_, _, _)
+            | Insn::StOwnByNameWithNameSet(_, _, _) => &[4],
+            Insn::DefineClassWithBuffer(_, _, _, _, _) => &[8],
+            Insn::StOwnByIndex(slot, _, _) if *slot <= u8::MAX as u16 => &[2],
+            Insn::StOwnByIndex(_, _, _) => &[3],
+            Insn::StArraySpread(_, _) => &[1, 2],
+            Insn::GetNextPropName(_) | Insn::CreateGeneratorObj(_) => &[1],
+            _ => &[],
+        }
+    }
+
     /// Encode this instruction into its binary byte representation.
     ///
     /// `_strings` is accepted for API compatibility but is currently unused;
@@ -469,6 +758,8 @@ impl Insn {
             Insn::LdNull => vec![0x01],
             Insn::LdTrue => vec![0x02],
             Insn::LdFalse => vec![0x03],
+            Insn::LdHole => vec![0x70],
+            Insn::LdGlobal => vec![0x6d],
 
             // ── immediates ───────────────────────────────────────────────────
             Insn::LdAi(n) => {
@@ -488,6 +779,14 @@ impl Insn {
                 v.extend_from_slice(&id.to_le_bytes());
                 v
             }
+            Insn::LdBigInt(id) => {
+                let mut v = vec![0xd3];
+                v.extend_from_slice(&id.to_le_bytes());
+                v
+            }
+            Insn::DynamicImport => vec![0xbd],
+            Insn::GetImportMeta => vec![0xd5],
+            Insn::Debugger => vec![0xb0],
 
             // ── register moves ───────────────────────────────────────────────
             Insn::Lda(vreg) => vec![0x60, *vreg],
@@ -528,13 +827,17 @@ impl Insn {
             Insn::And2(slot, vreg) => vec![0x18, *slot, *vreg],
             Insn::Or2(slot, vreg) => vec![0x19, *slot, *vreg],
             Insn::Xor2(slot, vreg) => vec![0x1A, *slot, *vreg],
+            Insn::Exp(slot, vreg) => vec![0x1B, *slot, *vreg],
 
             // ── unary operators ───────────────────────────────────────────────
             Insn::TypeOf(slot) => vec![0x1C, *slot],
+            Insn::ToNumber(slot) => vec![0x1d, *slot],
             Insn::Neg(slot) => vec![0x1F, *slot],
             Insn::BitNot(slot) => vec![0x20, *slot],
             Insn::Inc(slot) => vec![0x21, *slot],
             Insn::Dec(slot) => vec![0x22, *slot],
+            Insn::IsTrue => vec![0x23],
+            Insn::IsFalse => vec![0x24],
             Insn::CallRuntimeIsTrue(slot) => vec![0xfb, 0x13, *slot],
             Insn::CallRuntimeIsFalse(slot) => vec![0xfb, 0x14, *slot],
 
@@ -543,6 +846,7 @@ impl Insn {
 
             // ── in operator ───────────────────────────────────────────────────
             Insn::IsIn(slot, vreg) => vec![0x25, *slot, *vreg],
+            Insn::InstanceOf(slot, vreg) => vec![0x26, *slot, *vreg],
 
             // ── strict equality ───────────────────────────────────────────────
             Insn::StrictNotEq(slot, vreg) => vec![0x27, *slot, *vreg],
@@ -561,6 +865,14 @@ impl Insn {
             Insn::CallThis3(slot, this, v0, v1, v2) => vec![0x30, *slot, *this, *v0, *v1, *v2],
             Insn::CallThisRange(slot, argc, this_vreg) => vec![0x31, *slot, *argc, *this_vreg],
             Insn::SuperCallThisRange(slot, argc, v_start) => vec![0x32, *slot, *argc, *v_start],
+            Insn::SuperCallSpread(slot, args_vreg) => vec![0xb9, *slot, *args_vreg],
+            Insn::Apply(slot, this_vreg, args_vreg) => vec![0xba, *slot, *this_vreg, *args_vreg],
+            Insn::GetTemplateObject(slot) if *slot <= u8::MAX as u16 => vec![0x76, *slot as u8],
+            Insn::GetTemplateObject(slot) => {
+                let mut v = vec![0xc1];
+                v.extend_from_slice(&slot.to_le_bytes());
+                v
+            }
 
             // ── global access ────────────────────────────────────────────────
             Insn::TryLdGlobalByName(slot, name_id) => {
@@ -574,9 +886,16 @@ impl Insn {
                 v
             }
             Insn::LdExternalModuleVar(index) => vec![0x7e, *index],
+            Insn::LdLocalModuleVar(index) => vec![0x7d, *index],
             Insn::StModuleVar(index) => vec![0x7c, *index],
-            Insn::LdLexVar(level, slot) => vec![0x3c, (level << 4) | slot],
-            Insn::StLexVar(level, slot) => vec![0x3d, (level << 4) | slot],
+            Insn::LdLexVar(level, slot) if *level <= 0x0f && *slot <= 0x0f => {
+                vec![0x3c, (slot << 4) | level]
+            }
+            Insn::LdLexVar(level, slot) => vec![0x8a, *level, *slot],
+            Insn::StLexVar(level, slot) if *level <= 0x0f && *slot <= 0x0f => {
+                vec![0x3d, (slot << 4) | level]
+            }
+            Insn::StLexVar(level, slot) => vec![0x8b, *level, *slot],
             Insn::NewLexEnvWithName(count, literal_id) => {
                 let mut v = vec![0xb6, *count];
                 v.extend_from_slice(&literal_id.to_le_bytes());
@@ -589,6 +908,7 @@ impl Insn {
                 v
             }
             Insn::ThrowIfSuperNotCorrectCall(kind) => vec![0xfe, 0x07, *kind],
+            Insn::ThrowIfNotObject(vreg) => vec![0xfe, 0x05, *vreg],
 
             // ── object property ──────────────────────────────────────────────
             Insn::LdObjByName(slot, name_id) => {
@@ -599,6 +919,64 @@ impl Insn {
             Insn::StObjByName(slot, name_id, obj) => {
                 let mut v = vec![0x43, *slot];
                 v.extend_from_slice(&name_id.to_le_bytes());
+                v.push(*obj);
+                v
+            }
+            Insn::LdSuperByName(slot, name_id) => {
+                let mut v = vec![0x46, *slot];
+                v.extend_from_slice(&name_id.to_le_bytes());
+                v
+            }
+            Insn::StSuperByName(slot, name_id, obj) => {
+                let mut v = vec![0xd0, *slot];
+                v.extend_from_slice(&name_id.to_le_bytes());
+                v.push(*obj);
+                v
+            }
+            Insn::DefinePropertyByName(slot, name_id, obj) => {
+                let mut v = vec![0xdc, *slot];
+                v.extend_from_slice(&name_id.to_le_bytes());
+                v.push(*obj);
+                v
+            }
+            Insn::DefineFieldByName(slot, name_id, obj) => {
+                let mut v = vec![0xdb, *slot];
+                v.extend_from_slice(&name_id.to_le_bytes());
+                v.push(*obj);
+                v
+            }
+            Insn::CallRuntimeDefineFieldByValue(slot, key, obj) => {
+                vec![0xfb, 0x01, *slot, *key, *obj]
+            }
+            Insn::LdPrivateProperty(ic, level, slot) => {
+                let mut v = vec![0xd8, *ic];
+                v.extend_from_slice(&level.to_le_bytes());
+                v.extend_from_slice(&slot.to_le_bytes());
+                v
+            }
+            Insn::StPrivateProperty(ic, level, slot, obj) => {
+                let mut v = vec![0xd9, *ic];
+                v.extend_from_slice(&level.to_le_bytes());
+                v.extend_from_slice(&slot.to_le_bytes());
+                v.push(*obj);
+                v
+            }
+            Insn::TestIn(ic, level, slot) => {
+                let mut v = vec![0xda, *ic];
+                v.extend_from_slice(&level.to_le_bytes());
+                v.extend_from_slice(&slot.to_le_bytes());
+                v
+            }
+            Insn::CallRuntimeCreatePrivateProperty(num, lit_id) => {
+                let mut v = vec![0xfb, 0x04];
+                v.extend_from_slice(&num.to_le_bytes());
+                v.extend_from_slice(&lit_id.to_le_bytes());
+                v
+            }
+            Insn::CallRuntimeDefinePrivateProperty(ic, level, slot, obj) => {
+                let mut v = vec![0xfb, 0x05, *ic];
+                v.extend_from_slice(&level.to_le_bytes());
+                v.extend_from_slice(&slot.to_le_bytes());
                 v.push(*obj);
                 v
             }
@@ -633,6 +1011,11 @@ impl Insn {
                 v.extend_from_slice(&slot.to_le_bytes());
                 v
             }
+            Insn::CreateArrayWithBuffer(slot, lit_id) => {
+                let mut v = vec![0x06, *slot];
+                v.extend_from_slice(&lit_id.to_le_bytes());
+                v
+            }
             Insn::StOwnByIndex(slot, array, index) if *slot <= u8::MAX as u16 => {
                 let mut v = vec![0x79, *slot as u8, *array];
                 v.extend_from_slice(&index.to_le_bytes());
@@ -645,12 +1028,40 @@ impl Insn {
                 v.extend_from_slice(&index.to_le_bytes());
                 v
             }
+            Insn::StArraySpread(array, index) => vec![0xc6, *array, *index],
+            Insn::LdObjByValue(slot, obj) => vec![0x37, *slot, *obj],
+            Insn::StObjByValue(slot, obj, key) => vec![0x38, *slot, *obj, *key],
+            Insn::LdSuperByValue(slot, obj) => vec![0x39, *slot, *obj],
+            Insn::StSuperByValue(slot, obj, key) => vec![0xc9, *slot, *obj, *key],
             Insn::StOwnByName(slot, name_id, obj) => {
                 let mut v = vec![0x7a, *slot];
                 v.extend_from_slice(&name_id.to_le_bytes());
                 v.push(*obj);
                 v
             }
+            Insn::StOwnByNameWithNameSet(slot, name_id, obj) => {
+                let mut v = vec![0x8e, *slot];
+                v.extend_from_slice(&name_id.to_le_bytes());
+                v.push(*obj);
+                v
+            }
+            Insn::StOwnByValueWithNameSet(slot, obj, key) => vec![0x99, *slot, *obj, *key],
+            Insn::StOwnByValue(slot, obj, key) => vec![0x78, *slot, *obj, *key],
+            Insn::CopyDataProperties(dst) => vec![0xc5, *dst],
+            Insn::DelObjProp(obj) => vec![0xc2, *obj],
+            Insn::CreateObjectWithExcludedKeys(arg_count, obj, keys_start)
+                if *arg_count <= u8::MAX as u16 =>
+            {
+                vec![0xb3, *arg_count as u8, *obj, *keys_start]
+            }
+            Insn::CreateObjectWithExcludedKeys(arg_count, obj, keys_start) => {
+                let mut v = vec![0xfd, 0x00];
+                v.extend_from_slice(&arg_count.to_le_bytes());
+                v.push(*obj);
+                v.push(*keys_start);
+                v
+            }
+            Insn::SetObjectWithProto(slot, proto) => vec![0x77, *slot, *proto],
 
             // ── object construction ──────────────────────────────────────────
             Insn::CreateEmptyObject => vec![0x04],
@@ -660,6 +1071,7 @@ impl Insn {
                 v
             }
             Insn::NewObjRange(slot, argc, v_start) => vec![0x08, *slot, *argc, *v_start],
+            Insn::NewObjApply(slot, ctor_vreg) => vec![0xb4, *slot, *ctor_vreg],
 
             // ── returns ──────────────────────────────────────────────────────
             Insn::Return => vec![0x64],
@@ -702,6 +1114,7 @@ impl Insn {
 
             // ── exception ────────────────────────────────────────────────────
             Insn::Throw => vec![0xFE, 0x00],
+            Insn::ThrowPatternNonCoercible => vec![0xFE, 0x02],
 
             // ── for-in iteration ─────────────────────────────────────────────
             Insn::GetPropIterator => vec![0x66],
@@ -710,25 +1123,35 @@ impl Insn {
             // ── for-of iteration ─────────────────────────────────────────────
             Insn::GetIterator(slot) => vec![0x67, *slot],
             Insn::CloseIterator(slot, vreg) => vec![0x68, *slot, *vreg],
-            Insn::CreateGeneratorObj(vreg) => vec![0xC0, *vreg],
-            Insn::SuspendGenerator(slot, gen_reg) => vec![0xC1, *slot, *gen_reg],
-            Insn::ResumeGenerator(gen_reg) => vec![0xC2, *gen_reg],
+            Insn::CreateGeneratorObj(vreg) => vec![0xB1, *vreg],
+            Insn::SuspendGenerator(gen_reg) => vec![0xC3, *gen_reg],
+            Insn::ResumeGenerator => vec![0xBF],
+            Insn::GetResumeMode => vec![0xC0],
 
             // ── rest parameters / async ───────────────────────────────────────
             Insn::CopyRestArgs(n) => vec![0xA1, *n],
             Insn::AsyncFunctionEnter => vec![0xBB],
-            Insn::AsyncFunctionResolve(slot, async_reg) => vec![0xBC, *slot, *async_reg],
-            Insn::AsyncFunctionReject(slot, async_reg) => vec![0xBD, *slot, *async_reg],
+            Insn::AsyncFunctionAwaitUncaught(async_reg) => vec![0xC4, *async_reg],
+            Insn::AsyncFunctionResolve(async_reg) => vec![0xCD, *async_reg],
+            Insn::AsyncFunctionReject(async_reg) => vec![0xCE, *async_reg],
         }
     }
 
     /// Return the encoded byte length of this instruction without encoding it.
     pub fn byte_len(&self) -> usize {
         match self {
-            Insn::LdUndefined | Insn::LdNull | Insn::LdTrue | Insn::LdFalse => 1,
+            Insn::LdUndefined
+            | Insn::LdNull
+            | Insn::LdTrue
+            | Insn::LdFalse
+            | Insn::LdHole
+            | Insn::LdGlobal
+            | Insn::DynamicImport
+            | Insn::GetImportMeta
+            | Insn::Debugger => 1,
             Insn::LdAi(_) => 5,
             Insn::FLdAi(_) => 9,
-            Insn::LdaStr(_) => 3,
+            Insn::LdaStr(_) | Insn::LdBigInt(_) => 3,
             Insn::Lda(_) | Insn::Sta(_) => 2,
             Insn::MovV4(_, _) => 2,
             Insn::MovV8(_, _) => 3,
@@ -750,10 +1173,18 @@ impl Insn {
             | Insn::And2(_, _)
             | Insn::Or2(_, _)
             | Insn::Xor2(_, _)
+            | Insn::Exp(_, _)
             | Insn::IsIn(_, _)
+            | Insn::InstanceOf(_, _)
             | Insn::StrictNotEq(_, _)
             | Insn::StrictEq(_, _) => 3,
-            Insn::TypeOf(_) | Insn::Neg(_) | Insn::BitNot(_) | Insn::Inc(_) | Insn::Dec(_) => 2,
+            Insn::TypeOf(_)
+            | Insn::ToNumber(_)
+            | Insn::Neg(_)
+            | Insn::BitNot(_)
+            | Insn::Inc(_)
+            | Insn::Dec(_) => 2,
+            Insn::IsTrue | Insn::IsFalse => 1,
             Insn::CallRuntimeIsTrue(_) | Insn::CallRuntimeIsFalse(_) => 3,
             Insn::LdThis => 1,
             Insn::CallArg0(_) => 2,
@@ -767,16 +1198,42 @@ impl Insn {
             Insn::CallThis3(_, _, _, _, _) => 6,
             Insn::CallThisRange(_, _, _) => 4,
             Insn::SuperCallThisRange(_, _, _) => 4,
+            Insn::SuperCallSpread(_, _) => 3,
+            Insn::Apply(_, _, _) => 4,
+            Insn::GetTemplateObject(slot) => {
+                if *slot <= u8::MAX as u16 {
+                    2
+                } else {
+                    3
+                }
+            }
             Insn::TryLdGlobalByName(_, _)
             | Insn::TryStGlobalByName(_, _)
-            | Insn::LdObjByName(_, _) => 4,
-            Insn::LdExternalModuleVar(_) | Insn::StModuleVar(_) => 2,
-            Insn::LdLexVar(_, _) | Insn::StLexVar(_, _) => 2,
+            | Insn::LdObjByName(_, _)
+            | Insn::LdSuperByName(_, _) => 4,
+            Insn::LdExternalModuleVar(_) | Insn::LdLocalModuleVar(_) | Insn::StModuleVar(_) => 2,
+            Insn::LdLexVar(level, slot) | Insn::StLexVar(level, slot) => {
+                if *level <= 0x0f && *slot <= 0x0f {
+                    2
+                } else {
+                    3
+                }
+            }
             Insn::NewLexEnv(_) => 2,
             Insn::NewLexEnvWithName(_, _) => 4,
             Insn::ThrowUndefinedIfHoleWithName(_) => 4,
             Insn::ThrowIfSuperNotCorrectCall(_) => 3,
-            Insn::StObjByName(_, _, _) => 5,
+            Insn::ThrowIfNotObject(_) => 3,
+            Insn::StObjByName(_, _, _)
+            | Insn::StSuperByName(_, _, _)
+            | Insn::DefinePropertyByName(_, _, _)
+            | Insn::DefineFieldByName(_, _, _)
+            | Insn::StOwnByNameWithNameSet(_, _, _) => 5,
+            Insn::CallRuntimeDefineFieldByValue(_, _, _) => 5,
+            Insn::LdPrivateProperty(_, _, _) | Insn::TestIn(_, _, _) => 6,
+            Insn::StPrivateProperty(_, _, _, _) => 7,
+            Insn::CallRuntimeCreatePrivateProperty(_, _) => 6,
+            Insn::CallRuntimeDefinePrivateProperty(_, _, _, _) => 8,
             Insn::DefineFuncShort(_, _, _) | Insn::DefineMethodShort(_, _, _) => 5,
             Insn::DefineClassWithBuffer(_, _, _, _, _) => 9,
             Insn::DefineGetterSetterByValue(_, _, _, _) => 5,
@@ -787,6 +1244,7 @@ impl Insn {
                     3
                 }
             }
+            Insn::CreateArrayWithBuffer(_, _) => 4,
             Insn::StOwnByIndex(slot, _, _) => {
                 if *slot <= u8::MAX as u16 {
                     5
@@ -794,25 +1252,90 @@ impl Insn {
                     6
                 }
             }
+            Insn::LdObjByValue(_, _) | Insn::LdSuperByValue(_, _) => 3,
+            Insn::StArraySpread(_, _) => 3,
+            Insn::StObjByValue(_, _, _) | Insn::StSuperByValue(_, _, _) => 4,
             Insn::StOwnByName(_, _, _) => 5,
+            Insn::StOwnByValue(_, _, _) | Insn::StOwnByValueWithNameSet(_, _, _) => 4,
+            Insn::CopyDataProperties(_) | Insn::DelObjProp(_) => 2,
+            Insn::CreateObjectWithExcludedKeys(arg_count, _, _) if *arg_count <= u8::MAX as u16 => {
+                4
+            }
+            Insn::CreateObjectWithExcludedKeys(_, _, _) => 6,
+            Insn::SetObjectWithProto(_, _) => 3,
             Insn::CreateEmptyObject => 1,
             Insn::CreateObjectWithBuffer(_, _) => 4,
             Insn::NewObjRange(_, _, _) => 4,
+            Insn::NewObjApply(_, _) => 3,
             Insn::Return | Insn::ReturnUndefined => 1,
             Insn::JmpShort(_) | Insn::JeqzShort(_) | Insn::JnezShort(_) => 2,
             Insn::Jmp(_) | Insn::Jeqz(_) | Insn::Jnez(_) => 3,
             Insn::JmpWide(_) | Insn::JeqzWide(_) | Insn::JnezWide(_) => 5,
-            Insn::Throw => 2,
+            Insn::Throw | Insn::ThrowPatternNonCoercible => 2,
             Insn::GetPropIterator => 1,
             Insn::GetNextPropName(_) => 2,
             Insn::GetIterator(_) => 2,
             Insn::CloseIterator(_, _) => 3,
             Insn::CreateGeneratorObj(_) => 2,
-            Insn::SuspendGenerator(_, _) => 3,
-            Insn::ResumeGenerator(_) => 2,
+            Insn::SuspendGenerator(_) => 2,
+            Insn::ResumeGenerator | Insn::GetResumeMode => 1,
             Insn::CopyRestArgs(_) => 2,
             Insn::AsyncFunctionEnter => 1,
-            Insn::AsyncFunctionResolve(_, _) | Insn::AsyncFunctionReject(_, _) => 3,
+            Insn::AsyncFunctionAwaitUncaught(_)
+            | Insn::AsyncFunctionResolve(_)
+            | Insn::AsyncFunctionReject(_) => 2,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Insn;
+    use crate::emit::strings::StringTable;
+
+    #[test]
+    fn create_object_with_excluded_keys_encodes_default_and_wide_forms() {
+        let mut strings = StringTable::default();
+
+        let default = Insn::CreateObjectWithExcludedKeys(2, 4, 5);
+        assert_eq!(default.encode(&mut strings), vec![0xb3, 2, 4, 5]);
+        assert_eq!(default.byte_len(), 4);
+        assert_eq!(default.register_operand_offsets(), &[2, 3]);
+
+        let wide = Insn::CreateObjectWithExcludedKeys(300, 4, 5);
+        assert_eq!(
+            wide.encode(&mut strings),
+            vec![0xfd, 0x00, 0x2c, 0x01, 4, 5]
+        );
+        assert_eq!(wide.byte_len(), 6);
+        assert_eq!(wide.register_operand_offsets(), &[4, 5]);
+    }
+
+    #[test]
+    fn unary_and_delete_support_opcodes_use_isa_encodings() {
+        let mut strings = StringTable::default();
+
+        let ldglobal = Insn::LdGlobal;
+        assert_eq!(ldglobal.encode(&mut strings), vec![0x6d]);
+        assert_eq!(ldglobal.byte_len(), 1);
+        assert!(ldglobal.register_operand_offsets().is_empty());
+
+        let tonumber = Insn::ToNumber(0);
+        assert_eq!(tonumber.encode(&mut strings), vec![0x1d, 0]);
+        assert_eq!(tonumber.byte_len(), 2);
+        assert!(tonumber.register_operand_offsets().is_empty());
+
+        let delete = Insn::DelObjProp(7);
+        assert_eq!(delete.encode(&mut strings), vec![0xc2, 7]);
+        assert_eq!(delete.byte_len(), 2);
+        assert_eq!(delete.register_operand_offsets(), &[1]);
+    }
+
+    #[test]
+    fn throw_pattern_non_coercible_uses_throw_prefix_opcode() {
+        let mut strings = StringTable::default();
+        let insn = Insn::ThrowPatternNonCoercible;
+        assert_eq!(insn.encode(&mut strings), vec![0xfe, 0x02]);
+        assert_eq!(insn.byte_len(), 2);
     }
 }

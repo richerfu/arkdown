@@ -20,6 +20,15 @@ pub(super) struct FunctionRecord<'a> {
     pub(super) node: FunctionRecordNode<'a>,
 }
 
+impl<'a> FunctionRecord<'a> {
+    pub(super) fn span(&self) -> (u32, u32) {
+        match self.node {
+            FunctionRecordNode::Function(function) => (function.span.start, function.span.end),
+            FunctionRecordNode::Arrow(arrow) => (arrow.span.start, arrow.span.end),
+        }
+    }
+}
+
 pub(super) fn collect_function_records<'a>(
     program: &'a Program<'a>,
     stmts: &'a [Statement<'a>],
@@ -354,6 +363,11 @@ impl<'a, 'names> FunctionRecordCollector<'a, 'names> {
                         self.scan_expr(value, property_key_name(&property.key));
                     }
                 }
+                ClassElement::StaticBlock(block) => {
+                    for stmt in &block.body {
+                        self.scan_stmt(stmt);
+                    }
+                }
                 _ => {}
             }
         }
@@ -368,6 +382,9 @@ impl<'a, 'names> FunctionRecordCollector<'a, 'names> {
     }
 
     fn push_function(&mut self, function: &'a Function<'a>, inferred_name: Option<&'a str>) {
+        if is_type_only_function(function) {
+            return;
+        }
         let span = (function.span.start, function.span.end);
         if !self.seen_spans.insert(span) {
             return;
@@ -401,6 +418,10 @@ impl<'a, 'names> FunctionRecordCollector<'a, 'names> {
             node: FunctionRecordNode::Arrow(arrow),
         });
     }
+}
+
+fn is_type_only_function(function: &Function<'_>) -> bool {
+    function.declare || function.body.is_none()
 }
 
 fn binding_name<'a>(pattern: &'a BindingPattern<'a>) -> Option<&'a str> {

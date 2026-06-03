@@ -158,11 +158,7 @@ impl ByteCodeHarScanEntry {
     // Private scan helpers
     // -----------------------------------------------------------------------
 
-    fn scan_oh_modules_dir(
-        oh_modules: &Path,
-        seen: &mut FxHashSet<String>,
-        out: &mut Vec<Self>,
-    ) {
+    fn scan_oh_modules_dir(oh_modules: &Path, seen: &mut FxHashSet<String>, out: &mut Vec<Self>) {
         for entry in Self::read_dir_sorted(oh_modules) {
             let pkg_dir = entry.path();
             if !pkg_dir.is_dir() {
@@ -458,8 +454,7 @@ pub fn collect_dynamic_import_lib_info(
             pkg_dir
         };
         let entry_file = DynamicImportLibEntry::find_entry_file(&pkg_dir);
-        let pkg_module_name =
-            DynamicImportLibEntry::read_module_name_from_pkg(&pkg_dir, dep_name);
+        let pkg_module_name = DynamicImportLibEntry::read_module_name_from_pkg(&pkg_dir, dep_name);
 
         let entry = DynamicImportLibEntry {
             entry_file_path: entry_file,

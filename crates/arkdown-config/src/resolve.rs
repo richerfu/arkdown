@@ -186,6 +186,7 @@ pub fn load_config(
         name: raw_product.name,
         bundle_name,
         compatible_sdk_version: raw_product.compatible_sdk_version.clone(),
+        compatible_sdk_version_stage: raw_product.compatible_sdk_version_stage.clone(),
         runtime_os: raw_product.runtime_os,
         signing_config,
         build_option,

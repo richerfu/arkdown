@@ -177,6 +177,7 @@ fn is_external_specifier(s: &str) -> bool {
         || s.starts_with("@bundle:")
         || s.starts_with("@system.")
         || s.starts_with("@hms.")
+        || s.starts_with("@hms:")
 }
 
 /// Convert an `ArkChunk` to an OHM URL string.
@@ -281,6 +282,7 @@ mod tests {
         ChunkGraph {
             chunks: idx_vec,
             full_module_ids: Vec::new(),
+            full_module_is_commonjs: FxHashMap::default(),
             module_to_chunk: IndexVec::new(),
             entry_module_to_entry_chunk: FxHashMap::default(),
         }

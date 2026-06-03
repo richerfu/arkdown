@@ -183,6 +183,9 @@ Current HmosWorld artifact status after a clean arkdown rebuild:
 | `ets/modules.abc` | 2,875,016B | 3,917,672B | not aligned |
 | `ets/widgets.abc` | 28,424B | 38,864B | not aligned |
 | ABC file version | `0x0002000c` | `0x0002000c` | aligned |
+| kit import binding type (default vs named) | correct | correct | fixed: `@kit.*` replacements now emit default imports where the kit re-exports a default and named imports otherwise |
+| HMS kit configs in kit map | present | present | fixed: `@kit.MapKit`, `@kit.AccountKit`, `@kit.PushKit`, `@kit.ServiceCollaborationKit`, `@kit.CoreSpeechKit`, `@kit.CoreVisionKit` now included |
+| `@Provide` constructor calls | `this.addProvidedVar(...)` | `this.addProvidedVar(...)` | fixed: `@Provide` fields now generate `addProvidedVar` calls in the class constructor |
 
 The ABC byte delta is therefore not caused by missing app/sys resource objects
 in the generated TypeScript cache or by missing CompileArkTS handoff modules.
@@ -274,6 +277,19 @@ Priority order from the current 2026-06-01 state:
 2. **[Parity harness] Add a stable ABC diff helper.** It should compare
    CodeItems, DebugInfo/LNP, method records, indexes, literal arrays, and final
    bytes separately so future regressions are localized immediately.
+3. **[ETS transform] Execution gaps from 2026-06-02 session — ALL FIXED on branch feat/hmosworld-gap-closure:**
+   - `@Prop` default value fallback: **FIXED** — `if (params.X === undefined) { this.__X.set(default) }`
+   - `NavDestination.create` builder+metadata: **FIXED** — emits `({ moduleName, pagePath })` second arg
+   - `__Common__.create` call emission: **FIXED** — emitted for custom components with chained attributes
+   - `ifElseBranchUpdateFunction` wrapper: **FIXED** — each if/else branch now registers update fn
+   - `forEachUpdateFunction` wrapper: **FIXED** — ForEach now registers key/diff update fn
+   - Gesture `.pop()` calls: **FIXED** — PanGesture, LongPressGesture etc. emit `.pop()`
+   - `@CustomDialog` `setController` method: **FIXED** — emitted after field declarations
+   - Kit import binding types (default vs named): **FIXED** — `KitEntry::Named` uses `import { X }`
+   - HMS kit configs: **FIXED** — `@kit.MapKit`, `@kit.AccountKit`, `@kit.PushKit` etc. added
+   - `@Provide` `addProvidedVar` calls: **FIXED** — emitted in constructor after backing field init
+   - ABC size vs hvigor: arkdown ABC is ~36% larger when built in debug mode vs hvigor release mode;
+     comment-induced LNP line shifts are the primary cause — needs fresh release-mode comparison.
 
 ## SPEC Coverage Map
 

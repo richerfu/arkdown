@@ -3,14 +3,23 @@ use crate::emit::record::{FieldRecord, FieldValue, FIELD_OWNER_CLASS_IDX};
 
 pub(super) struct RecordLayout<'a> {
     record_name: &'a str,
+    package_name: Option<&'a str>,
     source: &'a str,
+    is_commonjs: bool,
 }
 
 impl<'a> RecordLayout<'a> {
-    pub(super) fn new(record_name: &'a str, source: &'a str) -> Self {
+    pub(super) fn new(
+        record_name: &'a str,
+        package_name: Option<&'a str>,
+        source: &'a str,
+        is_commonjs: bool,
+    ) -> Self {
         Self {
             record_name,
+            package_name,
             source,
+            is_commonjs,
         }
     }
 
@@ -35,12 +44,12 @@ impl<'a> RecordLayout<'a> {
     pub(super) fn module_fields(
         &self,
         scope_names_idx: usize,
-        module_record_idx: usize,
+        module_record_idx: Option<usize>,
     ) -> Vec<FieldRecord> {
-        let module_name = self.module_name();
-        vec![
+        let module_name = self.package_name.unwrap_or_else(|| self.module_name());
+        let mut fields = vec![
             module_u8_field(format!("pkgName@{module_name}")),
-            module_u8_field("isCommonjs"),
+            module_u8_field_with_value("isCommonjs", u8::from(self.is_commonjs)),
             module_u8_field("hasTopLevelAwait"),
             module_u8_field("isSharedModule"),
             FieldRecord {
@@ -50,14 +59,17 @@ impl<'a> RecordLayout<'a> {
                 access_flags: 0,
                 value: Some(FieldValue::LiteralArray(scope_names_idx)),
             },
-            FieldRecord {
+        ];
+        if let Some(module_record_idx) = module_record_idx {
+            fields.push(FieldRecord {
                 name: "moduleRecordIdx".to_string(),
                 class_idx: FIELD_OWNER_CLASS_IDX,
                 type_idx: 1,
                 access_flags: 0,
                 value: Some(FieldValue::LiteralArray(module_record_idx)),
-            },
-        ]
+            });
+        }
+        fields
     }
 
     pub(super) fn source_code_strings(&self) -> Vec<String> {
@@ -97,12 +109,16 @@ impl<'a> RecordLayout<'a> {
 }
 
 fn module_u8_field(name: impl Into<String>) -> FieldRecord {
+    module_u8_field_with_value(name, 0)
+}
+
+fn module_u8_field_with_value(name: impl Into<String>, value: u8) -> FieldRecord {
     FieldRecord {
         name: name.into(),
         class_idx: FIELD_OWNER_CLASS_IDX,
         type_idx: 0,
         access_flags: 0,
-        value: Some(FieldValue::U8(0)),
+        value: Some(FieldValue::U8(value)),
     }
 }
 

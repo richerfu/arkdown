@@ -63,25 +63,24 @@ pub(crate) fn load_json_file(id: &str) -> HookLoadReturn {
 
 impl Json5Plugin {
     fn load_json_file_impl(id: &str) -> HookLoadReturn {
-    if !id.ends_with(".json") && !id.ends_with(".json5") {
-        return Ok(None);
+        if !id.ends_with(".json") && !id.ends_with(".json5") {
+            return Ok(None);
+        }
+        let raw = fs_err::read_to_string(id)
+            .map_err(|e| anyhow::anyhow!("json5 plugin: failed to read {id}: {e}"))?;
+        let value: serde_json::Value = if id.ends_with(".json5") {
+            json5::from_str(&raw)
+                .map_err(|e| anyhow::anyhow!("json5 plugin: parse error in {id}: {e}"))?
+        } else {
+            serde_json::from_str(&raw)
+                .map_err(|e| anyhow::anyhow!("json5 plugin: parse error in {id}: {e}"))?
+        };
+        let code = generate_esm_from_json(&value);
+        Ok(Some(HookLoadOutput {
+            code: code.into(),
+            ..Default::default()
+        }))
     }
-    let raw = fs_err::read_to_string(id)
-        .map_err(|e| anyhow::anyhow!("json5 plugin: failed to read {id}: {e}"))?;
-    let value: serde_json::Value = if id.ends_with(".json5") {
-        json5::from_str(&raw)
-            .map_err(|e| anyhow::anyhow!("json5 plugin: parse error in {id}: {e}"))?
-    } else {
-        serde_json::from_str(&raw)
-            .map_err(|e| anyhow::anyhow!("json5 plugin: parse error in {id}: {e}"))?
-    };
-    let code = generate_esm_from_json(&value);
-    Ok(Some(HookLoadOutput {
-        code: code.into(),
-        ..Default::default()
-    }))
-}
-
 }
 
 fn resolve_relative_path(specifier: &str, importer: Option<&str>) -> anyhow::Result<PathBuf> {

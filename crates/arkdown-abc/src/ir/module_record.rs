@@ -1,10 +1,13 @@
 use oxc_ast::ast::{
-    AssignmentTarget, BindingPattern, Declaration, ExportAllDeclaration,
+    AssignmentTarget, BindingIdentifier, BindingPattern, Declaration, ExportAllDeclaration,
     ExportDefaultDeclarationKind, Expression, ImportDeclarationSpecifier, ImportOrExportKind,
-    ModuleExportName, Program, Statement,
+    ModuleExportName, Program, Statement, TSImportEqualsDeclaration, TSModuleReference,
 };
+use oxc_semantic::Scoping;
 
 use crate::emit::file::{LiteralArray, LiteralEntry};
+
+pub(super) const DEFAULT_LOCAL_NAME: &str = "*default*";
 
 #[derive(Debug, Default, Clone)]
 pub(super) struct ModuleRecordInfo {
@@ -48,6 +51,37 @@ pub(super) struct StarExportEntry {
 }
 
 impl ModuleRecordInfo {
+    pub(super) fn regular_imports_in_external_order(&self) -> Vec<&RegularImportEntry> {
+        let mut imports: Vec<&RegularImportEntry> = self.regular_imports.iter().collect();
+        imports.sort_by(|a, b| {
+            a.local_name
+                .cmp(&b.local_name)
+                .then_with(|| a.import_name.cmp(&b.import_name))
+                .then_with(|| a.module_request_idx.cmp(&b.module_request_idx))
+        });
+        imports
+    }
+
+    pub(super) fn namespace_imports_in_external_order(&self) -> Vec<&NamespaceImportEntry> {
+        let mut imports: Vec<&NamespaceImportEntry> = self.namespace_imports.iter().collect();
+        imports.sort_by(|a, b| {
+            a.local_name
+                .cmp(&b.local_name)
+                .then_with(|| a.module_request_idx.cmp(&b.module_request_idx))
+        });
+        imports
+    }
+
+    pub(super) fn local_exports_in_external_order(&self) -> Vec<&LocalExportEntry> {
+        let mut exports: Vec<&LocalExportEntry> = self.local_exports.iter().collect();
+        exports.sort_by(|a, b| {
+            a.local_name
+                .cmp(&b.local_name)
+                .then_with(|| a.export_name.cmp(&b.export_name))
+        });
+        exports
+    }
+
     fn request_index(&mut self, specifier: &str) -> u16 {
         if let Some(index) = self
             .module_requests
@@ -153,29 +187,29 @@ impl ModuleRecordInfo {
         );
 
         entries.push(LiteralEntry::RawU32(self.regular_imports.len() as u32));
-        for import in &self.regular_imports {
+        for import in self.regular_imports_in_external_order() {
             entries.push(LiteralEntry::RawString(import.local_name.clone()));
             entries.push(LiteralEntry::RawString(import.import_name.clone()));
             entries.push(LiteralEntry::RawU16(import.module_request_idx));
         }
 
         entries.push(LiteralEntry::RawU32(self.namespace_imports.len() as u32));
-        for ns in &self.namespace_imports {
-            entries.push(LiteralEntry::RawU16(ns.module_request_idx));
+        for ns in self.namespace_imports_in_external_order() {
             entries.push(LiteralEntry::RawString(ns.local_name.clone()));
+            entries.push(LiteralEntry::RawU16(ns.module_request_idx));
         }
 
         entries.push(LiteralEntry::RawU32(self.local_exports.len() as u32));
-        for export in &self.local_exports {
+        for export in self.local_exports_in_external_order() {
             entries.push(LiteralEntry::RawString(export.local_name.clone()));
             entries.push(LiteralEntry::RawString(export.export_name.clone()));
         }
 
         entries.push(LiteralEntry::RawU32(self.indirect_exports.len() as u32));
         for export in &self.indirect_exports {
-            entries.push(LiteralEntry::RawU16(export.module_request_idx));
-            entries.push(LiteralEntry::RawString(export.import_name.clone()));
             entries.push(LiteralEntry::RawString(export.export_name.clone()));
+            entries.push(LiteralEntry::RawString(export.import_name.clone()));
+            entries.push(LiteralEntry::RawU16(export.module_request_idx));
         }
 
         entries.push(LiteralEntry::RawU32(self.star_exports.len() as u32));
@@ -192,21 +226,32 @@ impl ModuleRecordInfo {
 /// Module mode scans top-level `import`/`export` declarations directly.
 /// Non-module compatibility mode also recognises CommonJS patterns such as
 /// `var import_X = require("@ohos:...")` and `module.exports = Local`.
-pub(super) fn collect_module_record(program: &Program<'_>, _is_module: bool) -> ModuleRecordInfo {
+pub(super) fn collect_module_record(
+    program: &Program<'_>,
+    _is_module: bool,
+    scoping: Option<&Scoping>,
+) -> ModuleRecordInfo {
     let mut info = ModuleRecordInfo::default();
     for stmt in &program.body {
-        scan_stmt_for_module_record(stmt, &mut info);
+        scan_stmt_for_module_record(stmt, &mut info, scoping);
     }
     info
 }
 
 /// Scan a statement for module import/export patterns.
-fn scan_stmt_for_module_record(stmt: &Statement<'_>, info: &mut ModuleRecordInfo) {
+fn scan_stmt_for_module_record(
+    stmt: &Statement<'_>,
+    info: &mut ModuleRecordInfo,
+    scoping: Option<&Scoping>,
+) {
     match stmt {
         Statement::ExpressionStatement(es) => {
             scan_expr_for_module_record(&es.expression, info);
         }
         Statement::VariableDeclaration(decl) => {
+            if decl.declare {
+                return;
+            }
             for declarator in &decl.declarations {
                 let local_name = match &declarator.id {
                     BindingPattern::BindingIdentifier(id) => Some(id.name.as_str()),
@@ -224,6 +269,9 @@ fn scan_stmt_for_module_record(stmt: &Statement<'_>, info: &mut ModuleRecordInfo
                 }
             }
         }
+        Statement::TSImportEqualsDeclaration(decl) => {
+            scan_ts_import_equals_for_module_record(decl, info, scoping);
+        }
         Statement::ImportDeclaration(import) => {
             if import.import_kind == ImportOrExportKind::Type {
                 return;
@@ -233,13 +281,18 @@ fn scan_stmt_for_module_record(stmt: &Statement<'_>, info: &mut ModuleRecordInfo
                 for spec in specifiers {
                     match spec {
                         ImportDeclarationSpecifier::ImportDefaultSpecifier(default) => {
+                            if !import_binding_has_value_reference(&default.local, scoping) {
+                                continue;
+                            }
                             info.add_regular_import(
                                 default.local.name.as_str().to_string(),
                                 specifier,
                             );
                         }
                         ImportDeclarationSpecifier::ImportSpecifier(named) => {
-                            if named.import_kind == ImportOrExportKind::Type {
+                            if named.import_kind == ImportOrExportKind::Type
+                                || !import_binding_has_value_reference(&named.local, scoping)
+                            {
                                 continue;
                             }
                             info.add_named_import(
@@ -249,6 +302,9 @@ fn scan_stmt_for_module_record(stmt: &Statement<'_>, info: &mut ModuleRecordInfo
                             );
                         }
                         ImportDeclarationSpecifier::ImportNamespaceSpecifier(ns) => {
+                            if !import_binding_has_value_reference(&ns.local, scoping) {
+                                continue;
+                            }
                             info.add_namespace_import(
                                 ns.local.name.as_str().to_string(),
                                 specifier,
@@ -262,7 +318,7 @@ fn scan_stmt_for_module_record(stmt: &Statement<'_>, info: &mut ModuleRecordInfo
         }
         Statement::BlockStatement(block) => {
             for s in &block.body {
-                scan_stmt_for_module_record(s, info);
+                scan_stmt_for_module_record(s, info, scoping);
             }
         }
         Statement::ReturnStatement(ret) => {
@@ -272,15 +328,28 @@ fn scan_stmt_for_module_record(stmt: &Statement<'_>, info: &mut ModuleRecordInfo
         }
         Statement::ExportDefaultDeclaration(export) => match &export.declaration {
             ExportDefaultDeclarationKind::ClassDeclaration(cls) => {
-                let local_name = cls.id.as_ref().map_or("default", |id| id.name.as_str());
+                if cls.declare {
+                    return;
+                }
+                let local_name = cls
+                    .id
+                    .as_ref()
+                    .map_or(DEFAULT_LOCAL_NAME, |id| id.name.as_str());
                 info.add_local_export(local_name.to_string(), "default");
             }
             ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
-                let local_name = func.id.as_ref().map_or("default", |id| id.name.as_str());
+                if is_type_only_function(func) {
+                    return;
+                }
+                let local_name = func
+                    .id
+                    .as_ref()
+                    .map_or(DEFAULT_LOCAL_NAME, |id| id.name.as_str());
                 info.add_local_export(local_name.to_string(), "default");
             }
+            ExportDefaultDeclarationKind::TSInterfaceDeclaration(_) => {}
             _ => {
-                info.add_local_export("default".to_string(), "default");
+                info.add_local_export(DEFAULT_LOCAL_NAME.to_string(), "default");
             }
         },
         Statement::ExportNamedDeclaration(export) => {
@@ -309,7 +378,20 @@ fn scan_stmt_for_module_record(stmt: &Statement<'_>, info: &mut ModuleRecordInfo
                 }
                 if let Some(declaration) = &export.declaration {
                     match declaration {
+                        Declaration::VariableDeclaration(variable) => {
+                            if variable.declare {
+                                return;
+                            }
+                            for declarator in &variable.declarations {
+                                for local_name in collect_binding_names(&declarator.id) {
+                                    info.add_local_export(local_name.clone(), &local_name);
+                                }
+                            }
+                        }
                         Declaration::ClassDeclaration(cls) => {
+                            if cls.declare {
+                                return;
+                            }
                             if let Some(id) = &cls.id {
                                 info.add_local_export(
                                     id.name.as_str().to_string(),
@@ -318,10 +400,28 @@ fn scan_stmt_for_module_record(stmt: &Statement<'_>, info: &mut ModuleRecordInfo
                             }
                         }
                         Declaration::FunctionDeclaration(func) => {
-                            if let Some(id) = &func.id {
+                            if !is_type_only_function(func) {
+                                if let Some(id) = &func.id {
+                                    info.add_local_export(
+                                        id.name.as_str().to_string(),
+                                        id.name.as_str(),
+                                    );
+                                }
+                            }
+                        }
+                        Declaration::TSEnumDeclaration(decl) => {
+                            if !decl.declare {
                                 info.add_local_export(
-                                    id.name.as_str().to_string(),
-                                    id.name.as_str(),
+                                    decl.id.name.as_str().to_string(),
+                                    decl.id.name.as_str(),
+                                );
+                            }
+                        }
+                        Declaration::TSImportEqualsDeclaration(decl) => {
+                            if scan_ts_import_equals_for_module_record(decl, info, scoping) {
+                                info.add_local_export(
+                                    decl.id.name.as_str().to_string(),
+                                    decl.id.name.as_str(),
                                 );
                             }
                         }
@@ -335,6 +435,58 @@ fn scan_stmt_for_module_record(stmt: &Statement<'_>, info: &mut ModuleRecordInfo
         }
         _ => {}
     }
+}
+
+fn import_binding_has_value_reference(
+    local: &BindingIdentifier<'_>,
+    scoping: Option<&Scoping>,
+) -> bool {
+    let Some(scoping) = scoping else {
+        return true;
+    };
+    let Some(symbol_id) = local.symbol_id.get() else {
+        return true;
+    };
+    let mut has_reference = false;
+    for reference in scoping.get_resolved_references(symbol_id) {
+        has_reference = true;
+        if reference.flags().is_value() {
+            return true;
+        }
+    }
+    !has_reference
+}
+
+fn ts_import_equals_has_value_reference(
+    local: &BindingIdentifier<'_>,
+    scoping: Option<&Scoping>,
+) -> bool {
+    let Some(scoping) = scoping else {
+        return true;
+    };
+    let Some(symbol_id) = local.symbol_id.get() else {
+        return true;
+    };
+    scoping
+        .get_resolved_references(symbol_id)
+        .any(|reference| !reference.is_type())
+}
+
+fn scan_ts_import_equals_for_module_record(
+    decl: &TSImportEqualsDeclaration<'_>,
+    info: &mut ModuleRecordInfo,
+    scoping: Option<&Scoping>,
+) -> bool {
+    if decl.import_kind == ImportOrExportKind::Type {
+        return false;
+    }
+    if !ts_import_equals_has_value_reference(&decl.id, scoping) {
+        return false;
+    }
+    if let TSModuleReference::ExternalModuleReference(reference) = &decl.module_reference {
+        info.request_index(reference.expression.value.as_str());
+    }
+    true
 }
 
 fn scan_export_all_for_module_record(
@@ -391,6 +543,43 @@ fn scan_expr_for_module_record(expr: &Expression<'_>, info: &mut ModuleRecordInf
             scan_expr_for_module_record(&log.right, info);
         }
         _ => {}
+    }
+}
+
+fn collect_binding_names(pattern: &BindingPattern<'_>) -> Vec<String> {
+    let mut names = Vec::new();
+    collect_binding_names_into(pattern, &mut names);
+    names
+}
+
+fn is_type_only_function(func: &oxc_ast::ast::Function<'_>) -> bool {
+    func.declare || func.body.is_none()
+}
+
+fn collect_binding_names_into(pattern: &BindingPattern<'_>, names: &mut Vec<String>) {
+    match pattern {
+        BindingPattern::BindingIdentifier(id) => {
+            names.push(id.name.as_str().to_string());
+        }
+        BindingPattern::ObjectPattern(pattern) => {
+            for property in &pattern.properties {
+                collect_binding_names_into(&property.value, names);
+            }
+            if let Some(rest) = &pattern.rest {
+                collect_binding_names_into(&rest.argument, names);
+            }
+        }
+        BindingPattern::ArrayPattern(pattern) => {
+            for element in pattern.elements.iter().flatten() {
+                collect_binding_names_into(element, names);
+            }
+            if let Some(rest) = &pattern.rest {
+                collect_binding_names_into(&rest.argument, names);
+            }
+        }
+        BindingPattern::AssignmentPattern(pattern) => {
+            collect_binding_names_into(&pattern.left, names);
+        }
     }
 }
 

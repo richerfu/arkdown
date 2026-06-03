@@ -4,9 +4,10 @@ pub(super) fn patch_bytecode_index_operands(
     bytecode: &[u8],
     string_pool_indices: &FxHashMap<u16, u16>,
     literal_pool_indices: &FxHashMap<u16, u16>,
-    ctor_pool_index: u16,
+    ctor_pool_indices: &[u16],
     definefunc_pool_indices: &[u16],
     definemethod_pool_indices_by_name: &FxHashMap<u16, u16>,
+    defineclass_cursor: &mut usize,
     definefunc_cursor: &mut usize,
 ) -> Vec<u8> {
     let mut patched = bytecode.to_vec();
@@ -26,7 +27,7 @@ pub(super) fn patch_bytecode_index_operands(
                 pos += 4;
                 continue;
             }
-            0x43 | 0x7a if pos + 4 < patched.len() => {
+            0x43 | 0x7a | 0x8e | 0xdb | 0xdc if pos + 4 < patched.len() => {
                 rewrite_u16_operand(&mut patched, pos + 2, string_pool_indices);
                 pos += 5;
                 continue;
@@ -40,12 +41,17 @@ pub(super) fn patch_bytecode_index_operands(
         }
         if opcode == 0x33 && pos + 4 < patched.len() {
             let method_pos = pos + 2;
-            let method_index = if let Some(&index) = definefunc_pool_indices.get(*definefunc_cursor)
-            {
+            let method_name_id = u16::from_le_bytes([patched[method_pos], patched[method_pos + 1]]);
+            let method_index = if method_name_id != 0 {
+                definemethod_pool_indices_by_name
+                    .get(&method_name_id)
+                    .copied()
+                    .unwrap_or(method_name_id)
+            } else if let Some(&index) = definefunc_pool_indices.get(*definefunc_cursor) {
                 *definefunc_cursor += 1;
                 index
             } else {
-                ctor_pool_index
+                ctor_pool_indices.first().copied().unwrap_or_default()
             };
             patched[method_pos..method_pos + 2].copy_from_slice(&method_index.to_le_bytes());
             pos += 5;
@@ -62,7 +68,10 @@ pub(super) fn patch_bytecode_index_operands(
         }
         if opcode == 0x35 && pos + 8 < patched.len() {
             let ctor_pos = pos + 2;
-            patched[ctor_pos..ctor_pos + 2].copy_from_slice(&ctor_pool_index.to_le_bytes());
+            if let Some(&ctor_pool_index) = ctor_pool_indices.get(*defineclass_cursor) {
+                *defineclass_cursor += 1;
+                patched[ctor_pos..ctor_pos + 2].copy_from_slice(&ctor_pool_index.to_le_bytes());
+            }
             let buf_pos = pos + 4;
             let old_buf = u16::from_le_bytes([patched[buf_pos], patched[buf_pos + 1]]);
             let new_buf = literal_pool_indices
@@ -84,7 +93,7 @@ pub(super) fn patch_bytecode_index_operands(
             pos += 4;
             continue;
         }
-        if opcode == 0x07 && pos + 3 < patched.len() {
+        if matches!(opcode, 0x06 | 0x07) && pos + 3 < patched.len() {
             let literal_pos = pos + 2;
             let old_literal = u16::from_le_bytes([patched[literal_pos], patched[literal_pos + 1]]);
             let new_literal = literal_pool_indices
@@ -127,6 +136,7 @@ fn inline_cache_slot_operand(bytecode: &[u8], pos: usize, opcode: u8) -> Option<
         }
         let inc = match sub_opcode {
             0x13 | 0x14 => 1,
+            0x01 => 2,
             _ => return None,
         };
         return Some((operand_pos, inc));
@@ -138,10 +148,10 @@ fn inline_cache_slot_operand(bytecode: &[u8], pos: usize, opcode: u8) -> Option<
     }
     let inc = match opcode {
         0x05
+        | 0x06
         | 0x07
-        | 0x0a..=0x1a
+        | 0x0a..=0x1b
         | 0x1f..=0x22
-        | 0x25
         | 0x27
         | 0x28
         | 0x34
@@ -149,7 +159,27 @@ fn inline_cache_slot_operand(bytecode: &[u8], pos: usize, opcode: u8) -> Option<
         | 0x35
         | 0x3f
         | 0x40 => 1,
-        0x08 | 0x1c | 0x29..=0x32 | 0x42 | 0x43 | 0x73 | 0x79 | 0x7a | 0xb9 => 2,
+        0x08
+        | 0x1c
+        | 0x25
+        | 0x26
+        | 0x29..=0x32
+        | 0x37
+        | 0x38
+        | 0x42
+        | 0x43
+        | 0x73
+        | 0x77
+        | 0x78
+        | 0x79
+        | 0x7a
+        | 0x8e
+        | 0x99
+        | 0xb4
+        | 0xb9
+        | 0xba
+        | 0xdb
+        | 0xdc => 2,
         _ => return None,
     };
     Some((operand_pos, inc))
@@ -179,7 +209,7 @@ pub(super) fn collect_bytecode_string_indices(bytecode: &[u8], indices: &mut Vec
                 pos += 4;
                 continue;
             }
-            0x43 | 0x7a if pos + 4 < bytecode.len() => {
+            0x43 | 0x7a | 0x8e | 0xdb | 0xdc if pos + 4 < bytecode.len() => {
                 indices.push(u16::from_le_bytes([bytecode[pos + 2], bytecode[pos + 3]]) as u32);
                 pos += 5;
                 continue;
@@ -199,20 +229,29 @@ pub(super) fn collect_bytecode_string_indices(bytecode: &[u8], indices: &mut Vec
 
 fn instruction_len(opcode: u8, next: Option<u8>) -> usize {
     match opcode {
-        0x00..=0x03 | 0x64 | 0x65 => 1,
-        0x1c | 0x29 | 0x3c | 0x3d | 0x44 | 0x4d | 0x4f | 0x51 | 0x60 | 0x61 | 0x7c | 0x7e => 2,
-        0x2a | 0x2d | 0x3e | 0x45 | 0x50 | 0x9b | 0x4e | 0xb9 => 3,
-        0x0a..=0x1a | 0x25 | 0x27 | 0x28 => 3,
+        0x00..=0x03 | 0x64 | 0x65 | 0x70 | 0xbf | 0xc0 => 1,
+        0x05 | 0x09 | 0x1c | 0x29 | 0x36 | 0x3c | 0x3d | 0x44 | 0x4d | 0x4f | 0x51 | 0x60
+        | 0x61 | 0x67 | 0x7c | 0x7d | 0x7e | 0xb1 | 0xc3 | 0xc4 | 0xc5 | 0xcd | 0xce => 2,
+        0x2a | 0x2d | 0x3e | 0x45 | 0x50 | 0x68 | 0x77 | 0x8a | 0x8b | 0x9b | 0x4e | 0xb4
+        | 0xb9 | 0xc6 => 3,
+        0x0a..=0x1b | 0x25 | 0x26 | 0x27 | 0x28 => 3,
         0x1f..=0x22 => 2,
-        0x07 | 0x08 | 0x2b | 0x2e | 0x31 | 0x32 | 0x3f | 0x40 | 0x42 | 0x73 | 0xb6 => 4,
-        0x2c | 0x33 | 0x34 | 0x43 | 0x62 | 0x7a | 0x8f | 0x98 | 0x9a | 0x9c | 0xbc => 5,
+        0x06 | 0x07 | 0x08 | 0x2b | 0x2e | 0x31 | 0x32 | 0x38 | 0x3f | 0x40 | 0x42 | 0x73
+        | 0x78 | 0x99 | 0xb3 | 0xb6 | 0xba => 4,
+        0x37 => 3,
+        0x2c | 0x33 | 0x34 | 0x43 | 0x62 | 0x79 | 0x7a | 0x8e | 0x8f | 0x98 | 0x9a | 0x9c
+        | 0xbc | 0xdb | 0xdc => 5,
         0x2f => 5,
         0x30 => 6,
         0x35 | 0x63 => 9,
         0xcf => 2,
+        0x80 => 3,
+        0xcb => 6,
+        0xfd if next == Some(0x00) => 6,
         0xfe if next == Some(0x00) => 2,
-        0xfe if next == Some(0x07) => 3,
+        0xfe if matches!(next, Some(0x05 | 0x07)) => 3,
         0xfe if next == Some(0x09) => 4,
+        0xfb if next == Some(0x01) => 5,
         0xfb if matches!(next, Some(0x13 | 0x14)) => 3,
         _ => 1,
     }

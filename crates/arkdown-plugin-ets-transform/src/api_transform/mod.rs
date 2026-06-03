@@ -12,6 +12,7 @@ use oxc_parser::Parser;
 use oxc_semantic::{Scoping, SemanticBuilder};
 use oxc_span::{SourceType, SPAN};
 
+use crate::kit_map::KitEntry;
 use crate::{apply_source_patches, module_export_name_text, SourcePatch};
 
 /// Apply all API-version-gated source transforms.
@@ -102,7 +103,7 @@ fn rewrite_kit_import_declaration(
 
         let imported_name = module_export_name_text(&specifier.imported);
         let local_name = specifier.local.name.as_str();
-        let Some(ohos_module) = crate::kit_map::resolve_kit_import(kit_specifier, &imported_name)
+        let Some(kit_entry) = crate::kit_map::resolve_kit_import(kit_specifier, &imported_name)
         else {
             continue;
         };
@@ -120,8 +121,9 @@ fn rewrite_kit_import_declaration(
         };
         imports.push(KitImportBinding {
             local_name: local_name.to_owned(),
-            module: ohos_module.to_owned(),
+            module: kit_entry.module().to_owned(),
             import_kind,
+            binding: kit_entry,
         });
     }
 
@@ -132,6 +134,8 @@ struct KitImportBinding {
     local_name: String,
     module: String,
     import_kind: ImportOrExportKind,
+    /// Whether to emit a default or named specifier.
+    binding: KitEntry,
 }
 
 struct KitImportEmitter {
@@ -170,9 +174,29 @@ impl KitImportEmitter {
     ) -> Statement<'a> {
         let local_name: &'a str = ast.allocator.alloc_str(&import.local_name);
         let module: &'a str = ast.allocator.alloc_str(&import.module);
-        let specifier = ImportDeclarationSpecifier::ImportDefaultSpecifier(
-            ast.alloc_import_default_specifier(SPAN, ast.binding_identifier(SPAN, local_name)),
-        );
+        let specifier = match &import.binding {
+            KitEntry::Default(_) => ImportDeclarationSpecifier::ImportDefaultSpecifier(
+                ast.alloc_import_default_specifier(SPAN, ast.binding_identifier(SPAN, local_name)),
+            ),
+            KitEntry::Named(_, binding_name) => {
+                let binding_name: &'a str = ast.allocator.alloc_str(binding_name);
+                let is_renamed = local_name != binding_name;
+                // When not renamed the OXC codegen omits the `as` clause automatically
+                // because `imported` == `local`. When renamed we set `imported` to the
+                // binding name so codegen emits `{ binding_name as local_name }`.
+                let imported = if is_renamed {
+                    ast.module_export_name_identifier_name(SPAN, binding_name)
+                } else {
+                    ast.module_export_name_identifier_name(SPAN, local_name)
+                };
+                ImportDeclarationSpecifier::ImportSpecifier(ast.alloc_import_specifier(
+                    SPAN,
+                    imported,
+                    ast.binding_identifier(SPAN, local_name),
+                    ImportOrExportKind::Value,
+                ))
+            }
+        };
         Statement::from(ast.module_declaration_import_declaration(
             SPAN,
             Some(ast.vec1(specifier)),
@@ -261,6 +285,43 @@ hilog.info(0, "tag", "message");"#;
         let src = r#"import hilog from "@ohos:hilog";"#;
         let out = rewrite_kit_imports(src);
         assert_eq!(out, src);
+    }
+
+    #[test]
+    fn test_named_binding_no_alias() {
+        // Callee is KitEntry::Named(@ohos:app.ability.UIAbility, "Callee")
+        // local_name == binding_name → emit `import { Callee } from "…"`
+        // Use the symbol as a value (function call) so the semantic analysis
+        // classifies it as a value import, not a type import.
+        let src = r#"import { Callee } from "@kit.AbilityKit";
+const c = new Callee();"#;
+        let out = rewrite_kit_imports(src);
+        assert!(
+            out.contains("import { Callee } from \"@ohos:app.ability.UIAbility\""),
+            "named import without alias; got: {out}"
+        );
+        assert!(
+            !out.contains("@kit.AbilityKit"),
+            "kit specifier must be gone; got: {out}"
+        );
+    }
+
+    #[test]
+    fn test_named_binding_with_alias() {
+        // Callee is KitEntry::Named(@ohos:app.ability.UIAbility, "Callee")
+        // local_name (MyCallee) != binding_name (Callee) → emit `import { Callee as MyCallee }`
+        // Use the symbol as a value so the semantic analysis classifies it as a value import.
+        let src = r#"import { Callee as MyCallee } from "@kit.AbilityKit";
+const c = new MyCallee();"#;
+        let out = rewrite_kit_imports(src);
+        assert!(
+            out.contains("import { Callee as MyCallee } from \"@ohos:app.ability.UIAbility\""),
+            "named import with alias; got: {out}"
+        );
+        assert!(
+            !out.contains("@kit.AbilityKit"),
+            "kit specifier must be gone; got: {out}"
+        );
     }
 
     #[test]

@@ -286,6 +286,8 @@ fn collect_js_chunks_from_output(
                     .map(|meta| meta.record_name.clone())
                     .unwrap_or_else(|| chunk_name.clone()),
                 source_file: meta.and_then(|meta| meta.source_file.clone()),
+                package_name: None,
+                is_commonjs: false,
                 source_map: None,
             }
         })
@@ -944,6 +946,7 @@ fn test_non_entry_importees_populated_with_har_dep() {
     let graph = ChunkGraph {
         chunks,
         full_module_ids: Vec::new(),
+        full_module_is_commonjs: FxHashMap::default(),
         module_to_chunk: IndexVec::new(),
         entry_module_to_entry_chunk: FxHashMap::default(),
     };

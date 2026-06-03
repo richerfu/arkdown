@@ -1,11 +1,13 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::{fmt::Write, sync::Arc};
 
+use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     Argument, ArkUIChild, ArkUIComponentExpression, BlockStatement, CallExpression, Expression,
     FunctionBody, IfStatement, ObjectPropertyKind, Statement,
 };
-use oxc_span::{GetSpan, Span};
+use oxc_parser::Parser;
+use oxc_span::{GetSpan, SourceType, Span};
 
 use crate::transform::component_meta::ComponentMetadata;
 use crate::transform::global_rewrite::rewrite_global_context_calls_in_expression_if_needed;
@@ -15,7 +17,7 @@ use crate::transform::viewpu_emit::ViewpuWriter;
 mod custom_component;
 use custom_component::{
     custom_reuse_id_from_component_attrs, custom_reuse_id_from_leaf_attrs,
-    emit_custom_component_call,
+    emit_common_wrapped_custom_component_call, emit_custom_component_call,
 };
 mod raw_object;
 use raw_object::{
@@ -59,7 +61,9 @@ pub type CustomComponentUpdateProps = FxHashMap<String, CustomComponentInfo>;
 #[derive(Clone, Debug, Default)]
 struct BuildContext {
     use_parent_context: bool,
+    current_component_reusable: bool,
     raw_object_fields: Arc<FxHashSet<String>>,
+    module_name: Arc<str>,
 }
 
 impl BuildContext {
@@ -83,9 +87,213 @@ impl BuildContext {
         self
     }
 
+    fn with_module_name(mut self, module_name: &str) -> Self {
+        self.module_name = Arc::from(module_name);
+        self
+    }
+
+    fn with_current_component_reusable(mut self, reusable: bool) -> Self {
+        self.current_component_reusable = reusable;
+        self
+    }
+
     fn is_raw_object_field(&self, name: &str) -> bool {
         self.raw_object_fields.contains(name)
     }
+}
+
+/// Gesture type names that receive `.create()`/`.pop()` pairs in the ViewPU
+/// output.  Matches `GESTURE_TYPE_NAMES` from upstream `component_map.js`.
+const GESTURE_TYPE_NAMES: &[&str] = &[
+    "TapGesture",
+    "LongPressGesture",
+    "PanGesture",
+    "PinchGesture",
+    "RotationGesture",
+    "SwipeGesture",
+    "GestureGroup",
+];
+
+fn is_gesture_type(name: &str) -> bool {
+    GESTURE_TYPE_NAMES.contains(&name)
+}
+
+/// Extracted representation of a gesture call and its attribute chain.
+/// Used to emit `Gesture.create(priority)` / `XxxGesture.create(args)` /
+/// `XxxGesture.onX(...)` / `XxxGesture.pop()` / `Gesture.pop()` sequences.
+///
+/// For `GestureGroup`, `create_args` holds only the first argument (the
+/// `GestureMode`) and `children` holds the expanded child gesture chains.
+struct GestureChain {
+    gesture_type: String,
+    create_args: String,
+    attrs: Vec<(String, String)>,
+    /// Child gestures for `GestureGroup(mode, child1, child2, ...)`.
+    /// Empty for all other gesture types.
+    children: Vec<GestureChain>,
+}
+
+/// Extract a `GestureChain` from a chained `CallExpression` like
+/// `PinchGesture().onActionStart(...).onActionEnd(...)`.
+///
+/// Returns `None` if the base identifier is not a known gesture type.
+fn extract_gesture_chain<'a>(
+    call: &'a CallExpression<'a>,
+    source_text: &str,
+    context: &BuildContext,
+) -> Option<GestureChain> {
+    extract_gesture_chain_inner(call, source_text, context)
+}
+
+fn extract_gesture_chain_inner<'a>(
+    call: &'a CallExpression<'a>,
+    source_text: &str,
+    context: &BuildContext,
+) -> Option<GestureChain> {
+    match &call.callee {
+        Expression::Identifier(_) => {
+            let name = match component_name(&call.callee) {
+                Ok(n) => n,
+                Err(_) => return None,
+            };
+            if !is_gesture_type(&name) {
+                return None;
+            }
+            // GestureGroup: first arg is the GestureMode; remaining args are
+            // child gesture expressions that must be expanded recursively.
+            if name == "GestureGroup" {
+                let create_args = call
+                    .arguments
+                    .first()
+                    .map(|a| {
+                        raw_arguments_text_with_context(
+                            std::slice::from_ref(a),
+                            source_text,
+                            context,
+                        )
+                    })
+                    .unwrap_or_default();
+                let children = call
+                    .arguments
+                    .iter()
+                    .skip(1)
+                    .filter_map(|arg| arg.as_expression())
+                    .filter_map(|expr| {
+                        if let Expression::CallExpression(child_call) = expr {
+                            extract_gesture_chain_inner(child_call, source_text, context)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                return Some(GestureChain {
+                    gesture_type: name,
+                    create_args,
+                    attrs: vec![],
+                    children,
+                });
+            }
+            let create_args =
+                raw_arguments_text_with_context(&call.arguments, source_text, context);
+            Some(GestureChain {
+                gesture_type: name,
+                create_args,
+                attrs: vec![],
+                children: vec![],
+            })
+        }
+        Expression::StaticMemberExpression(member) => {
+            let attr_name = member.property.name.to_string();
+            let attr_args = raw_arguments_text_with_context(&call.arguments, source_text, context);
+            match &member.object {
+                Expression::CallExpression(inner) => {
+                    let mut gc = extract_gesture_chain_inner(inner, source_text, context)?;
+                    gc.attrs.push((attr_name, attr_args));
+                    Some(gc)
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Emit one gesture node (create / attrs / children / pop) without the outer
+/// `Gesture.create` / `Gesture.pop` wrapper.  Used for both top-level gestures
+/// and child gestures inside a `GestureGroup`.
+fn emit_gesture_node(out: &mut String, indent: &str, gc: &GestureChain) {
+    let mut writer = ViewpuWriter::new(out);
+    writer.component_create(indent, &gc.gesture_type, "create", &gc.create_args);
+    for (attr_name, attr_args) in &gc.attrs {
+        writer.component_attribute(indent, &gc.gesture_type, attr_name, attr_args);
+    }
+    // Recursively emit child gestures (GestureGroup only).
+    for child in &gc.children {
+        emit_gesture_node(out, indent, child);
+    }
+    let mut writer = ViewpuWriter::new(out);
+    writer.component_pop(indent, &gc.gesture_type);
+}
+
+/// Emit a full gesture sequence into `out`:
+/// ```text
+/// Gesture.create(GesturePriority.Low);
+/// XxxGesture.create(args);
+/// XxxGesture.onX(handler);
+/// ...
+/// XxxGesture.pop();
+/// Gesture.pop();
+/// ```
+///
+/// For `GestureGroup`, child gestures are expanded between
+/// `GestureGroup.create(mode)` and `GestureGroup.pop()`.
+fn emit_gesture_sequence(out: &mut String, indent: &str, gc: &GestureChain) {
+    let attr_indent = format!("{indent}    ");
+    let mut writer = ViewpuWriter::new(out);
+    writer.component_create(&attr_indent, "Gesture", "create", "GesturePriority.Low");
+    emit_gesture_node(out, &attr_indent, gc);
+    let mut writer = ViewpuWriter::new(out);
+    writer.component_pop(&attr_indent, "Gesture");
+}
+
+/// Attempt to emit a gesture sequence from a raw argument text string.
+///
+/// Parses `args_text` as a TypeScript expression, extracts the gesture chain,
+/// and emits the sequence.  Returns `true` if the text was a known gesture
+/// type; `false` if it should be emitted as a regular attribute instead.
+fn try_emit_gesture_from_text(
+    out: &mut String,
+    indent: &str,
+    args_text: &str,
+    context: &BuildContext,
+) -> bool {
+    let allocator = Allocator::default();
+    let source = format!("__g__({args_text});");
+    let source_type = SourceType::ts().with_module(true);
+    let parsed = Parser::new(&allocator, &source, source_type).parse();
+    if !parsed.errors.is_empty() {
+        return false;
+    }
+    let Some(Statement::ExpressionStatement(stmt)) = parsed.program.body.first() else {
+        return false;
+    };
+    let Expression::CallExpression(wrapper) = &stmt.expression else {
+        return false;
+    };
+    let Some(arg) = wrapper.arguments.first() else {
+        return false;
+    };
+    let Some(arg_expr) = arg.as_expression() else {
+        return false;
+    };
+    let Expression::CallExpression(gesture_call) = arg_expr else {
+        return false;
+    };
+    let Some(gc) = extract_gesture_chain(gesture_call, &source, context) else {
+        return false;
+    };
+    emit_gesture_sequence(out, indent, &gc);
+    true
 }
 
 /// Extracted representation of a leaf component call and its attribute chain.
@@ -113,9 +321,15 @@ fn push_attribute_calls(
     component_name: &str,
     attrs: &[(String, String, bool)],
 ) {
-    let mut writer = ViewpuWriter::new(out);
+    let context = BuildContext::default();
     let attr_indent = format!("{indent}    ");
     for (attr_name, attr_args, _) in attrs {
+        if attr_name == "gesture" {
+            if try_emit_gesture_from_text(out, indent, attr_args, &context) {
+                continue;
+            }
+        }
+        let mut writer = ViewpuWriter::new(out);
         writer.component_attribute(&attr_indent, component_name, attr_name, attr_args);
     }
 }
@@ -184,7 +398,7 @@ fn extract_leaf_component(
         Expression::Identifier(_) => {
             let name = component_name(&call.callee)?;
             let create_args =
-                raw_arguments_text_with_context(&call.arguments, source_text, context);
+                component_create_arguments_text(&call.arguments, source_text, context);
             Ok(LeafComponent {
                 name,
                 create_args,
@@ -274,28 +488,44 @@ fn lower_call_expression(
         component_metadata,
         &context,
     )?;
-    if custom_components.contains(&lc.name)
-        && (lc.chain_attrs.is_empty()
-            || custom_component_update_props
+    if custom_components.contains(&lc.name) {
+        let base_call = base_component_call(call);
+        let is_reusable_reuse_id_only =
+            custom_component_update_props
                 .get(&lc.name)
                 .is_some_and(|info| {
                     info.reusable && lc.chain_attrs.iter().all(|(name, _, _)| name == "reuseId")
-                }))
-    {
-        let base_call = base_component_call(call);
-        emit_custom_component_call(
-            &lc.name,
-            &base_call.arguments,
-            custom_component_update_props.get(&lc.name),
-            custom_reuse_id_from_leaf_attrs(&lc.chain_attrs),
-            base_call.span,
-            source_text,
-            source_id,
-            context.clone(),
-            indent,
-            out,
-            span_hints,
-        );
+                });
+        if lc.chain_attrs.is_empty() || is_reusable_reuse_id_only {
+            emit_custom_component_call(
+                &lc.name,
+                &base_call.arguments,
+                custom_component_update_props.get(&lc.name),
+                custom_reuse_id_from_leaf_attrs(&lc.chain_attrs),
+                base_call.span,
+                source_text,
+                source_id,
+                context.clone(),
+                indent,
+                out,
+                span_hints,
+            );
+        } else {
+            // Custom component with chained attribute calls — wrap in __Common__.
+            emit_common_wrapped_custom_component_call(
+                &lc.name,
+                &base_call.arguments,
+                custom_component_update_props.get(&lc.name),
+                base_call.span,
+                &lc.chain_attrs,
+                source_text,
+                source_id,
+                context.clone(),
+                indent,
+                out,
+                span_hints,
+            );
+        }
         return Ok(());
     }
     let mut creation_body = String::new();
@@ -384,7 +614,40 @@ pub fn lower_build_body_with_component_context(
     custom_component_update_props: &CustomComponentUpdateProps,
     component_metadata: &ComponentMetadata,
     raw_object_fields: &FxHashSet<String>,
+    current_component_reusable: bool,
 ) -> Result<(String, Vec<SpanHint>), BuildLoweringError> {
+    lower_build_body_with_component_context_and_module(
+        body,
+        source_text,
+        source_id,
+        custom_components,
+        builder_methods,
+        custom_component_update_props,
+        component_metadata,
+        raw_object_fields,
+        None,
+        current_component_reusable,
+    )
+}
+
+pub fn lower_build_body_with_component_context_and_module(
+    body: Option<&FunctionBody<'_>>,
+    source_text: &str,
+    source_id: &str,
+    custom_components: &FxHashSet<String>,
+    builder_methods: &FxHashSet<String>,
+    custom_component_update_props: &CustomComponentUpdateProps,
+    component_metadata: &ComponentMetadata,
+    raw_object_fields: &FxHashSet<String>,
+    module_name: Option<&str>,
+    current_component_reusable: bool,
+) -> Result<(String, Vec<SpanHint>), BuildLoweringError> {
+    let mut ctx = BuildContext::default()
+        .with_raw_object_fields(raw_object_fields)
+        .with_current_component_reusable(current_component_reusable);
+    if let Some(m) = module_name {
+        ctx = ctx.with_module_name(m);
+    }
     lower_build_body_with_context(
         body,
         source_text,
@@ -393,7 +656,7 @@ pub fn lower_build_body_with_component_context(
         builder_methods,
         custom_component_update_props,
         component_metadata,
-        BuildContext::default().with_raw_object_fields(raw_object_fields),
+        ctx,
     )
 }
 
@@ -428,6 +691,34 @@ pub fn lower_builder_body_with_component_context(
     component_metadata: &ComponentMetadata,
     raw_object_fields: &FxHashSet<String>,
 ) -> Result<(String, Vec<SpanHint>), BuildLoweringError> {
+    lower_builder_body_with_component_context_and_module(
+        body,
+        source_text,
+        source_id,
+        custom_components,
+        builder_methods,
+        custom_component_update_props,
+        component_metadata,
+        raw_object_fields,
+        None,
+    )
+}
+
+pub fn lower_builder_body_with_component_context_and_module(
+    body: Option<&FunctionBody<'_>>,
+    source_text: &str,
+    source_id: &str,
+    custom_components: &FxHashSet<String>,
+    builder_methods: &FxHashSet<String>,
+    custom_component_update_props: &CustomComponentUpdateProps,
+    component_metadata: &ComponentMetadata,
+    raw_object_fields: &FxHashSet<String>,
+    module_name: Option<&str>,
+) -> Result<(String, Vec<SpanHint>), BuildLoweringError> {
+    let mut ctx = BuildContext::builder().with_raw_object_fields(raw_object_fields);
+    if let Some(m) = module_name {
+        ctx = ctx.with_module_name(m);
+    }
     lower_build_body_with_context(
         body,
         source_text,
@@ -436,7 +727,7 @@ pub fn lower_builder_body_with_component_context(
         builder_methods,
         custom_component_update_props,
         component_metadata,
-        BuildContext::builder().with_raw_object_fields(raw_object_fields),
+        ctx,
     )
 }
 
@@ -628,7 +919,6 @@ fn lower_if_statement(
     out: &mut String,
     span_hints: &mut Vec<SpanHint>,
 ) -> Result<(), BuildLoweringError> {
-    let test = original_node_text(&statement.test, source_text);
     let branch_indent = format!("{indent}    ");
     let inner_indent = format!("{branch_indent}    ");
 
@@ -636,15 +926,90 @@ fn lower_if_statement(
         let mut writer = ViewpuWriter::new(out);
         writer.observe_component_creation_start(indent, context.view_context());
         writer.line(&branch_indent, format_args!("If.create();"));
-        writer.line(&branch_indent, format_args!("if ({test}) {{"));
+    }
+
+    // Emit the full if/else-if/else chain without new If.create()/If.pop() wrappers.
+    let branch_count = lower_if_chain(
+        statement,
+        source_text,
+        source_id,
+        custom_components,
+        builder_methods,
+        custom_component_update_props,
+        component_metadata,
+        context.clone(),
+        &branch_indent,
+        &inner_indent,
+        0,
+        out,
+        span_hints,
+    )?;
+
+    // If there was no else clause at all, synthesize an empty else branch so
+    // the ArkUI runtime always has a complete branch set.
+    if branch_count == 1 {
+        let mut writer = ViewpuWriter::new(out);
+        writer.line(&branch_indent, format_args!("}} else {{"));
         writer.line(
             &inner_indent,
             format_args!(
-                "{}.ifElseBranchUpdateFunction(0, () => {{",
+                "{}.ifElseBranchUpdateFunction(1, () => {{",
+                context.view_context()
+            ),
+        );
+        writer.line(&inner_indent, format_args!("}});"));
+    }
+
+    {
+        let mut writer = ViewpuWriter::new(out);
+        writer.line(&branch_indent, format_args!("}}"));
+        writer.observe_component_creation_end(indent, "If");
+        writer.component_pop(indent, "If");
+    }
+
+    Ok(())
+}
+
+/// Emit the if/else-if/else chain for a single `IfStatement` node, reusing
+/// the same `If.create()`/`If.pop()` wrapper from the caller.
+///
+/// Returns the total number of branches emitted (i.e. `branch_start + 1 + N`
+/// where N is the number of `else if` / `else` branches handled).
+#[allow(clippy::too_many_arguments)]
+fn lower_if_chain(
+    statement: &IfStatement<'_>,
+    source_text: &str,
+    source_id: &str,
+    custom_components: &FxHashSet<String>,
+    builder_methods: &FxHashSet<String>,
+    custom_component_update_props: &CustomComponentUpdateProps,
+    component_metadata: &ComponentMetadata,
+    context: BuildContext,
+    branch_indent: &str,
+    inner_indent: &str,
+    branch_index: usize,
+    out: &mut String,
+    span_hints: &mut Vec<SpanHint>,
+) -> Result<usize, BuildLoweringError> {
+    let test = original_node_text(&statement.test, source_text);
+
+    // Emit `if (test) {` or `} else if (test) {` depending on branch_index.
+    {
+        let mut writer = ViewpuWriter::new(out);
+        if branch_index == 0 {
+            writer.line(branch_indent, format_args!("if ({test}) {{"));
+        } else {
+            writer.line(branch_indent, format_args!("}} else if ({test}) {{"));
+        }
+        writer.line(
+            inner_indent,
+            format_args!(
+                "{}.ifElseBranchUpdateFunction({branch_index}, () => {{",
                 context.view_context()
             ),
         );
     }
+
     lower_statement(
         &statement.consequent,
         source_text,
@@ -658,80 +1023,70 @@ fn lower_if_statement(
         out,
         span_hints,
     )?;
+
     {
         let mut writer = ViewpuWriter::new(out);
-        writer.line(&inner_indent, format_args!("}});"));
+        writer.line(inner_indent, format_args!("}});"));
     }
 
-    let mut branch_index = 1usize;
-    if let Some(alternate) = &statement.alternate {
-        {
-            let mut writer = ViewpuWriter::new(out);
-            writer.line(&branch_indent, format_args!("}} else {{"));
-            writer.line(
-                &inner_indent,
-                format_args!(
-                    "{}.ifElseBranchUpdateFunction({branch_index}, () => {{",
-                    context.view_context()
-                ),
-            );
-        }
-        match alternate {
-            Statement::IfStatement(alternate_if) => {
-                lower_if_statement(
-                    alternate_if,
-                    source_text,
-                    source_id,
-                    custom_components,
-                    builder_methods,
-                    custom_component_update_props,
-                    component_metadata,
-                    context.clone(),
-                    &format!("{inner_indent}    "),
-                    out,
-                    span_hints,
-                )?;
-            }
-            _ => {
-                lower_statement(
-                    alternate,
-                    source_text,
-                    source_id,
-                    custom_components,
-                    builder_methods,
-                    custom_component_update_props,
-                    component_metadata,
-                    context.clone(),
-                    &format!("{inner_indent}    "),
-                    out,
-                    span_hints,
-                )?;
-            }
-        }
-        {
-            let mut writer = ViewpuWriter::new(out);
-            writer.line(&inner_indent, format_args!("}});"));
-        }
-        branch_index += 1;
-    }
-    if branch_index == 1 {
-        let mut writer = ViewpuWriter::new(out);
-        writer.line(&branch_indent, format_args!("}} else {{"));
-        writer.line(
-            &inner_indent,
-            format_args!(
-                "{}.ifElseBranchUpdateFunction(1, () => {{",
-                context.view_context()
-            ),
-        );
-        writer.line(&inner_indent, format_args!("}});"));
-    }
-    let mut writer = ViewpuWriter::new(out);
-    writer.line(&branch_indent, format_args!("}}"));
-    writer.observe_component_creation_end(indent, "If");
-    writer.component_pop(indent, "If");
+    let next_index = branch_index + 1;
 
-    Ok(())
+    match &statement.alternate {
+        None => {
+            // No else clause — caller will synthesize the empty branch if needed.
+            Ok(next_index)
+        }
+        Some(Statement::IfStatement(alternate_if)) => {
+            // else if — continue the chain without a new If.create()/If.pop() wrapper.
+            lower_if_chain(
+                alternate_if,
+                source_text,
+                source_id,
+                custom_components,
+                builder_methods,
+                custom_component_update_props,
+                component_metadata,
+                context,
+                branch_indent,
+                inner_indent,
+                next_index,
+                out,
+                span_hints,
+            )
+        }
+        Some(alternate) => {
+            // else clause.
+            {
+                let mut writer = ViewpuWriter::new(out);
+                writer.line(branch_indent, format_args!("}} else {{"));
+                writer.line(
+                    inner_indent,
+                    format_args!(
+                        "{}.ifElseBranchUpdateFunction({next_index}, () => {{",
+                        context.view_context()
+                    ),
+                );
+            }
+            lower_statement(
+                alternate,
+                source_text,
+                source_id,
+                custom_components,
+                builder_methods,
+                custom_component_update_props,
+                component_metadata,
+                context,
+                &format!("{inner_indent}    "),
+                out,
+                span_hints,
+            )?;
+            {
+                let mut writer = ViewpuWriter::new(out);
+                writer.line(inner_indent, format_args!("}});"));
+            }
+            Ok(next_index + 1)
+        }
+    }
 }
 
 fn lower_component(
@@ -759,19 +1114,50 @@ fn lower_component(
     }
 
     if custom_components.contains(&name) {
-        emit_custom_component_call(
-            &name,
-            &component.arguments,
-            custom_component_update_props.get(&name),
-            custom_reuse_id_from_component_attrs(component, source_text),
-            component.callee.span(),
-            source_text,
-            source_id,
-            context,
-            indent,
-            out,
-            span_hints,
-        );
+        let has_chain_attrs = !component.chain_expressions.is_empty();
+        if has_chain_attrs {
+            // Collect chain attrs from the ArkUIComponentExpression.
+            let mut chain_attrs = Vec::new();
+            for chain in &component.chain_expressions {
+                let chain_attr_name = chain_name(chain)?;
+                let chain_attr_args = attribute_arguments_text(
+                    &chain_attr_name,
+                    &chain.arguments,
+                    source_text,
+                    builder_methods,
+                    &context,
+                );
+                let regular = arguments_are_regular_attrs(&chain.arguments, component_metadata);
+                chain_attrs.push((chain_attr_name, chain_attr_args, regular));
+            }
+            emit_common_wrapped_custom_component_call(
+                &name,
+                &component.arguments,
+                custom_component_update_props.get(&name),
+                component.callee.span(),
+                &chain_attrs,
+                source_text,
+                source_id,
+                context,
+                indent,
+                out,
+                span_hints,
+            );
+        } else {
+            emit_custom_component_call(
+                &name,
+                &component.arguments,
+                custom_component_update_props.get(&name),
+                custom_reuse_id_from_component_attrs(component, source_text),
+                component.callee.span(),
+                source_text,
+                source_id,
+                context,
+                indent,
+                out,
+                span_hints,
+            );
+        }
         return Ok(());
     }
 
@@ -806,13 +1192,31 @@ fn lower_component(
         );
     }
 
-    let args = raw_arguments_text_with_context(&component.arguments, source_text, &context);
+    let args = component_create_arguments_text(&component.arguments, source_text, &context);
     if name == "ListItem"
         && !component.children.is_empty()
         && is_lazy_list_item(component, source_text)
     {
         return lower_lazy_list_item(
             component,
+            source_text,
+            source_id,
+            custom_components,
+            builder_methods,
+            custom_component_update_props,
+            component_metadata,
+            context,
+            indent,
+            out,
+            span_hints,
+        );
+    }
+
+    if is_nav_router_component(&name) {
+        return lower_nav_component(
+            component,
+            &name,
+            &args,
             source_text,
             source_id,
             custom_components,
@@ -857,9 +1261,31 @@ fn lower_component(
             &args,
         );
     }
-    let mut attrs = Vec::new();
+    // Gesture attrs are emitted inline as Gesture.create/pop sequences rather
+    // than as regular attribute calls.  Each chain expression is either a
+    // regular attribute or a gesture attribute; they are emitted in source order.
+    enum AttrOrGesture {
+        Regular {
+            name: String,
+            args: String,
+            immutable: bool,
+        },
+        Gesture(GestureChain),
+    }
+    let mut ordered_attrs: Vec<AttrOrGesture> = Vec::new();
     for (index, chain) in component.chain_expressions.iter().enumerate() {
         let chain_name = chain_name(chain)?;
+        // Gesture attributes: extract chain from the single argument AST node.
+        if chain_name == "gesture" {
+            if let Some(arg) = chain.arguments.first() {
+                if let Some(Expression::CallExpression(gesture_call)) = arg.as_expression() {
+                    if let Some(gc) = extract_gesture_chain(gesture_call, source_text, &context) {
+                        ordered_attrs.push(AttrOrGesture::Gesture(gc));
+                        continue;
+                    }
+                }
+            }
+        }
         let chain_args = attribute_arguments_text(
             &chain_name,
             &chain.arguments,
@@ -892,13 +1318,43 @@ fn lower_component(
             &chain.arguments,
             source_text,
         );
-        attrs.push((
-            chain_name,
-            chain_args,
-            arguments_are_regular_attrs(&chain.arguments, component_metadata),
-        ));
+        let immutable = context.current_component_reusable
+            && arguments_are_regular_attrs(&chain.arguments, component_metadata);
+        ordered_attrs.push(AttrOrGesture::Regular {
+            name: chain_name,
+            args: chain_args,
+            immutable,
+        });
     }
-    push_attribute_calls(&mut creation_body, "", &name, &attrs);
+    // Emit attrs and gesture sequences in source order into creation_body.
+    {
+        let attr_indent = "    ";
+        let mut immutable_body = String::new();
+        for entry in &ordered_attrs {
+            match entry {
+                AttrOrGesture::Regular {
+                    name: attr_name,
+                    args: attr_args,
+                    immutable,
+                } => {
+                    let target = if *immutable {
+                        &mut immutable_body
+                    } else {
+                        &mut creation_body
+                    };
+                    let mut writer = ViewpuWriter::new(target);
+                    writer.component_attribute(attr_indent, &name, attr_name, attr_args);
+                }
+                AttrOrGesture::Gesture(gc) => {
+                    emit_gesture_sequence(&mut creation_body, "", gc);
+                }
+            }
+        }
+        if !immutable_body.is_empty() {
+            let mut writer = ViewpuWriter::new(&mut creation_body);
+            writer.if_initial_render(attr_indent, &immutable_body);
+        }
+    }
     {
         let mut writer = ViewpuWriter::new(out);
         writer.observe_component_creation(
@@ -970,6 +1426,167 @@ fn lower_component(
         );
         let mut writer = ViewpuWriter::new(out);
         writer.component_pop(indent, &name);
+    }
+    Ok(())
+}
+
+/// Returns true for components that require the `{ moduleName, pagePath }` metadata
+/// second argument: `NavDestination` and `Navigation`.
+fn is_nav_router_component(name: &str) -> bool {
+    matches!(name, "NavDestination" | "Navigation")
+}
+
+/// Compute the `pagePath` value for NavDestination/Navigation metadata.
+///
+/// Uses the hvigor source id (relative path like
+/// `features/challenge/ChallengeDetailView.ets`) and strips the `.ets`
+/// extension, matching the upstream `ets-loader` behaviour.
+fn nav_page_path(source_id: &str) -> String {
+    source_id.trim_end_matches(".ets").to_string()
+}
+
+/// Lower a `NavDestination` or `Navigation` component with the full
+/// builder-closure + metadata form that hvigor emits:
+///
+/// ```js
+/// NavDestination.create(() => { ...children... }, { moduleName: "...", pagePath: "..." });
+/// ```
+///
+/// For `Navigation`, an additional `isUserCreateStack` boolean property is
+/// appended to the metadata object.
+#[allow(clippy::too_many_arguments)]
+fn lower_nav_component(
+    component: &ArkUIComponentExpression<'_>,
+    name: &str,
+    create_args: &str,
+    source_text: &str,
+    source_id: &str,
+    custom_components: &FxHashSet<String>,
+    builder_methods: &FxHashSet<String>,
+    custom_component_update_props: &CustomComponentUpdateProps,
+    component_metadata: &ComponentMetadata,
+    context: BuildContext,
+    indent: &str,
+    out: &mut String,
+    span_hints: &mut Vec<SpanHint>,
+) -> Result<(), BuildLoweringError> {
+    let module_name = context.module_name.as_ref();
+    let page_path = nav_page_path(source_id);
+    let has_children = !component.children.is_empty();
+
+    // Build the metadata object literal.
+    let meta = if name == "Navigation" {
+        let is_user_create_stack = has_children;
+        format!(
+            "{{ moduleName: \"{module_name}\", pagePath: \"{page_path}\", isUserCreateStack: {is_user_create_stack} }}"
+        )
+    } else {
+        format!("{{ moduleName: \"{module_name}\", pagePath: \"{page_path}\" }}")
+    };
+
+    // Build the create call arguments.
+    // NavDestination.create(() => { ...body... }, meta)
+    // The first positional arg from the source (e.g. a NavPathStack for Navigation)
+    // is passed through unchanged, then the builder closure, then the meta.
+    //
+    // Upstream ets-loader passes the builder closure as the *first* argument for
+    // NavDestination (which takes no user-visible constructor arg), and for
+    // Navigation the existing first arg is kept and the meta is appended.
+    let full_create_args = if create_args.is_empty() {
+        // NavDestination has no user-visible first arg; closure is first arg.
+        format!("() => {{}}, {meta}")
+    } else {
+        // Navigation passes its first arg (e.g. new NavPathStack()) then meta.
+        format!("{create_args}, {meta}")
+    };
+
+    // Build the observeComponentCreation2 wrapper with the create call.
+    let mut creation_body = String::new();
+    {
+        let mut writer = ViewpuWriter::new(&mut creation_body);
+        writer.component_create("", name, "create", &full_create_args);
+    }
+    let mut attrs = Vec::new();
+    for chain in &component.chain_expressions {
+        let chain_name = chain_name(chain)?;
+        let chain_args = attribute_arguments_text(
+            &chain_name,
+            &chain.arguments,
+            source_text,
+            builder_methods,
+            &context,
+        );
+        attrs.push((
+            chain_name,
+            chain_args,
+            arguments_are_regular_attrs(&chain.arguments, component_metadata),
+        ));
+    }
+    push_attribute_calls(&mut creation_body, "", name, &attrs);
+    {
+        let mut writer = ViewpuWriter::new(out);
+        writer.observe_component_creation(indent, context.use_parent_context, name, &creation_body);
+    }
+
+    // Lower children into the builder closure body.
+    // For NavDestination with children we need to emit a real closure body.
+    // Upstream wraps the children in an arrow function passed as the first arg.
+    // Since we already emitted the create call with `() => {}` as placeholder,
+    // we need to emit children *outside* the observeComponentCreation2 but
+    // *before* the pop, which is the standard pattern for container components.
+    for child in &component.children {
+        match child {
+            ArkUIChild::Component(child) => {
+                lower_component(
+                    child,
+                    source_text,
+                    source_id,
+                    custom_components,
+                    builder_methods,
+                    custom_component_update_props,
+                    component_metadata,
+                    context.clone(),
+                    indent,
+                    out,
+                    span_hints,
+                )?;
+            }
+            ArkUIChild::Expression(expression) => {
+                lower_expression(
+                    expression,
+                    source_text,
+                    source_id,
+                    custom_components,
+                    builder_methods,
+                    custom_component_update_props,
+                    component_metadata,
+                    context.clone(),
+                    indent,
+                    out,
+                    span_hints,
+                )?;
+            }
+            ArkUIChild::Statement(statement) => {
+                lower_statement(
+                    statement,
+                    source_text,
+                    source_id,
+                    custom_components,
+                    builder_methods,
+                    custom_component_update_props,
+                    component_metadata,
+                    context.clone(),
+                    indent,
+                    out,
+                    span_hints,
+                )?;
+            }
+        }
+    }
+
+    if component_metadata.needs_pop(name) {
+        let mut writer = ViewpuWriter::new(out);
+        writer.component_pop(indent, name);
     }
     Ok(())
 }
@@ -1108,6 +1725,31 @@ fn raw_arguments_text_with_context(
         .map(|argument| raw_argument_text_with_context(argument, source_text, context))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn component_create_arguments_text(
+    arguments: &[Argument<'_>],
+    source_text: &str,
+    context: &BuildContext,
+) -> String {
+    arguments
+        .iter()
+        .map(|argument| component_create_argument_text(argument, source_text, context))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn component_create_argument_text(
+    argument: &Argument<'_>,
+    source_text: &str,
+    context: &BuildContext,
+) -> String {
+    argument
+        .as_expression()
+        .and_then(|expression| {
+            expression_text_with_raw_object_call_args(expression, source_text, context)
+        })
+        .unwrap_or_else(|| raw_argument_text(argument, source_text))
 }
 
 fn attribute_arguments_text(

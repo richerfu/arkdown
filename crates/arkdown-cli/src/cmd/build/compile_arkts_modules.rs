@@ -1,6 +1,9 @@
 use super::compile_arkts_handoff::CompileArkTsInfo;
 use super::*;
+use arkdown_plugin_ohos_resolve::ResolvedImportMap;
 use arkdown_resolver::OhPackage;
+
+const OHM_PACKAGES_PREFIX: &str = "pkg_modules";
 
 pub(super) struct CompileModuleInfo {
     pub(super) source_path: PathBuf,
@@ -26,6 +29,10 @@ impl CompileModuleInfo {
             origin_source_lang: self.origin_source_lang.clone(),
             abc_cache_path: None,
         }
+    }
+
+    pub(super) fn set_rolldown_commonjs(&mut self, is_commonjs: bool) {
+        self.module_type = if is_commonjs { "commonjs" } else { "esm" }.to_string();
     }
 
     pub(super) fn compute(
@@ -76,7 +83,7 @@ impl CompileModuleInfo {
                 )
             };
             let version = package_version_or_default(&module_root);
-            let module_type = Self::module_type_for_source(&source_path, &source_ext);
+            let module_type = Self::module_type_for_source(&source_ext);
 
             return Some(CompileModuleInfo {
                 source_path,
@@ -118,7 +125,10 @@ impl CompileModuleInfo {
 
         let project_root = canonical_or_owned(Path::new(&loader_json.project_root_path));
         let cache_rel = source_path.strip_prefix(&project_root).ok()?;
-        let ts_path = cache_root.join(with_extension(&arkdown_utils::to_unix_path(cache_rel), output_ext));
+        let ts_path = cache_root.join(with_extension(
+            &arkdown_utils::to_unix_path(cache_rel),
+            output_ext,
+        ));
         let record_name = format!(
             "{}/{}",
             package_entry_name,
@@ -138,7 +148,7 @@ impl CompileModuleInfo {
             ts_path,
             record_name,
             package_name: package_entry_name,
-            module_type: Self::module_type_for_source(source_path, &source_ext),
+            module_type: Self::module_type_for_source(&source_ext),
             origin_source_lang: Self::origin_source_lang(&source_ext),
             source_ext,
             output_ext: output_ext.to_string(),
@@ -188,27 +198,8 @@ impl CompileModuleInfo {
             .any(|line| line.contains("@ts-nocheck") || line.contains("@ts-ignore"))
     }
 
-    fn module_type_for_source(source_path: &Path, source_ext: &str) -> String {
-        let is_commonjs = match source_ext {
-            "cjs" => true,
-            "mjs" | "ets" | "ts" => false,
-            "js" => fs_err::read_to_string(source_path)
-                .map(|source| {
-                    let package_has_module_field = find_package_root(source_path)
-                        .and_then(|root| {
-                            OhPackage::load_from_root(&root)
-                                .and_then(|p| p.module.as_deref().map(str::to_string))
-                        })
-                        .is_some();
-                    !package_has_module_field
-                        && (source.contains("module.exports")
-                            || source.contains("exports.")
-                            || source.contains("= exports")
-                            || source.contains("require("))
-                })
-                .unwrap_or(false),
-            _ => false,
-        };
+    fn module_type_for_source(source_ext: &str) -> String {
+        let is_commonjs = source_ext == "cjs";
         if is_commonjs { "commonjs" } else { "esm" }.to_string()
     }
 
@@ -264,9 +255,17 @@ pub(super) fn rewrite_compile_module_imports_to_ohm(
     cache_root: &Path,
     loader_json: &arkdown_profile::LoaderJson,
     config: &ArkdownConfig,
+    resolved_imports: &ResolvedImportMap,
 ) -> String {
     rewrite_static_module_specifiers_with(source, &importer.to_string_lossy(), |specifier| {
-        compile_module_ohm_for_specifier(specifier, importer, cache_root, loader_json, config)
+        compile_module_ohm_for_specifier(
+            specifier,
+            importer,
+            cache_root,
+            loader_json,
+            config,
+            resolved_imports,
+        )
     })
 }
 
@@ -276,93 +275,112 @@ fn compile_module_ohm_for_specifier(
     cache_root: &Path,
     loader_json: &arkdown_profile::LoaderJson,
     config: &ArkdownConfig,
+    resolved_imports: &ResolvedImportMap,
 ) -> Option<String> {
-    if specifier.starts_with("@bundle:")
-        || specifier.starts_with("@shared:")
-        || specifier.starts_with("@ohos:")
-        || specifier.starts_with("@system.")
-        || specifier.starts_with("@native:")
-    {
+    if let Some(ohm_url) = system_api_or_lib_ohm_url(specifier, loader_json, config) {
+        return Some(ohm_url);
+    }
+
+    if is_ohm_url_specifier(specifier) {
         return None;
     }
 
-    let resolved = if specifier.starts_with('.') {
-        resolve_source_request(importer.parent()?, specifier)?
-    } else {
-        local_entry_for_package_specifier(specifier, importer, loader_json)?
-    };
+    let resolved = resolve_compile_module_specifier(specifier, importer, resolved_imports)?;
     let info = CompileModuleInfo::compute(&resolved, cache_root, loader_json, config)?;
-    Some(format!("@bundle:{}", info.record_name))
+    Some(compile_module_ohm_url(&info))
 }
 
-fn local_entry_for_package_specifier(
+fn system_api_or_lib_ohm_url(
+    specifier: &str,
+    loader_json: &arkdown_profile::LoaderJson,
+    config: &ArkdownConfig,
+) -> Option<String> {
+    let request = specifier.trim();
+    if let Some(lib_key) = request
+        .strip_prefix("lib")
+        .and_then(|rest| rest.strip_suffix(".so"))
+        .filter(|key| !key.is_empty())
+    {
+        return Some(format!(
+            "@app:{}/{}/{}",
+            config.product.bundle_name, loader_json.module_name, lib_key
+        ));
+    }
+
+    let (module_type, system_key) = request.strip_prefix('@')?.split_once('.')?;
+    if !matches!(module_type, "system" | "ohos" | "arkts" | "arkui-x") || system_key.is_empty() {
+        return None;
+    }
+
+    let system_module = format!("{module_type}.{system_key}");
+    if is_native_system_module(&system_module) {
+        return Some(format!("@native:{system_module}"));
+    }
+    if module_type == "arkts" {
+        return Some(format!("@ohos:{system_module}"));
+    }
+    Some(format!("@ohos:{system_key}"))
+}
+
+fn is_native_system_module(system_module: &str) -> bool {
+    matches!(
+        system_module,
+        "system.app"
+            | "ohos.app"
+            | "system.router"
+            | "system.curves"
+            | "ohos.curves"
+            | "system.matrix4"
+            | "ohos.matrix4"
+    )
+}
+
+fn is_ohm_url_specifier(specifier: &str) -> bool {
+    // Upstream `resolve_ohm_url.ts::isOhmUrl()` treats every `@xxx:` request
+    // as an already-normalized OHM URL.
+    specifier.starts_with('@')
+        && specifier
+            .split('/')
+            .next()
+            .is_some_and(|head| head.contains(':'))
+}
+
+fn compile_module_ohm_url(info: &CompileModuleInfo) -> String {
+    // Upstream `ModuleSourceFile.getOhmUrl()` prefixes record names beginning
+    // with `PACKAGES` (`pkg_modules`) as package OHM URLs; all other source
+    // records are bundle OHM URLs.
+    if info.record_name.starts_with(OHM_PACKAGES_PREFIX) {
+        format!("@package:{}", info.record_name)
+    } else {
+        format!("@bundle:{}", info.record_name)
+    }
+}
+
+fn resolve_compile_module_specifier(
     specifier: &str,
     importer: &Path,
-    loader_json: &arkdown_profile::LoaderJson,
+    resolved_imports: &ResolvedImportMap,
 ) -> Option<PathBuf> {
-    if let Some(dynamic_info) = loader_json.dynamic_import_lib_info.get(specifier) {
-        let entry_file = dynamic_info
-            .get("entryFilePath")
-            .and_then(|value| value.as_str())?;
-        return Some(canonical_or_owned(Path::new(entry_file)));
-    }
-
-    if let Some(importer_root) = find_package_root(importer) {
-        if let Some(dep_value) = read_manifest_dependency_value(&importer_root, specifier) {
-            if let Some(local_dep) = dep_value.strip_prefix("file:") {
-                let dep_root = canonical_or_owned(&importer_root.join(local_dep));
-                if let Some(entry) = package_entry_path(&dep_root) {
-                    return Some(canonical_or_owned(&entry));
-                }
-            }
-        }
-    }
-
-    for module_root in loader_json.module_path_map.values() {
-        let module_root = canonical_or_owned(Path::new(module_root));
-        if package_name_or_dir(&module_root) != specifier {
-            continue;
-        }
-        if let Some(entry) = package_entry_path(&module_root) {
-            return Some(canonical_or_owned(&entry));
-        }
-    }
-    None
+    let resolved = resolved_import_from_map(specifier, importer, resolved_imports)?;
+    module_id_to_source_path(&resolved)
 }
 
-pub(super) fn read_manifest_dependency_value(
-    package_root: &Path,
+fn resolved_import_from_map(
     specifier: &str,
+    importer: &Path,
+    resolved_imports: &ResolvedImportMap,
 ) -> Option<String> {
-    OhPackage::load_from_root(package_root)
-        .and_then(|p| p.dependency_value(specifier).map(str::to_string))
-}
-
-pub(super) fn resolve_source_request(base_dir: &Path, request: &str) -> Option<PathBuf> {
-    let base = base_dir.join(request);
-    if base.is_file() {
-        return Some(canonical_or_owned(&base));
-    }
-    for ext in ["ets", "ts", "js", "mjs", "cjs", "json", "json5"] {
-        let candidate = base.with_extension(ext);
-        if candidate.is_file() {
-            return Some(canonical_or_owned(&candidate));
-        }
-    }
-    for index in [
-        "index.ets",
-        "index.ts",
-        "index.js",
-        "index.mjs",
-        "index.cjs",
-        "index.json",
-    ] {
-        let candidate = base.join(index);
-        if candidate.is_file() {
-            return Some(canonical_or_owned(&candidate));
-        }
-    }
-    None
+    let importer_keys = [
+        importer.to_string_lossy().into_owned(),
+        slash_path(importer),
+        canonical_or_owned(importer).to_string_lossy().into_owned(),
+        slash_path(&canonical_or_owned(importer)),
+    ];
+    importer_keys
+        .iter()
+        .find_map(|key| resolved_imports.get(key))
+        .and_then(|imports| imports.get(specifier))
+        .cloned()
 }
 
 pub(super) fn compile_source_passthrough(source: &str, source_ext: &str) -> String {
@@ -589,9 +607,16 @@ pub(super) fn with_extension(path: &str, extension: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use arkdown_core::{ArkChunk, ChunkGraph};
+    use arkdown_core::{
+        ArkChunk, ArkdownConfig, BuildMode, BuildOption, ChunkGraph, ModuleConfig, OhosModuleType,
+        OutputTarget, ProductConfig, SdkConfig, StrictModeConfig,
+    };
+    use fs_err as fs;
     use index_vec::IndexVec;
     use rustc_hash::FxHashMap;
+    use tempfile::TempDir;
+
+    use super::*;
 
     #[test]
     fn all_module_ids_prefers_full_rolldown_module_graph() {
@@ -606,6 +631,7 @@ mod tests {
                 "/project/entry/src/main/ets/Index.ets".to_string(),
                 "/project/entry/src/main/ets/PureReexport.ts".to_string(),
             ],
+            full_module_is_commonjs: FxHashMap::default(),
             module_to_chunk: IndexVec::new(),
             entry_module_to_entry_chunk: FxHashMap::default(),
         };
@@ -617,5 +643,281 @@ mod tests {
                 "/project/entry/src/main/ets/PureReexport.ts".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn module_type_uses_rolldown_commonjs_result_not_source_scan() {
+        let temp = TempDir::new().unwrap();
+        let project = temp.path();
+        let phone_root = project.join("phone");
+        let source_path = phone_root.join("src/main/ets/cjsish.js");
+        fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+        fs::write(&source_path, "module.exports = function cjsish() {};\n").unwrap();
+
+        let loader_json = make_loader_json(project, &[("phone", &phone_root)]);
+        let config = make_config(project, &phone_root);
+        let cache_root = project.join("cache");
+
+        let mut info = CompileModuleInfo::compute(&source_path, &cache_root, &loader_json, &config)
+            .expect("module info");
+
+        assert_eq!(
+            info.module_type, "esm",
+            "CompileArkTS must not rescan source text to infer CommonJS"
+        );
+
+        info.set_rolldown_commonjs(true);
+        assert_eq!(info.module_type, "commonjs");
+    }
+
+    #[test]
+    fn compile_module_ohm_uses_package_prefix_for_ohpm_package_records() {
+        let temp = TempDir::new().unwrap();
+        let project = temp.path();
+        let phone_root = project.join("phone");
+        let importer = phone_root.join("src/main/ets/agc/Request.ts");
+        fs::create_dir_all(importer.parent().unwrap()).unwrap();
+        fs::write(&importer, "").unwrap();
+
+        let package_root = project
+            .join("oh_modules/.ohpm/@hw-agconnect+cloud@1.0.2/oh_modules/@hw-agconnect/cloud");
+        fs::create_dir_all(&package_root).unwrap();
+        fs::write(
+            package_root.join("oh-package.json5"),
+            r#"{"name":"@hw-agconnect/cloud","version":"1.0.2","main":"index.ets"}"#,
+        )
+        .unwrap();
+        fs::write(package_root.join("index.ets"), "export default {};\n").unwrap();
+
+        let loader_json = make_loader_json(project, &[("phone", &phone_root)]);
+        let config = make_config(project, &phone_root);
+        let cache_root = project.join("cache");
+        let resolved_imports = make_resolved_imports(
+            &importer,
+            "@hw-agconnect/cloud",
+            &package_root.join("index.ets"),
+        );
+
+        let ohm = compile_module_ohm_for_specifier(
+            "@hw-agconnect/cloud",
+            &importer,
+            &cache_root,
+            &loader_json,
+            &config,
+            &resolved_imports,
+        )
+        .unwrap();
+
+        assert_eq!(
+            ohm,
+            "@package:pkg_modules/.ohpm/@hw-agconnect+cloud@1.0.2/pkg_modules/@hw-agconnect/cloud/index"
+        );
+    }
+
+    #[test]
+    fn compile_module_ohm_keeps_bundle_prefix_for_project_module_records() {
+        let temp = TempDir::new().unwrap();
+        let project = temp.path();
+        let phone_root = project.join("phone");
+        let utils_root = project.join("utils");
+        let importer = phone_root.join("src/main/ets/pages/Index.ets");
+        let logger = utils_root.join("src/main/ets/Index.ets");
+        fs::create_dir_all(importer.parent().unwrap()).unwrap();
+        fs::create_dir_all(logger.parent().unwrap()).unwrap();
+        fs::write(&importer, "").unwrap();
+        fs::write(&logger, "export class Logger {}\n").unwrap();
+        fs::write(
+            project.join("oh-package.json5"),
+            r#"{"name":"hmosworld","dependencies":{"@ohos/utils":"file:./utils"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            utils_root.join("oh-package.json5"),
+            r#"{"name":"@ohos/utils","version":"1.0.0","main":"src/main/ets/Index.ets"}"#,
+        )
+        .unwrap();
+
+        let loader_json =
+            make_loader_json(project, &[("phone", &phone_root), ("utils", &utils_root)]);
+        let config = make_config(project, &phone_root);
+        let cache_root = project.join("cache");
+        let resolved_imports = make_resolved_imports(&importer, "@ohos/utils", &logger);
+
+        let ohm = compile_module_ohm_for_specifier(
+            "@ohos/utils",
+            &importer,
+            &cache_root,
+            &loader_json,
+            &config,
+            &resolved_imports,
+        )
+        .unwrap();
+
+        assert_eq!(ohm, "@bundle:com.example.hmosworld/phone@utils/ets/Index");
+    }
+
+    #[test]
+    fn compile_module_ohm_rewrites_system_api_and_lib_requests() {
+        let temp = TempDir::new().unwrap();
+        let project = temp.path();
+        let phone_root = project.join("phone");
+        let importer = phone_root.join("src/main/ets/pages/Index.ets");
+        fs::create_dir_all(importer.parent().unwrap()).unwrap();
+        fs::write(&importer, "").unwrap();
+
+        let loader_json = make_loader_json(project, &[("phone", &phone_root)]);
+        let config = make_config(project, &phone_root);
+        let cache_root = project.join("cache");
+        let resolved_imports = ResolvedImportMap::default();
+
+        let cases = [
+            ("@ohos.app.ability.common", "@ohos:app.ability.common"),
+            ("@ohos.hilog", "@ohos:hilog"),
+            ("@system.app", "@native:system.app"),
+            ("@arkts.collections", "@ohos:arkts.collections"),
+            (
+                "libapplication.so",
+                "@app:com.example.hmosworld/phone/application",
+            ),
+        ];
+        for (specifier, expected) in cases {
+            let ohm = compile_module_ohm_for_specifier(
+                specifier,
+                &importer,
+                &cache_root,
+                &loader_json,
+                &config,
+                &resolved_imports,
+            )
+            .unwrap();
+            assert_eq!(ohm, expected, "specifier {specifier}");
+        }
+    }
+
+    #[test]
+    fn compile_module_ohm_does_not_guess_without_rolldown_resolved_import() {
+        let temp = TempDir::new().unwrap();
+        let project = temp.path();
+        let phone_root = project.join("phone");
+        let importer = phone_root.join("src/main/ets/pages/Index.ets");
+        let target = phone_root.join("src/main/ets/pages/Dep.ets");
+        fs::create_dir_all(importer.parent().unwrap()).unwrap();
+        fs::write(&importer, "").unwrap();
+        fs::write(&target, "export const dep = 1;\n").unwrap();
+
+        let loader_json = make_loader_json(project, &[("phone", &phone_root)]);
+        let config = make_config(project, &phone_root);
+        let cache_root = project.join("cache");
+        let resolved_imports = ResolvedImportMap::default();
+
+        let ohm = compile_module_ohm_for_specifier(
+            "./Dep",
+            &importer,
+            &cache_root,
+            &loader_json,
+            &config,
+            &resolved_imports,
+        );
+
+        assert!(ohm.is_none());
+    }
+
+    fn make_resolved_imports(
+        importer: &Path,
+        specifier: &str,
+        resolved: &Path,
+    ) -> ResolvedImportMap {
+        let mut imports = FxHashMap::default();
+        imports.insert(
+            specifier.to_string(),
+            resolved.to_string_lossy().into_owned(),
+        );
+        let mut map = FxHashMap::default();
+        map.insert(importer.to_string_lossy().into_owned(), imports);
+        map
+    }
+
+    fn make_loader_json(project: &Path, modules: &[(&str, &Path)]) -> arkdown_profile::LoaderJson {
+        let mut loader_json = arkdown_profile::LoaderJson {
+            module_path_map: Default::default(),
+            compile_mode: "esmodule".to_string(),
+            project_root_path: project.to_string_lossy().into_owned(),
+            node_modules_path: project
+                .join("loader_out/node_modules")
+                .to_string_lossy()
+                .into_owned(),
+            byte_code_har_info: FxHashMap::default(),
+            declaration_entry: vec![],
+            module_name: "phone".to_string(),
+            hsp_name_ohm_map: FxHashMap::default(),
+            har_name_ohm_map: FxHashMap::default(),
+            package_manager_type: "ohpm".to_string(),
+            hvigor_compile_entry: vec![],
+            other_compile_files: vec![],
+            dynamic_import_lib_info: Default::default(),
+            router_map: vec![],
+            hsp_resources_map: FxHashMap::default(),
+            update_version_info: FxHashMap::default(),
+            an_build_out_put: project.join("an").to_string_lossy().into_owned(),
+            an_build_mode: "type".to_string(),
+            non_entry_importees: vec![],
+            compiled_importees: vec![],
+            compile_entry: vec![],
+            module_root_path: modules[0].1.join("src/main").to_string_lossy().into_owned(),
+            cache_path: project.join("cache").to_string_lossy().into_owned(),
+            ace_module_build: project.join("ets").to_string_lossy().into_owned(),
+            build_mode: "release".to_string(),
+            support_chunks: false,
+            use_normalized_ohm_url: false,
+            api_version: 12,
+            fallback_an_build: false,
+            pkg_name_to_pkg_brief_info: FxHashMap::default(),
+            workers: vec![],
+        };
+        for (name, root) in modules {
+            loader_json
+                .module_path_map
+                .insert((*name).to_string(), root.to_string_lossy().into_owned());
+        }
+        loader_json
+    }
+
+    fn make_config(project: &Path, phone_root: &Path) -> ArkdownConfig {
+        ArkdownConfig {
+            project_root: project.to_path_buf(),
+            build_mode: BuildMode::Release,
+            output_target: OutputTarget::Hap,
+            product: ProductConfig {
+                name: "default".to_string(),
+                bundle_name: "com.example.hmosworld".to_string(),
+                compatible_sdk_version: "5.0.0(12)".to_string(),
+                compatible_sdk_version_stage: None,
+                runtime_os: "HarmonyOS".to_string(),
+                signing_config: None,
+                build_option: BuildOption {
+                    strict_mode: StrictModeConfig {
+                        case_sensitive_check: false,
+                        use_normalized_ohm_url: false,
+                    },
+                    ark_options: None,
+                    res_options: None,
+                    source_option: None,
+                    preload_so: vec![],
+                },
+            },
+            modules: vec![ModuleConfig {
+                name: "phone".to_string(),
+                src_path: phone_root.to_path_buf(),
+                module_type: OhosModuleType::Entry,
+            }],
+            sdk_config: SdkConfig {
+                ets_loader_path: project.join("sdk/ets/build-tools/ets-loader"),
+                es2abc_path: project.join("sdk/ets/build-tools/es2abc"),
+                restool_path: project.join("sdk/toolchains/restool"),
+                compile_api_version: 12,
+                has_rollup_plugin: true,
+                compile_sdk_version: "6.0.0.47".to_string(),
+            },
+        }
     }
 }

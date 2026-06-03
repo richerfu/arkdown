@@ -58,6 +58,16 @@ pub struct AbcModule {
     /// Upstream `es2abc` gets this from `filesInfo.txt`; source maps are not
     /// inputs to `BuildLineNumberProgram()`.
     pub source_file: Option<String>,
+    /// Package name stored in the module metadata `pkgName@...` field.
+    ///
+    /// Upstream `es2abc` reads this from column 5 of `filesInfo.txt` and does
+    /// not derive it from the record name.
+    pub package_name: Option<String>,
+    /// Whether this record is compiled from a CommonJS source file.
+    ///
+    /// Upstream `es2abc` reads this from column 3 of `filesInfo.txt` and writes
+    /// it to the module metadata `isCommonjs` field.
+    pub is_commonjs: bool,
 }
 
 /// Output produced by a successful compilation run.
@@ -108,6 +118,7 @@ fn source_file_from_record_name(record_name: &str) -> String {
 fn cache_key_inputs(
     modules: &[AbcModule],
     npm_entries_source: Option<&str>,
+    options: &AbcCompileOptions,
 ) -> Vec<(String, String)> {
     let mut inputs: Vec<(String, String)> = modules
         .iter()
@@ -115,13 +126,28 @@ fn cache_key_inputs(
             (
                 module.record_name.clone(),
                 format!(
-                    "{}\0source_file={}",
+                    "{}\0source_file={}\0package_name={}\0is_commonjs={}",
                     module.source,
-                    module.source_file.as_deref().unwrap_or_default()
+                    module.source_file.as_deref().unwrap_or_default(),
+                    module.package_name.as_deref().unwrap_or_default(),
+                    module.is_commonjs
                 ),
             )
         })
         .collect();
+    inputs.push((
+        "__arkdown_compile_options__".to_string(),
+        format!(
+            "target_api_version={}\0target_api_sub_version={}\0module={}\0debug_info={}",
+            options.target_api_version,
+            options
+                .target_api_sub_version
+                .as_deref()
+                .unwrap_or_default(),
+            options.module,
+            options.debug_info
+        ),
+    ));
     if let Some(source) = npm_entries_source {
         inputs.push(("__arkdown_npm_entries__".to_string(), source.to_string()));
     }
@@ -152,7 +178,7 @@ fn cache_key_inputs(
 /// });
 ///
 /// let result = compiler.compile(
-///     vec![AbcModule { record_name: "entry/main".into(), source: "export const x = 1;" .into(), source_map: None, source_file: None }],
+///     vec![AbcModule { record_name: "entry/main".into(), source: "export const x = 1;" .into(), source_map: None, source_file: None, package_name: None }],
 ///     Path::new("output/modules.abc"),
 /// )?;
 /// println!("wrote {} bytes to {:?}", std::fs::metadata(&result.path)?.len(), result.path);
@@ -216,14 +242,18 @@ impl AbcCompiler {
                         .then(|| source_file_from_record_name(&input.record_name))
                 });
             has_debug_info |= source_file.is_some();
-            let record = builder::build_record_with_debug(
+            let record = builder::build_record_with_debug_and_package_for_target(
                 &js_source,
                 &input.record_name,
                 &mut abc_file.strings,
                 &mut abc_file.literal_arrays,
                 source_file.as_deref(),
+                None,
+                false,
                 // Widget source files are always compiled as ESM modules.
                 true,
+                config.target_api_version,
+                None,
             )?;
             abc_file.add_record(record);
         }
@@ -288,12 +318,18 @@ impl AbcCompiler {
         // cached bytecode directly to `output` and return early — skipping all
         // IR lowering.
         if let Some(ref cache_dir) = self.options.cache_path {
-            let key_inputs_owned = cache_key_inputs(&modules, npm_entries_source.as_deref());
+            let key_inputs_owned =
+                cache_key_inputs(&modules, npm_entries_source.as_deref(), &self.options);
             let key_inputs: Vec<(&str, &str)> = key_inputs_owned
                 .iter()
                 .map(|(record_name, source)| (record_name.as_str(), source.as_str()))
                 .collect();
-            let key = derive_key(&key_inputs, self.options.module, self.options.debug_info);
+            let key = derive_key(
+                &key_inputs,
+                self.options.module,
+                self.options.debug_info,
+                self.options.target_api_version,
+            );
 
             let cache = CacheFile::load(cache_dir);
             if let Some(cached_bytes) = cache.lookup(&key) {
@@ -339,13 +375,17 @@ impl AbcCompiler {
                         .then(|| source_file_from_record_name(&module.record_name))
                 });
             has_debug_info |= source_file.is_some();
-            let record = builder::build_record_with_debug(
+            let record = builder::build_record_with_debug_and_package_for_target(
                 &js_source,
                 &module.record_name,
                 &mut abc_file.strings,
                 &mut abc_file.literal_arrays,
                 source_file.as_deref(),
+                module.package_name.as_deref(),
+                module.is_commonjs,
                 self.options.module,
+                self.options.target_api_version,
+                self.options.target_api_sub_version.as_deref(),
             )?;
             abc_file.add_record(record);
         }
@@ -377,12 +417,18 @@ impl AbcCompiler {
 
         // ── Write result to cache (SPEC-025) ──────────────────────────────────
         if let Some(ref cache_dir) = self.options.cache_path {
-            let key_inputs_owned = cache_key_inputs(&modules, npm_entries_source.as_deref());
+            let key_inputs_owned =
+                cache_key_inputs(&modules, npm_entries_source.as_deref(), &self.options);
             let key_inputs: Vec<(&str, &str)> = key_inputs_owned
                 .iter()
                 .map(|(record_name, source)| (record_name.as_str(), source.as_str()))
                 .collect();
-            let key = derive_key(&key_inputs, self.options.module, self.options.debug_info);
+            let key = derive_key(
+                &key_inputs,
+                self.options.module,
+                self.options.debug_info,
+                self.options.target_api_version,
+            );
             let mut cache = CacheFile::load(cache_dir);
             cache.upsert(key, &bytes);
             // Ignore cache write errors — they are non-fatal.

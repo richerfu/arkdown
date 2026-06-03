@@ -40,6 +40,8 @@ pub(super) fn write_compile_arkts_abc_handoff(
             path: ts_path,
             record_name: info.record_name.clone(),
             source_file: Some(info.source_file.clone()),
+            package_name: Some(info.package_name.clone()),
+            is_commonjs: info.module_type == "commonjs",
             source_map: None,
         });
     }

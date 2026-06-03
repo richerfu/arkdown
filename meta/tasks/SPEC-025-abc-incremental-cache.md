@@ -132,7 +132,10 @@ debug logging mechanism.
   independently-compiled `ClassRecord`s (shared string tables make this complex).
 - No LRU eviction: the cache file grows unboundedly.  A future SPEC-025v2 could
   add a max-entries limit.
-- `compileEnv` invalidation (API version change) is handled implicitly: the
-  cache key does not include `target_api_version`, so a version bump will reuse
-  stale entries.  A future revision should include `target_api_version` in the
-  key.
+- `compileEnv` invalidation (API version change): **FIXED** — `target_api_version`
+  is now included in the cache key (format: `api={version}`), so a version bump
+  correctly invalidates the cache.
+- Remaining gap: replace the internal JSON bytecode cache with upstream-compatible
+  `modules.cache`/protoBin ProgramCache generation and merge semantics.  This
+  requires the exact protoBuf wire format from the upstream es2abc source (not yet
+  ported).

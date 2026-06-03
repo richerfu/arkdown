@@ -56,6 +56,8 @@ fn compile_case(case: &UpstreamCase) -> Vec<u8> {
                 source: case.source.to_string(),
                 source_map: None,
                 source_file: None,
+                package_name: None,
+                is_commonjs: false,
             }],
             &out,
         )

@@ -497,7 +497,10 @@ mod tests {
             StartupConfigInput::parse_profile_name("$profile:my_config"),
             Some("my_config")
         );
-        assert_eq!(StartupConfigInput::parse_profile_name("not_a_profile"), None);
+        assert_eq!(
+            StartupConfigInput::parse_profile_name("not_a_profile"),
+            None
+        );
         assert_eq!(StartupConfigInput::parse_profile_name(""), None);
     }
 
