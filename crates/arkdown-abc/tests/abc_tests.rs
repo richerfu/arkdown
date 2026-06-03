@@ -1899,6 +1899,35 @@ fn test_runtime_ts_module_declaration_stays_rejected_until_transformer_is_ported
 }
 
 #[test]
+fn test_ts_namespace_export_declaration_is_type_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("ts_namespace_export.abc");
+    let record_name = "test/ts_namespace_export";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"export as namespace PublicApi;
+const value = 1;"#,
+            )],
+            &out,
+        )
+        .expect("TS namespace export declarations must be erased as type-only");
+    let bytes = std::fs::read(&out).unwrap();
+    assert_eq!(
+        module_local_exports(&bytes, record_name),
+        Vec::<(String, String)>::new(),
+        "TS namespace export declarations must not create runtime local exports"
+    );
+    assert!(
+        !bytes
+            .windows(b"PublicApi".len())
+            .any(|w| w == b"PublicApi"),
+        "TS namespace export declarations must not serialize the namespace name into runtime ABC data"
+    );
+}
+
+#[test]
 fn test_type_only_ts_import_equals_declarations_are_erased() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("type_only_ts_import_equals.abc");

@@ -44,6 +44,8 @@ gap is either implemented with focused tests or rejected with
 - [x] Lower runtime TypeScript import-equals declarations through upstream
   transformer-shaped local bindings for `require("...")` and qualified member
   aliases, while erasing aliases used only in type positions.
+- [x] Erase TypeScript `export as namespace ...` declarations as declaration
+  file/type-only syntax.
 - [ ] Port remaining TypeScript runtime declarations beyond enum lowering,
   including non-declare namespace/module lowering.
 - [ ] Broaden upstream bytecode parity coverage for for-of, try-finally,

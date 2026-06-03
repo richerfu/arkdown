@@ -1832,9 +1832,7 @@ impl UnsupportedScanner<'_> {
             }
             Statement::ImportDeclaration(_) | Statement::ExportAllDeclaration(_) => Ok(()),
             Statement::TSExportAssignment(_) => Err(self.unsupported("TSExportAssignment")),
-            Statement::TSNamespaceExportDeclaration(_) => {
-                Err(self.unsupported("TSNamespaceExportDeclaration"))
-            }
+            Statement::TSNamespaceExportDeclaration(_) => Ok(()),
             Statement::TSTypeAliasDeclaration(_)
             | Statement::TSInterfaceDeclaration(_)
             | Statement::TSGlobalDeclaration(_) => Ok(()),
