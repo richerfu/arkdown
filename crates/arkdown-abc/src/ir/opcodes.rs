@@ -365,6 +365,11 @@ pub enum Insn {
     /// Encoding: `[0xC5] [dst_vreg: u8]` = 2 bytes.
     CopyDataProperties(u8),
 
+    /// `0xB3` / `0xFD 0x00` — create object excluding keys from a source object.
+    /// Encoding: `[0xB3] [arg_count: u8] [obj_vreg: u8] [keys_start_vreg: u8]` = 4 bytes,
+    /// or `[0xFD] [0x00] [arg_count: u16 LE] [obj_vreg: u8] [keys_start_vreg: u8]` = 6 bytes.
+    CreateObjectWithExcludedKeys(u16, u8, u8),
+
     /// `0x77` — set object prototype. Accumulator holds the object, operand is proto.
     /// Encoding: `[0x77] [slot: u8] [proto_vreg: u8]` = 3 bytes.
     SetObjectWithProto(u8, u8),
@@ -444,6 +449,10 @@ pub enum Insn {
     /// `0xFE 0x00` — throw the value in the accumulator.
     /// Encoding: `[0xFE] [0x00]` = 2 bytes (prefixed instruction).
     Throw,
+
+    /// `0xFE 0x02` — throw when an object destructuring source is nullish.
+    /// Encoding: `[0xFE] [0x02]` = 2 bytes (prefixed instruction).
+    ThrowPatternNonCoercible,
 
     // ── For-in iteration ─────────────────────────────────────────────────────
     /// `0x66` `op_none` — create a property-iterator for the object in acc.
@@ -587,6 +596,8 @@ impl Insn {
             | Insn::StOwnByValue(_, _, _)
             | Insn::StOwnByValueWithNameSet(_, _, _) => &[2, 3],
             Insn::CopyDataProperties(_) => &[1],
+            Insn::CreateObjectWithExcludedKeys(count, _, _) if *count <= u8::MAX as u16 => &[2, 3],
+            Insn::CreateObjectWithExcludedKeys(_, _, _) => &[4, 5],
             Insn::SetObjectWithProto(_, _) => &[2],
             Insn::DefineGetterSetterByValue(_, _, _, _) => &[1, 2, 3, 4],
             Insn::CallRuntimeDefineFieldByValue(_, _, _) => &[3, 4],
@@ -855,6 +866,18 @@ impl Insn {
             Insn::StOwnByValueWithNameSet(slot, obj, key) => vec![0x99, *slot, *obj, *key],
             Insn::StOwnByValue(slot, obj, key) => vec![0x78, *slot, *obj, *key],
             Insn::CopyDataProperties(dst) => vec![0xc5, *dst],
+            Insn::CreateObjectWithExcludedKeys(arg_count, obj, keys_start)
+                if *arg_count <= u8::MAX as u16 =>
+            {
+                vec![0xb3, *arg_count as u8, *obj, *keys_start]
+            }
+            Insn::CreateObjectWithExcludedKeys(arg_count, obj, keys_start) => {
+                let mut v = vec![0xfd, 0x00];
+                v.extend_from_slice(&arg_count.to_le_bytes());
+                v.push(*obj);
+                v.push(*keys_start);
+                v
+            }
             Insn::SetObjectWithProto(slot, proto) => vec![0x77, *slot, *proto],
 
             // ── object construction ──────────────────────────────────────────
@@ -908,6 +931,7 @@ impl Insn {
 
             // ── exception ────────────────────────────────────────────────────
             Insn::Throw => vec![0xFE, 0x00],
+            Insn::ThrowPatternNonCoercible => vec![0xFE, 0x02],
 
             // ── for-in iteration ─────────────────────────────────────────────
             Insn::GetPropIterator => vec![0x66],
@@ -1025,6 +1049,10 @@ impl Insn {
             Insn::StOwnByName(_, _, _) => 5,
             Insn::StOwnByValue(_, _, _) | Insn::StOwnByValueWithNameSet(_, _, _) => 4,
             Insn::CopyDataProperties(_) => 2,
+            Insn::CreateObjectWithExcludedKeys(arg_count, _, _) if *arg_count <= u8::MAX as u16 => {
+                4
+            }
+            Insn::CreateObjectWithExcludedKeys(_, _, _) => 6,
             Insn::SetObjectWithProto(_, _) => 3,
             Insn::CreateEmptyObject => 1,
             Insn::CreateObjectWithBuffer(_, _) => 4,
@@ -1034,7 +1062,7 @@ impl Insn {
             Insn::JmpShort(_) | Insn::JeqzShort(_) | Insn::JnezShort(_) => 2,
             Insn::Jmp(_) | Insn::Jeqz(_) | Insn::Jnez(_) => 3,
             Insn::JmpWide(_) | Insn::JeqzWide(_) | Insn::JnezWide(_) => 5,
-            Insn::Throw => 2,
+            Insn::Throw | Insn::ThrowPatternNonCoercible => 2,
             Insn::GetPropIterator => 1,
             Insn::GetNextPropName(_) => 2,
             Insn::GetIterator(_) => 2,
@@ -1048,5 +1076,37 @@ impl Insn {
             | Insn::AsyncFunctionResolve(_)
             | Insn::AsyncFunctionReject(_) => 2,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Insn;
+    use crate::emit::strings::StringTable;
+
+    #[test]
+    fn create_object_with_excluded_keys_encodes_default_and_wide_forms() {
+        let mut strings = StringTable::default();
+
+        let default = Insn::CreateObjectWithExcludedKeys(2, 4, 5);
+        assert_eq!(default.encode(&mut strings), vec![0xb3, 2, 4, 5]);
+        assert_eq!(default.byte_len(), 4);
+        assert_eq!(default.register_operand_offsets(), &[2, 3]);
+
+        let wide = Insn::CreateObjectWithExcludedKeys(300, 4, 5);
+        assert_eq!(
+            wide.encode(&mut strings),
+            vec![0xfd, 0x00, 0x2c, 0x01, 4, 5]
+        );
+        assert_eq!(wide.byte_len(), 6);
+        assert_eq!(wide.register_operand_offsets(), &[4, 5]);
+    }
+
+    #[test]
+    fn throw_pattern_non_coercible_uses_throw_prefix_opcode() {
+        let mut strings = StringTable::default();
+        let insn = Insn::ThrowPatternNonCoercible;
+        assert_eq!(insn.encode(&mut strings), vec![0xfe, 0x02]);
+        assert_eq!(insn.byte_len(), 2);
     }
 }
