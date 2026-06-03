@@ -1,4 +1,5 @@
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::path::Path;
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
@@ -14,6 +15,7 @@ use oxc_parser::{Parser, ParserReturn};
 use oxc_semantic::{Reference, Scoping, SemanticBuilder};
 use oxc_span::{GetSpan, SourceType};
 use oxc_syntax::operator::UpdateOperator;
+use oxc_transformer::{TransformOptions, Transformer};
 
 use crate::emit::file::{LiteralArray, LiteralEntry};
 use crate::emit::record::{CatchEntry, ClassRecord, DebugInfoRecord, MethodKind, MethodRecord};
@@ -213,7 +215,7 @@ pub fn build_record_with_debug_and_source_map_for_target(
     let allocator = Allocator::default();
     let source_type = SourceType::ts().with_module(is_module);
     let ParserReturn {
-        program,
+        mut program,
         panicked,
         errors,
         ..
@@ -228,18 +230,37 @@ pub fn build_record_with_debug_and_source_map_for_target(
                 .unwrap_or_else(|| "parser panic".to_string()),
         });
     }
-    let semantic_ret = SemanticBuilder::new().build(&program);
+    let semantic_ret = SemanticBuilder::new().with_enum_eval(true).build(&program);
     let scoping = if semantic_ret.errors.is_empty() {
-        Some(semantic_ret.semantic.scoping())
+        let mut scoping = semantic_ret.semantic.into_scoping();
+        if needs_typescript_runtime_transform(&program) {
+            let mut options = TransformOptions::default();
+            options.typescript.allow_namespaces = true;
+            options.typescript.optimize_const_enums = false;
+            let path = source_file
+                .map(Path::new)
+                .unwrap_or_else(|| Path::new(record_name));
+            let ret = Transformer::new(&allocator, path, &options)
+                .build_with_scoping(scoping, &mut program);
+            if let Some(error) = ret.errors.first() {
+                return Err(AbcError::Parse {
+                    file: record_name.to_string(),
+                    message: error.to_string(),
+                });
+            }
+            scoping = ret.scoping;
+        }
+        Some(scoping)
     } else {
         None
     };
-    let runtime_ts_import_equals = collect_runtime_ts_import_equals(&program, scoping);
+    let scoping_ref = scoping.as_ref();
+    let runtime_ts_import_equals = collect_runtime_ts_import_equals(&program, scoping_ref);
     reject_unsupported_constructs(&program, record_name)?;
 
     // Collect module import/export records before lowering so bytecode can use
     // hvigor/es2abc's module-variable opcodes instead of global lookups.
-    let module_record = collect_module_record(&program, is_module, scoping);
+    let module_record = collect_module_record(&program, is_module, scoping_ref);
     let lexical_bindings = collect_module_lexical_bindings(&program, is_module, &module_record);
     let function_lexical_infos = collect_function_lexical_bindings(&program);
     let scan_stmts: &[Statement<'_>] = statement_scan_body(&program, is_module);
@@ -1638,6 +1659,31 @@ fn reject_unsupported_constructs(program: &Program<'_>, record_name: &str) -> Re
     let body = statement_scan_body(program, true);
     let mut scanner = UnsupportedScanner { record_name };
     scanner.scan_statements(body)
+}
+
+fn needs_typescript_runtime_transform(program: &Program<'_>) -> bool {
+    program
+        .body
+        .iter()
+        .any(statement_needs_typescript_runtime_transform)
+}
+
+fn statement_needs_typescript_runtime_transform(stmt: &Statement<'_>) -> bool {
+    match stmt {
+        Statement::TSModuleDeclaration(decl) => ts_module_needs_runtime_transform(decl),
+        Statement::ExportNamedDeclaration(export) => {
+            matches!(
+                export.declaration.as_ref(),
+                Some(Declaration::TSModuleDeclaration(decl))
+                    if ts_module_needs_runtime_transform(decl)
+            )
+        }
+        _ => false,
+    }
+}
+
+fn ts_module_needs_runtime_transform(decl: &TSModuleDeclaration<'_>) -> bool {
+    !decl.declare && decl.body.is_some()
 }
 
 fn collect_runtime_ts_import_equals(

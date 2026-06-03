@@ -1873,28 +1873,42 @@ declare module "virtual:asset" {
 }
 
 #[test]
-fn test_runtime_ts_module_declaration_stays_rejected_until_transformer_is_ported() {
+fn test_runtime_ts_namespace_declaration_lowers_through_transformer() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("runtime_ts_module.abc");
-    let err = match module_compiler().compile(
-        vec![module_record(
-            "test/runtime_ts_module",
-            r#"namespace Runtime { export const value = 1; }"#,
-        )],
-        &out,
-    ) {
-        Ok(_) => panic!("runtime TS namespace must not be silently erased"),
-        Err(err) => err,
-    };
+    let record_name = "test/runtime_ts_module";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"export namespace RuntimeNs {
+  export const answer = 42;
+  export function read() { return answer; }
+}"#,
+            )],
+            &out,
+        )
+        .expect("runtime TS namespace must lower through upstream-shaped TS transform");
+    let bytes = std::fs::read(&out).unwrap();
+    assert_eq!(
+        module_local_exports(&bytes, record_name),
+        vec![("RuntimeNs".to_string(), "RuntimeNs".to_string())],
+        "export namespace must create a runtime local export for the namespace object"
+    );
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
     assert!(
-        matches!(
-            err,
-            AbcError::UnsupportedConstruct {
-                ref construct,
-                ..
-            } if construct == "TSModuleDeclaration"
-        ),
-        "runtime TS namespace must stay rejected until upstream transformer lowering is ported, got {err:?}"
+        bytecode_contains_opcode(&bytecode, 0x04),
+        "runtime namespace must create a namespace object"
+    );
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x2a),
+        "runtime namespace must call the transformed namespace IIFE with one argument"
+    );
+    assert!(
+        bytes_contain_ascii(&bytes, "RuntimeNs")
+            && bytes_contain_ascii(&bytes, "answer")
+            && bytes_contain_ascii(&bytes, "read"),
+        "runtime namespace object and exported members must be present in ABC strings"
     );
 }
 

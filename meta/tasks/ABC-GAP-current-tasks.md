@@ -48,7 +48,9 @@ gap is either implemented with focused tests or rejected with
   file/type-only syntax.
 - [x] Erase TypeScript `declare` class/var/enum declarations as type-only
   declarations, including exported ambient classes.
-- [ ] Port remaining TypeScript runtime declarations beyond enum lowering,
-  including non-declare namespace/module lowering.
+- [x] Lower non-declare TypeScript namespace/module runtime declarations through
+  the TypeScript transformer's upstream-shaped namespace IIFE form.
+- [ ] Port remaining TypeScript runtime declaration edge cases beyond enum and
+  namespace lowering.
 - [ ] Broaden upstream bytecode parity coverage for for-of, try-finally,
   async/TLA, source-map/debug LNP, widgets, and HmosWorld cache-TS parity.
