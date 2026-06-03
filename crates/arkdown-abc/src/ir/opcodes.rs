@@ -303,6 +303,14 @@ pub enum Insn {
     /// Short form: `[0x43] [slot: u8] [name_id: u16 LE] [obj_vreg: u8]` = 5 bytes.
     StObjByName(u8, u16, u8),
 
+    /// `0x46` — load `super.<name>` into accumulator (acc is this).
+    /// Short form: `[0x46] [slot: u8] [name_id: u16 LE]` = 4 bytes.
+    LdSuperByName(u8, u16),
+
+    /// `0xD0` — store accumulator into `super.<name>`.
+    /// Short form: `[0xD0] [slot: u8] [name_id: u16 LE] [this_vreg: u8]` = 5 bytes.
+    StSuperByName(u8, u16, u8),
+
     /// `0xDC` — define accumulator as an own named property on `obj_vreg`.
     /// Short form: `[0xDC] [slot: u8] [name_id: u16 LE] [obj_vreg: u8]` = 5 bytes.
     DefinePropertyByName(u8, u16, u8),
@@ -358,6 +366,14 @@ pub enum Insn {
     /// `0x38` — store accumulator into `obj_vreg[key_vreg]`.
     /// Encoding: `[0x38] [slot: u8] [obj_vreg: u8] [key_vreg: u8]` = 4 bytes.
     StObjByValue(u8, u8, u8),
+
+    /// `0x39` — load `super[acc]` into accumulator.
+    /// Encoding: `[0x39] [slot: u8] [this_vreg: u8]` = 3 bytes.
+    LdSuperByValue(u8, u8),
+
+    /// `0xC9` — store accumulator into `super[key_vreg]`.
+    /// Encoding: `[0xC9] [slot: u8] [this_vreg: u8] [key_vreg: u8]` = 4 bytes.
+    StSuperByValue(u8, u8, u8),
 
     /// `0x7A` — store accumulator into own named property.
     /// Encoding: `[0x7A] [slot: u8] [name_id: u16 LE] [obj_vreg: u8]` = 5 bytes.
@@ -602,6 +618,7 @@ impl Insn {
             | Insn::CallArg1(_, _)
             | Insn::CallThis0(_, _)
             | Insn::LdObjByValue(_, _)
+            | Insn::LdSuperByValue(_, _)
             | Insn::CloseIterator(_, _) => &[2],
             Insn::ThrowIfNotObject(_) => &[2],
             Insn::SuspendGenerator(_)
@@ -611,6 +628,7 @@ impl Insn {
             Insn::CallArgs2(_, _, _)
             | Insn::CallThis1(_, _, _)
             | Insn::StObjByValue(_, _, _)
+            | Insn::StSuperByValue(_, _, _)
             | Insn::StOwnByValue(_, _, _)
             | Insn::StOwnByValueWithNameSet(_, _, _) => &[2, 3],
             Insn::CopyDataProperties(_) | Insn::DelObjProp(_) => &[1],
@@ -628,6 +646,7 @@ impl Insn {
             Insn::SuperCallSpread(_, _) | Insn::NewObjApply(_, _) => &[2],
             Insn::Apply(_, _, _) => &[2, 3],
             Insn::StObjByName(_, _, _)
+            | Insn::StSuperByName(_, _, _)
             | Insn::DefinePropertyByName(_, _, _)
             | Insn::DefineFieldByName(_, _, _)
             | Insn::StOwnByName(_, _, _)
@@ -812,6 +831,17 @@ impl Insn {
                 v.push(*obj);
                 v
             }
+            Insn::LdSuperByName(slot, name_id) => {
+                let mut v = vec![0x46, *slot];
+                v.extend_from_slice(&name_id.to_le_bytes());
+                v
+            }
+            Insn::StSuperByName(slot, name_id, obj) => {
+                let mut v = vec![0xd0, *slot];
+                v.extend_from_slice(&name_id.to_le_bytes());
+                v.push(*obj);
+                v
+            }
             Insn::DefinePropertyByName(slot, name_id, obj) => {
                 let mut v = vec![0xdc, *slot];
                 v.extend_from_slice(&name_id.to_le_bytes());
@@ -878,6 +908,8 @@ impl Insn {
             Insn::StArraySpread(array, index) => vec![0xc6, *array, *index],
             Insn::LdObjByValue(slot, obj) => vec![0x37, *slot, *obj],
             Insn::StObjByValue(slot, obj, key) => vec![0x38, *slot, *obj, *key],
+            Insn::LdSuperByValue(slot, obj) => vec![0x39, *slot, *obj],
+            Insn::StSuperByValue(slot, obj, key) => vec![0xc9, *slot, *obj, *key],
             Insn::StOwnByName(slot, name_id, obj) => {
                 let mut v = vec![0x7a, *slot];
                 v.extend_from_slice(&name_id.to_le_bytes());
@@ -1046,7 +1078,8 @@ impl Insn {
             Insn::Apply(_, _, _) => 4,
             Insn::TryLdGlobalByName(_, _)
             | Insn::TryStGlobalByName(_, _)
-            | Insn::LdObjByName(_, _) => 4,
+            | Insn::LdObjByName(_, _)
+            | Insn::LdSuperByName(_, _) => 4,
             Insn::LdExternalModuleVar(_) | Insn::LdLocalModuleVar(_) | Insn::StModuleVar(_) => 2,
             Insn::LdLexVar(level, slot) | Insn::StLexVar(level, slot) => {
                 if *level <= 0x0f && *slot <= 0x0f {
@@ -1061,6 +1094,7 @@ impl Insn {
             Insn::ThrowIfSuperNotCorrectCall(_) => 3,
             Insn::ThrowIfNotObject(_) => 3,
             Insn::StObjByName(_, _, _)
+            | Insn::StSuperByName(_, _, _)
             | Insn::DefinePropertyByName(_, _, _)
             | Insn::DefineFieldByName(_, _, _)
             | Insn::StOwnByNameWithNameSet(_, _, _) => 5,
@@ -1083,9 +1117,9 @@ impl Insn {
                     6
                 }
             }
-            Insn::LdObjByValue(_, _) => 3,
+            Insn::LdObjByValue(_, _) | Insn::LdSuperByValue(_, _) => 3,
             Insn::StArraySpread(_, _) => 3,
-            Insn::StObjByValue(_, _, _) => 4,
+            Insn::StObjByValue(_, _, _) | Insn::StSuperByValue(_, _, _) => 4,
             Insn::StOwnByName(_, _, _) => 5,
             Insn::StOwnByValue(_, _, _) | Insn::StOwnByValueWithNameSet(_, _, _) => 4,
             Insn::CopyDataProperties(_) | Insn::DelObjProp(_) => 2,

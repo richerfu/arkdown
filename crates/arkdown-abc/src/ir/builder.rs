@@ -3743,19 +3743,10 @@ impl<'a> CodeGen<'a> {
                 self.emit_expr(&expr.expression);
             }
             Expression::ThisExpression(_) => {
-                if self.arrow_captures.this_slot.is_some() {
-                    if let Some((level, slot)) = self.lexical_lookup("this") {
-                        self.push(Insn::LdLexVar(level, slot));
-                    } else {
-                        self.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
-                    }
-                } else {
-                    // PandaGen::GetThis loads binder::MANDATORY_PARAM_THIS.
-                    self.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
-                    if self.derived_constructor {
-                        self.push(Insn::ThrowIfSuperNotCorrectCall(0));
-                    }
-                }
+                self.emit_this_value();
+            }
+            Expression::Super(_) => {
+                self.emit_this_value();
             }
             Expression::MetaProperty(meta) => {
                 let is_nt = is_new_target_meta(meta);
@@ -3879,6 +3870,22 @@ impl<'a> CodeGen<'a> {
             }
             _ => {
                 self.push(Insn::LdUndefined);
+            }
+        }
+    }
+
+    fn emit_this_value(&mut self) {
+        if self.arrow_captures.this_slot.is_some() {
+            if let Some((level, slot)) = self.lexical_lookup("this") {
+                self.push(Insn::LdLexVar(level, slot));
+            } else {
+                self.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
+            }
+        } else {
+            // PandaGen::GetThis loads binder::MANDATORY_PARAM_THIS.
+            self.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
+            if self.derived_constructor {
+                self.push(Insn::ThrowIfSuperNotCorrectCall(0));
             }
         }
     }
@@ -4971,10 +4978,18 @@ impl<'a> CodeGen<'a> {
         if let Expression::StringLiteral(key) = &mem.expression {
             let name_id = self.intern(key.value.as_str());
             self.push(Insn::Lda(obj_reg));
-            self.push(Insn::LdObjByName(0, name_id));
+            if matches!(&mem.object, Expression::Super(_)) {
+                self.push(Insn::LdSuperByName(0, name_id));
+            } else {
+                self.push(Insn::LdObjByName(0, name_id));
+            }
         } else {
             self.emit_expr(&mem.expression);
-            self.push(Insn::LdObjByValue(0, obj_reg));
+            if matches!(&mem.object, Expression::Super(_)) {
+                self.push(Insn::LdSuperByValue(0, obj_reg));
+            } else {
+                self.push(Insn::LdObjByValue(0, obj_reg));
+            }
         }
         self.next_reg = saved_next_reg;
     }
@@ -4991,7 +5006,11 @@ impl<'a> CodeGen<'a> {
         self.set_debug_pos(mem.property.span.start);
         let name_id = self.intern(mem.property.name.as_str());
         self.push(Insn::Lda(obj_reg));
-        self.push(Insn::LdObjByName(0, name_id));
+        if matches!(&mem.object, Expression::Super(_)) {
+            self.push(Insn::LdSuperByName(0, name_id));
+        } else {
+            self.push(Insn::LdObjByName(0, name_id));
+        }
         self.next_reg = saved_next_reg;
     }
 
@@ -5242,9 +5261,17 @@ impl<'a> CodeGen<'a> {
         self.set_debug_pos(mem.property.span.start);
         let name_id = self.intern(mem.property.name.as_str());
         self.push(Insn::Lda(obj_reg));
-        self.push(Insn::LdObjByName(0, name_id));
+        if matches!(&mem.object, Expression::Super(_)) {
+            self.push(Insn::LdSuperByName(0, name_id));
+        } else {
+            self.push(Insn::LdObjByName(0, name_id));
+        }
         let (original_reg, updated_reg) = self.emit_update_acc(operator, prefix);
-        self.push(Insn::StObjByName(0, name_id, obj_reg));
+        if matches!(&mem.object, Expression::Super(_)) {
+            self.push(Insn::StSuperByName(0, name_id, obj_reg));
+        } else {
+            self.push(Insn::StObjByName(0, name_id, obj_reg));
+        }
         self.emit_update_result(original_reg, updated_reg);
         self.next_reg = saved_next_reg;
     }
@@ -5264,10 +5291,18 @@ impl<'a> CodeGen<'a> {
         let key_reg = self.alloc_reg();
         self.push(Insn::Sta(key_reg));
         self.push(Insn::Lda(key_reg));
-        self.push(Insn::LdObjByValue(0, obj_reg));
+        if matches!(&mem.object, Expression::Super(_)) {
+            self.push(Insn::LdSuperByValue(0, obj_reg));
+        } else {
+            self.push(Insn::LdObjByValue(0, obj_reg));
+        }
         let (original_reg, updated_reg) = self.emit_update_acc(operator, prefix);
         self.set_debug_pos(mem.span.start);
-        self.push(Insn::StObjByValue(0, obj_reg, key_reg));
+        if matches!(&mem.object, Expression::Super(_)) {
+            self.push(Insn::StSuperByValue(0, obj_reg, key_reg));
+        } else {
+            self.push(Insn::StObjByValue(0, obj_reg, key_reg));
+        }
         self.emit_update_result(original_reg, updated_reg);
         self.next_reg = saved_next_reg;
     }
@@ -5325,18 +5360,30 @@ impl<'a> CodeGen<'a> {
             let name_id = self.intern(key.value.as_str());
             if operator.is_logical() {
                 self.push(Insn::Lda(obj_reg));
-                self.push(Insn::LdObjByName(0, name_id));
+                if matches!(&mem.object, Expression::Super(_)) {
+                    self.push(Insn::LdSuperByName(0, name_id));
+                } else {
+                    self.push(Insn::LdObjByName(0, name_id));
+                }
                 let lhs_reg = self.alloc_reg();
                 self.push(Insn::Sta(lhs_reg));
                 self.emit_logical_assignment_after_lhs(operator, right, lhs_reg, |this| {
-                    this.push(Insn::StObjByName(0, name_id, obj_reg));
+                    if matches!(&mem.object, Expression::Super(_)) {
+                        this.push(Insn::StSuperByName(0, name_id, obj_reg));
+                    } else {
+                        this.push(Insn::StObjByName(0, name_id, obj_reg));
+                    }
                 });
                 self.next_reg = saved_next_reg;
                 return;
             }
             if operator != AssignmentOperator::Assign {
                 self.push(Insn::Lda(obj_reg));
-                self.push(Insn::LdObjByName(0, name_id));
+                if matches!(&mem.object, Expression::Super(_)) {
+                    self.push(Insn::LdSuperByName(0, name_id));
+                } else {
+                    self.push(Insn::LdObjByName(0, name_id));
+                }
                 let lhs_reg = self.alloc_reg();
                 self.push(Insn::Sta(lhs_reg));
                 self.emit_expr(right);
@@ -5344,25 +5391,41 @@ impl<'a> CodeGen<'a> {
             } else {
                 self.emit_expr(right);
             }
-            self.push(Insn::StObjByName(0, name_id, obj_reg));
+            if matches!(&mem.object, Expression::Super(_)) {
+                self.push(Insn::StSuperByName(0, name_id, obj_reg));
+            } else {
+                self.push(Insn::StObjByName(0, name_id, obj_reg));
+            }
         } else {
             self.emit_expr(&mem.expression);
             let key_reg = self.alloc_reg();
             self.push(Insn::Sta(key_reg));
             if operator.is_logical() {
                 self.push(Insn::Lda(key_reg));
-                self.push(Insn::LdObjByValue(0, obj_reg));
+                if matches!(&mem.object, Expression::Super(_)) {
+                    self.push(Insn::LdSuperByValue(0, obj_reg));
+                } else {
+                    self.push(Insn::LdObjByValue(0, obj_reg));
+                }
                 let lhs_reg = self.alloc_reg();
                 self.push(Insn::Sta(lhs_reg));
                 self.emit_logical_assignment_after_lhs(operator, right, lhs_reg, |this| {
-                    this.push(Insn::StObjByValue(0, obj_reg, key_reg));
+                    if matches!(&mem.object, Expression::Super(_)) {
+                        this.push(Insn::StSuperByValue(0, obj_reg, key_reg));
+                    } else {
+                        this.push(Insn::StObjByValue(0, obj_reg, key_reg));
+                    }
                 });
                 self.next_reg = saved_next_reg;
                 return;
             }
             if operator != AssignmentOperator::Assign {
                 self.push(Insn::Lda(key_reg));
-                self.push(Insn::LdObjByValue(0, obj_reg));
+                if matches!(&mem.object, Expression::Super(_)) {
+                    self.push(Insn::LdSuperByValue(0, obj_reg));
+                } else {
+                    self.push(Insn::LdObjByValue(0, obj_reg));
+                }
                 let lhs_reg = self.alloc_reg();
                 self.push(Insn::Sta(lhs_reg));
                 self.emit_expr(right);
@@ -5371,7 +5434,11 @@ impl<'a> CodeGen<'a> {
                 self.emit_expr(right);
             }
             self.set_debug_pos(mem.span.start);
-            self.push(Insn::StObjByValue(0, obj_reg, key_reg));
+            if matches!(&mem.object, Expression::Super(_)) {
+                self.push(Insn::StSuperByValue(0, obj_reg, key_reg));
+            } else {
+                self.push(Insn::StObjByValue(0, obj_reg, key_reg));
+            }
         }
         self.next_reg = saved_next_reg;
     }
@@ -5389,18 +5456,30 @@ impl<'a> CodeGen<'a> {
         if operator.is_logical() {
             self.push(Insn::Lda(obj_reg));
             let name_id = self.intern(mem.property.name.as_str());
-            self.push(Insn::LdObjByName(0, name_id));
+            if matches!(&mem.object, Expression::Super(_)) {
+                self.push(Insn::LdSuperByName(0, name_id));
+            } else {
+                self.push(Insn::LdObjByName(0, name_id));
+            }
             let lhs_reg = self.alloc_reg();
             self.push(Insn::Sta(lhs_reg));
             self.emit_logical_assignment_after_lhs(operator, right, lhs_reg, |this| {
-                this.push(Insn::StObjByName(0, name_id, obj_reg));
+                if matches!(&mem.object, Expression::Super(_)) {
+                    this.push(Insn::StSuperByName(0, name_id, obj_reg));
+                } else {
+                    this.push(Insn::StObjByName(0, name_id, obj_reg));
+                }
             });
             return;
         }
         if operator != AssignmentOperator::Assign {
             self.push(Insn::Lda(obj_reg));
             let name_id = self.intern(mem.property.name.as_str());
-            self.push(Insn::LdObjByName(0, name_id));
+            if matches!(&mem.object, Expression::Super(_)) {
+                self.push(Insn::LdSuperByName(0, name_id));
+            } else {
+                self.push(Insn::LdObjByName(0, name_id));
+            }
             let lhs_reg = self.alloc_reg();
             self.push(Insn::Sta(lhs_reg));
             self.emit_expr(right);
@@ -5410,7 +5489,11 @@ impl<'a> CodeGen<'a> {
         }
         self.set_debug_pos(mem.span.start);
         let name_id = self.intern(mem.property.name.as_str());
-        self.push(Insn::StObjByName(0, name_id, obj_reg));
+        if matches!(&mem.object, Expression::Super(_)) {
+            self.push(Insn::StSuperByName(0, name_id, obj_reg));
+        } else {
+            self.push(Insn::StObjByName(0, name_id, obj_reg));
+        }
     }
 
     fn emit_logical_assignment_after_lhs<F>(
@@ -5610,6 +5693,7 @@ impl<'a> CodeGen<'a> {
                 recv_expr
             }
         };
+        let recv_is_super = matches!(recv_expr, Expression::Super(_));
         self.emit_expr(recv_expr);
         self.set_debug_pos(call.callee.span().start);
         self.push(Insn::Sta(this_reg));
@@ -5619,16 +5703,31 @@ impl<'a> CodeGen<'a> {
                 self.set_debug_pos(prop_start);
                 let name_id = self.intern(method_name);
                 self.push(Insn::Lda(this_reg));
-                self.push(Insn::LdObjByName(0, name_id));
+                if recv_is_super {
+                    self.push(Insn::LdSuperByName(0, name_id));
+                } else {
+                    self.push(Insn::LdObjByName(0, name_id));
+                }
                 self.push(Insn::Sta(callee_reg));
             }
             MethodCallee::Computed(_, key_expr, prop_start) => {
                 self.set_debug_pos(prop_start);
-                self.emit_expr(key_expr);
-                let key_reg = self.alloc_reg();
-                self.push(Insn::Sta(key_reg));
-                self.push(Insn::Lda(key_reg));
-                self.push(Insn::LdObjByValue(0, this_reg));
+                if recv_is_super {
+                    if let Expression::StringLiteral(key) = key_expr {
+                        let name_id = self.intern(key.value.as_str());
+                        self.push(Insn::Lda(this_reg));
+                        self.push(Insn::LdSuperByName(0, name_id));
+                    } else {
+                        self.emit_expr(key_expr);
+                        self.push(Insn::LdSuperByValue(0, this_reg));
+                    }
+                } else {
+                    self.emit_expr(key_expr);
+                    let key_reg = self.alloc_reg();
+                    self.push(Insn::Sta(key_reg));
+                    self.push(Insn::Lda(key_reg));
+                    self.push(Insn::LdObjByValue(0, this_reg));
+                }
                 self.push(Insn::Sta(callee_reg));
             }
         }

@@ -4084,6 +4084,80 @@ const value = new Child([1, 2]);
 }
 
 #[test]
+fn test_super_property_access_uses_upstream_super_opcodes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("super_property.abc");
+    let record_name = "test/super_property";
+    let source = r#"
+class Base {
+  constructor() { this.value = 1; }
+  method() { return this.value; }
+}
+class Child extends Base {
+  constructor() { super(); }
+  read(key) { return super.value + super[key]; }
+  call() { return super.method(); }
+  write(key) { super.value = 1; super[key] += 2; return ++super.value; }
+}
+const child = new Child();
+child.read("value");
+child.call();
+child.write("value");
+"#;
+    module_compiler()
+        .compile(vec![module_record(record_name, source)], &out)
+        .expect("compile super property source");
+    let bytes = std::fs::read(&out).unwrap();
+    let class_name = format!("L{record_name};");
+    let class_off = class_offsets(&bytes)
+        .into_iter()
+        .map(|off| off as usize)
+        .find(|&off| class_name_at(&bytes, off) == class_name)
+        .expect("module class must exist");
+    let methods = class_method_items(&bytes, class_off);
+    let method_bytecode = |method_name: &str| {
+        methods
+            .iter()
+            .find_map(|(_, name, code_off)| {
+                (name == method_name).then(|| {
+                    code_item_bytecode(&bytes, code_off.expect("method has code") as usize)
+                })
+            })
+            .unwrap_or_else(|| panic!("{method_name} method must exist"))
+    };
+
+    let read = method_bytecode("read");
+    assert!(
+        bytecode_contains_opcode(read, 0x46),
+        "super.value must use ldsuperbyname"
+    );
+    assert!(
+        bytecode_contains_opcode(read, 0x39),
+        "super[key] must use ldsuperbyvalue"
+    );
+
+    let call = method_bytecode("call");
+    assert!(
+        bytecode_contains_opcode(call, 0x46),
+        "super.method() must load callee with ldsuperbyname"
+    );
+    assert!(
+        bytecode_contains_opcode(call, 0x2d),
+        "super.method() must preserve callthis receiver semantics"
+    );
+
+    let write = method_bytecode("write");
+    assert!(
+        bytecode_contains_opcode(write, 0xd0),
+        "super.value assignment/update must use stsuperbyname"
+    );
+    assert!(
+        bytecode_contains_opcode(write, 0xc9),
+        "super[key] assignment must use stsuperbyvalue"
+    );
+}
+
+#[test]
 fn test_function_object_literal_uses_definefieldbyname_on_default_api() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("object_methods.abc");
