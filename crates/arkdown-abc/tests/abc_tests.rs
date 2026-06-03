@@ -4278,30 +4278,53 @@ fn test_private_in_expression_is_rejected_instead_of_undefined_fallback() {
 }
 
 #[test]
-fn test_import_meta_is_rejected_instead_of_undefined_fallback() {
+fn test_import_meta_emits_getimportmeta_opcode() {
+    // Upstream es2abc emits `getimportmeta` (0xd5) for `import.meta`.
+    // The runtime loader populates the meta object's `url` / `resolve` properties.
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("import_meta.abc");
-    let err = match module_compiler().compile(
-        vec![module_record(
-            "test/import_meta",
-            r#"const url = import.meta.url;"#,
-        )],
-        &out,
-    ) {
-        Ok(_) => panic!("import.meta must not compile as undefined"),
-        Err(err) => err,
-    };
-
+    let record_name = "test/import_meta";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"const url = import.meta.url;"#,
+            )],
+            &out,
+        )
+        .expect("import.meta must compile with getimportmeta lowering");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
     assert!(
-        matches!(
-            err,
-            AbcError::UnsupportedConstruct {
-                ref construct,
-                ..
-            } if construct == "ImportMeta"
-        ),
-        "import.meta must be rejected until upstream module-meta lowering is implemented, got {err:?}"
+        bytecode_contains_opcode(&bytecode, 0xd5),
+        "import.meta must emit getimportmeta (0xd5) like upstream es2abc"
     );
+}
+
+#[test]
+fn test_annotation_declaration_is_erased() {
+    // AnnotationDeclaration (@interface) is a metadata-only ArkTS node; it produces
+    // no runtime bytecode.  Upstream ets-loader / es2abc both erase it before or
+    // during ABC emission.  arkdown-abc must not reject it.
+    //
+    // The source_file must end in `.ets` so the parser uses ETS source type and
+    // recognises the `@interface` syntax.
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("annotation_decl.abc");
+    module_compiler()
+        .compile(
+            vec![AbcModule {
+                record_name: "test/annotation_decl".into(),
+                source: "@interface RouteMeta {\n  title: string;\n  count: number;\n}".into(),
+                source_map: None,
+                // `.ets` extension triggers ETS-aware parsing in the abc builder.
+                source_file: Some("test/annotation_decl.ets".into()),
+                package_name: None,
+                is_commonjs: false,
+            }],
+            &out,
+        )
+        .expect("AnnotationDeclaration (@interface) must be erased without emitting bytecode");
 }
 
 #[test]

@@ -62,6 +62,17 @@ pub enum Insn {
     /// `0xBD` `op_none` — perform dynamic import with the specifier in accumulator.
     DynamicImport,
 
+    /// `0xD5` `op_none` — load the `import.meta` object of the current module into accumulator.
+    ///
+    /// In module mode this yields the per-module meta object; its `url` and `resolve`
+    /// properties are populated by the runtime loader.  Only valid inside an ESM module.
+    ///
+    /// Encoding: `[0xD5]` = 1 byte.
+    ///
+    /// Source: `isa.yaml` — `getimportmeta`, format `op_none`,
+    /// `opcode_idx: [0xd5]`.
+    GetImportMeta,
+
     /// `0xB0` `op_none` — debugger statement marker, emitted only for debug builds.
     Debugger,
 
@@ -705,6 +716,7 @@ impl Insn {
                 v
             }
             Insn::DynamicImport => vec![0xbd],
+            Insn::GetImportMeta => vec![0xd5],
             Insn::Debugger => vec![0xb0],
 
             // ── register moves ───────────────────────────────────────────────
@@ -1034,6 +1046,7 @@ impl Insn {
             | Insn::LdHole
             | Insn::LdGlobal
             | Insn::DynamicImport
+            | Insn::GetImportMeta
             | Insn::Debugger => 1,
             Insn::LdAi(_) => 5,
             Insn::FLdAi(_) => 9,

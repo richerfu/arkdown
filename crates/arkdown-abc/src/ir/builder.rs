@@ -214,7 +214,19 @@ pub fn build_record_with_debug_and_source_map_for_target(
     let literal_start = literal_arrays.len();
 
     let allocator = Allocator::default();
-    let source_type = SourceType::ts().with_module(is_module);
+    // Use ETS source type when the source file is a `.ets` file so that
+    // ArkTS-specific syntax (AnnotationDeclaration, StructStatement, etc.)
+    // is parsed correctly.  Plain `.ts`/`.js` sources use the standard TS type.
+    let is_ets = source_file
+        .or(Some(record_name))
+        .map(|s| s.ends_with(".ets"))
+        .unwrap_or(false);
+    let source_type = if is_ets {
+        // SourceType::ets() sets LanguageVariant::Arkui, enabling @interface, struct, etc.
+        SourceType::ets()
+    } else {
+        SourceType::ts().with_module(is_module)
+    };
     let ParserReturn {
         mut program,
         panicked,
@@ -1930,7 +1942,9 @@ impl UnsupportedScanner<'_> {
                 self.scan_ts_import_equals_declaration(decl)
             }
             Statement::StructStatement(_) => Err(self.unsupported("StructStatement")),
-            Statement::AnnotationDeclaration(_) => Err(self.unsupported("AnnotationDeclaration")),
+            // AnnotationDeclaration is metadata-only; no runtime bytecode is emitted.
+            // These are erased at the ETS transform stage but may survive to the ABC pass.
+            Statement::AnnotationDeclaration(_) => Ok(()),
             Statement::LazyImportDeclaration(_) => Err(self.unsupported("LazyImportDeclaration")),
         }
     }
@@ -1957,7 +1971,8 @@ impl UnsupportedScanner<'_> {
                 self.scan_ts_import_equals_declaration(decl)
             }
             Declaration::StructStatement(_) => Err(self.unsupported("StructStatement")),
-            Declaration::AnnotationDeclaration(_) => Err(self.unsupported("AnnotationDeclaration")),
+            // AnnotationDeclaration is metadata-only; no runtime bytecode is emitted.
+            Declaration::AnnotationDeclaration(_) => Ok(()),
         }
     }
 
@@ -1999,9 +2014,8 @@ impl UnsupportedScanner<'_> {
             Expression::JSXElement(_) => Err(self.unsupported("JSXElement")),
             Expression::JSXFragment(_) => Err(self.unsupported("JSXFragment")),
             Expression::V8IntrinsicExpression(_) => Err(self.unsupported("V8IntrinsicExpression")),
-            Expression::MetaProperty(meta) if !is_new_target_meta(meta) => {
-                Err(self.unsupported("ImportMeta"))
-            }
+            // import.meta is handled in emit_expression via GetImportMeta opcode.
+            Expression::MetaProperty(_) => Ok(()),
             Expression::TSAsExpression(expr) => self.scan_expression(&expr.expression),
             Expression::TSSatisfiesExpression(expr) => self.scan_expression(&expr.expression),
             Expression::TSNonNullExpression(expr) => self.scan_expression(&expr.expression),
@@ -2160,7 +2174,6 @@ impl UnsupportedScanner<'_> {
             | Expression::RegExpLiteral(_)
             | Expression::StringLiteral(_)
             | Expression::Identifier(_)
-            | Expression::MetaProperty(_)
             | Expression::Super(_)
             | Expression::ThisExpression(_) => Ok(()),
         }
@@ -4730,8 +4743,7 @@ impl<'a> CodeGen<'a> {
                 self.emit_this_value();
             }
             Expression::MetaProperty(meta) => {
-                let is_nt = is_new_target_meta(meta);
-                if is_nt {
+                if is_new_target_meta(meta) {
                     if self.arrow_captures.new_target_slot.is_some() {
                         if let Some((level, slot)) = self.lexical_lookup("new.target") {
                             self.push(Insn::LdLexVar(level, slot));
@@ -4742,7 +4754,9 @@ impl<'a> CodeGen<'a> {
                         self.push(Insn::Lda(MANDATORY_PARAM_NEW_TARGET_REG));
                     }
                 } else {
-                    self.push(Insn::LdUndefined);
+                    // import.meta — load the per-module meta object via getimportmeta (0xd5).
+                    // The runtime populates its `url` and `resolve` properties.
+                    self.push(Insn::GetImportMeta);
                 }
             }
             Expression::ParenthesizedExpression(p) => {
