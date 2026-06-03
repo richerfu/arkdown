@@ -2273,6 +2273,31 @@ fn test_logical_nullish_assignment_uses_strict_nullish_short_circuit() {
 }
 
 #[test]
+fn test_nullish_coalescing_uses_strict_nullish_short_circuit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("nullish_coalesce.abc");
+    let record_name = "test/nullish_coalesce";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"const result = value ?? next;"#,
+            )],
+            &out,
+        )
+        .expect("compile nullish coalescing source");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x28)
+            && bytecode_contains_opcode(&bytecode, 0x9b)
+            && bytecode_contains_opcode(&bytecode, 0x50)
+            && !bytecode_contains_opcode(&bytecode, 0x23),
+        "?? must use strict null/undefined checks instead of truthiness"
+    );
+}
+
+#[test]
 fn test_typeof_emits_typeof_opcode() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("test.abc");

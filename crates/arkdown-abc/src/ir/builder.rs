@@ -5033,19 +5033,7 @@ impl<'a> CodeGen<'a> {
                 branch_pos
             }
             AssignmentOperator::LogicalNullish => {
-                self.push(Insn::LdNull);
-                self.push(Insn::StrictEq(0, lhs_reg));
-                let nullish_pos = self.insns.len();
-                self.push(Insn::Jnez(0));
-
-                self.push(Insn::LdUndefined);
-                self.push(Insn::StrictEq(0, lhs_reg));
-                let skip_pos = self.insns.len();
-                self.push(Insn::Jeqz(0));
-
-                let nullish_target = self.insns.len();
-                self.patch_jump_to(nullish_pos, nullish_target);
-                skip_pos
+                self.emit_skip_rhs_when_lhs_is_not_nullish(lhs_reg)
             }
             _ => unreachable!("logical assignment lowering requires a logical assignment operator"),
         };
@@ -5061,6 +5049,22 @@ impl<'a> CodeGen<'a> {
 
         let end = self.insns.len();
         self.patch_jump_to(end_jump, end);
+    }
+
+    fn emit_skip_rhs_when_lhs_is_not_nullish(&mut self, lhs_reg: u8) -> usize {
+        self.push(Insn::LdNull);
+        self.push(Insn::StrictEq(0, lhs_reg));
+        let nullish_pos = self.insns.len();
+        self.push(Insn::Jnez(0));
+
+        self.push(Insn::LdUndefined);
+        self.push(Insn::StrictEq(0, lhs_reg));
+        let skip_pos = self.insns.len();
+        self.push(Insn::Jeqz(0));
+
+        let nullish_target = self.insns.len();
+        self.patch_jump_to(nullish_pos, nullish_target);
+        skip_pos
     }
 
     // ── Call: callee(args) ────────────────────────────────────────────────────
@@ -5635,6 +5639,9 @@ impl<'a> CodeGen<'a> {
     ///   <right>
     ///   <after>
     /// ```
+    ///
+    /// `??` follows upstream `CompileLogical`: skip right only when lhs is
+    /// neither `null` nor `undefined`.
     fn emit_logical_expr(&mut self, log: &oxc_ast::ast::LogicalExpression<'_>) {
         let saved_next_reg = self.next_reg;
         self.emit_expr(&log.left);
@@ -5654,14 +5661,7 @@ impl<'a> CodeGen<'a> {
                 self.push(Insn::Jnez(0));
                 branch_jump
             }
-            LogicalOperator::Coalesce => {
-                // `a ?? b`: skip right only when left is not null/undefined.
-                // Approximation: treat as `||` (does not handle 0/""/false correctly).
-                self.emit_is_true();
-                let branch_jump = self.insns.len();
-                self.push(Insn::Jnez(0));
-                branch_jump
-            }
+            LogicalOperator::Coalesce => self.emit_skip_rhs_when_lhs_is_not_nullish(lhs_reg),
         };
 
         self.emit_expr(&log.right);
