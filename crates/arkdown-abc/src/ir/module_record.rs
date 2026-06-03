@@ -7,6 +7,8 @@ use oxc_semantic::Scoping;
 
 use crate::emit::file::{LiteralArray, LiteralEntry};
 
+pub(super) const DEFAULT_LOCAL_NAME: &str = "*default*";
+
 #[derive(Debug, Default, Clone)]
 pub(super) struct ModuleRecordInfo {
     pub(super) module_requests: Vec<String>,
@@ -320,15 +322,21 @@ fn scan_stmt_for_module_record(
         }
         Statement::ExportDefaultDeclaration(export) => match &export.declaration {
             ExportDefaultDeclarationKind::ClassDeclaration(cls) => {
-                let local_name = cls.id.as_ref().map_or("default", |id| id.name.as_str());
+                let local_name = cls
+                    .id
+                    .as_ref()
+                    .map_or(DEFAULT_LOCAL_NAME, |id| id.name.as_str());
                 info.add_local_export(local_name.to_string(), "default");
             }
             ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
-                let local_name = func.id.as_ref().map_or("default", |id| id.name.as_str());
+                let local_name = func
+                    .id
+                    .as_ref()
+                    .map_or(DEFAULT_LOCAL_NAME, |id| id.name.as_str());
                 info.add_local_export(local_name.to_string(), "default");
             }
             _ => {
-                info.add_local_export("default".to_string(), "default");
+                info.add_local_export(DEFAULT_LOCAL_NAME.to_string(), "default");
             }
         },
         Statement::ExportNamedDeclaration(export) => {

@@ -31,7 +31,7 @@ use crate::ir::function_records::{
 };
 use crate::ir::lowering_context::LoweringContext;
 use crate::ir::module_lexical::collect_module_lexical_bindings;
-use crate::ir::module_record::collect_module_record;
+use crate::ir::module_record::{collect_module_record, DEFAULT_LOCAL_NAME};
 use crate::ir::opcodes::Insn;
 use crate::ir::record_layout::RecordLayout;
 
@@ -2185,7 +2185,7 @@ impl<'a> CodeGen<'a> {
                     if let ExportDefaultDeclarationKind::FunctionDeclaration(func) =
                         &export.declaration
                     {
-                        self.emit_function_declaration(func);
+                        self.emit_default_function_declaration(func);
                     }
                 }
                 _ => {}
@@ -2210,6 +2210,27 @@ impl<'a> CodeGen<'a> {
                 self.push(Insn::Lda(reg));
                 self.push(Insn::StModuleVar(export_index));
             }
+        }
+    }
+
+    fn emit_default_function_declaration(&mut self, func: &Function<'_>) {
+        if func.id.is_some() {
+            self.emit_function_declaration(func);
+            return;
+        }
+
+        let length = func.params.items.len() as u8;
+        let record_name = self
+            .lowering
+            .function_name(func.span.start, func.span.end)
+            .map(str::to_string);
+        let name_id = record_name
+            .as_deref()
+            .map(|name| self.intern(name))
+            .unwrap_or_else(|| self.intern("default"));
+        self.push(Insn::DefineFuncShort(0, name_id, length));
+        if let Some(export_index) = self.lowering.export_index(DEFAULT_LOCAL_NAME) {
+            self.push(Insn::StModuleVar(export_index));
         }
     }
 
@@ -2613,7 +2634,7 @@ impl<'a> CodeGen<'a> {
             Statement::ExportDefaultDeclaration(export) => {
                 if let ExportDefaultDeclarationKind::ClassDeclaration(cls) = &export.declaration {
                     let local_name = cls.id.as_ref().map(|id| id.name.as_str());
-                    let class_name = local_name.unwrap_or("default");
+                    let class_name = local_name.unwrap_or(DEFAULT_LOCAL_NAME);
                     let class_reg = self.alloc_reg();
                     if let Some(name) = local_name {
                         self.var_regs.insert(name.to_string(), class_reg + 1);
@@ -2669,14 +2690,14 @@ impl<'a> CodeGen<'a> {
                             class_reg,
                             cls.body.span.start,
                         );
-                        if let Some(export_index) = self.lowering.export_index("default") {
+                        if let Some(export_index) = self.lowering.export_index(DEFAULT_LOCAL_NAME) {
                             self.push(Insn::Lda(class_reg));
                             self.push(Insn::StModuleVar(export_index));
                         }
                     }
                 } else if let Some(expr) = export.declaration.as_expression() {
                     self.emit_expr(expr);
-                    if let Some(export_index) = self.lowering.export_index("default") {
+                    if let Some(export_index) = self.lowering.export_index(DEFAULT_LOCAL_NAME) {
                         self.push(Insn::StModuleVar(export_index));
                     }
                 }

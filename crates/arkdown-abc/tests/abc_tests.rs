@@ -1578,6 +1578,62 @@ fn test_exported_variable_declaration_writes_module_variable() {
     );
 }
 
+#[test]
+fn test_anonymous_default_function_uses_default_local_export() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("anonymous_default_function.abc");
+    let record_name = "test/anonymous_default_function";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                "export default function () { return 1; }",
+            )],
+            &out,
+        )
+        .expect("compile anonymous default function declaration");
+    let bytes = std::fs::read(&out).unwrap();
+
+    assert_eq!(
+        module_local_exports(&bytes, record_name),
+        vec![("*default*".to_string(), "default".to_string())],
+        "anonymous export default declarations use upstream's *default* local export name"
+    );
+
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x33),
+        "anonymous default function declarations must define the function in func_main_0"
+    );
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x7c),
+        "anonymous default function declarations must store the function into the module variable slot"
+    );
+}
+
+#[test]
+fn test_default_expression_uses_default_local_export() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("default_expression_export.abc");
+    let record_name = "test/default_expression_export";
+    module_compiler()
+        .compile(vec![module_record(record_name, "export default 1;")], &out)
+        .expect("compile default expression export");
+    let bytes = std::fs::read(&out).unwrap();
+
+    assert_eq!(
+        module_local_exports(&bytes, record_name),
+        vec![("*default*".to_string(), "default".to_string())],
+        "export default expressions use upstream's *default* local export name"
+    );
+
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x7c),
+        "export default expressions must store the value into the module variable slot"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // AbcArtifactResult fields
 // ---------------------------------------------------------------------------
@@ -1975,6 +2031,46 @@ fn module_func_main_bytecode(bytes: &[u8], record_name: &str) -> Vec<u8> {
         .and_then(|(_, _, code_off)| code_off)
         .expect("func_main_0 must have a code item") as usize;
     code_item_bytecode(bytes, code_off).to_vec()
+}
+
+fn module_local_exports(bytes: &[u8], record_name: &str) -> Vec<(String, String)> {
+    let class_name = format!("L{record_name};");
+    let class_off = class_offsets(bytes)
+        .into_iter()
+        .map(|off| off as usize)
+        .find(|&off| class_name_at(bytes, off) == class_name)
+        .expect("module class must exist");
+    let fields = user_field_values(bytes, class_off);
+    let mut pos = *fields
+        .get("moduleRecordIdx")
+        .expect("moduleRecordIdx field has a literal-array value") as usize;
+
+    let _item_count = read_u32(bytes, pos);
+    pos += 4;
+
+    let module_request_count = read_u32(bytes, pos) as usize;
+    pos += 4 + module_request_count * 4;
+
+    let regular_import_count = read_u32(bytes, pos) as usize;
+    pos += 4 + regular_import_count * (4 + 4 + 2);
+
+    let namespace_import_count = read_u32(bytes, pos) as usize;
+    pos += 4 + namespace_import_count * (4 + 2);
+
+    let local_export_count = read_u32(bytes, pos) as usize;
+    pos += 4;
+    let mut exports = Vec::with_capacity(local_export_count);
+    for _ in 0..local_export_count {
+        let local_name = read_u32(bytes, pos) as usize;
+        pos += 4;
+        let export_name = read_u32(bytes, pos) as usize;
+        pos += 4;
+        exports.push((
+            inline_string_at(bytes, local_name),
+            inline_string_at(bytes, export_name),
+        ));
+    }
+    exports
 }
 
 fn first_non_main_method_bytecode_and_tries(bytes: &[u8], record_name: &str) -> (Vec<u8>, u64) {
