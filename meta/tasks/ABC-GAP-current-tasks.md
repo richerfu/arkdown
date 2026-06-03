@@ -38,6 +38,12 @@ gap is either implemented with focused tests or rejected with
 - [x] Lower TypeScript enum runtime declarations with upstream transformer
   semantics for name/value and numeric reverse mappings.
 - [x] Erase `declare` TypeScript module/namespace declarations as type-only.
+- [x] Erase `import type Alias = ...` TypeScript import-equals declarations as
+  type-only, including external module references without runtime module
+  requests.
+- [x] Lower runtime TypeScript import-equals declarations through upstream
+  transformer-shaped local bindings for `require("...")` and qualified member
+  aliases, while erasing aliases used only in type positions.
 - [ ] Port remaining TypeScript runtime declarations beyond enum lowering,
   including non-declare namespace/module lowering.
 - [ ] Broaden upstream bytecode parity coverage for for-of, try-finally,

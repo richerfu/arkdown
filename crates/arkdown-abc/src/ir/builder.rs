@@ -4,12 +4,14 @@ use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     Argument, AssignmentOperator, AssignmentTarget, BindingPattern, ClassElement, Declaration,
     ExportDefaultDeclarationKind, Expression, ForInStatement, ForOfStatement, ForStatementLeft,
-    FormalParameter, Function, FunctionBody, LogicalOperator, MethodDefinitionKind, Program,
-    PropertyKey, SimpleAssignmentTarget, Statement, TSEnumDeclaration, TSEnumMemberName,
-    TSModuleDeclaration, UnaryOperator, UpdateExpression, YieldExpression,
+    FormalParameter, Function, FunctionBody, ImportOrExportKind, LogicalOperator,
+    MethodDefinitionKind, Program, PropertyKey, SimpleAssignmentTarget, Statement,
+    TSEnumDeclaration, TSEnumMemberName, TSImportEqualsDeclaration, TSModuleDeclaration,
+    TSModuleReference, TSQualifiedName, TSTypeName, UnaryOperator, UpdateExpression,
+    YieldExpression,
 };
 use oxc_parser::{Parser, ParserReturn};
-use oxc_semantic::SemanticBuilder;
+use oxc_semantic::{Reference, Scoping, SemanticBuilder};
 use oxc_span::{GetSpan, SourceType};
 use oxc_syntax::operator::UpdateOperator;
 
@@ -226,14 +228,14 @@ pub fn build_record_with_debug_and_source_map_for_target(
                 .unwrap_or_else(|| "parser panic".to_string()),
         });
     }
-    reject_unsupported_constructs(&program, record_name)?;
-
     let semantic_ret = SemanticBuilder::new().build(&program);
     let scoping = if semantic_ret.errors.is_empty() {
         Some(semantic_ret.semantic.scoping())
     } else {
         None
     };
+    let runtime_ts_import_equals = collect_runtime_ts_import_equals(&program, scoping);
+    reject_unsupported_constructs(&program, record_name)?;
 
     // Collect module import/export records before lowering so bytecode can use
     // hvigor/es2abc's module-variable opcodes instead of global lookups.
@@ -275,6 +277,7 @@ pub fn build_record_with_debug_and_source_map_for_target(
             is_module,
             source,
             source_mapper,
+            &runtime_ts_import_equals,
         )
     } else {
         compile_program_body(
@@ -284,6 +287,7 @@ pub fn build_record_with_debug_and_source_map_for_target(
             &lowering,
             is_module,
             source,
+            &runtime_ts_import_equals,
         )
     };
     methods.push(MethodRecord {
@@ -1006,6 +1010,7 @@ fn compile_program_body(
     lowering: &LoweringContext,
     _is_module: bool,
     source: &str,
+    runtime_ts_import_equals: &FxHashSet<(u32, u32)>,
 ) -> BodyCompileResult {
     compile_body_stmts(
         &program.body,
@@ -1016,6 +1021,7 @@ fn compile_program_body(
         &[],
         None,
         Some(source),
+        runtime_ts_import_equals,
     )
 }
 
@@ -1038,6 +1044,7 @@ fn compile_function_body(
             param_names,
             current_function_span,
             None,
+            &FxHashSet::default(),
         ),
         None => {
             let mut st = StringTable::default();
@@ -1097,6 +1104,7 @@ fn compile_function_body_tracked_with_end(
             source_mapper,
             function_end,
             current_function_span,
+            &FxHashSet::default(),
         ),
         None => {
             let mut st = StringTable::default();
@@ -1452,9 +1460,11 @@ fn compile_body_stmts(
     param_names: &[String],
     current_function_span: Option<(u32, u32)>,
     source: Option<&str>,
+    runtime_ts_import_equals: &FxHashSet<(u32, u32)>,
 ) -> BodyCompileResult {
     let mut cg = CodeGen::new(strings, literal_arrays, lowering);
     cg.source = source;
+    cg.runtime_ts_import_equals = runtime_ts_import_equals.clone();
     cg.module_body = module_body;
     if module_body {
         cg.use_module_lexical_env();
@@ -1495,9 +1505,11 @@ fn compile_body_stmts_tracked(
     source_mapper: Option<&SourceMapper>,
     function_end: Option<u32>,
     current_function_span: Option<(u32, u32)>,
+    runtime_ts_import_equals: &FxHashSet<(u32, u32)>,
 ) -> BodyCompileResult {
     let mut cg = CodeGen::new_with_source(strings, literal_arrays, lowering, source, source_mapper);
     cg.function_end = function_end;
+    cg.runtime_ts_import_equals = runtime_ts_import_equals.clone();
     cg.module_body = module_body;
     if module_body {
         cg.use_module_lexical_env();
@@ -1550,6 +1562,7 @@ fn compile_program_body_tracked(
     _is_module: bool,
     source: &str,
     source_mapper: Option<&SourceMapper>,
+    runtime_ts_import_equals: &FxHashSet<(u32, u32)>,
 ) -> BodyCompileResult {
     compile_body_stmts_tracked(
         &program.body,
@@ -1562,6 +1575,7 @@ fn compile_program_body_tracked(
         source_mapper,
         None,
         None,
+        runtime_ts_import_equals,
     )
 }
 
@@ -1606,6 +1620,65 @@ fn reject_unsupported_constructs(program: &Program<'_>, record_name: &str) -> Re
     let body = statement_scan_body(program, true);
     let mut scanner = UnsupportedScanner { record_name };
     scanner.scan_statements(body)
+}
+
+fn collect_runtime_ts_import_equals(
+    program: &Program<'_>,
+    scoping: Option<&Scoping>,
+) -> FxHashSet<(u32, u32)> {
+    let mut runtime_decls = FxHashSet::default();
+    collect_runtime_ts_import_equals_from_statements(&program.body, scoping, &mut runtime_decls);
+    runtime_decls
+}
+
+fn collect_runtime_ts_import_equals_from_statements(
+    statements: &[Statement<'_>],
+    scoping: Option<&Scoping>,
+    runtime_decls: &mut FxHashSet<(u32, u32)>,
+) {
+    for stmt in statements {
+        match stmt {
+            Statement::TSImportEqualsDeclaration(decl) => {
+                collect_runtime_ts_import_equals_decl(decl, scoping, runtime_decls);
+            }
+            Statement::ExportNamedDeclaration(export) => {
+                if let Some(Declaration::TSImportEqualsDeclaration(decl)) = &export.declaration {
+                    collect_runtime_ts_import_equals_decl(decl, scoping, runtime_decls);
+                }
+            }
+            Statement::BlockStatement(block) => {
+                collect_runtime_ts_import_equals_from_statements(
+                    &block.body,
+                    scoping,
+                    runtime_decls,
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_runtime_ts_import_equals_decl(
+    decl: &TSImportEqualsDeclaration<'_>,
+    scoping: Option<&Scoping>,
+    runtime_decls: &mut FxHashSet<(u32, u32)>,
+) {
+    if decl.import_kind == ImportOrExportKind::Type {
+        return;
+    }
+    let has_value_reference = scoping
+        .and_then(|scoping| {
+            let symbol_id = decl.id.symbol_id.get()?;
+            Some(
+                scoping
+                    .get_resolved_references(symbol_id)
+                    .any(|reference| !Reference::is_type(reference)),
+            )
+        })
+        .unwrap_or(true);
+    if has_value_reference {
+        runtime_decls.insert((decl.span.start, decl.span.end));
+    }
 }
 
 struct UnsupportedScanner<'a> {
@@ -1767,8 +1840,8 @@ impl UnsupportedScanner<'_> {
             | Statement::TSGlobalDeclaration(_) => Ok(()),
             Statement::TSEnumDeclaration(decl) => self.scan_ts_enum_declaration(decl),
             Statement::TSModuleDeclaration(decl) => self.scan_ts_module_declaration(decl),
-            Statement::TSImportEqualsDeclaration(_) => {
-                Err(self.unsupported("TSImportEqualsDeclaration"))
+            Statement::TSImportEqualsDeclaration(decl) => {
+                self.scan_ts_import_equals_declaration(decl)
             }
             Statement::StructStatement(_) => Err(self.unsupported("StructStatement")),
             Statement::AnnotationDeclaration(_) => Err(self.unsupported("AnnotationDeclaration")),
@@ -1791,8 +1864,8 @@ impl UnsupportedScanner<'_> {
             | Declaration::TSGlobalDeclaration(_) => Ok(()),
             Declaration::TSEnumDeclaration(decl) => self.scan_ts_enum_declaration(decl),
             Declaration::TSModuleDeclaration(decl) => self.scan_ts_module_declaration(decl),
-            Declaration::TSImportEqualsDeclaration(_) => {
-                Err(self.unsupported("TSImportEqualsDeclaration"))
+            Declaration::TSImportEqualsDeclaration(decl) => {
+                self.scan_ts_import_equals_declaration(decl)
             }
             Declaration::StructStatement(_) => Err(self.unsupported("StructStatement")),
             Declaration::AnnotationDeclaration(_) => Err(self.unsupported("AnnotationDeclaration")),
@@ -1819,6 +1892,13 @@ impl UnsupportedScanner<'_> {
             return Ok(());
         }
         Err(self.unsupported("TSModuleDeclaration"))
+    }
+
+    fn scan_ts_import_equals_declaration(
+        &mut self,
+        _decl: &TSImportEqualsDeclaration<'_>,
+    ) -> Result<(), AbcError> {
+        Ok(())
     }
 
     fn scan_expression(&mut self, expr: &Expression<'_>) -> Result<(), AbcError> {
@@ -2296,6 +2376,7 @@ struct CodeGen<'a> {
     current_lexical_names: Vec<String>,
     current_lexical_indices: FxHashMap<String, u8>,
     outer_lexical_envs: Vec<FxHashMap<String, u8>>,
+    runtime_ts_import_equals: FxHashSet<(u32, u32)>,
 }
 
 struct LabelContext {
@@ -2344,6 +2425,7 @@ impl<'a> CodeGen<'a> {
             current_lexical_names: Vec::new(),
             current_lexical_indices: FxHashMap::default(),
             outer_lexical_envs: Vec::new(),
+            runtime_ts_import_equals: FxHashSet::default(),
         }
     }
 
@@ -2762,6 +2844,9 @@ impl<'a> CodeGen<'a> {
             Statement::TSEnumDeclaration(decl) => {
                 self.emit_ts_enum_declaration(decl);
             }
+            Statement::TSImportEqualsDeclaration(decl) => {
+                self.emit_ts_import_equals_declaration(decl);
+            }
             Statement::ExpressionStatement(es) => {
                 // Skip string-literal "use strict" directives — they produce
                 // an expression but generate no bytecode.
@@ -3047,6 +3132,9 @@ impl<'a> CodeGen<'a> {
                         Declaration::VariableDeclaration(decl) => self.emit_var_decl(decl),
                         Declaration::FunctionDeclaration(_) => {}
                         Declaration::TSEnumDeclaration(decl) => self.emit_ts_enum_declaration(decl),
+                        Declaration::TSImportEqualsDeclaration(decl) => {
+                            self.emit_ts_import_equals_declaration(decl);
+                        }
                         Declaration::ClassDeclaration(cls) => {
                             let super_class = cls.super_class.as_ref();
                             let class_name = cls.id.as_ref().map(|id| id.name.as_str());
@@ -4164,6 +4252,69 @@ impl<'a> CodeGen<'a> {
                 }
             }
         }
+    }
+
+    fn emit_ts_import_equals_declaration(&mut self, decl: &TSImportEqualsDeclaration<'_>) {
+        if !self
+            .runtime_ts_import_equals
+            .contains(&(decl.span.start, decl.span.end))
+        {
+            return;
+        }
+
+        let name = decl.id.name.as_str().to_string();
+        let saved_next_reg = self.next_reg;
+        self.emit_ts_module_reference(&decl.module_reference);
+        let reg = self.alloc_reg();
+        self.var_regs.insert(name.clone(), reg);
+        self.set_debug_pos(decl.id.span.start);
+        self.push(Insn::Sta(reg));
+        if let Some(slot) = self.current_lexical_slot(&name) {
+            self.push(Insn::Lda(reg));
+            self.push(Insn::StLexVar(0, slot));
+            self.var_regs.remove(&name);
+            self.next_reg = saved_next_reg;
+        }
+        if let Some(export_index) = self.lowering.export_index(&name) {
+            self.push(Insn::Lda(reg));
+            self.push(Insn::StModuleVar(export_index));
+        }
+    }
+
+    fn emit_ts_module_reference(&mut self, module_reference: &TSModuleReference<'_>) {
+        match module_reference {
+            TSModuleReference::ExternalModuleReference(reference) => {
+                let name_id = self.intern(reference.expression.value.as_str());
+                self.push(Insn::TryLdGlobalByName(0, name_id));
+            }
+            TSModuleReference::IdentifierReference(id) => {
+                self.emit_identifier_load(id.name.as_str());
+            }
+            TSModuleReference::QualifiedName(qualified) => {
+                self.emit_ts_qualified_name(qualified);
+            }
+        }
+    }
+
+    fn emit_ts_type_name(&mut self, type_name: &TSTypeName<'_>) {
+        match type_name {
+            TSTypeName::IdentifierReference(id) => self.emit_identifier_load(id.name.as_str()),
+            TSTypeName::QualifiedName(qualified) => self.emit_ts_qualified_name(qualified),
+            TSTypeName::ThisExpression(_) => self.push(Insn::LdThis),
+        }
+    }
+
+    fn emit_ts_qualified_name(&mut self, qualified: &TSQualifiedName<'_>) {
+        let saved_next_reg = self.next_reg;
+        let obj_reg = self.alloc_reg();
+        self.emit_ts_type_name(&qualified.left);
+        self.set_debug_pos(qualified.left.span().start);
+        self.push(Insn::Sta(obj_reg));
+        let name_id = self.intern(qualified.right.name.as_str());
+        self.set_debug_pos(qualified.right.span.start);
+        self.push(Insn::Lda(obj_reg));
+        self.push(Insn::LdObjByName(0, name_id));
+        self.next_reg = saved_next_reg;
     }
 
     fn emit_ts_enum_var_hoists(&mut self, stmts: &[Statement<'_>]) {

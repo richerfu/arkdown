@@ -1899,6 +1899,82 @@ fn test_runtime_ts_module_declaration_stays_rejected_until_transformer_is_ported
 }
 
 #[test]
+fn test_type_only_ts_import_equals_declarations_are_erased() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("type_only_ts_import_equals.abc");
+    let record_name = "test/type_only_ts_import_equals";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"import type Alias = Types.Shape;
+import type External = require("virtual:types");
+declare namespace Types { export interface Shape { value: string } }
+const value = 1;"#,
+            )],
+            &out,
+        )
+        .expect("type-only TS import-equals declarations must be erased");
+    let bytes = std::fs::read(&out).unwrap();
+    assert_eq!(
+        module_local_exports(&bytes, record_name),
+        Vec::<(String, String)>::new(),
+        "type-only TS import-equals declarations must not create runtime exports"
+    );
+    assert!(
+        !bytes
+            .windows(b"virtual:types".len())
+            .any(|w| w == b"virtual:types"),
+        "type-only external import-equals must not create module requests"
+    );
+}
+
+#[test]
+fn test_runtime_external_ts_import_equals_lowers_to_require_binding() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("runtime_ts_import_equals.abc");
+    let record_name = "test/runtime_ts_import_equals";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"import Runtime = require("runtime");
+const value = Runtime.value;"#,
+            )],
+            &out,
+        )
+        .expect("runtime external TS import-equals must lower like a require binding");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(
+        bytes.windows(b"runtime".len()).any(|w| w == b"runtime"),
+        "runtime external TS import-equals must emit the require module request"
+    );
+}
+
+#[test]
+fn test_runtime_qualified_ts_import_equals_lowers_to_member_alias() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("runtime_qualified_ts_import_equals.abc");
+    let record_name = "test/runtime_qualified_ts_import_equals";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"import Alias = Ns.Inner;
+const value = Alias.value;"#,
+            )],
+            &out,
+        )
+        .expect("runtime qualified TS import-equals must lower to a member alias");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(
+        bytes.windows(b"Ns".len()).any(|w| w == b"Ns")
+            && bytes.windows(b"Inner".len()).any(|w| w == b"Inner"),
+        "qualified TS import-equals must emit the qualified member load before storing Alias"
+    );
+}
+
+#[test]
 fn test_exported_ts_function_overload_does_not_emit_runtime_export() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("exported_ts_function_overload.abc");

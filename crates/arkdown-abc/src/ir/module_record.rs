@@ -1,7 +1,7 @@
 use oxc_ast::ast::{
     AssignmentTarget, BindingIdentifier, BindingPattern, Declaration, ExportAllDeclaration,
     ExportDefaultDeclarationKind, Expression, ImportDeclarationSpecifier, ImportOrExportKind,
-    ModuleExportName, Program, Statement,
+    ModuleExportName, Program, Statement, TSImportEqualsDeclaration, TSModuleReference,
 };
 use oxc_semantic::Scoping;
 
@@ -266,6 +266,9 @@ fn scan_stmt_for_module_record(
                 }
             }
         }
+        Statement::TSImportEqualsDeclaration(decl) => {
+            scan_ts_import_equals_for_module_record(decl, info, scoping);
+        }
         Statement::ImportDeclaration(import) => {
             if import.import_kind == ImportOrExportKind::Type {
                 return;
@@ -400,6 +403,14 @@ fn scan_stmt_for_module_record(
                                 decl.id.name.as_str(),
                             );
                         }
+                        Declaration::TSImportEqualsDeclaration(decl) => {
+                            if scan_ts_import_equals_for_module_record(decl, info, scoping) {
+                                info.add_local_export(
+                                    decl.id.name.as_str().to_string(),
+                                    decl.id.name.as_str(),
+                                );
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -430,6 +441,38 @@ fn import_binding_has_value_reference(
         }
     }
     !has_reference
+}
+
+fn ts_import_equals_has_value_reference(
+    local: &BindingIdentifier<'_>,
+    scoping: Option<&Scoping>,
+) -> bool {
+    let Some(scoping) = scoping else {
+        return true;
+    };
+    let Some(symbol_id) = local.symbol_id.get() else {
+        return true;
+    };
+    scoping
+        .get_resolved_references(symbol_id)
+        .any(|reference| !reference.is_type())
+}
+
+fn scan_ts_import_equals_for_module_record(
+    decl: &TSImportEqualsDeclaration<'_>,
+    info: &mut ModuleRecordInfo,
+    scoping: Option<&Scoping>,
+) -> bool {
+    if decl.import_kind == ImportOrExportKind::Type {
+        return false;
+    }
+    if !ts_import_equals_has_value_reference(&decl.id, scoping) {
+        return false;
+    }
+    if let TSModuleReference::ExternalModuleReference(reference) = &decl.module_reference {
+        info.request_index(reference.expression.value.as_str());
+    }
+    true
 }
 
 fn scan_export_all_for_module_record(
