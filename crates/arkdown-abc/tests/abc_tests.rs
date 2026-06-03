@@ -1840,6 +1840,65 @@ fn test_default_ts_interface_does_not_emit_local_export() {
 }
 
 #[test]
+fn test_declare_ts_module_declarations_are_type_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("declare_ts_module.abc");
+    let record_name = "test/declare_ts_module";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"declare namespace Types {
+  export interface Shape { value: string }
+  export const size: number;
+}
+declare module "virtual:asset" {
+  export const asset: string;
+}"#,
+            )],
+            &out,
+        )
+        .expect("declare TS module declarations must be erased as type-only");
+    let bytes = std::fs::read(&out).unwrap();
+    assert_eq!(
+        module_local_exports(&bytes, record_name),
+        Vec::<(String, String)>::new(),
+        "declare TS module declarations must not create runtime local exports"
+    );
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+    assert!(
+        !bytecode_contains_opcode(&bytecode, 0x04),
+        "declare TS module declarations must not create runtime namespace objects"
+    );
+}
+
+#[test]
+fn test_runtime_ts_module_declaration_stays_rejected_until_transformer_is_ported() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("runtime_ts_module.abc");
+    let err = match module_compiler().compile(
+        vec![module_record(
+            "test/runtime_ts_module",
+            r#"namespace Runtime { export const value = 1; }"#,
+        )],
+        &out,
+    ) {
+        Ok(_) => panic!("runtime TS namespace must not be silently erased"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(
+            err,
+            AbcError::UnsupportedConstruct {
+                ref construct,
+                ..
+            } if construct == "TSModuleDeclaration"
+        ),
+        "runtime TS namespace must stay rejected until upstream transformer lowering is ported, got {err:?}"
+    );
+}
+
+#[test]
 fn test_exported_ts_function_overload_does_not_emit_runtime_export() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("exported_ts_function_overload.abc");

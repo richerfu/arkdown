@@ -37,6 +37,8 @@ gap is either implemented with focused tests or rejected with
 - [ ] Port generator and async-generator state-machine lowering.
 - [x] Lower TypeScript enum runtime declarations with upstream transformer
   semantics for name/value and numeric reverse mappings.
-- [ ] Port remaining TypeScript runtime declarations beyond enum lowering.
+- [x] Erase `declare` TypeScript module/namespace declarations as type-only.
+- [ ] Port remaining TypeScript runtime declarations beyond enum lowering,
+  including non-declare namespace/module lowering.
 - [ ] Broaden upstream bytecode parity coverage for for-of, try-finally,
   async/TLA, source-map/debug LNP, widgets, and HmosWorld cache-TS parity.

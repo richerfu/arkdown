@@ -6,7 +6,7 @@ use oxc_ast::ast::{
     ExportDefaultDeclarationKind, Expression, ForInStatement, ForOfStatement, ForStatementLeft,
     FormalParameter, Function, FunctionBody, LogicalOperator, MethodDefinitionKind, Program,
     PropertyKey, SimpleAssignmentTarget, Statement, TSEnumDeclaration, TSEnumMemberName,
-    UnaryOperator, UpdateExpression, YieldExpression,
+    TSModuleDeclaration, UnaryOperator, UpdateExpression, YieldExpression,
 };
 use oxc_parser::{Parser, ParserReturn};
 use oxc_semantic::SemanticBuilder;
@@ -1766,7 +1766,7 @@ impl UnsupportedScanner<'_> {
             | Statement::TSInterfaceDeclaration(_)
             | Statement::TSGlobalDeclaration(_) => Ok(()),
             Statement::TSEnumDeclaration(decl) => self.scan_ts_enum_declaration(decl),
-            Statement::TSModuleDeclaration(_) => Err(self.unsupported("TSModuleDeclaration")),
+            Statement::TSModuleDeclaration(decl) => self.scan_ts_module_declaration(decl),
             Statement::TSImportEqualsDeclaration(_) => {
                 Err(self.unsupported("TSImportEqualsDeclaration"))
             }
@@ -1790,7 +1790,7 @@ impl UnsupportedScanner<'_> {
             | Declaration::TSInterfaceDeclaration(_)
             | Declaration::TSGlobalDeclaration(_) => Ok(()),
             Declaration::TSEnumDeclaration(decl) => self.scan_ts_enum_declaration(decl),
-            Declaration::TSModuleDeclaration(_) => Err(self.unsupported("TSModuleDeclaration")),
+            Declaration::TSModuleDeclaration(decl) => self.scan_ts_module_declaration(decl),
             Declaration::TSImportEqualsDeclaration(_) => {
                 Err(self.unsupported("TSImportEqualsDeclaration"))
             }
@@ -1809,6 +1809,16 @@ impl UnsupportedScanner<'_> {
             }
         }
         Ok(())
+    }
+
+    fn scan_ts_module_declaration(
+        &mut self,
+        decl: &TSModuleDeclaration<'_>,
+    ) -> Result<(), AbcError> {
+        if decl.declare || decl.body.is_none() {
+            return Ok(());
+        }
+        Err(self.unsupported("TSModuleDeclaration"))
     }
 
     fn scan_expression(&mut self, expr: &Expression<'_>) -> Result<(), AbcError> {
