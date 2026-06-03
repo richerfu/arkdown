@@ -3695,6 +3695,9 @@ impl<'a> CodeGen<'a> {
                     self.push(Insn::FLdAi(n.value));
                 }
             }
+            Expression::BigIntLiteral(bigint) => {
+                self.emit_bigint_literal(bigint);
+            }
             Expression::StringLiteral(s) => {
                 let id = self.intern(s.value.as_str());
                 self.push(Insn::LdaStr(id));
@@ -4179,6 +4182,18 @@ impl<'a> CodeGen<'a> {
             }
         }
         self.push(Insn::Lda(arr_reg));
+    }
+
+    // ── BigInt literal: 123n ─────────────────────────────────────────────────
+
+    fn emit_bigint_literal(&mut self, bigint: &oxc_ast::ast::BigIntLiteral<'_>) {
+        let value = bigint
+            .raw
+            .as_ref()
+            .and_then(|raw| raw.as_str().strip_suffix('n'))
+            .unwrap_or_else(|| bigint.value.as_str());
+        let id = self.intern(value);
+        self.push(Insn::LdBigInt(id));
     }
 
     // ── RegExp literal: /pattern/flags ───────────────────────────────────────

@@ -345,7 +345,7 @@ fn bytecode_insn_len(bytecode: &[u8], pos: usize, opcode: u8) -> usize {
         0x0a..=0x1b | 0x25 | 0x26 | 0x27 | 0x28 => 3,
         0x37 => 3,
         0x38 => 4,
-        0x3e => 3,
+        0x3e | 0xd3 => 3,
         0x36 | 0x67 | 0xc2 | 0xc5 => 2,
         0x68 | 0x77 | 0xb4 | 0xb9 | 0xc6 => 3,
         0x3f | 0x40 | 0x42 => 4,
@@ -2739,6 +2739,31 @@ const flagged = /bar/ig;
     assert!(
         bytes_contain_ascii(&bytes, "gi"),
         "regexp flags must be emitted as the constructor flags argument"
+    );
+}
+
+#[test]
+fn test_bigint_literal_uses_upstream_ldbigint() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("bigint_literal.abc");
+    let record_name = "test/bigint_literal";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"
+const decimal = 123n;
+"#,
+            )],
+            &out,
+        )
+        .expect("compile bigint literal source");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0xd3),
+        "BigInt literal must use ldbigint like upstream LoadAccumulatorBigInt"
     );
 }
 

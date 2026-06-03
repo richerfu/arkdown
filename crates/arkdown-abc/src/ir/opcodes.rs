@@ -55,6 +55,10 @@ pub enum Insn {
     /// Encoding: `[0x3E] [string_id: u16 LE]` = 3 bytes.
     LdaStr(u16),
 
+    /// `0xD3` `op_id_16` — load BigInt literal (by 16-bit string index) into accumulator.
+    /// Encoding: `[0xD3] [string_id: u16 LE]` = 3 bytes.
+    LdBigInt(u16),
+
     // ── Register moves ───────────────────────────────────────────────────────
     /// `0x60` `op_v_8` — load virtual register `v` into accumulator.
     /// Encoding: `[0x60] [vreg: u8]` = 2 bytes.
@@ -666,6 +670,11 @@ impl Insn {
                 v.extend_from_slice(&id.to_le_bytes());
                 v
             }
+            Insn::LdBigInt(id) => {
+                let mut v = vec![0xd3];
+                v.extend_from_slice(&id.to_le_bytes());
+                v
+            }
 
             // ── register moves ───────────────────────────────────────────────
             Insn::Lda(vreg) => vec![0x60, *vreg],
@@ -976,7 +985,7 @@ impl Insn {
             | Insn::LdGlobal => 1,
             Insn::LdAi(_) => 5,
             Insn::FLdAi(_) => 9,
-            Insn::LdaStr(_) => 3,
+            Insn::LdaStr(_) | Insn::LdBigInt(_) => 3,
             Insn::Lda(_) | Insn::Sta(_) => 2,
             Insn::MovV4(_, _) => 2,
             Insn::MovV8(_, _) => 3,
