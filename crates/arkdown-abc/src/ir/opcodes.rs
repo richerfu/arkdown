@@ -59,6 +59,9 @@ pub enum Insn {
     /// Encoding: `[0xD3] [string_id: u16 LE]` = 3 bytes.
     LdBigInt(u16),
 
+    /// `0xBD` `op_none` — perform dynamic import with the specifier in accumulator.
+    DynamicImport,
+
     // ── Register moves ───────────────────────────────────────────────────────
     /// `0x60` `op_v_8` — load virtual register `v` into accumulator.
     /// Encoding: `[0x60] [vreg: u8]` = 2 bytes.
@@ -675,6 +678,7 @@ impl Insn {
                 v.extend_from_slice(&id.to_le_bytes());
                 v
             }
+            Insn::DynamicImport => vec![0xbd],
 
             // ── register moves ───────────────────────────────────────────────
             Insn::Lda(vreg) => vec![0x60, *vreg],
@@ -982,7 +986,8 @@ impl Insn {
             | Insn::LdTrue
             | Insn::LdFalse
             | Insn::LdHole
-            | Insn::LdGlobal => 1,
+            | Insn::LdGlobal
+            | Insn::DynamicImport => 1,
             Insn::LdAi(_) => 5,
             Insn::FLdAi(_) => 9,
             Insn::LdaStr(_) | Insn::LdBigInt(_) => 3,

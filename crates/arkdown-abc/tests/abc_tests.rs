@@ -356,7 +356,7 @@ fn bytecode_insn_len(bytecode: &[u8], pos: usize, opcode: u8) -> usize {
         0x8a | 0x8b => 3,
         0x44 | 0x60 | 0x61 | 0x7c | 0x7d | 0x3c | 0x3d | 0xb1 | 0xc3 | 0xc4 | 0xcd | 0xce => 2,
         0x1d | 0x21 | 0x22 => 2,
-        0x6d | 0xbf | 0xc0 => 1,
+        0x6d | 0xbd | 0xbf | 0xc0 => 1,
         0xfe if bytecode.get(pos + 1) == Some(&0x09) => 4,
         0xfe if matches!(bytecode.get(pos + 1), Some(0x05 | 0x07)) => 3,
         0xfe => 2,
@@ -2764,6 +2764,35 @@ const decimal = 123n;
     assert!(
         bytecode_contains_opcode(&bytecode, 0xd3),
         "BigInt literal must use ldbigint like upstream LoadAccumulatorBigInt"
+    );
+}
+
+#[test]
+fn test_import_expression_uses_upstream_dynamicimport() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("dynamic_import.abc");
+    let record_name = "test/dynamic_import";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"
+const promise = import("./dep");
+"#,
+            )],
+            &out,
+        )
+        .expect("compile dynamic import source");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x3e),
+        "dynamic import must compile its source expression before importing"
+    );
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0xbd),
+        "ImportExpression must emit dynamicimport like upstream DynamicImportCall"
     );
 }
 

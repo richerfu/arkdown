@@ -3779,6 +3779,9 @@ impl<'a> CodeGen<'a> {
             Expression::CallExpression(call) => {
                 self.emit_call(call);
             }
+            Expression::ImportExpression(import) => {
+                self.emit_import_expr(import);
+            }
             Expression::BinaryExpression(bin) => {
                 self.emit_binary_expr(bin);
             }
@@ -4194,6 +4197,13 @@ impl<'a> CodeGen<'a> {
             .unwrap_or_else(|| bigint.value.as_str());
         let id = self.intern(value);
         self.push(Insn::LdBigInt(id));
+    }
+
+    // ── Dynamic import: import(source) ───────────────────────────────────────
+
+    fn emit_import_expr(&mut self, import: &oxc_ast::ast::ImportExpression<'_>) {
+        self.emit_expr(&import.source);
+        self.push(Insn::DynamicImport);
     }
 
     // ── RegExp literal: /pattern/flags ───────────────────────────────────────
