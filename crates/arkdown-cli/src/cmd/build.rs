@@ -526,19 +526,11 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         if !ts2abc_inputs.is_empty() {
             // ABC incremental compiler cache: hvigor uses es2abc --cache-file to
             // avoid re-parsing unchanged modules inside the ABC backend.
-            let abc_compiler_cache_path = module
-                .src_path
-                .join("build/default/cache/abc/modules.abc.cache");
-            if let Some(parent) = abc_compiler_cache_path.parent() {
-                std::fs::create_dir_all(parent).ok();
-            }
-            // Create the cache file marker if it does not yet exist.
-            // The ABC compiler will write its incremental data here when that
-            // feature is implemented; touching the file now lets callers check
-            // for cache existence without special-casing the unimplemented path.
-            if !abc_compiler_cache_path.exists() {
-                let _ = std::fs::write(&abc_compiler_cache_path, &[]);
-            }
+            // Pass the *directory* — CacheFile::path_for() appends the filename
+            // internally. Previously this erroneously passed the full file path,
+            // causing path_for() to produce "…/modules.abc.cache/modules.abc.cache".
+            let abc_cache_dir = module.src_path.join("build/default/cache/abc");
+            std::fs::create_dir_all(&abc_cache_dir).ok();
             compile_to_abc(Ts2abcOptions {
                 inputs: ts2abc_inputs,
                 output: bundle_out.modules_abc_path.clone(),
@@ -553,7 +545,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 merge_abc: true,
                 module: true,
                 commonjs: false,
-                cache_file: Some(abc_compiler_cache_path),
+                cache_file: Some(abc_cache_dir),
                 npm_module_entry_list: compile_arkts_handoff.npm_entries_path,
             })
             .map_err(|e| anyhow::anyhow!("ABC compile failed: {}", e))?;

@@ -296,16 +296,9 @@ fn run_pipeline(fixture: &Path) -> PathBuf {
     let modules_abc = bundle_out.modules_abc_path.clone();
 
     if !ts2abc_inputs.is_empty() {
-        let abc_cache_file = module
-            .src_path
-            .join("build/default/cache/abc/modules.abc.cache");
-        if let Some(parent) = abc_cache_file.parent() {
-            std::fs::create_dir_all(parent).ok();
-        }
-        // Create the cache marker file (mirrors build.rs behaviour).
-        if !abc_cache_file.exists() {
-            let _ = std::fs::write(&abc_cache_file, &[]);
-        }
+        // Pass the directory — CacheFile::path_for() appends the filename.
+        let abc_cache_dir = module.src_path.join("build/default/cache/abc");
+        std::fs::create_dir_all(&abc_cache_dir).ok();
 
         // Load module build cache (mirrors build.rs logic).
         let cache_dir = module.src_path.join("build/default/cache/modules");
@@ -356,7 +349,7 @@ fn run_pipeline(fixture: &Path) -> PathBuf {
                 merge_abc: true,
                 module: true,
                 commonjs: false,
-                cache_file: Some(abc_cache_file),
+                cache_file: Some(abc_cache_dir),
                 npm_module_entry_list: None,
             }
             .compile()

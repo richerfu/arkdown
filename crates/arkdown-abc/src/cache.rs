@@ -50,7 +50,11 @@ pub struct CacheFile {
 }
 
 impl CacheFile {
-    /// Resolve the path to the cache file given a cache directory.
+    /// Resolve the path to the cache file given a **cache directory**.
+    ///
+    /// `cache_dir` must be a directory path (e.g. `build/default/cache/abc`).
+    /// The filename `modules.abc.cache` is always appended here, so callers
+    /// must **not** include the filename in `cache_dir`.
     pub fn path_for(cache_dir: &Path) -> PathBuf {
         cache_dir.join("modules.abc.cache")
     }

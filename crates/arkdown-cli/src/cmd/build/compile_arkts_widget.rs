@@ -148,12 +148,9 @@ pub(super) fn compile_widget_pass(
     )?;
 
     let widget_abc = PathBuf::from(&loader_json.ace_module_build).join("widgets.abc");
-    let widget_cache_file = module
-        .src_path
-        .join("build/default/cache/abc/widgets.abc.cache");
-    if let Some(parent) = widget_cache_file.parent() {
-        fs_err::create_dir_all(parent)?;
-    }
+    // Pass the directory — CacheFile::path_for() appends the filename internally.
+    let widget_cache_dir = module.src_path.join("build/default/cache/abc");
+    fs_err::create_dir_all(&widget_cache_dir)?;
     compile_to_abc(Ts2abcOptions {
         inputs: handoff.inputs,
         output: widget_abc,
@@ -168,7 +165,7 @@ pub(super) fn compile_widget_pass(
         merge_abc: true,
         module: true,
         commonjs: false,
-        cache_file: Some(widget_cache_file),
+        cache_file: Some(widget_cache_dir),
         npm_module_entry_list: handoff.npm_entries_path,
     })
     .map_err(|e| anyhow::anyhow!("widget ABC compile failed: {}", e))?;
