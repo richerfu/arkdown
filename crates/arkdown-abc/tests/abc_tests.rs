@@ -1634,6 +1634,29 @@ fn test_default_expression_uses_default_local_export() {
     );
 }
 
+#[test]
+fn test_default_ts_interface_does_not_emit_local_export() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("default_ts_interface.abc");
+    let record_name = "test/default_ts_interface";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                "export default interface Foo { value: string }",
+            )],
+            &out,
+        )
+        .expect("compile default TS interface export");
+    let bytes = std::fs::read(&out).unwrap();
+
+    assert_eq!(
+        module_local_exports(&bytes, record_name),
+        Vec::<(String, String)>::new(),
+        "upstream skips type-only default interface declarations in module records"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // AbcArtifactResult fields
 // ---------------------------------------------------------------------------

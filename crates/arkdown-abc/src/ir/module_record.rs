@@ -335,6 +335,7 @@ fn scan_stmt_for_module_record(
                     .map_or(DEFAULT_LOCAL_NAME, |id| id.name.as_str());
                 info.add_local_export(local_name.to_string(), "default");
             }
+            ExportDefaultDeclarationKind::TSInterfaceDeclaration(_) => {}
             _ => {
                 info.add_local_export(DEFAULT_LOCAL_NAME.to_string(), "default");
             }
