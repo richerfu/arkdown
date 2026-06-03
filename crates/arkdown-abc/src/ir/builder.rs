@@ -25,6 +25,7 @@ use crate::ir::ast_analysis::{
 use crate::ir::class_layout::{
     class_buffer_literal_array, class_method_num_args, class_method_record_name,
     constructor_required_param_count, is_class_buffer_method, method_key_name,
+    static_initializer_record_name,
 };
 use crate::ir::debug_lnp::{argument_span_start, col_at, line_at, LineTracker, SourceMapper};
 use crate::ir::function_lexical::collect_function_lexical_bindings;
@@ -652,9 +653,12 @@ fn compile_class_method_bodies(
         }
         if let Statement::ExportDefaultDeclaration(export) = stmt {
             if let ExportDefaultDeclarationKind::ClassDeclaration(cls) = &export.declaration {
-                let class_name = cls.id.as_ref().map(|id| id.name.as_str());
+                let class_name = cls
+                    .id
+                    .as_ref()
+                    .map_or(DEFAULT_LOCAL_NAME, |id| id.name.as_str());
                 compile_class_elements(
-                    class_name,
+                    Some(class_name),
                     cls.super_class.is_some(),
                     &cls.body.body,
                     strings,
@@ -793,6 +797,34 @@ fn compile_class_elements(
             line_ops: compiled.line_ops,
             catch_entries: compiled.catches,
             kind: MethodKind::Constructor,
+            method_pool_entry: true,
+            definefunc_order: None,
+        });
+    }
+
+    if let Some(static_initializer_name) = static_initializer_record_name(class_name, elements) {
+        let compiled = compile_static_class_initializer(
+            elements,
+            strings,
+            literal_arrays,
+            lowering,
+            source,
+            source_mapper,
+        );
+        methods.push(MethodRecord {
+            name: static_initializer_name,
+            bytecode: compiled.bytecode,
+            num_vregs: compiled.vregs,
+            num_args: 3,
+            debug_info: source_file_path.map(|path| DebugInfoRecord {
+                line_start: 1,
+                source_file: path.to_string(),
+                param_names: Vec::new(),
+                lexical_this: false,
+            }),
+            line_ops: compiled.line_ops,
+            catch_entries: compiled.catches,
+            kind: MethodKind::Function,
             method_pool_entry: true,
             definefunc_order: None,
         });
@@ -1345,6 +1377,43 @@ fn compile_constructor_with_fields_tracked<'src>(
         cg.set_debug_pos(function_span_end);
         cg.push(Insn::Return);
         cg.returned = true;
+    }
+    cg.finish_with_line_ops_and_catches()
+}
+
+fn compile_static_class_initializer<'src>(
+    elements: &[ClassElement<'src>],
+    strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
+    lowering: &LoweringContext,
+    source: Option<&'src str>,
+    source_mapper: Option<&'src SourceMapper>,
+) -> BodyCompileResult {
+    let mut cg = if let Some(src) = source {
+        CodeGen::new_with_source(strings, literal_arrays, lowering, src, source_mapper)
+    } else {
+        CodeGen::new(strings, literal_arrays, lowering)
+    };
+    let this_reg = cg.alloc_reg();
+    cg.push(Insn::LdThis);
+    cg.push(Insn::Sta(this_reg));
+    for element in elements {
+        let ClassElement::PropertyDefinition(property) = element else {
+            continue;
+        };
+        if !property.r#static || property.computed {
+            continue;
+        }
+        let Some(name) = method_key_name(&property.key) else {
+            continue;
+        };
+        if let Some(init_expr) = &property.value {
+            cg.emit_expr(init_expr);
+        } else {
+            cg.push(Insn::LdUndefined);
+        }
+        let name_id = cg.intern(&name);
+        cg.define_own_property_by_name(name_id, this_reg);
     }
     cg.finish_with_line_ops_and_catches()
 }
@@ -2034,9 +2103,6 @@ impl UnsupportedScanner<'_> {
                 }
                 ClassElement::PropertyDefinition(property) => {
                     self.scan_property_key(&property.key)?;
-                    if property.r#static {
-                        return Err(self.unsupported("StaticClassField"));
-                    }
                     if property.computed {
                         return Err(self.unsupported("ComputedClassField"));
                     }
@@ -2730,6 +2796,12 @@ impl<'a> CodeGen<'a> {
                             class_reg,
                             cls.body.span.start,
                         );
+                        self.emit_class_static_initializer(
+                            class_name.unwrap_or(&name),
+                            &cls.body.body,
+                            class_reg,
+                            cls.body.span.start,
+                        );
                         if let Some(lex_idx) = self.current_lexical_slot(&name) {
                             self.push(Insn::Lda(class_reg));
                             self.push(Insn::StLexVar(0, lex_idx));
@@ -2776,6 +2848,12 @@ impl<'a> CodeGen<'a> {
                     self.set_debug_pos(id.span.start);
                     self.push(Insn::Sta(var_reg));
                     self.emit_class_missing_properties(
+                        class_name.unwrap_or(&name),
+                        &cls.body.body,
+                        class_reg,
+                        cls.body.span.start,
+                    );
+                    self.emit_class_static_initializer(
                         class_name.unwrap_or(&name),
                         &cls.body.body,
                         class_reg,
@@ -2844,6 +2922,12 @@ impl<'a> CodeGen<'a> {
                             class_reg,
                             cls.body.span.start,
                         );
+                        self.emit_class_static_initializer(
+                            class_name,
+                            &cls.body.body,
+                            class_reg,
+                            cls.body.span.start,
+                        );
                         if let Some(export_index) = self.lowering.export_index(name) {
                             self.push(Insn::Lda(class_reg));
                             if let Some(id) = &cls.id {
@@ -2853,6 +2937,12 @@ impl<'a> CodeGen<'a> {
                         }
                     } else {
                         self.emit_class_missing_properties(
+                            class_name,
+                            &cls.body.body,
+                            class_reg,
+                            cls.body.span.start,
+                        );
+                        self.emit_class_static_initializer(
                             class_name,
                             &cls.body.body,
                             class_reg,
@@ -2888,12 +2978,6 @@ impl<'a> CodeGen<'a> {
                                 self.push(Insn::Sta(class_reg));
                                 self.set_debug_pos(id.span.start);
                                 self.push(Insn::Sta(var_reg));
-                                self.emit_class_missing_properties(
-                                    class_name.unwrap_or(&name),
-                                    &cls.body.body,
-                                    class_reg,
-                                    cls.body.span.start,
-                                );
                                 if let Some(lex_idx) = self.current_lexical_slot(&name) {
                                     self.push(Insn::Lda(class_reg));
                                     self.push(Insn::StLexVar(0, lex_idx));
@@ -5305,6 +5389,11 @@ impl<'a> CodeGen<'a> {
             formal_count,
             proto_vreg,
         ));
+        let class_reg = self.alloc_reg();
+        self.push(Insn::Sta(class_reg));
+        self.emit_class_missing_properties(class_name.unwrap_or("_"), elements, class_reg, 0);
+        self.emit_class_static_initializer(class_name.unwrap_or("_"), elements, class_reg, 0);
+        self.push(Insn::Lda(class_reg));
     }
 
     fn emit_class_var_decl(&mut self, name: &str, cls: &oxc_ast::ast::Class<'_>) {
@@ -5359,6 +5448,12 @@ impl<'a> CodeGen<'a> {
             class_reg,
             cls.body.span.start,
         );
+        self.emit_class_static_initializer(
+            class_name,
+            &cls.body.body,
+            class_reg,
+            cls.body.span.start,
+        );
         if let Some(slot) = lexical_slot {
             self.push(Insn::Lda(class_reg));
             self.push(Insn::Sta(class_reg));
@@ -5370,6 +5465,29 @@ impl<'a> CodeGen<'a> {
             self.push(Insn::Lda(class_reg));
             self.push(Insn::StModuleVar(export_index));
         }
+    }
+
+    fn emit_class_static_initializer(
+        &mut self,
+        class_name: &str,
+        elements: &[ClassElement<'_>],
+        class_reg: u8,
+        class_span_start: u32,
+    ) {
+        let Some(initializer_name) = static_initializer_record_name(class_name, elements) else {
+            return;
+        };
+        let callee_reg = self.alloc_reg();
+        let this_reg = self.alloc_reg();
+        let method_name_id = self.intern(&initializer_name);
+        self.set_debug_pos(class_span_start);
+        self.push(Insn::DefineFuncShort(0, method_name_id, 0));
+        self.push(Insn::Sta(callee_reg));
+        self.push(Insn::Lda(class_reg));
+        self.push(Insn::Sta(this_reg));
+        self.push(Insn::Lda(callee_reg));
+        self.push(Insn::CallThis0(0, this_reg));
+        self.push(Insn::Lda(class_reg));
     }
 
     fn emit_class_missing_properties(

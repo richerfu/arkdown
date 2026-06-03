@@ -17,9 +17,10 @@ gap is either implemented with focused tests or rejected with
   `do...while`, `for`, `for-in`, and `for-of`.
 - [x] Lower instance class fields through the upstream `CompileField` shape:
   initializer or `undefined`, followed by own-property definition.
-- [ ] Port static class fields through upstream static initializer functions;
-  keep computed fields, accessors, and static blocks unsupported until their
-  upstream lowering is ported.
+- [x] Lower public non-computed static class fields through upstream static
+  initializer functions.
+- [ ] Port computed fields, accessors, and static blocks through their upstream
+  class-environment lowering.
 - [x] Reject unsupported `with`, destructuring bindings/assignments, private
   names, JSX, V8 intrinsics, `import.meta`, and generator/yield lowering.
 - [ ] Port full destructuring binding and assignment lowering.

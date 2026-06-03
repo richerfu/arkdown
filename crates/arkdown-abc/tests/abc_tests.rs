@@ -3898,46 +3898,81 @@ const box = new Box();"#,
 }
 
 #[test]
-fn test_static_class_field_is_rejected_until_static_initialization_is_supported() {
+fn test_static_class_field_runs_static_initializer() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("static_class_field.abc");
-    let err = match module_compiler().compile(
-        vec![module_record(
-            "test/static_class_field",
-            r#"class Box { static value = 1; }"#,
-        )],
-        &out,
-    ) {
-        Ok(_) => panic!("static class field must not be silently dropped"),
-        Err(err) => err,
-    };
+    let record_name = "test/static_class_field";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"class Box { static value = 1; }"#,
+            )],
+            &out,
+        )
+        .expect("static class field source must compile through the static initializer path");
 
+    let bytes = std::fs::read(&out).unwrap();
+    let main = module_func_main_bytecode(&bytes, record_name);
     assert!(
-        matches!(
-            err,
-            AbcError::UnsupportedConstruct {
-                ref construct,
-                ..
-            } if construct == "StaticClassField"
-        ),
-        "static class fields must be rejected until upstream static initialization is implemented, got {err:?}"
+        bytecode_contains_opcode(&main, 0x2d),
+        "class definition must call the generated static initializer with callthis0"
+    );
+    let (_, initializer) =
+        module_method_bytecode_by_suffix(&bytes, record_name, "static_initializer#")
+            .expect("static initializer method exists");
+    assert!(
+        bytecode_contains_opcode(&initializer, 0x6f),
+        "static initializer must load this like upstream CompileClassInitializer"
+    );
+    assert!(
+        bytecode_contains_opcode(&initializer, 0xdb),
+        "static class field must define an own property like upstream CompileField"
     );
 }
 
 #[test]
-fn test_default_export_static_class_field_is_rejected_by_pre_scan() {
+fn test_default_export_uninitialized_static_class_field_defines_undefined_property() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("default_static_class_field.abc");
+    let record_name = "test/default_static_class_field";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"export default class { static value; }"#,
+            )],
+            &out,
+        )
+        .expect("default-exported static class field source must compile");
+
+    let bytes = std::fs::read(&out).unwrap();
+    let (_, initializer) =
+        module_method_bytecode_by_suffix(&bytes, record_name, "static_initializer#")
+            .expect("static initializer method exists");
+    assert!(
+        bytecode_contains_opcode(&initializer, 0x00),
+        "uninitialized static class fields must load undefined like upstream CompileField"
+    );
+    assert!(
+        bytecode_contains_opcode(&initializer, 0xdb),
+        "uninitialized static class fields must define the own property"
+    );
+}
+
+#[test]
+fn test_computed_static_class_field_is_rejected_until_class_key_lowering_is_supported() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("computed_static_class_field.abc");
     let err = match module_compiler().compile(
         vec![module_record(
-            "test/default_static_class_field",
-            r#"export default class Box { static value = 1; }"#,
+            "test/computed_static_class_field",
+            r#"const name = "value";
+class Box { static [name] = 1; }"#,
         )],
         &out,
     ) {
-        Ok(_) => {
-            panic!("default-exported static class fields must not bypass unsupported scanning")
-        }
+        Ok(_) => panic!("computed static class field must not be silently lowered"),
         Err(err) => err,
     };
 
@@ -3947,9 +3982,9 @@ fn test_default_export_static_class_field_is_rejected_by_pre_scan() {
             AbcError::UnsupportedConstruct {
                 ref construct,
                 ..
-            } if construct == "StaticClassField"
+            } if construct == "ComputedClassField"
         ),
-        "default-exported static class fields must be rejected before lowering, got {err:?}"
+        "computed static class fields must stay rejected until upstream computed-key lowering is ported, got {err:?}"
     );
 }
 

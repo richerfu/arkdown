@@ -1,4 +1,5 @@
 use oxc_ast::ast::{ClassElement, MethodDefinition, MethodDefinitionKind, PropertyKey};
+use oxc_span::GetSpan;
 
 use crate::emit::file::{LiteralArray, LiteralEntry};
 use crate::ir::function_records::FunctionNameAllocator;
@@ -57,6 +58,22 @@ pub(super) fn class_buffer_literal_array(
 
     entries.push(LiteralEntry::TaggedInteger(instance_method_count));
     LiteralArray { entries }
+}
+
+pub(super) fn static_initializer_record_name(
+    class_name: &str,
+    elements: &[ClassElement<'_>],
+) -> Option<String> {
+    let first_static_field_start = elements.iter().find_map(|element| {
+        let ClassElement::PropertyDefinition(property) = element else {
+            return None;
+        };
+        (property.r#static && !property.computed && method_key_name(&property.key).is_some())
+            .then(|| property.key.span().start)
+    })?;
+    Some(format!(
+        "#{class_name}_{first_static_field_start}_static_initializer#"
+    ))
 }
 
 pub(super) fn is_class_buffer_method(method: &MethodDefinition<'_>) -> bool {
