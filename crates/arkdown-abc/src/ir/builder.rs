@@ -5531,6 +5531,11 @@ impl<'a> CodeGen<'a> {
             let record_name = public_name.clone();
             let method_name_id = self.intern(&record_name);
             let length = method.value.params.items.len() as u8;
+            let target_reg = if method.r#static {
+                class_reg
+            } else {
+                prototype_reg
+            };
 
             if method.kind.is_accessor() {
                 let saved_next_reg = self.next_reg;
@@ -5548,7 +5553,7 @@ impl<'a> CodeGen<'a> {
                     self.set_debug_pos(class_span_start);
                     self.push(Insn::Sta(undefined_reg));
                     self.set_debug_pos(class_span_start);
-                    self.push(Insn::Lda(prototype_reg));
+                    self.push(Insn::Lda(target_reg));
                     self.set_debug_pos(method.value.span.start);
                     self.push(Insn::DefineMethodShort(0, method_name_id, length));
                     self.set_debug_pos(method.value.span.start);
@@ -5557,7 +5562,7 @@ impl<'a> CodeGen<'a> {
                     self.push(Insn::LdFalse);
                     self.set_debug_pos(class_span_start);
                     self.push(Insn::DefineGetterSetterByValue(
-                        prototype_reg,
+                        target_reg,
                         name_reg,
                         method_reg,
                         undefined_reg,
@@ -5567,7 +5572,7 @@ impl<'a> CodeGen<'a> {
                     self.set_debug_pos(class_span_start);
                     self.push(Insn::Sta(undefined_reg));
                     self.set_debug_pos(class_span_start);
-                    self.push(Insn::Lda(prototype_reg));
+                    self.push(Insn::Lda(target_reg));
                     self.set_debug_pos(method.value.span.start);
                     self.push(Insn::DefineMethodShort(0, method_name_id, length));
                     self.set_debug_pos(method.value.span.start);
@@ -5576,7 +5581,7 @@ impl<'a> CodeGen<'a> {
                     self.push(Insn::LdFalse);
                     self.set_debug_pos(class_span_start);
                     self.push(Insn::DefineGetterSetterByValue(
-                        prototype_reg,
+                        target_reg,
                         name_reg,
                         undefined_reg,
                         method_reg,
@@ -5586,11 +5591,6 @@ impl<'a> CodeGen<'a> {
                 continue;
             }
 
-            let target_reg = if method.r#static {
-                class_reg
-            } else {
-                prototype_reg
-            };
             self.set_debug_pos(class_span_start);
             self.push(Insn::Lda(target_reg));
             self.set_debug_pos(method.value.span.start);

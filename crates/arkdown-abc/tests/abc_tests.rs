@@ -375,6 +375,17 @@ fn bytecode_contains_opcode(bytecode: &[u8], target: u8) -> bool {
     false
 }
 
+fn first_opcode_position(bytecode: &[u8], target: u8) -> Option<usize> {
+    let mut pos = 0usize;
+    while let Some(&opcode) = bytecode.get(pos) {
+        if opcode == target {
+            return Some(pos);
+        }
+        pos += bytecode_insn_len(bytecode, pos, opcode);
+    }
+    None
+}
+
 fn bytes_contain_ascii(bytes: &[u8], text: &str) -> bool {
     bytes
         .windows(text.len())
@@ -3764,6 +3775,40 @@ const target = {
 }
 
 #[test]
+fn test_static_class_accessor_uses_class_constructor_as_target() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("static_class_accessor.abc");
+    let record_name = "test/static_class_accessor";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"class Box { static get value() { return 1; } }
+const value = Box.value;"#,
+            )],
+            &out,
+        )
+        .expect("compile static class accessor source");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+
+    let define_class = first_opcode_position(&bytecode, 0x35).expect("defineclasswithbuffer");
+    let after_define_class = define_class + bytecode_insn_len(&bytecode, define_class, 0x35);
+    assert_eq!(
+        bytecode[after_define_class], 0x61,
+        "class constructor must be stored immediately after defineclasswithbuffer"
+    );
+    let class_reg = bytecode[after_define_class + 1];
+    let define_accessor =
+        first_opcode_position(&bytecode, 0xbc).expect("definegettersetterbyvalue");
+    assert_eq!(
+        bytecode[define_accessor + 1],
+        class_reg,
+        "static class accessors must define on the class constructor like upstream CompileMissingProperties"
+    );
+}
+
+#[test]
 fn test_private_in_expression_is_rejected_instead_of_undefined_fallback() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("private_in.abc");
@@ -4048,6 +4093,33 @@ class Box { [name]() { return 1; } }"#,
             } if construct == "ComputedClassMethod"
         ),
         "computed class methods must be rejected until upstream key lowering is implemented, got {err:?}"
+    );
+}
+
+#[test]
+fn test_auto_accessor_class_field_is_rejected_until_accessor_property_lowering_is_supported() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("auto_accessor_class_field.abc");
+    let err = match module_compiler().compile(
+        vec![module_record(
+            "test/auto_accessor_class_field",
+            r#"class Box { accessor value = 1; }"#,
+        )],
+        &out,
+    ) {
+        Ok(_) => panic!("auto-accessor class field must not silently compile as a plain field"),
+        Err(err) => err,
+    };
+
+    assert!(
+        matches!(
+            err,
+            AbcError::UnsupportedConstruct {
+                ref construct,
+                ..
+            } if construct == "AccessorClassField"
+        ),
+        "auto-accessor class fields must stay rejected until upstream accessor-property lowering is ported, got {err:?}"
     );
 }
 
