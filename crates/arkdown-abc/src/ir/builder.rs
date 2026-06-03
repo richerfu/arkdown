@@ -3846,11 +3846,15 @@ impl<'a> CodeGen<'a> {
             }
             Expression::MetaProperty(meta) => {
                 let is_nt = is_new_target_meta(meta);
-                if is_nt && self.arrow_captures.new_target_slot.is_some() {
-                    if let Some((level, slot)) = self.lexical_lookup("new.target") {
-                        self.push(Insn::LdLexVar(level, slot));
+                if is_nt {
+                    if self.arrow_captures.new_target_slot.is_some() {
+                        if let Some((level, slot)) = self.lexical_lookup("new.target") {
+                            self.push(Insn::LdLexVar(level, slot));
+                        } else {
+                            self.push(Insn::Lda(MANDATORY_PARAM_NEW_TARGET_REG));
+                        }
                     } else {
-                        self.push(Insn::LdUndefined);
+                        self.push(Insn::Lda(MANDATORY_PARAM_NEW_TARGET_REG));
                     }
                 } else {
                     self.push(Insn::LdUndefined);

@@ -4721,6 +4721,47 @@ class Box {
 }
 
 #[test]
+fn test_function_new_target_loads_mandatory_parameter() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("new_target.abc");
+    let record_name = "test/new_target";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"function factory() { return new.target; }
+const value = new factory();"#,
+            )],
+            &out,
+        )
+        .expect("compile new.target source");
+    let bytes = std::fs::read(&out).unwrap();
+    let class_off = class_offsets(&bytes)
+        .into_iter()
+        .map(|off| off as usize)
+        .find(|&off| class_name_at(&bytes, off) == "Ltest/new_target;")
+        .expect("module class must exist");
+    let methods = class_method_items(&bytes, class_off);
+    let factory = methods
+        .iter()
+        .find_map(|(_, name, code_off)| {
+            let code_off = (*code_off)? as usize;
+            (name != "func_main_0"
+                && bytecode_contains_opcode(code_item_bytecode(&bytes, code_off), 0x64))
+            .then(|| code_item_bytecode(&bytes, code_off))
+        })
+        .expect("factory function body must exist");
+    assert!(
+        factory.first() == Some(&0x60),
+        "new.target must load the mandatory new-target parameter instead of undefined"
+    );
+    assert!(
+        factory.first() != Some(&0x00),
+        "new.target must not lower to ldundefined"
+    );
+}
+
+#[test]
 fn test_lnp_per_instruction_tracking() {
     use arkdown_abc::emit::file::LiteralArray;
     use arkdown_abc::emit::strings::StringTable;
