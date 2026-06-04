@@ -451,7 +451,7 @@ fn test_first_build_writes_cache_entries() {
     );
 }
 
-/// After a first build the ABC compiler cache file exists.
+/// After a first build the ABC compiler cache manifest file exists.
 #[test]
 fn test_first_build_writes_abc_cache_file() {
     let fixture = fresh_fixture_copy(&fixture_root());
@@ -460,9 +460,11 @@ fn test_first_build_writes_abc_cache_file() {
     let config =
         load_config(&fixture, BuildMode::Debug, OutputTarget::Hap, None, None).expect("config");
     let module = &config.modules[0];
+    // ModulesCache writes `modules.cache` (manifest) + `modules.protoBin` (ARKD binary).
+    // Pass the directory — ModulesCache::manifest_path_for() appends the filename.
     let abc_cache = module
         .src_path
-        .join("build/default/cache/abc/modules.abc.cache");
+        .join("build/default/cache/abc/modules.cache");
     assert!(
         abc_cache.exists(),
         "ABC compiler cache file must exist after first build: {abc_cache:?}"
