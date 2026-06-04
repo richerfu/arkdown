@@ -140,6 +140,10 @@ pub struct BuildOption {
     /// HAP under `libs/arm64-v8a/`.
     #[serde(default)]
     pub preload_so: Vec<PathBuf>,
+    /// Permissions to remove from HAR/HSP dependency `requestPermissions`.
+    /// Matches hvigor's `MergeProfile.getRemovePermissionSet()` behavior.
+    #[serde(default)]
+    pub remove_permissions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

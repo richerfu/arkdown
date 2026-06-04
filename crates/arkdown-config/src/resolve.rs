@@ -175,6 +175,12 @@ pub fn load_config(
         .map(|bo| bo.preload_so.clone())
         .unwrap_or_default();
 
+    let remove_permissions = raw_product
+        .build_option
+        .as_ref()
+        .map(|bo| bo.remove_permissions.clone())
+        .unwrap_or_default();
+
     let source_option = raw_product
         .build_option
         .as_ref()
@@ -204,6 +210,7 @@ pub fn load_config(
         res_options: None,
         source_option,
         preload_so,
+        remove_permissions,
     };
 
     let product = ProductConfig {

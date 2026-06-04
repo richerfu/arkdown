@@ -29,6 +29,7 @@ fn make_config() -> Arc<ArkdownConfig> {
             signing_config: None,
             build_option: BuildOption {
                 preload_so: vec![],
+                remove_permissions: vec![],
                 strict_mode: StrictModeConfig {
                     case_sensitive_check: false,
                     use_normalized_ohm_url: true,

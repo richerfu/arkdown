@@ -43,6 +43,7 @@ fn make_test_config(fixture: &PathBuf) -> ArkdownConfig {
             signing_config: None,
             build_option: BuildOption {
                 preload_so: vec![],
+                remove_permissions: vec![],
                 strict_mode: StrictModeConfig {
                     case_sensitive_check: false,
                     use_normalized_ohm_url: false,
@@ -314,6 +315,7 @@ fn make_minimal_config(project_root: &PathBuf, build_mode: BuildMode) -> Arkdown
             signing_config: None,
             build_option: BuildOption {
                 preload_so: vec![],
+                remove_permissions: vec![],
                 strict_mode: StrictModeConfig {
                     case_sensitive_check: false,
                     use_normalized_ohm_url: false,

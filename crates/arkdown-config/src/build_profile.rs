@@ -237,6 +237,10 @@ pub struct RawBuildOption {
     /// SO file paths listed under `buildOption.preloadSo` in `build-profile.json5`.
     #[serde(default)]
     pub preload_so: Vec<std::path::PathBuf>,
+    /// Permissions to remove from HAR/HSP dependency `requestPermissions` lists.
+    /// Matches hvigor's `MergeProfile.getRemovePermissionSet()` behavior.
+    #[serde(rename = "removePermissions", default)]
+    pub remove_permissions: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]

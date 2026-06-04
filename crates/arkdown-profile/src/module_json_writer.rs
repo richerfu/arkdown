@@ -54,13 +54,33 @@ pub fn write_module_json(
         &config.product.bundle_name,
         resource_ids,
     );
-    let module_section = ModuleJsonWriter::manifest_to_json(
+    let remove_permissions = &config.product.build_option.remove_permissions;
+    let mut module_section = ModuleJsonWriter::manifest_to_json(
         manifest,
         raw_module5.as_ref(),
         resource_ids,
         &package_name,
         &bundle_type,
     );
+
+    // Apply removePermissions filter (hvigor MergeProfile.getRemovePermissionSet()).
+    // Removes any permissions in the remove_permissions list from the output module.json.
+    if !remove_permissions.is_empty() {
+        if let serde_json::Value::Object(ref mut obj) = module_section {
+            if let Some(serde_json::Value::Array(ref mut perms)) =
+                obj.get_mut("requestPermissions")
+            {
+                perms.retain(|perm| {
+                    let name = perm
+                        .get("name")
+                        .or_else(|| perm.as_str().map(|_| perm))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    !remove_permissions.iter().any(|r| r == name)
+                });
+            }
+        }
+    }
 
     let mut combined = serde_json::Map::new();
     combined.insert("app".into(), serde_json::Value::Object(app_section));
@@ -431,7 +451,8 @@ impl ModuleJsonWriter {
             })
             .collect();
         obj.insert("dependencies".into(), serde_json::Value::Array(deps));
-        // requestPermissions: preserved verbatim from module.json5.
+        // requestPermissions: preserved from module.json5, filtered by
+        // buildOption.removePermissions (hvigor MergeProfile.getRemovePermissionSet()).
         if let Some(perms) = raw_module5.and_then(|v| v.get("requestPermissions")) {
             if perms.as_array().map_or(false, |a| !a.is_empty()) {
                 obj.insert("requestPermissions".into(), perms.clone());

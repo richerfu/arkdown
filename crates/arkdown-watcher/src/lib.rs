@@ -158,6 +158,7 @@ mod tests {
                     res_options: None,
                     source_option: None,
                     preload_so: vec![],
+                remove_permissions: vec![],
                 },
             },
             modules: vec![],
