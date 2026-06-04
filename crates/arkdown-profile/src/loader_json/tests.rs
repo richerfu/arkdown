@@ -128,6 +128,146 @@ fn test_loader_json_collects_bytecode_har_declaration_entry() {
     assert!(entry.abc_path.ends_with("ets/modules.abc"));
 }
 
+#[test]
+fn test_loader_json_populates_bytecode_har_update_version_info() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_root = tmp.path().to_path_buf();
+    let module_root = project_root.join("entry");
+    let oh_modules = module_root.join("oh_modules");
+    let bytecode_har = oh_modules.join("bytecode-har");
+
+    fs::create_dir_all(bytecode_har.join("ets")).expect("create bytecode har");
+    fs::write(
+        bytecode_har.join("ets").join("modules.abc"),
+        b"PANDA\x00\x00\x00",
+    )
+    .expect("write abc");
+    fs::write(
+        bytecode_har.join("oh-package.json5"),
+        r#"{
+              name: "bytecode-har",
+              metadata: {
+                byteCodeHar: true,
+                dependencyPkgVersion: { "dep-a": "1.0.0" }
+              }
+            }"#,
+    )
+    .expect("write bytecode har package");
+    fs::create_dir_all(oh_modules.join("dep-a")).expect("create dep package");
+    fs::write(
+        oh_modules.join("dep-a").join("oh-package.json5"),
+        r#"{ name: "dep-a", version: "1.1.0" }"#,
+    )
+    .expect("write dep package");
+
+    let mut config = make_config(true);
+    config.project_root = project_root;
+    let mut module_cfg = make_module_cfg();
+    module_cfg.src_path = module_root;
+    let loader = LoaderJson::generate(&config, &module_cfg, &make_manifest());
+
+    assert_eq!(
+        loader
+            .update_version_info
+            .get("bytecode-har")
+            .and_then(|v| v.get("dep-a")),
+        Some(&serde_json::Value::String("1.1.0".to_string()))
+    );
+}
+
+#[test]
+fn test_loader_json_populates_bytecode_har_other_compile_files() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_root = tmp.path().to_path_buf();
+    let module_root = project_root.join("entry");
+    let oh_modules = module_root.join("oh_modules");
+    let bytecode_har = oh_modules.join("bytecode-har");
+    let source_har = oh_modules.join("source-har");
+    let extra_pkg = oh_modules.join("extra-pkg");
+
+    fs::create_dir_all(&module_root).expect("create module root");
+    fs::write(
+        module_root.join("oh-package.json5"),
+        r#"{ dependencies: { "bytecode-har": "1.0.0" } }"#,
+    )
+    .expect("write module oh-package");
+    fs::create_dir_all(bytecode_har.join("ets")).expect("create bytecode har");
+    fs::write(
+        bytecode_har.join("ets").join("modules.abc"),
+        b"PANDA\x00\x00\x00",
+    )
+    .expect("write abc");
+    fs::write(
+        bytecode_har.join("oh-package.json5"),
+        r#"{
+              name: "bytecode-har",
+              dependencies: { "source-har": "1.0.0" },
+              metadata: {
+                byteCodeHar: true,
+                extraImportees: ["extra-pkg/src/feature"]
+              }
+            }"#,
+    )
+    .expect("write bytecode har package");
+    fs::create_dir_all(&source_har).expect("create source har package root");
+    fs::write(
+        source_har.join("oh-package.json5"),
+        r#"{ name: "source-har", main: "src/main/ets/index.ets" }"#,
+    )
+    .expect("write source har package");
+    fs::create_dir_all(source_har.join("src/main")).expect("create source har module dir");
+    fs::write(
+        source_har.join("src/main/module.json5"),
+        r#"{ module: { name: "source", type: "har" } }"#,
+    )
+    .expect("write source har module json");
+    fs::create_dir_all(source_har.join("src/main/ets/pages")).expect("create source har ets dir");
+    fs::write(
+        source_har.join("src/main/ets/index.ets"),
+        "export default 1;\n",
+    )
+    .expect("write source har entry");
+    fs::write(
+        source_har.join("src/main/ets/pages/Page.ets"),
+        "export default 2;\n",
+    )
+    .expect("write source har page");
+    fs::create_dir_all(&extra_pkg).expect("create extra package root");
+    fs::write(
+        extra_pkg.join("oh-package.json5"),
+        r#"{ name: "extra-pkg" }"#,
+    )
+    .expect("write extra package");
+    fs::create_dir_all(extra_pkg.join("src")).expect("create extra package src");
+    fs::write(extra_pkg.join("src/feature.ets"), "export default 3;\n")
+        .expect("write extra feature");
+
+    let mut config = make_config(true);
+    config.project_root = project_root;
+    let mut module_cfg = make_module_cfg();
+    module_cfg.src_path = module_root;
+    let loader = LoaderJson::generate(&config, &module_cfg, &make_manifest());
+
+    assert!(loader
+        .other_compile_files
+        .iter()
+        .any(|path| path.ends_with("source-har/src/main/ets/index.ets")));
+    assert!(loader
+        .other_compile_files
+        .iter()
+        .any(|path| path.ends_with("source-har/src/main/ets/pages/Page.ets")));
+    assert!(loader
+        .other_compile_files
+        .iter()
+        .any(|path| path.ends_with("extra-pkg/src/feature.ets")));
+    for path in &loader.other_compile_files {
+        assert!(
+            loader.compile_entry.contains(path),
+            "otherCompileFiles entry must also be compiled by arkdown: {path}"
+        );
+    }
+}
+
 /// Verify loader.json round-trips through serde correctly.
 #[test]
 fn test_loader_json_serialization() {

@@ -25,6 +25,7 @@ pub mod router_map;
 
 pub use arkdown_core::PkgBriefInfo;
 pub use bytecode_har::{
+    collect_bytecode_har_other_compile_files, collect_bytecode_har_update_version_info,
     collect_dynamic_import_lib_info, scan_bytecode_har_deps, ByteCodeHarScanEntry,
     DynamicImportLibEntry, HostModuleInfo,
 };

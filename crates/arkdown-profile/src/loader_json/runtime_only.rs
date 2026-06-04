@@ -133,15 +133,24 @@ fn read_package_dep_names(module_root: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn read_pkg_runtime_only_packages(pkg_dir: &Path) -> Vec<String> {
+/// Combined runtimeOnly config from a package's `oh-package.json5#metadata.runtimeOnly`.
+struct PkgRuntimeOnly {
+    pub packages: Vec<String>,
+    pub sources: Vec<String>,
+}
+
+fn read_pkg_runtime_only(pkg_dir: &Path) -> PkgRuntimeOnly {
     let path = pkg_dir.join("oh-package.json5");
     let Ok(content) = std::fs::read_to_string(&path) else {
-        return vec![];
+        return PkgRuntimeOnly {
+            packages: vec![],
+            sources: vec![],
+        };
     };
 
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
-    struct PkgRuntimeOnly {
+    struct PkgJson {
         #[serde(default)]
         metadata: PkgMetadata,
     }
@@ -158,11 +167,23 @@ fn read_pkg_runtime_only_packages(pkg_dir: &Path) -> Vec<String> {
     struct PkgRuntimeOnlyConfig {
         #[serde(default)]
         packages: Vec<String>,
+        #[serde(default)]
+        sources: Vec<String>,
     }
 
-    json5::from_str::<PkgRuntimeOnly>(&content)
-        .map(|p| p.metadata.runtime_only.packages)
-        .unwrap_or_default()
+    json5::from_str::<PkgJson>(&content)
+        .map(|p| PkgRuntimeOnly {
+            packages: p.metadata.runtime_only.packages,
+            sources: p.metadata.runtime_only.sources,
+        })
+        .unwrap_or(PkgRuntimeOnly {
+            packages: vec![],
+            sources: vec![],
+        })
+}
+
+fn read_pkg_runtime_only_packages(pkg_dir: &Path) -> Vec<String> {
+    read_pkg_runtime_only(pkg_dir).packages
 }
 
 fn resolve_oh_module_dir(
@@ -229,6 +250,31 @@ pub(super) fn collect_runtime_only_source_files(
         }
     }
 
+    // D3: also collect sources from dependency metadata.runtimeOnly.sources.
+    // Matches hvigor's processIndirectDependency() for transitive runtimeOnly.sources.
+    let dep_names = read_package_dep_names(&module_cfg.src_path);
+    for dep_name in &dep_names {
+        let Some(pkg_dir) =
+            resolve_oh_module_dir(dep_name, &module_cfg.src_path, &config.project_root)
+        else {
+            continue;
+        };
+        let rt = read_pkg_runtime_only(&pkg_dir);
+        for source in &rt.sources {
+            let path = Path::new(source);
+            let source_path = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                pkg_dir.join(path)
+            };
+            if source_path.is_file() && is_dynamic_import_source_file(&source_path) {
+                files.push(source_path);
+            } else if source_path.is_dir() {
+                files.extend(collect_dynamic_import_source_files(&source_path));
+            }
+        }
+    }
+
     let mut seen = FxHashSet::default();
     files.retain(|path| seen.insert(to_unix_path(path)));
     files
@@ -251,14 +297,34 @@ pub(super) fn collect_runtime_only_package_source_files(
             .unwrap_or_default(),
     );
 
-    let mut files = Vec::new();
-    for package in &packages {
+    // D3: also include runtimeOnly.packages from direct dependency metadata
+    // (matches hvigor's processIndirectDependency() transitive runtimeOnly traversal).
+    let dep_names = read_package_dep_names(&module_cfg.src_path);
+    for dep_name in dep_names {
         let Some(pkg_dir) =
-            resolve_oh_module_dir(package, &module_cfg.src_path, &config.project_root)
+            resolve_oh_module_dir(&dep_name, &module_cfg.src_path, &config.project_root)
+        else {
+            continue;
+        };
+        packages.extend(read_pkg_runtime_only_packages(&pkg_dir));
+    }
+
+    let mut files = Vec::new();
+    let mut visited: FxHashSet<String> = FxHashSet::default();
+    // BFS over runtimeOnly package list (handles transitive packages).
+    let mut queue: std::collections::VecDeque<String> = packages.into_iter().collect();
+    while let Some(package) = queue.pop_front() {
+        if !visited.insert(package.clone()) {
+            continue;
+        }
+        let Some(pkg_dir) =
+            resolve_oh_module_dir(&package, &module_cfg.src_path, &config.project_root)
         else {
             continue;
         };
         files.extend(collect_package_source_files(&pkg_dir));
+        // Collect transitive runtimeOnly.packages from this dep.
+        queue.extend(read_pkg_runtime_only_packages(&pkg_dir));
     }
     dedupe_paths(&mut files);
     files

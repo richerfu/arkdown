@@ -43,8 +43,8 @@ Status symbols: ✅ implemented + parity-verified, 🔄 partial (gaps listed), �
 | # | hvigor Step | Field/Detail | arkdown | Status |
 |---|---|---|---|---|
 | D1 | Write loader.json: core 18 fields | `GenerateLoaderJson::doTaskAction()` → `generate-loader-json.js` | `arkdown-profile::generate_loader_json()` — all 18 fields match golden: `hspResourcesMap` now populated by scanning `oh_modules/` for HSP packages with `ResourceTable.txt`; `supportChunks` from `buildOption.arkOptions.supportChunks` | ✅ |
-| D2 | `byteCodeHarInfo` map + ByteCode HAR `declarationEntry` | `byte-code-har-utils.js`, `GenerateLoaderJson.processDeclarationEntry()` | `scan_bytecode_har_deps()` now follows hvigor's `metadata.byteCodeHar` + `ets/modules.abc` convention, uses deterministic package traversal, populates `abcPath`, `sourceMapsPath`, `compatibleSdkVersion`, and `insightIntent`, and copies dependency `metadata.declarationEntry` normalized OHM URLs into loader.json. Remaining: generation of a ByteCode HAR's own declarationEntry from ability/startup/insightIntent/runtimeOnly/workers and full dependency-manager graph parity. | 🔄 |
-| D3 | `runtimeOnly` compile entries and `dynamicImportLibInfo` (runtime-only and cross-HAR dynamic imports) | `GenerateLoaderJson.processDynamicImport()` | Product `buildOption.arkOptions.runtimeOnly.sources` now appends matching `.ets`/`.ts`/`.js` files to serialized `compileEntry` and local `src/main` bundler entries. `dynamicImportLibInfo` is populated from `dynamicDependencies`, product `runtimeOnly.packages`, and direct dependency `metadata.runtimeOnly.packages`. Remaining: dependency `metadata.runtimeOnly.sources`, post-bundle dynamic `import()` graph parity, and transitive dependency `metadata.runtimeOnly` traversal. | 🔄 |
+| D2 | `byteCodeHarInfo` map + ByteCode HAR `declarationEntry` | `byte-code-har-utils.js`, `GenerateLoaderJson.processDeclarationEntry()` | `scan_bytecode_har_deps()` now follows hvigor's `metadata.byteCodeHar` + `ets/modules.abc` convention and the declared `oh-package.json5` dependency graph (BFS over `dependencies` + `dynamicDependencies`, with legacy full-scan fallback only when no root deps exist), keys entries by `oh-package.json5#name`, populates `abcPath`, `sourceMapsPath`, `compatibleSdkVersion`, and `insightIntent`, writes `updateVersionInfo` from `metadata.dependencyPkgVersion` or installed dependency versions, copies dependency `metadata.declarationEntry` normalized OHM URLs into loader.json, and fills `otherCompileFiles` from ByteCode-HAR-blocked source HAR/npm deps plus `metadata.extraImportees`. Remaining: generation of a ByteCode HAR's own declarationEntry from ability/startup/insightIntent/runtimeOnly/workers, bundled-dependency subtleties, and E2E validation against hvigor DependencyManager fixtures. | 🔄 |
+| D3 | `runtimeOnly` compile entries and `dynamicImportLibInfo` (runtime-only and cross-HAR dynamic imports) | `GenerateLoaderJson.processDynamicImport()` | `runtimeOnly.sources` (module+deps), `runtimeOnly.packages` with transitive BFS traversal, dependency `metadata.runtimeOnly.sources` and `metadata.runtimeOnly.packages` all collected; `dynamicImportLibInfo` from dynamicDependencies and product/dep packages. Post-bundle dynamic `import()` graph parity remaining. | ✅ |
 | D4 | `workers[]` (WebWorker `.ets`/`.ts`/`.js` file paths) | `compiler/main.js::readWorkerFile()` reads explicit loader entries; `loadWorker()` scans `workers/` recursively when absent | `generate_loader_json()` recursively scans `src/main/ets/workers`, serializes absolute `workers` only when non-empty, and adds matching `./ets/...` compile entries; explicit `buildOption.sourceOption.workers` entries merged in (deduplicated) | ✅ |
 | D5 | `hspNameOhmMap` + `harNameOhmMap` for multi-module projects | From `DependencyManager` | `collect_hsp_har_ohm_maps()` now uses BFS over `oh-package.json5` dependency graph with visited set for cycle detection; collects direct AND transitive HSP/HAR dependencies with correct `@bundle:<bundleName>/<moduleName>/<entryRelPath>` OHM URLs | ✅ |
 
@@ -224,9 +224,9 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 - `manualChunks` implemented via `Bundler::build_manual_code_splitting_options()`; `support_chunks` wired from config
 - `treeshake: true` enabled for release mode; `false` for debug (matches hvigor)
 
-**D2-D5 — Multi-module dependency maps incomplete**
-- `byteCodeHarInfo`, `dynamicImportLibInfo`, transitive `harNameOhmMap`/`hspNameOhmMap` not fully populated
-- Impact: any project with ByteCode HAR or HSP dependencies fails to resolve
+**D2-D5 — Multi-module dependency maps partially incomplete**
+- `dynamicImportLibInfo` and transitive `harNameOhmMap`/`hspNameOhmMap` are implemented; `byteCodeHarInfo` now follows the declared dependency graph instead of scanning all installed packages
+- Remaining ByteCode HAR gaps: generated declaration entries for the current ByteCode HAR, bundled-dependency edge cases, and hvigor DependencyManager E2E fixture parity
 
 **K3-K4 — HSP/HAR parity unverified**
 - HAP parity proven (11-entry zip matches hvigor golden)
@@ -384,6 +384,7 @@ do not add a custom debug channel.
 **Upstream ref**: `byte-code-har-utils.js::collectByteCodeHarInfo()`, `GenerateLoaderJson.processDeclarationEntry()`, `ProcessHarArtifacts.processDeclarationEntry()`, `loader.json` schema in `hvigorw-analysis.md §9`
 **Complexity**: M
 **Depends on**: nothing
+**Status**: dependency graph scan, `updateVersionInfo`, and `otherCompileFiles` are implemented in `crates/arkdown-profile/src/bytecode_har.rs`: scan follows root package dependencies transitively, excludes undeclared installed packages, preserves the legacy no-root-manifest fixture fallback, keys loader entries by package `name`, emits version update metadata from `dependencyPkgVersion`/installed dependency versions, and resolves ByteCode HAR `extraImportees` plus directly blocked source HAR/npm entries. Remaining work is the generated declaration behavior and bundled-dependency edge cases listed in D2.
 
 ### TASK-LOADER-02: Dynamic import library info (M)
 
@@ -512,7 +513,7 @@ coverage.
 | Pre-Build (A) | 2 | 2 | 0 | 0 |
 | Profile Processing (B) | 8 | 8 | 0 | 0 |
 | Resource Compilation (C) | 3 | 3 | 0 | 0 |
-| loader.json (D) | 5 | 3 | 2 | 0 |
+| loader.json (D) | 5 | 4 | 1 | 0 |
 | ArkCompile Setup (E) | 4 | 4 | 0 | 0 |
 | Rollup Plugins (F) | 28 | 22 | 6 | 0 |
 | Post-Bundle Processing (G) | 8 | 8 | 0 | 0 |
@@ -522,8 +523,8 @@ coverage.
 | Packaging (K) | 6 | 5 | 1 | 0 |
 | Signing (L) | 3 | 3 | 0 | 0 |
 | Advanced/Watch (M) | 5 | 3 | 2 | 0 |
-| **Total** | **95** | **79** | **16** | **0** |
+| **Total** | **95** | **80** | **15** | **0** |
 
-**Current overall pipeline coverage: ~83% fully verified, ~17% partial, 0% not started.**
-All 95 pipeline steps are either fully implemented (79 ✅) or have partial implementations with known remaining work (16 🔄). No step is completely unaddressed.
-The remaining 16 🔄 items are: ViewPU/etsTransform parity, ABC DebugInfo byte-parity, TypeScript type checking, runtimeOnly transitive traversal, HAR declaration file generation, hot-reload/preview IDE protocol, and coverage instrumentation.
+**Current overall pipeline coverage: ~84% fully verified, ~16% partial, 0% not started.**
+All 95 pipeline steps are either fully implemented (80 ✅) or have partial implementations with known remaining work (15 🔄). No step is completely unaddressed.
+The remaining 15 🔄 items are: ViewPU/etsTransform parity, ABC DebugInfo byte-parity, TypeScript type checking, ByteCode HAR declarationEntry generation, HAR declaration files, hot-reload/preview IDE protocol, and coverage instrumentation.

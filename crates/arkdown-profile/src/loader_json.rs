@@ -8,7 +8,10 @@ use arkdown_core::{
     ArkdownConfig, BuildMode, HapManifest, ModuleConfig, OhosModuleType, PkgBriefInfo,
 };
 
-use crate::bytecode_har::{collect_dynamic_import_lib_info, scan_bytecode_har_deps};
+use crate::bytecode_har::{
+    collect_bytecode_har_other_compile_files, collect_bytecode_har_update_version_info,
+    collect_dynamic_import_lib_info, scan_bytecode_har_deps,
+};
 
 mod runtime_only;
 use runtime_only::{
@@ -249,6 +252,18 @@ impl LoaderJson {
             }
         }
 
+        let bytecode_har_deps = scan_bytecode_har_deps(&module_cfg.src_path, &config.project_root);
+        let other_compile_paths = collect_bytecode_har_other_compile_files(
+            &bytecode_har_deps,
+            &module_cfg.src_path,
+            &config.project_root,
+        );
+        let other_compile_files: Vec<String> = other_compile_paths
+            .iter()
+            .map(|path| to_absolute_path_string(path))
+            .collect();
+        compile_entry.extend(other_compile_files.iter().cloned());
+
         // Deduplicate while preserving order.
         {
             let mut seen = FxHashSet::default();
@@ -286,9 +301,6 @@ impl LoaderJson {
             module_path_map.insert(module_cfg.name.clone(), module_root.clone());
         }
 
-        // --- TASK-LOADER-01: scan oh_modules/ for ByteCode HAR dependencies ---
-        let bytecode_har_deps = scan_bytecode_har_deps(&module_cfg.src_path, &config.project_root);
-
         let byte_code_har_info: FxHashMap<String, ByteCodeHarEntry> = bytecode_har_deps
             .iter()
             .cloned()
@@ -306,6 +318,11 @@ impl LoaderJson {
         } else {
             Vec::new()
         };
+        let update_version_info = collect_bytecode_har_update_version_info(
+            &bytecode_har_deps,
+            &module_cfg.src_path,
+            &config.project_root,
+        );
 
         // --- TASK-LOADER-02: populate dynamicImportLibInfo from oh-package.json5 ---
         let dynamic_import_lib_info: IndexMap<String, serde_json::Value> = {
@@ -341,11 +358,11 @@ impl LoaderJson {
             har_name_ohm_map,
             package_manager_type: "ohpm".to_string(),
             hvigor_compile_entry,
-            other_compile_files: vec![],
+            other_compile_files,
             dynamic_import_lib_info,
             router_map,
             hsp_resources_map: Self::collect_hsp_resources_map(&module_cfg.src_path),
-            update_version_info: FxHashMap::default(),
+            update_version_info,
             an_build_out_put: format!(
                 "{}/build/default/intermediates/loader_out/default/an/arm64-v8a",
                 module_root
