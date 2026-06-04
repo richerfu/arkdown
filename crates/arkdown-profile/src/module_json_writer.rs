@@ -207,6 +207,25 @@ impl ModuleJsonWriter {
         package_name: &str,
         bundle_type: &str,
     ) -> serde_json::Value {
+        // Build a name→raw-ability lookup for preserve-and-mutate.
+        // Hvigor cloneDeep-copies the ability array and mutates selected fields
+        // (resource IDs, srcEntry), preserving all other fields verbatim.
+        let raw_abilities: Vec<serde_json::Map<String, serde_json::Value>> = raw_module5
+            .and_then(|m| m.get("abilities"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_object().cloned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let find_raw_ability = |name: &str| {
+            raw_abilities
+                .iter()
+                .find(|raw| raw.get("name").and_then(|n| n.as_str()) == Some(name))
+                .cloned()
+        };
+
         let abilities: Vec<serde_json::Value> = manifest
             .abilities
             .iter()
@@ -227,7 +246,12 @@ impl ModuleJsonWriter {
                     .zip(a.start_window_background.as_deref())
                     .and_then(|(ids, r)| Self::resolve_res_ref(r, ids));
 
-                let mut obj = serde_json::Map::new();
+                // Start from the raw ability object (preserves launchType,
+                // visible, continuable, orientation, windowMode, and any other
+                // fields not modelled in AbilityEntry).
+                let mut obj = find_raw_ability(&a.name).unwrap_or_default();
+
+                // Overlay fields that arkdown computes or normalises.
                 obj.insert("exported".into(), a.exported.into());
                 if let Some(id) = icon_id {
                     obj.insert("iconId".into(), (id as u64).into());
@@ -268,6 +292,23 @@ impl ModuleJsonWriter {
             })
             .collect();
 
+        // Build a name→raw-extensionAbility lookup for preserve-and-mutate.
+        let raw_ext_abilities: Vec<serde_json::Map<String, serde_json::Value>> = raw_module5
+            .and_then(|m| m.get("extensionAbilities"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_object().cloned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let find_raw_ext_ability = |name: &str| {
+            raw_ext_abilities
+                .iter()
+                .find(|raw| raw.get("name").and_then(|n| n.as_str()) == Some(name))
+                .cloned()
+        };
+
         let extension_abilities: Vec<serde_json::Value> = manifest
             .extension_abilities
             .iter()
@@ -300,7 +341,9 @@ impl ModuleJsonWriter {
                     })
                     .collect();
 
-                let mut obj = serde_json::Map::new();
+                // Start from the raw extensionAbility object to preserve unknown
+                // fields (permissions, readPermission, writePermission, forms, etc.).
+                let mut obj = find_raw_ext_ability(&a.name).unwrap_or_default();
                 obj.insert("name".into(), a.name.clone().into());
                 obj.insert("srcEntry".into(), a.src_entry.clone().into());
                 if let Some(label) = &a.label {
