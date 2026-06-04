@@ -200,6 +200,30 @@ impl LoaderJson {
             discovered_workers.push(to_absolute_path_string(path));
         }
 
+        // Merge in explicit sourceOption.workers entries from build-profile.json5.
+        // Hvigor's `targetService.getWorkerConfig()` resolves these to absolute paths;
+        // we do the same in resolve.rs, so they arrive here already absolute.
+        if let Some(source_opt) = config
+            .product
+            .build_option
+            .source_option
+            .as_ref()
+        {
+            for worker_path in &source_opt.workers {
+                let abs = to_absolute_path_string(worker_path);
+                if !discovered_workers.contains(&abs) {
+                    // Also add a compile entry if the file is under src/main/ets.
+                    if let Ok(rel) = worker_path.strip_prefix(&ets_root) {
+                        let entry = format!("./ets/{}", to_unix_path(rel));
+                        if !compile_entry.contains(&entry) {
+                            compile_entry.push(entry);
+                        }
+                    }
+                    discovered_workers.push(abs);
+                }
+            }
+        }
+
         let router_map =
             Self::read_loader_router_maps(config, module_cfg, manifest.router_map.as_deref());
 
@@ -316,7 +340,7 @@ impl LoaderJson {
             other_compile_files: vec![],
             dynamic_import_lib_info,
             router_map,
-            hsp_resources_map: FxHashMap::default(),
+            hsp_resources_map: Self::collect_hsp_resources_map(&module_cfg.src_path),
             update_version_info: FxHashMap::default(),
             an_build_out_put: format!(
                 "{}/build/default/intermediates/loader_out/default/an/arm64-v8a",
@@ -337,7 +361,13 @@ impl LoaderJson {
                 module_root
             ),
             build_mode: build_mode_str,
-            support_chunks: false,
+            support_chunks: config
+                .product
+                .build_option
+                .ark_options
+                .as_ref()
+                .and_then(|ao| ao.support_chunks.then_some(true))
+                .unwrap_or(false),
             use_normalized_ohm_url,
             api_version: config.sdk_config.compile_api_version,
             fallback_an_build: false,
@@ -622,6 +652,59 @@ impl LoaderJson {
             }));
         }
         files
+    }
+
+    /// Walk `oh_modules/` under `module_root`, find installed HSP packages,
+    /// and collect their `ResourceTable.txt` paths.
+    ///
+    /// Matches hvigor's `getHspResourcesMap()` for remote HSP dependencies:
+    /// `<dep_root>/ResourceTable.txt` is checked for each HSP package.
+    fn collect_hsp_resources_map(module_root: &Path) -> FxHashMap<String, String> {
+        let oh_modules_dir = module_root.join("oh_modules");
+        let Ok(entries) = std::fs::read_dir(&oh_modules_dir) else {
+            return FxHashMap::default();
+        };
+        let mut map = FxHashMap::default();
+        for entry in entries.flatten() {
+            let pkg_dir = entry.path();
+            if !pkg_dir.is_dir() {
+                continue;
+            }
+            // Only consider HSP packages (module.json5#module.type == "shared").
+            let module_json5 = pkg_dir.join("src/main/module.json5");
+            let module_json = pkg_dir.join("src/main/module.json");
+            let content = std::fs::read_to_string(&module_json5)
+                .or_else(|_| std::fs::read_to_string(&module_json));
+            let Ok(content) = content else {
+                continue;
+            };
+            #[derive(serde::Deserialize)]
+            struct Wrapper {
+                module: ModuleType,
+            }
+            #[derive(serde::Deserialize)]
+            struct ModuleType {
+                #[serde(rename = "type", default)]
+                module_type: String,
+            }
+            let Ok(w) = json5::from_str::<Wrapper>(&content) else {
+                continue;
+            };
+            if w.module.module_type != "shared" {
+                continue;
+            }
+            // Check for ResourceTable.txt at the dep root (remote HSP layout).
+            let resource_table = pkg_dir.join("ResourceTable.txt");
+            if resource_table.is_file() {
+                let pkg_name = pkg_dir
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default()
+                    .to_string();
+                map.insert(pkg_name, to_absolute_path_string(&resource_table));
+            }
+        }
+        map
     }
 
     fn build_pkg_brief_info(

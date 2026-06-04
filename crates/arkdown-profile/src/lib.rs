@@ -211,6 +211,7 @@ mod tests {
                 metadata: vec![],
                 app_startup: None,
                 cross_app_shared_config: vec![],
+                ..Default::default()
             },
         }
     }
@@ -383,6 +384,7 @@ fi
                 metadata: vec![],
                 app_startup: None,
                 cross_app_shared_config: vec![],
+                ..Default::default()
             },
         };
 

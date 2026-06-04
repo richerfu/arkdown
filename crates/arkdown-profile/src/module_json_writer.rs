@@ -30,6 +30,22 @@ pub fn write_module_json(
         ModuleJsonWriter::compute_numeric_api_version(&config.product.compatible_sdk_version);
     let is_debug = matches!(config.build_mode, arkdown_core::BuildMode::Debug);
 
+    // Derive packageName from oh-package.json5#name for this module.
+    // Falls back to module_name if the file is absent or unparseable.
+    let package_name = ModuleJsonWriter::read_oh_package_name(manifest, config)
+        .unwrap_or_else(|| manifest.module_name.clone());
+
+    // Derive bundle_type for installationFree logic (from app.json5).
+    let bundle_type = app_json5_fields
+        .get("bundleType")
+        .and_then(|v| v.as_str())
+        .unwrap_or("app")
+        .to_string();
+
+    // Read raw module.json5 for preserve-and-mutate: unknown fields from the
+    // source are appended verbatim after all known fields are emitted.
+    let raw_module5 = ModuleJsonWriter::read_raw_module5(manifest, config);
+
     let app_section = ModuleJsonWriter::build_app_section(
         &app_json5_fields,
         numeric_api,
@@ -38,7 +54,13 @@ pub fn write_module_json(
         &config.product.bundle_name,
         resource_ids,
     );
-    let module_section = ModuleJsonWriter::manifest_to_json(manifest, resource_ids);
+    let module_section = ModuleJsonWriter::manifest_to_json(
+        manifest,
+        raw_module5.as_ref(),
+        resource_ids,
+        &package_name,
+        &bundle_type,
+    );
 
     let mut combined = serde_json::Map::new();
     combined.insert("app".into(), serde_json::Value::Object(app_section));
@@ -175,9 +197,15 @@ impl ModuleJsonWriter {
     ///   virtualMachine, mainElement, installationFree, deliveryWithInstall, description,
     ///   compileMode, type, dependencies, abilities, deviceTypes, pages, descriptionId,
     ///   name, packageName
+    ///
+    /// Unknown fields from the raw `module.json5` are appended verbatim after
+    /// `packageName` (preserve-and-mutate semantics, matching hvigor's `cloneDeep` + mutate).
     fn manifest_to_json(
         manifest: &HapManifest,
+        raw_module5: Option<&serde_json::Value>,
         resource_ids: Option<&FxHashMap<String, u32>>,
+        package_name: &str,
+        bundle_type: &str,
     ) -> serde_json::Value {
         let abilities: Vec<serde_json::Value> = manifest
             .abilities
@@ -303,8 +331,25 @@ impl ModuleJsonWriter {
         if let Some(main_el) = &manifest.main_element {
             obj.insert("mainElement".into(), main_el.clone().into());
         }
-        obj.insert("installationFree".into(), false.into());
-        obj.insert("deliveryWithInstall".into(), true.into());
+        // installationFree: true only for atomicService bundles (hvigor sets this
+        // unconditionally from bundleType, ignoring whatever is in module.json5).
+        obj.insert(
+            "installationFree".into(),
+            (bundle_type == "atomicService").into(),
+        );
+        // atomicService config block: only emitted for atomicService bundles,
+        // preserved from module.json5 (hvigor deletes it for app/shared types).
+        if bundle_type == "atomicService" {
+            if let Some(atomic) = raw_module5.and_then(|v| v.get("atomicService")) {
+                obj.insert("atomicService".into(), atomic.clone());
+            }
+        }
+        // deliveryWithInstall: respect value from module.json5; default true.
+        let delivery_with_install = raw_module5
+            .and_then(|v| v.get("deliveryWithInstall"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        obj.insert("deliveryWithInstall".into(), delivery_with_install.into());
         if let Some(desc) = &manifest.description {
             obj.insert("description".into(), desc.clone().into());
         }
@@ -313,13 +358,44 @@ impl ModuleJsonWriter {
             manifest.compile_mode.to_string().into(),
         );
         obj.insert("type".into(), manifest.module_type.to_string().into());
-        obj.insert("dependencies".into(), serde_json::Value::Array(vec![]));
+        // dependencies: serialise from manifest (populated for HSP modules).
+        let deps: Vec<serde_json::Value> = manifest
+            .dependencies
+            .iter()
+            .map(|d| {
+                let mut dep = serde_json::Map::new();
+                dep.insert("bundleName".into(), d.bundle_name.clone().into());
+                dep.insert("moduleName".into(), d.module_name.clone().into());
+                serde_json::Value::Object(dep)
+            })
+            .collect();
+        obj.insert("dependencies".into(), serde_json::Value::Array(deps));
+        // requestPermissions: preserved verbatim from module.json5.
+        if let Some(perms) = raw_module5.and_then(|v| v.get("requestPermissions")) {
+            if perms.as_array().map_or(false, |a| !a.is_empty()) {
+                obj.insert("requestPermissions".into(), perms.clone());
+            }
+        }
+        // definePermissions: preserved verbatim from module.json5.
+        if let Some(defs) = raw_module5.and_then(|v| v.get("definePermissions")) {
+            if defs.as_array().map_or(false, |a| !a.is_empty()) {
+                obj.insert("definePermissions".into(), defs.clone());
+            }
+        }
         obj.insert("abilities".into(), serde_json::Value::Array(abilities));
         if !extension_abilities.is_empty() {
             obj.insert(
                 "extensionAbilities".into(),
                 serde_json::Value::Array(extension_abilities),
             );
+        }
+        // proxyData: preserved verbatim from module.json5.
+        // (bundleName URI mutation only applies when hvigor receives a CLI
+        // --bundleName override; arkdown does not implement that yet.)
+        if let Some(proxy) = raw_module5.and_then(|v| v.get("proxyData")) {
+            if proxy.as_array().map_or(false, |a| !a.is_empty()) {
+                obj.insert("proxyData".into(), proxy.clone());
+            }
         }
         obj.insert(
             "deviceTypes".into(),
@@ -340,9 +416,61 @@ impl ModuleJsonWriter {
             }
         }
         obj.insert("name".into(), manifest.module_name.clone().into());
-        obj.insert("packageName".into(), manifest.module_name.clone().into());
+        // packageName from oh-package.json5#name (hvigor: Object.assign using
+        // packageJsonObj.name); falls back to module_name when file is absent.
+        obj.insert("packageName".into(), package_name.into());
+
+        // Preserve-and-mutate passthrough: append any module.json5 keys that
+        // were not already emitted above.  This mirrors hvigor's cloneDeep +
+        // targeted-mutation approach so that metadata, appStartup,
+        // crossAppSharedConfig, and any future fields survive the build.
+        if let Some(raw_map) = raw_module5.and_then(|v| v.as_object()) {
+            for (key, value) in raw_map {
+                if !obj.contains_key(key.as_str()) {
+                    // Skip empty arrays to avoid emitting noise.
+                    if let serde_json::Value::Array(arr) = value {
+                        if arr.is_empty() {
+                            continue;
+                        }
+                    }
+                    obj.insert(key.clone(), value.clone());
+                }
+            }
+        }
 
         serde_json::Value::Object(obj)
+    }
+
+    /// Read `oh-package.json5#name` from the module's source directory.
+    ///
+    /// Returns `None` when the module is not in `config.modules`, the file is
+    /// absent, or parsing fails; callers fall back to `manifest.module_name`.
+    fn read_oh_package_name(manifest: &HapManifest, config: &ArkdownConfig) -> Option<String> {
+        let src_path = config
+            .modules
+            .iter()
+            .find(|m| m.name == manifest.module_name)
+            .map(|m| m.src_path.as_path())?;
+        let path = src_path.join("oh-package.json5");
+        let content = fs_err::read_to_string(&path).ok()?;
+        let raw: serde_json::Value = json5::from_str(&content).ok()?;
+        raw.get("name").and_then(|v| v.as_str()).map(str::to_string)
+    }
+
+    /// Read the `module` object from `src/main/module.json5` as a raw JSON value.
+    ///
+    /// Used for preserve-and-mutate field passthrough.  Returns `None` when the
+    /// module is not in `config.modules`, the file is absent, or parsing fails.
+    fn read_raw_module5(manifest: &HapManifest, config: &ArkdownConfig) -> Option<serde_json::Value> {
+        let src_path = config
+            .modules
+            .iter()
+            .find(|m| m.name == manifest.module_name)
+            .map(|m| m.src_path.as_path())?;
+        let path = src_path.join("src/main/module.json5");
+        let content = fs_err::read_to_string(&path).ok()?;
+        let raw: serde_json::Value = json5::from_str(&content).ok()?;
+        raw.get("module").cloned()
     }
 
     /// Resolve a `$type:name` resource reference to a numeric ID.

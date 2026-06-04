@@ -74,6 +74,7 @@ fn single_ability_json5(module_name: &str) -> ModuleJson5 {
             metadata: vec![],
             app_startup: None,
             cross_app_shared_config: vec![],
+            ..Default::default()
         },
     }
 }
@@ -231,6 +232,7 @@ fn test_multiple_abilities_produce_multiple_compile_entries() {
             metadata: vec![],
             app_startup: None,
             cross_app_shared_config: vec![],
+            ..Default::default()
         },
     };
 
@@ -486,5 +488,204 @@ fn test_write_loader_json_creates_parent_dirs() {
     assert!(
         out_path.exists(),
         "loader.json must be written at the hvigor intermediate path"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1.6 – field-preservation regression tests
+// ---------------------------------------------------------------------------
+
+/// `packageName` is read from `oh-package.json5#name` rather than defaulting
+/// to the module directory name.
+#[test]
+fn test_write_module_json_package_name_from_oh_package_json5() {
+    use arkdown_core::{AbilityEntry, ArkdownConfig, CompileMode, HapManifest, ModuleConfig,
+                        OhosModuleType};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let module_src = tmp.path().join("mymodule");
+    std::fs::create_dir_all(module_src.join("src/main")).expect("create dirs");
+
+    // Write oh-package.json5 with a distinct name to verify it is read.
+    std::fs::write(
+        module_src.join("oh-package.json5"),
+        r#"{ "name": "my-scoped-package", "version": "1.0.0" }"#,
+    )
+    .expect("write oh-package.json5");
+
+    // Write a minimal module.json5 so raw passthrough does not fail.
+    std::fs::write(
+        module_src.join("src/main/module.json5"),
+        r#"{ "module": { "name": "mymodule", "type": "entry", "deviceTypes": ["phone"] } }"#,
+    )
+    .expect("write module.json5");
+
+    let mut config = (*default_config()).clone();
+    config.project_root = tmp.path().to_path_buf();
+    config.modules = vec![ModuleConfig {
+        name: "mymodule".to_string(),
+        src_path: module_src.clone(),
+        module_type: OhosModuleType::Entry,
+    }];
+    let processor = ProfileProcessor::new(Arc::new(config));
+
+    let manifest = HapManifest {
+        module_name: "mymodule".to_string(),
+        module_type: OhosModuleType::Entry,
+        device_types: vec!["phone".to_string()],
+        virtual_machine: "ark12.0.6.0".to_string(),
+        compile_mode: CompileMode::EsModule,
+        src_entry: None,
+        abilities: vec![],
+        extension_abilities: vec![],
+        dependencies: vec![],
+        router_map: None,
+        pages: None,
+        main_element: None,
+        description: None,
+    };
+
+    let out_path = tmp.path().join("module.json");
+    processor
+        .write_module_json(&manifest, &out_path, None)
+        .expect("write_module_json must succeed");
+
+    let content = std::fs::read_to_string(&out_path).expect("read module.json");
+    let parsed: serde_json::Value = serde_json::from_str(&content).expect("valid JSON");
+    assert_eq!(
+        parsed["module"]["packageName"].as_str(),
+        Some("my-scoped-package"),
+        "packageName must be read from oh-package.json5#name"
+    );
+}
+
+/// Unknown fields in `module.json5` (e.g. `requestPermissions`) are preserved
+/// verbatim in the written `module.json` (preserve-and-mutate semantics).
+#[test]
+fn test_write_module_json_preserves_unknown_fields_from_module_json5() {
+    use arkdown_core::{AbilityEntry, ArkdownConfig, CompileMode, HapManifest, ModuleConfig,
+                        OhosModuleType};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let module_src = tmp.path().join("entry");
+    std::fs::create_dir_all(module_src.join("src/main")).expect("create dirs");
+
+    std::fs::write(
+        module_src.join("oh-package.json5"),
+        r#"{ "name": "entry" }"#,
+    )
+    .expect("write oh-package.json5");
+
+    // module.json5 with requestPermissions and a custom unknown field.
+    std::fs::write(
+        module_src.join("src/main/module.json5"),
+        r#"{
+          "module": {
+            "name": "entry",
+            "type": "entry",
+            "deviceTypes": ["phone"],
+            "requestPermissions": [{ "name": "ohos.permission.CAMERA" }],
+            "customFutureField": "preserved"
+          }
+        }"#,
+    )
+    .expect("write module.json5");
+
+    let mut config = (*default_config()).clone();
+    config.project_root = tmp.path().to_path_buf();
+    config.modules = vec![ModuleConfig {
+        name: "entry".to_string(),
+        src_path: module_src.clone(),
+        module_type: OhosModuleType::Entry,
+    }];
+    let processor = ProfileProcessor::new(Arc::new(config));
+
+    let manifest = HapManifest {
+        module_name: "entry".to_string(),
+        module_type: OhosModuleType::Entry,
+        device_types: vec!["phone".to_string()],
+        virtual_machine: "ark12.0.6.0".to_string(),
+        compile_mode: CompileMode::EsModule,
+        src_entry: None,
+        abilities: vec![],
+        extension_abilities: vec![],
+        dependencies: vec![],
+        router_map: None,
+        pages: None,
+        main_element: None,
+        description: None,
+    };
+
+    let out_path = tmp.path().join("module.json");
+    processor
+        .write_module_json(&manifest, &out_path, None)
+        .expect("write_module_json must succeed");
+
+    let content = std::fs::read_to_string(&out_path).expect("read module.json");
+    let parsed: serde_json::Value = serde_json::from_str(&content).expect("valid JSON");
+    let module = &parsed["module"];
+
+    let perms = module["requestPermissions"].as_array().expect("requestPermissions must be an array");
+    assert_eq!(perms.len(), 1, "requestPermissions must have 1 entry");
+    assert_eq!(
+        perms[0]["name"].as_str(),
+        Some("ohos.permission.CAMERA"),
+        "requestPermissions[0].name must be preserved"
+    );
+    assert_eq!(
+        module["customFutureField"].as_str(),
+        Some("preserved"),
+        "unknown future fields must be passed through verbatim"
+    );
+}
+
+/// `installationFree` is `true` when `bundleType` is `atomicService`.
+#[test]
+fn test_write_module_json_installation_free_for_atomic_service() {
+    use arkdown_core::{CompileMode, HapManifest, OhosModuleType};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    // Write an app.json5 with bundleType = atomicService.
+    let app_scope = tmp.path().join("AppScope");
+    std::fs::create_dir_all(&app_scope).expect("create AppScope");
+    std::fs::write(
+        app_scope.join("app.json5"),
+        r#"{ "app": { "bundleName": "com.example.atomic", "versionCode": 1000000,
+                      "versionName": "1.0.0", "bundleType": "atomicService" } }"#,
+    )
+    .expect("write app.json5");
+
+    let mut config = (*default_config()).clone();
+    config.project_root = tmp.path().to_path_buf();
+    config.product.bundle_name = "com.example.atomic".to_string();
+    let processor = ProfileProcessor::new(Arc::new(config));
+
+    let manifest = HapManifest {
+        module_name: "entry".to_string(),
+        module_type: OhosModuleType::Entry,
+        device_types: vec!["phone".to_string()],
+        virtual_machine: "ark12.0.6.0".to_string(),
+        compile_mode: CompileMode::EsModule,
+        src_entry: None,
+        abilities: vec![],
+        extension_abilities: vec![],
+        dependencies: vec![],
+        router_map: None,
+        pages: None,
+        main_element: None,
+        description: None,
+    };
+
+    let out_path = tmp.path().join("module.json");
+    processor
+        .write_module_json(&manifest, &out_path, None)
+        .expect("write_module_json must succeed");
+
+    let content = std::fs::read_to_string(&out_path).expect("read module.json");
+    let parsed: serde_json::Value = serde_json::from_str(&content).expect("valid JSON");
+    assert_eq!(
+        parsed["module"]["installationFree"].as_bool(),
+        Some(true),
+        "installationFree must be true for atomicService bundles"
     );
 }

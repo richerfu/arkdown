@@ -165,6 +165,7 @@ pub fn load_config(
                 obfuscation,
                 types: Vec::new(),
                 runtime_only,
+                support_chunks: ao.support_chunks.unwrap_or(false),
             }
         });
 
@@ -174,11 +175,34 @@ pub fn load_config(
         .map(|bo| bo.preload_so.clone())
         .unwrap_or_default();
 
+    let source_option = raw_product
+        .build_option
+        .as_ref()
+        .and_then(|bo| bo.source_option.as_ref())
+        .map(|so| {
+            let workers = so
+                .workers
+                .iter()
+                .map(|w| {
+                    let p = std::path::Path::new(w);
+                    if p.is_absolute() {
+                        p.to_path_buf()
+                    } else {
+                        root.join(p)
+                    }
+                })
+                .collect();
+            arkdown_core::SourceOption {
+                source_language: None,
+                workers,
+            }
+        });
+
     let build_option = BuildOption {
         strict_mode,
         ark_options,
         res_options: None,
-        source_option: None,
+        source_option,
         preload_so,
     };
 

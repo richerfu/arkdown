@@ -27,7 +27,7 @@
 use rustc_hash::FxHashSet;
 use std::path::{Path, PathBuf};
 
-use arkdown_core::{AppStartupProfile, MergedStartupConfig, StartupTask};
+use arkdown_core::{AppStartupProfile, ArkdownError, MergedStartupConfig, StartupTask};
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -54,10 +54,13 @@ pub struct StartupConfigOutput {
 /// Collect and merge startup task configs from the module and all its
 /// HAR/HSP dependencies, returning the merged result.
 ///
+/// Returns `Err` when two tasks in the same category share the same name —
+/// this is a hard build error matching hvigor's `printErrorExit` call.
 /// Missing or malformed config files in individual dependencies are silently
-/// skipped (matching hvigor's behaviour where packages without `appStartup`
-/// simply contribute nothing).
-pub fn merge_startup_config(input: StartupConfigInput<'_>) -> StartupConfigOutput {
+/// skipped.
+pub fn merge_startup_config(
+    input: StartupConfigInput<'_>,
+) -> Result<StartupConfigOutput, ArkdownError> {
     let mut merged = MergedStartupConfig::default();
     let mut found_any = false;
 
@@ -87,19 +90,19 @@ pub fn merge_startup_config(input: StartupConfigInput<'_>) -> StartupConfigOutpu
     }
 
     if !found_any {
-        return StartupConfigOutput { config: None };
+        return Ok(StartupConfigOutput { config: None });
     }
 
     // 3. Validate: no two tasks in the same category may share the same name.
-    StartupConfigInput::check_duplicate_task_names(&merged.startup_tasks, "startupTask");
+    StartupConfigInput::check_duplicate_task_names(&merged.startup_tasks, "startupTask")?;
     StartupConfigInput::check_duplicate_task_names(
         &merged.app_preload_hint_startup_tasks,
         "appPreloadHintStartupTask",
-    );
+    )?;
 
-    StartupConfigOutput {
+    Ok(StartupConfigOutput {
         config: Some(merged),
-    }
+    })
 }
 
 /// Write the merged startup config to `output_path`.
@@ -277,22 +280,23 @@ impl<'a> StartupConfigInput<'a> {
         None
     }
 
-    /// Emit a warning when two tasks in the same category share the same name.
+    /// Returns `Err` when two tasks in the same category share the same name.
     ///
-    /// Hvigor calls `printErrorExit` here; arkdown downgrades to a non-fatal
-    /// warning so the build can continue.
-    fn check_duplicate_task_names(tasks: &[StartupTask], category: &str) {
+    /// Hvigor calls `printErrorExit` here; arkdown now matches that hard-error behaviour.
+    fn check_duplicate_task_names(
+        tasks: &[StartupTask],
+        category: &str,
+    ) -> Result<(), ArkdownError> {
         let mut seen: FxHashSet<&str> = FxHashSet::default();
         for task in tasks {
             if !seen.insert(task.name.as_str()) {
-                tracing::warn!(
-                    category,
-                    name = task.name,
-                    module_name = ?task.module_name,
-                    "startup config duplicate task name"
-                );
+                return Err(ArkdownError::Bundler(format!(
+                    "ProcessStartupConfig: duplicate {} name '{}'",
+                    category, task.name
+                )));
             }
         }
+        Ok(())
     }
 }
 
@@ -317,7 +321,8 @@ mod tests {
             module_root: tmp.path(),
             module_name: "entry",
             app_startup: None,
-        });
+        })
+        .unwrap();
         assert!(output.config.is_none());
     }
 
@@ -340,7 +345,8 @@ mod tests {
             module_root: tmp.path(),
             module_name: "entry",
             app_startup: Some("$profile:startup_config".to_string()),
-        });
+        })
+        .unwrap();
 
         let config = output.config.unwrap();
         assert_eq!(config.startup_tasks.len(), 1);
@@ -382,7 +388,8 @@ mod tests {
             module_root: tmp.path(),
             module_name: "entry",
             app_startup: None,
-        });
+        })
+        .unwrap();
 
         let config = output.config.unwrap();
         assert_eq!(config.startup_tasks.len(), 1);
@@ -425,7 +432,8 @@ mod tests {
             module_root: tmp.path(),
             module_name: "entry",
             app_startup: Some("$profile:startup_config".to_string()),
-        });
+        })
+        .unwrap();
 
         let config = output.config.unwrap();
         assert_eq!(config.startup_tasks.len(), 2);
@@ -519,7 +527,8 @@ mod tests {
             module_root: tmp.path(),
             module_name: "entry",
             app_startup: None,
-        });
+        })
+        .unwrap();
         // No tasks found → config is None (no panic).
         assert!(output.config.is_none());
     }
@@ -543,7 +552,8 @@ mod tests {
             module_root: tmp.path(),
             module_name: "entry",
             app_startup: Some("$profile:startup_config".to_string()),
-        });
+        })
+        .unwrap();
 
         let config = output.config.unwrap();
         assert!(config.startup_tasks.is_empty());

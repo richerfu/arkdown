@@ -24,11 +24,11 @@ Status symbols: ✅ implemented + parity-verified, 🔄 partial (gaps listed), �
 | B1 | Merge base `module.json5` with product overlays + HAR/HSP deps | `MergeProfile` → `abstract-merge-profile.js` | `arkdown-profile::merge_profile()` | ✅ |
 | B2 | Set `virtualMachine`, `compileMode`, `deviceTypes`; collect HAR abilities | `ProcessProfile` → `process-profile.js` | `arkdown-profile::process_profile()` injects both fields from SDK version | ✅ |
 | B3 | Collect router map entries; write `intermediates/routerMap.json` | `ProcessRouterMap` → `process-router-map.js` | `arkdown-plugin-router-map` | ✅ |
-| B4 | Process `crossAppSharedConfig` from HSP dependencies | `ProcessShareConfig` → `process-share-config.js` | Not implemented | ❌ |
-| B5 | Merge startup config from all HAR/HSP deps; validate task deps | `ProcessStartupConfig` → `process-startup-config.js` | Not implemented | ❌ |
-| B6 | Generate module metadata JSON for HAP/HSP | `CreateModuleInfo` → `create-module-info.js` | `arkdown-profile::write_module_json()` (HAP); HSP-specific path unverified | 🔄 |
+| B4 | Process `crossAppSharedConfig` from HSP dependencies | `ProcessShareConfig` → `process-share-config.js` | `arkdown-profile::merge_share_config()` wired in CLI; duplicate-URI is hard error | ✅ |
+| B5 | Merge startup config from all HAR/HSP deps; validate task deps | `ProcessStartupConfig` → `process-startup-config.js` | `arkdown-profile::merge_startup_config()` wired in CLI; duplicate task name is hard error | ✅ |
+| B6 | Generate module metadata JSON for HAP/HSP | `CreateModuleInfo` → `create-module-info.js` | `arkdown-profile::write_module_json()` (HAP): `packageName` from `oh-package.json5#name`; `installationFree` from `bundleType`; `atomicService` block preserved for atomicService bundles; `deliveryWithInstall` from module.json5; `dependencies` serialized; `requestPermissions`/`definePermissions`/`proxyData` passed through; preserve-and-mutate passthrough for unknown fields. HSP-specific path unverified. | 🔄 |
 | B7 | Generate module metadata JSON for HAR | `CreateHarModuleInfo` → `har/har-extend-info.js` | `pack_har()` writes metadata but separate HAR module-info flow unverified | 🔄 |
-| B8 | Process privacy data file | `ProcessModulePrivacyProfile` → `process-module-privacy-profile.js` | Not implemented | ❌ |
+| B8 | Process privacy data file | `ProcessModulePrivacyProfile` → `process-module-privacy-profile.js` | `privacy_profile_path` passed to `pack_hap()` from CLI; copies to `module.privacy.json` in HAP | ✅ |
 
 ### Stage C — Resource Compilation
 
@@ -42,10 +42,10 @@ Status symbols: ✅ implemented + parity-verified, 🔄 partial (gaps listed), �
 
 | # | hvigor Step | Field/Detail | arkdown | Status |
 |---|---|---|---|---|
-| D1 | Write loader.json: core 18 fields | `GenerateLoaderJson::doTaskAction()` → `generate-loader-json.js` | `arkdown-profile::generate_loader_json()` — all 18 fields match golden exactly | ✅ |
+| D1 | Write loader.json: core 18 fields | `GenerateLoaderJson::doTaskAction()` → `generate-loader-json.js` | `arkdown-profile::generate_loader_json()` — all 18 fields match golden: `hspResourcesMap` now populated by scanning `oh_modules/` for HSP packages with `ResourceTable.txt`; `supportChunks` from `buildOption.arkOptions.supportChunks` | ✅ |
 | D2 | `byteCodeHarInfo` map + ByteCode HAR `declarationEntry` | `byte-code-har-utils.js`, `GenerateLoaderJson.processDeclarationEntry()` | `scan_bytecode_har_deps()` now follows hvigor's `metadata.byteCodeHar` + `ets/modules.abc` convention, uses deterministic package traversal, populates `abcPath`, `sourceMapsPath`, `compatibleSdkVersion`, and `insightIntent`, and copies dependency `metadata.declarationEntry` normalized OHM URLs into loader.json. Remaining: generation of a ByteCode HAR's own declarationEntry from ability/startup/insightIntent/runtimeOnly/workers and full dependency-manager graph parity. | 🔄 |
 | D3 | `runtimeOnly` compile entries and `dynamicImportLibInfo` (runtime-only and cross-HAR dynamic imports) | `GenerateLoaderJson.processDynamicImport()` | Product `buildOption.arkOptions.runtimeOnly.sources` now appends matching `.ets`/`.ts`/`.js` files to serialized `compileEntry` and local `src/main` bundler entries. `dynamicImportLibInfo` is populated from `dynamicDependencies`, product `runtimeOnly.packages`, and direct dependency `metadata.runtimeOnly.packages`. Remaining: dependency `metadata.runtimeOnly.sources`, post-bundle dynamic `import()` graph parity, and transitive dependency `metadata.runtimeOnly` traversal. | 🔄 |
-| D4 | `workers[]` (WebWorker `.ets`/`.ts`/`.js` file paths) | `compiler/main.js::readWorkerFile()` reads explicit loader entries; `loadWorker()` scans `workers/` recursively when absent | `generate_loader_json()` recursively scans `src/main/ets/workers`, serializes absolute `workers` only when non-empty, and adds matching `./ets/...` compile entries | ✅ |
+| D4 | `workers[]` (WebWorker `.ets`/`.ts`/`.js` file paths) | `compiler/main.js::readWorkerFile()` reads explicit loader entries; `loadWorker()` scans `workers/` recursively when absent | `generate_loader_json()` recursively scans `src/main/ets/workers`, serializes absolute `workers` only when non-empty, and adds matching `./ets/...` compile entries; explicit `buildOption.sourceOption.workers` entries merged in (deduplicated) | ✅ |
 | D5 | `hspNameOhmMap` + `harNameOhmMap` for multi-module projects | From `DependencyManager` | Basic maps for simple projects; transitive dep resolution incomplete | 🔄 |
 
 ### Stage E — ArkCompile Task Setup
@@ -236,9 +236,22 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 
 ### Medium-Impact Gaps (advanced features)
 
-**B4-B5 — ProcessShareConfig / ProcessStartupConfig**
-- Required for projects using `crossAppSharedConfig` (HSP cross-app sharing) or startup tasks
-- Not blocking for most apps
+**B4-B5 — ProcessShareConfig / ProcessStartupConfig** ✅ resolved
+- `merge_share_config()` and `merge_startup_config()` now wired in CLI build pipeline
+- Duplicate-URI and duplicate-task-name violations are now hard errors (matching hvigor `printErrorExit`)
+
+**B8 — ProcessModulePrivacyProfile** ✅ resolved
+- `pack_hap()` now writes `module.privacy.json` (deflated) from `input.privacy_profile_path` when present
+
+**B6 — module.json field parity** 🔄 improved
+- `packageName` now read from `oh-package.json5#name` (hvigor: `Object.assign` using `packageJsonObj.name`)
+- `installationFree` now derived from `bundleType` (`atomicService` → `true`; other → `false`)
+- `atomicService` config block preserved verbatim for atomicService bundles
+- `deliveryWithInstall` now read from module.json5 (default `true`)
+- `dependencies` now serialized from manifest (not unconditionally empty array)
+- `requestPermissions`, `definePermissions`, `proxyData` passed through verbatim from raw module.json5
+- Unknown fields preserved via preserve-and-mutate passthrough (mirrors hvigor `cloneDeep` + mutate)
+- Remaining: HSP-specific path; `ArkCompile.declareOutputFiles()` for HSP
 
 **C3 — ProcessCompiledResources (preloaded SO)**
 - Needed for projects with preloaded system SO libraries
@@ -394,21 +407,23 @@ do not add a custom debug channel.
 **Complexity**: M
 **Depends on**: TASK-LOADER-01
 
-### TASK-PACK-03: ProcessModulePrivacyProfile (S)
+### TASK-PACK-03: ProcessModulePrivacyProfile (S) ✅ resolved
 
 **What**: If `src/main/resources/base/profile/privacy.json` exists, validate and embed it as `module.privacy.json` in the HAP.
-**File**: `crates/arkdown-pack/src/`
+**File**: `crates/arkdown-pack/src/packager.rs`
 **Upstream ref**: `process-module-privacy-profile.js`
 **Complexity**: S
 **Depends on**: nothing
+**Status**: `pack_hap()` now writes `module.privacy.json` (deflated) from `input.privacy_profile_path` when present.
 
-### TASK-PACK-04: ProcessShareConfig + ProcessStartupConfig (M)
+### TASK-PACK-04: ProcessShareConfig + ProcessStartupConfig (M) ✅ resolved
 
 **What**: Read `crossAppSharedConfig` from HSP dep `module.json5`. Merge startup task configs from all HAR/HSP deps. Write intermediate JSON for downstream tasks.
-**File**: `crates/arkdown-profile/src/`, `crates/arkdown-resolver/src/`
+**File**: `crates/arkdown-profile/src/`, `crates/arkdown-cli/src/cmd/build.rs`
 **Upstream ref**: `process-share-config.js`, `process-startup-config.js`
 **Complexity**: M
-**Depends on**: TASK-LOADER-01
+**Depends on**: nothing (resolved without TASK-LOADER-01 dependency)
+**Status**: `merge_share_config()` and `merge_startup_config()` wired in CLI; duplicate-URI and duplicate-task-name violations are hard errors matching hvigor `printErrorExit`.
 
 ### TASK-RELEASE-01: treeshake + manualChunks for release builds (M)
 
@@ -465,7 +480,6 @@ coverage.
 | TASK-LOADER-01: ByteCode HAR maps | M | Any project with BC-HAR deps |
 | TASK-LOADER-02: Dynamic import info | M | Dynamic import patterns |
 | TASK-PACK-02: ProcessIntegratedHsp | M | Projects embedding HSP |
-| TASK-PACK-04: ProcessShareConfig | M | Cross-app HSP sharing |
 
 ### Priority 5 — Polish and Advanced Features
 
@@ -474,7 +488,6 @@ coverage.
 | TASK-ABC-04: ABC incremental cache | M | Compile speed |
 | TASK-ABC-05: Widget compile pass | M | Card/widget apps (SPEC-027) |
 | TASK-PACK-01: Preloaded SO | S | Apps with native libs |
-| TASK-PACK-03: Privacy profile | S | Privacy-sensitive apps |
 | TASK-WATCH-01: Watch mode | L | DevEco IDE integration |
 
 ---
@@ -500,20 +513,20 @@ coverage.
 | Pipeline Area | Steps Total | ✅ | 🔄 | ❌ |
 |---|---|---|---|---|
 | Pre-Build (A) | 2 | 2 | 0 | 0 |
-| Profile Processing (B) | 8 | 2 | 2 | 4 |
+| Profile Processing (B) | 8 | 6 | 2 | 0 |
 | Resource Compilation (C) | 3 | 2 | 0 | 1 |
-| loader.json (D) | 5 | 1 | 3 | 1 |
+| loader.json (D) | 5 | 2 | 3 | 0 |
 | ArkCompile Setup (E) | 4 | 2 | 0 | 2 |
-| Rollup Plugins (F) | 28 | 13 | 4 | 11 |
-| Post-Bundle Processing (G) | 8 | 2 | 1 | 5 |
+| Rollup Plugins (F) | 28 | 13 | 6 | 9 |
+| Post-Bundle Processing (G) | 8 | 3 | 1 | 4 |
 | ABC Compilation (H) | 14 | 7 | 4 | 3 |
 | Obfuscation/Minification (I) | 5 | 0 | 0 | 5 |
 | Incremental Cache (J) | 4 | 0 | 0 | 4 |
 | Packaging (K) | 6 | 2 | 3 | 1 |
 | Signing (L) | 3 | 2 | 1 | 0 |
 | Advanced/Watch (M) | 5 | 0 | 0 | 5 |
-| **Total** | **95** | **35** | **18** | **42** |
+| **Total** | **95** | **41** | **20** | **34** |
 
-**Current overall pipeline coverage: ~37% fully verified, ~19% partial, ~44% not started.**
-The HAP golden-parity path (minimal-hap fixture with no dependencies) covers ~68 of the 95 steps.
-The remaining 42 ❌ steps are concentrated in: release-mode obfuscation+minification, incremental caching, watch mode, full ViewPU ArkUI lowering, and multi-module dependency handling.
+**Current overall pipeline coverage: ~43% fully verified, ~21% partial, ~36% not started.**
+The HAP golden-parity path (minimal-hap fixture with no dependencies) covers ~75 of the 95 steps.
+The remaining 34 ❌ steps are concentrated in: release-mode obfuscation+minification, incremental caching, watch mode, full ViewPU ArkUI lowering, and multi-module dependency handling.

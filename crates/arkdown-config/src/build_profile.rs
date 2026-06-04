@@ -232,9 +232,18 @@ pub struct RawBuildOption {
     pub strict_mode: Option<RawStrictMode>,
     #[serde(default)]
     pub ark_options: Option<RawArkOptions>,
+    #[serde(default)]
+    pub source_option: Option<RawSourceOption>,
     /// SO file paths listed under `buildOption.preloadSo` in `build-profile.json5`.
     #[serde(default)]
     pub preload_so: Vec<std::path::PathBuf>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RawSourceOption {
+    #[serde(default)]
+    pub workers: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -253,6 +262,8 @@ pub struct RawArkOptions {
     pub obfuscation: Option<RawObfuscation>,
     #[serde(default)]
     pub runtime_only: Option<RawRuntimeOnly>,
+    #[serde(default)]
+    pub support_chunks: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Default)]

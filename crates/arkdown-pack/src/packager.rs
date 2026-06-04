@@ -537,6 +537,14 @@ impl Packager {
 
         Self::add_profile_guided_ap(&mut writer, &input)?;
 
+        // module.privacy.json — PAC/privacy profile (deflated), written when
+        // `ProcessModulePrivacyProfile` produced a validated privacy profile.
+        if let Some(ref privacy_path) = input.privacy_profile_path {
+            if privacy_path.exists() {
+                zip_writer::add_file_deflate(&mut writer, "module.privacy.json", privacy_path)?;
+            }
+        }
+
         // pack.info — bundle metadata (deflated JSON), written last by hvigor
         // for a normal HAP.
         let mut pack_info = self.generate_pack_info(&input);

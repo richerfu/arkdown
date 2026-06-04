@@ -200,6 +200,36 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         // --- Profile processing ---
         let module_json5_path = module.src_path.join("src/main/module.json5");
         let module_json5 = read_module_json5(&module_json5_path)?;
+
+        // --- Share config (B4): collect crossAppSharedConfig from oh_modules HSPs ---
+        let share_out = arkdown_profile::merge_share_config(
+            arkdown_profile::ShareConfigInput {
+                module_root: &module.src_path,
+                self_entries: module_json5.module.cross_app_shared_config.clone(),
+            },
+        )
+        .map_err(|e| anyhow::anyhow!("ProcessShareConfig failed: {}", e))?;
+        let share_config_out = module.src_path.join(
+            "build/default/intermediates/share_config/default/temp-share-config.json",
+        );
+        arkdown_profile::write_share_config(&share_out, &share_config_out)
+            .map_err(|e| anyhow::anyhow!("write share config failed: {}", e))?;
+
+        // --- Startup config (B5): collect appStartup task configs ---
+        let startup_out = arkdown_profile::merge_startup_config(
+            arkdown_profile::StartupConfigInput {
+                module_root: &module.src_path,
+                module_name: &module.name,
+                app_startup: module_json5.module.app_startup.clone(),
+            },
+        )
+        .map_err(|e| anyhow::anyhow!("ProcessStartupConfig failed: {}", e))?;
+        let startup_config_out = module.src_path.join(
+            "build/default/intermediates/startup_config/default/temp-startup-config.json",
+        );
+        arkdown_profile::write_startup_config(&startup_out, &startup_config_out)
+            .map_err(|e| anyhow::anyhow!("write startup config failed: {}", e))?;
+
         let (manifest, mut loader_json) = processor
             .process_module(module, &module_json5)
             .map_err(|e| anyhow::anyhow!("{}", e))?;

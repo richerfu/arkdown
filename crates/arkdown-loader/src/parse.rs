@@ -43,7 +43,7 @@ impl<'a> ModuleParser<'a> {
         let source_type = self.source_type();
 
         let ParserReturn {
-            program, errors, ..
+            program, errors: _, ..
         } = Parser::new(&allocator, &self.source.content, source_type).parse();
 
         for stmt in &program.body {
@@ -53,8 +53,8 @@ impl<'a> ModuleParser<'a> {
         ParsedModule {
             imports: self.imports,
             exports: self.exports,
-            // Conservative: treat any module with parse errors as having side effects.
-            has_side_effects: !errors.is_empty() || true,
+            // Conservative: always true until tree-shaking (F26) is wired.
+            has_side_effects: true,
         }
     }
 

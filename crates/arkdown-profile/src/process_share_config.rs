@@ -24,7 +24,7 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::{Path, PathBuf};
 
-use arkdown_core::CrossAppSharedConfigEntry;
+use arkdown_core::{ArkdownError, CrossAppSharedConfigEntry};
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -47,7 +47,7 @@ impl ShareConfigInput<'_> {
     /// Errors are returned for I/O failures only; missing or malformed `module.json5`
     /// files in individual dependencies are silently skipped (matching hvigor behaviour
     /// where non-HSP packages simply have no `crossAppSharedConfig`).
-    pub fn merge(self) -> ShareConfigOutput {
+    pub fn merge(self) -> Result<ShareConfigOutput, ArkdownError> {
         let mut all_entries: Vec<CrossAppSharedConfigEntry> = Vec::new();
 
         // Include the module's own entries first (for HSP modules that export shared components).
@@ -62,11 +62,11 @@ impl ShareConfigInput<'_> {
         // Validate: no two entries from different packages may share the same URI.
         // (Duplicate URIs within the same package are allowed — hvigor only errors
         // on cross-package URI collisions.)
-        ShareConfigInput::check_duplicate_uris(&all_entries);
+        ShareConfigInput::check_duplicate_uris(&all_entries)?;
 
-        ShareConfigOutput {
+        Ok(ShareConfigOutput {
             entries: all_entries,
-        }
+        })
     }
 }
 
@@ -81,10 +81,10 @@ pub struct ShareConfigOutput {
 /// from every HSP dependency, merge them with `self_entries`, validate for
 /// duplicate URIs, and return the merged list.
 ///
-/// Errors are returned for I/O failures only; missing or malformed `module.json5`
-/// files in individual dependencies are silently skipped (matching hvigor behaviour
-/// where non-HSP packages simply have no `crossAppSharedConfig`).
-pub fn merge_share_config(input: ShareConfigInput<'_>) -> ShareConfigOutput {
+/// Returns `Err` when two packages declare the same URI — this is a hard build
+/// error matching hvigor's `printErrorExit` call.
+/// Missing or malformed `module.json5` files are silently skipped.
+pub fn merge_share_config(input: ShareConfigInput<'_>) -> Result<ShareConfigOutput, ArkdownError> {
     input.merge()
 }
 
@@ -203,11 +203,9 @@ impl ShareConfigInput<'_> {
         vec![]
     }
 
-    /// Log a warning (but do not abort) when two entries from different packages
-    /// share the same URI.  Hvigor calls `printErrorExit` here; arkdown downgrades
-    /// to a non-fatal warning so the build continues in the same way that missing
-    /// optional config files are handled elsewhere in the pipeline.
-    fn check_duplicate_uris(entries: &[CrossAppSharedConfigEntry]) {
+    /// Returns `Err` when two entries from different packages share the same URI.
+    /// Hvigor calls `printErrorExit` here; arkdown now matches that hard-error behaviour.
+    fn check_duplicate_uris(entries: &[CrossAppSharedConfigEntry]) -> Result<(), ArkdownError> {
         // Map URI → list of package names that declare it.
         let mut uri_to_packages: FxHashMap<&str, Vec<&str>> = FxHashMap::default();
         for entry in entries {
@@ -219,20 +217,20 @@ impl ShareConfigInput<'_> {
 
         for (uri, packages) in &uri_to_packages {
             if packages.len() > 1 {
-                // Deduplicate package names before emitting the warning.
+                // Deduplicate package names before emitting the error.
                 let mut unique: Vec<&&str> = packages
                     .iter()
                     .collect::<FxHashSet<_>>()
                     .into_iter()
                     .collect();
                 unique.sort();
-                tracing::warn!(
-                    uri,
-                    packages = ?unique,
-                    "crossAppSharedConfig duplicate URI declared by multiple packages"
-                );
+                return Err(ArkdownError::Bundler(format!(
+                    "ProcessShareConfig: duplicate crossAppSharedConfig URI '{}' declared by packages: {:?}",
+                    uri, unique
+                )));
             }
         }
+        Ok(())
     }
 }
 
@@ -257,7 +255,8 @@ mod tests {
         let output = merge_share_config(ShareConfigInput {
             module_root: tmp.path(),
             self_entries: vec![],
-        });
+        })
+        .unwrap();
         assert!(output.entries.is_empty());
     }
 
@@ -282,7 +281,8 @@ mod tests {
         let output = merge_share_config(ShareConfigInput {
             module_root: tmp.path(),
             self_entries: vec![],
-        });
+        })
+        .unwrap();
 
         assert_eq!(output.entries.len(), 1);
         assert_eq!(output.entries[0].uri, "myapp://shared/Foo");
@@ -310,7 +310,8 @@ mod tests {
         let output = merge_share_config(ShareConfigInput {
             module_root: tmp.path(),
             self_entries: vec![],
-        });
+        })
+        .unwrap();
 
         assert!(
             output.entries.is_empty(),
@@ -329,7 +330,8 @@ mod tests {
         let output = merge_share_config(ShareConfigInput {
             module_root: tmp.path(),
             self_entries: vec![self_entry.clone()],
-        });
+        })
+        .unwrap();
         assert_eq!(output.entries.len(), 1);
         assert_eq!(output.entries[0], self_entry);
     }
@@ -391,7 +393,8 @@ mod tests {
         let output = merge_share_config(ShareConfigInput {
             module_root: tmp.path(),
             self_entries: vec![],
-        });
+        })
+        .unwrap();
 
         assert_eq!(output.entries.len(), 1);
         assert_eq!(

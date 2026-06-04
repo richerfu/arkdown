@@ -745,6 +745,7 @@ fn test_loader_json_dynamic_import_lib_info_uses_runtime_only_packages() {
             packages: vec!["@runtime/feature".to_string()],
             sources: vec![],
         }),
+        support_chunks: false,
     });
     let module_cfg = ModuleConfig {
         name: "entry".to_string(),
@@ -795,6 +796,7 @@ fn test_loader_json_compile_entry_uses_runtime_only_sources() {
             packages: vec![],
             sources: vec!["src/main/ets/runtime".to_string()],
         }),
+        support_chunks: false,
     });
     let module_cfg = ModuleConfig {
         name: "entry".to_string(),

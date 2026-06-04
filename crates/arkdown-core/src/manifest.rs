@@ -152,6 +152,15 @@ pub struct ModuleJson5Module {
     /// Populated by `ProcessShareConfig` when merging HSP dep manifests.
     #[serde(default)]
     pub cross_app_shared_config: Vec<CrossAppSharedConfigEntry>,
+    /// Permissions requested by this module, preserved verbatim in the output `module.json`.
+    #[serde(rename = "requestPermissions", default, skip_serializing_if = "Vec::is_empty")]
+    pub request_permissions: Vec<serde_json::Value>,
+    /// Permissions defined/exported by this module.
+    #[serde(rename = "definePermissions", default, skip_serializing_if = "Vec::is_empty")]
+    pub define_permissions: Vec<serde_json::Value>,
+    /// Proxy data entries (cross-app data proxy configuration), preserved verbatim.
+    #[serde(rename = "proxyData", default, skip_serializing_if = "Vec::is_empty")]
+    pub proxy_data: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

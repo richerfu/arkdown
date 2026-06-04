@@ -153,6 +153,10 @@ pub struct ArkOptions {
     pub obfuscation: Option<ObfuscationConfig>,
     pub types: Vec<String>,
     pub runtime_only: Option<RuntimeOnlyConfig>,
+    /// Whether to allow the bundler to split output into multiple chunks
+    /// (`buildOption.arkOptions.supportChunks` in `build-profile.json5`).
+    #[serde(default)]
+    pub support_chunks: bool,
 }
 
 /// Obfuscation configuration (from `buildOption.arkOptions.obfuscation` in
@@ -186,6 +190,11 @@ pub struct ResOptions {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceOption {
     pub source_language: Option<String>,
+    /// Worker entry files from `buildOption.sourceOption.workers` in
+    /// `build-profile.json5`. Resolved to absolute paths relative to the
+    /// project root during config resolution.
+    #[serde(default)]
+    pub workers: Vec<PathBuf>,
 }
 
 /// Runtime-only package configuration.
