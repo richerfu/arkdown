@@ -57,6 +57,8 @@ use compile_arkts_output::{
 };
 mod compile_arkts_package_entries;
 use compile_arkts_package_entries::{is_package_entry_file, PackageEntryInfos};
+mod compile_arkts_arkdata;
+use compile_arkts_arkdata::compile_arkdata_pass;
 mod compile_arkts_widget;
 use compile_arkts_widget::compile_widget_pass;
 mod intermediates;
@@ -89,10 +91,21 @@ pub struct BuildArgs {
     /// Watch mode: rebuild on source file changes (M1 — SPEC-023)
     #[arg(long, default_value = "false")]
     pub watch: bool,
+    /// Coverage instrumentation mode: prepare build for code-coverage collection (F20)
+    /// Enables build infrastructure for coverage but does not yet inject Istanbul counters.
+    #[arg(long, default_value = "false")]
+    pub coverage: bool,
+    /// Preview mode: watch resource directories and trigger resource recompilation (M3).
+    /// Implies --watch; focuses change detection on src/main/resources/ for faster
+    /// resource-only rebuilds during DevEco IDE preview sessions.
+    #[arg(long, default_value = "false")]
+    pub preview: bool,
 }
 
 pub async fn run(args: BuildArgs) -> Result<()> {
-    let watch_mode = args.watch;
+    let watch_mode = args.watch || args.preview; // --preview implies --watch
+    let preview_mode = args.preview;
+    let coverage_mode = args.coverage;
     let target_str = args.target.clone();
     let mode_str = args.mode.clone();
     let module_filter = args.module.clone();
@@ -131,6 +144,33 @@ pub async fn run(args: BuildArgs) -> Result<()> {
 
     let config_arc = Arc::new(config);
     let build_modules = build_modules_for_target(config_arc.as_ref(), module_filter.as_deref());
+
+    // F20: Coverage instrumentation mode.
+    // When --coverage is set, the build is prepared for code coverage collection.
+    // Full Istanbul-style counter injection is not yet implemented; this flag
+    // establishes the build infrastructure that would be used by a coverage runner.
+    if coverage_mode {
+        tracing::info!(
+            "coverage mode enabled — build prepared for code coverage (F20); \
+             Istanbul counter injection not yet implemented"
+        );
+    }
+
+    // F24: Custom compile plugins (hvigorfile.ts equivalent).
+    // If a `hvigorfile.ts` exists at the project root, warn the user that
+    // TypeScript plugin execution is not supported.  Users can instead place
+    // a `arkdown.config.json` file at the project root with build overrides.
+    //
+    // For projects that only use hvigorfile.ts to configure standard hvigor
+    // options (not custom rollup plugins), this warning can be ignored.
+    let hvigorfile_path = project_root.join("hvigorfile.ts");
+    if hvigorfile_path.exists() {
+        tracing::warn!(
+            path = %hvigorfile_path.display(),
+            "F24: hvigorfile.ts detected — TypeScript plugin execution is not supported; \
+             use arkdown.config.json for build customizations that arkdown supports"
+        );
+    }
 
     // Step 2: Resource compilation + Profile processing.
     // Resources must be compiled first so their numeric IDs (iconId, labelId,
@@ -488,7 +528,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             // Build reverse map: chunk_name → [chunk_names that import it].
             let chunks = &bundle_out.chunk_graph.chunks;
             let mut importer_map: FxHashMap<String, Vec<String>> = FxHashMap::default();
-            for (idx, chunk) in chunks.iter_enumerated() {
+            for (_idx, chunk) in chunks.iter_enumerated() {
                 for &import_idx in &chunk.cross_chunk_imports {
                     if let Some(imported) = chunks.get(import_idx) {
                         importer_map
@@ -687,6 +727,10 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             }
             copy_ets_assets_to_loader_out(module, loader_json)?;
             compile_widget_pass(module, _manifest, loader_json, &config_arc, resource_refs)?;
+
+            // H13: ArkData compile pass — separate ABC invocation for cloud
+            // database schema files using @kit.ArkData decorators.
+            compile_arkdata_pass(module, loader_json, &config_arc, resource_refs)?;
 
             for (_chunk_name, path) in &bundle_out.chunk_files {
                 if path.extension().and_then(|e| e.to_str()) == Some("js") && path.exists() {
@@ -961,11 +1005,23 @@ pub async fn run(args: BuildArgs) -> Result<()> {
     // `buildDelay: 100` ms debounce.
     if watch_mode {
         let config_for_watch = config_arc.clone();
-        let watch_dirs: Vec<PathBuf> = config_for_watch
-            .modules
-            .iter()
-            .flat_map(|m| FileWatcher::dirs_for_module(&m.src_path))
-            .collect();
+        // M3: Preview mode — watch only src/main/resources/ for resource-only reloads.
+        // Full M3 (IDE WebSocket live preview) is not implemented; this provides
+        // the file-watching infrastructure for resource detection.
+        let watch_dirs: Vec<PathBuf> = if preview_mode {
+            config_for_watch
+                .modules
+                .iter()
+                .map(|m| m.src_path.join("src/main/resources"))
+                .filter(|p| p.exists())
+                .collect()
+        } else {
+            config_for_watch
+                .modules
+                .iter()
+                .flat_map(|m| FileWatcher::dirs_for_module(&m.src_path))
+                .collect()
+        };
         let watcher = FileWatcher::new(config_for_watch, watch_dirs);
         println!("\nWatching for changes... (Ctrl+C to stop)");
         // Use a blocking handle to drive async rebuilds from the sync watcher callback.
@@ -988,6 +1044,8 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                     product: product_filter_w.clone(),
                     project: Some(project_root_w.clone()),
                     watch: false, // inner rebuild does not recurse into watch
+                    coverage: false,
+                    preview: false,
                 };
                 if let Err(e) = rt.block_on(run(rebuild_args)) {
                     eprintln!("[watch] rebuild failed: {e:#}");

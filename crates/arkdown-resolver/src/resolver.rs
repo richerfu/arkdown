@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use arkdown_core::{ModuleType, OhosResolvedModule, PkgContext};
 use oxc_resolver::{
     EnforceExtension, ResolveOptions as OxcResolveOptions, Resolver as OxcResolver,
+    TsconfigDiscovery, TsconfigOptions, TsconfigReferences,
 };
 
 use crate::error::ResolveError;
@@ -301,6 +302,20 @@ impl OhosResolver {
             modules.push("oh_modules".to_string());
         }
 
+        // F23 — tscResolve: if tsconfig.json exists at the project root, enable
+        // TypeScript paths-based resolution.  This mirrors hvigor's useTscResolve
+        // option: when active, the TypeScript compiler's path-mapping rules in
+        // tsconfig.json (compilerOptions.paths) are honoured during resolution.
+        let tsconfig_path = config.project_root.join("tsconfig.json");
+        let tsconfig = if tsconfig_path.exists() {
+            Some(TsconfigDiscovery::Manual(TsconfigOptions {
+                config_file: tsconfig_path,
+                references: TsconfigReferences::Disabled,
+            }))
+        } else {
+            None
+        };
+
         OxcResolveOptions {
             cwd: Some(config.project_root.clone()),
             extensions: [
@@ -316,6 +331,7 @@ impl OhosResolver {
             node_path: false,
             enforce_extension: EnforceExtension::Disabled,
             symlinks: true,
+            tsconfig,
             ..OxcResolveOptions::default()
         }
     }

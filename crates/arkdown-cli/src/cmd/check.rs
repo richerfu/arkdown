@@ -12,14 +12,13 @@
 //! This command does NOT run TypeScript semantic type checking (that requires
 //! the full `ets_checker.js` pipeline from the SDK).
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::Args;
 use walkdir::WalkDir;
 
-use arkdown_config::load_config;
-use arkdown_core::{ArkdownConfig, BuildMode, OutputTarget};
+use arkdown_core::{BuildMode, OutputTarget};
 use arkdown_plugin_ets_transform::{load_system_resource_references, EtsTransformPlugin};
 
 #[derive(Args, Debug)]
