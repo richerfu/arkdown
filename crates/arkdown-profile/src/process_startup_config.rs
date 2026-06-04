@@ -75,9 +75,10 @@ pub fn merge_startup_config(
                 .join("src/main/resources/base/profile")
                 .join(format!("{}.json", profile_name));
             if let Some(profile) = StartupConfigInput::read_startup_profile(&profile_path) {
-                StartupConfigInput::merge_tasks_from_profile(
+                StartupConfigInput::merge_tasks_from_profile_with_bundle(
                     &profile,
                     input.module_name,
+                    input.bundle_name,
                     &profile_path,
                     &mut merged,
                 );
@@ -169,8 +170,16 @@ impl<'a> StartupConfigInput<'a> {
         profile_path: &Path,
         merged: &mut MergedStartupConfig,
     ) {
-        // Optional bundle_name extracted from profile_path context if available.
-        // Used to generate OHM URLs matching hvigor's format.
+        Self::merge_tasks_from_profile_with_bundle(profile, module_name, None, profile_path, merged)
+    }
+
+    fn merge_tasks_from_profile_with_bundle(
+        profile: &AppStartupProfile,
+        module_name: &str,
+        bundle_name: Option<&str>,
+        profile_path: &Path,
+        merged: &mut MergedStartupConfig,
+    ) {
         let config_path_str = profile_path.to_string_lossy().into_owned();
 
         let annotate = |task: &StartupTask| -> StartupTask {
@@ -194,16 +203,19 @@ impl<'a> StartupConfigInput<'a> {
             }
 
             // ohmurl: @bundle:<bundleName>/<moduleName>/<srcEntryWithoutExt>
-            // The bundleName is not available here; callers that have it
-            // should set it after merging.  We pre-compute the module/path part.
+            // Matches hvigor's processModuleStartupConfig() OHM URL format.
             if t.ohmurl.is_none() {
                 let src = task
                     .src_entry
                     .trim_start_matches("./")
                     .trim_end_matches(".ets")
                     .trim_end_matches(".ts");
-                // Partial OHM URL — caller fills in bundleName prefix if available.
-                t.ohmurl = Some(format!("{}:{}/{}", module_name, module_name, src));
+                let ohm = if let Some(bn) = bundle_name {
+                    format!("@bundle:{}/{}/{}", bn, module_name, src)
+                } else {
+                    format!("@bundle:__bundle__/{}/{}", module_name, src)
+                };
+                t.ohmurl = Some(ohm);
             }
 
             t

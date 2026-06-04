@@ -227,6 +227,58 @@ impl LoaderJson {
             }
         }
 
+        // Add startup task srcEntry paths to compileEntry.
+        // Matches hvigor's GenerateLoaderJson which includes startup task source files
+        // so that the bundler processes them alongside ability entry points.
+        // Read the appStartup reference directly from module.json5 since HapManifest
+        // doesn't carry it forward.
+        let module_json5_app_startup: Option<String> = {
+            let path = module_cfg.src_path.join("src/main/module.json5");
+            std::fs::read_to_string(&path).ok().and_then(|s| {
+                #[derive(serde::Deserialize)]
+                struct ModuleWrapper {
+                    module: ModuleAppStartup,
+                }
+                #[derive(serde::Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct ModuleAppStartup {
+                    #[serde(default)]
+                    app_startup: Option<String>,
+                }
+                json5::from_str::<ModuleWrapper>(&s).ok()?.module.app_startup
+            })
+        };
+        if let Some(app_startup_ref) = &module_json5_app_startup {
+            if let Some(profile_name) = app_startup_ref.strip_prefix("$profile:") {
+                let profile_path = module_cfg
+                    .src_path
+                    .join("src/main/resources/base/profile")
+                    .join(format!("{}.json", profile_name));
+                if let Ok(content) = std::fs::read_to_string(&profile_path) {
+                    #[derive(serde::Deserialize)]
+                    #[serde(rename_all = "camelCase")]
+                    struct StartupProfile {
+                        #[serde(default)]
+                        startup_tasks: Vec<StartupTaskEntry>,
+                    }
+                    #[derive(serde::Deserialize)]
+                    #[serde(rename_all = "camelCase")]
+                    struct StartupTaskEntry {
+                        src_entry: String,
+                    }
+                    if let Ok(profile) = json5::from_str::<StartupProfile>(&content) {
+                        for task in &profile.startup_tasks {
+                            let src = task.src_entry.trim_start_matches("./");
+                            let entry = format!("./ets/{}", src.trim_start_matches("ets/"));
+                            if !compile_entry.contains(&entry) {
+                                compile_entry.push(entry);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let router_map =
             Self::read_loader_router_maps(config, module_cfg, manifest.router_map.as_deref());
 
