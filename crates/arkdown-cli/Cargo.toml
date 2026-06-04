@@ -27,6 +27,7 @@ arkdown-plugin-ets-transform = { workspace = true }
 arkdown-plugin-ohos-resolve = { workspace = true }
 arkdown-plugin-module-meta = { workspace = true }
 arkdown-plugin-duplicate-check = { workspace = true }
+arkdown-plugin-har-dedup = { workspace = true }
 arkdown-plugin-json5 = { workspace = true }
 arkdown-plugin-router-map = { workspace = true }
 arkdown-resolver = { workspace = true }

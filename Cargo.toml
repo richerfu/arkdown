@@ -39,6 +39,7 @@ arkdown-obfuscate = { path = "crates/arkdown-obfuscate" }
 arkdown-pack = { path = "crates/arkdown-pack" }
 arkdown-plugin-duplicate-check = { path = "crates/arkdown-plugin-duplicate-check" }
 arkdown-plugin-ets-transform = { path = "crates/arkdown-plugin-ets-transform" }
+arkdown-plugin-har-dedup = { path = "crates/arkdown-plugin-har-dedup" }
 arkdown-plugin-json5 = { path = "crates/arkdown-plugin-json5" }
 arkdown-plugin-module-meta = { path = "crates/arkdown-plugin-module-meta" }
 arkdown-plugin-ohos-resolve = { path = "crates/arkdown-plugin-ohos-resolve" }

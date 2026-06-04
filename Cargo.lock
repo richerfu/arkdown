@@ -227,6 +227,7 @@ dependencies = [
  "arkdown-pack",
  "arkdown-plugin-duplicate-check",
  "arkdown-plugin-ets-transform",
+ "arkdown-plugin-har-dedup",
  "arkdown-plugin-json5",
  "arkdown-plugin-module-meta",
  "arkdown-plugin-ohos-resolve",

@@ -443,7 +443,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 .strict_mode
                 .case_sensitive_check,
         ));
-        let plugins: Vec<SharedPluginable> = vec![
+        let mut plugins: Vec<SharedPluginable> = vec![
             // 1. ETS transform — must be first, desugars .ets before any other plugin sees it
             Arc::new(EtsTransformPlugin::with_resource_references(
                 config_arc.clone(),
@@ -461,6 +461,26 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             // 5. Duplicate filename check
             Arc::new(DuplicateCheckPlugin) as SharedPluginable,
         ];
+
+        // F14 — hspCollectHarFilesPlugin: collect HAR files used in HSP builds.
+        // For HSP modules, add the HAR dedup plugin in collect-pass mode so that
+        // the HAR modules included in this build are written to an intermediate
+        // JSON file. A subsequent build with real_build mode would then exclude
+        // these duplicated HAR modules (not yet implemented for two-pass builds).
+        // Matches hvigor's hspCollectHarFilesPlugin buildEnd semantics.
+        if matches!(config_arc.output_target, OutputTarget::Hsp) {
+            let collect_file = module
+                .src_path
+                .join("build/default/intermediates/har_files/default/har_files.json");
+            if let Some(parent) = collect_file.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            plugins.push(
+                Arc::new(arkdown_plugin_har_dedup::HarDeduplicatePlugin::collect_pass(
+                    collect_file,
+                )) as SharedPluginable,
+            );
+        }
         let bundler = Bundler::new((*config_arc).clone(), plugins);
         let bundle_out = bundler
             .bundle(loader_json)
