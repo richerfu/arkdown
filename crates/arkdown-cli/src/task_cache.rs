@@ -181,6 +181,8 @@ mod tests {
                 build_option: BuildOption {
                     preload_so: vec![],
                 remove_permissions: vec![],
+                aot_compile_mode: None,
+                ap_path: None,
                     strict_mode: StrictModeConfig {
                         case_sensitive_check: false,
                         use_normalized_ohm_url: true,

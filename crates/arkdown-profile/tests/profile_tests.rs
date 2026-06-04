@@ -35,6 +35,8 @@ fn default_config() -> Arc<ArkdownConfig> {
                 source_option: None,
                 preload_so: vec![],
                 remove_permissions: vec![],
+                aot_compile_mode: None,
+                ap_path: None,
             },
         },
         modules: vec![],

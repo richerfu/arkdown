@@ -241,6 +241,12 @@ pub struct RawBuildOption {
     /// Matches hvigor's `MergeProfile.getRemovePermissionSet()` behavior.
     #[serde(rename = "removePermissions", default)]
     pub remove_permissions: Vec<String>,
+    /// AOT compile mode: "type" | "method" | "speed". Controls anBuildMode in loader.json.
+    #[serde(rename = "aotCompileMode", default)]
+    pub aot_compile_mode: Option<String>,
+    /// Path to AOT profile data (`.ap` file) for PGO-based AOT compilation.
+    #[serde(rename = "apPath", default)]
+    pub ap_path: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Deserialize, Default)]

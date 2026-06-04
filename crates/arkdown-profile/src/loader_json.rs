@@ -469,7 +469,14 @@ impl LoaderJson {
                 "{}/build/default/intermediates/loader_out/default/an/arm64-v8a",
                 module_root
             ),
-            an_build_mode: "type".to_string(),
+            // anBuildMode from buildOption.aotCompileMode (hvigor handleAotFields).
+            // Defaults to "type" (compile-by-type AOT) when not specified.
+            an_build_mode: config
+                .product
+                .build_option
+                .aot_compile_mode
+                .clone()
+                .unwrap_or_else(|| "type".to_string()),
             non_entry_importees: vec![],
             compiled_importees: vec![],
 

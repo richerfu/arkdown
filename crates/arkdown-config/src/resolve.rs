@@ -181,6 +181,17 @@ pub fn load_config(
         .map(|bo| bo.remove_permissions.clone())
         .unwrap_or_default();
 
+    let aot_compile_mode = raw_product
+        .build_option
+        .as_ref()
+        .and_then(|bo| bo.aot_compile_mode.clone());
+
+    let ap_path = raw_product
+        .build_option
+        .as_ref()
+        .and_then(|bo| bo.ap_path.as_ref())
+        .map(|p| if p.is_absolute() { p.clone() } else { root.join(p) });
+
     let source_option = raw_product
         .build_option
         .as_ref()
@@ -211,6 +222,8 @@ pub fn load_config(
         source_option,
         preload_so,
         remove_permissions,
+        aot_compile_mode,
+        ap_path,
     };
 
     let product = ProductConfig {
