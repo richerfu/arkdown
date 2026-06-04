@@ -548,9 +548,20 @@ impl Packager {
 
         // module.privacy.json — PAC/privacy profile (deflated), written when
         // `ProcessModulePrivacyProfile` produced a validated privacy profile.
+        // Matches hvigor's validation: only include if the file contains valid JSON.
         if let Some(ref privacy_path) = input.privacy_profile_path {
             if privacy_path.exists() {
-                zip_writer::add_file_deflate(&mut writer, "module.privacy.json", privacy_path)?;
+                // Basic validation: ensure it's valid JSON before including.
+                if let Ok(content) = std::fs::read_to_string(privacy_path) {
+                    if serde_json::from_str::<serde_json::Value>(&content).is_ok() {
+                        zip_writer::add_file_deflate(&mut writer, "module.privacy.json", privacy_path)?;
+                    } else {
+                        tracing::warn!(
+                            path = %privacy_path.display(),
+                            "ProcessModulePrivacyProfile: invalid JSON in privacy profile; skipping"
+                        );
+                    }
+                }
             }
         }
 
