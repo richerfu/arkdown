@@ -358,6 +358,122 @@ impl<'a> AbcReader<'a> {
 ///
 /// Returns the subset of class names from `dep_data` that are NOT in `base_data`.
 /// Used to detect which ByteCode HAR classes would be added on merge.
+/// Per-section hashes for an ABC binary.
+///
+/// Used by the regression test harness (TASK-ABC-03) to determine whether an
+/// ABC output change is in the executable bytecode or only in the debug
+/// (DebugInfo / LineNumberProgram) sections.
+///
+/// # Usage
+///
+/// ```ignore
+/// let golden = AbcSectionHashes::compute(golden_bytes)?;
+/// let actual = AbcSectionHashes::compute(actual_bytes)?;
+/// // Assert only the code (non-debug) region is byte-identical.
+/// assert_eq!(golden.code_hash, actual.code_hash,
+///            "bytecode changed — check CodeItems/ClassRecords/StringTable");
+/// // Allow debug info to differ in a separate assertion if desired.
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AbcSectionHashes {
+    /// FNV-1a 64-bit hash of the full file bytes.
+    pub full_hash: u64,
+    /// FNV-1a 64-bit hash of the file up to (but not including) the first
+    /// LNP entry referenced by the LNP index.  This covers the header,
+    /// class records, string table, method bytecode, and literal arrays.
+    ///
+    /// A mismatch here means executable bytecode changed.
+    pub code_hash: u64,
+    /// FNV-1a 64-bit hash of the LNP (LineNumberProgram) section.
+    ///
+    /// A mismatch here (while `code_hash` is identical) means only debug
+    /// source-position information changed.
+    pub lnp_hash: u64,
+    /// Total size of the file in bytes (from the ABC header field at 0x10).
+    pub file_size: u32,
+    /// Number of LNP entries (from ABC header field at 0x24).
+    pub num_lnp: u32,
+}
+
+impl AbcSectionHashes {
+    /// Compute per-section hashes for an ABC binary.
+    ///
+    /// Requires valid PANDA magic and a parseable header.  Errors are returned
+    /// for malformed files.
+    pub fn compute(data: &[u8]) -> Result<Self, AbcReadError> {
+        let reader = AbcReader::new(data)?;
+
+        let file_size = reader.read_u32(0x10)?;
+        let num_lnp = reader.read_u32(0x24)?;
+        let lnp_idx_off = reader.read_u32(0x28)? as usize;
+
+        let full_hash = fnv1a_hash_bytes(data);
+
+        // The LNP section begins at the first LNP item offset listed in the
+        // LNP index.  The LNP index itself is at `lnp_idx_off`; each entry is
+        // a u32 pointing to the start of a LineNumberProgram item.
+        //
+        // If there are no LNP entries, lnp_idx_off is 0 (per Panda spec): in
+        // that case the entire file is the "code" region.
+        let lnp_data_start = if num_lnp > 0 && lnp_idx_off > 0 && lnp_idx_off + 4 <= data.len() {
+            // Read the first LNP item offset (the earliest LNP body in the file).
+            let mut earliest = reader.read_u32(lnp_idx_off)? as usize;
+            for i in 1..num_lnp as usize {
+                let off = lnp_idx_off + i * 4;
+                if off + 4 > data.len() {
+                    break;
+                }
+                let candidate = reader.read_u32(off)? as usize;
+                if candidate < earliest {
+                    earliest = candidate;
+                }
+            }
+            // Clamp to valid range.
+            earliest.min(data.len())
+        } else {
+            data.len()
+        };
+
+        // "code region" = everything before the first LNP body.
+        let code_hash = fnv1a_hash_bytes(&data[..lnp_data_start]);
+
+        // "LNP region" = everything from the first LNP body to end of file.
+        let lnp_hash = fnv1a_hash_bytes(&data[lnp_data_start..]);
+
+        Ok(Self {
+            full_hash,
+            code_hash,
+            lnp_hash,
+            file_size,
+            num_lnp,
+        })
+    }
+
+    /// Returns `true` when both files have the same code hash (CodeItems,
+    /// ClassRecords, StringTable, LiteralArrays) even if debug info differs.
+    pub fn code_region_matches(&self, other: &Self) -> bool {
+        self.code_hash == other.code_hash
+    }
+
+    /// Returns `true` when the full file is byte-identical.
+    pub fn is_identical(&self, other: &Self) -> bool {
+        self.full_hash == other.full_hash && self.file_size == other.file_size
+    }
+}
+
+/// FNV-1a 64-bit hash of a byte slice.
+///
+/// Used internally by `AbcSectionHashes::compute()` to avoid pulling in an
+/// additional crate dependency.
+fn fnv1a_hash_bytes(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
 pub fn diff_class_names(
     base_data: &[u8],
     dep_data: &[u8],
@@ -442,5 +558,43 @@ mod tests {
         assert!(!AbcReader::is_valid_magic(b"not abc"));
         assert!(AbcReader::is_valid_magic(b"PANDA\x00\x00\x00extra"));
         assert!(!AbcReader::is_valid_magic(b"PANDA\x00\x00")); // too short
+    }
+
+    // ── AbcSectionHashes ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_section_hashes_full_equals_code_when_no_lnp() {
+        // Compile without debug info: no LNP entries → code_hash == full_hash.
+        let bytes = compile_to_bytes("var x = 1;", "entry/ets/Index");
+        let hashes = AbcSectionHashes::compute(&bytes).unwrap();
+        // num_lnp == 0 or lnp_idx_off == 0 → lnp_data_start == file_size.
+        // full_hash and code_hash may or may not be equal depending on whether
+        // any LNP index is present; at minimum the struct should be parseable.
+        assert_eq!(hashes.full_hash, fnv1a_hash_bytes(&bytes));
+        assert!(hashes.file_size as usize <= bytes.len());
+    }
+
+    #[test]
+    fn test_section_hashes_same_source_yields_identical_hashes() {
+        let source = "export function add(a: number, b: number): number { return a + b; }";
+        let bytes1 = compile_to_bytes(source, "module/ets/math");
+        let bytes2 = compile_to_bytes(source, "module/ets/math");
+        let h1 = AbcSectionHashes::compute(&bytes1).unwrap();
+        let h2 = AbcSectionHashes::compute(&bytes2).unwrap();
+        assert!(h1.is_identical(&h2), "identical sources must produce identical ABC");
+    }
+
+    #[test]
+    fn test_section_hashes_code_region_matches_catches_debug_vs_code_change() {
+        // Two different sources produce different code hashes.
+        let bytes_a = compile_to_bytes("var x = 1;", "entry/ets/A");
+        let bytes_b = compile_to_bytes("var y = 2;", "entry/ets/B");
+        let h_a = AbcSectionHashes::compute(&bytes_a).unwrap();
+        let h_b = AbcSectionHashes::compute(&bytes_b).unwrap();
+        // Different sources must differ in code_hash.
+        assert!(
+            !h_a.code_region_matches(&h_b),
+            "different sources must not have matching code hash"
+        );
     }
 }

@@ -36,7 +36,7 @@ pub mod ir;
 mod npm_entries;
 pub mod widget;
 
-pub use abc_reader::{AbcClassInfo, AbcReadError, AbcReader, ParsedAbcSummary};
+pub use abc_reader::{AbcClassInfo, AbcReadError, AbcReader, AbcSectionHashes, ParsedAbcSummary};
 pub use compiler::{AbcArtifactResult, AbcCompileOptions, AbcCompiler, AbcModule};
 pub use error::AbcError;
 pub use widget::{

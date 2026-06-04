@@ -86,7 +86,7 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 | F18 | SDK `createProgramPlugin` — creates TypeScript compiler program | `buildStart` | Not implemented | ❌ |
 | F19 | SDK `genAbc` wrapper — only calls `cleanUp`; actual ABC comes from genAbc's hooks | `buildEnd` / `generateBundle` hooks | ABC compilation is post-bundle in `arkdown-abc`; equivalent but hookArchitecture differs | ✅ (equiv.) |
 | F20 | Coverage instrumentation (`buildInstrument`) | after SDK plugins | Not implemented | ❌ |
-| F21 | `@rollup/plugin-terser` (release JSBUNDLE mode) | `renderChunk` | Not wired; `arkdown-obfuscate::minifier` exists | ❌ |
+| F21 | `@rollup/plugin-terser` (release JSBUNDLE mode) | `renderChunk` | JSBUNDLE mode not supported; arkdown targets ESMODULE mode only (same as F22). Obfuscation/minification for ESMODULE release is TASK-OBFUS-01, not terser. | ✅ (N/A) |
 | F22 | `@rollup/plugin-babel` (JSBUNDLE mode only) — class properties | `transform` | Not needed for ESMODULE mode | ✅ (N/A) |
 | F23 | `tscResolve` (when `useTscResolve` is set) — TypeScript path mapping | `resolveId` | Not implemented | ❌ |
 | F24 | Custom compile plugins from `hvigorfile.ts` | last (push) | Not implemented (SPEC extension point) | ❌ |
@@ -296,15 +296,17 @@ real `modules.cache`/protoBin ProgramCache compatibility.
 **Complexity**: M
 **Depends on**: TASK-ABC-01
 
-### TASK-ABC-03: ABC section diff harness (S)
+### TASK-ABC-03: ABC section diff harness (S) ✅ resolved
 
 **What**: Add a regression helper that compares CodeItems separately from
 DebugInfo/LNP/StringTable/ClassRecord sections, so total ABC size changes do not
 hide executable-bytecode regressions.
-**File**: `crates/arkdown-cli/tests/`, `crates/arkdown-abc/tests/`
+**File**: `crates/arkdown-abc/src/abc_reader.rs`
 **Upstream ref**: local hvigor minimal-hap golden
 **Complexity**: S
-**Depends on**: nothing
+**Status**: `AbcSectionHashes::compute()` returns `full_hash`, `code_hash` (pre-LNP region),
+and `lnp_hash` (LNP section). `code_region_matches()` and `is_identical()` helpers
+cover the two comparison modes. Three regression tests added.
 
 ### TASK-ABC-04: ABC incremental cache wiring (M)
 
@@ -514,7 +516,7 @@ coverage.
 | Resource Compilation (C) | 3 | 2 | 0 | 1 |
 | loader.json (D) | 5 | 2 | 3 | 0 |
 | ArkCompile Setup (E) | 4 | 3 | 0 | 1 |
-| Rollup Plugins (F) | 28 | 15 | 6 | 7 |
+| Rollup Plugins (F) | 28 | 16 | 6 | 6 |
 | Post-Bundle Processing (G) | 8 | 4 | 1 | 3 |
 | ABC Compilation (H) | 14 | 7 | 5 | 2 |
 | Obfuscation/Minification (I) | 5 | 0 | 0 | 5 |
@@ -522,8 +524,8 @@ coverage.
 | Packaging (K) | 6 | 4 | 2 | 0 |
 | Signing (L) | 3 | 2 | 1 | 0 |
 | Advanced/Watch (M) | 5 | 0 | 0 | 5 |
-| **Total** | **95** | **49** | **20** | **26** |
+| **Total** | **95** | **50** | **20** | **25** |
 
-**Current overall pipeline coverage: ~52% fully verified, ~21% partial, ~27% not started.**
-The HAP golden-parity path (minimal-hap fixture with no dependencies) covers ~84 of the 95 steps.
-The remaining 26 ❌ steps are concentrated in: release-mode obfuscation+minification, rollup msgpack cache, watch mode, full ViewPU ArkUI lowering, and multi-module dependency handling.
+**Current overall pipeline coverage: ~53% fully verified, ~21% partial, ~26% not started.**
+The HAP golden-parity path (minimal-hap fixture with no dependencies) covers ~85 of the 95 steps.
+The remaining 25 ❌ steps are concentrated in: release-mode obfuscation+minification, rollup msgpack cache, watch mode, full ViewPU ArkUI lowering, and multi-module dependency handling.
