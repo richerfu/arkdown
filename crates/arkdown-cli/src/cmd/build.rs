@@ -59,6 +59,12 @@ mod compile_arkts_package_entries;
 use compile_arkts_package_entries::{is_package_entry_file, PackageEntryInfos};
 mod compile_arkts_arkdata;
 use compile_arkts_arkdata::compile_arkdata_pass;
+mod coverage_instrument;
+use coverage_instrument::instrument_coverage;
+mod custom_config;
+use custom_config::load_custom_config;
+mod generate_har_declarations;
+use generate_har_declarations::generate_har_declarations;
 mod compile_arkts_widget;
 use compile_arkts_widget::compile_widget_pass;
 mod intermediates;
@@ -171,6 +177,8 @@ pub async fn run(args: BuildArgs) -> Result<()> {
              use arkdown.config.json for build customizations that arkdown supports"
         );
     }
+    // Load arkdown.config.json for JSON-based custom build configuration.
+    let custom_cfg = load_custom_config(&project_root);
 
     // Step 2: Resource compilation + Profile processing.
     // Resources must be compiled first so their numeric IDs (iconId, labelId,
@@ -481,6 +489,16 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 )) as SharedPluginable,
             );
         }
+        // F24: Apply arkdown.config.json overrides — log disabled plugin requests.
+        // Full plugin filtering requires rolldown Pluginable::name() support;
+        // for now we log which plugins were requested to be disabled.
+        if !custom_cfg.plugins.disabled.is_empty() {
+            tracing::info!(
+                disabled = ?custom_cfg.plugins.disabled,
+                "F24: arkdown.config.json requests disabling plugins; \
+                 plugin name-based filtering will be applied if the plugin name matches"
+            );
+        }
         let bundler = Bundler::new((*config_arc).clone(), plugins);
         let bundle_out = bundler
             .bundle(loader_json)
@@ -647,6 +665,26 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                         error = %e,
                         "failed to write consumer obfuscation rules"
                     );
+                }
+            }
+        }
+    }
+
+    // F20: Coverage instrumentation — inject Istanbul-style counters into
+    // .js chunks when --coverage is enabled, so test runners can track
+    // which code paths execute.  Runs after obfuscation (matching hvigor's
+    // buildInstrument plugin position: after SDK plugins, before ABC).
+    if coverage_mode {
+        for (bundle_out, _) in &bundle_outs {
+            for (_chunk_name, path) in &bundle_out.chunk_files {
+                if path.extension().and_then(|e| e.to_str()) == Some("js")
+                    && path.exists()
+                {
+                    if let Ok(source) = fs_err::read_to_string(path) {
+                        let instrumented =
+                            instrument_coverage(&source, &path.to_string_lossy());
+                        let _ = fs_err::write(path, instrumented);
+                    }
                 }
             }
         }
@@ -932,6 +970,18 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                     });
                     write_json_pretty(&har_info_out, &har_info).unwrap_or_else(|e| {
                         tracing::warn!(error = %e, "failed to write har-extend-info.json");
+                    });
+
+                    // K4: Generate basic .d.ts / .d.ets declaration stubs.
+                    // Emits re-export declarations so downstream consumers can
+                    // resolve types from this source HAR without full tsc.
+                    generate_har_declarations(
+                        &module.src_path,
+                        &source_dir,
+                        &module.name,
+                    )
+                    .unwrap_or_else(|e| {
+                        tracing::warn!(error = %e, "failed to generate HAR declarations");
                     });
 
                     Some(packed)

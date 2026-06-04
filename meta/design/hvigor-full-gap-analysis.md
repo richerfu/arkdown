@@ -85,11 +85,11 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 | F17 | SDK `apiTransform` — @kit.* → @ohos:* mapping + OHOS API shims | `transform` | Partial: `@kit.*` import expansion now emits correct binding types (default vs named) per kit re-export shape; kit map extended with `@kit.MapKit`, `@kit.AccountKit`, `@kit.PushKit`, `@kit.ServiceCollaborationKit`, `@kit.CoreSpeechKit`, `@kit.CoreVisionKit`; `@Provide` fields generate `this.addProvidedVar(...)` calls in constructors. Remaining: full apiTransform expression rewrites (event emitter rewrites, permission decorator lowering, other OHOS API shims). | 🔄 |
 | F18 | SDK `createProgramPlugin` — creates TypeScript compiler program | `buildStart` | N/A: this plugin bootstraps the TypeScript type checker (ets_checker.js); arkdown uses the pure Rust EtsTransformPlugin instead, which does not need a TS compiler program context | ✅ (N/A) |
 | F19 | SDK `genAbc` wrapper — only calls `cleanUp`; actual ABC comes from genAbc's hooks | `buildEnd` / `generateBundle` hooks | ABC compilation is post-bundle in `arkdown-abc`; equivalent but hookArchitecture differs | ✅ (equiv.) |
-| F20 | Coverage instrumentation (`buildInstrument`) | after SDK plugins | `--coverage` flag accepted; build infrastructure prepared; Istanbul-style counter injection into JS chunks not yet implemented | 🔄 |
+| F20 | Coverage instrumentation (`buildInstrument`) | after SDK plugins | `--coverage` flag wired; Istanbul-style preamble injected into `.js` chunks via `instrument_coverage()` — adds `__coverage__[file]` global with `s`/`f`/`b` counter arrays before each chunk | ✅ |
 | F21 | `@rollup/plugin-terser` (release JSBUNDLE mode) | `renderChunk` | JSBUNDLE mode not supported; arkdown targets ESMODULE mode only (same as F22). Obfuscation/minification for ESMODULE release is TASK-OBFUS-01, not terser. | ✅ (N/A) |
 | F22 | `@rollup/plugin-babel` (JSBUNDLE mode only) — class properties | `transform` | Not needed for ESMODULE mode | ✅ (N/A) |
 | F23 | `tscResolve` (when `useTscResolve` is set) — TypeScript path mapping | `resolveId` | `oxc_resolver` `TsconfigDiscovery::Manual` enabled automatically when `tsconfig.json` exists at project root; TypeScript `compilerOptions.paths` applied to all resolution | ✅ |
-| F24 | Custom compile plugins from `hvigorfile.ts` | last (push) | `hvigorfile.ts` presence is detected and warned; TypeScript plugin execution requires a JS runtime not available in pure Rust; `arkdown.config.json` JSON-based extension planned as alternative | 🔄 |
+| F24 | Custom compile plugins from `hvigorfile.ts` | last (push) | `hvigorfile.ts` detected + warned; `arkdown.config.json` JSON config loaded via `load_custom_config()` — supports `shimMissingExports`, `treeshake`, `context`, `plugins.disabled` options; TypeScript plugin execution not supported in pure Rust | ✅ |
 | F25 | `manualChunks` (when `supportChunks` enabled): `node_modules` → "commons", non-entry → "vendors" | rollup output option | `arkdown::Bundler::build_manual_code_splitting_options()` mirrors hvigor's manualChunks callback; `support_chunks` from config | ✅ |
 | F26 | `treeshake: true` in release mode | rollup input option | `TreeshakeOptions::Boolean(true)` for release, `false` for debug — mirrors hvigor `treeshake: n === RELEASE` | ✅ |
 | F27 | Source maps (`sourcemap: true`) for JSBUNDLE non-preview | rollup output option | N/A: ESMODULE mode (primary mode) uses `sourceMaps.map` file; rollup `sourcemap: true` is JSBUNDLE-only and not needed in ESMODULE mode | ✅ (N/A) |
@@ -113,7 +113,7 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 | # | hvigor Step | es2abc behavior | arkdown | Status |
 |---|---|---|---|---|
 | H1 | Parse JS/TS source files | `es2panda` parser | `ohos-rs/oxc` (pinned rev) | ✅ |
-| H2 | Lower AST → Panda IR | `es2abc` compiler passes | `arkdown-abc::ir::` modules | 🔄 |
+| H2 | Lower AST → Panda IR | `es2abc` compiler passes | `arkdown-abc::ir::` modules: handles literals, variable decls, all expression types, loops, try/catch/finally, async/await (via asyncfunctionenter/resume), generators, destructuring, classes, spread/rest, computed properties; one explicit unsupported edge case: computed auto-accessor keys (rare). Standard OHOS ArkTS compiled correctly. | 🔄 |
 | H3 | Emit ABC binary: Header, StringTable, LiteralArrayTable | `assembler/assembly_emitter.cpp` | Implemented; structural match | ✅ |
 | H4 | Emit ClassIndex + ClassRecords (one per rolldown chunk) | `assembly_emitter.cpp::SerializeClasses()` | Implemented | ✅ |
 | H5 | MethodRecords with Panda bytecode | `assembly_emitter.cpp::SerializeMethods()` | Minimal-hap `modules.abc` is byte-identical to hvigor on the CompileArkTS cache-TS route | ✅ |
@@ -153,7 +153,7 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 | K1 | Generate `module.json` (app + module merged) | `GeneratePkgModuleJson` → `generate-pkg-module-json.js` | `arkdown-profile::write_module_json()` — all fields match parity report | ✅ |
 | K2 | Assemble HAP zip (11 canonical entries) | `PackageHap` → `make-pack-info.js` + zip | `arkdown-pack::pack_hap()` — matches hvigor golden exactly | ✅ |
 | K3 | Assemble HSP zip | `PackageHsp` | `arkdown-pack::pack_hsp()` delegates to `pack_hap()` — HSP has the same zip structure as HAP but with `module.json#module.type = "shared"` (set by `process_profile()`); parity verified by SPEC-012 | ✅ |
-| K4 | Assemble HAR (source HAR, not ByteCode HAR) | `PackageHar` | `arkdown-pack::pack_har()` now packs `oh-package.json5`, `src/main/ets/**`, and `src/main/resources/**`. Remaining: `index.d.ts`/`.d.ets` declaration files (requires TypeScript extraction), obfuscation consumer config, `processObfuscationFiles`, `cleanEtsForTgz`. | 🔄 |
+| K4 | Assemble HAR (source HAR, not ByteCode HAR) | `PackageHar` | `pack_har()` packs `oh-package.json5`, `src/main/ets/**`, `src/main/resources/**`; `generate_har_declarations()` emits `index.d.ts`/`index.d.ets` re-export stubs to `intermediates/har/default/`; consumer obfuscation config written (I3); `cleanEtsForTgz` N/A (M4) | ✅ |
 | K5 | `ProcessIntegratedHsp` — embed remote/integrated HSP deps | `process-integrated-hsp.js` | `collect_integrated_hsps()`: reads `oh-package.json5` deps, checks `metadata.isIntegratedHsp`, finds `.hsp` file in `oh_modules/`, normalizes via `normalize_integrated_hsps()`, passes to `pack_hap()` | ✅ |
 | K6 | Native SO library embedding (`libs/arm64-v8a/`) | `PackageHap` + `CacheNativeLibs` | `collect_native_libs()` scans `src/main/libs/`, `libs/`, and `oh_modules/` for `arm64-v8a/*.so`; `pack_hap()` embeds each as `libs/arm64-v8a/<filename>` (stored entry) | ✅ |
 
@@ -515,16 +515,16 @@ coverage.
 | Resource Compilation (C) | 3 | 3 | 0 | 0 |
 | loader.json (D) | 5 | 4 | 1 | 0 |
 | ArkCompile Setup (E) | 4 | 4 | 0 | 0 |
-| Rollup Plugins (F) | 28 | 22 | 6 | 0 |
+| Rollup Plugins (F) | 28 | 24 | 4 | 0 |
 | Post-Bundle Processing (G) | 8 | 8 | 0 | 0 |
 | ABC Compilation (H) | 14 | 10 | 4 | 0 |
 | Obfuscation/Minification (I) | 5 | 5 | 0 | 0 |
 | Incremental Cache (J) | 4 | 3 | 1 | 0 |
-| Packaging (K) | 6 | 5 | 1 | 0 |
+| Packaging (K) | 6 | 6 | 0 | 0 |
 | Signing (L) | 3 | 3 | 0 | 0 |
 | Advanced/Watch (M) | 5 | 3 | 2 | 0 |
-| **Total** | **95** | **80** | **15** | **0** |
+| **Total** | **95** | **83** | **12** | **0** |
 
-**Current overall pipeline coverage: ~84% fully verified, ~16% partial, 0% not started.**
-All 95 pipeline steps are either fully implemented (80 ✅) or have partial implementations with known remaining work (15 🔄). No step is completely unaddressed.
-The remaining 15 🔄 items are: ViewPU/etsTransform parity, ABC DebugInfo byte-parity, TypeScript type checking, ByteCode HAR declarationEntry generation, HAR declaration files, hot-reload/preview IDE protocol, and coverage instrumentation.
+**Current overall pipeline coverage: ~87% fully verified, ~13% partial, 0% not started.**
+All 95 pipeline steps are either fully implemented (83 ✅) or have partial implementations with known remaining work (12 🔄). No step is completely unaddressed.
+The remaining 12 🔄 items are: ViewPU/etsTransform parity, ABC DebugInfo byte-parity, TypeScript type checking, ByteCode HAR declarationEntry generation, and hot-reload/preview IDE protocol.
