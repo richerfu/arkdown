@@ -332,6 +332,29 @@ pub struct RawTarget {
     pub name: String,
     #[serde(default)]
     pub apply_to_products: Vec<String>,
+    /// Source-set overlay: abilities with per-target icon/label/launchType overrides.
+    #[serde(default)]
+    pub source: Option<RawTargetSource>,
+}
+
+/// Source overlay for a target, allowing per-target ability configuration.
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RawTargetSource {
+    /// Per-target ability overrides (icon, label, launchType).
+    #[serde(default)]
+    pub abilities: Vec<RawTargetAbility>,
+}
+
+/// Per-target ability configuration override.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RawTargetAbility {
+    pub name: String,
+    pub icon: Option<String>,
+    pub label: Option<String>,
+    #[serde(default)]
+    pub launch_type: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
