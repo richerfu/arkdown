@@ -18,6 +18,8 @@ enum Commands {
     Build(cmd::build::BuildArgs),
     /// Remove build outputs
     Clean(cmd::clean::CleanArgs),
+    /// Run ETS struct-decoration checks without building (M5 — SPEC-023 lint mode)
+    Check(cmd::check::CheckArgs),
 }
 
 #[tokio::main]
@@ -25,9 +27,10 @@ async fn main() {
     init_tracing();
 
     let cli = Cli::parse();
-    let result = match cli.command {
+    let result: anyhow::Result<()> = match cli.command {
         Commands::Build(args) => cmd::build::run(args).await,
         Commands::Clean(args) => cmd::clean::run(args),
+        Commands::Check(args) => cmd::check::run(args),
     };
     if let Err(e) = result {
         eprintln!("error: {}", e);

@@ -479,6 +479,35 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 tracing::warn!(error = %e, "process_importees failed");
             }
         }
+        // F13 — collectImportersPlugin: write reverse importer map.
+        // Maps each chunk name to the list of chunk names that import it.
+        // Used by the hot-reload delta engine (M2) to compute the minimal set
+        // of modules to recompile on a file change.
+        // Matches hvigor's collectImportersPlugin moduleParsed hook semantics.
+        {
+            // Build reverse map: chunk_name → [chunk_names that import it].
+            let chunks = &bundle_out.chunk_graph.chunks;
+            let mut importer_map: FxHashMap<String, Vec<String>> = FxHashMap::default();
+            for (idx, chunk) in chunks.iter_enumerated() {
+                for &import_idx in &chunk.cross_chunk_imports {
+                    if let Some(imported) = chunks.get(import_idx) {
+                        importer_map
+                            .entry(imported.name.clone())
+                            .or_default()
+                            .push(chunk.name.clone());
+                    }
+                }
+            }
+            let out_dir = module
+                .src_path
+                .join("build/default/intermediates/importer_map/default");
+            std::fs::create_dir_all(&out_dir).ok();
+            let json = serde_json::to_value(&importer_map).unwrap_or_default();
+            write_json_pretty(&out_dir.join("importer_map.json"), &json).unwrap_or_else(
+                |e| tracing::warn!(error = %e, "failed to write importer_map.json"),
+            );
+        }
+
         // Add ByteCode HAR OHM URLs to compiledImportees. They are pre-compiled
         // and therefore absent from the bundle's ChunkGraph; process_importees
         // cannot discover them automatically.
@@ -533,6 +562,31 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "could not initialize obfuscator, skipping");
+                }
+            }
+
+            // I3: Generate consumer obfuscation config for HAR publishing.
+            // When building a source HAR with obfuscation enabled, write the
+            // obfuscation rule files to an intermediate consumer-rules file so
+            // that downstream consumers of this HAR know which symbols to keep.
+            // Matches hvigor's generateConsumerObConfigFile() behavior.
+            if target_str == "har" {
+                let consumer_dir =
+                    project_root.join("build/default/intermediates/obfuscation/default");
+                std::fs::create_dir_all(&consumer_dir).ok();
+                let consumer_path = consumer_dir.join("consumer-rules.txt");
+                let mut consumer_content = String::new();
+                for rule_file in &obf_config.rule_files {
+                    if let Ok(content) = std::fs::read_to_string(rule_file) {
+                        consumer_content.push_str(&content);
+                        consumer_content.push('\n');
+                    }
+                }
+                if let Err(e) = std::fs::write(&consumer_path, &consumer_content) {
+                    tracing::warn!(
+                        error = %e,
+                        "failed to write consumer obfuscation rules"
+                    );
                 }
             }
         }

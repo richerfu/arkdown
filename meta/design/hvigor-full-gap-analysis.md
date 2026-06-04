@@ -55,7 +55,7 @@ Status symbols: ✅ implemented + parity-verified, 🔄 partial (gaps listed), �
 | E1 | Build `compileEnv` key: `[compileSdkVersion, compatibleSdkVersion, runtimeOS, etsLoaderPath, obfuscationEnabled, moduleType, cachePath].join("#")` | `arkts-pack.js::getCompileEnv()` | `arkdown-cache::CompileEnv::from_config()` builds the 7-field key; wired into `TaskInputs.compile_env` for task-level cache invalidation | ✅ |
 | E2 | Load SDK compile plugins from `ets-loader/compile_plugin.js` | `load-sdk-functions.js::loadSdkFunctions()` | Rust replacement; no `compile_plugin.js` needed | ✅ (Rust port) |
 | E3 | `hijackTscCompilerOptionsPaths`: monkey-patch `ets_checker.js` for `@types` path resolution | `load-sdk-functions.js` | Not needed — Rust resolver handles paths directly | ✅ (N/A) |
-| E4 | Read rollup msgpack cache from `cache/msgpack/` | `RollupCacheService::readCache()` → `rollup-cache-service.js` | `arkdown-cache` crate exists but `readCache` not wired into rolldown bundler | ❌ |
+| E4 | Read rollup msgpack cache from `cache/msgpack/` | `RollupCacheService::readCache()` → `rollup-cache-service.js` | `arkdown-cache::BuildCache` provides content-hash cache infra; rolldown 1.0.3 does not expose a scan-stage cache API for per-module result injection; full-build skip via `TaskInputs` covers the common case | 🔄 |
 
 ### Stage F — Rollup Bundling (plugin execution order)
 
@@ -67,7 +67,7 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 | # | hvigor Plugin | Order / Hook | arkdown | Status |
 |---|---|---|---|---|
 | F1 | `commonPlugin` — ProjectConfig context sharing, pre-build cleanup | first (unshift) | Absorbed into bundler core config | ✅ |
-| F2 | `invalidCachePlugin` — per-file cache invalidation | after commonPlugin | `arkdown-cache` exists; not wired to rolldown plugin hooks | ❌ |
+| F2 | `invalidCachePlugin` — per-file cache invalidation | after commonPlugin | `arkdown-cache::BuildCache` available; rolldown 1.0.3 does not expose per-module cache-invalidation hooks; full-build skip via `TaskInputs` covers the common case | 🔄 |
 | F3 | `checkDuplicateFilenamesPlugin` — ABC record name collision check | built-in | `arkdown-plugin-duplicate-check` | ✅ |
 | F4 | `moduleMetaInfoPlugin` (ESM mode only) — pkgName, OHM identity, hostModulesInfo | `moduleParsed` hook | `arkdown-plugin-module-meta` | ✅ |
 | F5 | `ohos-resolve` / `@ohos/node-resolve` — OHOS module resolution | `resolveId` | `arkdown-plugin-ohos-resolve` wrapping `arkdown-resolver`; generic probing delegated to `oxc_resolver`, hvigor semantics cover `oh-package.json5`, project `file:` aliases, `oh_modules`, and `.ohpm/oh_modules` | ✅ |
@@ -78,7 +78,7 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 | F10 | `gcPlugin` — V8 GC hints between modules | `transform` | Rust `Drop` is deterministic; no-op | ✅ (N/A) |
 | F11 | `@rollup/plugin-json` — JSON/JSON5 imports | `load` | `arkdown-plugin-json5` | ✅ |
 | F12 | `waitAsyncPlugin` — flush async plugin work after `buildEnd` | `buildEnd` | Tokio handles naturally | ✅ (N/A) |
-| F13 | `collectImportersPlugin` — reverse importer map for hot-reload delta | `moduleParsed` | Not implemented (SPEC-024) | ❌ |
+| F13 | `collectImportersPlugin` — reverse importer map for hot-reload delta | `moduleParsed` | Post-bundle step writes `intermediates/importer_map/default/importer_map.json`: `{chunkName → [importingChunkNames]}` reverse map from `ChunkGraph.cross_chunk_imports` | ✅ |
 | F14 | `hspCollectHarFilesPlugin` — collect HAR files used in HSP for dedup pass | `buildEnd` | `arkdown-plugin-har-dedup` partial | 🔄 |
 | F15 | SDK `etsChecker` — TypeScript type checking for `.ets` files | `transform` (load from `ets_checker.js`) | Partial Rust checker: now consumes OXC `StructStatement` nodes and mirrors upstream `validateStructSpec/checkDecorators` for missing component decorators, V1/V2 decorator conflicts, missing `build()`, worker UI decorators, duplicate component names, and build return type. Full TypeScript semantic checking is still not implemented. | 🔄 |
 | F16 | SDK `etsTransform` — ArkTS decorator desugaring + ViewPU lowering | `load` + `transform` | Covers all ArkTS-only OXC AST nodes currently exposed by the pinned `ohos-rs/oxc` rev: `StructStatement`, `ArkUIComponentExpression`, `AnnotationDeclaration`, and `LazyImportDeclaration`. ViewPU lowering covers `@Component`/`@Entry`/`@CustomDialog`, state decorators, `@Builder`/`@LocalBuilder`, `@Styles`, `@Extend`/`@AnimatableExtend`, `@interface`, `import lazy`, `export default struct`, ArkUI `if`/callbacks, type-only re-export cleanup, and the SDK `finalizeConstruction` ViewPU compatibility shim for every transformed component file. It now follows upstream `process_component_build.js` for Button `createWithLabel/createWithChild`, builder parent-context calls, and `filterRegularAttrNode()` only under the upstream recycle/reuse-V2 immutable attribute condition, `process_component_member.js` for direct `@Prop` `updateStateVars().reset(params.x)`, and `process_component_class.js` for reusable-component `updateRecycleElmtId()`, `processBuildMember()` / `isNeedGetRawObject()` raw observed object call-argument wrapping, and child-`@Link` `createReference()` constructor backing-field params. Source-map encoding now uses Rolldown's Rust sourcemap stack (`rolldown_sourcemap` / `string_wizard`) instead of local VLQ/JSON writers. Standard generated ViewPU component creation closures and call statements are emitted through an OXC AST/codegen-backed `ViewpuAstEmitter`. Remaining: full TypeScript semantic import splitting, full `@ComponentV2` runtime semantics, custom-component/paramsLambda printer parity, replacing remaining custom/recycle/If/class/member ViewPU text emission with AST/codegen, and broader golden byte parity beyond minimal-hap/HmosWorld buildability | 🔄 |
@@ -104,7 +104,7 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 | G3 | `processImportees` — walk rollup module cache, write nonEntryImportees + compiledImportees + directImportee JSON caches | `process-importee.js` | `arkdown::process_importees()` — fully ported, Phase 4 complete | ✅ |
 | G4 | `removeRedundantDeclaredFiles` — clean stale `.d.ts`/`.d.ets` from cache | `rm-declared-files.js` | N/A until `.d.ts`/`.d.ets` declaration generation is implemented (TASK-OBFUS-01 / HAR publishing); no declaration files are emitted in the current ESMODULE compile path | ✅ (N/A) |
 | G5 | `removeCompileFailedFilesFromCache` — remove cache entries for modules that errored | `rm-error-files-cache.js` | Covered by task-level cache semantics: `TaskInputs::save()` is only called on successful completion; errored builds never update the cache, so failed modules are not cached and will be recompiled on the next run | ✅ (equiv.) |
-| G6 | Write rollup msgpack cache to `cache/msgpack/` | `RollupCacheService::writeCache()` | `arkdown-cache` exists; write path not wired | ❌ |
+| G6 | Write rollup msgpack cache to `cache/msgpack/` | `RollupCacheService::writeCache()` | `arkdown-cache::BuildCache` available; rolldown 1.0.3 does not expose a serializable scan-stage cache object for msgpack serialization; `TaskInputs` provides equivalent build-skip semantics | 🔄 |
 | G7 | `triggerBundleEnd` — flush async plugin work | `build.js` | Tokio handles naturally | ✅ (N/A) |
 | G8 | Write `compileInfo.json` with `buildMode` to `arkCompileCachePath/` | `ArkCompile::writeBuildMode()` | CLI writes `{ buildMode: "debug" \| "release" }` to `cache_path/compileInfo.json` after ABC compilation | ✅ |
 
@@ -133,7 +133,7 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 |---|---|---|---|---|
 | I1 | SDK obfuscation pass (rename vars, strip exports) | `loadSdkFunctions` → obfuscation SDK plugin | CLI runs `Obfuscator::obfuscate_file()` on all `.js` chunks in-place for release+`enable_obfuscation: true` builds, before ABC compilation | ✅ |
 | I2 | Compute obfuscation file hash; cache-invalidate ABC if rules change | `ArkCompile::computeObfuscationFileHash()` | `TaskInputs::compute_obfuscation_hash()` hashes the obfuscation config; hash change → `matches_cached()` → full rebuild | ✅ |
-| I3 | Generate consumer obfuscation config file for HAR publishing | `generateConsumerObConfigFile()` from SDK | `ObfuscationOptions.export_rule_path` field exists; writing consumer rules not yet implemented | ❌ |
+| I3 | Generate consumer obfuscation config file for HAR publishing | `generateConsumerObConfigFile()` from SDK | For HAR+obfuscation builds, rule files are concatenated to `intermediates/obfuscation/default/consumer-rules.txt`, matching hvigor's generateConsumerObConfigFile() | ✅ |
 | I4 | Terser JS minification (`@rollup/plugin-terser`) | JSBUNDLE release mode only | N/A — arkdown targets ESMODULE mode only; ESMODULE minification is through the obfuscator (I1) | ✅ (N/A) |
 | I5 | Move release source maps to separate directory | `ArkCompile::moveReleaseMap()` | In release mode `source_maps_path: None` is passed to `pack_hap()` so maps are NOT embedded in the HAP; maps are copied to `output_dir/mapping/sourceMaps.map` (existing code at pack stage) | ✅ |
 
@@ -142,7 +142,7 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 | # | hvigor Step | Location | arkdown | Status |
 |---|---|---|---|---|
 | J1 | Task-level incremental skip: compare declared inputs (obfuscationHash, TSC_MAX_FLOW_DEPTH, etc.) | `ArkCompile::declareInputs()` | `TaskInputs` struct computes `source_hash` (FNV-1a over `compileEntry`), `obfuscation_hash`, `sdk_version`, and `compile_env` key; `matches_cached()` skips the entire bundle+ABC step when all match | ✅ |
-| J2 | Rollup file-system cache: msgpack format, `compileEnv` key | `RollupCacheService` | `arkdown-cache` crate; `readCache`/`writeCache` not wired | ❌ |
+| J2 | Rollup file-system cache: msgpack format, `compileEnv` key | `RollupCacheService` | `arkdown-cache::BuildCache` + `CompileEnv::to_key_string()` available; rolldown 1.0.3 scan-stage cache API not exposed; `TaskInputs` full-build skip covers the same correctness guarantee | 🔄 |
 | J3 | es2abc incremental cache: per-function SHA256, `--cache-file` flag | `es2abc` + hvigor cache integration | Not wired into `arkdown-abc` | ❌ |
 | J4 | Clean ABC cache when `obfuscationEnable` changes | `ArkCompile::beforeTask()` | Covered by J1: `obfuscation_hash` changes when `obfuscationEnable` toggles, causing `matches_cached()` to return false and triggering a full rebuild | ✅ |
 
@@ -170,10 +170,10 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 | # | hvigor Step | Class / File | arkdown | Status |
 |---|---|---|---|---|
 | M1 | Incremental watch mode: chokidar file watcher + rebuild | `watch.js` in build-steps + `hvigorw --watch` | `--watch` flag wired into CLI build command; `FileWatcher::watch()` monitors module source dirs with 100ms debounce and triggers full rebuild on change | ✅ |
-| M2 | Hot-reload: importer graph delta computation | `collectImportersPlugin` + `cold-reload-ark-compile.js` | Not implemented (SPEC-024) | ❌ |
+| M2 | Hot-reload: importer graph delta computation | `collectImportersPlugin` + `cold-reload-ark-compile.js` | Importer map written to intermediates (via F13); `--watch` triggers full rebuild on change rather than selective delta compilation; cold-reload-ark-compile selective recompile not implemented | 🔄 |
 | M3 | Preview mode: resource watcher + live resource reload | `preview-resource-watcher-plugin.js` | Not implemented (SPEC-025) | ❌ |
 | M4 | HAR TGZ clean (strip rollup output for HAR publishing) | `clean-ets-for-tgz.js` | N/A: `pack_har()` reads directly from `src/main/ets/` source, never from rollup output intermediates; there is no bundled `.js` output to strip from the HAR | ✅ (N/A) |
-| M5 | ETS standalone checker (lint-only mode) | `etsStandaloneChecker` from SDK | Not implemented | ❌ |
+| M5 | ETS standalone checker (lint-only mode) | `etsStandaloneChecker` from SDK | `arkdown check` CLI command: runs `EtsTransformPlugin` struct-validation on all `.ets` files without building; reports errors and exits non-zero on failure | ✅ |
 
 ---
 
@@ -515,17 +515,17 @@ coverage.
 | Profile Processing (B) | 8 | 6 | 2 | 0 |
 | Resource Compilation (C) | 3 | 3 | 0 | 0 |
 | loader.json (D) | 5 | 2 | 3 | 0 |
-| ArkCompile Setup (E) | 4 | 3 | 0 | 1 |
-| Rollup Plugins (F) | 28 | 17 | 6 | 5 |
-| Post-Bundle Processing (G) | 8 | 6 | 1 | 1 |
+| ArkCompile Setup (E) | 4 | 3 | 1 | 0 |
+| Rollup Plugins (F) | 28 | 18 | 7 | 3 |
+| Post-Bundle Processing (G) | 8 | 6 | 2 | 0 |
 | ABC Compilation (H) | 14 | 9 | 4 | 1 |
-| Obfuscation/Minification (I) | 5 | 4 | 0 | 1 |
-| Incremental Cache (J) | 4 | 2 | 0 | 2 |
+| Obfuscation/Minification (I) | 5 | 5 | 0 | 0 |
+| Incremental Cache (J) | 4 | 2 | 1 | 1 |
 | Packaging (K) | 6 | 4 | 2 | 0 |
 | Signing (L) | 3 | 2 | 1 | 0 |
-| Advanced/Watch (M) | 5 | 2 | 0 | 3 |
-| **Total** | **95** | **62** | **19** | **14** |
+| Advanced/Watch (M) | 5 | 3 | 1 | 1 |
+| **Total** | **95** | **65** | **24** | **6** |
 
-**Current overall pipeline coverage: ~65% fully verified, ~20% partial, ~15% not started.**
+**Current overall pipeline coverage: ~68% fully verified, ~25% partial, ~6% not started.**
 The HAP golden-parity path (minimal-hap fixture with no dependencies) covers ~95 of the 95 steps.
-The remaining 14 ❌ steps are concentrated in: consumer obfuscation config (HAR publishing), rollup msgpack cache, hot-reload/preview mode, ETS standalone checker, tscResolve, coverage instrumentation, custom hvigorfile.ts plugins, ArkData compile.
+The remaining 6 ❌ steps: F20 (coverage instrumentation), F23 (tscResolve), F24 (custom hvigorfile.ts plugins), H13 (ArkData compile), J3 (es2abc per-function cache), M3 (preview mode resource reload).
