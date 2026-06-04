@@ -862,17 +862,59 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 let source_dir = module.src_path.join("src/main/ets");
                 let oh_package_json = module.src_path.join("oh-package.json5");
                 if source_dir.exists() {
-                    Some(
-                        packager
-                            .pack_har(HarPackInput {
-                                module_name: module.name.clone(),
-                                source_dir,
-                                resources_dir: module.src_path.join("src/main/resources"),
-                                oh_package_json,
-                                output_path: output.clone(),
+                    let packed = packager
+                        .pack_har(HarPackInput {
+                            module_name: module.name.clone(),
+                            source_dir: source_dir.clone(),
+                            resources_dir: module.src_path.join("src/main/resources"),
+                            oh_package_json: oh_package_json.clone(),
+                            output_path: output.clone(),
+                        })
+                        .map_err(|e| anyhow::anyhow!("Pack failed: {}", e))?;
+
+                    // B7: Generate HAR module-info (har-extend-info.json).
+                    // Mirrors hvigor CreateHarModuleInfo → har/har-extend-info.js:
+                    // writes metadata about the HAR's exported API surface so
+                    // downstream consumers can understand what the HAR provides.
+                    let har_info_out = module
+                        .src_path
+                        .join("build/default/intermediates/har/default/har-extend-info.json");
+                    if let Some(parent) = har_info_out.parent() {
+                        std::fs::create_dir_all(parent).ok();
+                    }
+                    // Collect exported .ets source files.
+                    let exported_sources: Vec<String> =
+                        walkdir::WalkDir::new(&source_dir)
+                            .into_iter()
+                            .filter_map(|e| e.ok())
+                            .filter(|e| {
+                                e.file_type().is_file()
+                                    && e.path()
+                                        .extension()
+                                        .and_then(|x| x.to_str())
+                                        .map_or(false, |x| x == "ets")
                             })
-                            .map_err(|e| anyhow::anyhow!("Pack failed: {}", e))?,
-                    )
+                            .filter_map(|e| {
+                                e.path()
+                                    .strip_prefix(&source_dir)
+                                    .ok()
+                                    .map(|r| r.to_string_lossy().replace('\\', "/"))
+                            })
+                            .collect();
+                    let har_info = serde_json::json!({
+                        "moduleName": module.name,
+                        "moduleType": "har",
+                        "exportedSources": exported_sources,
+                        "abilities": manifest.abilities.iter().map(|a| serde_json::json!({
+                            "name": a.name,
+                            "srcEntry": a.src_entry,
+                        })).collect::<Vec<_>>(),
+                    });
+                    write_json_pretty(&har_info_out, &har_info).unwrap_or_else(|e| {
+                        tracing::warn!(error = %e, "failed to write har-extend-info.json");
+                    });
+
+                    Some(packed)
                 } else {
                     None
                 }

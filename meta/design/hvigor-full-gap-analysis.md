@@ -27,7 +27,7 @@ Status symbols: ✅ implemented + parity-verified, 🔄 partial (gaps listed), �
 | B4 | Process `crossAppSharedConfig` from HSP dependencies | `ProcessShareConfig` → `process-share-config.js` | `arkdown-profile::merge_share_config()` wired in CLI; duplicate-URI is hard error | ✅ |
 | B5 | Merge startup config from all HAR/HSP deps; validate task deps | `ProcessStartupConfig` → `process-startup-config.js` | `arkdown-profile::merge_startup_config()` wired in CLI; duplicate task name is hard error | ✅ |
 | B6 | Generate module metadata JSON for HAP/HSP | `CreateModuleInfo` → `create-module-info.js` | `arkdown-profile::write_module_json()`: `packageName` from `oh-package.json5#name`; `installationFree` from `bundleType`; `atomicService` block preserved; `deliveryWithInstall` from module.json5; `dependencies` serialized; `requestPermissions`/`definePermissions`/`proxyData` passed through; preserve-and-mutate for unknown module fields AND ability/extensionAbility fields (launchType, visible, continuable, orientation, permissions, etc.). Remaining: `ArkCompile.declareOutputFiles()` for HSP declaration files. | 🔄 |
-| B7 | Generate module metadata JSON for HAR | `CreateHarModuleInfo` → `har/har-extend-info.js` | `pack_har()` writes metadata but separate HAR module-info flow unverified | 🔄 |
+| B7 | Generate module metadata JSON for HAR | `CreateHarModuleInfo` → `har/har-extend-info.js` | `har-extend-info.json` written to `intermediates/har/default/` after HAR packing: moduleName, moduleType, exportedSources list, abilities array | ✅ |
 | B8 | Process privacy data file | `ProcessModulePrivacyProfile` → `process-module-privacy-profile.js` | `privacy_profile_path` passed to `pack_hap()` from CLI; copies to `module.privacy.json` in HAP | ✅ |
 
 ### Stage C — Resource Compilation
@@ -510,7 +510,7 @@ coverage.
 | Pipeline Area | Steps Total | ✅ | 🔄 | ❌ |
 |---|---|---|---|---|
 | Pre-Build (A) | 2 | 2 | 0 | 0 |
-| Profile Processing (B) | 8 | 6 | 2 | 0 |
+| Profile Processing (B) | 8 | 7 | 1 | 0 |
 | Resource Compilation (C) | 3 | 3 | 0 | 0 |
 | loader.json (D) | 5 | 2 | 3 | 0 |
 | ArkCompile Setup (E) | 4 | 3 | 1 | 0 |
@@ -522,8 +522,8 @@ coverage.
 | Packaging (K) | 6 | 4 | 2 | 0 |
 | Signing (L) | 3 | 2 | 1 | 0 |
 | Advanced/Watch (M) | 5 | 3 | 2 | 0 |
-| **Total** | **95** | **67** | **28** | **0** |
+| **Total** | **95** | **68** | **27** | **0** |
 
-**Current overall pipeline coverage: ~71% fully verified, ~29% partial, 0% not started.**
-All 95 pipeline steps are either fully implemented (67 ✅) or have partial implementations with known remaining work (28 🔄). No step is completely unaddressed.
-The remaining 28 🔄 items are: ViewPU/etsTransform parity, ABC DebugInfo byte-parity, TypeScript type checking, rolldown scan-stage cache, obfuscation consumer config precision, and multi-module dependency graph traversal.
+**Current overall pipeline coverage: ~72% fully verified, ~28% partial, 0% not started.**
+All 95 pipeline steps are either fully implemented (68 ✅) or have partial implementations with known remaining work (27 🔄). No step is completely unaddressed.
+The remaining 27 🔄 items are: ViewPU/etsTransform parity, ABC DebugInfo byte-parity, TypeScript type checking, rolldown scan-stage cache, obfuscation consumer config precision, and multi-module dependency graph traversal.
