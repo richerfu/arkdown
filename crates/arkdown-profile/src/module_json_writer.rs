@@ -188,6 +188,24 @@ impl ModuleJsonWriter {
         );
         obj.insert("apiReleaseType".into(), "Release".into());
         obj.insert("targetMinorAPIVersion".into(), 0u64.into());
+
+        // Preserve-and-mutate passthrough: append any app.json5 `app` keys that
+        // are not already emitted above.  Matches hvigor's cloneDeep + targeted
+        // mutation approach so that `sanitizer`, `multiProjects`, `deviceTypes`,
+        // `car`, `wearable`, `tablet`, `startWindowBackgroundColor`, and any
+        // future fields survive the build without needing explicit support here.
+        for (key, value) in src {
+            if !obj.contains_key(key.as_str()) {
+                // Skip empty arrays to avoid emitting noise.
+                if let serde_json::Value::Array(arr) = value {
+                    if arr.is_empty() {
+                        continue;
+                    }
+                }
+                obj.insert(key.clone(), value.clone());
+            }
+        }
+
         obj
     }
 

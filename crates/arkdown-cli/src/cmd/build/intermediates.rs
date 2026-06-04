@@ -202,6 +202,14 @@ pub(super) fn write_resource_config_files(
     let res_out = canonical_or_owned(res_out);
     let toolchains_dir = resource_toolchains_dir(&config.sdk_config.restool_path);
 
+    // Build the dependencies list from HSP/HAR resource tables installed in oh_modules/.
+    // Matches hvigor's restool config generation which includes dependency resource tables
+    // so that HSP resource IDs can be resolved during compilation.
+    let dependencies: Vec<serde_json::Value> = collect_dependency_resource_tables(
+        &module_root,
+        &project_root,
+    );
+
     write_json_minified_newline(
         &res_out.join("opt-compression.json"),
         &serde_json::json!({
@@ -231,7 +239,7 @@ pub(super) fn write_resource_config_files(
             "moduleResources": [
                 path_string(&module_root.join("src/main/resources")),
             ],
-            "dependencies": [],
+            "dependencies": dependencies,
             "iconCheck": true,
             "compression": path_string(&res_out.join("opt-compression.json")),
             "ids": path_string(&res_out.join("ids_map")),
@@ -241,6 +249,42 @@ pub(super) fn write_resource_config_files(
     )?;
 
     Ok(())
+}
+
+/// Collect ResourceTable.txt paths from HSP dependencies in oh_modules/.
+///
+/// Matches hvigor's restool config generation which includes dependency resource
+/// tables so that HSP resource IDs can be resolved during HAP/HSP compilation.
+fn collect_dependency_resource_tables(
+    module_root: &Path,
+    project_root: &Path,
+) -> Vec<serde_json::Value> {
+    let mut tables = Vec::new();
+    for base in &[
+        module_root.join("oh_modules"),
+        project_root.join("oh_modules"),
+    ] {
+        if !base.is_dir() {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(base) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let pkg_dir = entry.path();
+            if !pkg_dir.is_dir() {
+                continue;
+            }
+            // Check for a ResourceTable.txt (HSP packages with resources).
+            let resource_table = pkg_dir.join("ResourceTable.txt");
+            if resource_table.is_file() {
+                tables.push(serde_json::json!({
+                    "resourceTable": path_string(&resource_table),
+                }));
+            }
+        }
+    }
+    tables
 }
 
 pub(super) fn write_static_intermediate_files(module_root: &Path) -> Result<()> {
@@ -256,11 +300,10 @@ pub(super) fn write_static_intermediate_files(module_root: &Path) -> Result<()> 
         &module_root.join("build/default/intermediates/router_map/default/temp-router-map.json"),
         br#"{"routerMap":[]}"#,
     )?;
-    write_bytes(
-        &module_root
-            .join("build/default/intermediates/share_config/default/temp-share-config.json"),
-        br#"{"crossAppSharedConfig":[]}"#,
-    )?;
+    // NOTE: temp-share-config.json is written by merge_share_config() before this
+    // function is called. Do NOT write a placeholder here — it would overwrite the
+    // real merged share config. (Bug fix: previously this overwrote the real config
+    // with {"crossAppSharedConfig":[]}, causing crossAppSharedConfig to be lost.)
     Ok(())
 }
 

@@ -1,5 +1,6 @@
 use arkdown_core::{
-    AbilityEntry, CompileMode, ExtensionAbilityEntry, HapManifest, ModuleJson5, OhosModuleType,
+    AbilityEntry, CompileMode, ExtensionAbilityEntry, HapManifest, HspDependency, ModuleJson5,
+    OhosModuleType,
 };
 
 /// Transform a raw [`ModuleJson5`] into a processed [`HapManifest`].
@@ -67,7 +68,20 @@ pub fn process_profile_with_ark_vm_version(
         compile_mode,
         abilities,
         extension_abilities,
-        dependencies: vec![],
+        // Populate HSP dependencies from module.json5#module.dependencies.
+        // Hvigor's ProcessProfile.addModuleDependencies() collects HSP dependency
+        // metadata; we use the raw field from module.json5 for each dep entry.
+        dependencies: module_json5.module.dependencies
+            .iter()
+            .filter_map(|dep| {
+                let bundle = dep.get("bundleName").and_then(|v| v.as_str())?;
+                let module_n = dep.get("moduleName").and_then(|v| v.as_str())?;
+                Some(HspDependency {
+                    bundle_name: bundle.to_string(),
+                    module_name: module_n.to_string(),
+                })
+            })
+            .collect(),
         router_map: module_json5.module.router_map.clone(),
         pages: module_json5.module.pages.clone(),
         main_element: module_json5.module.main_element.clone(),

@@ -304,6 +304,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             arkdown_profile::StartupConfigInput {
                 module_root: &module.src_path,
                 module_name: &module.name,
+                bundle_name: Some(config_arc.product.bundle_name.as_str()),
                 app_startup: module_json5.module.app_startup.clone(),
             },
         )
@@ -621,9 +622,13 @@ pub async fn run(args: BuildArgs) -> Result<()> {
 
     // ── Obfuscation (release builds only) ────────────────────────────────────
     //
-    // hvigor runs SDK obfuscation + terser between bundling and ABC compilation.
-    // We run the pure-Rust obfuscator on the .js chunks in-place so the ABC
-    // compiler receives already-obfuscated source.
+    // hvigor runs SDK obfuscation between bundling and ABC compilation.
+    // The obfuscation must affect the *CompileArkTS handoff inputs* (the cache
+    // TS files that go into es2abc), not only the bundled .js chunks.
+    //
+    // Fix: apply obfuscation to both:
+    //   (a) .js chunk files (for JSBUNDLE parity / chunk-level obfuscation)
+    //   (b) CompileArkTS handoff .ts inputs (the actual ABC compiler inputs)
     //
     // The step is skipped unless:
     //   1. Build mode is Release, AND
@@ -644,6 +649,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 export_rule_path: None,
             }) {
                 Ok(obfuscator) => {
+                    // (a) Obfuscate .js chunks (JSBUNDLE / chunk-level pass).
                     for (bundle_out, _) in &bundle_outs {
                         for (_chunk_name, path) in &bundle_out.chunk_files {
                             if path.extension().and_then(|e| e.to_str()) == Some("js")
@@ -654,6 +660,31 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                                     .obfuscate_file(path, &tmp)
                                     .map_err(|e| anyhow::anyhow!("Obfuscation failed: {}", e))?;
                                 std::fs::rename(&tmp, path)?;
+                            }
+                        }
+                    }
+
+                    // (b) Obfuscate CompileArkTS handoff .ts inputs — these are the
+                    // actual files that es2abc/ts2abc compiles into modules.abc.
+                    // Without this step, release ABC is NOT obfuscated even though
+                    // the .js chunks are, because the ABC compiler reads the handoff
+                    // .ts files (not the .js chunks).
+                    for handoff in &compile_arkts_handoffs_by_bundle {
+                        for input in &handoff.inputs {
+                            let path = &input.path;
+                            if path.extension().and_then(|e| e.to_str()) == Some("ts")
+                                && path.exists()
+                            {
+                                let tmp = path.with_extension("ts.obf_tmp");
+                                if let Err(e) = obfuscator.obfuscate_file(path, &tmp) {
+                                    tracing::warn!(
+                                        path = %path.display(),
+                                        error = %e,
+                                        "obfuscation of handoff .ts skipped"
+                                    );
+                                    continue;
+                                }
+                                let _ = std::fs::rename(&tmp, path);
                             }
                         }
                     }
@@ -1061,9 +1092,11 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                                             "build/default/intermediates/res/default/resources",
                                         ),
                                     ),
-                                    bundle_version_code: 1000000,
-                                    bundle_version_name: "1.0.0".to_string(),
-                                    bundle_type: "app".to_string(),
+                                    bundle_version_code: read_bundle_version_code(&project_root),
+                                    bundle_version_name: read_bundle_version_name(&project_root),
+                                    // HSP packages use bundle_type "shared"; HAP/HSP modules
+                                    // with atomicService type use "atomicService"; default is "app".
+                                    bundle_type: read_bundle_type(&project_root, &config_arc),
                                     source_maps_path,
                                     abilities,
                                     integrated_hsps: collect_integrated_hsps(
@@ -1345,6 +1378,87 @@ fn collect_native_libs(project_root: &Path, module: &ModuleConfig) -> Vec<PathBu
     }
     libs.sort();
     libs
+}
+
+/// Read versionCode from AppScope/app.json5.
+///
+/// Matches hvigor's use of `app.versionCode` from the app.json5 manifest.
+/// Falls back to 1000000 when absent (compatible with DevEco's default).
+fn read_bundle_version_code(project_root: &Path) -> u64 {
+    let path = project_root.join("AppScope/app.json5");
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return 1000000;
+    };
+    #[derive(serde::Deserialize)]
+    struct AppJson {
+        app: AppSection,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct AppSection {
+        #[serde(default)]
+        version_code: Option<u64>,
+    }
+    json5::from_str::<AppJson>(&content)
+        .ok()
+        .and_then(|a| a.app.version_code)
+        .unwrap_or(1000000)
+}
+
+/// Read versionName from AppScope/app.json5.
+fn read_bundle_version_name(project_root: &Path) -> String {
+    let path = project_root.join("AppScope/app.json5");
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return "1.0.0".to_string();
+    };
+    #[derive(serde::Deserialize)]
+    struct AppJson {
+        app: AppSection,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct AppSection {
+        #[serde(default)]
+        version_name: Option<String>,
+    }
+    json5::from_str::<AppJson>(&content)
+        .ok()
+        .and_then(|a| a.app.version_name)
+        .unwrap_or_else(|| "1.0.0".to_string())
+}
+
+/// Determine the bundle_type for pack.info.
+///
+/// - HSP output target → "shared"
+/// - atomicService bundleType → "atomicService"
+/// - Default → "app"
+///
+/// Matches hvigor's pack.info generation which uses the module's bundleType
+/// from AppScope/app.json5 and the target type to set the correct type.
+fn read_bundle_type(project_root: &Path, config: &ArkdownConfig) -> String {
+    // Check if this is an HSP build — HSP packs as "shared".
+    if matches!(config.output_target, OutputTarget::Hsp) {
+        return "shared".to_string();
+    }
+    // Otherwise read from AppScope/app.json5#app.bundleType.
+    let path = project_root.join("AppScope/app.json5");
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return "app".to_string();
+    };
+    #[derive(serde::Deserialize)]
+    struct AppJson {
+        app: AppSection,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct AppSection {
+        #[serde(default)]
+        bundle_type: Option<String>,
+    }
+    json5::from_str::<AppJson>(&content)
+        .ok()
+        .and_then(|a| a.app.bundle_type)
+        .unwrap_or_else(|| "app".to_string())
 }
 
 fn write_compile_arkts_cache(

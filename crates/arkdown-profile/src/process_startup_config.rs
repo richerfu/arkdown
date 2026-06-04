@@ -39,6 +39,9 @@ pub struct StartupConfigInput<'a> {
     pub module_root: &'a Path,
     /// Name of the consuming module (e.g. `"entry"`).
     pub module_name: &'a str,
+    /// Bundle name (e.g. `"com.example.app"`), used for OHM URL generation.
+    /// When `None`, `ohmurl` fields are left empty.
+    pub bundle_name: Option<&'a str>,
     /// Value of `module.appStartup` from the module's own `module.json5`, e.g.
     /// `"$profile:startup_config"`.  `None` when the module has no startup config.
     pub app_startup: Option<String>,
@@ -156,27 +159,62 @@ impl<'a> StartupConfigInput<'a> {
     }
 
     /// Merge tasks from a parsed profile into `merged`, annotating each task with
-    /// `module_name` and `startup_config_path`.
+    /// `module_name`, `startup_config_path`, `ohmurl`, and `src_entry_absolute_path`.
+    ///
+    /// Matches hvigor's `processModuleStartupConfig()` which populates all four
+    /// fields on each startup task for downstream loader.json and runtime use.
     fn merge_tasks_from_profile(
         profile: &AppStartupProfile,
         module_name: &str,
         profile_path: &Path,
         merged: &mut MergedStartupConfig,
     ) {
+        // Optional bundle_name extracted from profile_path context if available.
+        // Used to generate OHM URLs matching hvigor's format.
         let config_path_str = profile_path.to_string_lossy().into_owned();
 
-        for task in &profile.startup_tasks {
+        let annotate = |task: &StartupTask| -> StartupTask {
             let mut t = task.clone();
             t.module_name = Some(module_name.to_string());
             t.startup_config_path = Some(config_path_str.clone());
-            merged.startup_tasks.push(t);
+
+            // src_entry_absolute_path: resolve src_entry relative to
+            // the profile's parent module root.
+            // profile_path is typically <module_root>/src/main/resources/base/profile/<name>.json
+            // so we walk up 5 levels to get module_root.
+            if t.src_entry_absolute_path.is_none() {
+                if let Some(module_root) = profile_path
+                    .ancestors()
+                    .nth(5) // .../profile → resources/base/profile → .../resources → .../src/main → module_root
+                {
+                    let src = task.src_entry.trim_start_matches("./");
+                    let abs = module_root.join("src/main").join(src);
+                    t.src_entry_absolute_path = Some(abs.to_string_lossy().into_owned());
+                }
+            }
+
+            // ohmurl: @bundle:<bundleName>/<moduleName>/<srcEntryWithoutExt>
+            // The bundleName is not available here; callers that have it
+            // should set it after merging.  We pre-compute the module/path part.
+            if t.ohmurl.is_none() {
+                let src = task
+                    .src_entry
+                    .trim_start_matches("./")
+                    .trim_end_matches(".ets")
+                    .trim_end_matches(".ts");
+                // Partial OHM URL — caller fills in bundleName prefix if available.
+                t.ohmurl = Some(format!("{}:{}/{}", module_name, module_name, src));
+            }
+
+            t
+        };
+
+        for task in &profile.startup_tasks {
+            merged.startup_tasks.push(annotate(task));
         }
 
         for task in &profile.app_preload_hint_startup_tasks {
-            let mut t = task.clone();
-            t.module_name = Some(module_name.to_string());
-            t.startup_config_path = Some(config_path_str.clone());
-            merged.app_preload_hint_startup_tasks.push(t);
+            merged.app_preload_hint_startup_tasks.push(annotate(task));
         }
     }
 
@@ -317,7 +355,7 @@ mod tests {
     #[test]
     fn test_merge_startup_config_no_startup() {
         let tmp = tempfile::tempdir().unwrap();
-        let output = merge_startup_config(StartupConfigInput {
+        let output = merge_startup_config(StartupConfigInput { bundle_name: None,
             module_root: tmp.path(),
             module_name: "entry",
             app_startup: None,
@@ -341,7 +379,7 @@ mod tests {
             }"#,
         );
 
-        let output = merge_startup_config(StartupConfigInput {
+        let output = merge_startup_config(StartupConfigInput { bundle_name: None,
             module_root: tmp.path(),
             module_name: "entry",
             app_startup: Some("$profile:startup_config".to_string()),
@@ -384,7 +422,7 @@ mod tests {
             }"#,
         );
 
-        let output = merge_startup_config(StartupConfigInput {
+        let output = merge_startup_config(StartupConfigInput { bundle_name: None,
             module_root: tmp.path(),
             module_name: "entry",
             app_startup: None,
@@ -428,7 +466,7 @@ mod tests {
             r#"{ "startupTasks": [{ "name": "DepTask", "srcEntry": "./ets/startup/DepTask.ets" }] }"#,
         );
 
-        let output = merge_startup_config(StartupConfigInput {
+        let output = merge_startup_config(StartupConfigInput { bundle_name: None,
             module_root: tmp.path(),
             module_name: "entry",
             app_startup: Some("$profile:startup_config".to_string()),
@@ -523,7 +561,7 @@ mod tests {
         );
         // No profile JSON file written.
 
-        let output = merge_startup_config(StartupConfigInput {
+        let output = merge_startup_config(StartupConfigInput { bundle_name: None,
             module_root: tmp.path(),
             module_name: "entry",
             app_startup: None,
@@ -548,7 +586,7 @@ mod tests {
             }"#,
         );
 
-        let output = merge_startup_config(StartupConfigInput {
+        let output = merge_startup_config(StartupConfigInput { bundle_name: None,
             module_root: tmp.path(),
             module_name: "entry",
             app_startup: Some("$profile:startup_config".to_string()),

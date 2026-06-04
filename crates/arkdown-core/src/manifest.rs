@@ -149,8 +149,19 @@ pub struct ModuleJson5Module {
     #[serde(default)]
     pub app_startup: Option<String>,
     /// Cross-app shared component config entries exported by this HSP module.
+    ///
+    /// In hvigor, this field in `module.json5` is typically a `$profile:<name>`
+    /// reference string (e.g. `"$profile:cross_app_shared_config"`) that points
+    /// to a profile JSON file, OR an inline array of entries.  Both forms are
+    /// supported: the `$profile` form is resolved by `ProcessShareConfig` at
+    /// resource-phase rewrite; the inline array is used directly.
+    ///
     /// Populated by `ProcessShareConfig` when merging HSP dep manifests.
-    #[serde(default)]
+    #[serde(
+        default,
+        rename = "crossAppSharedConfig",
+        deserialize_with = "deserialize_cross_app_shared_config"
+    )]
     pub cross_app_shared_config: Vec<CrossAppSharedConfigEntry>,
     /// Permissions requested by this module, preserved verbatim in the output `module.json`.
     #[serde(rename = "requestPermissions", default, skip_serializing_if = "Vec::is_empty")]
@@ -161,6 +172,10 @@ pub struct ModuleJson5Module {
     /// Proxy data entries (cross-app data proxy configuration), preserved verbatim.
     #[serde(rename = "proxyData", default, skip_serializing_if = "Vec::is_empty")]
     pub proxy_data: Vec<serde_json::Value>,
+    /// Module dependencies declared in `module.json5` (HSP inter-module deps).
+    /// Each entry has at minimum `bundleName` and `moduleName` fields.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -334,4 +349,54 @@ pub struct PackageMetadata {
     pub workers: Vec<String>,
     #[serde(default)]
     pub dependency_pkg_version: FxHashMap<String, String>,
+}
+
+/// Custom deserializer for `crossAppSharedConfig` that accepts both:
+/// - A `$profile:<name>` reference string (hvigor's canonical form in `module.json5`)
+/// - An inline array of `CrossAppSharedConfigEntry` objects
+///
+/// When the field is a string (e.g. `"$profile:cross_app_shared_config"`), the
+/// entries cannot be resolved without reading the profile file.  We store an
+/// empty vec here and let `ProcessShareConfig` resolve the reference during the
+/// resource rewrite phase.  When it's an inline array, entries are used directly.
+fn deserialize_cross_app_shared_config<'de, D>(
+    deserializer: D,
+) -> Result<Vec<CrossAppSharedConfigEntry>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+
+    struct Visitor;
+
+    impl<'de> de::Visitor<'de> for Visitor {
+        type Value = Vec<CrossAppSharedConfigEntry>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str(
+                "a crossAppSharedConfig array or \"$profile:<name>\" reference string",
+            )
+        }
+
+        fn visit_str<E: de::Error>(self, _value: &str) -> Result<Self::Value, E> {
+            // $profile:<name> reference — cannot resolve without resource files.
+            // Return empty vec; ProcessShareConfig resolves it during resource phase.
+            Ok(Vec::new())
+        }
+
+        fn visit_seq<A: de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut entries = Vec::new();
+            while let Some(entry) =
+                seq.next_element::<CrossAppSharedConfigEntry>()?
+            {
+                entries.push(entry);
+            }
+            Ok(entries)
+        }
+    }
+
+    deserializer.deserialize_any(Visitor)
 }
