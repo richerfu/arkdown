@@ -26,7 +26,7 @@ Status symbols: ✅ implemented + parity-verified, 🔄 partial (gaps listed), �
 | B3 | Collect router map entries; write `intermediates/routerMap.json` | `ProcessRouterMap` → `process-router-map.js` | `arkdown-plugin-router-map` | ✅ |
 | B4 | Process `crossAppSharedConfig` from HSP dependencies | `ProcessShareConfig` → `process-share-config.js` | `arkdown-profile::merge_share_config()` wired in CLI; duplicate-URI is hard error | ✅ |
 | B5 | Merge startup config from all HAR/HSP deps; validate task deps | `ProcessStartupConfig` → `process-startup-config.js` | `arkdown-profile::merge_startup_config()` wired in CLI; duplicate task name is hard error | ✅ |
-| B6 | Generate module metadata JSON for HAP/HSP | `CreateModuleInfo` → `create-module-info.js` | `arkdown-profile::write_module_json()` (HAP): `packageName` from `oh-package.json5#name`; `installationFree` from `bundleType`; `atomicService` block preserved for atomicService bundles; `deliveryWithInstall` from module.json5; `dependencies` serialized; `requestPermissions`/`definePermissions`/`proxyData` passed through; preserve-and-mutate passthrough for unknown fields. HSP-specific path unverified. | 🔄 |
+| B6 | Generate module metadata JSON for HAP/HSP | `CreateModuleInfo` → `create-module-info.js` | `arkdown-profile::write_module_json()`: `packageName` from `oh-package.json5#name`; `installationFree` from `bundleType`; `atomicService` block preserved; `deliveryWithInstall` from module.json5; `dependencies` serialized; `requestPermissions`/`definePermissions`/`proxyData` passed through; preserve-and-mutate for unknown module fields AND ability/extensionAbility fields (launchType, visible, continuable, orientation, permissions, etc.). Remaining: `ArkCompile.declareOutputFiles()` for HSP declaration files. | 🔄 |
 | B7 | Generate module metadata JSON for HAR | `CreateHarModuleInfo` → `har/har-extend-info.js` | `pack_har()` writes metadata but separate HAR module-info flow unverified | 🔄 |
 | B8 | Process privacy data file | `ProcessModulePrivacyProfile` → `process-module-privacy-profile.js` | `privacy_profile_path` passed to `pack_hap()` from CLI; copies to `module.privacy.json` in HAP | ✅ |
 
@@ -249,8 +249,9 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 - `deliveryWithInstall` now read from module.json5 (default `true`)
 - `dependencies` now serialized from manifest (not unconditionally empty array)
 - `requestPermissions`, `definePermissions`, `proxyData` passed through verbatim from raw module.json5
-- Unknown fields preserved via preserve-and-mutate passthrough (mirrors hvigor `cloneDeep` + mutate)
-- Remaining: HSP-specific path; `ArkCompile.declareOutputFiles()` for HSP
+- Unknown module-level fields preserved via preserve-and-mutate passthrough (mirrors hvigor `cloneDeep` + mutate)
+- **New**: `abilities` and `extensionAbilities` now preserve unknown fields (launchType, visible, continuable, orientation, windowMode, permissions, forms, etc.) via preserve-and-mutate; computed values (resource IDs, srcEntry) are overlaid
+- Remaining: `ArkCompile.declareOutputFiles()` for HSP declaration files
 
 **C3 — ProcessCompiledResources (preloaded SO)**
 - Needed for projects with preloaded system SO libraries
