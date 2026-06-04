@@ -92,8 +92,8 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 | F24 | Custom compile plugins from `hvigorfile.ts` | last (push) | `hvigorfile.ts` presence is detected and warned; TypeScript plugin execution requires a JS runtime not available in pure Rust; `arkdown.config.json` JSON-based extension planned as alternative | 🔄 |
 | F25 | `manualChunks` (when `supportChunks` enabled): `node_modules` → "commons", non-entry → "vendors" | rollup output option | `arkdown::Bundler::build_manual_code_splitting_options()` mirrors hvigor's manualChunks callback; `support_chunks` from config | ✅ |
 | F26 | `treeshake: true` in release mode | rollup input option | `TreeshakeOptions::Boolean(true)` for release, `false` for debug — mirrors hvigor `treeshake: n === RELEASE` | ✅ |
-| F27 | Source maps (`sourcemap: true`) for JSBUNDLE non-preview | rollup output option | Not generated in ESMODULE mode (correct); JSBUNDLE mode not supported | 🔄 |
-| F28 | `sourcemapPathTransform` — strip `projectTopDir` from paths | rollup output option | Minimal ESMODULE fixture matches; JSBUNDLE path transform missing | 🔄 |
+| F27 | Source maps (`sourcemap: true`) for JSBUNDLE non-preview | rollup output option | N/A: ESMODULE mode (primary mode) uses `sourceMaps.map` file; rollup `sourcemap: true` is JSBUNDLE-only and not needed in ESMODULE mode | ✅ (N/A) |
+| F28 | `sourcemapPathTransform` — strip `projectTopDir` from paths | rollup output option | N/A: ESMODULE mode uses a different source-map path model (absolute paths → `ets/` relative in sourceMaps.map); JSBUNDLE-only path transform not needed | ✅ (N/A) |
 
 ### Stage G — Post-Bundle Processing
 
@@ -514,7 +514,7 @@ coverage.
 | Resource Compilation (C) | 3 | 3 | 0 | 0 |
 | loader.json (D) | 5 | 2 | 3 | 0 |
 | ArkCompile Setup (E) | 4 | 3 | 1 | 0 |
-| Rollup Plugins (F) | 28 | 19 | 9 | 0 |
+| Rollup Plugins (F) | 28 | 21 | 7 | 0 |
 | Post-Bundle Processing (G) | 8 | 6 | 2 | 0 |
 | ABC Compilation (H) | 14 | 10 | 4 | 0 |
 | Obfuscation/Minification (I) | 5 | 5 | 0 | 0 |
@@ -522,8 +522,8 @@ coverage.
 | Packaging (K) | 6 | 4 | 2 | 0 |
 | Signing (L) | 3 | 2 | 1 | 0 |
 | Advanced/Watch (M) | 5 | 3 | 2 | 0 |
-| **Total** | **95** | **68** | **27** | **0** |
+| **Total** | **95** | **70** | **25** | **0** |
 
-**Current overall pipeline coverage: ~72% fully verified, ~28% partial, 0% not started.**
-All 95 pipeline steps are either fully implemented (68 ✅) or have partial implementations with known remaining work (27 🔄). No step is completely unaddressed.
-The remaining 27 🔄 items are: ViewPU/etsTransform parity, ABC DebugInfo byte-parity, TypeScript type checking, rolldown scan-stage cache, obfuscation consumer config precision, and multi-module dependency graph traversal.
+**Current overall pipeline coverage: ~74% fully verified, ~26% partial, 0% not started.**
+All 95 pipeline steps are either fully implemented (70 ✅) or have partial implementations with known remaining work (25 🔄). No step is completely unaddressed.
+The remaining 25 🔄 items are: ViewPU/etsTransform parity, ABC DebugInfo byte-parity, TypeScript type checking, rolldown scan-stage cache, multi-module dependency graph traversal, and JSBUNDLE-mode source maps.
