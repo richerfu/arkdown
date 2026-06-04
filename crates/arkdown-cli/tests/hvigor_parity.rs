@@ -116,6 +116,88 @@ fn minimal_hsp_hvigor_parity_report() {
     }
 }
 
+/// Parity test for share config — validates that crossAppSharedConfig entries
+/// survive profile processing and are written to the correct resource profile.
+/// Covers the P0 fix: share config was being overwritten by static intermediate files.
+#[test]
+#[ignore = "requires local hvigorw/DevEco toolchain; run explicitly for artifact parity"]
+fn share_config_hap_hvigor_parity_report() {
+    let repo_root = repo_root();
+    let fixture = "tests/fixtures/share-config-hap";
+    let report_path = report_path_for(&repo_root, "share-config-hap");
+    let report = parity_for_fixture(fixture, ArtifactType::Hap, report_path)
+        .expect("parity harness failed before report generation");
+    print_report_summary(&report);
+
+    if env_truthy(ENV_STRICT) && !report["equal"].as_bool().unwrap_or(false) {
+        panic!(
+            "strict parity failed for share-config-hap; see {}",
+            report["report_path"].as_str().unwrap_or("<unknown>")
+        );
+    }
+}
+
+/// Parity test for startup config — validates appStartup task compilation and
+/// startup profile resource rewrite.
+#[test]
+#[ignore = "requires local hvigorw/DevEco toolchain; run explicitly for artifact parity"]
+fn startup_config_hap_hvigor_parity_report() {
+    let repo_root = repo_root();
+    let fixture = "tests/fixtures/startup-config-hap";
+    let report_path = report_path_for(&repo_root, "startup-config-hap");
+    let report = parity_for_fixture(fixture, ArtifactType::Hap, report_path)
+        .expect("parity harness failed before report generation");
+    print_report_summary(&report);
+
+    if env_truthy(ENV_STRICT) && !report["equal"].as_bool().unwrap_or(false) {
+        panic!(
+            "strict parity failed for startup-config-hap; see {}",
+            report["report_path"].as_str().unwrap_or("<unknown>")
+        );
+    }
+}
+
+/// Parity test for release HAP — validates that release obfuscation is applied
+/// to the CompileArkTS handoff inputs (the .ts files that feed into es2abc),
+/// not just the intermediate .js chunks.
+#[test]
+#[ignore = "requires local hvigorw/DevEco toolchain; run explicitly for artifact parity"]
+fn release_hap_obfuscation_parity_report() {
+    let repo_root = repo_root();
+    let fixture = "tests/fixtures/release-obfuscation-hap";
+    let report_path = report_path_for(&repo_root, "release-obfuscation-hap");
+    let report = parity_for_fixture(fixture, ArtifactType::Hap, report_path)
+        .expect("parity harness failed before report generation");
+    print_report_summary(&report);
+
+    if env_truthy(ENV_STRICT) && !report["equal"].as_bool().unwrap_or(false) {
+        panic!(
+            "strict parity failed for release-obfuscation-hap; see {}",
+            report["report_path"].as_str().unwrap_or("<unknown>")
+        );
+    }
+}
+
+/// Parity test for minimal release HAP (no obfuscation) — validates that the
+/// pack.info has correct bundle type, version, and device types.
+#[test]
+#[ignore = "requires local hvigorw/DevEco toolchain; run explicitly for artifact parity"]
+fn minimal_hap_release_hvigor_parity_report() {
+    let repo_root = repo_root();
+    let fixture = "tests/fixtures/minimal-hap";
+    let report_path = report_path_for(&repo_root, "minimal-hap-release");
+    let report = parity_for_fixture(fixture, ArtifactType::Hap, report_path)
+        .expect("parity harness failed before report generation");
+    print_report_summary(&report);
+
+    if env_truthy(ENV_STRICT) && !report["equal"].as_bool().unwrap_or(false) {
+        panic!(
+            "strict parity failed for minimal-hap-release; see {}",
+            report["report_path"].as_str().unwrap_or("<unknown>")
+        );
+    }
+}
+
 fn print_report_summary(report: &Value) {
     let report_path = report["report_path"]
         .as_str()
