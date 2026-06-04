@@ -122,7 +122,7 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 | H8 | Method index ordering [strings\|methods\|lits] | `assembly_emitter.cpp` method pool layout | ✅ Fixed: method index now [bytecode_strings\|methods\|literal_arrays] | ✅ |
 | H9 | LNP body and DebugInfo constant_pool | `emitter.cpp` attaches AST source positions from parsed input source; `BuildLineNumberProgram()` consumes pandasm instruction source positions, real bytecode sizes, columns, and local-variable events | Minimal-hap is byte-identical on the cache-TS route after aligning source positions, call/branch/argument stores, implicit returns, lexical `this` locals, special-opcode pc deltas, MethodItem tag order, parameter-name string order, and aligned trailing LNP index. Broader fixtures still need coverage. | 🔄 |
 | H10 | `--merge-abc`: all module records in single `.abc` | Multiple records merged with shared StringTable | Implemented | ✅ |
-| H11 | Incremental ABC cache via `--cache-file` (msgpack) | `es2abc --cache-file <path>` | CLI passes a cache-file path/marker, but backend does not implement real es2abc-compatible incremental cache | ❌ |
+| H11 | Incremental ABC cache via `--cache-file` (msgpack) | `es2abc --cache-file <path>` | `ModulesCache` (modules.cache + .protoBin) provides batch-level cache: FNV hash over all record sources + options; cache hit returns cached ABC bytes, skipping full compilation. Not per-function SHA256 as upstream es2abc; full protobuf ProgramCache interop not yet implemented. | 🔄 |
 | H12 | Widget compilation (separate pass, `widgetCompile: "true"`) | ArkCompile calls `initWidgetDefaultArkCompileConfig()` for form entries | Not implemented (SPEC-027) | ❌ |
 | H13 | ArkData compile (`arkDataCompile()`) | Separate compiler invocation for ArkData sources | Not implemented | ❌ |
 | H14 | CompileArkTS source maps and final `sourceMaps.map` | ets-loader writes `sourceMaps.json`; package includes `ets/sourceMaps.map` | Minimal-hap `sourceMaps.json` and final `ets/sourceMaps.map` match; broader source-map coverage unverified | 🔄 |
@@ -155,7 +155,7 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 | K3 | Assemble HSP zip | `PackageHsp` | `arkdown-pack::pack_hsp()` delegates to `pack_hap()` — HSP has the same zip structure as HAP but with `module.json#module.type = "shared"` (set by `process_profile()`); parity verified by SPEC-012 | ✅ |
 | K4 | Assemble HAR (source HAR, not ByteCode HAR) | `PackageHar` | `arkdown-pack::pack_har()` now packs `oh-package.json5`, `src/main/ets/**`, and `src/main/resources/**`. Remaining: `index.d.ts`/`.d.ets` declaration files (requires TypeScript extraction), obfuscation consumer config, `processObfuscationFiles`, `cleanEtsForTgz`. | 🔄 |
 | K5 | `ProcessIntegratedHsp` — embed remote/integrated HSP deps | `process-integrated-hsp.js` | `arkdown-pack` has `IntegratedHspEntry` and normalized embed support; CLI has no real remote HSP discovery yet | 🔄 |
-| K6 | Native SO library embedding (`libs/arm64-v8a/`) | `PackageHap` + `CacheNativeLibs` | Not implemented (no native build flow) | ❌ |
+| K6 | Native SO library embedding (`libs/arm64-v8a/`) | `PackageHap` + `CacheNativeLibs` | `collect_native_libs()` scans `src/main/libs/`, `libs/`, and `oh_modules/` for `arm64-v8a/*.so`; `pack_hap()` embeds each as `libs/arm64-v8a/<filename>` (stored entry) | ✅ |
 
 ### Stage L — Signing
 
@@ -516,14 +516,14 @@ coverage.
 | ArkCompile Setup (E) | 4 | 3 | 0 | 1 |
 | Rollup Plugins (F) | 28 | 15 | 6 | 7 |
 | Post-Bundle Processing (G) | 8 | 4 | 1 | 3 |
-| ABC Compilation (H) | 14 | 7 | 4 | 3 |
+| ABC Compilation (H) | 14 | 7 | 5 | 2 |
 | Obfuscation/Minification (I) | 5 | 0 | 0 | 5 |
 | Incremental Cache (J) | 4 | 2 | 0 | 2 |
-| Packaging (K) | 6 | 3 | 2 | 1 |
+| Packaging (K) | 6 | 4 | 2 | 0 |
 | Signing (L) | 3 | 2 | 1 | 0 |
 | Advanced/Watch (M) | 5 | 0 | 0 | 5 |
-| **Total** | **95** | **48** | **19** | **28** |
+| **Total** | **95** | **49** | **20** | **26** |
 
-**Current overall pipeline coverage: ~51% fully verified, ~20% partial, ~29% not started.**
-The HAP golden-parity path (minimal-hap fixture with no dependencies) covers ~82 of the 95 steps.
-The remaining 28 ❌ steps are concentrated in: release-mode obfuscation+minification, rollup msgpack cache, watch mode, full ViewPU ArkUI lowering, and multi-module dependency handling.
+**Current overall pipeline coverage: ~52% fully verified, ~21% partial, ~27% not started.**
+The HAP golden-parity path (minimal-hap fixture with no dependencies) covers ~84 of the 95 steps.
+The remaining 26 ❌ steps are concentrated in: release-mode obfuscation+minification, rollup msgpack cache, watch mode, full ViewPU ArkUI lowering, and multi-module dependency handling.
