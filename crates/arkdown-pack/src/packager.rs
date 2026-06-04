@@ -598,6 +598,24 @@ impl Packager {
             }
         }
 
+        // src/main/resources/ — embed resources in the source HAR so consumers
+        // can use the HAR's resource entries. Matches hvigor's HAR layout.
+        if input.resources_dir.exists() {
+            for entry in walkdir::WalkDir::new(&input.resources_dir)
+                .min_depth(1)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_file())
+            {
+                let rel = entry
+                    .path()
+                    .strip_prefix(&input.resources_dir)
+                    .unwrap_or(entry.path());
+                let dest = ArchivePath::har_resources(rel);
+                zip_writer::add_file_deflate(&mut writer, &dest, entry.path())?;
+            }
+        }
+
         writer.finish()?;
         Ok(input.output_path)
     }
@@ -677,6 +695,10 @@ impl ArchivePath {
 
     fn har_ets(rel: &std::path::Path) -> String {
         format!("src/main/ets/{}", arkdown_utils::to_unix_path(rel))
+    }
+
+    fn har_resources(rel: &std::path::Path) -> String {
+        format!("src/main/resources/{}", arkdown_utils::to_unix_path(rel))
     }
 
     fn ets(rel_text: &str) -> String {

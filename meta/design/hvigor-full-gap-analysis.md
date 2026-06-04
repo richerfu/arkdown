@@ -152,8 +152,8 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 |---|---|---|---|---|
 | K1 | Generate `module.json` (app + module merged) | `GeneratePkgModuleJson` → `generate-pkg-module-json.js` | `arkdown-profile::write_module_json()` — all fields match parity report | ✅ |
 | K2 | Assemble HAP zip (11 canonical entries) | `PackageHap` → `make-pack-info.js` + zip | `arkdown-pack::pack_hap()` — matches hvigor golden exactly | ✅ |
-| K3 | Assemble HSP zip | `PackageHsp` | `arkdown-pack::pack_hsp()` — similar to HAP but unverified for HSP-specific content | 🔄 |
-| K4 | Assemble HAR (source HAR, not ByteCode HAR) | `PackageHar` | `arkdown-pack::pack_har()` — basic implementation | 🔄 |
+| K3 | Assemble HSP zip | `PackageHsp` | `arkdown-pack::pack_hsp()` delegates to `pack_hap()` — HSP has the same zip structure as HAP but with `module.json#module.type = "shared"` (set by `process_profile()`); parity verified by SPEC-012 | ✅ |
+| K4 | Assemble HAR (source HAR, not ByteCode HAR) | `PackageHar` | `arkdown-pack::pack_har()` now packs `oh-package.json5`, `src/main/ets/**`, and `src/main/resources/**`. Remaining: `index.d.ts`/`.d.ets` declaration files (requires TypeScript extraction), obfuscation consumer config, `processObfuscationFiles`, `cleanEtsForTgz`. | 🔄 |
 | K5 | `ProcessIntegratedHsp` — embed remote/integrated HSP deps | `process-integrated-hsp.js` | `arkdown-pack` has `IntegratedHspEntry` and normalized embed support; CLI has no real remote HSP discovery yet | 🔄 |
 | K6 | Native SO library embedding (`libs/arm64-v8a/`) | `PackageHap` + `CacheNativeLibs` | Not implemented (no native build flow) | ❌ |
 
@@ -520,11 +520,11 @@ coverage.
 | ABC Compilation (H) | 14 | 7 | 4 | 3 |
 | Obfuscation/Minification (I) | 5 | 0 | 0 | 5 |
 | Incremental Cache (J) | 4 | 0 | 0 | 4 |
-| Packaging (K) | 6 | 2 | 3 | 1 |
+| Packaging (K) | 6 | 3 | 2 | 1 |
 | Signing (L) | 3 | 2 | 1 | 0 |
 | Advanced/Watch (M) | 5 | 0 | 0 | 5 |
-| **Total** | **95** | **44** | **20** | **31** |
+| **Total** | **95** | **45** | **19** | **31** |
 
-**Current overall pipeline coverage: ~46% fully verified, ~21% partial, ~33% not started.**
-The HAP golden-parity path (minimal-hap fixture with no dependencies) covers ~78 of the 95 steps.
+**Current overall pipeline coverage: ~47% fully verified, ~20% partial, ~33% not started.**
+The HAP golden-parity path (minimal-hap fixture with no dependencies) covers ~79 of the 95 steps.
 The remaining 31 ❌ steps are concentrated in: release-mode obfuscation+minification, incremental caching, watch mode, full ViewPU ArkUI lowering, and multi-module dependency handling.
