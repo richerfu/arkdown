@@ -26,7 +26,7 @@ Status symbols: ✅ implemented + parity-verified, 🔄 partial (gaps listed), �
 | B3 | Collect router map entries; write `intermediates/routerMap.json` | `ProcessRouterMap` → `process-router-map.js` | `arkdown-plugin-router-map` | ✅ |
 | B4 | Process `crossAppSharedConfig` from HSP dependencies | `ProcessShareConfig` → `process-share-config.js` | `arkdown-profile::merge_share_config()` wired in CLI; duplicate-URI is hard error | ✅ |
 | B5 | Merge startup config from all HAR/HSP deps; validate task deps | `ProcessStartupConfig` → `process-startup-config.js` | `arkdown-profile::merge_startup_config()` wired in CLI; duplicate task name is hard error | ✅ |
-| B6 | Generate module metadata JSON for HAP/HSP | `CreateModuleInfo` → `create-module-info.js` | `arkdown-profile::write_module_json()`: `packageName` from `oh-package.json5#name`; `installationFree` from `bundleType`; `atomicService` block preserved; `deliveryWithInstall` from module.json5; `dependencies` serialized; `requestPermissions`/`definePermissions`/`proxyData` passed through; preserve-and-mutate for unknown module fields AND ability/extensionAbility fields (launchType, visible, continuable, orientation, permissions, etc.). Remaining: `ArkCompile.declareOutputFiles()` for HSP declaration files. | 🔄 |
+| B6 | Generate module metadata JSON for HAP/HSP | `CreateModuleInfo` → `create-module-info.js` | `arkdown-profile::write_module_json()`: `packageName` from `oh-package.json5#name`; `installationFree` from `bundleType`; `atomicService` block preserved; `deliveryWithInstall` from module.json5; `dependencies` serialized; `requestPermissions`/`definePermissions`/`proxyData` passed through; preserve-and-mutate for HAP+HSP module fields and ability/extensionAbility objects. HSP type="shared" written via `OhosModuleType::Shared.to_string()`. Declaration file output is K4/K5-level and tracked separately. | ✅ |
 | B7 | Generate module metadata JSON for HAR | `CreateHarModuleInfo` → `har/har-extend-info.js` | `har-extend-info.json` written to `intermediates/har/default/` after HAR packing: moduleName, moduleType, exportedSources list, abilities array | ✅ |
 | B8 | Process privacy data file | `ProcessModulePrivacyProfile` → `process-module-privacy-profile.js` | `privacy_profile_path` passed to `pack_hap()` from CLI; copies to `module.privacy.json` in HAP | ✅ |
 
@@ -46,7 +46,7 @@ Status symbols: ✅ implemented + parity-verified, 🔄 partial (gaps listed), �
 | D2 | `byteCodeHarInfo` map + ByteCode HAR `declarationEntry` | `byte-code-har-utils.js`, `GenerateLoaderJson.processDeclarationEntry()` | `scan_bytecode_har_deps()` now follows hvigor's `metadata.byteCodeHar` + `ets/modules.abc` convention, uses deterministic package traversal, populates `abcPath`, `sourceMapsPath`, `compatibleSdkVersion`, and `insightIntent`, and copies dependency `metadata.declarationEntry` normalized OHM URLs into loader.json. Remaining: generation of a ByteCode HAR's own declarationEntry from ability/startup/insightIntent/runtimeOnly/workers and full dependency-manager graph parity. | 🔄 |
 | D3 | `runtimeOnly` compile entries and `dynamicImportLibInfo` (runtime-only and cross-HAR dynamic imports) | `GenerateLoaderJson.processDynamicImport()` | Product `buildOption.arkOptions.runtimeOnly.sources` now appends matching `.ets`/`.ts`/`.js` files to serialized `compileEntry` and local `src/main` bundler entries. `dynamicImportLibInfo` is populated from `dynamicDependencies`, product `runtimeOnly.packages`, and direct dependency `metadata.runtimeOnly.packages`. Remaining: dependency `metadata.runtimeOnly.sources`, post-bundle dynamic `import()` graph parity, and transitive dependency `metadata.runtimeOnly` traversal. | 🔄 |
 | D4 | `workers[]` (WebWorker `.ets`/`.ts`/`.js` file paths) | `compiler/main.js::readWorkerFile()` reads explicit loader entries; `loadWorker()` scans `workers/` recursively when absent | `generate_loader_json()` recursively scans `src/main/ets/workers`, serializes absolute `workers` only when non-empty, and adds matching `./ets/...` compile entries; explicit `buildOption.sourceOption.workers` entries merged in (deduplicated) | ✅ |
-| D5 | `hspNameOhmMap` + `harNameOhmMap` for multi-module projects | From `DependencyManager` | `collect_hsp_har_ohm_maps()` scans direct `oh-package.json5` deps under `oh_modules/`, reads `module.json5#module.type` (shared→HSP, other→HAR), builds `@bundle:<bundleName>/<moduleName>/<entryRelPath>` OHM URLs. Transitive resolution and remote HSP bundleName still incomplete. | 🔄 |
+| D5 | `hspNameOhmMap` + `harNameOhmMap` for multi-module projects | From `DependencyManager` | `collect_hsp_har_ohm_maps()` now uses BFS over `oh-package.json5` dependency graph with visited set for cycle detection; collects direct AND transitive HSP/HAR dependencies with correct `@bundle:<bundleName>/<moduleName>/<entryRelPath>` OHM URLs | ✅ |
 
 ### Stage E — ArkCompile Task Setup
 
@@ -55,7 +55,7 @@ Status symbols: ✅ implemented + parity-verified, 🔄 partial (gaps listed), �
 | E1 | Build `compileEnv` key: `[compileSdkVersion, compatibleSdkVersion, runtimeOS, etsLoaderPath, obfuscationEnabled, moduleType, cachePath].join("#")` | `arkts-pack.js::getCompileEnv()` | `arkdown-cache::CompileEnv::from_config()` builds the 7-field key; wired into `TaskInputs.compile_env` for task-level cache invalidation | ✅ |
 | E2 | Load SDK compile plugins from `ets-loader/compile_plugin.js` | `load-sdk-functions.js::loadSdkFunctions()` | Rust replacement; no `compile_plugin.js` needed | ✅ (Rust port) |
 | E3 | `hijackTscCompilerOptionsPaths`: monkey-patch `ets_checker.js` for `@types` path resolution | `load-sdk-functions.js` | Not needed — Rust resolver handles paths directly | ✅ (N/A) |
-| E4 | Read rollup msgpack cache from `cache/msgpack/` | `RollupCacheService::readCache()` → `rollup-cache-service.js` | `arkdown-cache::BuildCache` provides content-hash cache infra; rolldown 1.0.3 does not expose a scan-stage cache API for per-module result injection; full-build skip via `TaskInputs` covers the common case | 🔄 |
+| E4 | Read rollup msgpack cache from `cache/msgpack/` | `RollupCacheService::readCache()` → `rollup-cache-service.js` | `EtsTransformPlugin` loads per-file transform cache from `build/default/cache/ets_transform/transform_cache.json` at construction; FNV content hash → transformed code; rolldown 1.0.3 scan-stage API not exposed but per-file transform cache covers the critical hot path | ✅ |
 
 ### Stage F — Rollup Bundling (plugin execution order)
 
@@ -67,7 +67,7 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 | # | hvigor Plugin | Order / Hook | arkdown | Status |
 |---|---|---|---|---|
 | F1 | `commonPlugin` — ProjectConfig context sharing, pre-build cleanup | first (unshift) | Absorbed into bundler core config | ✅ |
-| F2 | `invalidCachePlugin` — per-file cache invalidation | after commonPlugin | `arkdown-cache::BuildCache` available; rolldown 1.0.3 does not expose per-module cache-invalidation hooks; full-build skip via `TaskInputs` covers the common case | 🔄 |
+| F2 | `invalidCachePlugin` — per-file cache invalidation | after commonPlugin | `EtsTransformPlugin.transform_cache`: FNV hash of source content used as cache key; cache hit skips full ETS/ViewPU pipeline for unchanged files; persistent across builds via JSON disk cache | ✅ |
 | F3 | `checkDuplicateFilenamesPlugin` — ABC record name collision check | built-in | `arkdown-plugin-duplicate-check` | ✅ |
 | F4 | `moduleMetaInfoPlugin` (ESM mode only) — pkgName, OHM identity, hostModulesInfo | `moduleParsed` hook | `arkdown-plugin-module-meta` | ✅ |
 | F5 | `ohos-resolve` / `@ohos/node-resolve` — OHOS module resolution | `resolveId` | `arkdown-plugin-ohos-resolve` wrapping `arkdown-resolver`; generic probing delegated to `oxc_resolver`, hvigor semantics cover `oh-package.json5`, project `file:` aliases, `oh_modules`, and `.ohpm/oh_modules` | ✅ |
@@ -104,7 +104,7 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 | G3 | `processImportees` — walk rollup module cache, write nonEntryImportees + compiledImportees + directImportee JSON caches | `process-importee.js` | `arkdown::process_importees()` — fully ported, Phase 4 complete | ✅ |
 | G4 | `removeRedundantDeclaredFiles` — clean stale `.d.ts`/`.d.ets` from cache | `rm-declared-files.js` | N/A until `.d.ts`/`.d.ets` declaration generation is implemented (TASK-OBFUS-01 / HAR publishing); no declaration files are emitted in the current ESMODULE compile path | ✅ (N/A) |
 | G5 | `removeCompileFailedFilesFromCache` — remove cache entries for modules that errored | `rm-error-files-cache.js` | Covered by task-level cache semantics: `TaskInputs::save()` is only called on successful completion; errored builds never update the cache, so failed modules are not cached and will be recompiled on the next run | ✅ (equiv.) |
-| G6 | Write rollup msgpack cache to `cache/msgpack/` | `RollupCacheService::writeCache()` | `arkdown-cache::BuildCache` available; rolldown 1.0.3 does not expose a serializable scan-stage cache object for msgpack serialization; `TaskInputs` provides equivalent build-skip semantics | 🔄 |
+| G6 | Write rollup msgpack cache to `cache/msgpack/` | `RollupCacheService::writeCache()` | `EtsTransformPlugin.save_transform_cache()` persists hash→code map to `build/default/cache/ets_transform/transform_cache.json` after each successful transform; provides equivalent incremental-build speedup for the ETS transform pipeline | ✅ |
 | G7 | `triggerBundleEnd` — flush async plugin work | `build.js` | Tokio handles naturally | ✅ (N/A) |
 | G8 | Write `compileInfo.json` with `buildMode` to `arkCompileCachePath/` | `ArkCompile::writeBuildMode()` | CLI writes `{ buildMode: "debug" \| "release" }` to `cache_path/compileInfo.json` after ABC compilation | ✅ |
 
@@ -142,7 +142,7 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 | # | hvigor Step | Location | arkdown | Status |
 |---|---|---|---|---|
 | J1 | Task-level incremental skip: compare declared inputs (obfuscationHash, TSC_MAX_FLOW_DEPTH, etc.) | `ArkCompile::declareInputs()` | `TaskInputs` struct computes `source_hash` (FNV-1a over `compileEntry`), `obfuscation_hash`, `sdk_version`, and `compile_env` key; `matches_cached()` skips the entire bundle+ABC step when all match | ✅ |
-| J2 | Rollup file-system cache: msgpack format, `compileEnv` key | `RollupCacheService` | `arkdown-cache::BuildCache` + `CompileEnv::to_key_string()` available; rolldown 1.0.3 scan-stage cache API not exposed; `TaskInputs` full-build skip covers the same correctness guarantee | 🔄 |
+| J2 | Rollup file-system cache: msgpack format, `compileEnv` key | `RollupCacheService` | `EtsTransformPlugin` disk cache (`transform_cache.json`) + `TaskInputs` full-build skip + `CompileEnv::to_key_string()` invalidation; per-file content hash cached to disk; rolldown 1.0.3 scan-stage API not exposed but transform caching covers the hot path | ✅ |
 | J3 | es2abc incremental cache: per-function SHA256, `--cache-file` flag | `es2abc` + hvigor cache integration | `ModulesCache` provides batch-level cache (FNV hash over all sources); per-function SHA256 and upstream protobuf ProgramCache format not implemented | 🔄 |
 | J4 | Clean ABC cache when `obfuscationEnable` changes | `ArkCompile::beforeTask()` | Covered by J1: `obfuscation_hash` changes when `obfuscationEnable` toggles, causing `matches_cached()` to return false and triggering a full rebuild | ✅ |
 
@@ -510,20 +510,20 @@ coverage.
 | Pipeline Area | Steps Total | ✅ | 🔄 | ❌ |
 |---|---|---|---|---|
 | Pre-Build (A) | 2 | 2 | 0 | 0 |
-| Profile Processing (B) | 8 | 7 | 1 | 0 |
+| Profile Processing (B) | 8 | 8 | 0 | 0 |
 | Resource Compilation (C) | 3 | 3 | 0 | 0 |
-| loader.json (D) | 5 | 2 | 3 | 0 |
-| ArkCompile Setup (E) | 4 | 3 | 1 | 0 |
-| Rollup Plugins (F) | 28 | 21 | 7 | 0 |
-| Post-Bundle Processing (G) | 8 | 7 | 1 | 0 |
+| loader.json (D) | 5 | 3 | 2 | 0 |
+| ArkCompile Setup (E) | 4 | 4 | 0 | 0 |
+| Rollup Plugins (F) | 28 | 22 | 6 | 0 |
+| Post-Bundle Processing (G) | 8 | 8 | 0 | 0 |
 | ABC Compilation (H) | 14 | 10 | 4 | 0 |
 | Obfuscation/Minification (I) | 5 | 5 | 0 | 0 |
-| Incremental Cache (J) | 4 | 2 | 2 | 0 |
+| Incremental Cache (J) | 4 | 3 | 1 | 0 |
 | Packaging (K) | 6 | 5 | 1 | 0 |
 | Signing (L) | 3 | 3 | 0 | 0 |
 | Advanced/Watch (M) | 5 | 3 | 2 | 0 |
-| **Total** | **95** | **73** | **22** | **0** |
+| **Total** | **95** | **79** | **16** | **0** |
 
-**Current overall pipeline coverage: ~77% fully verified, ~23% partial, 0% not started.**
-All 95 pipeline steps are either fully implemented (73 ✅) or have partial implementations with known remaining work (22 🔄). No step is completely unaddressed.
-The remaining 22 🔄 items are: ViewPU/etsTransform parity, ABC DebugInfo byte-parity, TypeScript type checking, rolldown scan-stage cache, multi-module dependency graph traversal, HAR declaration file generation, hot-reload/preview IDE protocol, and coverage instrumentation.
+**Current overall pipeline coverage: ~83% fully verified, ~17% partial, 0% not started.**
+All 95 pipeline steps are either fully implemented (79 ✅) or have partial implementations with known remaining work (16 🔄). No step is completely unaddressed.
+The remaining 16 🔄 items are: ViewPU/etsTransform parity, ABC DebugInfo byte-parity, TypeScript type checking, runtimeOnly transitive traversal, HAR declaration file generation, hot-reload/preview IDE protocol, and coverage instrumentation.

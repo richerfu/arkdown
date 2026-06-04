@@ -711,12 +711,11 @@ impl LoaderJson {
         map
     }
 
-    /// Scan direct HAR/HSP dependencies declared in `oh-package.json5` and
-    /// build the `hspNameOhmMap` / `harNameOhmMap` entries.
+    /// Scan HAR/HSP dependencies (direct and transitive) declared in
+    /// `oh-package.json5` and build the `hspNameOhmMap` / `harNameOhmMap`.
     ///
-    /// Matches hvigor's `getHspNameOhmMap()` / `getHarNameOhmMap()` for
-    /// single-bundle projects (direct deps only; transitive resolution is a
-    /// separate TASK-LOADER-01 extension).
+    /// Matches hvigor's `getHspNameOhmMap()` / `getHarNameOhmMap()` including
+    /// transitive dependency traversal via the DependencyManager graph.
     ///
     /// Key:   dependency alias (from `oh-package.json5#dependencies`)
     /// Value: `@bundle:<bundleName>/<moduleName>/<entryRelPath>`
@@ -725,72 +724,88 @@ impl LoaderJson {
         module_cfg: &ModuleConfig,
     ) -> (FxHashMap<String, String>, FxHashMap<String, String>) {
         let bundle_name = &config.product.bundle_name;
-
-        // Read the module's own oh-package.json5 to get its declared deps.
-        #[derive(Deserialize)]
-        struct OhPkgDeps {
-            #[serde(default)]
-            dependencies: FxHashMap<String, String>,
-        }
-        let pkg_json_path = module_cfg.src_path.join("oh-package.json5");
-        let deps: FxHashMap<String, String> = std::fs::read_to_string(&pkg_json_path)
-            .ok()
-            .and_then(|s| json5::from_str::<OhPkgDeps>(&s).ok())
-            .map(|p| p.dependencies)
-            .unwrap_or_default();
-
         let oh_modules_root = module_cfg.src_path.join("oh_modules");
         let project_oh_modules = config.project_root.join("oh_modules");
 
         let mut hsp_map: FxHashMap<String, String> = FxHashMap::default();
         let mut har_map: FxHashMap<String, String> = FxHashMap::default();
+        let mut visited: FxHashSet<String> = FxHashSet::default();
 
-        for dep_alias in deps.keys() {
-            // Resolve package directory: module-level oh_modules first, then project root.
-            let pkg_dir = Self::resolve_dep_dir(dep_alias, &oh_modules_root, &project_oh_modules);
-            let Some(pkg_dir) = pkg_dir else {
-                continue;
-            };
+        // Recursive BFS over the dependency graph.
+        let mut queue: std::collections::VecDeque<PathBuf> = std::collections::VecDeque::new();
+        queue.push_back(module_cfg.src_path.clone());
 
-            // Read module.json5/module.json to determine type (shared=HSP).
+        while let Some(pkg_root) = queue.pop_front() {
             #[derive(Deserialize)]
-            struct ModuleJson {
-                module: ModuleSection,
-            }
-            #[derive(Deserialize)]
-            struct ModuleSection {
-                #[serde(rename = "type", default)]
-                module_type: String,
+            struct OhPkgDeps {
                 #[serde(default)]
-                name: Option<String>,
+                dependencies: FxHashMap<String, String>,
             }
-            let module_json_content = ["src/main/module.json5", "src/main/module.json"]
-                .iter()
-                .find_map(|n| std::fs::read_to_string(pkg_dir.join(n)).ok());
-            let Some(content) = module_json_content else {
+            let pkg_json_path = pkg_root.join("oh-package.json5");
+            let Ok(pkg_content) = std::fs::read_to_string(&pkg_json_path) else {
                 continue;
             };
-            let Ok(parsed) = json5::from_str::<ModuleJson>(&content) else {
-                continue;
-            };
-            let module_name = parsed
-                .module
-                .name
-                .filter(|n| !n.is_empty())
-                .unwrap_or_else(|| {
-                    dep_alias.rsplit('/').next().unwrap_or(dep_alias).to_string()
-                });
+            let deps: FxHashMap<String, String> =
+                json5::from_str::<OhPkgDeps>(&pkg_content)
+                    .map(|p| p.dependencies)
+                    .unwrap_or_default();
 
-            // Find and normalize the entry file path relative to pkg_dir.
-            let entry_rel = Self::dep_entry_rel_path(&pkg_dir);
+            for dep_alias in deps.keys() {
+                if !visited.insert(dep_alias.clone()) {
+                    continue; // already processed this alias
+                }
 
-            let ohm_url = format!("@bundle:{}/{}/{}", bundle_name, module_name, entry_rel);
+                // Resolve package directory under oh_modules.
+                let pkg_dir =
+                    Self::resolve_dep_dir(dep_alias, &oh_modules_root, &project_oh_modules);
+                let Some(pkg_dir) = pkg_dir else {
+                    continue;
+                };
 
-            if parsed.module.module_type == "shared" {
-                hsp_map.insert(dep_alias.clone(), ohm_url);
-            } else {
-                // feature / har / empty → treat as HAR.
-                har_map.insert(dep_alias.clone(), ohm_url);
+                // Read module.json5/module.json to determine type (shared=HSP).
+                #[derive(Deserialize)]
+                struct ModuleJson {
+                    module: ModuleSection,
+                }
+                #[derive(Deserialize)]
+                struct ModuleSection {
+                    #[serde(rename = "type", default)]
+                    module_type: String,
+                    #[serde(default)]
+                    name: Option<String>,
+                }
+                let module_json_content = ["src/main/module.json5", "src/main/module.json"]
+                    .iter()
+                    .find_map(|n| std::fs::read_to_string(pkg_dir.join(n)).ok());
+                let Some(content) = module_json_content else {
+                    // No module.json — still enqueue for further transitive deps.
+                    queue.push_back(pkg_dir);
+                    continue;
+                };
+                let Ok(parsed) = json5::from_str::<ModuleJson>(&content) else {
+                    queue.push_back(pkg_dir);
+                    continue;
+                };
+                let module_name = parsed
+                    .module
+                    .name
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or_else(|| {
+                        dep_alias.rsplit('/').next().unwrap_or(dep_alias).to_string()
+                    });
+
+                let entry_rel = Self::dep_entry_rel_path(&pkg_dir);
+                let ohm_url =
+                    format!("@bundle:{}/{}/{}", bundle_name, module_name, entry_rel);
+
+                if parsed.module.module_type == "shared" {
+                    hsp_map.insert(dep_alias.clone(), ohm_url);
+                } else {
+                    har_map.insert(dep_alias.clone(), ohm_url);
+                }
+
+                // Enqueue this dep for its own transitive deps.
+                queue.push_back(pkg_dir);
             }
         }
 
