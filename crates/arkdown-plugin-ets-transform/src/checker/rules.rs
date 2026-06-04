@@ -37,11 +37,16 @@ pub fn check(source: &str, file: &str) -> Vec<EtsTransformError> {
 
     let mut errors: Vec<EtsTransformError> = Vec::new();
     let mut seen_component_names: FxHashSet<String> = Default::default();
+    let mut entry_count = 0usize;
 
     for stmt in &program.body {
         match stmt {
             Statement::StructStatement(statement) => {
                 check_struct_component(statement, file, &mut seen_component_names, &mut errors);
+                // Count @Entry decorators — at most one per file.
+                if statement.decorators.iter().any(|d| decorator_name(d) == "Entry") {
+                    entry_count += 1;
+                }
             }
             Statement::ExportNamedDeclaration(export) => {
                 if let Some(Declaration::StructStatement(statement)) = export.declaration.as_ref() {
@@ -230,6 +235,18 @@ pub fn check(source: &str, file: &str) -> Vec<EtsTransformError> {
                 }
             }
         }
+    }
+
+    // Rule: at most one @Entry struct per file.
+    if entry_count > 1 {
+        errors.push(EtsTransformError::Diagnostic {
+            file: file.to_string(),
+            message: format!(
+                "At most one '@Entry' decorated struct is allowed per file, but {} were found",
+                entry_count
+            ),
+            severity: DiagnosticSeverity::Error,
+        });
     }
 
     errors

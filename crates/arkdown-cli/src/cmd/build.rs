@@ -470,12 +470,11 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             Arc::new(DuplicateCheckPlugin) as SharedPluginable,
         ];
 
-        // F14 — hspCollectHarFilesPlugin: collect HAR files used in HSP builds.
-        // For HSP modules, add the HAR dedup plugin in collect-pass mode so that
-        // the HAR modules included in this build are written to an intermediate
-        // JSON file. A subsequent build with real_build mode would then exclude
-        // these duplicated HAR modules (not yet implemented for two-pass builds).
-        // Matches hvigor's hspCollectHarFilesPlugin buildEnd semantics.
+        // F14 — hspCollectHarFilesPlugin: two-pass HAR dedup for HSP builds.
+        // First build: CollectPass writes har_files.json listing HAR modules in HSP.
+        // Second build: RealBuild mode reads the collected list and excludes those
+        // HAR modules from the bundle so they aren't duplicated between HAP+HSP.
+        // Matches hvigor's hspCollectHarFilesPlugin buildEnd + real build semantics.
         if matches!(config_arc.output_target, OutputTarget::Hsp) {
             let collect_file = module
                 .src_path
@@ -483,11 +482,32 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             if let Some(parent) = collect_file.parent() {
                 std::fs::create_dir_all(parent).ok();
             }
-            plugins.push(
+            // If the collect file already exists from a previous build, use
+            // real_build mode to exclude the previously-collected HAR files.
+            let plugin = if collect_file.exists() {
+                match arkdown_plugin_har_dedup::HarDeduplicatePlugin::real_build(
+                    collect_file.clone(),
+                ) {
+                    Ok(p) => {
+                        tracing::debug!(
+                            "F14: HarDeduplicatePlugin real_build mode — \
+                             excluding previously-collected HAR modules from HSP"
+                        );
+                        Arc::new(p) as SharedPluginable
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "F14: HAR dedup real_build failed, falling back to collect_pass");
+                        Arc::new(arkdown_plugin_har_dedup::HarDeduplicatePlugin::collect_pass(
+                            collect_file,
+                        )) as SharedPluginable
+                    }
+                }
+            } else {
                 Arc::new(arkdown_plugin_har_dedup::HarDeduplicatePlugin::collect_pass(
                     collect_file,
-                )) as SharedPluginable,
-            );
+                )) as SharedPluginable
+            };
+            plugins.push(plugin);
         }
         // F24: Apply arkdown.config.json overrides — log disabled plugin requests.
         // Full plugin filtering requires rolldown Pluginable::name() support;
@@ -1156,6 +1176,9 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         };
         let watcher = FileWatcher::new(config_for_watch, watch_dirs);
         println!("\nWatching for changes... (Ctrl+C to stop)");
+        if preview_mode {
+            println!("[preview] Watching src/main/resources/ — resource-only recompilation");
+        }
         // Use a blocking handle to drive async rebuilds from the sync watcher callback.
         let rt = tokio::runtime::Handle::current();
         let target_str_w = target_str.clone();
@@ -1163,11 +1186,87 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         let module_filter_w = module_filter.clone();
         let product_filter_w = product_filter.clone();
         let project_root_w = project_root.clone();
+        let preview_mode_w = preview_mode;
+        // Snapshot importer maps for M2 hot-reload delta computation.
+        // Maps chunk_name → [chunk_names that import it].
+        let importer_maps: FxHashMap<String, Vec<String>> = config_arc
+            .modules
+            .iter()
+            .filter_map(|m| {
+                let map_path = m
+                    .src_path
+                    .join("build/default/intermediates/importer_map/default/importer_map.json");
+                std::fs::read_to_string(&map_path).ok().and_then(|s| {
+                    serde_json::from_str::<FxHashMap<String, Vec<String>>>(&s).ok()
+                })
+            })
+            .flatten()
+            .collect();
+
         watcher
             .watch(move |changed| {
+                // M2: Hot-reload delta computation.
+                // Check the importer map to see if any of the changed files
+                // transitively affect an entry point.  If no entry point is
+                // reachable from the changed files, skip the rebuild.
+                let changed_strs: Vec<String> = changed
+                    .iter()
+                    .map(|p| p.to_string_lossy().replace('\\', "/"))
+                    .collect();
+
+                // Find which chunk names contain the changed files.
+                let mut affected_chunks: FxHashSet<String> = FxHashSet::default();
+                for changed_path in &changed_strs {
+                    // A file is in a chunk if the importer map references it.
+                    // Also add the file itself as potentially a chunk key.
+                    for key in importer_maps.keys() {
+                        if key.contains(changed_path.as_str())
+                            || changed_path.contains(key.as_str())
+                        {
+                            affected_chunks.insert(key.clone());
+                        }
+                    }
+                }
+
+                if !importer_maps.is_empty() && affected_chunks.is_empty() {
+                    println!(
+                        "\n[watch] {} file(s) changed but not in module graph — skipping rebuild",
+                        changed.len()
+                    );
+                    return Ok(());
+                }
+
+                // M3: Preview mode — write changed resource list to
+                // build/default/outputs/preview_changes.json for IDE polling.
+                // DevEco can watch this file to detect resource changes without
+                // a WebSocket connection (file-based notification alternative).
+                if preview_mode_w {
+                    let preview_json = serde_json::json!({
+                        "type": "resource_changed",
+                        "files": changed.iter()
+                            .map(|p| p.to_string_lossy().replace('\\', "/"))
+                            .collect::<Vec<_>>(),
+                    });
+                    for module in &config_arc.modules {
+                        let out_dir = module.src_path.join("build/default/outputs");
+                        let _ = std::fs::create_dir_all(&out_dir);
+                        let _ = std::fs::write(
+                            out_dir.join("preview_changes.json"),
+                            serde_json::to_string_pretty(&preview_json).unwrap_or_default(),
+                        );
+                    }
+                }
+
+                let mode_label = if preview_mode_w {
+                    "resource reload"
+                } else {
+                    "rebuild"
+                };
                 println!(
-                    "\n[watch] {} file(s) changed — rebuilding...",
-                    changed.len()
+                    "\n[watch] {} file(s) changed — {}... (affected: {} chunks)",
+                    changed.len(),
+                    mode_label,
+                    if affected_chunks.is_empty() { "all".to_string() } else { affected_chunks.len().to_string() }
                 );
                 let rebuild_args = BuildArgs {
                     target: target_str_w.clone(),
@@ -1177,7 +1276,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                     project: Some(project_root_w.clone()),
                     watch: false, // inner rebuild does not recurse into watch
                     coverage: false,
-                    preview: false,
+                    preview: false, // inner rebuild handles resource compilation
                 };
                 if let Err(e) = rt.block_on(run(rebuild_args)) {
                     eprintln!("[watch] rebuild failed: {e:#}");

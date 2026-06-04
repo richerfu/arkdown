@@ -312,6 +312,56 @@ impl LoaderJson {
                 .iter()
                 .flat_map(|dep| dep.declaration_entry.iter().cloned())
                 .collect();
+
+            // D2: When this module is itself a ByteCode HAR (metadata.byteCodeHar=true),
+            // generate its own declarationEntry from abilities + extension abilities.
+            // This provides the OHM URLs that downstream consumers of THIS ByteCode HAR
+            // will put into their own loader.json declarationEntry.
+            let bundle_name = &config.product.bundle_name;
+            let mod_name = &module_cfg.name;
+            let is_bytecode_har = {
+                let pkg_path = module_cfg.src_path.join("oh-package.json5");
+                std::fs::read_to_string(&pkg_path)
+                    .ok()
+                    .and_then(|s| {
+                        #[derive(serde::Deserialize)]
+                        struct PkgMetadata {
+                            #[serde(default)]
+                            metadata: MetadataSection,
+                        }
+                        #[derive(Default, serde::Deserialize)]
+                        #[serde(rename_all = "camelCase")]
+                        struct MetadataSection {
+                            #[serde(default)]
+                            byte_code_har: bool,
+                        }
+                        json5::from_str::<PkgMetadata>(&s).ok()
+                    })
+                    .map_or(false, |p| p.metadata.byte_code_har)
+            };
+            if is_bytecode_har {
+                for ability_entry in &manifest.abilities {
+                    let path = ability_entry.src_entry.trim_start_matches("./");
+                    let ohm = format!(
+                        "@bundle:{}/{}/{}",
+                        bundle_name,
+                        mod_name,
+                        path.trim_end_matches(".ets").trim_end_matches(".ts")
+                    );
+                    entries.push(ohm);
+                }
+                for ext_ability in &manifest.extension_abilities {
+                    let path = ext_ability.src_entry.trim_start_matches("./");
+                    let ohm = format!(
+                        "@bundle:{}/{}/{}",
+                        bundle_name,
+                        mod_name,
+                        path.trim_end_matches(".ets").trim_end_matches(".ts")
+                    );
+                    entries.push(ohm);
+                }
+            }
+
             let mut seen = FxHashSet::default();
             entries.retain(|entry| seen.insert(entry.clone()));
             entries
