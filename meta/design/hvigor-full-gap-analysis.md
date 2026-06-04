@@ -123,7 +123,7 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 | H9 | LNP body and DebugInfo constant_pool | `emitter.cpp` attaches AST source positions from parsed input source; `BuildLineNumberProgram()` consumes pandasm instruction source positions, real bytecode sizes, columns, and local-variable events | Minimal-hap is byte-identical on the cache-TS route after aligning source positions, call/branch/argument stores, implicit returns, lexical `this` locals, special-opcode pc deltas, MethodItem tag order, parameter-name string order, and aligned trailing LNP index. Broader fixtures still need coverage. | 🔄 |
 | H10 | `--merge-abc`: all module records in single `.abc` | Multiple records merged with shared StringTable | Implemented | ✅ |
 | H11 | Incremental ABC cache via `--cache-file` (msgpack) | `es2abc --cache-file <path>` | `ModulesCache` (modules.cache + .protoBin) provides batch-level cache: FNV hash over all record sources + options; cache hit returns cached ABC bytes, skipping full compilation. Not per-function SHA256 as upstream es2abc; full protobuf ProgramCache interop not yet implemented. | 🔄 |
-| H12 | Widget compilation (separate pass, `widgetCompile: "true"`) | ArkCompile calls `initWidgetDefaultArkCompileConfig()` for form entries | Not implemented (SPEC-027) | ❌ |
+| H12 | Widget compilation (separate pass, `widgetCompile: "true"`) | ArkCompile calls `initWidgetDefaultArkCompileConfig()` for form entries | `compile_widget_pass()` in CLI: scans extension abilities for form entries, transforms + rewrites OHM URLs, compiles to `widgets.abc` via separate `compile_to_abc()` invocation with widget cache dir. Output path matches hvigor's `ets/widgets.abc`. | ✅ |
 | H13 | ArkData compile (`arkDataCompile()`) | Separate compiler invocation for ArkData sources | Not implemented | ❌ |
 | H14 | CompileArkTS source maps and final `sourceMaps.map` | ets-loader writes `sourceMaps.json`; package includes `ets/sourceMaps.map` | Minimal-hap `sourceMaps.json` and final `ets/sourceMaps.map` match; broader source-map coverage unverified | 🔄 |
 
@@ -320,13 +320,13 @@ do not add a custom debug channel.
 **Complexity**: M
 **Depends on**: TASK-CACHE-01
 
-### TASK-ABC-05: Widget compilation pass (M)
+### TASK-ABC-05: Widget compilation pass (M) ✅ resolved
 
 **What**: Implement `initWidgetDefaultArkCompileConfig()` equivalent: second `arkdown-abc` invocation with `widgetCompile: true`, separate cache dir, widget-specific loader.json input.
-**File**: `crates/arkdown-abc/`, `crates/arkdown-cli/`
+**File**: `crates/arkdown-cli/src/cmd/build/compile_arkts_widget.rs`
 **Upstream ref**: `ark-compile.js::doTaskAction()` — `if (this.needSubmitArkTsWidget) { initWidgetDefaultArkCompileConfig() }`; SPEC-027
 **Complexity**: M
-**Depends on**: TASK-ABC-01 through TASK-ABC-04
+**Status**: `compile_widget_pass()` scans extension abilities for form entries, transforms widget sources with `EtsTransformPlugin`, rewrites OHM imports, compiles to `ets/widgets.abc` via a second `compile_to_abc()` invocation with a separate widget cache directory (`debug_widget`/`release_widget`).
 
 ### TASK-ETS-01: ViewPU build() body lowering (L)
 
@@ -485,7 +485,6 @@ coverage.
 | Task | Complexity | Impact |
 |------|------------|--------|
 | TASK-ABC-04: ABC incremental cache | M | Compile speed |
-| TASK-ABC-05: Widget compile pass | M | Card/widget apps (SPEC-027) |
 | TASK-PACK-01: Preloaded SO | S | Apps with native libs |
 | TASK-WATCH-01: Watch mode | L | DevEco IDE integration |
 
@@ -518,14 +517,14 @@ coverage.
 | ArkCompile Setup (E) | 4 | 3 | 0 | 1 |
 | Rollup Plugins (F) | 28 | 16 | 6 | 6 |
 | Post-Bundle Processing (G) | 8 | 4 | 1 | 3 |
-| ABC Compilation (H) | 14 | 7 | 5 | 2 |
+| ABC Compilation (H) | 14 | 8 | 5 | 1 |
 | Obfuscation/Minification (I) | 5 | 0 | 0 | 5 |
 | Incremental Cache (J) | 4 | 2 | 0 | 2 |
 | Packaging (K) | 6 | 4 | 2 | 0 |
 | Signing (L) | 3 | 2 | 1 | 0 |
 | Advanced/Watch (M) | 5 | 0 | 0 | 5 |
-| **Total** | **95** | **50** | **20** | **25** |
+| **Total** | **95** | **51** | **20** | **24** |
 
-**Current overall pipeline coverage: ~53% fully verified, ~21% partial, ~26% not started.**
-The HAP golden-parity path (minimal-hap fixture with no dependencies) covers ~85 of the 95 steps.
-The remaining 25 ❌ steps are concentrated in: release-mode obfuscation+minification, rollup msgpack cache, watch mode, full ViewPU ArkUI lowering, and multi-module dependency handling.
+**Current overall pipeline coverage: ~54% fully verified, ~21% partial, ~25% not started.**
+The HAP golden-parity path (minimal-hap fixture with no dependencies) covers ~86 of the 95 steps.
+The remaining 24 ❌ steps are concentrated in: release-mode obfuscation+minification, rollup msgpack cache, watch mode, full ViewPU ArkUI lowering, and multi-module dependency handling.
