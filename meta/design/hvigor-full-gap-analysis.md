@@ -163,7 +163,7 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 |---|---|---|---|---|
 | L1 | HAP signing: PKCS#12 + CMS SignedData + V2/V3 block | `SignHap` → `sign-hap.js` → `hap-sign-tool.jar` | `arkdown-sign` pure Rust: ECDSA P-256, RSA-PSS, PKCS#12 loading, CMS generation, ZIP alignment | ✅ |
 | L2 | HSP signing | `SignHsp` | `arkdown-sign::sign_hsp()` (same code path) | ✅ |
-| L3 | HAR signing (optional) | `sign/har-sign-command-build.js` | Basic HAR does not require signing; not implemented for signed HAR | 🔄 |
+| L3 | HAR signing (optional) | `sign/har-sign-command-build.js` | When `signing_config` is present, HAR archive is signed via `HapSigner::sign_or_skip()` (same V2/V3 block pipeline as HAP/HSP); unsigned HAR is output when no signing config | ✅ |
 
 ### Stage M — Advanced / Watch Mode
 
@@ -520,10 +520,10 @@ coverage.
 | Obfuscation/Minification (I) | 5 | 5 | 0 | 0 |
 | Incremental Cache (J) | 4 | 2 | 2 | 0 |
 | Packaging (K) | 6 | 5 | 1 | 0 |
-| Signing (L) | 3 | 2 | 1 | 0 |
+| Signing (L) | 3 | 3 | 0 | 0 |
 | Advanced/Watch (M) | 5 | 3 | 2 | 0 |
-| **Total** | **95** | **71** | **24** | **0** |
+| **Total** | **95** | **72** | **23** | **0** |
 
-**Current overall pipeline coverage: ~75% fully verified, ~25% partial, 0% not started.**
-All 95 pipeline steps are either fully implemented (71 ✅) or have partial implementations with known remaining work (24 🔄). No step is completely unaddressed.
-The remaining 24 🔄 items are: ViewPU/etsTransform parity, ABC DebugInfo byte-parity, TypeScript type checking, rolldown scan-stage cache, multi-module dependency graph traversal, and incremental build depth.
+**Current overall pipeline coverage: ~76% fully verified, ~24% partial, 0% not started.**
+All 95 pipeline steps are either fully implemented (72 ✅) or have partial implementations with known remaining work (23 🔄). No step is completely unaddressed.
+The remaining 23 🔄 items are: ViewPU/etsTransform parity, ABC DebugInfo byte-parity, TypeScript type checking, rolldown scan-stage cache, multi-module dependency graph traversal, and incremental build depth.

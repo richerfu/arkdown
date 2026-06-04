@@ -1003,7 +1003,22 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         };
         if let Some(path) = out {
             let final_path = if matches!(&config_arc.output_target, OutputTarget::Har) {
-                path
+                // L3: HAR signing (optional).
+                // When a signing config is present, sign the HAR archive using
+                // the same HAP signing pipeline (both are ZIP-based archives).
+                // Matches hvigor's optional har-sign-command-build.js behavior.
+                if config_arc.product.signing_config.is_some() {
+                    HapSigner::sign_or_skip(
+                        &path,
+                        &signed_output,
+                        config_arc.product.signing_config.as_ref(),
+                        config_arc.sdk_config.compile_api_version,
+                    )
+                    .map_err(|e| anyhow::anyhow!("HAR sign failed: {}", e))?;
+                    signed_output.clone()
+                } else {
+                    path
+                }
             } else {
                 HapSigner::sign_or_skip(
                     &path,
