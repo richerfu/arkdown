@@ -296,7 +296,7 @@ fn run_pipeline(fixture: &Path) -> PathBuf {
     let modules_abc = bundle_out.modules_abc_path.clone();
 
     if !ts2abc_inputs.is_empty() {
-        // Pass the directory — CacheFile::path_for() appends the filename.
+        // Pass the directory — ModulesCache::manifest_path_for() appends the filename.
         let abc_cache_dir = module.src_path.join("build/default/cache/abc");
         std::fs::create_dir_all(&abc_cache_dir).ok();
 

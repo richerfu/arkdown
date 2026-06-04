@@ -234,20 +234,46 @@ impl ArgParser {
                 let _ = self.value(flag, value)?;
             }
             // Accepted, value consumed; currently not implemented.
-            // Upstream: emit a .protoBin ProgramCache alongside the .abc output.
-            // TODO(SPEC-042): implement protoBin cache serialization.
+            //
+            // Upstream `es2abc` semantic: write a `.protoBin` ProgramCache file
+            // (protobuf-serialized `pandasm::Program` IR) alongside the `.abc`
+            // output. This affects BUILD CACHING ONLY — the `.abc` product is
+            // not changed by the presence or absence of this flag.
+            //
+            // Status: non-critical for correctness; arkdown uses its own
+            // `ModulesCache` / `modules.protoBin` format instead. Passing
+            // `--output-proto` is therefore safe to accept silently. If a
+            // caller depends on the upstream protobuf file being present,
+            // it will silently miss the cache but produce a correct `.abc`.
+            //
+            // TODO(SPEC-042): emit an ARKD-format `.protoBin` at the given path.
             "--output-proto" => {
                 let proto_path = self.value(flag, value)?;
-                tracing::warn!(
+                tracing::debug!(
                     path = %proto_path,
-                    "--output-proto is not yet implemented; .protoBin will not be written"
+                    "--output-proto: .protoBin cache output not yet implemented \
+                     (non-critical; product .abc is unaffected)"
                 );
             }
             // Accepted, value consumed; currently not implemented.
-            // Upstream: emit a compile-context JSON file alongside the .abc output.
+            //
+            // Upstream `es2abc` semantic: write a compile-context JSON file
+            // containing module record metadata alongside the `.abc` output.
+            // This file is read by the DevEco Studio IDE for incremental
+            // dependency tracking; it does NOT affect the `.abc` binary.
+            //
+            // Status: build-non-critical (IDE-only metadata); safely accepted
+            // as a no-op. Callers relying on incremental IDE analysis will see
+            // stale module graphs but the built artifact will be correct.
+            //
+            // TODO(SPEC-043): emit the compile-context JSON at the given path.
             "--compile-context-info" => {
-                let _ = self.value(flag, value)?;
-                tracing::warn!("--compile-context-info is not yet implemented; context JSON will not be written");
+                let ctx_path = self.value(flag, value)?;
+                tracing::debug!(
+                    path = %ctx_path,
+                    "--compile-context-info: context JSON output not yet implemented \
+                     (non-critical; product .abc is unaffected)"
+                );
             }
             // Accepted, value consumed; stored for future use in module record generation.
             "--module-record-field-name" => {

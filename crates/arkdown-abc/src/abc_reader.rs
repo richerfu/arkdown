@@ -111,6 +111,80 @@ impl<'a> AbcReader<'a> {
         data.len() >= 8 && data[0..8] == ABC_MAGIC
     }
 
+    /// Perform a structural validation of an ABC binary.
+    ///
+    /// Checks beyond the magic bytes:
+    /// - `file_size` header field matches the actual data length.
+    /// - Class index region is within bounds.
+    /// - LNP (LineNumberProgram) index region is within bounds when present.
+    /// - LiteralArray index region is within bounds when present.
+    ///
+    /// Use this in security/correctness paths (e.g. ByteCode HAR integration)
+    /// rather than `is_valid_magic()`, which only checks the first 8 bytes.
+    pub fn validate(data: &[u8]) -> Result<(), AbcReadError> {
+        // Use a local reader bound to `data`'s lifetime.
+        let reader = AbcReader::new(data)?;
+
+        // file_size must equal the actual data length.
+        let file_size = reader.read_u32(0x10)? as usize;
+        if file_size != data.len() {
+            return Err(AbcReadError::MalformedClassItem {
+                offset: 0x10,
+                reason: format!(
+                    "file_size header field ({}) does not match data length ({})",
+                    file_size,
+                    data.len()
+                ),
+            });
+        }
+
+        // Class index bounds.
+        let num_classes = reader.read_u32(0x1C)? as usize;
+        let class_idx_off = reader.read_u32(0x20)? as usize;
+        let idx_end = class_idx_off.saturating_add(num_classes * 4);
+        if idx_end > data.len() {
+            return Err(AbcReadError::ClassIndexOob {
+                offset: class_idx_off,
+                size: num_classes * 4,
+                file_len: data.len(),
+            });
+        }
+
+        // LNP index bounds (offset 0x24/0x28; absent when lnp_idx_off == 0).
+        let num_lnp = reader.read_u32(0x24)? as usize;
+        let lnp_idx_off = reader.read_u32(0x28)? as usize;
+        if lnp_idx_off != 0 {
+            let lnp_end = lnp_idx_off.saturating_add(num_lnp * 4);
+            if lnp_end > data.len() {
+                return Err(AbcReadError::MalformedClassItem {
+                    offset: 0x28,
+                    reason: format!(
+                        "LNP index region [{:#x}, {:#x}) exceeds file length {}",
+                        lnp_idx_off, lnp_end, data.len()
+                    ),
+                });
+            }
+        }
+
+        // LiteralArray index bounds (offset 0x2C/0x30; absent when off == 0).
+        let num_literal = reader.read_u32(0x2C)? as usize;
+        let literal_idx_off = reader.read_u32(0x30)? as usize;
+        if literal_idx_off != 0 {
+            let lit_end = literal_idx_off.saturating_add(num_literal * 4);
+            if lit_end > data.len() {
+                return Err(AbcReadError::MalformedClassItem {
+                    offset: 0x30,
+                    reason: format!(
+                        "LiteralArray index region [{:#x}, {:#x}) exceeds file length {}",
+                        literal_idx_off, lit_end, data.len()
+                    ),
+                });
+            }
+        }
+
+        Ok(())
+    }
+
     /// Parse the file and return a summary with class names.
     pub fn read_summary(&self) -> Result<ParsedAbcSummary, AbcReadError> {
         let version = self.read_u32(0x0C)?;

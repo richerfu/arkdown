@@ -148,8 +148,12 @@ pub(super) fn compile_widget_pass(
     )?;
 
     let widget_abc = PathBuf::from(&loader_json.ace_module_build).join("widgets.abc");
-    // Pass the directory — CacheFile::path_for() appends the filename internally.
-    let widget_cache_dir = module.src_path.join("build/default/cache/abc");
+    // Widget cache must be isolated from the main module cache to prevent
+    // incremental state cross-contamination.  hvigor appends "_widget" to the
+    // main task temp dir; we use the cache_root already computed above, which
+    // is mode-specific (debug_widget / release_widget) and separate from the
+    // main module cache dir.  See WidgetCompileConfig.cache_dir docs.
+    let widget_cache_dir = cache_root.join("abc");
     fs_err::create_dir_all(&widget_cache_dir)?;
     compile_to_abc(Ts2abcOptions {
         inputs: handoff.inputs,

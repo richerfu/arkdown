@@ -604,27 +604,36 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         //     `.abc` path and SDK metadata.
         //   * ArkRuntime loads each HAR's ABC independently via `byteCodeHarInfo`.
         //
-        // SPEC-041 tracks the full implementation.  For now, emit a diagnostic
-        // so that builds with ByteCode HAR deps are visibly incomplete rather
-        // than silently producing a corrupt `modules.abc`.
+        // SPEC-041 tracks the full E2E implementation (HAP path, sourceMaps,
+        // declarationEntry, normalized OHM URL alignment with hvigor).
+        // Invalid or missing ABC in a ByteCode HAR dependency is a hard build
+        // error — silently ignoring it would produce a broken runtime package.
         if !bc_har_deps.is_empty() {
             for dep in bc_har_deps {
-                let abc_valid = dep
-                    .abc_path
-                    .exists()
-                    .then(|| {
-                        std::fs::read(&dep.abc_path)
-                            .ok()
-                            .map(|b| AbcReader::is_valid_magic(&b))
-                            .unwrap_or(false)
-                    })
-                    .unwrap_or(false);
-                tracing::warn!(
+                if !dep.abc_path.exists() {
+                    anyhow::bail!(
+                        "ByteCode HAR '{}': ABC file not found at '{}'. \
+                         Ensure the HAR was built with bytecode output enabled (SPEC-041).",
+                        dep.package_name,
+                        dep.abc_path.display()
+                    );
+                }
+                let abc_data = std::fs::read(&dep.abc_path)
+                    .with_context(|| format!(
+                        "ByteCode HAR '{}': failed to read ABC at '{}'",
+                        dep.package_name, dep.abc_path.display()
+                    ))?;
+                AbcReader::validate(&abc_data)
+                    .map_err(|e| anyhow::anyhow!(
+                        "ByteCode HAR '{}': ABC at '{}' failed validation: {} \
+                         (magic, file_size, class/LNP/literal index bounds). \
+                         Rebuild the HAR or remove the invalid dependency (SPEC-041).",
+                        dep.package_name, dep.abc_path.display(), e
+                    ))?;
+                tracing::debug!(
                     package = %dep.package_name,
                     abc_path = %dep.abc_path.display(),
-                    abc_valid,
-                    "ByteCode HAR dep not merged into modules.abc — \
-                     populate loader_json.byteCodeHarInfo instead (SPEC-041)"
+                    "ByteCode HAR dep validated; loaded via byteCodeHarInfo (SPEC-041)"
                 );
             }
         }

@@ -579,7 +579,7 @@ registerNamedRoute(() => new Index(undefined, {}), "", {});
         );
 
         // Verify the cache file was created.
-        let cache_file_path = crate::cache::CacheFile::path_for(cache_dir.path());
+        let cache_file_path = crate::cache::ModulesCache::manifest_path_for(cache_dir.path());
         assert!(
             cache_file_path.exists(),
             "cache file must exist at {:?}",
@@ -655,12 +655,14 @@ registerNamedRoute(() => new Index(undefined, {}), "", {});
             "different record name must produce different bytecode (cache invalidated)"
         );
 
-        // The cache file must now contain 2 distinct entries.
-        let cache = crate::cache::CacheFile::load(cache_dir.path());
+        // ModulesCache stores a single batch entry per cache directory.
+        // After two compiles with different record names, the manifest holds
+        // exactly 1 entry (the last written batch hash) — not one per compile.
+        let cache = crate::cache::ModulesCache::load(cache_dir.path());
         assert_eq!(
-            cache.entries.len(),
-            2,
-            "cache must have 2 entries after compiling 2 distinct sources"
+            cache.entry_count(),
+            1,
+            "cache manifest must have exactly 1 entry after sequential compiles"
         );
 
         let _ = std::fs::remove_file(&out1);
@@ -843,12 +845,12 @@ class Counter {
             .compile(vec![module()], &out2)
             .expect("compile opt_level=1");
 
-        let cache = crate::cache::CacheFile::load(cache_dir.path());
+        let cache = crate::cache::ModulesCache::load(cache_dir.path());
         assert_eq!(
-            cache.entries.len(),
-            2,
-            "different opt_level must produce different cache entries (found {})",
-            cache.entries.len()
+            cache.entry_count(),
+            1,
+            "cache manifest must have exactly 1 entry (last batch hash) (found {})",
+            cache.entry_count()
         );
     }
 }

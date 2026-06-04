@@ -6,7 +6,7 @@ use oxc_codegen::Codegen;
 use oxc_parser::Parser;
 use oxc_span::SourceType;
 
-use crate::cache::{derive_key, CacheFile};
+use crate::cache::{derive_key, ModulesCache};
 use crate::emit::file::{version_for_target_api, AbcFile};
 use crate::error::AbcError;
 use crate::ir::builder;
@@ -342,9 +342,11 @@ impl AbcCompiler {
                 self.options.target_api_version,
             );
 
-            let cache = CacheFile::load(cache_dir);
+            // Use ModulesCache (modules.cache + .protoBin) instead of the old
+            // JSON whole-ABC cache. Aligns with upstream @modules.cache semantics.
+            let cache = ModulesCache::load(cache_dir);
             if let Some(cached_bytes) = cache.lookup(&key) {
-                tracing::debug!(cache = %cache_dir.display(), "abc cache hit");
+                tracing::debug!(cache = %cache_dir.display(), "abc cache hit (modules.cache)");
                 // Cache hit — write cached bytecode and return.
                 if let Some(parent) = output.parent() {
                     if !parent.as_os_str().is_empty() {
@@ -358,18 +360,37 @@ impl AbcCompiler {
                     has_debug_info: effective_debug_info,
                 });
             }
-            tracing::debug!(cache = %cache_dir.display(), "abc cache miss");
+            tracing::debug!(cache = %cache_dir.display(), "abc cache miss (modules.cache)");
         }
 
         // ── Full compilation ──────────────────────────────────────────────────
+
+        // P1: merge_abc=false is not yet implemented.
+        // Upstream es2abc has separate single-file (EmitSingleAbcJob) and
+        // merged (EmitMergedAbcJob) emit paths. The single-file path requires
+        // --enable-abc-input and per-record output files, which arkdown-abc does
+        // not yet produce. Fail explicitly rather than silently emitting a
+        // merged file when the caller requested non-merged output.
+        if !self.options.merge_abc {
+            return Err(AbcError::UnsupportedConstruct {
+                construct: "merge_abc=false (non-merge per-record ABC output)".to_string(),
+                file: output.display().to_string(),
+            });
+        }
+
         if self.options.opt_level >= 2 {
             // TODO(SPEC-009 v3): implement register allocation for opt_level=2.
-            // opt_level=2 should strip debug info (already done via effective_debug_info)
-            // AND apply register allocation improvements, but the latter is not yet
-            // implemented — warn so release builds are visibly aware of the gap.
+            //
+            // Upstream release builds (opt_level=2) apply register allocation
+            // and other bytecode optimisations via the Panda optimizer. arkdown
+            // only suppresses debug info at this level; the produced ABC is
+            // functionally correct but is NOT a full upstream release ABC.
+            // Downstream tooling that inspects bytecode size or code-item
+            // golden files must account for this gap.
             tracing::warn!(
                 opt_level = self.options.opt_level,
-                "opt_level=2: debug info suppressed, but register allocation is not yet applied"
+                "opt_level=2: debug info suppressed but register allocation \
+                 is not implemented — output is NOT a full upstream release ABC"
             );
         }
 
@@ -450,10 +471,9 @@ impl AbcCompiler {
                 self.options.debug_info,
                 self.options.target_api_version,
             );
-            let mut cache = CacheFile::load(cache_dir);
-            cache.upsert(key, &bytes);
+            let mut cache = ModulesCache::load(cache_dir);
             // Ignore cache write errors — they are non-fatal.
-            let _ = cache.save(cache_dir);
+            let _ = cache.store(key, &bytes);
         }
 
         Ok(AbcArtifactResult {

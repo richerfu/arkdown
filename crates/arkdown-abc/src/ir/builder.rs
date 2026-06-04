@@ -374,7 +374,7 @@ pub fn build_record_with_debug_and_source_map_for_target(
         source_file,
         source_mapper,
         &mut function_names,
-    );
+    )?;
 
     let record_layout = RecordLayout::new(record_name, package_name, source, is_commonjs);
     let class_name = record_layout.class_name();
@@ -708,7 +708,7 @@ fn compile_class_method_bodies(
     source_file_path: Option<&str>,
     source_mapper: Option<&SourceMapper>,
     function_names: &mut FunctionNameAllocator<'_>,
-) {
+) -> Result<(), AbcError> {
     for stmt in stmts {
         // Handle `class Foo { ... }` (ClassDeclaration)
         if let Statement::ClassDeclaration(cls) = stmt {
@@ -728,7 +728,7 @@ fn compile_class_method_bodies(
                 source_file_path,
                 source_mapper,
                 function_names,
-            );
+            )?;
             continue;
         }
         if let Statement::ExportDefaultDeclaration(export) = stmt {
@@ -752,7 +752,7 @@ fn compile_class_method_bodies(
                     source_file_path,
                     source_mapper,
                     function_names,
-                );
+                )?;
             }
             continue;
         }
@@ -774,7 +774,7 @@ fn compile_class_method_bodies(
                     source_file_path,
                     source_mapper,
                     function_names,
-                );
+                )?;
             }
             continue;
         }
@@ -802,12 +802,13 @@ fn compile_class_method_bodies(
                         source_file_path,
                         source_mapper,
                         function_names,
-                    );
+                    )?;
                     continue;
                 }
             }
         }
     }
+    Ok(())
 }
 
 /// Compile method bodies from a class element list and append MethodRecords.
@@ -824,7 +825,7 @@ fn compile_class_elements(
     source_file_path: Option<&str>,
     source_mapper: Option<&SourceMapper>,
     function_names: &mut FunctionNameAllocator<'_>,
-) {
+) -> Result<(), AbcError> {
     let class_name = class_name.unwrap_or("_");
 
     // Collect non-static instance fields for injection into the constructor.
@@ -1122,9 +1123,17 @@ fn compile_class_elements(
         let key_name = match &accessor.key {
             PropertyKey::StaticIdentifier(id) => id.name.as_str().to_string(),
             PropertyKey::StringLiteral(s) => s.value.as_str().to_string(),
-            // Computed accessor keys are not yet lowered; silently skip for now.
-            // TODO: capture computed key into a synthetic private slot at class init.
-            _ => continue,
+            // Computed accessor keys require capturing the computed key expression
+            // into a synthetic private slot at class-definition time (upstream
+            // Transformer::ProcessAutoAccessorProperty handles this via a class
+            // environment slot). This is not yet implemented; fail explicitly
+            // rather than silently omitting the getter/setter pair.
+            _ => {
+                return Err(AbcError::UnsupportedConstruct {
+                    construct: "ComputedAccessorProperty (computed auto-accessor key)".to_string(),
+                    file: class_name.to_string(),
+                });
+            }
         };
 
         // Getter: `get <key>() { return this.#backing; }`
@@ -1183,6 +1192,7 @@ fn compile_class_elements(
             definefunc_order: None,
         });
     }
+    Ok(())
 }
 
 fn static_computed_class_field_count(elements: &[ClassElement<'_>]) -> u16 {
