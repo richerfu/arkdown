@@ -352,6 +352,33 @@ impl LoaderJson {
         if module_path_map.is_empty() {
             module_path_map.insert(module_cfg.name.clone(), module_root.clone());
         }
+        // Add direct oh_modules source packages to modulePathMap.
+        // hvigor includes all resolved packages from the DependencyManager graph.
+        for base in &[
+            module_cfg.src_path.join("oh_modules"),
+            config.project_root.join("oh_modules"),
+        ] {
+            let Ok(entries) = std::fs::read_dir(base) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let pkg_dir = entry.path();
+                if !pkg_dir.is_dir() {
+                    continue;
+                }
+                // Read oh-package.json5#name to get the canonical package name.
+                let pkg_name: Option<String> = std::fs::read_to_string(pkg_dir.join("oh-package.json5"))
+                    .ok()
+                    .and_then(|s| json5::from_str::<serde_json::Value>(&s).ok())
+                    .and_then(|v| v.get("name").and_then(|n| n.as_str()).map(str::to_string));
+                let key = pkg_name.unwrap_or_else(|| {
+                    entry.file_name().to_string_lossy().into_owned()
+                });
+                module_path_map
+                    .entry(key)
+                    .or_insert_with(|| to_absolute_path_string(&pkg_dir));
+            }
+        }
 
         let byte_code_har_info: FxHashMap<String, ByteCodeHarEntry> = bytecode_har_deps
             .iter()
