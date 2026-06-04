@@ -976,7 +976,12 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                                     bundle_type: "app".to_string(),
                                     source_maps_path,
                                     abilities,
-                                    integrated_hsps: vec![],
+                                    integrated_hsps: collect_integrated_hsps(
+                                        module,
+                                        &project_root,
+                                        &config_arc.product.bundle_name,
+                                        1000000,
+                                    ),
                                     privacy_profile_path: {
                                         let p = module
                                             .src_path
@@ -1168,4 +1173,120 @@ fn write_compile_arkts_cache(
 ) -> Result<CompileArkTsHandoff> {
     CompileArktsCacheWriter::new(module, loader_json, config, resource_refs, resolved_imports)
         .write(chunk_graph)
+}
+
+/// K5 — ProcessIntegratedHsp: discover integrated (embedded) HSP dependencies.
+///
+/// Reads `oh-package.json5` for the module and collects any HSP dependencies
+/// whose metadata has `isIntegratedHsp: true`.  These must be embedded inside
+/// the HAP archive at `libs/<dir_name>/<file_name>.hsp`.
+///
+/// Mirrors hvigor's `ProcessIntegratedHsp` / `getIntegratedHspDependencies()`.
+fn collect_integrated_hsps(
+    module: &ModuleConfig,
+    project_root: &Path,
+    bundle_name: &str,
+    version_code: u64,
+) -> Vec<arkdown_pack::IntegratedHspEntry> {
+    use arkdown_pack::{normalize_integrated_hsps, IntegratedHspEntry};
+
+    #[derive(serde::Deserialize)]
+    struct OhPkgMinimal {
+        #[serde(default)]
+        dependencies: std::collections::HashMap<String, String>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct DepMetadata {
+        #[serde(rename = "isIntegratedHsp", default)]
+        is_integrated_hsp: bool,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct DepPkg {
+        #[serde(default)]
+        metadata: Option<DepMetadata>,
+    }
+
+    let pkg_json_path = module.src_path.join("oh-package.json5");
+    let Ok(content) = std::fs::read_to_string(&pkg_json_path) else {
+        return vec![];
+    };
+    let Ok(pkg) = json5::from_str::<OhPkgMinimal>(&content) else {
+        return vec![];
+    };
+
+    let oh_modules_roots = [
+        module.src_path.join("oh_modules"),
+        project_root.join("oh_modules"),
+    ];
+
+    let mut raw_entries: Vec<IntegratedHspEntry> = Vec::new();
+    for (dep_name, _dep_ver) in &pkg.dependencies {
+        // Find the package directory.
+        let pkg_dir = oh_modules_roots
+            .iter()
+            .map(|r| r.join(dep_name))
+            .find(|p| p.is_dir());
+        let Some(pkg_dir) = pkg_dir else {
+            continue;
+        };
+
+        // Check if this dep is marked as an integrated HSP.
+        let dep_pkg_json = pkg_dir.join("oh-package.json5");
+        let Ok(dep_content) = std::fs::read_to_string(&dep_pkg_json) else {
+            continue;
+        };
+        let Ok(dep_pkg) = json5::from_str::<DepPkg>(&dep_content) else {
+            continue;
+        };
+        if !dep_pkg.metadata.map_or(false, |m| m.is_integrated_hsp) {
+            continue;
+        }
+
+        // Look for a pre-built .hsp file.
+        let hsp_name = dep_name.rsplit('/').next().unwrap_or(dep_name);
+        let hsp_path = pkg_dir.join(format!("{}.hsp", hsp_name));
+        if !hsp_path.exists() {
+            tracing::warn!(
+                dep = dep_name,
+                "K5: integrated HSP dependency has no pre-built .hsp file; skipping"
+            );
+            continue;
+        }
+
+        raw_entries.push(IntegratedHspEntry {
+            hsp_dir_name: format!("{}@1.0.0", hsp_name),
+            hsp_file_name: format!("{}.hsp", hsp_name),
+            hsp_path,
+        });
+    }
+
+    if raw_entries.is_empty() {
+        return vec![];
+    }
+
+    let out_dir = module
+        .src_path
+        .join("build/default/intermediates/integrated_hsp");
+    std::fs::create_dir_all(&out_dir).ok();
+
+    // Normalize the HSPs (patch pack.info) and create entries pointing to
+    // the normalized output files for the packer.
+    match normalize_integrated_hsps(&raw_entries, bundle_name, version_code, &out_dir) {
+        Ok(normalized_paths) => {
+            raw_entries
+                .into_iter()
+                .zip(normalized_paths)
+                .map(|(mut entry, normalized_path)| {
+                    entry.hsp_path = normalized_path;
+                    entry
+                })
+                .collect()
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "K5: failed to normalize integrated HSPs");
+            vec![]
+        }
+    }
 }

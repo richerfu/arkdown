@@ -154,7 +154,7 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 | K2 | Assemble HAP zip (11 canonical entries) | `PackageHap` → `make-pack-info.js` + zip | `arkdown-pack::pack_hap()` — matches hvigor golden exactly | ✅ |
 | K3 | Assemble HSP zip | `PackageHsp` | `arkdown-pack::pack_hsp()` delegates to `pack_hap()` — HSP has the same zip structure as HAP but with `module.json#module.type = "shared"` (set by `process_profile()`); parity verified by SPEC-012 | ✅ |
 | K4 | Assemble HAR (source HAR, not ByteCode HAR) | `PackageHar` | `arkdown-pack::pack_har()` now packs `oh-package.json5`, `src/main/ets/**`, and `src/main/resources/**`. Remaining: `index.d.ts`/`.d.ets` declaration files (requires TypeScript extraction), obfuscation consumer config, `processObfuscationFiles`, `cleanEtsForTgz`. | 🔄 |
-| K5 | `ProcessIntegratedHsp` — embed remote/integrated HSP deps | `process-integrated-hsp.js` | `arkdown-pack` has `IntegratedHspEntry` and normalized embed support; CLI has no real remote HSP discovery yet | 🔄 |
+| K5 | `ProcessIntegratedHsp` — embed remote/integrated HSP deps | `process-integrated-hsp.js` | `collect_integrated_hsps()`: reads `oh-package.json5` deps, checks `metadata.isIntegratedHsp`, finds `.hsp` file in `oh_modules/`, normalizes via `normalize_integrated_hsps()`, passes to `pack_hap()` | ✅ |
 | K6 | Native SO library embedding (`libs/arm64-v8a/`) | `PackageHap` + `CacheNativeLibs` | `collect_native_libs()` scans `src/main/libs/`, `libs/`, and `oh_modules/` for `arm64-v8a/*.so`; `pack_hap()` embeds each as `libs/arm64-v8a/<filename>` (stored entry) | ✅ |
 
 ### Stage L — Signing
@@ -519,11 +519,11 @@ coverage.
 | ABC Compilation (H) | 14 | 10 | 4 | 0 |
 | Obfuscation/Minification (I) | 5 | 5 | 0 | 0 |
 | Incremental Cache (J) | 4 | 2 | 2 | 0 |
-| Packaging (K) | 6 | 4 | 2 | 0 |
+| Packaging (K) | 6 | 5 | 1 | 0 |
 | Signing (L) | 3 | 2 | 1 | 0 |
 | Advanced/Watch (M) | 5 | 3 | 2 | 0 |
-| **Total** | **95** | **70** | **25** | **0** |
+| **Total** | **95** | **71** | **24** | **0** |
 
-**Current overall pipeline coverage: ~74% fully verified, ~26% partial, 0% not started.**
-All 95 pipeline steps are either fully implemented (70 ✅) or have partial implementations with known remaining work (25 🔄). No step is completely unaddressed.
-The remaining 25 🔄 items are: ViewPU/etsTransform parity, ABC DebugInfo byte-parity, TypeScript type checking, rolldown scan-stage cache, multi-module dependency graph traversal, and JSBUNDLE-mode source maps.
+**Current overall pipeline coverage: ~75% fully verified, ~25% partial, 0% not started.**
+All 95 pipeline steps are either fully implemented (71 ✅) or have partial implementations with known remaining work (24 🔄). No step is completely unaddressed.
+The remaining 24 🔄 items are: ViewPU/etsTransform parity, ABC DebugInfo byte-parity, TypeScript type checking, rolldown scan-stage cache, multi-module dependency graph traversal, and incremental build depth.
