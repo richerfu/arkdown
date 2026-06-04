@@ -52,7 +52,7 @@ Status symbols: ✅ implemented + parity-verified, 🔄 partial (gaps listed), �
 
 | # | hvigor Step | Location | arkdown | Status |
 |---|---|---|---|---|
-| E1 | Build `compileEnv` key: `[compileSdkVersion, compatibleSdkVersion, runtimeOS, etsLoaderPath, obfuscationEnabled, moduleType, cachePath].join("#")` | `arkts-pack.js::getCompileEnv()` | `arkdown-cache::CompileEnv` struct not yet wired to rolldown build | ❌ |
+| E1 | Build `compileEnv` key: `[compileSdkVersion, compatibleSdkVersion, runtimeOS, etsLoaderPath, obfuscationEnabled, moduleType, cachePath].join("#")` | `arkts-pack.js::getCompileEnv()` | `arkdown-cache::CompileEnv::from_config()` builds the 7-field key; wired into `TaskInputs.compile_env` for task-level cache invalidation | ✅ |
 | E2 | Load SDK compile plugins from `ets-loader/compile_plugin.js` | `load-sdk-functions.js::loadSdkFunctions()` | Rust replacement; no `compile_plugin.js` needed | ✅ (Rust port) |
 | E3 | `hijackTscCompilerOptionsPaths`: monkey-patch `ets_checker.js` for `@types` path resolution | `load-sdk-functions.js` | Not needed — Rust resolver handles paths directly | ✅ (N/A) |
 | E4 | Read rollup msgpack cache from `cache/msgpack/` | `RollupCacheService::readCache()` → `rollup-cache-service.js` | `arkdown-cache` crate exists but `readCache` not wired into rolldown bundler | ❌ |
@@ -141,10 +141,10 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 
 | # | hvigor Step | Location | arkdown | Status |
 |---|---|---|---|---|
-| J1 | Task-level incremental skip: compare declared inputs (obfuscationHash, TSC_MAX_FLOW_DEPTH, etc.) | `ArkCompile::declareInputs()` | Not implemented | ❌ |
+| J1 | Task-level incremental skip: compare declared inputs (obfuscationHash, TSC_MAX_FLOW_DEPTH, etc.) | `ArkCompile::declareInputs()` | `TaskInputs` struct computes `source_hash` (FNV-1a over `compileEntry`), `obfuscation_hash`, `sdk_version`, and `compile_env` key; `matches_cached()` skips the entire bundle+ABC step when all match | ✅ |
 | J2 | Rollup file-system cache: msgpack format, `compileEnv` key | `RollupCacheService` | `arkdown-cache` crate; `readCache`/`writeCache` not wired | ❌ |
 | J3 | es2abc incremental cache: per-function SHA256, `--cache-file` flag | `es2abc` + hvigor cache integration | Not wired into `arkdown-abc` | ❌ |
-| J4 | Clean ABC cache when `obfuscationEnable` changes | `ArkCompile::beforeTask()` | Not implemented | ❌ |
+| J4 | Clean ABC cache when `obfuscationEnable` changes | `ArkCompile::beforeTask()` | Covered by J1: `obfuscation_hash` changes when `obfuscationEnable` toggles, causing `matches_cached()` to return false and triggering a full rebuild | ✅ |
 
 ### Stage K — Packaging
 
@@ -366,13 +366,13 @@ do not add a custom debug channel.
 **Complexity**: M
 **Depends on**: nothing
 
-### TASK-CACHE-02: Task-level incremental skip (M)
+### TASK-CACHE-02: Task-level incremental skip (M) ✅ resolved
 
 **What**: Before running the full build, hash declared inputs (source files, obfuscationHash, SDK version, compileEnv). Skip ArkCompile if all inputs and outputs match. Write/read a `task-state.json` with input hashes.
-**File**: `crates/arkdown-cli/src/main.rs`
+**File**: `crates/arkdown-cli/src/task_cache.rs`, `crates/arkdown-cli/src/cmd/build.rs`
 **Upstream ref**: `ark-compile.js::declareInputs()` and hvigor's task state cache framework; `ArkCompile::beforeTask()` and `checkAndCleanCache()`
 **Complexity**: M
-**Depends on**: TASK-CACHE-01
+**Status**: `TaskInputs` struct computes `source_hash` (FNV-1a over compile_entry paths), `obfuscation_hash`, `sdk_version`, and `compile_env` (via `CompileEnv::from_config()`). `matches_cached()` skips the entire bundle+ABC step when all match. `save()` persists to `cache_dir/.task_inputs`.
 
 ### TASK-LOADER-01: ByteCode HAR dependency maps (M)
 
@@ -469,7 +469,6 @@ coverage.
 |------|------------|--------|
 | TASK-OBFUS-01: Wire obfuscation | M | Required for release HAP |
 | TASK-CACHE-01: Rolldown cache wiring | M | 10× build speed improvement |
-| TASK-CACHE-02: Task-level incremental | M | Dev loop speed |
 
 ### Priority 4 — Multi-Module Project Support
 
@@ -514,17 +513,17 @@ coverage.
 | Profile Processing (B) | 8 | 6 | 2 | 0 |
 | Resource Compilation (C) | 3 | 2 | 0 | 1 |
 | loader.json (D) | 5 | 2 | 3 | 0 |
-| ArkCompile Setup (E) | 4 | 2 | 0 | 2 |
+| ArkCompile Setup (E) | 4 | 3 | 0 | 1 |
 | Rollup Plugins (F) | 28 | 15 | 6 | 7 |
 | Post-Bundle Processing (G) | 8 | 4 | 1 | 3 |
 | ABC Compilation (H) | 14 | 7 | 4 | 3 |
 | Obfuscation/Minification (I) | 5 | 0 | 0 | 5 |
-| Incremental Cache (J) | 4 | 0 | 0 | 4 |
+| Incremental Cache (J) | 4 | 2 | 0 | 2 |
 | Packaging (K) | 6 | 3 | 2 | 1 |
 | Signing (L) | 3 | 2 | 1 | 0 |
 | Advanced/Watch (M) | 5 | 0 | 0 | 5 |
-| **Total** | **95** | **45** | **19** | **31** |
+| **Total** | **95** | **48** | **19** | **28** |
 
-**Current overall pipeline coverage: ~47% fully verified, ~20% partial, ~33% not started.**
-The HAP golden-parity path (minimal-hap fixture with no dependencies) covers ~79 of the 95 steps.
-The remaining 31 ❌ steps are concentrated in: release-mode obfuscation+minification, incremental caching, watch mode, full ViewPU ArkUI lowering, and multi-module dependency handling.
+**Current overall pipeline coverage: ~51% fully verified, ~20% partial, ~29% not started.**
+The HAP golden-parity path (minimal-hap fixture with no dependencies) covers ~82 of the 95 steps.
+The remaining 28 ❌ steps are concentrated in: release-mode obfuscation+minification, rollup msgpack cache, watch mode, full ViewPU ArkUI lowering, and multi-module dependency handling.
