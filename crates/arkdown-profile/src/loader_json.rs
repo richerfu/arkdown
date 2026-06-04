@@ -463,7 +463,7 @@ impl LoaderJson {
             other_compile_files,
             dynamic_import_lib_info,
             router_map,
-            hsp_resources_map: Self::collect_hsp_resources_map(&module_cfg.src_path),
+            hsp_resources_map: Self::collect_hsp_resources_map(&module_cfg.src_path, &config.project_root),
             update_version_info,
             an_build_out_put: format!(
                 "{}/build/default/intermediates/loader_out/default/an/arm64-v8a",
@@ -789,12 +789,16 @@ impl LoaderJson {
     ///
     /// Matches hvigor's `getHspResourcesMap()` for remote HSP dependencies:
     /// `<dep_root>/ResourceTable.txt` is checked for each HSP package.
-    fn collect_hsp_resources_map(module_root: &Path) -> FxHashMap<String, String> {
-        let oh_modules_dir = module_root.join("oh_modules");
-        let Ok(entries) = std::fs::read_dir(&oh_modules_dir) else {
-            return FxHashMap::default();
-        };
+    fn collect_hsp_resources_map(module_root: &Path, project_root: &Path) -> FxHashMap<String, String> {
         let mut map = FxHashMap::default();
+        // Check both module-level and project-level oh_modules for HSP packages.
+        for base in &[
+            module_root.join("oh_modules"),
+            project_root.join("oh_modules"),
+        ] {
+        let Ok(entries) = std::fs::read_dir(base) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let pkg_dir = entry.path();
             if !pkg_dir.is_dir() {
@@ -831,9 +835,10 @@ impl LoaderJson {
                     .and_then(|n| n.to_str())
                     .unwrap_or_default()
                     .to_string();
-                map.insert(pkg_name, to_absolute_path_string(&resource_table));
+                map.entry(pkg_name).or_insert_with(|| to_absolute_path_string(&resource_table));
             }
         }
+        } // end for base
         map
     }
 
@@ -1001,13 +1006,14 @@ impl LoaderJson {
     }
 
     fn build_pkg_brief_info(
-        _config: &ArkdownConfig,
+        config: &ArkdownConfig,
         module_cfg: &ModuleConfig,
     ) -> FxHashMap<String, PkgBriefInfo> {
         let mut map = FxHashMap::default();
         let module_root = to_absolute_path_string(&module_cfg.src_path);
         let ets_src = format!("{}/src/main/ets", module_root);
 
+        // Add the current module.
         map.insert(
             module_cfg.name.clone(),
             PkgBriefInfo {
@@ -1017,6 +1023,65 @@ impl LoaderJson {
                 original_source_roots: vec![ets_src],
             },
         );
+
+        // Add all other workspace modules (hvigor includes the full target module graph).
+        for project_module in &config.modules {
+            if project_module.name == module_cfg.name {
+                continue; // already added above
+            }
+            let pkg_root = to_absolute_path_string(&project_module.src_path);
+            let pkg_ets_src = format!("{}/src/main/ets", pkg_root);
+            map.insert(
+                project_module.name.clone(),
+                PkgBriefInfo {
+                    pkg_root: pkg_root.clone(),
+                    pkg_name: project_module.name.clone(),
+                    source_roots: vec![pkg_ets_src.clone()],
+                    original_source_roots: vec![pkg_ets_src],
+                },
+            );
+        }
+
+        // Add direct oh_modules dependencies (source packages with src/main/ets).
+        // This mirrors hvigor's DependencyManager providing pkg context for all resolved pkgs.
+        for base in &[
+            module_cfg.src_path.join("oh_modules"),
+            config.project_root.join("oh_modules"),
+        ] {
+            let Ok(entries) = std::fs::read_dir(base) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let pkg_dir = entry.path();
+                if !pkg_dir.is_dir() {
+                    continue;
+                }
+                let ets_dir = pkg_dir.join("src/main/ets");
+                if !ets_dir.is_dir() {
+                    continue; // skip non-source packages (ByteCode HAR, etc.)
+                }
+                let pkg_name = pkg_dir
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default()
+                    .to_string();
+                if map.contains_key(&pkg_name) {
+                    continue; // already present (prefer workspace module)
+                }
+                let pkg_root_str = to_absolute_path_string(&pkg_dir);
+                let pkg_ets_src = to_absolute_path_string(&ets_dir);
+                map.insert(
+                    pkg_name.clone(),
+                    PkgBriefInfo {
+                        pkg_root: pkg_root_str,
+                        pkg_name,
+                        source_roots: vec![pkg_ets_src.clone()],
+                        original_source_roots: vec![pkg_ets_src],
+                    },
+                );
+            }
+        }
+
         map
     }
 
