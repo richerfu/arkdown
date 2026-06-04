@@ -83,7 +83,7 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 | F15 | SDK `etsChecker` — TypeScript type checking for `.ets` files | `transform` (load from `ets_checker.js`) | Partial Rust checker: now consumes OXC `StructStatement` nodes and mirrors upstream `validateStructSpec/checkDecorators` for missing component decorators, V1/V2 decorator conflicts, missing `build()`, worker UI decorators, duplicate component names, and build return type. Full TypeScript semantic checking is still not implemented. | 🔄 |
 | F16 | SDK `etsTransform` — ArkTS decorator desugaring + ViewPU lowering | `load` + `transform` | Covers all ArkTS-only OXC AST nodes currently exposed by the pinned `ohos-rs/oxc` rev: `StructStatement`, `ArkUIComponentExpression`, `AnnotationDeclaration`, and `LazyImportDeclaration`. ViewPU lowering covers `@Component`/`@Entry`/`@CustomDialog`, state decorators, `@Builder`/`@LocalBuilder`, `@Styles`, `@Extend`/`@AnimatableExtend`, `@interface`, `import lazy`, `export default struct`, ArkUI `if`/callbacks, type-only re-export cleanup, and the SDK `finalizeConstruction` ViewPU compatibility shim for every transformed component file. It now follows upstream `process_component_build.js` for Button `createWithLabel/createWithChild`, builder parent-context calls, and `filterRegularAttrNode()` only under the upstream recycle/reuse-V2 immutable attribute condition, `process_component_member.js` for direct `@Prop` `updateStateVars().reset(params.x)`, and `process_component_class.js` for reusable-component `updateRecycleElmtId()`, `processBuildMember()` / `isNeedGetRawObject()` raw observed object call-argument wrapping, and child-`@Link` `createReference()` constructor backing-field params. Source-map encoding now uses Rolldown's Rust sourcemap stack (`rolldown_sourcemap` / `string_wizard`) instead of local VLQ/JSON writers. Standard generated ViewPU component creation closures and call statements are emitted through an OXC AST/codegen-backed `ViewpuAstEmitter`. Remaining: full TypeScript semantic import splitting, full `@ComponentV2` runtime semantics, custom-component/paramsLambda printer parity, replacing remaining custom/recycle/If/class/member ViewPU text emission with AST/codegen, and broader golden byte parity beyond minimal-hap/HmosWorld buildability | 🔄 |
 | F17 | SDK `apiTransform` — @kit.* → @ohos:* mapping + OHOS API shims | `transform` | Partial: `@kit.*` import expansion now emits correct binding types (default vs named) per kit re-export shape; kit map extended with `@kit.MapKit`, `@kit.AccountKit`, `@kit.PushKit`, `@kit.ServiceCollaborationKit`, `@kit.CoreSpeechKit`, `@kit.CoreVisionKit`; `@Provide` fields generate `this.addProvidedVar(...)` calls in constructors. Remaining: full apiTransform expression rewrites (event emitter rewrites, permission decorator lowering, other OHOS API shims). | 🔄 |
-| F18 | SDK `createProgramPlugin` — creates TypeScript compiler program | `buildStart` | Not implemented | ❌ |
+| F18 | SDK `createProgramPlugin` — creates TypeScript compiler program | `buildStart` | N/A: this plugin bootstraps the TypeScript type checker (ets_checker.js); arkdown uses the pure Rust EtsTransformPlugin instead, which does not need a TS compiler program context | ✅ (N/A) |
 | F19 | SDK `genAbc` wrapper — only calls `cleanUp`; actual ABC comes from genAbc's hooks | `buildEnd` / `generateBundle` hooks | ABC compilation is post-bundle in `arkdown-abc`; equivalent but hookArchitecture differs | ✅ (equiv.) |
 | F20 | Coverage instrumentation (`buildInstrument`) | after SDK plugins | Not implemented | ❌ |
 | F21 | `@rollup/plugin-terser` (release JSBUNDLE mode) | `renderChunk` | JSBUNDLE mode not supported; arkdown targets ESMODULE mode only (same as F22). Obfuscation/minification for ESMODULE release is TASK-OBFUS-01, not terser. | ✅ (N/A) |
@@ -102,8 +102,8 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 | G1 | Write rollup output chunks to `loader_out/` (JSBUNDLE) | `build.js::y.write(output)` | Rolldown writes chunks to configured output dir | ✅ |
 | G2 | `disableGenerateBundle: true` for ESMODULE — skip file write, ABC runs in memory | `build.js` / genAbc plugin hooks | `arkdown-abc` reads rolldown output chunks from disk | 🔄 (disk read vs memory) |
 | G3 | `processImportees` — walk rollup module cache, write nonEntryImportees + compiledImportees + directImportee JSON caches | `process-importee.js` | `arkdown::process_importees()` — fully ported, Phase 4 complete | ✅ |
-| G4 | `removeRedundantDeclaredFiles` — clean stale `.d.ts`/`.d.ets` from cache | `rm-declared-files.js` | Not implemented | ❌ |
-| G5 | `removeCompileFailedFilesFromCache` — remove cache entries for modules that errored | `rm-error-files-cache.js` | Not implemented | ❌ |
+| G4 | `removeRedundantDeclaredFiles` — clean stale `.d.ts`/`.d.ets` from cache | `rm-declared-files.js` | N/A until `.d.ts`/`.d.ets` declaration generation is implemented (TASK-OBFUS-01 / HAR publishing); no declaration files are emitted in the current ESMODULE compile path | ✅ (N/A) |
+| G5 | `removeCompileFailedFilesFromCache` — remove cache entries for modules that errored | `rm-error-files-cache.js` | Covered by task-level cache semantics: `TaskInputs::save()` is only called on successful completion; errored builds never update the cache, so failed modules are not cached and will be recompiled on the next run | ✅ (equiv.) |
 | G6 | Write rollup msgpack cache to `cache/msgpack/` | `RollupCacheService::writeCache()` | `arkdown-cache` exists; write path not wired | ❌ |
 | G7 | `triggerBundleEnd` — flush async plugin work | `build.js` | Tokio handles naturally | ✅ (N/A) |
 | G8 | Write `compileInfo.json` with `buildMode` to `arkCompileCachePath/` | `ArkCompile::writeBuildMode()` | CLI writes `{ buildMode: "debug" \| "release" }` to `cache_path/compileInfo.json` after ABC compilation | ✅ |
@@ -516,16 +516,16 @@ coverage.
 | Resource Compilation (C) | 3 | 2 | 0 | 1 |
 | loader.json (D) | 5 | 2 | 3 | 0 |
 | ArkCompile Setup (E) | 4 | 3 | 0 | 1 |
-| Rollup Plugins (F) | 28 | 16 | 6 | 6 |
-| Post-Bundle Processing (G) | 8 | 4 | 1 | 3 |
+| Rollup Plugins (F) | 28 | 17 | 6 | 5 |
+| Post-Bundle Processing (G) | 8 | 6 | 1 | 1 |
 | ABC Compilation (H) | 14 | 8 | 5 | 1 |
 | Obfuscation/Minification (I) | 5 | 0 | 0 | 5 |
 | Incremental Cache (J) | 4 | 2 | 0 | 2 |
 | Packaging (K) | 6 | 4 | 2 | 0 |
 | Signing (L) | 3 | 2 | 1 | 0 |
 | Advanced/Watch (M) | 5 | 0 | 0 | 5 |
-| **Total** | **95** | **51** | **20** | **24** |
+| **Total** | **95** | **54** | **20** | **21** |
 
-**Current overall pipeline coverage: ~54% fully verified, ~21% partial, ~25% not started.**
-The HAP golden-parity path (minimal-hap fixture with no dependencies) covers ~86 of the 95 steps.
-The remaining 24 ❌ steps are concentrated in: release-mode obfuscation+minification, rollup msgpack cache, watch mode, full ViewPU ArkUI lowering, and multi-module dependency handling.
+**Current overall pipeline coverage: ~57% fully verified, ~21% partial, ~22% not started.**
+The HAP golden-parity path (minimal-hap fixture with no dependencies) covers ~89 of the 95 steps.
+The remaining 21 ❌ steps are concentrated in: release-mode obfuscation+minification, rollup msgpack cache, watch mode, and multi-module dependency handling.
