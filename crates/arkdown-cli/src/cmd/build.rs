@@ -33,6 +33,7 @@ use arkdown_resolver::ResolverConfig;
 use arkdown_resource::{ResourceCompileConfig, ResourceCompileInput, ResourceCompiler};
 use arkdown_sign::HapSigner;
 use arkdown_ts2abc::{compile_to_abc, Ts2abcInput, Ts2abcOptions};
+use arkdown_watcher::FileWatcher;
 use rolldown_plugin::__inner::SharedPluginable;
 
 use crate::progress::Progress;
@@ -85,20 +86,28 @@ pub struct BuildArgs {
     /// Project root (default: current directory)
     #[arg(long)]
     pub project: Option<PathBuf>,
+    /// Watch mode: rebuild on source file changes (M1 — SPEC-023)
+    #[arg(long, default_value = "false")]
+    pub watch: bool,
 }
 
 pub async fn run(args: BuildArgs) -> Result<()> {
+    let watch_mode = args.watch;
+    let target_str = args.target.clone();
+    let mode_str = args.mode.clone();
+    let module_filter = args.module.clone();
+    let product_filter = args.product.clone();
     let project_root = args
         .project
         .unwrap_or_else(|| std::env::current_dir().expect("failed to get current directory"));
     let start = Instant::now();
 
-    let target = match args.target.as_str() {
+    let target = match target_str.as_str() {
         "hsp" => OutputTarget::Hsp,
         "har" => OutputTarget::Har,
         _ => OutputTarget::Hap,
     };
-    let mode = match args.mode.as_str() {
+    let mode = match mode_str.as_str() {
         "release" => BuildMode::Release,
         _ => BuildMode::Debug,
     };
@@ -107,9 +116,9 @@ pub async fn run(args: BuildArgs) -> Result<()> {
 
     // Step 1: Config
     progress.step(1, 6, "Parsing config");
-    let config = load_config(&project_root, mode, target, args.product.as_deref(), None)
+    let config = load_config(&project_root, mode, target, product_filter.as_deref(), None)
         .context("Failed to parse project config")?;
-    if let Some(module_name) = args.module.as_deref() {
+    if let Some(module_name) = module_filter.as_deref() {
         if !config
             .modules
             .iter()
@@ -121,7 +130,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
     progress.done();
 
     let config_arc = Arc::new(config);
-    let build_modules = build_modules_for_target(config_arc.as_ref(), args.module.as_deref());
+    let build_modules = build_modules_for_target(config_arc.as_ref(), module_filter.as_deref());
 
     // Step 2: Resource compilation + Profile processing.
     // Resources must be compiled first so their numeric IDs (iconId, labelId,
@@ -197,6 +206,33 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             &config_arc.product.bundle_name,
             &module.name,
         )?);
+
+        // --- C3: ProcessCompiledResources — preloaded system SO file list ---
+        // Matches hvigor `addPreloadSystemSoFileList()`: when `buildOption.preloadSo`
+        // lists system SO files, write them to an intermediate JSON so the packager
+        // and installer can propagate the preload metadata.
+        let preload_so_paths = &config_arc.product.build_option.preload_so;
+        if !preload_so_paths.is_empty() {
+            let preload_so_out = module
+                .src_path
+                .join("build/default/intermediates/preload_so/default");
+            std::fs::create_dir_all(&preload_so_out).ok();
+            let so_list: Vec<String> = preload_so_paths
+                .iter()
+                .map(|p| {
+                    p.to_str().unwrap_or_default().replace('\\', "/").to_string()
+                })
+                .collect();
+            let json = serde_json::json!({ "soFileList": so_list });
+            write_json_pretty(
+                &preload_so_out.join("preload_so_list.json"),
+                &json,
+            )
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "failed to write preload_so_list.json");
+            });
+        }
+
         // --- Profile processing ---
         let module_json5_path = module.src_path.join("src/main/module.json5");
         let module_json5 = read_module_json5(&module_json5_path)?;
@@ -754,12 +790,24 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                         std::fs::write(&resources_index, &[])?;
                     }
                     {
-                        let source_maps_path = bundle_out.source_maps_path.clone().or_else(|| {
-                            let candidate = module.src_path.join(
-                                "build/default/intermediates/loader_out/default/ets/sourceMaps.map",
-                            );
-                            candidate.exists().then_some(candidate)
-                        });
+                        // I5 — moveReleaseMap: source maps are not embedded in
+                        // the HAP for release builds (hvigor ArkCompile::moveReleaseMap).
+                        // The map is still copied to the outputs/mapping/ directory
+                        // below for developer use; it just doesn't end up inside the
+                        // signed archive.
+                        let raw_source_maps_path =
+                            bundle_out.source_maps_path.clone().or_else(|| {
+                                let candidate = module.src_path.join(
+                                    "build/default/intermediates/loader_out/default/ets/sourceMaps.map",
+                                );
+                                candidate.exists().then_some(candidate)
+                            });
+                        let source_maps_path =
+                            if matches!(config_arc.build_mode, BuildMode::Release) {
+                                None // excluded from HAP in release; moved to mapping/ below
+                            } else {
+                                raw_source_maps_path.clone()
+                            };
                         // Abilities from the processed manifest
                         let abilities: Vec<PackAbility> = manifest
                             .abilities
@@ -851,6 +899,50 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             );
         }
     }
+
+    // M1: Watch mode (SPEC-023) — rebuild on file changes.
+    // After the initial build, watch source directories for changes and
+    // trigger an incremental rebuild on every detected change batch.
+    // Mirrors hvigor's `--watch` flag and chokidar-based watcher with
+    // `buildDelay: 100` ms debounce.
+    if watch_mode {
+        let config_for_watch = config_arc.clone();
+        let watch_dirs: Vec<PathBuf> = config_for_watch
+            .modules
+            .iter()
+            .flat_map(|m| FileWatcher::dirs_for_module(&m.src_path))
+            .collect();
+        let watcher = FileWatcher::new(config_for_watch, watch_dirs);
+        println!("\nWatching for changes... (Ctrl+C to stop)");
+        // Use a blocking handle to drive async rebuilds from the sync watcher callback.
+        let rt = tokio::runtime::Handle::current();
+        let target_str_w = target_str.clone();
+        let mode_str_w = mode_str.clone();
+        let module_filter_w = module_filter.clone();
+        let product_filter_w = product_filter.clone();
+        let project_root_w = project_root.clone();
+        watcher
+            .watch(move |changed| {
+                println!(
+                    "\n[watch] {} file(s) changed — rebuilding...",
+                    changed.len()
+                );
+                let rebuild_args = BuildArgs {
+                    target: target_str_w.clone(),
+                    mode: mode_str_w.clone(),
+                    module: module_filter_w.clone(),
+                    product: product_filter_w.clone(),
+                    project: Some(project_root_w.clone()),
+                    watch: false, // inner rebuild does not recurse into watch
+                };
+                if let Err(e) = rt.block_on(run(rebuild_args)) {
+                    eprintln!("[watch] rebuild failed: {e:#}");
+                }
+                Ok(())
+            })
+            .map_err(|e| anyhow::anyhow!("Watch error: {e}"))?;
+    }
+
     Ok(())
 }
 

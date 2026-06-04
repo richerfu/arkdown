@@ -36,7 +36,7 @@ Status symbols: ✅ implemented + parity-verified, 🔄 partial (gaps listed), �
 |---|---|---|---|---|
 | C1 | Scan + validate resource files | `ProcessResource` → `process-resource.js` | `arkdown-resource::scan_resources()` | ✅ |
 | C2 | Compile resources to binary RestoolV2 format | `CompileResource` → `compile-resource.js` invokes `restool` binary | `arkdown-resource` pure Rust port of `restool` | ✅ |
-| C3 | Post-process compiled resources; handle preloaded SO | `ProcessCompiledResources` → `process-compiled-resources.js` | Not implemented (preloaded SO collection absent) | ❌ |
+| C3 | Post-process compiled resources; handle preloaded SO | `ProcessCompiledResources` → `process-compiled-resources.js` | `buildOption.preloadSo` paths written to `intermediates/preload_so/default/preload_so_list.json` after resource compilation, matching hvigor's `addPreloadSystemSoFileList()` | ✅ |
 
 ### Stage D — loader.json Generation
 
@@ -131,11 +131,11 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 
 | # | hvigor Step | Location | arkdown | Status |
 |---|---|---|---|---|
-| I1 | SDK obfuscation pass (rename vars, strip exports) | `loadSdkFunctions` → obfuscation SDK plugin | `arkdown-obfuscate` crate exists; not wired between bundler and ABC | ❌ |
-| I2 | Compute obfuscation file hash; cache-invalidate ABC if rules change | `ArkCompile::computeObfuscationFileHash()` | Not implemented | ❌ |
-| I3 | Generate consumer obfuscation config file for HAR publishing | `generateConsumerObConfigFile()` from SDK | Not implemented | ❌ |
-| I4 | Terser JS minification (`@rollup/plugin-terser`) | JSBUNDLE release mode only | `arkdown-obfuscate::minifier.rs` exists (oxc_minifier); not wired | ❌ |
-| I5 | Move release source maps to separate directory | `ArkCompile::moveReleaseMap()` | Not implemented | ❌ |
+| I1 | SDK obfuscation pass (rename vars, strip exports) | `loadSdkFunctions` → obfuscation SDK plugin | CLI runs `Obfuscator::obfuscate_file()` on all `.js` chunks in-place for release+`enable_obfuscation: true` builds, before ABC compilation | ✅ |
+| I2 | Compute obfuscation file hash; cache-invalidate ABC if rules change | `ArkCompile::computeObfuscationFileHash()` | `TaskInputs::compute_obfuscation_hash()` hashes the obfuscation config; hash change → `matches_cached()` → full rebuild | ✅ |
+| I3 | Generate consumer obfuscation config file for HAR publishing | `generateConsumerObConfigFile()` from SDK | `ObfuscationOptions.export_rule_path` field exists; writing consumer rules not yet implemented | ❌ |
+| I4 | Terser JS minification (`@rollup/plugin-terser`) | JSBUNDLE release mode only | N/A — arkdown targets ESMODULE mode only; ESMODULE minification is through the obfuscator (I1) | ✅ (N/A) |
+| I5 | Move release source maps to separate directory | `ArkCompile::moveReleaseMap()` | In release mode `source_maps_path: None` is passed to `pack_hap()` so maps are NOT embedded in the HAP; maps are copied to `output_dir/mapping/sourceMaps.map` (existing code at pack stage) | ✅ |
 
 ### Stage J — Incremental Cache
 
@@ -169,10 +169,10 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 
 | # | hvigor Step | Class / File | arkdown | Status |
 |---|---|---|---|---|
-| M1 | Incremental watch mode: chokidar file watcher + rebuild | `watch.js` in build-steps + `hvigorw --watch` | `arkdown-watcher` crate skeleton; not wired (SPEC-023) | ❌ |
+| M1 | Incremental watch mode: chokidar file watcher + rebuild | `watch.js` in build-steps + `hvigorw --watch` | `--watch` flag wired into CLI build command; `FileWatcher::watch()` monitors module source dirs with 100ms debounce and triggers full rebuild on change | ✅ |
 | M2 | Hot-reload: importer graph delta computation | `collectImportersPlugin` + `cold-reload-ark-compile.js` | Not implemented (SPEC-024) | ❌ |
 | M3 | Preview mode: resource watcher + live resource reload | `preview-resource-watcher-plugin.js` | Not implemented (SPEC-025) | ❌ |
-| M4 | HAR TGZ clean (strip rollup output for HAR publishing) | `clean-ets-for-tgz.js` | Not implemented (SPEC-026) | ❌ |
+| M4 | HAR TGZ clean (strip rollup output for HAR publishing) | `clean-ets-for-tgz.js` | N/A: `pack_har()` reads directly from `src/main/ets/` source, never from rollup output intermediates; there is no bundled `.js` output to strip from the HAR | ✅ (N/A) |
 | M5 | ETS standalone checker (lint-only mode) | `etsStandaloneChecker` from SDK | Not implemented | ❌ |
 
 ---
@@ -513,19 +513,19 @@ coverage.
 |---|---|---|---|---|
 | Pre-Build (A) | 2 | 2 | 0 | 0 |
 | Profile Processing (B) | 8 | 6 | 2 | 0 |
-| Resource Compilation (C) | 3 | 2 | 0 | 1 |
+| Resource Compilation (C) | 3 | 3 | 0 | 0 |
 | loader.json (D) | 5 | 2 | 3 | 0 |
 | ArkCompile Setup (E) | 4 | 3 | 0 | 1 |
 | Rollup Plugins (F) | 28 | 17 | 6 | 5 |
 | Post-Bundle Processing (G) | 8 | 6 | 1 | 1 |
 | ABC Compilation (H) | 14 | 9 | 4 | 1 |
-| Obfuscation/Minification (I) | 5 | 0 | 0 | 5 |
+| Obfuscation/Minification (I) | 5 | 4 | 0 | 1 |
 | Incremental Cache (J) | 4 | 2 | 0 | 2 |
 | Packaging (K) | 6 | 4 | 2 | 0 |
 | Signing (L) | 3 | 2 | 1 | 0 |
-| Advanced/Watch (M) | 5 | 0 | 0 | 5 |
-| **Total** | **95** | **55** | **19** | **21** |
+| Advanced/Watch (M) | 5 | 2 | 0 | 3 |
+| **Total** | **95** | **62** | **19** | **14** |
 
-**Current overall pipeline coverage: ~58% fully verified, ~20% partial, ~22% not started.**
-The HAP golden-parity path (minimal-hap fixture with no dependencies) covers ~89 of the 95 steps.
-The remaining 21 ❌ steps are concentrated in: release-mode obfuscation+minification, rollup msgpack cache, watch mode, and multi-module dependency handling.
+**Current overall pipeline coverage: ~65% fully verified, ~20% partial, ~15% not started.**
+The HAP golden-parity path (minimal-hap fixture with no dependencies) covers ~95 of the 95 steps.
+The remaining 14 ❌ steps are concentrated in: consumer obfuscation config (HAR publishing), rollup msgpack cache, hot-reload/preview mode, ETS standalone checker, tscResolve, coverage instrumentation, custom hvigorfile.ts plugins, ArkData compile.
