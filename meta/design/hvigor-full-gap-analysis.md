@@ -518,14 +518,14 @@ coverage.
 | ArkCompile Setup (E) | 4 | 3 | 0 | 1 |
 | Rollup Plugins (F) | 28 | 17 | 6 | 5 |
 | Post-Bundle Processing (G) | 8 | 6 | 1 | 1 |
-| ABC Compilation (H) | 14 | 8 | 5 | 1 |
+| ABC Compilation (H) | 14 | 9 | 4 | 1 |
 | Obfuscation/Minification (I) | 5 | 0 | 0 | 5 |
 | Incremental Cache (J) | 4 | 2 | 0 | 2 |
 | Packaging (K) | 6 | 4 | 2 | 0 |
 | Signing (L) | 3 | 2 | 1 | 0 |
 | Advanced/Watch (M) | 5 | 0 | 0 | 5 |
-| **Total** | **95** | **54** | **20** | **21** |
+| **Total** | **95** | **55** | **19** | **21** |
 
-**Current overall pipeline coverage: ~57% fully verified, ~21% partial, ~22% not started.**
+**Current overall pipeline coverage: ~58% fully verified, ~20% partial, ~22% not started.**
 The HAP golden-parity path (minimal-hap fixture with no dependencies) covers ~89 of the 95 steps.
 The remaining 21 ❌ steps are concentrated in: release-mode obfuscation+minification, rollup msgpack cache, watch mode, and multi-module dependency handling.
