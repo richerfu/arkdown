@@ -322,6 +322,10 @@ impl LoaderJson {
                 .collect()
         };
 
+        // --- D5: basic hspNameOhmMap/harNameOhmMap from direct oh_modules deps ---
+        let (hsp_name_ohm_map, har_name_ohm_map) =
+            Self::collect_hsp_har_ohm_maps(config, module_cfg);
+
         LoaderJson {
             module_path_map,
             compile_mode,
@@ -333,8 +337,8 @@ impl LoaderJson {
             byte_code_har_info,
             declaration_entry,
             module_name: module_cfg.name.clone(),
-            hsp_name_ohm_map: FxHashMap::default(),
-            har_name_ohm_map: FxHashMap::default(),
+            hsp_name_ohm_map,
+            har_name_ohm_map,
             package_manager_type: "ohpm".to_string(),
             hvigor_compile_entry,
             other_compile_files: vec![],
@@ -705,6 +709,154 @@ impl LoaderJson {
             }
         }
         map
+    }
+
+    /// Scan direct HAR/HSP dependencies declared in `oh-package.json5` and
+    /// build the `hspNameOhmMap` / `harNameOhmMap` entries.
+    ///
+    /// Matches hvigor's `getHspNameOhmMap()` / `getHarNameOhmMap()` for
+    /// single-bundle projects (direct deps only; transitive resolution is a
+    /// separate TASK-LOADER-01 extension).
+    ///
+    /// Key:   dependency alias (from `oh-package.json5#dependencies`)
+    /// Value: `@bundle:<bundleName>/<moduleName>/<entryRelPath>`
+    fn collect_hsp_har_ohm_maps(
+        config: &ArkdownConfig,
+        module_cfg: &ModuleConfig,
+    ) -> (FxHashMap<String, String>, FxHashMap<String, String>) {
+        let bundle_name = &config.product.bundle_name;
+
+        // Read the module's own oh-package.json5 to get its declared deps.
+        #[derive(Deserialize)]
+        struct OhPkgDeps {
+            #[serde(default)]
+            dependencies: FxHashMap<String, String>,
+        }
+        let pkg_json_path = module_cfg.src_path.join("oh-package.json5");
+        let deps: FxHashMap<String, String> = std::fs::read_to_string(&pkg_json_path)
+            .ok()
+            .and_then(|s| json5::from_str::<OhPkgDeps>(&s).ok())
+            .map(|p| p.dependencies)
+            .unwrap_or_default();
+
+        let oh_modules_root = module_cfg.src_path.join("oh_modules");
+        let project_oh_modules = config.project_root.join("oh_modules");
+
+        let mut hsp_map: FxHashMap<String, String> = FxHashMap::default();
+        let mut har_map: FxHashMap<String, String> = FxHashMap::default();
+
+        for dep_alias in deps.keys() {
+            // Resolve package directory: module-level oh_modules first, then project root.
+            let pkg_dir = Self::resolve_dep_dir(dep_alias, &oh_modules_root, &project_oh_modules);
+            let Some(pkg_dir) = pkg_dir else {
+                continue;
+            };
+
+            // Read module.json5/module.json to determine type (shared=HSP).
+            #[derive(Deserialize)]
+            struct ModuleJson {
+                module: ModuleSection,
+            }
+            #[derive(Deserialize)]
+            struct ModuleSection {
+                #[serde(rename = "type", default)]
+                module_type: String,
+                #[serde(default)]
+                name: Option<String>,
+            }
+            let module_json_content = ["src/main/module.json5", "src/main/module.json"]
+                .iter()
+                .find_map(|n| std::fs::read_to_string(pkg_dir.join(n)).ok());
+            let Some(content) = module_json_content else {
+                continue;
+            };
+            let Ok(parsed) = json5::from_str::<ModuleJson>(&content) else {
+                continue;
+            };
+            let module_name = parsed
+                .module
+                .name
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| {
+                    dep_alias.rsplit('/').next().unwrap_or(dep_alias).to_string()
+                });
+
+            // Find and normalize the entry file path relative to pkg_dir.
+            let entry_rel = Self::dep_entry_rel_path(&pkg_dir);
+
+            let ohm_url = format!("@bundle:{}/{}/{}", bundle_name, module_name, entry_rel);
+
+            if parsed.module.module_type == "shared" {
+                hsp_map.insert(dep_alias.clone(), ohm_url);
+            } else {
+                // feature / har / empty → treat as HAR.
+                har_map.insert(dep_alias.clone(), ohm_url);
+            }
+        }
+
+        (hsp_map, har_map)
+    }
+
+    /// Resolve a dependency alias to its package directory under `oh_modules/`.
+    fn resolve_dep_dir(
+        dep_alias: &str,
+        module_oh_modules: &Path,
+        project_oh_modules: &Path,
+    ) -> Option<PathBuf> {
+        for base in &[module_oh_modules, project_oh_modules] {
+            let candidate = base.join(dep_alias);
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
+    /// Return the entry file path relative to `pkg_dir` with extension stripped.
+    ///
+    /// Reads `oh-package.json5#main`; falls back to conventional candidates.
+    fn dep_entry_rel_path(pkg_dir: &Path) -> String {
+        #[derive(Deserialize)]
+        struct PkgEntry {
+            #[serde(default)]
+            main: Option<String>,
+        }
+        let main_file: Option<String> = std::fs::read_to_string(pkg_dir.join("oh-package.json5"))
+            .ok()
+            .and_then(|s| json5::from_str::<PkgEntry>(&s).ok())
+            .and_then(|p| p.main)
+            .filter(|m| !m.is_empty());
+
+        if let Some(main) = main_file {
+            // Strip leading ./ and known extensions.
+            let rel = main
+                .trim_start_matches("./")
+                .trim_end_matches(".ets")
+                .trim_end_matches(".ts")
+                .trim_end_matches(".js");
+            if !rel.is_empty() {
+                return rel.to_string();
+            }
+        }
+
+        // Conventional fallbacks: these cover the common package layouts.
+        for candidate_rel in &[
+            "src/main/ets/index",
+            "src/main/ets/Index",
+            "index",
+            "Index",
+        ] {
+            let candidate = pkg_dir.join(format!("{}.ets", candidate_rel));
+            if candidate.exists() {
+                return candidate_rel.to_string();
+            }
+            let candidate = pkg_dir.join(format!("{}.ts", candidate_rel));
+            if candidate.exists() {
+                return candidate_rel.to_string();
+            }
+        }
+
+        "index".to_string()
     }
 
     fn build_pkg_brief_info(

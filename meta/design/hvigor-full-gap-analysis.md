@@ -46,7 +46,7 @@ Status symbols: ✅ implemented + parity-verified, 🔄 partial (gaps listed), �
 | D2 | `byteCodeHarInfo` map + ByteCode HAR `declarationEntry` | `byte-code-har-utils.js`, `GenerateLoaderJson.processDeclarationEntry()` | `scan_bytecode_har_deps()` now follows hvigor's `metadata.byteCodeHar` + `ets/modules.abc` convention, uses deterministic package traversal, populates `abcPath`, `sourceMapsPath`, `compatibleSdkVersion`, and `insightIntent`, and copies dependency `metadata.declarationEntry` normalized OHM URLs into loader.json. Remaining: generation of a ByteCode HAR's own declarationEntry from ability/startup/insightIntent/runtimeOnly/workers and full dependency-manager graph parity. | 🔄 |
 | D3 | `runtimeOnly` compile entries and `dynamicImportLibInfo` (runtime-only and cross-HAR dynamic imports) | `GenerateLoaderJson.processDynamicImport()` | Product `buildOption.arkOptions.runtimeOnly.sources` now appends matching `.ets`/`.ts`/`.js` files to serialized `compileEntry` and local `src/main` bundler entries. `dynamicImportLibInfo` is populated from `dynamicDependencies`, product `runtimeOnly.packages`, and direct dependency `metadata.runtimeOnly.packages`. Remaining: dependency `metadata.runtimeOnly.sources`, post-bundle dynamic `import()` graph parity, and transitive dependency `metadata.runtimeOnly` traversal. | 🔄 |
 | D4 | `workers[]` (WebWorker `.ets`/`.ts`/`.js` file paths) | `compiler/main.js::readWorkerFile()` reads explicit loader entries; `loadWorker()` scans `workers/` recursively when absent | `generate_loader_json()` recursively scans `src/main/ets/workers`, serializes absolute `workers` only when non-empty, and adds matching `./ets/...` compile entries; explicit `buildOption.sourceOption.workers` entries merged in (deduplicated) | ✅ |
-| D5 | `hspNameOhmMap` + `harNameOhmMap` for multi-module projects | From `DependencyManager` | Basic maps for simple projects; transitive dep resolution incomplete | 🔄 |
+| D5 | `hspNameOhmMap` + `harNameOhmMap` for multi-module projects | From `DependencyManager` | `collect_hsp_har_ohm_maps()` scans direct `oh-package.json5` deps under `oh_modules/`, reads `module.json5#module.type` (shared→HSP, other→HAR), builds `@bundle:<bundleName>/<moduleName>/<entryRelPath>` OHM URLs. Transitive resolution and remote HSP bundleName still incomplete. | 🔄 |
 
 ### Stage E — ArkCompile Task Setup
 
@@ -90,8 +90,8 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 | F22 | `@rollup/plugin-babel` (JSBUNDLE mode only) — class properties | `transform` | Not needed for ESMODULE mode | ✅ (N/A) |
 | F23 | `tscResolve` (when `useTscResolve` is set) — TypeScript path mapping | `resolveId` | Not implemented | ❌ |
 | F24 | Custom compile plugins from `hvigorfile.ts` | last (push) | Not implemented (SPEC extension point) | ❌ |
-| F25 | `manualChunks` (when `supportChunks` enabled): `node_modules` → "commons", non-entry → "vendors" | rollup output option | Not implemented for release builds | ❌ |
-| F26 | `treeshake: true` in release mode | rollup input option | Always false (disabled); release mode not wired | ❌ |
+| F25 | `manualChunks` (when `supportChunks` enabled): `node_modules` → "commons", non-entry → "vendors" | rollup output option | `arkdown::Bundler::build_manual_code_splitting_options()` mirrors hvigor's manualChunks callback; `support_chunks` from config | ✅ |
+| F26 | `treeshake: true` in release mode | rollup input option | `TreeshakeOptions::Boolean(true)` for release, `false` for debug — mirrors hvigor `treeshake: n === RELEASE` | ✅ |
 | F27 | Source maps (`sourcemap: true`) for JSBUNDLE non-preview | rollup output option | Not generated in ESMODULE mode (correct); JSBUNDLE mode not supported | 🔄 |
 | F28 | `sourcemapPathTransform` — strip `projectTopDir` from paths | rollup output option | Minimal ESMODULE fixture matches; JSBUNDLE path transform missing | 🔄 |
 
@@ -106,7 +106,7 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 | G5 | `removeCompileFailedFilesFromCache` — remove cache entries for modules that errored | `rm-error-files-cache.js` | Not implemented | ❌ |
 | G6 | Write rollup msgpack cache to `cache/msgpack/` | `RollupCacheService::writeCache()` | `arkdown-cache` exists; write path not wired | ❌ |
 | G7 | `triggerBundleEnd` — flush async plugin work | `build.js` | Tokio handles naturally | ✅ (N/A) |
-| G8 | Write `compileInfo.json` with `buildMode` to `arkCompileCachePath/` | `ArkCompile::writeBuildMode()` | Not implemented | ❌ |
+| G8 | Write `compileInfo.json` with `buildMode` to `arkCompileCachePath/` | `ArkCompile::writeBuildMode()` | CLI writes `{ buildMode: "debug" \| "release" }` to `cache_path/compileInfo.json` after ABC compilation | ✅ |
 
 ### Stage H — ABC Compilation (arkdown-abc)
 
@@ -220,10 +220,9 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 - Neither rolldown `ScanStageCache` serialization nor ABC `--cache-file` equivalent are wired
 - Clean builds take ~10× longer than incremental on large projects
 
-**F25-F26 — Release mode chunk splitting and tree-shake**
-- `manualChunks` for `supportChunks` projects (commons + vendors split) not implemented
-- `treeshake: true` for release not enabled; all modules unconditionally included
-- Impact: release HAP sizes larger than necessary
+**F25-F26 — Release mode chunk splitting and tree-shake** ✅ resolved
+- `manualChunks` implemented via `Bundler::build_manual_code_splitting_options()`; `support_chunks` wired from config
+- `treeshake: true` enabled for release mode; `false` for debug (matches hvigor)
 
 **D2-D5 — Multi-module dependency maps incomplete**
 - `byteCodeHarInfo`, `dynamicImportLibInfo`, transitive `harNameOhmMap`/`hspNameOhmMap` not fully populated
@@ -425,13 +424,13 @@ do not add a custom debug channel.
 **Depends on**: nothing (resolved without TASK-LOADER-01 dependency)
 **Status**: `merge_share_config()` and `merge_startup_config()` wired in CLI; duplicate-URI and duplicate-task-name violations are hard errors matching hvigor `printErrorExit`.
 
-### TASK-RELEASE-01: treeshake + manualChunks for release builds (M)
+### TASK-RELEASE-01: treeshake + manualChunks for release builds (M) ✅ resolved
 
 **What**: Enable rolldown `treeshake: true` in release mode. Implement `manualChunks` equivalent: modules from `oh_modules/` → chunk named "commons"; non-entry, non-node_modules → chunk named "vendors".
-**File**: `crates/arkdown/src/`, `crates/arkdown-cli/src/`
+**File**: `crates/arkdown/src/bundler.rs`
 **Upstream ref**: `arkts-pack.js::generateConfig()` — `treeshake: n === RELEASE`; `manualChunks(id, {getModuleInfo})` function
 **Complexity**: M
-**Depends on**: nothing
+**Status**: `TreeshakeOptions::Boolean(true/false)` switches on build mode; `build_manual_code_splitting_options()` provides the manualChunks logic via `support_chunks` from config.
 
 ### TASK-WATCH-01: Watch mode (L)
 
@@ -469,7 +468,6 @@ coverage.
 | Task | Complexity | Impact |
 |------|------------|--------|
 | TASK-OBFUS-01: Wire obfuscation | M | Required for release HAP |
-| TASK-RELEASE-01: treeshake + manualChunks | M | Required for correct release HAP size |
 | TASK-CACHE-01: Rolldown cache wiring | M | 10× build speed improvement |
 | TASK-CACHE-02: Task-level incremental | M | Dev loop speed |
 
@@ -517,16 +515,16 @@ coverage.
 | Resource Compilation (C) | 3 | 2 | 0 | 1 |
 | loader.json (D) | 5 | 2 | 3 | 0 |
 | ArkCompile Setup (E) | 4 | 2 | 0 | 2 |
-| Rollup Plugins (F) | 28 | 13 | 6 | 9 |
-| Post-Bundle Processing (G) | 8 | 3 | 1 | 4 |
+| Rollup Plugins (F) | 28 | 15 | 6 | 7 |
+| Post-Bundle Processing (G) | 8 | 4 | 1 | 3 |
 | ABC Compilation (H) | 14 | 7 | 4 | 3 |
 | Obfuscation/Minification (I) | 5 | 0 | 0 | 5 |
 | Incremental Cache (J) | 4 | 0 | 0 | 4 |
 | Packaging (K) | 6 | 2 | 3 | 1 |
 | Signing (L) | 3 | 2 | 1 | 0 |
 | Advanced/Watch (M) | 5 | 0 | 0 | 5 |
-| **Total** | **95** | **41** | **20** | **34** |
+| **Total** | **95** | **44** | **20** | **31** |
 
-**Current overall pipeline coverage: ~43% fully verified, ~21% partial, ~36% not started.**
-The HAP golden-parity path (minimal-hap fixture with no dependencies) covers ~75 of the 95 steps.
-The remaining 34 ❌ steps are concentrated in: release-mode obfuscation+minification, incremental caching, watch mode, full ViewPU ArkUI lowering, and multi-module dependency handling.
+**Current overall pipeline coverage: ~46% fully verified, ~21% partial, ~33% not started.**
+The HAP golden-parity path (minimal-hap fixture with no dependencies) covers ~78 of the 95 steps.
+The remaining 31 ❌ steps are concentrated in: release-mode obfuscation+minification, incremental caching, watch mode, full ViewPU ArkUI lowering, and multi-module dependency handling.

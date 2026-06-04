@@ -620,6 +620,28 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             if let Err(e) = task_inputs.save(&cache_dir) {
                 tracing::warn!(error = %e, "failed to save task inputs cache");
             }
+
+            // G8: Write compileInfo.json with buildMode to arkCompileCachePath.
+            // Matches hvigor ArkCompile::writeBuildMode() which writes this file
+            // so that subsequent builds can detect build-mode changes and
+            // invalidate the ABC cache when switching debug ↔ release.
+            let build_mode_str = match config_arc.build_mode {
+                BuildMode::Debug => "debug",
+                BuildMode::Release => "release",
+            };
+            let compile_info_path = cache_dir.join("compileInfo.json");
+            let compile_info =
+                serde_json::json!({ "buildMode": build_mode_str });
+            if let Err(e) = fs_err::write(
+                &compile_info_path,
+                serde_json::to_string(&compile_info).unwrap_or_default(),
+            ) {
+                tracing::warn!(
+                    path = %compile_info_path.display(),
+                    error = %e,
+                    "failed to write compileInfo.json"
+                );
+            }
         }
         // ByteCode HAR ABC integration (SPEC-041).
         //
