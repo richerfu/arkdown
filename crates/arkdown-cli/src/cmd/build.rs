@@ -1185,6 +1185,12 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                                         1000000,
                                     ),
                                     device_types: manifest.device_types.clone(),
+                                    // installationFree: true for atomicService bundles
+                                    installation_free: read_bundle_type(&project_root, &config_arc)
+                                        == "atomicService",
+                                    // deliveryWithInstall defaults to true per OHOS spec;
+                                    // HSP modules may set it false in module.json5
+                                    delivery_with_install: true,
                                     privacy_profile_path: {
                                         let p = module
                                             .src_path

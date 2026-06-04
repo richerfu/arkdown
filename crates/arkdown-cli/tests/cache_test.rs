@@ -405,6 +405,8 @@ fn run_pipeline(fixture: &Path) -> PathBuf {
             integrated_hsps: vec![],
             privacy_profile_path: None,
             device_types: vec![],
+        installation_free: false,
+        delivery_with_install: true,
             source_maps_path: bundle_out.source_maps_path,
             abilities: vec![],
         })

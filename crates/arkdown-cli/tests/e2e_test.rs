@@ -258,6 +258,8 @@ fn run_build(fixture: &PathBuf) -> PathBuf {
             integrated_hsps: vec![],
             privacy_profile_path: None,
             device_types: vec![],
+        installation_free: false,
+        delivery_with_install: true,
             source_maps_path: bundle_out.source_maps_path.clone(),
             abilities: vec![],
         })
@@ -496,6 +498,8 @@ fn run_build_hsp(fixture: &PathBuf) -> PathBuf {
             integrated_hsps: vec![],
             privacy_profile_path: None,
             device_types: vec![],
+        installation_free: false,
+        delivery_with_install: true,
             source_maps_path: bundle_out.source_maps_path.clone(),
             abilities: vec![],
         })

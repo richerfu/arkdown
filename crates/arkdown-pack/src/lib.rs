@@ -86,6 +86,8 @@ mod tests {
             integrated_hsps: vec![],
             privacy_profile_path: None,
         device_types: vec![],
+        installation_free: false,
+        delivery_with_install: true,
             source_maps_path: None,
             abilities: vec![],
         });
@@ -138,6 +140,8 @@ mod tests {
                 integrated_hsps: vec![],
                 privacy_profile_path: None,
         device_types: vec![],
+        installation_free: false,
+        delivery_with_install: true,
             })
             .unwrap();
 
@@ -169,6 +173,8 @@ mod tests {
             integrated_hsps: vec![],
             privacy_profile_path: None,
         device_types: vec![],
+        installation_free: false,
+        delivery_with_install: true,
             source_maps_path: None,
             abilities: vec![],
         });
@@ -246,6 +252,8 @@ mod tests {
             integrated_hsps: vec![],
             privacy_profile_path: None,
         device_types: vec![],
+        installation_free: false,
+        delivery_with_install: true,
             source_maps_path: None,
             abilities: vec![],
         });
@@ -288,6 +296,8 @@ mod tests {
                 abilities: vec![],
                 privacy_profile_path: None,
         device_types: vec![],
+        installation_free: false,
+        delivery_with_install: true,
                 integrated_hsps: vec![],
             })
             .unwrap();
@@ -336,6 +346,8 @@ mod tests {
                 privacy_profile_path: Some(privacy),
                 integrated_hsps: vec![],
                 device_types: vec![],
+        installation_free: false,
+        delivery_with_install: true,
             })
             .unwrap();
 

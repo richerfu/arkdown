@@ -346,6 +346,12 @@ pub struct PackInput {
     /// Device types from the module manifest (e.g. `["phone", "tablet"]`).
     /// Used in pack.info `deviceType` field.  Defaults to `["phone"]` when empty.
     pub device_types: Vec<String>,
+    /// Whether this module is installation-free (atomicService bundles).
+    /// Used in pack.info `distro.installationFree` field.
+    pub installation_free: bool,
+    /// Whether this module is delivered with install.
+    /// Used in pack.info `distro.deliveryWithInstall` and `packages[].deliveryWithInstall`.
+    pub delivery_with_install: bool,
 }
 
 pub struct HarPackInput {
@@ -419,8 +425,8 @@ impl Packager {
                         "abilities": abilities_json,
                         "distro": {
                             "moduleType": module_type,
-                            "installationFree": false,
-                            "deliveryWithInstall": true,
+                            "installationFree": input.installation_free,
+                            "deliveryWithInstall": input.delivery_with_install,
                             "moduleName": input.module_name
                         },
                         "apiVersion": {
@@ -435,7 +441,7 @@ impl Packager {
                 {
                     "deviceType": if input.device_types.is_empty() { vec!["phone".to_string()] } else { input.device_types.clone() },
                     "moduleType": module_type,
-                    "deliveryWithInstall": true,
+                    "deliveryWithInstall": input.delivery_with_install,
                     "name": format!("{}-default", input.module_name)
                 }
             ]
