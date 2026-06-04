@@ -83,6 +83,7 @@ fn minimal_pack_input(
         abilities: vec![],
         integrated_hsps: vec![],
         privacy_profile_path: None,
+        device_types: vec![],
     }
 }
 
@@ -267,6 +268,7 @@ fn test_hap_resource_files_copied_from_processed_dir() {
             abilities: vec![],
             integrated_hsps: vec![],
             privacy_profile_path: None,
+        device_types: vec![],
         })
         .expect("pack_hap must succeed");
 
@@ -325,6 +327,7 @@ fn test_missing_abc_returns_missing_input_error() {
         abilities: vec![],
         integrated_hsps: vec![],
         privacy_profile_path: None,
+        device_types: vec![],
     });
     assert!(result.is_err(), "missing ABC must return Err");
     assert!(
@@ -351,6 +354,7 @@ fn test_missing_module_json_returns_missing_input_error() {
         abilities: vec![],
         integrated_hsps: vec![],
         privacy_profile_path: None,
+        device_types: vec![],
     });
     assert!(result.is_err());
     assert!(matches!(result.unwrap_err(), PackError::MissingInput(_)));
@@ -384,6 +388,7 @@ fn test_hsp_output_is_valid_zip() {
             abilities: vec![],
             integrated_hsps: vec![],
             privacy_profile_path: None,
+        device_types: vec![],
         })
         .expect("pack_hsp must succeed");
 
@@ -584,6 +589,7 @@ fn test_pack_hap_embeds_integrated_hsp() {
             abilities: vec![],
             integrated_hsps: vec![integrated_entry],
             privacy_profile_path: None,
+        device_types: vec![],
         })
         .expect("pack_hap must succeed");
 

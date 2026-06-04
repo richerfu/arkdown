@@ -1184,6 +1184,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                                         &config_arc.product.bundle_name,
                                         1000000,
                                     ),
+                                    device_types: manifest.device_types.clone(),
                                     privacy_profile_path: {
                                         let p = module
                                             .src_path

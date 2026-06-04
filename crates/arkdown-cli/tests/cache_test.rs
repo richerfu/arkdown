@@ -404,6 +404,7 @@ fn run_pipeline(fixture: &Path) -> PathBuf {
             bundle_type: "app".to_string(),
             integrated_hsps: vec![],
             privacy_profile_path: None,
+            device_types: vec![],
             source_maps_path: bundle_out.source_maps_path,
             abilities: vec![],
         })

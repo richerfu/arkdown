@@ -343,6 +343,9 @@ pub struct PackInput {
     /// Pass an empty vec for HAPs without integrated HSPs (the common case).
     pub integrated_hsps: Vec<IntegratedHspEntry>,
     pub privacy_profile_path: Option<std::path::PathBuf>,
+    /// Device types from the module manifest (e.g. `["phone", "tablet"]`).
+    /// Used in pack.info `deviceType` field.  Defaults to `["phone"]` when empty.
+    pub device_types: Vec<String>,
 }
 
 pub struct HarPackInput {
@@ -412,7 +415,7 @@ impl Packager {
                 "modules": [
                     {
                         "mainAbility": main_ability,
-                        "deviceType": ["phone"],
+                        "deviceType": if input.device_types.is_empty() { vec!["phone".to_string()] } else { input.device_types.clone() },
                         "abilities": abilities_json,
                         "distro": {
                             "moduleType": module_type,
@@ -430,7 +433,7 @@ impl Packager {
             },
             "packages": [
                 {
-                    "deviceType": ["phone"],
+                    "deviceType": if input.device_types.is_empty() { vec!["phone".to_string()] } else { input.device_types.clone() },
                     "moduleType": module_type,
                     "deliveryWithInstall": true,
                     "name": format!("{}-default", input.module_name)

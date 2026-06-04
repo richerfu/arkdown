@@ -257,6 +257,7 @@ fn run_build(fixture: &PathBuf) -> PathBuf {
             bundle_type: "app".to_string(),
             integrated_hsps: vec![],
             privacy_profile_path: None,
+            device_types: vec![],
             source_maps_path: bundle_out.source_maps_path.clone(),
             abilities: vec![],
         })
@@ -494,6 +495,7 @@ fn run_build_hsp(fixture: &PathBuf) -> PathBuf {
             bundle_type: "app".to_string(),
             integrated_hsps: vec![],
             privacy_profile_path: None,
+            device_types: vec![],
             source_maps_path: bundle_out.source_maps_path.clone(),
             abilities: vec![],
         })
