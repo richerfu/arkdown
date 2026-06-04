@@ -170,13 +170,17 @@ pub fn is_state_decorator(decorator: &str) -> bool {
             | "ObjectLink"
             | "PropRef"
             | "BuilderParam"
-            | "Local"
-            | "Param"
-            | "Once"
-            | "Provider"
-            | "Consumer"
-            | "Env"
-            | "Trace"
+            | "Local"    // @ComponentV2: local state (like @State)
+            | "Param"    // @ComponentV2: received param (like @Prop)
+            | "Once"     // @ComponentV2: one-time param binding
+            | "Provider" // @ComponentV2: provides to descendants
+            | "Consumer" // @ComponentV2: consumes from ancestor
+            | "Env"      // @ComponentV2: environment injection
+            | "Trace"    // @ComponentV2: traced (reactive) field
+            // @Event: treated as regular field (like @BuilderParam without backing store)
+            // @Require: meta-decorator marking required params (no backing store)
+            // (Neither @Event nor @Require are in is_state_decorator — they fall through
+            //  to regular_fields which generates direct assignment without __ prefix)
             | "StoragePropRef"
             | "LocalStoragePropRef"
     )

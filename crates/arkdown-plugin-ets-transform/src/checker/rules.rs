@@ -63,6 +63,51 @@ pub fn check(source: &str, file: &str) -> Vec<EtsTransformError> {
             _ => {}
         }
 
+        // Rule: @Builder functions must have void return type.
+        // Rule: @Styles functions must have void return type.
+        // (Top-level @Builder/@Styles function declarations)
+        let func_decl = match stmt {
+            Statement::FunctionDeclaration(f) => Some(f.as_ref()),
+            Statement::ExportNamedDeclaration(e) => {
+                if let Some(Declaration::FunctionDeclaration(f)) = e.declaration.as_ref() {
+                    Some(f.as_ref())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if let Some(func) = func_decl {
+            let is_builder = func
+                .decorators
+                .iter()
+                .any(|d| decorator_name(d) == "Builder");
+            let is_styles = func
+                .decorators
+                .iter()
+                .any(|d| decorator_name(d) == "Styles");
+            if is_builder || is_styles {
+                if let Some(ret_ty) = func.return_type.as_ref() {
+                    if !is_void_type(&ret_ty.type_annotation) {
+                        let decorator = if is_builder { "@Builder" } else { "@Styles" };
+                        let name = func
+                            .id
+                            .as_ref()
+                            .map(|id| id.name.as_str())
+                            .unwrap_or("<anonymous>");
+                        errors.push(EtsTransformError::Diagnostic {
+                            file: file.to_string(),
+                            message: format!(
+                                "{} function '{}' must have void return type",
+                                decorator, name
+                            ),
+                            severity: DiagnosticSeverity::Error,
+                        });
+                    }
+                }
+            }
+        }
+
         if let Statement::ClassDeclaration(class) = stmt {
             let has_component = class
                 .decorators
