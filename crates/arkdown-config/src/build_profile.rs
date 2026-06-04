@@ -237,6 +237,9 @@ pub struct RawBuildOption {
     /// SO file paths listed under `buildOption.preloadSo` in `build-profile.json5`.
     #[serde(default)]
     pub preload_so: Vec<std::path::PathBuf>,
+    /// Resource options from `buildOption.resOptions` in `build-profile.json5`.
+    #[serde(rename = "resOptions", default)]
+    pub res_options: Option<RawResOptions>,
     /// Permissions to remove from HAR/HSP dependency `requestPermissions` lists.
     /// Matches hvigor's `MergeProfile.getRemovePermissionSet()` behavior.
     #[serde(rename = "removePermissions", default)]
@@ -248,6 +251,19 @@ pub struct RawBuildOption {
     #[serde(rename = "apPath", default)]
     pub ap_path: Option<std::path::PathBuf>,
 }
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RawResOptions {
+    /// Whether to include AppScope/resources in resource compilation.
+    #[serde(rename = "includeAppScopeRes", default = "default_true")]
+    pub include_app_scope_res: bool,
+    /// Additional resource directories to include.
+    #[serde(default)]
+    pub directories: Vec<std::path::PathBuf>,
+}
+
+fn default_true() -> bool { true }
 
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]

@@ -218,7 +218,18 @@ pub fn load_config(
     let build_option = BuildOption {
         strict_mode,
         ark_options,
-        res_options: None,
+        res_options: raw_product
+            .build_option
+            .as_ref()
+            .and_then(|bo| bo.res_options.as_ref())
+            .map(|ro| arkdown_core::ResOptions {
+                res_path: None,
+                include_app_scope_res: ro.include_app_scope_res,
+                resource_directories: ro.directories
+                    .iter()
+                    .map(|p| if p.is_absolute() { p.clone() } else { root.join(p) })
+                    .collect(),
+            }),
         source_option,
         preload_so,
         remove_permissions,

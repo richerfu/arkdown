@@ -195,6 +195,18 @@ impl ObfuscationConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResOptions {
     pub res_path: Option<PathBuf>,
+    /// Whether to include AppScope/resources in the resource compilation.
+    /// Defaults to `true` in hvigor; set to `false` for shared modules that
+    /// don't need the app-scope resources.
+    #[serde(default = "default_true")]
+    pub include_app_scope_res: bool,
+    /// Additional resource directories to include (from `buildOption.resOptions.directories`).
+    #[serde(default)]
+    pub resource_directories: Vec<PathBuf>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Source language options.

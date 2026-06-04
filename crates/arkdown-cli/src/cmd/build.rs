@@ -206,10 +206,25 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             .src_path
             .join("build/default/intermediates/res/default");
         // Include AppScope/resources so app-level icon/label IDs are assigned.
+        // Respects resOptions.includeAppScopeRes (default true per hvigor).
+        let include_app_scope = config_arc
+            .product
+            .build_option
+            .res_options
+            .as_ref()
+            .map_or(true, |ro| ro.include_app_scope_res);
         let mut res_dirs: Vec<PathBuf> = vec![];
         let app_scope_res = project_root.join("AppScope/resources");
-        if app_scope_res.exists() {
+        if include_app_scope && app_scope_res.exists() {
             res_dirs.push(app_scope_res);
+        }
+        // Include additional resource directories from resOptions.directories.
+        if let Some(res_opts) = config_arc.product.build_option.res_options.as_ref() {
+            for dir in &res_opts.resource_directories {
+                if dir.exists() && !res_dirs.contains(dir) {
+                    res_dirs.push(dir.clone());
+                }
+            }
         }
         for resource_module in resource_modules_for_build(config_arc.as_ref(), module) {
             let module_res_dir = resource_module.src_path.join("src/main/resources");
