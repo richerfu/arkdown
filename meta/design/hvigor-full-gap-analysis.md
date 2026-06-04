@@ -393,13 +393,13 @@ do not add a custom debug channel.
 **Complexity**: M
 **Depends on**: TASK-LOADER-01
 
-### TASK-PACK-01: ProcessCompiledResources — preloaded SO (S)
+### TASK-PACK-01: ProcessCompiledResources — preloaded SO (S) ✅ resolved
 
 **What**: After resource compilation, collect preloaded system SO file paths from `buildOption.preloadSo`. Write the preload SO file list to the HAP intermediates.
-**File**: `crates/arkdown-pack/src/`, `crates/arkdown-cli/src/`
+**File**: `crates/arkdown-cli/src/cmd/build.rs`
 **Upstream ref**: `ark-compile.js::addPreloadSystemSoFileList()` and `allowToPreloadSystemSo()`; `PackageHap` SO library embedding
 **Complexity**: S
-**Depends on**: nothing
+**Status**: `buildOption.preloadSo` paths written to `intermediates/preload_so/default/preload_so_list.json` after resource compilation.
 
 ### TASK-PACK-02: ProcessIntegratedHsp (M)
 
@@ -435,13 +435,13 @@ do not add a custom debug channel.
 **Complexity**: M
 **Status**: `TreeshakeOptions::Boolean(true/false)` switches on build mode; `build_manual_code_splitting_options()` provides the manualChunks logic via `support_chunks` from config.
 
-### TASK-WATCH-01: Watch mode (L)
+### TASK-WATCH-01: Watch mode (L) ✅ resolved
 
 **What**: Implement `--watch` flag: chokidar-equivalent file watching (use `notify` crate), incremental rebuild on change, delta-only ABC recompilation.
-**File**: `crates/arkdown-watcher/src/` (SPEC-023), `crates/arkdown-cli/src/`
+**File**: `crates/arkdown-watcher/src/`, `crates/arkdown-cli/src/cmd/build.rs`
 **Upstream ref**: `build-steps/watch.js`; `arkts-pack.js::getWatchConfig()` — `{chokidar: {useFsEvents: false}, buildDelay: 100}`; SPEC-023
 **Complexity**: L
-**Depends on**: TASK-CACHE-01, TASK-CACHE-02
+**Status**: `--watch` flag wired into CLI build command; `FileWatcher::watch()` monitors module source dirs with 100ms debounce; on change triggers full rebuild. `--preview` flag watches only `src/main/resources/`. Importer map (F13) written for future delta computation (M2).
 
 ---
 
@@ -486,8 +486,6 @@ coverage.
 | Task | Complexity | Impact |
 |------|------------|--------|
 | TASK-ABC-04: ABC incremental cache | M | Compile speed |
-| TASK-PACK-01: Preloaded SO | S | Apps with native libs |
-| TASK-WATCH-01: Watch mode | L | DevEco IDE integration |
 
 ---
 
