@@ -299,6 +299,37 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         arkdown_profile::write_share_config(&share_out, &share_config_out)
             .map_err(|e| anyhow::anyhow!("write share config failed: {}", e))?;
 
+        // Resource-phase rewrite: write merged share config to
+        // resources/base/profile so it becomes part of the HAP resource package.
+        // Matches hvigor's CompileResource.processShareConfig() which writes
+        // the merged entries as a profile JSON and updates module.crossAppSharedConfig
+        // to a $profile reference.
+        if !share_out.entries.is_empty() {
+            let profile_dir = module
+                .src_path
+                .join("build/default/intermediates/res/default/resources/base/profile");
+            std::fs::create_dir_all(&profile_dir).ok();
+            let profile_path = profile_dir.join("cross_app_shared_config.json");
+            let profile_json = serde_json::json!({
+                "crossAppSharedConfig": share_out.entries
+                    .iter()
+                    .map(|e| {
+                        let mut obj = serde_json::json!({
+                            "packageName": e.package_name,
+                            "uri": e.uri,
+                        });
+                        if let Some(ref src) = e.src_entry {
+                            obj["srcEntry"] = src.clone().into();
+                        }
+                        obj
+                    })
+                    .collect::<Vec<_>>()
+            });
+            if let Err(e) = write_json_pretty(&profile_path, &profile_json) {
+                tracing::warn!(error = %e, "failed to write cross_app_shared_config profile");
+            }
+        }
+
         // --- Startup config (B5): collect appStartup task configs ---
         let startup_out = arkdown_profile::merge_startup_config(
             arkdown_profile::StartupConfigInput {
@@ -314,6 +345,54 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         );
         arkdown_profile::write_startup_config(&startup_out, &startup_config_out)
             .map_err(|e| anyhow::anyhow!("write startup config failed: {}", e))?;
+
+        // Resource-phase rewrite: write merged startup config to resources/base/profile
+        // so it becomes part of the HAP resource package.
+        // Matches hvigor's CompileResource.processStartupConfig() which strips
+        // intermediate-only fields (moduleName, startupConfigPath, ohmurl,
+        // srcEntryAbsolutePath) and writes the clean profile JSON.
+        if let Some(ref startup_config) = startup_out.config {
+            if !startup_config.startup_tasks.is_empty()
+                || !startup_config.app_preload_hint_startup_tasks.is_empty()
+            {
+                let profile_dir = module
+                    .src_path
+                    .join("build/default/intermediates/res/default/resources/base/profile");
+                std::fs::create_dir_all(&profile_dir).ok();
+                let profile_path = profile_dir.join("startup_config.json");
+                // Strip intermediate-only fields before writing resource profile.
+                let clean_tasks: Vec<_> = startup_config
+                    .startup_tasks
+                    .iter()
+                    .map(|t| {
+                        let mut obj = serde_json::json!({
+                            "name": t.name,
+                            "srcEntry": t.src_entry,
+                        });
+                        if let Some(ref rt) = t.run_on_thread {
+                            obj["runOnThread"] = rt.clone().into();
+                        }
+                        if let Some(wait) = t.wait_on_main_thread {
+                            obj["waitOnMainThread"] = wait.into();
+                        }
+                        if !t.dependencies.is_empty() {
+                            obj["dependencies"] = t.dependencies.clone().into();
+                        }
+                        obj
+                    })
+                    .collect();
+                let profile_json = serde_json::json!({
+                    "startupTasks": clean_tasks,
+                    "appPreloadHintStartupTasks": startup_config.app_preload_hint_startup_tasks
+                        .iter()
+                        .map(|t| serde_json::json!({"name": t.name, "srcEntry": t.src_entry}))
+                        .collect::<Vec<_>>(),
+                });
+                if let Err(e) = write_json_pretty(&profile_path, &profile_json) {
+                    tracing::warn!(error = %e, "failed to write startup_config resource profile");
+                }
+            }
+        }
 
         let (manifest, mut loader_json) = processor
             .process_module(module, &module_json5)
