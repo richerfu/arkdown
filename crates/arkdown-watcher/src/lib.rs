@@ -163,6 +163,7 @@ mod tests {
                     aot_compile_mode: None,
                     host_pgo: None,
                     ap_path: None,
+                    abi_filters: vec![],
                 },
             },
             modules: vec![],

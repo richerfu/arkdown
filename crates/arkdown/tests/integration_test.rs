@@ -48,6 +48,7 @@ fn make_test_config(fixture: &PathBuf) -> ArkdownConfig {
                 aot_compile_mode: None,
                 host_pgo: None,
                 ap_path: None,
+                abi_filters: vec![],
                 strict_mode: StrictModeConfig {
                     case_sensitive_check: false,
                     use_normalized_ohm_url: false,
@@ -325,6 +326,7 @@ fn make_minimal_config(project_root: &PathBuf, build_mode: BuildMode) -> Arkdown
                 aot_compile_mode: None,
                 host_pgo: None,
                 ap_path: None,
+                abi_filters: vec![],
                 strict_mode: StrictModeConfig {
                     case_sensitive_check: false,
                     use_normalized_ohm_url: false,

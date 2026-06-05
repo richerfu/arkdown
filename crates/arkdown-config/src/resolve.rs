@@ -213,6 +213,16 @@ pub fn load_config(
             }
         });
 
+    // ABI filters from buildOption.externalNativeOptions.abiFilters.
+    // When not configured, use the hvigor default of ["arm64-v8a"].
+    let abi_filters = raw_product
+        .build_option
+        .as_ref()
+        .and_then(|bo| bo.external_native_options.as_ref())
+        .map(|eno| eno.abi_filters.clone())
+        .filter(|filters| !filters.is_empty())
+        .unwrap_or_else(|| vec!["arm64-v8a".to_string()]);
+
     let build_option = BuildOption {
         strict_mode,
         ark_options,
@@ -242,6 +252,7 @@ pub fn load_config(
         aot_compile_mode,
         host_pgo,
         ap_path,
+        abi_filters,
     };
 
     let product = ProductConfig {

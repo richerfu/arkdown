@@ -1444,7 +1444,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                                     abc_path: modules_abc,
                                     resources_index,
                                     module_json,
-                                    native_libs: collect_native_libs(&project_root, module),
+                                    native_libs: collect_native_libs(&project_root, module, &config_arc.product.build_option.abi_filters),
                                     output_path: output.clone(),
                                     resources_src_dir: Some(
                                         module.src_path.join(
@@ -1865,26 +1865,37 @@ fn target_source_set_resource_dir(module: &ModuleConfig, target_name: &str) -> O
 // by select_effective_module_target above.  This avoids duplicating the priority
 // logic across multiple pipeline stages.
 
-fn collect_native_libs(project_root: &Path, module: &ModuleConfig) -> Vec<PathBuf> {
+fn collect_native_libs(
+    project_root: &Path,
+    module: &ModuleConfig,
+    abi_filters: &[String],
+) -> Vec<PathBuf> {
     let mut libs = Vec::new();
     let mut seen = FxHashSet::default();
     for root in [
         module.src_path.join("src/main/libs"),
         module.src_path.join("libs"),
     ] {
-        collect_native_libs_from_root(&root, &mut seen, &mut libs);
+        collect_native_libs_from_root(&root, &mut seen, &mut libs, abi_filters);
     }
     for dep_root in collect_declared_dependency_roots_for_native(&module.src_path, project_root) {
-        collect_native_libs_from_root(&dep_root, &mut seen, &mut libs);
+        collect_native_libs_from_root(&dep_root, &mut seen, &mut libs, abi_filters);
     }
     libs.sort();
     libs
 }
 
+/// Collect `.so` files from `root` whose path contains an ABI directory
+/// matching one of the configured `abi_filters`.
+///
+/// hvigor uses `buildOption.externalNativeOptions.abiFilters` to determine
+/// which CPU architectures to include.  Previously this was hardcoded to
+/// `arm64-v8a`; now all configured ABIs are supported.
 fn collect_native_libs_from_root(
     root: &Path,
     seen: &mut FxHashSet<PathBuf>,
     libs: &mut Vec<PathBuf>,
+    abi_filters: &[String],
 ) {
     if !root.exists() {
         return;
@@ -1898,10 +1909,13 @@ fn collect_native_libs_from_root(
         if path.extension().and_then(|ext| ext.to_str()) != Some("so") {
             continue;
         }
-        if path
+        // Check if the path passes through any of the configured ABI directories.
+        let path_components: Vec<_> = path
             .components()
-            .any(|component| component.as_os_str().to_string_lossy().as_ref() == "arm64-v8a")
-        {
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        let matches_abi = abi_filters.iter().any(|abi| path_components.contains(abi));
+        if matches_abi {
             let path = canonical_or_owned(path);
             if seen.insert(path.clone()) {
                 libs.push(path);
@@ -2257,6 +2271,7 @@ mod tests {
                     aot_compile_mode: None,
                     host_pgo: None,
                     ap_path: None,
+                    abi_filters: vec![],
                 },
             },
             modules: vec![],
@@ -2600,7 +2615,8 @@ mod tests {
             src_path: module_root,
             module_type: OhosModuleType::Entry,
         };
-        let libs = collect_native_libs(project_root, &module);
+        let default_abi_filters = vec!["arm64-v8a".to_string()];
+        let libs = collect_native_libs(project_root, &module, &default_abi_filters);
         let names: Vec<_> = libs
             .iter()
             .filter_map(|path| path.file_name().and_then(|name| name.to_str()))
@@ -2609,6 +2625,52 @@ mod tests {
         assert!(names.contains(&"libself.so"));
         assert!(names.contains(&"libdeclared.so"));
         assert!(!names.contains(&"libundeclared.so"));
+    }
+
+    /// Verify that `collect_native_libs_from_root` respects the configured ABI filters.
+    /// When only `armeabi-v7a` is in the filter, `arm64-v8a` libs should be skipped.
+    #[test]
+    fn test_collect_native_libs_respects_abi_filters() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let libs_root = tmp.path().join("libs");
+
+        // Create SO files for two ABIs.
+        std::fs::create_dir_all(libs_root.join("arm64-v8a")).unwrap();
+        std::fs::write(libs_root.join("arm64-v8a/lib64.so"), b"arm64").unwrap();
+        std::fs::create_dir_all(libs_root.join("armeabi-v7a")).unwrap();
+        std::fs::write(libs_root.join("armeabi-v7a/lib32.so"), b"arm32").unwrap();
+
+        // Filter: only arm64-v8a — lib32.so should be excluded.
+        let mut libs = Vec::new();
+        let mut seen = rustc_hash::FxHashSet::default();
+        collect_native_libs_from_root(
+            &libs_root,
+            &mut seen,
+            &mut libs,
+            &["arm64-v8a".to_string()],
+        );
+        let names: Vec<_> = libs
+            .iter()
+            .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
+            .collect();
+        assert!(names.contains(&"lib64.so"), "arm64 lib must be included");
+        assert!(!names.contains(&"lib32.so"), "arm32 lib must be excluded");
+
+        // Filter: both ABIs — both should be included.
+        let mut libs2 = Vec::new();
+        let mut seen2 = rustc_hash::FxHashSet::default();
+        collect_native_libs_from_root(
+            &libs_root,
+            &mut seen2,
+            &mut libs2,
+            &["arm64-v8a".to_string(), "armeabi-v7a".to_string()],
+        );
+        let names2: Vec<_> = libs2
+            .iter()
+            .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
+            .collect();
+        assert!(names2.contains(&"lib64.so"), "arm64 lib must be included");
+        assert!(names2.contains(&"lib32.so"), "arm32 lib must be included");
     }
 
     #[test]

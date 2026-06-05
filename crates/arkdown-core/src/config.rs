@@ -160,6 +160,11 @@ pub struct BuildOption {
     /// are module-root relative, matching hvigor's `TargetTaskService.getApPath()`.
     #[serde(default)]
     pub ap_path: Option<PathBuf>,
+    /// ABI filter list from `buildOption.externalNativeOptions.abiFilters`.
+    /// Controls which native SO library directories are collected.
+    /// Empty means default: `["arm64-v8a"]`.
+    #[serde(default)]
+    pub abi_filters: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -262,6 +262,21 @@ pub struct RawBuildOption {
     /// Path to AOT profile data (`.ap` file) for PGO-based AOT compilation.
     #[serde(rename = "apPath", default)]
     pub ap_path: Option<std::path::PathBuf>,
+    /// Native build options including ABI filters.
+    /// `buildOption.externalNativeOptions.abiFilters` controls which CPU
+    /// architectures' SO libraries are collected and included in the package.
+    #[serde(rename = "externalNativeOptions", default)]
+    pub external_native_options: Option<RawExternalNativeOptions>,
+}
+
+/// `buildOption.externalNativeOptions` — controls native/CMake build settings.
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RawExternalNativeOptions {
+    /// ABI filter list (e.g. `["arm64-v8a", "armeabi-v7a", "x86_64"]`).
+    /// When empty, defaults to `["arm64-v8a"]` (hvigor default).
+    #[serde(default)]
+    pub abi_filters: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -1096,6 +1111,34 @@ mod tests {
         assert!(!RawAppJson5::is_valid_hvigor_bundle_name(
             "com.example.app_"
         ));
+    }
+
+    /// Verify that `externalNativeOptions.abiFilters` is parsed and resolved.
+    #[test]
+    fn test_abi_filters_parsed_from_external_native_options() {
+        let json = r#"{
+            app: {
+              products: [{
+                name: "default",
+                buildOption: {
+                  externalNativeOptions: {
+                    abiFilters: ["arm64-v8a", "armeabi-v7a", "x86_64"]
+                  }
+                }
+              }]
+            },
+            modules: [{ name: "entry", srcPath: "./entry" }]
+        }"#;
+
+        let profile =
+            RawBuildProfile::parse(json, std::path::Path::new("build-profile.json5")).unwrap();
+        let product = &profile.app.products[0];
+        let build_option = product.build_option.as_ref().unwrap();
+        let eno = build_option.external_native_options.as_ref().unwrap();
+        assert_eq!(
+            eno.abi_filters,
+            vec!["arm64-v8a", "armeabi-v7a", "x86_64"]
+        );
     }
 
     /// Verify that `buildModeSet` on a target is parsed correctly.
