@@ -201,21 +201,31 @@ pub struct SourceLocation {
 
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DebuginfoIns {
-    #[prost(uint32, tag = "1")]
-    pub line_number: u32,
+    #[prost(uint64, tag = "1")]
+    pub line_number: u64,
     #[prost(uint32, tag = "2")]
     pub column_number: u32,
+    #[prost(bytes = "vec", tag = "3")]
+    pub whole_line: Vec<u8>,
+    #[prost(uint64, tag = "4")]
+    pub bound_left: u64,
+    #[prost(uint64, tag = "5")]
+    pub bound_right: u64,
 }
 
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct LocalVariable {
     #[prost(bytes = "vec", tag = "1")]
     pub name: Vec<u8>,
-    #[prost(int32, tag = "2")]
+    #[prost(bytes = "vec", tag = "2")]
+    pub signature: Vec<u8>,
+    #[prost(bytes = "vec", tag = "3")]
+    pub signature_type: Vec<u8>,
+    #[prost(int32, tag = "4")]
     pub reg: i32,
-    #[prost(uint32, tag = "3")]
+    #[prost(uint32, tag = "5")]
     pub start: u32,
-    #[prost(uint32, tag = "4")]
+    #[prost(uint32, tag = "6")]
     pub length: u32,
 }
 
@@ -295,8 +305,8 @@ pub struct Record {
     pub metadata: Option<RecordMetadata>,
     #[prost(message, repeated, tag = "5")]
     pub field_list: Vec<Field>,
-    #[prost(uint32, tag = "6")]
-    pub params_num: u32,
+    #[prost(uint64, tag = "6")]
+    pub params_num: u64,
     #[prost(bool, tag = "7")]
     pub body_presence: bool,
     #[prost(message, optional, tag = "8")]
