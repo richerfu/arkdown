@@ -41,6 +41,7 @@ struct ArgParser {
     index: usize,
     target_api_version: u32,
     target_api_sub_version: Option<String>,
+    enable_annotations: bool,
     output: Option<PathBuf>,
     default_output_source: Option<PathBuf>,
     record_name: Option<String>,
@@ -78,6 +79,7 @@ impl ArgParser {
             index: 0,
             target_api_version: DEFAULT_TARGET_API_VERSION,
             target_api_sub_version: None,
+            enable_annotations: false,
             output: None,
             default_output_source: None,
             record_name: None,
@@ -179,6 +181,7 @@ impl ArgParser {
             output,
             target_api_version: self.target_api_version,
             target_api_sub_version: self.target_api_sub_version.clone(),
+            enable_annotations: self.enable_annotations,
             debug_info: self.debug_info,
             opt_level: self.opt_level,
             optimize_try_catch_func: self.optimize_try_catch_func,
@@ -319,6 +322,7 @@ impl ArgParser {
                 self.compile_context_info = CompileContextInfo::read_upstream_lenient(&path)?;
             }
             "--enable-abc-input" => self.enable_abc_input = true,
+            "--enable-annotations" => self.enable_annotations = true,
             "--dump-deps-info" => self.dump_deps_info = true,
             "--remove-redundant-file" => self.remove_redundant_file = true,
             "--module-record-field-name" => {

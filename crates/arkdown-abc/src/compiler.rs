@@ -36,6 +36,8 @@ pub struct AbcCompileOptions {
     pub target_api_version: u32,
     /// Optional target API stage/sub-version passed as `--target-api-sub-version`.
     pub target_api_sub_version: Option<String>,
+    /// Match upstream `--enable-annotations`, effective only for API 20+.
+    pub enable_annotations: bool,
     /// Merge all records into a single `.abc` output file.
     pub merge_abc: bool,
     /// Parse and lower inputs as ECMAScript modules, matching upstream
@@ -823,6 +825,7 @@ impl AbcCompiler {
                 self.options.module,
                 self.options.target_api_version,
                 self.options.target_api_sub_version.as_deref(),
+                self.options.enable_annotations,
                 effective_debug_info,
                 standalone_ecmascript_input,
             )?;

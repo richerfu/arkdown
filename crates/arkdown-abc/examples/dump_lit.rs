@@ -9,6 +9,7 @@ fn main() {
         optimize_try_catch_func: true,
         target_api_version: 12,
         target_api_sub_version: None,
+        enable_annotations: false,
         merge_abc: true,
         module: true,
         module_record_field_name: None,

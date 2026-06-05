@@ -444,6 +444,7 @@ fn accepts_hvigor_compat_flags() {
         "ts",
         "--module-record-field-name",
         "moduleRecordField",
+        "--enable-annotations",
         "--enable-release-column",
         "--use-define-semantic",
         "--output",
@@ -461,6 +462,7 @@ fn accepts_hvigor_compat_flags() {
                 opts.module_record_field_name.as_deref(),
                 Some("moduleRecordField")
             );
+            assert!(opts.enable_annotations);
         }
         other => panic!("expected compile command, got {other:?}"),
     }

@@ -1134,6 +1134,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 output: bundle_out.modules_abc_path.clone(),
                 target_api_version: config_arc.sdk_config.compile_api_version,
                 target_api_sub_version: config_arc.product.compatible_sdk_version_stage.clone(),
+                enable_annotations: false,
                 debug_info: matches!(config_arc.build_mode, BuildMode::Debug),
                 opt_level: if matches!(config_arc.build_mode, BuildMode::Release) {
                     2

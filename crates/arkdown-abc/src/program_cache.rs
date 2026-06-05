@@ -3253,6 +3253,7 @@ af(); gf(); ag(); ar(); aa(); cf(); sf(); saf();
             18,
             None,
             false,
+            false,
             true,
         )
         .unwrap();
@@ -3322,6 +3323,7 @@ cf();
             18,
             None,
             false,
+            false,
             true,
         )
         .unwrap();
@@ -3374,6 +3376,7 @@ outer();
             18,
             None,
             false,
+            false,
             true,
         )
         .unwrap();
@@ -3421,6 +3424,7 @@ new C().method();
             18,
             None,
             false,
+            false,
             true,
         )
         .unwrap();
@@ -3455,6 +3459,7 @@ cf();
             18,
             None,
             false,
+            false,
             true,
         )
         .unwrap();
@@ -3484,6 +3489,7 @@ cf();
                 true,
                 18,
                 None,
+                false,
                 false,
                 true,
             )
@@ -3559,6 +3565,7 @@ sf(); saf();
                 target_api_version,
                 None,
                 false,
+                false,
                 true,
             )
             .unwrap();
@@ -3613,6 +3620,7 @@ obj.m(); obj.am(); obj.gm(); obj.agm();
             true,
             18,
             None,
+            false,
             false,
             true,
         )
@@ -3675,6 +3683,7 @@ obj.m(); obj.am(); obj.gm(); obj.agm();
             None,
             false,
             false,
+            false,
         )
         .unwrap();
         for method in &mut record.methods {
@@ -3725,6 +3734,7 @@ obj.m(); obj.am(); obj.gm(); obj.agm();
             true,
             12,
             None,
+            false,
             false,
             false,
         )
@@ -3828,6 +3838,7 @@ obj.m(); obj.am(); obj.gm(); obj.agm();
             None,
             false,
             false,
+            false,
         )
         .unwrap();
         file.add_record(record);
@@ -3882,6 +3893,7 @@ obj.m(); obj.am(); obj.gm(); obj.agm();
             None,
             false,
             false,
+            false,
         )
         .unwrap();
         let a_record = build_record_with_debug_and_package_for_target_with_mode(
@@ -3897,6 +3909,7 @@ obj.m(); obj.am(); obj.gm(); obj.agm();
             true,
             12,
             None,
+            false,
             false,
             false,
         )
@@ -3952,6 +3965,7 @@ obj.m(); obj.am(); obj.gm(); obj.agm();
             None,
             false,
             false,
+            false,
         )
         .unwrap();
         let expected_labels = record.methods[0]
@@ -3994,6 +4008,7 @@ obj.m(); obj.am(); obj.gm(); obj.agm();
             true,
             12,
             None,
+            false,
             false,
             false,
         )
@@ -4039,6 +4054,7 @@ obj.m(); obj.am(); obj.gm(); obj.agm();
             true,
             12,
             None,
+            false,
             false,
             false,
         )
@@ -4104,6 +4120,7 @@ obj.m(); obj.am(); obj.gm(); obj.agm();
             true,
             12,
             None,
+            false,
             false,
             false,
         )

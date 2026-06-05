@@ -3,14 +3,15 @@ use std::path::Path;
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    Argument, ArrayAssignmentTarget, ArrayPattern, AssignmentOperator, AssignmentTarget,
-    AssignmentTargetMaybeDefault, AssignmentTargetProperty, BindingPattern, ClassElement,
-    Declaration, ExportDefaultDeclarationKind, Expression, ForInStatement, ForOfStatement,
-    ForStatementLeft, FormalParameter, Function, FunctionBody, ImportDeclarationSpecifier,
-    ImportOrExportKind, LogicalOperator, MethodDefinitionKind, ObjectAssignmentTarget,
-    ObjectPattern, Program, PropertyKey, SimpleAssignmentTarget, Statement, TSEnumDeclaration,
-    TSEnumMemberName, TSImportEqualsDeclaration, TSModuleDeclaration, TSModuleReference,
-    TSQualifiedName, TSTypeName, UnaryOperator, UpdateExpression, YieldExpression,
+    AnnotationDeclaration, Argument, ArrayAssignmentTarget, ArrayPattern, AssignmentOperator,
+    AssignmentTarget, AssignmentTargetMaybeDefault, AssignmentTargetProperty, BindingPattern,
+    ClassElement, Declaration, ExportDefaultDeclarationKind, Expression, ForInStatement,
+    ForOfStatement, ForStatementLeft, FormalParameter, Function, FunctionBody,
+    ImportDeclarationSpecifier, ImportOrExportKind, LogicalOperator, MethodDefinitionKind,
+    ObjectAssignmentTarget, ObjectPattern, Program, PropertyKey, SimpleAssignmentTarget, Statement,
+    TSEnumDeclaration, TSEnumMemberName, TSImportEqualsDeclaration, TSModuleDeclaration,
+    TSModuleReference, TSQualifiedName, TSTypeName, UnaryOperator, UpdateExpression,
+    YieldExpression,
 };
 use oxc_ast_visit::{walk, Visit};
 use oxc_parser::{Parser, ParserReturn};
@@ -173,6 +174,7 @@ pub fn build_record_with_debug_and_package_for_target(
         is_module,
         target_api_version,
         target_api_sub_version,
+        false,
         source_file.is_some(),
         source_file.is_some_and(is_explicit_ecmascript_source_file),
     )
@@ -192,6 +194,7 @@ pub fn build_record_with_debug_and_package_for_target_with_mode(
     is_module: bool,
     target_api_version: u32,
     target_api_sub_version: Option<&str>,
+    enable_annotations: bool,
     emit_debugger: bool,
     standalone_ecmascript_input: bool,
 ) -> Result<ClassRecord, AbcError> {
@@ -209,6 +212,7 @@ pub fn build_record_with_debug_and_package_for_target_with_mode(
         None,
         target_api_version,
         target_api_sub_version,
+        enable_annotations,
         emit_debugger,
         standalone_ecmascript_input,
     )
@@ -268,6 +272,7 @@ pub fn build_record_with_debug_and_source_map_for_target(
         source_map,
         target_api_version,
         target_api_sub_version,
+        false,
         source_file.is_some(),
         source_file.is_some_and(is_explicit_ecmascript_source_file),
     )
@@ -288,6 +293,7 @@ pub fn build_record_with_debug_and_source_map_for_target_with_mode(
     source_map: Option<&str>,
     target_api_version: u32,
     target_api_sub_version: Option<&str>,
+    enable_annotations: bool,
     emit_debugger: bool,
     standalone_ecmascript_input: bool,
 ) -> Result<ClassRecord, AbcError> {
@@ -359,7 +365,12 @@ pub fn build_record_with_debug_and_source_map_for_target_with_mode(
     };
     let scoping_ref = scoping.as_ref();
     let runtime_ts_import_equals = collect_runtime_ts_import_equals(&program, scoping_ref);
-    reject_unsupported_constructs(&program, record_name)?;
+    reject_unsupported_constructs(
+        &program,
+        record_name,
+        target_api_version,
+        enable_annotations,
+    )?;
 
     // Collect module import/export records before lowering so bytecode can use
     // hvigor/es2abc's module-variable opcodes instead of global lookups.
@@ -3703,9 +3714,29 @@ fn function_rest_param(function: &oxc_ast::ast::Function<'_>) -> Option<(String,
     })
 }
 
-fn reject_unsupported_constructs(program: &Program<'_>, record_name: &str) -> Result<(), AbcError> {
+const ANNOTATION_SUPPORTED_API_VERSION: u32 = 20;
+const ANNOTATION_PREFIX: &str = "__$$ETS_ANNOTATION$$__";
+const ANNOTATION_NOT_ENABLED_MESSAGE: &str = concat!(
+    "Current configuration does not support using annotations. ",
+    "Annotations can be used in the version of API 20 or higher versions.\n",
+    "Solutions: > Check the compatibleSdkVersion in build-profile.json5.",
+    "> If compatibleSdkVersion is set to API 20 or higher version.",
+    "> If you're running es2abc in commandline without IDE, please check whether target-api-version and ",
+    "enable-annotations options are correctly configured."
+);
+
+fn reject_unsupported_constructs(
+    program: &Program<'_>,
+    record_name: &str,
+    target_api_version: u32,
+    enable_annotations: bool,
+) -> Result<(), AbcError> {
     let body = statement_scan_body(program, true);
-    let mut scanner = UnsupportedScanner { record_name };
+    let mut scanner = UnsupportedScanner {
+        record_name,
+        target_api_version,
+        enable_annotations,
+    };
     scanner.scan_statements(body)
 }
 
@@ -3796,6 +3827,8 @@ fn collect_runtime_ts_import_equals_decl(
 
 struct UnsupportedScanner<'a> {
     record_name: &'a str,
+    target_api_version: u32,
+    enable_annotations: bool,
 }
 
 impl UnsupportedScanner<'_> {
@@ -3804,6 +3837,32 @@ impl UnsupportedScanner<'_> {
             construct: construct.to_string(),
             file: self.record_name.to_string(),
         }
+    }
+
+    fn parse_error(&self, message: impl Into<String>) -> AbcError {
+        AbcError::Parse {
+            file: self.record_name.to_string(),
+            message: message.into(),
+        }
+    }
+
+    fn annotations_enabled(&self) -> bool {
+        self.enable_annotations && self.target_api_version >= ANNOTATION_SUPPORTED_API_VERSION
+    }
+
+    fn scan_annotation_declaration(
+        &self,
+        decl: &AnnotationDeclaration<'_>,
+    ) -> Result<(), AbcError> {
+        if !self.annotations_enabled() {
+            return Err(self.parse_error(ANNOTATION_NOT_ENABLED_MESSAGE));
+        }
+        if !decl.id.name.as_str().starts_with(ANNOTATION_PREFIX) {
+            return Err(self.parse_error(format!(
+                "Annotation declaration need to be prefixed with '{ANNOTATION_PREFIX}'"
+            )));
+        }
+        Ok(())
     }
 
     fn scan_statements(&mut self, statements: &[Statement<'_>]) -> Result<(), AbcError> {
@@ -3961,9 +4020,7 @@ impl UnsupportedScanner<'_> {
                 self.scan_ts_import_equals_declaration(decl)
             }
             Statement::StructStatement(_) => Err(self.unsupported("StructStatement")),
-            // AnnotationDeclaration is metadata-only; no runtime bytecode is emitted.
-            // These are erased at the ETS transform stage but may survive to the ABC pass.
-            Statement::AnnotationDeclaration(_) => Ok(()),
+            Statement::AnnotationDeclaration(decl) => self.scan_annotation_declaration(decl),
             Statement::LazyImportDeclaration(_) => Err(self.unsupported("LazyImportDeclaration")),
         }
     }
@@ -3990,8 +4047,7 @@ impl UnsupportedScanner<'_> {
                 self.scan_ts_import_equals_declaration(decl)
             }
             Declaration::StructStatement(_) => Err(self.unsupported("StructStatement")),
-            // AnnotationDeclaration is metadata-only; no runtime bytecode is emitted.
-            Declaration::AnnotationDeclaration(_) => Ok(()),
+            Declaration::AnnotationDeclaration(decl) => self.scan_annotation_declaration(decl),
         }
     }
 

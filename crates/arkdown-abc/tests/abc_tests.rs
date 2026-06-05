@@ -21,6 +21,7 @@ fn make_compiler() -> AbcCompiler {
         optimize_try_catch_func: true,
         target_api_version: 12,
         target_api_sub_version: None,
+        enable_annotations: false,
         merge_abc: true,
         module: false,
         module_record_field_name: None,
@@ -40,6 +41,7 @@ fn make_debug_compiler() -> AbcCompiler {
         optimize_try_catch_func: true,
         target_api_version: 12,
         target_api_sub_version: None,
+        enable_annotations: false,
         merge_abc: true,
         module: false,
         module_record_field_name: None,
@@ -1225,6 +1227,7 @@ fn test_user_records_are_marked_arkts_and_npm_entries_have_native_fields() {
         optimize_try_catch_func: true,
         target_api_version: 12,
         target_api_sub_version: None,
+        enable_annotations: false,
         merge_abc: true,
         module: false,
         module_record_field_name: None,
@@ -2558,6 +2561,7 @@ fn test_artifact_api_version_propagated() {
         optimize_try_catch_func: true,
         target_api_version: 9,
         target_api_sub_version: None,
+        enable_annotations: false,
         merge_abc: true,
         module: false,
         module_record_field_name: None,
@@ -2598,6 +2602,7 @@ fn test_artifact_debug_info_true() {
         optimize_try_catch_func: true,
         target_api_version: 12,
         target_api_sub_version: None,
+        enable_annotations: false,
         merge_abc: true,
         module: false,
         module_record_field_name: None,
@@ -2817,6 +2822,7 @@ fn test_api18_standalone_explicit_constructor_matches_upstream_lnp_layout() {
         optimize_try_catch_func: true,
         target_api_version: 18,
         target_api_sub_version: None,
+        enable_annotations: false,
         merge_abc: true,
         module: true,
         module_record_field_name: None,
@@ -2870,6 +2876,7 @@ fn test_api18_standalone_lexical_arrow_matches_upstream_abc_tail_layout() {
         optimize_try_catch_func: true,
         target_api_version: 18,
         target_api_sub_version: None,
+        enable_annotations: false,
         merge_abc: true,
         module: true,
         module_record_field_name: None,
@@ -2986,6 +2993,7 @@ fn test_non_merge_module_record_field_name_option_matches_upstream() {
         optimize_try_catch_func: true,
         target_api_version: 12,
         target_api_sub_version: None,
+        enable_annotations: false,
         merge_abc: false,
         module: true,
         module_record_field_name: Some("customModuleRecord".to_string()),
@@ -3177,6 +3185,7 @@ fn module_debug_compiler() -> AbcCompiler {
         optimize_try_catch_func: true,
         target_api_version: 12,
         target_api_sub_version: None,
+        enable_annotations: false,
         merge_abc: true,
         module: true,
         module_record_field_name: None,
@@ -3197,6 +3206,25 @@ fn module_compiler_for_target(
         optimize_try_catch_func: true,
         target_api_version,
         target_api_sub_version: target_api_sub_version.map(str::to_string),
+        enable_annotations: false,
+        merge_abc: true,
+        module: true,
+        module_record_field_name: None,
+        npm_entries: None,
+        dependency_context: None,
+        remove_redundant_file: false,
+        dump_deps_info: false,
+    })
+}
+
+fn module_compiler_with_annotations() -> AbcCompiler {
+    AbcCompiler::new(AbcCompileOptions {
+        debug_info: false,
+        opt_level: 0,
+        optimize_try_catch_func: true,
+        target_api_version: 20,
+        target_api_sub_version: None,
+        enable_annotations: true,
         merge_abc: true,
         module: true,
         module_record_field_name: None,
@@ -3218,6 +3246,10 @@ fn module_record(record_name: &str, source: &str) -> AbcModule {
         is_shared_module: false,
         origin_source_lang: String::new(),
     }
+}
+
+fn annotation_module(source: &str) -> AbcModule {
+    module_record("test/annotation_decl.ets", source)
 }
 
 fn commonjs_module_record(record_name: &str, source: &str) -> AbcModule {
@@ -5220,34 +5252,55 @@ fn test_import_meta_emits_getimportmeta_opcode() {
 }
 
 #[test]
-fn test_annotation_declaration_is_erased() {
-    // AnnotationDeclaration (@interface) is a metadata-only ArkTS node; it produces
-    // no runtime bytecode.  Upstream ets-loader / es2abc both erase it before or
-    // during ABC emission.  arkdown-abc must not reject it.
-    //
-    // The source_file must end in `.ets` so the parser uses ETS source type and
-    // recognises the `@interface` syntax.
+fn test_annotation_declaration_requires_upstream_enable_annotations() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("annotation_decl.abc");
-    // Use a record_name ending in `.ets` so the builder uses ETS-aware parsing.
-    // Previously, the ETS hint came from source_file; with upstream alignment,
-    // source_file is only used when debug_info=true (opt_level=0).  The ETS
-    // detection falls back to record_name, so record_name must end in `.ets`.
-    module_compiler()
+    let err = match module_compiler().compile(
+        vec![annotation_module(
+            "@interface RouteMeta {\n  title: string;\n}",
+        )],
+        &out,
+    ) {
+        Ok(_) => panic!("annotation declarations must require upstream --enable-annotations"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(err, AbcError::Parse { ref message, .. } if message.contains("Current configuration does not support using annotations")),
+        "unexpected annotation error: {err:?}"
+    );
+}
+
+#[test]
+fn test_annotation_declaration_requires_upstream_prefix_when_enabled() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("annotation_decl_prefix.abc");
+    let err = match module_compiler_with_annotations().compile(
+        vec![annotation_module(
+            "@interface RouteMeta {\n  title: string;\n}",
+        )],
+        &out,
+    ) {
+        Ok(_) => panic!("enabled annotation declarations must still require the upstream prefix"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(err, AbcError::Parse { ref message, .. } if message.contains("Annotation declaration need to be prefixed with '__$$ETS_ANNOTATION$$__'")),
+        "unexpected annotation prefix error: {err:?}"
+    );
+}
+
+#[test]
+fn test_prefixed_annotation_declaration_enabled_compiles() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("annotation_decl_enabled.abc");
+    module_compiler_with_annotations()
         .compile(
-            vec![AbcModule {
-                record_name: "test/annotation_decl.ets".into(),
-                source: "@interface RouteMeta {\n  title: string;\n  count: number;\n}".into(),
-                source_map: None,
-                source_file: None,
-                package_name: None,
-                is_commonjs: false,
-                is_shared_module: false,
-                origin_source_lang: String::new(),
-            }],
+            vec![annotation_module(
+                "@interface __$$ETS_ANNOTATION$$__RouteMeta {\n  title: string;\n}",
+            )],
             &out,
         )
-        .expect("AnnotationDeclaration (@interface) must be erased without emitting bytecode");
+        .expect("prefixed annotation declarations must pass the upstream parser gate");
 }
 
 #[test]
@@ -5912,6 +5965,7 @@ registerNamedRoute(() => new Index(void 0, {}), "", {bundleName: "com.example.ar
         optimize_try_catch_func: true,
         target_api_version: 12,
         target_api_sub_version: None,
+        enable_annotations: false,
         merge_abc: true,
         module: true,
         module_record_field_name: None,
