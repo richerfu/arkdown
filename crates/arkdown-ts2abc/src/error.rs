@@ -10,14 +10,12 @@ pub enum Ts2abcError {
     InvalidValue { flag: String, value: String },
     #[error("unsupported ts2abc/es2abc flag: {0}")]
     UnsupportedFlag(String),
+    #[error("unsupported ts2abc/es2abc feature {flag}: {reason}")]
+    UnsupportedFeature { flag: String, reason: String },
     #[error("no input source files were provided")]
     MissingInput,
-    #[error("missing --output path for ABC output")]
-    MissingOutput,
     #[error("input source does not exist: {0}")]
     MissingSource(PathBuf),
-    #[error("source-map output is not implemented by the Rust backend yet")]
-    SourceMapNotImplemented,
     /// Upstream es2abc rejects `--module` and `--commonjs` together
     /// (options.cpp: "cannot use --module and --commonjs at the same time").
     #[error("cannot use --module and --commonjs at the same time")]

@@ -101,6 +101,7 @@ pub(super) fn compile_widget_pass(
             source_file: entry_info.source_file_info.clone(),
             package_name: entry_info.package_name.clone(),
             origin_source_lang: entry_info.origin_source_lang.clone(),
+            is_shared_module: entry_info.is_shared_module,
             abc_cache_path: None,
         });
     }
@@ -137,13 +138,9 @@ pub(super) fn compile_widget_pass(
     )?;
 
     let widget_abc = PathBuf::from(&loader_json.ace_module_build).join("widgets.abc");
-    // Widget cache must be isolated from the main module cache to prevent
-    // incremental state cross-contamination.  hvigor appends "_widget" to the
-    // main task temp dir; we use the cache_root already computed above, which
-    // is mode-specific (debug_widget / release_widget) and separate from the
-    // main module cache dir.  See WidgetCompileConfig.cache_dir docs.
-    let widget_cache_dir = cache_root.join("abc");
-    fs_err::create_dir_all(&widget_cache_dir)?;
+    // Widget cache uses its own handoff modules.cache, matching
+    // es2abc --cache-file @... without reusing the main module manifest.
+    let modules_cache_path = handoff.modules_cache_path.clone();
     compile_to_abc(Ts2abcOptions {
         inputs: handoff.inputs,
         output: widget_abc,
@@ -155,10 +152,18 @@ pub(super) fn compile_widget_pass(
         } else {
             0
         },
+        optimize_try_catch_func: true,
         merge_abc: true,
         module: true,
         commonjs: false,
-        cache_file: Some(widget_cache_dir),
+        input_extension: "js".to_string(),
+        module_record_field_name: None,
+        cache_file: modules_cache_path,
+        output_proto: None,
+        compile_context_info: Default::default(),
+        enable_abc_input: false,
+        dump_deps_info: false,
+        remove_redundant_file: false,
         npm_module_entry_list: handoff.npm_entries_path,
     })
     .map_err(|e| anyhow::anyhow!("widget ABC compile failed: {}", e))?;

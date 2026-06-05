@@ -1,8 +1,14 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use arkdown_abc::cache::CacheFileMap;
+
+use crate::compile_context::CompileContextInfo;
 use crate::driver::{default_record_name, Ts2abcInput, Ts2abcOptions};
 use crate::error::Ts2abcError;
 use crate::version::{BytecodeVersion, DEFAULT_TARGET_API_VERSION};
+
+const DEFAULT_INPUT_EXTENSION: &str = "js";
+const VALID_INPUT_EXTENSIONS: &[&str] = &["js", "ts", "as", "abc"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VersionQuery {
@@ -36,19 +42,33 @@ struct ArgParser {
     target_api_version: u32,
     target_api_sub_version: Option<String>,
     output: Option<PathBuf>,
+    default_output_source: Option<PathBuf>,
     record_name: Option<String>,
     source_file: Option<String>,
+    input_extension: String,
+    module_record_field_name: Option<String>,
     cache_file: Option<PathBuf>,
+    output_proto: Option<PathBuf>,
+    compile_context_info: CompileContextInfo,
+    enable_abc_input: bool,
+    dump_deps_info: bool,
+    remove_redundant_file: bool,
     npm_module_entry_list: Option<PathBuf>,
     debug_info: bool,
     merge_abc: bool,
     module: bool,
     commonjs: bool,
     opt_level: u8,
+    optimize_try_catch_func: bool,
     print_bc_version: bool,
     print_bc_min_version: bool,
     print_target_bc_version: bool,
-    inputs: Vec<PathBuf>,
+    inputs: Vec<InputSpec>,
+}
+
+enum InputSpec {
+    Path(PathBuf),
+    FileInfo(Ts2abcInput),
 }
 
 impl ArgParser {
@@ -59,15 +79,24 @@ impl ArgParser {
             target_api_version: DEFAULT_TARGET_API_VERSION,
             target_api_sub_version: None,
             output: None,
+            default_output_source: None,
             record_name: None,
             source_file: None,
+            input_extension: DEFAULT_INPUT_EXTENSION.to_string(),
+            module_record_field_name: None,
             cache_file: None,
+            output_proto: None,
+            compile_context_info: CompileContextInfo::default(),
+            enable_abc_input: false,
+            dump_deps_info: false,
+            remove_redundant_file: false,
             npm_module_entry_list: None,
             debug_info: false,
             merge_abc: false,
             module: false,
             commonjs: false,
             opt_level: 2,
+            optimize_try_catch_func: true,
             print_bc_version: false,
             print_bc_min_version: false,
             print_target_bc_version: false,
@@ -105,26 +134,45 @@ impl ArgParser {
             )));
         }
 
-        let output = self.output.clone().ok_or(Ts2abcError::MissingOutput)?;
         if self.inputs.is_empty() {
             return Err(Ts2abcError::MissingInput);
         }
 
-        let single_record_name = self.record_name.clone();
-        let inputs = self
+        let output = self.compiler_output();
+        let single_record_name = self.record_name.clone().or_else(|| {
+            self.merge_abc
+                .then(|| default_record_name(output.as_path()))
+        });
+        let merge_abc = self.merge_abc;
+        let mut inputs = self
             .inputs
             .iter()
-            .map(|path| Ts2abcInput {
-                path: path.clone(),
-                record_name: single_record_name
-                    .clone()
-                    .unwrap_or_else(|| default_record_name(path)),
-                source_file: self.source_file.clone(),
-                package_name: None,
-                is_commonjs: self.commonjs,
-                source_map: None,
+            .map(|input| match input {
+                InputSpec::Path(path) => Ts2abcInput {
+                    path: path.clone(),
+                    output: None,
+                    cache_file: None,
+                    record_name: if merge_abc {
+                        single_record_name
+                            .clone()
+                            .unwrap_or_else(|| default_record_name(path))
+                    } else {
+                        String::new()
+                    },
+                    source_file: self
+                        .source_file
+                        .clone()
+                        .or_else(|| (!merge_abc).then(|| path.to_string_lossy().into_owned())),
+                    package_name: None,
+                    is_commonjs: self.commonjs,
+                    is_shared_module: false,
+                    origin_source_lang: String::new(),
+                    source_map: None,
+                },
+                InputSpec::FileInfo(input) => input.clone(),
             })
-            .collect();
+            .collect::<Vec<_>>();
+        self.apply_cache_file_mapping(&mut inputs)?;
 
         Ok(Ts2abcCommand::Compile(Ts2abcOptions {
             inputs,
@@ -133,10 +181,18 @@ impl ArgParser {
             target_api_sub_version: self.target_api_sub_version.clone(),
             debug_info: self.debug_info,
             opt_level: self.opt_level,
+            optimize_try_catch_func: self.optimize_try_catch_func,
             merge_abc: self.merge_abc,
             module: self.module,
             commonjs: self.commonjs,
+            input_extension: self.input_extension.clone(),
+            module_record_field_name: self.module_record_field_name.clone(),
             cache_file: self.cache_file.clone(),
+            output_proto: self.output_proto.clone(),
+            compile_context_info: self.compile_context_info.clone(),
+            enable_abc_input: self.enable_abc_input,
+            dump_deps_info: self.dump_deps_info,
+            remove_redundant_file: self.remove_redundant_file,
             npm_module_entry_list: self.npm_module_entry_list.clone(),
         }))
     }
@@ -144,12 +200,19 @@ impl ArgParser {
     fn parse_one(&mut self, arg: String) -> Result<(), Ts2abcError> {
         if arg == "--" {
             while self.index < self.args.len() {
-                self.inputs.push(PathBuf::from(&self.args[self.index]));
+                let path = PathBuf::from(&self.args[self.index]);
+                if self.default_output_source.is_none() {
+                    self.default_output_source = Some(path.clone());
+                }
+                self.inputs.push(InputSpec::Path(path));
                 self.index += 1;
             }
             return Ok(());
         }
         if let Some(list_path) = arg.strip_prefix('@') {
+            if self.default_output_source.is_none() {
+                self.default_output_source = Some(PathBuf::from(list_path));
+            }
             // @filelist: upstream options.cpp reads each line as a source input.
             // hvigor uses this for large module lists to avoid OS arg-length limits.
             let content = std::fs::read_to_string(list_path).map_err(|e| {
@@ -161,13 +224,17 @@ impl ArgParser {
             for line in content.lines() {
                 let trimmed = line.trim();
                 if !trimmed.is_empty() {
-                    self.inputs.push(PathBuf::from(trimmed));
+                    self.push_filelist_line(trimmed)?;
                 }
             }
             return Ok(());
         }
         if !arg.starts_with("--") {
-            self.inputs.push(PathBuf::from(arg));
+            let path = PathBuf::from(arg);
+            if self.default_output_source.is_none() {
+                self.default_output_source = Some(path.clone());
+            }
+            self.inputs.push(InputSpec::Path(path));
             return Ok(());
         }
 
@@ -221,6 +288,9 @@ impl ArgParser {
                     });
                 }
             }
+            "--opt-try-catch-func" => {
+                self.optimize_try_catch_func = parse_bool_flag(flag, value, true)?;
+            }
             "--file-threads"
             | "--function-threads"
             | "--abc-class-threads"
@@ -228,56 +298,31 @@ impl ArgParser {
             | "--perf-level" => {
                 let _ = self.value(flag, value)?;
             }
-            // Accepted, stored; value is consumed but currently no-op.
-            // Mirrors upstream --extension: overrides the default source file extension.
             "--extension" => {
-                let _ = self.value(flag, value)?;
+                let extension = self.value(flag, value)?;
+                if !VALID_INPUT_EXTENSIONS.contains(&extension.as_str()) {
+                    return Err(Ts2abcError::InvalidValue {
+                        flag: flag.to_string(),
+                        value: extension,
+                    });
+                }
+                self.input_extension = extension;
             }
-            // Accepted, value consumed; currently not implemented.
-            //
-            // Upstream `es2abc` semantic: write a `.protoBin` ProgramCache file
-            // (protobuf-serialized `pandasm::Program` IR) alongside the `.abc`
-            // output. This affects BUILD CACHING ONLY — the `.abc` product is
-            // not changed by the presence or absence of this flag.
-            //
-            // Status: non-critical for correctness; arkdown uses its own
-            // `ModulesCache` / `modules.protoBin` format instead. Passing
-            // `--output-proto` is therefore safe to accept silently. If a
-            // caller depends on the upstream protobuf file being present,
-            // it will silently miss the cache but produce a correct `.abc`.
-            //
-            // TODO(SPEC-042): emit an ARKD-format `.protoBin` at the given path.
-            "--output-proto" => {
-                let proto_path = self.value(flag, value)?;
-                tracing::debug!(
-                    path = %proto_path,
-                    "--output-proto: .protoBin cache output not yet implemented \
-                     (non-critical; product .abc is unaffected)"
-                );
+            // Upstream aot/main.cpp::GenerateProgram(): with exactly one
+            // program and no global optimization, --outputProto writes a
+            // protoPanda::Program snapshot and returns before ABC emit.
+            "--output-proto" | "--outputProto" => {
+                self.output_proto = Some(PathBuf::from(self.value(flag, value)?))
             }
-            // Accepted, value consumed; currently not implemented.
-            //
-            // Upstream `es2abc` semantic: write a compile-context JSON file
-            // containing module record metadata alongside the `.abc` output.
-            // This file is read by the DevEco Studio IDE for incremental
-            // dependency tracking; it does NOT affect the `.abc` binary.
-            //
-            // Status: build-non-critical (IDE-only metadata); safely accepted
-            // as a no-op. Callers relying on incremental IDE analysis will see
-            // stale module graphs but the built artifact will be correct.
-            //
-            // TODO(SPEC-043): emit the compile-context JSON at the given path.
             "--compile-context-info" => {
-                let ctx_path = self.value(flag, value)?;
-                tracing::debug!(
-                    path = %ctx_path,
-                    "--compile-context-info: context JSON output not yet implemented \
-                     (non-critical; product .abc is unaffected)"
-                );
+                let path = PathBuf::from(self.value(flag, value)?);
+                self.compile_context_info = CompileContextInfo::read_upstream_lenient(&path)?;
             }
-            // Accepted, value consumed; stored for future use in module record generation.
+            "--enable-abc-input" => self.enable_abc_input = true,
+            "--dump-deps-info" => self.dump_deps_info = true,
+            "--remove-redundant-file" => self.remove_redundant_file = true,
             "--module-record-field-name" => {
-                let _ = self.value(flag, value)?;
+                self.module_record_field_name = Some(self.value(flag, value)?);
             }
             // No-op flags: accepted by upstream, accepted here without action.
             "--enable-release-column" | "--use-define-semantic" => {}
@@ -297,6 +342,105 @@ impl ArgParser {
         self.index += 1;
         Ok(value)
     }
+
+    fn push_filelist_line(&mut self, line: &str) -> Result<(), Ts2abcError> {
+        if !line.contains(';') {
+            self.inputs.push(InputSpec::Path(PathBuf::from(line)));
+            return Ok(());
+        }
+
+        let items = split_file_info_items(line);
+        if items.is_empty() || items.len() > 7 {
+            return Err(Ts2abcError::InvalidValue {
+                flag: "@filelist".to_string(),
+                value: line.to_string(),
+            });
+        }
+        let Some(path) = items.first() else {
+            return Err(Ts2abcError::InvalidValue {
+                flag: "@filelist".to_string(),
+                value: line.to_string(),
+            });
+        };
+        let script_kind = items.get(2).map(String::as_str).unwrap_or("module");
+        let is_commonjs = script_kind == "commonjs";
+        let source_file = items
+            .get(3)
+            .cloned()
+            .or_else(|| (!self.merge_abc).then(|| path.clone()));
+        let package_or_output = items.get(4).cloned();
+        if !self.merge_abc && package_or_output.is_none() {
+            return Err(Ts2abcError::MissingValue(
+                "@filelist outputfile".to_string(),
+            ));
+        }
+        let input = Ts2abcInput {
+            path: PathBuf::from(path),
+            output: if self.merge_abc {
+                None
+            } else {
+                package_or_output.clone().map(PathBuf::from)
+            },
+            cache_file: None,
+            record_name: if self.merge_abc {
+                items
+                    .get(1)
+                    .cloned()
+                    .unwrap_or_else(|| default_record_name(Path::new(path)))
+            } else {
+                String::new()
+            },
+            source_file,
+            package_name: if self.merge_abc {
+                package_or_output
+            } else {
+                None
+            },
+            is_commonjs,
+            is_shared_module: items.get(5).is_some_and(|value| value == "true"),
+            origin_source_lang: items.get(6).cloned().unwrap_or_default(),
+            source_map: None,
+        };
+        self.inputs.push(InputSpec::FileInfo(input));
+        Ok(())
+    }
+
+    fn apply_cache_file_mapping(&self, inputs: &mut [Ts2abcInput]) -> Result<(), Ts2abcError> {
+        let Some(cache_file) = &self.cache_file else {
+            return Ok(());
+        };
+        let raw = cache_file.to_string_lossy();
+        if let Some(manifest) = raw.strip_prefix('@') {
+            let map = CacheFileMap::read_manifest(Path::new(manifest)).map_err(Ts2abcError::Io)?;
+            for input in inputs {
+                let source_file = input.path.to_string_lossy();
+                input.cache_file = map.get(&source_file).map(PathBuf::from);
+            }
+            return Ok(());
+        }
+
+        if inputs.len() == 1 {
+            inputs[0].cache_file = Some(cache_file.clone());
+        }
+        Ok(())
+    }
+
+    fn compiler_output(&self) -> PathBuf {
+        self.output
+            .clone()
+            .or_else(|| {
+                self.inputs.iter().find_map(|input| match input {
+                    InputSpec::Path(_) => None,
+                    InputSpec::FileInfo(input) => input.output.clone(),
+                })
+            })
+            .or_else(|| {
+                self.default_output_source
+                    .as_ref()
+                    .map(|path| derived_output_path(path))
+            })
+            .unwrap_or_else(|| PathBuf::from("Base64Output.abc"))
+    }
 }
 
 fn split_flag_value(arg: &str) -> (&str, Option<String>) {
@@ -305,4 +449,37 @@ fn split_flag_value(arg: &str) -> (&str, Option<String>) {
     } else {
         (arg, None)
     }
+}
+
+fn split_file_info_items(line: &str) -> Vec<String> {
+    line.split(';')
+        .filter(|item| !item.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn parse_bool_flag(
+    flag: &str,
+    inline: Option<String>,
+    default_when_present: bool,
+) -> Result<bool, Ts2abcError> {
+    let Some(value) = inline else {
+        return Ok(default_when_present);
+    };
+    match value.as_str() {
+        "true" | "1" => Ok(true),
+        "false" | "0" => Ok(false),
+        _ => Err(Ts2abcError::InvalidValue {
+            flag: flag.to_string(),
+            value,
+        }),
+    }
+}
+
+fn derived_output_path(path: &Path) -> PathBuf {
+    let stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("output");
+    PathBuf::from(format!("{stem}.abc"))
 }

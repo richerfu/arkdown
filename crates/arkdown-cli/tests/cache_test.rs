@@ -93,12 +93,16 @@ fn collect_js_chunks(
             let meta = record_name_map.get(name.as_str());
             Ts2abcInput {
                 path: path.clone(),
+                output: None,
+                cache_file: None,
                 record_name: meta
                     .map(|m| m.record_name.clone())
                     .unwrap_or_else(|| name.clone()),
                 source_file: meta.and_then(|m| m.source_file.clone()),
                 package_name: None,
                 is_commonjs: false,
+                is_shared_module: false,
+                origin_source_lang: String::new(),
                 source_map: None,
             }
         })
@@ -302,9 +306,9 @@ fn run_pipeline(fixture: &Path) -> PathBuf {
     let modules_abc = bundle_out.modules_abc_path.clone();
 
     if !ts2abc_inputs.is_empty() {
-        // Pass the directory — ModulesCache::manifest_path_for() appends the filename.
-        let abc_cache_dir = module.src_path.join("build/default/cache/abc");
-        std::fs::create_dir_all(&abc_cache_dir).ok();
+        let abc_cache_file = module
+            .src_path
+            .join("build/default/cache/default/default@CompileArkTS/esmodule/modules.cache");
 
         // Load module build cache (mirrors build.rs logic).
         let cache_dir = module.src_path.join("build/default/cache/modules");
@@ -352,10 +356,18 @@ fn run_pipeline(fixture: &Path) -> PathBuf {
                 target_api_sub_version: None,
                 debug_info: true,
                 opt_level: 0,
+                optimize_try_catch_func: true,
                 merge_abc: true,
                 module: true,
                 commonjs: false,
-                cache_file: Some(abc_cache_dir),
+                input_extension: "js".to_string(),
+                module_record_field_name: None,
+                cache_file: Some(abc_cache_file),
+                output_proto: None,
+                compile_context_info: Default::default(),
+                enable_abc_input: false,
+                dump_deps_info: false,
+                remove_redundant_file: false,
                 npm_module_entry_list: None,
             }
             .compile()
@@ -460,7 +472,7 @@ fn test_first_build_writes_cache_entries() {
     );
 }
 
-/// After a first build the ABC compiler cache manifest file exists.
+/// After a first build the CompileArkTS handoff cache manifest exists.
 #[test]
 fn test_first_build_writes_abc_cache_file() {
     let fixture = fresh_fixture_copy(&fixture_root());
@@ -469,14 +481,12 @@ fn test_first_build_writes_abc_cache_file() {
     let config =
         load_config(&fixture, BuildMode::Debug, OutputTarget::Hap, None, None).expect("config");
     let module = &config.modules[0];
-    // ModulesCache writes `modules.cache` (manifest) + `modules.protoBin` (ARKD binary).
-    // Pass the directory — ModulesCache::manifest_path_for() appends the filename.
     let abc_cache = module
         .src_path
-        .join("build/default/cache/abc/modules.cache");
+        .join("build/default/cache/default/default@CompileArkTS/esmodule/modules.cache");
     assert!(
         abc_cache.exists(),
-        "ABC compiler cache file must exist after first build: {abc_cache:?}"
+        "CompileArkTS modules.cache must exist after first build: {abc_cache:?}"
     );
 
     let _ = std::fs::remove_dir_all(&fixture);

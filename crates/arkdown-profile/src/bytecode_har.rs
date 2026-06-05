@@ -1577,7 +1577,9 @@ mod tests {
         ByteCodeHarScanEntry {
             package_name: pkg.to_string(),
             package_root: PathBuf::from("/oh_modules").join(pkg),
-            abc_path: PathBuf::from("/oh_modules").join(pkg).join("ets/modules.abc"),
+            abc_path: PathBuf::from("/oh_modules")
+                .join(pkg)
+                .join("ets/modules.abc"),
             compatible_sdk_version: "12".to_string(),
             source_maps_path: None,
             insight_intent: None,
@@ -1704,7 +1706,11 @@ mod tests {
         );
 
         let results = scan_bytecode_har_deps(tmp.path(), tmp.path());
-        assert_eq!(results.len(), 2, "both forms of byteCodeHar must be detected");
+        assert_eq!(
+            results.len(),
+            2,
+            "both forms of byteCodeHar must be detected"
+        );
         let names: std::collections::HashSet<&str> =
             results.iter().map(|e| e.package_name.as_str()).collect();
         assert!(names.contains("pkg-a"));

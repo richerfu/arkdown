@@ -16,6 +16,8 @@ pub(super) struct LoweringContext {
     function_lexical_infos: FxHashMap<(u32, u32), FunctionLexicalInfo>,
     target_api_version: u32,
     target_api_sub_version: Option<String>,
+    emit_debugger: bool,
+    standalone_ecmascript_input: bool,
     pub(super) module_lexical_names: Vec<String>,
 }
 
@@ -27,6 +29,8 @@ impl LoweringContext {
         function_lexical_infos: FxHashMap<(u32, u32), FunctionLexicalInfo>,
         target_api_version: u32,
         target_api_sub_version: Option<String>,
+        emit_debugger: bool,
+        standalone_ecmascript_input: bool,
     ) -> Self {
         let regular_imports = module_record.regular_imports_in_external_order();
         let mut import_indices: FxHashMap<String, u8> = regular_imports
@@ -65,6 +69,8 @@ impl LoweringContext {
             function_lexical_infos,
             target_api_version,
             target_api_sub_version,
+            emit_debugger,
+            standalone_ecmascript_input,
             module_lexical_names,
         }
     }
@@ -81,6 +87,14 @@ impl LoweringContext {
 
     pub(super) fn target_api_version(&self) -> u32 {
         self.target_api_version
+    }
+
+    pub(super) fn emit_debugger(&self) -> bool {
+        self.emit_debugger
+    }
+
+    pub(super) fn standalone_ecmascript_input(&self) -> bool {
+        self.standalone_ecmascript_input
     }
 
     pub(super) fn import_index(&self, name: &str) -> Option<u8> {

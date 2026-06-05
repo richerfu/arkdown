@@ -6,11 +6,10 @@ use crate::emit::debug_info::{
     encode_sleb128_bytes, infer_func_main_class_local_events,
 };
 use crate::emit::record::{
-    encode_code_item, inline_string, uleb128, ClassRecord, FieldRecord, FieldValue, MethodKind,
-    FIELD_OWNER_CLASS_IDX,
+    encode_code_item, inline_string, uleb128, ClassRecord, MethodAnnotationOffsets, MethodKind,
 };
 use crate::emit::strings::StringTable;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
 // ── LiteralArray types (Task 1) ───────────────────────────────────────────────
 
@@ -137,11 +136,17 @@ pub fn version_for_target_api(api: u32, sub_api: Option<&str>) -> u32 {
 /// The Panda header is **60 bytes** (0x3C).  The class index begins
 /// immediately after the header at offset `class_idx_off = 0x3C`.
 const HEADER_SIZE: usize = 0x3C;
+const INVALID_U32: u32 = u32::MAX;
+const LAST_LITERAL_ARRAY_HEADER_VERSION: [u8; 4] = [12, 0, 6, 0];
 
 const SOURCE_LANG_ECMASCRIPT: u8 = 0x00;
 
 fn align4(value: u32) -> u32 {
     (value + 3) & !3
+}
+
+fn contains_literal_array_in_header(version: u32) -> bool {
+    version.to_le_bytes() <= LAST_LITERAL_ARRAY_HEADER_VERSION
 }
 
 /// Assembled Panda `.abc` file ready for serialization.
@@ -176,7 +181,7 @@ impl AbcFile {
 
     /// Serialize the file to a byte vector.
     ///
-    /// ## Binary layout (API 13+ / DevEco Studio 6.0 / es2abc v13.0.1.0)
+    /// ## Binary layout (dynamic ABC / DevEco Studio 6.0 / es2abc v13.0.1.0)
     ///
     /// ```text
     /// Offset     Size   Field
@@ -190,15 +195,15 @@ impl AbcFile {
     /// 0x20         4    class_idx_off    = 0x3C (immediately after header)
     /// 0x24         4    num_lnp          = 0   (no line-number programs)
     /// 0x28         4    lnp_idx_off      = 0
-    /// 0x2C         4    num_literalarrays
-    /// 0x30         4    literalarray_idx_off
+    /// 0x2C         4    num_literalarrays    = 0xffffffff for v13+
+    /// 0x30         4    literalarray_idx_off = 0xffffffff for v13+
     /// 0x34         4    num_idx_regions  = 1
     /// 0x38         4    idx_section_off  = after class and literal-array indexes
     ///
     /// ── class index (at 0x3C) ─────────────────────────────────────────────
     ///      4*N    class_idx  [u32 file-offsets, sorted alphabetically by name]
     ///
-    /// ── literal-array index ──────────────────────────────────────────────
+    /// ── literal-array index (v12.0.6.0 and older only) ───────────────────
     ///      4*M    literal array file offsets
     ///
     /// ── IndexSection ─────────────────────────────────────────────────────
@@ -218,11 +223,12 @@ impl AbcFile {
     ///
     /// ## Annotation stub classes (API 13+)
     ///
-    /// API 13+ replaces old API 9 stubs. hvigor emits two regular ClassItems
-    /// with 0 fields, 0 methods, and access_flags = 0x2001 (ACC_PUBLIC |
-    /// ACC_ANNOTATION):
+    /// API 13+ replaces old API 9 stubs. hvigor emits regular ClassItems with
+    /// 0 fields, 0 methods, and access_flags = 0x2001 (ACC_PUBLIC |
+    /// ACC_ANNOTATION). v13 adds `L_ESExpectedPropertyCountAnnotation;`.
     ///
     /// * `L_ESConcurrentModuleRequestsAnnotation;`
+    /// * `L_ESExpectedPropertyCountAnnotation;` (v13+)
     /// * `L_ESSlotNumberAnnotation;`
     ///
     /// There is **no** ForeignClassItem or foreign section.
@@ -238,118 +244,27 @@ impl AbcFile {
     }
 
     pub fn serialize_with_version(&self, version: u32) -> Vec<u8> {
-        // ── SDK framework namespace stubs ────────────────────────────────────
-        //
-        // hvigorw emits these ClassItems for SDK runtime namespaces. In the
-        // native CompileArkTS path they come from `npmEntries.txt` records; in
-        // older direct-source tests they are represented by these compatibility
-        // stubs. If a real record with the same class name exists, prefer it.
-        //
-        // Class names start with 'L@' (0x40) so they sort before 'L_' annotation
-        // stubs (0x5F) and before user class names that start with 'L' followed by
-        // a bundle letter.
-        //
-        // access_flags = 0x0001 (ACC_PUBLIC): regular class, not an annotation.
-        let sdk_stubs = [
-            ClassRecord {
-                name: "L@ohos.app;".to_string(),
-                methods: vec![],
-                string_indices: vec![],
-                literal_indices: vec![],
-                module_literal_indices: vec![],
-                source_code_strings: vec![],
-                access_flags: 0x0001,
-                source_lang: SOURCE_LANG_ECMASCRIPT,
-                source_file: None,
-                module_requests: vec![],
-                fields: vec![Self::sdk_native_field("@native.ohos.app")],
-            },
-            ClassRecord {
-                name: "L@ohos.curves;".to_string(),
-                methods: vec![],
-                string_indices: vec![],
-                literal_indices: vec![],
-                module_literal_indices: vec![],
-                source_code_strings: vec![],
-                access_flags: 0x0001,
-                source_lang: SOURCE_LANG_ECMASCRIPT,
-                source_file: None,
-                module_requests: vec![],
-                fields: vec![Self::sdk_native_field("@native.ohos.curves")],
-            },
-            ClassRecord {
-                name: "L@ohos.matrix4;".to_string(),
-                methods: vec![],
-                string_indices: vec![],
-                literal_indices: vec![],
-                module_literal_indices: vec![],
-                source_code_strings: vec![],
-                access_flags: 0x0001,
-                source_lang: SOURCE_LANG_ECMASCRIPT,
-                source_file: None,
-                module_requests: vec![],
-                fields: vec![Self::sdk_native_field("@native.ohos.matrix4")],
-            },
-            ClassRecord {
-                name: "L@system.app;".to_string(),
-                methods: vec![],
-                string_indices: vec![],
-                literal_indices: vec![],
-                module_literal_indices: vec![],
-                source_code_strings: vec![],
-                access_flags: 0x0001,
-                source_lang: SOURCE_LANG_ECMASCRIPT,
-                source_file: None,
-                module_requests: vec![],
-                fields: vec![Self::sdk_native_field("@native.system.app")],
-            },
-            ClassRecord {
-                name: "L@system.curves;".to_string(),
-                methods: vec![],
-                string_indices: vec![],
-                literal_indices: vec![],
-                module_literal_indices: vec![],
-                source_code_strings: vec![],
-                access_flags: 0x0001,
-                source_lang: SOURCE_LANG_ECMASCRIPT,
-                source_file: None,
-                module_requests: vec![],
-                fields: vec![Self::sdk_native_field("@native.system.curves")],
-            },
-            ClassRecord {
-                name: "L@system.matrix4;".to_string(),
-                methods: vec![],
-                string_indices: vec![],
-                literal_indices: vec![],
-                module_literal_indices: vec![],
-                source_code_strings: vec![],
-                access_flags: 0x0001,
-                source_lang: SOURCE_LANG_ECMASCRIPT,
-                source_file: None,
-                module_requests: vec![],
-                fields: vec![Self::sdk_native_field("@native.system.matrix4")],
-            },
-            ClassRecord {
-                name: "L@system.router;".to_string(),
-                methods: vec![],
-                string_indices: vec![],
-                literal_indices: vec![],
-                module_literal_indices: vec![],
-                source_code_strings: vec![],
-                access_flags: 0x0001,
-                source_lang: SOURCE_LANG_ECMASCRIPT,
-                source_file: None,
-                module_requests: vec![],
-                fields: vec![Self::sdk_native_field("@native.system.router")],
-            },
-        ];
+        let literal_arrays_in_header = contains_literal_array_in_header(version);
 
-        // ── Annotation stub classes (API 13+ / hvigorw) ──────────────────────────
-        // hvigorw emits exactly 2 annotation stubs (acc=0x2001 = ACC_PUBLIC|ACC_ANNOTATION).
-        // L_ESExpectedPropertyCountAnnotation is NOT emitted by hvigorw.
-        let annotation_stubs = [
-            ClassRecord {
-                name: "L_ESConcurrentModuleRequestsAnnotation;".to_string(),
+        // ── Annotation stub classes ──────────────────────────────────────────
+        let mut annotation_stubs = Vec::with_capacity(if literal_arrays_in_header { 2 } else { 3 });
+        annotation_stubs.push(ClassRecord {
+            name: "L_ESConcurrentModuleRequestsAnnotation;".to_string(),
+            methods: vec![],
+            string_indices: vec![],
+            literal_indices: vec![],
+            module_literal_indices: vec![],
+            source_code_strings: vec![],
+            access_flags: 0x2001,
+            source_lang: SOURCE_LANG_ECMASCRIPT,
+            standalone_ecmascript_input: false,
+            source_file: None,
+            module_requests: vec![],
+            fields: vec![],
+        });
+        if !literal_arrays_in_header {
+            annotation_stubs.push(ClassRecord {
+                name: "L_ESExpectedPropertyCountAnnotation;".to_string(),
                 methods: vec![],
                 string_indices: vec![],
                 literal_indices: vec![],
@@ -357,44 +272,31 @@ impl AbcFile {
                 source_code_strings: vec![],
                 access_flags: 0x2001,
                 source_lang: SOURCE_LANG_ECMASCRIPT,
+                standalone_ecmascript_input: false,
                 source_file: None,
                 module_requests: vec![],
                 fields: vec![],
-            },
-            ClassRecord {
-                name: "L_ESSlotNumberAnnotation;".to_string(),
-                methods: vec![],
-                string_indices: vec![],
-                literal_indices: vec![],
-                module_literal_indices: vec![],
-                source_code_strings: vec![],
-                access_flags: 0x2001,
-                source_lang: SOURCE_LANG_ECMASCRIPT,
-                source_file: None,
-                module_requests: vec![],
-                fields: vec![],
-            },
-        ];
-
-        // Physical ClassItem order follows libpandafile ItemContainer insertion:
-        // annotation records, user records, then fixed SDK stubs.  The top-level
-        // class index is sorted separately below.
-        let record_names: FxHashSet<&str> = self
-            .records
-            .iter()
-            .map(|record| record.name.as_str())
-            .collect();
-        let sdk_stubs: Vec<ClassRecord> = sdk_stubs
-            .iter()
-            .filter(|stub| !record_names.contains(stub.name.as_str()))
-            .cloned()
-            .collect();
+            });
+        }
+        annotation_stubs.push(ClassRecord {
+            name: "L_ESSlotNumberAnnotation;".to_string(),
+            methods: vec![],
+            string_indices: vec![],
+            literal_indices: vec![],
+            module_literal_indices: vec![],
+            source_code_strings: vec![],
+            access_flags: 0x2001,
+            source_lang: SOURCE_LANG_ECMASCRIPT,
+            standalone_ecmascript_input: false,
+            source_file: None,
+            module_requests: vec![],
+            fields: vec![],
+        });
 
         let all_classes_owned: Vec<ClassRecord> = annotation_stubs
             .iter()
             .cloned()
             .chain(self.records.iter().cloned())
-            .chain(sdk_stubs.iter().cloned())
             .map(|cls| cls.with_upstream_method_order())
             .collect();
         let all_classes: Vec<&ClassRecord> = all_classes_owned.iter().collect();
@@ -411,27 +313,38 @@ impl AbcFile {
                     + class.literal_indices.len()
             })
             .sum::<usize>() as u32;
-
-        let num_lnp = all_classes
-            .iter()
-            .flat_map(|class| class.methods.iter())
-            .filter(|method| method.debug_info.is_some())
-            .count() as u32;
+        let has_expected_property_count_annotations = all_classes.iter().any(|class| {
+            class
+                .methods
+                .iter()
+                .any(|method| method.expected_property_count.is_some())
+        });
 
         // hvigor places the LNP index at the very end of the file (after the literal-array
         // section), not between the class index and literal-array index.  We match that layout
         // so `lnp_idx_off` is patched into the header after `total_size` is known.
         let num_literal_arrays = self.literal_arrays.len() as u32;
-        let literalarray_idx_off = if num_literal_arrays == 0 {
-            0
+        let header_num_literal_arrays = if literal_arrays_in_header {
+            num_literal_arrays
         } else {
-            // Literal-array index follows the class index immediately.
+            INVALID_U32
+        };
+        let literalarray_idx_off = if literal_arrays_in_header {
             class_idx_off + total_classes * 4
+        } else {
+            INVALID_U32
         };
 
-        // IndexSection is placed after the class index and literal-array index (no LNP gap).
-        let idx_sect_off = class_idx_off + total_classes * 4 + num_literal_arrays * 4;
-        let index_class_count = 2 + 1 + self.records.len() as u32 + sdk_stubs.len() as u32;
+        // v13+ deletes the header-adjacent literal-array offset table. Literal arrays
+        // are still referenced through the IndexHeader method index.
+        let literalarray_idx_size = if literal_arrays_in_header {
+            num_literal_arrays * 4
+        } else {
+            0
+        };
+        let idx_sect_off = class_idx_off + total_classes * 4 + literalarray_idx_size;
+        let index_class_count =
+            2 + u32::from(has_expected_property_count_annotations) + 1 + self.records.len() as u32;
         let index_header_size: u32 = 40;
         let index_class_idx_off = idx_sect_off + index_header_size;
         let index_method_idx_off = index_class_idx_off + index_class_count * 4;
@@ -561,36 +474,40 @@ impl AbcFile {
 
                 if let Some(debug) = &method.debug_info {
                     let is_arrow = method.kind == MethodKind::Anonymous;
-                    if is_arrow {
-                        string_items.get_or_create("0newTarget");
-                        string_items.get_or_create("0this");
-                        string_items.get_or_create("4funcObj");
-                    } else {
-                        string_items.get_or_create("4funcObj");
-                        string_items.get_or_create("any");
-                        string_items.get_or_create("4newTarget");
-                        if method.kind == MethodKind::Constructor {
-                            string_items.get_or_create("args");
+                    if !class.standalone_ecmascript_input {
+                        if is_arrow {
+                            string_items.get_or_create("0newTarget");
+                            string_items.get_or_create("0this");
+                            string_items.get_or_create("4funcObj");
+                        } else {
+                            string_items.get_or_create("4funcObj");
+                            string_items.get_or_create("any");
+                            string_items.get_or_create("4newTarget");
+                            if method.kind == MethodKind::Constructor {
+                                string_items.get_or_create("args");
+                            }
                         }
+                        let mut param_entries: Vec<(String, i32)> = debug
+                            .param_names
+                            .iter()
+                            .enumerate()
+                            .map(|(param_idx, param_name)| {
+                                (param_name.clone(), 3 + param_idx as i32)
+                            })
+                            .collect();
+                        param_entries.sort_by(|a, b| a.0.cmp(&b.0));
+                        let param_offsets = param_entries
+                            .into_iter()
+                            .map(|(name, reg)| {
+                                let off = string_items.get_or_create(&name);
+                                (name, reg, off)
+                            })
+                            .collect();
+                        if !is_arrow {
+                            string_items.get_or_create("this");
+                        }
+                        param_name_offsets_by_method[class_idx][method_idx] = Some(param_offsets);
                     }
-                    let mut param_entries: Vec<(String, i32)> = debug
-                        .param_names
-                        .iter()
-                        .enumerate()
-                        .map(|(param_idx, param_name)| (param_name.clone(), 3 + param_idx as i32))
-                        .collect();
-                    param_entries.sort_by(|a, b| a.0.cmp(&b.0));
-                    let param_offsets = param_entries
-                        .into_iter()
-                        .map(|(name, reg)| {
-                            let off = string_items.get_or_create(&name);
-                            (name, reg, off)
-                        })
-                        .collect();
-                    if !is_arrow {
-                        string_items.get_or_create("this");
-                    }
-                    param_name_offsets_by_method[class_idx][method_idx] = Some(param_offsets);
                 }
 
                 if let Some(source_file) = &class.source_file {
@@ -660,18 +577,39 @@ impl AbcFile {
             }
         }
 
-        let scope_offs_regular: [u32; 3] = [
-            string_items.get_or_create("4funcObj"),
-            string_items.get_or_create("4newTarget"),
-            string_items.get_or_create("this"),
-        ];
-        let scope_offs_arrow: [u32; 3] = [
-            string_items.get_or_create("0newTarget"),
-            string_items.get_or_create("0this"),
-            string_items.get_or_create("4funcObj"),
-        ];
-        let any_type_off = string_items.get_or_create("any");
-        let not_supported_source_code_off = string_items.get_or_create("not supported");
+        let needs_scope_debug = all_classes.iter().any(|class| {
+            !class.standalone_ecmascript_input
+                && class
+                    .methods
+                    .iter()
+                    .any(|method| method.debug_info.is_some())
+        });
+        let needs_not_supported_source_code = all_classes.iter().any(|class| {
+            !class.standalone_ecmascript_input
+                && class
+                    .methods
+                    .iter()
+                    .any(|method| method.name == "func_main_0" && method.debug_info.is_some())
+        });
+        let scope_offs_regular: Option<[u32; 3]> = needs_scope_debug.then(|| {
+            [
+                string_items.get_or_create("4funcObj"),
+                string_items.get_or_create("4newTarget"),
+                string_items.get_or_create("this"),
+            ]
+        });
+        let scope_offs_arrow: Option<[u32; 3]> = needs_scope_debug.then(|| {
+            [
+                string_items.get_or_create("0newTarget"),
+                string_items.get_or_create("0this"),
+                string_items.get_or_create("4funcObj"),
+            ]
+        });
+        let any_type_off = needs_scope_debug.then(|| string_items.get_or_create("any"));
+        let not_supported_source_code_off =
+            needs_not_supported_source_code.then(|| string_items.get_or_create("not supported"));
+        let expected_property_count_str_off = has_expected_property_count_annotations
+            .then(|| string_items.get_or_create("ExpectedPropertyCount"));
         let slot_number_str_off = string_items.get_or_create("SlotNumber");
         let mut cur = string_items.cur();
 
@@ -686,24 +624,34 @@ impl AbcFile {
             }
         }
 
-        // Build the IndexHeader class table used by FieldItem/MethodItem
-        // `class_idx` values. hvigor keeps two non-EntityId scalar entries at
-        // the front, then `_ESSlotNumberAnnotation`, user records, and SDK
-        // namespace stubs. `_ESConcurrentModuleRequestsAnnotation` is present
-        // in the top-level class index but not in this typed class table.
+        // Build the IndexHeader class table used by FieldItem/MethodItem/
+        // AnnotationItem `class_idx` values. Upstream keeps two non-EntityId
+        // scalar entries at the front, then classes referenced inside this
+        // IndexSection in IndexedItem creation order.
         let mut index_class_offsets = Vec::with_capacity(index_class_count as usize);
         index_class_offsets.extend_from_slice(&[2, 6]);
         let mut name_to_index_class_idx = FxHashMap::default();
-        for (i, class) in std::iter::once(&annotation_stubs[1])
-            .chain(self.records.iter())
-            .chain(sdk_stubs.iter())
-            .enumerate()
-        {
+        let expected_property_count_annotation = annotation_stubs
+            .iter()
+            .find(|class| class.name == "L_ESExpectedPropertyCountAnnotation;");
+        let slot_annotation = annotation_stubs
+            .iter()
+            .find(|class| class.name == "L_ESSlotNumberAnnotation;")
+            .expect("ESSlotNumber annotation stub must be emitted");
+        let mut indexed_classes = Vec::with_capacity(index_class_count.saturating_sub(2) as usize);
+        if has_expected_property_count_annotations {
+            indexed_classes.push(
+                expected_property_count_annotation
+                    .expect("ESExpectedPropertyCount annotation stub must be emitted"),
+            );
+        }
+        indexed_classes.push(slot_annotation);
+        indexed_classes.extend(self.records.iter());
+        for (i, class) in indexed_classes.into_iter().enumerate() {
             let off = *name_to_class_offset
                 .get(class.name.as_str())
                 .expect("indexed class name must have a ClassItem offset");
             index_class_offsets.push(off);
-            // Entries 0 and 1 are scalar placeholders; user classes start at index 2.
             name_to_index_class_idx.insert(class.name.as_str(), 2u16 + i as u16);
         }
         debug_assert_eq!(index_class_offsets.len() as u32, index_class_count);
@@ -711,8 +659,11 @@ impl AbcFile {
         let method_pool_layouts = Self::build_method_pool_layouts(&all_classes, &self.strings);
         let literal_emit_order =
             Self::build_literal_emit_order(&all_classes, self.literal_arrays.len());
-        let literal_header_order =
-            Self::build_literal_header_order(&all_classes, &self.literal_arrays);
+        let literal_header_order = if literal_arrays_in_header {
+            Self::build_literal_header_order(&all_classes, &self.literal_arrays)
+        } else {
+            Vec::new()
+        };
 
         // ── 3. Pre-compute LiteralArray section bytes ─────────────────────────
         //
@@ -787,10 +738,35 @@ impl AbcFile {
         };
         cur += lit_arr_section.len() as u32;
 
+        let mut slot_counts_per_class: Vec<Vec<u32>> = all_classes
+            .iter()
+            .map(|class| vec![0; class.methods.len()])
+            .collect();
+        for (class_idx, class) in all_classes.iter().enumerate() {
+            let layout = &method_pool_layouts[class_idx];
+            let mut defineclass_cursor = 0usize;
+            let mut definefunc_cursor = 0usize;
+            for (method_idx, method) in class.methods.iter().enumerate() {
+                let mut bytecode = patch_bytecode_index_operands(
+                    &method.bytecode,
+                    &layout.string_pool_indices,
+                    &layout.literal_pool_indices,
+                    &layout.ctor_pool_indices,
+                    &layout.definefunc_pool_indices,
+                    &layout.definemethod_pool_indices_by_name,
+                    &mut defineclass_cursor,
+                    &mut definefunc_cursor,
+                );
+                slot_counts_per_class[class_idx][method_idx] =
+                    assign_inline_cache_slots(&mut bytecode);
+            }
+        }
+
         // ── 4. Pre-compute AnnotationItem section ────────────────────────────
         //
-        // hvigor emits one `L_ESSlotNumberAnnotation` item per method and places
-        // the AnnotationItems before CodeItems in the referenced item area.
+        // es2panda emits function annotations before CodeItems. FunctionEmitter
+        // appends ExpectedPropertyCount first (when non-zero) and SlotNumber
+        // for every method, and libpandafile preserves that per-method order.
         //
         // AnnotationItem format (libpandafile annotation_data_accessor.h):
         //   class_idx: u16 LE  (2 = L_ESSlotNumberAnnotation in IndexSection)
@@ -799,8 +775,6 @@ impl AbcFile {
         //   tags:      [tag: u8] * count  (0x37 = 'U32' type tag, after ALL elements)
         // = 2+2+8+1 = 13 bytes per annotation
         let annotation_section_start = cur;
-        let total_annotations: u32 = all_classes.iter().map(|c| c.methods.len() as u32).sum();
-        let annotation_section_size = total_annotations * 13; // 13 bytes per annotation
         let annotation_order_per_class: Vec<Vec<usize>> = all_classes
             .iter()
             .map(|class| {
@@ -809,21 +783,70 @@ impl AbcFile {
                 order
             })
             .collect();
+        let expected_property_count_annotation_class_idx =
+            expected_property_count_str_off.map(|_| {
+                *name_to_index_class_idx
+                    .get("L_ESExpectedPropertyCountAnnotation;")
+                    .expect("ExpectedPropertyCount annotation class must be indexed")
+            });
+        let slot_number_annotation_class_idx = *name_to_index_class_idx
+            .get("L_ESSlotNumberAnnotation;")
+            .expect("SlotNumber annotation class must be indexed");
+
+        #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+        struct AnnotationKey {
+            class_idx: u16,
+            name_off: u32,
+            value: u32,
+        }
 
         // Per-class annotation offsets (parallel to methods).
-        let mut annotation_offsets_per_class: Vec<Vec<u32>> = Vec::with_capacity(all_classes.len());
+        let mut annotation_offsets_per_class: Vec<Vec<MethodAnnotationOffsets>> =
+            Vec::with_capacity(all_classes.len());
+        let mut annotation_emit_order = Vec::new();
         {
+            let mut annotation_offsets_by_key = FxHashMap::<AnnotationKey, u32>::default();
             let mut ann_cur = annotation_section_start;
             for (class_idx, class) in all_classes.iter().enumerate() {
                 let mut class_ann_offs = Vec::with_capacity(class.methods.len());
-                class_ann_offs.resize(class.methods.len(), 0);
+                class_ann_offs.resize(class.methods.len(), MethodAnnotationOffsets::default());
                 for &method_idx in &annotation_order_per_class[class_idx] {
-                    class_ann_offs[method_idx] = ann_cur;
-                    ann_cur += 13;
+                    if let Some(expected_property_count) =
+                        class.methods[method_idx].expected_property_count
+                    {
+                        let key = AnnotationKey {
+                            class_idx: expected_property_count_annotation_class_idx
+                                .expect("ExpectedPropertyCount annotation class must be indexed"),
+                            name_off: expected_property_count_str_off
+                                .expect("ExpectedPropertyCount string must be interned"),
+                            value: expected_property_count,
+                        };
+                        let off = *annotation_offsets_by_key.entry(key).or_insert_with(|| {
+                            let off = ann_cur;
+                            annotation_emit_order.push(key);
+                            ann_cur += 13;
+                            off
+                        });
+                        class_ann_offs[method_idx].expected_property_count = Some(off);
+                    }
+
+                    let key = AnnotationKey {
+                        class_idx: slot_number_annotation_class_idx,
+                        name_off: slot_number_str_off,
+                        value: slot_counts_per_class[class_idx][method_idx],
+                    };
+                    let off = *annotation_offsets_by_key.entry(key).or_insert_with(|| {
+                        let off = ann_cur;
+                        annotation_emit_order.push(key);
+                        ann_cur += 13;
+                        off
+                    });
+                    class_ann_offs[method_idx].slot_number = off;
                 }
                 annotation_offsets_per_class.push(class_ann_offs);
             }
         }
+        let annotation_section_size = annotation_emit_order.len() as u32 * 13;
         cur += annotation_section_size;
 
         // ── 5. Compute CodeItem start offsets ─────────────────────────────────
@@ -831,10 +854,6 @@ impl AbcFile {
 
         let mut code_offsets: Vec<Vec<u32>> = Vec::new();
         let mut all_code_items: Vec<Vec<u8>> = Vec::new();
-        let mut slot_counts_per_class: Vec<Vec<u32>> = all_classes
-            .iter()
-            .map(|class| vec![0; class.methods.len()])
-            .collect();
 
         let mut code_cur = code_section_start;
         for (class_idx, class) in all_classes.iter().enumerate() {
@@ -891,11 +910,31 @@ impl AbcFile {
             Vec<u8>,
             Vec<u32>,
         ) = {
-            let mut per_class_offsets = Vec::with_capacity(all_classes.len());
-            let mut section_buf = Vec::new();
-            // DebugInfo/LNP section starts after AnnotationItems + CodeItems.
-            let mut cur = code_cur;
-            let mut lnp_index = 0u32;
+            struct PendingDebugMethod {
+                class_idx: usize,
+                method_idx: usize,
+                lnp_data: Vec<u8>,
+                constant_pool: Vec<u8>,
+                line_start: u32,
+                emit_scope_locals: bool,
+            }
+
+            struct UniqueLnp {
+                data: Vec<u8>,
+                ref_count: u32,
+                representative_class_idx: usize,
+                representative_method_idx: usize,
+                representative_order: usize,
+                index: u32,
+                offset: u32,
+            }
+
+            let mut per_class_offsets: Vec<Vec<Option<u32>>> = all_classes
+                .iter()
+                .map(|class| vec![None; class.methods.len()])
+                .collect();
+            let mut pending_debug_methods = Vec::new();
+            let mut lnp_param_cursor = 0usize;
 
             // ── Correct LNP format (libpandafile architecture) ─────────────────
             //
@@ -908,10 +947,8 @@ impl AbcFile {
             // order used for CodeItems, while ClassItem method offsets remain in
             // the original method vector order.
             let _epilogue_pc_delta: u32 = 4;
-            let mut lnp_offsets = Vec::with_capacity(num_lnp as usize);
 
             for (class_idx, class) in all_classes.iter().enumerate() {
-                let mut class_offsets = vec![None; class.methods.len()];
                 let source_file_off = source_file_string_offsets[class_idx];
                 let mut method_order: Vec<usize> = (0..class.methods.len()).collect();
                 method_order.sort_by(|&a, &b| class.methods[a].name.cmp(&class.methods[b].name));
@@ -919,7 +956,7 @@ impl AbcFile {
                     let method = &class.methods[method_idx];
                     if let (Some(debug), Some(src_off)) = (&method.debug_info, source_file_off) {
                         let param_offs = per_lnp_param_name_offsets
-                            .get(lnp_index as usize)
+                            .get(lnp_param_cursor)
                             .cloned()
                             .unwrap_or_default();
                         let method_ops = method.line_ops.as_slice();
@@ -940,11 +977,12 @@ impl AbcFile {
                         //   Regular: r0=funcObj, r1=newTarget, r2=this
                         //   Arrow:   r1=newTarget, r2=this, r0=funcObj
                         let is_arrow = method.kind == MethodKind::Anonymous;
+                        let emit_scope_locals = !class.standalone_ecmascript_input;
                         let mut param_offs = param_offs;
                         let is_generated_constructor = method.kind == MethodKind::Constructor
                             && param_offs.is_empty()
                             && method.num_args > 3;
-                        if is_generated_constructor {
+                        if emit_scope_locals && is_generated_constructor {
                             let args_off = string_items.id_of("args").expect(
                                 "args string offset must be interned for constructor debug info",
                             );
@@ -967,8 +1005,14 @@ impl AbcFile {
                         // SET_SOURCE_CODE is emitted for module func_main_0 by
                         // es2panda when record debug source is disabled.
                         if method.name == "func_main_0" {
-                            lnp_data.push(0x0a);
-                            cp.extend_from_slice(&uleb128(not_supported_source_code_off as u64));
+                            if let Some(not_supported_source_code_off) =
+                                not_supported_source_code_off
+                            {
+                                lnp_data.push(0x0a);
+                                cp.extend_from_slice(&uleb128(
+                                    not_supported_source_code_off as u64,
+                                ));
+                            }
                         }
 
                         // SET_FILE
@@ -981,8 +1025,10 @@ impl AbcFile {
                         // copy width, and module entries keep a leading
                         // newlexenvwithname before those copies.
                         let prologue_size = debug_scope_start_pc(method);
-                        lnp_data.push(0x01); // ADV_PC
-                        cp.extend_from_slice(&uleb128(prologue_size as u64));
+                        if emit_scope_locals {
+                            lnp_data.push(0x01); // ADV_PC
+                            cp.extend_from_slice(&uleb128(prologue_size as u64));
+                        }
 
                         // START_LOCAL_EXTENDED for scope vars.  Non-arrow
                         // functions emit `this` after regular locals because
@@ -990,6 +1036,7 @@ impl AbcFile {
                         // the mandatory `this` binding.
                         let pre_scope_locals: Vec<(String, i32, u32)> = if method.name
                             == "func_main_0"
+                            && emit_scope_locals
                         {
                             class
                                 .source_code_strings
@@ -1002,47 +1049,59 @@ impl AbcFile {
                         } else {
                             Vec::new()
                         };
-                        for &(_, reg, name_off) in &pre_scope_locals {
-                            lnp_data.push(0x04);
-                            lnp_data.extend_from_slice(&encode_sleb128_bytes(reg));
-                            cp.extend_from_slice(&uleb128(name_off as u64));
-                            cp.extend_from_slice(&uleb128(any_type_off as u64));
-                            cp.extend_from_slice(&uleb128(any_type_off as u64));
-                        }
+                        let any_type_off = any_type_off.unwrap_or_default();
+                        if emit_scope_locals {
+                            for &(_, reg, name_off) in &pre_scope_locals {
+                                lnp_data.push(0x04);
+                                lnp_data.extend_from_slice(&encode_sleb128_bytes(reg));
+                                cp.extend_from_slice(&uleb128(name_off as u64));
+                                cp.extend_from_slice(&uleb128(any_type_off as u64));
+                                cp.extend_from_slice(&uleb128(any_type_off as u64));
+                            }
 
-                        let start_scope: Vec<(i32, u32)> = if is_arrow {
-                            vec![
-                                (1, scope_offs_arrow[0]),
-                                (2, scope_offs_arrow[1]),
-                                (0, scope_offs_arrow[2]),
-                            ]
-                        } else {
-                            vec![(0, scope_offs_regular[0]), (1, scope_offs_regular[1])]
-                        };
-                        for (reg, name_off) in start_scope {
-                            lnp_data.push(0x04);
-                            lnp_data.extend_from_slice(&encode_sleb128_bytes(reg));
-                            cp.extend_from_slice(&uleb128(name_off as u64)); // name
-                            cp.extend_from_slice(&uleb128(any_type_off as u64)); // type="any"
-                            cp.extend_from_slice(&uleb128(any_type_off as u64));
-                            // typesig="any"
+                            let scope_offs_regular = scope_offs_regular
+                                .expect("regular scope offsets must exist when scope debug emits");
+                            let scope_offs_arrow = scope_offs_arrow
+                                .expect("arrow scope offsets must exist when scope debug emits");
+                            let start_scope: Vec<(i32, u32)> = if is_arrow {
+                                vec![
+                                    (1, scope_offs_arrow[0]),
+                                    (2, scope_offs_arrow[1]),
+                                    (0, scope_offs_arrow[2]),
+                                ]
+                            } else {
+                                vec![(0, scope_offs_regular[0]), (1, scope_offs_regular[1])]
+                            };
+                            for (reg, name_off) in start_scope {
+                                lnp_data.push(0x04);
+                                lnp_data.extend_from_slice(&encode_sleb128_bytes(reg));
+                                cp.extend_from_slice(&uleb128(name_off as u64)); // name
+                                cp.extend_from_slice(&uleb128(any_type_off as u64)); // type="any"
+                                cp.extend_from_slice(&uleb128(any_type_off as u64));
+                                // typesig="any"
+                            }
                         }
                         // START_LOCAL_EXTENDED for locals/params, sorted like
                         // es2panda's scope binding map but keeping original
                         // register assignments.
                         let mut local_offs = param_offs.clone();
-                        if !is_arrow {
+                        if emit_scope_locals && !is_arrow {
                             if !debug.lexical_this {
+                                let scope_offs_regular = scope_offs_regular.expect(
+                                    "regular scope offsets must exist when scope debug emits",
+                                );
                                 local_offs.push(("this".to_string(), 2, scope_offs_regular[2]));
                             }
                             local_offs.sort_by(|a, b| a.0.cmp(&b.0));
                         }
-                        for &(_, reg, param_off) in &local_offs {
-                            lnp_data.push(0x04);
-                            lnp_data.extend_from_slice(&encode_sleb128_bytes(reg));
-                            cp.extend_from_slice(&uleb128(param_off as u64));
-                            cp.extend_from_slice(&uleb128(any_type_off as u64));
-                            cp.extend_from_slice(&uleb128(any_type_off as u64));
+                        if emit_scope_locals {
+                            for &(_, reg, param_off) in &local_offs {
+                                lnp_data.push(0x04);
+                                lnp_data.extend_from_slice(&encode_sleb128_bytes(reg));
+                                cp.extend_from_slice(&uleb128(param_off as u64));
+                                cp.extend_from_slice(&uleb128(any_type_off as u64));
+                                cp.extend_from_slice(&uleb128(any_type_off as u64));
+                            }
                         }
 
                         // Body opcodes + cp from line_ops, interleaving local
@@ -1050,58 +1109,147 @@ impl AbcFile {
                         // stream. This matches libpandafile
                         // BuildLineNumberProgram, which flushes pending PC
                         // before local start/end events.
-                        let mid_locals =
-                            infer_func_main_class_local_events(method, class, &string_items);
-                        append_line_ops_with_mid_locals(
-                            method_ops,
-                            prologue_size,
-                            &mid_locals,
-                            any_type_off,
-                            &mut lnp_data,
-                            &mut cp,
-                        );
+                        if emit_scope_locals {
+                            let mid_locals =
+                                infer_func_main_class_local_events(method, class, &string_items);
+                            append_line_ops_with_mid_locals(
+                                method_ops,
+                                prologue_size,
+                                &mid_locals,
+                                any_type_off,
+                                &mut lnp_data,
+                                &mut cp,
+                            );
+                        } else {
+                            append_line_ops_with_mid_locals(
+                                method_ops,
+                                0,
+                                &[],
+                                0,
+                                &mut lnp_data,
+                                &mut cp,
+                            );
+                        }
 
                         // END_LOCAL in the same order as START_LOCAL.
-                        let end_regs: Vec<i32> = if is_arrow {
-                            vec![1, 2, 0]
-                        } else {
-                            let mut regs: Vec<i32> =
-                                pre_scope_locals.iter().map(|(_, reg, _)| *reg).collect();
-                            regs.extend([0, 1]);
-                            regs.extend(local_offs.iter().map(|(_, reg, _)| *reg));
-                            regs
-                        };
-                        for reg in end_regs {
-                            lnp_data.push(0x05); // END_LOCAL
-                            lnp_data.extend_from_slice(&encode_sleb128_bytes(reg));
-                        }
-                        if is_arrow {
-                            for (_, reg, _) in &param_offs {
+                        if emit_scope_locals {
+                            let end_regs: Vec<i32> = if is_arrow {
+                                vec![1, 2, 0]
+                            } else {
+                                let mut regs: Vec<i32> =
+                                    pre_scope_locals.iter().map(|(_, reg, _)| *reg).collect();
+                                regs.extend([0, 1]);
+                                regs.extend(local_offs.iter().map(|(_, reg, _)| *reg));
+                                regs
+                            };
+                            for reg in end_regs {
                                 lnp_data.push(0x05); // END_LOCAL
-                                lnp_data.extend_from_slice(&encode_sleb128_bytes(*reg));
+                                lnp_data.extend_from_slice(&encode_sleb128_bytes(reg));
+                            }
+                            if is_arrow {
+                                for (_, reg, _) in &param_offs {
+                                    lnp_data.push(0x05); // END_LOCAL
+                                    lnp_data.extend_from_slice(&encode_sleb128_bytes(*reg));
+                                }
                             }
                         }
 
                         lnp_data.push(0x00); // END_SEQUENCE
 
-                        lnp_offsets.push(cur);
-                        section_buf.extend_from_slice(&lnp_data);
-                        cur += lnp_data.len() as u32;
-
-                        class_offsets[method_idx] = Some(cur);
-                        let di_bytes =
-                            encode_debug_info_with_cp(debug.line_start, &[], &cp, lnp_index);
-                        section_buf.extend_from_slice(&di_bytes);
-                        cur += di_bytes.len() as u32;
-                        lnp_index += 1;
+                        pending_debug_methods.push(PendingDebugMethod {
+                            class_idx,
+                            method_idx,
+                            lnp_data,
+                            constant_pool: cp,
+                            line_start: debug.line_start,
+                            emit_scope_locals: !class.standalone_ecmascript_input,
+                        });
+                        lnp_param_cursor += 1;
                     }
                 }
-                per_class_offsets.push(class_offsets);
             }
 
-            debug_assert_eq!(lnp_index, num_lnp);
+            let mut unique_by_data: FxHashMap<Vec<u8>, usize> = FxHashMap::default();
+            let mut unique_lnps: Vec<UniqueLnp> = Vec::new();
+            let mut pending_unique_indices = Vec::with_capacity(pending_debug_methods.len());
+            for pending in &pending_debug_methods {
+                let representative_order = pending.class_idx * 1_000_000 + pending.method_idx;
+                let unique_idx = if let Some(&idx) = unique_by_data.get(&pending.lnp_data) {
+                    unique_lnps[idx].ref_count += 1;
+                    if representative_order < unique_lnps[idx].representative_order {
+                        unique_lnps[idx].representative_class_idx = pending.class_idx;
+                        unique_lnps[idx].representative_method_idx = pending.method_idx;
+                        unique_lnps[idx].representative_order = representative_order;
+                    }
+                    idx
+                } else {
+                    let idx = unique_lnps.len();
+                    unique_by_data.insert(pending.lnp_data.clone(), idx);
+                    unique_lnps.push(UniqueLnp {
+                        data: pending.lnp_data.clone(),
+                        ref_count: 1,
+                        representative_class_idx: pending.class_idx,
+                        representative_method_idx: pending.method_idx,
+                        representative_order,
+                        index: 0,
+                        offset: 0,
+                    });
+                    idx
+                };
+                pending_unique_indices.push(unique_idx);
+            }
+
+            let mut lnp_index_order: Vec<usize> = (0..unique_lnps.len()).collect();
+            lnp_index_order.sort_by(|&a, &b| {
+                unique_lnps[b]
+                    .ref_count
+                    .cmp(&unique_lnps[a].ref_count)
+                    .then_with(|| {
+                        unique_lnps[a]
+                            .representative_order
+                            .cmp(&unique_lnps[b].representative_order)
+                    })
+            });
+            for (index, &unique_idx) in lnp_index_order.iter().enumerate() {
+                unique_lnps[unique_idx].index = index as u32;
+            }
+
+            let mut section_buf = Vec::new();
+            let mut cur = code_cur;
+            let mut emitted_unique_lnps = vec![false; unique_lnps.len()];
+            for (pending, &unique_idx) in pending_debug_methods
+                .iter()
+                .zip(pending_unique_indices.iter())
+            {
+                if !emitted_unique_lnps[unique_idx]
+                    && pending.class_idx == unique_lnps[unique_idx].representative_class_idx
+                    && pending.method_idx == unique_lnps[unique_idx].representative_method_idx
+                {
+                    unique_lnps[unique_idx].offset = cur;
+                    section_buf.extend_from_slice(&unique_lnps[unique_idx].data);
+                    cur += unique_lnps[unique_idx].data.len() as u32;
+                    emitted_unique_lnps[unique_idx] = true;
+                }
+
+                per_class_offsets[pending.class_idx][pending.method_idx] = Some(cur);
+                let di_bytes = encode_debug_info_with_cp(
+                    pending.line_start,
+                    &[],
+                    &pending.constant_pool,
+                    unique_lnps[unique_idx].index,
+                    pending.emit_scope_locals,
+                );
+                section_buf.extend_from_slice(&di_bytes);
+                cur += di_bytes.len() as u32;
+            }
+
+            let mut lnp_offsets = vec![0u32; unique_lnps.len()];
+            for unique in &unique_lnps {
+                lnp_offsets[unique.index as usize] = unique.offset;
+            }
             (per_class_offsets, section_buf, lnp_offsets)
         };
+        let num_lnp = lnp_offsets.len() as u32;
 
         // post_lnp_offset = after LiteralArrays + CodeItems + AnnotationItems + interleaved DebugInfo/LNP data.
         let post_lnp_offset = code_cur + debug_lnp_section.len() as u32;
@@ -1205,7 +1353,7 @@ impl AbcFile {
         file.extend_from_slice(&class_idx_off.to_le_bytes()); // 0x20 class_idx_off = 0x3C
         file.extend_from_slice(&num_lnp.to_le_bytes()); // 0x24 num_lnp
         file.extend_from_slice(&lnp_idx_off.to_le_bytes()); // 0x28 lnp_idx_off (at file end)
-        file.extend_from_slice(&num_literal_arrays.to_le_bytes()); // 0x2C num_literalarrays
+        file.extend_from_slice(&header_num_literal_arrays.to_le_bytes()); // 0x2C num_literalarrays
         file.extend_from_slice(&literalarray_idx_off.to_le_bytes()); // 0x30 literalarray_idx_off
         file.extend_from_slice(&1u32.to_le_bytes()); // 0x34 num_idx_regions = 1
         file.extend_from_slice(&idx_sect_off.to_le_bytes()); // 0x38 idx_section_off
@@ -1221,20 +1369,22 @@ impl AbcFile {
         debug_assert_eq!(
             file.len() as u32,
             class_idx_off + total_classes * 4,
-            "class index must end exactly before the literal-array index"
+            "class index must end at the upstream class index boundary"
         );
 
-        // ── LiteralArray index ───────────────────────────────────────────────
+        // ── LiteralArray index (v12.0.6.0 and older only) ────────────────────
         //
-        // hvigor places the literal-array index immediately after the class index
-        // (no LNP index in between).  API 17 output stores one u32 file offset per array.
-        for &literal_idx in &literal_header_order {
-            file.extend_from_slice(&literal_array_offsets[literal_idx].to_le_bytes());
+        // v13.0.0.0 deleted this offsets-array. Literal arrays are reachable through
+        // the IndexHeader method index, matching libpandafile's v13 ItemContainer.
+        if literal_arrays_in_header {
+            for &literal_idx in &literal_header_order {
+                file.extend_from_slice(&literal_array_offsets[literal_idx].to_le_bytes());
+            }
         }
         debug_assert_eq!(
             file.len() as u32,
             idx_sect_off,
-            "literal-array index must end exactly at idx_sect_off"
+            "pre-IndexSection header indexes must end exactly at idx_sect_off"
         );
 
         // ── IndexSection ─────────────────────────────────────────────────────
@@ -1287,24 +1437,21 @@ impl AbcFile {
 
         debug_assert_eq!(file.len() as u32, annotation_section_start);
 
-        // ── AnnotationItems (L_ESSlotNumberAnnotation, one per method) ────────
+        // ── AnnotationItems ───────────────────────────────────────────────────
         //
         // Format per annotation (libpandafile AnnotationDataAccessor):
-        //   class_idx: u16 LE  (2 = L_ESSlotNumberAnnotation in IndexSection)
+        //   class_idx: u16 LE  (annotation class in IndexSection)
         //   count:     u16 LE  (1 element)
         //   elements:  [(name_off: u32 LE, value: u32 LE)] * count
         //   tags:      [tag: u8] * count  (0x37 = 'U32' type tag)
         // = 2+2+8+1 = 13 bytes per annotation
         //
-        for (class_idx, _class) in all_classes.iter().enumerate() {
-            for &method_idx in &annotation_order_per_class[class_idx] {
-                let slot_count = slot_counts_per_class[class_idx][method_idx];
-                file.extend_from_slice(&2u16.to_le_bytes()); // class_idx = 2 (L_ESSlotNumberAnnotation)
-                file.extend_from_slice(&1u16.to_le_bytes()); // count = 1
-                file.extend_from_slice(&slot_number_str_off.to_le_bytes()); // name_off → "SlotNumber"
-                file.extend_from_slice(&slot_count.to_le_bytes()); // value = IC slot count
-                file.push(0x37); // tag = 'U32' (0x37 = ASCII '7')
-            }
+        for annotation in &annotation_emit_order {
+            file.extend_from_slice(&annotation.class_idx.to_le_bytes());
+            file.extend_from_slice(&1u16.to_le_bytes()); // count = 1
+            file.extend_from_slice(&annotation.name_off.to_le_bytes());
+            file.extend_from_slice(&annotation.value.to_le_bytes());
+            file.push(0x37); // tag = 'U32' (0x37 = ASCII '7')
         }
         debug_assert_eq!(file.len() as u32, code_section_start);
 
@@ -1458,7 +1605,9 @@ fn method_index_string_refs(
             .cmp(strings.get(*b).unwrap_or(""))
             .then_with(|| a.cmp(b))
     });
-    if class.name.contains("/ets/pages/") {
+    let use_page_method_pool_supplements =
+        class.name.contains("/ets/pages/") && !class.standalone_ecmascript_input;
+    if use_page_method_pool_supplements {
         indices.retain(|idx| {
             !matches!(
                 strings.get(*idx).unwrap_or(""),
@@ -1476,7 +1625,7 @@ fn method_index_string_refs(
         .into_iter()
         .map(MethodIndexStringRef::Bytecode)
         .collect();
-    if class.name.contains("/ets/pages/") {
+    if use_page_method_pool_supplements {
         for required in ["getEntryName", "initialRender", "rerender"] {
             if !refs
                 .iter()
@@ -1502,16 +1651,6 @@ impl Default for AbcFile {
 }
 
 impl AbcFile {
-    fn sdk_native_field(name: &str) -> FieldRecord {
-        FieldRecord {
-            name: name.to_string(),
-            class_idx: FIELD_OWNER_CLASS_IDX,
-            type_idx: 0,
-            access_flags: 0,
-            value: Some(FieldValue::U8(0)),
-        }
-    }
-
     fn build_method_pool_layouts(
         classes: &[&ClassRecord],
         strings: &StringTable,

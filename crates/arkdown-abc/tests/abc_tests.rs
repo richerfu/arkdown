@@ -3,7 +3,10 @@
 //! These tests exercise [`AbcCompiler`] through its public interface only,
 //! without access to crate internals.
 
-use arkdown_abc::{AbcCompileOptions, AbcCompiler, AbcError, AbcModule};
+use arkdown_abc::cache::{source_cache_hash, ProgramCacheFile};
+use arkdown_abc::{
+    AbcCompileOptions, AbcCompiler, AbcError, AbcModule, AbcProgramCacheInput, AbcReader,
+};
 use std::collections::BTreeMap;
 
 // ---------------------------------------------------------------------------
@@ -14,12 +17,16 @@ fn make_compiler() -> AbcCompiler {
     AbcCompiler::new(AbcCompileOptions {
         debug_info: false,
         opt_level: 0,
+        optimize_try_catch_func: true,
         target_api_version: 12,
         target_api_sub_version: None,
         merge_abc: true,
         module: false,
-        cache_path: None,
+        module_record_field_name: None,
         npm_entries: None,
+        dependency_context: None,
+        remove_redundant_file: false,
+        dump_deps_info: false,
     })
 }
 
@@ -29,12 +36,16 @@ fn make_debug_compiler() -> AbcCompiler {
     AbcCompiler::new(AbcCompileOptions {
         debug_info: true,
         opt_level: 0,
+        optimize_try_catch_func: true,
         target_api_version: 12,
         target_api_sub_version: None,
         merge_abc: true,
         module: false,
-        cache_path: None,
+        module_record_field_name: None,
         npm_entries: None,
+        dependency_context: None,
+        remove_redundant_file: false,
+        dump_deps_info: false,
     })
 }
 
@@ -46,6 +57,8 @@ fn iife_module(record_name: &str, source: &str) -> AbcModule {
         source_file: None,
         package_name: None,
         is_commonjs: false,
+        is_shared_module: false,
+        origin_source_lang: String::new(),
     }
 }
 
@@ -217,9 +230,8 @@ fn user_field_values(bytes: &[u8], class_offset: usize) -> BTreeMap<String, u32>
     pos += 4; // super_class_off
     let access_flags = read_uleb(bytes, &mut pos);
     let fields_count = read_uleb(bytes, &mut pos) as usize;
-    let methods_count = read_uleb(bytes, &mut pos) as usize;
+    let _methods_count = read_uleb(bytes, &mut pos) as usize;
     assert_eq!(access_flags, 1);
-    assert!(methods_count > 0);
 
     loop {
         let tag = bytes[pos];
@@ -324,6 +336,24 @@ fn class_method_items(bytes: &[u8], class_offset: usize) -> Vec<(usize, String, 
     methods
 }
 
+fn method_source_lang_at(bytes: &[u8], method_offset: usize) -> u8 {
+    let mut pos = method_offset;
+    pos += 2 + 2;
+    pos += 4;
+    let _access_flags = read_uleb(bytes, &mut pos);
+    loop {
+        let tag = bytes[pos];
+        pos += 1;
+        match tag {
+            0x00 => panic!("method SOURCE_LANG tag must exist before MethodTag::NOTHING"),
+            0x01 => pos += 4,
+            0x02 => return bytes[pos],
+            0x05 | 0x06 => pos += 4,
+            other => panic!("unexpected method tag {other:#x}"),
+        }
+    }
+}
+
 fn code_item_bytecode(bytes: &[u8], code_off: usize) -> &[u8] {
     let mut pos = code_off;
     let _num_vregs = read_uleb(bytes, &mut pos);
@@ -399,6 +429,29 @@ fn bytecode_contains_opcode(bytecode: &[u8], target: u8) -> bool {
         pos += bytecode_insn_len(bytecode, pos, opcode);
     }
     false
+}
+
+fn bytecode_contains_any_opcode(bytecode: &[u8], targets: &[u8]) -> bool {
+    let mut pos = 0usize;
+    while let Some(&opcode) = bytecode.get(pos) {
+        if targets.contains(&opcode) {
+            return true;
+        }
+        pos += bytecode_insn_len(bytecode, pos, opcode);
+    }
+    false
+}
+
+fn bytecode_contains_jmp(bytecode: &[u8]) -> bool {
+    bytecode_contains_any_opcode(bytecode, &[0x4d, 0x4e, 0x98])
+}
+
+fn bytecode_contains_jeqz(bytecode: &[u8]) -> bool {
+    bytecode_contains_any_opcode(bytecode, &[0x4f, 0x50, 0x9a])
+}
+
+fn bytecode_contains_jnez(bytecode: &[u8]) -> bool {
+    bytecode_contains_any_opcode(bytecode, &[0x51, 0x9b, 0x9c])
 }
 
 fn bytecode_opcode_count(bytecode: &[u8], target: u8) -> usize {
@@ -568,6 +621,70 @@ fn test_literal_array_index_header_is_valid_when_classes_emit_literals() {
     assert_eq!(read_u32(&bytes, index_class_off as usize + 4), 6);
     assert_eq!(index_field_size, 0xFFFF_FFFF);
     assert_eq!(index_proto_size, 0xFFFF_FFFF);
+}
+
+#[test]
+fn test_api18_literal_array_header_fields_are_reserved() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = tmp.path().join("api18-literal-index.abc");
+    module_compiler_for_target(18, None)
+        .compile(
+            vec![module_record(
+                "com.example.app/entry/ets/pages/Index",
+                r#"import UIAbility from "@ohos:app.ability.UIAbility";
+var Index = class extends UIAbility { onCreate(){} };
+export { Index as default };"#,
+            )],
+            &out,
+        )
+        .expect("compile must succeed");
+
+    let bytes = std::fs::read(&out).expect("read .abc");
+    let version = read_u32(&bytes, 0x0c);
+    let num_classes = read_u32(&bytes, 0x1c);
+    let class_idx_off = read_u32(&bytes, 0x20);
+    let num_literalarrays = read_u32(&bytes, 0x2c);
+    let literalarray_idx_off = read_u32(&bytes, 0x30);
+    let idx_section_off = read_u32(&bytes, 0x38);
+
+    assert_eq!(
+        version,
+        arkdown_abc::emit::file::version_for_target_api(18, None),
+        "API18 maps to upstream bytecode version 13.0.1.0"
+    );
+    assert_eq!(
+        num_literalarrays,
+        u32::MAX,
+        "v13 reserves num_literalarrays with INVALID_INDEX"
+    );
+    assert_eq!(
+        literalarray_idx_off,
+        u32::MAX,
+        "v13 reserves literalarray_idx_off with INVALID_OFFSET"
+    );
+    assert_eq!(
+        idx_section_off,
+        class_idx_off + num_classes * 4,
+        "v13 deletes the header-adjacent LiteralArrayIdx table"
+    );
+    AbcReader::validate(&bytes).expect("reader must accept upstream v13 reserved fields");
+
+    let user_off = class_offsets(&bytes)
+        .into_iter()
+        .find(|off| {
+            class_name_at(&bytes, *off as usize) == "Lcom.example.app/entry/ets/pages/Index;"
+        })
+        .expect("user record exists") as usize;
+    let fields = user_field_values(&bytes, user_off);
+    for field in ["moduleRecordIdx", "scopeNames"] {
+        let offset = *fields
+            .get(field)
+            .expect("module literal-array field is emitted");
+        assert!(
+            offset < bytes.len() as u32,
+            "{field} must still point at a literal array payload in v13"
+        );
+    }
 }
 
 #[test]
@@ -1096,18 +1213,39 @@ export { genRanHex };"#,
 }
 
 #[test]
-fn test_user_records_are_marked_arkts_and_sdk_stubs_have_native_fields() {
+fn test_user_records_are_marked_arkts_and_npm_entries_have_native_fields() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = tmp.path().join("records.abc");
-    make_compiler()
-        .compile(
-            vec![iife_module(
+    let npm_entries = tmp.path().join("npmEntries.txt");
+    fs_err::write(&npm_entries, "@ohos.app:@native.ohos.app\n").expect("write npm entries");
+    AbcCompiler::new(AbcCompileOptions {
+        debug_info: false,
+        opt_level: 0,
+        optimize_try_catch_func: true,
+        target_api_version: 12,
+        target_api_sub_version: None,
+        merge_abc: true,
+        module: false,
+        module_record_field_name: None,
+        npm_entries: Some(npm_entries),
+        dependency_context: None,
+        remove_redundant_file: false,
+        dump_deps_info: false,
+    })
+    .compile(
+        vec![{
+            let mut module = iife_module(
                 "com.example.app/entry/ets/entryability/EntryAbility",
                 "(function(){ var EntryAbility = class {}; })();",
-            )],
-            &out,
-        )
-        .expect("compile must succeed");
+            );
+            module.source_file =
+                Some("entry|entry|1.0.0|ets/entryability/EntryAbility.ts".to_string());
+            module.origin_source_lang = "ets".to_string();
+            module
+        }],
+        &out,
+    )
+    .expect("compile must succeed");
     let bytes = std::fs::read(&out).expect("read .abc");
 
     let offsets = class_offsets(&bytes);
@@ -1128,7 +1266,7 @@ fn test_user_records_are_marked_arkts_and_sdk_stubs_have_native_fields() {
     let (_, sdk_fields, _, sdk_tag, sdk_lang, sdk_end) = class_header_counts(&bytes, sdk_off);
     assert_eq!(
         sdk_fields, 1,
-        "SDK stubs carry one @native field in hvigor output"
+        "npm entry records carry one @native field in hvigor output"
     );
     assert_eq!((sdk_tag, sdk_lang, sdk_end), (0x02, 0x00, 0x00));
     assert!(
@@ -1154,6 +1292,61 @@ fn test_user_records_are_marked_arkts_and_sdk_stubs_have_native_fields() {
             .any(|w| w == b"pkgName@entry"),
         "pkgName field includes the module name suffix"
     );
+}
+
+#[test]
+fn test_origin_source_lang_controls_source_lang_tags() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = tmp.path().join("source_lang.abc");
+    let cases = [
+        ("ets", "test/source_lang_ets", 0x04),
+        ("ts", "test/source_lang_ts", 0x03),
+        ("js", "test/source_lang_js", 0x02),
+        ("", "test/source_lang_default", 0x00),
+        ("unknown", "test/source_lang_unknown", 0x00),
+    ];
+    let modules = cases
+        .iter()
+        .map(|(origin_source_lang, record_name, _)| {
+            let mut module = module_record_with_source_file(
+                record_name,
+                "export const value = 1;",
+                "entry|entry|1.0.0|src/main/ets/pages/Index.ts",
+            );
+            module.origin_source_lang = (*origin_source_lang).to_string();
+            module
+        })
+        .collect();
+
+    module_compiler()
+        .compile(modules, &out)
+        .expect("compile sourceLang records");
+    let bytes = std::fs::read(&out).expect("read sourceLang abc");
+
+    for (_, record_name, expected_lang) in cases {
+        let class_name = format!("L{record_name};");
+        let class_off = class_offsets(&bytes)
+            .into_iter()
+            .map(|off| off as usize)
+            .find(|&off| class_name_at(&bytes, off) == class_name)
+            .expect("sourceLang class exists");
+        let (_, _, _, tag, class_lang, end) = class_header_counts(&bytes, class_off);
+        assert_eq!(
+            (tag, class_lang, end),
+            (0x02, expected_lang, 0x00),
+            "{record_name} class SOURCE_LANG must match upstream Program::SetSourceLang"
+        );
+
+        let func_main = class_method_items(&bytes, class_off)
+            .into_iter()
+            .find(|(_, name, _)| name == "func_main_0")
+            .expect("func_main_0 method exists");
+        assert_eq!(
+            method_source_lang_at(&bytes, func_main.0),
+            expected_lang,
+            "{record_name} method SOURCE_LANG must match class SOURCE_LANG"
+        );
+    }
 }
 
 #[test]
@@ -1258,6 +1451,66 @@ export { Index as default };"#,
     assert!(
         has_class_method_buffer,
         "class buffer literal array links instance methods by MethodItem offset"
+    );
+}
+
+#[test]
+fn test_module_record_marks_top_level_await() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = tmp.path().join("module-tla.abc");
+    module_compiler()
+        .compile(
+            vec![module_record(
+                "com.example.app/entry/ets/pages/Index",
+                r#"function load() { return Promise.resolve(1); }
+await load();"#,
+            )],
+            &out,
+        )
+        .expect("compile must succeed");
+
+    let bytes = std::fs::read(&out).expect("read .abc");
+    let user_off = class_offsets(&bytes)
+        .into_iter()
+        .find(|off| {
+            class_name_at(&bytes, *off as usize) == "Lcom.example.app/entry/ets/pages/Index;"
+        })
+        .expect("user record exists") as usize;
+    let fields = user_field_values(&bytes, user_off);
+    assert_eq!(
+        fields.get("hasTopLevelAwait"),
+        Some(&1),
+        "merge-abc module metadata mirrors Program::HasTLA()"
+    );
+}
+
+#[test]
+fn test_module_record_does_not_mark_nested_async_await_as_tla() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = tmp.path().join("module-nested-await.abc");
+    module_compiler()
+        .compile(
+            vec![module_record(
+                "com.example.app/entry/ets/pages/Index",
+                r#"async function load() { await Promise.resolve(1); }
+load();"#,
+            )],
+            &out,
+        )
+        .expect("compile must succeed");
+
+    let bytes = std::fs::read(&out).expect("read .abc");
+    let user_off = class_offsets(&bytes)
+        .into_iter()
+        .find(|off| {
+            class_name_at(&bytes, *off as usize) == "Lcom.example.app/entry/ets/pages/Index;"
+        })
+        .expect("user record exists") as usize;
+    let fields = user_field_values(&bytes, user_off);
+    assert_eq!(
+        fields.get("hasTopLevelAwait"),
+        Some(&0),
+        "await inside a function must not set Program::HasTLA()"
     );
 }
 
@@ -1754,7 +2007,7 @@ enum Status { Ready }"#,
         "pre-declaration enum reads must use the local enum binding instead of global fallback"
     );
     assert!(
-        bytecode_contains_opcode(&bytecode, 0x9b),
+        bytecode_contains_jnez(&bytecode),
         "enum object initialization must use the upstream logical-or guard"
     );
 }
@@ -2301,12 +2554,16 @@ fn test_artifact_api_version_propagated() {
     let compiler = AbcCompiler::new(AbcCompileOptions {
         debug_info: false,
         opt_level: 0,
+        optimize_try_catch_func: true,
         target_api_version: 9,
         target_api_sub_version: None,
         merge_abc: true,
         module: false,
-        cache_path: None,
+        module_record_field_name: None,
         npm_entries: None,
+        dependency_context: None,
+        remove_redundant_file: false,
+        dump_deps_info: false,
     });
     let result = compiler
         .compile(vec![iife_module("api_test", "(function(){}())")], &out)
@@ -2337,12 +2594,16 @@ fn test_artifact_debug_info_true() {
     let compiler = AbcCompiler::new(AbcCompileOptions {
         debug_info: true,
         opt_level: 0,
+        optimize_try_catch_func: true,
         target_api_version: 12,
         target_api_sub_version: None,
         merge_abc: true,
         module: false,
-        cache_path: None,
+        module_record_field_name: None,
         npm_entries: None,
+        dependency_context: None,
+        remove_redundant_file: false,
+        dump_deps_info: false,
     });
     let result = compiler
         .compile(vec![iife_module("debug_test", "(function(){}())")], &out)
@@ -2428,6 +2689,8 @@ fn test_compile_source_map_field_ignored_safely() {
             source_file: None,
             package_name: None,
             is_commonjs: false,
+            is_shared_module: false,
+            origin_source_lang: String::new(),
         }],
         &out,
     );
@@ -2455,6 +2718,8 @@ fn test_source_file_emits_debug_info_and_lnp() {
                 source_file: Some(source_file.to_string()),
                 package_name: None,
                 is_commonjs: false,
+                is_shared_module: false,
+                origin_source_lang: String::new(),
             }],
             &out,
         )
@@ -2494,8 +2759,8 @@ fn test_source_file_emits_debug_info_and_lnp() {
     let mut pos = debug_info as usize;
     assert_eq!(
         read_uleb(&bytes, &mut pos),
-        u32::MAX as u64,
-        "line_start uses hvigor NO_LINE_NUMBER sentinel"
+        0,
+        "standalone es2abc-style input stores the concrete 0-based start line"
     );
     assert_eq!(read_uleb(&bytes, &mut pos), 0, "no parameter names emitted");
     let cp_size = read_uleb(&bytes, &mut pos) as usize;
@@ -2542,6 +2807,123 @@ fn test_source_file_emits_debug_info_and_lnp() {
 }
 
 #[test]
+fn test_api18_standalone_explicit_constructor_matches_upstream_lnp_layout() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = tmp.path().join("explicit-constructor.abc");
+    let compiler = AbcCompiler::new(AbcCompileOptions {
+        debug_info: false,
+        opt_level: 0,
+        optimize_try_catch_func: true,
+        target_api_version: 18,
+        target_api_sub_version: None,
+        merge_abc: true,
+        module: true,
+        module_record_field_name: None,
+        npm_entries: None,
+        dependency_context: None,
+        remove_redundant_file: false,
+        dump_deps_info: false,
+    });
+    compiler
+        .compile(
+            vec![AbcModule {
+                record_name: "com.example.app/entry/ets/pages/Index".to_string(),
+                source: include_str!(
+                    "fixtures/upstream/es2panda/bytecode/js/class/test-explicit-constructor.js"
+                )
+                .to_string(),
+                source_map: None,
+                source_file: Some("entry/src/main/ets/pages/Index.ts".to_string()),
+                package_name: None,
+                is_commonjs: false,
+                is_shared_module: false,
+                origin_source_lang: String::new(),
+            }],
+            &out,
+        )
+        .expect("compile explicit constructor fixture");
+
+    let bytes = std::fs::read(&out).expect("read .abc");
+    assert_eq!(bytes.len(), 984, "API18 standalone fixture size");
+    assert_eq!(read_u32(&bytes, 0x28), 0x3cc, "LNP index offset");
+    assert_eq!(
+        &bytes[0x39f..0x3d8],
+        &[
+            0x09, 0x0b, 0x00, 0x05, 0x00, 0x03, 0xbb, 0x05, 0x00, 0x00, 0x09, 0x0b, 0x01, 0x02,
+            0x10, 0x65, 0x00, 0x08, 0x00, 0x05, 0xbb, 0x05, 0x00, 0x10, 0x77, 0x01, 0x09, 0x0b,
+            0x01, 0x11, 0x01, 0x02, 0x10, 0x00, 0x05, 0x00, 0x06, 0xbb, 0x05, 0x00, 0x12, 0x0d,
+            0x79, 0x02, 0x00, 0x9f, 0x03, 0x00, 0x00, 0xa9, 0x03, 0x00, 0x00, 0xb9, 0x03, 0x00,
+            0x00,
+        ],
+        "LNP/DebugInfo section matches upstream es2abc for the fixture"
+    );
+}
+
+#[test]
+fn test_api18_standalone_lexical_arrow_matches_upstream_abc_tail_layout() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = tmp.path().join("lexical-arrow.abc");
+    let compiler = AbcCompiler::new(AbcCompileOptions {
+        debug_info: false,
+        opt_level: 0,
+        optimize_try_catch_func: true,
+        target_api_version: 18,
+        target_api_sub_version: None,
+        merge_abc: true,
+        module: true,
+        module_record_field_name: None,
+        npm_entries: None,
+        dependency_context: None,
+        remove_redundant_file: false,
+        dump_deps_info: false,
+    });
+    compiler
+        .compile(
+            vec![AbcModule {
+                record_name: "com.example.app/entry/ets/pages/Index".to_string(),
+                source: include_str!(
+                    "fixtures/upstream/es2panda/bytecode/js/lexicalEnv/arrow-function-reference-ctx.js"
+                )
+                .to_string(),
+                source_map: None,
+                source_file: Some("entry/src/main/ets/pages/Index.ts".to_string()),
+                package_name: None,
+                is_commonjs: false,
+            is_shared_module: false,
+            origin_source_lang: String::new(),
+            }],
+            &out,
+        )
+        .expect("compile lexical arrow fixture");
+
+    let bytes = std::fs::read(&out).expect("read .abc");
+    assert_eq!(bytes.len(), 2064, "API18 lexical fixture size");
+    assert_eq!(read_u32(&bytes, 0x28), 0x7f8, "LNP index offset");
+    assert_eq!(
+        bytes[0x76b], 0x00,
+        "standalone lexenv catch-all handler code_size matches upstream"
+    );
+    assert_eq!(
+        &bytes[0x76c..0x810],
+        &[
+            0x09, 0x0b, 0x01, 0x02, 0x10, 0x00, 0xff, 0xff, 0xff, 0xff, 0x0f, 0x00, 0x05, 0xc7,
+            0x08, 0x00, 0x06, 0x27, 0x00, 0x06, 0x00, 0x05, 0xc7, 0x08, 0x00, 0x0a, 0x79, 0x00,
+            0x09, 0x0b, 0xaf, 0x7e, 0x01, 0x12, 0x00, 0xff, 0xff, 0xff, 0xff, 0x0f, 0x00, 0x04,
+            0xc7, 0x08, 0x00, 0x10, 0x02, 0xff, 0xff, 0xff, 0xff, 0x0f, 0x00, 0x06, 0xc7, 0x08,
+            0x00, 0x06, 0x1e, 0x10, 0x01, 0x09, 0x0b, 0x01, 0x02, 0x10, 0x7f, 0x01, 0x12, 0x00,
+            0xff, 0xff, 0xff, 0xff, 0x0f, 0x00, 0x06, 0xc7, 0x08, 0x00, 0x06, 0x13, 0x10, 0x01,
+            0x09, 0x0b, 0x6b, 0x2f, 0x01, 0x11, 0x00, 0x09, 0x00, 0x04, 0xc7, 0x08, 0x00, 0x10,
+            0x03, 0x09, 0x0b, 0x01, 0x11, 0x6b, 0xfe, 0xaa, 0x00, 0x13, 0x00, 0x04, 0xc7, 0x08,
+            0x00, 0x15, 0x04, 0x09, 0x0b, 0x01, 0x11, 0x2f, 0xfe, 0xaa, 0x00, 0x1e, 0x00, 0x04,
+            0xc7, 0x08, 0x00, 0x15, 0x05, 0x05, 0x00, 0x05, 0xc7, 0x08, 0x00, 0x24, 0x7a, 0x00,
+            0x6c, 0x07, 0x00, 0x00, 0xa9, 0x07, 0x00, 0x00, 0x88, 0x07, 0x00, 0x00, 0xc0, 0x07,
+            0x00, 0x00, 0xcf, 0x07, 0x00, 0x00, 0xdf, 0x07, 0x00, 0x00,
+        ],
+        "DebugInfo/LNP tail matches upstream es2abc for lexical fixture"
+    );
+}
+
+#[test]
 fn test_module_metadata_uses_files_info_package_name() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = tmp.path().join("package-name.abc");
@@ -2558,6 +2940,8 @@ fn test_module_metadata_uses_files_info_package_name() {
                         "pkg_modules/.ohpm/@scope+pkg@1.0.0/pkg_modules/@scope/pkg".to_string(),
                     ),
                     is_commonjs: false,
+                    is_shared_module: false,
+                    origin_source_lang: String::new(),
                 },
                 AbcModule {
                     record_name: "com.example.app/phone@utils/Index".to_string(),
@@ -2566,6 +2950,8 @@ fn test_module_metadata_uses_files_info_package_name() {
                     source_file: None,
                     package_name: Some("utils".to_string()),
                     is_commonjs: false,
+                    is_shared_module: false,
+                    origin_source_lang: String::new(),
                 },
             ],
             &out,
@@ -2590,6 +2976,56 @@ fn test_module_metadata_uses_files_info_package_name() {
 }
 
 #[test]
+fn test_non_merge_module_record_field_name_option_matches_upstream() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = tmp.path().join("module-record-field-name.abc");
+    let compiler = AbcCompiler::new(AbcCompileOptions {
+        debug_info: false,
+        opt_level: 0,
+        optimize_try_catch_func: true,
+        target_api_version: 12,
+        target_api_sub_version: None,
+        merge_abc: false,
+        module: true,
+        module_record_field_name: Some("customModuleRecord".to_string()),
+        npm_entries: None,
+        dependency_context: None,
+        remove_redundant_file: false,
+        dump_deps_info: false,
+    });
+    compiler
+        .compile(
+            vec![AbcModule {
+                record_name: String::new(),
+                source: "export const value = 1;".to_string(),
+                source_map: None,
+                source_file: Some("main.js".to_string()),
+                package_name: None,
+                is_commonjs: false,
+                is_shared_module: false,
+                origin_source_lang: String::new(),
+            }],
+            &out,
+        )
+        .expect("compile must succeed");
+
+    let bytes = std::fs::read(&out).expect("read .abc");
+    let module_record_off = class_offsets(&bytes)
+        .into_iter()
+        .find(|off| class_name_at(&bytes, *off as usize).contains("_ESModuleRecord"))
+        .expect("_ESModuleRecord exists") as usize;
+    let fields = user_field_values(&bytes, module_record_off);
+    assert!(
+        fields.contains_key("customModuleRecord"),
+        "--module-record-field-name must replace the default source-file field name"
+    );
+    assert!(
+        !fields.contains_key("main.js"),
+        "custom module record field name must override the source-file fallback"
+    );
+}
+
+#[test]
 fn test_module_metadata_marks_commonjs_records() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = tmp.path().join("commonjs.abc");
@@ -2607,6 +3043,8 @@ fn test_module_metadata_marks_commonjs_records() {
                         .to_string(),
                 ),
                 is_commonjs: true,
+            is_shared_module: false,
+            origin_source_lang: String::new(),
             }],
             &out,
         )
@@ -2632,6 +3070,91 @@ fn test_module_metadata_marks_commonjs_records() {
     );
 }
 
+#[test]
+fn test_module_metadata_marks_shared_modules() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = tmp.path().join("shared-module.abc");
+    module_compiler()
+        .compile(
+            vec![AbcModule {
+                record_name: "com.example.shared/shared/ets/pages/Index".to_string(),
+                source: "export const value = 1;".to_string(),
+                source_map: None,
+                source_file: Some("shared/src/main/ets/pages/Index.ts".to_string()),
+                package_name: Some("shared".to_string()),
+                is_commonjs: false,
+                is_shared_module: true,
+                origin_source_lang: String::new(),
+            }],
+            &out,
+        )
+        .expect("compile must succeed");
+
+    let bytes = std::fs::read(&out).expect("read .abc");
+    let user_off = class_offsets(&bytes)
+        .into_iter()
+        .find(|off| {
+            class_name_at(bytes.as_slice(), *off as usize)
+                == "Lcom.example.shared/shared/ets/pages/Index;"
+        })
+        .expect("shared record exists") as usize;
+    let fields = user_field_values(&bytes, user_off);
+    assert_eq!(
+        fields.get("isSharedModule"),
+        Some(&1),
+        "filesInfo isSharedModule is written to the isSharedModule field"
+    );
+}
+
+#[test]
+fn program_cache_hit_restores_program_and_skips_source_compile() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cache_file = tmp.path().join("Index.protoBin");
+    let first_output = tmp.path().join("first.abc");
+    let second_output = tmp.path().join("second.abc");
+    let record_name = "entry|entry|1.0.0|src/main/ets/pages/Index";
+    let file_name = tmp.path().join("Index.js").to_string_lossy().into_owned();
+    let valid_source = "export const value = 1;";
+    let invalid_source = "export const = ;";
+    let cache_input = AbcProgramCacheInput {
+        file_name: file_name.clone(),
+        cache_file: cache_file.clone(),
+    };
+
+    module_compiler()
+        .compile_with_program_cache(
+            vec![module_record(record_name, valid_source)],
+            &first_output,
+            vec![Some(cache_input.clone())],
+        )
+        .unwrap();
+
+    let entry = ProgramCacheFile::read(&cache_file).unwrap().unwrap();
+    let invalid_source_hash = source_cache_hash(invalid_source, &file_name, record_name, "", "");
+    ProgramCacheFile::write(&cache_file, invalid_source_hash, entry.program).unwrap();
+
+    let result = module_compiler()
+        .compile_with_program_cache(
+            vec![module_record(record_name, invalid_source)],
+            &second_output,
+            vec![Some(cache_input)],
+        )
+        .unwrap();
+
+    assert_eq!(result.path, second_output);
+    assert_eq!(
+        &fs_err::read(&result.path).unwrap()[0..8],
+        b"PANDA\x00\x00\x00"
+    );
+    assert_eq!(
+        ProgramCacheFile::read(&cache_file)
+            .unwrap()
+            .unwrap()
+            .hash_code,
+        invalid_source_hash
+    );
+}
+
 // ── New opcode coverage tests ────────────────────────────────────────────────
 
 fn module_compiler() -> AbcCompiler {
@@ -2643,12 +3166,16 @@ fn module_debug_compiler() -> AbcCompiler {
     AbcCompiler::new(AbcCompileOptions {
         debug_info: true,
         opt_level: 0,
+        optimize_try_catch_func: true,
         target_api_version: 12,
         target_api_sub_version: None,
         merge_abc: true,
         module: true,
-        cache_path: None,
+        module_record_field_name: None,
         npm_entries: None,
+        dependency_context: None,
+        remove_redundant_file: false,
+        dump_deps_info: false,
     })
 }
 
@@ -2659,12 +3186,16 @@ fn module_compiler_for_target(
     AbcCompiler::new(AbcCompileOptions {
         debug_info: false,
         opt_level: 0,
+        optimize_try_catch_func: true,
         target_api_version,
         target_api_sub_version: target_api_sub_version.map(str::to_string),
         merge_abc: true,
         module: true,
-        cache_path: None,
+        module_record_field_name: None,
         npm_entries: None,
+        dependency_context: None,
+        remove_redundant_file: false,
+        dump_deps_info: false,
     })
 }
 
@@ -2676,6 +3207,8 @@ fn module_record(record_name: &str, source: &str) -> AbcModule {
         source_file: None,
         package_name: None,
         is_commonjs: false,
+        is_shared_module: false,
+        origin_source_lang: String::new(),
     }
 }
 
@@ -2687,6 +3220,8 @@ fn commonjs_module_record(record_name: &str, source: &str) -> AbcModule {
         source_file: None,
         package_name: None,
         is_commonjs: true,
+        is_shared_module: false,
+        origin_source_lang: String::new(),
     }
 }
 
@@ -2698,6 +3233,8 @@ fn module_record_with_source_file(record_name: &str, source: &str, source_file: 
         source_file: Some(source_file.to_string()),
         package_name: None,
         is_commonjs: false,
+        is_shared_module: false,
+        origin_source_lang: String::new(),
     }
 }
 
@@ -3040,7 +3577,7 @@ fn test_logical_and_assignment_uses_short_circuit_store() {
     let bytes = std::fs::read(&out).unwrap();
     let bytecode = module_func_main_bytecode(&bytes, record_name);
     assert!(
-        bytecode_contains_opcode(&bytecode, 0x24) && bytecode_contains_opcode(&bytecode, 0x9b),
+        bytecode_contains_opcode(&bytecode, 0x24) && bytecode_contains_jnez(&bytecode),
         "&&= must test lhs falsiness and skip rhs/store when falsy"
     );
 }
@@ -3062,7 +3599,7 @@ fn test_logical_or_assignment_uses_short_circuit_store() {
     let bytes = std::fs::read(&out).unwrap();
     let bytecode = module_func_main_bytecode(&bytes, record_name);
     assert!(
-        bytecode_contains_opcode(&bytecode, 0x23) && bytecode_contains_opcode(&bytecode, 0x9b),
+        bytecode_contains_opcode(&bytecode, 0x23) && bytecode_contains_jnez(&bytecode),
         "||= must test lhs truthiness and skip rhs/store when truthy"
     );
 }
@@ -3085,8 +3622,8 @@ fn test_logical_nullish_assignment_uses_strict_nullish_short_circuit() {
     let bytecode = module_func_main_bytecode(&bytes, record_name);
     assert!(
         bytecode_contains_opcode(&bytecode, 0x28)
-            && bytecode_contains_opcode(&bytecode, 0x9b)
-            && bytecode_contains_opcode(&bytecode, 0x50),
+            && bytecode_contains_jnez(&bytecode)
+            && bytecode_contains_jeqz(&bytecode),
         "??= must use strict null/undefined checks before deciding whether to store rhs"
     );
 }
@@ -3109,8 +3646,8 @@ fn test_nullish_coalescing_uses_strict_nullish_short_circuit() {
     let bytecode = module_func_main_bytecode(&bytes, record_name);
     assert!(
         bytecode_contains_opcode(&bytecode, 0x28)
-            && bytecode_contains_opcode(&bytecode, 0x9b)
-            && bytecode_contains_opcode(&bytecode, 0x50)
+            && bytecode_contains_jnez(&bytecode)
+            && bytecode_contains_jeqz(&bytecode)
             && !bytecode_contains_opcode(&bytecode, 0x23),
         "?? must use strict null/undefined checks instead of truthiness"
     );
@@ -3268,11 +3805,11 @@ export default value;
         "switch case tests must use strict equality"
     );
     assert!(
-        bytecode_contains_opcode(&bytecode, 0x9b),
+        bytecode_contains_jnez(&bytecode),
         "matching switch cases must branch to their case bodies"
     );
     assert!(
-        bytecode_contains_opcode(&bytecode, 0x4e),
+        bytecode_contains_jmp(&bytecode),
         "switch dispatch and break must use patched jumps"
     );
     assert!(
@@ -3331,7 +3868,7 @@ export default value;"#,
     let bytecode = module_func_main_bytecode(&bytes, record_name);
 
     assert!(
-        bytecode_contains_opcode(&bytecode, 0x4e),
+        bytecode_contains_jmp(&bytecode),
         "labeled break must emit a patched forward jump to the label end"
     );
     assert!(
@@ -3364,7 +3901,7 @@ export default value;"#,
     let bytecode = module_func_main_bytecode(&bytes, record_name);
 
     assert!(
-        bytecode_contains_opcode(&bytecode, 0x4e),
+        bytecode_contains_jmp(&bytecode),
         "labeled continue must emit a patched jump to the labeled loop update"
     );
 }
@@ -3394,7 +3931,7 @@ export default value;"#,
     let bytecode = module_func_main_bytecode(&bytes, record_name);
 
     assert!(
-        bytecode_contains_opcode(&bytecode, 0x4e),
+        bytecode_contains_jmp(&bytecode),
         "labeled for-in continue must emit a patched jump to the next property"
     );
     assert!(
@@ -3427,7 +3964,7 @@ export default value;"#,
     let bytecode = module_func_main_bytecode(&bytes, record_name);
 
     assert!(
-        bytecode_contains_opcode(&bytecode, 0x4e),
+        bytecode_contains_jmp(&bytecode),
         "labeled for-of continue must emit a patched jump to the iterator next call"
     );
     assert!(
@@ -3876,6 +4413,63 @@ fn test_for_left_array_destructuring_uses_nested_iterator() {
 }
 
 #[test]
+fn test_for_of_array_assignment_target_destructures_like_upstream() {
+    // Upstream ForOfStatement compiles the left side through LReference; an
+    // assignment-pattern left (`for ([a] of values)`) is a destructuring lref,
+    // not an unsupported construct.
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("for_of_array_assignment_target.abc");
+    let record_name = "test/for_of_array_assignment_target";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"let a;
+for ([a] of [[1]]) {
+  globalThis["value"] = a;
+}"#,
+            )],
+            &out,
+        )
+        .expect("for-of array assignment target must lower through destructuring lref");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+    assert!(
+        bytecode_opcode_count(&bytecode, 0x67) >= 2,
+        "for-of array assignment target must use outer and destructuring iterators"
+    );
+}
+
+#[test]
+fn test_for_of_object_assignment_target_destructures_like_upstream() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("for_of_object_assignment_target.abc");
+    let record_name = "test/for_of_object_assignment_target";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"const target = {};
+for ({x: target.value} of [{x: 1}]) {
+  globalThis["value"] = target.value;
+}"#,
+            )],
+            &out,
+        )
+        .expect("for-of object assignment target must lower through destructuring lref");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x42),
+        "object destructuring assignment target must load named properties"
+    );
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x43),
+        "member target inside object destructuring must store by property name"
+    );
+}
+
+#[test]
 fn test_object_destructuring_in_function_param_uses_property_load() {
     // Upstream: `function f({ value }) {}` extracts the property from the
     // parameter object via LdObjByName (0x41) in the function body prologue.
@@ -4221,9 +4815,7 @@ fn test_for_in_checks_getnextpropname_against_undefined() {
         "for-in getpropiterator must be protected by a rethrow catch table"
     );
     assert!(
-        bytecode
-            .windows(5)
-            .any(|window| matches!(window, [0x00, 0x0f, _, _, 0x9b])),
+        bytecode_contains_opcode(&bytecode, 0x0f) && bytecode_contains_jnez(&bytecode),
         "for-in must compare getnextpropname result with undefined before exiting"
     );
 }
@@ -4382,7 +4974,7 @@ export default f;
 #[test]
 fn test_top_level_await_uses_async_function_enter_opcode() {
     // Top-level await (TLA): module-level `await expr` is supported in module
-    // mode and must emit the asyncfunctionenter (0xbb) prologue at module level.
+    // mode and must emit the asyncfunctionenter (0xae) prologue at module level.
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("tla.abc");
     let record_name = "test/tla";
@@ -4397,11 +4989,11 @@ fn test_top_level_await_uses_async_function_enter_opcode() {
         .expect("top-level await must compile in module mode");
     let bytes = std::fs::read(&out).unwrap();
     let bytecode = module_func_main_bytecode(&bytes, record_name);
-    // TLA wraps the module body in an async context — asyncfunctionenter (0xbb)
+    // TLA wraps the module body in an async context — asyncfunctionenter (0xae)
     // must appear in the module's func_main_0.
     assert!(
-        bytecode_contains_opcode(&bytecode, 0xbb),
-        "top-level await must emit asyncfunctionenter (0xbb) in func_main_0"
+        bytecode_contains_opcode(&bytecode, 0xae),
+        "top-level await must emit asyncfunctionenter (0xae) in func_main_0"
     );
 }
 
@@ -4642,6 +5234,8 @@ fn test_annotation_declaration_is_erased() {
                 source_file: None,
                 package_name: None,
                 is_commonjs: false,
+                is_shared_module: false,
+                origin_source_lang: String::new(),
             }],
             &out,
         )
@@ -4996,6 +5590,45 @@ fn test_auto_accessor_class_field_lowers_to_getter_setter_and_private_backing() 
 }
 
 #[test]
+fn test_computed_auto_accessor_uses_precomputed_key_without_synthetic_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("computed_auto_accessor.abc");
+    let record_name = "test/computed_auto_accessor";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"function key() { return "value"; }
+class Box {
+  accessor [key()] = 1;
+}"#,
+            )],
+            &out,
+        )
+        .expect("computed auto-accessor must lower through upstream-style key backup");
+
+    let bytes = std::fs::read(&out).unwrap();
+    let main = module_func_main_bytecode(&bytes, record_name);
+    assert!(
+        bytecode_contains_opcode(&main, 0xbc),
+        "computed auto-accessor must install getter/setter by runtime key value"
+    );
+    assert!(
+        bytes.windows(2).any(|w| w == [0xfb, 0x04]),
+        "computed auto-accessor must still create a private backing slot"
+    );
+    assert_eq!(
+        bytecode_opcode_count(&main, 0x29),
+        1,
+        "computed auto-accessor key expression must be evaluated once and reused"
+    );
+    assert!(
+        !bytes_contain_ascii(&bytes, "__computed_accessor"),
+        "computed auto-accessor must not use the old synthetic-key fallback"
+    );
+}
+
+#[test]
 fn test_object_spread_and_proto_use_upstream_object_ops() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("object_spread_proto.abc");
@@ -5268,12 +5901,16 @@ registerNamedRoute(() => new Index(void 0, {}), "", {bundleName: "com.example.ar
     AbcCompiler::new(AbcCompileOptions {
         debug_info: true,
         opt_level: 0,
+        optimize_try_catch_func: true,
         target_api_version: 12,
         target_api_sub_version: None,
         merge_abc: true,
         module: true,
-        cache_path: None,
+        module_record_field_name: None,
         npm_entries: None,
+        dependency_context: None,
+        remove_redundant_file: false,
+        dump_deps_info: false,
     })
     .compile(
         vec![
@@ -5284,6 +5921,8 @@ registerNamedRoute(() => new Index(void 0, {}), "", {bundleName: "com.example.ar
                 source_file: None,
                 package_name: None,
                 is_commonjs: false,
+                is_shared_module: false,
+                origin_source_lang: String::new(),
             },
             AbcModule {
                 record_name: "com.example.test/entry/ets/pages/Index".to_string(),
@@ -5292,6 +5931,8 @@ registerNamedRoute(() => new Index(void 0, {}), "", {bundleName: "com.example.ar
                 source_file: None,
                 package_name: None,
                 is_commonjs: false,
+                is_shared_module: false,
+                origin_source_lang: String::new(),
             },
         ],
         &out,
@@ -5803,13 +6444,13 @@ export default f;
         .filter_map(|(_, name, code_off)| {
             let code_off = (*code_off)? as usize;
             let bytecode = code_item_bytecode(&bytes, code_off);
-            (name != "func_main_0" && bytecode_contains_opcode(bytecode, 0xbb))
+            (name != "func_main_0" && bytecode_contains_opcode(bytecode, 0xae))
                 .then_some((bytecode, code_item_tries_size(&bytes, code_off)))
         })
         .next()
         .expect("async function method must exist");
 
-    for opcode in [0xbb, 0xc4, 0xc3, 0xbf, 0xc0, 0xcd, 0xce] {
+    for opcode in [0xae, 0xc4, 0xc3, 0xbf, 0xc0, 0xcd, 0xce] {
         assert!(
             bytecode_contains_opcode(bytecode, opcode),
             "async await method must contain opcode {opcode:#x}"

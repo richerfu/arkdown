@@ -215,9 +215,11 @@ fn run_build(fixture: &PathBuf) -> PathBuf {
             target_api_sub_version: None,
             debug_info: true,
             opt_level: 0,
+            optimize_try_catch_func: true,
             target_api_version: config.sdk_config.compile_api_version,
             merge_abc: true,
             cache_file: None,
+            output_proto: None,
             module: true,
             commonjs: false,
             npm_module_entry_list: None,
@@ -286,12 +288,16 @@ fn collect_js_chunks_from_output(
             let meta = record_name_map.get(chunk_name.as_str());
             arkdown_ts2abc::Ts2abcInput {
                 path: path.clone(),
+                output: None,
+                cache_file: None,
                 record_name: meta
                     .map(|meta| meta.record_name.clone())
                     .unwrap_or_else(|| chunk_name.clone()),
                 source_file: meta.and_then(|meta| meta.source_file.clone()),
                 package_name: None,
                 is_commonjs: false,
+                is_shared_module: false,
+                origin_source_lang: String::new(),
                 source_map: None,
             }
         })
@@ -466,9 +472,11 @@ fn run_build_hsp(fixture: &PathBuf) -> PathBuf {
             target_api_sub_version: None,
             debug_info: true,
             opt_level: 0,
+            optimize_try_catch_func: true,
             target_api_version: config.sdk_config.compile_api_version,
             merge_abc: true,
             cache_file: None,
+            output_proto: None,
             module: true,
             commonjs: false,
             npm_module_entry_list: None,
@@ -1319,9 +1327,11 @@ fn run_build_bc_har(fixture_src: &PathBuf) -> (PathBuf, PathBuf) {
             target_api_sub_version: None,
             debug_info: true,
             opt_level: 0,
+            optimize_try_catch_func: true,
             target_api_version: config.sdk_config.compile_api_version,
             merge_abc: true,
             cache_file: None,
+            output_proto: None,
             module: true,
             commonjs: false,
             npm_module_entry_list: None,

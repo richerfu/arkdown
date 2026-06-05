@@ -1,0 +1,2229 @@
+use std::collections::{BTreeMap, BTreeSet};
+use std::io;
+
+use crate::emit::file::{AbcFile, LiteralArray, LiteralEntry};
+use crate::emit::record::{
+    method_access, CatchEntry, ClassRecord, DebugInfoRecord, FieldRecord, FieldValue,
+    InstructionDebugInfo, MethodKind, MethodRecord, FIELD_OWNER_CLASS_IDX,
+};
+use crate::emit::strings::StringTable;
+use crate::ir::debug_lnp::LineTracker;
+use crate::ir::opcodes::{Insn, PandasmImm, PandasmInsn};
+use crate::isa::{encode_pandasm_instruction, IdKind};
+use crate::proto_panda::{
+    ins, program, scalar_value, variant_value, DebuginfoIns, Field, FieldMetadata, Function,
+    FunctionMetadata, Ins, ItemMetadata, Literal, Metadata, ParamMetadata, Parameter, Program,
+    Record, RecordMetadata, ScalarValue, Type, Value, VariantValue,
+};
+
+const VALUE_TYPE_U8: u32 = 2;
+const VALUE_TYPE_U32: u32 = 6;
+const VALUE_TYPE_LITERALARRAY: u32 = 20;
+
+const VARIANT_U8: i32 = variant_value::VariantValueType::U8 as i32;
+const VARIANT_U16: i32 = variant_value::VariantValueType::U16 as i32;
+const VARIANT_U32: i32 = variant_value::VariantValueType::U32 as i32;
+const VARIANT_STRING: i32 = variant_value::VariantValueType::String as i32;
+
+const SCALAR_UINT64: i32 = scalar_value::VariantValueType::Uint64 as i32;
+const SCALAR_STRING: i32 = scalar_value::VariantValueType::String as i32;
+
+pub(crate) fn program_for_record(
+    file: &AbcFile,
+    record_index: usize,
+) -> io::Result<Option<Program>> {
+    let Some(record) = file.records.get(record_index) else {
+        return Ok(None);
+    };
+    if record
+        .methods
+        .iter()
+        .any(|method| method.pandasm_insns.is_empty() && !method.bytecode.is_empty())
+    {
+        return Ok(None);
+    }
+
+    let lang = record.source_lang as u32;
+    let mut literal_indices = BTreeSet::new();
+    for &idx in &record.module_literal_indices {
+        literal_indices.insert(idx);
+    }
+    for &idx in &record.literal_indices {
+        literal_indices.insert(idx);
+    }
+
+    let mut program = Program {
+        lang,
+        record_table: vec![program::RecordTable {
+            key: bytes(&record.name),
+            value: Some(record_to_proto(record, file)),
+        }],
+        function_table: Vec::with_capacity(record.methods.len()),
+        function_synonyms: Vec::new(),
+        literal_array_table: Vec::with_capacity(literal_indices.len()),
+        strings: record
+            .string_indices
+            .iter()
+            .filter_map(|idx| file.strings.get(*idx).map(bytes))
+            .collect(),
+        array_types: Vec::new(),
+    };
+
+    for method in &record.methods {
+        let function = function_to_proto(method, record, &file.strings)?;
+        program.function_table.push(program::FunctionTable {
+            key: bytes(&method.name),
+            value: Some(function),
+        });
+    }
+
+    for idx in literal_indices {
+        let Some(array) = file.literal_arrays.get(idx) else {
+            continue;
+        };
+        program
+            .literal_array_table
+            .push(program::LiteralArrayTable {
+                key: bytes(&literal_key(record, idx)),
+                value: Some(literal_array_to_proto(array)),
+            });
+    }
+
+    Ok(Some(program))
+}
+
+pub(crate) fn program_for_file(file: &AbcFile) -> io::Result<Program> {
+    if file
+        .records
+        .iter()
+        .flat_map(|record| &record.methods)
+        .any(|method| method.pandasm_insns.is_empty() && !method.bytecode.is_empty())
+    {
+        return invalid_data(
+            "cannot materialize upstream Program proto for records without pandasm instructions",
+        );
+    }
+
+    let lang = file
+        .records
+        .first()
+        .map(|record| record.source_lang as u32)
+        .unwrap_or_default();
+    let mut literal_indices = BTreeSet::new();
+    let mut literal_keys = BTreeMap::new();
+    for record in &file.records {
+        for &idx in &record.module_literal_indices {
+            literal_indices.insert(idx);
+            literal_keys
+                .entry(idx)
+                .or_insert_with(|| literal_key(record, idx));
+        }
+        for &idx in &record.literal_indices {
+            literal_indices.insert(idx);
+            literal_keys
+                .entry(idx)
+                .or_insert_with(|| literal_key(record, idx));
+        }
+    }
+
+    let mut program = Program {
+        lang,
+        record_table: Vec::with_capacity(file.records.len()),
+        function_table: Vec::new(),
+        function_synonyms: Vec::new(),
+        literal_array_table: Vec::with_capacity(literal_indices.len()),
+        strings: file.strings.iter().map(bytes).collect(),
+        array_types: Vec::new(),
+    };
+
+    for record in &file.records {
+        program.record_table.push(program::RecordTable {
+            key: bytes(&record.name),
+            value: Some(record_to_proto(record, file)),
+        });
+        for method in &record.methods {
+            let function = function_to_proto(method, record, &file.strings)?;
+            program.function_table.push(program::FunctionTable {
+                key: bytes(&method.name),
+                value: Some(function),
+            });
+        }
+    }
+
+    for idx in literal_indices {
+        let Some(array) = file.literal_arrays.get(idx) else {
+            continue;
+        };
+        program
+            .literal_array_table
+            .push(program::LiteralArrayTable {
+                key: bytes(
+                    literal_keys
+                        .get(&idx)
+                        .map(String::as_str)
+                        .unwrap_or_default(),
+                ),
+                value: Some(literal_array_to_proto(array)),
+            });
+    }
+
+    Ok(program)
+}
+
+pub(crate) fn append_program_to_file(
+    file: &mut AbcFile,
+    program: Program,
+) -> io::Result<Vec<usize>> {
+    for value in &program.strings {
+        file.strings.intern(utf8(value)?.as_str());
+    }
+
+    let module_literal_keys = collect_module_literal_keys(&program)?;
+    let mut literal_key_to_index = BTreeMap::new();
+    let mut literal_method_refs = BTreeSet::new();
+    for entry in program.literal_array_table {
+        let key = utf8(&entry.key)?;
+        let Some(array) = entry.value else {
+            continue;
+        };
+        let is_module_literal = module_literal_keys.contains(&key);
+        let literal = literal_array_from_proto(array, is_module_literal, &mut literal_method_refs)?;
+        let index = file.literal_arrays.len();
+        file.literal_arrays.push(literal);
+        literal_key_to_index.insert(key, index);
+    }
+
+    let functions = program
+        .function_table
+        .into_iter()
+        .filter_map(|entry| entry.value.map(|function| (entry.key, function)))
+        .collect::<Vec<_>>();
+    let mut appended = Vec::new();
+
+    for record_entry in program.record_table {
+        let Some(record_proto) = record_entry.value else {
+            continue;
+        };
+        let record_name = if record_proto.name.is_empty() {
+            utf8(&record_entry.key)?
+        } else {
+            utf8(&record_proto.name)?
+        };
+        let record_index = file.records.len();
+        let mut function_refs = FunctionRefs::default();
+        let mut literal_refs = BTreeSet::new();
+        let mut methods = Vec::with_capacity(functions.len());
+
+        for (function_key, function) in &functions {
+            let method = method_from_proto(
+                function_key,
+                function,
+                &record_name,
+                &mut file.strings,
+                &literal_key_to_index,
+                &mut function_refs,
+                &mut literal_refs,
+            )?;
+            methods.push(method);
+        }
+
+        function_refs
+            .method_pool_entries
+            .extend(literal_method_refs.iter().cloned());
+        for method in &mut methods {
+            finalize_method_kind_and_pool(method, &function_refs);
+        }
+
+        let mut module_literal_indices = BTreeSet::new();
+        let fields = record_proto
+            .field_list
+            .iter()
+            .map(|field| {
+                field_from_proto(field, &literal_key_to_index, &mut module_literal_indices)
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        literal_refs.retain(|idx| !module_literal_indices.contains(idx));
+
+        file.records.push(ClassRecord {
+            name: record_name,
+            methods,
+            string_indices: Vec::new(),
+            literal_indices: literal_refs.into_iter().collect(),
+            module_literal_indices: module_literal_indices.into_iter().collect(),
+            source_code_strings: functions
+                .iter()
+                .filter(|(_, function)| !function.source_code.is_empty())
+                .map(|(_, function)| utf8(&function.source_code))
+                .collect::<io::Result<Vec<_>>>()?,
+            access_flags: record_access_flags(&record_proto),
+            source_lang: record_proto.language as u8,
+            standalone_ecmascript_input: false,
+            source_file: (!record_proto.source_file.is_empty())
+                .then(|| utf8(&record_proto.source_file))
+                .transpose()?,
+            module_requests: Vec::new(),
+            fields,
+        });
+        appended.push(record_index);
+    }
+
+    Ok(appended)
+}
+
+fn collect_module_literal_keys(program: &Program) -> io::Result<BTreeSet<String>> {
+    let mut keys = BTreeSet::new();
+    for record in &program.record_table {
+        let Some(record) = &record.value else {
+            continue;
+        };
+        for field in &record.field_list {
+            let Some(value) = field
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.value.as_ref())
+            else {
+                continue;
+            };
+            if value.father.as_ref().map(|father| father.r#type) == Some(VALUE_TYPE_LITERALARRAY) {
+                if let Some(scalar_value::Value::ValueStr(bytes)) = &value.value {
+                    keys.insert(utf8(bytes)?);
+                }
+            }
+        }
+    }
+    Ok(keys)
+}
+
+fn literal_array_from_proto(
+    array: crate::proto_panda::LiteralArray,
+    module_style: bool,
+    method_refs: &mut BTreeSet<String>,
+) -> io::Result<LiteralArray> {
+    let mut entries = Vec::with_capacity(array.literals.len());
+    for literal in array.literals {
+        entries.push(literal_from_proto(literal, module_style, method_refs)?);
+    }
+    Ok(LiteralArray { entries })
+}
+
+fn literal_from_proto(
+    literal: Literal,
+    module_style: bool,
+    method_refs: &mut BTreeSet<String>,
+) -> io::Result<LiteralEntry> {
+    let Some(value) = literal.value else {
+        return invalid_data("missing literal value");
+    };
+    match (literal.tag, value.value, value.r#type) {
+        (0x02, Some(variant_value::Value::ValueInt(value)), VARIANT_U16) => {
+            Ok(LiteralEntry::RawU16(to_u16(value, "literal u16")?))
+        }
+        (0x02, Some(variant_value::Value::ValueInt(value)), _) if module_style => {
+            Ok(LiteralEntry::RawU32(to_u32(value, "literal u32")?))
+        }
+        (0x02, Some(variant_value::Value::ValueInt(value)), _) => Ok(LiteralEntry::TaggedInteger(
+            to_u32(value, "literal integer")?,
+        )),
+        (0x05, Some(variant_value::Value::ValueStr(value)), _) if module_style => {
+            Ok(LiteralEntry::RawString(utf8(&value)?))
+        }
+        (0x05, Some(variant_value::Value::ValueStr(value)), _) => {
+            Ok(LiteralEntry::TaggedString(utf8(&value)?))
+        }
+        (0x06, Some(variant_value::Value::ValueInt(value)), _) => {
+            Ok(LiteralEntry::TaggedMethod(to_u32(value, "literal method")?))
+        }
+        (0x06, Some(variant_value::Value::ValueStr(value)), _) => {
+            let name = utf8(&value)?;
+            method_refs.insert(name.clone());
+            Ok(LiteralEntry::TaggedMethodName(name))
+        }
+        (0x09, Some(variant_value::Value::ValueInt(value)), _) => Ok(
+            LiteralEntry::TaggedMethodAffiliate(to_u16(value, "literal method affiliate")?),
+        ),
+        (0xff, _, _) => Ok(LiteralEntry::TaggedNull),
+        (tag, _, _) => invalid_data(format!("unsupported literal tag {tag:#x}")),
+    }
+}
+
+fn field_from_proto(
+    field: &Field,
+    literal_key_to_index: &BTreeMap<String, usize>,
+    module_literal_indices: &mut BTreeSet<usize>,
+) -> io::Result<FieldRecord> {
+    let field_type = field
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.field_type.as_ref())
+        .or(field.r#type.as_ref());
+    let value = field
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.value.as_ref())
+        .map(|value| field_value_from_proto(value, literal_key_to_index, module_literal_indices))
+        .transpose()?;
+    Ok(FieldRecord {
+        name: utf8(&field.name)?,
+        class_idx: FIELD_OWNER_CLASS_IDX,
+        type_idx: field_type.map(type_idx).unwrap_or(0),
+        access_flags: field_access_flags(field),
+        value,
+    })
+}
+
+fn field_value_from_proto(
+    value: &ScalarValue,
+    literal_key_to_index: &BTreeMap<String, usize>,
+    module_literal_indices: &mut BTreeSet<usize>,
+) -> io::Result<FieldValue> {
+    match value.father.as_ref().map(|father| father.r#type) {
+        Some(VALUE_TYPE_U8) => Ok(FieldValue::U8(to_u8(
+            scalar_u64_value(value)?,
+            "field u8 value",
+        )?)),
+        Some(VALUE_TYPE_U32) => Ok(FieldValue::U32(to_u32(
+            scalar_u64_value(value)?,
+            "field u32 value",
+        )?)),
+        Some(VALUE_TYPE_LITERALARRAY) => {
+            let key = scalar_string_value(value)?;
+            let Some(&index) = literal_key_to_index.get(&key) else {
+                return invalid_data(format!("missing literal array key {key}"));
+            };
+            module_literal_indices.insert(index);
+            Ok(FieldValue::LiteralArray(index))
+        }
+        other => invalid_data(format!("unsupported field value type {other:?}")),
+    }
+}
+
+#[derive(Default)]
+struct FunctionRefs {
+    constructor_names: BTreeSet<String>,
+    method_pool_entries: BTreeSet<String>,
+    definefunc_order: BTreeMap<String, u32>,
+    next_definefunc_order: u32,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JumpKind {
+    Jmp,
+    Jeqz,
+    Jnez,
+}
+
+enum DecodedItem {
+    Label(String),
+    Insn {
+        insn: Insn,
+        jump: Option<(JumpKind, String)>,
+    },
+}
+
+fn method_from_proto(
+    function_key: &[u8],
+    function: &Function,
+    record_name: &str,
+    strings: &mut StringTable,
+    literal_key_to_index: &BTreeMap<String, usize>,
+    refs: &mut FunctionRefs,
+    literal_refs: &mut BTreeSet<usize>,
+) -> io::Result<MethodRecord> {
+    let name = if function.name.is_empty() {
+        utf8(function_key)?
+    } else {
+        utf8(&function.name)?
+    };
+    let (pandasm_insns, pandasm_debug, line_ops, catch_entries, method_refs) =
+        function_insns_from_proto(function, record_name, strings, literal_key_to_index)?;
+    refs.constructor_names
+        .extend(method_refs.constructor_names.iter().cloned());
+    refs.method_pool_entries
+        .extend(method_refs.method_pool_entries.iter().cloned());
+    for definefunc in &method_refs.definefunc_order {
+        refs.method_pool_entries.insert(definefunc.clone());
+        refs.definefunc_order
+            .entry(definefunc.clone())
+            .or_insert_with(|| {
+                let order = refs.next_definefunc_order;
+                refs.next_definefunc_order = refs.next_definefunc_order.saturating_add(1);
+                order
+            });
+    }
+    literal_refs.extend(method_refs.literal_indices);
+
+    let mut string_table = StringTable::default();
+    let bytecode = pandasm_insns
+        .iter()
+        .flat_map(|insn| insn.encode(&mut string_table))
+        .collect();
+    let kind = method_kind_from_proto(
+        &name,
+        function_access_flags(function),
+        function.function_kind,
+    );
+
+    Ok(MethodRecord {
+        name,
+        bytecode,
+        pandasm_insns,
+        pandasm_debug,
+        num_vregs: to_u16(function.regs_num, "function regs_num")?,
+        num_args: to_u16(function.params.len() as u64, "function params")?,
+        debug_info: if function.source_file.is_empty() {
+            None
+        } else {
+            Some(DebugInfoRecord {
+                line_start: 1,
+                source_file: utf8(&function.source_file)?,
+                param_names: Vec::new(),
+                lexical_this: false,
+            })
+        },
+        line_ops,
+        catch_entries,
+        kind,
+        method_pool_entry: false,
+        expected_property_count: None,
+        definefunc_order: None,
+    })
+}
+
+fn finalize_method_kind_and_pool(method: &mut MethodRecord, refs: &FunctionRefs) {
+    if refs.constructor_names.contains(&method.name) {
+        method.kind = MethodKind::Constructor;
+    } else if method.name == "func_main_0" {
+        method.kind = MethodKind::Module;
+    }
+    method.method_pool_entry = refs.method_pool_entries.contains(&method.name)
+        || matches!(
+            method.kind,
+            MethodKind::FunctionLiteral | MethodKind::Anonymous | MethodKind::Constructor
+        );
+    if matches!(
+        method.kind,
+        MethodKind::FunctionLiteral | MethodKind::Anonymous
+    ) {
+        method.definefunc_order = refs.definefunc_order.get(&method.name).copied();
+    }
+}
+
+fn function_insns_from_proto(
+    function: &Function,
+    record_name: &str,
+    strings: &mut StringTable,
+    literal_key_to_index: &BTreeMap<String, usize>,
+) -> io::Result<(
+    Vec<Insn>,
+    Vec<InstructionDebugInfo>,
+    Vec<u8>,
+    Vec<CatchEntry>,
+    MethodDecodeRefs,
+)> {
+    let mut items = Vec::with_capacity(function.ins.len());
+    let mut pandasm_debug = Vec::new();
+    let mut refs = MethodDecodeRefs::default();
+    for ins in &function.ins {
+        if ins.set_label_val {
+            items.push(DecodedItem::Label(utf8(&ins.label)?));
+            continue;
+        }
+        let decoded = insn_from_proto(ins, record_name, strings, literal_key_to_index, &mut refs)?;
+        items.push(decoded);
+        if let Some(debug) = instruction_debug_from_proto(ins)? {
+            pandasm_debug.push(debug);
+        }
+    }
+
+    let (pandasm_insns, label_offsets) = resolve_jump_labels(&mut items)?;
+    if pandasm_debug.len() != pandasm_insns.len() {
+        pandasm_debug.clear();
+    }
+    let line_ops = if !function.source_file.is_empty() && !pandasm_debug.is_empty() {
+        line_ops_from_instruction_debug(&pandasm_insns, &pandasm_debug)
+    } else {
+        Vec::new()
+    };
+    let catch_entries = function
+        .catch_blocks
+        .iter()
+        .map(|catch| catch_entry_from_proto(catch, &label_offsets))
+        .collect::<io::Result<Vec<_>>>()?;
+    Ok((pandasm_insns, pandasm_debug, line_ops, catch_entries, refs))
+}
+
+fn instruction_debug_from_proto(ins: &Ins) -> io::Result<Option<InstructionDebugInfo>> {
+    let Some(debug) = &ins.ins_debug else {
+        return Ok(None);
+    };
+    Ok(Some(InstructionDebugInfo {
+        line_number: to_u32(debug.line_number, "instruction debug line number")?,
+        column_number: debug.column_number,
+    }))
+}
+
+fn line_ops_from_instruction_debug(insns: &[Insn], debug: &[InstructionDebugInfo]) -> Vec<u8> {
+    if debug.is_empty() {
+        return Vec::new();
+    }
+    let mut tracker = LineTracker::new(u32::MAX);
+    for (insn, debug) in insns.iter().zip(debug) {
+        tracker.advance_with_col(
+            debug.line_number,
+            debug.column_number,
+            insn.byte_len() as u32,
+        );
+    }
+    tracker.finish()
+}
+
+#[derive(Default)]
+struct MethodDecodeRefs {
+    constructor_names: BTreeSet<String>,
+    method_pool_entries: BTreeSet<String>,
+    definefunc_order: Vec<String>,
+    literal_indices: BTreeSet<usize>,
+}
+
+fn resolve_jump_labels(
+    items: &mut [DecodedItem],
+) -> io::Result<(Vec<Insn>, BTreeMap<String, usize>)> {
+    for _ in 0..8 {
+        let (offsets, labels) = item_offsets(items);
+        let mut changed = false;
+        let mut insn_index = 0usize;
+        for item in items.iter_mut() {
+            let DecodedItem::Insn { insn, jump } = item else {
+                continue;
+            };
+            if let Some((kind, label)) = jump {
+                let Some(&target) = labels.get(label) else {
+                    return invalid_data(format!("missing jump label {label}"));
+                };
+                let offset = offsets[insn_index];
+                let rel = target as i64 - offset as i64;
+                let new_insn = jump_insn(*kind, rel)?;
+                if new_insn.byte_len() != insn.byte_len() {
+                    changed = true;
+                }
+                *insn = new_insn;
+            }
+            insn_index += 1;
+        }
+        if !changed {
+            let (_, labels) = item_offsets(items);
+            let insns = items
+                .iter()
+                .filter_map(|item| match item {
+                    DecodedItem::Insn { insn, .. } => Some(insn.clone()),
+                    DecodedItem::Label(_) => None,
+                })
+                .collect();
+            return Ok((insns, labels));
+        }
+    }
+    invalid_data("jump label relaxation did not converge")
+}
+
+fn item_offsets(items: &[DecodedItem]) -> (Vec<usize>, BTreeMap<String, usize>) {
+    let mut offsets = Vec::new();
+    let mut labels = BTreeMap::new();
+    let mut offset = 0usize;
+    for item in items {
+        match item {
+            DecodedItem::Label(label) => {
+                labels.insert(label.clone(), offset);
+            }
+            DecodedItem::Insn { insn, .. } => {
+                offsets.push(offset);
+                offset += insn.byte_len();
+            }
+        }
+    }
+    (offsets, labels)
+}
+
+fn jump_insn(kind: JumpKind, rel: i64) -> io::Result<Insn> {
+    let rel_i32 = i32::try_from(rel)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "jump offset out of i32 range"))?;
+    Ok(match kind {
+        JumpKind::Jmp if i8::try_from(rel_i32).is_ok() => Insn::JmpShort(rel_i32 as i8),
+        JumpKind::Jmp if i16::try_from(rel_i32).is_ok() => Insn::Jmp(rel_i32 as i16),
+        JumpKind::Jmp => Insn::JmpWide(rel_i32),
+        JumpKind::Jeqz if i8::try_from(rel_i32).is_ok() => Insn::JeqzShort(rel_i32 as i8),
+        JumpKind::Jeqz if i16::try_from(rel_i32).is_ok() => Insn::Jeqz(rel_i32 as i16),
+        JumpKind::Jeqz => Insn::JeqzWide(rel_i32),
+        JumpKind::Jnez if i8::try_from(rel_i32).is_ok() => Insn::JnezShort(rel_i32 as i8),
+        JumpKind::Jnez if i16::try_from(rel_i32).is_ok() => Insn::Jnez(rel_i32 as i16),
+        JumpKind::Jnez => Insn::JnezWide(rel_i32),
+    })
+}
+
+fn catch_entry_from_proto(
+    catch: &crate::proto_panda::CatchBlock,
+    labels: &BTreeMap<String, usize>,
+) -> io::Result<CatchEntry> {
+    Ok(CatchEntry {
+        try_begin: label_offset(labels, &catch.try_begin_label)?,
+        try_end: label_offset(labels, &catch.try_end_label)?,
+        catch_begin: label_offset(labels, &catch.catch_begin_label)?,
+        catch_end: label_offset(labels, &catch.catch_end_label)?,
+    })
+}
+
+fn insn_from_proto(
+    ins: &Ins,
+    _record_name: &str,
+    strings: &mut StringTable,
+    literal_key_to_index: &BTreeMap<String, usize>,
+    refs: &mut MethodDecodeRefs,
+) -> io::Result<DecodedItem> {
+    let mut jump = None;
+    let insn = match ins.opcode {
+        2 => Insn::LdUndefined,
+        3 => Insn::LdNull,
+        5 => Insn::LdGlobal,
+        6 => Insn::LdTrue,
+        7 => Insn::LdFalse,
+        8 => Insn::LdHole,
+        11 => Insn::LdThis,
+        12 => Insn::PopLexEnv,
+        15 => Insn::AsyncFunctionEnter,
+        17 => Insn::Debugger,
+        18 => Insn::GetPropIterator,
+        19 => Insn::GetIterator(imm_u8(ins, 0, "getiterator slot")?),
+        20 => Insn::CloseIterator(imm_u8(ins, 0, "closeiterator slot")?, reg_u8(ins, 0)?),
+        23 => Insn::LdPrivateProperty(
+            imm_u8(ins, 0, "ldprivateproperty ic")?,
+            imm_u16(ins, 1, "ldprivateproperty level")?,
+            imm_u16(ins, 2, "ldprivateproperty slot")?,
+        ),
+        24 => Insn::StPrivateProperty(
+            imm_u8(ins, 0, "stprivateproperty ic")?,
+            imm_u16(ins, 1, "stprivateproperty level")?,
+            imm_u16(ins, 2, "stprivateproperty slot")?,
+            reg_u8(ins, 0)?,
+        ),
+        25 => Insn::TestIn(
+            imm_u8(ins, 0, "testin ic")?,
+            imm_u16(ins, 1, "testin level")?,
+            imm_u16(ins, 2, "testin slot")?,
+        ),
+        26 => Insn::DefineFieldByName(
+            imm_u8(ins, 0, "definefieldbyname slot")?,
+            intern_id(strings, id(ins, 0)?)?,
+            reg_u8(ins, 0)?,
+        ),
+        27 => Insn::DefinePropertyByName(
+            imm_u8(ins, 0, "definepropertybyname slot")?,
+            intern_id(strings, id(ins, 0)?)?,
+            reg_u8(ins, 0)?,
+        ),
+        28 => Insn::CreateEmptyObject,
+        29 => Insn::CreateEmptyArray(imm_u16(ins, 0, "createemptyarray slot")?),
+        30 => Insn::CreateGeneratorObj(reg_u8(ins, 0)?),
+        32 | 33 => Insn::CreateObjectWithExcludedKeys(
+            imm_u16(ins, 0, "createobjectwithexcludedkeys count")?,
+            reg_u8(ins, 0)?,
+            reg_u8(ins, 1)?,
+        ),
+        34 => {
+            let literal = literal_ref(literal_key_to_index, id(ins, 0)?, refs)?;
+            Insn::CreateArrayWithBuffer(imm_u8(ins, 0, "createarraywithbuffer slot")?, literal)
+        }
+        36 => {
+            let literal = literal_ref(literal_key_to_index, id(ins, 0)?, refs)?;
+            Insn::CreateObjectWithBuffer(imm_u8(ins, 0, "createobjectwithbuffer slot")?, literal)
+        }
+        39 => Insn::NewObjApply(imm_u8(ins, 0, "newobjapply slot")?, reg_u8(ins, 0)?),
+        40 => Insn::NewObjRange(
+            imm_u8(ins, 0, "newobjrange slot")?,
+            imm_u8(ins, 1, "newobjrange argc")?,
+            reg_u8(ins, 0)?,
+        ),
+        42 => Insn::NewLexEnv(imm_u8(ins, 0, "newlexenv count")?),
+        44 => {
+            let literal = literal_ref(literal_key_to_index, id(ins, 0)?, refs)?;
+            Insn::NewLexEnvWithName(imm_u8(ins, 0, "newlexenvwithname count")?, literal)
+        }
+        48 => Insn::Add2(imm_u8(ins, 0, "add2 slot")?, reg_u8(ins, 0)?),
+        49 => Insn::Sub2(imm_u8(ins, 0, "sub2 slot")?, reg_u8(ins, 0)?),
+        50 => Insn::Mul2(imm_u8(ins, 0, "mul2 slot")?, reg_u8(ins, 0)?),
+        51 => Insn::Div2(imm_u8(ins, 0, "div2 slot")?, reg_u8(ins, 0)?),
+        52 => Insn::Mod2(imm_u8(ins, 0, "mod2 slot")?, reg_u8(ins, 0)?),
+        53 => Insn::Eq(imm_u8(ins, 0, "eq slot")?, reg_u8(ins, 0)?),
+        54 => Insn::NotEq(imm_u8(ins, 0, "noteq slot")?, reg_u8(ins, 0)?),
+        55 => Insn::Less(imm_u8(ins, 0, "less slot")?, reg_u8(ins, 0)?),
+        56 => Insn::LessEq(imm_u8(ins, 0, "lesseq slot")?, reg_u8(ins, 0)?),
+        57 => Insn::Greater(imm_u8(ins, 0, "greater slot")?, reg_u8(ins, 0)?),
+        58 => Insn::GreaterEq(imm_u8(ins, 0, "greatereq slot")?, reg_u8(ins, 0)?),
+        59 => Insn::Shl2(imm_u8(ins, 0, "shl2 slot")?, reg_u8(ins, 0)?),
+        60 => Insn::Shr2(imm_u8(ins, 0, "shr2 slot")?, reg_u8(ins, 0)?),
+        61 => Insn::Ashr2(imm_u8(ins, 0, "ashr2 slot")?, reg_u8(ins, 0)?),
+        62 => Insn::And2(imm_u8(ins, 0, "and2 slot")?, reg_u8(ins, 0)?),
+        63 => Insn::Or2(imm_u8(ins, 0, "or2 slot")?, reg_u8(ins, 0)?),
+        64 => Insn::Xor2(imm_u8(ins, 0, "xor2 slot")?, reg_u8(ins, 0)?),
+        65 => Insn::Exp(imm_u8(ins, 0, "exp slot")?, reg_u8(ins, 0)?),
+        66 => Insn::TypeOf(imm_u8(ins, 0, "typeof slot")?),
+        67 => Insn::ToNumber(imm_u8(ins, 0, "tonumber slot")?),
+        69 => Insn::ToNumeric(imm_u8(ins, 0, "tonumeric slot")?),
+        71 => Insn::Neg(imm_u8(ins, 0, "neg slot")?),
+        73 => Insn::BitNot(imm_u8(ins, 0, "bitnot slot")?),
+        75 => Insn::Inc(imm_u8(ins, 0, "inc slot")?),
+        77 => Insn::Dec(imm_u8(ins, 0, "dec slot")?),
+        79 => Insn::IsTrue,
+        80 => Insn::IsFalse,
+        81 => Insn::IsIn(imm_u8(ins, 0, "isin slot")?, reg_u8(ins, 0)?),
+        82 => Insn::InstanceOf(imm_u8(ins, 0, "instanceof slot")?, reg_u8(ins, 0)?),
+        83 => Insn::StrictNotEq(imm_u8(ins, 0, "strictnoteq slot")?, reg_u8(ins, 0)?),
+        84 => Insn::StrictEq(imm_u8(ins, 0, "stricteq slot")?, reg_u8(ins, 0)?),
+        86 => Insn::CallRuntimeDefineFieldByValue(
+            imm_u8(ins, 0, "definefieldbyvalue slot")?,
+            reg_u8(ins, 0)?,
+            reg_u8(ins, 1)?,
+        ),
+        89 => {
+            let literal = literal_ref(literal_key_to_index, id(ins, 0)?, refs)?;
+            Insn::CallRuntimeCreatePrivateProperty(
+                imm_u16(ins, 0, "createprivateproperty count")?,
+                literal,
+            )
+        }
+        90 => Insn::CallRuntimeDefinePrivateProperty(
+            imm_u8(ins, 0, "defineprivateproperty ic")?,
+            imm_u16(ins, 1, "defineprivateproperty level")?,
+            imm_u16(ins, 2, "defineprivateproperty slot")?,
+            reg_u8(ins, 0)?,
+        ),
+        91 => Insn::CallRuntimeCallInit(imm_u8(ins, 0, "callinit slot")?, reg_u8(ins, 0)?),
+        102 => Insn::CallRuntimeIsTrue(imm_u8(ins, 0, "callruntime.istrue slot")?),
+        103 => Insn::CallRuntimeIsFalse(imm_u8(ins, 0, "callruntime.isfalse slot")?),
+        109 => Insn::Throw,
+        111 => Insn::ThrowPatternNonCoercible,
+        114 => Insn::ThrowIfNotObject(reg_u8(ins, 0)?),
+        116 => Insn::ThrowIfSuperNotCorrectCall(imm_u8(ins, 0, "throwifsupernotcorrectcall kind")?),
+        117 => Insn::ThrowUndefinedIfHoleWithName(intern_id(strings, id(ins, 0)?)?),
+        120 => Insn::CallArg0(imm_u8(ins, 0, "callarg0 slot")?),
+        122 => Insn::CallArg1(imm_u8(ins, 0, "callarg1 slot")?, reg_u8(ins, 0)?),
+        124 => Insn::CallArgs2(
+            imm_u8(ins, 0, "callargs2 slot")?,
+            reg_u8(ins, 0)?,
+            reg_u8(ins, 1)?,
+        ),
+        126 => Insn::CallArgs3(
+            imm_u8(ins, 0, "callargs3 slot")?,
+            reg_u8(ins, 0)?,
+            reg_u8(ins, 1)?,
+            reg_u8(ins, 2)?,
+        ),
+        128 => Insn::CallRange(
+            imm_u8(ins, 0, "callrange slot")?,
+            imm_u8(ins, 1, "callrange argc")?,
+            reg_u8(ins, 0)?,
+        ),
+        131 => Insn::SuperCallSpread(imm_u8(ins, 0, "supercallspread slot")?, reg_u8(ins, 0)?),
+        132 => Insn::Apply(
+            imm_u8(ins, 0, "apply slot")?,
+            reg_u8(ins, 0)?,
+            reg_u8(ins, 1)?,
+        ),
+        134 => Insn::CallThis0(imm_u8(ins, 0, "callthis0 slot")?, reg_u8(ins, 0)?),
+        135 => Insn::CallThis1(
+            imm_u8(ins, 0, "callthis1 slot")?,
+            reg_u8(ins, 0)?,
+            reg_u8(ins, 1)?,
+        ),
+        136 => Insn::CallThis2(
+            imm_u8(ins, 0, "callthis2 slot")?,
+            reg_u8(ins, 0)?,
+            reg_u8(ins, 1)?,
+            reg_u8(ins, 2)?,
+        ),
+        137 => Insn::CallThis3(
+            imm_u8(ins, 0, "callthis3 slot")?,
+            reg_u8(ins, 0)?,
+            reg_u8(ins, 1)?,
+            reg_u8(ins, 2)?,
+            reg_u8(ins, 3)?,
+        ),
+        138 => Insn::CallThisRange(
+            imm_u8(ins, 0, "callthisrange slot")?,
+            imm_u8(ins, 1, "callthisrange argc")?,
+            reg_u8(ins, 0)?,
+        ),
+        141 => Insn::SuperCallThisRange(
+            imm_u8(ins, 0, "supercallthisrange slot")?,
+            imm_u8(ins, 1, "supercallthisrange argc")?,
+            reg_u8(ins, 0)?,
+        ),
+        143 => Insn::SuperCallArrowRange(
+            imm_u8(ins, 0, "supercallarrowrange slot")?,
+            imm_u8(ins, 1, "supercallarrowrange argc")?,
+            reg_u8(ins, 0)?,
+        ),
+        145 => Insn::DefineGetterSetterByValue(
+            reg_u8(ins, 0)?,
+            reg_u8(ins, 1)?,
+            reg_u8(ins, 2)?,
+            reg_u8(ins, 3)?,
+        ),
+        146 => {
+            let name = utf8(id(ins, 0)?)?;
+            let name_id = intern_id(strings, name.as_bytes())?;
+            refs.definefunc_order.push(name.clone());
+            Insn::DefineFuncShort(
+                imm_u8(ins, 0, "definefunc slot")?,
+                name_id,
+                imm_u8(ins, 1, "definefunc length")?,
+            )
+        }
+        147 => {
+            let name = utf8(id(ins, 0)?)?;
+            refs.method_pool_entries.insert(name.clone());
+            Insn::DefineMethodShort(
+                imm_u8(ins, 0, "definemethod slot")?,
+                intern_id(strings, name.as_bytes())?,
+                imm_u8(ins, 1, "definemethod length")?,
+            )
+        }
+        148 => {
+            let ctor = utf8(id(ins, 0)?)?;
+            refs.constructor_names.insert(ctor.clone());
+            refs.method_pool_entries.insert(ctor);
+            let literal = literal_ref(literal_key_to_index, id(ins, 1)?, refs)?;
+            Insn::DefineClassWithBuffer(
+                imm_u8(ins, 0, "defineclass slot")?,
+                0,
+                literal,
+                imm_u16(ins, 1, "defineclass argc")?,
+                reg_u8(ins, 0)?,
+            )
+        }
+        150 => Insn::ResumeGenerator,
+        152 => Insn::GetResumeMode,
+        154 => Insn::GetTemplateObject(imm_u16(ins, 0, "gettemplateobject slot")?),
+        156 => Insn::GetNextPropName(reg_u8(ins, 0)?),
+        157 => Insn::DelObjProp(reg_u8(ins, 0)?),
+        159 => Insn::SuspendGenerator(reg_u8(ins, 0)?),
+        161 => Insn::AsyncFunctionAwaitUncaught(reg_u8(ins, 0)?),
+        163 => Insn::CopyDataProperties(reg_u8(ins, 0)?),
+        165 => Insn::StArraySpread(reg_u8(ins, 0)?, reg_u8(ins, 1)?),
+        166 => {
+            Insn::SetObjectWithProto(imm_u8(ins, 0, "setobjectwithproto slot")?, reg_u8(ins, 0)?)
+        }
+        168 => Insn::LdObjByValue(imm_u8(ins, 0, "ldobjbyvalue slot")?, reg_u8(ins, 0)?),
+        170 => Insn::StObjByValue(
+            imm_u8(ins, 0, "stobjbyvalue slot")?,
+            reg_u8(ins, 0)?,
+            reg_u8(ins, 1)?,
+        ),
+        171 => Insn::StOwnByValue(
+            imm_u8(ins, 0, "stownbyvalue slot")?,
+            reg_u8(ins, 0)?,
+            reg_u8(ins, 1)?,
+        ),
+        172 => Insn::LdSuperByValue(imm_u8(ins, 0, "ldsuperbyvalue slot")?, reg_u8(ins, 0)?),
+        174 => Insn::StSuperByValue(
+            imm_u8(ins, 0, "stsuperbyvalue slot")?,
+            reg_u8(ins, 0)?,
+            reg_u8(ins, 1)?,
+        ),
+        180 | 181 => Insn::StOwnByIndex(
+            imm_u16(ins, 0, "stownbyindex slot")?,
+            reg_u8(ins, 0)?,
+            imm_u16(ins, 1, "stownbyindex index")?,
+        ),
+        182 => Insn::AsyncFunctionResolve(reg_u8(ins, 0)?),
+        184 => Insn::AsyncFunctionReject(reg_u8(ins, 0)?),
+        186 => Insn::CopyRestArgs(imm_u8(ins, 0, "copyrestargs count")?),
+        188 | 189 => Insn::LdLexVar(
+            imm_u8(ins, 0, "ldlexvar level")?,
+            imm_u8(ins, 1, "ldlexvar slot")?,
+        ),
+        190 | 191 => Insn::StLexVar(
+            imm_u8(ins, 0, "stlexvar level")?,
+            imm_u8(ins, 1, "stlexvar slot")?,
+        ),
+        196 => Insn::StModuleVar(imm_u8(ins, 0, "stmodulevar index")?),
+        199 => Insn::TryLdGlobalByName(
+            imm_u8(ins, 0, "tryldglobalbyname slot")?,
+            intern_id(strings, id(ins, 0)?)?,
+        ),
+        200 => Insn::TryStGlobalByName(
+            imm_u8(ins, 0, "trystglobalbyname slot")?,
+            intern_id(strings, id(ins, 0)?)?,
+        ),
+        203 => Insn::LdObjByName(
+            imm_u8(ins, 0, "ldobjbyname slot")?,
+            intern_id(strings, id(ins, 0)?)?,
+        ),
+        205 => Insn::StObjByName(
+            imm_u8(ins, 0, "stobjbyname slot")?,
+            intern_id(strings, id(ins, 0)?)?,
+            reg_u8(ins, 0)?,
+        ),
+        206 => Insn::StOwnByName(
+            imm_u8(ins, 0, "stownbyname slot")?,
+            intern_id(strings, id(ins, 0)?)?,
+            reg_u8(ins, 0)?,
+        ),
+        207 => Insn::LdSuperByName(
+            imm_u8(ins, 0, "ldsuperbyname slot")?,
+            intern_id(strings, id(ins, 0)?)?,
+        ),
+        209 => Insn::StSuperByName(
+            imm_u8(ins, 0, "stsuperbyname slot")?,
+            intern_id(strings, id(ins, 0)?)?,
+            reg_u8(ins, 0)?,
+        ),
+        210 => Insn::LdLocalModuleVar(imm_u8(ins, 0, "ldlocalmodulevar index")?),
+        212 => Insn::LdExternalModuleVar(imm_u8(ins, 0, "ldexternalmodulevar index")?),
+        222 => Insn::StOwnByValueWithNameSet(
+            imm_u8(ins, 0, "stownbyvaluewithnameset slot")?,
+            reg_u8(ins, 0)?,
+            reg_u8(ins, 1)?,
+        ),
+        223 => Insn::StOwnByNameWithNameSet(
+            imm_u8(ins, 0, "stownbynamewithnameset slot")?,
+            intern_id(strings, id(ins, 0)?)?,
+            reg_u8(ins, 0)?,
+        ),
+        224 => Insn::LdBigInt(intern_id(strings, id(ins, 0)?)?),
+        231 => Insn::DynamicImport,
+        236 => Insn::LdaStr(intern_id(strings, id(ins, 0)?)?),
+        237 => {
+            let label = utf8(id(ins, 0)?)?;
+            jump = Some((JumpKind::Jmp, label));
+            Insn::JmpWide(0)
+        }
+        238 => {
+            let label = utf8(id(ins, 0)?)?;
+            jump = Some((JumpKind::Jeqz, label));
+            Insn::JeqzWide(0)
+        }
+        239 => {
+            let label = utf8(id(ins, 0)?)?;
+            jump = Some((JumpKind::Jnez, label));
+            Insn::JnezWide(0)
+        }
+        254 => {
+            let dst = reg_u16(ins, 0)?;
+            let src = reg_u16(ins, 1)?;
+            if dst <= 0x0f && src <= 0x0f {
+                Insn::MovV4(dst as u8, src as u8)
+            } else if dst <= u8::MAX as u16 && src <= u8::MAX as u16 {
+                Insn::MovV8(dst as u8, src as u8)
+            } else {
+                Insn::MovV16(dst, src)
+            }
+        }
+        255 => Insn::Lda(reg_u8(ins, 0)?),
+        256 => Insn::Sta(reg_u8(ins, 0)?),
+        257 => Insn::LdAi(imm_i32(ins, 0, "ldai value")?),
+        258 => Insn::FLdAi(read_imm_f64(ins, 0, "fldai value")?),
+        259 => Insn::Return,
+        260 => Insn::ReturnUndefined,
+        261 => Insn::Nop,
+        opcode => generic_insn_from_proto(ins, opcode, strings, literal_key_to_index, refs)?,
+    };
+    Ok(DecodedItem::Insn { insn, jump })
+}
+
+fn generic_insn_from_proto(
+    ins: &Ins,
+    opcode: u32,
+    strings: &mut StringTable,
+    literal_key_to_index: &BTreeMap<String, usize>,
+    refs: &mut MethodDecodeRefs,
+) -> io::Result<Insn> {
+    let imms = ins
+        .imms
+        .iter()
+        .map(|imm| match imm.r#type.as_ref() {
+            Some(ins::i_type::Type::ValueInt(value)) => Ok(PandasmImm::Int(*value)),
+            Some(ins::i_type::Type::ValueDouble(value)) => Ok(PandasmImm::Double(*value)),
+            None => invalid_data("missing generic pandasm immediate"),
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    let bytes = encode_pandasm_instruction(opcode, &ins.regs, &ins.ids, &imms, |kind, id| {
+        resolve_pandasm_proto_id(kind, id, strings, literal_key_to_index, refs)
+    })
+    .ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unsupported pandasm opcode {opcode}"),
+        )
+    })?;
+    Ok(Insn::Pandasm(PandasmInsn {
+        opcode,
+        regs: ins.regs.clone(),
+        ids: ins.ids.clone(),
+        imms,
+        bytes,
+    }))
+}
+
+fn resolve_pandasm_proto_id(
+    kind: IdKind,
+    id: &[u8],
+    strings: &mut StringTable,
+    literal_key_to_index: &BTreeMap<String, usize>,
+    refs: &mut MethodDecodeRefs,
+) -> Option<u32> {
+    match kind {
+        IdKind::String | IdKind::Method => intern_id(strings, id).ok().map(u32::from),
+        IdKind::LiteralArray => literal_ref(literal_key_to_index, id, refs)
+            .ok()
+            .map(u32::from),
+        IdKind::Other => None,
+    }
+}
+
+fn method_kind_from_proto(name: &str, access_flags: u32, function_kind: u32) -> MethodKind {
+    if name == "func_main_0" {
+        MethodKind::Module
+    } else if access_flags == method_access::ANON {
+        MethodKind::Anonymous
+    } else if access_flags == method_access::MODULE_OR_CTOR || function_kind == 2 {
+        MethodKind::FunctionLiteral
+    } else {
+        MethodKind::Function
+    }
+}
+
+fn record_access_flags(record: &Record) -> u32 {
+    record
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.father.as_ref())
+        .map(|metadata| metadata.access_flags)
+        .unwrap_or(1)
+}
+
+fn field_access_flags(field: &Field) -> u32 {
+    field
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.father.as_ref())
+        .map(|metadata| metadata.access_flags)
+        .unwrap_or(0)
+}
+
+fn function_access_flags(function: &Function) -> u32 {
+    function
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.father.as_ref())
+        .map(|metadata| metadata.access_flags)
+        .unwrap_or(method_access::INSTANCE)
+}
+
+fn type_idx(value: &Type) -> u16 {
+    match std::str::from_utf8(&value.name).ok() {
+        Some("u8") => 0,
+        Some("u32") => 1,
+        _ => 0,
+    }
+}
+
+fn scalar_u64_value(value: &ScalarValue) -> io::Result<u64> {
+    match &value.value {
+        Some(scalar_value::Value::ValueU64(value)) => Ok(*value),
+        _ => invalid_data("missing scalar uint64 value"),
+    }
+}
+
+fn scalar_string_value(value: &ScalarValue) -> io::Result<String> {
+    match &value.value {
+        Some(scalar_value::Value::ValueStr(value)) => utf8(value),
+        _ => invalid_data("missing scalar string value"),
+    }
+}
+
+fn label_offset(labels: &BTreeMap<String, usize>, label: &[u8]) -> io::Result<u32> {
+    let label = utf8(label)?;
+    let Some(offset) = labels.get(&label) else {
+        return invalid_data(format!("missing catch label {label}"));
+    };
+    to_u32(*offset as u64, "catch label offset")
+}
+
+fn literal_ref(
+    literal_key_to_index: &BTreeMap<String, usize>,
+    key: &[u8],
+    refs: &mut MethodDecodeRefs,
+) -> io::Result<u16> {
+    let key = utf8(key)?;
+    let Some(&index) = literal_key_to_index.get(&key) else {
+        return invalid_data(format!("missing literal array key {key}"));
+    };
+    refs.literal_indices.insert(index);
+    to_u16(index as u64, "literal array index")
+}
+
+fn intern_id(strings: &mut StringTable, value: &[u8]) -> io::Result<u16> {
+    let value = utf8(value)?;
+    let index = strings.intern(&value);
+    to_u16(index as u64, "string index")
+}
+
+fn id(ins: &Ins, index: usize) -> io::Result<&[u8]> {
+    ins.ids
+        .get(index)
+        .map(Vec::as_slice)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing instruction id"))
+}
+
+fn reg_u8(ins: &Ins, index: usize) -> io::Result<u8> {
+    let value = *ins.regs.get(index).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidData, "missing instruction register")
+    })?;
+    to_u8(value as u64, "instruction register")
+}
+
+fn reg_u16(ins: &Ins, index: usize) -> io::Result<u16> {
+    let value = *ins.regs.get(index).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidData, "missing instruction register")
+    })?;
+    to_u16(value as u64, "instruction register")
+}
+
+fn read_imm_i64(ins: &Ins, index: usize, name: &str) -> io::Result<i64> {
+    match ins.imms.get(index).and_then(|value| value.r#type.as_ref()) {
+        Some(ins::i_type::Type::ValueInt(value)) => Ok(*value),
+        _ => invalid_data(format!("missing integer immediate {name}")),
+    }
+}
+
+fn imm_i32(ins: &Ins, index: usize, name: &str) -> io::Result<i32> {
+    let value = read_imm_i64(ins, index, name)?;
+    i32::try_from(value).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{name} out of i32 range"),
+        )
+    })
+}
+
+fn imm_u8(ins: &Ins, index: usize, name: &str) -> io::Result<u8> {
+    let value = read_imm_i64(ins, index, name)?;
+    if value < 0 {
+        return invalid_data(format!("{name} is negative"));
+    }
+    to_u8(value as u64, name)
+}
+
+fn imm_u16(ins: &Ins, index: usize, name: &str) -> io::Result<u16> {
+    let value = read_imm_i64(ins, index, name)?;
+    if value < 0 {
+        return invalid_data(format!("{name} is negative"));
+    }
+    to_u16(value as u64, name)
+}
+
+fn read_imm_f64(ins: &Ins, index: usize, name: &str) -> io::Result<f64> {
+    match ins.imms.get(index).and_then(|value| value.r#type.as_ref()) {
+        Some(ins::i_type::Type::ValueDouble(value)) => Ok(*value),
+        _ => invalid_data(format!("missing double immediate {name}")),
+    }
+}
+
+fn utf8(value: &[u8]) -> io::Result<String> {
+    String::from_utf8(value.to_vec()).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid protoPanda UTF-8 string: {error}"),
+        )
+    })
+}
+
+fn to_u8(value: u64, name: &str) -> io::Result<u8> {
+    u8::try_from(value).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{name} out of u8 range"),
+        )
+    })
+}
+
+fn to_u16(value: u64, name: &str) -> io::Result<u16> {
+    u16::try_from(value).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{name} out of u16 range"),
+        )
+    })
+}
+
+fn to_u32(value: u64, name: &str) -> io::Result<u32> {
+    u32::try_from(value).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{name} out of u32 range"),
+        )
+    })
+}
+
+fn invalid_data<T>(message: impl Into<String>) -> io::Result<T> {
+    Err(io::Error::new(io::ErrorKind::InvalidData, message.into()))
+}
+
+fn record_to_proto(record: &ClassRecord, file: &AbcFile) -> Record {
+    Record {
+        name: bytes(&record.name),
+        conflict: false,
+        language: record.source_lang as u32,
+        metadata: Some(record_metadata(record.access_flags)),
+        field_list: record
+            .fields
+            .iter()
+            .map(|field| field_to_proto(field, record, file))
+            .collect(),
+        params_num: 0,
+        body_presence: false,
+        body_location: None,
+        source_file: record.source_file.as_deref().map(bytes).unwrap_or_default(),
+        file_location: None,
+    }
+}
+
+fn field_to_proto(field: &FieldRecord, record: &ClassRecord, file: &AbcFile) -> Field {
+    let field_type = field_type(field.type_idx);
+    Field {
+        r#type: Some(field_type.clone()),
+        name: bytes(&field.name),
+        metadata: Some(FieldMetadata {
+            father: Some(item_metadata(field.access_flags)),
+            field_type: Some(field_type),
+            value: field
+                .value
+                .map(|value| field_scalar_value(value, record, file)),
+        }),
+        line_of_def: 0,
+        whole_line: Vec::new(),
+        bound_left: 0,
+        bound_right: 0,
+        is_defined: false,
+    }
+}
+
+fn field_scalar_value(value: FieldValue, record: &ClassRecord, _file: &AbcFile) -> ScalarValue {
+    match value {
+        FieldValue::U8(value) => scalar_u64(VALUE_TYPE_U8, value as u64),
+        FieldValue::U32(value) => scalar_u64(VALUE_TYPE_U32, value as u64),
+        FieldValue::LiteralArray(index) => {
+            scalar_string(VALUE_TYPE_LITERALARRAY, literal_key(record, index))
+        }
+    }
+}
+
+fn function_to_proto(
+    method: &MethodRecord,
+    record: &ClassRecord,
+    strings: &StringTable,
+) -> io::Result<Function> {
+    let mut pandasm_insns = method.pandasm_insns.clone();
+    let slots_num = assign_inline_cache_slots(&mut pandasm_insns);
+
+    let mut labels = BTreeSet::<usize>::new();
+    let offsets = instruction_offsets(&pandasm_insns);
+    for (idx, insn) in pandasm_insns.iter().enumerate() {
+        if let Some(target) = jump_target(offsets[idx], insn) {
+            labels.insert(target);
+        }
+    }
+    for catch in &method.catch_entries {
+        labels.insert(catch.try_begin as usize);
+        labels.insert(catch.try_end as usize);
+        labels.insert(catch.catch_begin as usize);
+        labels.insert(catch.catch_end as usize);
+    }
+
+    let mut ins = Vec::with_capacity(method.pandasm_insns.len() + labels.len());
+    for (idx, asm) in pandasm_insns.iter().enumerate() {
+        let offset = offsets[idx];
+        if labels.contains(&offset) {
+            ins.push(label_ins(offset));
+        }
+        ins.push(insn_to_proto(
+            asm,
+            method.pandasm_debug.get(idx).copied(),
+            offset,
+            record,
+            strings,
+        )?);
+    }
+    let end_offset = pandasm_insns.iter().map(Insn::byte_len).sum::<usize>();
+    if labels.contains(&end_offset) {
+        ins.push(label_ins(end_offset));
+    }
+
+    Ok(Function {
+        name: bytes(&method.name),
+        language: record.source_lang as u32,
+        metadata: Some(function_metadata(method.access_flags())),
+        label_table: Vec::new(),
+        ins,
+        local_variable_debug: Vec::new(),
+        source_file: method
+            .debug_info
+            .as_ref()
+            .map(|debug| bytes(&debug.source_file))
+            .unwrap_or_default(),
+        source_code: Vec::new(),
+        catch_blocks: method
+            .catch_entries
+            .iter()
+            .map(|catch| crate::proto_panda::CatchBlock {
+                whole_line: Vec::new(),
+                exception_record: Vec::new(),
+                try_begin_label: bytes(&label_name(catch.try_begin as usize)),
+                try_end_label: bytes(&label_name(catch.try_end as usize)),
+                catch_begin_label: bytes(&label_name(catch.catch_begin as usize)),
+                catch_end_label: bytes(&label_name(catch.catch_end as usize)),
+            })
+            .collect(),
+        value_of_first_param: -1,
+        regs_num: method.num_vregs as u64,
+        params: (0..method.num_args)
+            .map(|_| Parameter {
+                r#type: Some(type_named("any")),
+                metadata: Some(ParamMetadata {
+                    father: Some(annotation_metadata()),
+                }),
+            })
+            .collect(),
+        body_presence: !method.bytecode.is_empty(),
+        return_type: Some(type_named("any")),
+        body_location: None,
+        file_location: None,
+        function_kind: function_kind(method.kind),
+        slots_num: slots_num.into(),
+        concurrent_module_requests: Vec::new(),
+    })
+}
+
+fn assign_inline_cache_slots(insns: &mut [Insn]) -> u32 {
+    let mut current_slot = 0u32;
+    for insn in insns {
+        if let Some(slot_size) = insn.assign_inline_cache_slot(current_slot) {
+            current_slot += slot_size as u32;
+        }
+    }
+    current_slot
+}
+
+fn instruction_offsets(insns: &[Insn]) -> Vec<usize> {
+    let mut offsets = Vec::with_capacity(insns.len());
+    let mut offset = 0usize;
+    for insn in insns {
+        offsets.push(offset);
+        offset += insn.byte_len();
+    }
+    offsets
+}
+
+fn jump_target(offset: usize, insn: &Insn) -> Option<usize> {
+    let rel = match insn {
+        Insn::JmpShort(value) => *value as i32,
+        Insn::Jmp(value) => *value as i32,
+        Insn::JmpWide(value) => *value,
+        Insn::JeqzShort(value) => *value as i32,
+        Insn::Jeqz(value) => *value as i32,
+        Insn::JeqzWide(value) => *value,
+        Insn::JnezShort(value) => *value as i32,
+        Insn::Jnez(value) => *value as i32,
+        Insn::JnezWide(value) => *value,
+        _ => return None,
+    };
+    (offset as i64 + rel as i64).try_into().ok()
+}
+
+fn label_ins(offset: usize) -> Ins {
+    Ins {
+        opcode: 0,
+        regs: Vec::new(),
+        ids: Vec::new(),
+        imms: Vec::new(),
+        label: bytes(&label_name(offset)),
+        set_label_val: true,
+        ins_debug: Some(default_ins_debug()),
+    }
+}
+
+fn ins_debug(debug: Option<InstructionDebugInfo>) -> DebuginfoIns {
+    let Some(debug) = debug else {
+        return default_ins_debug();
+    };
+    DebuginfoIns {
+        line_number: debug.line_number as u64,
+        column_number: debug.column_number,
+        whole_line: Vec::new(),
+        bound_left: 0,
+        bound_right: 0,
+    }
+}
+
+fn default_ins_debug() -> DebuginfoIns {
+    DebuginfoIns {
+        line_number: 0,
+        column_number: 0,
+        whole_line: Vec::new(),
+        bound_left: 0,
+        bound_right: 0,
+    }
+}
+
+fn insn_to_proto(
+    insn: &Insn,
+    debug: Option<InstructionDebugInfo>,
+    offset: usize,
+    record: &ClassRecord,
+    strings: &StringTable,
+) -> io::Result<Ins> {
+    let mut out = Ins {
+        opcode: pandasm_opcode(insn),
+        regs: Vec::new(),
+        ids: Vec::new(),
+        imms: Vec::new(),
+        label: Vec::new(),
+        set_label_val: false,
+        ins_debug: Some(ins_debug(debug)),
+    };
+
+    if let Insn::Pandasm(raw) = insn {
+        out.opcode = raw.opcode;
+        out.regs = raw.regs.clone();
+        out.ids = raw.ids.clone();
+        out.imms = raw
+            .imms
+            .iter()
+            .map(|imm| match imm {
+                PandasmImm::Int(value) => imm_i64(*value),
+                PandasmImm::Double(value) => imm_f64(*value),
+            })
+            .collect();
+        return Ok(out);
+    }
+
+    match insn {
+        Insn::Pandasm(_) => unreachable!("generic pandasm instruction serialized above"),
+        Insn::LdUndefined
+        | Insn::LdNull
+        | Insn::LdTrue
+        | Insn::LdFalse
+        | Insn::LdHole
+        | Insn::LdGlobal
+        | Insn::DynamicImport
+        | Insn::GetImportMeta
+        | Insn::Debugger
+        | Insn::LdThis
+        | Insn::PopLexEnv
+        | Insn::CreateEmptyObject
+        | Insn::Return
+        | Insn::ReturnUndefined
+        | Insn::Throw
+        | Insn::ThrowPatternNonCoercible
+        | Insn::GetPropIterator
+        | Insn::ResumeGenerator
+        | Insn::GetResumeMode
+        | Insn::AsyncFunctionEnter
+        | Insn::Nop
+        | Insn::IsTrue
+        | Insn::IsFalse => {}
+        Insn::LdAi(value) => out.imms.push(imm_i64(*value as i64)),
+        Insn::FLdAi(value) => out.imms.push(imm_f64(*value)),
+        Insn::LdaStr(id) | Insn::LdBigInt(id) => out.ids.push(string_id(strings, *id)?),
+        Insn::Lda(reg)
+        | Insn::Sta(reg)
+        | Insn::ThrowIfNotObject(reg)
+        | Insn::CopyDataProperties(reg)
+        | Insn::DelObjProp(reg)
+        | Insn::GetNextPropName(reg)
+        | Insn::CreateGeneratorObj(reg)
+        | Insn::SuspendGenerator(reg)
+        | Insn::AsyncFunctionAwaitUncaught(reg)
+        | Insn::AsyncFunctionResolve(reg)
+        | Insn::AsyncFunctionReject(reg) => out.regs.push(*reg as u32),
+        Insn::MovV4(dst, src) | Insn::MovV8(dst, src) => {
+            out.regs.extend([*dst as u32, *src as u32]);
+        }
+        Insn::MovV16(dst, src) => out.regs.extend([*dst as u32, *src as u32]),
+        Insn::Add2(slot, reg)
+        | Insn::Sub2(slot, reg)
+        | Insn::Mul2(slot, reg)
+        | Insn::Div2(slot, reg)
+        | Insn::Mod2(slot, reg)
+        | Insn::Eq(slot, reg)
+        | Insn::NotEq(slot, reg)
+        | Insn::Less(slot, reg)
+        | Insn::LessEq(slot, reg)
+        | Insn::Greater(slot, reg)
+        | Insn::GreaterEq(slot, reg)
+        | Insn::Shl2(slot, reg)
+        | Insn::Shr2(slot, reg)
+        | Insn::Ashr2(slot, reg)
+        | Insn::And2(slot, reg)
+        | Insn::Or2(slot, reg)
+        | Insn::Xor2(slot, reg)
+        | Insn::Exp(slot, reg)
+        | Insn::IsIn(slot, reg)
+        | Insn::InstanceOf(slot, reg)
+        | Insn::StrictNotEq(slot, reg)
+        | Insn::StrictEq(slot, reg)
+        | Insn::CallArg1(slot, reg)
+        | Insn::CallThis0(slot, reg)
+        | Insn::LdObjByValue(slot, reg)
+        | Insn::LdSuperByValue(slot, reg)
+        | Insn::SetObjectWithProto(slot, reg)
+        | Insn::SuperCallSpread(slot, reg)
+        | Insn::NewObjApply(slot, reg)
+        | Insn::CloseIterator(slot, reg)
+        | Insn::CallRuntimeCallInit(slot, reg) => {
+            out.imms.push(imm_i64(*slot as i64));
+            out.regs.push(*reg as u32);
+        }
+        Insn::TypeOf(slot)
+        | Insn::ToNumber(slot)
+        | Insn::ToNumeric(slot)
+        | Insn::Neg(slot)
+        | Insn::BitNot(slot)
+        | Insn::Inc(slot)
+        | Insn::Dec(slot)
+        | Insn::CallArg0(slot)
+        | Insn::GetIterator(slot)
+        | Insn::CopyRestArgs(slot)
+        | Insn::CallRuntimeIsTrue(slot)
+        | Insn::CallRuntimeIsFalse(slot) => out.imms.push(imm_i64(*slot as i64)),
+        Insn::CreateEmptyArray(slot) => out.imms.push(imm_i64(*slot as i64)),
+        Insn::CallArgs2(slot, a, b)
+        | Insn::CallThis1(slot, a, b)
+        | Insn::StObjByValue(slot, a, b)
+        | Insn::StSuperByValue(slot, a, b)
+        | Insn::StOwnByValue(slot, a, b)
+        | Insn::StOwnByValueWithNameSet(slot, a, b)
+        | Insn::CallRuntimeDefineFieldByValue(slot, a, b)
+        | Insn::Apply(slot, a, b) => {
+            out.imms.push(imm_i64(*slot as i64));
+            out.regs.extend([*a as u32, *b as u32]);
+        }
+        Insn::CallArgs3(slot, a, b, c) | Insn::CallThis2(slot, a, b, c) => {
+            out.imms.push(imm_i64(*slot as i64));
+            out.regs.extend([*a as u32, *b as u32, *c as u32]);
+        }
+        Insn::CallThis3(slot, a, b, c, d) => {
+            out.imms.push(imm_i64(*slot as i64));
+            out.regs
+                .extend([*a as u32, *b as u32, *c as u32, *d as u32]);
+        }
+        Insn::CallRange(slot, argc, start)
+        | Insn::CallThisRange(slot, argc, start)
+        | Insn::SuperCallThisRange(slot, argc, start)
+        | Insn::SuperCallArrowRange(slot, argc, start)
+        | Insn::NewObjRange(slot, argc, start) => {
+            out.imms
+                .extend([imm_i64(*slot as i64), imm_i64(*argc as i64)]);
+            out.regs.push(*start as u32);
+        }
+        Insn::TryLdGlobalByName(slot, id)
+        | Insn::TryStGlobalByName(slot, id)
+        | Insn::LdObjByName(slot, id)
+        | Insn::LdSuperByName(slot, id) => {
+            out.imms.push(imm_i64(*slot as i64));
+            out.ids.push(string_id(strings, *id)?);
+        }
+        Insn::StObjByName(slot, id, reg)
+        | Insn::StSuperByName(slot, id, reg)
+        | Insn::DefinePropertyByName(slot, id, reg)
+        | Insn::DefineFieldByName(slot, id, reg)
+        | Insn::StOwnByName(slot, id, reg)
+        | Insn::StOwnByNameWithNameSet(slot, id, reg) => {
+            out.imms.push(imm_i64(*slot as i64));
+            out.ids.push(string_id(strings, *id)?);
+            out.regs.push(*reg as u32);
+        }
+        Insn::LdExternalModuleVar(index)
+        | Insn::LdLocalModuleVar(index)
+        | Insn::StModuleVar(index) => out.imms.push(imm_i64(*index as i64)),
+        Insn::LdLexVar(level, slot) | Insn::StLexVar(level, slot) => {
+            out.imms
+                .extend([imm_i64(*level as i64), imm_i64(*slot as i64)]);
+        }
+        Insn::NewLexEnvWithName(count, literal)
+        | Insn::CreateArrayWithBuffer(count, literal)
+        | Insn::CreateObjectWithBuffer(count, literal) => {
+            out.imms.push(imm_i64(*count as i64));
+            out.ids.push(bytes(&literal_key(record, *literal as usize)));
+        }
+        Insn::NewLexEnv(count) => out.imms.push(imm_i64(*count as i64)),
+        Insn::ThrowUndefinedIfHoleWithName(id) => out.ids.push(string_id(strings, *id)?),
+        Insn::ThrowIfSuperNotCorrectCall(kind) => out.imms.push(imm_i64(*kind as i64)),
+        Insn::LdPrivateProperty(ic, level, slot) | Insn::TestIn(ic, level, slot) => {
+            out.imms.extend([
+                imm_i64(*ic as i64),
+                imm_i64(*level as i64),
+                imm_i64(*slot as i64),
+            ]);
+        }
+        Insn::StPrivateProperty(ic, level, slot, reg)
+        | Insn::CallRuntimeDefinePrivateProperty(ic, level, slot, reg) => {
+            out.imms.extend([
+                imm_i64(*ic as i64),
+                imm_i64(*level as i64),
+                imm_i64(*slot as i64),
+            ]);
+            out.regs.push(*reg as u32);
+        }
+        Insn::CallRuntimeCreatePrivateProperty(count, literal) => {
+            out.imms.push(imm_i64(*count as i64));
+            out.ids.push(bytes(&literal_key(record, *literal as usize)));
+        }
+        Insn::DefineFuncShort(slot, id, length) | Insn::DefineMethodShort(slot, id, length) => {
+            out.imms
+                .extend([imm_i64(*slot as i64), imm_i64(*length as i64)]);
+            out.ids.push(string_id(strings, *id)?);
+        }
+        Insn::DefineClassWithBuffer(slot, _ctor, literal, argc, reg) => {
+            out.imms
+                .extend([imm_i64(*slot as i64), imm_i64(*argc as i64)]);
+            out.ids.push(bytes(
+                &next_constructor_name(record, offset).unwrap_or_else(|| "func_main_0".to_string()),
+            ));
+            out.ids.push(bytes(&literal_key(record, *literal as usize)));
+            out.regs.push(*reg as u32);
+        }
+        Insn::DefineGetterSetterByValue(a, b, c, d) => {
+            out.regs
+                .extend([*a as u32, *b as u32, *c as u32, *d as u32]);
+        }
+        Insn::StOwnByIndex(slot, array, index) => {
+            out.imms
+                .extend([imm_i64(*slot as i64), imm_i64(*index as i64)]);
+            out.regs.push(*array as u32);
+        }
+        Insn::StArraySpread(a, b) => out.regs.extend([*a as u32, *b as u32]),
+        Insn::CreateObjectWithExcludedKeys(count, a, b) => {
+            out.imms.push(imm_i64(*count as i64));
+            out.regs.extend([*a as u32, *b as u32]);
+        }
+        Insn::GetTemplateObject(slot) => out.imms.push(imm_i64(*slot as i64)),
+        Insn::JmpShort(_)
+        | Insn::Jmp(_)
+        | Insn::JmpWide(_)
+        | Insn::JeqzShort(_)
+        | Insn::Jeqz(_)
+        | Insn::JeqzWide(_)
+        | Insn::JnezShort(_)
+        | Insn::Jnez(_)
+        | Insn::JnezWide(_) => {
+            if let Some(target) = jump_target(offset, insn) {
+                out.ids.push(bytes(&label_name(target)));
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn next_constructor_name(record: &ClassRecord, _offset: usize) -> Option<String> {
+    record
+        .methods
+        .iter()
+        .find(|method| method.kind == MethodKind::Constructor)
+        .map(|method| method.name.clone())
+}
+
+fn pandasm_opcode(insn: &Insn) -> u32 {
+    match insn {
+        Insn::Pandasm(raw) => raw.opcode,
+        Insn::LdUndefined => 2,
+        Insn::LdNull => 3,
+        Insn::LdGlobal => 5,
+        Insn::LdTrue => 6,
+        Insn::LdFalse => 7,
+        Insn::LdHole => 8,
+        Insn::LdThis => 11,
+        Insn::PopLexEnv => 12,
+        Insn::AsyncFunctionEnter => 15,
+        Insn::Debugger => 17,
+        Insn::GetPropIterator => 18,
+        Insn::GetIterator(_) => 19,
+        Insn::CloseIterator(_, _) => 20,
+        Insn::LdPrivateProperty(_, _, _) => 23,
+        Insn::StPrivateProperty(_, _, _, _) => 24,
+        Insn::TestIn(_, _, _) => 25,
+        Insn::DefineFieldByName(_, _, _) => 26,
+        Insn::DefinePropertyByName(_, _, _) => 27,
+        Insn::CreateEmptyObject => 28,
+        Insn::CreateEmptyArray(_) => 29,
+        Insn::CreateGeneratorObj(_) => 30,
+        Insn::CreateObjectWithExcludedKeys(count, _, _) if *count > u8::MAX as u16 => 33,
+        Insn::CreateObjectWithExcludedKeys(_, _, _) => 32,
+        Insn::CreateArrayWithBuffer(_, _) => 34,
+        Insn::CreateObjectWithBuffer(_, _) => 36,
+        Insn::NewObjApply(_, _) => 39,
+        Insn::NewObjRange(_, _, _) => 40,
+        Insn::NewLexEnv(_) => 42,
+        Insn::NewLexEnvWithName(_, _) => 44,
+        Insn::Add2(_, _) => 48,
+        Insn::Sub2(_, _) => 49,
+        Insn::Mul2(_, _) => 50,
+        Insn::Div2(_, _) => 51,
+        Insn::Mod2(_, _) => 52,
+        Insn::Eq(_, _) => 53,
+        Insn::NotEq(_, _) => 54,
+        Insn::Less(_, _) => 55,
+        Insn::LessEq(_, _) => 56,
+        Insn::Greater(_, _) => 57,
+        Insn::GreaterEq(_, _) => 58,
+        Insn::Shl2(_, _) => 59,
+        Insn::Shr2(_, _) => 60,
+        Insn::Ashr2(_, _) => 61,
+        Insn::And2(_, _) => 62,
+        Insn::Or2(_, _) => 63,
+        Insn::Xor2(_, _) => 64,
+        Insn::Exp(_, _) => 65,
+        Insn::TypeOf(_) => 66,
+        Insn::ToNumber(_) => 67,
+        Insn::ToNumeric(_) => 69,
+        Insn::Neg(_) => 71,
+        Insn::BitNot(_) => 73,
+        Insn::Inc(_) => 75,
+        Insn::Dec(_) => 77,
+        Insn::IsTrue => 79,
+        Insn::IsFalse => 80,
+        Insn::IsIn(_, _) => 81,
+        Insn::InstanceOf(_, _) => 82,
+        Insn::StrictNotEq(_, _) => 83,
+        Insn::StrictEq(_, _) => 84,
+        Insn::CallRuntimeDefineFieldByValue(_, _, _) => 86,
+        Insn::CallRuntimeCreatePrivateProperty(_, _) => 89,
+        Insn::CallRuntimeDefinePrivateProperty(_, _, _, _) => 90,
+        Insn::CallRuntimeCallInit(_, _) => 91,
+        Insn::CallRuntimeIsTrue(_) => 102,
+        Insn::CallRuntimeIsFalse(_) => 103,
+        Insn::Throw => 109,
+        Insn::ThrowPatternNonCoercible => 111,
+        Insn::ThrowIfNotObject(_) => 114,
+        Insn::ThrowIfSuperNotCorrectCall(_) => 116,
+        Insn::ThrowUndefinedIfHoleWithName(_) => 117,
+        Insn::CallArg0(_) => 120,
+        Insn::CallArg1(_, _) => 122,
+        Insn::CallArgs2(_, _, _) => 124,
+        Insn::CallArgs3(_, _, _, _) => 126,
+        Insn::CallRange(_, _, _) => 128,
+        Insn::SuperCallSpread(_, _) => 131,
+        Insn::Apply(_, _, _) => 132,
+        Insn::CallThis0(_, _) => 134,
+        Insn::CallThis1(_, _, _) => 135,
+        Insn::CallThis2(_, _, _, _) => 136,
+        Insn::CallThis3(_, _, _, _, _) => 137,
+        Insn::CallThisRange(_, _, _) => 138,
+        Insn::SuperCallThisRange(_, _, _) => 141,
+        Insn::SuperCallArrowRange(_, _, _) => 143,
+        Insn::DefineGetterSetterByValue(_, _, _, _) => 145,
+        Insn::DefineFuncShort(_, _, _) => 146,
+        Insn::DefineMethodShort(_, _, _) => 147,
+        Insn::DefineClassWithBuffer(_, _, _, _, _) => 148,
+        Insn::ResumeGenerator => 150,
+        Insn::GetResumeMode => 152,
+        Insn::GetTemplateObject(_) => 154,
+        Insn::GetNextPropName(_) => 156,
+        Insn::DelObjProp(_) => 157,
+        Insn::SuspendGenerator(_) => 159,
+        Insn::AsyncFunctionAwaitUncaught(_) => 161,
+        Insn::CopyDataProperties(_) => 163,
+        Insn::StArraySpread(_, _) => 165,
+        Insn::SetObjectWithProto(_, _) => 166,
+        Insn::LdObjByValue(_, _) => 168,
+        Insn::StObjByValue(_, _, _) => 170,
+        Insn::StOwnByValue(_, _, _) => 171,
+        Insn::LdSuperByValue(_, _) => 172,
+        Insn::StSuperByValue(_, _, _) => 174,
+        Insn::StOwnByIndex(slot, _, _) if *slot > u8::MAX as u16 => 181,
+        Insn::StOwnByIndex(_, _, _) => 180,
+        Insn::AsyncFunctionResolve(_) => 182,
+        Insn::AsyncFunctionReject(_) => 184,
+        Insn::CopyRestArgs(_) => 186,
+        Insn::LdLexVar(level, slot) if *level > 0x0f || *slot > 0x0f => 189,
+        Insn::LdLexVar(_, _) => 188,
+        Insn::StLexVar(level, slot) if *level > 0x0f || *slot > 0x0f => 191,
+        Insn::StLexVar(_, _) => 190,
+        Insn::StModuleVar(_) => 196,
+        Insn::TryLdGlobalByName(_, _) => 199,
+        Insn::TryStGlobalByName(_, _) => 200,
+        Insn::LdObjByName(_, _) => 203,
+        Insn::StObjByName(_, _, _) => 205,
+        Insn::StOwnByName(_, _, _) => 206,
+        Insn::LdSuperByName(_, _) => 207,
+        Insn::StSuperByName(_, _, _) => 209,
+        Insn::LdLocalModuleVar(_) => 210,
+        Insn::LdExternalModuleVar(_) => 212,
+        Insn::StOwnByValueWithNameSet(_, _, _) => 222,
+        Insn::StOwnByNameWithNameSet(_, _, _) => 223,
+        Insn::LdBigInt(_) => 224,
+        Insn::DynamicImport => 231,
+        Insn::LdaStr(_) => 236,
+        Insn::JmpShort(_) | Insn::Jmp(_) | Insn::JmpWide(_) => 237,
+        Insn::JeqzShort(_) | Insn::Jeqz(_) | Insn::JeqzWide(_) => 238,
+        Insn::JnezShort(_) | Insn::Jnez(_) | Insn::JnezWide(_) => 239,
+        Insn::MovV4(_, _) | Insn::MovV8(_, _) | Insn::MovV16(_, _) => 254,
+        Insn::Lda(_) => 255,
+        Insn::Sta(_) => 256,
+        Insn::LdAi(_) => 257,
+        Insn::FLdAi(_) => 258,
+        Insn::Return => 259,
+        Insn::ReturnUndefined => 260,
+        Insn::Nop | Insn::GetImportMeta => 261,
+    }
+}
+
+fn literal_array_to_proto(array: &LiteralArray) -> crate::proto_panda::LiteralArray {
+    crate::proto_panda::LiteralArray {
+        literals: array.entries.iter().map(literal_to_proto).collect(),
+    }
+}
+
+fn literal_to_proto(entry: &LiteralEntry) -> Literal {
+    match entry {
+        LiteralEntry::TaggedInteger(value) | LiteralEntry::RawU32(value) => {
+            literal_u32(0x02, *value)
+        }
+        LiteralEntry::RawU16(value) => literal_u16(0x02, *value),
+        LiteralEntry::TaggedString(value) | LiteralEntry::RawString(value) => {
+            literal_string(0x05, value)
+        }
+        LiteralEntry::TaggedMethod(value) => literal_u32(0x06, *value),
+        LiteralEntry::TaggedMethodName(value) => literal_string(0x06, value),
+        LiteralEntry::TaggedMethodAffiliate(value) => literal_u16(0x09, *value),
+        LiteralEntry::TaggedNull => literal_u8(0xff, 0),
+    }
+}
+
+fn literal_u8(tag: u32, value: u8) -> Literal {
+    Literal {
+        tag,
+        value: Some(VariantValue {
+            value: Some(variant_value::Value::ValueInt(value as u64)),
+            r#type: VARIANT_U8,
+        }),
+    }
+}
+
+fn literal_u16(tag: u32, value: u16) -> Literal {
+    Literal {
+        tag,
+        value: Some(VariantValue {
+            value: Some(variant_value::Value::ValueInt(value as u64)),
+            r#type: VARIANT_U16,
+        }),
+    }
+}
+
+fn literal_u32(tag: u32, value: u32) -> Literal {
+    Literal {
+        tag,
+        value: Some(VariantValue {
+            value: Some(variant_value::Value::ValueInt(value as u64)),
+            r#type: VARIANT_U32,
+        }),
+    }
+}
+
+fn literal_string(tag: u32, value: &str) -> Literal {
+    Literal {
+        tag,
+        value: Some(VariantValue {
+            value: Some(variant_value::Value::ValueStr(bytes(value))),
+            r#type: VARIANT_STRING,
+        }),
+    }
+}
+
+fn string_id(strings: &StringTable, id: u16) -> io::Result<Vec<u8>> {
+    strings.get(id as u32).map(bytes).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "missing string id for ProgramCache",
+        )
+    })
+}
+
+fn imm_i64(value: i64) -> ins::IType {
+    ins::IType {
+        r#type: Some(ins::i_type::Type::ValueInt(value)),
+    }
+}
+
+fn imm_f64(value: f64) -> ins::IType {
+    ins::IType {
+        r#type: Some(ins::i_type::Type::ValueDouble(value)),
+    }
+}
+
+fn literal_key(record: &ClassRecord, literal_index: usize) -> String {
+    format!("{}_{}", record.name, literal_index)
+}
+
+fn label_name(offset: usize) -> String {
+    format!("L_{offset:08x}")
+}
+
+fn function_kind(kind: MethodKind) -> u32 {
+    match kind {
+        MethodKind::Module | MethodKind::FunctionLiteral | MethodKind::Constructor => 2,
+        MethodKind::Function | MethodKind::Anonymous => 1,
+    }
+}
+
+fn record_metadata(access_flags: u32) -> RecordMetadata {
+    RecordMetadata {
+        father: Some(item_metadata(access_flags)),
+    }
+}
+
+fn function_metadata(access_flags: u32) -> FunctionMetadata {
+    FunctionMetadata {
+        father: Some(item_metadata(access_flags)),
+    }
+}
+
+fn item_metadata(access_flags: u32) -> ItemMetadata {
+    ItemMetadata {
+        father: Some(annotation_metadata()),
+        access_flags,
+    }
+}
+
+fn annotation_metadata() -> crate::proto_panda::AnnotationMetadata {
+    crate::proto_panda::AnnotationMetadata {
+        father: Some(Metadata {
+            set_attributes: Vec::new(),
+            attributes: Vec::new(),
+        }),
+        annotations: Vec::new(),
+    }
+}
+
+fn scalar_u64(value_type: u32, value: u64) -> ScalarValue {
+    ScalarValue {
+        father: Some(Value { r#type: value_type }),
+        value: Some(scalar_value::Value::ValueU64(value)),
+        r#type: SCALAR_UINT64,
+    }
+}
+
+fn scalar_string(value_type: u32, value: String) -> ScalarValue {
+    ScalarValue {
+        father: Some(Value { r#type: value_type }),
+        value: Some(scalar_value::Value::ValueStr(bytes(&value))),
+        r#type: SCALAR_STRING,
+    }
+}
+
+fn field_type(type_idx: u16) -> Type {
+    match type_idx {
+        0 => type_named("u8"),
+        1 => type_named("u32"),
+        _ => type_named("any"),
+    }
+}
+
+fn type_named(name: &str) -> Type {
+    Type {
+        component_name: bytes(name),
+        rank: 0,
+        name: bytes(name),
+        type_id: 0,
+    }
+}
+
+fn bytes(value: &str) -> Vec<u8> {
+    value.as_bytes().to_vec()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::emit::file::AbcFile;
+    use crate::ir::builder::build_record_with_debug_and_package_for_target_with_mode;
+
+    #[test]
+    fn program_cache_uses_pandasm_opcode_numbers_not_byte_values() {
+        assert_eq!(pandasm_opcode(&Insn::LdaStr(0)), 236);
+        assert_eq!(pandasm_opcode(&Insn::TryLdGlobalByName(0, 0)), 199);
+        assert_ne!(pandasm_opcode(&Insn::LdaStr(0)), 0x3e);
+    }
+
+    #[test]
+    fn proto_program_restores_generic_pandasm_instruction() {
+        let ins = Ins {
+            opcode: 0,
+            regs: Vec::new(),
+            ids: Vec::new(),
+            imms: Vec::new(),
+            label: Vec::new(),
+            set_label_val: false,
+            ins_debug: None,
+        };
+        let mut strings = StringTable::default();
+        let literals = BTreeMap::new();
+        let mut refs = MethodDecodeRefs::default();
+
+        let restored =
+            generic_insn_from_proto(&ins, 0, &mut strings, &literals, &mut refs).unwrap();
+
+        let Insn::Pandasm(raw) = restored else {
+            panic!("generic PB opcode should restore as Insn::Pandasm");
+        };
+        assert_eq!(raw.opcode, 0);
+        assert_eq!(raw.bytes, vec![0x6a]);
+    }
+
+    #[test]
+    fn compiled_record_can_build_proto_program() {
+        let mut file = AbcFile::new();
+        let record = build_record_with_debug_and_package_for_target_with_mode(
+            "let x = 1; x;",
+            "@bundle:demo/entry/ets/pages/Index",
+            &mut file.strings,
+            &mut file.literal_arrays,
+            Some("entry/src/main/ets/pages/Index.ets"),
+            None,
+            false,
+            false,
+            "ets",
+            true,
+            12,
+            None,
+            false,
+            false,
+        )
+        .unwrap();
+        file.add_record(record);
+
+        let program = program_for_record(&file, 0).unwrap().unwrap();
+        assert_eq!(program.record_table.len(), 1);
+        assert!(program
+            .function_table
+            .iter()
+            .any(|entry| entry.key == b"func_main_0"));
+    }
+
+    #[test]
+    fn proto_program_can_restore_record_methods_literals_and_jumps() {
+        let mut file = AbcFile::new();
+        let record = build_record_with_debug_and_package_for_target_with_mode(
+            "let x = 0; if (x) { x = 1; } else { x = 2; } x;",
+            "@bundle:demo/entry/ets/pages/Index",
+            &mut file.strings,
+            &mut file.literal_arrays,
+            Some("entry/src/main/ets/pages/Index.ets"),
+            Some("entry"),
+            false,
+            false,
+            "ets",
+            true,
+            12,
+            None,
+            false,
+            false,
+        )
+        .unwrap();
+        file.add_record(record);
+
+        let program = program_for_record(&file, 0).unwrap().unwrap();
+        let function_count = program.function_table.len();
+        let literal_count = program.literal_array_table.len();
+        assert!(program
+            .function_table
+            .iter()
+            .filter_map(|entry| entry.value.as_ref())
+            .flat_map(|function| function.ins.iter())
+            .any(|ins| ins.ins_debug.is_some()));
+        let mut restored = AbcFile::new();
+
+        let appended = append_program_to_file(&mut restored, program).unwrap();
+
+        assert_eq!(appended, vec![0]);
+        assert_eq!(restored.records.len(), 1);
+        assert_eq!(restored.records[0].name, file.records[0].name);
+        assert_eq!(restored.records[0].methods.len(), function_count);
+        assert_eq!(restored.literal_arrays.len(), literal_count);
+        assert!(restored.records[0]
+            .methods
+            .iter()
+            .any(|method| method.name == "func_main_0"
+                && !method.bytecode.is_empty()
+                && !method.pandasm_insns.is_empty()));
+        let restored_main = restored.records[0]
+            .methods
+            .iter()
+            .find(|method| method.name == "func_main_0")
+            .unwrap();
+        let original_main = file.records[0]
+            .methods
+            .iter()
+            .find(|method| method.name == "func_main_0")
+            .unwrap();
+        assert_eq!(restored_main.bytecode, original_main.bytecode);
+        assert_eq!(restored_main.line_ops, original_main.line_ops);
+        assert_eq!(restored_main.pandasm_debug, original_main.pandasm_debug);
+        assert!(program_for_record(&restored, 0).unwrap().is_some());
+    }
+
+    #[test]
+    fn proto_program_restores_debug_line_ops_for_straight_line_code() {
+        let mut file = AbcFile::new();
+        let record = build_record_with_debug_and_package_for_target_with_mode(
+            "let x = 1; x;",
+            "@bundle:demo/entry/ets/pages/Index",
+            &mut file.strings,
+            &mut file.literal_arrays,
+            Some("entry/src/main/ets/pages/Index.ets"),
+            Some("entry"),
+            false,
+            false,
+            "ets",
+            true,
+            12,
+            None,
+            false,
+            false,
+        )
+        .unwrap();
+        file.add_record(record);
+
+        let program = program_for_record(&file, 0).unwrap().unwrap();
+        let mut restored = AbcFile::new();
+        append_program_to_file(&mut restored, program).unwrap();
+
+        let original_main = file.records[0]
+            .methods
+            .iter()
+            .find(|method| method.name == "func_main_0")
+            .unwrap();
+        let restored_main = restored.records[0]
+            .methods
+            .iter()
+            .find(|method| method.name == "func_main_0")
+            .unwrap();
+        assert_eq!(restored_main.pandasm_debug, original_main.pandasm_debug);
+        assert_eq!(restored_main.line_ops, original_main.line_ops);
+    }
+
+    #[test]
+    fn program_cache_assigns_inline_cache_slots_before_serializing() {
+        let mut insns = vec![
+            Insn::TryLdGlobalByName(0, 0),
+            Insn::CallArg0(0),
+            Insn::CreateObjectWithBuffer(0, 0),
+        ];
+
+        let slots = assign_inline_cache_slots(&mut insns);
+
+        assert_eq!(slots, 4);
+        assert!(matches!(insns[0], Insn::TryLdGlobalByName(0, 0)));
+        assert!(matches!(insns[1], Insn::CallArg0(1)));
+        assert!(matches!(insns[2], Insn::CreateObjectWithBuffer(3, 0)));
+    }
+}

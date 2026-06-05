@@ -1,347 +1,445 @@
-//! Incremental build cache for the ABC compiler (SPEC-025).
+//! Upstream-compatible ABC ProgramCache/protoBin support.
 //!
-//! ## Upstream vs. arkdown cache semantics
+//! `es2abc --cache-file` is a pandasm `Program` cache:
 //!
-//! Upstream `es2abc` caches a per-file `pandasm::Program` IR in a `.protoBin`
-//! binary (serialized via protobuf). For merged-ABC builds, a `modules.cache`
-//! text manifest maps each source file to its `.protoBin` path:
-//!
-//! ```text
-//! src/path/file1.js;cache/file1.protoBin
-//! src/path/file2.js;cache/file2.protoBin
-//! ```
-//!
-//! `--cache-file @path/to/modules.cache` reads this manifest at startup; a
-//! bare `--cache-file path/to/file.protoBin` (no `@`) sets the cache for the
-//! single input file.
-//!
-//! ## arkdown cache implementation
-//!
-//! arkdown does not implement the upstream protobuf Program IR serialization
-//! (which would require a complete pandasm Program roundtrip). Instead, it
-//! caches the **compiled batch ABC** keyed by a SHA-256 hash of all record
-//! sources + compile options.
-//!
-//! The cache layout inside `<cache_dir>/`:
-//!
-//! ```text
-//! modules.cache    — text manifest, semicolon-separated: hash;proto_bin_name
-//! modules.protoBin — binary: ARKD magic + u32 hash_len + hash_bytes +
-//!                                       u32 abc_len  + abc_bytes
-//! ```
-//!
-//! The `modules.cache` manifest uses the same semicolon-separated line format
-//! as upstream but stores the batch hash in the first column (instead of a
-//! per-file source path). The `.protoBin` binary format starts with the
-//! `ARKD` magic (4 bytes) to distinguish it from upstream protobuf wire
-//! encoding and from the old JSON `modules.abc.cache` format.
-//!
-//! ## Removed: old JSON whole-ABC cache
-//!
-//! The previous `modules.abc.cache` JSON format (hex-encoded bytecode) has
-//! been removed. Stale `modules.abc.cache` files are silently ignored. The
-//! replacement `ModulesCache` / `modules.protoBin` format is binary and
-//! version-aware.
+//! - bare `--cache-file file.protoBin` maps the current source file to one
+//!   protobuf `ProgramCache` file;
+//! - `--cache-file @modules.cache` reads a semicolon manifest where column 1 is
+//!   `SourceFile::fileName` and column 2 is the `.protoBin` path;
+//! - source cache validity is `GetHash32String(source + fileName + recordName +
+//!   sourcefile + pkgName + pandaFileVersion)`;
+//! - ABC input cache validity is `GetHash32(abcBytes + fileName + recordName +
+//!   sourcefile + pkgName + pandaFileVersion)`;
+//! - a hit restores a `Program` into `progsInfo_`; final ABC emission still
+//!   happens normally from all programs.
 
 use std::io;
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest, Sha256};
+use prost::Message;
 
-/// Magic bytes for arkdown `.protoBin` cache files.
-///
-/// Chosen to be distinct from both upstream protobuf wire encoding (which
-/// would begin with a field tag varint) and the old JSON format (`{`).
-const ARKDOWN_PROTO_BIN_MAGIC: &[u8; 4] = b"ARKD";
+use crate::proto_panda::{abc_proto_programs_cache, AbcProtoProgramsCache, Program, ProgramCache};
 
-// ── Internal manifest helpers ─────────────────────────────────────────────
+const MURMUR_DEFAULT_SEED: u32 = 0x1234_5678;
+const MURMUR_C1: u32 = 0xCC9E_2D51;
+const MURMUR_C2: u32 = 0x1B87_3593;
+const MURMUR_MAIN_CONSTANT: u32 = 0xE654_6B64;
+const MURMUR_FINALIZE_FIRST_MULTIPLIER: u32 = 0x85EB_CA6B;
+const MURMUR_FINALIZE_SECOND_MULTIPLIER: u32 = 0x0C2B_AE35;
+const CURRENT_PANDA_FILE_VERSION: u32 = 0x0001_000D;
 
-struct ManifestEntry {
-    hash: String,
-    proto_bin_name: String,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheManifestEntry {
+    pub source_file: String,
+    pub proto_bin: PathBuf,
 }
 
-fn parse_manifest(path: &Path) -> Vec<ManifestEntry> {
-    let content = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
-    content
-        .lines()
-        .filter_map(|line| {
-            let mut parts = line.splitn(2, ';');
-            let hash = parts.next()?.trim().to_string();
-            let name = parts.next()?.trim().to_string();
-            if hash.is_empty() || name.is_empty() {
-                None
-            } else {
-                Some(ManifestEntry {
-                    hash,
-                    proto_bin_name: name,
-                })
-            }
-        })
-        .collect()
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CacheFileMap {
+    entries: Vec<CacheManifestEntry>,
 }
 
-fn write_manifest(dir: &Path, entries: &[ManifestEntry]) -> io::Result<()> {
-    let manifest_path = dir.join(ModulesCache::MANIFEST_NAME);
-    let content: String = entries
-        .iter()
-        .map(|e| format!("{};{}\n", e.hash, e.proto_bin_name))
-        .collect();
-    std::fs::write(manifest_path, content)
-}
-
-// ── .protoBin binary format ───────────────────────────────────────────────
-
-/// Encode `(hash_hex, abc_bytes)` into the ARKD binary format:
-/// `ARKD` magic (4) + hash_len u32 LE (4) + hash_bytes + abc_len u32 LE (4) + abc_bytes.
-fn encode_proto_bin(hash_hex: &str, abc: &[u8]) -> Vec<u8> {
-    let hash_bytes = hash_hex.as_bytes();
-    let mut out = Vec::with_capacity(4 + 4 + hash_bytes.len() + 4 + abc.len());
-    out.extend_from_slice(ARKDOWN_PROTO_BIN_MAGIC);
-    out.extend_from_slice(&(hash_bytes.len() as u32).to_le_bytes());
-    out.extend_from_slice(hash_bytes);
-    out.extend_from_slice(&(abc.len() as u32).to_le_bytes());
-    out.extend_from_slice(abc);
-    out
-}
-
-/// Decode an ARKD binary, returning `(hash_hex, abc_bytes)` on success.
-fn decode_proto_bin(data: &[u8]) -> io::Result<(String, Vec<u8>)> {
-    if data.len() < 8 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "proto_bin too short",
-        ));
-    }
-    if &data[0..4] != ARKDOWN_PROTO_BIN_MAGIC {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "bad ARKD magic"));
-    }
-    let hash_len = u32::from_le_bytes(data[4..8].try_into().unwrap()) as usize;
-    let hash_end = 8 + hash_len;
-    if data.len() < hash_end + 4 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "proto_bin truncated before abc_len",
-        ));
-    }
-    let hash_hex = String::from_utf8_lossy(&data[8..hash_end]).into_owned();
-    let abc_len = u32::from_le_bytes(data[hash_end..hash_end + 4].try_into().unwrap()) as usize;
-    let abc_start = hash_end + 4;
-    if data.len() < abc_start + abc_len {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "proto_bin truncated in abc data",
-        ));
-    }
-    Ok((hash_hex, data[abc_start..abc_start + abc_len].to_vec()))
-}
-
-// ── Public API ────────────────────────────────────────────────────────────
-
-/// Per-batch incremental build cache.
-///
-/// Layout inside `cache_dir/`:
-///
-/// ```text
-/// modules.cache    — semicolon-separated manifest: hash;proto_bin_filename
-/// modules.protoBin — ARKD binary: magic + hash + compiled ABC bytes
-/// ```
-///
-/// This aligns with the upstream `--cache-file @modules.cache` convention
-/// while using an ARKD-magic binary format (not upstream protobuf) for the
-/// actual cache payload. The hash covers all record sources + compile options,
-/// so any change to any record or option causes a full recompile.
-pub struct ModulesCache {
-    dir: PathBuf,
-    entries: Vec<ManifestEntry>,
-}
-
-impl ModulesCache {
-    /// Name of the manifest file inside the cache directory.
-    pub const MANIFEST_NAME: &'static str = "modules.cache";
-    /// Default name for the batch protoBin inside the cache directory.
-    const PROTO_BIN_NAME: &'static str = "modules.protoBin";
-
-    /// Load (or initialise an empty) cache from `dir`.
-    pub fn load(dir: &Path) -> Self {
-        let manifest_path = dir.join(Self::MANIFEST_NAME);
-        let entries = parse_manifest(&manifest_path);
+impl CacheFileMap {
+    pub fn empty() -> Self {
         Self {
-            dir: dir.to_path_buf(),
-            entries,
+            entries: Vec::new(),
         }
     }
 
-    /// Look up a batch hash.  Returns the compiled ABC bytes on a cache hit.
-    pub fn lookup(&self, hash: &str) -> Option<Vec<u8>> {
-        let entry = self.entries.iter().find(|e| e.hash == hash)?;
-        let proto_bin_path = self.dir.join(&entry.proto_bin_name);
-        let data = std::fs::read(&proto_bin_path).ok()?;
-        let (stored_hash, abc) = decode_proto_bin(&data).ok()?;
-        // Double-check hash inside the binary (defence against partial writes).
-        if stored_hash != hash {
-            return None;
+    pub fn from_entries(entries: Vec<CacheManifestEntry>) -> Self {
+        Self { entries }
+    }
+
+    pub fn parse_option(cache_input: &str, source_file: &str) -> io::Result<Self> {
+        if let Some(manifest) = cache_input.strip_prefix('@') {
+            return Self::read_manifest(Path::new(manifest));
         }
-        Some(abc)
+
+        Ok(Self::from_entries(vec![CacheManifestEntry {
+            source_file: source_file.to_string(),
+            proto_bin: PathBuf::from(cache_input),
+        }]))
     }
 
-    /// Store a batch `hash` → `abc` mapping.  Writes the `.protoBin` file and
-    /// updates the manifest.  Errors are returned but are non-fatal to the
-    /// caller.
-    pub fn store(&mut self, hash: String, abc: &[u8]) -> io::Result<()> {
-        std::fs::create_dir_all(&self.dir)?;
-        let proto_bin_name = Self::PROTO_BIN_NAME.to_string();
-        let proto_bin_path = self.dir.join(&proto_bin_name);
-        let data = encode_proto_bin(&hash, abc);
-        std::fs::write(&proto_bin_path, data)?;
-        // Upsert manifest entry.
-        if let Some(e) = self
-            .entries
-            .iter_mut()
-            .find(|e| e.proto_bin_name == proto_bin_name)
-        {
-            e.hash = hash;
-        } else {
-            self.entries.push(ManifestEntry {
-                hash,
-                proto_bin_name,
-            });
-        }
-        write_manifest(&self.dir, &self.entries)
+    pub fn read_manifest(path: &Path) -> io::Result<Self> {
+        let content = std::fs::read_to_string(path)?;
+        let entries = content
+            .lines()
+            .filter_map(parse_manifest_line)
+            .collect::<Vec<_>>();
+        Ok(Self::from_entries(entries))
     }
 
-    /// Return the expected path to the `modules.cache` manifest inside `dir`.
-    pub fn manifest_path_for(dir: &Path) -> PathBuf {
-        dir.join(Self::MANIFEST_NAME)
+    pub fn get(&self, source_file: &str) -> Option<&Path> {
+        self.entries
+            .iter()
+            .find(|entry| entry.source_file == source_file)
+            .map(|entry| entry.proto_bin.as_path())
     }
 
-    /// Return the number of entries in the loaded manifest.
-    pub fn entry_count(&self) -> usize {
-        self.entries.len()
+    pub fn entries(&self) -> &[CacheManifestEntry] {
+        &self.entries
     }
 }
 
-/// Derive a SHA-256 cache key from a slice of `(record_name, source)` pairs
-/// and compile options.
-///
-/// The key covers:
-/// - All record names and source texts (in order)
-/// - `module` flag
-/// - `debug_info` flag
-/// - `target_api_version` (to avoid reusing stale cache across API bumps)
-pub fn derive_key(
-    modules: &[(&str, &str)],
-    module_mode: bool,
-    debug_info: bool,
-    target_api_version: u32,
-) -> String {
-    let mut hasher = Sha256::new();
-    for (record_name, source) in modules {
-        hasher.update(record_name.as_bytes());
-        hasher.update(b"\x00");
-        hasher.update(source.as_bytes());
-        hasher.update(b"\x00");
+fn parse_manifest_line(line: &str) -> Option<CacheManifestEntry> {
+    let items = line
+        .split(';')
+        .filter(|item| !item.is_empty())
+        .collect::<Vec<_>>();
+    if items.len() != 2 {
+        return None;
     }
-    hasher.update(if module_mode {
-        b"module=1"
-    } else {
-        b"module=0"
-    });
-    hasher.update(if debug_info { b"debug=1" } else { b"debug=0" });
-    // Include target API version so cache entries are not shared across API bumps.
-    hasher.update(format!("api={target_api_version}").as_bytes());
-    hex::encode(hasher.finalize())
+    Some(CacheManifestEntry {
+        source_file: items[0].to_string(),
+        proto_bin: PathBuf::from(items[1]),
+    })
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProgramCacheEntry {
+    pub hash_code: u32,
+    pub program: Program,
+}
+
+pub struct ProgramCacheFile;
+
+impl ProgramCacheFile {
+    pub fn read(path: &Path) -> io::Result<Option<ProgramCacheEntry>> {
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let proto = match ProgramCache::decode(bytes.as_slice()) {
+            Ok(proto) => proto,
+            Err(_) => return Ok(None),
+        };
+        let Some(program) = proto.program else {
+            return Ok(None);
+        };
+        Ok(Some(ProgramCacheEntry {
+            hash_code: proto.hash_code,
+            program,
+        }))
+    }
+
+    pub fn read_if_hash_matches(path: &Path, hash_code: u32) -> io::Result<Option<Program>> {
+        let Some(entry) = Self::read(path)? else {
+            return Ok(None);
+        };
+        if entry.hash_code == hash_code {
+            Ok(Some(entry.program))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn write(path: &Path, hash_code: u32, program: Program) -> io::Result<()> {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        let proto = ProgramCache {
+            hash_code,
+            program: Some(program),
+        };
+        std::fs::write(path, proto.encode_to_vec())
+    }
+}
+
+pub struct ProgramProtoFile;
+
+impl ProgramProtoFile {
+    pub fn read(path: &Path) -> io::Result<Option<Program>> {
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        match Program::decode(bytes.as_slice()) {
+            Ok(program) => Ok(Some(program)),
+            Err(_) => Ok(None),
+        }
+    }
+
+    pub fn write(path: &Path, program: Program) -> io::Result<()> {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        std::fs::write(path, program.encode_to_vec())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AbcProgramsCacheEntry {
+    pub hash_code: u32,
+    pub programs: Vec<(String, Program)>,
+}
+
+pub struct AbcProgramsCacheFile;
+
+impl AbcProgramsCacheFile {
+    pub fn read(path: &Path) -> io::Result<Option<AbcProgramsCacheEntry>> {
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let proto = match AbcProtoProgramsCache::decode(bytes.as_slice()) {
+            Ok(proto) => proto,
+            Err(_) => return Ok(None),
+        };
+        let programs = proto
+            .abc_proto_programs_map
+            .into_iter()
+            .filter_map(|item| item.program.map(|program| (item.name, program)))
+            .collect::<Vec<_>>();
+        Ok(Some(AbcProgramsCacheEntry {
+            hash_code: proto.hash_code,
+            programs,
+        }))
+    }
+
+    pub fn read_if_hash_matches(
+        path: &Path,
+        hash_code: u32,
+    ) -> io::Result<Option<Vec<(String, Program)>>> {
+        let Some(entry) = Self::read(path)? else {
+            return Ok(None);
+        };
+        if entry.hash_code == hash_code {
+            Ok(Some(entry.programs))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn write(path: &Path, hash_code: u32, programs: Vec<(String, Program)>) -> io::Result<()> {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        let proto = AbcProtoProgramsCache {
+            hash_code,
+            abc_proto_programs_map: programs
+                .into_iter()
+                .map(
+                    |(name, program)| abc_proto_programs_cache::AbcProtoProgramCache {
+                        name,
+                        program: Some(program),
+                    },
+                )
+                .collect(),
+        };
+        std::fs::write(path, proto.encode_to_vec())
+    }
+}
+
+pub fn source_cache_hash(
+    source: &str,
+    file_name: &str,
+    record_name: &str,
+    source_file: &str,
+    package_name: &str,
+) -> u32 {
+    let mut bytes = Vec::with_capacity(
+        source.len()
+            + file_name.len()
+            + record_name.len()
+            + source_file.len()
+            + package_name.len()
+            + current_panda_file_version_string().len(),
+    );
+    bytes.extend_from_slice(source.as_bytes());
+    bytes.extend_from_slice(file_name.as_bytes());
+    bytes.extend_from_slice(record_name.as_bytes());
+    bytes.extend_from_slice(source_file.as_bytes());
+    bytes.extend_from_slice(package_name.as_bytes());
+    bytes.extend_from_slice(current_panda_file_version_string().as_bytes());
+    get_hash32_string(&bytes)
+}
+
+pub fn abc_input_cache_hash(
+    abc_bytes: &[u8],
+    file_name: &str,
+    record_name: &str,
+    source_file: &str,
+    package_name: &str,
+) -> u32 {
+    let mut bytes = Vec::with_capacity(
+        abc_bytes.len()
+            + file_name.len()
+            + record_name.len()
+            + source_file.len()
+            + package_name.len()
+            + current_panda_file_version_string().len(),
+    );
+    bytes.extend_from_slice(abc_bytes);
+    bytes.extend_from_slice(file_name.as_bytes());
+    bytes.extend_from_slice(record_name.as_bytes());
+    bytes.extend_from_slice(source_file.as_bytes());
+    bytes.extend_from_slice(package_name.as_bytes());
+    bytes.extend_from_slice(current_panda_file_version_string().as_bytes());
+    get_hash32(&bytes)
+}
+
+fn current_panda_file_version_string() -> String {
+    bytecode_version_string(CURRENT_PANDA_FILE_VERSION)
+}
+
+fn bytecode_version_string(version: u32) -> String {
+    let [major, minor, feature, build] = version.to_le_bytes();
+    format!("{major}.{minor}.{feature}.{build}")
+}
+
+pub fn get_hash32(bytes: &[u8]) -> u32 {
+    murmur_hash32(bytes, MURMUR_DEFAULT_SEED)
+}
+
+pub fn get_hash32_string(bytes: &[u8]) -> u32 {
+    let end = bytes
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(bytes.len());
+    murmur_hash32(&bytes[..end], MURMUR_DEFAULT_SEED)
+}
+
+fn murmur_hash32(bytes: &[u8], seed: u32) -> u32 {
+    let mut hash = seed;
+    let mut chunks = bytes.chunks_exact(4);
+    for chunk in &mut chunks {
+        let mut k1 = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        k1 = k1.wrapping_mul(MURMUR_C1);
+        k1 = k1.rotate_left(15);
+        k1 = k1.wrapping_mul(MURMUR_C2);
+
+        hash ^= k1;
+        hash = hash.rotate_left(13);
+        hash = hash.wrapping_mul(5).wrapping_add(MURMUR_MAIN_CONSTANT);
+    }
+
+    let tail = chunks.remainder();
+    let mut k1 = 0u32;
+    for i in (0..tail.len()).rev() {
+        k1 ^= (tail[i] as u32) << (8 * i);
+    }
+    if !tail.is_empty() {
+        k1 = k1.rotate_left(15);
+        k1 = k1.wrapping_mul(MURMUR_C2);
+        hash ^= k1;
+    }
+
+    hash ^= bytes.len() as u32;
+    finalize_murmur_hash32(hash)
+}
+
+fn finalize_murmur_hash32(mut hash: u32) -> u32 {
+    hash ^= hash >> 16;
+    hash = hash.wrapping_mul(MURMUR_FINALIZE_FIRST_MULTIPLIER);
+    hash ^= hash >> 13;
+    hash = hash.wrapping_mul(MURMUR_FINALIZE_SECOND_MULTIPLIER);
+    hash ^= hash >> 16;
+    hash
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proto_panda::{program, Record};
 
     #[test]
-    fn test_derive_key_deterministic() {
-        let modules = vec![("entry/main", "export const x = 1;")];
-        let k1 = derive_key(&modules, true, false, 12);
-        let k2 = derive_key(&modules, true, false, 12);
-        assert_eq!(k1, k2, "key must be deterministic");
-    }
-
-    #[test]
-    fn test_derive_key_changes_on_source_change() {
-        let m1 = vec![("entry/main", "export const x = 1;")];
-        let m2 = vec![("entry/main", "export const x = 2;")];
-        let k1 = derive_key(&m1, true, false, 12);
-        let k2 = derive_key(&m2, true, false, 12);
-        assert_ne!(k1, k2, "key must change when source changes");
-    }
-
-    #[test]
-    fn test_derive_key_changes_on_api_version_change() {
-        let modules = vec![("entry/main", "export const x = 1;")];
-        let k_v12 = derive_key(&modules, true, false, 12);
-        let k_v13 = derive_key(&modules, true, false, 13);
-        assert_ne!(
-            k_v12, k_v13,
-            "key must change when target_api_version changes"
+    fn upstream_murmur_hash_matches_known_values() {
+        assert_eq!(get_hash32_string(b""), 0x453c_77fc);
+        assert_eq!(get_hash32_string(b"a"), 0x2444_ff8e);
+        assert_eq!(get_hash32_string(b"abc"), 0x647e_bde0);
+        assert_eq!(
+            source_cache_hash(
+                "export const x = 1;",
+                "entry/main",
+                "entry/main",
+                "main.ts",
+                "entry"
+            ),
+            0x643f_91c5
         );
     }
 
     #[test]
-    fn test_modules_cache_round_trip() {
+    fn manifest_uses_source_file_to_proto_bin_mapping() {
         let dir = tempfile::tempdir().unwrap();
-        let abc_bytes = b"PANDA\x00\x00\x00fake_bytecode";
-        let hash = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
+        let manifest = dir.path().join("modules.cache");
+        std::fs::write(
+            &manifest,
+            "a.ts;/tmp/a.protoBin\nignored\nb.ts;/tmp/b.protoBin;extra\nc.ts;/tmp/c.protoBin\n",
+        )
+        .unwrap();
 
-        let mut cache = ModulesCache::load(dir.path());
-        cache.store(hash.to_string(), abc_bytes).unwrap();
-
-        let loaded = ModulesCache::load(dir.path());
-        let hit = loaded.lookup(hash).unwrap();
-        assert_eq!(hit, abc_bytes);
-
-        // Verify both manifest and protoBin files exist.
-        assert!(dir.path().join(ModulesCache::MANIFEST_NAME).exists());
-        assert!(dir.path().join("modules.protoBin").exists());
+        let map = CacheFileMap::read_manifest(&manifest).unwrap();
+        assert_eq!(map.entries().len(), 2);
+        assert_eq!(map.get("a.ts"), Some(Path::new("/tmp/a.protoBin")));
+        assert_eq!(map.get("c.ts"), Some(Path::new("/tmp/c.protoBin")));
+        assert!(map.get("b.ts").is_none());
     }
 
     #[test]
-    fn test_modules_cache_miss_returns_none() {
+    fn program_cache_proto_bin_round_trip() {
         let dir = tempfile::tempdir().unwrap();
-        let cache = ModulesCache::load(dir.path());
-        assert!(cache.lookup("nonexistent_hash").is_none());
+        let path = dir.path().join("entry.protoBin");
+        let program = Program {
+            lang: 0,
+            record_table: vec![program::RecordTable {
+                key: b"entry/main".to_vec(),
+                value: Some(Record {
+                    name: b"entry/main".to_vec(),
+                    language: 0,
+                    body_presence: true,
+                    ..Default::default()
+                }),
+            }],
+            ..Default::default()
+        };
+
+        ProgramCacheFile::write(&path, 0x1234, program.clone()).unwrap();
+        let hit = ProgramCacheFile::read_if_hash_matches(&path, 0x1234)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hit, program);
+        assert!(ProgramCacheFile::read_if_hash_matches(&path, 0x5678)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
-    fn test_modules_cache_hash_mismatch_returns_none() {
+    fn abc_programs_cache_proto_bin_round_trip() {
         let dir = tempfile::tempdir().unwrap();
-        let abc_bytes = b"PANDA\x00\x00\x00";
-        let hash_a = "aaaa";
-        let hash_b = "bbbb";
+        let path = dir.path().join("input.protoBin");
+        let program = Program {
+            lang: 0,
+            record_table: vec![program::RecordTable {
+                key: b"Lentry/main;".to_vec(),
+                value: Some(Record {
+                    name: b"Lentry/main;".to_vec(),
+                    language: 0,
+                    body_presence: true,
+                    ..Default::default()
+                }),
+            }],
+            ..Default::default()
+        };
+        let programs = vec![("input.abc|Lentry/main;".to_string(), program.clone())];
 
-        let mut cache = ModulesCache::load(dir.path());
-        cache.store(hash_a.to_string(), abc_bytes).unwrap();
-
-        // Looking up with a different hash should miss even if the file exists.
-        let loaded = ModulesCache::load(dir.path());
-        assert!(loaded.lookup(hash_b).is_none());
-    }
-
-    #[test]
-    fn test_proto_bin_round_trip() {
-        let hash = "deadbeef";
-        let abc = b"PANDA\x00\x00\x00test";
-        let encoded = encode_proto_bin(hash, abc);
-        let (got_hash, got_abc) = decode_proto_bin(&encoded).unwrap();
-        assert_eq!(got_hash, hash);
-        assert_eq!(got_abc, abc);
-    }
-
-    #[test]
-    fn test_proto_bin_bad_magic_rejected() {
-        let mut bad = encode_proto_bin("hash", b"abc");
-        bad[0] = b'X'; // corrupt magic
-        assert!(decode_proto_bin(&bad).is_err());
+        AbcProgramsCacheFile::write(&path, 0x1234, programs.clone()).unwrap();
+        let hit = AbcProgramsCacheFile::read_if_hash_matches(&path, 0x1234)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hit, programs);
+        assert!(AbcProgramsCacheFile::read_if_hash_matches(&path, 0x5678)
+            .unwrap()
+            .is_none());
     }
 }

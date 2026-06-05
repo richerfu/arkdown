@@ -435,15 +435,17 @@ fn read_sleb128_from(bytes: &[u8], mut pos: usize) -> Option<(i32, usize)> {
 /// data_ stream that need them (SET_FILE src_off, START_LOCAL_EXTENDED operands,
 /// ADVANCE_PC delta, ADVANCE_LINE delta, etc.).
 pub(super) fn encode_debug_info_with_cp(
-    _line_start: u32,
+    line_start: u32,
     param_name_offsets: &[u32],
     constant_pool: &[u8],
     lnp_index: u32,
+    no_line_number: bool,
 ) -> Vec<u8> {
     let mut out = Vec::with_capacity(8 + constant_pool.len());
     // es2abc leaves the source line in the LineNumberProgram and writes the
     // DebugInfo line_num field as NO_LINE_NUMBER.
-    out.extend_from_slice(&uleb128(u32::MAX as u64));
+    let line_num = if no_line_number { u32::MAX } else { line_start };
+    out.extend_from_slice(&uleb128(line_num as u64));
     out.extend_from_slice(&uleb128(param_name_offsets.len() as u64));
     for &off in param_name_offsets {
         out.extend_from_slice(&uleb128(off as u64));
@@ -465,7 +467,7 @@ fn encode_debug_info(
     lnp_index: u32,
 ) -> Vec<u8> {
     let cp = uleb128(source_file_offset as u64);
-    encode_debug_info_with_cp(line_start, param_name_offsets, &cp, lnp_index)
+    encode_debug_info_with_cp(line_start, param_name_offsets, &cp, lnp_index, true)
 }
 
 pub(super) fn debug_scope_start_pc(method: &MethodRecord) -> u32 {
