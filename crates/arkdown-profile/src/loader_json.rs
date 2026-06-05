@@ -1479,35 +1479,32 @@ impl LoaderJson {
     /// Walk declared `oh_modules` dependencies, find installed HSP packages,
     /// and collect their `ResourceTable.txt` paths.
     ///
-    /// Matches hvigor's `getHspResourcesMap()` for remote HSP dependencies:
-    /// `<dep_root>/ResourceTable.txt` is checked for each HSP package.
+    /// Uses `LocalDependencyGraph` for BFS-consistent node ordering and
+    /// correct type classification (only SharedHsp nodes contribute).
+    /// Matches hvigor's `getHspResourcesMap()` for HSP dependencies.
     fn collect_hsp_resources_map(
         config: &ArkdownConfig,
         module_cfg: &ModuleConfig,
     ) -> FxHashMap<String, String> {
+        use crate::dependency_graph::{DependencyNodeType, LocalDependencyGraph};
         let mut map = FxHashMap::default();
-        for pkg_dir in Self::collect_declared_dependency_roots(config, module_cfg) {
-            let Some(module_json) = Self::read_dependency_module_json(&pkg_dir) else {
-                continue;
-            };
-            if module_json.module.module_type != "shared" {
-                continue;
-            }
+        let graph = LocalDependencyGraph::build(&module_cfg.src_path, &config.project_root);
 
+        for node in graph.shared_hsps() {
+            if node.pkg_root.as_os_str().is_empty() {
+                continue; // RemoteOrUnknown with empty path
+            }
             // Check for ResourceTable.txt in priority order:
             // 1. Build output intermediates (hvigor target intermediates layout)
             // 2. Dep root (remote HSP / pre-packaged layout)
-            // This matches hvigor's DependencyManager which uses the target
-            // intermediates ResourceTable.txt when the HSP was built locally.
-            let pkg_name = Self::dependency_package_name(&pkg_dir);
             let resource_table = [
-                pkg_dir.join("build/default/intermediates/res/default/ResourceTable.txt"),
-                pkg_dir.join("ResourceTable.txt"),
+                node.pkg_root.join("build/default/intermediates/res/default/ResourceTable.txt"),
+                node.pkg_root.join("ResourceTable.txt"),
             ]
             .into_iter()
             .find(|p| p.is_file());
             if let Some(resource_table) = resource_table {
-                map.entry(pkg_name)
+                map.entry(node.package_name.clone())
                     .or_insert_with(|| to_absolute_path_string(&resource_table));
             }
         }
