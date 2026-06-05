@@ -201,31 +201,21 @@ pub struct SourceLocation {
 
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DebuginfoIns {
-    #[prost(uint64, tag = "1")]
-    pub line_number: u64,
+    #[prost(uint32, tag = "1")]
+    pub line_number: u32,
     #[prost(uint32, tag = "2")]
     pub column_number: u32,
-    #[prost(bytes = "vec", tag = "3")]
-    pub whole_line: Vec<u8>,
-    #[prost(uint64, tag = "4")]
-    pub bound_left: u64,
-    #[prost(uint64, tag = "5")]
-    pub bound_right: u64,
 }
 
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct LocalVariable {
     #[prost(bytes = "vec", tag = "1")]
     pub name: Vec<u8>,
-    #[prost(bytes = "vec", tag = "2")]
-    pub signature: Vec<u8>,
-    #[prost(bytes = "vec", tag = "3")]
-    pub signature_type: Vec<u8>,
-    #[prost(int32, tag = "4")]
+    #[prost(int32, tag = "2")]
     pub reg: i32,
-    #[prost(uint32, tag = "5")]
+    #[prost(uint32, tag = "3")]
     pub start: u32,
-    #[prost(uint32, tag = "6")]
+    #[prost(uint32, tag = "4")]
     pub length: u32,
 }
 

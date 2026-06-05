@@ -916,11 +916,8 @@ fn instruction_debug_from_proto(ins: &Ins) -> io::Result<Option<InstructionDebug
     let Some(debug) = &ins.ins_debug else {
         return Ok(None);
     };
-    if debug.line_number == u64::MAX {
-        return Ok(None);
-    }
     Ok(Some(InstructionDebugInfo {
-        line_number: to_u32(debug.line_number, "instruction debug line number")?,
+        line_number: debug.line_number,
         column_number: debug.column_number,
     }))
 }
@@ -2210,21 +2207,15 @@ fn ins_debug(debug: Option<InstructionDebugInfo>) -> DebuginfoIns {
         return default_ins_debug();
     };
     DebuginfoIns {
-        line_number: debug.line_number as u64,
+        line_number: debug.line_number,
         column_number: debug.column_number,
-        whole_line: Vec::new(),
-        bound_left: 0,
-        bound_right: 0,
     }
 }
 
 fn default_ins_debug() -> DebuginfoIns {
     DebuginfoIns {
-        line_number: u64::MAX,
+        line_number: u32::MAX,
         column_number: 0,
-        whole_line: Vec::new(),
-        bound_left: 0,
-        bound_right: 0,
     }
 }
 
@@ -2901,6 +2892,7 @@ mod tests {
     use super::*;
     use crate::emit::file::AbcFile;
     use crate::ir::builder::build_record_with_debug_and_package_for_target_with_mode;
+    use prost::Message as _;
 
     #[test]
     fn program_cache_uses_pandasm_opcode_numbers_not_byte_values() {
@@ -2908,8 +2900,28 @@ mod tests {
         assert_eq!(pandasm_opcode(&Insn::TryLdGlobalByName(0, 0)), 63);
         assert_eq!(pandasm_opcode(&Insn::CallRuntimeIsFalse(0)), 291);
         assert_eq!(label_ins("label_0").opcode, pandasm_invalid_opcode());
-        assert_eq!(default_ins_debug().line_number, u64::MAX);
+        assert_eq!(default_ins_debug().line_number, u32::MAX);
         assert_eq!(default_ins_debug().column_number, 0);
+    }
+
+    #[test]
+    fn debug_proto_wire_fields_match_upstream_schema() {
+        let debug = DebuginfoIns {
+            line_number: 7,
+            column_number: 3,
+        };
+        assert_eq!(debug.encode_to_vec(), vec![0x08, 0x07, 0x10, 0x03]);
+
+        let local = crate::proto_panda::LocalVariable {
+            name: b"x".to_vec(),
+            reg: 2,
+            start: 3,
+            length: 4,
+        };
+        assert_eq!(
+            local.encode_to_vec(),
+            vec![0x0a, 0x01, b'x', 0x10, 0x02, 0x18, 0x03, 0x20, 0x04]
+        );
     }
 
     #[test]
@@ -3049,7 +3061,7 @@ mod tests {
     }
 
     #[test]
-    fn proto_program_ignores_upstream_invalid_instruction_debug_line() {
+    fn proto_program_preserves_upstream_invalid_instruction_debug_line() {
         let ins = Ins {
             opcode: 0,
             regs: Vec::new(),
@@ -3058,15 +3070,18 @@ mod tests {
             label: Vec::new(),
             set_label_val: false,
             ins_debug: Some(DebuginfoIns {
-                line_number: u64::MAX,
+                line_number: u32::MAX,
                 column_number: 0,
-                whole_line: Vec::new(),
-                bound_left: 0,
-                bound_right: 0,
             }),
         };
 
-        assert!(instruction_debug_from_proto(&ins).unwrap().is_none());
+        assert_eq!(
+            instruction_debug_from_proto(&ins).unwrap(),
+            Some(InstructionDebugInfo {
+                line_number: u32::MAX,
+                column_number: 0,
+            })
+        );
     }
 
     #[test]
