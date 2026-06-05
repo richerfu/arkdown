@@ -451,6 +451,7 @@ pub fn build_record_with_debug_and_source_map_for_target_with_mode(
         pandasm_debug: func_main.pandasm_debug,
         num_vregs: func_main.vregs,
         num_args: 3,
+        value_of_first_param: -1,
         debug_info: source_file.map(|path| DebugInfoRecord {
             line_start: func_main.debug_line_start.unwrap_or_else(|| {
                 first_runtime_stmt_start(scan_stmts)
@@ -2136,6 +2137,7 @@ fn compile_function_record(
                 pandasm_debug: compiled.pandasm_debug,
                 num_vregs,
                 num_args,
+                value_of_first_param: -1,
                 debug_info: source_file_path.map(|path| DebugInfoRecord {
                     line_start: compiled.debug_line_start.unwrap_or(1),
                     source_file: path.to_string(),
@@ -2188,6 +2190,7 @@ fn compile_function_record(
                 pandasm_debug: compiled.pandasm_debug,
                 num_vregs,
                 num_args,
+                value_of_first_param: -1,
                 debug_info: source_file_path.map(|path| DebugInfoRecord {
                     line_start: compiled.debug_line_start.unwrap_or(1),
                     source_file: path.to_string(),
@@ -2848,6 +2851,7 @@ fn compile_class_elements(
             pandasm_debug: compiled.pandasm_debug,
             num_vregs: compiled.vregs,
             num_args: constructor_num_args,
+            value_of_first_param: -1,
             debug_info,
             line_ops: compiled.line_ops,
             catch_entries: compiled.catches,
@@ -2886,6 +2890,7 @@ fn compile_class_elements(
             pandasm_debug: compiled.pandasm_debug,
             num_vregs: compiled.vregs,
             num_args: 3,
+            value_of_first_param: -1,
             debug_info: source_file_path.map(|path| DebugInfoRecord {
                 line_start: compiled.debug_line_start.unwrap_or(1),
                 source_file: path.to_string(),
@@ -2926,6 +2931,7 @@ fn compile_class_elements(
             pandasm_debug: compiled.pandasm_debug,
             num_vregs: compiled.vregs,
             num_args: 3 + static_key_count,
+            value_of_first_param: -1,
             debug_info: source_file_path.map(|path| DebugInfoRecord {
                 line_start: compiled.debug_line_start.unwrap_or(1),
                 source_file: path.to_string(),
@@ -3117,6 +3123,7 @@ fn compile_class_elements(
                 pandasm_debug: compiled.pandasm_debug,
                 num_vregs,
                 num_args,
+                value_of_first_param: -1,
                 debug_info,
                 line_ops: compiled.line_ops,
                 catch_entries: compiled.catches,
@@ -3179,6 +3186,7 @@ fn compile_class_elements(
             pandasm_debug: getter_compiled.pandasm_debug,
             num_vregs: getter_compiled.vregs,
             num_args: 3,
+            value_of_first_param: -1,
             debug_info: None,
             line_ops: Vec::new(),
             catch_entries: getter_compiled.catches,
@@ -3220,6 +3228,7 @@ fn compile_class_elements(
             pandasm_debug: setter_compiled.pandasm_debug,
             num_vregs: setter_compiled.vregs,
             num_args: 4, // 3 mandatory + 1 value param
+            value_of_first_param: -1,
             debug_info: None,
             line_ops: Vec::new(),
             catch_entries: setter_compiled.catches,

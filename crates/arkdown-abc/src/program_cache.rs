@@ -927,6 +927,7 @@ fn method_from_proto(
         pandasm_debug,
         num_vregs: to_u16(function.regs_num, "function regs_num")?,
         num_args: to_u16(function.params.len() as u64, "function params")?,
+        value_of_first_param: function.value_of_first_param,
         debug_info: has_debug_info.then(|| DebugInfoRecord {
             line_start,
             source_file,
@@ -2439,7 +2440,7 @@ fn function_to_proto(
                 })
             })
             .collect::<io::Result<Vec<_>>>()?,
-        value_of_first_param: -1,
+        value_of_first_param: method.value_of_first_param,
         regs_num: method.num_vregs as u64,
         params: (0..method.num_args as usize)
             .map(|param_idx| {
@@ -4486,6 +4487,7 @@ class A {}
 
         let param_reg = function.regs_num as i32;
         let second_local_reg = if function.regs_num > 1 { 1 } else { 0 };
+        function.value_of_first_param = 42;
         function.local_variable_debug = vec![
             LocalVariable {
                 name: b"param0".to_vec(),
@@ -4512,6 +4514,7 @@ class A {}
                 length: 1,
             },
         ];
+        let expected_value_of_first_param = function.value_of_first_param;
         let expected_locals = function.local_variable_debug.clone();
 
         let mut restored = AbcFile::new();
@@ -4531,6 +4534,10 @@ class A {}
             .debug_info
             .as_ref()
             .expect("local variables require DebugInfo");
+        assert_eq!(
+            restored_method.value_of_first_param,
+            expected_value_of_first_param
+        );
         assert_eq!(restored_debug.local_variables.len(), expected_locals.len());
         assert_eq!(restored_debug.local_variables[0].name, "param0");
         assert_eq!(restored_debug.local_variables[1].name, "local0");
@@ -4539,6 +4546,10 @@ class A {}
         let roundtrip_program = program_for_file(&restored, 20).unwrap();
         let roundtrip_function = function_by_short_name(&roundtrip_program, "func_main_0")
             .expect("roundtrip func_main_0 function must exist");
+        assert_eq!(
+            roundtrip_function.value_of_first_param,
+            expected_value_of_first_param
+        );
         assert_eq!(roundtrip_function.local_variable_debug, expected_locals);
 
         let bytes = restored.serialize_with_version(version_for_target_api(20, None));

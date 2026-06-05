@@ -513,6 +513,7 @@ mod tests {
             pandasm_debug: Vec::new(),
             num_vregs,
             num_args,
+            value_of_first_param: -1,
             debug_info: None,
             line_ops: vec![],
             catch_entries: vec![],

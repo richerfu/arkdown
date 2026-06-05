@@ -167,6 +167,7 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
                     pandasm_debug: Vec::new(),
                     num_vregs: code.num_vregs as u16,
                     num_args: code.num_args as u16,
+                    value_of_first_param: -1,
                     debug_info: None,
                     line_ops: Vec::new(),
                     catch_entries: code

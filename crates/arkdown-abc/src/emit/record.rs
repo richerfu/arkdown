@@ -187,6 +187,10 @@ pub struct MethodRecord {
     /// ArkRuntime always passes **3** arguments when invoking `func_main_0`:
     /// `(JSThread*, JSTaggedValue this, JSTaggedValue[] args)` — set this to 3.
     pub num_args: u16,
+    /// protoPanda parser helper for the highest `aN` parameter register seen in
+    /// pandasm source. ABC stores `num_vregs`/`num_args`, so this is preserved
+    /// only for ProgramCache/protoBin roundtrips.
+    pub value_of_first_param: i64,
     /// Optional method debug metadata. hvigor/es2abc emits this in non-stripped
     /// output so ArkRuntime can link bytecode spans back to source files.
     pub debug_info: Option<DebugInfoRecord>,
@@ -1008,6 +1012,7 @@ mod tests {
                 pandasm_debug: Vec::new(),
                 num_vregs: 0,
                 num_args: 3,
+                value_of_first_param: -1,
                 debug_info: None,
                 line_ops: vec![],
                 catch_entries: vec![],
@@ -1056,6 +1061,7 @@ mod tests {
                 pandasm_debug: Vec::new(),
                 num_vregs: 0,
                 num_args: 3,
+                value_of_first_param: -1,
                 debug_info: None,
                 line_ops: vec![],
                 catch_entries: vec![],
