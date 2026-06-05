@@ -29,7 +29,10 @@
 use std::collections::BTreeSet;
 
 use crate::emit::file::{
-    LITERAL_TAG_ACCESSOR, LITERAL_TAG_ASYNC_GENERATOR_METHOD, LITERAL_TAG_BOOL,
+    LITERAL_TAG_ACCESSOR, LITERAL_TAG_ARRAY_F32, LITERAL_TAG_ARRAY_F64, LITERAL_TAG_ARRAY_I16,
+    LITERAL_TAG_ARRAY_I32, LITERAL_TAG_ARRAY_I64, LITERAL_TAG_ARRAY_I8, LITERAL_TAG_ARRAY_STRING,
+    LITERAL_TAG_ARRAY_U1, LITERAL_TAG_ARRAY_U16, LITERAL_TAG_ARRAY_U32, LITERAL_TAG_ARRAY_U64,
+    LITERAL_TAG_ARRAY_U8, LITERAL_TAG_ASYNC_GENERATOR_METHOD, LITERAL_TAG_BOOL,
     LITERAL_TAG_BUILTIN_TYPE_INDEX, LITERAL_TAG_DOUBLE, LITERAL_TAG_ETS_IMPLEMENTS,
     LITERAL_TAG_FLOAT, LITERAL_TAG_GENERATOR_METHOD, LITERAL_TAG_GETTER, LITERAL_TAG_INTEGER,
     LITERAL_TAG_LITERAL_ARRAY, LITERAL_TAG_LITERAL_BUFFER_INDEX, LITERAL_TAG_METHOD,
@@ -204,11 +207,23 @@ pub enum AbcLiteralEntry {
     LiteralArray {
         offset: u32,
     },
-    ArrayPayload {
+    Array {
         tag: u8,
-        offset: u32,
+        values: Vec<AbcLiteralArrayValue>,
     },
     Null,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AbcLiteralArrayValue {
+    Bool(bool),
+    U8(u8),
+    U16(u16),
+    U32(u32),
+    U64(u64),
+    F32(f32),
+    F64(f64),
+    String { offset: u32, value: String },
 }
 
 /// Parsed summary of a Panda `.abc` binary file.
@@ -658,13 +673,44 @@ impl<'a> AbcReader<'a> {
                     cursor += 4;
                     AbcLiteralEntry::LiteralArray { offset: nested_off }
                 }
-                0x0a..=0x15 => {
-                    let payload_off = cursor as u32;
-                    entries.push(AbcLiteralEntry::ArrayPayload {
-                        tag,
-                        offset: payload_off,
-                    });
-                    break;
+                LITERAL_TAG_ARRAY_U1
+                | LITERAL_TAG_ARRAY_U8
+                | LITERAL_TAG_ARRAY_I8
+                | LITERAL_TAG_ARRAY_U16
+                | LITERAL_TAG_ARRAY_I16
+                | LITERAL_TAG_ARRAY_U32
+                | LITERAL_TAG_ARRAY_I32
+                | LITERAL_TAG_ARRAY_U64
+                | LITERAL_TAG_ARRAY_I64
+                | LITERAL_TAG_ARRAY_F32
+                | LITERAL_TAG_ARRAY_F64
+                | LITERAL_TAG_ARRAY_STRING => {
+                    let declared_len = self.read_u32(cursor)? as usize;
+                    cursor += 4;
+                    let expected_len =
+                        raw_item_count.checked_sub(2).ok_or_else(|| {
+                            AbcReadError::MalformedClassItem {
+                                offset,
+                                reason: format!(
+                                    "typed literal array tag {tag:#x} has raw item count {raw_item_count}"
+                                ),
+                            }
+                        })? as usize;
+                    if declared_len != expected_len {
+                        return Err(AbcReadError::MalformedClassItem {
+                            offset,
+                            reason: format!(
+                                "typed literal array tag {tag:#x} length mismatch: header={expected_len}, value={declared_len}"
+                            ),
+                        });
+                    }
+                    let mut values = Vec::with_capacity(declared_len);
+                    for _ in 0..declared_len {
+                        values.push(self.read_typed_literal_array_value(tag, &mut cursor)?);
+                    }
+                    entries.push(AbcLiteralEntry::Array { tag, values });
+                    item_index = raw_item_count;
+                    continue;
                 }
                 other => {
                     return Err(AbcReadError::MalformedClassItem {
@@ -682,6 +728,65 @@ impl<'a> AbcReader<'a> {
             raw_item_count,
             entries,
         })
+    }
+
+    fn read_typed_literal_array_value(
+        &self,
+        tag: u8,
+        cursor: &mut usize,
+    ) -> Result<AbcLiteralArrayValue, AbcReadError> {
+        let value = match tag {
+            LITERAL_TAG_ARRAY_U1 => {
+                let value = self.read_u8(*cursor)? != 0;
+                *cursor += 1;
+                AbcLiteralArrayValue::Bool(value)
+            }
+            LITERAL_TAG_ARRAY_U8 | LITERAL_TAG_ARRAY_I8 => {
+                let value = self.read_u8(*cursor)?;
+                *cursor += 1;
+                AbcLiteralArrayValue::U8(value)
+            }
+            LITERAL_TAG_ARRAY_U16 | LITERAL_TAG_ARRAY_I16 => {
+                let value = self.read_u16(*cursor)?;
+                *cursor += 2;
+                AbcLiteralArrayValue::U16(value)
+            }
+            LITERAL_TAG_ARRAY_U32 | LITERAL_TAG_ARRAY_I32 => {
+                let value = self.read_u32(*cursor)?;
+                *cursor += 4;
+                AbcLiteralArrayValue::U32(value)
+            }
+            LITERAL_TAG_ARRAY_U64 | LITERAL_TAG_ARRAY_I64 => {
+                let value = self.read_u64(*cursor)?;
+                *cursor += 8;
+                AbcLiteralArrayValue::U64(value)
+            }
+            LITERAL_TAG_ARRAY_F32 => {
+                let value = f32::from_bits(self.read_u32(*cursor)?);
+                *cursor += 4;
+                AbcLiteralArrayValue::F32(value)
+            }
+            LITERAL_TAG_ARRAY_F64 => {
+                let value = f64::from_bits(self.read_u64(*cursor)?);
+                *cursor += 8;
+                AbcLiteralArrayValue::F64(value)
+            }
+            LITERAL_TAG_ARRAY_STRING => {
+                let string_off = self.read_u32(*cursor)?;
+                *cursor += 4;
+                AbcLiteralArrayValue::String {
+                    offset: string_off,
+                    value: self.read_string_at(string_off as usize)?,
+                }
+            }
+            other => {
+                return Err(AbcReadError::MalformedClassItem {
+                    offset: *cursor,
+                    reason: format!("unsupported typed LiteralTag {other:#x}"),
+                })
+            }
+        };
+        Ok(value)
     }
 
     /// Read a standalone or inline Panda `StringItem` by absolute file offset.

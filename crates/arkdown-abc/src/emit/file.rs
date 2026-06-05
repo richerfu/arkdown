@@ -34,6 +34,18 @@ pub(crate) const LITERAL_TAG_METHOD: u8 = 0x06;
 pub(crate) const LITERAL_TAG_GENERATOR_METHOD: u8 = 0x07;
 pub(crate) const LITERAL_TAG_ACCESSOR: u8 = 0x08;
 pub(crate) const LITERAL_TAG_METHOD_AFFILIATE: u8 = 0x09;
+pub(crate) const LITERAL_TAG_ARRAY_U1: u8 = 0x0a;
+pub(crate) const LITERAL_TAG_ARRAY_U8: u8 = 0x0b;
+pub(crate) const LITERAL_TAG_ARRAY_I8: u8 = 0x0c;
+pub(crate) const LITERAL_TAG_ARRAY_U16: u8 = 0x0d;
+pub(crate) const LITERAL_TAG_ARRAY_I16: u8 = 0x0e;
+pub(crate) const LITERAL_TAG_ARRAY_U32: u8 = 0x0f;
+pub(crate) const LITERAL_TAG_ARRAY_I32: u8 = 0x10;
+pub(crate) const LITERAL_TAG_ARRAY_U64: u8 = 0x11;
+pub(crate) const LITERAL_TAG_ARRAY_I64: u8 = 0x12;
+pub(crate) const LITERAL_TAG_ARRAY_F32: u8 = 0x13;
+pub(crate) const LITERAL_TAG_ARRAY_F64: u8 = 0x14;
+pub(crate) const LITERAL_TAG_ARRAY_STRING: u8 = 0x15;
 pub(crate) const LITERAL_TAG_ASYNC_GENERATOR_METHOD: u8 = 0x16;
 pub(crate) const LITERAL_TAG_LITERAL_BUFFER_INDEX: u8 = 0x17;
 pub(crate) const LITERAL_TAG_LITERAL_ARRAY: u8 = 0x18;
@@ -209,6 +221,18 @@ impl ScalarValueRecord {
 /// so each tagged entry contributes two items. Module records are a special
 /// compact libpandafile layout and store raw values without tag-value items.
 #[derive(Debug, Clone, PartialEq)]
+pub enum LiteralArrayElement {
+    Bool(bool),
+    U8(u8),
+    U16(u16),
+    U32(u32),
+    U64(u64),
+    F32(f32),
+    F64(f64),
+    String(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum LiteralEntry {
     TaggedBool(bool),
     TaggedInteger(u32),
@@ -231,6 +255,10 @@ pub enum LiteralEntry {
     TaggedLiteralArrayIndex(usize),
     TaggedBuiltinTypeIndex(u8),
     TaggedEtsImplements(String),
+    TaggedArray {
+        component_tag: u8,
+        values: Vec<LiteralArrayElement>,
+    },
     TaggedNull,
     RawU32(u32),
     RawU16(u16),
@@ -322,6 +350,7 @@ impl LiteralEntry {
             | LiteralEntry::TaggedBuiltinTypeIndex(_)
             | LiteralEntry::TaggedEtsImplements(_)
             | LiteralEntry::TaggedNull => 2,
+            LiteralEntry::TaggedArray { values, .. } => 2 + values.len() as u32,
             LiteralEntry::RawU32(_) | LiteralEntry::RawU16(_) | LiteralEntry::RawString(_) => 1,
         }
     }
@@ -877,28 +906,18 @@ impl AbcFile {
             for &array_idx in &class.module_literal_indices {
                 let array = &self.literal_arrays[array_idx];
                 for (entry_idx, entry) in array.entries.iter().enumerate() {
-                    let value = match entry {
-                        LiteralEntry::TaggedString(value)
-                        | LiteralEntry::TaggedEtsImplements(value)
-                        | LiteralEntry::RawString(value) => value,
-                        _ => continue,
-                    };
-                    let off = string_items.get_or_create(value);
-                    literal_string_offsets[array_idx][entry_idx] = Some(off);
+                    if let Some(off) = intern_literal_entry_strings(entry, &mut string_items) {
+                        literal_string_offsets[array_idx][entry_idx] = Some(off);
+                    }
                 }
             }
 
             for &array_idx in &class.literal_indices {
                 let array = &self.literal_arrays[array_idx];
                 for (entry_idx, entry) in array.entries.iter().enumerate() {
-                    let value = match entry {
-                        LiteralEntry::TaggedString(value)
-                        | LiteralEntry::TaggedEtsImplements(value)
-                        | LiteralEntry::RawString(value) => value,
-                        _ => continue,
-                    };
-                    let off = string_items.get_or_create(value);
-                    literal_string_offsets[array_idx][entry_idx] = Some(off);
+                    if let Some(off) = intern_literal_entry_strings(entry, &mut string_items) {
+                        literal_string_offsets[array_idx][entry_idx] = Some(off);
+                    }
                 }
             }
         }
@@ -908,14 +927,9 @@ impl AbcFile {
                 if literal_string_offsets[array_idx][entry_idx].is_some() {
                     continue;
                 }
-                let value = match entry {
-                    LiteralEntry::TaggedString(value)
-                    | LiteralEntry::TaggedEtsImplements(value)
-                    | LiteralEntry::RawString(value) => value,
-                    _ => continue,
-                };
-                let off = string_items.get_or_create(value);
-                literal_string_offsets[array_idx][entry_idx] = Some(off);
+                if let Some(off) = intern_literal_entry_strings(entry, &mut string_items) {
+                    literal_string_offsets[array_idx][entry_idx] = Some(off);
+                }
             }
         }
 
@@ -1227,6 +1241,19 @@ impl AbcFile {
                         LiteralEntry::TaggedBuiltinTypeIndex(value) => {
                             buf.push(LITERAL_TAG_BUILTIN_TYPE_INDEX);
                             buf.push(*value);
+                        }
+                        LiteralEntry::TaggedArray {
+                            component_tag,
+                            values,
+                        } => {
+                            buf.push(*component_tag);
+                            buf.extend_from_slice(&(values.len() as u32).to_le_bytes());
+                            write_typed_literal_array_values(
+                                &mut buf,
+                                *component_tag,
+                                values,
+                                &string_items,
+                            );
                         }
                         LiteralEntry::TaggedNull => {
                             buf.push(LITERAL_TAG_NULL);
@@ -2325,6 +2352,83 @@ impl StringItemWriter {
 
     fn items(&self) -> &[Vec<u8>] {
         &self.items
+    }
+}
+
+fn intern_literal_entry_strings(
+    entry: &LiteralEntry,
+    string_items: &mut StringItemWriter,
+) -> Option<u32> {
+    match entry {
+        LiteralEntry::TaggedString(value)
+        | LiteralEntry::TaggedEtsImplements(value)
+        | LiteralEntry::RawString(value) => Some(string_items.get_or_create(value)),
+        LiteralEntry::TaggedArray {
+            component_tag: LITERAL_TAG_ARRAY_STRING,
+            values,
+        } => {
+            for value in values {
+                if let LiteralArrayElement::String(value) = value {
+                    string_items.get_or_create(value);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn write_typed_literal_array_values(
+    buf: &mut Vec<u8>,
+    component_tag: u8,
+    values: &[LiteralArrayElement],
+    string_items: &StringItemWriter,
+) {
+    for value in values {
+        match (component_tag, value) {
+            (LITERAL_TAG_ARRAY_U1, LiteralArrayElement::Bool(value)) => {
+                buf.push(u8::from(*value));
+            }
+            (
+                LITERAL_TAG_ARRAY_U8 | LITERAL_TAG_ARRAY_I8,
+                LiteralArrayElement::U8(value),
+            ) => {
+                buf.push(*value);
+            }
+            (
+                LITERAL_TAG_ARRAY_U16 | LITERAL_TAG_ARRAY_I16,
+                LiteralArrayElement::U16(value),
+            ) => {
+                buf.extend_from_slice(&value.to_le_bytes());
+            }
+            (
+                LITERAL_TAG_ARRAY_U32 | LITERAL_TAG_ARRAY_I32,
+                LiteralArrayElement::U32(value),
+            ) => {
+                buf.extend_from_slice(&value.to_le_bytes());
+            }
+            (
+                LITERAL_TAG_ARRAY_U64 | LITERAL_TAG_ARRAY_I64,
+                LiteralArrayElement::U64(value),
+            ) => {
+                buf.extend_from_slice(&value.to_le_bytes());
+            }
+            (LITERAL_TAG_ARRAY_F32, LiteralArrayElement::F32(value)) => {
+                buf.extend_from_slice(&value.to_bits().to_le_bytes());
+            }
+            (LITERAL_TAG_ARRAY_F64, LiteralArrayElement::F64(value)) => {
+                buf.extend_from_slice(&value.to_bits().to_le_bytes());
+            }
+            (LITERAL_TAG_ARRAY_STRING, LiteralArrayElement::String(value)) => {
+                let offset = string_items
+                    .id_of(value)
+                    .unwrap_or_else(|| panic!("typed literal array string {value} must be interned"));
+                buf.extend_from_slice(&offset.to_le_bytes());
+            }
+            _ => panic!(
+                "typed literal array value {value:?} does not match component tag {component_tag:#x}"
+            ),
+        }
     }
 }
 

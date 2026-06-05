@@ -2,13 +2,16 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use rustc_hash::FxHashMap;
 
-use crate::abc_reader::{AbcClassItem, AbcFieldValue, AbcLiteralEntry, AbcReader};
+use crate::abc_reader::{
+    AbcClassItem, AbcFieldValue, AbcLiteralArrayValue, AbcLiteralEntry, AbcReader,
+};
 use crate::emit::bytecode::instruction_len;
 use crate::emit::file::{
-    AbcFile, LiteralArray, LiteralEntry, LITERAL_TAG_ACCESSOR, LITERAL_TAG_ASYNC_GENERATOR_METHOD,
-    LITERAL_TAG_BUILTIN_TYPE_INDEX, LITERAL_TAG_ETS_IMPLEMENTS, LITERAL_TAG_GENERATOR_METHOD,
-    LITERAL_TAG_GETTER, LITERAL_TAG_INTEGER, LITERAL_TAG_LITERAL_BUFFER_INDEX, LITERAL_TAG_METHOD,
-    LITERAL_TAG_METHOD_AFFILIATE, LITERAL_TAG_SETTER, LITERAL_TAG_STRING,
+    AbcFile, LiteralArray, LiteralArrayElement, LiteralEntry, LITERAL_TAG_ACCESSOR,
+    LITERAL_TAG_ASYNC_GENERATOR_METHOD, LITERAL_TAG_BUILTIN_TYPE_INDEX, LITERAL_TAG_ETS_IMPLEMENTS,
+    LITERAL_TAG_GENERATOR_METHOD, LITERAL_TAG_GETTER, LITERAL_TAG_INTEGER,
+    LITERAL_TAG_LITERAL_BUFFER_INDEX, LITERAL_TAG_METHOD, LITERAL_TAG_METHOD_AFFILIATE,
+    LITERAL_TAG_SETTER, LITERAL_TAG_STRING,
 };
 use crate::emit::record::{
     function_kind, method_access, AnnotationElementRecord, AnnotationRecord, AnnotationValue,
@@ -1118,6 +1121,13 @@ fn read_tagged_literal_array(
                 };
                 LiteralEntry::TaggedLiteralArrayIndex(index)
             }
+            AbcLiteralEntry::Array { tag, values } => LiteralEntry::TaggedArray {
+                component_tag: tag,
+                values: values
+                    .into_iter()
+                    .map(literal_array_value_from_abc)
+                    .collect(),
+            },
             AbcLiteralEntry::Null => LiteralEntry::TaggedNull,
             other => {
                 return Err(AbcError::UnsupportedConstruct {
@@ -1131,6 +1141,19 @@ fn read_tagged_literal_array(
         entries,
         explicit_key: None,
     })
+}
+
+fn literal_array_value_from_abc(value: AbcLiteralArrayValue) -> LiteralArrayElement {
+    match value {
+        AbcLiteralArrayValue::Bool(value) => LiteralArrayElement::Bool(value),
+        AbcLiteralArrayValue::U8(value) => LiteralArrayElement::U8(value),
+        AbcLiteralArrayValue::U16(value) => LiteralArrayElement::U16(value),
+        AbcLiteralArrayValue::U32(value) => LiteralArrayElement::U32(value),
+        AbcLiteralArrayValue::U64(value) => LiteralArrayElement::U64(value),
+        AbcLiteralArrayValue::F32(value) => LiteralArrayElement::F32(value),
+        AbcLiteralArrayValue::F64(value) => LiteralArrayElement::F64(value),
+        AbcLiteralArrayValue::String { value, .. } => LiteralArrayElement::String(value),
+    }
 }
 
 fn read_module_record_literal_array(

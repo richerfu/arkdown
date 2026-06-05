@@ -2,12 +2,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 
 use crate::emit::file::{
-    AbcFile, LiteralArray, LiteralEntry, LITERAL_TAG_ACCESSOR, LITERAL_TAG_ASYNC_GENERATOR_METHOD,
-    LITERAL_TAG_BOOL, LITERAL_TAG_BUILTIN_TYPE_INDEX, LITERAL_TAG_DOUBLE,
-    LITERAL_TAG_ETS_IMPLEMENTS, LITERAL_TAG_FLOAT, LITERAL_TAG_GENERATOR_METHOD,
-    LITERAL_TAG_GETTER, LITERAL_TAG_INTEGER, LITERAL_TAG_LITERAL_ARRAY,
-    LITERAL_TAG_LITERAL_BUFFER_INDEX, LITERAL_TAG_METHOD, LITERAL_TAG_METHOD_AFFILIATE,
-    LITERAL_TAG_NULL, LITERAL_TAG_SETTER, LITERAL_TAG_STRING, LITERAL_TAG_TAGVALUE,
+    AbcFile, LiteralArray, LiteralArrayElement, LiteralEntry, LITERAL_TAG_ACCESSOR,
+    LITERAL_TAG_ARRAY_F32, LITERAL_TAG_ARRAY_F64, LITERAL_TAG_ARRAY_I16, LITERAL_TAG_ARRAY_I32,
+    LITERAL_TAG_ARRAY_I64, LITERAL_TAG_ARRAY_I8, LITERAL_TAG_ARRAY_STRING, LITERAL_TAG_ARRAY_U1,
+    LITERAL_TAG_ARRAY_U16, LITERAL_TAG_ARRAY_U32, LITERAL_TAG_ARRAY_U64, LITERAL_TAG_ARRAY_U8,
+    LITERAL_TAG_ASYNC_GENERATOR_METHOD, LITERAL_TAG_BOOL, LITERAL_TAG_BUILTIN_TYPE_INDEX,
+    LITERAL_TAG_DOUBLE, LITERAL_TAG_ETS_IMPLEMENTS, LITERAL_TAG_FLOAT,
+    LITERAL_TAG_GENERATOR_METHOD, LITERAL_TAG_GETTER, LITERAL_TAG_INTEGER,
+    LITERAL_TAG_LITERAL_ARRAY, LITERAL_TAG_LITERAL_BUFFER_INDEX, LITERAL_TAG_METHOD,
+    LITERAL_TAG_METHOD_AFFILIATE, LITERAL_TAG_NULL, LITERAL_TAG_SETTER, LITERAL_TAG_STRING,
+    LITERAL_TAG_TAGVALUE,
 };
 use crate::emit::record::{
     function_kind, method_access, AnnotationElementRecord, AnnotationRecord, AnnotationValue,
@@ -49,6 +53,7 @@ const VARIANT_BOOL: i32 = variant_value::VariantValueType::Bool as i32;
 const VARIANT_U8: i32 = variant_value::VariantValueType::U8 as i32;
 const VARIANT_U16: i32 = variant_value::VariantValueType::U16 as i32;
 const VARIANT_U32: i32 = variant_value::VariantValueType::U32 as i32;
+const VARIANT_U64: i32 = variant_value::VariantValueType::U64 as i32;
 const VARIANT_F32: i32 = variant_value::VariantValueType::F32 as i32;
 const VARIANT_F64: i32 = variant_value::VariantValueType::F64 as i32;
 const VARIANT_STRING: i32 = variant_value::VariantValueType::String as i32;
@@ -645,13 +650,34 @@ fn literal_array_from_proto(
         });
     }
 
-    if array.literals.len() % 2 != 0 {
-        return invalid_data("tagged literal array must contain TAGVALUE/value pairs");
-    }
-    let mut entries = Vec::with_capacity(array.literals.len() / 2);
+    let mut entries = Vec::new();
     let mut literals = array.literals.into_iter();
     while let Some(tag_literal) = literals.next() {
         let tag = tag_value_from_proto(tag_literal)?;
+        if is_typed_array_literal_tag(tag) {
+            let length_literal = literals.next().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "missing typed literal array length",
+                )
+            })?;
+            let length = typed_array_length_from_proto(length_literal)? as usize;
+            let mut values = Vec::with_capacity(length);
+            for _ in 0..length {
+                let value_literal = literals.next().ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "missing typed literal array value",
+                    )
+                })?;
+                values.push(typed_array_element_from_proto(tag, value_literal)?);
+            }
+            entries.push(LiteralEntry::TaggedArray {
+                component_tag: tag,
+                values,
+            });
+            continue;
+        }
         let value_literal = literals.next().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "missing tagged literal value")
         })?;
@@ -696,6 +722,99 @@ fn tag_value_from_proto(literal: Literal) -> io::Result<u8> {
             to_u8(value, "literal TAGVALUE")
         }
         (tag, _, _) => invalid_data(format!("expected TAGVALUE literal, got tag {tag:#x}")),
+    }
+}
+
+fn is_typed_array_literal_tag(tag: u8) -> bool {
+    matches!(
+        tag,
+        LITERAL_TAG_ARRAY_U1
+            | LITERAL_TAG_ARRAY_U8
+            | LITERAL_TAG_ARRAY_I8
+            | LITERAL_TAG_ARRAY_U16
+            | LITERAL_TAG_ARRAY_I16
+            | LITERAL_TAG_ARRAY_U32
+            | LITERAL_TAG_ARRAY_I32
+            | LITERAL_TAG_ARRAY_U64
+            | LITERAL_TAG_ARRAY_I64
+            | LITERAL_TAG_ARRAY_F32
+            | LITERAL_TAG_ARRAY_F64
+            | LITERAL_TAG_ARRAY_STRING
+    )
+}
+
+fn typed_array_length_from_proto(literal: Literal) -> io::Result<u32> {
+    let Some(value) = literal.value else {
+        return invalid_data("missing typed literal array length value");
+    };
+    match (literal.tag as u8, value.value, value.r#type) {
+        (LITERAL_TAG_INTEGER, Some(variant_value::Value::ValueInt(value)), VARIANT_U32) => {
+            to_u32(value, "typed literal array length")
+        }
+        (tag, _, _) => invalid_data(format!(
+            "expected typed literal array INTEGER length, got tag {tag:#x}"
+        )),
+    }
+}
+
+fn typed_array_element_from_proto(
+    component_tag: u8,
+    literal: Literal,
+) -> io::Result<LiteralArrayElement> {
+    let Some(value) = literal.value else {
+        return invalid_data("missing typed literal array element value");
+    };
+    if literal.tag as u8 != component_tag {
+        return invalid_data(format!(
+            "typed literal array element tag {:#x} does not match component tag {component_tag:#x}",
+            literal.tag
+        ));
+    }
+    match (component_tag, value.value, value.r#type) {
+        (LITERAL_TAG_ARRAY_U1, Some(variant_value::Value::ValueInt(value)), VARIANT_BOOL) => {
+            Ok(LiteralArrayElement::Bool(value != 0))
+        }
+        (
+            LITERAL_TAG_ARRAY_U8 | LITERAL_TAG_ARRAY_I8,
+            Some(variant_value::Value::ValueInt(value)),
+            VARIANT_U8,
+        ) => Ok(LiteralArrayElement::U8(to_u8(
+            value,
+            "typed literal array u8",
+        )?)),
+        (
+            LITERAL_TAG_ARRAY_U16 | LITERAL_TAG_ARRAY_I16,
+            Some(variant_value::Value::ValueInt(value)),
+            VARIANT_U16,
+        ) => Ok(LiteralArrayElement::U16(to_u16(
+            value,
+            "typed literal array u16",
+        )?)),
+        (
+            LITERAL_TAG_ARRAY_U32 | LITERAL_TAG_ARRAY_I32,
+            Some(variant_value::Value::ValueInt(value)),
+            VARIANT_U32,
+        ) => Ok(LiteralArrayElement::U32(to_u32(
+            value,
+            "typed literal array u32",
+        )?)),
+        (
+            LITERAL_TAG_ARRAY_U64 | LITERAL_TAG_ARRAY_I64,
+            Some(variant_value::Value::ValueInt(value)),
+            VARIANT_U64,
+        ) => Ok(LiteralArrayElement::U64(value)),
+        (LITERAL_TAG_ARRAY_F32, Some(variant_value::Value::ValueFloat(value)), VARIANT_F32) => {
+            Ok(LiteralArrayElement::F32(value))
+        }
+        (LITERAL_TAG_ARRAY_F64, Some(variant_value::Value::ValueDouble(value)), VARIANT_F64) => {
+            Ok(LiteralArrayElement::F64(value))
+        }
+        (LITERAL_TAG_ARRAY_STRING, Some(variant_value::Value::ValueStr(value)), VARIANT_STRING) => {
+            Ok(LiteralArrayElement::String(utf8(&value)?))
+        }
+        (tag, _, _) => invalid_data(format!(
+            "unsupported typed literal array element tag {tag:#x}"
+        )),
     }
 }
 
@@ -3315,6 +3434,19 @@ fn push_tagged_literal_to_proto(
     entry: &LiteralEntry,
     record_name: &str,
 ) -> io::Result<()> {
+    if let LiteralEntry::TaggedArray {
+        component_tag,
+        values,
+    } = entry
+    {
+        literals.push(literal_u8(LITERAL_TAG_TAGVALUE, *component_tag));
+        literals.push(literal_u32(LITERAL_TAG_INTEGER, values.len() as u32));
+        for value in values {
+            literals.push(typed_array_element_to_proto(*component_tag, value)?);
+        }
+        return Ok(());
+    }
+
     let tag = tagged_literal_tag(entry)?;
     literals.push(literal_u8(LITERAL_TAG_TAGVALUE, tag));
     literals.push(tagged_literal_value_to_proto(entry, record_name)?);
@@ -3414,6 +3546,41 @@ fn literal_key_for_index(record_name: &str, index: usize) -> String {
     literal_array_key(record_name, index)
 }
 
+fn typed_array_element_to_proto(
+    component_tag: u8,
+    value: &LiteralArrayElement,
+) -> io::Result<Literal> {
+    Ok(match (component_tag, value) {
+        (LITERAL_TAG_ARRAY_U1, LiteralArrayElement::Bool(value)) => {
+            literal_bool(LITERAL_TAG_ARRAY_U1, *value)
+        }
+        (LITERAL_TAG_ARRAY_U8 | LITERAL_TAG_ARRAY_I8, LiteralArrayElement::U8(value)) => {
+            literal_u8(component_tag, *value)
+        }
+        (LITERAL_TAG_ARRAY_U16 | LITERAL_TAG_ARRAY_I16, LiteralArrayElement::U16(value)) => {
+            literal_u16(component_tag, *value)
+        }
+        (LITERAL_TAG_ARRAY_U32 | LITERAL_TAG_ARRAY_I32, LiteralArrayElement::U32(value)) => {
+            literal_u32(component_tag, *value)
+        }
+        (LITERAL_TAG_ARRAY_U64 | LITERAL_TAG_ARRAY_I64, LiteralArrayElement::U64(value)) => {
+            literal_u64(component_tag, *value)
+        }
+        (LITERAL_TAG_ARRAY_F32, LiteralArrayElement::F32(value)) => {
+            literal_f32(LITERAL_TAG_ARRAY_F32, *value)
+        }
+        (LITERAL_TAG_ARRAY_F64, LiteralArrayElement::F64(value)) => {
+            literal_f64(LITERAL_TAG_ARRAY_F64, *value)
+        }
+        (LITERAL_TAG_ARRAY_STRING, LiteralArrayElement::String(value)) => {
+            literal_string(LITERAL_TAG_ARRAY_STRING, value)
+        }
+        _ => return invalid_data(format!(
+            "typed literal array value {value:?} does not match component tag {component_tag:#x}"
+        )),
+    })
+}
+
 fn literal_bool(tag: u8, value: bool) -> Literal {
     Literal {
         tag: tag as u32,
@@ -3450,6 +3617,16 @@ fn literal_u32(tag: u8, value: u32) -> Literal {
         value: Some(VariantValue {
             value: Some(variant_value::Value::ValueInt(value as u64)),
             r#type: VARIANT_U32,
+        }),
+    }
+}
+
+fn literal_u64(tag: u8, value: u64) -> Literal {
+    Literal {
+        tag: tag as u32,
+        value: Some(VariantValue {
+            value: Some(variant_value::Value::ValueInt(value)),
+            r#type: VARIANT_U64,
         }),
     }
 }
@@ -3855,7 +4032,10 @@ mod tests {
     use super::*;
     use crate::abc2program::append_abc_file;
     use crate::abc_reader::AbcReader;
-    use crate::emit::file::{version_for_target_api, AbcFile, LiteralEntry};
+    use crate::emit::file::{
+        version_for_target_api, AbcFile, LiteralArray, LiteralArrayElement, LiteralEntry,
+        LITERAL_TAG_ARRAY_STRING, LITERAL_TAG_ARRAY_U64,
+    };
     use crate::ir::builder::{
         annotation_records_from_source, build_record_with_debug_and_package_for_target_with_mode,
     };
@@ -5528,6 +5708,124 @@ class A {}
                 .set_attributes[0],
             b"function_attr"
         );
+    }
+
+    #[test]
+    fn typed_literal_arrays_roundtrip_through_proto_and_abc_input() {
+        let mut file = annotation_usage_file();
+        file.array_types.push(PandasmTypeRecord {
+            component_name: "u64".to_string(),
+            rank: 1,
+            name: "u64[]".to_string(),
+            type_id: 0x0a,
+        });
+        file.array_types.push(PandasmTypeRecord {
+            component_name: "panda.String".to_string(),
+            rank: 1,
+            name: "panda.String[]".to_string(),
+            type_id: 0x0c,
+        });
+        let u64_array = file.literal_arrays.len();
+        file.literal_arrays.push(LiteralArray {
+            entries: vec![LiteralEntry::TaggedArray {
+                component_tag: LITERAL_TAG_ARRAY_U64,
+                values: vec![
+                    LiteralArrayElement::U64(0x1_0000_0000),
+                    LiteralArrayElement::U64(0x2_0000_0001),
+                ],
+            }],
+            explicit_key: None,
+        });
+        let string_array = file.literal_arrays.len();
+        file.literal_arrays.push(LiteralArray {
+            entries: vec![LiteralEntry::TaggedArray {
+                component_tag: LITERAL_TAG_ARRAY_STRING,
+                values: vec![
+                    LiteralArrayElement::String("alpha".to_string()),
+                    LiteralArrayElement::String("beta".to_string()),
+                ],
+            }],
+            explicit_key: None,
+        });
+        file.records[0].literal_indices.push(u64_array);
+        file.records[0].literal_indices.push(string_array);
+
+        let program = program_for_file(&file, 20).unwrap();
+        let typed_arrays = program
+            .literal_array_table
+            .iter()
+            .filter_map(|entry| entry.value.as_ref())
+            .filter(|array| {
+                array
+                    .literals
+                    .first()
+                    .is_some_and(|literal| literal.tag as u8 == LITERAL_TAG_TAGVALUE)
+            })
+            .collect::<Vec<_>>();
+        assert!(typed_arrays.iter().any(|array| {
+            matches!(
+                array.literals.as_slice(),
+                [tag, len, first, second]
+                    if tag.value.as_ref().and_then(|value| value.value.as_ref())
+                        == Some(&variant_value::Value::ValueInt(LITERAL_TAG_ARRAY_U64 as u64))
+                    && len.tag as u8 == LITERAL_TAG_INTEGER
+                    && first.tag as u8 == LITERAL_TAG_ARRAY_U64
+                    && first.value.as_ref().map(|value| value.r#type) == Some(VARIANT_U64)
+                    && second.tag as u8 == LITERAL_TAG_ARRAY_U64
+                    && second.value.as_ref().map(|value| value.r#type) == Some(VARIANT_U64)
+            )
+        }));
+        assert!(typed_arrays.iter().any(|array| {
+            matches!(
+                array.literals.as_slice(),
+                [tag, len, first, second]
+                    if tag.value.as_ref().and_then(|value| value.value.as_ref())
+                        == Some(&variant_value::Value::ValueInt(LITERAL_TAG_ARRAY_STRING as u64))
+                    && len.tag as u8 == LITERAL_TAG_INTEGER
+                    && first.tag as u8 == LITERAL_TAG_ARRAY_STRING
+                    && first.value.as_ref().map(|value| value.r#type) == Some(VARIANT_STRING)
+                    && second.tag as u8 == LITERAL_TAG_ARRAY_STRING
+                    && second.value.as_ref().map(|value| value.r#type) == Some(VARIANT_STRING)
+            )
+        }));
+
+        let mut restored_from_proto = AbcFile::new();
+        append_program_to_file(&mut restored_from_proto, program).unwrap();
+        assert!(restored_from_proto.literal_arrays.iter().any(|array| {
+            matches!(
+                array.entries.as_slice(),
+                [LiteralEntry::TaggedArray { component_tag: LITERAL_TAG_ARRAY_U64, values }]
+                    if values.as_slice() == &[
+                        LiteralArrayElement::U64(0x1_0000_0000),
+                        LiteralArrayElement::U64(0x2_0000_0001),
+                    ]
+            )
+        }));
+
+        let bytes = file.serialize_with_version(version_for_target_api(20, None));
+        AbcReader::validate(&bytes).unwrap();
+        let mut restored_from_abc = AbcFile::new();
+        append_abc_file(&mut restored_from_abc, &bytes).unwrap();
+        assert!(restored_from_abc.literal_arrays.iter().any(|array| {
+            matches!(
+                array.entries.as_slice(),
+                [LiteralEntry::TaggedArray { component_tag: LITERAL_TAG_ARRAY_U64, values }]
+                    if values.as_slice() == &[
+                        LiteralArrayElement::U64(0x1_0000_0000),
+                        LiteralArrayElement::U64(0x2_0000_0001),
+                    ]
+            )
+        }));
+        assert!(restored_from_abc.literal_arrays.iter().any(|array| {
+            matches!(
+                array.entries.as_slice(),
+                [LiteralEntry::TaggedArray { component_tag: LITERAL_TAG_ARRAY_STRING, values }]
+                    if values.as_slice() == &[
+                        LiteralArrayElement::String("alpha".to_string()),
+                        LiteralArrayElement::String("beta".to_string()),
+                    ]
+            )
+        }));
     }
 
     #[test]
