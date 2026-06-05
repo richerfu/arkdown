@@ -928,6 +928,7 @@ fn method_from_proto(
         num_vregs: to_u16(function.regs_num, "function regs_num")?,
         num_args: to_u16(function.params.len() as u64, "function params")?,
         value_of_first_param: function.value_of_first_param,
+        slots_num: Some(to_u32(function.slots_num, "function slots_num")?),
         debug_info: has_debug_info.then(|| DebugInfoRecord {
             line_start,
             source_file,
@@ -2338,7 +2339,10 @@ fn function_to_proto(
     strings: &StringTable,
 ) -> io::Result<Function> {
     let mut pandasm_insns = method.pandasm_insns.clone();
-    let slots_num = assign_inline_cache_slots(&mut pandasm_insns);
+    let slots_num = match method.slots_num {
+        Some(slots_num) => slots_num,
+        None => assign_inline_cache_slots(&mut pandasm_insns),
+    };
 
     let mut required_label_offsets = BTreeSet::<usize>::new();
     let offsets = instruction_offsets(&pandasm_insns);
@@ -4488,6 +4492,7 @@ class A {}
         let param_reg = function.regs_num as i32;
         let second_local_reg = if function.regs_num > 1 { 1 } else { 0 };
         function.value_of_first_param = 42;
+        function.slots_num = 77;
         function.local_variable_debug = vec![
             LocalVariable {
                 name: b"param0".to_vec(),
@@ -4515,6 +4520,7 @@ class A {}
             },
         ];
         let expected_value_of_first_param = function.value_of_first_param;
+        let expected_slots_num = function.slots_num as u32;
         let expected_locals = function.local_variable_debug.clone();
 
         let mut restored = AbcFile::new();
@@ -4538,6 +4544,7 @@ class A {}
             restored_method.value_of_first_param,
             expected_value_of_first_param
         );
+        assert_eq!(restored_method.slots_num, Some(expected_slots_num));
         assert_eq!(restored_debug.local_variables.len(), expected_locals.len());
         assert_eq!(restored_debug.local_variables[0].name, "param0");
         assert_eq!(restored_debug.local_variables[1].name, "local0");
@@ -4550,9 +4557,28 @@ class A {}
             roundtrip_function.value_of_first_param,
             expected_value_of_first_param
         );
+        assert_eq!(roundtrip_function.slots_num, expected_slots_num as u64);
+        assert_eq!(
+            function_annotation_u32(roundtrip_function, SLOT_NUMBER_RECORD_NAME, "SlotNumber")
+                .unwrap(),
+            Some(expected_slots_num)
+        );
         assert_eq!(roundtrip_function.local_variable_debug, expected_locals);
 
         let bytes = restored.serialize_with_version(version_for_target_api(20, None));
+        let mut restored_from_abc = AbcFile::new();
+        crate::abc2program::append_abc_file(&mut restored_from_abc, &bytes).unwrap();
+        let abc_method = restored_from_abc
+            .records
+            .iter()
+            .find(|record| record.name == "Lusage_string.ets;")
+            .expect("ABC-imported user record must exist")
+            .methods
+            .iter()
+            .find(|method| method.name == "func_main_0")
+            .expect("ABC-imported func_main_0 method must exist");
+        assert_eq!(abc_method.slots_num, Some(expected_slots_num));
+
         let reader = AbcReader::new(&bytes).unwrap();
         let class = reader
             .class_items()

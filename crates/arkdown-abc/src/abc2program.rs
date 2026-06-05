@@ -168,6 +168,7 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
                     num_vregs: code.num_vregs as u16,
                     num_args: code.num_args as u16,
                     value_of_first_param: -1,
+                    slots_num: annotations.slot_number,
                     debug_info: None,
                     line_ops: Vec::new(),
                     catch_entries: code
@@ -262,6 +263,7 @@ fn is_ark_annotation_stub(name: &str) -> bool {
 #[derive(Default)]
 struct AbcDecodedMethodAnnotations {
     expected_property_count: Option<u32>,
+    slot_number: Option<u32>,
     custom: Vec<AnnotationRecord>,
 }
 
@@ -351,9 +353,16 @@ fn method_annotations_from_abc(
             });
             continue;
         }
-        if record_name == "_ESSlotNumberAnnotation"
-            || record_name == "_ESConcurrentModuleRequestsAnnotation"
-        {
+        if record_name == "_ESSlotNumberAnnotation" {
+            decoded.slot_number = elements.iter().find_map(|element| {
+                (element.name == "SlotNumber").then_some(match &element.value {
+                    AnnotationValue::U32(value) => Some(*value),
+                    _ => None,
+                })?
+            });
+            continue;
+        }
+        if record_name == "_ESConcurrentModuleRequestsAnnotation" {
             continue;
         }
         decoded.custom.push(AnnotationRecord {

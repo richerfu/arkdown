@@ -1156,8 +1156,9 @@ impl AbcFile {
                     &mut defineclass_cursor,
                     &mut definefunc_cursor,
                 );
-                slot_counts_per_class[class_idx][method_idx] =
-                    assign_inline_cache_slots(&mut bytecode);
+                slot_counts_per_class[class_idx][method_idx] = method
+                    .slots_num
+                    .unwrap_or_else(|| assign_inline_cache_slots(&mut bytecode));
             }
         }
 
@@ -1498,7 +1499,8 @@ impl AbcFile {
                 );
                 let mut bytecode = bytecode;
                 let slot_count = assign_inline_cache_slots(&mut bytecode);
-                slot_counts_per_class[class_idx][class_code_items.len()] = slot_count;
+                slot_counts_per_class[class_idx][class_code_items.len()] =
+                    method.slots_num.unwrap_or(slot_count);
                 let ci = encode_code_item(
                     method.num_vregs,
                     method.num_args,

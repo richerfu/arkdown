@@ -191,6 +191,11 @@ pub struct MethodRecord {
     /// pandasm source. ABC stores `num_vregs`/`num_args`, so this is preserved
     /// only for ProgramCache/protoBin roundtrips.
     pub value_of_first_param: i64,
+    /// Upstream `Function::slots_num` / `_ESSlotNumberAnnotation` value.
+    /// Source compilation computes this from inline-cache operands; proto/ABC
+    /// inputs keep the upstream value here so ProgramCache snapshots do not
+    /// lose metadata when an instruction is not modeled by local IR yet.
+    pub slots_num: Option<u32>,
     /// Optional method debug metadata. hvigor/es2abc emits this in non-stripped
     /// output so ArkRuntime can link bytecode spans back to source files.
     pub debug_info: Option<DebugInfoRecord>,
@@ -1013,6 +1018,7 @@ mod tests {
                 num_vregs: 0,
                 num_args: 3,
                 value_of_first_param: -1,
+                slots_num: None,
                 debug_info: None,
                 line_ops: vec![],
                 catch_entries: vec![],
@@ -1062,6 +1068,7 @@ mod tests {
                 num_vregs: 0,
                 num_args: 3,
                 value_of_first_param: -1,
+                slots_num: None,
                 debug_info: None,
                 line_ops: vec![],
                 catch_entries: vec![],
