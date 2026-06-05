@@ -10,9 +10,29 @@ pub(super) fn class_method_record_name(
     method: &MethodDefinition<'_>,
     class_name: &str,
     function_names: &mut FunctionNameAllocator<'_>,
+    standalone_ecmascript_input: bool,
 ) -> Option<String> {
+    if standalone_ecmascript_input {
+        return class_method_upstream_name(method, class_name);
+    }
     let name = class_method_inferred_name(method, class_name)?;
     Some(function_names.bind(method.value.span.start, method.value.span.end, Some(&name)))
+}
+
+pub(super) fn class_method_upstream_name(
+    method: &MethodDefinition<'_>,
+    class_name: &str,
+) -> Option<String> {
+    if method.kind == MethodDefinitionKind::Constructor {
+        return Some(format!("#~{class_name}=#{class_name}"));
+    }
+    let marker = if method.r#static { '<' } else { '>' };
+    let key_name = method_key_name(&method.key).or_else(|| {
+        method
+            .computed
+            .then(|| computed_class_method_record_name(method))
+    })?;
+    Some(format!("#~{class_name}{marker}#{key_name}"))
 }
 
 pub(super) fn class_method_inferred_name(
@@ -57,8 +77,9 @@ pub(super) fn method_key_name(key: &PropertyKey<'_>) -> Option<String> {
 }
 
 pub(super) fn class_buffer_literal_array(
-    _class_name: &str,
+    class_name: &str,
     elements: &[ClassElement<'_>],
+    standalone_ecmascript_input: bool,
 ) -> LiteralArray {
     let mut entries = Vec::new();
     let mut instance_method_count = 0u32;
@@ -74,9 +95,14 @@ pub(super) fn class_buffer_literal_array(
         let Some(public_name) = method_key_name(&method.key) else {
             continue;
         };
+        let method_name = if standalone_ecmascript_input {
+            class_method_upstream_name(method, class_name).unwrap_or_else(|| public_name.clone())
+        } else {
+            public_name.clone()
+        };
 
         entries.push(LiteralEntry::TaggedString(public_name.clone()));
-        entries.push(LiteralEntry::TaggedMethodName(public_name));
+        entries.push(LiteralEntry::TaggedMethodName(method_name));
         entries.push(LiteralEntry::TaggedMethodAffiliate(
             method.value.params.items.len() as u16,
         ));

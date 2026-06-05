@@ -14,6 +14,7 @@ pub(super) struct CompileModuleInfo {
     pub(super) package_name: String,
     pub(super) module_type: String,
     pub(super) origin_source_lang: String,
+    pub(super) is_shared_module: bool,
     pub(super) source_ext: String,
     pub(super) output_ext: String,
 }
@@ -27,6 +28,7 @@ impl CompileModuleInfo {
             source_file: self.source_file_info.clone(),
             package_name: self.package_name.clone(),
             origin_source_lang: self.origin_source_lang.clone(),
+            is_shared_module: self.is_shared_module,
             abc_cache_path: None,
         }
     }
@@ -84,6 +86,7 @@ impl CompileModuleInfo {
             };
             let version = package_version_or_default(&module_root);
             let module_type = Self::module_type_for_source(&source_ext);
+            let is_shared_module = module_root_is_shared(&module_root);
 
             return Some(CompileModuleInfo {
                 source_path,
@@ -97,6 +100,7 @@ impl CompileModuleInfo {
                 package_name: module_name.to_string(),
                 module_type,
                 origin_source_lang: Self::origin_source_lang(&source_ext),
+                is_shared_module,
                 source_ext,
                 output_ext: output_ext.to_string(),
             });
@@ -150,6 +154,7 @@ impl CompileModuleInfo {
             package_name: package_entry_name,
             module_type: Self::module_type_for_source(&source_ext),
             origin_source_lang: Self::origin_source_lang(&source_ext),
+            is_shared_module: module_root_is_shared(&package_root),
             source_ext,
             output_ext: output_ext.to_string(),
         })
@@ -469,6 +474,17 @@ pub(super) fn package_version_or_default(package_root: &Path) -> String {
     }
 }
 
+fn module_root_is_shared(module_root: &Path) -> bool {
+    arkdown_config::module_json::RawModuleJson::load(module_root)
+        .map(|module_json| {
+            matches!(
+                OhosModuleType::from_type_str(&module_json.module.module_type),
+                OhosModuleType::Shared
+            )
+        })
+        .unwrap_or(false)
+}
+
 pub(super) fn pkg_modules_package_name(
     package_root: &Path,
     loader_json: &arkdown_profile::LoaderJson,
@@ -668,6 +684,34 @@ mod tests {
 
         info.set_rolldown_commonjs(true);
         assert_eq!(info.module_type, "commonjs");
+    }
+
+    #[test]
+    fn compile_module_info_reads_shared_module_flag_from_module_json() {
+        let temp = TempDir::new().unwrap();
+        let project = temp.path();
+        let shared_root = project.join("shared");
+        let source_path = shared_root.join("src/main/ets/pages/Index.ets");
+        fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+        fs::write(&source_path, "export const value = 1;\n").unwrap();
+        fs::write(
+            shared_root.join("src/main/module.json5"),
+            r#"{ module: { name: "shared", type: "shared" } }"#,
+        )
+        .unwrap();
+
+        let loader_json = make_loader_json(project, &[("shared", &shared_root)]);
+        let config = make_config(project, &shared_root);
+        let cache_root = project.join("cache");
+
+        let info = CompileModuleInfo::compute(&source_path, &cache_root, &loader_json, &config)
+            .expect("module info");
+
+        assert!(
+            info.is_shared_module,
+            "filesInfo isSharedModule follows module.json5 module.type"
+        );
+        assert!(info.to_compile_info().is_shared_module);
     }
 
     #[test]

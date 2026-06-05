@@ -157,10 +157,14 @@ pub(super) fn compile_arkdata_pass(
         );
         inputs.push(Ts2abcInput {
             path: cache_path,
+            output: None,
+            cache_file: None,
             record_name,
             source_file: Some(path_string(&source_path)),
             package_name: None,
             is_commonjs: false,
+            is_shared_module: matches!(module.module_type, OhosModuleType::Shared),
+            origin_source_lang: "ets".to_string(),
             source_map: None,
         });
     }
@@ -171,8 +175,6 @@ pub(super) fn compile_arkdata_pass(
 
     let output_dir = PathBuf::from(&loader_json.ace_module_build);
     let data_abc_path = output_dir.join("data.abc");
-    let abc_cache_dir = module.src_path.join("build/default/cache/abc_arkdata");
-    std::fs::create_dir_all(&abc_cache_dir).ok();
 
     compile_to_abc(Ts2abcOptions {
         inputs,
@@ -185,10 +187,18 @@ pub(super) fn compile_arkdata_pass(
         } else {
             0
         },
+        optimize_try_catch_func: true,
         merge_abc: true,
         module: true,
         commonjs: false,
-        cache_file: Some(abc_cache_dir),
+        input_extension: "js".to_string(),
+        module_record_field_name: None,
+        cache_file: None,
+        output_proto: None,
+        compile_context_info: Default::default(),
+        enable_abc_input: false,
+        dump_deps_info: false,
+        remove_redundant_file: false,
         npm_module_entry_list: None,
     })
     .map_err(|e| anyhow::anyhow!("H13: ArkData ABC compile failed: {}", e))?;

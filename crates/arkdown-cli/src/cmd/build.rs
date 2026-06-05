@@ -39,9 +39,9 @@ use arkdown_ts2abc::{compile_to_abc, Ts2abcInput, Ts2abcOptions};
 use arkdown_watcher::FileWatcher;
 use rolldown_plugin::__inner::SharedPluginable;
 
-use arkdown_cache::{BuildCache, BundleCacheKey, CacheKey};
 use crate::progress::Progress;
 use crate::task_cache::TaskInputs;
+use arkdown_cache::{BuildCache, BundleCacheKey, CacheKey};
 
 mod compile_arkts_cache;
 use compile_arkts_cache::CompileArktsCacheWriter;
@@ -1068,6 +1068,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             .get(bundle_index)
             .cloned()
             .unwrap_or_default();
+        let modules_cache_path = compile_arkts_handoff.modules_cache_path.clone();
         let ts2abc_inputs = compile_arkts_handoff.inputs;
         if ts2abc_inputs.is_empty() {
             return Err(anyhow::anyhow!(
@@ -1075,13 +1076,6 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             ));
         }
         if !ts2abc_inputs.is_empty() {
-            // ABC incremental compiler cache: hvigor uses es2abc --cache-file to
-            // avoid re-parsing unchanged modules inside the ABC backend.
-            // Pass the *directory* — CacheFile::path_for() appends the filename
-            // internally. Previously this erroneously passed the full file path,
-            // causing path_for() to produce "…/modules.abc.cache/modules.abc.cache".
-            let abc_cache_dir = module.src_path.join("build/default/cache/abc");
-            std::fs::create_dir_all(&abc_cache_dir).ok();
             compile_to_abc(Ts2abcOptions {
                 inputs: ts2abc_inputs,
                 output: bundle_out.modules_abc_path.clone(),
@@ -1093,10 +1087,18 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 } else {
                     0
                 },
+                optimize_try_catch_func: true,
                 merge_abc: true,
                 module: true,
                 commonjs: false,
-                cache_file: Some(abc_cache_dir),
+                input_extension: "js".to_string(),
+                module_record_field_name: None,
+                cache_file: modules_cache_path,
+                output_proto: None,
+                compile_context_info: Default::default(),
+                enable_abc_input: false,
+                dump_deps_info: false,
+                remove_redundant_file: false,
                 npm_module_entry_list: compile_arkts_handoff.npm_entries_path,
             })
             .map_err(|e| anyhow::anyhow!("ABC compile failed: {}", e))?;

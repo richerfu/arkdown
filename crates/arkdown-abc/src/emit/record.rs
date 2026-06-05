@@ -14,6 +14,8 @@ pub(crate) fn uleb128(mut value: u64) -> Vec<u8> {
     out
 }
 
+use crate::ir::opcodes::Insn;
+
 pub const FIELD_OWNER_CLASS_IDX: u16 = u16::MAX;
 
 /// Method access flags constants for MethodItem `access_flags`.
@@ -137,6 +139,16 @@ pub struct MethodRecord {
     pub name: String,
     /// Encoded bytecode for the method body.
     pub bytecode: Vec<u8>,
+    /// Structured pandasm instruction stream used by upstream ProgramCache.
+    ///
+    /// This must describe the same instruction stream as `bytecode`, after
+    /// argument-register physicalization and bytecode optimization. Hand-written
+    /// tests may leave it empty; ProgramCache serialization then refuses to
+    /// cache that method instead of emitting an invalid protoPanda program.
+    pub pandasm_insns: Vec<Insn>,
+    /// Per-pandasm-instruction debug position serialized through
+    /// protoPanda `Ins.insDebug`.
+    pub pandasm_debug: Vec<InstructionDebugInfo>,
     /// Number of virtual registers required by this method.
     pub num_vregs: u16,
     /// Number of formal parameters.
@@ -158,10 +170,23 @@ pub struct MethodRecord {
     pub catch_entries: Vec<CatchEntry>,
     pub kind: MethodKind,
     pub method_pool_entry: bool,
+    pub expected_property_count: Option<u32>,
     /// Source-order key for `definefunc` operands. MethodItems may be sorted for
     /// upstream file layout, but anonymous `definefunc` opcodes are resolved in
     /// AST discovery order.
     pub definefunc_order: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstructionDebugInfo {
+    pub line_number: u32,
+    pub column_number: u32,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct MethodAnnotationOffsets {
+    pub(crate) expected_property_count: Option<u32>,
+    pub(crate) slot_number: u32,
 }
 
 /// Minimal method debug info linked through a Panda LineNumberProgram.
@@ -247,9 +272,12 @@ pub struct ClassRecord {
     pub access_flags: u32,
     /// Class and method source-language byte.
     ///
-    /// hvigor's API 17 output uses `0x04` for user ArkTS records and `0x00`
-    /// for fixed SDK/annotation ECMAScript records.
+    /// Matches libpandafile `SourceLang`: ECMASCRIPT=0, JAVASCRIPT=2,
+    /// TYPESCRIPT=3, ARKTS=4.
     pub source_lang: u8,
+    /// True when the record comes from a direct es2abc-style `.js`/`.ts`
+    /// source-file input rather than hvigor's filesInfo handoff.
+    pub standalone_ecmascript_input: bool,
     /// Optional source file path written as ClassTag::SOURCE_FILE.
     pub source_file: Option<String>,
     /// Module specifiers referenced by `require("@ohos:xxx")` calls in this
@@ -373,7 +401,7 @@ impl ClassRecord {
     /// - `code_offsets`: File offsets of each method's `CodeItem`, parallel to
     ///   `self.methods`.
     #[allow(clippy::too_many_arguments)]
-    pub fn serialize_class_item(
+    pub(crate) fn serialize_class_item(
         &self,
         class_idx: u16,
         field_name_offsets: &[u32],
@@ -381,7 +409,7 @@ impl ClassRecord {
         method_name_offsets: &[u32],
         code_offsets: &[u32],
         debug_info_offsets: &[Option<u32>],
-        annotation_offsets: &[u32],
+        annotation_offsets: &[MethodAnnotationOffsets],
         literal_array_offsets: &[u32],
     ) -> Vec<u8> {
         debug_assert_eq!(field_name_offsets.len(), self.fields.len());
@@ -452,7 +480,7 @@ impl ClassRecord {
         for (i, method) in self.methods.iter().enumerate() {
             let name_off = method_name_offsets[i];
             let code_off = code_offsets[i];
-            let ann_off = annotation_offsets[i];
+            let ann_offsets = annotation_offsets[i];
 
             // class_idx: u16 LE
             buf.extend_from_slice(&class_idx.to_le_bytes());
@@ -473,10 +501,15 @@ impl ClassRecord {
                 buf.push(0x05);
                 buf.extend_from_slice(&debug_info_off.to_le_bytes());
             }
-            // MethodTag::ANNOTATION = 0x06 + annotation offset (always emitted).
-            // Points to the L_ESSlotNumberAnnotation item for this method.
+            if let Some(expected_off) = ann_offsets.expected_property_count {
+                buf.push(0x06);
+                buf.extend_from_slice(&expected_off.to_le_bytes());
+            }
+            // MethodTag::ANNOTATION = 0x06 + annotation offset. Every method
+            // gets SlotNumber, and ExpectedPropertyCount (when non-zero) is
+            // emitted before it, matching FunctionEmitter::Generate().
             buf.push(0x06);
-            buf.extend_from_slice(&ann_off.to_le_bytes());
+            buf.extend_from_slice(&ann_offsets.slot_number.to_le_bytes());
             // MethodTag::NOTHING = 0x00
             buf.push(0x00);
         }
@@ -508,7 +541,10 @@ impl MethodRecord {
     pub(crate) fn access_flags(&self) -> u32 {
         match self.kind {
             MethodKind::Module => method_access::MODULE_OR_CTOR,
-            MethodKind::Constructor if self.is_generated_default_derived_constructor() => {
+            MethodKind::Constructor
+                if self.is_generated_default_base_constructor()
+                    || self.is_generated_default_derived_constructor() =>
+            {
                 method_access::MODULE_OR_CTOR
             }
             MethodKind::FunctionLiteral => method_access::MODULE_OR_CTOR,
@@ -529,6 +565,14 @@ impl MethodRecord {
         ])
     }
 
+    fn is_generated_default_base_constructor(&self) -> bool {
+        // Direct es2abc standalone inputs synthesize a default base constructor
+        // as `lda this; return` and mark it with constructor/module flags.
+        self.num_args == 3
+            && (self.bytecode == [0x60, 0x02, 0x64]
+                || self.bytecode == [0x3c, 0x00, 0xfb, 0x06, 0x00, 0x02, 0x60, 0x02, 0x64])
+    }
+
     pub(crate) fn method_item_byte_size(&self) -> usize {
         // class_idx(2) + proto_idx(2) + name_off(4) + access_flags(variable)
         // + MethodTag::CODE(1) + code_off(4) + MethodTag::SOURCE_LANG(1) + lang(1)
@@ -538,6 +582,7 @@ impl MethodRecord {
         let access_flags_len = uleb128(self.access_flags() as u64).len();
         16 + access_flags_len
             + (1 + 4) // MethodTag::ANNOTATION always emitted
+            + self.expected_property_count.map_or(0, |_| 1 + 4)
             + self.debug_info.as_ref().map_or(0, |_| 1 + 4)
     }
 }
@@ -632,6 +677,8 @@ mod tests {
             methods: vec![MethodRecord {
                 name: "func_main_0".to_string(),
                 bytecode: vec![0x65],
+                pandasm_insns: Vec::new(),
+                pandasm_debug: Vec::new(),
                 num_vregs: 0,
                 num_args: 3,
                 debug_info: None,
@@ -639,6 +686,7 @@ mod tests {
                 catch_entries: vec![],
                 kind: MethodKind::Module,
                 method_pool_entry: false,
+                expected_property_count: None,
                 definefunc_order: None,
             }],
             string_indices: vec![],
@@ -647,6 +695,7 @@ mod tests {
             source_code_strings: vec![],
             access_flags: 1,
             source_lang: 0,
+            standalone_ecmascript_input: false,
             source_file: None,
             module_requests: vec![],
             fields: vec![],
@@ -669,6 +718,8 @@ mod tests {
             methods: vec![MethodRecord {
                 name: "func_main_0".to_string(),
                 bytecode: vec![0x65],
+                pandasm_insns: Vec::new(),
+                pandasm_debug: Vec::new(),
                 num_vregs: 0,
                 num_args: 3,
                 debug_info: None,
@@ -676,6 +727,7 @@ mod tests {
                 catch_entries: vec![],
                 kind: MethodKind::Module,
                 method_pool_entry: false,
+                expected_property_count: None,
                 definefunc_order: None,
             }],
             string_indices: vec![],
@@ -684,13 +736,25 @@ mod tests {
             source_code_strings: vec![],
             access_flags: 1,
             source_lang: 0,
+            standalone_ecmascript_input: false,
             source_file: None,
             module_requests: vec![],
             fields: vec![],
         };
         // annotation_offset = 0x200 (dummy annotation offset for test)
-        let bytes =
-            record.serialize_class_item(4, &[], None, &[0x12a], &[0x1a1], &[None], &[0x200], &[]);
+        let bytes = record.serialize_class_item(
+            4,
+            &[],
+            None,
+            &[0x12a],
+            &[0x1a1],
+            &[None],
+            &[MethodAnnotationOffsets {
+                expected_property_count: None,
+                slot_number: 0x200,
+            }],
+            &[],
+        );
         assert_eq!(bytes.len(), record.class_item_byte_size());
 
         // Verify inline class name starts with ULEB128(0x13) = "L_GLOBAL;"

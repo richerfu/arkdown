@@ -65,11 +65,11 @@ impl FunctionLexicalCollector {
         };
         if let Some(info) = self.infos.get_mut(&frame.span) {
             let mut names = frame.captures;
-            if frame.captures_this && !names.iter().any(|name| name == "this") {
-                names.push("this".to_string());
-            }
             if frame.captures_new_target && !names.iter().any(|name| name == "new.target") {
                 names.push("new.target".to_string());
+            }
+            if frame.captures_this && !names.iter().any(|name| name == "this") {
+                names.push("this".to_string());
             }
             info.names = names;
         }

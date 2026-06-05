@@ -40,6 +40,7 @@ fn npm_entry_record(entry: NpmEntry) -> ClassRecord {
         source_code_strings: vec![],
         access_flags: 1,
         source_lang: 0,
+        standalone_ecmascript_input: false,
         source_file: None,
         module_requests: vec![],
         fields: vec![FieldRecord {

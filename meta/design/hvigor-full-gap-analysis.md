@@ -113,7 +113,7 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 | # | hvigor Step | es2abc behavior | arkdown | Status |
 |---|---|---|---|---|
 | H1 | Parse JS/TS source files | `es2panda` parser | `ohos-rs/oxc` (pinned rev) | ✅ |
-| H2 | Lower AST → Panda IR | `es2abc` compiler passes | `arkdown-abc::ir::` modules: handles literals, variable decls, all expression types, loops, try/catch/finally, async/await (via asyncfunctionenter/resume), generators, destructuring, classes, spread/rest, computed properties, auto-accessor properties. All standard OHOS ArkTS patterns compile correctly; computed auto-accessor key fallback emits synthetic name for rare `accessor [Symbol.foo]` patterns. | ✅ |
+| H2 | Lower AST → Panda IR + release bytecode optimization | `es2abc` compiler passes + `bytecode_optimizer::RunOptimizations()` | `arkdown-abc::ir::` modules handle literals, variable decls, loops, try/catch/finally, async/await (via asyncfunctionenter/resume), generators, destructuring including for-left assignment patterns, classes, spread/rest, computed properties, and auto-accessor properties. Computed auto-accessors now precompute and reuse runtime keys instead of synthetic fallback names. Non-zero `opt_level` now runs a Rust encoded-bytecode optimizer entry instead of failing; the port currently covers upstream-like register-frame compaction, range operand frame modeling, and upstream `--opt-try-catch-func` behavior, including the default EH-method participation and explicit `--opt-try-catch-func=false` skip path. The full graph pass stack (`Cleanup`, optional `ConstantPropagation`/`BranchElimination`, `ValNum`, `Lowering`, `MoveConstants`, `RegAccAlloc`, `RegAlloc`, `RegEncoder`, `BytecodeGen`) is still incomplete. | 🔄 |
 | H3 | Emit ABC binary: Header, StringTable, LiteralArrayTable | `assembler/assembly_emitter.cpp` | Implemented; structural match | ✅ |
 | H4 | Emit ClassIndex + ClassRecords (one per rolldown chunk) | `assembly_emitter.cpp::SerializeClasses()` | Implemented | ✅ |
 | H5 | MethodRecords with Panda bytecode | `assembly_emitter.cpp::SerializeMethods()` | Minimal-hap `modules.abc` is byte-identical to hvigor on the CompileArkTS cache-TS route | ✅ |
@@ -121,10 +121,10 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 | H7 | Module annotation strings deduplicated in StringTable | Single string entry shared across all records | ✅ Fixed: field name strings deduplicated across classes | ✅ |
 | H8 | Method index ordering [strings\|methods\|lits] | `assembly_emitter.cpp` method pool layout | ✅ Fixed: method index now [bytecode_strings\|methods\|literal_arrays] | ✅ |
 | H9 | LNP body and DebugInfo constant_pool | `emitter.cpp` attaches AST source positions from parsed input source; `BuildLineNumberProgram()` consumes pandasm instruction source positions, real bytecode sizes, columns, and local-variable events | Minimal-hap is byte-identical on the cache-TS route after aligning source positions, call/branch/argument stores, implicit returns, lexical `this` locals, special-opcode pc deltas, MethodItem tag order, parameter-name string order, and aligned trailing LNP index. Broader fixtures still need coverage. | ✅ |
-| H10 | `--merge-abc`: all module records in single `.abc` | Multiple records merged with shared StringTable | Implemented | ✅ |
-| H11 | Incremental ABC cache via `--cache-file` (msgpack) | `es2abc --cache-file <path>` | `ModulesCache` (modules.cache + .protoBin): FNV hash over all sources + options; cache hit skips full compilation and returns cached ABC. Per-function SHA256 protoBin format is a separate optimization; batch-level correctness is equivalent to upstream `--cache-file` intent. | ✅ (equiv.) |
-| H12 | Widget compilation (separate pass, `widgetCompile: "true"`) | ArkCompile calls `initWidgetDefaultArkCompileConfig()` for form entries | `compile_widget_pass()` in CLI: scans extension abilities for form entries, transforms + rewrites OHM URLs, compiles to `widgets.abc` via separate `compile_to_abc()` invocation with widget cache dir. Output path matches hvigor's `ets/widgets.abc`. | ✅ |
-| H13 | ArkData compile (`arkDataCompile()`) | Separate compiler invocation for ArkData sources | `compile_arkdata_pass()`: scans `.ets` files for `@kit.ArkData`/`@ohos/cloudData` imports; transforms and compiles to `ets/data.abc` via separate `compile_to_abc()` invocation with `debug_arkdata`/`release_arkdata` cache dir | ✅ |
+| H10 | `--merge-abc` / default non-merge emit mode | `EmitMergedAbcJob` uses `AsmEmitter::EmitPrograms`; default non-merge uses `EmitSingleAbcJob`, source `recordName=""`, `OutputFiles().at(inputPath)`, and metadata records such as `_ESModuleRecord`, `_ESScopeNamesRecord`, `_HasTopLevelAwait`, `_SharedModuleRecord`, `_CommonJsRecord` instead of merge-record fields | Merge mode is implemented. Single-source non-merge compiles through the Rust ABC backend instead of failing; ts2abc parsing leaves recordName empty and defaults source_file to the input path when `--merge-abc` is absent, matching upstream options.cpp. Non-merge metadata is split into upstream-style standalone records for module record, scope names, top-level await, shared module, and CommonJS. Multi-source non-merge file lists now parse the upstream `filePath;recordName;moduleKind;sourceFile;outputfile;isSharedModule;sourceLang` shape and write one ABC per input via `Ts2abcInput.output`, matching `OutputFiles()`. The low-level `AbcCompiler::compile` remains a single-output API and still rejects multi-source non-merge directly. | 🔄 |
+| H11 | Incremental ABC cache via `--cache-file` / `@modules.cache` ProgramCache | `aot/options.cpp::ParseCacheFileOption`, `compiler/core/compileQueue.cpp::RetrieveProgramFromCacheFiles`, `aot/emitFiles.cpp::ScheduleEmitCacheJobs` | Partially aligned. The false ARKD batch cache of final ABC bytes has been removed. `arkdown-abc` now carries upstream `protoPanda` protobuf types, reads/writes source `ProgramCache` and ABC-input `AbcProtoProgramsCache` protoBin envelopes with `prost`, parses `@modules.cache` as `sourceFile;protoBin`, and computes the upstream Murmur3 cache hash including the current Panda bytecode version string. `ts2abc --cache-file` maps cache files per input; source inputs restore/store per-source `Program`, and ABC inputs restore/store `abcPath|recordName -> Program` entries before normal ABC emission. Remaining gap: the Rust `pandasm_insns` model still needs broader opcode parity evidence against upstream abc2program for large bytecode-HAR fixtures. | 🔄 |
+| H12 | Widget compilation (separate pass, `widgetCompile: "true"`) | ArkCompile calls `initWidgetDefaultArkCompileConfig()` for form entries | `compile_widget_pass()` in CLI: scans extension abilities for form entries, transforms + rewrites OHM URLs, writes a widget CompileArkTS handoff (`filesInfo.txt`, `modules.cache`, `npmEntries.txt`), and compiles to `widgets.abc` via separate `compile_to_abc()` invocation. Output path matches hvigor's `ets/widgets.abc`. | ✅ |
+| H13 | ArkData compile (`arkDataCompile()`) | Separate compiler invocation for ArkData sources | `compile_arkdata_pass()`: scans `.ets` files for `@kit.ArkData`/`@ohos/cloudData` imports; transforms and compiles to `ets/data.abc` via separate `compile_to_abc()` invocation. ABC ProgramCache is not enabled on this path until an ArkData handoff manifest is produced. | ✅ |
 | H14 | CompileArkTS source maps and final `sourceMaps.map` | ets-loader writes `sourceMaps.json`; package includes `ets/sourceMaps.map` | Minimal-hap `sourceMaps.json` and final `ets/sourceMaps.map` match hvigor output; source-map generation uses `rolldown_sourcemap`/`string_wizard` stack for ETS transforms; hvigor-standard mapping format from `write_hvigor_source_maps()` | ✅ |
 
 ### Stage I — Obfuscation and Minification (Release)
@@ -143,7 +143,7 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 |---|---|---|---|---|
 | J1 | Task-level incremental skip: compare declared inputs (obfuscationHash, TSC_MAX_FLOW_DEPTH, etc.) | `ArkCompile::declareInputs()` | `TaskInputs` struct computes `source_hash` (FNV-1a over `compileEntry`), `obfuscation_hash`, `sdk_version`, and `compile_env` key; `matches_cached()` skips the entire bundle+ABC step when all match | ✅ |
 | J2 | Rollup file-system cache: msgpack format, `compileEnv` key | `RollupCacheService` | `EtsTransformPlugin` disk cache (`transform_cache.json`) + `TaskInputs` full-build skip + `CompileEnv::to_key_string()` invalidation; per-file content hash cached to disk; rolldown 1.0.3 scan-stage API not exposed but transform caching covers the hot path | ✅ |
-| J3 | es2abc incremental cache: per-function SHA256, `--cache-file` flag | `es2abc` + hvigor cache integration | `ModulesCache` (modules.cache + .protoBin): batch-level FNV hash provides incremental compilation skip equivalent to upstream `--cache-file` intent. Per-function SHA256 is an upstream optimization not required for correctness. | ✅ (equiv.) |
+| J3 | es2abc incremental cache: protobuf ProgramCache/protoBin via `--cache-file` | `es2abc` + hvigor cache integration | Partially aligned. The private final-ABC cache has been deleted; `--cache-file` now follows upstream bare/`@manifest` mapping. Source inputs use `protoPanda.ProgramCache` for cache hit/store around lowering; ABC inputs use `protoPanda.AbcProtoProgramsCache` for cache hit/store around abc2program, matching upstream's separate `GetAbcInputCacheContext` / `UpdateAbcCacheFile` path. Remaining work is broad parity validation against hvigor-generated cache files and larger bytecode-HAR ABC inputs. | 🔄 |
 | J4 | Clean ABC cache when `obfuscationEnable` changes | `ArkCompile::beforeTask()` | Covered by J1: `obfuscation_hash` changes when `obfuscationEnable` toggles, causing `matches_cached()` to return false and triggering a full rebuild | ✅ |
 
 ### Stage K — Packaging
@@ -215,10 +215,10 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 - CLI passes no obfuscation config to bundler or ABC compiler
 - Needs: wire between `arkdown::Bundler` output and `arkdown-abc::AbcCompiler` input
 
-**J2-J3 — Incremental cache not wired**
-- `arkdown-cache` crate exists with correct data structures
-- Neither rolldown `ScanStageCache` serialization nor ABC `--cache-file` equivalent are wired
-- Clean builds take ~10× longer than incremental on large projects
+**J2-J3 — Incremental cache not fully parity-verified**
+- Rolldown transform/task cache is wired for the current Rust pipeline
+- The old ABC ARKD final-byte cache has been removed; `--cache-file` now uses upstream source-to-protoBin mapping, source `ProgramCache`, ABC-input `AbcProtoProgramsCache`, and upstream-style hash inputs including the current bytecode version string
+- Remaining work: validate generated protoBins against hvigor on large real projects and bytecode-HAR inputs; extend ABC bytecode -> `pandasm_insns` decoding if those fixtures expose additional upstream opcodes
 
 **F25-F26 — Release mode chunk splitting and tree-shake** ✅ resolved
 - `manualChunks` implemented via `Bundler::build_manual_code_splitting_options()`; `support_chunks` wired from config
@@ -311,12 +311,14 @@ cover the two comparison modes. Three regression tests added.
 
 ### TASK-ABC-04: ABC incremental cache wiring (M)
 
-**What**: Replace the current arkdown JSON cache with hvigor-compatible
-`--cache-file @modules.cache` behavior. Parse source-to-protoBin mappings,
-generate/update protoBin ProgramCache entries, and merge cached programs with
-the same semantics as upstream es2panda. Use `tracing::debug!` for diagnostics;
-do not add a custom debug channel.
-**File**: `crates/arkdown-abc/src/compiler.rs`, `crates/arkdown-cli/src/main.rs`
+**What**: Complete hvigor-compatible `--cache-file @modules.cache` behavior.
+The old JSON/ARKD final-ABC cache is removed and source-to-protoBin mapping,
+protobuf schema, protoBin envelope read/write, upstream cache hash, source
+ProgramCache hit/store, and ABC-input AbcProtoProgramsCache hit/store are in
+place. Remaining implementation should focus on parity validation and any opcode
+coverage gaps exposed by hvigor-generated protoBins or bytecode-HAR ABC inputs.
+Use `tracing::debug!` for diagnostics; do not add a custom debug channel.
+**File**: `crates/arkdown-abc/src/cache.rs`, `crates/arkdown-abc/src/proto_panda.rs`, `crates/arkdown-abc/src/compiler.rs`, `crates/arkdown-ts2abc/src/args.rs`, `crates/arkdown-cli/src/cmd/build.rs`
 **Upstream ref**: `es2abc --cache-file` behavior; hvigor `RollupCacheService` msgpack cache at `cache/msgpack/MSGPACK_COMPILE_CACHE_DIR_NAME`; `ark-compile.js::trace()` and `doTaskAction()` cache setup
 **Complexity**: M
 **Depends on**: TASK-CACHE-01
@@ -327,7 +329,7 @@ do not add a custom debug channel.
 **File**: `crates/arkdown-cli/src/cmd/build/compile_arkts_widget.rs`
 **Upstream ref**: `ark-compile.js::doTaskAction()` — `if (this.needSubmitArkTsWidget) { initWidgetDefaultArkCompileConfig() }`; SPEC-027
 **Complexity**: M
-**Status**: `compile_widget_pass()` scans extension abilities for form entries, transforms widget sources with `EtsTransformPlugin`, rewrites OHM imports, compiles to `ets/widgets.abc` via a second `compile_to_abc()` invocation with a separate widget cache directory (`debug_widget`/`release_widget`).
+**Status**: `compile_widget_pass()` scans extension abilities for form entries, transforms widget sources with `EtsTransformPlugin`, rewrites OHM imports, writes a widget CompileArkTS handoff under the widget cache root, and compiles to `ets/widgets.abc` via a second `compile_to_abc()` invocation.
 
 ### TASK-ETS-01: ViewPU build() body lowering (L)
 

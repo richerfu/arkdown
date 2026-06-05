@@ -5,11 +5,13 @@
 //! work into arkdown's Rust bytecode backend instead of spawning SDK tools.
 
 pub mod args;
+pub mod compile_context;
 pub mod driver;
 pub mod error;
 pub mod version;
 
 pub use args::{Ts2abcCommand, VersionQuery};
+pub use compile_context::{CompileContextInfo, PkgInfo};
 pub use driver::{
     compile_to_abc, ArkdownAbcBackend, BytecodeBackend, Ts2abcInput, Ts2abcOptions, Ts2abcOutput,
 };
