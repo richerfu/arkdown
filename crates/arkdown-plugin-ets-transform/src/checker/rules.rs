@@ -500,9 +500,10 @@ fn check_struct_component(
             PropertyKey::StaticIdentifier(id) => id.name.as_str().to_string(),
             _ => "<unknown>".to_string(),
         };
-        let has_state_dec = prop.decorators.iter().any(|d| {
+        let state_dec_name = prop.decorators.iter().find_map(|d| {
+            let name = decorator_name(d);
             matches!(
-                decorator_name(d),
+                name,
                 "State"
                     | "Prop"
                     | "Link"
@@ -514,16 +515,31 @@ fn check_struct_component(
                     | "LocalStorageLink"
                     | "LocalStorageProp"
             )
+            .then_some(name)
         });
-        if has_state_dec && !has_component {
-            errors.push(EtsTransformError::Diagnostic {
-                file: file.to_string(),
-                message: format!(
-                    "State decorator on '{}' in non-@Component struct",
-                    field_name
-                ),
-                severity: DiagnosticSeverity::Error,
-            });
+        if let Some(dec_name) = state_dec_name {
+            if !has_component {
+                errors.push(EtsTransformError::Diagnostic {
+                    file: file.to_string(),
+                    message: format!(
+                        "State decorator '@{}' on '{}' in non-@Component struct",
+                        dec_name, field_name
+                    ),
+                    severity: DiagnosticSeverity::Error,
+                });
+            }
+            // State decorators are not allowed on static struct properties.
+            // Matches hvigor etsChecker's validateStateDecoratorNotStatic() rule.
+            if prop.r#static {
+                errors.push(EtsTransformError::Diagnostic {
+                    file: file.to_string(),
+                    message: format!(
+                        "'@{}' is not allowed on static property '{}' in struct '{}'",
+                        dec_name, field_name, component_name
+                    ),
+                    severity: DiagnosticSeverity::Error,
+                });
+            }
         }
 
         let is_builder_param = prop
