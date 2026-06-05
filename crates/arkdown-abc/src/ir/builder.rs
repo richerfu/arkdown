@@ -1023,7 +1023,6 @@ fn compile_function_record(
                         source_mapper,
                         Some((func.span.start, func.span.end)),
                     )
-                    .unwrap_or_else(BodyCompileResult::empty)
                 } else {
                     compile_function_body_with_destructure_params(
                         func.body.as_deref(),
@@ -1038,7 +1037,6 @@ fn compile_function_record(
                         None,
                         Some((func.span.start, func.span.end)),
                     )
-                    .unwrap_or_else(BodyCompileResult::empty)
                 }
             } else if let Some(src) = source {
                 compile_function_body_tracked_with_end(
@@ -1917,7 +1915,6 @@ fn compile_class_elements(
                     Some((method.value.span.start, method.value.span.end)),
                     private_field_slots.clone(),
                 )
-                .unwrap_or_else(BodyCompileResult::empty)
             } else if let Some(src) = source {
                 compile_body_stmts_tracked_with_private(
                     method
@@ -2268,90 +2265,6 @@ fn compile_arrow_body_with_line_ops<'src>(
     gen.finish_with_line_ops_and_catches()
 }
 
-/// Compile a function body with optional rest-parameter and async-function support.
-///
-/// When `rest_param` is `Some((name, n))`:
-/// - Emits `copyrestargs n` at the start of the body.
-/// - Stores the result to a fresh register named `name`.
-///
-/// When `is_async` is `true`, follows es2panda's `AsyncFunctionBuilder`:
-/// `asyncfunctionenter` creates the async function object, return sites resolve
-/// it, and the protected body has a catch-all cleanup that rejects it.
-///
-/// Note: the live code paths use `compile_function_body_ext_tracked_with_private`
-/// (which handles private class fields).  These simpler variants are kept as
-/// fallback entry points for callers that do not need a private-field slot map.
-#[allow(dead_code)]
-fn compile_function_body_ext(
-    body: Option<&FunctionBody<'_>>,
-    rest_param: Option<(String, u8)>,
-    is_async: bool,
-    strings: &mut StringTable,
-    literal_arrays: &mut Vec<LiteralArray>,
-    lowering: &LoweringContext,
-    param_names: &[String],
-    current_function_span: Option<(u32, u32)>,
-) -> BodyCompileResult {
-    compile_function_body_ext_tracked(
-        body,
-        rest_param,
-        is_async,
-        strings,
-        literal_arrays,
-        lowering,
-        param_names,
-        None,
-        None,
-        current_function_span,
-    )
-    .unwrap_or_else(BodyCompileResult::empty)
-}
-
-#[allow(dead_code)]
-fn compile_function_body_ext_tracked(
-    body: Option<&FunctionBody<'_>>,
-    rest_param: Option<(String, u8)>,
-    is_async: bool,
-    strings: &mut StringTable,
-    literal_arrays: &mut Vec<LiteralArray>,
-    lowering: &LoweringContext,
-    param_names: &[String],
-    source: Option<&str>,
-    source_mapper: Option<&SourceMapper>,
-    current_function_span: Option<(u32, u32)>,
-) -> Option<BodyCompileResult> {
-    let stmts: &[_] = match body {
-        Some(fb) => fb.statements.as_slice(),
-        None => {
-            return Some(BodyCompileResult::return_undefined());
-        }
-    };
-    let mut cg = if let Some(src) = source {
-        CodeGen::new_with_source(strings, literal_arrays, lowering, src, source_mapper)
-    } else {
-        CodeGen::new(strings, literal_arrays, lowering)
-    };
-    cg.is_async = is_async;
-    cg.use_function_lexical_env(current_function_span);
-    cg.emit_function_lex_env_prologue();
-    cg.bind_function_mandatory_lexical_names();
-    cg.emit_async_function_prologue();
-    cg.bind_function_param_names(param_names);
-    if let Some((name, count)) = rest_param {
-        let reg = cg.alloc_reg();
-        cg.push(Insn::CopyRestArgs(count));
-        cg.push(Insn::Sta(reg));
-        cg.var_regs.insert(name, reg);
-    }
-    for stmt in stmts {
-        cg.emit_stmt(stmt);
-        if cg.returned {
-            break;
-        }
-    }
-    Some(cg.finish_with_line_ops_and_catches())
-}
-
 /// Like `compile_function_body_ext_tracked` but also emits destructuring
 /// bindings for function parameters that use array/object patterns.
 #[allow(clippy::too_many_arguments)]
@@ -2367,11 +2280,11 @@ fn compile_function_body_with_destructure_params<'src>(
     source: Option<&str>,
     source_mapper: Option<&SourceMapper>,
     current_function_span: Option<(u32, u32)>,
-) -> Option<BodyCompileResult> {
+) -> BodyCompileResult {
     let stmts: &[_] = match body {
         Some(fb) => fb.statements.as_slice(),
         None => {
-            return Some(BodyCompileResult::return_undefined());
+            return BodyCompileResult::return_undefined();
         }
     };
     let mut cg = if let Some(src) = source {
@@ -2399,7 +2312,7 @@ fn compile_function_body_with_destructure_params<'src>(
             break;
         }
     }
-    Some(cg.finish_with_line_ops_and_catches())
+    cg.finish_with_line_ops_and_catches()
 }
 
 /// Compile a generator (or async-generator) function body.
@@ -3551,11 +3464,11 @@ fn compile_function_body_ext_tracked_with_private<'src>(
     source_mapper: Option<&SourceMapper>,
     current_function_span: Option<(u32, u32)>,
     private_field_slots: FxHashMap<String, u16>,
-) -> Option<BodyCompileResult> {
+) -> BodyCompileResult {
     let stmts: &[_] = match body {
         Some(fb) => fb.statements.as_slice(),
         None => {
-            return Some(BodyCompileResult::return_undefined());
+            return BodyCompileResult::return_undefined();
         }
     };
     let mut cg = if let Some(src) = source {
@@ -3588,7 +3501,7 @@ fn compile_function_body_ext_tracked_with_private<'src>(
             break;
         }
     }
-    Some(cg.finish_with_line_ops_and_catches())
+    cg.finish_with_line_ops_and_catches()
 }
 
 fn is_hoisted_function_declaration(stmt: &Statement<'_>) -> bool {
@@ -4651,10 +4564,6 @@ impl BodyCompileResult {
     fn with_debug_line_start(mut self, debug_line_start: Option<u32>) -> Self {
         self.debug_line_start = debug_line_start;
         self
-    }
-
-    fn empty() -> Self {
-        Self::new(Vec::new(), Vec::new(), Vec::new(), 0)
     }
 }
 
