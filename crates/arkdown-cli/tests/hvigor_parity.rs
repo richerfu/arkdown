@@ -110,6 +110,22 @@ fn minimal_hsp_hvigor_parity_report() {
     );
 }
 
+/// Parity test for ByteCode HAR dependency — validates that BC HAR packages
+/// with root-level `byteCodeHar: true` are detected, their OHM URLs appear
+/// in `compiledImportees`, and `byteCodeHarInfo` references the correct .abc path.
+///
+/// Covers the section 3.8 gap:
+///   "ByteCode HAR/source HAR/HAR declarations/obfuscation files"
+#[test]
+fn bc_har_dep_hap_hvigor_parity_report() {
+    run_parity_report_test(
+        "tests/fixtures/minimal-hap-with-bc-har",
+        "bc-har-dep-hap",
+        ArtifactType::Hap,
+        ParityBuildMode::Debug,
+    );
+}
+
 /// Parity test for share config — validates that crossAppSharedConfig entries
 /// survive profile processing and are written to the correct resource profile.
 /// Covers the P0 fix: share config was being overwritten by static intermediate files.

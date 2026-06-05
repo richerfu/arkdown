@@ -2358,3 +2358,82 @@ fn test_loader_json_byte_code_har_info_populated_from_oh_modules() {
     assert!(entry.abc_path.ends_with("index.abc"));
     assert!(entry.source_maps_path.is_none());
 }
+
+/// Verify that a non-default effective target's `src/<target>/ets/` directory
+/// appears in `pkgNameToPkgBriefInfo.sourceRoots` when the directory exists.
+///
+/// Addresses section 3.1 gap:
+///   "sourceRoots/originalSourceRoots 严格语义和字段顺序仍不完整"
+#[test]
+fn test_loader_json_target_ets_src_added_to_source_roots() {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    let project_root = tmp.path().to_path_buf();
+    let module_root = project_root.join("entry");
+
+    // Create the default source directory.
+    std::fs::create_dir_all(module_root.join("src/main/ets")).expect("create src/main/ets");
+
+    // Create a target-specific ETS directory.
+    let target_ets = module_root.join("src/phone/ets");
+    std::fs::create_dir_all(&target_ets).expect("create src/phone/ets");
+
+    // Create a build-profile.json5 with a non-default "phone" target.
+    std::fs::write(
+        project_root.join("build-profile.json5"),
+        r#"{
+          app: { products: [{ name: "default" }] },
+          modules: [{
+            name: "entry",
+            srcPath: "./entry",
+            targets: [{
+              name: "phone",
+              applyToProducts: ["default"],
+              buildModeSet: [{ name: "debug" }]
+            }]
+          }]
+        }"#,
+    )
+    .expect("write build-profile");
+
+    let mut config = make_config(false);
+    config.project_root = project_root.clone();
+    let module_cfg = ModuleConfig {
+        name: "entry".to_string(),
+        src_path: module_root.clone(),
+        module_type: OhosModuleType::Entry,
+    };
+    let manifest = make_manifest();
+
+    let loader = LoaderJson::generate(&config, &module_cfg, &manifest);
+
+    let pkg_info = loader
+        .pkg_name_to_pkg_brief_info
+        .get("entry")
+        .expect("entry must be in pkgBriefInfo");
+
+    // sourceRoots should include the target-specific path BEFORE src/main/ets.
+    assert!(
+        pkg_info.source_roots.len() >= 2,
+        "sourceRoots must include target-specific dir; got: {:?}",
+        pkg_info.source_roots
+    );
+    let has_target_ets = pkg_info.source_roots.iter().any(|r| r.contains("src/phone/ets"));
+    assert!(
+        has_target_ets,
+        "sourceRoots must contain src/phone/ets; got: {:?}",
+        pkg_info.source_roots
+    );
+
+    // originalSourceRoots should still be src/main/ets only.
+    assert_eq!(
+        pkg_info.original_source_roots.len(),
+        1,
+        "originalSourceRoots must be [src/main/ets]; got: {:?}",
+        pkg_info.original_source_roots
+    );
+    assert!(
+        pkg_info.original_source_roots[0].contains("src/main/ets"),
+        "originalSourceRoots[0] must be src/main/ets; got: {}",
+        pkg_info.original_source_roots[0]
+    );
+}

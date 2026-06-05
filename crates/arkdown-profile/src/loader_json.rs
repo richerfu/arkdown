@@ -1579,13 +1579,37 @@ impl LoaderJson {
         let module_root = to_absolute_path_string(&module_cfg.src_path);
         let ets_src = format!("{}/src/main/ets", module_root);
 
-        // Add the current module.
+        // Detect effective target to include target-specific source root
+        // (`src/<target>/ets/`) when a non-default target is active.
+        //
+        // hvigor adds `src/<target>` as an additional `sourceRoot` in
+        // `pkgNameToPkgBriefInfo` when the effective target is not `default`.
+        // This allows the compiler to resolve target-specific source files.
+        let build_mode_name = match config.build_mode {
+            arkdown_core::BuildMode::Debug => "debug",
+            arkdown_core::BuildMode::Release => "release",
+        };
+        let target_ets_src = Self::detect_target_specific_ets_src(
+            &module_cfg.src_path,
+            &config.project_root,
+            &module_cfg.name,
+            &config.product.name,
+            build_mode_name,
+        );
+
+        // Add the current module with original (src/main/ets) as originalSourceRoots
+        // and target-specific source root (when present) prepended to sourceRoots.
+        let source_roots = if let Some(ref target_ets) = target_ets_src {
+            vec![target_ets.clone(), ets_src.clone()]
+        } else {
+            vec![ets_src.clone()]
+        };
         map.insert(
             module_cfg.name.clone(),
             PkgBriefInfo {
                 pkg_root: module_root.clone(),
                 pkg_name: module_cfg.name.clone(),
-                source_roots: vec![ets_src.clone()],
+                source_roots,
                 original_source_roots: vec![ets_src],
             },
         );
@@ -1635,6 +1659,100 @@ impl LoaderJson {
 
         map
     }
+
+    /// Detect an active non-default target's `src/<target>/ets/` directory.
+    ///
+    /// hvigor includes this path in `pkgNameToPkgBriefInfo.sourceRoots` when
+    /// a non-default effective target is selected.  The `originalSourceRoots`
+    /// keeps `src/main/ets` so the compiler can resolve both roots.
+    ///
+    /// Returns `None` when:
+    /// - There is no non-default effective target for this module.
+    /// - The effective target's `src/<name>/ets/` directory does not exist.
+    fn detect_target_specific_ets_src(
+        module_root: &std::path::Path,
+        project_root: &std::path::Path,
+        module_name: &str,
+        product_name: &str,
+        build_mode_name: &str,
+    ) -> Option<String> {
+        use arkdown_config::build_profile::RawBuildProfile;
+
+        let profile = RawBuildProfile::load(project_root).ok()?;
+        let raw_module = profile
+            .modules
+            .iter()
+            .find(|m| m.name == module_name)?;
+
+        // Select the effective target using the same 4-priority rules as build.rs.
+        let target = select_effective_target_for_info(
+            &raw_module.targets,
+            product_name,
+            build_mode_name,
+        )?;
+
+        // Only emit a target source root for non-default targets.
+        if target.name == "default" {
+            return None;
+        }
+
+        let target_ets = module_root.join("src").join(&target.name).join("ets");
+        if target_ets.is_dir() {
+            Some(to_absolute_path_string(&target_ets))
+        } else {
+            None
+        }
+    }
+}
+
+/// Select the effective target for pkgBriefInfo source-root detection.
+///
+/// Uses the same 4-priority rules as build.rs `select_effective_resource_target`:
+/// 1. Named "default" + product + build mode.
+/// 2. Any target matching product + build mode.
+/// 3. Product match (any mode).
+/// 4. Bare "default".
+fn select_effective_target_for_info<'a>(
+    targets: &'a [arkdown_config::build_profile::RawTarget],
+    product_name: &str,
+    build_mode_name: &str,
+) -> Option<&'a arkdown_config::build_profile::RawTarget> {
+    fn applies_to_product(
+        target: &arkdown_config::build_profile::RawTarget,
+        product: &str,
+    ) -> bool {
+        if target.apply_to_products.is_empty() {
+            product == "default"
+        } else {
+            target.apply_to_products.iter().any(|p| p == product)
+        }
+    }
+
+    fn applies_to_mode(
+        target: &arkdown_config::build_profile::RawTarget,
+        mode: &str,
+    ) -> bool {
+        if target.build_mode_set.is_empty() {
+            true
+        } else {
+            target.build_mode_set.iter().any(|m| m.name == mode)
+        }
+    }
+
+    targets
+        .iter()
+        .find(|t| {
+            t.name == "default"
+                && applies_to_product(t, product_name)
+                && applies_to_mode(t, build_mode_name)
+        })
+        .or_else(|| {
+            targets.iter().find(|t| {
+                applies_to_product(t, product_name) && applies_to_mode(t, build_mode_name)
+            })
+        })
+        .or_else(|| targets.iter().find(|t| applies_to_product(t, product_name)))
+        .or_else(|| targets.iter().find(|t| t.name == "default"))
 }
 
 fn default_build_mode() -> String {
