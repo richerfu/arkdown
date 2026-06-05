@@ -37,6 +37,7 @@ pub(crate) struct InstructionSpec {
     opcode: u8,
     format: String,
     operands: Vec<OperandKind>,
+    call: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,6 +182,20 @@ pub(crate) fn id_operands(bytecode: &[u8], pos: usize) -> Option<Vec<IdOperand>>
     Some(ids)
 }
 
+pub(crate) fn first_id_operand(bytecode: &[u8], pos: usize) -> Option<Option<IdOperand>> {
+    Some(id_operands(bytecode, pos)?.into_iter().next())
+}
+
+pub(crate) fn is_call_instruction(bytecode: &[u8], pos: usize) -> Option<bool> {
+    let first = *bytecode.get(pos)?;
+    let (prefix, opcode) = if is_prefix(first) {
+        (Some(first), *bytecode.get(pos + 1)?)
+    } else {
+        (None, first)
+    };
+    Some(pandasm_spec(prefix, opcode)?.call)
+}
+
 pub(crate) fn encode_pandasm_instruction<F>(
     opcode: u32,
     regs: &[u32],
@@ -286,12 +301,16 @@ fn specs() -> &'static [InstructionSpec] {
         let mut pandasm_opcode = 0u32;
         for group in isa.groups {
             let group_jump = group.properties.iter().any(|property| property == "jump");
+            let group_properties = group.properties;
             for instruction in group.instructions {
                 let instruction_jump = group_jump
                     || instruction
                         .properties
                         .iter()
                         .any(|property| property == "jump");
+                let call = has_property(&group_properties, &instruction.properties, "call")
+                    && !mnemonic_is_range(&instruction.sig)
+                    && !has_property(&group_properties, &instruction.properties, "dynamic");
                 let operands = parse_operands(&instruction.sig, instruction_jump);
                 let prefix = instruction.prefix.as_deref().map(prefix_byte);
                 for (opcode, format) in instruction
@@ -306,6 +325,7 @@ fn specs() -> &'static [InstructionSpec] {
                         opcode,
                         format,
                         operands: operands.clone(),
+                        call,
                     });
                 }
                 pandasm_opcode = pandasm_opcode.saturating_add(1);
@@ -313,6 +333,20 @@ fn specs() -> &'static [InstructionSpec] {
         }
         specs
     })
+}
+
+fn has_property(group: &[String], instruction: &[String], property: &str) -> bool {
+    group
+        .iter()
+        .chain(instruction.iter())
+        .any(|candidate| candidate == property)
+}
+
+fn mnemonic_is_range(sig: &str) -> bool {
+    sig.split_whitespace()
+        .next()
+        .and_then(|mnemonic| mnemonic.split('.').next_back())
+        == Some("range")
 }
 
 fn parse_operands(sig: &str, jump: bool) -> Vec<OperandKind> {
@@ -584,7 +618,7 @@ fn prefix_byte(prefix: &str) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::decode_pandasm_instruction;
+    use super::{decode_pandasm_instruction, is_call_instruction};
 
     #[test]
     fn decodes_untyped_no_operand_instruction_from_upstream_isa() {
@@ -616,5 +650,10 @@ mod tests {
         )
         .expect("getiterator encodes");
         assert_eq!(bytes, vec![0x67, 7]);
+    }
+
+    #[test]
+    fn dynamic_callarg_is_not_marked_as_upstream_call_flag() {
+        assert_eq!(is_call_instruction(&[0x29, 0x00], 0), Some(false));
     }
 }

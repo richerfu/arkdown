@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use rustc_hash::FxHashMap;
 
-use crate::abc_reader::{AbcFieldValue, AbcLiteralEntry, AbcReader};
+use crate::abc_reader::{AbcClassItem, AbcFieldValue, AbcLiteralEntry, AbcReader};
 use crate::emit::bytecode::instruction_len;
 use crate::emit::file::{AbcFile, LiteralArray, LiteralEntry};
 use crate::emit::record::{
@@ -10,10 +10,11 @@ use crate::emit::record::{
     FIELD_OWNER_CLASS_IDX,
 };
 use crate::error::AbcError;
-use crate::ir::opcodes::Insn;
+use crate::ir::opcodes::{Insn, PandasmInsn};
 use crate::isa::{
-    decode_pandasm_instruction, id_operands as isa_id_operands,
-    instruction_len as isa_instruction_len, IdKind,
+    decode_pandasm_instruction, first_id_operand as isa_first_id_operand,
+    id_operands as isa_id_operands, instruction_len as isa_instruction_len,
+    is_call_instruction as isa_is_call_instruction, IdKind,
 };
 
 pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usize>, AbcError> {
@@ -66,6 +67,7 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
         .flat_map(|section| section.method_offsets)
         .filter(|offset| method_names.contains_key(offset))
         .collect::<BTreeSet<_>>();
+    let method_call_infos = build_method_call_infos(&reader, &classes)?;
 
     let mut appended = Vec::new();
     for class in classes {
@@ -114,7 +116,15 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
                     &mut record_string_indices,
                     &mut record_literal_indices,
                 )?;
-                let pandasm_insns = decode_bytecode(&bytecode, file, class.name.as_str())?;
+                let pandasm_insns = decode_bytecode(
+                    &reader,
+                    &bytecode,
+                    &code.bytecode,
+                    file,
+                    class.name.as_str(),
+                    method.offset,
+                    &method_call_infos,
+                )?;
                 Ok(MethodRecord {
                     name: method.name.clone(),
                     bytecode,
@@ -186,6 +196,57 @@ fn is_ark_annotation_stub(name: &str) -> bool {
             | "L_ESExpectedPropertyCountAnnotation;"
             | "L_ESSlotNumberAnnotation;"
     )
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AbcMethodCallInfo {
+    access_flags: u32,
+    proto_num_args: Option<u32>,
+    code_num_args: Option<u32>,
+}
+
+impl AbcMethodCallInfo {
+    fn is_static(self) -> bool {
+        const ACC_STATIC: u32 = 0x0008;
+        self.access_flags & ACC_STATIC != 0
+    }
+
+    fn num_args(self) -> Option<u32> {
+        self.proto_num_args.or(self.code_num_args)
+    }
+}
+
+fn build_method_call_infos(
+    reader: &AbcReader<'_>,
+    classes: &[AbcClassItem],
+) -> Result<BTreeMap<u32, AbcMethodCallInfo>, AbcError> {
+    let mut infos = BTreeMap::new();
+    for class in classes {
+        for method in &class.methods {
+            let proto_num_args = if method.proto_idx == u16::MAX {
+                None
+            } else {
+                reader
+                    .resolve_proto_index(method.offset, method.proto_idx as u32)
+                    .map_err(read_error("<abc input>"))?
+                    .map(|proto_off| {
+                        reader
+                            .proto_num_args(proto_off)
+                            .map_err(read_error("<abc input>"))
+                    })
+                    .transpose()?
+            };
+            infos.insert(
+                method.offset,
+                AbcMethodCallInfo {
+                    access_flags: method.access_flags,
+                    proto_num_args,
+                    code_num_args: method.code.as_ref().map(|code| code.num_args),
+                },
+            );
+        }
+    }
+    Ok(infos)
 }
 
 fn field_value_from_abc(
@@ -626,14 +687,37 @@ fn write_id_operand(bytecode: &mut [u8], operand_pos: usize, width: u8, value: u
 }
 
 fn decode_bytecode(
+    reader: &AbcReader<'_>,
     bytecode: &[u8],
+    raw_bytecode: &[u8],
     file: &AbcFile,
     record_name: &str,
+    method_off: u32,
+    method_call_infos: &BTreeMap<u32, AbcMethodCallInfo>,
 ) -> Result<Vec<Insn>, AbcError> {
+    if raw_bytecode.len() != bytecode.len() {
+        return Err(AbcError::UnsupportedConstruct {
+            construct: format!(
+                "ABC bytecode length changed while materializing Program: raw={}, rewritten={}",
+                raw_bytecode.len(),
+                bytecode.len()
+            ),
+            file: "<abc input>".to_string(),
+        });
+    }
     let mut insns = Vec::new();
     let mut pos = 0usize;
     while pos < bytecode.len() {
-        let insn = decode_one(bytecode, pos, file, record_name)?;
+        let insn = decode_one(
+            reader,
+            bytecode,
+            raw_bytecode,
+            pos,
+            file,
+            record_name,
+            method_off,
+            method_call_infos,
+        )?;
         let len = insn.byte_len().max(1);
         if pos.saturating_add(len) > bytecode.len() {
             return Err(AbcError::UnsupportedConstruct {
@@ -651,10 +735,14 @@ fn decode_bytecode(
 }
 
 fn decode_one(
+    reader: &AbcReader<'_>,
     bytecode: &[u8],
+    raw_bytecode: &[u8],
     pos: usize,
     file: &AbcFile,
     record_name: &str,
+    method_off: u32,
+    method_call_infos: &BTreeMap<u32, AbcMethodCallInfo>,
 ) -> Result<Insn, AbcError> {
     let op = bytecode[pos];
     let at = |offset: usize| -> u8 { bytecode[pos + offset] };
@@ -831,10 +919,16 @@ fn decode_one(
             0x07 => Insn::ThrowIfSuperNotCorrectCall(at(2)),
             0x09 => Insn::ThrowUndefinedIfHoleWithName(u16_at(2)),
             sub => {
-                return decode_pandasm_instruction(bytecode, pos, |kind, index| {
-                    resolve_pandasm_id(file, record_name, kind, index)
-                })
-                .map(Insn::Pandasm)
+                return decode_generic_pandasm(
+                    bytecode,
+                    raw_bytecode,
+                    pos,
+                    reader,
+                    file,
+                    record_name,
+                    method_off,
+                    method_call_infos,
+                )?
                 .ok_or_else(|| unsupported_prefixed_error("throw", sub, pos));
             }
         },
@@ -846,18 +940,31 @@ fn decode_one(
             0x13 => Insn::CallRuntimeIsTrue(at(2)),
             0x14 => Insn::CallRuntimeIsFalse(at(2)),
             sub => {
-                return decode_pandasm_instruction(bytecode, pos, |kind, index| {
-                    resolve_pandasm_id(file, record_name, kind, index)
-                })
-                .map(Insn::Pandasm)
+                return decode_generic_pandasm(
+                    bytecode,
+                    raw_bytecode,
+                    pos,
+                    reader,
+                    file,
+                    record_name,
+                    method_off,
+                    method_call_infos,
+                )?
                 .ok_or_else(|| unsupported_prefixed_error("callruntime", sub, pos));
             }
         },
         _ => {
-            if let Some(raw) = decode_pandasm_instruction(bytecode, pos, |kind, index| {
-                resolve_pandasm_id(file, record_name, kind, index)
-            }) {
-                return Ok(Insn::Pandasm(raw));
+            if let Some(insn) = decode_generic_pandasm(
+                bytecode,
+                raw_bytecode,
+                pos,
+                reader,
+                file,
+                record_name,
+                method_off,
+                method_call_infos,
+            )? {
+                return Ok(insn);
             }
             return Err(AbcError::UnsupportedConstruct {
                 construct: format!(
@@ -868,6 +975,114 @@ fn decode_one(
         }
     };
     Ok(insn)
+}
+
+fn decode_generic_pandasm(
+    bytecode: &[u8],
+    raw_bytecode: &[u8],
+    pos: usize,
+    reader: &AbcReader<'_>,
+    file: &AbcFile,
+    record_name: &str,
+    method_off: u32,
+    method_call_infos: &BTreeMap<u32, AbcMethodCallInfo>,
+) -> Result<Option<Insn>, AbcError> {
+    let Some(mut raw) = decode_pandasm_instruction(bytecode, pos, |kind, index| {
+        resolve_pandasm_id(file, record_name, kind, index)
+    }) else {
+        return Ok(None);
+    };
+    trim_pandasm_call_regs(
+        &mut raw,
+        raw_bytecode,
+        pos,
+        reader,
+        method_off,
+        method_call_infos,
+    )?;
+    Ok(Some(Insn::Pandasm(raw)))
+}
+
+fn trim_pandasm_call_regs(
+    insn: &mut PandasmInsn,
+    raw_bytecode: &[u8],
+    pos: usize,
+    reader: &AbcReader<'_>,
+    method_off: u32,
+    method_call_infos: &BTreeMap<u32, AbcMethodCallInfo>,
+) -> Result<(), AbcError> {
+    if !isa_is_call_instruction(raw_bytecode, pos).unwrap_or(false) {
+        return Ok(());
+    }
+
+    let target_method_off =
+        match isa_first_id_operand(raw_bytecode, pos).flatten() {
+            Some(id_operand) => {
+                let operand_pos = pos.checked_add(id_operand.offset).ok_or_else(|| {
+                    AbcError::UnsupportedConstruct {
+                        construct: format!("overflowed ABC call id operand at pc {pos}"),
+                        file: "<abc input>".to_string(),
+                    }
+                })?;
+                let index = read_id_operand(raw_bytecode, operand_pos, id_operand.width)
+                    .ok_or_else(|| AbcError::UnsupportedConstruct {
+                        construct: format!("unsupported ABC call id operand width at pc {pos}"),
+                        file: "<abc input>".to_string(),
+                    })?;
+                reader
+                    .resolve_method_index(method_off, index)
+                    .map_err(read_error("<abc input>"))?
+                    .ok_or_else(|| AbcError::UnsupportedConstruct {
+                        construct: format!(
+                            "missing method index {index} for CALL instruction at pc {pos}"
+                        ),
+                        file: "<abc input>".to_string(),
+                    })?
+            }
+            None => method_off,
+        };
+
+    let info = method_call_infos
+        .get(&target_method_off)
+        .copied()
+        .ok_or_else(|| AbcError::UnsupportedConstruct {
+            construct: format!(
+                "missing method metadata for CALL target {target_method_off:#x} at pc {pos}"
+            ),
+            file: "<abc input>".to_string(),
+        })?;
+    trim_call_regs_for_method(insn, info, pos)
+}
+
+fn trim_call_regs_for_method(
+    insn: &mut PandasmInsn,
+    info: AbcMethodCallInfo,
+    pos: usize,
+) -> Result<(), AbcError> {
+    let num_args = info
+        .num_args()
+        .ok_or_else(|| AbcError::UnsupportedConstruct {
+            construct: format!("missing ProtoItem arg count for CALL instruction at pc {pos}"),
+            file: "<abc input>".to_string(),
+        })?;
+    let overhead = if info.is_static() {
+        insn.regs.len() as i64 - num_args as i64
+    } else {
+        insn.regs.len() as i64 - num_args as i64 - 1
+    };
+    if overhead < 0 || overhead as usize > insn.regs.len() {
+        return Err(AbcError::UnsupportedConstruct {
+            construct: format!(
+                "invalid CALL register overhead {overhead} at pc {pos}; regs={}, args={num_args}, static={}",
+                insn.regs.len(),
+                info.is_static(),
+            ),
+            file: "<abc input>".to_string(),
+        });
+    }
+    let keep = insn.regs.len() - overhead as usize;
+    insn.regs.truncate(keep);
+    Ok(())
 }
 
 fn resolve_pandasm_id(
@@ -892,5 +1107,69 @@ fn unsupported_prefixed_error(prefix: &str, sub_opcode: u8, pos: usize) -> AbcEr
             "unsupported ABC bytecode {prefix} sub-opcode {sub_opcode:#x} at pc {pos} for Program materialization"
         ),
         file: "<abc input>".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{trim_call_regs_for_method, AbcMethodCallInfo};
+    use crate::ir::opcodes::PandasmInsn;
+
+    fn pandasm_with_regs(regs: &[u32]) -> PandasmInsn {
+        PandasmInsn {
+            opcode: 0,
+            regs: regs.to_vec(),
+            ids: Vec::new(),
+            imms: Vec::new(),
+            bytes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn trims_static_call_regs_to_proto_arg_count() {
+        let mut insn = pandasm_with_regs(&[1, 2, 3, 4]);
+        trim_call_regs_for_method(
+            &mut insn,
+            AbcMethodCallInfo {
+                access_flags: 0x0008,
+                proto_num_args: Some(2),
+                code_num_args: None,
+            },
+            0,
+        )
+        .unwrap();
+        assert_eq!(insn.regs, vec![1, 2]);
+    }
+
+    #[test]
+    fn trims_instance_call_regs_with_receiver_slot() {
+        let mut insn = pandasm_with_regs(&[1, 2, 3, 4]);
+        trim_call_regs_for_method(
+            &mut insn,
+            AbcMethodCallInfo {
+                access_flags: 0,
+                proto_num_args: Some(2),
+                code_num_args: None,
+            },
+            0,
+        )
+        .unwrap();
+        assert_eq!(insn.regs, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn rejects_negative_call_overhead() {
+        let mut insn = pandasm_with_regs(&[1]);
+        let error = trim_call_regs_for_method(
+            &mut insn,
+            AbcMethodCallInfo {
+                access_flags: 0x0008,
+                proto_num_args: Some(2),
+                code_num_args: None,
+            },
+            7,
+        )
+        .expect_err("negative overhead must match upstream abc2program failure");
+        assert!(error.to_string().contains("invalid CALL register overhead"));
     }
 }

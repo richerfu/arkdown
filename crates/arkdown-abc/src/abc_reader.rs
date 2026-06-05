@@ -423,7 +423,7 @@ impl<'a> AbcReader<'a> {
     pub fn resolve_method_index(
         &self,
         method_item_off: u32,
-        index: u16,
+        index: u32,
     ) -> Result<Option<u32>, AbcReadError> {
         let Some(section) = self
             .index_sections()?
@@ -433,6 +433,47 @@ impl<'a> AbcReader<'a> {
             return Ok(None);
         };
         Ok(section.method_offsets.get(index as usize).copied())
+    }
+
+    /// Resolve a method-local proto-index operand.
+    ///
+    /// Equivalent to upstream `File::ResolveProtoIndex(method_id, idx)`.
+    pub fn resolve_proto_index(
+        &self,
+        method_item_off: u32,
+        index: u32,
+    ) -> Result<Option<u32>, AbcReadError> {
+        let Some(section) = self
+            .index_sections()?
+            .into_iter()
+            .find(|section| section.start <= method_item_off && method_item_off < section.end)
+        else {
+            return Ok(None);
+        };
+        Ok(section.proto_offsets.get(index as usize).copied())
+    }
+
+    /// Return `ProtoDataAccessor::GetNumArgs()` for a ProtoItem offset.
+    pub fn proto_num_args(&self, proto_off: u32) -> Result<u32, AbcReadError> {
+        let mut cursor = proto_off as usize;
+        let mut shorty = self.read_u16(cursor)?;
+        cursor += 2;
+        let mut elem_num = 0u32;
+
+        while shorty != 0 {
+            let shift = (elem_num % 4) * 4;
+            let elem = (shorty >> shift) & 0x0f;
+            if elem == 0 {
+                break;
+            }
+            elem_num += 1;
+            if elem_num % 4 == 0 {
+                shorty = self.read_u16(cursor)?;
+                cursor += 2;
+            }
+        }
+
+        Ok(elem_num.saturating_sub(1))
     }
 
     /// Return the method-index table visible from `method_item_off`.
@@ -1327,6 +1368,22 @@ mod tests {
             matches!(result, Err(AbcReadError::BadMagic { .. })),
             "expected BadMagic error"
         );
+    }
+
+    #[test]
+    fn test_abc_reader_counts_proto_args_from_shorty() {
+        let mut bytes = vec![0u8; ABC_HEADER_SIZE + 8];
+        bytes[0..8].copy_from_slice(&ABC_MAGIC);
+        let proto_off = ABC_HEADER_SIZE;
+
+        bytes[proto_off..proto_off + 2].copy_from_slice(&0x0321u16.to_le_bytes());
+        let reader = AbcReader::new(&bytes).unwrap();
+        assert_eq!(reader.proto_num_args(proto_off as u32).unwrap(), 2);
+
+        bytes[proto_off..proto_off + 2].copy_from_slice(&0x4321u16.to_le_bytes());
+        bytes[proto_off + 2..proto_off + 4].copy_from_slice(&0x0005u16.to_le_bytes());
+        let reader = AbcReader::new(&bytes).unwrap();
+        assert_eq!(reader.proto_num_args(proto_off as u32).unwrap(), 4);
     }
 
     #[test]
