@@ -557,6 +557,30 @@ fn check_struct_component(
             });
         }
 
+        // Rule: @StorageLink/@StorageProp/@AppStorageLink/@AppStorageProp require
+        // a string key argument — e.g. @StorageLink("myKey").
+        // Matches hvigor etsChecker's validateStorageDecoratorHasKey() rule.
+        for storage_dec in &["StorageLink", "StorageProp", "AppStorageLink", "AppStorageProp"] {
+            let found_without_key = prop.decorators.iter().any(|d| {
+                let name = decorator_name(d);
+                if name != *storage_dec {
+                    return false;
+                }
+                // Check if it's a bare identifier (no argument) — which is invalid.
+                matches!(&d.expression, Expression::Identifier(_))
+            });
+            if found_without_key {
+                errors.push(EtsTransformError::Diagnostic {
+                    file: file.to_string(),
+                    message: format!(
+                        "'@{}' on field '{}' requires a storage key argument, e.g. @{}(\"key\")",
+                        storage_dec, field_name, storage_dec
+                    ),
+                    severity: DiagnosticSeverity::Error,
+                });
+            }
+        }
+
         let is_state = prop.decorators.iter().any(|d| decorator_name(d) == "State");
         if is_state && prop.type_annotation.is_none() {
             errors.push(EtsTransformError::Diagnostic {
