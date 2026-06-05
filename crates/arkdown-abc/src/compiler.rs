@@ -304,6 +304,7 @@ fn metadata_record(
         source_code_strings: vec![],
         access_flags: 1,
         source_lang,
+        metadata_attrs: Default::default(),
         conflict: false,
         params_num: 0,
         body_presence: false,
@@ -322,9 +323,11 @@ fn u8_metadata_field(name: impl Into<String>, value: u8) -> FieldRecord {
         class_idx: FIELD_OWNER_CLASS_IDX,
         type_idx: 0,
         field_type: FieldType::U8,
+        metadata_field_type: None,
         access_flags: 0,
         value: Some(FieldValue::U8(value)),
         annotations: vec![],
+        metadata_attrs: Default::default(),
         source: Default::default(),
     }
 }
@@ -335,9 +338,11 @@ fn literal_metadata_field(name: impl Into<String>, literal_idx: usize) -> FieldR
         class_idx: FIELD_OWNER_CLASS_IDX,
         type_idx: 1,
         field_type: FieldType::U32,
+        metadata_field_type: None,
         access_flags: 0,
         value: Some(FieldValue::LiteralArray(literal_idx)),
         annotations: vec![],
+        metadata_attrs: Default::default(),
         source: Default::default(),
     }
 }

@@ -239,7 +239,8 @@ fn static_imports(file: &AbcFile, record: &ClassRecord) -> Vec<String> {
                 | FieldValue::Bool(_)
                 | FieldValue::U32(_)
                 | FieldValue::String(_)
-                | FieldValue::F64(_) => None,
+                | FieldValue::F64(_)
+                | FieldValue::RawScalar(_) => None,
             })
     }) else {
         return Vec::new();

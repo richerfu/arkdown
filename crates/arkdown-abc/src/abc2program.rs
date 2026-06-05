@@ -12,8 +12,12 @@ use crate::emit::file::{
 };
 use crate::emit::record::{
     function_kind, method_access, AnnotationElementRecord, AnnotationRecord, AnnotationValue,
-    CatchEntry, ClassRecord, FieldRecord, FieldType, FieldValue, MethodKind, MethodLabelStyle,
-    MethodRecord, FIELD_OWNER_CLASS_IDX,
+    ArrayValueRecord, CatchEntry, ClassRecord, FieldRecord, FieldType, FieldValue, MethodKind,
+    MethodLabelStyle, MethodRecord, ScalarValueData, ScalarValueRecord, FIELD_OWNER_CLASS_IDX,
+    VALUE_TYPE_ANNOTATION, VALUE_TYPE_ENUM, VALUE_TYPE_F32, VALUE_TYPE_F64, VALUE_TYPE_I16,
+    VALUE_TYPE_I32, VALUE_TYPE_I64, VALUE_TYPE_I8, VALUE_TYPE_LITERALARRAY, VALUE_TYPE_METHOD,
+    VALUE_TYPE_METHOD_HANDLE, VALUE_TYPE_RECORD, VALUE_TYPE_STRING, VALUE_TYPE_STRING_NULLPTR,
+    VALUE_TYPE_U1, VALUE_TYPE_U16, VALUE_TYPE_U32, VALUE_TYPE_U64, VALUE_TYPE_U8,
 };
 use crate::error::AbcError;
 use crate::ir::opcodes::{Insn, PandasmInsn};
@@ -109,6 +113,7 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
                     class_idx: FIELD_OWNER_CLASS_IDX,
                     type_idx: field.type_idx,
                     field_type: FieldType::from_legacy_idx(field.type_idx),
+                    metadata_field_type: None,
                     access_flags: field.access_flags,
                     value: field_value_from_abc(
                         field.name.as_str(),
@@ -116,6 +121,7 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
                         &literal_offset_to_index,
                     )?,
                     annotations,
+                    metadata_attrs: Default::default(),
                     source: Default::default(),
                 })
             })
@@ -190,6 +196,7 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
                     method_pool_entry: method_pool_offsets.contains(&method.offset),
                     expected_property_count: annotations.expected_property_count,
                     annotations: annotations.custom,
+                    metadata_attrs: Default::default(),
                     param_annotations: method_param_annotations_from_abc(
                         data,
                         &reader,
@@ -239,6 +246,7 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
             source_code_strings: Vec::new(),
             access_flags: class.access_flags,
             source_lang: class.source_lang.unwrap_or(0),
+            metadata_attrs: Default::default(),
             conflict: false,
             params_num: 0,
             body_presence: false,
@@ -501,6 +509,8 @@ fn annotation_from_abc(
             data,
             reader,
             owner_class,
+            section,
+            class_name_by_offset,
             tag,
             value,
             literal_offset_to_index,
@@ -540,6 +550,8 @@ fn annotation_value_from_abc(
     data: &[u8],
     reader: &AbcReader<'_>,
     owner_class: &AbcClassItem,
+    section: &crate::abc_reader::AbcIndexSection,
+    class_name_by_offset: &BTreeMap<u32, String>,
     tag: u8,
     value: u32,
     literal_offset_to_index: &BTreeMap<u32, usize>,
@@ -569,10 +581,254 @@ fn annotation_value_from_abc(
                 key: literal_array_key(&owner_class.name, index),
             })
         }
-        other => Err(AbcError::UnsupportedConstruct {
-            construct: format!("ABC annotation tag {other:#x} is unsupported"),
-            file: owner_class.name.clone(),
-        }),
+        b'2' => Ok(raw_u64_annotation_value(VALUE_TYPE_I8, value as u64)),
+        b'3' => Ok(raw_u64_annotation_value(VALUE_TYPE_U8, value as u64)),
+        b'4' => Ok(raw_u64_annotation_value(VALUE_TYPE_I16, value as u64)),
+        b'5' => Ok(raw_u64_annotation_value(VALUE_TYPE_U16, value as u64)),
+        b'6' => Ok(raw_u64_annotation_value(VALUE_TYPE_I32, value as u64)),
+        b'8' => Ok(raw_u64_annotation_value(
+            VALUE_TYPE_I64,
+            read_at_u64(data, value as usize, "annotation i64 value")?,
+        )),
+        b'9' => Ok(raw_u64_annotation_value(
+            VALUE_TYPE_U64,
+            read_at_u64(data, value as usize, "annotation u64 value")?,
+        )),
+        b'A' => Ok(AnnotationValue::RawScalar(ScalarValueRecord {
+            value_type: VALUE_TYPE_F32,
+            value: ScalarValueData::F32(f32::from_bits(value)),
+        })),
+        b'G' => {
+            let Some((record_name, elements)) = annotation_from_abc(
+                data,
+                reader,
+                owner_class,
+                value,
+                section,
+                class_name_by_offset,
+                literal_offset_to_index,
+            )?
+            else {
+                return Ok(raw_u64_annotation_value(
+                    VALUE_TYPE_ANNOTATION,
+                    value as u64,
+                ));
+            };
+            Ok(AnnotationValue::RawScalar(ScalarValueRecord {
+                value_type: VALUE_TYPE_ANNOTATION,
+                value: ScalarValueData::Annotation(Box::new(AnnotationRecord {
+                    record_name,
+                    elements,
+                })),
+            }))
+        }
+        b'K'..=b'Z' | b'@' | b'H' => Ok(AnnotationValue::Array(array_value_from_abc(
+            data,
+            reader,
+            owner_class,
+            section,
+            class_name_by_offset,
+            tag,
+            value,
+            literal_offset_to_index,
+        )?)),
+        other => Ok(AnnotationValue::RawScalar(ScalarValueRecord {
+            value_type: annotation_tag_value_type(other),
+            value: ScalarValueData::U64(value as u64),
+        })),
+    }
+}
+
+fn raw_u64_annotation_value(value_type: u32, value: u64) -> AnnotationValue {
+    AnnotationValue::RawScalar(ScalarValueRecord {
+        value_type,
+        value: ScalarValueData::U64(value),
+    })
+}
+
+fn array_value_from_abc(
+    data: &[u8],
+    reader: &AbcReader<'_>,
+    owner_class: &AbcClassItem,
+    section: &crate::abc_reader::AbcIndexSection,
+    class_name_by_offset: &BTreeMap<u32, String>,
+    tag: u8,
+    value: u32,
+    literal_offset_to_index: &BTreeMap<u32, usize>,
+) -> Result<ArrayValueRecord, AbcError> {
+    let component_type = annotation_array_tag_component_type(tag);
+    let mut cursor = value as usize;
+    let (count, len) = read_uleb128_at(data, cursor, "annotation array count")?;
+    cursor += len;
+    let mut values = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        values.push(read_array_scalar_value(
+            data,
+            reader,
+            owner_class,
+            section,
+            class_name_by_offset,
+            component_type,
+            &mut cursor,
+            literal_offset_to_index,
+        )?);
+    }
+    Ok(ArrayValueRecord {
+        value_type: 17,
+        component_type,
+        values,
+    })
+}
+
+fn read_array_scalar_value(
+    data: &[u8],
+    reader: &AbcReader<'_>,
+    owner_class: &AbcClassItem,
+    section: &crate::abc_reader::AbcIndexSection,
+    class_name_by_offset: &BTreeMap<u32, String>,
+    component_type: u32,
+    cursor: &mut usize,
+    literal_offset_to_index: &BTreeMap<u32, usize>,
+) -> Result<ScalarValueRecord, AbcError> {
+    let value = match component_type {
+        VALUE_TYPE_U1 | VALUE_TYPE_I8 | VALUE_TYPE_U8 => {
+            let value = *data
+                .get(*cursor)
+                .ok_or_else(|| abc_data_oob(*cursor, "annotation array u8"))?;
+            *cursor += 1;
+            ScalarValueData::U64(value as u64)
+        }
+        VALUE_TYPE_I16 | VALUE_TYPE_U16 => {
+            let value = read_at_u16(data, *cursor, "annotation array u16")?;
+            *cursor += 2;
+            ScalarValueData::U64(value as u64)
+        }
+        VALUE_TYPE_I32 | VALUE_TYPE_U32 => {
+            let value = read_at_u32(data, *cursor, "annotation array u32")?;
+            *cursor += 4;
+            ScalarValueData::U64(value as u64)
+        }
+        VALUE_TYPE_F32 => {
+            let value = read_at_u32(data, *cursor, "annotation array f32")?;
+            *cursor += 4;
+            ScalarValueData::F32(f32::from_bits(value))
+        }
+        VALUE_TYPE_I64 | VALUE_TYPE_U64 => {
+            let value = read_at_u64(data, *cursor, "annotation array u64")?;
+            *cursor += 8;
+            ScalarValueData::U64(value)
+        }
+        VALUE_TYPE_F64 => {
+            let value = read_at_u64(data, *cursor, "annotation array f64")?;
+            *cursor += 8;
+            ScalarValueData::F64(f64::from_bits(value))
+        }
+        VALUE_TYPE_STRING => {
+            let value = read_at_u32(data, *cursor, "annotation array string")?;
+            *cursor += 4;
+            ScalarValueData::String(
+                reader
+                    .string_at(value)
+                    .map_err(read_error("<abc annotation array>"))?,
+            )
+        }
+        VALUE_TYPE_ANNOTATION => {
+            let value = read_at_u32(data, *cursor, "annotation array annotation")?;
+            *cursor += 4;
+            let Some((record_name, elements)) = annotation_from_abc(
+                data,
+                reader,
+                owner_class,
+                value,
+                section,
+                class_name_by_offset,
+                literal_offset_to_index,
+            )?
+            else {
+                return Ok(ScalarValueRecord {
+                    value_type: component_type,
+                    value: ScalarValueData::U64(value as u64),
+                });
+            };
+            ScalarValueData::Annotation(Box::new(AnnotationRecord {
+                record_name,
+                elements,
+            }))
+        }
+        _ => {
+            let value = read_at_u32(data, *cursor, "annotation array id")?;
+            *cursor += 4;
+            ScalarValueData::U64(value as u64)
+        }
+    };
+    Ok(ScalarValueRecord {
+        value_type: component_type,
+        value,
+    })
+}
+
+fn read_uleb128_at(data: &[u8], mut cursor: usize, what: &str) -> Result<(u64, usize), AbcError> {
+    let start = cursor;
+    let mut result = 0u64;
+    let mut shift = 0u32;
+    loop {
+        let byte = *data.get(cursor).ok_or_else(|| abc_data_oob(cursor, what))?;
+        cursor += 1;
+        result |= ((byte & 0x7f) as u64) << shift;
+        if (byte & 0x80) == 0 {
+            return Ok((result, cursor - start));
+        }
+        shift += 7;
+        if shift >= 64 {
+            return Err(abc_data_oob(start, what));
+        }
+    }
+}
+
+fn annotation_tag_value_type(tag: u8) -> u32 {
+    match tag {
+        b'1' => VALUE_TYPE_U1,
+        b'2' => VALUE_TYPE_I8,
+        b'3' => VALUE_TYPE_U8,
+        b'4' => VALUE_TYPE_I16,
+        b'5' => VALUE_TYPE_U16,
+        b'6' => VALUE_TYPE_I32,
+        b'7' => VALUE_TYPE_U32,
+        b'8' => VALUE_TYPE_I64,
+        b'9' => VALUE_TYPE_U64,
+        b'A' => VALUE_TYPE_F32,
+        b'B' => VALUE_TYPE_F64,
+        b'C' => VALUE_TYPE_STRING,
+        b'D' => VALUE_TYPE_RECORD,
+        b'E' => VALUE_TYPE_METHOD,
+        b'F' => VALUE_TYPE_ENUM,
+        b'G' => VALUE_TYPE_ANNOTATION,
+        b'*' => VALUE_TYPE_STRING_NULLPTR,
+        b'#' => VALUE_TYPE_LITERALARRAY,
+        _ => VALUE_TYPE_U32,
+    }
+}
+
+fn annotation_array_tag_component_type(tag: u8) -> u32 {
+    match tag {
+        b'K' | b'H' => VALUE_TYPE_U1,
+        b'L' => VALUE_TYPE_I8,
+        b'M' => VALUE_TYPE_U8,
+        b'N' => VALUE_TYPE_I16,
+        b'O' => VALUE_TYPE_U16,
+        b'P' => VALUE_TYPE_I32,
+        b'Q' => VALUE_TYPE_U32,
+        b'R' => VALUE_TYPE_I64,
+        b'S' => VALUE_TYPE_U64,
+        b'T' => VALUE_TYPE_F32,
+        b'U' => VALUE_TYPE_F64,
+        b'V' => VALUE_TYPE_STRING,
+        b'W' => VALUE_TYPE_RECORD,
+        b'X' => VALUE_TYPE_METHOD,
+        b'Y' => VALUE_TYPE_ENUM,
+        b'Z' => VALUE_TYPE_ANNOTATION,
+        b'@' => VALUE_TYPE_METHOD_HANDLE,
+        _ => VALUE_TYPE_U32,
     }
 }
 

@@ -874,8 +874,13 @@ impl<'a> AbcReader<'a> {
             match tag {
                 0x00 => break,
                 0x01 => {
-                    value = Some(AbcFieldValue::U8(self.read_u8(cursor)?));
-                    cursor += 1;
+                    let (raw, len) = self.read_sleb128(cursor)?;
+                    value = Some(if (0..=u8::MAX as i64).contains(&raw) {
+                        AbcFieldValue::U8(raw as u8)
+                    } else {
+                        AbcFieldValue::U32(raw as u32)
+                    });
+                    cursor += len;
                 }
                 0x02 => {
                     value = Some(AbcFieldValue::U32(self.read_u32(cursor)?));
@@ -1188,6 +1193,32 @@ impl<'a> AbcReader<'a> {
         Ok(u32::from_le_bytes(
             self.data[offset..offset + 4].try_into().unwrap(),
         ))
+    }
+
+    fn read_sleb128(&self, mut offset: usize) -> Result<(i64, usize), AbcReadError> {
+        let start = offset;
+        let mut result = 0i64;
+        let mut shift = 0u32;
+        let mut byte;
+        loop {
+            byte = self.read_u8(offset)?;
+            offset += 1;
+            result |= ((byte & 0x7f) as i64) << shift;
+            shift += 7;
+            if (byte & 0x80) == 0 {
+                break;
+            }
+            if shift >= 64 {
+                return Err(AbcReadError::MalformedClassItem {
+                    offset: start,
+                    reason: "SLEB128 value is too large".to_string(),
+                });
+            }
+        }
+        if shift < 64 && (byte & 0x40) != 0 {
+            result |= (!0i64) << shift;
+        }
+        Ok((result, offset - start))
     }
 
     fn read_u64(&self, offset: usize) -> Result<u64, AbcReadError> {

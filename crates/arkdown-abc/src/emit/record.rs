@@ -145,6 +145,19 @@ pub struct FileLocationRecord {
     pub is_defined: bool,
 }
 
+/// Generic upstream pandasm metadata attributes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MetadataRecord {
+    pub set_attributes: Vec<String>,
+    pub attributes: Vec<MetadataAttributeRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataAttributeRecord {
+    pub key: String,
+    pub values: Vec<String>,
+}
+
 /// Parser source metadata stored directly on upstream pandasm fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldSourceRecord {
@@ -185,6 +198,29 @@ impl PandasmTypeRecord {
             type_id: 0x0e,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScalarValueRecord {
+    pub value_type: u32,
+    pub value: ScalarValueData,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ScalarValueData {
+    U64(u64),
+    F32(f32),
+    F64(f64),
+    String(String),
+    Type(PandasmTypeRecord),
+    Annotation(Box<AnnotationRecord>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ArrayValueRecord {
+    pub value_type: u32,
+    pub component_type: u32,
+    pub values: Vec<ScalarValueRecord>,
 }
 
 /// Encode a Panda `CodeItem`.
@@ -288,6 +324,8 @@ pub struct MethodRecord {
     pub method_pool_entry: bool,
     pub expected_property_count: Option<u32>,
     pub annotations: Vec<AnnotationRecord>,
+    /// Upstream generic pandasm metadata attributes.
+    pub metadata_attrs: MetadataRecord,
     /// Custom annotations attached to each Panda method parameter.
     ///
     /// The outer index is the proto parameter index used by libpandafile's
@@ -397,12 +435,17 @@ pub struct FieldRecord {
     /// Structured Panda field type used by ProgramCache and by the ABC
     /// IndexSection type table.
     pub field_type: FieldType,
+    /// Upstream `FieldMetadata::field_type`, preserved separately from the
+    /// top-level pandasm field type.
+    pub metadata_field_type: Option<PandasmTypeRecord>,
     /// Access flags — 1 = ACC_PUBLIC.
     pub access_flags: u32,
     /// Optional constant value emitted in the field's tagged section.
     pub value: Option<FieldValue>,
     /// Custom annotation metadata attached to this field.
     pub annotations: Vec<AnnotationRecord>,
+    /// Upstream generic pandasm metadata attributes.
+    pub metadata_attrs: MetadataRecord,
     /// Upstream pandasm parser source metadata for ProgramCache/protoBin
     /// roundtrips.
     pub source: FieldSourceRecord,
@@ -412,9 +455,16 @@ pub struct FieldRecord {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FieldType {
     U1,
+    I8,
     U8,
+    I16,
+    U16,
+    I32,
     U32,
+    F32,
     F64,
+    I64,
+    U64,
     PandaString,
     Array { component_name: String, rank: u32 },
     Any,
@@ -432,9 +482,16 @@ impl FieldType {
     pub(crate) fn binary_type_id(&self) -> Option<u32> {
         match self {
             Self::U1 => Some(0),
+            Self::I8 => Some(1),
             Self::U8 => Some(2),
+            Self::I16 => Some(3),
+            Self::U16 => Some(4),
+            Self::I32 => Some(5),
             Self::U32 => Some(6),
+            Self::F32 => Some(7),
             Self::F64 => Some(8),
+            Self::I64 => Some(9),
+            Self::U64 => Some(10),
             Self::PandaString | Self::Array { .. } | Self::Any => None,
         }
     }
@@ -442,9 +499,16 @@ impl FieldType {
     pub(crate) fn component_name(&self) -> &str {
         match self {
             Self::U1 => "u1",
+            Self::I8 => "i8",
             Self::U8 => "u8",
+            Self::I16 => "i16",
+            Self::U16 => "u16",
+            Self::I32 => "i32",
             Self::U32 => "u32",
+            Self::F32 => "f32",
             Self::F64 => "f64",
+            Self::I64 => "i64",
+            Self::U64 => "u64",
             Self::PandaString => "panda.String",
             Self::Array { component_name, .. } => component_name,
             Self::Any => "any",
@@ -548,6 +612,9 @@ pub enum FieldValue {
     String(String),
     /// `u32` file offset of an inline f64 default value.
     F64(f64),
+    /// Upstream protoPanda scalar value not covered by the legacy ABC field
+    /// encoder yet. Preserved for ProgramCache/protoBin roundtrips.
+    RawScalar(ScalarValueRecord),
 }
 
 /// Custom annotation metadata attached to a Panda class, method, or field.
@@ -570,6 +637,8 @@ pub enum AnnotationValue {
     F64(f64),
     String(String),
     LiteralArray { index: usize, key: String },
+    RawScalar(ScalarValueRecord),
+    Array(ArrayValueRecord),
 }
 
 impl AnnotationValue {
@@ -580,7 +649,60 @@ impl AnnotationValue {
             Self::F64(_) => b'B',
             Self::String(_) => b'C',
             Self::LiteralArray { .. } => b'#',
+            Self::RawScalar(value) => scalar_value_type_tag(value.value_type),
+            Self::Array(value) if value.values.is_empty() => b'H',
+            Self::Array(value) => array_component_type_tag(value.component_type),
         }
+    }
+}
+
+pub(crate) fn scalar_value_type_tag(value_type: u32) -> u8 {
+    match value_type {
+        0 => b'1',
+        1 => b'2',
+        2 => b'3',
+        3 => b'4',
+        4 => b'5',
+        5 => b'6',
+        6 => b'7',
+        7 => b'8',
+        8 => b'9',
+        9 => b'A',
+        10 => b'B',
+        11 => b'C',
+        12 => b'*',
+        13 => b'D',
+        14 => b'E',
+        15 => b'F',
+        16 => b'G',
+        17 => b'H',
+        18 => b'I',
+        19 => b'J',
+        20 => b'#',
+        _ => b'0',
+    }
+}
+
+pub(crate) fn array_component_type_tag(component_type: u32) -> u8 {
+    match component_type {
+        0 => b'K',
+        1 => b'L',
+        2 => b'M',
+        3 => b'N',
+        4 => b'O',
+        5 => b'P',
+        6 => b'Q',
+        7 => b'R',
+        8 => b'S',
+        9 => b'T',
+        10 => b'U',
+        11 => b'V',
+        13 => b'W',
+        14 => b'X',
+        15 => b'Y',
+        16 => b'Z',
+        19 => b'@',
+        _ => b'0',
     }
 }
 
@@ -619,6 +741,8 @@ pub struct ClassRecord {
     /// Matches libpandafile `SourceLang`: ECMASCRIPT=0, JAVASCRIPT=2,
     /// TYPESCRIPT=3, ARKTS=4.
     pub source_lang: u8,
+    /// Upstream generic pandasm metadata attributes.
+    pub metadata_attrs: MetadataRecord,
     /// Raw upstream `Record::conflict` flag.
     pub conflict: bool,
     /// Raw upstream `Record::params_num` value.
@@ -687,6 +811,24 @@ impl ClassRecord {
                 .sum::<usize>()
     }
 
+    /// Return absolute offsets for this class's inline FieldItem records.
+    pub fn field_item_offsets(&self, class_item_offset: u32) -> Vec<u32> {
+        let first_field = class_item_offset + self.field_items_start_offset() as u32;
+        let mut offsets = Vec::with_capacity(self.fields.len());
+        let mut cur = first_field;
+        for field in &self.fields {
+            offsets.push(cur);
+            cur += (2
+                + 2
+                + 4
+                + uleb128(field.access_flags as u64).len()
+                + field.value.as_ref().map_or(0, FieldValue::encoded_len)
+                + field.annotations.len() * (1 + 4)
+                + 1) as u32;
+        }
+        offsets
+    }
+
     /// Return absolute offsets for this class's inline MethodItem records.
     pub fn method_item_offsets(&self, class_item_offset: u32) -> Vec<u32> {
         let first_method = class_item_offset + self.method_items_start_offset() as u32;
@@ -699,14 +841,17 @@ impl ClassRecord {
         offsets
     }
 
-    fn method_items_start_offset(&self) -> usize {
+    fn field_items_start_offset(&self) -> usize {
         inline_string(&self.name).len()
             + 4
             + uleb128(self.access_flags as u64).len()
             + uleb128(self.fields.len() as u64).len()
             + uleb128(self.methods.len() as u64).len()
             + self.class_tagged_data_byte_size()
-            + self.field_items_byte_size()
+    }
+
+    fn method_items_start_offset(&self) -> usize {
+        self.field_items_start_offset() + self.field_items_byte_size()
     }
 
     fn class_tagged_data_byte_size(&self) -> usize {
@@ -1001,13 +1146,17 @@ impl MethodRecord {
 }
 
 impl FieldValue {
-    fn encoded_len(&self) -> usize {
+    pub(crate) fn encoded_len(&self) -> usize {
         match self {
             FieldValue::U8(_) | FieldValue::Bool(_) => 2,
             FieldValue::U32(_)
             | FieldValue::LiteralArray(_)
             | FieldValue::String(_)
             | FieldValue::F64(_) => 5,
+            FieldValue::RawScalar(value) if scalar_field_value_is_integer(value.value_type) => {
+                1 + sleb128_i32(value.scalar_u32_bits() as i32).len()
+            }
+            FieldValue::RawScalar(_) => 5,
         }
     }
 
@@ -1043,8 +1192,88 @@ impl FieldValue {
                 buf.push(0x02);
                 buf.extend_from_slice(&value.to_le_bytes());
             }
+            FieldValue::RawScalar(value) if scalar_field_value_is_integer(value.value_type) => {
+                buf.push(0x01);
+                buf.extend_from_slice(&sleb128_i32(value.scalar_u32_bits() as i32));
+            }
+            FieldValue::RawScalar(value) if value.value_type == VALUE_TYPE_F32 => {
+                buf.push(0x02);
+                buf.extend_from_slice(&value.scalar_f32_bits().to_le_bytes());
+            }
+            FieldValue::RawScalar(_) => {
+                let value = field_value_offset.expect("raw field value offset must be resolved");
+                buf.push(0x02);
+                buf.extend_from_slice(&value.to_le_bytes());
+            }
         }
     }
+}
+
+pub(crate) const VALUE_TYPE_U1: u32 = 0;
+pub(crate) const VALUE_TYPE_I8: u32 = 1;
+pub(crate) const VALUE_TYPE_U8: u32 = 2;
+pub(crate) const VALUE_TYPE_I16: u32 = 3;
+pub(crate) const VALUE_TYPE_U16: u32 = 4;
+pub(crate) const VALUE_TYPE_I32: u32 = 5;
+pub(crate) const VALUE_TYPE_U32: u32 = 6;
+pub(crate) const VALUE_TYPE_I64: u32 = 7;
+pub(crate) const VALUE_TYPE_U64: u32 = 8;
+pub(crate) const VALUE_TYPE_F32: u32 = 9;
+pub(crate) const VALUE_TYPE_F64: u32 = 10;
+pub(crate) const VALUE_TYPE_STRING: u32 = 11;
+pub(crate) const VALUE_TYPE_STRING_NULLPTR: u32 = 12;
+pub(crate) const VALUE_TYPE_RECORD: u32 = 13;
+pub(crate) const VALUE_TYPE_METHOD: u32 = 14;
+pub(crate) const VALUE_TYPE_ENUM: u32 = 15;
+pub(crate) const VALUE_TYPE_ANNOTATION: u32 = 16;
+pub(crate) const VALUE_TYPE_ARRAY: u32 = 17;
+pub(crate) const VALUE_TYPE_METHOD_HANDLE: u32 = 19;
+pub(crate) const VALUE_TYPE_LITERALARRAY: u32 = 20;
+
+fn scalar_field_value_is_integer(value_type: u32) -> bool {
+    matches!(
+        value_type,
+        VALUE_TYPE_U1
+            | VALUE_TYPE_I8
+            | VALUE_TYPE_U8
+            | VALUE_TYPE_I16
+            | VALUE_TYPE_U16
+            | VALUE_TYPE_I32
+            | VALUE_TYPE_U32
+            | VALUE_TYPE_STRING_NULLPTR
+    )
+}
+
+impl ScalarValueRecord {
+    pub(crate) fn scalar_u32_bits(&self) -> u32 {
+        match &self.value {
+            ScalarValueData::U64(value) => *value as u32,
+            ScalarValueData::F32(value) => value.to_bits(),
+            _ => 0,
+        }
+    }
+
+    pub(crate) fn scalar_f32_bits(&self) -> u32 {
+        match &self.value {
+            ScalarValueData::F32(value) => value.to_bits(),
+            ScalarValueData::U64(value) => *value as u32,
+            _ => 0,
+        }
+    }
+}
+
+fn sleb128_i32(mut value: i32) -> Vec<u8> {
+    let mut out = Vec::new();
+    loop {
+        let byte = (value as u8) & 0x7f;
+        value >>= 7;
+        let done = (value == 0 && (byte & 0x40) == 0) || (value == -1 && (byte & 0x40) != 0);
+        out.push(if done { byte } else { byte | 0x80 });
+        if done {
+            break;
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1124,6 +1353,7 @@ mod tests {
                 method_pool_entry: false,
                 expected_property_count: None,
                 annotations: Vec::new(),
+                metadata_attrs: Default::default(),
                 param_annotations: Vec::new(),
                 definefunc_order: None,
                 label_style: MethodLabelStyle::Source,
@@ -1139,6 +1369,7 @@ mod tests {
             source_code_strings: vec![],
             access_flags: 1,
             source_lang: 0,
+            metadata_attrs: Default::default(),
             conflict: false,
             params_num: 0,
             body_presence: false,
@@ -1184,6 +1415,7 @@ mod tests {
                 method_pool_entry: false,
                 expected_property_count: None,
                 annotations: Vec::new(),
+                metadata_attrs: Default::default(),
                 param_annotations: Vec::new(),
                 definefunc_order: None,
                 label_style: MethodLabelStyle::Source,
@@ -1199,6 +1431,7 @@ mod tests {
             source_code_strings: vec![],
             access_flags: 1,
             source_lang: 0,
+            metadata_attrs: Default::default(),
             conflict: false,
             params_num: 0,
             body_presence: false,

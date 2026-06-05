@@ -475,6 +475,7 @@ pub fn build_record_with_debug_and_source_map_for_target_with_mode(
         method_pool_entry: false,
         expected_property_count: None,
         annotations: Vec::new(),
+        metadata_attrs: Default::default(),
         param_annotations: Vec::new(),
         definefunc_order: None,
         label_style: MethodLabelStyle::Source,
@@ -598,6 +599,7 @@ pub fn build_record_with_debug_and_source_map_for_target_with_mode(
         source_code_strings,
         access_flags: 1,
         source_lang,
+        metadata_attrs: Default::default(),
         conflict: false,
         params_num: 0,
         body_presence: false,
@@ -756,9 +758,11 @@ fn annotation_record_from_decl(
             class_idx: FIELD_OWNER_CLASS_IDX,
             type_idx: legacy_annotation_type_idx(&field_type),
             field_type,
+            metadata_field_type: None,
             access_flags: 0,
             value,
             annotations: Vec::new(),
+            metadata_attrs: Default::default(),
             source: Default::default(),
         });
     }
@@ -772,6 +776,7 @@ fn annotation_record_from_decl(
         source_code_strings: Vec::new(),
         access_flags: 0x2000,
         source_lang: 0,
+        metadata_attrs: Default::default(),
         conflict: false,
         params_num: 0,
         body_presence: false,
@@ -909,8 +914,15 @@ fn annotation_field_type_from_component(component_name: &str, rank: u32) -> Fiel
     match component_name {
         "panda.String" => FieldType::PandaString,
         "f64" => FieldType::F64,
+        "f32" => FieldType::F32,
+        "i64" => FieldType::I64,
+        "u64" => FieldType::U64,
+        "i32" => FieldType::I32,
         "u1" => FieldType::U1,
+        "i8" => FieldType::I8,
         "u8" => FieldType::U8,
+        "i16" => FieldType::I16,
+        "u16" => FieldType::U16,
         "u32" => FieldType::U32,
         _ => FieldType::Any,
     }
@@ -988,12 +1000,20 @@ fn annotation_field_value(
                 file: record_name.to_string(),
             }),
         },
-        FieldType::U8 | FieldType::U32 | FieldType::Any | FieldType::Array { .. } => {
-            Err(AbcError::UnsupportedConstruct {
-                construct: "AnnotationFieldDefault".to_string(),
-                file: record_name.to_string(),
-            })
-        }
+        FieldType::I8
+        | FieldType::U8
+        | FieldType::I16
+        | FieldType::U16
+        | FieldType::I32
+        | FieldType::U32
+        | FieldType::F32
+        | FieldType::I64
+        | FieldType::U64
+        | FieldType::Any
+        | FieldType::Array { .. } => Err(AbcError::UnsupportedConstruct {
+            construct: "AnnotationFieldDefault".to_string(),
+            file: record_name.to_string(),
+        }),
     }
 }
 
@@ -2176,6 +2196,7 @@ fn compile_function_record(
                 method_pool_entry: true,
                 expected_property_count,
                 annotations: Vec::new(),
+                metadata_attrs: Default::default(),
                 param_annotations: Vec::new(),
                 definefunc_order: Some(definefunc_order),
                 label_style: MethodLabelStyle::Source,
@@ -2237,6 +2258,7 @@ fn compile_function_record(
                 method_pool_entry: true,
                 expected_property_count,
                 annotations: Vec::new(),
+                metadata_attrs: Default::default(),
                 param_annotations: Vec::new(),
                 definefunc_order: Some(definefunc_order),
                 label_style: MethodLabelStyle::Source,
@@ -2894,6 +2916,7 @@ fn compile_class_elements(
             method_pool_entry: true,
             expected_property_count: class_expected_property_count,
             annotations: constructor_annotations,
+            metadata_attrs: Default::default(),
             param_annotations: Vec::new(),
             definefunc_order: None,
             label_style: MethodLabelStyle::Source,
@@ -2947,6 +2970,7 @@ fn compile_class_elements(
             method_pool_entry: true,
             expected_property_count: None,
             annotations: Vec::new(),
+            metadata_attrs: Default::default(),
             param_annotations: Vec::new(),
             definefunc_order: None,
             label_style: MethodLabelStyle::Source,
@@ -2995,6 +3019,7 @@ fn compile_class_elements(
             method_pool_entry: true,
             expected_property_count: None,
             annotations: Vec::new(),
+            metadata_attrs: Default::default(),
             param_annotations: Vec::new(),
             definefunc_order: None,
             label_style: MethodLabelStyle::Source,
@@ -3195,6 +3220,7 @@ fn compile_class_elements(
                     .then_some(class_expected_property_count)
                     .flatten(),
                 annotations,
+                metadata_attrs: Default::default(),
                 param_annotations: Vec::new(),
                 definefunc_order: None,
                 label_style: MethodLabelStyle::Source,
@@ -3257,6 +3283,7 @@ fn compile_class_elements(
             method_pool_entry: true,
             expected_property_count: None,
             annotations: Vec::new(),
+            metadata_attrs: Default::default(),
             param_annotations: Vec::new(),
             definefunc_order: None,
             label_style: MethodLabelStyle::Source,
@@ -3306,6 +3333,7 @@ fn compile_class_elements(
             method_pool_entry: true,
             expected_property_count: None,
             annotations: Vec::new(),
+            metadata_attrs: Default::default(),
             param_annotations: Vec::new(),
             definefunc_order: None,
             label_style: MethodLabelStyle::Source,

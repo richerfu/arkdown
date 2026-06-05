@@ -9,11 +9,17 @@ use crate::emit::debug_info::{
     local_variable_debug_param_offsets,
 };
 use crate::emit::record::{
-    encode_code_item, inline_string, uleb128, AnnotationRecord, AnnotationValue,
+    encode_code_item, inline_string, uleb128, AnnotationRecord, AnnotationValue, ArrayValueRecord,
     ClassAnnotationOffsets, ClassRecord, DebugInfoRecord, FieldAnnotationOffsets, FieldType,
-    FieldValue, MethodAnnotationOffsets, MethodKind,
+    FieldValue, MethodAnnotationOffsets, MethodKind, PandasmTypeRecord, ScalarValueData,
+    ScalarValueRecord, VALUE_TYPE_ANNOTATION, VALUE_TYPE_ARRAY, VALUE_TYPE_ENUM, VALUE_TYPE_F32,
+    VALUE_TYPE_F64, VALUE_TYPE_I16, VALUE_TYPE_I32, VALUE_TYPE_I64, VALUE_TYPE_I8,
+    VALUE_TYPE_LITERALARRAY, VALUE_TYPE_METHOD, VALUE_TYPE_METHOD_HANDLE, VALUE_TYPE_RECORD,
+    VALUE_TYPE_STRING, VALUE_TYPE_STRING_NULLPTR, VALUE_TYPE_U1, VALUE_TYPE_U16, VALUE_TYPE_U32,
+    VALUE_TYPE_U64, VALUE_TYPE_U8,
 };
 use crate::emit::strings::StringTable;
+use crate::names::full_method_name;
 use rustc_hash::FxHashMap;
 
 // ── LiteralArray types (Task 1) ───────────────────────────────────────────────
@@ -37,12 +43,163 @@ pub(crate) const LITERAL_TAG_SETTER: u8 = 0x1b;
 pub(crate) const LITERAL_TAG_ETS_IMPLEMENTS: u8 = 0x1c;
 pub(crate) const LITERAL_TAG_NULL: u8 = 0xff;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum AnnotationOwnerKind {
-    Class,
-    Field,
-    Method,
-    Param,
+#[derive(Debug, Clone, Copy)]
+enum PendingValueItem<'a> {
+    Long(u64),
+    Double(f64),
+    Array(&'a ArrayValueRecord),
+}
+
+impl PendingValueItem<'_> {
+    fn alignment(&self) -> u32 {
+        match self {
+            Self::Long(_) | Self::Double(_) => 8,
+            Self::Array(_) => 1,
+        }
+    }
+
+    fn byte_size(&self) -> u32 {
+        match self {
+            Self::Long(_) | Self::Double(_) => 8,
+            Self::Array(value) => {
+                uleb128(value.values.len() as u64).len() as u32
+                    + value.values.len() as u32 * array_component_byte_size(value.component_type)
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ScalarBinaryValue {
+    Integer(u32),
+    Float(u32),
+    Id(u32),
+    Offset(u32),
+}
+
+impl ScalarBinaryValue {
+    fn annotation_u32(self) -> u32 {
+        match self {
+            Self::Integer(value) | Self::Float(value) | Self::Id(value) | Self::Offset(value) => {
+                value
+            }
+        }
+    }
+
+    fn needs_value_item(value: &ScalarValueRecord) -> Option<PendingValueItem<'_>> {
+        match value.value_type {
+            VALUE_TYPE_I64 | VALUE_TYPE_U64 => Some(PendingValueItem::Long(value.scalar_u64())),
+            VALUE_TYPE_F64 => Some(PendingValueItem::Double(value.scalar_f64())),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct AnnotationElementKey {
+    name_off: u32,
+    value: u32,
+    tag: u8,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct AnnotationItemKey {
+    class_idx: u16,
+    elements: Vec<AnnotationElementKey>,
+}
+
+impl AnnotationItemKey {
+    fn byte_size(&self) -> u32 {
+        2 + 2 + (self.elements.len() as u32 * (4 + 4)) + self.elements.len() as u32
+    }
+}
+
+fn insert_annotation_key(
+    annotation_offsets_by_key: &mut FxHashMap<AnnotationItemKey, u32>,
+    annotation_emit_order: &mut Vec<AnnotationItemKey>,
+    ann_cur: &mut u32,
+    key: AnnotationItemKey,
+) -> u32 {
+    *annotation_offsets_by_key
+        .entry(key.clone())
+        .or_insert_with(|| {
+            let off = *ann_cur;
+            *ann_cur += key.byte_size();
+            annotation_emit_order.push(key);
+            off
+        })
+}
+
+fn scalar_value_is_32bit_integer(value_type: u32) -> bool {
+    matches!(
+        value_type,
+        VALUE_TYPE_U1
+            | VALUE_TYPE_I8
+            | VALUE_TYPE_U8
+            | VALUE_TYPE_I16
+            | VALUE_TYPE_U16
+            | VALUE_TYPE_I32
+            | VALUE_TYPE_U32
+            | VALUE_TYPE_STRING_NULLPTR
+    )
+}
+
+fn scalar_value_is_id(value_type: u32) -> bool {
+    matches!(
+        value_type,
+        VALUE_TYPE_STRING
+            | VALUE_TYPE_RECORD
+            | VALUE_TYPE_METHOD
+            | VALUE_TYPE_ENUM
+            | VALUE_TYPE_ANNOTATION
+            | VALUE_TYPE_METHOD_HANDLE
+            | VALUE_TYPE_LITERALARRAY
+    )
+}
+
+fn array_component_byte_size(component_type: u32) -> u32 {
+    match component_type {
+        VALUE_TYPE_U1 | VALUE_TYPE_I8 | VALUE_TYPE_U8 => 1,
+        VALUE_TYPE_I16 | VALUE_TYPE_U16 => 2,
+        VALUE_TYPE_I32 | VALUE_TYPE_U32 | VALUE_TYPE_F32 => 4,
+        VALUE_TYPE_I64 | VALUE_TYPE_U64 | VALUE_TYPE_F64 => 8,
+        VALUE_TYPE_STRING
+        | VALUE_TYPE_RECORD
+        | VALUE_TYPE_METHOD
+        | VALUE_TYPE_ENUM
+        | VALUE_TYPE_ANNOTATION
+        | VALUE_TYPE_METHOD_HANDLE
+        | VALUE_TYPE_LITERALARRAY => 4,
+        VALUE_TYPE_ARRAY => 0,
+        _ => 4,
+    }
+}
+
+impl ScalarValueRecord {
+    fn scalar_u64(&self) -> u64 {
+        match &self.value {
+            ScalarValueData::U64(value) => *value,
+            ScalarValueData::F32(value) => value.to_bits() as u64,
+            ScalarValueData::F64(value) => value.to_bits(),
+            _ => 0,
+        }
+    }
+
+    fn scalar_f32(&self) -> f32 {
+        match &self.value {
+            ScalarValueData::F32(value) => *value,
+            ScalarValueData::U64(value) => f32::from_bits(*value as u32),
+            _ => 0.0,
+        }
+    }
+
+    fn scalar_f64(&self) -> f64 {
+        match &self.value {
+            ScalarValueData::F64(value) => *value,
+            ScalarValueData::U64(value) => f64::from_bits(*value),
+            _ => 0.0,
+        }
+    }
 }
 
 /// A single entry in a Panda `LiteralArray`.
@@ -211,8 +368,12 @@ fn align4(value: u32) -> u32 {
     (value + 3) & !3
 }
 
-fn align8(value: u32) -> u32 {
-    (value + 7) & !7
+fn align_to(value: u32, alignment: u32) -> u32 {
+    if alignment <= 1 {
+        value
+    } else {
+        (value + alignment - 1) & !(alignment - 1)
+    }
 }
 
 fn contains_literal_array_in_header(version: u32) -> bool {
@@ -224,6 +385,13 @@ pub struct AbcFile {
     /// Interned string table for bytecode string operands (`lda.str`,
     /// `tryldglobalbyname`, etc.).  Referenced by 16-bit index in opcodes.
     pub strings: StringTable,
+    /// Optional upstream Program.lang preserved for ProgramCache/protoBin
+    /// roundtrips. Source compilation leaves it unset and derives lang from
+    /// selected class records.
+    pub program_lang: Option<u32>,
+    /// Upstream Program.array_types preserved for ProgramCache/protoBin
+    /// roundtrips. ABC binary emission does not use this table directly.
+    pub array_types: Vec<PandasmTypeRecord>,
     /// Class records, one per compiled JavaScript chunk.
     pub records: Vec<ClassRecord>,
     /// Literal arrays referenced by `defineclasswithbuffer`.
@@ -239,6 +407,8 @@ impl AbcFile {
     pub fn new() -> Self {
         AbcFile {
             strings: StringTable::default(),
+            program_lang: None,
+            array_types: Vec::new(),
             records: Vec::new(),
             literal_arrays: Vec::new(),
         }
@@ -327,6 +497,7 @@ impl AbcFile {
             source_code_strings: vec![],
             access_flags: 0x2001,
             source_lang: SOURCE_LANG_ECMASCRIPT,
+            metadata_attrs: Default::default(),
             conflict: false,
             params_num: 0,
             body_presence: false,
@@ -347,6 +518,7 @@ impl AbcFile {
                 source_code_strings: vec![],
                 access_flags: 0x2001,
                 source_lang: SOURCE_LANG_ECMASCRIPT,
+                metadata_attrs: Default::default(),
                 conflict: false,
                 params_num: 0,
                 body_presence: false,
@@ -367,6 +539,7 @@ impl AbcFile {
             source_code_strings: vec![],
             access_flags: 0x2001,
             source_lang: SOURCE_LANG_ECMASCRIPT,
+            metadata_attrs: Default::default(),
             conflict: false,
             params_num: 0,
             body_presence: false,
@@ -597,12 +770,7 @@ impl AbcFile {
             }
 
             for annotation in &class.annotations {
-                for element in &annotation.elements {
-                    string_items.get_or_create(&element.name);
-                    if let AnnotationValue::String(value) = &element.value {
-                        string_items.get_or_create(value);
-                    }
-                }
+                intern_annotation_strings(annotation, &mut string_items);
             }
 
             if let Some(source_file) = &class.source_file {
@@ -617,13 +785,11 @@ impl AbcFile {
                     field_value_offsets[class_idx][field_idx] =
                         Some(string_items.get_or_create(value));
                 }
+                if let Some(value) = &field.value {
+                    intern_field_value_strings(value, &mut string_items);
+                }
                 for annotation in &field.annotations {
-                    for element in &annotation.elements {
-                        string_items.get_or_create(&element.name);
-                        if let AnnotationValue::String(value) = &element.value {
-                            string_items.get_or_create(value);
-                        }
-                    }
+                    intern_annotation_strings(annotation, &mut string_items);
                 }
             }
 
@@ -695,21 +861,11 @@ impl AbcFile {
                 }
 
                 for annotation in &method.annotations {
-                    for element in &annotation.elements {
-                        string_items.get_or_create(&element.name);
-                        if let AnnotationValue::String(value) = &element.value {
-                            string_items.get_or_create(value);
-                        }
-                    }
+                    intern_annotation_strings(annotation, &mut string_items);
                 }
                 for param_annotations in &method.param_annotations {
                     for annotation in param_annotations {
-                        for element in &annotation.elements {
-                            string_items.get_or_create(&element.name);
-                            if let AnnotationValue::String(value) = &element.value {
-                                string_items.get_or_create(value);
-                            }
-                        }
+                        intern_annotation_strings(annotation, &mut string_items);
                     }
                 }
             }
@@ -804,132 +960,78 @@ impl AbcFile {
             .then(|| string_items.get_or_create("ExpectedPropertyCount"));
         let slot_number_str_off = string_items.get_or_create("SlotNumber");
         let mut cur = string_items.cur();
-        let mut field_value_section = Vec::new();
-        let mut annotation_f64_value_offsets =
-            FxHashMap::<(AnnotationOwnerKind, usize, usize, usize, usize, usize), u32>::default();
+        let mut pending_value_items = Vec::<(u32, PendingValueItem<'_>)>::new();
+        let mut annotation_value_offsets = FxHashMap::<usize, u32>::default();
         for (class_idx, class) in all_classes.iter().enumerate() {
-            for (annotation_idx, annotation) in class.annotations.iter().enumerate() {
-                for (element_idx, element) in annotation.elements.iter().enumerate() {
-                    if let AnnotationValue::F64(value) = &element.value {
-                        let aligned = align8(cur);
-                        while cur < aligned {
-                            field_value_section.push(0);
-                            cur += 1;
-                        }
-                        annotation_f64_value_offsets.insert(
-                            (
-                                AnnotationOwnerKind::Class,
-                                class_idx,
-                                0,
-                                0,
-                                annotation_idx,
-                                element_idx,
-                            ),
-                            cur,
-                        );
-                        field_value_section.extend_from_slice(&value.to_le_bytes());
-                        cur += 8;
-                    }
-                }
+            for annotation in &class.annotations {
+                collect_pending_annotation_offsets(
+                    annotation,
+                    &mut cur,
+                    &mut pending_value_items,
+                    &mut annotation_value_offsets,
+                );
             }
             for (field_idx, field) in class.fields.iter().enumerate() {
-                if let Some(FieldValue::F64(value)) = field.value.as_ref() {
-                    let aligned = align8(cur);
-                    while cur < aligned {
-                        field_value_section.push(0);
-                        cur += 1;
-                    }
-                    field_value_offsets[class_idx][field_idx] = Some(cur);
-                    field_value_section.extend_from_slice(&value.to_le_bytes());
-                    cur += 8;
+                if let Some(FieldValue::RawScalar(value)) = field.value.as_ref() {
+                    collect_pending_scalar_offsets(
+                        value,
+                        &mut cur,
+                        &mut pending_value_items,
+                        &mut annotation_value_offsets,
+                    );
                 }
-                for (annotation_idx, annotation) in field.annotations.iter().enumerate() {
-                    for (element_idx, element) in annotation.elements.iter().enumerate() {
-                        if let AnnotationValue::F64(value) = &element.value {
-                            let aligned = align8(cur);
-                            while cur < aligned {
-                                field_value_section.push(0);
-                                cur += 1;
-                            }
-                            annotation_f64_value_offsets.insert(
-                                (
-                                    AnnotationOwnerKind::Field,
-                                    class_idx,
-                                    field_idx,
-                                    0,
-                                    annotation_idx,
-                                    element_idx,
-                                ),
-                                cur,
-                            );
-                            field_value_section.extend_from_slice(&value.to_le_bytes());
-                            cur += 8;
-                        }
-                    }
+                if let Some(item) = field_pending_value_item(field.value.as_ref()) {
+                    let off = push_pending_value(&mut cur, &mut pending_value_items, item);
+                    field_value_offsets[class_idx][field_idx] = Some(off);
+                }
+                for annotation in &field.annotations {
+                    collect_pending_annotation_offsets(
+                        annotation,
+                        &mut cur,
+                        &mut pending_value_items,
+                        &mut annotation_value_offsets,
+                    );
                 }
             }
-            for (method_idx, method) in class.methods.iter().enumerate() {
-                for (annotation_idx, annotation) in method.annotations.iter().enumerate() {
-                    for (element_idx, element) in annotation.elements.iter().enumerate() {
-                        if let AnnotationValue::F64(value) = &element.value {
-                            let aligned = align8(cur);
-                            while cur < aligned {
-                                field_value_section.push(0);
-                                cur += 1;
-                            }
-                            annotation_f64_value_offsets.insert(
-                                (
-                                    AnnotationOwnerKind::Method,
-                                    class_idx,
-                                    method_idx,
-                                    0,
-                                    annotation_idx,
-                                    element_idx,
-                                ),
-                                cur,
-                            );
-                            field_value_section.extend_from_slice(&value.to_le_bytes());
-                            cur += 8;
-                        }
-                    }
+            for method in &class.methods {
+                for annotation in &method.annotations {
+                    collect_pending_annotation_offsets(
+                        annotation,
+                        &mut cur,
+                        &mut pending_value_items,
+                        &mut annotation_value_offsets,
+                    );
                 }
-                for (param_idx, param_annotations) in method.param_annotations.iter().enumerate() {
-                    for (annotation_idx, annotation) in param_annotations.iter().enumerate() {
-                        for (element_idx, element) in annotation.elements.iter().enumerate() {
-                            if let AnnotationValue::F64(value) = &element.value {
-                                let aligned = align8(cur);
-                                while cur < aligned {
-                                    field_value_section.push(0);
-                                    cur += 1;
-                                }
-                                annotation_f64_value_offsets.insert(
-                                    (
-                                        AnnotationOwnerKind::Param,
-                                        class_idx,
-                                        method_idx,
-                                        param_idx,
-                                        annotation_idx,
-                                        element_idx,
-                                    ),
-                                    cur,
-                                );
-                                field_value_section.extend_from_slice(&value.to_le_bytes());
-                                cur += 8;
-                            }
-                        }
+                for param_annotations in &method.param_annotations {
+                    for annotation in param_annotations {
+                        collect_pending_annotation_offsets(
+                            annotation,
+                            &mut cur,
+                            &mut pending_value_items,
+                            &mut annotation_value_offsets,
+                        );
                     }
                 }
             }
         }
 
         let mut method_name_offsets = FxHashMap::default();
+        let mut method_entity_offsets = FxHashMap::<String, u32>::default();
+        let mut field_entity_offsets = FxHashMap::<String, u32>::default();
         for (class, &class_off) in all_classes.iter().zip(class_item_offsets.iter()) {
+            for (field, field_off) in class.fields.iter().zip(class.field_item_offsets(class_off)) {
+                field_entity_offsets.insert(format!("{}.{}", class.name, field.name), field_off);
+                field_entity_offsets.insert(field.name.clone(), field_off);
+            }
             for (method, method_off) in class
                 .methods
                 .iter()
                 .zip(class.method_item_offsets(class_off))
             {
                 method_name_offsets.insert(method.name.as_str(), method_off);
+                method_entity_offsets
+                    .insert(full_method_name(&class.name, &method.name), method_off);
+                method_entity_offsets.insert(method.name.clone(), method_off);
             }
         }
 
@@ -1148,6 +1250,14 @@ impl AbcFile {
             (offsets, buf)
         };
         cur += lit_arr_section.len() as u32;
+        let literal_key_to_offset: FxHashMap<String, u32> = self
+            .literal_arrays
+            .iter()
+            .zip(literal_array_offsets.iter())
+            .filter_map(|(array, &offset)| {
+                array.explicit_key.as_ref().map(|key| (key.clone(), offset))
+            })
+            .collect();
 
         let mut slot_counts_per_class: Vec<Vec<u32>> = all_classes
             .iter()
@@ -1204,79 +1314,12 @@ impl AbcFile {
         let slot_number_annotation_class_idx = *name_to_index_class_idx
             .get("L_ESSlotNumberAnnotation;")
             .expect("SlotNumber annotation class must be indexed");
-
-        #[derive(Clone, Debug, Hash, PartialEq, Eq)]
-        struct AnnotationElementKey {
-            name_off: u32,
-            value: u32,
-            tag: u8,
-        }
-
-        #[derive(Clone, Debug, Hash, PartialEq, Eq)]
-        struct AnnotationItemKey {
-            class_idx: u16,
-            elements: Vec<AnnotationElementKey>,
-        }
-
-        impl AnnotationItemKey {
-            fn byte_size(&self) -> u32 {
-                2 + 2 + (self.elements.len() as u32 * (4 + 4)) + self.elements.len() as u32
-            }
-        }
-
-        let make_annotation_key =
-            |owner_kind: AnnotationOwnerKind,
-             class_idx: usize,
-             member_idx: usize,
-             param_idx: usize,
-             annotation_idx: usize,
-             annotation: &AnnotationRecord| {
-                let annotation_class_name = format!("L{};", annotation.record_name);
-                let annotation_class_idx = *name_to_index_class_idx
-                    .get(annotation_class_name.as_str())
-                    .unwrap_or_else(|| {
-                        panic!("custom annotation record {annotation_class_name} must be indexed")
-                    });
-                let elements = annotation
-                    .elements
-                    .iter()
-                    .enumerate()
-                    .map(|(element_idx, element)| {
-                        let name_off = string_items
-                            .id_of(&element.name)
-                            .expect("annotation element name must be interned");
-                        let value = match &element.value {
-                            AnnotationValue::Bool(value) => u32::from(*value),
-                            AnnotationValue::U32(value) => *value,
-                            AnnotationValue::F64(_) => *annotation_f64_value_offsets
-                                .get(&(
-                                    owner_kind,
-                                    class_idx,
-                                    member_idx,
-                                    param_idx,
-                                    annotation_idx,
-                                    element_idx,
-                                ))
-                                .expect("annotation f64 value offset must be resolved"),
-                            AnnotationValue::String(value) => string_items
-                                .id_of(value)
-                                .expect("annotation string value must be interned"),
-                            AnnotationValue::LiteralArray { index, .. } => {
-                                literal_array_offsets[*index]
-                            }
-                        };
-                        AnnotationElementKey {
-                            name_off,
-                            value,
-                            tag: element.value.tag(),
-                        }
-                    })
-                    .collect();
-                AnnotationItemKey {
-                    class_idx: annotation_class_idx,
-                    elements,
-                }
-            };
+        let entity_offsets = EntityOffsetMaps {
+            class_offsets: &name_to_class_offset,
+            method_offsets: &method_entity_offsets,
+            field_offsets: &field_entity_offsets,
+            literal_offsets: &literal_key_to_offset,
+        };
 
         let mut class_annotation_offsets_per_class: Vec<ClassAnnotationOffsets> =
             Vec::with_capacity(all_classes.len());
@@ -1287,28 +1330,25 @@ impl AbcFile {
         let mut param_annotation_offsets_per_class: Vec<Vec<Option<Vec<Vec<u32>>>>> =
             Vec::with_capacity(all_classes.len());
         let mut annotation_emit_order = Vec::new();
+        let mut annotation_offsets_by_key = FxHashMap::<AnnotationItemKey, u32>::default();
+        let mut annotation_offsets_by_ptr = FxHashMap::<usize, u32>::default();
+        let mut ann_cur = annotation_section_start;
         {
-            let mut annotation_offsets_by_key = FxHashMap::<AnnotationItemKey, u32>::default();
-            let mut ann_cur = annotation_section_start;
             for (class_idx, class) in all_classes.iter().enumerate() {
                 let mut class_annotation_offsets = ClassAnnotationOffsets::default();
-                for (annotation_idx, annotation) in class.annotations.iter().enumerate() {
-                    let key = make_annotation_key(
-                        AnnotationOwnerKind::Class,
-                        class_idx,
-                        0,
-                        0,
-                        annotation_idx,
+                for annotation in &class.annotations {
+                    let off = insert_annotation_record(
                         annotation,
+                        &name_to_index_class_idx,
+                        &string_items,
+                        &entity_offsets,
+                        &literal_array_offsets,
+                        &annotation_value_offsets,
+                        &mut annotation_offsets_by_key,
+                        &mut annotation_offsets_by_ptr,
+                        &mut annotation_emit_order,
+                        &mut ann_cur,
                     );
-                    let off = *annotation_offsets_by_key
-                        .entry(key.clone())
-                        .or_insert_with(|| {
-                            let off = ann_cur;
-                            ann_cur += key.byte_size();
-                            annotation_emit_order.push(key);
-                            off
-                        });
                     class_annotation_offsets.custom.push(off);
                 }
                 class_annotation_offsets_per_class.push(class_annotation_offsets);
@@ -1317,24 +1357,33 @@ impl AbcFile {
                 field_annotation_offsets
                     .resize(class.fields.len(), FieldAnnotationOffsets::default());
                 for (field_idx, field) in class.fields.iter().enumerate() {
-                    for (annotation_idx, annotation) in field.annotations.iter().enumerate() {
-                        let key = make_annotation_key(
-                            AnnotationOwnerKind::Field,
-                            class_idx,
-                            field_idx,
-                            0,
-                            annotation_idx,
-                            annotation,
+                    if let Some(FieldValue::RawScalar(value)) = field.value.as_ref() {
+                        register_nested_scalar_annotation(
+                            value,
+                            &name_to_index_class_idx,
+                            &string_items,
+                            &entity_offsets,
+                            &literal_array_offsets,
+                            &annotation_value_offsets,
+                            &mut annotation_offsets_by_key,
+                            &mut annotation_offsets_by_ptr,
+                            &mut annotation_emit_order,
+                            &mut ann_cur,
                         );
-                        let off =
-                            *annotation_offsets_by_key
-                                .entry(key.clone())
-                                .or_insert_with(|| {
-                                    let off = ann_cur;
-                                    ann_cur += key.byte_size();
-                                    annotation_emit_order.push(key);
-                                    off
-                                });
+                    }
+                    for annotation in &field.annotations {
+                        let off = insert_annotation_record(
+                            annotation,
+                            &name_to_index_class_idx,
+                            &string_items,
+                            &entity_offsets,
+                            &literal_array_offsets,
+                            &annotation_value_offsets,
+                            &mut annotation_offsets_by_key,
+                            &mut annotation_offsets_by_ptr,
+                            &mut annotation_emit_order,
+                            &mut ann_cur,
+                        );
                         field_annotation_offsets[field_idx].custom.push(off);
                     }
                 }
@@ -1346,24 +1395,19 @@ impl AbcFile {
                 method_param_ann_offsets.resize(class.methods.len(), None);
                 for &method_idx in &annotation_order_per_class[class_idx] {
                     let method = &class.methods[method_idx];
-                    for (annotation_idx, annotation) in method.annotations.iter().enumerate() {
-                        let key = make_annotation_key(
-                            AnnotationOwnerKind::Method,
-                            class_idx,
-                            method_idx,
-                            0,
-                            annotation_idx,
+                    for annotation in &method.annotations {
+                        let off = insert_annotation_record(
                             annotation,
+                            &name_to_index_class_idx,
+                            &string_items,
+                            &entity_offsets,
+                            &literal_array_offsets,
+                            &annotation_value_offsets,
+                            &mut annotation_offsets_by_key,
+                            &mut annotation_offsets_by_ptr,
+                            &mut annotation_emit_order,
+                            &mut ann_cur,
                         );
-                        let off =
-                            *annotation_offsets_by_key
-                                .entry(key.clone())
-                                .or_insert_with(|| {
-                                    let off = ann_cur;
-                                    ann_cur += key.byte_size();
-                                    annotation_emit_order.push(key);
-                                    off
-                                });
                         method_ann_offs[method_idx].custom.push(off);
                     }
 
@@ -1378,23 +1422,12 @@ impl AbcFile {
                                 tag: b'7',
                             }],
                         };
-                        let off = *annotation_offsets_by_key.entry(key).or_insert_with(|| {
-                            let off = ann_cur;
-                            let key = AnnotationItemKey {
-                                class_idx: expected_property_count_annotation_class_idx.expect(
-                                    "ExpectedPropertyCount annotation class must be indexed",
-                                ),
-                                elements: vec![AnnotationElementKey {
-                                    name_off: expected_property_count_str_off
-                                        .expect("ExpectedPropertyCount string must be interned"),
-                                    value: expected_property_count,
-                                    tag: b'7',
-                                }],
-                            };
-                            ann_cur += key.byte_size();
-                            annotation_emit_order.push(key);
-                            off
-                        });
+                        let off = insert_annotation_key(
+                            &mut annotation_offsets_by_key,
+                            &mut annotation_emit_order,
+                            &mut ann_cur,
+                            key,
+                        );
                         method_ann_offs[method_idx].expected_property_count = Some(off);
                     }
 
@@ -1406,17 +1439,12 @@ impl AbcFile {
                             tag: b'7',
                         }],
                     };
-                    let off = *annotation_offsets_by_key
-                        .entry(key.clone())
-                        .or_insert_with(|| {
-                            let off = ann_cur;
-                            annotation_emit_order.push(key);
-                            ann_cur += annotation_emit_order
-                                .last()
-                                .expect("annotation key must have just been pushed")
-                                .byte_size();
-                            off
-                        });
+                    let off = insert_annotation_key(
+                        &mut annotation_offsets_by_key,
+                        &mut annotation_emit_order,
+                        &mut ann_cur,
+                        key,
+                    );
                     method_ann_offs[method_idx].slot_number = off;
 
                     if method.has_param_annotations() {
@@ -1426,24 +1454,19 @@ impl AbcFile {
                         for (param_idx, param_annotations) in
                             method.param_annotations.iter().enumerate()
                         {
-                            for (annotation_idx, annotation) in param_annotations.iter().enumerate()
-                            {
-                                let key = make_annotation_key(
-                                    AnnotationOwnerKind::Param,
-                                    class_idx,
-                                    method_idx,
-                                    param_idx,
-                                    annotation_idx,
+                            for annotation in param_annotations {
+                                let off = insert_annotation_record(
                                     annotation,
+                                    &name_to_index_class_idx,
+                                    &string_items,
+                                    &entity_offsets,
+                                    &literal_array_offsets,
+                                    &annotation_value_offsets,
+                                    &mut annotation_offsets_by_key,
+                                    &mut annotation_offsets_by_ptr,
+                                    &mut annotation_emit_order,
+                                    &mut ann_cur,
                                 );
-                                let off = *annotation_offsets_by_key
-                                    .entry(key.clone())
-                                    .or_insert_with(|| {
-                                        let off = ann_cur;
-                                        ann_cur += key.byte_size();
-                                        annotation_emit_order.push(key);
-                                        off
-                                    });
                                 param_offsets[param_idx].push(off);
                             }
                         }
@@ -1484,6 +1507,31 @@ impl AbcFile {
                 }
             }
         }
+        for (class_idx, class) in all_classes.iter().enumerate() {
+            for (field_idx, field) in class.fields.iter().enumerate() {
+                if field_value_offsets[class_idx][field_idx].is_some() {
+                    continue;
+                }
+                if let Some(FieldValue::RawScalar(value)) = field.value.as_ref() {
+                    if scalar_value_is_id(value.value_type) {
+                        field_value_offsets[class_idx][field_idx] =
+                            Some(resolve_scalar_id_existing(
+                                value,
+                                &string_items,
+                                &entity_offsets,
+                                &mut annotation_offsets_by_ptr,
+                            ));
+                    }
+                }
+            }
+        }
+        let field_value_section = encode_pending_value_section(
+            string_items.cur(),
+            &pending_value_items,
+            &string_items,
+            &entity_offsets,
+            &mut annotation_offsets_by_ptr,
+        );
 
         // ── 5. Compute CodeItem start offsets ─────────────────────────────────
         let code_section_start: u32 = cur;
@@ -2214,7 +2262,17 @@ fn field_type_index(
     }
     match field_type {
         FieldType::Any => 0,
-        FieldType::U1 | FieldType::U8 | FieldType::U32 | FieldType::F64 => unreachable!(),
+        FieldType::U1
+        | FieldType::I8
+        | FieldType::U8
+        | FieldType::I16
+        | FieldType::U16
+        | FieldType::I32
+        | FieldType::U32
+        | FieldType::F32
+        | FieldType::F64
+        | FieldType::I64
+        | FieldType::U64 => unreachable!(),
         FieldType::PandaString | FieldType::Array { .. } => unreachable!(),
     }
 }
@@ -2267,6 +2325,733 @@ impl StringItemWriter {
 
     fn items(&self) -> &[Vec<u8>] {
         &self.items
+    }
+}
+
+fn intern_field_value_strings(value: &FieldValue, string_items: &mut StringItemWriter) {
+    match value {
+        FieldValue::String(value) => {
+            string_items.get_or_create(value);
+        }
+        FieldValue::RawScalar(value) => intern_scalar_value_strings(value, string_items),
+        FieldValue::U8(_)
+        | FieldValue::Bool(_)
+        | FieldValue::U32(_)
+        | FieldValue::LiteralArray(_)
+        | FieldValue::F64(_) => {}
+    }
+}
+
+fn intern_annotation_strings(annotation: &AnnotationRecord, string_items: &mut StringItemWriter) {
+    for element in &annotation.elements {
+        string_items.get_or_create(&element.name);
+        intern_annotation_value_strings(&element.value, string_items);
+    }
+}
+
+fn intern_annotation_value_strings(value: &AnnotationValue, string_items: &mut StringItemWriter) {
+    match value {
+        AnnotationValue::String(value) => {
+            string_items.get_or_create(value);
+        }
+        AnnotationValue::RawScalar(value) => intern_scalar_value_strings(value, string_items),
+        AnnotationValue::Array(value) => intern_array_value_strings(value, string_items),
+        AnnotationValue::Bool(_)
+        | AnnotationValue::U32(_)
+        | AnnotationValue::F64(_)
+        | AnnotationValue::LiteralArray { .. } => {}
+    }
+}
+
+fn intern_scalar_value_strings(value: &ScalarValueRecord, string_items: &mut StringItemWriter) {
+    match &value.value {
+        ScalarValueData::String(string) if value.value_type == VALUE_TYPE_STRING => {
+            string_items.get_or_create(string);
+        }
+        ScalarValueData::Annotation(annotation) => {
+            intern_annotation_strings(annotation, string_items);
+        }
+        _ => {}
+    }
+}
+
+fn intern_array_value_strings(value: &ArrayValueRecord, string_items: &mut StringItemWriter) {
+    for element in &value.values {
+        if value.component_type == VALUE_TYPE_STRING {
+            if let ScalarValueData::String(value) = &element.value {
+                string_items.get_or_create(value);
+            }
+        }
+        if let ScalarValueData::Annotation(annotation) = &element.value {
+            intern_annotation_strings(annotation, string_items);
+        }
+    }
+}
+
+fn push_pending_value<'a>(
+    cur: &mut u32,
+    pending_items: &mut Vec<(u32, PendingValueItem<'a>)>,
+    item: PendingValueItem<'a>,
+) -> u32 {
+    let aligned = align_to(*cur, item.alignment());
+    let off = aligned;
+    *cur = aligned + item.byte_size();
+    pending_items.push((off, item));
+    off
+}
+
+fn collect_pending_annotation_offsets<'a>(
+    annotation: &'a AnnotationRecord,
+    cur: &mut u32,
+    pending_items: &mut Vec<(u32, PendingValueItem<'a>)>,
+    annotation_value_offsets: &mut FxHashMap<usize, u32>,
+) {
+    for element in &annotation.elements {
+        collect_pending_annotation_value_offsets(
+            &element.value,
+            cur,
+            pending_items,
+            annotation_value_offsets,
+        );
+    }
+}
+
+fn collect_pending_annotation_value_offsets<'a>(
+    value: &'a AnnotationValue,
+    cur: &mut u32,
+    pending_items: &mut Vec<(u32, PendingValueItem<'a>)>,
+    annotation_value_offsets: &mut FxHashMap<usize, u32>,
+) {
+    if let Some(item) = pending_annotation_value_item(value) {
+        let off = push_pending_value(cur, pending_items, item);
+        annotation_value_offsets.insert(annotation_value_offset_key(value), off);
+    }
+
+    match value {
+        AnnotationValue::RawScalar(value) => {
+            collect_pending_scalar_offsets(value, cur, pending_items, annotation_value_offsets);
+        }
+        AnnotationValue::Array(value) => {
+            collect_pending_array_offsets(value, cur, pending_items, annotation_value_offsets);
+        }
+        AnnotationValue::Bool(_)
+        | AnnotationValue::U32(_)
+        | AnnotationValue::F64(_)
+        | AnnotationValue::String(_)
+        | AnnotationValue::LiteralArray { .. } => {}
+    }
+}
+
+fn collect_pending_scalar_offsets<'a>(
+    value: &'a ScalarValueRecord,
+    cur: &mut u32,
+    pending_items: &mut Vec<(u32, PendingValueItem<'a>)>,
+    annotation_value_offsets: &mut FxHashMap<usize, u32>,
+) {
+    if let ScalarValueData::Annotation(annotation) = &value.value {
+        collect_pending_annotation_offsets(
+            annotation,
+            cur,
+            pending_items,
+            annotation_value_offsets,
+        );
+    }
+}
+
+fn collect_pending_array_offsets<'a>(
+    value: &'a ArrayValueRecord,
+    cur: &mut u32,
+    pending_items: &mut Vec<(u32, PendingValueItem<'a>)>,
+    annotation_value_offsets: &mut FxHashMap<usize, u32>,
+) {
+    for element in &value.values {
+        collect_pending_scalar_offsets(element, cur, pending_items, annotation_value_offsets);
+    }
+}
+
+fn annotation_value_offset_key(value: &AnnotationValue) -> usize {
+    value as *const AnnotationValue as usize
+}
+
+fn annotation_record_offset_key(value: &AnnotationRecord) -> usize {
+    value as *const AnnotationRecord as usize
+}
+
+fn field_pending_value_item(value: Option<&FieldValue>) -> Option<PendingValueItem<'_>> {
+    match value {
+        Some(FieldValue::F64(value)) => Some(PendingValueItem::Double(*value)),
+        Some(FieldValue::RawScalar(value)) => ScalarBinaryValue::needs_value_item(value),
+        _ => None,
+    }
+}
+
+fn pending_annotation_value_item(value: &AnnotationValue) -> Option<PendingValueItem<'_>> {
+    match value {
+        AnnotationValue::F64(value) => Some(PendingValueItem::Double(*value)),
+        AnnotationValue::RawScalar(value) => ScalarBinaryValue::needs_value_item(value),
+        AnnotationValue::Array(value) => Some(PendingValueItem::Array(value)),
+        _ => None,
+    }
+}
+
+struct EntityOffsetMaps<'a> {
+    class_offsets: &'a FxHashMap<&'a str, u32>,
+    method_offsets: &'a FxHashMap<String, u32>,
+    field_offsets: &'a FxHashMap<String, u32>,
+    literal_offsets: &'a FxHashMap<String, u32>,
+}
+
+fn insert_annotation_record(
+    annotation: &AnnotationRecord,
+    name_to_index_class_idx: &FxHashMap<&str, u16>,
+    string_items: &StringItemWriter,
+    entities: &EntityOffsetMaps<'_>,
+    literal_array_offsets: &[u32],
+    annotation_value_offsets: &FxHashMap<usize, u32>,
+    annotation_offsets_by_key: &mut FxHashMap<AnnotationItemKey, u32>,
+    annotation_offsets_by_ptr: &mut FxHashMap<usize, u32>,
+    annotation_emit_order: &mut Vec<AnnotationItemKey>,
+    ann_cur: &mut u32,
+) -> u32 {
+    let ptr_key = annotation_record_offset_key(annotation);
+    if let Some(offset) = annotation_offsets_by_ptr.get(&ptr_key).copied() {
+        return offset;
+    }
+
+    for element in &annotation.elements {
+        register_nested_annotation_values(
+            &element.value,
+            name_to_index_class_idx,
+            string_items,
+            entities,
+            literal_array_offsets,
+            annotation_value_offsets,
+            annotation_offsets_by_key,
+            annotation_offsets_by_ptr,
+            annotation_emit_order,
+            ann_cur,
+        );
+    }
+
+    let key = annotation_item_key(
+        annotation,
+        name_to_index_class_idx,
+        string_items,
+        entities,
+        literal_array_offsets,
+        annotation_value_offsets,
+        annotation_offsets_by_key,
+        annotation_offsets_by_ptr,
+        annotation_emit_order,
+        ann_cur,
+    );
+    let off = insert_annotation_key(
+        annotation_offsets_by_key,
+        annotation_emit_order,
+        ann_cur,
+        key,
+    );
+    annotation_offsets_by_ptr.insert(ptr_key, off);
+    off
+}
+
+fn register_nested_annotation_values(
+    value: &AnnotationValue,
+    name_to_index_class_idx: &FxHashMap<&str, u16>,
+    string_items: &StringItemWriter,
+    entities: &EntityOffsetMaps<'_>,
+    literal_array_offsets: &[u32],
+    annotation_value_offsets: &FxHashMap<usize, u32>,
+    annotation_offsets_by_key: &mut FxHashMap<AnnotationItemKey, u32>,
+    annotation_offsets_by_ptr: &mut FxHashMap<usize, u32>,
+    annotation_emit_order: &mut Vec<AnnotationItemKey>,
+    ann_cur: &mut u32,
+) {
+    match value {
+        AnnotationValue::RawScalar(value) => register_nested_scalar_annotation(
+            value,
+            name_to_index_class_idx,
+            string_items,
+            entities,
+            literal_array_offsets,
+            annotation_value_offsets,
+            annotation_offsets_by_key,
+            annotation_offsets_by_ptr,
+            annotation_emit_order,
+            ann_cur,
+        ),
+        AnnotationValue::Array(value) => {
+            for element in &value.values {
+                register_nested_scalar_annotation(
+                    element,
+                    name_to_index_class_idx,
+                    string_items,
+                    entities,
+                    literal_array_offsets,
+                    annotation_value_offsets,
+                    annotation_offsets_by_key,
+                    annotation_offsets_by_ptr,
+                    annotation_emit_order,
+                    ann_cur,
+                );
+            }
+        }
+        AnnotationValue::Bool(_)
+        | AnnotationValue::U32(_)
+        | AnnotationValue::F64(_)
+        | AnnotationValue::String(_)
+        | AnnotationValue::LiteralArray { .. } => {}
+    }
+}
+
+fn register_nested_scalar_annotation(
+    value: &ScalarValueRecord,
+    name_to_index_class_idx: &FxHashMap<&str, u16>,
+    string_items: &StringItemWriter,
+    entities: &EntityOffsetMaps<'_>,
+    literal_array_offsets: &[u32],
+    annotation_value_offsets: &FxHashMap<usize, u32>,
+    annotation_offsets_by_key: &mut FxHashMap<AnnotationItemKey, u32>,
+    annotation_offsets_by_ptr: &mut FxHashMap<usize, u32>,
+    annotation_emit_order: &mut Vec<AnnotationItemKey>,
+    ann_cur: &mut u32,
+) {
+    if let ScalarValueData::Annotation(annotation) = &value.value {
+        insert_annotation_record(
+            annotation,
+            name_to_index_class_idx,
+            string_items,
+            entities,
+            literal_array_offsets,
+            annotation_value_offsets,
+            annotation_offsets_by_key,
+            annotation_offsets_by_ptr,
+            annotation_emit_order,
+            ann_cur,
+        );
+    }
+}
+
+fn annotation_item_key(
+    annotation: &AnnotationRecord,
+    name_to_index_class_idx: &FxHashMap<&str, u16>,
+    string_items: &StringItemWriter,
+    entities: &EntityOffsetMaps<'_>,
+    literal_array_offsets: &[u32],
+    annotation_value_offsets: &FxHashMap<usize, u32>,
+    annotation_offsets_by_key: &mut FxHashMap<AnnotationItemKey, u32>,
+    annotation_offsets_by_ptr: &mut FxHashMap<usize, u32>,
+    annotation_emit_order: &mut Vec<AnnotationItemKey>,
+    ann_cur: &mut u32,
+) -> AnnotationItemKey {
+    let annotation_class_name = format!("L{};", annotation.record_name);
+    let annotation_class_idx = *name_to_index_class_idx
+        .get(annotation_class_name.as_str())
+        .unwrap_or_else(|| {
+            panic!("custom annotation record {annotation_class_name} must be indexed")
+        });
+    let elements = annotation
+        .elements
+        .iter()
+        .map(|element| {
+            let name_off = string_items
+                .id_of(&element.name)
+                .expect("annotation element name must be interned");
+            let value = annotation_value_binary_u32(
+                &element.value,
+                annotation_value_offsets
+                    .get(&annotation_value_offset_key(&element.value))
+                    .copied(),
+                name_to_index_class_idx,
+                string_items,
+                entities,
+                literal_array_offsets,
+                annotation_value_offsets,
+                annotation_offsets_by_key,
+                annotation_offsets_by_ptr,
+                annotation_emit_order,
+                ann_cur,
+            );
+            AnnotationElementKey {
+                name_off,
+                value,
+                tag: element.value.tag(),
+            }
+        })
+        .collect();
+    AnnotationItemKey {
+        class_idx: annotation_class_idx,
+        elements,
+    }
+}
+
+fn annotation_value_binary_u32(
+    value: &AnnotationValue,
+    pending_offset: Option<u32>,
+    name_to_index_class_idx: &FxHashMap<&str, u16>,
+    string_items: &StringItemWriter,
+    entities: &EntityOffsetMaps<'_>,
+    literal_array_offsets: &[u32],
+    annotation_value_offsets: &FxHashMap<usize, u32>,
+    annotation_offsets_by_key: &mut FxHashMap<AnnotationItemKey, u32>,
+    annotation_offsets_by_ptr: &mut FxHashMap<usize, u32>,
+    annotation_emit_order: &mut Vec<AnnotationItemKey>,
+    ann_cur: &mut u32,
+) -> u32 {
+    match value {
+        AnnotationValue::Bool(value) => u32::from(*value),
+        AnnotationValue::U32(value) => *value,
+        AnnotationValue::F64(_) => pending_offset.expect("annotation f64 value offset must exist"),
+        AnnotationValue::String(value) => string_items
+            .id_of(value)
+            .expect("annotation string value must be interned"),
+        AnnotationValue::LiteralArray { index, .. } => literal_array_offsets[*index],
+        AnnotationValue::RawScalar(value) => scalar_binary_value_u32(
+            value,
+            pending_offset,
+            name_to_index_class_idx,
+            string_items,
+            entities,
+            literal_array_offsets,
+            annotation_value_offsets,
+            annotation_offsets_by_key,
+            annotation_offsets_by_ptr,
+            annotation_emit_order,
+            ann_cur,
+        )
+        .annotation_u32(),
+        AnnotationValue::Array(_) => {
+            pending_offset.expect("annotation array value offset must exist")
+        }
+    }
+}
+
+fn scalar_binary_value_u32(
+    value: &ScalarValueRecord,
+    pending_offset: Option<u32>,
+    name_to_index_class_idx: &FxHashMap<&str, u16>,
+    string_items: &StringItemWriter,
+    entities: &EntityOffsetMaps<'_>,
+    literal_array_offsets: &[u32],
+    annotation_value_offsets: &FxHashMap<usize, u32>,
+    annotation_offsets_by_key: &mut FxHashMap<AnnotationItemKey, u32>,
+    annotation_offsets_by_ptr: &mut FxHashMap<usize, u32>,
+    annotation_emit_order: &mut Vec<AnnotationItemKey>,
+    ann_cur: &mut u32,
+) -> ScalarBinaryValue {
+    if scalar_value_is_32bit_integer(value.value_type) {
+        return ScalarBinaryValue::Integer(value.scalar_u64() as u32);
+    }
+    if value.value_type == VALUE_TYPE_F32 {
+        return ScalarBinaryValue::Float(value.scalar_f32().to_bits());
+    }
+    if matches!(
+        value.value_type,
+        VALUE_TYPE_I64 | VALUE_TYPE_U64 | VALUE_TYPE_F64
+    ) {
+        return ScalarBinaryValue::Offset(
+            pending_offset.expect("non-32-bit scalar value offset must exist"),
+        );
+    }
+    if scalar_value_is_id(value.value_type) {
+        return ScalarBinaryValue::Id(resolve_scalar_id(
+            value,
+            name_to_index_class_idx,
+            string_items,
+            entities,
+            literal_array_offsets,
+            annotation_value_offsets,
+            annotation_offsets_by_key,
+            annotation_offsets_by_ptr,
+            annotation_emit_order,
+            ann_cur,
+        ));
+    }
+    panic!(
+        "unsupported protoPanda scalar value type {} for ABC binary emission",
+        value.value_type
+    );
+}
+
+fn resolve_scalar_id(
+    value: &ScalarValueRecord,
+    name_to_index_class_idx: &FxHashMap<&str, u16>,
+    string_items: &StringItemWriter,
+    entities: &EntityOffsetMaps<'_>,
+    literal_array_offsets: &[u32],
+    annotation_value_offsets: &FxHashMap<usize, u32>,
+    annotation_offsets_by_key: &mut FxHashMap<AnnotationItemKey, u32>,
+    annotation_offsets_by_ptr: &mut FxHashMap<usize, u32>,
+    annotation_emit_order: &mut Vec<AnnotationItemKey>,
+    ann_cur: &mut u32,
+) -> u32 {
+    match (&value.value, value.value_type) {
+        (ScalarValueData::String(value), VALUE_TYPE_STRING) => string_items
+            .id_of(value)
+            .expect("raw scalar string value must be interned"),
+        (ScalarValueData::String(value), VALUE_TYPE_METHOD) => *entities
+            .method_offsets
+            .get(value)
+            .unwrap_or_else(|| panic!("raw scalar method {value} must be indexed")),
+        (ScalarValueData::String(value), VALUE_TYPE_ENUM) => *entities
+            .field_offsets
+            .get(value)
+            .unwrap_or_else(|| panic!("raw scalar enum field {value} must be indexed")),
+        (ScalarValueData::String(value), VALUE_TYPE_LITERALARRAY) => *entities
+            .literal_offsets
+            .get(value)
+            .unwrap_or_else(|| panic!("raw scalar literal array {value} must be indexed")),
+        (ScalarValueData::Type(value), VALUE_TYPE_RECORD) => {
+            let descriptor = pandasm_type_binary_descriptor(value);
+            *entities
+                .class_offsets
+                .get(descriptor.as_str())
+                .unwrap_or_else(|| panic!("raw scalar record {descriptor} must be indexed"))
+        }
+        (ScalarValueData::U64(_), VALUE_TYPE_STRING_NULLPTR) => 0,
+        (ScalarValueData::Annotation(annotation), VALUE_TYPE_ANNOTATION) => {
+            insert_annotation_record(
+                annotation,
+                name_to_index_class_idx,
+                string_items,
+                entities,
+                literal_array_offsets,
+                annotation_value_offsets,
+                annotation_offsets_by_key,
+                annotation_offsets_by_ptr,
+                annotation_emit_order,
+                ann_cur,
+            )
+        }
+        (_, VALUE_TYPE_METHOD_HANDLE) => {
+            panic!("method handle annotation binary emission is not supported by upstream")
+        }
+        _ => panic!(
+            "unsupported protoPanda scalar id value type {} for ABC binary emission",
+            value.value_type
+        ),
+    }
+}
+
+fn scalar_binary_value_u32_existing(
+    value: &ScalarValueRecord,
+    pending_offset: Option<u32>,
+    string_items: &StringItemWriter,
+    entities: &EntityOffsetMaps<'_>,
+    annotation_offsets_by_ptr: &FxHashMap<usize, u32>,
+) -> ScalarBinaryValue {
+    if scalar_value_is_32bit_integer(value.value_type) {
+        return ScalarBinaryValue::Integer(value.scalar_u64() as u32);
+    }
+    if value.value_type == VALUE_TYPE_F32 {
+        return ScalarBinaryValue::Float(value.scalar_f32().to_bits());
+    }
+    if matches!(
+        value.value_type,
+        VALUE_TYPE_I64 | VALUE_TYPE_U64 | VALUE_TYPE_F64
+    ) {
+        return ScalarBinaryValue::Offset(
+            pending_offset.expect("non-32-bit scalar value offset must exist"),
+        );
+    }
+    if scalar_value_is_id(value.value_type) {
+        return ScalarBinaryValue::Id(resolve_scalar_id_existing(
+            value,
+            string_items,
+            entities,
+            annotation_offsets_by_ptr,
+        ));
+    }
+    panic!(
+        "unsupported protoPanda scalar value type {} for ABC binary emission",
+        value.value_type
+    );
+}
+
+fn resolve_scalar_id_existing(
+    value: &ScalarValueRecord,
+    string_items: &StringItemWriter,
+    entities: &EntityOffsetMaps<'_>,
+    annotation_offsets_by_ptr: &FxHashMap<usize, u32>,
+) -> u32 {
+    match (&value.value, value.value_type) {
+        (ScalarValueData::String(value), VALUE_TYPE_STRING) => string_items
+            .id_of(value)
+            .expect("raw scalar string value must be interned"),
+        (ScalarValueData::String(value), VALUE_TYPE_METHOD) => *entities
+            .method_offsets
+            .get(value)
+            .unwrap_or_else(|| panic!("raw scalar method {value} must be indexed")),
+        (ScalarValueData::String(value), VALUE_TYPE_ENUM) => *entities
+            .field_offsets
+            .get(value)
+            .unwrap_or_else(|| panic!("raw scalar enum field {value} must be indexed")),
+        (ScalarValueData::String(value), VALUE_TYPE_LITERALARRAY) => *entities
+            .literal_offsets
+            .get(value)
+            .unwrap_or_else(|| panic!("raw scalar literal array {value} must be indexed")),
+        (ScalarValueData::Type(value), VALUE_TYPE_RECORD) => {
+            let descriptor = pandasm_type_binary_descriptor(value);
+            *entities
+                .class_offsets
+                .get(descriptor.as_str())
+                .unwrap_or_else(|| panic!("raw scalar record {descriptor} must be indexed"))
+        }
+        (ScalarValueData::U64(_), VALUE_TYPE_STRING_NULLPTR) => 0,
+        (ScalarValueData::Annotation(annotation), VALUE_TYPE_ANNOTATION) => {
+            annotation_offsets_by_ptr
+                .get(&annotation_record_offset_key(annotation))
+                .copied()
+                .expect("annotation scalar must be registered")
+        }
+        (_, VALUE_TYPE_METHOD_HANDLE) => {
+            panic!("method handle annotation binary emission is not supported by upstream")
+        }
+        _ => panic!(
+            "unsupported protoPanda scalar id value type {} for ABC binary emission",
+            value.value_type
+        ),
+    }
+}
+
+fn encode_pending_value_section(
+    section_start: u32,
+    pending_items: &[(u32, PendingValueItem<'_>)],
+    string_items: &StringItemWriter,
+    entities: &EntityOffsetMaps<'_>,
+    annotation_offsets_by_ptr: &FxHashMap<usize, u32>,
+) -> Vec<u8> {
+    let mut buf = Vec::new();
+    for (offset, item) in pending_items {
+        while section_start + (buf.len() as u32) < *offset {
+            buf.push(0);
+        }
+        match item {
+            PendingValueItem::Long(value) => buf.extend_from_slice(&value.to_le_bytes()),
+            PendingValueItem::Double(value) => buf.extend_from_slice(&value.to_le_bytes()),
+            PendingValueItem::Array(value) => {
+                buf.extend_from_slice(&uleb128(value.values.len() as u64));
+                for element in &value.values {
+                    encode_array_scalar_element(
+                        &mut buf,
+                        value.component_type,
+                        element,
+                        string_items,
+                        entities,
+                        annotation_offsets_by_ptr,
+                    );
+                }
+            }
+        }
+    }
+    buf
+}
+
+fn encode_array_scalar_element(
+    buf: &mut Vec<u8>,
+    component_type: u32,
+    value: &ScalarValueRecord,
+    string_items: &StringItemWriter,
+    entities: &EntityOffsetMaps<'_>,
+    annotation_offsets_by_ptr: &FxHashMap<usize, u32>,
+) {
+    match component_type {
+        VALUE_TYPE_U1 | VALUE_TYPE_I8 | VALUE_TYPE_U8 => {
+            buf.push(value.scalar_u64() as u8);
+        }
+        VALUE_TYPE_I16 | VALUE_TYPE_U16 => {
+            buf.extend_from_slice(&(value.scalar_u64() as u16).to_le_bytes());
+        }
+        VALUE_TYPE_I32 | VALUE_TYPE_U32 => {
+            buf.extend_from_slice(&(value.scalar_u64() as u32).to_le_bytes());
+        }
+        VALUE_TYPE_F32 => {
+            buf.extend_from_slice(&value.scalar_f32().to_bits().to_le_bytes());
+        }
+        VALUE_TYPE_I64 | VALUE_TYPE_U64 => {
+            buf.extend_from_slice(&value.scalar_u64().to_le_bytes());
+        }
+        VALUE_TYPE_F64 => {
+            buf.extend_from_slice(&value.scalar_f64().to_le_bytes());
+        }
+        VALUE_TYPE_STRING
+        | VALUE_TYPE_RECORD
+        | VALUE_TYPE_METHOD
+        | VALUE_TYPE_ENUM
+        | VALUE_TYPE_LITERALARRAY
+        | VALUE_TYPE_METHOD_HANDLE => {
+            let id = resolve_scalar_id_existing(
+                value,
+                string_items,
+                entities,
+                annotation_offsets_by_ptr,
+            );
+            buf.extend_from_slice(&id.to_le_bytes());
+        }
+        VALUE_TYPE_ANNOTATION => {
+            let ScalarValueData::Annotation(annotation) = &value.value else {
+                panic!("annotation array element must carry annotation data")
+            };
+            let id = annotation_offsets_by_ptr
+                .get(&annotation_record_offset_key(annotation))
+                .copied()
+                .expect("annotation array element must be registered");
+            buf.extend_from_slice(&id.to_le_bytes());
+        }
+        VALUE_TYPE_ARRAY => {
+            panic!("nested array annotation element is not supported by upstream")
+        }
+        _ => {
+            let scalar = scalar_binary_value_u32_existing(
+                value,
+                None,
+                string_items,
+                entities,
+                annotation_offsets_by_ptr,
+            )
+            .annotation_u32();
+            buf.extend_from_slice(&scalar.to_le_bytes());
+        }
+    }
+}
+
+fn pandasm_type_binary_descriptor(value: &PandasmTypeRecord) -> String {
+    if value.rank > 0 {
+        let mut descriptor = "[".repeat(value.rank as usize);
+        if let Some(shorty) = primitive_descriptor_for_name(&value.component_name) {
+            descriptor.push(shorty);
+        } else {
+            descriptor.push('L');
+            descriptor.push_str(&value.component_name);
+            descriptor.push(';');
+        }
+        return descriptor;
+    }
+    if value.name.starts_with('L') && value.name.ends_with(';') {
+        value.name.clone()
+    } else if let Some(shorty) = primitive_descriptor_for_name(&value.name) {
+        shorty.to_string()
+    } else {
+        format!("L{};", value.name)
+    }
+}
+
+fn primitive_descriptor_for_name(value: &str) -> Option<char> {
+    match value {
+        "void" => Some('V'),
+        "u1" => Some('Z'),
+        "i8" => Some('B'),
+        "u8" => Some('H'),
+        "i16" => Some('S'),
+        "u16" => Some('C'),
+        "i32" => Some('I'),
+        "u32" => Some('U'),
+        "f32" => Some('F'),
+        "f64" => Some('D'),
+        "i64" => Some('J'),
+        "u64" => Some('Q'),
+        "any" => Some('A'),
+        _ => None,
     }
 }
 
@@ -2373,11 +3158,6 @@ fn debug_source_file_differs_from_record(class: &ClassRecord, debug: &DebugInfoR
     !debug.source_file.is_empty()
         && class.source_file.as_deref() != Some(debug.source_file.as_str())
 }
-
-/// Compute Adler-32 checksum of `data`.
-///
-/// Used for the ABC file checksum field at offset 0x08.
-/// Verified against: `es2abc` output for API 9 SDK.
 
 impl Default for AbcFile {
     fn default() -> Self {
@@ -2554,6 +3334,8 @@ impl AbcFile {
         order
     }
 
+    // Compute Adler-32 checksum for the ABC file checksum field at offset 0x08.
+    // Verified against `es2abc` output for API 9 SDK.
     fn adler32(data: &[u8]) -> u32 {
         const MOD: u32 = 65521;
         let (mut a, mut b) = (1u32, 0u32);

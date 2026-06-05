@@ -11,9 +11,10 @@ use crate::emit::file::{
 };
 use crate::emit::record::{
     function_kind, method_access, AnnotationElementRecord, AnnotationRecord, AnnotationValue,
-    CatchEntry, ClassRecord, DebugInfoRecord, FieldRecord, FieldSourceRecord, FieldType,
-    FieldValue, FileLocationRecord, InstructionDebugInfo, LocalVariableDebugRecord, MethodKind,
-    MethodLabelStyle, MethodRecord, PandasmTypeRecord, ProgramLabel, SourceLocationRecord,
+    ArrayValueRecord, CatchEntry, ClassRecord, DebugInfoRecord, FieldRecord, FieldSourceRecord,
+    FieldType, FieldValue, FileLocationRecord, InstructionDebugInfo, LocalVariableDebugRecord,
+    MetadataAttributeRecord, MetadataRecord, MethodKind, MethodLabelStyle, MethodRecord,
+    PandasmTypeRecord, ProgramLabel, ScalarValueData, ScalarValueRecord, SourceLocationRecord,
     SourcePositionRecord, FIELD_OWNER_CLASS_IDX,
 };
 use crate::emit::strings::StringTable;
@@ -27,18 +28,22 @@ use crate::names::{
     pandasm_record_name, short_method_name,
 };
 use crate::proto_panda::{
-    annotation_element, ins, program, scalar_value, variant_value, AnnotationData,
-    AnnotationElement, DebuginfoIns, Field, FieldMetadata, FileLocation, Function,
+    annotation_element, ins, metadata, program, scalar_value, variant_value, AnnotationData,
+    AnnotationElement, ArrayValue, DebuginfoIns, Field, FieldMetadata, FileLocation, Function,
     FunctionMetadata, Ins, ItemMetadata, Literal, LocalVariable, Metadata, ParamMetadata,
     Parameter, Program, Record, RecordMetadata, ScalarValue, SourceLocation, SourcePosition, Type,
     Value, VariantValue,
 };
 
 const VALUE_TYPE_U8: u32 = 2;
-const VALUE_TYPE_U1: u32 = 1;
+const VALUE_TYPE_U1: u32 = 0;
 const VALUE_TYPE_U32: u32 = 6;
 const VALUE_TYPE_F64: u32 = 10;
 const VALUE_TYPE_STRING: u32 = 11;
+#[cfg(test)]
+const VALUE_TYPE_ANNOTATION: u32 = 16;
+#[cfg(test)]
+const VALUE_TYPE_ARRAY: u32 = 17;
 const VALUE_TYPE_LITERALARRAY: u32 = 20;
 
 const VARIANT_BOOL: i32 = variant_value::VariantValueType::Bool as i32;
@@ -75,7 +80,7 @@ pub(crate) fn program_for_record(
         return Ok(None);
     }
 
-    let lang = record.source_lang as u32;
+    let lang = file.program_lang.unwrap_or(record.source_lang as u32);
     let mut literal_indices = BTreeSet::new();
     for &idx in &record.module_literal_indices {
         literal_indices.insert(idx);
@@ -91,7 +96,7 @@ pub(crate) fn program_for_record(
         function_synonyms: Vec::new(),
         literal_array_table: Vec::new(),
         strings: record_program_strings(record, file),
-        array_types: Vec::new(),
+        array_types: file.array_types.iter().map(pandasm_type_to_proto).collect(),
     };
 
     let mut record_table = BTreeMap::new();
@@ -181,10 +186,12 @@ pub(crate) fn program_for_records(
         .filter_map(|idx| file.records.get(*idx))
         .collect::<Vec<_>>();
 
-    let lang = selected_records
-        .first()
-        .map(|record| record.source_lang as u32)
-        .unwrap_or_default();
+    let lang = file.program_lang.unwrap_or_else(|| {
+        selected_records
+            .first()
+            .map(|record| record.source_lang as u32)
+            .unwrap_or_default()
+    });
     let mut literal_indices = BTreeSet::new();
     let mut literal_keys = BTreeMap::new();
     let mut literal_record_names = BTreeMap::new();
@@ -216,7 +223,7 @@ pub(crate) fn program_for_records(
         function_synonyms: Vec::new(),
         literal_array_table: Vec::new(),
         strings: sorted_program_strings(file.strings.iter()),
-        array_types: Vec::new(),
+        array_types: file.array_types.iter().map(pandasm_type_to_proto).collect(),
     };
 
     let mut record_table = BTreeMap::new();
@@ -294,6 +301,13 @@ pub(crate) fn append_program_to_file(
     file: &mut AbcFile,
     program: Program,
 ) -> io::Result<Vec<usize>> {
+    file.program_lang = Some(program.lang);
+    file.array_types = program
+        .array_types
+        .iter()
+        .map(pandasm_type_from_proto)
+        .collect::<io::Result<Vec<_>>>()?;
+
     for value in &program.strings {
         file.strings.intern(utf8(value)?.as_str());
     }
@@ -401,6 +415,7 @@ pub(crate) fn append_program_to_file(
                 .collect::<io::Result<Vec<_>>>()?,
             access_flags: record_access_flags(&record_proto),
             source_lang: record_proto.language as u8,
+            metadata_attrs: record_metadata_attrs(&record_proto)?,
             conflict: record_proto.conflict,
             params_num: record_proto.params_num,
             body_presence: record_proto.body_presence,
@@ -815,14 +830,22 @@ fn field_from_proto(
     let field_type = proto_field_type
         .map(field_type_from_proto)
         .unwrap_or(FieldType::U8);
+    let metadata_field_type = field
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.field_type.as_ref())
+        .map(pandasm_type_from_proto)
+        .transpose()?;
     Ok(FieldRecord {
         name: utf8(&field.name)?,
         class_idx: FIELD_OWNER_CLASS_IDX,
         type_idx: legacy_type_idx(&field_type),
         field_type,
+        metadata_field_type,
         access_flags: field_access_flags(field),
         value,
         annotations: field_custom_annotations(field, literal_key_to_index, literal_refs)?,
+        metadata_attrs: field_metadata_attrs(field)?,
         source: FieldSourceRecord {
             line_of_def: field.line_of_def,
             whole_line: utf8(&field.whole_line)?,
@@ -858,7 +881,8 @@ fn field_value_from_proto(
             module_literal_indices.insert(index);
             Ok(FieldValue::LiteralArray(index))
         }
-        other => invalid_data(format!("unsupported field value type {other:?}")),
+        Some(_) => Ok(FieldValue::RawScalar(scalar_record_from_proto(value)?)),
+        None => invalid_data("missing field scalar value type"),
     }
 }
 
@@ -964,6 +988,7 @@ fn method_from_proto(
         method_pool_entry: false,
         expected_property_count: function_expected_property_count(function)?,
         annotations: function_custom_annotations(function, literal_key_to_index, literal_refs)?,
+        metadata_attrs: function_metadata_attrs(function)?,
         param_annotations: function_param_annotations(
             function,
             literal_key_to_index,
@@ -2027,6 +2052,52 @@ fn param_annotation_metadata(param: &Parameter) -> Option<&crate::proto_panda::A
         .and_then(|metadata| metadata.father.as_ref())
 }
 
+fn function_metadata_attrs(function: &Function) -> io::Result<MetadataRecord> {
+    metadata_attrs_from_annotation_metadata(function_annotation_metadata(function))
+}
+
+fn record_metadata_attrs(record: &Record) -> io::Result<MetadataRecord> {
+    metadata_attrs_from_annotation_metadata(record_annotation_metadata(record))
+}
+
+fn field_metadata_attrs(field: &Field) -> io::Result<MetadataRecord> {
+    metadata_attrs_from_annotation_metadata(field_annotation_metadata(field))
+}
+
+fn metadata_attrs_from_annotation_metadata(
+    annotation_metadata: Option<&crate::proto_panda::AnnotationMetadata>,
+) -> io::Result<MetadataRecord> {
+    annotation_metadata
+        .and_then(|metadata| metadata.father.as_ref())
+        .map(metadata_from_proto)
+        .transpose()
+        .map(Option::unwrap_or_default)
+}
+
+fn metadata_from_proto(metadata: &Metadata) -> io::Result<MetadataRecord> {
+    Ok(MetadataRecord {
+        set_attributes: metadata
+            .set_attributes
+            .iter()
+            .map(|value| utf8(value))
+            .collect::<io::Result<Vec<_>>>()?,
+        attributes: metadata
+            .attributes
+            .iter()
+            .map(|entry| {
+                Ok(MetadataAttributeRecord {
+                    key: utf8(&entry.key)?,
+                    values: entry
+                        .value
+                        .iter()
+                        .map(|value| utf8(value))
+                        .collect::<io::Result<Vec<_>>>()?,
+                })
+            })
+            .collect::<io::Result<Vec<_>>>()?,
+    })
+}
+
 fn is_system_function_annotation(record_name: &[u8]) -> bool {
     record_name == CONCURRENT_MODULE_REQUEST_RECORD_NAME.as_bytes()
         || record_name == EXPECTED_PROPERTY_COUNT_RECORD_NAME.as_bytes()
@@ -2059,8 +2130,8 @@ fn annotation_element_from_proto(
         Some(annotation_element::Value::Scalar(value)) => {
             annotation_scalar_from_proto(value, literal_key_to_index, literal_refs)?
         }
-        Some(annotation_element::Value::Array(_)) => {
-            return invalid_data("inline annotation array values are not used by upstream ABC")
+        Some(annotation_element::Value::Array(value)) => {
+            AnnotationValue::Array(array_value_from_proto(value)?)
         }
         None => return invalid_data("missing annotation element value"),
     };
@@ -2091,8 +2162,120 @@ fn annotation_scalar_from_proto(
             literal_refs.insert(index);
             Ok(AnnotationValue::LiteralArray { index, key })
         }
-        other => invalid_data(format!("unsupported annotation scalar type {other:?}")),
+        Some(_) => Ok(AnnotationValue::RawScalar(scalar_record_from_proto(value)?)),
+        None => invalid_data("missing annotation scalar value type"),
     }
+}
+
+fn array_value_from_proto(value: &ArrayValue) -> io::Result<ArrayValueRecord> {
+    Ok(ArrayValueRecord {
+        value_type: value
+            .father
+            .as_ref()
+            .map(|father| father.r#type)
+            .unwrap_or(17),
+        component_type: value.component_type,
+        values: value
+            .values
+            .iter()
+            .map(scalar_record_from_proto)
+            .collect::<io::Result<Vec<_>>>()?,
+    })
+}
+
+fn array_value_to_proto(value: &ArrayValueRecord) -> ArrayValue {
+    ArrayValue {
+        father: Some(Value {
+            r#type: value.value_type,
+        }),
+        component_type: value.component_type,
+        values: value.values.iter().map(scalar_record_to_proto).collect(),
+    }
+}
+
+fn scalar_record_from_proto(value: &ScalarValue) -> io::Result<ScalarValueRecord> {
+    let value_type = value
+        .father
+        .as_ref()
+        .map(|father| father.r#type)
+        .unwrap_or(0);
+    let Some(data) = &value.value else {
+        return invalid_data("missing scalar value payload");
+    };
+    let value = match data {
+        scalar_value::Value::ValueU64(value) => ScalarValueData::U64(*value),
+        scalar_value::Value::ValueFloat(value) => ScalarValueData::F32(*value),
+        scalar_value::Value::ValueDouble(value) => ScalarValueData::F64(*value),
+        scalar_value::Value::ValueStr(value) => ScalarValueData::String(utf8(value)?),
+        scalar_value::Value::ValueType(value) => {
+            ScalarValueData::Type(pandasm_type_from_proto(value)?)
+        }
+        scalar_value::Value::ValueAnno(value) => {
+            ScalarValueData::Annotation(Box::new(annotation_data_raw_from_proto(value)?))
+        }
+    };
+    Ok(ScalarValueRecord { value_type, value })
+}
+
+fn scalar_record_to_proto(value: &ScalarValueRecord) -> ScalarValue {
+    let (payload, value_type) = match &value.value {
+        ScalarValueData::U64(value) => (
+            scalar_value::Value::ValueU64(*value),
+            scalar_value::VariantValueType::Uint64,
+        ),
+        ScalarValueData::F32(value) => (
+            scalar_value::Value::ValueFloat(*value),
+            scalar_value::VariantValueType::Float,
+        ),
+        ScalarValueData::F64(value) => (
+            scalar_value::Value::ValueDouble(*value),
+            scalar_value::VariantValueType::Double,
+        ),
+        ScalarValueData::String(value) => (
+            scalar_value::Value::ValueStr(bytes(value)),
+            scalar_value::VariantValueType::String,
+        ),
+        ScalarValueData::Type(value) => (
+            scalar_value::Value::ValueType(pandasm_type_to_proto(value)),
+            scalar_value::VariantValueType::PandasmType,
+        ),
+        ScalarValueData::Annotation(value) => (
+            scalar_value::Value::ValueAnno(custom_annotation_to_proto(value)),
+            scalar_value::VariantValueType::AnnotationData,
+        ),
+    };
+    ScalarValue {
+        father: Some(Value {
+            r#type: value.value_type,
+        }),
+        value: Some(payload),
+        r#type: value_type as i32,
+    }
+}
+
+fn annotation_data_raw_from_proto(annotation: &AnnotationData) -> io::Result<AnnotationRecord> {
+    Ok(AnnotationRecord {
+        record_name: utf8(&annotation.record_name)?,
+        elements: annotation
+            .elements
+            .iter()
+            .map(|element| {
+                let value = match &element.value {
+                    Some(annotation_element::Value::Scalar(value)) => {
+                        AnnotationValue::RawScalar(scalar_record_from_proto(value)?)
+                    }
+                    Some(annotation_element::Value::Array(value)) => {
+                        AnnotationValue::Array(array_value_from_proto(value)?)
+                    }
+                    None => return invalid_data("missing annotation element value"),
+                };
+                Ok(AnnotationElementRecord {
+                    name: utf8(&element.name)?,
+                    value,
+                })
+            })
+            .collect::<io::Result<Vec<_>>>()?,
+    })
 }
 
 fn function_annotation_u32(
@@ -2138,9 +2321,16 @@ fn field_type_from_proto(value: &Type) -> FieldType {
     }
     match component_name.as_str() {
         "u1" => FieldType::U1,
+        "i8" => FieldType::I8,
         "u8" => FieldType::U8,
+        "i16" => FieldType::I16,
+        "u16" => FieldType::U16,
+        "i32" => FieldType::I32,
         "u32" => FieldType::U32,
+        "f32" => FieldType::F32,
         "f64" => FieldType::F64,
+        "i64" => FieldType::I64,
+        "u64" => FieldType::U64,
         "panda.String" => FieldType::PandaString,
         "any" => FieldType::Any,
         _ => FieldType::Any,
@@ -2330,13 +2520,14 @@ fn record_to_proto(record: &ClassRecord, file: &AbcFile) -> Record {
         name: bytes(&pandasm_record_name(&record.name)),
         conflict: record.conflict,
         language: record.source_lang as u32,
-        metadata: Some(record_metadata_with_annotations(
+        metadata: Some(record_metadata_with_annotations_and_attrs(
             record.access_flags,
             record
                 .annotations
                 .iter()
                 .map(custom_annotation_to_proto)
                 .collect(),
+            &record.metadata_attrs,
         )),
         field_list: record
             .fields
@@ -2357,15 +2548,22 @@ fn field_to_proto(field: &FieldRecord, record: &ClassRecord, file: &AbcFile) -> 
         r#type: Some(field_type.clone()),
         name: bytes(&field.name),
         metadata: Some(FieldMetadata {
-            father: Some(item_metadata_with_annotations(
+            father: Some(item_metadata_with_annotations_and_attrs(
                 field.access_flags,
                 field
                     .annotations
                     .iter()
                     .map(custom_annotation_to_proto)
                     .collect(),
+                &field.metadata_attrs,
             )),
-            field_type: Some(annotation_field_type_sentinel()),
+            field_type: Some(
+                field
+                    .metadata_field_type
+                    .as_ref()
+                    .map(pandasm_type_to_proto)
+                    .unwrap_or_else(annotation_field_type_sentinel),
+            ),
             value: field
                 .value
                 .as_ref()
@@ -2389,6 +2587,7 @@ fn field_scalar_value(value: &FieldValue, record: &ClassRecord, file: &AbcFile) 
         }
         FieldValue::String(value) => scalar_string(VALUE_TYPE_STRING, value.clone()),
         FieldValue::F64(value) => scalar_double(VALUE_TYPE_F64, *value),
+        FieldValue::RawScalar(value) => scalar_record_to_proto(value),
     }
 }
 
@@ -2461,6 +2660,7 @@ fn function_to_proto(
             method.function_kind,
             &method.concurrent_module_requests,
             &method.annotations,
+            &method.metadata_attrs,
         )),
         label_table: method
             .label_table
@@ -3389,12 +3589,17 @@ fn record_metadata(access_flags: u32) -> RecordMetadata {
     record_metadata_with_attributes(access_flags, Vec::new())
 }
 
-fn record_metadata_with_annotations(
+fn record_metadata_with_annotations_and_attrs(
     access_flags: u32,
     annotations: Vec<AnnotationData>,
+    metadata_attrs: &MetadataRecord,
 ) -> RecordMetadata {
     RecordMetadata {
-        father: Some(item_metadata_with_annotations(access_flags, annotations)),
+        father: Some(item_metadata_with_annotations_and_attrs(
+            access_flags,
+            annotations,
+            metadata_attrs,
+        )),
     }
 }
 
@@ -3418,6 +3623,7 @@ fn function_metadata(
     function_kind_value: u32,
     concurrent_module_requests: &[u32],
     custom_annotations: &[AnnotationRecord],
+    metadata_attrs: &MetadataRecord,
 ) -> FunctionMetadata {
     let mut annotations = custom_annotations
         .iter()
@@ -3430,15 +3636,23 @@ fn function_metadata(
         concurrent_module_requests,
     ));
     FunctionMetadata {
-        father: Some(item_metadata_with_annotations(access_flags, annotations)),
+        father: Some(item_metadata_with_annotations_and_attrs(
+            access_flags,
+            annotations,
+            metadata_attrs,
+        )),
     }
 }
 
-fn item_metadata_with_annotations(
+fn item_metadata_with_annotations_and_attrs(
     access_flags: u32,
     annotations: Vec<AnnotationData>,
+    metadata_attrs: &MetadataRecord,
 ) -> ItemMetadata {
-    item_metadata_with_attributes(access_flags, annotations, Vec::new())
+    ItemMetadata {
+        father: Some(annotation_metadata_with_attrs(annotations, metadata_attrs)),
+        access_flags,
+    }
 }
 
 fn item_metadata_with_attributes(
@@ -3459,15 +3673,38 @@ fn annotation_metadata_with_attributes(
     annotations: Vec<AnnotationData>,
     set_attributes: Vec<String>,
 ) -> crate::proto_panda::AnnotationMetadata {
+    let metadata_attrs = MetadataRecord {
+        set_attributes,
+        attributes: Vec::new(),
+    };
+    annotation_metadata_with_attrs(annotations, &metadata_attrs)
+}
+
+fn annotation_metadata_with_attrs(
+    annotations: Vec<AnnotationData>,
+    metadata_attrs: &MetadataRecord,
+) -> crate::proto_panda::AnnotationMetadata {
     crate::proto_panda::AnnotationMetadata {
-        father: Some(Metadata {
-            set_attributes: set_attributes
-                .into_iter()
-                .map(|value| bytes(&value))
-                .collect(),
-            attributes: Vec::new(),
-        }),
+        father: Some(metadata_to_proto(metadata_attrs)),
         annotations,
+    }
+}
+
+fn metadata_to_proto(metadata_attrs: &MetadataRecord) -> Metadata {
+    Metadata {
+        set_attributes: metadata_attrs
+            .set_attributes
+            .iter()
+            .map(|value| bytes(value))
+            .collect(),
+        attributes: metadata_attrs
+            .attributes
+            .iter()
+            .map(|entry| metadata::Attributes {
+                key: bytes(&entry.key),
+                value: entry.values.iter().map(|value| bytes(value)).collect(),
+            })
+            .collect(),
     }
 }
 
@@ -3483,19 +3720,40 @@ fn custom_annotation_to_proto(annotation: &AnnotationRecord) -> AnnotationData {
 }
 
 fn annotation_element_to_proto(element: &AnnotationElementRecord) -> AnnotationElement {
-    let scalar = match &element.value {
-        AnnotationValue::Bool(value) => scalar_u64(VALUE_TYPE_U1, u64::from(*value)),
-        AnnotationValue::U32(value) => scalar_u64(VALUE_TYPE_U32, *value as u64),
-        AnnotationValue::F64(value) => scalar_double(VALUE_TYPE_F64, *value),
-        AnnotationValue::String(value) => scalar_string(VALUE_TYPE_STRING, value.clone()),
-        AnnotationValue::LiteralArray { key, .. } => {
-            scalar_string(VALUE_TYPE_LITERALARRAY, key.clone())
-        }
+    let (value, value_type) = match &element.value {
+        AnnotationValue::Bool(value) => (
+            annotation_element::Value::Scalar(scalar_u64(VALUE_TYPE_U1, u64::from(*value))),
+            annotation_element::ValueType::Scalar,
+        ),
+        AnnotationValue::U32(value) => (
+            annotation_element::Value::Scalar(scalar_u64(VALUE_TYPE_U32, *value as u64)),
+            annotation_element::ValueType::Scalar,
+        ),
+        AnnotationValue::F64(value) => (
+            annotation_element::Value::Scalar(scalar_double(VALUE_TYPE_F64, *value)),
+            annotation_element::ValueType::Scalar,
+        ),
+        AnnotationValue::String(value) => (
+            annotation_element::Value::Scalar(scalar_string(VALUE_TYPE_STRING, value.clone())),
+            annotation_element::ValueType::Scalar,
+        ),
+        AnnotationValue::LiteralArray { key, .. } => (
+            annotation_element::Value::Scalar(scalar_string(VALUE_TYPE_LITERALARRAY, key.clone())),
+            annotation_element::ValueType::Scalar,
+        ),
+        AnnotationValue::RawScalar(value) => (
+            annotation_element::Value::Scalar(scalar_record_to_proto(value)),
+            annotation_element::ValueType::Scalar,
+        ),
+        AnnotationValue::Array(value) => (
+            annotation_element::Value::Array(array_value_to_proto(value)),
+            annotation_element::ValueType::Array,
+        ),
     };
     AnnotationElement {
         name: bytes(&element.name),
-        value: Some(annotation_element::Value::Scalar(scalar)),
-        value_type: annotation_element::ValueType::Scalar as i32,
+        value: Some(value),
+        value_type: value_type as i32,
     }
 }
 
@@ -4139,6 +4397,7 @@ class A {
             class_idx: FIELD_OWNER_CLASS_IDX,
             type_idx: 1,
             field_type: FieldType::U32,
+            metadata_field_type: None,
             access_flags: 0,
             value: None,
             annotations: vec![AnnotationRecord {
@@ -4148,6 +4407,7 @@ class A {
                     value: AnnotationValue::String("field".to_string()),
                 }],
             }],
+            metadata_attrs: Default::default(),
             source: Default::default(),
         });
         file
@@ -4309,6 +4569,103 @@ class A {}
             "usage_new_array.ets.Anno",
         );
         assert_eq!(restored_keys.len(), 3);
+    }
+
+    #[test]
+    fn raw_scalar_and_array_annotation_values_emit_to_abc_binary() {
+        let mut file = annotated_record_and_field_file();
+        let record = file
+            .records
+            .iter_mut()
+            .find(|record| record.name == "Lusage_string.ets;")
+            .expect("user record must exist");
+        record.annotations[0].elements = vec![
+            AnnotationElementRecord {
+                name: "a".to_string(),
+                value: AnnotationValue::RawScalar(ScalarValueRecord {
+                    value_type: 4,
+                    value: ScalarValueData::U64(65535),
+                }),
+            },
+            AnnotationElementRecord {
+                name: "items".to_string(),
+                value: AnnotationValue::Array(ArrayValueRecord {
+                    value_type: 17,
+                    component_type: VALUE_TYPE_STRING,
+                    values: vec![ScalarValueRecord {
+                        value_type: VALUE_TYPE_STRING,
+                        value: ScalarValueData::String("item".to_string()),
+                    }],
+                }),
+            },
+            AnnotationElementRecord {
+                name: "nested".to_string(),
+                value: AnnotationValue::RawScalar(ScalarValueRecord {
+                    value_type: VALUE_TYPE_ANNOTATION,
+                    value: ScalarValueData::Annotation(Box::new(AnnotationRecord {
+                        record_name: "usage_string.ets.Anno".to_string(),
+                        elements: vec![AnnotationElementRecord {
+                            name: "a".to_string(),
+                            value: AnnotationValue::U32(7),
+                        }],
+                    })),
+                }),
+            },
+            AnnotationElementRecord {
+                name: "nestedItems".to_string(),
+                value: AnnotationValue::Array(ArrayValueRecord {
+                    value_type: VALUE_TYPE_ARRAY,
+                    component_type: VALUE_TYPE_ANNOTATION,
+                    values: vec![ScalarValueRecord {
+                        value_type: VALUE_TYPE_ANNOTATION,
+                        value: ScalarValueData::Annotation(Box::new(AnnotationRecord {
+                            record_name: "usage_string.ets.Anno".to_string(),
+                            elements: vec![AnnotationElementRecord {
+                                name: "a".to_string(),
+                                value: AnnotationValue::U32(8),
+                            }],
+                        })),
+                    }],
+                }),
+            },
+        ];
+
+        let bytes = file.serialize_with_version(version_for_target_api(20, None));
+        AbcReader::validate(&bytes).unwrap();
+        let mut restored = AbcFile::new();
+        append_abc_file(&mut restored, &bytes).unwrap();
+        let restored_record = restored
+            .records
+            .iter()
+            .find(|record| record.name == "Lusage_string.ets;")
+            .expect("restored user record must exist");
+        let raw_annotation = restored_record
+            .annotations
+            .iter()
+            .find(|annotation| annotation.record_name == "usage_string.ets.Anno")
+            .expect("raw annotation must roundtrip from ABC");
+        assert!(matches!(
+            raw_annotation.elements[0].value,
+            AnnotationValue::RawScalar(_)
+        ));
+        assert!(matches!(
+            raw_annotation.elements[1].value,
+            AnnotationValue::Array(_)
+        ));
+        assert!(matches!(
+            raw_annotation.elements[2].value,
+            AnnotationValue::RawScalar(ScalarValueRecord {
+                value_type: VALUE_TYPE_ANNOTATION,
+                ..
+            })
+        ));
+        assert!(matches!(
+            raw_annotation.elements[3].value,
+            AnnotationValue::Array(ArrayValueRecord {
+                component_type: VALUE_TYPE_ANNOTATION,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -4972,6 +5329,191 @@ class A {}
 
         let bytes = restored.serialize_with_version(version_for_target_api(20, None));
         AbcReader::validate(&bytes).unwrap();
+    }
+
+    #[test]
+    fn program_metadata_attributes_and_raw_annotation_values_roundtrip_through_proto() {
+        let file = annotation_usage_file();
+        let mut program = program_for_file(&file, 20).unwrap();
+        program.lang = 4;
+        program.array_types.push(Type {
+            component_name: b"u32".to_vec(),
+            rank: 1,
+            name: b"u32[]".to_vec(),
+            type_id: 0x08,
+        });
+
+        let record = program
+            .record_table
+            .iter_mut()
+            .find(|entry| entry.key == b"usage_string.ets")
+            .and_then(|entry| entry.value.as_mut())
+            .expect("usage_string.ets record must exist");
+        let record_annotation_metadata_mut = record
+            .metadata
+            .as_mut()
+            .unwrap()
+            .father
+            .as_mut()
+            .unwrap()
+            .father
+            .as_mut()
+            .unwrap();
+        record_annotation_metadata_mut.father = Some(Metadata {
+            set_attributes: vec![b"record_attr".to_vec()],
+            attributes: vec![metadata::Attributes {
+                key: b"record_key".to_vec(),
+                value: vec![b"record_value_a".to_vec(), b"record_value_b".to_vec()],
+            }],
+        });
+        record_annotation_metadata_mut
+            .annotations
+            .push(AnnotationData {
+                record_name: b"LRawAnnotation;".to_vec(),
+                elements: vec![
+                    AnnotationElement {
+                        name: b"u16Value".to_vec(),
+                        value: Some(annotation_element::Value::Scalar(ScalarValue {
+                            father: Some(Value { r#type: 4 }),
+                            value: Some(scalar_value::Value::ValueU64(65535)),
+                            r#type: scalar_value::VariantValueType::Uint64 as i32,
+                        })),
+                        value_type: annotation_element::ValueType::Scalar as i32,
+                    },
+                    AnnotationElement {
+                        name: b"stringArray".to_vec(),
+                        value: Some(annotation_element::Value::Array(ArrayValue {
+                            father: Some(Value { r#type: 17 }),
+                            component_type: VALUE_TYPE_STRING,
+                            values: vec![ScalarValue {
+                                father: Some(Value {
+                                    r#type: VALUE_TYPE_STRING,
+                                }),
+                                value: Some(scalar_value::Value::ValueStr(b"item".to_vec())),
+                                r#type: scalar_value::VariantValueType::String as i32,
+                            }],
+                        })),
+                        value_type: annotation_element::ValueType::Array as i32,
+                    },
+                ],
+            });
+
+        let field = record
+            .field_list
+            .first_mut()
+            .expect("usage_string.ets record must have fields");
+        field.metadata.as_mut().unwrap().field_type = Some(Type {
+            component_name: b"i32".to_vec(),
+            rank: 0,
+            name: b"i32".to_vec(),
+            type_id: 0x07,
+        });
+        field
+            .metadata
+            .as_mut()
+            .unwrap()
+            .father
+            .as_mut()
+            .unwrap()
+            .father
+            .as_mut()
+            .unwrap()
+            .father = Some(Metadata {
+            set_attributes: vec![b"field_attr".to_vec()],
+            attributes: vec![metadata::Attributes {
+                key: b"field_key".to_vec(),
+                value: vec![b"field_value".to_vec()],
+            }],
+        });
+
+        let function = function_by_short_name_mut(&mut program, "func_main_0")
+            .expect("func_main_0 function must exist");
+        function
+            .metadata
+            .as_mut()
+            .unwrap()
+            .father
+            .as_mut()
+            .unwrap()
+            .father
+            .as_mut()
+            .unwrap()
+            .father = Some(Metadata {
+            set_attributes: vec![b"function_attr".to_vec()],
+            attributes: vec![metadata::Attributes {
+                key: b"function_key".to_vec(),
+                value: vec![b"function_value".to_vec()],
+            }],
+        });
+
+        let mut restored = AbcFile::new();
+        append_program_to_file(&mut restored, program).unwrap();
+        let roundtrip = program_for_file(&restored, 20).unwrap();
+
+        assert_eq!(roundtrip.lang, 4);
+        assert_eq!(roundtrip.array_types[0].name, b"u32[]");
+
+        let roundtrip_record = roundtrip
+            .record_table
+            .iter()
+            .find(|entry| entry.key == b"usage_string.ets")
+            .and_then(|entry| entry.value.as_ref())
+            .expect("roundtrip usage_string.ets record must exist");
+        let roundtrip_record_metadata = record_annotation_metadata(roundtrip_record)
+            .unwrap()
+            .father
+            .as_ref()
+            .unwrap();
+        assert_eq!(roundtrip_record_metadata.set_attributes[0], b"record_attr");
+        assert_eq!(
+            roundtrip_record_metadata.attributes[0].value[1],
+            b"record_value_b"
+        );
+        let raw_annotation = record_annotation_metadata(roundtrip_record)
+            .unwrap()
+            .annotations
+            .iter()
+            .find(|annotation| annotation.record_name == b"LRawAnnotation;")
+            .expect("raw annotation must roundtrip");
+        assert_eq!(
+            raw_annotation.elements[0]
+                .value
+                .as_ref()
+                .and_then(|value| match value {
+                    annotation_element::Value::Scalar(value) => value.value.as_ref(),
+                    _ => None,
+                }),
+            Some(&scalar_value::Value::ValueU64(65535))
+        );
+        assert!(matches!(
+            raw_annotation.elements[1].value,
+            Some(annotation_element::Value::Array(_))
+        ));
+        assert_eq!(
+            roundtrip_record
+                .field_list
+                .first()
+                .unwrap()
+                .metadata
+                .as_ref()
+                .unwrap()
+                .field_type
+                .as_ref()
+                .unwrap()
+                .name,
+            b"i32"
+        );
+        let roundtrip_function = function_by_short_name(&roundtrip, "func_main_0")
+            .expect("roundtrip func_main_0 function must exist");
+        assert_eq!(
+            function_annotation_metadata(roundtrip_function)
+                .unwrap()
+                .father
+                .as_ref()
+                .unwrap()
+                .set_attributes[0],
+            b"function_attr"
+        );
     }
 
     #[test]
