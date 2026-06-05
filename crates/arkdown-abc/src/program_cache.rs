@@ -4,7 +4,7 @@ use std::io;
 use crate::emit::file::{AbcFile, LiteralArray, LiteralEntry};
 use crate::emit::record::{
     method_access, CatchEntry, ClassRecord, DebugInfoRecord, FieldRecord, FieldValue,
-    InstructionDebugInfo, MethodKind, MethodRecord, FIELD_OWNER_CLASS_IDX,
+    InstructionDebugInfo, MethodKind, MethodLabelStyle, MethodRecord, FIELD_OWNER_CLASS_IDX,
 };
 use crate::emit::strings::StringTable;
 use crate::ir::debug_lnp::LineTracker;
@@ -607,6 +607,7 @@ fn method_from_proto(
         method_pool_entry: false,
         expected_property_count: function_expected_property_count(function)?,
         definefunc_order: None,
+        label_style: MethodLabelStyle::Source,
     })
 }
 
@@ -677,6 +678,9 @@ fn instruction_debug_from_proto(ins: &Ins) -> io::Result<Option<InstructionDebug
     let Some(debug) = &ins.ins_debug else {
         return Ok(None);
     };
+    if debug.line_number == u64::MAX {
+        return Ok(None);
+    }
     Ok(Some(InstructionDebugInfo {
         line_number: to_u32(debug.line_number, "instruction debug line number")?,
         column_number: debug.column_number,
@@ -1518,12 +1522,13 @@ fn function_to_proto(
         labels.insert(catch.catch_begin as usize);
         labels.insert(catch.catch_end as usize);
     }
+    let label_names = method_label_names(&pandasm_insns, &labels, method.label_style);
 
     let mut ins = Vec::with_capacity(method.pandasm_insns.len() + labels.len());
     for (idx, asm) in pandasm_insns.iter().enumerate() {
         let offset = offsets[idx];
         if labels.contains(&offset) {
-            ins.push(label_ins(offset));
+            ins.push(label_ins(label_name_for_offset(&label_names, offset)?));
         }
         ins.push(insn_to_proto(
             asm,
@@ -1531,11 +1536,12 @@ fn function_to_proto(
             offset,
             record,
             strings,
+            &label_names,
         )?);
     }
     let end_offset = pandasm_insns.iter().map(Insn::byte_len).sum::<usize>();
     if labels.contains(&end_offset) {
-        ins.push(label_ins(end_offset));
+        ins.push(label_ins(label_name_for_offset(&label_names, end_offset)?));
     }
 
     Ok(Function {
@@ -1558,15 +1564,29 @@ fn function_to_proto(
         catch_blocks: method
             .catch_entries
             .iter()
-            .map(|catch| crate::proto_panda::CatchBlock {
-                whole_line: Vec::new(),
-                exception_record: Vec::new(),
-                try_begin_label: bytes(&label_name(catch.try_begin as usize)),
-                try_end_label: bytes(&label_name(catch.try_end as usize)),
-                catch_begin_label: bytes(&label_name(catch.catch_begin as usize)),
-                catch_end_label: bytes(&label_name(catch.catch_end as usize)),
+            .map(|catch| -> io::Result<crate::proto_panda::CatchBlock> {
+                Ok(crate::proto_panda::CatchBlock {
+                    whole_line: Vec::new(),
+                    exception_record: Vec::new(),
+                    try_begin_label: bytes(label_name_for_offset(
+                        &label_names,
+                        catch.try_begin as usize,
+                    )?),
+                    try_end_label: bytes(label_name_for_offset(
+                        &label_names,
+                        catch.try_end as usize,
+                    )?),
+                    catch_begin_label: bytes(label_name_for_offset(
+                        &label_names,
+                        catch.catch_begin as usize,
+                    )?),
+                    catch_end_label: bytes(label_name_for_offset(
+                        &label_names,
+                        catch.catch_end as usize,
+                    )?),
+                })
             })
-            .collect(),
+            .collect::<io::Result<Vec<_>>>()?,
         value_of_first_param: -1,
         regs_num: method.num_vregs as u64,
         params: (0..method.num_args)
@@ -1605,6 +1625,39 @@ fn instruction_offsets(insns: &[Insn]) -> Vec<usize> {
     offsets
 }
 
+fn method_label_names(
+    insns: &[Insn],
+    label_offsets: &BTreeSet<usize>,
+    style: MethodLabelStyle,
+) -> BTreeMap<usize, String> {
+    let offsets = instruction_offsets(insns);
+    label_offsets
+        .iter()
+        .map(|&offset| {
+            let name = match style {
+                MethodLabelStyle::Source => label_name_for_byte_offset(offset),
+                MethodLabelStyle::Abc2Program => {
+                    label_name_for_inst_idx(instruction_index_at_offset(&offsets, offset))
+                }
+            };
+            (offset, name)
+        })
+        .collect()
+}
+
+fn instruction_index_at_offset(offsets: &[usize], offset: usize) -> usize {
+    offsets
+        .binary_search(&offset)
+        .unwrap_or_else(|_| offsets.len())
+}
+
+fn label_name_for_offset(label_names: &BTreeMap<usize, String>, offset: usize) -> io::Result<&str> {
+    label_names
+        .get(&offset)
+        .map(String::as_str)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing Program label"))
+}
+
 fn jump_target(offset: usize, insn: &Insn) -> Option<usize> {
     let rel = match insn {
         Insn::JmpShort(value) => *value as i32,
@@ -1621,13 +1674,13 @@ fn jump_target(offset: usize, insn: &Insn) -> Option<usize> {
     (offset as i64 + rel as i64).try_into().ok()
 }
 
-fn label_ins(offset: usize) -> Ins {
+fn label_ins(name: &str) -> Ins {
     Ins {
         opcode: 0,
         regs: Vec::new(),
         ids: Vec::new(),
         imms: Vec::new(),
-        label: bytes(&label_name(offset)),
+        label: bytes(name),
         set_label_val: true,
         ins_debug: Some(default_ins_debug()),
     }
@@ -1648,7 +1701,7 @@ fn ins_debug(debug: Option<InstructionDebugInfo>) -> DebuginfoIns {
 
 fn default_ins_debug() -> DebuginfoIns {
     DebuginfoIns {
-        line_number: 0,
+        line_number: u64::MAX,
         column_number: 0,
         whole_line: Vec::new(),
         bound_left: 0,
@@ -1662,6 +1715,7 @@ fn insn_to_proto(
     offset: usize,
     record: &ClassRecord,
     strings: &StringTable,
+    label_names: &BTreeMap<usize, String>,
 ) -> io::Result<Ins> {
     let mut out = Ins {
         opcode: pandasm_opcode(insn),
@@ -1900,7 +1954,8 @@ fn insn_to_proto(
         | Insn::Jnez(_)
         | Insn::JnezWide(_) => {
             if let Some(target) = jump_target(offset, insn) {
-                out.ids.push(bytes(&label_name(target)));
+                out.ids
+                    .push(bytes(label_name_for_offset(label_names, target)?));
             }
         }
     }
@@ -2168,8 +2223,12 @@ fn literal_key(record: &ClassRecord, literal_index: usize) -> String {
     literal_array_key(&record.name, literal_index)
 }
 
-fn label_name(offset: usize) -> String {
+fn label_name_for_byte_offset(offset: usize) -> String {
     format!("L_{offset:08x}")
+}
+
+fn label_name_for_inst_idx(inst_idx: usize) -> String {
+    format!("label@{inst_idx}")
 }
 
 fn function_kind(kind: MethodKind) -> u32 {
@@ -2335,6 +2394,8 @@ mod tests {
         assert_eq!(pandasm_opcode(&Insn::LdaStr(0)), 236);
         assert_eq!(pandasm_opcode(&Insn::TryLdGlobalByName(0, 0)), 199);
         assert_ne!(pandasm_opcode(&Insn::LdaStr(0)), 0x3e);
+        assert_eq!(default_ins_debug().line_number, u64::MAX);
+        assert_eq!(default_ins_debug().column_number, 0);
     }
 
     #[test]
@@ -2361,6 +2422,84 @@ mod tests {
         };
         assert_eq!(raw.opcode, 0);
         assert_eq!(raw.bytes, vec![0x6a]);
+    }
+
+    #[test]
+    fn proto_program_ignores_upstream_invalid_instruction_debug_line() {
+        let ins = Ins {
+            opcode: 0,
+            regs: Vec::new(),
+            ids: Vec::new(),
+            imms: Vec::new(),
+            label: Vec::new(),
+            set_label_val: false,
+            ins_debug: Some(DebuginfoIns {
+                line_number: u64::MAX,
+                column_number: 0,
+                whole_line: Vec::new(),
+                bound_left: 0,
+                bound_right: 0,
+            }),
+        };
+
+        assert!(instruction_debug_from_proto(&ins).unwrap().is_none());
+    }
+
+    #[test]
+    fn abc2program_label_style_uses_instruction_index_labels() {
+        assert_eq!(instruction_index_at_offset(&[0, 2, 5], 0), 0);
+        assert_eq!(instruction_index_at_offset(&[0, 2, 5], 2), 1);
+        assert_eq!(instruction_index_at_offset(&[0, 2, 5], 7), 3);
+        assert_eq!(instruction_index_at_offset(&[0, 2, 5], 3), 3);
+
+        let mut file = AbcFile::new();
+        let mut record = build_record_with_debug_and_package_for_target_with_mode(
+            "let x = 0; if (x) { x = 1; } else { x = 2; } x;",
+            "@bundle:demo/entry/ets/pages/Index",
+            &mut file.strings,
+            &mut file.literal_arrays,
+            Some("entry/src/main/ets/pages/Index.ets"),
+            Some("entry"),
+            false,
+            false,
+            "ets",
+            true,
+            12,
+            None,
+            false,
+            false,
+        )
+        .unwrap();
+        for method in &mut record.methods {
+            method.label_style = MethodLabelStyle::Abc2Program;
+        }
+        file.add_record(record);
+
+        let program = program_for_record(&file, 0).unwrap().unwrap();
+        let labels = program
+            .function_table
+            .iter()
+            .filter_map(|entry| entry.value.as_ref())
+            .flat_map(|function| function.ins.iter())
+            .filter(|ins| ins.set_label_val)
+            .map(|ins| ins.label.as_slice())
+            .collect::<Vec<_>>();
+        let jump_ids = program
+            .function_table
+            .iter()
+            .filter_map(|entry| entry.value.as_ref())
+            .flat_map(|function| function.ins.iter())
+            .filter(|ins| matches!(ins.opcode, 237..=239))
+            .flat_map(|ins| ins.ids.iter())
+            .map(Vec::as_slice)
+            .collect::<Vec<_>>();
+
+        assert!(!labels.is_empty());
+        assert!(!jump_ids.is_empty());
+        assert!(labels.iter().all(|label| label.starts_with(b"label@")));
+        assert!(jump_ids.iter().all(|id| id.starts_with(b"label@")));
+        assert!(labels.iter().all(|label| !label.starts_with(b"L_")));
+        assert!(jump_ids.iter().all(|id| !id.starts_with(b"L_")));
     }
 
     #[test]

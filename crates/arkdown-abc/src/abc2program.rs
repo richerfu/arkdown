@@ -6,8 +6,8 @@ use crate::abc_reader::{AbcClassItem, AbcFieldValue, AbcLiteralEntry, AbcReader}
 use crate::emit::bytecode::instruction_len;
 use crate::emit::file::{AbcFile, LiteralArray, LiteralEntry};
 use crate::emit::record::{
-    method_access, CatchEntry, ClassRecord, FieldRecord, FieldValue, MethodKind, MethodRecord,
-    FIELD_OWNER_CLASS_IDX,
+    method_access, CatchEntry, ClassRecord, FieldRecord, FieldValue, MethodKind, MethodLabelStyle,
+    MethodRecord, FIELD_OWNER_CLASS_IDX,
 };
 use crate::error::AbcError;
 use crate::ir::opcodes::{Insn, PandasmInsn};
@@ -149,6 +149,7 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
                     method_pool_entry: method_pool_offsets.contains(&method.offset),
                     expected_property_count: None,
                     definefunc_order: None,
+                    label_style: MethodLabelStyle::Abc2Program,
                 })
             })
             .collect::<Result<Vec<_>, AbcError>>()?;

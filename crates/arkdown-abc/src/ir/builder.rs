@@ -20,7 +20,8 @@ use oxc_transformer::{Module as TransformModule, TransformOptions, Transformer};
 
 use crate::emit::file::{LiteralArray, LiteralEntry};
 use crate::emit::record::{
-    CatchEntry, ClassRecord, DebugInfoRecord, InstructionDebugInfo, MethodKind, MethodRecord,
+    CatchEntry, ClassRecord, DebugInfoRecord, InstructionDebugInfo, MethodKind, MethodLabelStyle,
+    MethodRecord,
 };
 use crate::emit::strings::StringTable;
 use crate::error::AbcError;
@@ -444,6 +445,7 @@ pub fn build_record_with_debug_and_source_map_for_target_with_mode(
         method_pool_entry: false,
         expected_property_count: None,
         definefunc_order: None,
+        label_style: MethodLabelStyle::Source,
     });
 
     let tracked_source = source_file.as_ref().map(|_| source);
@@ -844,6 +846,7 @@ fn compile_function_record(
                 method_pool_entry: true,
                 expected_property_count,
                 definefunc_order: Some(definefunc_order),
+                label_style: MethodLabelStyle::Source,
             });
         }
         FunctionRecordNode::Arrow(arrow) => {
@@ -885,6 +888,7 @@ fn compile_function_record(
                 method_pool_entry: true,
                 expected_property_count,
                 definefunc_order: Some(definefunc_order),
+                label_style: MethodLabelStyle::Source,
             });
         }
     }
@@ -1390,6 +1394,7 @@ fn compile_class_elements(
             method_pool_entry: true,
             expected_property_count: class_expected_property_count,
             definefunc_order: None,
+            label_style: MethodLabelStyle::Source,
         });
     }
 
@@ -1427,6 +1432,7 @@ fn compile_class_elements(
             method_pool_entry: true,
             expected_property_count: None,
             definefunc_order: None,
+            label_style: MethodLabelStyle::Source,
         });
     }
 
@@ -1459,6 +1465,7 @@ fn compile_class_elements(
             method_pool_entry: true,
             expected_property_count: None,
             definefunc_order: None,
+            label_style: MethodLabelStyle::Source,
         });
     }
 
@@ -1618,6 +1625,7 @@ fn compile_class_elements(
                     .then_some(class_expected_property_count)
                     .flatten(),
                 definefunc_order: None,
+                label_style: MethodLabelStyle::Source,
             });
         }
     }
@@ -1666,6 +1674,7 @@ fn compile_class_elements(
             method_pool_entry: true,
             expected_property_count: None,
             definefunc_order: None,
+            label_style: MethodLabelStyle::Source,
         });
 
         // Setter: `set <key>(v) { this.#backing = v; }`
@@ -1701,6 +1710,7 @@ fn compile_class_elements(
             method_pool_entry: true,
             expected_property_count: None,
             definefunc_order: None,
+            label_style: MethodLabelStyle::Source,
         });
     }
     Ok(())

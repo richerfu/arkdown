@@ -34,6 +34,12 @@ pub enum MethodKind {
     Anonymous,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MethodLabelStyle {
+    Source,
+    Abc2Program,
+}
+
 /// Return the correct `access_flags` value for a method based on its IR role.
 /// Encode a Panda `StringItem` as an inline ULEB128-prefixed null-terminated string.
 ///
@@ -175,6 +181,8 @@ pub struct MethodRecord {
     /// upstream file layout, but anonymous `definefunc` opcodes are resolved in
     /// AST discovery order.
     pub definefunc_order: Option<u32>,
+    /// Label naming style used when materializing protoPanda Program snapshots.
+    pub label_style: MethodLabelStyle,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -688,6 +696,7 @@ mod tests {
                 method_pool_entry: false,
                 expected_property_count: None,
                 definefunc_order: None,
+                label_style: MethodLabelStyle::Source,
             }],
             string_indices: vec![],
             literal_indices: vec![],
@@ -729,6 +738,7 @@ mod tests {
                 method_pool_entry: false,
                 expected_property_count: None,
                 definefunc_order: None,
+                label_style: MethodLabelStyle::Source,
             }],
             string_indices: vec![],
             literal_indices: vec![],
