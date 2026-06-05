@@ -172,6 +172,34 @@ pub fn check(source: &str, file: &str) -> Vec<EtsTransformError> {
                 });
             }
 
+            // Rule: @Track is only valid in @ObservedV2 classes; using it in
+            // non-@ObservedV2 classes (including @Observed or plain classes) is an error.
+            // Matches hvigor etsChecker's validateTrackDecorator() rule.
+            if !has_observed_v2 {
+                let class_name = class
+                    .id
+                    .as_ref()
+                    .map(|id| id.name.as_str().to_string())
+                    .unwrap_or_else(|| "<anonymous>".to_string());
+                for element in &class.body.body {
+                    if let ClassElement::PropertyDefinition(prop) = element {
+                        let has_track =
+                            prop.decorators.iter().any(|d| decorator_name(d) == "Track");
+                        if has_track {
+                            errors.push(EtsTransformError::Diagnostic {
+                                file: file.to_string(),
+                                message: format!(
+                                    "'@Track' can only be used in '@ObservedV2' classes; \
+                                     class '{}' is not decorated with '@ObservedV2'",
+                                    class_name
+                                ),
+                                severity: DiagnosticSeverity::Error,
+                            });
+                        }
+                    }
+                }
+            }
+
             // Rule: @Entry without @Component
             if has_entry && !has_component {
                 errors.push(EtsTransformError::Diagnostic {
@@ -579,6 +607,45 @@ mod tests {
         assert!(
             has_error_containing(src, "@Observed"),
             "@Observed with @ObservedV2 must be an error"
+        );
+    }
+
+    #[test]
+    fn test_track_outside_observed_v2_is_error() {
+        // @Track on a plain class should error.
+        let src = "class MyData {\n  @Track count: number = 0;\n}";
+        assert!(
+            has_error_containing(src, "@Track"),
+            "@Track outside @ObservedV2 must be an error"
+        );
+    }
+
+    #[test]
+    fn test_track_on_observed_v1_class_is_error() {
+        // @Track is V2 only; cannot use in @Observed (V1) class.
+        let src = "@Observed\nclass MyData {\n  @Track count: number = 0;\n}";
+        assert!(
+            has_error_containing(src, "@Track"),
+            "@Track in @Observed class must be an error (V2 decorator in V1 class)"
+        );
+    }
+
+    #[test]
+    fn test_track_in_observed_v2_class_is_valid() {
+        // @Track is valid inside @ObservedV2 class.
+        let src = "@ObservedV2\nclass MyData {\n  @Track count: number = 0;\n}";
+        let errs = check(src, "test.ets");
+        let track_errors: Vec<_> = errs
+            .iter()
+            .filter(|e| {
+                matches!(e, EtsTransformError::Diagnostic { message, severity, .. }
+                    if message.contains("@Track") && matches!(severity, crate::error::DiagnosticSeverity::Error))
+            })
+            .collect();
+        assert!(
+            track_errors.is_empty(),
+            "@Track in @ObservedV2 class must not produce errors; got: {:?}",
+            errs
         );
     }
 
