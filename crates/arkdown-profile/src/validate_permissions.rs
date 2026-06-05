@@ -120,6 +120,19 @@ pub fn validate_request_permissions(
                      {profile_path}"
                 )));
             }
+            // Validate usedScene.when value if present.
+            // hvigor accepts "inuse" and "always"; any other value is an error.
+            if let Some(used_scene) = permission.get("usedScene") {
+                if let Some(when) = used_scene.get("when").and_then(|w| w.as_str()) {
+                    if !matches!(when, "inuse" | "always") {
+                        return Err(ArkdownError::Bundler(format!(
+                            "The usedScene.when value '{}' is invalid for permission '{}'; \
+                             expected 'inuse' or 'always'.\nat {profile_path}",
+                            when, name
+                        )));
+                    }
+                }
+            }
         }
     }
 
@@ -504,6 +517,55 @@ mod tests {
                 "ohos.permission.LOCATION".to_string()
             ]
         );
+    }
+
+    /// Verify that `usedScene.when` only accepts `"inuse"` and `"always"`.
+    /// Matches hvigor's PermissionUtils validation for user_grant permissions.
+    #[test]
+    fn test_hap_user_grant_invalid_used_scene_when_is_error() {
+        let sdk = SdkPermissionData {
+            all_permissions: vec!["ohos.permission.CAMERA".to_string()],
+            user_grant_permissions: vec!["ohos.permission.CAMERA".to_string()],
+        };
+        // Invalid "when" value should fail.
+        let err = validate_request_permissions(RequestPermissionValidationInput {
+            module_type: "entry",
+            module_json5_path: None,
+            request_permissions: &[serde_json::json!({
+                "name": "ohos.permission.CAMERA",
+                "reason": "$string:camera_reason",
+                "usedScene": { "when": "never" }  // invalid
+            })],
+            define_permissions: &[],
+            sdk_permissions: Some(&sdk),
+        })
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("never"),
+            "error must mention the invalid value; got: {}",
+            err
+        );
+        assert!(err.to_string().contains("inuse") || err.to_string().contains("always"));
+
+        // Valid "when" values must pass.
+        for valid_when in &["inuse", "always"] {
+            let result = validate_request_permissions(RequestPermissionValidationInput {
+                module_type: "entry",
+                module_json5_path: None,
+                request_permissions: &[serde_json::json!({
+                    "name": "ohos.permission.CAMERA",
+                    "reason": "$string:camera_reason",
+                    "usedScene": { "when": valid_when }
+                })],
+                define_permissions: &[],
+                sdk_permissions: Some(&sdk),
+            });
+            assert!(
+                result.is_ok(),
+                "usedScene.when={valid_when} must be valid; got: {:?}",
+                result.err()
+            );
+        }
     }
 
     #[test]
