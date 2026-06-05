@@ -1548,6 +1548,7 @@ impl LoaderJson {
         config: &ArkdownConfig,
         module_cfg: &ModuleConfig,
     ) -> (FxHashMap<String, String>, FxHashMap<String, String>) {
+        use crate::dependency_graph::{DependencyNodeType, LocalDependencyGraph};
         let bundle_name = &config.product.bundle_name;
         let use_normalized = config
             .product
@@ -1558,22 +1559,35 @@ impl LoaderJson {
         let mut hsp_map: FxHashMap<String, String> = FxHashMap::default();
         let mut har_map: FxHashMap<String, String> = FxHashMap::default();
 
-        for pkg_dir in Self::collect_declared_dependency_roots(config, module_cfg) {
-            let Some(parsed) = Self::read_dependency_module_json(&pkg_dir) else {
+        // Use LocalDependencyGraph for BFS-consistent ordering and type classification.
+        let graph = LocalDependencyGraph::build(&module_cfg.src_path, &config.project_root);
+
+        for node in graph.nodes.values() {
+            // Only handle SourceHar and SharedHsp nodes; skip RemoteOrUnknown/NativeSo/BytecodeHar.
+            let is_hsp = node.node_type == DependencyNodeType::SharedHsp;
+            let is_har = node.node_type == DependencyNodeType::SourceHar;
+            if !is_hsp && !is_har {
+                continue;
+            }
+            if node.pkg_root.as_os_str().is_empty() {
+                continue;
+            }
+
+            let pkg_dir = &node.pkg_root;
+            let Some(parsed) = Self::read_dependency_module_json(pkg_dir) else {
                 continue;
             };
-            let dep_name = Self::dependency_package_name(&pkg_dir);
+            let dep_name = &node.package_name;
             let module_name = parsed
                 .module
                 .name
                 .filter(|name| !name.is_empty())
-                .unwrap_or_else(|| dep_name.rsplit('/').next().unwrap_or(&dep_name).to_string());
+                .unwrap_or_else(|| dep_name.rsplit('/').next().unwrap_or(dep_name).to_string());
 
-            let entry_rel = Self::dep_entry_rel_path(&pkg_dir);
+            let entry_rel = Self::dep_entry_rel_path(pkg_dir);
             let ohm_url = if use_normalized {
                 // Normalized format: @normalized:N&<bundleName>&<moduleName>&<entryRelPath>&<version>
-                // hvigor uses the oh-package.json5 version field; fall back to "" when absent.
-                let version = Self::dep_package_version(&pkg_dir);
+                let version = Self::dep_package_version(pkg_dir);
                 format!(
                     "@normalized:N&{}&{}&{}&{}",
                     bundle_name, module_name, entry_rel, version
@@ -1582,10 +1596,10 @@ impl LoaderJson {
                 format!("@bundle:{}/{}/{}", bundle_name, module_name, entry_rel)
             };
 
-            if parsed.module.module_type == "shared" {
-                hsp_map.insert(dep_name, ohm_url);
-            } else if parsed.module.module_type == "har" {
-                har_map.insert(dep_name, ohm_url);
+            if is_hsp {
+                hsp_map.insert(dep_name.clone(), ohm_url);
+            } else {
+                har_map.insert(dep_name.clone(), ohm_url);
             }
         }
 
