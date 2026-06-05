@@ -98,7 +98,10 @@ impl TaskInputs {
 
     /// Derive a stable obfuscation hash from the config's obfuscation settings.
     ///
-    /// Returns 0 when obfuscation is disabled (no rules file to hash).
+    /// Hashes the content of ALL rule files (not just the first) so that a
+    /// change to any rule file invalidates the ABC compile cache.
+    ///
+    /// Returns 0 when obfuscation is disabled or no rule files are configured.
     fn compute_obfuscation_hash(config: &ArkdownConfig) -> u64 {
         let Some(ark) = config.product.build_option.ark_options.as_ref() else {
             return 0;
@@ -106,18 +109,21 @@ impl TaskInputs {
         let Some(obf) = ark.obfuscation.as_ref() else {
             return 0;
         };
-        if !obf.enable_obfuscation {
+        if !obf.enable_obfuscation || obf.rule_files.is_empty() {
             return 0;
         }
-        let Some(rules_path) = obf.rule_files.first() else {
-            return 0;
-        };
-        let Ok(content) = std::fs::read(rules_path) else {
-            return 0;
-        };
         let mut h: u64 = 0xcbf29ce484222325;
-        for b in content {
-            h ^= b as u64;
+        // Hash all rule files in order — a change to any file invalidates the cache.
+        for rules_path in &obf.rule_files {
+            let Ok(content) = std::fs::read(rules_path) else {
+                continue;
+            };
+            for b in content {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+            // Separator between files so that [A, AB] ≠ [AA, B].
+            h ^= b'\0' as u64;
             h = h.wrapping_mul(0x100000001b3);
         }
         h
