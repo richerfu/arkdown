@@ -201,6 +201,34 @@ pub(super) fn write_resource_config_files(
     config: &ArkdownConfig,
     res_out: &Path,
 ) -> Result<()> {
+    // Use src/main/resources as the default module resources path when no
+    // specific resource directories have been determined.  The hvigor parity
+    // report reads resConfig.json to compare resource inputs; callers that
+    // know the effective resource directories should call the variant that
+    // accepts an explicit list.
+    let default_res_dir = module.src_path.join("src/main/resources");
+    write_resource_config_files_with_dirs(
+        project_root,
+        module,
+        config,
+        res_out,
+        &[default_res_dir],
+    )
+}
+
+/// Like [`write_resource_config_files`] but uses `module_res_dirs` for
+/// `moduleResources` in `resConfig.json` instead of the default `src/main/resources`.
+///
+/// Callers (build.rs) should pass the effective resource directories after
+/// target selection so the config matches what the resource compiler actually
+/// processes.
+pub(super) fn write_resource_config_files_with_dirs(
+    project_root: &Path,
+    module: &ModuleConfig,
+    config: &ArkdownConfig,
+    res_out: &Path,
+    module_res_dirs: &[PathBuf],
+) -> Result<()> {
     let project_root = canonical_or_owned(project_root);
     let module_root = canonical_or_owned(&module.src_path);
     let res_out = canonical_or_owned(res_out);
@@ -238,9 +266,9 @@ pub(super) fn write_resource_config_files(
                 path_string(&module_root.join("build/default/generated/r/default/ResourceTable.h")),
             ],
             "applicationResource": path_string(&project_root.join("AppScope/resources")),
-            "moduleResources": [
-                path_string(&module_root.join("src/main/resources")),
-            ],
+            "moduleResources": module_res_dirs.iter().map(|d| {
+                serde_json::Value::String(path_string(&canonical_or_owned(d)))
+            }).collect::<Vec<_>>(),
             "dependencies": dependencies,
             "iconCheck": true,
             "compression": path_string(&res_out.join("opt-compression.json")),

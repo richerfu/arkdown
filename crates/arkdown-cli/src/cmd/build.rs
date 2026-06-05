@@ -76,6 +76,7 @@ use intermediates::{
     canonical_or_owned, copy_ets_assets_to_loader_out, copy_if_exists, extract_zip_entry,
     path_string, rewrite_package_intermediate_module_json, write_bytes, write_hap_metadata,
     write_json_pretty, write_profile_intermediates, write_resource_config_files,
+    write_resource_config_files_with_dirs,
     write_router_map_intermediates, write_static_intermediate_files,
 };
 mod module_plan;
@@ -562,7 +563,28 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         })
         .map_err(|e| anyhow::anyhow!("process distro filter profile failed: {}", e))?;
         write_profile_intermediates(&module.src_path, &module_json_out)?;
-        write_resource_config_files(&project_root, module, &config_arc, &res_out)?;
+        // Write restool config using the effective module resource directories
+        // (may include target-specific `src/<target>/resources/` instead of
+        // the default `src/main/resources/`) so the hvigor parity report
+        // compares the correct resource inputs.
+        {
+            let module_res_dirs: Vec<PathBuf> =
+                module_resource_dirs(config_arc.as_ref(), module)
+                    .into_iter()
+                    .filter(|d| d.exists())
+                    .collect();
+            if module_res_dirs.is_empty() {
+                write_resource_config_files(&project_root, module, &config_arc, &res_out)?;
+            } else {
+                write_resource_config_files_with_dirs(
+                    &project_root,
+                    module,
+                    &config_arc,
+                    &res_out,
+                    &module_res_dirs,
+                )?;
+            }
+        }
 
         let loader_json_out = module
             .src_path
