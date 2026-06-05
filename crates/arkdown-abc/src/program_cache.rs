@@ -10,6 +10,10 @@ use crate::emit::strings::StringTable;
 use crate::ir::debug_lnp::LineTracker;
 use crate::ir::opcodes::{Insn, PandasmImm, PandasmInsn};
 use crate::isa::{encode_pandasm_instruction, IdKind};
+use crate::names::{
+    class_name_from_pandasm_record, full_method_name, literal_array_key, literal_array_record_name,
+    pandasm_record_name, short_method_name,
+};
 use crate::proto_panda::{
     ins, program, scalar_value, variant_value, DebuginfoIns, Field, FieldMetadata, Function,
     FunctionMetadata, Ins, ItemMetadata, Literal, Metadata, ParamMetadata, Parameter, Program,
@@ -27,6 +31,11 @@ const VARIANT_STRING: i32 = variant_value::VariantValueType::String as i32;
 
 const SCALAR_UINT64: i32 = scalar_value::VariantValueType::Uint64 as i32;
 const SCALAR_STRING: i32 = scalar_value::VariantValueType::String as i32;
+
+const CONCURRENT_MODULE_REQUEST_RECORD_NAME: &str = "_ESConcurrentModuleRequestsAnnotation";
+const EXPECTED_PROPERTY_COUNT_RECORD_NAME: &str = "_ESExpectedPropertyCountAnnotation";
+const SLOT_NUMBER_RECORD_NAME: &str = "_ESSlotNumberAnnotation";
+const ANNOTATION_RECORD_ACCESS_FLAGS: u32 = 0x2001;
 
 pub(crate) fn program_for_record(
     file: &AbcFile,
@@ -54,10 +63,7 @@ pub(crate) fn program_for_record(
 
     let mut program = Program {
         lang,
-        record_table: vec![program::RecordTable {
-            key: bytes(&record.name),
-            value: Some(record_to_proto(record, file)),
-        }],
+        record_table: Vec::with_capacity(record.methods.len() + 3),
         function_table: Vec::with_capacity(record.methods.len()),
         function_synonyms: Vec::new(),
         literal_array_table: Vec::with_capacity(literal_indices.len()),
@@ -69,10 +75,22 @@ pub(crate) fn program_for_record(
         array_types: Vec::new(),
     };
 
+    push_annotation_record_tables(
+        &mut program.record_table,
+        record
+            .methods
+            .iter()
+            .any(|method| method.expected_property_count.is_some()),
+    );
+    program.record_table.push(program::RecordTable {
+        key: bytes(&pandasm_record_name(&record.name)),
+        value: Some(record_to_proto(record, file)),
+    });
+
     for method in &record.methods {
         let function = function_to_proto(method, record, &file.strings)?;
         program.function_table.push(program::FunctionTable {
-            key: bytes(&method.name),
+            key: bytes(&full_method_name(&record.name, &method.name)),
             value: Some(function),
         });
     }
@@ -85,7 +103,7 @@ pub(crate) fn program_for_record(
             .literal_array_table
             .push(program::LiteralArrayTable {
                 key: bytes(&literal_key(record, idx)),
-                value: Some(literal_array_to_proto(array)),
+                value: Some(literal_array_to_proto(array, &record.name)),
             });
     }
 
@@ -109,26 +127,39 @@ pub(crate) fn program_for_file(file: &AbcFile) -> io::Result<Program> {
         .first()
         .map(|record| record.source_lang as u32)
         .unwrap_or_default();
+    let has_expected_property_count = file.records.iter().any(|record| {
+        record
+            .methods
+            .iter()
+            .any(|method| method.expected_property_count.is_some())
+    });
     let mut literal_indices = BTreeSet::new();
     let mut literal_keys = BTreeMap::new();
+    let mut literal_record_names = BTreeMap::new();
     for record in &file.records {
         for &idx in &record.module_literal_indices {
             literal_indices.insert(idx);
             literal_keys
                 .entry(idx)
                 .or_insert_with(|| literal_key(record, idx));
+            literal_record_names
+                .entry(idx)
+                .or_insert_with(|| record.name.clone());
         }
         for &idx in &record.literal_indices {
             literal_indices.insert(idx);
             literal_keys
                 .entry(idx)
                 .or_insert_with(|| literal_key(record, idx));
+            literal_record_names
+                .entry(idx)
+                .or_insert_with(|| record.name.clone());
         }
     }
 
     let mut program = Program {
         lang,
-        record_table: Vec::with_capacity(file.records.len()),
+        record_table: Vec::with_capacity(file.records.len() + 3),
         function_table: Vec::new(),
         function_synonyms: Vec::new(),
         literal_array_table: Vec::with_capacity(literal_indices.len()),
@@ -136,15 +167,16 @@ pub(crate) fn program_for_file(file: &AbcFile) -> io::Result<Program> {
         array_types: Vec::new(),
     };
 
+    push_annotation_record_tables(&mut program.record_table, has_expected_property_count);
     for record in &file.records {
         program.record_table.push(program::RecordTable {
-            key: bytes(&record.name),
+            key: bytes(&pandasm_record_name(&record.name)),
             value: Some(record_to_proto(record, file)),
         });
         for method in &record.methods {
             let function = function_to_proto(method, record, &file.strings)?;
             program.function_table.push(program::FunctionTable {
-                key: bytes(&method.name),
+                key: bytes(&full_method_name(&record.name, &method.name)),
                 value: Some(function),
             });
         }
@@ -163,7 +195,13 @@ pub(crate) fn program_for_file(file: &AbcFile) -> io::Result<Program> {
                         .map(String::as_str)
                         .unwrap_or_default(),
                 ),
-                value: Some(literal_array_to_proto(array)),
+                value: Some(literal_array_to_proto(
+                    array,
+                    literal_record_names
+                        .get(&idx)
+                        .map(String::as_str)
+                        .unwrap_or_default(),
+                )),
             });
     }
 
@@ -187,7 +225,12 @@ pub(crate) fn append_program_to_file(
             continue;
         };
         let is_module_literal = module_literal_keys.contains(&key);
-        let literal = literal_array_from_proto(array, is_module_literal, &mut literal_method_refs)?;
+        let literal = literal_array_from_proto(
+            array,
+            is_module_literal,
+            literal_array_record_name(&key),
+            &mut literal_method_refs,
+        )?;
         let index = file.literal_arrays.len();
         file.literal_arrays.push(literal);
         literal_key_to_index.insert(key, index);
@@ -204,17 +247,24 @@ pub(crate) fn append_program_to_file(
         let Some(record_proto) = record_entry.value else {
             continue;
         };
-        let record_name = if record_proto.name.is_empty() {
+        let proto_record_name = if record_proto.name.is_empty() {
             utf8(&record_entry.key)?
         } else {
             utf8(&record_proto.name)?
         };
+        if is_pandasm_annotation_stub(&proto_record_name) {
+            continue;
+        }
+        let record_name = class_name_from_pandasm_record(&proto_record_name);
         let record_index = file.records.len();
         let mut function_refs = FunctionRefs::default();
         let mut literal_refs = BTreeSet::new();
         let mut methods = Vec::with_capacity(functions.len());
 
         for (function_key, function) in &functions {
+            if !function_belongs_to_record(function_key, function, &record_name)? {
+                continue;
+            }
             let method = method_from_proto(
                 function_key,
                 function,
@@ -294,14 +344,79 @@ fn collect_module_literal_keys(program: &Program) -> io::Result<BTreeSet<String>
     Ok(keys)
 }
 
+fn push_annotation_record_tables(
+    record_table: &mut Vec<program::RecordTable>,
+    has_expected_property_count: bool,
+) {
+    for name in annotation_record_names(has_expected_property_count) {
+        record_table.push(program::RecordTable {
+            key: bytes(name),
+            value: Some(annotation_record_to_proto(name)),
+        });
+    }
+}
+
+fn annotation_record_names(has_expected_property_count: bool) -> Vec<&'static str> {
+    let mut names = Vec::with_capacity(if has_expected_property_count { 3 } else { 2 });
+    names.push(CONCURRENT_MODULE_REQUEST_RECORD_NAME);
+    if has_expected_property_count {
+        names.push(EXPECTED_PROPERTY_COUNT_RECORD_NAME);
+    }
+    names.push(SLOT_NUMBER_RECORD_NAME);
+    names
+}
+
+fn annotation_record_to_proto(name: &str) -> Record {
+    Record {
+        name: bytes(name),
+        conflict: false,
+        language: 0,
+        metadata: Some(record_metadata(ANNOTATION_RECORD_ACCESS_FLAGS)),
+        field_list: Vec::new(),
+        params_num: 0,
+        body_presence: false,
+        body_location: None,
+        source_file: Vec::new(),
+        file_location: None,
+    }
+}
+
+fn is_pandasm_annotation_stub(name: &str) -> bool {
+    matches!(
+        name,
+        CONCURRENT_MODULE_REQUEST_RECORD_NAME
+            | EXPECTED_PROPERTY_COUNT_RECORD_NAME
+            | SLOT_NUMBER_RECORD_NAME
+    )
+}
+
+fn function_belongs_to_record(
+    function_key: &[u8],
+    function: &Function,
+    record_name: &str,
+) -> io::Result<bool> {
+    let name = if function.name.is_empty() {
+        utf8(function_key)?
+    } else {
+        utf8(&function.name)?
+    };
+    Ok(short_method_name(record_name, &name) != name)
+}
+
 fn literal_array_from_proto(
     array: crate::proto_panda::LiteralArray,
     module_style: bool,
+    record_name: Option<&str>,
     method_refs: &mut BTreeSet<String>,
 ) -> io::Result<LiteralArray> {
     let mut entries = Vec::with_capacity(array.literals.len());
     for literal in array.literals {
-        entries.push(literal_from_proto(literal, module_style, method_refs)?);
+        entries.push(literal_from_proto(
+            literal,
+            module_style,
+            record_name,
+            method_refs,
+        )?);
     }
     Ok(LiteralArray { entries })
 }
@@ -309,6 +424,7 @@ fn literal_array_from_proto(
 fn literal_from_proto(
     literal: Literal,
     module_style: bool,
+    record_name: Option<&str>,
     method_refs: &mut BTreeSet<String>,
 ) -> io::Result<LiteralEntry> {
     let Some(value) = literal.value else {
@@ -334,7 +450,10 @@ fn literal_from_proto(
             Ok(LiteralEntry::TaggedMethod(to_u32(value, "literal method")?))
         }
         (0x06, Some(variant_value::Value::ValueStr(value)), _) => {
-            let name = utf8(&value)?;
+            let value = utf8(&value)?;
+            let name = record_name
+                .map(|record_name| short_method_name(record_name, &value))
+                .unwrap_or(value);
             method_refs.insert(name.clone());
             Ok(LiteralEntry::TaggedMethodName(name))
         }
@@ -434,6 +553,7 @@ fn method_from_proto(
     } else {
         utf8(&function.name)?
     };
+    let name = short_method_name(record_name, &name);
     let (pandasm_insns, pandasm_debug, line_ops, catch_entries, method_refs) =
         function_insns_from_proto(function, record_name, strings, literal_key_to_index)?;
     refs.constructor_names
@@ -673,7 +793,7 @@ fn catch_entry_from_proto(
 
 fn insn_from_proto(
     ins: &Ins,
-    _record_name: &str,
+    record_name: &str,
     strings: &mut StringTable,
     literal_key_to_index: &BTreeMap<String, usize>,
     refs: &mut MethodDecodeRefs,
@@ -868,7 +988,7 @@ fn insn_from_proto(
             reg_u8(ins, 3)?,
         ),
         146 => {
-            let name = utf8(id(ins, 0)?)?;
+            let name = short_method_name(record_name, &utf8(id(ins, 0)?)?);
             let name_id = intern_id(strings, name.as_bytes())?;
             refs.definefunc_order.push(name.clone());
             Insn::DefineFuncShort(
@@ -878,7 +998,7 @@ fn insn_from_proto(
             )
         }
         147 => {
-            let name = utf8(id(ins, 0)?)?;
+            let name = short_method_name(record_name, &utf8(id(ins, 0)?)?);
             refs.method_pool_entries.insert(name.clone());
             Insn::DefineMethodShort(
                 imm_u8(ins, 0, "definemethod slot")?,
@@ -887,7 +1007,7 @@ fn insn_from_proto(
             )
         }
         148 => {
-            let ctor = utf8(id(ins, 0)?)?;
+            let ctor = short_method_name(record_name, &utf8(id(ins, 0)?)?);
             refs.constructor_names.insert(ctor.clone());
             refs.method_pool_entries.insert(ctor);
             let literal = literal_ref(literal_key_to_index, id(ins, 1)?, refs)?;
@@ -1024,7 +1144,14 @@ fn insn_from_proto(
         259 => Insn::Return,
         260 => Insn::ReturnUndefined,
         261 => Insn::Nop,
-        opcode => generic_insn_from_proto(ins, opcode, strings, literal_key_to_index, refs)?,
+        opcode => generic_insn_from_proto(
+            ins,
+            opcode,
+            record_name,
+            strings,
+            literal_key_to_index,
+            refs,
+        )?,
     };
     Ok(DecodedItem::Insn { insn, jump })
 }
@@ -1032,6 +1159,7 @@ fn insn_from_proto(
 fn generic_insn_from_proto(
     ins: &Ins,
     opcode: u32,
+    record_name: &str,
     strings: &mut StringTable,
     literal_key_to_index: &BTreeMap<String, usize>,
     refs: &mut MethodDecodeRefs,
@@ -1046,7 +1174,7 @@ fn generic_insn_from_proto(
         })
         .collect::<io::Result<Vec<_>>>()?;
     let bytes = encode_pandasm_instruction(opcode, &ins.regs, &ins.ids, &imms, |kind, id| {
-        resolve_pandasm_proto_id(kind, id, strings, literal_key_to_index, refs)
+        resolve_pandasm_proto_id(kind, id, record_name, strings, literal_key_to_index, refs)
     })
     .ok_or_else(|| {
         io::Error::new(
@@ -1066,12 +1194,18 @@ fn generic_insn_from_proto(
 fn resolve_pandasm_proto_id(
     kind: IdKind,
     id: &[u8],
+    record_name: &str,
     strings: &mut StringTable,
     literal_key_to_index: &BTreeMap<String, usize>,
     refs: &mut MethodDecodeRefs,
 ) -> Option<u32> {
     match kind {
-        IdKind::String | IdKind::Method => intern_id(strings, id).ok().map(u32::from),
+        IdKind::String => intern_id(strings, id).ok().map(u32::from),
+        IdKind::Method => {
+            let name = std::str::from_utf8(id).ok()?;
+            let name = short_method_name(record_name, name);
+            intern_id(strings, name.as_bytes()).ok().map(u32::from)
+        }
         IdKind::LiteralArray => literal_ref(literal_key_to_index, id, refs)
             .ok()
             .map(u32::from),
@@ -1270,7 +1404,7 @@ fn invalid_data<T>(message: impl Into<String>) -> io::Result<T> {
 
 fn record_to_proto(record: &ClassRecord, file: &AbcFile) -> Record {
     Record {
-        name: bytes(&record.name),
+        name: bytes(&pandasm_record_name(&record.name)),
         conflict: false,
         language: record.source_lang as u32,
         metadata: Some(record_metadata(record.access_flags)),
@@ -1359,7 +1493,7 @@ fn function_to_proto(
     }
 
     Ok(Function {
-        name: bytes(&method.name),
+        name: bytes(&full_method_name(&record.name, &method.name)),
         language: record.source_lang as u32,
         metadata: Some(function_metadata(method.access_flags())),
         label_table: Vec::new(),
@@ -1681,13 +1815,14 @@ fn insn_to_proto(
         Insn::DefineFuncShort(slot, id, length) | Insn::DefineMethodShort(slot, id, length) => {
             out.imms
                 .extend([imm_i64(*slot as i64), imm_i64(*length as i64)]);
-            out.ids.push(string_id(strings, *id)?);
+            out.ids.push(method_id(record, strings, *id)?);
         }
         Insn::DefineClassWithBuffer(slot, _ctor, literal, argc, reg) => {
             out.imms
                 .extend([imm_i64(*slot as i64), imm_i64(*argc as i64)]);
             out.ids.push(bytes(
-                &next_constructor_name(record, offset).unwrap_or_else(|| "func_main_0".to_string()),
+                &next_constructor_name(record, offset)
+                    .unwrap_or_else(|| full_method_name(&record.name, "func_main_0")),
             ));
             out.ids.push(bytes(&literal_key(record, *literal as usize)));
             out.regs.push(*reg as u32);
@@ -1729,7 +1864,7 @@ fn next_constructor_name(record: &ClassRecord, _offset: usize) -> Option<String>
         .methods
         .iter()
         .find(|method| method.kind == MethodKind::Constructor)
-        .map(|method| method.name.clone())
+        .map(|method| full_method_name(&record.name, &method.name))
 }
 
 fn pandasm_opcode(insn: &Insn) -> u32 {
@@ -1877,13 +2012,20 @@ fn pandasm_opcode(insn: &Insn) -> u32 {
     }
 }
 
-fn literal_array_to_proto(array: &LiteralArray) -> crate::proto_panda::LiteralArray {
+fn literal_array_to_proto(
+    array: &LiteralArray,
+    record_name: &str,
+) -> crate::proto_panda::LiteralArray {
     crate::proto_panda::LiteralArray {
-        literals: array.entries.iter().map(literal_to_proto).collect(),
+        literals: array
+            .entries
+            .iter()
+            .map(|entry| literal_to_proto(entry, record_name))
+            .collect(),
     }
 }
 
-fn literal_to_proto(entry: &LiteralEntry) -> Literal {
+fn literal_to_proto(entry: &LiteralEntry, record_name: &str) -> Literal {
     match entry {
         LiteralEntry::TaggedInteger(value) | LiteralEntry::RawU32(value) => {
             literal_u32(0x02, *value)
@@ -1893,7 +2035,9 @@ fn literal_to_proto(entry: &LiteralEntry) -> Literal {
             literal_string(0x05, value)
         }
         LiteralEntry::TaggedMethod(value) => literal_u32(0x06, *value),
-        LiteralEntry::TaggedMethodName(value) => literal_string(0x06, value),
+        LiteralEntry::TaggedMethodName(value) => {
+            literal_string(0x06, &full_method_name(record_name, value))
+        }
         LiteralEntry::TaggedMethodAffiliate(value) => literal_u16(0x09, *value),
         LiteralEntry::TaggedNull => literal_u8(0xff, 0),
     }
@@ -1948,6 +2092,18 @@ fn string_id(strings: &StringTable, id: u16) -> io::Result<Vec<u8>> {
     })
 }
 
+fn method_id(record: &ClassRecord, strings: &StringTable, id: u16) -> io::Result<Vec<u8>> {
+    strings
+        .get(id as u32)
+        .map(|name| bytes(&full_method_name(&record.name, name)))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "missing method id for ProgramCache",
+            )
+        })
+}
+
 fn imm_i64(value: i64) -> ins::IType {
     ins::IType {
         r#type: Some(ins::i_type::Type::ValueInt(value)),
@@ -1961,7 +2117,7 @@ fn imm_f64(value: f64) -> ins::IType {
 }
 
 fn literal_key(record: &ClassRecord, literal_index: usize) -> String {
-    format!("{}_{}", record.name, literal_index)
+    literal_array_key(&record.name, literal_index)
 }
 
 fn label_name(offset: usize) -> String {
@@ -2070,7 +2226,8 @@ mod tests {
         let mut refs = MethodDecodeRefs::default();
 
         let restored =
-            generic_insn_from_proto(&ins, 0, &mut strings, &literals, &mut refs).unwrap();
+            generic_insn_from_proto(&ins, 0, "Lentry/main;", &mut strings, &literals, &mut refs)
+                .unwrap();
 
         let Insn::Pandasm(raw) = restored else {
             panic!("generic PB opcode should restore as Insn::Pandasm");
@@ -2102,11 +2259,33 @@ mod tests {
         file.add_record(record);
 
         let program = program_for_record(&file, 0).unwrap().unwrap();
-        assert_eq!(program.record_table.len(), 1);
+        assert_eq!(program.record_table.len(), 3);
+        assert_eq!(
+            program.record_table[0].key,
+            b"_ESConcurrentModuleRequestsAnnotation"
+        );
+        assert_eq!(program.record_table[1].key, b"_ESSlotNumberAnnotation");
+        let user_record = program
+            .record_table
+            .iter()
+            .find(|record| record.key == b"@bundle:demo/entry/ets/pages/Index")
+            .unwrap();
+        assert_eq!(user_record.key, b"@bundle:demo/entry/ets/pages/Index");
+        assert_eq!(
+            user_record.value.as_ref().unwrap().name,
+            b"@bundle:demo/entry/ets/pages/Index"
+        );
         assert!(program
             .function_table
             .iter()
-            .any(|entry| entry.key == b"func_main_0"));
+            .any(|entry| entry.key == b"@bundle:demo/entry/ets/pages/Index.func_main_0"));
+        let main = program
+            .function_table
+            .iter()
+            .find(|entry| entry.key == b"@bundle:demo/entry/ets/pages/Index.func_main_0")
+            .and_then(|entry| entry.value.as_ref())
+            .unwrap();
+        assert_eq!(main.name, b"@bundle:demo/entry/ets/pages/Index.func_main_0");
     }
 
     #[test]
@@ -2134,6 +2313,9 @@ mod tests {
         let program = program_for_record(&file, 0).unwrap().unwrap();
         let function_count = program.function_table.len();
         let literal_count = program.literal_array_table.len();
+        assert!(program.function_table.iter().all(|entry| entry
+            .key
+            .starts_with(b"@bundle:demo/entry/ets/pages/Index.")));
         assert!(program
             .function_table
             .iter()

@@ -1,5 +1,7 @@
 use rustc_hash::FxHashMap;
 
+use crate::isa::{id_operands as isa_id_operands, instruction_len as isa_instruction_len, IdKind};
+
 pub(super) fn patch_bytecode_index_operands(
     bytecode: &[u8],
     string_pool_indices: &FxHashMap<u16, u16>,
@@ -104,6 +106,16 @@ pub(super) fn patch_bytecode_index_operands(
             pos += 4;
             continue;
         }
+        if let Some(len) = patch_isa_id_operands(
+            &mut patched,
+            pos,
+            string_pool_indices,
+            literal_pool_indices,
+            definemethod_pool_indices_by_name,
+        ) {
+            pos += len;
+            continue;
+        }
         pos += instruction_len(opcode, patched.get(pos + 1).copied());
     }
     patched
@@ -146,8 +158,94 @@ pub(crate) fn remap_literal_array_ids(bytecode: &mut [u8], literal_indices: &FxH
             }
             _ => {}
         }
+        if let Some(len) = remap_isa_literal_array_ids(bytecode, pos, literal_indices) {
+            pos += len;
+            continue;
+        }
         pos += instruction_len(opcode, bytecode.get(pos + 1).copied());
     }
+}
+
+fn patch_isa_id_operands(
+    bytecode: &mut [u8],
+    pos: usize,
+    string_pool_indices: &FxHashMap<u16, u16>,
+    literal_pool_indices: &FxHashMap<u16, u16>,
+    method_pool_indices: &FxHashMap<u16, u16>,
+) -> Option<usize> {
+    let len = isa_instruction_len(bytecode, pos)?;
+    if pos.checked_add(len)? > bytecode.len() {
+        return None;
+    }
+    let operands = isa_id_operands(bytecode, pos)?;
+    for operand in operands {
+        let operand_pos = pos.checked_add(operand.offset)?;
+        let old = read_id_operand(bytecode, operand_pos, operand.width)?;
+        let new = match operand.kind {
+            IdKind::String => string_pool_indices.get(&(old as u16)).copied(),
+            IdKind::Method => method_pool_indices.get(&(old as u16)).copied(),
+            IdKind::LiteralArray => literal_pool_indices.get(&(old as u16)).copied(),
+            IdKind::Other => None,
+        };
+        if let Some(new) = new {
+            write_id_operand(bytecode, operand_pos, operand.width, new as u32)?;
+        }
+    }
+    Some(len)
+}
+
+fn remap_isa_literal_array_ids(
+    bytecode: &mut [u8],
+    pos: usize,
+    literal_indices: &FxHashMap<u16, u16>,
+) -> Option<usize> {
+    let len = isa_instruction_len(bytecode, pos)?;
+    if pos.checked_add(len)? > bytecode.len() {
+        return None;
+    }
+    for operand in isa_id_operands(bytecode, pos)? {
+        if operand.kind != IdKind::LiteralArray {
+            continue;
+        }
+        let operand_pos = pos.checked_add(operand.offset)?;
+        let old = read_id_operand(bytecode, operand_pos, operand.width)?;
+        if let Some(&new) = literal_indices.get(&(old as u16)) {
+            write_id_operand(bytecode, operand_pos, operand.width, new as u32)?;
+        }
+    }
+    Some(len)
+}
+
+fn read_id_operand(bytecode: &[u8], operand_pos: usize, width: u8) -> Option<u32> {
+    match width {
+        16 => {
+            Some(
+                u16::from_le_bytes([*bytecode.get(operand_pos)?, *bytecode.get(operand_pos + 1)?])
+                    as u32,
+            )
+        }
+        32 => Some(u32::from_le_bytes([
+            *bytecode.get(operand_pos)?,
+            *bytecode.get(operand_pos + 1)?,
+            *bytecode.get(operand_pos + 2)?,
+            *bytecode.get(operand_pos + 3)?,
+        ])),
+        _ => None,
+    }
+}
+
+fn write_id_operand(bytecode: &mut [u8], operand_pos: usize, width: u8, value: u32) -> Option<()> {
+    match width {
+        16 => {
+            let value = u16::try_from(value).ok()?;
+            bytecode[operand_pos..operand_pos + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        32 => {
+            bytecode[operand_pos..operand_pos + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        _ => return None,
+    }
+    Some(())
 }
 
 pub(super) fn assign_inline_cache_slots(bytecode: &mut [u8]) -> u32 {

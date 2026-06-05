@@ -16,6 +16,7 @@ use crate::isa::{
     id_operands as isa_id_operands, instruction_len as isa_instruction_len,
     is_call_instruction as isa_is_call_instruction, IdKind,
 };
+use crate::names::{full_method_name, literal_array_key};
 
 pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usize>, AbcError> {
     let reader = AbcReader::new(data).map_err(read_error("<abc input>"))?;
@@ -1092,11 +1093,15 @@ fn resolve_pandasm_id(
     index: u32,
 ) -> Option<Vec<u8>> {
     match kind {
-        IdKind::String | IdKind::Method => file
+        IdKind::String => file
             .strings
             .get(index)
             .map(|value| value.as_bytes().to_vec()),
-        IdKind::LiteralArray => Some(format!("{record_name}_{index}").into_bytes()),
+        IdKind::Method => file
+            .strings
+            .get(index)
+            .map(|value| full_method_name(record_name, value).into_bytes()),
+        IdKind::LiteralArray => Some(literal_array_key(record_name, index as usize).into_bytes()),
         IdKind::Other => None,
     }
 }

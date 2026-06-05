@@ -111,12 +111,12 @@ fn compile_to_abc_writes_upstream_program_cache_proto_bin() {
             package_name
         )
     );
-    assert_eq!(entry.program.record_table.len(), 1);
+    assert_eq!(entry.program.record_table.len(), 3);
     assert!(entry
         .program
         .function_table
         .iter()
-        .any(|function| function.key == b"func_main_0"));
+        .any(|function| function.key == b"entry|entry|1.0.0|src/main/ets/pages/Index.func_main_0"));
 }
 
 #[test]
@@ -171,11 +171,11 @@ fn compile_to_abc_writes_output_proto_and_returns_before_abc_emit() {
     let program = ProgramProtoFile::read(&output_proto)
         .unwrap()
         .expect("output proto is a protoPanda Program");
-    assert_eq!(program.record_table.len(), 1);
+    assert_eq!(program.record_table.len(), 3);
     assert!(program
         .function_table
         .iter()
-        .any(|function| function.key == b"func_main_0"));
+        .any(|function| function.key == b"entry|entry|1.0.0|src/main/ets/pages/Index.func_main_0"));
 }
 
 #[test]
@@ -482,11 +482,11 @@ fn compile_to_abc_writes_output_proto_for_abc_input() {
     let program = ProgramProtoFile::read(&output_proto)
         .unwrap()
         .expect("ABC input outputProto must be a protoPanda Program");
-    assert_eq!(program.record_table.len(), 1);
+    assert_eq!(program.record_table.len(), 3);
     assert!(program
         .function_table
         .iter()
-        .any(|function| function.key == b"func_main_0"));
+        .any(|function| function.key == b"entry/main.func_main_0"));
     assert!(
         !program.literal_array_table.is_empty(),
         "ABC input Program must retain module literal arrays"

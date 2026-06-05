@@ -41,6 +41,7 @@ pub mod emit;
 pub mod error;
 pub mod ir;
 pub(crate) mod isa;
+pub(crate) mod names;
 mod npm_entries;
 mod optimizer;
 mod program_cache;
