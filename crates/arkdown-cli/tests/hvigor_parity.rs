@@ -660,6 +660,37 @@ fn collect_build(
                 &["intermediates/source_map", "intermediates/loader_out"],
                 false,
             )?;
+            // Resource compiler config — important for verifying effective
+            // resource directories and dependency resource tables.
+            collect_named_artifact(
+                &mut artifacts,
+                root,
+                archive.as_ref(),
+                "resConfig.json",
+                None,
+                &["intermediates/res", "build/default"],
+                false,
+            )?;
+            // CompileArkTS handoff: filesInfo.txt lists all modules fed to es2abc.
+            collect_named_artifact(
+                &mut artifacts,
+                root,
+                archive.as_ref(),
+                "filesInfo.txt",
+                None,
+                &["cache/default/default@CompileArkTS", "cache/default"],
+                false,
+            )?;
+            // npmEntries.txt: package module entries written by the bundler.
+            collect_named_artifact(
+                &mut artifacts,
+                root,
+                archive.as_ref(),
+                "npmEntries.txt",
+                None,
+                &["cache/default/default@CompileArkTS", "cache/default"],
+                false,
+            )?;
         }
         ArtifactType::Har => {
             // HAR archives contain oh-package.json5, source ETS files, and optionally index.abc
