@@ -458,6 +458,7 @@ pub fn build_record_with_debug_and_source_map_for_target_with_mode(
                     .unwrap_or(1)
             }),
             source_file: path.to_string(),
+            source_code: None,
             param_names: Vec::new(),
             lexical_this: false,
         }),
@@ -562,6 +563,7 @@ pub fn build_record_with_debug_and_source_map_for_target_with_mode(
                 method.debug_info = Some(DebugInfoRecord {
                     line_start: 1,
                     source_file: file.clone(),
+                    source_code: None,
                     param_names: vec![],
                     lexical_this: false,
                 });
@@ -2135,6 +2137,7 @@ fn compile_function_record(
                 debug_info: source_file_path.map(|path| DebugInfoRecord {
                     line_start: compiled.debug_line_start.unwrap_or(1),
                     source_file: path.to_string(),
+                    source_code: None,
                     param_names,
                     lexical_this: func
                         .body
@@ -2185,6 +2188,7 @@ fn compile_function_record(
                 debug_info: source_file_path.map(|path| DebugInfoRecord {
                     line_start: compiled.debug_line_start.unwrap_or(1),
                     source_file: path.to_string(),
+                    source_code: None,
                     param_names,
                     lexical_this: captures.this_slot.is_some(),
                 }),
@@ -2828,6 +2832,7 @@ fn compile_class_elements(
         let debug_info = source_file_path.map(|path| DebugInfoRecord {
             line_start: compiled.debug_line_start.unwrap_or(1),
             source_file: path.to_string(),
+            source_code: None,
             param_names: Vec::new(),
             lexical_this: false,
         });
@@ -2879,6 +2884,7 @@ fn compile_class_elements(
             debug_info: source_file_path.map(|path| DebugInfoRecord {
                 line_start: compiled.debug_line_start.unwrap_or(1),
                 source_file: path.to_string(),
+                source_code: None,
                 param_names: Vec::new(),
                 lexical_this: false,
             }),
@@ -2917,6 +2923,7 @@ fn compile_class_elements(
             debug_info: source_file_path.map(|path| DebugInfoRecord {
                 line_start: compiled.debug_line_start.unwrap_or(1),
                 source_file: path.to_string(),
+                source_code: None,
                 param_names: Vec::new(),
                 lexical_this: false,
             }),
@@ -3087,6 +3094,7 @@ fn compile_class_elements(
             let debug_info = source_file_path.map(|path| DebugInfoRecord {
                 line_start: compiled.debug_line_start.unwrap_or(1),
                 source_file: path.to_string(),
+                source_code: None,
                 param_names: param_names.clone(),
                 lexical_this: method
                     .value

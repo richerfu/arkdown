@@ -524,6 +524,10 @@ impl AbcFile {
             .iter()
             .map(|class| vec![None; class.methods.len()])
             .collect();
+        let mut method_source_code_string_offsets: Vec<Vec<Option<u32>>> = all_classes
+            .iter()
+            .map(|class| vec![None; class.methods.len()])
+            .collect();
         let mut literal_string_offsets: Vec<Vec<Option<u32>>> = self
             .literal_arrays
             .iter()
@@ -621,6 +625,14 @@ impl AbcFile {
                     if debug_source_file_differs_from_record(class, debug) {
                         method_source_file_string_offsets[class_idx][method_idx] =
                             Some(string_items.get_or_create(&debug.source_file));
+                    }
+                    if let Some(source_code) = debug
+                        .source_code
+                        .as_deref()
+                        .filter(|value| !value.is_empty())
+                    {
+                        method_source_code_string_offsets[class_idx][method_idx] =
+                            Some(string_items.get_or_create(source_code));
                     }
                     let is_arrow = method.kind == MethodKind::Anonymous;
                     if !class.standalone_ecmascript_input {
@@ -753,15 +765,6 @@ impl AbcFile {
                     .iter()
                     .any(|method| method.debug_info.is_some())
         });
-        let needs_not_supported_source_code = all_classes.iter().any(|class| {
-            !class.standalone_ecmascript_input
-                && class.methods.iter().any(|method| {
-                    method.name == "func_main_0"
-                        && method.debug_info.as_ref().is_some_and(|debug| {
-                            debug_source_file_differs_from_record(class, debug)
-                        })
-                })
-        });
         let scope_offs_regular: Option<[u32; 3]> = needs_scope_debug.then(|| {
             [
                 string_items.get_or_create("4funcObj"),
@@ -777,8 +780,6 @@ impl AbcFile {
             ]
         });
         let any_type_off = needs_scope_debug.then(|| string_items.get_or_create("any"));
-        let not_supported_source_code_off =
-            needs_not_supported_source_code.then(|| string_items.get_or_create("not supported"));
         let expected_property_count_str_off = has_expected_property_count_annotations
             .then(|| string_items.get_or_create("ExpectedPropertyCount"));
         let slot_number_str_off = string_items.get_or_create("SlotNumber");
@@ -1572,6 +1573,8 @@ impl AbcFile {
                     if let Some(debug) = &method.debug_info {
                         let method_source_file_off =
                             method_source_file_string_offsets[class_idx][method_idx];
+                        let method_source_code_off =
+                            method_source_code_string_offsets[class_idx][method_idx];
                         if class_source_file_off.is_none() && method_source_file_off.is_none() {
                             continue;
                         }
@@ -1625,17 +1628,9 @@ impl AbcFile {
                         //   END
 
                         if let Some(src_off) = method_source_file_off {
-                            // SET_SOURCE_CODE is emitted for module func_main_0
-                            // inside the same upstream guard as SET_FILE.
-                            if method.name == "func_main_0" {
-                                if let Some(not_supported_source_code_off) =
-                                    not_supported_source_code_off
-                                {
-                                    lnp_data.push(0x0a);
-                                    cp.extend_from_slice(&uleb128(
-                                        not_supported_source_code_off as u64,
-                                    ));
-                                }
+                            if let Some(source_code_off) = method_source_code_off {
+                                lnp_data.push(0x0a);
+                                cp.extend_from_slice(&uleb128(source_code_off as u64));
                             }
 
                             // SET_FILE

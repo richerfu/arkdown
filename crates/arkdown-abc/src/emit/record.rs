@@ -253,6 +253,8 @@ pub struct DebugInfoRecord {
     pub line_start: u32,
     /// Source file path stored in the LNP SET_FILE debug opcode.
     pub source_file: String,
+    /// Optional source text stored through the LNP SET_SOURCE_CODE opcode.
+    pub source_code: Option<String>,
     /// Formal parameter names, parallel to the method's parameter list.
     /// Empty for methods whose params are unnamed or not tracked.
     pub param_names: Vec<String>,

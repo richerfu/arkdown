@@ -925,6 +925,9 @@ fn method_from_proto(
             Some(DebugInfoRecord {
                 line_start: 1,
                 source_file: utf8(&function.source_file)?,
+                source_code: (!function.source_code.is_empty())
+                    .then(|| utf8(&function.source_code))
+                    .transpose()?,
                 param_names: Vec::new(),
                 lexical_this: false,
             })
@@ -2356,7 +2359,12 @@ fn function_to_proto(
             .as_ref()
             .map(|debug| bytes(&debug.source_file))
             .unwrap_or_default(),
-        source_code: Vec::new(),
+        source_code: method
+            .debug_info
+            .as_ref()
+            .and_then(|debug| debug.source_code.as_ref())
+            .map(|source_code| bytes(source_code))
+            .unwrap_or_default(),
         catch_blocks: method
             .catch_entries
             .iter()
@@ -3803,6 +3811,33 @@ class A {
         )
     }
 
+    fn test_read_u32(bytes: &[u8], offset: usize) -> u32 {
+        u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
+    }
+
+    fn test_read_uleb(bytes: &[u8], offset: &mut usize) -> u64 {
+        let mut value = 0u64;
+        let mut shift = 0;
+        loop {
+            let byte = bytes[*offset];
+            *offset += 1;
+            value |= ((byte & 0x7f) as u64) << shift;
+            if byte & 0x80 == 0 {
+                return value;
+            }
+            shift += 7;
+        }
+    }
+
+    fn test_inline_string_at(bytes: &[u8], offset: usize) -> String {
+        let mut pos = offset;
+        let header = test_read_uleb(bytes, &mut pos);
+        let len = (header >> 1) as usize;
+        let is_ascii = header & 1 == 1;
+        assert!(is_ascii, "test strings are ASCII");
+        String::from_utf8(bytes[pos..pos + len].to_vec()).unwrap()
+    }
+
     fn annotated_record_and_field_file() -> AbcFile {
         let mut file = annotation_usage_file();
         let record = file
@@ -4250,6 +4285,102 @@ class A {}
         assert_eq!(
             restored_record.source_file.as_deref(),
             Some("usage_string.ets")
+        );
+    }
+
+    #[test]
+    fn function_source_code_roundtrips_through_proto_and_lnp_set_source_code() {
+        let mut file = annotation_usage_file();
+        let record = file
+            .records
+            .iter_mut()
+            .find(|record| record.name == "Lusage_string.ets;")
+            .expect("user record must exist");
+        record.source_file = Some("record_source.ets".to_string());
+        let method = record
+            .methods
+            .iter_mut()
+            .find(|method| method.name == "func_main_0")
+            .expect("func_main_0 method must exist");
+        let debug = method
+            .debug_info
+            .as_mut()
+            .expect("fixture method carries debug info");
+        debug.source_file = "function_source.ets".to_string();
+        debug.source_code = Some("let value = 1;".to_string());
+
+        let program = program_for_file(&file, 20).unwrap();
+        let function = function_by_short_name(&program, "func_main_0")
+            .expect("func_main_0 function must be present");
+        assert_eq!(function.source_file, b"function_source.ets");
+        assert_eq!(function.source_code, b"let value = 1;");
+
+        let mut restored = AbcFile::new();
+        append_program_to_file(&mut restored, program).unwrap();
+        let restored_method = restored
+            .records
+            .iter()
+            .find(|record| record.name == "Lusage_string.ets;")
+            .and_then(|record| {
+                record
+                    .methods
+                    .iter()
+                    .find(|method| method.name == "func_main_0")
+            })
+            .expect("restored func_main_0 method must exist");
+        let restored_debug = restored_method
+            .debug_info
+            .as_ref()
+            .expect("restored method debug info must exist");
+        assert_eq!(restored_debug.source_file, "function_source.ets");
+        assert_eq!(
+            restored_debug.source_code.as_deref(),
+            Some("let value = 1;")
+        );
+
+        let bytes = restored.serialize_with_version(version_for_target_api(20, None));
+        let reader = AbcReader::new(&bytes).unwrap();
+        let class = reader
+            .class_items()
+            .unwrap()
+            .into_iter()
+            .find(|class| class.name == "Lusage_string.ets;")
+            .expect("user class must be present");
+        assert_eq!(class.source_file.as_deref(), Some("record_source.ets"));
+        let method = class
+            .methods
+            .iter()
+            .find(|method| method.name == "func_main_0")
+            .expect("func_main_0 method item must exist");
+        let debug_info = method
+            .debug_info_off
+            .expect("method DEBUG_INFO tag must exist") as usize;
+
+        let mut pos = debug_info;
+        test_read_uleb(&bytes, &mut pos); // line_start
+        test_read_uleb(&bytes, &mut pos); // num_params
+        let cp_size = test_read_uleb(&bytes, &mut pos) as usize;
+        let cp_start = pos;
+        let mut cp = cp_start;
+        let source_code_off = test_read_uleb(&bytes, &mut cp) as usize;
+        let source_file_off = test_read_uleb(&bytes, &mut cp) as usize;
+        assert!(cp <= cp_start + cp_size);
+        assert_eq!(
+            test_inline_string_at(&bytes, source_code_off),
+            "let value = 1;"
+        );
+        assert_eq!(
+            test_inline_string_at(&bytes, source_file_off),
+            "function_source.ets"
+        );
+        pos = cp_start + cp_size;
+        let lnp_index = test_read_uleb(&bytes, &mut pos) as usize;
+        let lnp_idx_off = test_read_u32(&bytes, 0x28) as usize;
+        let lnp_offset = test_read_u32(&bytes, lnp_idx_off + lnp_index * 4) as usize;
+        assert_eq!(
+            &bytes[lnp_offset..lnp_offset + 2],
+            &[0x0a, 0x09],
+            "LNP must emit SET_SOURCE_CODE before SET_FILE"
         );
     }
 
