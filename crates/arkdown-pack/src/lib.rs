@@ -210,6 +210,8 @@ mod tests {
             resource_str_dir: None,
             oh_package_json: pkg_json,
             output_path: out.clone(),
+            declarations_dir: None,
+            consumer_rules_path: None,
         });
         assert!(result.is_ok(), "{:?}", result.err());
         assert!(out.exists());

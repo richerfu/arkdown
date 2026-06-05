@@ -326,6 +326,8 @@ fn run_build_har(fixture: &PathBuf) -> PathBuf {
             resource_str_dir: None,
             oh_package_json,
             output_path: output.clone(),
+            declarations_dir: None,
+            consumer_rules_path: None,
         })
         .expect("pack_har");
     output

@@ -1261,6 +1261,21 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 let source_dir = module.src_path.join("src/main/ets");
                 let oh_package_json = module.src_path.join("oh-package.json5");
                 if source_dir.exists() {
+                    // K4: Generate basic .d.ts / .d.ets declaration stubs BEFORE packing.
+                    // Emits re-export declarations so downstream consumers can resolve
+                    // types from this source HAR without full tsc.
+                    // Generated to intermediates/har/default/ so pack_har can include them.
+                    let declarations_dir =
+                        module.src_path.join("build/default/intermediates/har/default");
+                    generate_har_declarations(&module.src_path, &source_dir, &module.name)
+                        .unwrap_or_else(|e| {
+                            tracing::warn!(error = %e, "failed to generate HAR declarations");
+                        });
+
+                    // Consumer obfuscation rules for the HAR (written by obfuscation pass above).
+                    let consumer_rules_path = project_root
+                        .join("build/default/intermediates/obfuscation/default/consumer-rules.txt");
+
                     let packed = packager
                         .pack_har(HarPackInput {
                             module_name: module.name.clone(),
@@ -1274,6 +1289,10 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                             },
                             oh_package_json: oh_package_json.clone(),
                             output_path: output.clone(),
+                            declarations_dir: declarations_dir.exists().then_some(declarations_dir),
+                            consumer_rules_path: consumer_rules_path
+                                .exists()
+                                .then_some(consumer_rules_path),
                         })
                         .map_err(|e| anyhow::anyhow!("Pack failed: {}", e))?;
 
@@ -1317,14 +1336,6 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                     write_json_pretty(&har_info_out, &har_info).unwrap_or_else(|e| {
                         tracing::warn!(error = %e, "failed to write har-extend-info.json");
                     });
-
-                    // K4: Generate basic .d.ts / .d.ets declaration stubs.
-                    // Emits re-export declarations so downstream consumers can
-                    // resolve types from this source HAR without full tsc.
-                    generate_har_declarations(&module.src_path, &source_dir, &module.name)
-                        .unwrap_or_else(|e| {
-                            tracing::warn!(error = %e, "failed to generate HAR declarations");
-                        });
 
                     Some(packed)
                 } else {

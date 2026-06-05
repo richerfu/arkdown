@@ -502,6 +502,8 @@ fn test_har_contains_ets_source_files() {
             resource_str_dir: None,
             oh_package_json: pkg_json,
             output_path: out.clone(),
+            declarations_dir: None,
+            consumer_rules_path: None,
         })
         .expect("pack_har must succeed");
 
@@ -539,6 +541,8 @@ fn test_har_contains_oh_package_json5() {
             resource_str_dir: None,
             oh_package_json: pkg_json,
             output_path: out.clone(),
+            declarations_dir: None,
+            consumer_rules_path: None,
         })
         .expect("pack_har must succeed");
 
@@ -579,6 +583,8 @@ fn test_har_contains_permission_reason_resource_str() {
             resource_str_dir: Some(resource_str_dir),
             oh_package_json: pkg_json,
             output_path: out.clone(),
+            declarations_dir: None,
+            consumer_rules_path: None,
         })
         .expect("pack_har must succeed");
 
@@ -772,5 +778,130 @@ fn test_pack_hap_empty_integrated_hsps_no_libs_entry() {
             .any(|n| n.starts_with("libs/") && n.ends_with(".hsp")),
         "HAP with no integrated_hsps must not contain any .hsp under libs/; entries: {:?}",
         names
+    );
+}
+
+/// Verify that declaration stubs (`index.d.ts`, `index.d.ets`) from the
+/// declarations directory are included in the HAR archive at the root level.
+///
+/// hvigor calls `processDeclarationEntry()` before packing and places the
+/// resulting stubs at the archive root so consumers can use `types` to
+/// resolve type information without running `tsc`.
+#[test]
+fn test_har_includes_declaration_stubs() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src_dir = tmp.path().join("src/main/ets");
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::write(src_dir.join("Index.ets"), b"export class Index {}").unwrap();
+
+    let declarations_dir = tmp.path().join("declarations");
+    fs::create_dir_all(&declarations_dir).unwrap();
+    fs::write(
+        declarations_dir.join("index.d.ts"),
+        b"export declare class Index {}\n",
+    )
+    .unwrap();
+    fs::write(
+        declarations_dir.join("index.d.ets"),
+        b"export declare class Index {}\n",
+    )
+    .unwrap();
+    // Add an unrelated file that should NOT appear.
+    fs::write(declarations_dir.join("other.json"), b"{}").unwrap();
+
+    let pkg_json = tmp.path().join("oh-package.json5");
+    fs::write(&pkg_json, r#"{"name":"lib"}"#).unwrap();
+
+    let out = tmp.path().join("lib.har");
+    Packager::new(make_config())
+        .pack_har(HarPackInput {
+            module_name: "lib".into(),
+            source_dir: src_dir,
+            resources_dir: tmp.path().join("src/main/resources"),
+            resource_str_dir: None,
+            oh_package_json: pkg_json,
+            output_path: out.clone(),
+            declarations_dir: Some(declarations_dir),
+            consumer_rules_path: None,
+        })
+        .expect("pack_har must succeed");
+
+    let file = fs::File::open(&out).expect("open HAR");
+    let archive = zip::ZipArchive::new(file).expect("valid ZIP");
+    let names: Vec<_> = archive.file_names().collect();
+
+    assert!(
+        names.iter().any(|n| *n == "index.d.ts"),
+        "HAR must contain index.d.ts declaration stub; entries: {:?}",
+        names
+    );
+    assert!(
+        names.iter().any(|n| *n == "index.d.ets"),
+        "HAR must contain index.d.ets declaration stub; entries: {:?}",
+        names
+    );
+    assert!(
+        !names.iter().any(|n| *n == "other.json"),
+        "HAR must not contain non-declaration files from declarations dir; entries: {:?}",
+        names
+    );
+}
+
+/// Verify that consumer obfuscation rules are included in the HAR archive
+/// at the root level as `consumer-rules.txt`.
+///
+/// hvigor calls `generateConsumerObConfigFile()` and includes the rules so
+/// downstream consumers can extend their own obfuscation configuration.
+#[test]
+fn test_har_includes_consumer_rules() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src_dir = tmp.path().join("src/main/ets");
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::write(src_dir.join("Index.ets"), b"export class Index {}").unwrap();
+
+    let consumer_rules = tmp.path().join("consumer-rules.txt");
+    fs::write(
+        &consumer_rules,
+        b"-keep public class com.example.lib.*\n",
+    )
+    .unwrap();
+
+    let pkg_json = tmp.path().join("oh-package.json5");
+    fs::write(&pkg_json, r#"{"name":"lib"}"#).unwrap();
+
+    let out = tmp.path().join("lib.har");
+    Packager::new(make_config())
+        .pack_har(HarPackInput {
+            module_name: "lib".into(),
+            source_dir: src_dir,
+            resources_dir: tmp.path().join("src/main/resources"),
+            resource_str_dir: None,
+            oh_package_json: pkg_json,
+            output_path: out.clone(),
+            declarations_dir: None,
+            consumer_rules_path: Some(consumer_rules),
+        })
+        .expect("pack_har must succeed");
+
+    let file = fs::File::open(&out).expect("open HAR");
+    let mut archive = zip::ZipArchive::new(file).expect("valid ZIP");
+    let names: Vec<_> = archive.file_names().map(str::to_string).collect();
+
+    assert!(
+        names.iter().any(|n| n == "consumer-rules.txt"),
+        "HAR must contain consumer-rules.txt; entries: {:?}",
+        names
+    );
+
+    let mut content = String::new();
+    archive
+        .by_name("consumer-rules.txt")
+        .expect("consumer-rules.txt entry")
+        .read_to_string(&mut content)
+        .expect("read consumer-rules.txt");
+    assert!(
+        content.contains("-keep public class"),
+        "consumer-rules.txt must contain keep rules; got: {:?}",
+        content
     );
 }
