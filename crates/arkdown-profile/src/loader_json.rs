@@ -487,6 +487,9 @@ impl LoaderJson {
 
         let mut serialized_compile_entry = Self::collect_insight_intent_src_entries(module_cfg);
         serialized_compile_entry.extend(Self::collect_mock_compile_entries(config, module_cfg));
+        // ohosTest (local-test injection): add src/ohosTest/ets/ sources for Test builds.
+        serialized_compile_entry
+            .extend(Self::collect_ohos_test_compile_entries(config, module_cfg));
         serialized_compile_entry.extend(Self::collect_app_startup_compile_entries(module_cfg));
         serialized_compile_entry.extend(collect_runtime_only_source_files(config, module_cfg));
         serialized_compile_entry.extend(collect_runtime_only_package_source_files(
@@ -1295,6 +1298,49 @@ impl LoaderJson {
                 Self::is_existing_hvigor_compile_entry_path(&path).then_some(path)
             })
             .collect()
+    }
+
+    /// Collect `src/ohosTest/ets/` source files for `OutputTarget::Test` builds.
+    ///
+    /// hvigor's `collectOhosTestEntry()` scans `src/ohosTest/ets/` and adds all
+    /// `.ets`/`.ts` source files to `compileEntry` when building in test mode.
+    /// This is the "local-test injection state" — test harness sources that only
+    /// participate in the `ohosTest` build, not in regular debug/release builds.
+    fn collect_ohos_test_compile_entries(
+        config: &ArkdownConfig,
+        module_cfg: &ModuleConfig,
+    ) -> Vec<PathBuf> {
+        if !matches!(config.output_target, OutputTarget::Test) {
+            return vec![];
+        }
+
+        let test_ets_root = module_cfg.src_path.join("src/ohosTest/ets");
+        if !test_ets_root.is_dir() {
+            return vec![];
+        }
+
+        let mut entries = Vec::new();
+        let mut stack = vec![test_ets_root];
+        while let Some(dir) = stack.pop() {
+            let Ok(read_dir) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            let mut dir_entries: Vec<_> = read_dir.flatten().collect();
+            dir_entries.sort_by_key(|e| e.file_name());
+            for entry in dir_entries {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.is_file() {
+                    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                        if matches!(ext, "ets" | "ts") && !path.to_string_lossy().ends_with(".d.ts") && !path.to_string_lossy().ends_with(".d.ets") {
+                            entries.push(path);
+                        }
+                    }
+                }
+            }
+        }
+        entries
     }
 
     fn collect_app_startup_compile_entries(module_cfg: &ModuleConfig) -> Vec<PathBuf> {

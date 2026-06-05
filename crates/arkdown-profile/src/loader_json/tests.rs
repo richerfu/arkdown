@@ -2505,3 +2505,71 @@ fn test_loader_json_target_ets_src_added_to_source_roots() {
         pkg_info.original_source_roots[0]
     );
 }
+
+/// Verify that `src/ohosTest/ets/` sources are added to compileEntry when
+/// building in Test (ohosTest) mode, and excluded in debug/release mode.
+///
+/// Addresses section 3.4/3.1: 'local-test 注入態'
+/// hvigor's collectOhosTestEntry() scans src/ohosTest/ets/ for test sources.
+#[test]
+fn test_loader_json_ohos_test_sources_injected_in_test_mode() {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    let project_root = tmp.path().to_path_buf();
+    let module_root = project_root.join("entry");
+
+    // Create src/main/ets/Index.ets (main source)
+    fs::create_dir_all(module_root.join("src/main/ets")).expect("create main ets");
+    fs::write(module_root.join("src/main/ets/Index.ets"), "export {}").expect("write main");
+
+    // Create src/ohosTest/ets/ with test sources
+    let test_ets = module_root.join("src/ohosTest/ets");
+    fs::create_dir_all(&test_ets).expect("create test ets");
+    fs::write(test_ets.join("TestRunner.ets"), "export class TestRunner {}").expect("write test runner");
+    fs::write(test_ets.join("index.ets"), "export * from './TestRunner'").expect("write test index");
+    // A .d.ts file should NOT be included
+    fs::write(test_ets.join("TestTypes.d.ts"), "export type T = {}").expect("write types");
+
+    // Test mode should include ohosTest sources
+    let mut test_config = make_config(false);
+    test_config.project_root = project_root.clone();
+    test_config.output_target = arkdown_core::OutputTarget::Test;
+    let mut module_cfg = make_module_cfg();
+    module_cfg.src_path = module_root.clone();
+
+    let loader = LoaderJson::generate(&test_config, &module_cfg, &make_manifest());
+
+    let has_test_runner = loader.hvigor_compile_entry.iter().any(|e| e.contains("TestRunner"));
+    assert!(
+        has_test_runner,
+        "TestRunner.ets must be in compileEntry for ohosTest mode; entries: {:?}",
+        loader.hvigor_compile_entry
+    );
+    let has_test_index = loader.hvigor_compile_entry.iter().any(|e| e.contains("ohosTest") && e.contains("index"));
+    assert!(
+        has_test_index,
+        "index.ets must be in compileEntry for ohosTest mode; entries: {:?}",
+        loader.hvigor_compile_entry
+    );
+    let has_types = loader.hvigor_compile_entry.iter().any(|e| e.ends_with(".d.ts"));
+    assert!(
+        !has_types,
+        "declaration files must not be included in ohosTest compileEntry; entries: {:?}",
+        loader.hvigor_compile_entry
+    );
+
+    // Debug mode should NOT include ohosTest sources
+    let debug_config = make_config(false);
+    let mut debug_module_cfg = make_module_cfg();
+    debug_module_cfg.src_path = module_root;
+
+    let debug_loader = LoaderJson::generate(&debug_config, &debug_module_cfg, &make_manifest());
+    let has_ohos_test = debug_loader
+        .hvigor_compile_entry
+        .iter()
+        .any(|e| e.contains("ohosTest"));
+    assert!(
+        !has_ohos_test,
+        "ohosTest sources must not be included in debug compileEntry; entries: {:?}",
+        debug_loader.hvigor_compile_entry
+    );
+}
