@@ -4,7 +4,12 @@ use rustc_hash::FxHashMap;
 
 use crate::abc_reader::{AbcClassItem, AbcFieldValue, AbcLiteralEntry, AbcReader};
 use crate::emit::bytecode::instruction_len;
-use crate::emit::file::{AbcFile, LiteralArray, LiteralEntry};
+use crate::emit::file::{
+    AbcFile, LiteralArray, LiteralEntry, LITERAL_TAG_ACCESSOR, LITERAL_TAG_ASYNC_GENERATOR_METHOD,
+    LITERAL_TAG_BUILTIN_TYPE_INDEX, LITERAL_TAG_ETS_IMPLEMENTS, LITERAL_TAG_GENERATOR_METHOD,
+    LITERAL_TAG_GETTER, LITERAL_TAG_INTEGER, LITERAL_TAG_LITERAL_BUFFER_INDEX, LITERAL_TAG_METHOD,
+    LITERAL_TAG_METHOD_AFFILIATE, LITERAL_TAG_SETTER, LITERAL_TAG_STRING,
+};
 use crate::emit::record::{
     method_access, CatchEntry, ClassRecord, FieldRecord, FieldValue, MethodKind, MethodLabelStyle,
     MethodRecord, FIELD_OWNER_CLASS_IDX,
@@ -40,16 +45,19 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
     let literal_offsets = reader
         .literal_array_offsets()
         .map_err(read_error("<abc input>"))?;
-    let mut literal_offset_to_index = BTreeMap::new();
+    let literal_base_index = file.literal_arrays.len();
+    let literal_offset_to_index = literal_offsets
+        .iter()
+        .enumerate()
+        .map(|(index, &offset)| (offset, literal_base_index + index))
+        .collect::<BTreeMap<_, _>>();
     for offset in literal_offsets {
         let literal = if module_literal_offsets.contains(&offset) {
             read_module_record_literal_array(data, &reader, offset)?
         } else {
-            read_tagged_literal_array(&reader, offset)?
+            read_tagged_literal_array(&reader, offset, &literal_offset_to_index)?
         };
-        let index = file.literal_arrays.len();
         file.literal_arrays.push(literal);
-        literal_offset_to_index.insert(offset, index);
     }
 
     let method_names = classes
@@ -285,6 +293,7 @@ fn field_value_from_abc(
 fn read_tagged_literal_array(
     reader: &AbcReader<'_>,
     offset: u32,
+    literal_offset_to_index: &BTreeMap<u32, usize>,
 ) -> Result<LiteralArray, AbcError> {
     let array = reader
         .read_literal_array_item(offset)
@@ -292,12 +301,83 @@ fn read_tagged_literal_array(
     let mut entries = Vec::with_capacity(array.entries.len());
     for entry in array.entries {
         entries.push(match entry {
-            AbcLiteralEntry::U32(value) => LiteralEntry::TaggedInteger(value),
-            AbcLiteralEntry::String { value, .. } => LiteralEntry::TaggedString(value),
-            AbcLiteralEntry::Method { offset, name } => name
+            AbcLiteralEntry::Bool(value) => LiteralEntry::TaggedBool(value),
+            AbcLiteralEntry::U8 {
+                tag: LITERAL_TAG_ACCESSOR,
+                value,
+            } => LiteralEntry::TaggedAccessor(value),
+            AbcLiteralEntry::U8 {
+                tag: LITERAL_TAG_BUILTIN_TYPE_INDEX,
+                value,
+            } => LiteralEntry::TaggedBuiltinTypeIndex(value),
+            AbcLiteralEntry::U32 {
+                tag: LITERAL_TAG_INTEGER,
+                value,
+            } => LiteralEntry::TaggedInteger(value),
+            AbcLiteralEntry::U32 {
+                tag: LITERAL_TAG_LITERAL_BUFFER_INDEX,
+                value,
+            } => LiteralEntry::TaggedLiteralBufferIndex(value),
+            AbcLiteralEntry::F32(value) => LiteralEntry::TaggedFloat(value),
+            AbcLiteralEntry::F64(value) => LiteralEntry::TaggedDouble(value),
+            AbcLiteralEntry::String {
+                tag: LITERAL_TAG_STRING,
+                value,
+                ..
+            } => LiteralEntry::TaggedString(value),
+            AbcLiteralEntry::String {
+                tag: LITERAL_TAG_ETS_IMPLEMENTS,
+                value,
+                ..
+            } => LiteralEntry::TaggedEtsImplements(value),
+            AbcLiteralEntry::Method {
+                tag: LITERAL_TAG_METHOD,
+                offset,
+                name,
+            } => name
                 .map(LiteralEntry::TaggedMethodName)
                 .unwrap_or(LiteralEntry::TaggedMethod(offset)),
-            AbcLiteralEntry::U16(value) => LiteralEntry::TaggedMethodAffiliate(value),
+            AbcLiteralEntry::Method {
+                tag: LITERAL_TAG_GENERATOR_METHOD,
+                offset,
+                name,
+            } => name
+                .map(LiteralEntry::TaggedGeneratorMethodName)
+                .unwrap_or(LiteralEntry::TaggedGeneratorMethod(offset)),
+            AbcLiteralEntry::Method {
+                tag: LITERAL_TAG_ASYNC_GENERATOR_METHOD,
+                offset,
+                name,
+            } => name
+                .map(LiteralEntry::TaggedAsyncGeneratorMethodName)
+                .unwrap_or(LiteralEntry::TaggedAsyncGeneratorMethod(offset)),
+            AbcLiteralEntry::Method {
+                tag: LITERAL_TAG_GETTER,
+                offset,
+                name,
+            } => name
+                .map(LiteralEntry::TaggedGetterName)
+                .unwrap_or(LiteralEntry::TaggedGetter(offset)),
+            AbcLiteralEntry::Method {
+                tag: LITERAL_TAG_SETTER,
+                offset,
+                name,
+            } => name
+                .map(LiteralEntry::TaggedSetterName)
+                .unwrap_or(LiteralEntry::TaggedSetter(offset)),
+            AbcLiteralEntry::U16 {
+                tag: LITERAL_TAG_METHOD_AFFILIATE,
+                value,
+            } => LiteralEntry::TaggedMethodAffiliate(value),
+            AbcLiteralEntry::LiteralArray { offset } => {
+                let Some(index) = literal_offset_to_index.get(&offset).copied() else {
+                    return Err(AbcError::UnsupportedConstruct {
+                        construct: format!("missing nested literal array at {offset:#x}"),
+                        file: format!("{offset:#x}"),
+                    });
+                };
+                LiteralEntry::TaggedLiteralArrayIndex(index)
+            }
             AbcLiteralEntry::Null => LiteralEntry::TaggedNull,
             other => {
                 return Err(AbcError::UnsupportedConstruct {

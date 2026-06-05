@@ -28,6 +28,14 @@
 
 use std::collections::BTreeSet;
 
+use crate::emit::file::{
+    LITERAL_TAG_ACCESSOR, LITERAL_TAG_ASYNC_GENERATOR_METHOD, LITERAL_TAG_BOOL,
+    LITERAL_TAG_BUILTIN_TYPE_INDEX, LITERAL_TAG_DOUBLE, LITERAL_TAG_ETS_IMPLEMENTS,
+    LITERAL_TAG_FLOAT, LITERAL_TAG_GENERATOR_METHOD, LITERAL_TAG_GETTER, LITERAL_TAG_INTEGER,
+    LITERAL_TAG_LITERAL_ARRAY, LITERAL_TAG_LITERAL_BUFFER_INDEX, LITERAL_TAG_METHOD,
+    LITERAL_TAG_METHOD_AFFILIATE, LITERAL_TAG_NULL, LITERAL_TAG_SETTER, LITERAL_TAG_STRING,
+    LITERAL_TAG_TAGVALUE,
+};
 use thiserror::Error;
 
 /// Error type for ABC binary parse failures.
@@ -164,16 +172,38 @@ pub struct AbcLiteralArrayItem {
 #[derive(Debug, Clone, PartialEq)]
 pub enum AbcLiteralEntry {
     Bool(bool),
-    U8(u8),
-    U16(u16),
-    U32(u32),
+    U8 {
+        tag: u8,
+        value: u8,
+    },
+    U16 {
+        tag: u8,
+        value: u16,
+    },
+    U32 {
+        tag: u8,
+        value: u32,
+    },
     U64(u64),
     F32(f32),
     F64(f64),
-    String { offset: u32, value: String },
-    Method { offset: u32, name: Option<String> },
-    LiteralArray { offset: u32 },
-    ArrayPayload { tag: u8, offset: u32 },
+    String {
+        tag: u8,
+        offset: u32,
+        value: String,
+    },
+    Method {
+        tag: u8,
+        offset: u32,
+        name: Option<String>,
+    },
+    LiteralArray {
+        offset: u32,
+    },
+    ArrayPayload {
+        tag: u8,
+        offset: u32,
+    },
     Null,
 }
 
@@ -554,62 +584,68 @@ impl<'a> AbcReader<'a> {
             let tag = self.read_u8(cursor)?;
             cursor += 1;
             let entry = match tag {
-                0x00 => {
+                LITERAL_TAG_TAGVALUE => {
                     let value = self.read_u8(cursor)?;
                     cursor += 1;
-                    AbcLiteralEntry::U8(value)
+                    AbcLiteralEntry::U8 { tag, value }
                 }
-                0x01 => {
+                LITERAL_TAG_BOOL => {
                     let value = self.read_u8(cursor)? != 0;
                     cursor += 1;
                     AbcLiteralEntry::Bool(value)
                 }
-                0x02 | 0x17 => {
+                LITERAL_TAG_INTEGER | LITERAL_TAG_LITERAL_BUFFER_INDEX => {
                     let value = self.read_u32(cursor)?;
                     cursor += 4;
-                    AbcLiteralEntry::U32(value)
+                    AbcLiteralEntry::U32 { tag, value }
                 }
-                0x03 => {
+                LITERAL_TAG_FLOAT => {
                     let value = f32::from_bits(self.read_u32(cursor)?);
                     cursor += 4;
                     AbcLiteralEntry::F32(value)
                 }
-                0x04 => {
+                LITERAL_TAG_DOUBLE => {
                     let value = f64::from_bits(self.read_u64(cursor)?);
                     cursor += 8;
                     AbcLiteralEntry::F64(value)
                 }
-                0x05 | 0x1c => {
+                LITERAL_TAG_STRING | LITERAL_TAG_ETS_IMPLEMENTS => {
                     let string_off = self.read_u32(cursor)?;
                     cursor += 4;
                     AbcLiteralEntry::String {
+                        tag,
                         offset: string_off,
                         value: self.read_string_at(string_off as usize)?,
                     }
                 }
-                0x06 | 0x07 | 0x16 | 0x1a | 0x1b => {
+                LITERAL_TAG_METHOD
+                | LITERAL_TAG_GENERATOR_METHOD
+                | LITERAL_TAG_ASYNC_GENERATOR_METHOD
+                | LITERAL_TAG_GETTER
+                | LITERAL_TAG_SETTER => {
                     let method_off = self.read_u32(cursor)?;
                     cursor += 4;
                     AbcLiteralEntry::Method {
+                        tag,
                         offset: method_off,
                         name: self.method_name_at_offset(method_off)?,
                     }
                 }
-                0x08 | 0x19 | 0xff => {
+                LITERAL_TAG_ACCESSOR | LITERAL_TAG_BUILTIN_TYPE_INDEX | LITERAL_TAG_NULL => {
                     let value = self.read_u8(cursor)?;
                     cursor += 1;
-                    if tag == 0xff {
+                    if tag == LITERAL_TAG_NULL {
                         AbcLiteralEntry::Null
                     } else {
-                        AbcLiteralEntry::U8(value)
+                        AbcLiteralEntry::U8 { tag, value }
                     }
                 }
-                0x09 => {
+                LITERAL_TAG_METHOD_AFFILIATE => {
                     let value = self.read_u16(cursor)?;
                     cursor += 2;
-                    AbcLiteralEntry::U16(value)
+                    AbcLiteralEntry::U16 { tag, value }
                 }
-                0x18 => {
+                LITERAL_TAG_LITERAL_ARRAY => {
                     let nested_off = self.read_u32(cursor)?;
                     cursor += 4;
                     AbcLiteralEntry::LiteralArray { offset: nested_off }

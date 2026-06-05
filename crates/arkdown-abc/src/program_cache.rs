@@ -1,7 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 
-use crate::emit::file::{AbcFile, LiteralArray, LiteralEntry};
+use crate::emit::file::{
+    AbcFile, LiteralArray, LiteralEntry, LITERAL_TAG_ACCESSOR, LITERAL_TAG_ASYNC_GENERATOR_METHOD,
+    LITERAL_TAG_BOOL, LITERAL_TAG_BUILTIN_TYPE_INDEX, LITERAL_TAG_DOUBLE,
+    LITERAL_TAG_ETS_IMPLEMENTS, LITERAL_TAG_FLOAT, LITERAL_TAG_GENERATOR_METHOD,
+    LITERAL_TAG_GETTER, LITERAL_TAG_INTEGER, LITERAL_TAG_LITERAL_ARRAY,
+    LITERAL_TAG_LITERAL_BUFFER_INDEX, LITERAL_TAG_METHOD, LITERAL_TAG_METHOD_AFFILIATE,
+    LITERAL_TAG_NULL, LITERAL_TAG_SETTER, LITERAL_TAG_STRING, LITERAL_TAG_TAGVALUE,
+};
 use crate::emit::record::{
     method_access, CatchEntry, ClassRecord, DebugInfoRecord, FieldRecord, FieldValue,
     InstructionDebugInfo, MethodKind, MethodLabelStyle, MethodRecord, ProgramLabel,
@@ -28,9 +35,12 @@ const VALUE_TYPE_U8: u32 = 2;
 const VALUE_TYPE_U32: u32 = 6;
 const VALUE_TYPE_LITERALARRAY: u32 = 20;
 
+const VARIANT_BOOL: i32 = variant_value::VariantValueType::Bool as i32;
 const VARIANT_U8: i32 = variant_value::VariantValueType::U8 as i32;
 const VARIANT_U16: i32 = variant_value::VariantValueType::U16 as i32;
 const VARIANT_U32: i32 = variant_value::VariantValueType::U32 as i32;
+const VARIANT_F32: i32 = variant_value::VariantValueType::F32 as i32;
+const VARIANT_F64: i32 = variant_value::VariantValueType::F64 as i32;
 const VARIANT_STRING: i32 = variant_value::VariantValueType::String as i32;
 
 const SCALAR_UINT64: i32 = scalar_value::VariantValueType::Uint64 as i32;
@@ -119,7 +129,7 @@ pub(crate) fn program_for_record(
         insert_literal_array_table(
             &mut literal_array_table,
             bytes(&literal_key(record, idx)),
-            literal_array_to_proto(array, &record.name),
+            literal_array_to_proto(array, &record.name, is_raw_module_literal_array(array))?,
         );
     }
     program.literal_array_table = literal_array_table
@@ -240,7 +250,8 @@ pub(crate) fn program_for_file(file: &AbcFile, target_api_version: u32) -> io::R
                     .get(&idx)
                     .map(String::as_str)
                     .unwrap_or_default(),
-            ),
+                is_raw_module_literal_array(array),
+            )?,
         );
     }
     program.literal_array_table = literal_array_table
@@ -265,7 +276,12 @@ pub(crate) fn append_program_to_file(
     let module_literal_keys = collect_module_literal_keys(&program)?;
     let mut literal_key_to_index = BTreeMap::new();
     let mut literal_method_refs = BTreeSet::new();
-    for entry in program.literal_array_table {
+    let literal_base_index = file.literal_arrays.len();
+    let literal_entries = program.literal_array_table;
+    for (index, entry) in literal_entries.iter().enumerate() {
+        literal_key_to_index.insert(utf8(&entry.key)?, literal_base_index + index);
+    }
+    for entry in literal_entries {
         let key = utf8(&entry.key)?;
         let Some(array) = entry.value else {
             continue;
@@ -275,11 +291,10 @@ pub(crate) fn append_program_to_file(
             array,
             is_module_literal,
             literal_array_record_name(&key),
+            &literal_key_to_index,
             &mut literal_method_refs,
         )?;
-        let index = file.literal_arrays.len();
         file.literal_arrays.push(literal);
-        literal_key_to_index.insert(key, index);
     }
 
     let functions = program
@@ -373,6 +388,13 @@ fn collect_module_literal_keys(program: &Program) -> io::Result<BTreeSet<String>
             continue;
         };
         for field in &record.field_list {
+            let field_name = utf8(&field.name)?;
+            if !matches!(
+                field_name.as_str(),
+                "moduleRecordIdx" | "moduleRequestPhaseIdx"
+            ) {
+                continue;
+            }
             let Some(value) = field
                 .metadata
                 .as_ref()
@@ -414,6 +436,16 @@ fn sorted_program_strings<'a>(strings: impl IntoIterator<Item = &'a str>) -> Vec
         .into_iter()
         .map(bytes)
         .collect()
+}
+
+fn is_raw_module_literal_array(array: &LiteralArray) -> bool {
+    !array.entries.is_empty()
+        && array.entries.iter().all(|entry| {
+            matches!(
+                entry,
+                LiteralEntry::RawU32(_) | LiteralEntry::RawU16(_) | LiteralEntry::RawString(_)
+            )
+        })
 }
 
 fn insert_record_table(table: &mut BTreeMap<Vec<u8>, Record>, key: Vec<u8>, value: Record) {
@@ -492,62 +524,175 @@ fn literal_array_from_proto(
     array: crate::proto_panda::LiteralArray,
     module_style: bool,
     record_name: Option<&str>,
+    literal_key_to_index: &BTreeMap<String, usize>,
     method_refs: &mut BTreeSet<String>,
 ) -> io::Result<LiteralArray> {
-    let mut entries = Vec::with_capacity(array.literals.len());
-    for literal in array.literals {
-        entries.push(literal_from_proto(
-            literal,
-            module_style,
+    if module_style {
+        let mut entries = Vec::with_capacity(array.literals.len());
+        for literal in array.literals {
+            entries.push(module_literal_from_proto(literal)?);
+        }
+        return Ok(LiteralArray { entries });
+    }
+
+    if array.literals.len() % 2 != 0 {
+        return invalid_data("tagged literal array must contain TAGVALUE/value pairs");
+    }
+    let mut entries = Vec::with_capacity(array.literals.len() / 2);
+    let mut literals = array.literals.into_iter();
+    while let Some(tag_literal) = literals.next() {
+        let tag = tag_value_from_proto(tag_literal)?;
+        let value_literal = literals.next().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "missing tagged literal value")
+        })?;
+        entries.push(tagged_literal_from_proto(
+            tag,
+            value_literal,
             record_name,
+            literal_key_to_index,
             method_refs,
         )?);
     }
     Ok(LiteralArray { entries })
 }
 
-fn literal_from_proto(
+fn module_literal_from_proto(literal: Literal) -> io::Result<LiteralEntry> {
+    let Some(value) = literal.value else {
+        return invalid_data("missing literal value");
+    };
+    match (literal.tag as u8, value.value, value.r#type) {
+        (LITERAL_TAG_INTEGER, Some(variant_value::Value::ValueInt(value)), _) => {
+            Ok(LiteralEntry::RawU32(to_u32(value, "module literal u32")?))
+        }
+        (LITERAL_TAG_METHOD_AFFILIATE, Some(variant_value::Value::ValueInt(value)), _) => {
+            Ok(LiteralEntry::RawU16(to_u16(value, "module literal u16")?))
+        }
+        (LITERAL_TAG_STRING, Some(variant_value::Value::ValueStr(value)), _) => {
+            Ok(LiteralEntry::RawString(utf8(&value)?))
+        }
+        (tag, _, _) => invalid_data(format!("unsupported module literal tag {tag:#x}")),
+    }
+}
+
+fn tag_value_from_proto(literal: Literal) -> io::Result<u8> {
+    let Some(value) = literal.value else {
+        return invalid_data("missing literal TAGVALUE value");
+    };
+    match (literal.tag as u8, value.value, value.r#type) {
+        (LITERAL_TAG_TAGVALUE, Some(variant_value::Value::ValueInt(value)), VARIANT_U8) => {
+            to_u8(value, "literal TAGVALUE")
+        }
+        (tag, _, _) => invalid_data(format!("expected TAGVALUE literal, got tag {tag:#x}")),
+    }
+}
+
+fn tagged_literal_from_proto(
+    tag: u8,
     literal: Literal,
-    module_style: bool,
     record_name: Option<&str>,
+    literal_key_to_index: &BTreeMap<String, usize>,
     method_refs: &mut BTreeSet<String>,
 ) -> io::Result<LiteralEntry> {
     let Some(value) = literal.value else {
         return invalid_data("missing literal value");
     };
-    match (literal.tag, value.value, value.r#type) {
-        (0x02, Some(variant_value::Value::ValueInt(value)), VARIANT_U16) => {
-            Ok(LiteralEntry::RawU16(to_u16(value, "literal u16")?))
+    if literal.tag as u8 != tag {
+        return invalid_data(format!(
+            "literal TAGVALUE {tag:#x} does not match value tag {:#x}",
+            literal.tag
+        ));
+    }
+    match (tag, value.value, value.r#type) {
+        (LITERAL_TAG_BOOL, Some(variant_value::Value::ValueInt(value)), _) => {
+            Ok(LiteralEntry::TaggedBool(value != 0))
         }
-        (0x02, Some(variant_value::Value::ValueInt(value)), _) if module_style => {
-            Ok(LiteralEntry::RawU32(to_u32(value, "literal u32")?))
+        (LITERAL_TAG_INTEGER, Some(variant_value::Value::ValueInt(value)), _) => Ok(
+            LiteralEntry::TaggedInteger(to_u32(value, "literal integer")?),
+        ),
+        (LITERAL_TAG_FLOAT, Some(variant_value::Value::ValueFloat(value)), _) => {
+            Ok(LiteralEntry::TaggedFloat(value))
         }
-        (0x02, Some(variant_value::Value::ValueInt(value)), _) => Ok(LiteralEntry::TaggedInteger(
-            to_u32(value, "literal integer")?,
-        )),
-        (0x05, Some(variant_value::Value::ValueStr(value)), _) if module_style => {
-            Ok(LiteralEntry::RawString(utf8(&value)?))
+        (LITERAL_TAG_DOUBLE, Some(variant_value::Value::ValueDouble(value)), _) => {
+            Ok(LiteralEntry::TaggedDouble(value))
         }
-        (0x05, Some(variant_value::Value::ValueStr(value)), _) => {
+        (LITERAL_TAG_STRING, Some(variant_value::Value::ValueStr(value)), _) => {
             Ok(LiteralEntry::TaggedString(utf8(&value)?))
         }
-        (0x06, Some(variant_value::Value::ValueInt(value)), _) => {
+        (LITERAL_TAG_METHOD, Some(variant_value::Value::ValueInt(value)), _) => {
             Ok(LiteralEntry::TaggedMethod(to_u32(value, "literal method")?))
         }
-        (0x06, Some(variant_value::Value::ValueStr(value)), _) => {
-            let value = utf8(&value)?;
-            let name = record_name
-                .map(|record_name| short_method_name(record_name, &value))
-                .unwrap_or(value);
+        (LITERAL_TAG_METHOD, Some(variant_value::Value::ValueStr(value)), _) => {
+            let name = method_literal_name(record_name, &value)?;
             method_refs.insert(name.clone());
             Ok(LiteralEntry::TaggedMethodName(name))
         }
-        (0x09, Some(variant_value::Value::ValueInt(value)), _) => Ok(
+        (LITERAL_TAG_GENERATOR_METHOD, Some(variant_value::Value::ValueInt(value)), _) => Ok(
+            LiteralEntry::TaggedGeneratorMethod(to_u32(value, "literal generator method")?),
+        ),
+        (LITERAL_TAG_GENERATOR_METHOD, Some(variant_value::Value::ValueStr(value)), _) => {
+            let name = method_literal_name(record_name, &value)?;
+            method_refs.insert(name.clone());
+            Ok(LiteralEntry::TaggedGeneratorMethodName(name))
+        }
+        (LITERAL_TAG_ASYNC_GENERATOR_METHOD, Some(variant_value::Value::ValueInt(value)), _) => {
+            Ok(LiteralEntry::TaggedAsyncGeneratorMethod(to_u32(
+                value,
+                "literal async generator method",
+            )?))
+        }
+        (LITERAL_TAG_ASYNC_GENERATOR_METHOD, Some(variant_value::Value::ValueStr(value)), _) => {
+            let name = method_literal_name(record_name, &value)?;
+            method_refs.insert(name.clone());
+            Ok(LiteralEntry::TaggedAsyncGeneratorMethodName(name))
+        }
+        (LITERAL_TAG_GETTER, Some(variant_value::Value::ValueInt(value)), _) => {
+            Ok(LiteralEntry::TaggedGetter(to_u32(value, "literal getter")?))
+        }
+        (LITERAL_TAG_GETTER, Some(variant_value::Value::ValueStr(value)), _) => {
+            let name = method_literal_name(record_name, &value)?;
+            method_refs.insert(name.clone());
+            Ok(LiteralEntry::TaggedGetterName(name))
+        }
+        (LITERAL_TAG_SETTER, Some(variant_value::Value::ValueInt(value)), _) => {
+            Ok(LiteralEntry::TaggedSetter(to_u32(value, "literal setter")?))
+        }
+        (LITERAL_TAG_SETTER, Some(variant_value::Value::ValueStr(value)), _) => {
+            let name = method_literal_name(record_name, &value)?;
+            method_refs.insert(name.clone());
+            Ok(LiteralEntry::TaggedSetterName(name))
+        }
+        (LITERAL_TAG_ACCESSOR, Some(variant_value::Value::ValueInt(value)), _) => Ok(
+            LiteralEntry::TaggedAccessor(to_u8(value, "literal accessor")?),
+        ),
+        (LITERAL_TAG_METHOD_AFFILIATE, Some(variant_value::Value::ValueInt(value)), _) => Ok(
             LiteralEntry::TaggedMethodAffiliate(to_u16(value, "literal method affiliate")?),
         ),
-        (0xff, _, _) => Ok(LiteralEntry::TaggedNull),
+        (LITERAL_TAG_LITERAL_BUFFER_INDEX, Some(variant_value::Value::ValueInt(value)), _) => Ok(
+            LiteralEntry::TaggedLiteralBufferIndex(to_u32(value, "literal buffer index")?),
+        ),
+        (LITERAL_TAG_LITERAL_ARRAY, Some(variant_value::Value::ValueStr(value)), _) => {
+            let key = utf8(&value)?;
+            let Some(&index) = literal_key_to_index.get(&key) else {
+                return invalid_data(format!("missing nested literal array key {key}"));
+            };
+            Ok(LiteralEntry::TaggedLiteralArrayIndex(index))
+        }
+        (LITERAL_TAG_BUILTIN_TYPE_INDEX, Some(variant_value::Value::ValueInt(value)), _) => Ok(
+            LiteralEntry::TaggedBuiltinTypeIndex(to_u8(value, "literal builtin type index")?),
+        ),
+        (LITERAL_TAG_ETS_IMPLEMENTS, Some(variant_value::Value::ValueStr(value)), _) => {
+            Ok(LiteralEntry::TaggedEtsImplements(utf8(&value)?))
+        }
+        (LITERAL_TAG_NULL, _, _) => Ok(LiteralEntry::TaggedNull),
         (tag, _, _) => invalid_data(format!("unsupported literal tag {tag:#x}")),
     }
+}
+
+fn method_literal_name(record_name: Option<&str>, value: &[u8]) -> io::Result<String> {
+    let value = utf8(value)?;
+    Ok(record_name
+        .map(|record_name| short_method_name(record_name, &value))
+        .unwrap_or(value))
 }
 
 fn field_from_proto(
@@ -2356,37 +2501,147 @@ fn pandasm_opcode(insn: &Insn) -> u32 {
 fn literal_array_to_proto(
     array: &LiteralArray,
     record_name: &str,
-) -> crate::proto_panda::LiteralArray {
-    crate::proto_panda::LiteralArray {
-        literals: array
-            .entries
-            .iter()
-            .map(|entry| literal_to_proto(entry, record_name))
-            .collect(),
+    module_style: bool,
+) -> io::Result<crate::proto_panda::LiteralArray> {
+    let mut literals = Vec::new();
+    for entry in &array.entries {
+        if module_style {
+            literals.push(module_literal_to_proto(entry)?);
+        } else {
+            push_tagged_literal_to_proto(&mut literals, entry, record_name)?;
+        }
     }
+    Ok(crate::proto_panda::LiteralArray { literals })
 }
 
-fn literal_to_proto(entry: &LiteralEntry, record_name: &str) -> Literal {
+fn module_literal_to_proto(entry: &LiteralEntry) -> io::Result<Literal> {
     match entry {
-        LiteralEntry::TaggedInteger(value) | LiteralEntry::RawU32(value) => {
-            literal_u32(0x02, *value)
-        }
-        LiteralEntry::RawU16(value) => literal_u16(0x02, *value),
-        LiteralEntry::TaggedString(value) | LiteralEntry::RawString(value) => {
-            literal_string(0x05, value)
-        }
-        LiteralEntry::TaggedMethod(value) => literal_u32(0x06, *value),
-        LiteralEntry::TaggedMethodName(value) => {
-            literal_string(0x06, &full_method_name(record_name, value))
-        }
-        LiteralEntry::TaggedMethodAffiliate(value) => literal_u16(0x09, *value),
-        LiteralEntry::TaggedNull => literal_u8(0xff, 0),
+        LiteralEntry::RawU32(value) => Ok(literal_u32(LITERAL_TAG_INTEGER, *value)),
+        LiteralEntry::RawU16(value) => Ok(literal_u16(LITERAL_TAG_METHOD_AFFILIATE, *value)),
+        LiteralEntry::RawString(value) => Ok(literal_string(LITERAL_TAG_STRING, value)),
+        other => invalid_data(format!(
+            "non-module literal {other:?} in module literal array"
+        )),
     }
 }
 
-fn literal_u8(tag: u32, value: u8) -> Literal {
+fn push_tagged_literal_to_proto(
+    literals: &mut Vec<Literal>,
+    entry: &LiteralEntry,
+    record_name: &str,
+) -> io::Result<()> {
+    let tag = tagged_literal_tag(entry)?;
+    literals.push(literal_u8(LITERAL_TAG_TAGVALUE, tag));
+    literals.push(tagged_literal_value_to_proto(entry, record_name)?);
+    Ok(())
+}
+
+fn tagged_literal_tag(entry: &LiteralEntry) -> io::Result<u8> {
+    Ok(match entry {
+        LiteralEntry::TaggedBool(_) => LITERAL_TAG_BOOL,
+        LiteralEntry::TaggedInteger(_) => LITERAL_TAG_INTEGER,
+        LiteralEntry::TaggedFloat(_) => LITERAL_TAG_FLOAT,
+        LiteralEntry::TaggedDouble(_) => LITERAL_TAG_DOUBLE,
+        LiteralEntry::TaggedString(_) => LITERAL_TAG_STRING,
+        LiteralEntry::TaggedMethod(_) | LiteralEntry::TaggedMethodName(_) => LITERAL_TAG_METHOD,
+        LiteralEntry::TaggedGeneratorMethod(_) | LiteralEntry::TaggedGeneratorMethodName(_) => {
+            LITERAL_TAG_GENERATOR_METHOD
+        }
+        LiteralEntry::TaggedAsyncGeneratorMethod(_)
+        | LiteralEntry::TaggedAsyncGeneratorMethodName(_) => LITERAL_TAG_ASYNC_GENERATOR_METHOD,
+        LiteralEntry::TaggedGetter(_) | LiteralEntry::TaggedGetterName(_) => LITERAL_TAG_GETTER,
+        LiteralEntry::TaggedSetter(_) | LiteralEntry::TaggedSetterName(_) => LITERAL_TAG_SETTER,
+        LiteralEntry::TaggedAccessor(_) => LITERAL_TAG_ACCESSOR,
+        LiteralEntry::TaggedMethodAffiliate(_) => LITERAL_TAG_METHOD_AFFILIATE,
+        LiteralEntry::TaggedLiteralBufferIndex(_) => LITERAL_TAG_LITERAL_BUFFER_INDEX,
+        LiteralEntry::TaggedLiteralArrayIndex(_) => LITERAL_TAG_LITERAL_ARRAY,
+        LiteralEntry::TaggedBuiltinTypeIndex(_) => LITERAL_TAG_BUILTIN_TYPE_INDEX,
+        LiteralEntry::TaggedEtsImplements(_) => LITERAL_TAG_ETS_IMPLEMENTS,
+        LiteralEntry::TaggedNull => LITERAL_TAG_NULL,
+        other => {
+            return invalid_data(format!(
+                "module raw literal {other:?} in tagged literal array"
+            ))
+        }
+    })
+}
+
+fn tagged_literal_value_to_proto(entry: &LiteralEntry, record_name: &str) -> io::Result<Literal> {
+    Ok(match entry {
+        LiteralEntry::TaggedBool(value) => literal_bool(LITERAL_TAG_BOOL, *value),
+        LiteralEntry::TaggedInteger(value) => literal_u32(LITERAL_TAG_INTEGER, *value),
+        LiteralEntry::TaggedFloat(value) => literal_f32(LITERAL_TAG_FLOAT, *value),
+        LiteralEntry::TaggedDouble(value) => literal_f64(LITERAL_TAG_DOUBLE, *value),
+        LiteralEntry::TaggedString(value) => literal_string(LITERAL_TAG_STRING, value),
+        LiteralEntry::TaggedMethod(value) => literal_u32(LITERAL_TAG_METHOD, *value),
+        LiteralEntry::TaggedMethodName(value) => {
+            literal_string(LITERAL_TAG_METHOD, &full_method_name(record_name, value))
+        }
+        LiteralEntry::TaggedGeneratorMethod(value) => {
+            literal_u32(LITERAL_TAG_GENERATOR_METHOD, *value)
+        }
+        LiteralEntry::TaggedGeneratorMethodName(value) => literal_string(
+            LITERAL_TAG_GENERATOR_METHOD,
+            &full_method_name(record_name, value),
+        ),
+        LiteralEntry::TaggedAsyncGeneratorMethod(value) => {
+            literal_u32(LITERAL_TAG_ASYNC_GENERATOR_METHOD, *value)
+        }
+        LiteralEntry::TaggedAsyncGeneratorMethodName(value) => literal_string(
+            LITERAL_TAG_ASYNC_GENERATOR_METHOD,
+            &full_method_name(record_name, value),
+        ),
+        LiteralEntry::TaggedGetter(value) => literal_u32(LITERAL_TAG_GETTER, *value),
+        LiteralEntry::TaggedGetterName(value) => {
+            literal_string(LITERAL_TAG_GETTER, &full_method_name(record_name, value))
+        }
+        LiteralEntry::TaggedSetter(value) => literal_u32(LITERAL_TAG_SETTER, *value),
+        LiteralEntry::TaggedSetterName(value) => {
+            literal_string(LITERAL_TAG_SETTER, &full_method_name(record_name, value))
+        }
+        LiteralEntry::TaggedAccessor(value) => literal_u8(LITERAL_TAG_ACCESSOR, *value),
+        LiteralEntry::TaggedMethodAffiliate(value) => {
+            literal_u16(LITERAL_TAG_METHOD_AFFILIATE, *value)
+        }
+        LiteralEntry::TaggedLiteralBufferIndex(value) => {
+            literal_u32(LITERAL_TAG_LITERAL_BUFFER_INDEX, *value)
+        }
+        LiteralEntry::TaggedLiteralArrayIndex(index) => literal_string(
+            LITERAL_TAG_LITERAL_ARRAY,
+            &literal_key_for_index(record_name, *index),
+        ),
+        LiteralEntry::TaggedBuiltinTypeIndex(value) => {
+            literal_u8(LITERAL_TAG_BUILTIN_TYPE_INDEX, *value)
+        }
+        LiteralEntry::TaggedEtsImplements(value) => {
+            literal_string(LITERAL_TAG_ETS_IMPLEMENTS, value)
+        }
+        LiteralEntry::TaggedNull => literal_u8(LITERAL_TAG_NULL, 0),
+        other => {
+            return invalid_data(format!(
+                "module raw literal {other:?} in tagged literal array"
+            ))
+        }
+    })
+}
+
+fn literal_key_for_index(record_name: &str, index: usize) -> String {
+    literal_array_key(record_name, index)
+}
+
+fn literal_bool(tag: u8, value: bool) -> Literal {
     Literal {
-        tag,
+        tag: tag as u32,
+        value: Some(VariantValue {
+            value: Some(variant_value::Value::ValueInt(u64::from(value))),
+            r#type: VARIANT_BOOL,
+        }),
+    }
+}
+
+fn literal_u8(tag: u8, value: u8) -> Literal {
+    Literal {
+        tag: tag as u32,
         value: Some(VariantValue {
             value: Some(variant_value::Value::ValueInt(value as u64)),
             r#type: VARIANT_U8,
@@ -2394,9 +2649,9 @@ fn literal_u8(tag: u32, value: u8) -> Literal {
     }
 }
 
-fn literal_u16(tag: u32, value: u16) -> Literal {
+fn literal_u16(tag: u8, value: u16) -> Literal {
     Literal {
-        tag,
+        tag: tag as u32,
         value: Some(VariantValue {
             value: Some(variant_value::Value::ValueInt(value as u64)),
             r#type: VARIANT_U16,
@@ -2404,9 +2659,9 @@ fn literal_u16(tag: u32, value: u16) -> Literal {
     }
 }
 
-fn literal_u32(tag: u32, value: u32) -> Literal {
+fn literal_u32(tag: u8, value: u32) -> Literal {
     Literal {
-        tag,
+        tag: tag as u32,
         value: Some(VariantValue {
             value: Some(variant_value::Value::ValueInt(value as u64)),
             r#type: VARIANT_U32,
@@ -2414,9 +2669,29 @@ fn literal_u32(tag: u32, value: u32) -> Literal {
     }
 }
 
-fn literal_string(tag: u32, value: &str) -> Literal {
+fn literal_f32(tag: u8, value: f32) -> Literal {
     Literal {
-        tag,
+        tag: tag as u32,
+        value: Some(VariantValue {
+            value: Some(variant_value::Value::ValueFloat(value)),
+            r#type: VARIANT_F32,
+        }),
+    }
+}
+
+fn literal_f64(tag: u8, value: f64) -> Literal {
+    Literal {
+        tag: tag as u32,
+        value: Some(VariantValue {
+            value: Some(variant_value::Value::ValueDouble(value)),
+            r#type: VARIANT_F64,
+        }),
+    }
+}
+
+fn literal_string(tag: u8, value: &str) -> Literal {
+    Literal {
+        tag: tag as u32,
         value: Some(VariantValue {
             value: Some(variant_value::Value::ValueStr(bytes(value))),
             r#type: VARIANT_STRING,
@@ -2635,6 +2910,109 @@ mod tests {
         assert_eq!(label_ins("label_0").opcode, pandasm_invalid_opcode());
         assert_eq!(default_ins_debug().line_number, u64::MAX);
         assert_eq!(default_ins_debug().column_number, 0);
+    }
+
+    #[test]
+    fn tagged_literal_proto_uses_upstream_tagvalue_pairs() {
+        let entries = vec![
+            LiteralEntry::TaggedString("a".to_string()),
+            LiteralEntry::TaggedBool(true),
+            LiteralEntry::TaggedMethodAffiliate(7),
+            LiteralEntry::TaggedNull,
+        ];
+        let array = LiteralArray {
+            entries: entries.clone(),
+        };
+
+        let proto = literal_array_to_proto(&array, "record", false).unwrap();
+        let tags = proto
+            .literals
+            .iter()
+            .map(|literal| literal.tag as u8)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tags,
+            vec![
+                LITERAL_TAG_TAGVALUE,
+                LITERAL_TAG_STRING,
+                LITERAL_TAG_TAGVALUE,
+                LITERAL_TAG_BOOL,
+                LITERAL_TAG_TAGVALUE,
+                LITERAL_TAG_METHOD_AFFILIATE,
+                LITERAL_TAG_TAGVALUE,
+                LITERAL_TAG_NULL,
+            ]
+        );
+        let tag_values = proto
+            .literals
+            .chunks(2)
+            .map(|pair| literal_value_int(&pair[0]) as u8)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tag_values,
+            vec![
+                LITERAL_TAG_STRING,
+                LITERAL_TAG_BOOL,
+                LITERAL_TAG_METHOD_AFFILIATE,
+                LITERAL_TAG_NULL,
+            ]
+        );
+
+        let mut method_refs = BTreeSet::new();
+        let restored = literal_array_from_proto(
+            proto,
+            false,
+            Some("record"),
+            &BTreeMap::new(),
+            &mut method_refs,
+        )
+        .unwrap();
+        assert_eq!(restored.entries, entries);
+    }
+
+    #[test]
+    fn module_literal_proto_keeps_upstream_raw_tags() {
+        let entries = vec![
+            LiteralEntry::RawU32(1),
+            LiteralEntry::RawString("./dep".to_string()),
+            LiteralEntry::RawU16(0),
+        ];
+        let array = LiteralArray {
+            entries: entries.clone(),
+        };
+
+        let proto = literal_array_to_proto(&array, "record", true).unwrap();
+        let tags = proto
+            .literals
+            .iter()
+            .map(|literal| literal.tag as u8)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tags,
+            vec![
+                LITERAL_TAG_INTEGER,
+                LITERAL_TAG_STRING,
+                LITERAL_TAG_METHOD_AFFILIATE,
+            ]
+        );
+        assert!(!tags.contains(&LITERAL_TAG_TAGVALUE));
+
+        let mut method_refs = BTreeSet::new();
+        let restored =
+            literal_array_from_proto(proto, true, None, &BTreeMap::new(), &mut method_refs)
+                .unwrap();
+        assert_eq!(restored.entries, entries);
+    }
+
+    fn literal_value_int(literal: &Literal) -> u64 {
+        literal
+            .value
+            .as_ref()
+            .and_then(|value| match &value.value {
+                Some(variant_value::Value::ValueInt(value)) => Some(*value),
+                _ => None,
+            })
+            .unwrap()
     }
 
     #[test]

@@ -13,19 +13,54 @@ use rustc_hash::FxHashMap;
 
 // ── LiteralArray types (Task 1) ───────────────────────────────────────────────
 
+pub(crate) const LITERAL_TAG_TAGVALUE: u8 = 0x00;
+pub(crate) const LITERAL_TAG_BOOL: u8 = 0x01;
+pub(crate) const LITERAL_TAG_INTEGER: u8 = 0x02;
+pub(crate) const LITERAL_TAG_FLOAT: u8 = 0x03;
+pub(crate) const LITERAL_TAG_DOUBLE: u8 = 0x04;
+pub(crate) const LITERAL_TAG_STRING: u8 = 0x05;
+pub(crate) const LITERAL_TAG_METHOD: u8 = 0x06;
+pub(crate) const LITERAL_TAG_GENERATOR_METHOD: u8 = 0x07;
+pub(crate) const LITERAL_TAG_ACCESSOR: u8 = 0x08;
+pub(crate) const LITERAL_TAG_METHOD_AFFILIATE: u8 = 0x09;
+pub(crate) const LITERAL_TAG_ASYNC_GENERATOR_METHOD: u8 = 0x16;
+pub(crate) const LITERAL_TAG_LITERAL_BUFFER_INDEX: u8 = 0x17;
+pub(crate) const LITERAL_TAG_LITERAL_ARRAY: u8 = 0x18;
+pub(crate) const LITERAL_TAG_BUILTIN_TYPE_INDEX: u8 = 0x19;
+pub(crate) const LITERAL_TAG_GETTER: u8 = 0x1a;
+pub(crate) const LITERAL_TAG_SETTER: u8 = 0x1b;
+pub(crate) const LITERAL_TAG_ETS_IMPLEMENTS: u8 = 0x1c;
+pub(crate) const LITERAL_TAG_NULL: u8 = 0xff;
+
 /// A single entry in a Panda `LiteralArray`.
 ///
 /// Generic class/scope buffers are encoded as item pairs:
 /// `[tag_value: u8] [value: variable]`. The array count is the raw item count,
 /// so each tagged entry contributes two items. Module records are a special
 /// compact libpandafile layout and store raw values without tag-value items.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum LiteralEntry {
+    TaggedBool(bool),
     TaggedInteger(u32),
+    TaggedFloat(f32),
+    TaggedDouble(f64),
     TaggedString(String),
     TaggedMethod(u32),
     TaggedMethodName(String),
+    TaggedGeneratorMethod(u32),
+    TaggedGeneratorMethodName(String),
+    TaggedAsyncGeneratorMethod(u32),
+    TaggedAsyncGeneratorMethodName(String),
+    TaggedGetter(u32),
+    TaggedGetterName(String),
+    TaggedSetter(u32),
+    TaggedSetterName(String),
+    TaggedAccessor(u8),
     TaggedMethodAffiliate(u16),
+    TaggedLiteralBufferIndex(u32),
+    TaggedLiteralArrayIndex(usize),
+    TaggedBuiltinTypeIndex(u8),
+    TaggedEtsImplements(String),
     TaggedNull,
     RawU32(u32),
     RawU16(u16),
@@ -93,11 +128,27 @@ impl LiteralArray {
 impl LiteralEntry {
     fn item_count(&self) -> u32 {
         match self {
-            LiteralEntry::TaggedInteger(_)
+            LiteralEntry::TaggedBool(_)
+            | LiteralEntry::TaggedInteger(_)
+            | LiteralEntry::TaggedFloat(_)
+            | LiteralEntry::TaggedDouble(_)
             | LiteralEntry::TaggedString(_)
             | LiteralEntry::TaggedMethod(_)
             | LiteralEntry::TaggedMethodName(_)
+            | LiteralEntry::TaggedGeneratorMethod(_)
+            | LiteralEntry::TaggedGeneratorMethodName(_)
+            | LiteralEntry::TaggedAsyncGeneratorMethod(_)
+            | LiteralEntry::TaggedAsyncGeneratorMethodName(_)
+            | LiteralEntry::TaggedGetter(_)
+            | LiteralEntry::TaggedGetterName(_)
+            | LiteralEntry::TaggedSetter(_)
+            | LiteralEntry::TaggedSetterName(_)
+            | LiteralEntry::TaggedAccessor(_)
             | LiteralEntry::TaggedMethodAffiliate(_)
+            | LiteralEntry::TaggedLiteralBufferIndex(_)
+            | LiteralEntry::TaggedLiteralArrayIndex(_)
+            | LiteralEntry::TaggedBuiltinTypeIndex(_)
+            | LiteralEntry::TaggedEtsImplements(_)
             | LiteralEntry::TaggedNull => 2,
             LiteralEntry::RawU32(_) | LiteralEntry::RawU16(_) | LiteralEntry::RawString(_) => 1,
         }
@@ -524,7 +575,9 @@ impl AbcFile {
                 let array = &self.literal_arrays[array_idx];
                 for (entry_idx, entry) in array.entries.iter().enumerate() {
                     let value = match entry {
-                        LiteralEntry::TaggedString(value) | LiteralEntry::RawString(value) => value,
+                        LiteralEntry::TaggedString(value)
+                        | LiteralEntry::TaggedEtsImplements(value)
+                        | LiteralEntry::RawString(value) => value,
                         _ => continue,
                     };
                     let off = string_items.get_or_create(value);
@@ -536,7 +589,9 @@ impl AbcFile {
                 let array = &self.literal_arrays[array_idx];
                 for (entry_idx, entry) in array.entries.iter().enumerate() {
                     let value = match entry {
-                        LiteralEntry::TaggedString(value) | LiteralEntry::RawString(value) => value,
+                        LiteralEntry::TaggedString(value)
+                        | LiteralEntry::TaggedEtsImplements(value)
+                        | LiteralEntry::RawString(value) => value,
                         _ => continue,
                     };
                     let off = string_items.get_or_create(value);
@@ -551,7 +606,9 @@ impl AbcFile {
                     continue;
                 }
                 let value = match entry {
-                    LiteralEntry::TaggedString(value) | LiteralEntry::RawString(value) => value,
+                    LiteralEntry::TaggedString(value)
+                    | LiteralEntry::TaggedEtsImplements(value)
+                    | LiteralEntry::RawString(value) => value,
                     _ => continue,
                 };
                 let off = string_items.get_or_create(value);
@@ -689,34 +746,101 @@ impl AbcFile {
                 buf.extend_from_slice(&item_count.to_le_bytes());
                 for (entry_idx, entry) in lit_arr.entries.iter().enumerate() {
                     match entry {
+                        LiteralEntry::TaggedBool(value) => {
+                            buf.push(LITERAL_TAG_BOOL);
+                            buf.push(u8::from(*value));
+                        }
                         LiteralEntry::TaggedInteger(v) => {
-                            buf.push(0x02);
+                            buf.push(LITERAL_TAG_INTEGER);
                             buf.extend_from_slice(&v.to_le_bytes());
                         }
-                        LiteralEntry::TaggedString(_) => {
+                        LiteralEntry::TaggedFloat(value) => {
+                            buf.push(LITERAL_TAG_FLOAT);
+                            buf.extend_from_slice(&value.to_bits().to_le_bytes());
+                        }
+                        LiteralEntry::TaggedDouble(value) => {
+                            buf.push(LITERAL_TAG_DOUBLE);
+                            buf.extend_from_slice(&value.to_bits().to_le_bytes());
+                        }
+                        LiteralEntry::TaggedString(_) | LiteralEntry::TaggedEtsImplements(_) => {
                             let offset = literal_string_offsets[array_idx][entry_idx]
                                 .expect("tagged string literal offset must be resolved");
-                            buf.push(0x05);
+                            let tag = match entry {
+                                LiteralEntry::TaggedEtsImplements(_) => LITERAL_TAG_ETS_IMPLEMENTS,
+                                _ => LITERAL_TAG_STRING,
+                            };
+                            buf.push(tag);
                             buf.extend_from_slice(&offset.to_le_bytes());
                         }
                         LiteralEntry::TaggedMethod(off) => {
-                            buf.push(0x06);
+                            buf.push(LITERAL_TAG_METHOD);
                             buf.extend_from_slice(&off.to_le_bytes());
                         }
-                        LiteralEntry::TaggedMethodName(name) => {
+                        LiteralEntry::TaggedMethodName(name)
+                        | LiteralEntry::TaggedGeneratorMethodName(name)
+                        | LiteralEntry::TaggedAsyncGeneratorMethodName(name)
+                        | LiteralEntry::TaggedGetterName(name)
+                        | LiteralEntry::TaggedSetterName(name) => {
                             let off = method_name_offsets
                                 .get(name.as_str())
                                 .copied()
                                 .expect("tagged method literal offset must be resolved");
-                            buf.push(0x06);
+                            let tag = match entry {
+                                LiteralEntry::TaggedGeneratorMethodName(_) => {
+                                    LITERAL_TAG_GENERATOR_METHOD
+                                }
+                                LiteralEntry::TaggedAsyncGeneratorMethodName(_) => {
+                                    LITERAL_TAG_ASYNC_GENERATOR_METHOD
+                                }
+                                LiteralEntry::TaggedGetterName(_) => LITERAL_TAG_GETTER,
+                                LiteralEntry::TaggedSetterName(_) => LITERAL_TAG_SETTER,
+                                _ => LITERAL_TAG_METHOD,
+                            };
+                            buf.push(tag);
                             buf.extend_from_slice(&off.to_le_bytes());
                         }
+                        LiteralEntry::TaggedGeneratorMethod(off) => {
+                            buf.push(LITERAL_TAG_GENERATOR_METHOD);
+                            buf.extend_from_slice(&off.to_le_bytes());
+                        }
+                        LiteralEntry::TaggedAsyncGeneratorMethod(off) => {
+                            buf.push(LITERAL_TAG_ASYNC_GENERATOR_METHOD);
+                            buf.extend_from_slice(&off.to_le_bytes());
+                        }
+                        LiteralEntry::TaggedGetter(off) => {
+                            buf.push(LITERAL_TAG_GETTER);
+                            buf.extend_from_slice(&off.to_le_bytes());
+                        }
+                        LiteralEntry::TaggedSetter(off) => {
+                            buf.push(LITERAL_TAG_SETTER);
+                            buf.extend_from_slice(&off.to_le_bytes());
+                        }
+                        LiteralEntry::TaggedAccessor(value) => {
+                            buf.push(LITERAL_TAG_ACCESSOR);
+                            buf.push(*value);
+                        }
                         LiteralEntry::TaggedMethodAffiliate(value) => {
-                            buf.push(0x09);
+                            buf.push(LITERAL_TAG_METHOD_AFFILIATE);
                             buf.extend_from_slice(&value.to_le_bytes());
                         }
+                        LiteralEntry::TaggedLiteralBufferIndex(value) => {
+                            buf.push(LITERAL_TAG_LITERAL_BUFFER_INDEX);
+                            buf.extend_from_slice(&value.to_le_bytes());
+                        }
+                        LiteralEntry::TaggedLiteralArrayIndex(index) => {
+                            let offset = offsets
+                                .get(*index)
+                                .copied()
+                                .expect("literal array index must be resolved");
+                            buf.push(LITERAL_TAG_LITERAL_ARRAY);
+                            buf.extend_from_slice(&offset.to_le_bytes());
+                        }
+                        LiteralEntry::TaggedBuiltinTypeIndex(value) => {
+                            buf.push(LITERAL_TAG_BUILTIN_TYPE_INDEX);
+                            buf.push(*value);
+                        }
                         LiteralEntry::TaggedNull => {
-                            buf.push(0xff);
+                            buf.push(LITERAL_TAG_NULL);
                             buf.push(0);
                         }
                         LiteralEntry::RawU32(value) => {
