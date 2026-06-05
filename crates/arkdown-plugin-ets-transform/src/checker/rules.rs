@@ -90,10 +90,21 @@ pub fn check(source: &str, file: &str) -> Vec<EtsTransformError> {
                 .decorators
                 .iter()
                 .any(|d| decorator_name(d) == "Styles");
-            if is_builder || is_styles {
+            // @AnimatableExtend also requires void return type (matches hvigor validation).
+            let is_animatable_extend = func
+                .decorators
+                .iter()
+                .any(|d| decorator_name(d) == "AnimatableExtend");
+            if is_builder || is_styles || is_animatable_extend {
                 if let Some(ret_ty) = func.return_type.as_ref() {
                     if !is_void_type(&ret_ty.type_annotation) {
-                        let decorator = if is_builder { "@Builder" } else { "@Styles" };
+                        let decorator = if is_builder {
+                            "@Builder"
+                        } else if is_styles {
+                            "@Styles"
+                        } else {
+                            "@AnimatableExtend"
+                        };
                         let name = func
                             .id
                             .as_ref()
