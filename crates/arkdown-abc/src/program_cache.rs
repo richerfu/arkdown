@@ -3098,6 +3098,22 @@ mod tests {
             .and_then(|entry| entry.value.as_ref())
     }
 
+    fn functions_by_short_suffix<'a>(program: &'a Program, name: &str) -> Vec<&'a Function> {
+        program
+            .function_table
+            .iter()
+            .filter(|entry| {
+                std::str::from_utf8(&entry.key)
+                    .map(|key| {
+                        let short = key.rsplit('.').next().unwrap_or(key);
+                        short == name || short.ends_with(&format!("#{name}"))
+                    })
+                    .unwrap_or(false)
+            })
+            .filter_map(|entry| entry.value.as_ref())
+            .collect()
+    }
+
     fn function_kind_by_short_name(program: &Program, name: &str) -> Option<u32> {
         function_by_short_name(program, name).map(|function| function.function_kind)
     }
@@ -3323,6 +3339,170 @@ cf();
             ),
             vec![0, 0, 0, 1]
         );
+    }
+
+    #[test]
+    fn nested_concurrent_function_uses_nearest_upstream_owner_for_module_requests() {
+        let mut file = AbcFile::new();
+        let record = build_record_with_debug_and_package_for_target_with_mode(
+            r#"
+import { a } from "./dep1";
+import { b } from "./dep2";
+function outer() {
+  "use concurrent";
+  let local = 1;
+  function inner() {
+    "use concurrent";
+    return b;
+  }
+  function nested() {
+    return local + a;
+  }
+  return local + a;
+}
+outer();
+"#,
+            "@bundle:demo/entry/ets/pages/Index",
+            &mut file.strings,
+            &mut file.literal_arrays,
+            Some("entry/src/main/ets/pages/Index.ets"),
+            None,
+            false,
+            false,
+            "ets",
+            true,
+            18,
+            None,
+            false,
+            true,
+        )
+        .unwrap();
+        file.add_record(record);
+
+        let program = program_for_record(&file, 0, 18).unwrap().unwrap();
+        let outer = function_by_short_name(&program, "outer").unwrap();
+        let inner = function_by_short_name(&program, "inner").unwrap();
+        assert_eq!(outer.function_kind, function_kind::CONCURRENT_FUNCTION);
+        assert_eq!(inner.function_kind, function_kind::CONCURRENT_FUNCTION);
+        assert_eq!(outer.concurrent_module_requests, vec![0, 0]);
+        assert_eq!(inner.concurrent_module_requests, vec![1]);
+    }
+
+    #[test]
+    fn concurrent_methods_use_upstream_function_kind_and_module_requests() {
+        let mut file = AbcFile::new();
+        let record = build_record_with_debug_and_package_for_target_with_mode(
+            r#"
+import { a } from "./dep";
+const obj = {
+  method() {
+    "use concurrent";
+    return a;
+  },
+};
+class C {
+  method() {
+    "use concurrent";
+    return a;
+  }
+}
+obj.method();
+new C().method();
+"#,
+            "@bundle:demo/entry/ets/pages/Index",
+            &mut file.strings,
+            &mut file.literal_arrays,
+            Some("entry/src/main/ets/pages/Index.ets"),
+            None,
+            false,
+            false,
+            "ets",
+            true,
+            18,
+            None,
+            false,
+            true,
+        )
+        .unwrap();
+        file.add_record(record);
+
+        let program = program_for_record(&file, 0, 18).unwrap().unwrap();
+        let methods = functions_by_short_suffix(&program, "method");
+        assert_eq!(methods.len(), 2);
+        for method in methods {
+            assert_eq!(method.function_kind, function_kind::CONCURRENT_FUNCTION);
+            assert_eq!(method.concurrent_module_requests, vec![0]);
+        }
+    }
+
+    #[test]
+    fn concurrent_function_rejects_upstream_invalid_forms_and_captures() {
+        fn compile_error(source: &str) -> String {
+            let mut file = AbcFile::new();
+            build_record_with_debug_and_package_for_target_with_mode(
+                source,
+                "@bundle:demo/entry/ets/pages/Index",
+                &mut file.strings,
+                &mut file.literal_arrays,
+                Some("entry/src/main/ets/pages/Index.ets"),
+                None,
+                false,
+                false,
+                "ets",
+                true,
+                18,
+                None,
+                false,
+                true,
+            )
+            .unwrap_err()
+            .to_string()
+        }
+
+        let cases = [
+            (
+                r#"let a = 1;
+function cf() {
+  "use concurrent";
+  return a;
+}
+"#,
+                "Concurrent function should only use import variable or local variable, 'a' is not one of them",
+            ),
+            (
+                r#"import * as ns from "./dep";
+function cf() {
+  "use concurrent";
+  return ns.a;
+}
+"#,
+                "Concurrent function should only use import variable or local variable, 'ns' is not one of them",
+            ),
+            (
+                r#"function* cf() {
+  "use concurrent";
+  yield 1;
+}
+"#,
+                "Concurrent function should only be function declaration",
+            ),
+            (
+                r#"const cf = () => {
+  "use concurrent";
+  return 1;
+};
+"#,
+                "Concurrent function should only be function declaration",
+            ),
+        ];
+
+        for (source, expected) in cases {
+            let error = compile_error(source);
+            assert!(
+                error.contains(expected),
+                "expected {expected:?} in {error:?}"
+            );
+        }
     }
 
     #[test]

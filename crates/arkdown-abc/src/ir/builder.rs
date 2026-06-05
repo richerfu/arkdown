@@ -12,9 +12,9 @@ use oxc_ast::ast::{
     TSEnumMemberName, TSImportEqualsDeclaration, TSModuleDeclaration, TSModuleReference,
     TSQualifiedName, TSTypeName, UnaryOperator, UpdateExpression, YieldExpression,
 };
-use oxc_ast_visit::Visit;
+use oxc_ast_visit::{walk, Visit};
 use oxc_parser::{Parser, ParserReturn};
-use oxc_semantic::{Reference, Scoping, SemanticBuilder, SymbolId};
+use oxc_semantic::{Reference, ScopeFlags, ScopeId, Scoping, SemanticBuilder, SymbolId};
 use oxc_span::{GetSpan, SourceType};
 use oxc_syntax::operator::UpdateOperator;
 use oxc_transformer::{Module as TransformModule, TransformOptions, Transformer};
@@ -365,7 +365,7 @@ pub fn build_record_with_debug_and_source_map_for_target_with_mode(
     // hvigor/es2abc's module-variable opcodes instead of global lookups.
     let module_record = collect_module_record(&program, is_module, scoping_ref);
     let concurrent_import_requests =
-        ConcurrentImportRequests::new(&program, &module_record, scoping_ref);
+        ConcurrentImportRequests::new(&program, &module_record, scoping_ref, record_name)?;
     let lexical_bindings = collect_module_lexical_bindings(&program, is_module, &module_record);
     let function_lexical_infos = collect_function_lexical_bindings(&program);
     let scan_stmts: &[Statement<'_>] = statement_scan_body(&program, is_module);
@@ -485,6 +485,7 @@ pub fn build_record_with_debug_and_source_map_for_target_with_mode(
         source_file,
         source_mapper,
         &mut function_names,
+        &concurrent_import_requests,
     )?;
 
     let record_layout = RecordLayout::new(
@@ -731,8 +732,8 @@ fn first_scope_names_owner_in_class(elements: &[ClassElement<'_>]) -> Option<Str
 }
 
 struct ConcurrentImportRequests<'a> {
-    by_symbol: FxHashMap<SymbolId, u32>,
     by_name: FxHashMap<String, u32>,
+    requests_by_scope: FxHashMap<ScopeId, Vec<u32>>,
     scoping: Option<&'a Scoping>,
 }
 
@@ -741,7 +742,8 @@ impl<'a> ConcurrentImportRequests<'a> {
         program: &Program<'_>,
         module_record: &crate::ir::module_record::ModuleRecordInfo,
         scoping: Option<&'a Scoping>,
-    ) -> Self {
+        record_name: &str,
+    ) -> Result<Self, AbcError> {
         let by_name = module_record
             .regular_imports
             .iter()
@@ -749,7 +751,7 @@ impl<'a> ConcurrentImportRequests<'a> {
             .collect::<FxHashMap<_, _>>();
         let mut by_symbol = FxHashMap::default();
 
-        if scoping.is_some() {
+        if let Some(scoping) = scoping {
             for stmt in &program.body {
                 let Statement::ImportDeclaration(import) = stmt else {
                     continue;
@@ -781,18 +783,46 @@ impl<'a> ConcurrentImportRequests<'a> {
                     }
                 }
             }
+
+            let mut builder = ConcurrentMetadataBuilder {
+                scoping,
+                import_requests_by_symbol: &by_symbol,
+                requests_by_scope: FxHashMap::default(),
+                concurrent_stack: Vec::new(),
+                record_name,
+                error: None,
+            };
+            builder.visit_program(program);
+            if let Some(error) = builder.error {
+                return Err(error);
+            }
+
+            return Ok(Self {
+                by_name,
+                requests_by_scope: builder.requests_by_scope,
+                scoping: Some(scoping),
+            });
         }
 
-        Self {
-            by_symbol,
+        Ok(Self {
             by_name,
+            requests_by_scope: FxHashMap::default(),
             scoping,
-        }
+        })
     }
 
     fn collect_for_function(&self, function: &Function<'_>) -> Vec<u32> {
         if !function_has_directive(function, "use concurrent") {
             return Vec::new();
+        }
+        if self.scoping.is_some() {
+            if let Some(scope_id) = function.scope_id.get() {
+                return self
+                    .requests_by_scope
+                    .get(&scope_id)
+                    .cloned()
+                    .unwrap_or_default();
+            }
         }
         let Some(body) = &function.body else {
             return Vec::new();
@@ -806,24 +836,128 @@ impl<'a> ConcurrentImportRequests<'a> {
     }
 }
 
+struct ConcurrentMetadataBuilder<'b> {
+    scoping: &'b Scoping,
+    import_requests_by_symbol: &'b FxHashMap<SymbolId, u32>,
+    requests_by_scope: FxHashMap<ScopeId, Vec<u32>>,
+    concurrent_stack: Vec<ScopeId>,
+    record_name: &'b str,
+    error: Option<AbcError>,
+}
+
+impl ConcurrentMetadataBuilder<'_> {
+    fn invalid_concurrent_function(&self) -> AbcError {
+        AbcError::Parse {
+            file: self.record_name.to_string(),
+            message: "Concurrent function should only be function declaration".to_string(),
+        }
+    }
+
+    fn invalid_concurrent_variable(&self, name: &str) -> AbcError {
+        AbcError::Parse {
+            file: self.record_name.to_string(),
+            message: format!(
+                "Concurrent function should only use import variable or local variable, '{name}' is not one of them"
+            ),
+        }
+    }
+
+    fn scope_contains(&self, ancestor: ScopeId, scope: ScopeId) -> bool {
+        self.scoping
+            .scope_ancestors(scope)
+            .any(|scope| scope == ancestor)
+    }
+}
+
+impl<'a> Visit<'a> for ConcurrentMetadataBuilder<'_> {
+    fn visit_function(&mut self, it: &Function<'a>, flags: ScopeFlags) {
+        if self.error.is_some() {
+            return;
+        }
+
+        let is_concurrent = function_has_directive(it, "use concurrent");
+        if is_concurrent && it.generator {
+            self.error = Some(self.invalid_concurrent_function());
+            return;
+        }
+
+        if is_concurrent {
+            if let Some(scope_id) = it.scope_id.get() {
+                self.concurrent_stack.push(scope_id);
+                walk::walk_function(self, it, flags);
+                self.concurrent_stack.pop();
+                return;
+            }
+        }
+
+        walk::walk_function(self, it, flags);
+    }
+
+    fn visit_arrow_function_expression(&mut self, it: &oxc_ast::ast::ArrowFunctionExpression<'a>) {
+        if self.error.is_some() {
+            return;
+        }
+        if body_has_directive(&it.body, "use concurrent") {
+            self.error = Some(self.invalid_concurrent_function());
+            return;
+        }
+        walk::walk_arrow_function_expression(self, it);
+    }
+
+    fn visit_identifier_reference(&mut self, it: &oxc_ast::ast::IdentifierReference<'a>) {
+        if self.error.is_some() {
+            return;
+        }
+        let Some(concurrent_scope) = self.concurrent_stack.last().copied() else {
+            return;
+        };
+        let Some(reference_id) = it.reference_id.get() else {
+            return;
+        };
+        let reference = self.scoping.get_reference(reference_id);
+        if reference.is_type() {
+            return;
+        }
+        let Some(symbol_id) = reference.symbol_id() else {
+            return;
+        };
+        if self.scope_contains(concurrent_scope, self.scoping.symbol_scope_id(symbol_id)) {
+            return;
+        }
+
+        if let Some(request_idx) = self.import_requests_by_symbol.get(&symbol_id) {
+            self.requests_by_scope
+                .entry(concurrent_scope)
+                .or_default()
+                .push(*request_idx);
+            return;
+        }
+
+        self.error = Some(self.invalid_concurrent_variable(self.scoping.symbol_name(symbol_id)));
+    }
+}
+
 struct ConcurrentModuleRequestCollector<'a, 'b> {
     imports: &'b ConcurrentImportRequests<'a>,
     requests: Vec<u32>,
 }
 
 impl<'a> Visit<'a> for ConcurrentModuleRequestCollector<'a, '_> {
-    fn visit_identifier_reference(&mut self, it: &oxc_ast::ast::IdentifierReference<'a>) {
-        if let Some(scoping) = self.imports.scoping {
-            if let Some(reference_id) = it.reference_id.get() {
-                if let Some(symbol_id) = scoping.get_reference(reference_id).symbol_id() {
-                    if let Some(request_idx) = self.imports.by_symbol.get(&symbol_id) {
-                        self.requests.push(*request_idx);
-                    }
-                }
-            }
+    fn visit_function(&mut self, it: &Function<'a>, flags: ScopeFlags) {
+        if function_has_directive(it, "use concurrent") {
             return;
         }
+        walk::walk_function(self, it, flags);
+    }
 
+    fn visit_arrow_function_expression(&mut self, it: &oxc_ast::ast::ArrowFunctionExpression<'a>) {
+        if body_has_directive(&it.body, "use concurrent") {
+            return;
+        }
+        walk::walk_arrow_function_expression(self, it);
+    }
+
+    fn visit_identifier_reference(&mut self, it: &oxc_ast::ast::IdentifierReference<'a>) {
         if let Some(request_idx) = self.imports.by_name.get(it.name.as_str()) {
             self.requests.push(*request_idx);
         }
@@ -1054,6 +1188,10 @@ fn function_has_directive(function: &Function<'_>, directive: &str) -> bool {
     let Some(body) = &function.body else {
         return false;
     };
+    body_has_directive(body, directive)
+}
+
+fn body_has_directive(body: &FunctionBody<'_>, directive: &str) -> bool {
     if body
         .directives
         .iter()
@@ -1075,7 +1213,14 @@ fn function_has_directive(function: &Function<'_>, directive: &str) -> bool {
     false
 }
 
-fn class_method_function_kind(is_constructor: bool, is_async: bool) -> u32 {
+fn class_method_function_kind(
+    function: &Function<'_>,
+    is_constructor: bool,
+    is_async: bool,
+) -> u32 {
+    if function_has_directive(function, "use concurrent") {
+        return function_kind::CONCURRENT_FUNCTION;
+    }
     if is_constructor {
         function_kind::FUNCTION
     } else if is_async {
@@ -1112,6 +1257,7 @@ fn compile_class_method_bodies(
     source_file_path: Option<&str>,
     source_mapper: Option<&SourceMapper>,
     function_names: &mut FunctionNameAllocator<'_>,
+    concurrent_import_requests: &ConcurrentImportRequests<'_>,
 ) -> Result<(), AbcError> {
     for stmt in stmts {
         // Handle `class Foo { ... }` (ClassDeclaration)
@@ -1134,6 +1280,7 @@ fn compile_class_method_bodies(
                 source_file_path,
                 source_mapper,
                 function_names,
+                concurrent_import_requests,
             )?;
             continue;
         }
@@ -1160,6 +1307,7 @@ fn compile_class_method_bodies(
                     source_file_path,
                     source_mapper,
                     function_names,
+                    concurrent_import_requests,
                 )?;
             }
             continue;
@@ -1184,6 +1332,7 @@ fn compile_class_method_bodies(
                     source_file_path,
                     source_mapper,
                     function_names,
+                    concurrent_import_requests,
                 )?;
             }
             continue;
@@ -1214,6 +1363,7 @@ fn compile_class_method_bodies(
                         source_file_path,
                         source_mapper,
                         function_names,
+                        concurrent_import_requests,
                     )?;
                     continue;
                 }
@@ -1440,6 +1590,7 @@ fn compile_class_elements(
     source_file_path: Option<&str>,
     source_mapper: Option<&SourceMapper>,
     function_names: &mut FunctionNameAllocator<'_>,
+    concurrent_import_requests: &ConcurrentImportRequests<'_>,
 ) -> Result<(), AbcError> {
     let class_name = class_name.unwrap_or("_");
 
@@ -1805,6 +1956,10 @@ fn compile_class_elements(
             };
             let num_vregs = compiled.vregs;
             let num_args = class_method_num_args(method);
+            let upstream_function_kind =
+                class_method_function_kind(&method.value, is_constructor, is_method_async);
+            let concurrent_module_requests =
+                concurrent_import_requests.collect_for_function(&method.value);
             let debug_info = source_file_path.map(|path| DebugInfoRecord {
                 line_start: compiled.debug_line_start.unwrap_or(1),
                 source_file: path.to_string(),
@@ -1831,8 +1986,8 @@ fn compile_class_elements(
                 } else {
                     MethodKind::Function
                 },
-                function_kind: class_method_function_kind(is_constructor, is_method_async),
-                concurrent_module_requests: Vec::new(),
+                function_kind: upstream_function_kind,
+                concurrent_module_requests,
                 method_pool_entry: !(lowering.standalone_ecmascript_input()
                     && !is_constructor
                     && is_class_buffer_method(method)),
