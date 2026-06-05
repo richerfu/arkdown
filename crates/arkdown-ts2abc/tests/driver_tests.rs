@@ -2,8 +2,63 @@ use arkdown_abc::cache::{
     abc_input_cache_hash, source_cache_hash, AbcProgramsCacheFile, ProgramCacheFile,
     ProgramProtoFile,
 };
+use arkdown_abc::proto_panda::{annotation_element, scalar_value, Function, Program};
 use arkdown_abc::AbcReader;
 use arkdown_ts2abc::{CompileContextInfo, Ts2abcError, Ts2abcInput, Ts2abcOptions};
+
+fn assert_main_function_matches_upstream_program_shape(program: &Program, key: &[u8]) {
+    let function = program
+        .function_table
+        .iter()
+        .find(|function| function.key == key)
+        .and_then(|function| function.value.as_ref())
+        .expect("main function must exist");
+    assert_eq!(function.function_kind, 1);
+    assert_eq!(function.return_type.as_ref().unwrap().name, b"any");
+    assert_eq!(function.return_type.as_ref().unwrap().type_id, 0x0e);
+    assert!(function.body_location.is_some());
+    assert!(function.params.iter().all(|param| param.metadata.is_none()));
+    assert!(function
+        .params
+        .iter()
+        .all(|param| param.r#type.as_ref().unwrap().type_id == 0x0e));
+    assert_eq!(
+        function_annotation_u32(function, "_ESSlotNumberAnnotation", "SlotNumber"),
+        Some(function.slots_num as u32)
+    );
+}
+
+fn function_annotation_u32(
+    function: &Function,
+    record_name: &str,
+    element_name: &str,
+) -> Option<u32> {
+    let annotation_metadata = function
+        .metadata
+        .as_ref()?
+        .father
+        .as_ref()?
+        .father
+        .as_ref()?;
+    for annotation in &annotation_metadata.annotations {
+        if annotation.record_name != record_name.as_bytes() {
+            continue;
+        }
+        for element in &annotation.elements {
+            if element.name != element_name.as_bytes() {
+                continue;
+            }
+            let Some(annotation_element::Value::Scalar(value)) = &element.value else {
+                continue;
+            };
+            let Some(scalar_value::Value::ValueU64(value)) = value.value else {
+                continue;
+            };
+            return u32::try_from(value).ok();
+        }
+    }
+    None
+}
 
 #[test]
 fn compile_to_abc_uses_rust_backend_and_writes_panda_file() {
@@ -112,11 +167,10 @@ fn compile_to_abc_writes_upstream_program_cache_proto_bin() {
         )
     );
     assert_eq!(entry.program.record_table.len(), 3);
-    assert!(entry
-        .program
-        .function_table
-        .iter()
-        .any(|function| function.key == b"entry|entry|1.0.0|src/main/ets/pages/Index.func_main_0"));
+    assert_main_function_matches_upstream_program_shape(
+        &entry.program,
+        b"entry|entry|1.0.0|src/main/ets/pages/Index.func_main_0",
+    );
 }
 
 #[test]
@@ -172,10 +226,10 @@ fn compile_to_abc_writes_output_proto_and_returns_before_abc_emit() {
         .unwrap()
         .expect("output proto is a protoPanda Program");
     assert_eq!(program.record_table.len(), 3);
-    assert!(program
-        .function_table
-        .iter()
-        .any(|function| function.key == b"entry|entry|1.0.0|src/main/ets/pages/Index.func_main_0"));
+    assert_main_function_matches_upstream_program_shape(
+        &program,
+        b"entry|entry|1.0.0|src/main/ets/pages/Index.func_main_0",
+    );
 }
 
 #[test]

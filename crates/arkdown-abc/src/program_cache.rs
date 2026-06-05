@@ -15,9 +15,10 @@ use crate::names::{
     pandasm_record_name, short_method_name,
 };
 use crate::proto_panda::{
-    ins, program, scalar_value, variant_value, DebuginfoIns, Field, FieldMetadata, Function,
-    FunctionMetadata, Ins, ItemMetadata, Literal, Metadata, ParamMetadata, Parameter, Program,
-    Record, RecordMetadata, ScalarValue, Type, Value, VariantValue,
+    annotation_element, ins, program, scalar_value, variant_value, AnnotationData,
+    AnnotationElement, DebuginfoIns, Field, FieldMetadata, Function, FunctionMetadata, Ins,
+    ItemMetadata, Literal, Metadata, Parameter, Program, Record, RecordMetadata, ScalarValue,
+    SourceLocation, SourcePosition, Type, Value, VariantValue,
 };
 
 const VALUE_TYPE_U8: u32 = 2;
@@ -604,7 +605,7 @@ fn method_from_proto(
         catch_entries,
         kind,
         method_pool_entry: false,
-        expected_property_count: None,
+        expected_property_count: function_expected_property_count(function)?,
         definefunc_order: None,
     })
 }
@@ -1252,6 +1253,51 @@ fn function_access_flags(function: &Function) -> u32 {
         .unwrap_or(method_access::INSTANCE)
 }
 
+fn function_expected_property_count(function: &Function) -> io::Result<Option<u32>> {
+    function_annotation_u32(
+        function,
+        EXPECTED_PROPERTY_COUNT_RECORD_NAME,
+        "ExpectedPropertyCount",
+    )
+}
+
+fn function_annotation_u32(
+    function: &Function,
+    record_name: &str,
+    element_name: &str,
+) -> io::Result<Option<u32>> {
+    let Some(annotation_metadata) = function
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.father.as_ref())
+        .and_then(|metadata| metadata.father.as_ref())
+    else {
+        return Ok(None);
+    };
+
+    for annotation in &annotation_metadata.annotations {
+        if annotation.record_name != record_name.as_bytes() {
+            continue;
+        }
+        for element in &annotation.elements {
+            if element.name != element_name.as_bytes() {
+                continue;
+            }
+            let Some(annotation_element::Value::Scalar(value)) = &element.value else {
+                return invalid_data(format!(
+                    "annotation {record_name}.{element_name} is not scalar"
+                ));
+            };
+            return Ok(Some(to_u32(
+                scalar_u64_value(value)?,
+                "function annotation u32",
+            )?));
+        }
+    }
+
+    Ok(None)
+}
+
 fn type_idx(value: &Type) -> u16 {
     match std::str::from_utf8(&value.name).ok() {
         Some("u8") => 0,
@@ -1495,7 +1541,11 @@ fn function_to_proto(
     Ok(Function {
         name: bytes(&full_method_name(&record.name, &method.name)),
         language: record.source_lang as u32,
-        metadata: Some(function_metadata(method.access_flags())),
+        metadata: Some(function_metadata(
+            method.access_flags(),
+            method.expected_property_count,
+            slots_num,
+        )),
         label_table: Vec::new(),
         ins,
         local_variable_debug: Vec::new(),
@@ -1522,14 +1572,12 @@ fn function_to_proto(
         params: (0..method.num_args)
             .map(|_| Parameter {
                 r#type: Some(type_named("any")),
-                metadata: Some(ParamMetadata {
-                    father: Some(annotation_metadata()),
-                }),
+                metadata: None,
             })
             .collect(),
         body_presence: !method.bytecode.is_empty(),
         return_type: Some(type_named("any")),
-        body_location: None,
+        body_location: Some(default_source_location()),
         file_location: None,
         function_kind: function_kind(method.kind),
         slots_num: slots_num.into(),
@@ -2126,8 +2174,9 @@ fn label_name(offset: usize) -> String {
 
 fn function_kind(kind: MethodKind) -> u32 {
     match kind {
-        MethodKind::Module | MethodKind::FunctionLiteral | MethodKind::Constructor => 2,
-        MethodKind::Function | MethodKind::Anonymous => 1,
+        MethodKind::Module | MethodKind::FunctionLiteral | MethodKind::Function => 1,
+        MethodKind::Anonymous => 2,
+        MethodKind::Constructor => 0,
     }
 }
 
@@ -2137,26 +2186,74 @@ fn record_metadata(access_flags: u32) -> RecordMetadata {
     }
 }
 
-fn function_metadata(access_flags: u32) -> FunctionMetadata {
+fn function_metadata(
+    access_flags: u32,
+    expected_property_count: Option<u32>,
+    slots_num: u32,
+) -> FunctionMetadata {
     FunctionMetadata {
-        father: Some(item_metadata(access_flags)),
+        father: Some(item_metadata_with_annotations(
+            access_flags,
+            function_annotations(expected_property_count, slots_num),
+        )),
     }
 }
 
 fn item_metadata(access_flags: u32) -> ItemMetadata {
+    item_metadata_with_annotations(access_flags, Vec::new())
+}
+
+fn item_metadata_with_annotations(
+    access_flags: u32,
+    annotations: Vec<AnnotationData>,
+) -> ItemMetadata {
     ItemMetadata {
-        father: Some(annotation_metadata()),
+        father: Some(annotation_metadata(annotations)),
         access_flags,
     }
 }
 
-fn annotation_metadata() -> crate::proto_panda::AnnotationMetadata {
+fn annotation_metadata(annotations: Vec<AnnotationData>) -> crate::proto_panda::AnnotationMetadata {
     crate::proto_panda::AnnotationMetadata {
         father: Some(Metadata {
             set_attributes: Vec::new(),
             attributes: Vec::new(),
         }),
-        annotations: Vec::new(),
+        annotations,
+    }
+}
+
+fn function_annotations(
+    expected_property_count: Option<u32>,
+    slots_num: u32,
+) -> Vec<AnnotationData> {
+    let mut annotations = Vec::with_capacity(2);
+    if let Some(expected_property_count) = expected_property_count {
+        annotations.push(u32_annotation(
+            EXPECTED_PROPERTY_COUNT_RECORD_NAME,
+            "ExpectedPropertyCount",
+            expected_property_count,
+        ));
+    }
+    annotations.push(u32_annotation(
+        SLOT_NUMBER_RECORD_NAME,
+        "SlotNumber",
+        slots_num,
+    ));
+    annotations
+}
+
+fn u32_annotation(record_name: &str, element_name: &str, value: u32) -> AnnotationData {
+    AnnotationData {
+        record_name: bytes(record_name),
+        elements: vec![AnnotationElement {
+            name: bytes(element_name),
+            value: Some(annotation_element::Value::Scalar(scalar_u64(
+                VALUE_TYPE_U32,
+                value as u64,
+            ))),
+            value_type: annotation_element::ValueType::Scalar as i32,
+        }],
     }
 }
 
@@ -2189,8 +2286,38 @@ fn type_named(name: &str) -> Type {
         component_name: bytes(name),
         rank: 0,
         name: bytes(name),
-        type_id: 0,
+        type_id: pandasm_type_id(name),
     }
+}
+
+fn pandasm_type_id(name: &str) -> u32 {
+    match name {
+        "void" => 0x01,
+        "u1" => 0x02,
+        "i8" => 0x03,
+        "u8" => 0x04,
+        "i16" => 0x05,
+        "u16" => 0x06,
+        "i32" => 0x07,
+        "u32" => 0x08,
+        "f32" => 0x09,
+        "f64" => 0x0a,
+        "i64" => 0x0b,
+        "u64" => 0x0c,
+        "any" => 0x0e,
+        _ => 0x0d,
+    }
+}
+
+fn default_source_location() -> SourceLocation {
+    SourceLocation {
+        begin: Some(default_source_position()),
+        end: Some(default_source_position()),
+    }
+}
+
+fn default_source_position() -> SourcePosition {
+    SourcePosition { line: 0, column: 0 }
 }
 
 fn bytes(value: &str) -> Vec<u8> {
@@ -2286,6 +2413,47 @@ mod tests {
             .and_then(|entry| entry.value.as_ref())
             .unwrap();
         assert_eq!(main.name, b"@bundle:demo/entry/ets/pages/Index.func_main_0");
+        assert_eq!(main.function_kind, 1);
+        assert_eq!(main.return_type.as_ref().unwrap().type_id, 0x0e);
+        assert_eq!(main.return_type.as_ref().unwrap().name, b"any");
+        assert!(main.body_location.is_some());
+        let body_location = main.body_location.as_ref().unwrap();
+        assert_eq!(body_location.begin.as_ref().unwrap().line, 0);
+        assert_eq!(body_location.begin.as_ref().unwrap().column, 0);
+        assert_eq!(body_location.end.as_ref().unwrap().line, 0);
+        assert_eq!(body_location.end.as_ref().unwrap().column, 0);
+        assert!(main.params.iter().all(|param| param.metadata.is_none()));
+        assert!(main
+            .params
+            .iter()
+            .all(|param| param.r#type.as_ref().unwrap().type_id == 0x0e));
+        assert_eq!(
+            function_annotation_u32(main, SLOT_NUMBER_RECORD_NAME, "SlotNumber").unwrap(),
+            Some(main.slots_num as u32)
+        );
+        assert_eq!(
+            function_annotation_u32(
+                main,
+                EXPECTED_PROPERTY_COUNT_RECORD_NAME,
+                "ExpectedPropertyCount"
+            )
+            .unwrap(),
+            None
+        );
+        let user_record = user_record.value.as_ref().unwrap();
+        let field_type_ids = user_record
+            .field_list
+            .iter()
+            .map(|field| {
+                field
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.field_type.as_ref())
+                    .map(|field_type| (field.name.as_slice(), field_type.type_id))
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert!(field_type_ids.contains(&(b"moduleRecordIdx".as_slice(), 0x08)));
     }
 
     #[test]
