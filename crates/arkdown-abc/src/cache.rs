@@ -13,6 +13,7 @@
 //! - a hit restores a `Program` into `progsInfo_`; final ABC emission still
 //!   happens normally from all programs.
 
+use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -192,14 +193,16 @@ impl AbcProgramsCacheFile {
             Ok(proto) => proto,
             Err(_) => return Ok(None),
         };
-        let programs = proto
-            .abc_proto_programs_map
-            .into_iter()
-            .filter_map(|item| item.program.map(|program| (item.name, program)))
-            .collect::<Vec<_>>();
+        let mut programs = BTreeMap::new();
+        for item in proto.abc_proto_programs_map {
+            let Some(program) = item.program else {
+                continue;
+            };
+            programs.entry(item.name).or_insert(program);
+        }
         Ok(Some(AbcProgramsCacheEntry {
             hash_code: proto.hash_code,
-            programs,
+            programs: programs.into_iter().collect(),
         }))
     }
 
@@ -223,9 +226,13 @@ impl AbcProgramsCacheFile {
                 std::fs::create_dir_all(parent)?;
             }
         }
+        let mut sorted_programs = BTreeMap::new();
+        for (name, program) in programs {
+            sorted_programs.entry(name).or_insert(program);
+        }
         let proto = AbcProtoProgramsCache {
             hash_code,
-            abc_proto_programs_map: programs
+            abc_proto_programs_map: sorted_programs
                 .into_iter()
                 .map(
                     |(name, program)| abc_proto_programs_cache::AbcProtoProgramCache {
@@ -443,12 +450,12 @@ mod tests {
     fn abc_programs_cache_proto_bin_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("input.protoBin");
-        let program = Program {
-            lang: 0,
+        let program_a = Program {
+            lang: 1,
             record_table: vec![program::RecordTable {
-                key: b"Lentry/main;".to_vec(),
+                key: b"La;".to_vec(),
                 value: Some(Record {
-                    name: b"Lentry/main;".to_vec(),
+                    name: b"La;".to_vec(),
                     language: 0,
                     body_presence: true,
                     ..Default::default()
@@ -456,13 +463,35 @@ mod tests {
             }],
             ..Default::default()
         };
-        let programs = vec![("input.abc|Lentry/main;".to_string(), program.clone())];
+        let program_z = Program {
+            lang: 2,
+            record_table: vec![program::RecordTable {
+                key: b"Lz;".to_vec(),
+                value: Some(Record {
+                    name: b"Lz;".to_vec(),
+                    language: 0,
+                    body_presence: true,
+                    ..Default::default()
+                }),
+            }],
+            ..Default::default()
+        };
+        let programs = vec![
+            ("input.abc|Lz;".to_string(), program_z.clone()),
+            ("input.abc|La;".to_string(), program_a.clone()),
+        ];
 
         AbcProgramsCacheFile::write(&path, 0x1234, programs.clone()).unwrap();
         let hit = AbcProgramsCacheFile::read_if_hash_matches(&path, 0x1234)
             .unwrap()
             .unwrap();
-        assert_eq!(hit, programs);
+        assert_eq!(
+            hit,
+            vec![
+                ("input.abc|La;".to_string(), program_a),
+                ("input.abc|Lz;".to_string(), program_z),
+            ]
+        );
         assert!(AbcProgramsCacheFile::read_if_hash_matches(&path, 0x5678)
             .unwrap()
             .is_none());
