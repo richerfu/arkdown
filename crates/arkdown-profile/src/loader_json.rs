@@ -576,14 +576,21 @@ impl LoaderJson {
         if module_path_map.is_empty() {
             module_path_map.insert(module_cfg.name.clone(), module_root.clone());
         }
-        // Add resolved dependency packages to modulePathMap.
-        // hvigor populates this from the DependencyManager graph; use the
-        // declared dependency BFS as the local approximation.
-        for pkg_dir in Self::collect_declared_dependency_roots(config, module_cfg) {
-            let key = Self::dependency_package_name(&pkg_dir);
-            module_path_map
-                .entry(key)
-                .or_insert_with(|| to_absolute_path_string(&pkg_dir));
+        // Add resolved dependency packages to modulePathMap using LocalDependencyGraph
+        // for BFS-consistent ordering and type classification.
+        // All locally-found packages (SourceHar, SharedHsp, BytecodeHar, NativeSo) are
+        // included; RemoteOrUnknown with no on-disk root are skipped.
+        {
+            use crate::dependency_graph::LocalDependencyGraph;
+            let graph = LocalDependencyGraph::build(&module_cfg.src_path, &config.project_root);
+            for node in graph.nodes.values() {
+                if node.pkg_root.as_os_str().is_empty() {
+                    continue; // not installed locally
+                }
+                module_path_map
+                    .entry(node.package_name.clone())
+                    .or_insert_with(|| to_absolute_path_string(&node.pkg_root));
+            }
         }
 
         let byte_code_har_info: FxHashMap<String, ByteCodeHarEntry> = bytecode_har_deps
