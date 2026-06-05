@@ -1480,12 +1480,19 @@ impl LoaderJson {
     /// transitive dependency traversal via the DependencyManager graph.
     ///
     /// Key:   dependency package name
-    /// Value: `@bundle:<bundleName>/<moduleName>/<entryRelPath>`
+    /// Value: OHM URL in the format determined by `useNormalizedOHMUrl`:
+    ///   - `false` (default): `@bundle:<bundleName>/<moduleName>/<entryRelPath>`
+    ///   - `true`:  `@normalized:N&<bundleName>&<moduleName>&<entryRelPath>&<version>`
     fn collect_hsp_har_ohm_maps(
         config: &ArkdownConfig,
         module_cfg: &ModuleConfig,
     ) -> (FxHashMap<String, String>, FxHashMap<String, String>) {
         let bundle_name = &config.product.bundle_name;
+        let use_normalized = config
+            .product
+            .build_option
+            .strict_mode
+            .use_normalized_ohm_url;
 
         let mut hsp_map: FxHashMap<String, String> = FxHashMap::default();
         let mut har_map: FxHashMap<String, String> = FxHashMap::default();
@@ -1502,7 +1509,17 @@ impl LoaderJson {
                 .unwrap_or_else(|| dep_name.rsplit('/').next().unwrap_or(&dep_name).to_string());
 
             let entry_rel = Self::dep_entry_rel_path(&pkg_dir);
-            let ohm_url = format!("@bundle:{}/{}/{}", bundle_name, module_name, entry_rel);
+            let ohm_url = if use_normalized {
+                // Normalized format: @normalized:N&<bundleName>&<moduleName>&<entryRelPath>&<version>
+                // hvigor uses the oh-package.json5 version field; fall back to "" when absent.
+                let version = Self::dep_package_version(&pkg_dir);
+                format!(
+                    "@normalized:N&{}&{}&{}&{}",
+                    bundle_name, module_name, entry_rel, version
+                )
+            } else {
+                format!("@bundle:{}/{}/{}", bundle_name, module_name, entry_rel)
+            };
 
             if parsed.module.module_type == "shared" {
                 hsp_map.insert(dep_name, ohm_url);
@@ -1512,6 +1529,22 @@ impl LoaderJson {
         }
 
         (hsp_map, har_map)
+    }
+
+    /// Read the `version` field from a package's `oh-package.json5`.
+    /// Falls back to `""` when the file can't be read or has no version.
+    fn dep_package_version(pkg_dir: &Path) -> String {
+        #[derive(serde::Deserialize)]
+        struct PkgVersion {
+            #[serde(default)]
+            version: Option<String>,
+        }
+        std::fs::read_to_string(pkg_dir.join("oh-package.json5"))
+            .ok()
+            .and_then(|s| json5::from_str::<PkgVersion>(&s).ok())
+            .and_then(|p| p.version)
+            .filter(|v| !v.is_empty())
+            .unwrap_or_default()
     }
 
     /// Resolve a dependency alias to its package directory under `oh_modules/`.

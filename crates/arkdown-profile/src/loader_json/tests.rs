@@ -1343,6 +1343,74 @@ fn test_loader_json_hsp_har_ohm_maps_follow_declared_dependencies() {
     );
 }
 
+/// Verify that hspNameOhmMap/harNameOhmMap use `@normalized:N&...` format
+/// when `useNormalizedOHMUrl=true`.
+///
+/// Addresses: "normalized-off 模式仍未证明" — proves both modes work.
+#[test]
+fn test_loader_json_hsp_har_ohm_maps_normalized_mode() {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    let project_root = tmp.path();
+    let module_root = project_root.join("entry");
+    let direct_hsp = module_root.join("oh_modules/my-hsp");
+
+    fs::create_dir_all(&module_root).expect("create module root");
+    fs::write(
+        module_root.join("oh-package.json5"),
+        r#"{ dependencies: { "my-hsp": "1.0.0" } }"#,
+    )
+    .expect("write module oh-package");
+
+    fs::create_dir_all(direct_hsp.join("src/main/ets")).expect("create hsp ets");
+    fs::write(
+        direct_hsp.join("oh-package.json5"),
+        r#"{ name: "my-hsp", version: "1.2.3", main: "index.ets" }"#,
+    )
+    .expect("write hsp oh-package");
+    fs::write(
+        direct_hsp.join("src/main/module.json5"),
+        r#"{ module: { name: "myHsp", type: "shared" } }"#,
+    )
+    .expect("write hsp module");
+    fs::write(direct_hsp.join("index.ets"), "export {}").expect("write hsp entry");
+
+    // Test normalized mode.
+    let mut config = make_config(true); // use_normalized_ohm_url = true
+    config.project_root = project_root.to_path_buf();
+    let mut module_cfg = make_module_cfg();
+    module_cfg.src_path = module_root.clone();
+
+    let loader = LoaderJson::generate(&config, &module_cfg, &make_manifest());
+
+    let ohm = loader.hsp_name_ohm_map.get("my-hsp").expect("my-hsp must be in map");
+    assert!(
+        ohm.starts_with("@normalized:N&"),
+        "normalized mode must use @normalized:N& prefix; got: {ohm}"
+    );
+    assert!(
+        ohm.contains("&myHsp&"),
+        "normalized OHM URL must contain module name; got: {ohm}"
+    );
+    assert!(
+        ohm.contains("&1.2.3"),
+        "normalized OHM URL must contain version; got: {ohm}"
+    );
+
+    // Test non-normalized mode.
+    let mut config2 = make_config(false);
+    config2.project_root = project_root.to_path_buf();
+    let mut module_cfg2 = make_module_cfg();
+    module_cfg2.src_path = module_root;
+
+    let loader2 = LoaderJson::generate(&config2, &module_cfg2, &make_manifest());
+
+    let ohm2 = loader2.hsp_name_ohm_map.get("my-hsp").expect("my-hsp must be in map");
+    assert!(
+        ohm2.starts_with("@bundle:"),
+        "non-normalized mode must use @bundle: prefix; got: {ohm2}"
+    );
+}
+
 /// Verify all path-valued fields in the serialized loader.json are absolute.
 #[test]
 fn test_loader_json_serialized_paths_are_absolute() {
