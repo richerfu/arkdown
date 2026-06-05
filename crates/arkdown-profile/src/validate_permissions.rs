@@ -120,15 +120,26 @@ pub fn validate_request_permissions(
                      {profile_path}"
                 )));
             }
-            // Validate usedScene.when value if present.
-            // hvigor accepts "inuse" and "always"; any other value is an error.
+            // Validate usedScene fields when present.
             if let Some(used_scene) = permission.get("usedScene") {
+                // hvigor accepts "inuse" and "always" for usedScene.when.
                 if let Some(when) = used_scene.get("when").and_then(|w| w.as_str()) {
                     if !matches!(when, "inuse" | "always") {
                         return Err(ArkdownError::Bundler(format!(
                             "The usedScene.when value '{}' is invalid for permission '{}'; \
                              expected 'inuse' or 'always'.\nat {profile_path}",
                             when, name
+                        )));
+                    }
+                }
+                // usedScene.abilities must not be an empty array.
+                // hvigor requires at least one ability name or the special value "all".
+                if let Some(abilities) = used_scene.get("abilities").and_then(|a| a.as_array()) {
+                    if abilities.is_empty() {
+                        return Err(ArkdownError::Bundler(format!(
+                            "The usedScene.abilities for permission '{}' must not be empty; \
+                             provide at least one ability name or use [\"all\"].\nat {profile_path}",
+                            name
                         )));
                     }
                 }
