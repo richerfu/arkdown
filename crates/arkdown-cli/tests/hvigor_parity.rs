@@ -691,6 +691,16 @@ fn collect_build(
                 &["cache/default/default@CompileArkTS", "cache/default"],
                 false,
             )?;
+            // importee.json: compiledImportees / nonEntryImportees (includes BC HAR OHM URLs).
+            collect_named_artifact(
+                &mut artifacts,
+                root,
+                archive.as_ref(),
+                "importee.json",
+                None,
+                &["intermediates/importee"],
+                false,
+            )?;
         }
         ArtifactType::Har => {
             // HAR archives contain oh-package.json5, source ETS files, declaration stubs,
