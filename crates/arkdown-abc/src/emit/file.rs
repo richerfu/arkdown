@@ -2282,6 +2282,12 @@ fn field_type_index(
             .get(&id)
             .expect("primitive field type must be present in IndexSection");
     }
+    if let FieldType::Record { component_name } = field_type {
+        let descriptor = pandasm_reference_descriptor(component_name);
+        return *name_to_index_class_idx
+            .get(descriptor.as_str())
+            .expect("record field type must be present in IndexSection");
+    }
     if let Some(descriptor) = field_type.foreign_descriptor() {
         return *name_to_index_class_idx
             .get(descriptor.as_str())
@@ -2304,6 +2310,14 @@ fn field_type_index(
             unreachable!()
         }
     }
+}
+
+fn pandasm_reference_descriptor(component_name: &str) -> String {
+    let mut descriptor = String::with_capacity(component_name.len() + 2);
+    descriptor.push('L');
+    descriptor.push_str(component_name);
+    descriptor.push(';');
+    descriptor
 }
 
 #[derive(Debug, Default)]

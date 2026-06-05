@@ -4927,6 +4927,26 @@ class A {}
     #[test]
     fn reference_field_type_roundtrips_through_abc_input() {
         let mut file = annotation_usage_file();
+        file.records.push(ClassRecord {
+            name: "Lcustom.Record;".to_string(),
+            methods: Vec::new(),
+            string_indices: Vec::new(),
+            literal_indices: Vec::new(),
+            module_literal_indices: Vec::new(),
+            source_code_strings: Vec::new(),
+            access_flags: 1,
+            source_lang: 0,
+            metadata_attrs: Default::default(),
+            conflict: false,
+            params_num: 0,
+            body_presence: false,
+            file_location: None,
+            standalone_ecmascript_input: false,
+            source_file: None,
+            annotations: Vec::new(),
+            module_requests: Vec::new(),
+            fields: Vec::new(),
+        });
         let record = file
             .records
             .iter_mut()
@@ -4965,6 +4985,32 @@ class A {}
 
         let bytes = file.serialize_with_version(version_for_target_api(20, None));
         AbcReader::validate(&bytes).unwrap();
+        let reader = AbcReader::new(&bytes).unwrap();
+        let classes = reader.class_items().unwrap();
+        let user_class = classes
+            .iter()
+            .find(|class| class.name == "Lusage_string.ets;")
+            .expect("user class must exist");
+        let custom_class = classes
+            .iter()
+            .find(|class| class.name == "Lcustom.Record;")
+            .expect("custom class must exist");
+        let ref_field = user_class
+            .fields
+            .iter()
+            .find(|field| field.name == "refField")
+            .expect("refField must exist");
+        let index = reader
+            .index_sections()
+            .unwrap()
+            .into_iter()
+            .find(|section| section.start <= ref_field.offset && ref_field.offset < section.end)
+            .expect("field must be covered by IndexSection");
+        assert_eq!(
+            index.class_offsets[ref_field.type_idx as usize],
+            custom_class.offset
+        );
+
         let mut restored = AbcFile::new();
         append_abc_file(&mut restored, &bytes).unwrap();
         let restored_record = restored

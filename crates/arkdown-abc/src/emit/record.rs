@@ -550,13 +550,6 @@ impl FieldType {
     pub(crate) fn foreign_descriptor(&self) -> Option<String> {
         match self {
             Self::PandaString => Some("Lpanda.String;".to_string()),
-            Self::Record { component_name } => {
-                let mut descriptor = String::with_capacity(component_name.len() + 2);
-                descriptor.push('L');
-                descriptor.push_str(component_name);
-                descriptor.push(';');
-                Some(descriptor)
-            }
             Self::Array {
                 component_name,
                 rank,
