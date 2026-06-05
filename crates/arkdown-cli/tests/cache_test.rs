@@ -8,15 +8,14 @@
 //!    `ets/modules.abc` (deterministic output / cache correctness).
 
 use rustc_hash::FxHashMap;
+use std::fmt::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arkdown::Bundler;
 use arkdown_cache::{compute_content_hash, BuildCache, BundleCacheKey, CacheKey, CachedEntry};
 use arkdown_config::load_config;
-use arkdown_core::{
-    ArkChunk, ArkdownConfig, BuildMode, ChunkIdx, ModuleConfig, ModuleJson5, OutputTarget,
-};
+use arkdown_core::{ArkdownConfig, BuildMode, ModuleConfig, ModuleJson5, OutputTarget};
 use arkdown_pack::{PackInput, Packager};
 use arkdown_plugin_duplicate_check::DuplicateCheckPlugin;
 use arkdown_plugin_ets_transform::EtsTransformPlugin;
@@ -27,7 +26,6 @@ use arkdown_profile::ProfileProcessor;
 use arkdown_resolver::ResolverConfig;
 use arkdown_resource::{ResourceCompileConfig, ResourceCompileInput, ResourceCompiler};
 use arkdown_ts2abc::{Ts2abcInput, Ts2abcOptions};
-use index_vec::IndexVec;
 use rolldown_plugin::__inner::SharedPluginable;
 
 fn fixture_root() -> PathBuf {
@@ -74,6 +72,12 @@ fn copy_dir_no_build(src: &Path, dst: &Path) {
             std::fs::copy(&from, &to).expect("copy file");
         }
     }
+}
+
+fn compile_arkts_cache_root(module: &ModuleConfig) -> PathBuf {
+    module
+        .src_path
+        .join("build/default/cache/default/default@CompileArkTS/esmodule/debug")
 }
 
 #[derive(Debug, Clone)]
@@ -243,21 +247,6 @@ fn run_pipeline(fixture: &Path) -> PathBuf {
             }
             h
         };
-        let config_hash = {
-            let mut h: u64 = 0xcbf29ce484222325;
-            let fp = format!(
-                "debug:{}:{}:false:{}:{}",
-                config.product.bundle_name,
-                config.sdk_config.compile_api_version,
-                loader_json.support_chunks,
-                loader_json.module_name,
-            );
-            for b in fp.bytes() {
-                h ^= b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            h
-        };
         BundleCacheKey {
             inner: CacheKey {
                 content_hash: format!("{source_hash:x}"),
@@ -302,13 +291,30 @@ fn run_pipeline(fixture: &Path) -> PathBuf {
         })
         .collect();
 
-    let ts2abc_inputs = collect_js_chunks(&bundle_out.chunk_files, &record_name_map);
+    let mut ts2abc_inputs = collect_js_chunks(&bundle_out.chunk_files, &record_name_map);
     let modules_abc = bundle_out.modules_abc_path.clone();
 
     if !ts2abc_inputs.is_empty() {
-        let abc_cache_file = module
-            .src_path
-            .join("build/default/cache/default/default@CompileArkTS/esmodule/modules.cache");
+        let abc_cache_root = compile_arkts_cache_root(module);
+        let abc_cache_file = abc_cache_root.join("modules.cache");
+        fs_err::create_dir_all(&abc_cache_root).expect("create CompileArkTS cache root");
+        let mut modules_cache = String::new();
+        for input in &mut ts2abc_inputs {
+            let cache_stem = input
+                .path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("module");
+            let cache_file = abc_cache_root.join(format!("{cache_stem}.protoBin"));
+            let _ = writeln!(
+                modules_cache,
+                "{};{}",
+                input.path.display(),
+                cache_file.display()
+            );
+            input.cache_file = Some(cache_file);
+        }
+        fs_err::write(&abc_cache_file, modules_cache).expect("write CompileArkTS modules.cache");
 
         // Load module build cache (mirrors build.rs logic).
         let cache_dir = module.src_path.join("build/default/cache/modules");
@@ -481,9 +487,7 @@ fn test_first_build_writes_abc_cache_file() {
     let config =
         load_config(&fixture, BuildMode::Debug, OutputTarget::Hap, None, None).expect("config");
     let module = &config.modules[0];
-    let abc_cache = module
-        .src_path
-        .join("build/default/cache/default/default@CompileArkTS/esmodule/modules.cache");
+    let abc_cache = compile_arkts_cache_root(module).join("modules.cache");
     assert!(
         abc_cache.exists(),
         "CompileArkTS modules.cache must exist after first build: {abc_cache:?}"
