@@ -416,7 +416,8 @@ pub struct AbcFile {
     pub strings: StringTable,
     /// Optional upstream Program.lang preserved for ProgramCache/protoBin
     /// roundtrips. Source compilation leaves it unset and derives lang from
-    /// selected class records.
+    /// selected class records; ABC input uses upstream abc2program's default
+    /// ECMAScript program language independently from record/function language.
     pub program_lang: Option<u32>,
     /// Upstream Program.array_types preserved for ProgramCache/protoBin
     /// roundtrips. ABC binary emission does not use this table directly.

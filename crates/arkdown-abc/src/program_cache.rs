@@ -5444,6 +5444,39 @@ class A {}
     }
 
     #[test]
+    fn abc_input_program_lang_matches_upstream_default_ecmascript() {
+        let file = annotation_usage_file();
+        let source_program = program_for_file(&file, 20).unwrap();
+        assert_eq!(
+            source_program.lang, 0x04,
+            "source-created Program.lang follows the source context"
+        );
+
+        let bytes = file.serialize_with_version(version_for_target_api(20, None));
+        let mut imported = AbcFile::new();
+        append_abc_file(&mut imported, &bytes).unwrap();
+        assert_eq!(imported.program_lang, Some(0x00));
+
+        let imported_program = program_for_file(&imported, 20).unwrap();
+        assert_eq!(
+            imported_program.lang, 0x00,
+            "abc2program sets Program.lang to the upstream ECMAScript default"
+        );
+        let imported_record = imported_program
+            .record_table
+            .iter()
+            .find_map(|entry| {
+                let record = entry.value.as_ref()?;
+                (entry.key == b"usage_string.ets").then_some(record)
+            })
+            .expect("ABC-imported user record must be present");
+        assert_eq!(imported_record.language, 0x04);
+        let imported_function = function_by_short_name(&imported_program, "func_main_0")
+            .expect("ABC-imported func_main_0 function must exist");
+        assert_eq!(imported_function.language, 0x04);
+    }
+
+    #[test]
     fn function_source_code_roundtrips_through_proto_and_lnp_set_source_code() {
         let mut file = annotation_usage_file();
         let record = file

@@ -35,6 +35,7 @@ use crate::names::{full_method_name, literal_array_key};
 pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usize>, AbcError> {
     let reader = AbcReader::new(data).map_err(read_error("<abc input>"))?;
     let classes = reader.class_items().map_err(read_error("<abc input>"))?;
+    file.program_lang.get_or_insert(0);
 
     let module_literal_offsets = classes
         .iter()
