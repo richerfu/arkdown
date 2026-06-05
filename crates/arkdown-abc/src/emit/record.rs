@@ -209,6 +209,11 @@ pub struct MethodRecord {
     pub method_pool_entry: bool,
     pub expected_property_count: Option<u32>,
     pub annotations: Vec<AnnotationRecord>,
+    /// Custom annotations attached to each Panda method parameter.
+    ///
+    /// The outer index is the proto parameter index used by libpandafile's
+    /// MethodItem. Empty vectors mean the parameter has no custom annotations.
+    pub param_annotations: Vec<Vec<AnnotationRecord>>,
     /// Source-order key for `definefunc` operands. MethodItems may be sorted for
     /// upstream file layout, but anonymous `definefunc` opcodes are resolved in
     /// AST discovery order.
@@ -228,6 +233,7 @@ pub(crate) struct MethodAnnotationOffsets {
     pub(crate) custom: Vec<u32>,
     pub(crate) expected_property_count: Option<u32>,
     pub(crate) slot_number: u32,
+    pub(crate) param_annotations: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -770,6 +776,10 @@ impl ClassRecord {
             // emitted before it, matching FunctionEmitter::Generate().
             buf.push(0x06);
             buf.extend_from_slice(&ann_offsets.slot_number.to_le_bytes());
+            if let Some(param_annotations_off) = ann_offsets.param_annotations {
+                buf.push(0x07);
+                buf.extend_from_slice(&param_annotations_off.to_le_bytes());
+            }
             // MethodTag::NOTHING = 0x00
             buf.push(0x00);
         }
@@ -844,7 +854,14 @@ impl MethodRecord {
             + (1 + 4) // MethodTag::ANNOTATION always emitted
             + self.annotations.len() * (1 + 4)
             + self.expected_property_count.map_or(0, |_| 1 + 4)
+            + self.has_param_annotations().then_some(1 + 4).unwrap_or(0)
             + self.debug_info.as_ref().map_or(0, |_| 1 + 4)
+    }
+
+    pub(crate) fn has_param_annotations(&self) -> bool {
+        self.param_annotations
+            .iter()
+            .any(|annotations| !annotations.is_empty())
     }
 }
 
@@ -969,6 +986,7 @@ mod tests {
                 method_pool_entry: false,
                 expected_property_count: None,
                 annotations: Vec::new(),
+                param_annotations: Vec::new(),
                 definefunc_order: None,
                 label_style: MethodLabelStyle::Source,
             }],
@@ -1016,6 +1034,7 @@ mod tests {
                 method_pool_entry: false,
                 expected_property_count: None,
                 annotations: Vec::new(),
+                param_annotations: Vec::new(),
                 definefunc_order: None,
                 label_style: MethodLabelStyle::Source,
             }],
@@ -1045,6 +1064,7 @@ mod tests {
                 custom: Vec::new(),
                 expected_property_count: None,
                 slot_number: 0x200,
+                param_annotations: None,
             }],
             &[],
             &[],

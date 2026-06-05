@@ -186,6 +186,15 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
                     method_pool_entry: method_pool_offsets.contains(&method.offset),
                     expected_property_count: annotations.expected_property_count,
                     annotations: annotations.custom,
+                    param_annotations: method_param_annotations_from_abc(
+                        data,
+                        &reader,
+                        &class,
+                        method,
+                        &index_sections,
+                        &class_name_by_offset,
+                        &literal_offset_to_index,
+                    )?,
                     definefunc_order: None,
                     label_style: MethodLabelStyle::Abc2Program,
                 })
@@ -352,6 +361,65 @@ fn method_annotations_from_abc(
         });
     }
     Ok(decoded)
+}
+
+fn method_param_annotations_from_abc(
+    data: &[u8],
+    reader: &AbcReader<'_>,
+    owner_class: &AbcClassItem,
+    method: &crate::abc_reader::AbcMethodItem,
+    index_sections: &[crate::abc_reader::AbcIndexSection],
+    class_name_by_offset: &BTreeMap<u32, String>,
+    literal_offset_to_index: &BTreeMap<u32, usize>,
+) -> Result<Vec<Vec<AnnotationRecord>>, AbcError> {
+    let Some(param_annotation_off) = method.param_annotation_offset else {
+        return Ok(Vec::new());
+    };
+    let Some(section) = index_sections
+        .iter()
+        .find(|section| section.start <= method.offset && method.offset < section.end)
+        .or_else(|| index_sections.first())
+    else {
+        return Ok(Vec::new());
+    };
+
+    let mut cursor = param_annotation_off as usize;
+    let param_count = read_at_u32(data, cursor, "parameter annotation count")? as usize;
+    cursor += 4;
+    let mut params = Vec::with_capacity(param_count);
+    for _ in 0..param_count {
+        let annotation_count =
+            read_at_u32(data, cursor, "parameter annotation item count")? as usize;
+        cursor += 4;
+        let mut annotations = Vec::with_capacity(annotation_count);
+        for _ in 0..annotation_count {
+            let annotation_off = read_at_u32(data, cursor, "parameter annotation offset")?;
+            cursor += 4;
+            let Some((record_name, elements)) = annotation_from_abc(
+                data,
+                reader,
+                owner_class,
+                annotation_off,
+                section,
+                class_name_by_offset,
+                literal_offset_to_index,
+            )?
+            else {
+                continue;
+            };
+            if is_system_function_annotation(record_name.as_bytes())
+                || is_system_record_annotation(&record_name)
+            {
+                continue;
+            }
+            annotations.push(AnnotationRecord {
+                record_name,
+                elements,
+            });
+        }
+        params.push(annotations);
+    }
+    Ok(params)
 }
 
 fn annotation_from_abc(

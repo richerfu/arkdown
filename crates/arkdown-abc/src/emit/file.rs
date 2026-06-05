@@ -41,6 +41,7 @@ enum AnnotationOwnerKind {
     Class,
     Field,
     Method,
+    Param,
 }
 
 /// A single entry in a Panda `LiteralArray`.
@@ -658,6 +659,16 @@ impl AbcFile {
                         }
                     }
                 }
+                for param_annotations in &method.param_annotations {
+                    for annotation in param_annotations {
+                        for element in &annotation.elements {
+                            string_items.get_or_create(&element.name);
+                            if let AnnotationValue::String(value) = &element.value {
+                                string_items.get_or_create(value);
+                            }
+                        }
+                    }
+                }
             }
 
             for source_code in &class.source_code_strings {
@@ -764,7 +775,7 @@ impl AbcFile {
         let mut cur = string_items.cur();
         let mut field_value_section = Vec::new();
         let mut annotation_f64_value_offsets =
-            FxHashMap::<(AnnotationOwnerKind, usize, usize, usize, usize), u32>::default();
+            FxHashMap::<(AnnotationOwnerKind, usize, usize, usize, usize, usize), u32>::default();
         for (class_idx, class) in all_classes.iter().enumerate() {
             for (annotation_idx, annotation) in class.annotations.iter().enumerate() {
                 for (element_idx, element) in annotation.elements.iter().enumerate() {
@@ -778,6 +789,7 @@ impl AbcFile {
                             (
                                 AnnotationOwnerKind::Class,
                                 class_idx,
+                                0,
                                 0,
                                 annotation_idx,
                                 element_idx,
@@ -813,6 +825,7 @@ impl AbcFile {
                                     AnnotationOwnerKind::Field,
                                     class_idx,
                                     field_idx,
+                                    0,
                                     annotation_idx,
                                     element_idx,
                                 ),
@@ -838,6 +851,7 @@ impl AbcFile {
                                     AnnotationOwnerKind::Method,
                                     class_idx,
                                     method_idx,
+                                    0,
                                     annotation_idx,
                                     element_idx,
                                 ),
@@ -845,6 +859,32 @@ impl AbcFile {
                             );
                             field_value_section.extend_from_slice(&value.to_le_bytes());
                             cur += 8;
+                        }
+                    }
+                }
+                for (param_idx, param_annotations) in method.param_annotations.iter().enumerate() {
+                    for (annotation_idx, annotation) in param_annotations.iter().enumerate() {
+                        for (element_idx, element) in annotation.elements.iter().enumerate() {
+                            if let AnnotationValue::F64(value) = &element.value {
+                                let aligned = align8(cur);
+                                while cur < aligned {
+                                    field_value_section.push(0);
+                                    cur += 1;
+                                }
+                                annotation_f64_value_offsets.insert(
+                                    (
+                                        AnnotationOwnerKind::Param,
+                                        class_idx,
+                                        method_idx,
+                                        param_idx,
+                                        annotation_idx,
+                                        element_idx,
+                                    ),
+                                    cur,
+                                );
+                                field_value_section.extend_from_slice(&value.to_le_bytes());
+                                cur += 8;
+                            }
                         }
                     }
                 }
@@ -1156,6 +1196,7 @@ impl AbcFile {
             |owner_kind: AnnotationOwnerKind,
              class_idx: usize,
              member_idx: usize,
+             param_idx: usize,
              annotation_idx: usize,
              annotation: &AnnotationRecord| {
                 let annotation_class_name = format!("L{};", annotation.record_name);
@@ -1180,6 +1221,7 @@ impl AbcFile {
                                     owner_kind,
                                     class_idx,
                                     member_idx,
+                                    param_idx,
                                     annotation_idx,
                                     element_idx,
                                 ))
@@ -1210,6 +1252,8 @@ impl AbcFile {
             Vec::with_capacity(all_classes.len());
         let mut annotation_offsets_per_class: Vec<Vec<MethodAnnotationOffsets>> =
             Vec::with_capacity(all_classes.len());
+        let mut param_annotation_offsets_per_class: Vec<Vec<Option<Vec<Vec<u32>>>>> =
+            Vec::with_capacity(all_classes.len());
         let mut annotation_emit_order = Vec::new();
         {
             let mut annotation_offsets_by_key = FxHashMap::<AnnotationItemKey, u32>::default();
@@ -1220,6 +1264,7 @@ impl AbcFile {
                     let key = make_annotation_key(
                         AnnotationOwnerKind::Class,
                         class_idx,
+                        0,
                         0,
                         annotation_idx,
                         annotation,
@@ -1245,6 +1290,7 @@ impl AbcFile {
                             AnnotationOwnerKind::Field,
                             class_idx,
                             field_idx,
+                            0,
                             annotation_idx,
                             annotation,
                         );
@@ -1264,14 +1310,16 @@ impl AbcFile {
 
                 let mut method_ann_offs = Vec::with_capacity(class.methods.len());
                 method_ann_offs.resize(class.methods.len(), MethodAnnotationOffsets::default());
+                let mut method_param_ann_offsets = Vec::with_capacity(class.methods.len());
+                method_param_ann_offsets.resize(class.methods.len(), None);
                 for &method_idx in &annotation_order_per_class[class_idx] {
-                    for (annotation_idx, annotation) in
-                        class.methods[method_idx].annotations.iter().enumerate()
-                    {
+                    let method = &class.methods[method_idx];
+                    for (annotation_idx, annotation) in method.annotations.iter().enumerate() {
                         let key = make_annotation_key(
                             AnnotationOwnerKind::Method,
                             class_idx,
                             method_idx,
+                            0,
                             annotation_idx,
                             annotation,
                         );
@@ -1287,9 +1335,7 @@ impl AbcFile {
                         method_ann_offs[method_idx].custom.push(off);
                     }
 
-                    if let Some(expected_property_count) =
-                        class.methods[method_idx].expected_property_count
-                    {
+                    if let Some(expected_property_count) = method.expected_property_count {
                         let key = AnnotationItemKey {
                             class_idx: expected_property_count_annotation_class_idx
                                 .expect("ExpectedPropertyCount annotation class must be indexed"),
@@ -1340,8 +1386,40 @@ impl AbcFile {
                             off
                         });
                     method_ann_offs[method_idx].slot_number = off;
+
+                    if method.has_param_annotations() {
+                        let param_count =
+                            usize::max(method.num_args as usize, method.param_annotations.len());
+                        let mut param_offsets = vec![Vec::new(); param_count];
+                        for (param_idx, param_annotations) in
+                            method.param_annotations.iter().enumerate()
+                        {
+                            for (annotation_idx, annotation) in param_annotations.iter().enumerate()
+                            {
+                                let key = make_annotation_key(
+                                    AnnotationOwnerKind::Param,
+                                    class_idx,
+                                    method_idx,
+                                    param_idx,
+                                    annotation_idx,
+                                    annotation,
+                                );
+                                let off = *annotation_offsets_by_key
+                                    .entry(key.clone())
+                                    .or_insert_with(|| {
+                                        let off = ann_cur;
+                                        ann_cur += key.byte_size();
+                                        annotation_emit_order.push(key);
+                                        off
+                                    });
+                                param_offsets[param_idx].push(off);
+                            }
+                        }
+                        method_param_ann_offsets[method_idx] = Some(param_offsets);
+                    }
                 }
                 annotation_offsets_per_class.push(method_ann_offs);
+                param_annotation_offsets_per_class.push(method_param_ann_offsets);
             }
         }
         let annotation_section_size = annotation_emit_order
@@ -1349,6 +1427,31 @@ impl AbcFile {
             .map(AnnotationItemKey::byte_size)
             .sum::<u32>();
         cur += annotation_section_size;
+
+        let param_annotation_section_start = cur;
+        let mut param_annotation_section = Vec::new();
+        for (class_idx, _class) in all_classes.iter().enumerate() {
+            for &method_idx in &annotation_order_per_class[class_idx] {
+                let Some(param_annotation_offsets) =
+                    param_annotation_offsets_per_class[class_idx][method_idx].as_ref()
+                else {
+                    continue;
+                };
+                annotation_offsets_per_class[class_idx][method_idx].param_annotations = Some(cur);
+                param_annotation_section
+                    .extend_from_slice(&(param_annotation_offsets.len() as u32).to_le_bytes());
+                cur += 4;
+                for annotations in param_annotation_offsets {
+                    param_annotation_section
+                        .extend_from_slice(&(annotations.len() as u32).to_le_bytes());
+                    cur += 4;
+                    for &annotation_off in annotations {
+                        param_annotation_section.extend_from_slice(&annotation_off.to_le_bytes());
+                        cur += 4;
+                    }
+                }
+            }
+        }
 
         // ── 5. Compute CodeItem start offsets ─────────────────────────────────
         let code_section_start: u32 = cur;
@@ -1983,6 +2086,16 @@ impl AbcFile {
                 file.push(element.tag);
             }
         }
+        debug_assert_eq!(file.len() as u32, param_annotation_section_start);
+
+        // ── ParamAnnotationsItems ────────────────────────────────────────────
+        //
+        // Format per libpandafile ParamAnnotationsItem:
+        //   params_count: u32
+        //   repeated params_count times:
+        //     annotations_count: u32
+        //     annotation_off: u32 * annotations_count
+        file.extend_from_slice(&param_annotation_section);
         debug_assert_eq!(file.len() as u32, code_section_start);
 
         // ── CodeItems ─────────────────────────────────────────────────────────

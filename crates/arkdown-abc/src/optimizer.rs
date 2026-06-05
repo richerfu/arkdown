@@ -523,6 +523,7 @@ mod tests {
             method_pool_entry: false,
             expected_property_count: None,
             annotations: Vec::new(),
+            param_annotations: Vec::new(),
             definefunc_order: None,
             label_style: MethodLabelStyle::Source,
         }

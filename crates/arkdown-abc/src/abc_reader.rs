@@ -133,6 +133,7 @@ pub struct AbcMethodItem {
     pub code_off: Option<u32>,
     pub debug_info_off: Option<u32>,
     pub annotation_offsets: Vec<u32>,
+    pub param_annotation_offset: Option<u32>,
     pub code: Option<AbcCodeItem>,
 }
 
@@ -928,6 +929,7 @@ impl<'a> AbcReader<'a> {
         let mut code_off = None;
         let mut debug_info_off = None;
         let mut annotation_offsets = Vec::new();
+        let mut param_annotation_offset = None;
         loop {
             let tag = self.read_u8(cursor)?;
             cursor += 1;
@@ -947,6 +949,10 @@ impl<'a> AbcReader<'a> {
                 }
                 0x06 => {
                     annotation_offsets.push(self.read_u32(cursor)?);
+                    cursor += 4;
+                }
+                0x07 => {
+                    param_annotation_offset = Some(self.read_u32(cursor)?);
                     cursor += 4;
                 }
                 other => {
@@ -972,6 +978,7 @@ impl<'a> AbcReader<'a> {
                 code_off,
                 debug_info_off,
                 annotation_offsets,
+                param_annotation_offset,
                 code,
             },
             cursor,

@@ -470,6 +470,7 @@ pub fn build_record_with_debug_and_source_map_for_target_with_mode(
         method_pool_entry: false,
         expected_property_count: None,
         annotations: Vec::new(),
+        param_annotations: Vec::new(),
         definefunc_order: None,
         label_style: MethodLabelStyle::Source,
     });
@@ -2149,6 +2150,7 @@ fn compile_function_record(
                 method_pool_entry: true,
                 expected_property_count,
                 annotations: Vec::new(),
+                param_annotations: Vec::new(),
                 definefunc_order: Some(definefunc_order),
                 label_style: MethodLabelStyle::Source,
             });
@@ -2199,6 +2201,7 @@ fn compile_function_record(
                 method_pool_entry: true,
                 expected_property_count,
                 annotations: Vec::new(),
+                param_annotations: Vec::new(),
                 definefunc_order: Some(definefunc_order),
                 label_style: MethodLabelStyle::Source,
             });
@@ -2845,6 +2848,7 @@ fn compile_class_elements(
             method_pool_entry: true,
             expected_property_count: class_expected_property_count,
             annotations: constructor_annotations,
+            param_annotations: Vec::new(),
             definefunc_order: None,
             label_style: MethodLabelStyle::Source,
         });
@@ -2887,6 +2891,7 @@ fn compile_class_elements(
             method_pool_entry: true,
             expected_property_count: None,
             annotations: Vec::new(),
+            param_annotations: Vec::new(),
             definefunc_order: None,
             label_style: MethodLabelStyle::Source,
         });
@@ -2924,6 +2929,7 @@ fn compile_class_elements(
             method_pool_entry: true,
             expected_property_count: None,
             annotations: Vec::new(),
+            param_annotations: Vec::new(),
             definefunc_order: None,
             label_style: MethodLabelStyle::Source,
         });
@@ -3113,6 +3119,7 @@ fn compile_class_elements(
                     .then_some(class_expected_property_count)
                     .flatten(),
                 annotations,
+                param_annotations: Vec::new(),
                 definefunc_order: None,
                 label_style: MethodLabelStyle::Source,
             });
@@ -3166,6 +3173,7 @@ fn compile_class_elements(
             method_pool_entry: true,
             expected_property_count: None,
             annotations: Vec::new(),
+            param_annotations: Vec::new(),
             definefunc_order: None,
             label_style: MethodLabelStyle::Source,
         });
@@ -3206,6 +3214,7 @@ fn compile_class_elements(
             method_pool_entry: true,
             expected_property_count: None,
             annotations: Vec::new(),
+            param_annotations: Vec::new(),
             definefunc_order: None,
             label_style: MethodLabelStyle::Source,
         });

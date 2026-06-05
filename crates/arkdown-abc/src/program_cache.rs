@@ -28,8 +28,8 @@ use crate::names::{
 use crate::proto_panda::{
     annotation_element, ins, program, scalar_value, variant_value, AnnotationData,
     AnnotationElement, DebuginfoIns, Field, FieldMetadata, Function, FunctionMetadata, Ins,
-    ItemMetadata, Literal, Metadata, Parameter, Program, Record, RecordMetadata, ScalarValue,
-    SourceLocation, SourcePosition, Type, Value, VariantValue,
+    ItemMetadata, Literal, Metadata, ParamMetadata, Parameter, Program, Record, RecordMetadata,
+    ScalarValue, SourceLocation, SourcePosition, Type, Value, VariantValue,
 };
 
 const VALUE_TYPE_U8: u32 = 2;
@@ -938,6 +938,11 @@ fn method_from_proto(
         method_pool_entry: false,
         expected_property_count: function_expected_property_count(function)?,
         annotations: function_custom_annotations(function, literal_key_to_index, literal_refs)?,
+        param_annotations: function_param_annotations(
+            function,
+            literal_key_to_index,
+            literal_refs,
+        )?,
         definefunc_order: None,
         label_style: MethodLabelStyle::Source,
     })
@@ -1855,6 +1860,29 @@ fn field_custom_annotations(
         .collect()
 }
 
+fn function_param_annotations(
+    function: &Function,
+    literal_key_to_index: &BTreeMap<String, usize>,
+    literal_refs: &mut BTreeSet<usize>,
+) -> io::Result<Vec<Vec<AnnotationRecord>>> {
+    function
+        .params
+        .iter()
+        .map(|param| {
+            let Some(annotation_metadata) = param_annotation_metadata(param) else {
+                return Ok(Vec::new());
+            };
+            annotation_metadata
+                .annotations
+                .iter()
+                .map(|annotation| {
+                    annotation_data_from_proto(annotation, literal_key_to_index, literal_refs)
+                })
+                .collect()
+        })
+        .collect()
+}
+
 fn function_annotation_metadata(
     function: &Function,
 ) -> Option<&crate::proto_panda::AnnotationMetadata> {
@@ -1878,6 +1906,13 @@ fn field_annotation_metadata(field: &Field) -> Option<&crate::proto_panda::Annot
         .metadata
         .as_ref()
         .and_then(|metadata| metadata.father.as_ref())
+        .and_then(|metadata| metadata.father.as_ref())
+}
+
+fn param_annotation_metadata(param: &Parameter) -> Option<&crate::proto_panda::AnnotationMetadata> {
+    param
+        .metadata
+        .as_ref()
         .and_then(|metadata| metadata.father.as_ref())
 }
 
@@ -2350,10 +2385,24 @@ fn function_to_proto(
             .collect::<io::Result<Vec<_>>>()?,
         value_of_first_param: -1,
         regs_num: method.num_vregs as u64,
-        params: (0..method.num_args)
-            .map(|_| Parameter {
-                r#type: Some(type_named("any")),
-                metadata: None,
+        params: (0..method.num_args as usize)
+            .map(|param_idx| {
+                let annotations = method
+                    .param_annotations
+                    .get(param_idx)
+                    .map(|annotations| {
+                        annotations
+                            .iter()
+                            .map(custom_annotation_to_proto)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                Parameter {
+                    r#type: Some(type_named("any")),
+                    metadata: (!annotations.is_empty()).then(|| ParamMetadata {
+                        father: Some(annotation_metadata_with_attributes(annotations, Vec::new())),
+                    }),
+                }
             })
             .collect(),
         body_presence: !method.bytecode.is_empty(),
@@ -3689,6 +3738,18 @@ mod tests {
         )
     }
 
+    fn param_annotation_string_values(
+        param: &Parameter,
+        record_name: &str,
+        element_name: &str,
+    ) -> Vec<String> {
+        annotation_metadata_string_values(
+            param_annotation_metadata(param),
+            record_name,
+            element_name,
+        )
+    }
+
     fn annotation_usage_file_from_source(source: &str, record_name: &str) -> AbcFile {
         let mut file = AbcFile::new();
         let record = build_record_with_debug_and_package_for_target_with_mode(
@@ -3771,6 +3832,29 @@ class A {
                 }],
             }],
         });
+        file
+    }
+
+    fn annotated_parameter_file() -> AbcFile {
+        let mut file = annotation_usage_file();
+        let method = file
+            .records
+            .iter_mut()
+            .find(|record| record.name == "Lusage_string.ets;")
+            .and_then(|record| {
+                record
+                    .methods
+                    .iter_mut()
+                    .find(|method| method.name == "func_main_0")
+            })
+            .expect("func_main_0 method must exist");
+        method.param_annotations = vec![vec![AnnotationRecord {
+            record_name: "usage_string.ets.Anno".to_string(),
+            elements: vec![AnnotationElementRecord {
+                name: "a".to_string(),
+                value: AnnotationValue::String("param".to_string()),
+            }],
+        }]];
         file
     }
 
@@ -4117,6 +4201,107 @@ class A {}
         assert_eq!(
             restored_field.annotations[0].elements[0].value,
             AnnotationValue::String("field".to_string())
+        );
+    }
+
+    #[test]
+    fn parameter_annotations_roundtrip_through_program_cache() {
+        let file = annotated_parameter_file();
+        let program = program_for_file(&file, 20).unwrap();
+        let main = function_by_short_name(&program, "func_main_0")
+            .expect("func_main_0 function must be present");
+        assert_eq!(
+            param_annotation_string_values(&main.params[0], "usage_string.ets.Anno", "a"),
+            vec!["param".to_string()]
+        );
+        assert!(main
+            .params
+            .iter()
+            .skip(1)
+            .all(|param| param.metadata.is_none()));
+
+        let mut restored = AbcFile::new();
+        let appended = append_program_to_file(&mut restored, program).unwrap();
+        let restored_method = restored.records[appended[0]]
+            .methods
+            .iter()
+            .find(|method| method.name == "func_main_0")
+            .expect("restored func_main_0 must be present");
+        assert_eq!(
+            restored_method.param_annotations[0][0].elements[0].value,
+            AnnotationValue::String("param".to_string())
+        );
+    }
+
+    #[test]
+    fn parameter_annotations_write_upstream_param_annotation_item() {
+        let file = annotated_parameter_file();
+        let bytes = file.serialize_with_version(version_for_target_api(20, None));
+        AbcReader::validate(&bytes).unwrap();
+        let reader = AbcReader::new(&bytes).unwrap();
+        let classes = reader.class_items().unwrap();
+        let user_class = classes
+            .iter()
+            .find(|class| class.name == "Lusage_string.ets;")
+            .expect("user class must be present");
+        let method = user_class
+            .methods
+            .iter()
+            .find(|method| method.name == "func_main_0")
+            .expect("func_main_0 method must be present");
+        let param_annotation_off = method
+            .param_annotation_offset
+            .expect("method must carry PARAM_ANNOTATION tag");
+        let custom_annotation_class = classes
+            .iter()
+            .find(|class| class.name == "Lusage_string.ets.Anno;")
+            .expect("custom annotation class must be present");
+        let index = reader.index_sections().unwrap().remove(0);
+        let custom_annotation_class_idx = index
+            .class_offsets
+            .iter()
+            .position(|offset| *offset == custom_annotation_class.offset)
+            .expect("custom annotation class must be in IndexSection")
+            as u16;
+
+        let mut cursor = param_annotation_off as usize;
+        let param_count = u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().unwrap());
+        cursor += 4;
+        assert_eq!(param_count, method.code.as_ref().unwrap().num_args);
+        let first_param_annotation_count =
+            u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().unwrap());
+        cursor += 4;
+        assert_eq!(first_param_annotation_count, 1);
+        let annotation_off = u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().unwrap());
+        let annotation_class_idx = u16::from_le_bytes(
+            bytes[annotation_off as usize..annotation_off as usize + 2]
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(annotation_class_idx, custom_annotation_class_idx);
+    }
+
+    #[test]
+    fn abc_input_preserves_parameter_annotations() {
+        let file = annotated_parameter_file();
+        let bytes = file.serialize_with_version(version_for_target_api(20, None));
+        let mut restored = AbcFile::new();
+        append_abc_file(&mut restored, &bytes).unwrap();
+
+        let restored_method = restored
+            .records
+            .iter()
+            .find(|record| record.name == "Lusage_string.ets;")
+            .and_then(|record| {
+                record
+                    .methods
+                    .iter()
+                    .find(|method| method.name == "func_main_0")
+            })
+            .expect("restored func_main_0 must be present");
+        assert_eq!(
+            restored_method.param_annotations[0][0].elements[0].value,
+            AnnotationValue::String("param".to_string())
         );
     }
 
