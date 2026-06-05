@@ -18,6 +18,13 @@ pub(super) enum FunctionRecordNode<'a> {
 pub(super) struct FunctionRecord<'a> {
     pub(super) name: String,
     pub(super) node: FunctionRecordNode<'a>,
+    pub(super) flavor: FunctionRecordFlavor,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FunctionRecordFlavor {
+    Function,
+    ObjectMethod,
 }
 
 impl<'a> FunctionRecord<'a> {
@@ -320,7 +327,19 @@ impl<'a, 'names> FunctionRecordCollector<'a, 'names> {
                     let ObjectPropertyKind::ObjectProperty(property) = property else {
                         continue;
                     };
-                    self.scan_expr(&property.value, property_key_name(&property.key));
+                    let inferred = property_key_name(&property.key);
+                    if property.method {
+                        if let Expression::FunctionExpression(function) = &property.value {
+                            self.push_function_with_flavor(
+                                function,
+                                inferred,
+                                FunctionRecordFlavor::ObjectMethod,
+                            );
+                            self.scan_function_body(function);
+                            continue;
+                        }
+                    }
+                    self.scan_expr(&property.value, inferred);
                 }
             }
             Expression::ArrayExpression(array) => {
@@ -435,6 +454,15 @@ impl<'a, 'names> FunctionRecordCollector<'a, 'names> {
     }
 
     fn push_function(&mut self, function: &'a Function<'a>, inferred_name: Option<&'a str>) {
+        self.push_function_with_flavor(function, inferred_name, FunctionRecordFlavor::Function);
+    }
+
+    fn push_function_with_flavor(
+        &mut self,
+        function: &'a Function<'a>,
+        inferred_name: Option<&'a str>,
+        flavor: FunctionRecordFlavor,
+    ) {
         if is_type_only_function(function) {
             return;
         }
@@ -451,6 +479,7 @@ impl<'a, 'names> FunctionRecordCollector<'a, 'names> {
         self.records.push(FunctionRecord {
             name,
             node: FunctionRecordNode::Function(function),
+            flavor,
         });
     }
 
@@ -472,6 +501,7 @@ impl<'a, 'names> FunctionRecordCollector<'a, 'names> {
         self.records.push(FunctionRecord {
             name,
             node: FunctionRecordNode::Arrow(arrow),
+            flavor: FunctionRecordFlavor::Function,
         });
     }
 

@@ -11,8 +11,8 @@ use crate::emit::file::{
     LITERAL_TAG_METHOD_AFFILIATE, LITERAL_TAG_SETTER, LITERAL_TAG_STRING,
 };
 use crate::emit::record::{
-    method_access, CatchEntry, ClassRecord, FieldRecord, FieldValue, MethodKind, MethodLabelStyle,
-    MethodRecord, FIELD_OWNER_CLASS_IDX,
+    function_kind, method_access, CatchEntry, ClassRecord, FieldRecord, FieldValue, MethodKind,
+    MethodLabelStyle, MethodRecord, FIELD_OWNER_CLASS_IDX,
 };
 use crate::error::AbcError;
 use crate::ir::opcodes::{Insn, PandasmInsn};
@@ -134,6 +134,7 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
                     method.offset,
                     &method_call_infos,
                 )?;
+                let kind = method_kind_from_access_flags(method.name.as_str(), method.access_flags);
                 Ok(MethodRecord {
                     name: method.name.clone(),
                     bytecode,
@@ -154,7 +155,9 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
                         })
                         .collect(),
                     program_labels: Vec::new(),
-                    kind: method_kind_from_access_flags(method.name.as_str(), method.access_flags),
+                    kind,
+                    function_kind: abc_default_function_kind(kind),
+                    concurrent_module_requests: Vec::new(),
                     method_pool_entry: method_pool_offsets.contains(&method.offset),
                     expected_property_count: None,
                     definefunc_order: None,
@@ -574,6 +577,14 @@ fn method_kind_from_access_flags(name: &str, access_flags: u32) -> MethodKind {
         MethodKind::Anonymous
     } else {
         MethodKind::Function
+    }
+}
+
+fn abc_default_function_kind(kind: MethodKind) -> u32 {
+    if kind == MethodKind::Anonymous {
+        function_kind::NC_FUNCTION
+    } else {
+        function_kind::FUNCTION
     }
 }
 

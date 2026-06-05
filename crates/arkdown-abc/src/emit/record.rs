@@ -34,6 +34,18 @@ pub enum MethodKind {
     Anonymous,
 }
 
+/// `panda_file::FunctionKind` values serialized by upstream protoPanda.
+pub(crate) mod function_kind {
+    pub(crate) const NONE: u32 = 0;
+    pub(crate) const FUNCTION: u32 = 1;
+    pub(crate) const NC_FUNCTION: u32 = 2;
+    pub(crate) const GENERATOR_FUNCTION: u32 = 3;
+    pub(crate) const ASYNC_FUNCTION: u32 = 4;
+    pub(crate) const ASYNC_GENERATOR_FUNCTION: u32 = 5;
+    pub(crate) const ASYNC_NC_FUNCTION: u32 = 6;
+    pub(crate) const CONCURRENT_FUNCTION: u32 = 7;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MethodLabelStyle {
     Source,
@@ -189,6 +201,10 @@ pub struct MethodRecord {
     /// Ordered pandasm labels for ProgramCache/protoBin materialization.
     pub program_labels: Vec<ProgramLabel>,
     pub kind: MethodKind,
+    /// Raw upstream `panda_file::FunctionKind` value serialized in protoPanda.
+    pub function_kind: u32,
+    /// Module request indices captured for `"use concurrent"` functions.
+    pub concurrent_module_requests: Vec<u32>,
     pub method_pool_entry: bool,
     pub expected_property_count: Option<u32>,
     /// Source-order key for `definefunc` operands. MethodItems may be sorted for
@@ -708,6 +724,8 @@ mod tests {
                 catch_entries: vec![],
                 program_labels: vec![],
                 kind: MethodKind::Module,
+                function_kind: function_kind::FUNCTION,
+                concurrent_module_requests: Vec::new(),
                 method_pool_entry: false,
                 expected_property_count: None,
                 definefunc_order: None,
@@ -751,6 +769,8 @@ mod tests {
                 catch_entries: vec![],
                 program_labels: vec![],
                 kind: MethodKind::Module,
+                function_kind: function_kind::FUNCTION,
+                concurrent_module_requests: Vec::new(),
                 method_pool_entry: false,
                 expected_property_count: None,
                 definefunc_order: None,

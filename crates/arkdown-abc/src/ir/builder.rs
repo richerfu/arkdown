@@ -20,8 +20,8 @@ use oxc_transformer::{Module as TransformModule, TransformOptions, Transformer};
 
 use crate::emit::file::{LiteralArray, LiteralEntry};
 use crate::emit::record::{
-    CatchEntry, ClassRecord, DebugInfoRecord, InstructionDebugInfo, MethodKind, MethodLabelStyle,
-    MethodRecord, ProgramLabel,
+    function_kind, CatchEntry, ClassRecord, DebugInfoRecord, InstructionDebugInfo, MethodKind,
+    MethodLabelStyle, MethodRecord, ProgramLabel,
 };
 use crate::emit::strings::StringTable;
 use crate::error::AbcError;
@@ -40,7 +40,8 @@ use crate::ir::class_layout::{
 use crate::ir::debug_lnp::{argument_span_start, col_at, line_at, LineTracker, SourceMapper};
 use crate::ir::function_lexical::collect_function_lexical_bindings;
 use crate::ir::function_records::{
-    collect_function_records, FunctionNameAllocator, FunctionRecord, FunctionRecordNode,
+    collect_function_records, FunctionNameAllocator, FunctionRecord, FunctionRecordFlavor,
+    FunctionRecordNode,
 };
 use crate::ir::lowering_context::LoweringContext;
 use crate::ir::module_lexical::collect_module_lexical_bindings;
@@ -443,6 +444,8 @@ pub fn build_record_with_debug_and_source_map_for_target_with_mode(
         catch_entries: func_main.catches,
         program_labels: func_main.program_labels,
         kind: MethodKind::Module,
+        function_kind: function_kind::FUNCTION,
+        concurrent_module_requests: Vec::new(),
         method_pool_entry: false,
         expected_property_count: None,
         definefunc_order: None,
@@ -825,6 +828,7 @@ fn compile_function_record(
             let expected_property_count = expected_property_count_option(
                 function_body_expected_property_count(func.body.as_deref(), lowering),
             );
+            let upstream_function_kind = function_record_function_kind(func, function.flavor);
             methods.push(MethodRecord {
                 name: function.name,
                 bytecode: compiled.bytecode,
@@ -845,6 +849,8 @@ fn compile_function_record(
                 catch_entries: compiled.catches,
                 program_labels: compiled.program_labels,
                 kind: MethodKind::FunctionLiteral,
+                function_kind: upstream_function_kind,
+                concurrent_module_requests: Vec::new(),
                 method_pool_entry: true,
                 expected_property_count,
                 definefunc_order: Some(definefunc_order),
@@ -888,12 +894,86 @@ fn compile_function_record(
                 catch_entries: compiled.catches,
                 program_labels: compiled.program_labels,
                 kind: MethodKind::Anonymous,
+                function_kind: if arrow.r#async {
+                    function_kind::ASYNC_NC_FUNCTION
+                } else {
+                    function_kind::NC_FUNCTION
+                },
+                concurrent_module_requests: Vec::new(),
                 method_pool_entry: true,
                 expected_property_count,
                 definefunc_order: Some(definefunc_order),
                 label_style: MethodLabelStyle::Source,
             });
         }
+    }
+}
+
+fn function_record_function_kind(function: &Function<'_>, flavor: FunctionRecordFlavor) -> u32 {
+    if function_has_directive(function, "use concurrent") {
+        return function_kind::CONCURRENT_FUNCTION;
+    }
+
+    if flavor == FunctionRecordFlavor::ObjectMethod {
+        return if function.r#async {
+            function_kind::ASYNC_FUNCTION
+        } else {
+            function_kind::NONE
+        };
+    }
+
+    match (function.r#async, function.generator) {
+        (true, true) => function_kind::ASYNC_GENERATOR_FUNCTION,
+        (true, false) => function_kind::ASYNC_FUNCTION,
+        (false, true) => function_kind::GENERATOR_FUNCTION,
+        (false, false) => function_kind::FUNCTION,
+    }
+}
+
+fn function_has_directive(function: &Function<'_>, directive: &str) -> bool {
+    let Some(body) = &function.body else {
+        return false;
+    };
+    if body
+        .directives
+        .iter()
+        .any(|item| item.expression.value.as_str() == directive)
+    {
+        return true;
+    }
+    for stmt in &body.statements {
+        let Statement::ExpressionStatement(expr) = stmt else {
+            return false;
+        };
+        let Expression::StringLiteral(value) = &expr.expression else {
+            return false;
+        };
+        if value.value.as_str() == directive {
+            return true;
+        }
+    }
+    false
+}
+
+fn class_method_function_kind(is_constructor: bool, is_async: bool) -> u32 {
+    if is_constructor {
+        function_kind::FUNCTION
+    } else if is_async {
+        function_kind::ASYNC_FUNCTION
+    } else {
+        function_kind::NONE
+    }
+}
+
+fn object_method_literal_entry(record_name: String, function: &Function<'_>) -> LiteralEntry {
+    if function.generator {
+        if function.r#async {
+            LiteralEntry::TaggedAsyncGeneratorMethodName(record_name)
+        } else {
+            LiteralEntry::TaggedGeneratorMethodName(record_name)
+        }
+    } else {
+        LiteralEntry::TaggedMethodName(record_name)
     }
 }
 
@@ -1395,6 +1475,8 @@ fn compile_class_elements(
             catch_entries: compiled.catches,
             program_labels: compiled.program_labels,
             kind: MethodKind::Constructor,
+            function_kind: function_kind::FUNCTION,
+            concurrent_module_requests: Vec::new(),
             method_pool_entry: true,
             expected_property_count: class_expected_property_count,
             definefunc_order: None,
@@ -1434,6 +1516,8 @@ fn compile_class_elements(
             catch_entries: compiled.catches,
             program_labels: compiled.program_labels,
             kind: MethodKind::Function,
+            function_kind: function_kind::NONE,
+            concurrent_module_requests: Vec::new(),
             method_pool_entry: true,
             expected_property_count: None,
             definefunc_order: None,
@@ -1468,6 +1552,8 @@ fn compile_class_elements(
             catch_entries: compiled.catches,
             program_labels: compiled.program_labels,
             kind: MethodKind::Function,
+            function_kind: function_kind::NONE,
+            concurrent_module_requests: Vec::new(),
             method_pool_entry: true,
             expected_property_count: None,
             definefunc_order: None,
@@ -1625,6 +1711,8 @@ fn compile_class_elements(
                 } else {
                     MethodKind::Function
                 },
+                function_kind: class_method_function_kind(is_constructor, is_method_async),
+                concurrent_module_requests: Vec::new(),
                 method_pool_entry: !(lowering.standalone_ecmascript_input()
                     && !is_constructor
                     && is_class_buffer_method(method)),
@@ -1679,6 +1767,8 @@ fn compile_class_elements(
             catch_entries: getter_compiled.catches,
             program_labels: getter_compiled.program_labels,
             kind: MethodKind::Function,
+            function_kind: function_kind::NONE,
+            concurrent_module_requests: Vec::new(),
             method_pool_entry: true,
             expected_property_count: None,
             definefunc_order: None,
@@ -1716,6 +1806,8 @@ fn compile_class_elements(
             catch_entries: setter_compiled.catches,
             program_labels: setter_compiled.program_labels,
             kind: MethodKind::Function,
+            function_kind: function_kind::NONE,
+            concurrent_module_requests: Vec::new(),
             method_pool_entry: true,
             expected_property_count: None,
             definefunc_order: None,
@@ -8296,7 +8388,7 @@ impl<'a> CodeGen<'a> {
                     .function_name(func.span.start, func.span.end)
                     .map(str::to_string)
                     .unwrap_or_else(|| key_name.to_string());
-                entries.push(LiteralEntry::TaggedMethodName(record_name));
+                entries.push(object_method_literal_entry(record_name, func));
                 entries.push(LiteralEntry::TaggedMethodAffiliate(
                     func.params.items.len() as u16
                 ));

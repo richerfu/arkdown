@@ -503,7 +503,7 @@ fn read_u16(bytecode: &[u8], offset: usize) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::emit::record::{MethodKind, MethodLabelStyle, MethodRecord};
+    use crate::emit::record::{function_kind, MethodKind, MethodLabelStyle, MethodRecord};
 
     fn method(bytecode: Vec<u8>, num_vregs: u16, num_args: u16) -> MethodRecord {
         MethodRecord {
@@ -518,6 +518,8 @@ mod tests {
             catch_entries: vec![],
             program_labels: vec![],
             kind: MethodKind::Module,
+            function_kind: function_kind::FUNCTION,
+            concurrent_module_requests: Vec::new(),
             method_pool_entry: false,
             expected_property_count: None,
             definefunc_order: None,

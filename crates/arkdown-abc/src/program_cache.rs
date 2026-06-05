@@ -10,8 +10,8 @@ use crate::emit::file::{
     LITERAL_TAG_NULL, LITERAL_TAG_SETTER, LITERAL_TAG_STRING, LITERAL_TAG_TAGVALUE,
 };
 use crate::emit::record::{
-    method_access, CatchEntry, ClassRecord, DebugInfoRecord, FieldRecord, FieldValue,
-    InstructionDebugInfo, MethodKind, MethodLabelStyle, MethodRecord, ProgramLabel,
+    function_kind, method_access, CatchEntry, ClassRecord, DebugInfoRecord, FieldRecord,
+    FieldValue, InstructionDebugInfo, MethodKind, MethodLabelStyle, MethodRecord, ProgramLabel,
     FIELD_OWNER_CLASS_IDX,
 };
 use crate::emit::strings::StringTable;
@@ -834,6 +834,8 @@ fn method_from_proto(
         catch_entries,
         program_labels,
         kind,
+        function_kind: function.function_kind,
+        concurrent_module_requests: function.concurrent_module_requests.clone(),
         method_pool_entry: false,
         expected_property_count: function_expected_property_count(function)?,
         definefunc_order: None,
@@ -1988,6 +1990,8 @@ fn function_to_proto(
             method.access_flags(),
             method.expected_property_count,
             slots_num,
+            method.function_kind,
+            &method.concurrent_module_requests,
         )),
         label_table: Vec::new(),
         ins,
@@ -2036,9 +2040,9 @@ fn function_to_proto(
         return_type: Some(type_named("any")),
         body_location: Some(default_source_location()),
         file_location: None,
-        function_kind: function_kind(method.kind),
+        function_kind: method.function_kind,
         slots_num: slots_num.into(),
-        concurrent_module_requests: Vec::new(),
+        concurrent_module_requests: method.concurrent_module_requests.clone(),
     })
 }
 
@@ -2756,14 +2760,6 @@ fn label_name_for_inst_idx(inst_idx: usize) -> String {
     format!("label@{inst_idx}")
 }
 
-fn function_kind(kind: MethodKind) -> u32 {
-    match kind {
-        MethodKind::Module | MethodKind::FunctionLiteral | MethodKind::Function => 1,
-        MethodKind::Anonymous => 2,
-        MethodKind::Constructor => 0,
-    }
-}
-
 fn record_metadata(access_flags: u32) -> RecordMetadata {
     RecordMetadata {
         father: Some(item_metadata(access_flags)),
@@ -2774,11 +2770,18 @@ fn function_metadata(
     access_flags: u32,
     expected_property_count: Option<u32>,
     slots_num: u32,
+    function_kind_value: u32,
+    concurrent_module_requests: &[u32],
 ) -> FunctionMetadata {
     FunctionMetadata {
         father: Some(item_metadata_with_annotations(
             access_flags,
-            function_annotations(expected_property_count, slots_num),
+            function_annotations(
+                expected_property_count,
+                slots_num,
+                function_kind_value,
+                concurrent_module_requests,
+            ),
         )),
     }
 }
@@ -2810,8 +2813,15 @@ fn annotation_metadata(annotations: Vec<AnnotationData>) -> crate::proto_panda::
 fn function_annotations(
     expected_property_count: Option<u32>,
     slots_num: u32,
+    function_kind_value: u32,
+    concurrent_module_requests: &[u32],
 ) -> Vec<AnnotationData> {
-    let mut annotations = Vec::with_capacity(2);
+    let mut annotations = Vec::with_capacity(3);
+    if function_kind_value == function_kind::CONCURRENT_FUNCTION {
+        annotations.push(concurrent_module_requests_annotation(
+            concurrent_module_requests,
+        ));
+    }
     if let Some(expected_property_count) = expected_property_count {
         annotations.push(u32_annotation(
             EXPECTED_PROPERTY_COUNT_RECORD_NAME,
@@ -2825,6 +2835,23 @@ fn function_annotations(
         slots_num,
     ));
     annotations
+}
+
+fn concurrent_module_requests_annotation(requests: &[u32]) -> AnnotationData {
+    AnnotationData {
+        record_name: bytes(CONCURRENT_MODULE_REQUEST_RECORD_NAME),
+        elements: requests
+            .iter()
+            .map(|request| AnnotationElement {
+                name: bytes("ConcurrentModuleRequest"),
+                value: Some(annotation_element::Value::Scalar(scalar_u64(
+                    VALUE_TYPE_U32,
+                    *request as u64,
+                ))),
+                value_type: annotation_element::ValueType::Scalar as i32,
+            })
+            .collect(),
+    }
 }
 
 fn u32_annotation(record_name: &str, element_name: &str, value: u32) -> AnnotationData {
@@ -3056,6 +3083,39 @@ mod tests {
             .unwrap()
     }
 
+    fn function_by_short_name<'a>(program: &'a Program, name: &str) -> Option<&'a Function> {
+        program
+            .function_table
+            .iter()
+            .find(|entry| {
+                std::str::from_utf8(&entry.key)
+                    .map(|key| {
+                        let short = key.rsplit('.').next().unwrap_or(key);
+                        short == name || short.ends_with(&format!("#*#{name}"))
+                    })
+                    .unwrap_or(false)
+            })
+            .and_then(|entry| entry.value.as_ref())
+    }
+
+    fn function_kind_by_short_name(program: &Program, name: &str) -> Option<u32> {
+        function_by_short_name(program, name).map(|function| function.function_kind)
+    }
+
+    fn has_function_annotation(function: &Function, record_name: &str) -> bool {
+        function
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.father.as_ref())
+            .and_then(|metadata| metadata.father.as_ref())
+            .is_some_and(|metadata| {
+                metadata
+                    .annotations
+                    .iter()
+                    .any(|annotation| annotation.record_name == record_name.as_bytes())
+            })
+    }
+
     #[test]
     fn proto_program_restores_generic_pandasm_instruction() {
         let opcode = pandasm_opcode_for_bytecode(&[0x6a]).unwrap();
@@ -3122,6 +3182,130 @@ mod tests {
             .line_number,
             u64::MAX
         );
+    }
+
+    #[test]
+    fn compiled_program_uses_upstream_function_kind_values() {
+        let mut file = AbcFile::new();
+        let record = build_record_with_debug_and_package_for_target_with_mode(
+            r#"
+async function af() { return 1; }
+function* gf() { yield 1; }
+async function* ag() { yield 1; }
+const ar = () => 1;
+const aa = async () => 1;
+function cf() { "use concurrent"; return 1; }
+af(); gf(); ag(); ar(); aa(); cf();
+"#,
+            "@bundle:demo/entry/ets/pages/Index",
+            &mut file.strings,
+            &mut file.literal_arrays,
+            Some("entry/src/main/ets/pages/Index.ets"),
+            None,
+            false,
+            false,
+            "ets",
+            true,
+            18,
+            None,
+            false,
+            true,
+        )
+        .unwrap();
+        file.add_record(record);
+
+        let program = program_for_record(&file, 0, 18).unwrap().unwrap();
+        assert_eq!(
+            function_kind_by_short_name(&program, "af"),
+            Some(function_kind::ASYNC_FUNCTION)
+        );
+        assert_eq!(
+            function_kind_by_short_name(&program, "gf"),
+            Some(function_kind::GENERATOR_FUNCTION)
+        );
+        assert_eq!(
+            function_kind_by_short_name(&program, "ag"),
+            Some(function_kind::ASYNC_GENERATOR_FUNCTION)
+        );
+        assert_eq!(
+            function_kind_by_short_name(&program, "ar"),
+            Some(function_kind::NC_FUNCTION)
+        );
+        assert_eq!(
+            function_kind_by_short_name(&program, "aa"),
+            Some(function_kind::ASYNC_NC_FUNCTION)
+        );
+
+        let concurrent = function_by_short_name(&program, "cf").unwrap();
+        assert_eq!(concurrent.function_kind, function_kind::CONCURRENT_FUNCTION);
+        assert!(concurrent.concurrent_module_requests.is_empty());
+        assert!(has_function_annotation(
+            concurrent,
+            CONCURRENT_MODULE_REQUEST_RECORD_NAME
+        ));
+    }
+
+    #[test]
+    fn object_methods_use_upstream_method_function_kind_and_literal_tags() {
+        let mut file = AbcFile::new();
+        let record = build_record_with_debug_and_package_for_target_with_mode(
+            r#"
+const obj = {
+  m() { return 1; },
+  async am() { return 1; },
+  *gm() { yield 1; },
+  async *agm() { yield 1; },
+};
+obj.m(); obj.am(); obj.gm(); obj.agm();
+"#,
+            "@bundle:demo/entry/ets/pages/Index",
+            &mut file.strings,
+            &mut file.literal_arrays,
+            Some("entry/src/main/ets/pages/Index.ets"),
+            None,
+            false,
+            false,
+            "ets",
+            true,
+            18,
+            None,
+            false,
+            true,
+        )
+        .unwrap();
+        file.add_record(record);
+
+        let program = program_for_record(&file, 0, 18).unwrap().unwrap();
+        assert_eq!(
+            function_kind_by_short_name(&program, "m"),
+            Some(function_kind::NONE)
+        );
+        assert_eq!(
+            function_kind_by_short_name(&program, "gm"),
+            Some(function_kind::NONE)
+        );
+        assert_eq!(
+            function_kind_by_short_name(&program, "am"),
+            Some(function_kind::ASYNC_FUNCTION)
+        );
+        assert_eq!(
+            function_kind_by_short_name(&program, "agm"),
+            Some(function_kind::ASYNC_FUNCTION)
+        );
+
+        let entries = file
+            .literal_arrays
+            .iter()
+            .flat_map(|array| array.entries.iter())
+            .collect::<Vec<_>>();
+        assert!(entries.iter().any(|entry| matches!(
+            entry,
+            LiteralEntry::TaggedGeneratorMethodName(name) if name.ends_with("gm")
+        )));
+        assert!(entries.iter().any(|entry| matches!(
+            entry,
+            LiteralEntry::TaggedAsyncGeneratorMethodName(name) if name.ends_with("agm")
+        )));
     }
 
     #[test]
