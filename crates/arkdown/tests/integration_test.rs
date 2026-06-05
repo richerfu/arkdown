@@ -154,6 +154,7 @@ async fn test_build_minimal_hap_fixture() {
                     module.src_path.join("oh_modules"),
                     project_root.join("oh_modules"),
                 ],
+                source_set_overlays: vec![],
             },
             project_root.clone(),
             false,

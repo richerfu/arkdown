@@ -140,6 +140,7 @@ fn run_bundle_miss(
                 use_normalized_ohm_url: false,
                 case_sensitive_check: false,
                 oh_modules_roots: vec![],
+                source_set_overlays: vec![],
             },
             fixture.to_path_buf(),
             false,

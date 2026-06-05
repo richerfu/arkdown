@@ -683,6 +683,36 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         }
 
         // Bundling
+        // Build source-set overlays for target-specific source directories.
+        // When the effective target is non-default and has src/<target>/ets/,
+        // that directory shadows src/main/ets/ for relative imports (source-set overlay).
+        let source_set_overlays: Vec<(PathBuf, PathBuf)> = {
+            let build_mode_name = match config_arc.build_mode {
+                BuildMode::Debug => "debug",
+                BuildMode::Release => "release",
+            };
+            let base_ets = module.src_path.join("src/main/ets");
+            if let Some(cfg) = arkdown_config::build_profile::select_effective_target(
+                &project_root,
+                &module.name,
+                &config_arc.product.name,
+                build_mode_name,
+            ) {
+                if cfg.name != "default" {
+                    let target_ets = module.src_path.join("src").join(&cfg.name).join("ets");
+                    if target_ets.is_dir() && target_ets != base_ets {
+                        vec![(base_ets, target_ets)]
+                    } else {
+                        vec![]
+                    }
+                } else {
+                    vec![]
+                }
+            } else {
+                vec![]
+            }
+        };
+
         let ohos_resolve_plugin = Arc::new(OhosResolvePlugin::new(
             ResolverConfig {
                 project_root: project_root.clone(),
@@ -703,6 +733,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                     module.src_path.join("oh_modules"),
                     project_root.join("oh_modules"),
                 ],
+                source_set_overlays,
             },
             project_root.clone(),
             config_arc

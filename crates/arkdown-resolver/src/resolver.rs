@@ -26,6 +26,21 @@ pub struct ResolverConfig {
     pub case_sensitive_check: bool,
     /// Per-module `oh_modules/` roots and project-root `oh_modules/`.
     pub oh_modules_roots: Vec<PathBuf>,
+    /// Source-set overlay: when a non-default build target is active, resolved
+    /// paths under `src/main/ets/` may be shadowed by a target-specific file.
+    ///
+    /// Each entry is `(src_main_ets_root, target_ets_root)`:
+    /// - `src_main_ets_root`: the standard source root, e.g. `<module>/src/main/ets`
+    /// - `target_ets_root`: the override root, e.g. `<module>/src/phone/ets`
+    ///
+    /// When resolution produces a path under `src_main_ets_root`, the resolver
+    /// checks if a file with the same relative path exists under `target_ets_root`
+    /// and redirects to it if found (target-specific file wins).
+    ///
+    /// hvigor calls this the "source-set overlay"; it allows target-specific `.ets`
+    /// files to shadow the default `src/main/ets` versions without changing import
+    /// specifiers in the source code.
+    pub source_set_overlays: Vec<(PathBuf, PathBuf)>,
 }
 
 /// Brief package information extracted from `loader.json`.
@@ -150,6 +165,15 @@ impl OhosResolver {
             if let Ok(resolution) = self.fs_resolver.resolve_file(importer, specifier) {
                 let resolved_buf = resolution.into_path_buf();
                 let resolved = arkdown_utils::canonicalize_or_owned(&resolved_buf);
+
+                // Source-set overlay: check if a target-specific file shadows this path.
+                //
+                // hvigor supports `src/<target>/ets/` overlaying `src/main/ets/`:
+                // if the resolved path is under the base root, check if a file with
+                // the same relative path exists under the target root.  Target-specific
+                // files take priority (closest match wins).
+                let resolved = self.apply_source_set_overlay(resolved);
+
                 let module_type = ModuleType::infer(&resolved);
                 return Ok(OhosResolvedModule::LocalSource {
                     path: resolved,
@@ -290,6 +314,28 @@ impl OhosResolver {
                 let buf = resolution.into_path_buf();
                 arkdown_utils::canonicalize_or_owned(&buf)
             })
+    }
+
+    /// Apply source-set overlay: if the resolved path is under a `src/main/ets`
+    /// base root and a corresponding file exists in the target-specific overlay
+    /// root (`src/<target>/ets`), return the target-specific path instead.
+    ///
+    /// hvigor's source-set overlay allows `src/<target>/ets/Foo.ets` to shadow
+    /// `src/main/ets/Foo.ets` without changing import specifiers.  Target-specific
+    /// files take full precedence; imports that resolve to files without a target
+    /// override pass through unchanged.
+    fn apply_source_set_overlay(&self, resolved: PathBuf) -> PathBuf {
+        for (base_root, target_root) in &self.config.source_set_overlays {
+            // Canonicalize the base root to match the already-canonicalized resolved path.
+            let canonical_base = arkdown_utils::canonicalize_or_owned(base_root);
+            if let Ok(relative) = resolved.strip_prefix(&canonical_base) {
+                let candidate = target_root.join(relative);
+                if candidate.is_file() {
+                    return arkdown_utils::canonicalize_or_owned(&candidate);
+                }
+            }
+        }
+        resolved
     }
 
     fn oxc_resolve_options(config: &ResolverConfig) -> OxcResolveOptions {
@@ -547,6 +593,7 @@ mod tests {
             use_normalized_ohm_url: true,
             case_sensitive_check: false,
             oh_modules_roots,
+            source_set_overlays: vec![],
         })
     }
 
@@ -855,6 +902,82 @@ mod tests {
                 assert_eq!(module_name, "sharedlib");
             }
             _ => panic!("expected ExternalHsp"),
+        }
+    }
+
+    /// Test 9: source-set overlay — target-specific file shadows src/main/ets equivalent.
+    ///
+    /// When a file `src/<target>/ets/Foo.ets` exists alongside `src/main/ets/Foo.ets`,
+    /// a relative import that resolves to the main version should be redirected to the
+    /// target-specific version.
+    #[test]
+    fn test_source_set_overlay_target_shadows_main() {
+        let dir = TempDir::new().unwrap();
+        let base_ets = dir.path().join("src/main/ets");
+        let target_ets = dir.path().join("src/phone/ets");
+        fs::create_dir_all(&base_ets).unwrap();
+        fs::create_dir_all(&target_ets).unwrap();
+
+        // Create both the base and target versions of the same file.
+        fs::write(base_ets.join("Utils.ets"), "export const base = 1;").unwrap();
+        fs::write(target_ets.join("Utils.ets"), "export const target = 1;").unwrap();
+
+        // Create the importer in src/main/ets.
+        let importer = base_ets.join("Index.ets");
+        fs::write(&importer, "import { Utils } from './Utils';").unwrap();
+
+        // Build resolver WITH overlay: target/ets should shadow main/ets.
+        let resolver = OhosResolver::new(ResolverConfig {
+            project_root: dir.path().to_path_buf(),
+            sdk_api_dirs: vec![],
+            sdk_kits_dirs: vec![],
+            pkg_name_to_pkg_info: FxHashMap::default(),
+            use_normalized_ohm_url: false,
+            case_sensitive_check: false,
+            oh_modules_roots: vec![],
+            source_set_overlays: vec![(base_ets.clone(), target_ets.clone())],
+        });
+
+        let result = resolver.resolve("./Utils", &importer).unwrap();
+        match result {
+            OhosResolvedModule::LocalSource { path, .. } => {
+                let canonical = std::fs::canonicalize(&path).unwrap_or(path.clone());
+                let target_canonical =
+                    std::fs::canonicalize(&target_ets.join("Utils.ets")).unwrap();
+                assert_eq!(
+                    canonical, target_canonical,
+                    "source-set overlay must redirect to target-specific file; got: {:?}",
+                    canonical
+                );
+            }
+            _ => panic!("expected LocalSource"),
+        }
+
+        // Without overlay: should resolve to the base file.
+        let resolver_no_overlay = OhosResolver::new(ResolverConfig {
+            project_root: dir.path().to_path_buf(),
+            sdk_api_dirs: vec![],
+            sdk_kits_dirs: vec![],
+            pkg_name_to_pkg_info: FxHashMap::default(),
+            use_normalized_ohm_url: false,
+            case_sensitive_check: false,
+            oh_modules_roots: vec![],
+            source_set_overlays: vec![],
+        });
+
+        let result2 = resolver_no_overlay.resolve("./Utils", &importer).unwrap();
+        match result2 {
+            OhosResolvedModule::LocalSource { path, .. } => {
+                let canonical = std::fs::canonicalize(&path).unwrap_or(path.clone());
+                let base_canonical =
+                    std::fs::canonicalize(&base_ets.join("Utils.ets")).unwrap();
+                assert_eq!(
+                    canonical, base_canonical,
+                    "without overlay, must resolve to base file; got: {:?}",
+                    canonical
+                );
+            }
+            _ => panic!("expected LocalSource"),
         }
     }
 }
