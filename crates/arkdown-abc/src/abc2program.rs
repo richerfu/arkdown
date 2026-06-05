@@ -11,8 +11,9 @@ use crate::emit::file::{
     LITERAL_TAG_METHOD_AFFILIATE, LITERAL_TAG_SETTER, LITERAL_TAG_STRING,
 };
 use crate::emit::record::{
-    function_kind, method_access, CatchEntry, ClassRecord, FieldRecord, FieldType, FieldValue,
-    MethodKind, MethodLabelStyle, MethodRecord, FIELD_OWNER_CLASS_IDX,
+    function_kind, method_access, AnnotationElementRecord, AnnotationRecord, AnnotationValue,
+    CatchEntry, ClassRecord, FieldRecord, FieldType, FieldValue, MethodKind, MethodLabelStyle,
+    MethodRecord, FIELD_OWNER_CLASS_IDX,
 };
 use crate::error::AbcError;
 use crate::ir::opcodes::{Insn, PandasmInsn};
@@ -69,11 +70,14 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
                 .map(|method| (method.offset, method.name.clone()))
         })
         .collect::<BTreeMap<_, _>>();
-    let method_pool_offsets = reader
-        .index_sections()
-        .map_err(read_error("<abc input>"))?
-        .into_iter()
-        .flat_map(|section| section.method_offsets)
+    let index_sections = reader.index_sections().map_err(read_error("<abc input>"))?;
+    let class_name_by_offset = classes
+        .iter()
+        .map(|class| (class.offset, class.name.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let method_pool_offsets = index_sections
+        .iter()
+        .flat_map(|section| section.method_offsets.iter().copied())
         .filter(|offset| method_names.contains_key(offset))
         .collect::<BTreeSet<_>>();
     let method_call_infos = build_method_call_infos(&reader, &classes)?;
@@ -136,6 +140,15 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
                     &method_call_infos,
                 )?;
                 let kind = method_kind_from_access_flags(method.name.as_str(), method.access_flags);
+                let annotations = method_annotations_from_abc(
+                    data,
+                    &reader,
+                    &class,
+                    method,
+                    &index_sections,
+                    &class_name_by_offset,
+                    &literal_offset_to_index,
+                )?;
                 Ok(MethodRecord {
                     name: method.name.clone(),
                     bytecode,
@@ -160,7 +173,8 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
                     function_kind: abc_default_function_kind(kind),
                     concurrent_module_requests: Vec::new(),
                     method_pool_entry: method_pool_offsets.contains(&method.offset),
-                    expected_property_count: None,
+                    expected_property_count: annotations.expected_property_count,
+                    annotations: annotations.custom,
                     definefunc_order: None,
                     label_style: MethodLabelStyle::Abc2Program,
                 })
@@ -211,6 +225,205 @@ fn is_ark_annotation_stub(name: &str) -> bool {
             | "L_ESExpectedPropertyCountAnnotation;"
             | "L_ESSlotNumberAnnotation;"
     )
+}
+
+#[derive(Default)]
+struct AbcDecodedMethodAnnotations {
+    expected_property_count: Option<u32>,
+    custom: Vec<AnnotationRecord>,
+}
+
+fn method_annotations_from_abc(
+    data: &[u8],
+    reader: &AbcReader<'_>,
+    owner_class: &AbcClassItem,
+    method: &crate::abc_reader::AbcMethodItem,
+    index_sections: &[crate::abc_reader::AbcIndexSection],
+    class_name_by_offset: &BTreeMap<u32, String>,
+    literal_offset_to_index: &BTreeMap<u32, usize>,
+) -> Result<AbcDecodedMethodAnnotations, AbcError> {
+    let Some(section) = index_sections
+        .iter()
+        .find(|section| section.start <= method.offset && method.offset < section.end)
+        .or_else(|| index_sections.first())
+    else {
+        return Ok(AbcDecodedMethodAnnotations::default());
+    };
+
+    let mut decoded = AbcDecodedMethodAnnotations::default();
+    for &annotation_off in &method.annotation_offsets {
+        let Some((record_name, elements)) = annotation_from_abc(
+            data,
+            reader,
+            owner_class,
+            annotation_off,
+            section,
+            class_name_by_offset,
+            literal_offset_to_index,
+        )?
+        else {
+            continue;
+        };
+        if record_name == "_ESExpectedPropertyCountAnnotation" {
+            decoded.expected_property_count = elements.iter().find_map(|element| {
+                (element.name == "ExpectedPropertyCount").then_some(match &element.value {
+                    AnnotationValue::U32(value) => Some(*value),
+                    _ => None,
+                })?
+            });
+            continue;
+        }
+        if record_name == "_ESSlotNumberAnnotation"
+            || record_name == "_ESConcurrentModuleRequestsAnnotation"
+        {
+            continue;
+        }
+        decoded.custom.push(AnnotationRecord {
+            record_name,
+            elements,
+        });
+    }
+    Ok(decoded)
+}
+
+fn annotation_from_abc(
+    data: &[u8],
+    reader: &AbcReader<'_>,
+    owner_class: &AbcClassItem,
+    annotation_off: u32,
+    section: &crate::abc_reader::AbcIndexSection,
+    class_name_by_offset: &BTreeMap<u32, String>,
+    literal_offset_to_index: &BTreeMap<u32, usize>,
+) -> Result<Option<(String, Vec<AnnotationElementRecord>)>, AbcError> {
+    let mut cursor = annotation_off as usize;
+    let class_idx = read_at_u16(data, cursor, "annotation class_idx")?;
+    cursor += 2;
+    let Some(class_off) = section.class_offsets.get(class_idx as usize) else {
+        return Err(AbcError::UnsupportedConstruct {
+            construct: format!("ABC annotation class_idx {class_idx} out of IndexSection range"),
+            file: owner_class.name.clone(),
+        });
+    };
+    let Some(class_name) = class_name_by_offset.get(class_off) else {
+        return Err(AbcError::UnsupportedConstruct {
+            construct: format!("ABC annotation class offset {class_off:#x} missing"),
+            file: owner_class.name.clone(),
+        });
+    };
+    let Some(record_name) = annotation_record_name_from_class_name(class_name) else {
+        return Ok(None);
+    };
+
+    let count = read_at_u16(data, cursor, "annotation element count")? as usize;
+    cursor += 2;
+    let mut raw_elements = Vec::with_capacity(count);
+    for _ in 0..count {
+        let name_off = read_at_u32(data, cursor, "annotation element name")?;
+        cursor += 4;
+        let value = read_at_u32(data, cursor, "annotation element value")?;
+        cursor += 4;
+        raw_elements.push((name_off, value));
+    }
+
+    let mut elements = Vec::with_capacity(count);
+    for (element_idx, (name_off, value)) in raw_elements.into_iter().enumerate() {
+        let tag =
+            *data
+                .get(cursor + element_idx)
+                .ok_or_else(|| AbcError::UnsupportedConstruct {
+                    construct: "ABC annotation tag out of bounds".to_string(),
+                    file: owner_class.name.clone(),
+                })?;
+        let name = reader
+            .string_at(name_off)
+            .map_err(read_error("<abc annotation>"))?;
+        let value = annotation_value_from_abc(
+            data,
+            reader,
+            owner_class,
+            tag,
+            value,
+            literal_offset_to_index,
+        )?;
+        elements.push(AnnotationElementRecord { name, value });
+    }
+    Ok(Some((record_name, elements)))
+}
+
+fn annotation_record_name_from_class_name(class_name: &str) -> Option<String> {
+    class_name
+        .strip_prefix('L')
+        .and_then(|name| name.strip_suffix(';'))
+        .map(str::to_string)
+        .or_else(|| is_ark_annotation_stub(class_name).then(|| class_name.to_string()))
+}
+
+fn annotation_value_from_abc(
+    data: &[u8],
+    reader: &AbcReader<'_>,
+    owner_class: &AbcClassItem,
+    tag: u8,
+    value: u32,
+    literal_offset_to_index: &BTreeMap<u32, usize>,
+) -> Result<AnnotationValue, AbcError> {
+    match tag {
+        b'1' => Ok(AnnotationValue::Bool(value != 0)),
+        b'7' => Ok(AnnotationValue::U32(value)),
+        b'B' => Ok(AnnotationValue::F64(f64::from_bits(read_at_u64(
+            data,
+            value as usize,
+            "annotation f64 value",
+        )?))),
+        b'C' => Ok(AnnotationValue::String(
+            reader
+                .string_at(value)
+                .map_err(read_error("<abc annotation>"))?,
+        )),
+        b'#' => {
+            let Some(&index) = literal_offset_to_index.get(&value) else {
+                return Err(AbcError::UnsupportedConstruct {
+                    construct: format!("ABC annotation literal array offset {value:#x} missing"),
+                    file: owner_class.name.clone(),
+                });
+            };
+            Ok(AnnotationValue::LiteralArray {
+                index,
+                key: literal_array_key(&owner_class.name, index),
+            })
+        }
+        other => Err(AbcError::UnsupportedConstruct {
+            construct: format!("ABC annotation tag {other:#x} is unsupported"),
+            file: owner_class.name.clone(),
+        }),
+    }
+}
+
+fn read_at_u16(data: &[u8], offset: usize, what: &str) -> Result<u16, AbcError> {
+    let bytes = data
+        .get(offset..offset + 2)
+        .ok_or_else(|| abc_data_oob(offset, what))?;
+    Ok(u16::from_le_bytes(bytes.try_into().unwrap()))
+}
+
+fn read_at_u32(data: &[u8], offset: usize, what: &str) -> Result<u32, AbcError> {
+    let bytes = data
+        .get(offset..offset + 4)
+        .ok_or_else(|| abc_data_oob(offset, what))?;
+    Ok(u32::from_le_bytes(bytes.try_into().unwrap()))
+}
+
+fn read_at_u64(data: &[u8], offset: usize, what: &str) -> Result<u64, AbcError> {
+    let bytes = data
+        .get(offset..offset + 8)
+        .ok_or_else(|| abc_data_oob(offset, what))?;
+    Ok(u64::from_le_bytes(bytes.try_into().unwrap()))
+}
+
+fn abc_data_oob(offset: usize, what: &str) -> AbcError {
+    AbcError::UnsupportedConstruct {
+        construct: format!("ABC {what} at {offset:#x} out of bounds"),
+        file: "<abc input>".to_string(),
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

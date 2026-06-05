@@ -6,12 +6,13 @@ use oxc_ast::ast::{
     AnnotationDeclaration, AnnotationElement, Argument, ArrayAssignmentTarget,
     ArrayExpressionElement, ArrayPattern, AssignmentOperator, AssignmentTarget,
     AssignmentTargetMaybeDefault, AssignmentTargetProperty, BindingPattern, ClassElement,
-    Declaration, ExportDefaultDeclarationKind, Expression, ForInStatement, ForOfStatement,
-    ForStatementLeft, FormalParameter, Function, FunctionBody, ImportDeclarationSpecifier,
-    ImportOrExportKind, LogicalOperator, MethodDefinitionKind, ObjectAssignmentTarget,
-    ObjectPattern, Program, PropertyKey, SimpleAssignmentTarget, Statement, TSEnumDeclaration,
-    TSEnumMemberName, TSImportEqualsDeclaration, TSModuleDeclaration, TSModuleReference,
-    TSQualifiedName, TSType, TSTypeName, UnaryOperator, UpdateExpression, YieldExpression,
+    Declaration, Decorator, ExportDefaultDeclarationKind, Expression, ForInStatement,
+    ForOfStatement, ForStatementLeft, FormalParameter, Function, FunctionBody,
+    ImportDeclarationSpecifier, ImportOrExportKind, LogicalOperator, MethodDefinitionKind,
+    NewExpression, ObjectAssignmentTarget, ObjectPattern, ObjectPropertyKind, Program, PropertyKey,
+    SimpleAssignmentTarget, Statement, TSEnumDeclaration, TSEnumMemberName,
+    TSImportEqualsDeclaration, TSModuleDeclaration, TSModuleReference, TSQualifiedName, TSType,
+    TSTypeName, UnaryOperator, UpdateExpression, YieldExpression,
 };
 use oxc_ast_visit::{walk, Visit};
 use oxc_parser::{Parser, ParserReturn};
@@ -22,9 +23,9 @@ use oxc_transformer::{Module as TransformModule, TransformOptions, Transformer};
 
 use crate::emit::file::{LiteralArray, LiteralEntry};
 use crate::emit::record::{
-    function_kind, CatchEntry, ClassRecord, DebugInfoRecord, FieldRecord, FieldType, FieldValue,
-    InstructionDebugInfo, MethodKind, MethodLabelStyle, MethodRecord, ProgramLabel,
-    FIELD_OWNER_CLASS_IDX,
+    function_kind, AnnotationElementRecord, AnnotationRecord, AnnotationValue, CatchEntry,
+    ClassRecord, DebugInfoRecord, FieldRecord, FieldType, FieldValue, InstructionDebugInfo,
+    MethodKind, MethodLabelStyle, MethodRecord, ProgramLabel, FIELD_OWNER_CLASS_IDX,
 };
 use crate::emit::strings::StringTable;
 use crate::error::AbcError;
@@ -373,6 +374,10 @@ pub fn build_record_with_debug_and_source_map_for_target_with_mode(
         target_api_version,
         enable_annotations,
     )?;
+    let enum_infos = collect_annotation_enum_infos(&program);
+    let mut annotation_literal_array_counter = 0usize;
+    let annotations_enabled =
+        enable_annotations && target_api_version >= ANNOTATION_SUPPORTED_API_VERSION;
 
     // Collect module import/export records before lowering so bytecode can use
     // hvigor/es2abc's module-variable opcodes instead of global lookups.
@@ -464,6 +469,7 @@ pub fn build_record_with_debug_and_source_map_for_target_with_mode(
         concurrent_module_requests: Vec::new(),
         method_pool_entry: false,
         expected_property_count: None,
+        annotations: Vec::new(),
         definefunc_order: None,
         label_style: MethodLabelStyle::Source,
     });
@@ -499,6 +505,10 @@ pub fn build_record_with_debug_and_source_map_for_target_with_mode(
         source_mapper,
         &mut function_names,
         &concurrent_import_requests,
+        record_name,
+        annotations_enabled,
+        &enum_infos,
+        &mut annotation_literal_array_counter,
     )?;
 
     let record_layout = RecordLayout::new(
@@ -635,6 +645,10 @@ pub fn annotation_records_from_source(
     }
 
     let enum_infos = collect_annotation_enum_infos(&program);
+    let mut annotation_literal_array_counter = literal_arrays
+        .iter()
+        .filter(|array| array.explicit_key.is_some())
+        .count();
     let mut records = Vec::new();
     for stmt in &program.body {
         match stmt {
@@ -645,6 +659,7 @@ pub fn annotation_records_from_source(
                 enable_annotations,
                 literal_arrays,
                 &enum_infos,
+                &mut annotation_literal_array_counter,
             )?),
             Statement::ExportNamedDeclaration(export) => {
                 if let Some(Declaration::AnnotationDeclaration(decl)) = &export.declaration {
@@ -655,6 +670,7 @@ pub fn annotation_records_from_source(
                         enable_annotations,
                         literal_arrays,
                         &enum_infos,
+                        &mut annotation_literal_array_counter,
                     )?);
                 }
             }
@@ -671,6 +687,7 @@ fn annotation_record_from_decl(
     enable_annotations: bool,
     literal_arrays: &mut Vec<LiteralArray>,
     enum_infos: &FxHashMap<String, AnnotationEnumInfo>,
+    annotation_literal_array_counter: &mut usize,
 ) -> Result<ClassRecord, AbcError> {
     if !(enable_annotations && target_api_version >= ANNOTATION_SUPPORTED_API_VERSION) {
         return Err(AbcError::Parse {
@@ -714,6 +731,7 @@ fn annotation_record_from_decl(
             name.as_ref(),
             enum_infos,
             record_name,
+            annotation_literal_array_counter,
         )?;
         fields.push(FieldRecord {
             name: name.to_string(),
@@ -882,19 +900,22 @@ fn annotation_field_value(
     field_name: &str,
     enum_infos: &FxHashMap<String, AnnotationEnumInfo>,
     record_name: &str,
+    annotation_literal_array_counter: &mut usize,
 ) -> Result<Option<FieldValue>, AbcError> {
     let Some(value) = value else {
         return Ok(None);
     };
     if matches!(field_type, FieldType::Array { .. }) {
-        if let Expression::ArrayExpression(array) = value {
+        if matches!(
+            annotation_unwrap_expression(value),
+            Expression::ArrayExpression(_) | Expression::NewExpression(_)
+        ) {
             let key_prefix = format!("{annotation_record_name}_{field_name}");
-            let mut counter = 0usize;
             let index = annotation_literal_array_from_expr(
-                array,
+                value,
                 literal_arrays,
                 &key_prefix,
-                &mut counter,
+                annotation_literal_array_counter,
                 enum_infos,
                 record_name,
             )?;
@@ -952,6 +973,40 @@ fn annotation_field_value(
 }
 
 fn annotation_literal_array_from_expr(
+    expr: &Expression<'_>,
+    literal_arrays: &mut Vec<LiteralArray>,
+    key_prefix: &str,
+    counter: &mut usize,
+    enum_infos: &FxHashMap<String, AnnotationEnumInfo>,
+    record_name: &str,
+) -> Result<usize, AbcError> {
+    let expr = annotation_unwrap_expression(expr);
+    if let Expression::NewExpression(new_expr) = expr {
+        return annotation_literal_array_from_new_expr(
+            new_expr,
+            literal_arrays,
+            key_prefix,
+            counter,
+            record_name,
+        );
+    }
+    let Expression::ArrayExpression(array) = expr else {
+        return Err(AbcError::UnsupportedConstruct {
+            construct: "AnnotationArrayValue".to_string(),
+            file: record_name.to_string(),
+        });
+    };
+    annotation_literal_array_from_array(
+        array,
+        literal_arrays,
+        key_prefix,
+        counter,
+        enum_infos,
+        record_name,
+    )
+}
+
+fn annotation_literal_array_from_array(
     array: &oxc_ast::ast::ArrayExpression<'_>,
     literal_arrays: &mut Vec<LiteralArray>,
     key_prefix: &str,
@@ -979,6 +1034,68 @@ fn annotation_literal_array_from_expr(
         )?);
     }
     literal_arrays[index].entries = entries;
+    Ok(index)
+}
+
+fn annotation_literal_array_from_new_expr(
+    new_expr: &NewExpression<'_>,
+    literal_arrays: &mut Vec<LiteralArray>,
+    key_prefix: &str,
+    counter: &mut usize,
+    record_name: &str,
+) -> Result<usize, AbcError> {
+    let Some(type_arguments) = &new_expr.type_arguments else {
+        return Err(AbcError::UnsupportedConstruct {
+            construct: "AnnotationNewArrayType".to_string(),
+            file: record_name.to_string(),
+        });
+    };
+    let Some(element_type) = type_arguments.params.first() else {
+        return Err(AbcError::UnsupportedConstruct {
+            construct: "AnnotationNewArrayType".to_string(),
+            file: record_name.to_string(),
+        });
+    };
+    let builtin_type = match element_type {
+        TSType::TSNumberKeyword(_) => 0,
+        TSType::TSBooleanKeyword(_) => 1,
+        TSType::TSStringKeyword(_) => 2,
+        TSType::TSTypeReference(_) => {
+            let Some(marker) = new_expr.arguments.first().and_then(|arg| {
+                arg.as_expression()
+                    .and_then(|expr| annotation_number_constant(expr, &FxHashMap::default()))
+            }) else {
+                return Err(AbcError::UnsupportedConstruct {
+                    construct: "AnnotationNewArrayEnumMarker".to_string(),
+                    file: record_name.to_string(),
+                });
+            };
+            match marker as u8 {
+                1 => 0,
+                3 => 2,
+                _ => {
+                    return Err(AbcError::UnsupportedConstruct {
+                        construct: "AnnotationNewArrayEnumMarker".to_string(),
+                        file: record_name.to_string(),
+                    })
+                }
+            }
+        }
+        _ => {
+            return Err(AbcError::UnsupportedConstruct {
+                construct: "AnnotationNewArrayType".to_string(),
+                file: record_name.to_string(),
+            })
+        }
+    };
+
+    let index = literal_arrays.len();
+    let key = format!("{key_prefix}_{counter}");
+    *counter += 1;
+    literal_arrays.push(LiteralArray {
+        entries: vec![LiteralEntry::TaggedBuiltinTypeIndex(builtin_type)],
+        explicit_key: Some(key),
+    });
     Ok(index)
 }
 
@@ -1010,12 +1127,22 @@ fn annotation_literal_entry_from_element(
             Ok(LiteralEntry::TaggedString(lit.value.to_string()))
         }
         ArrayExpressionElement::ArrayExpression(array) => {
-            let index = annotation_literal_array_from_expr(
+            let index = annotation_literal_array_from_array(
                 array,
                 literal_arrays,
                 key_prefix,
                 counter,
                 enum_infos,
+                record_name,
+            )?;
+            Ok(LiteralEntry::TaggedLiteralArrayIndex(index))
+        }
+        ArrayExpressionElement::NewExpression(new_expr) => {
+            let index = annotation_literal_array_from_new_expr(
+                new_expr,
+                literal_arrays,
+                key_prefix,
+                counter,
                 record_name,
             )?;
             Ok(LiteralEntry::TaggedLiteralArrayIndex(index))
@@ -1224,6 +1351,261 @@ fn annotation_enum_value_to_literal_entry(value: AnnotationEnumValue) -> Literal
     match value {
         AnnotationEnumValue::Number(value) => LiteralEntry::TaggedDouble(value),
         AnnotationEnumValue::String(value) => LiteralEntry::TaggedString(value),
+    }
+}
+
+fn annotation_records_from_decorators(
+    decorators: &[Decorator<'_>],
+    method_full_name: &str,
+    record_name: &str,
+    literal_arrays: &mut Vec<LiteralArray>,
+    annotations_enabled: bool,
+    enum_infos: &FxHashMap<String, AnnotationEnumInfo>,
+    annotation_literal_array_counter: &mut usize,
+) -> Result<Vec<AnnotationRecord>, AbcError> {
+    if decorators.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !annotations_enabled {
+        return Err(AbcError::Parse {
+            file: record_name.to_string(),
+            message: ANNOTATION_NOT_ENABLED_MESSAGE.to_string(),
+        });
+    }
+
+    decorators
+        .iter()
+        .map(|decorator| {
+            annotation_record_from_decorator(
+                decorator,
+                method_full_name,
+                record_name,
+                literal_arrays,
+                enum_infos,
+                annotation_literal_array_counter,
+            )
+        })
+        .collect()
+}
+
+fn annotation_record_from_decorator(
+    decorator: &Decorator<'_>,
+    method_full_name: &str,
+    record_name: &str,
+    literal_arrays: &mut Vec<LiteralArray>,
+    enum_infos: &FxHashMap<String, AnnotationEnumInfo>,
+    annotation_literal_array_counter: &mut usize,
+) -> Result<AnnotationRecord, AbcError> {
+    let (annotation_name, properties) = annotation_usage_parts(&decorator.expression, record_name)?;
+    let record_name_for_usage = annotation_usage_record_name(&annotation_name, record_name)?;
+    let properties = match properties {
+        AnnotationUsageProperties::None => {
+            return Ok(AnnotationRecord {
+                record_name: record_name_for_usage,
+                elements: Vec::new(),
+            });
+        }
+        AnnotationUsageProperties::Single(value_expr) => {
+            let key_prefix = format!("{method_full_name}_value");
+            let value = annotation_usage_value_from_expr(
+                value_expr,
+                literal_arrays,
+                &key_prefix,
+                annotation_literal_array_counter,
+                enum_infos,
+                record_name,
+            )?;
+            return Ok(AnnotationRecord {
+                record_name: record_name_for_usage,
+                elements: vec![AnnotationElementRecord {
+                    name: "value".to_string(),
+                    value,
+                }],
+            });
+        }
+        AnnotationUsageProperties::Object(properties) => properties,
+    };
+
+    let mut elements = Vec::with_capacity(properties.properties.len());
+    for property in &properties.properties {
+        let ObjectPropertyKind::ObjectProperty(property) = property else {
+            return Err(AbcError::UnsupportedConstruct {
+                construct: "AnnotationSpreadProperty".to_string(),
+                file: record_name.to_string(),
+            });
+        };
+        let Some(name) = property.key.static_name() else {
+            return Err(AbcError::UnsupportedConstruct {
+                construct: "AnnotationComputedProperty".to_string(),
+                file: record_name.to_string(),
+            });
+        };
+        let element_name = name.to_string();
+        let key_prefix = format!("{method_full_name}_{element_name}");
+        let value = annotation_usage_value_from_expr(
+            &property.value,
+            literal_arrays,
+            &key_prefix,
+            annotation_literal_array_counter,
+            enum_infos,
+            record_name,
+        )?;
+        elements.push(AnnotationElementRecord {
+            name: element_name,
+            value,
+        });
+    }
+
+    Ok(AnnotationRecord {
+        record_name: record_name_for_usage,
+        elements,
+    })
+}
+
+enum AnnotationUsageProperties<'a> {
+    None,
+    Object(&'a oxc_ast::ast::ObjectExpression<'a>),
+    Single(&'a Expression<'a>),
+}
+
+fn annotation_usage_parts<'a>(
+    expr: &'a Expression<'a>,
+    record_name: &str,
+) -> Result<(String, AnnotationUsageProperties<'a>), AbcError> {
+    let expr = annotation_unwrap_expression(expr);
+    match expr {
+        Expression::CallExpression(call) => {
+            let name = annotation_usage_name(&call.callee, record_name)?;
+            let Some(argument) = call.arguments.first() else {
+                return Ok((name, AnnotationUsageProperties::None));
+            };
+            if call.arguments.len() > 1 {
+                return Err(AbcError::UnsupportedConstruct {
+                    construct: "AnnotationArguments".to_string(),
+                    file: record_name.to_string(),
+                });
+            };
+            let Some(argument_expr) = argument.as_expression() else {
+                return Err(AbcError::UnsupportedConstruct {
+                    construct: "AnnotationSpreadArgument".to_string(),
+                    file: record_name.to_string(),
+                });
+            };
+            match annotation_unwrap_expression(argument_expr) {
+                Expression::ObjectExpression(object) => {
+                    Ok((name, AnnotationUsageProperties::Object(object)))
+                }
+                expr => Ok((name, AnnotationUsageProperties::Single(expr))),
+            }
+        }
+        _ => Ok((
+            annotation_usage_name(expr, record_name)?,
+            AnnotationUsageProperties::None,
+        )),
+    }
+}
+
+fn annotation_usage_name(expr: &Expression<'_>, record_name: &str) -> Result<String, AbcError> {
+    match annotation_unwrap_expression(expr) {
+        Expression::Identifier(id) => Ok(id.name.as_str().to_string()),
+        Expression::StaticMemberExpression(mem) => Ok(mem.property.name.as_str().to_string()),
+        Expression::CallExpression(call) if call.arguments.is_empty() => {
+            annotation_usage_name(&call.callee, record_name)
+        }
+        _ => Err(AbcError::UnsupportedConstruct {
+            construct: "AnnotationUsage".to_string(),
+            file: record_name.to_string(),
+        }),
+    }
+}
+
+fn annotation_usage_record_name(
+    annotation_name: &str,
+    record_name: &str,
+) -> Result<String, AbcError> {
+    let Some(short_name) = annotation_name.strip_prefix(ANNOTATION_PREFIX) else {
+        return Err(AbcError::Parse {
+            file: record_name.to_string(),
+            message: format!(
+                "Annotation declaration need to be prefixed with '{ANNOTATION_PREFIX}'"
+            ),
+        });
+    };
+    if record_name.is_empty() {
+        Ok(short_name.to_string())
+    } else {
+        Ok(format!(
+            "{}.{}",
+            pandasm_record_name(record_name),
+            short_name
+        ))
+    }
+}
+
+fn annotation_method_base_name(record_name: &str, method_name: &str) -> String {
+    if record_name.is_empty() {
+        method_name.to_string()
+    } else {
+        format!("{}.{}", pandasm_record_name(record_name), method_name)
+    }
+}
+
+fn annotation_usage_value_from_expr(
+    expr: &Expression<'_>,
+    literal_arrays: &mut Vec<LiteralArray>,
+    key_prefix: &str,
+    counter: &mut usize,
+    enum_infos: &FxHashMap<String, AnnotationEnumInfo>,
+    record_name: &str,
+) -> Result<AnnotationValue, AbcError> {
+    let expr = annotation_unwrap_expression(expr);
+    if matches!(
+        expr,
+        Expression::ArrayExpression(_) | Expression::NewExpression(_)
+    ) {
+        let index = annotation_literal_array_from_expr(
+            expr,
+            literal_arrays,
+            key_prefix,
+            counter,
+            enum_infos,
+            record_name,
+        )?;
+        let key = literal_arrays[index]
+            .explicit_key
+            .clone()
+            .expect("annotation literal array must carry explicit key");
+        return Ok(AnnotationValue::LiteralArray { index, key });
+    }
+    if let Expression::BooleanLiteral(lit) = expr {
+        return Ok(AnnotationValue::Bool(lit.value));
+    }
+    if let Some(value) = annotation_string_constant(expr, &FxHashMap::default()) {
+        return Ok(AnnotationValue::String(value));
+    }
+    if let Some(value) = annotation_number_constant(expr, &FxHashMap::default()) {
+        return Ok(AnnotationValue::F64(value));
+    }
+    if let Some(value) = annotation_enum_value_from_expr(expr, enum_infos) {
+        return Ok(match value {
+            AnnotationEnumValue::Number(value) => AnnotationValue::F64(value),
+            AnnotationEnumValue::String(value) => AnnotationValue::String(value),
+        });
+    }
+    Err(AbcError::UnsupportedConstruct {
+        construct: "AnnotationElementValue".to_string(),
+        file: record_name.to_string(),
+    })
+}
+
+fn annotation_unwrap_expression<'a>(expr: &'a Expression<'a>) -> &'a Expression<'a> {
+    match expr {
+        Expression::ParenthesizedExpression(expr) => annotation_unwrap_expression(&expr.expression),
+        Expression::TSAsExpression(expr) => annotation_unwrap_expression(&expr.expression),
+        Expression::TSSatisfiesExpression(expr) => annotation_unwrap_expression(&expr.expression),
+        Expression::TSNonNullExpression(expr) => annotation_unwrap_expression(&expr.expression),
+        Expression::TSTypeAssertion(expr) => annotation_unwrap_expression(&expr.expression),
+        _ => expr,
     }
 }
 
@@ -1763,6 +2145,7 @@ fn compile_function_record(
                 concurrent_module_requests,
                 method_pool_entry: true,
                 expected_property_count,
+                annotations: Vec::new(),
                 definefunc_order: Some(definefunc_order),
                 label_style: MethodLabelStyle::Source,
             });
@@ -1812,6 +2195,7 @@ fn compile_function_record(
                 concurrent_module_requests: Vec::new(),
                 method_pool_entry: true,
                 expected_property_count,
+                annotations: Vec::new(),
                 definefunc_order: Some(definefunc_order),
                 label_style: MethodLabelStyle::Source,
             });
@@ -1927,6 +2311,10 @@ fn compile_class_method_bodies(
     source_mapper: Option<&SourceMapper>,
     function_names: &mut FunctionNameAllocator<'_>,
     concurrent_import_requests: &ConcurrentImportRequests<'_>,
+    record_name: &str,
+    annotations_enabled: bool,
+    enum_infos: &FxHashMap<String, AnnotationEnumInfo>,
+    annotation_literal_array_counter: &mut usize,
 ) -> Result<(), AbcError> {
     for stmt in stmts {
         // Handle `class Foo { ... }` (ClassDeclaration)
@@ -1940,6 +2328,7 @@ fn compile_class_method_bodies(
                 cls.super_class.is_some(),
                 cls.span.start,
                 cls.span.end,
+                &cls.decorators,
                 &cls.body.body,
                 strings,
                 literal_arrays,
@@ -1950,6 +2339,10 @@ fn compile_class_method_bodies(
                 source_mapper,
                 function_names,
                 concurrent_import_requests,
+                record_name,
+                annotations_enabled,
+                enum_infos,
+                annotation_literal_array_counter,
             )?;
             continue;
         }
@@ -1967,6 +2360,7 @@ fn compile_class_method_bodies(
                     cls.super_class.is_some(),
                     cls.span.start,
                     cls.span.end,
+                    &cls.decorators,
                     &cls.body.body,
                     strings,
                     literal_arrays,
@@ -1977,6 +2371,10 @@ fn compile_class_method_bodies(
                     source_mapper,
                     function_names,
                     concurrent_import_requests,
+                    record_name,
+                    annotations_enabled,
+                    enum_infos,
+                    annotation_literal_array_counter,
                 )?;
             }
             continue;
@@ -1992,6 +2390,7 @@ fn compile_class_method_bodies(
                     cls.super_class.is_some(),
                     cls.span.start,
                     cls.span.end,
+                    &cls.decorators,
                     &cls.body.body,
                     strings,
                     literal_arrays,
@@ -2002,6 +2401,10 @@ fn compile_class_method_bodies(
                     source_mapper,
                     function_names,
                     concurrent_import_requests,
+                    record_name,
+                    annotations_enabled,
+                    enum_infos,
+                    annotation_literal_array_counter,
                 )?;
             }
             continue;
@@ -2023,6 +2426,7 @@ fn compile_class_method_bodies(
                         cls.super_class.is_some(),
                         cls.span.start,
                         cls.span.end,
+                        &cls.decorators,
                         &cls.body.body,
                         strings,
                         literal_arrays,
@@ -2033,6 +2437,10 @@ fn compile_class_method_bodies(
                         source_mapper,
                         function_names,
                         concurrent_import_requests,
+                        record_name,
+                        annotations_enabled,
+                        enum_infos,
+                        annotation_literal_array_counter,
                     )?;
                     continue;
                 }
@@ -2250,6 +2658,7 @@ fn compile_class_elements(
     has_super_class: bool,
     class_span_start: u32,
     class_span_end: u32,
+    class_decorators: &[Decorator<'_>],
     elements: &[ClassElement<'_>],
     strings: &mut StringTable,
     literal_arrays: &mut Vec<LiteralArray>,
@@ -2260,6 +2669,10 @@ fn compile_class_elements(
     source_mapper: Option<&SourceMapper>,
     function_names: &mut FunctionNameAllocator<'_>,
     concurrent_import_requests: &ConcurrentImportRequests<'_>,
+    record_name: &str,
+    annotations_enabled: bool,
+    enum_infos: &FxHashMap<String, AnnotationEnumInfo>,
+    annotation_literal_array_counter: &mut usize,
 ) -> Result<(), AbcError> {
     let class_name = class_name.unwrap_or("_");
 
@@ -2397,6 +2810,15 @@ fn compile_class_elements(
             } else {
                 4
             };
+        let constructor_annotations = annotation_records_from_decorators(
+            class_decorators,
+            &annotation_method_base_name(record_name, &constructor_name),
+            record_name,
+            literal_arrays,
+            annotations_enabled,
+            enum_infos,
+            annotation_literal_array_counter,
+        )?;
         let debug_info = source_file_path.map(|path| DebugInfoRecord {
             line_start: compiled.debug_line_start.unwrap_or(1),
             source_file: path.to_string(),
@@ -2419,6 +2841,7 @@ fn compile_class_elements(
             concurrent_module_requests: Vec::new(),
             method_pool_entry: true,
             expected_property_count: class_expected_property_count,
+            annotations: constructor_annotations,
             definefunc_order: None,
             label_style: MethodLabelStyle::Source,
         });
@@ -2460,6 +2883,7 @@ fn compile_class_elements(
             concurrent_module_requests: Vec::new(),
             method_pool_entry: true,
             expected_property_count: None,
+            annotations: Vec::new(),
             definefunc_order: None,
             label_style: MethodLabelStyle::Source,
         });
@@ -2496,6 +2920,7 @@ fn compile_class_elements(
             concurrent_module_requests: Vec::new(),
             method_pool_entry: true,
             expected_property_count: None,
+            annotations: Vec::new(),
             definefunc_order: None,
             label_style: MethodLabelStyle::Source,
         });
@@ -2628,6 +3053,28 @@ fn compile_class_elements(
                 class_method_function_kind(&method.value, is_constructor, is_method_async);
             let concurrent_module_requests =
                 concurrent_import_requests.collect_for_function(&method.value);
+            let mut annotations = if is_constructor {
+                annotation_records_from_decorators(
+                    class_decorators,
+                    &annotation_method_base_name(record_name, &key_name),
+                    record_name,
+                    literal_arrays,
+                    annotations_enabled,
+                    enum_infos,
+                    annotation_literal_array_counter,
+                )?
+            } else {
+                Vec::new()
+            };
+            annotations.extend(annotation_records_from_decorators(
+                &method.decorators,
+                &annotation_method_base_name(record_name, &key_name),
+                record_name,
+                literal_arrays,
+                annotations_enabled,
+                enum_infos,
+                annotation_literal_array_counter,
+            )?);
             let debug_info = source_file_path.map(|path| DebugInfoRecord {
                 line_start: compiled.debug_line_start.unwrap_or(1),
                 source_file: path.to_string(),
@@ -2662,6 +3109,7 @@ fn compile_class_elements(
                 expected_property_count: is_constructor
                     .then_some(class_expected_property_count)
                     .flatten(),
+                annotations,
                 definefunc_order: None,
                 label_style: MethodLabelStyle::Source,
             });
@@ -2714,6 +3162,7 @@ fn compile_class_elements(
             concurrent_module_requests: Vec::new(),
             method_pool_entry: true,
             expected_property_count: None,
+            annotations: Vec::new(),
             definefunc_order: None,
             label_style: MethodLabelStyle::Source,
         });
@@ -2753,6 +3202,7 @@ fn compile_class_elements(
             concurrent_module_requests: Vec::new(),
             method_pool_entry: true,
             expected_property_count: None,
+            annotations: Vec::new(),
             definefunc_order: None,
             label_style: MethodLabelStyle::Source,
         });

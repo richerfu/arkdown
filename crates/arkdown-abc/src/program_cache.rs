@@ -10,8 +10,9 @@ use crate::emit::file::{
     LITERAL_TAG_NULL, LITERAL_TAG_SETTER, LITERAL_TAG_STRING, LITERAL_TAG_TAGVALUE,
 };
 use crate::emit::record::{
-    function_kind, method_access, CatchEntry, ClassRecord, DebugInfoRecord, FieldRecord, FieldType,
-    FieldValue, InstructionDebugInfo, MethodKind, MethodLabelStyle, MethodRecord, ProgramLabel,
+    function_kind, method_access, AnnotationElementRecord, AnnotationRecord, AnnotationValue,
+    CatchEntry, ClassRecord, DebugInfoRecord, FieldRecord, FieldType, FieldValue,
+    InstructionDebugInfo, MethodKind, MethodLabelStyle, MethodRecord, ProgramLabel,
     FIELD_OWNER_CLASS_IDX,
 };
 use crate::emit::strings::StringTable;
@@ -32,6 +33,7 @@ use crate::proto_panda::{
 };
 
 const VALUE_TYPE_U8: u32 = 2;
+const VALUE_TYPE_U1: u32 = 1;
 const VALUE_TYPE_U32: u32 = 6;
 const VALUE_TYPE_F64: u32 = 10;
 const VALUE_TYPE_STRING: u32 = 11;
@@ -925,6 +927,7 @@ fn method_from_proto(
         concurrent_module_requests: function.concurrent_module_requests.clone(),
         method_pool_entry: false,
         expected_property_count: function_expected_property_count(function)?,
+        annotations: function_custom_annotations(function, literal_key_to_index, literal_refs)?,
         definefunc_order: None,
         label_style: MethodLabelStyle::Source,
     })
@@ -1787,17 +1790,109 @@ fn function_expected_property_count(function: &Function) -> io::Result<Option<u3
     )
 }
 
+fn function_custom_annotations(
+    function: &Function,
+    literal_key_to_index: &BTreeMap<String, usize>,
+    literal_refs: &mut BTreeSet<usize>,
+) -> io::Result<Vec<AnnotationRecord>> {
+    let Some(annotation_metadata) = function_annotation_metadata(function) else {
+        return Ok(Vec::new());
+    };
+
+    annotation_metadata
+        .annotations
+        .iter()
+        .filter(|annotation| !is_system_function_annotation(&annotation.record_name))
+        .map(|annotation| {
+            annotation_data_from_proto(annotation, literal_key_to_index, literal_refs)
+        })
+        .collect()
+}
+
+fn function_annotation_metadata(
+    function: &Function,
+) -> Option<&crate::proto_panda::AnnotationMetadata> {
+    function
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.father.as_ref())
+        .and_then(|metadata| metadata.father.as_ref())
+}
+
+fn is_system_function_annotation(record_name: &[u8]) -> bool {
+    record_name == CONCURRENT_MODULE_REQUEST_RECORD_NAME.as_bytes()
+        || record_name == EXPECTED_PROPERTY_COUNT_RECORD_NAME.as_bytes()
+        || record_name == SLOT_NUMBER_RECORD_NAME.as_bytes()
+}
+
+fn annotation_data_from_proto(
+    annotation: &AnnotationData,
+    literal_key_to_index: &BTreeMap<String, usize>,
+    literal_refs: &mut BTreeSet<usize>,
+) -> io::Result<AnnotationRecord> {
+    Ok(AnnotationRecord {
+        record_name: utf8(&annotation.record_name)?,
+        elements: annotation
+            .elements
+            .iter()
+            .map(|element| {
+                annotation_element_from_proto(element, literal_key_to_index, literal_refs)
+            })
+            .collect::<io::Result<Vec<_>>>()?,
+    })
+}
+
+fn annotation_element_from_proto(
+    element: &AnnotationElement,
+    literal_key_to_index: &BTreeMap<String, usize>,
+    literal_refs: &mut BTreeSet<usize>,
+) -> io::Result<AnnotationElementRecord> {
+    let value = match &element.value {
+        Some(annotation_element::Value::Scalar(value)) => {
+            annotation_scalar_from_proto(value, literal_key_to_index, literal_refs)?
+        }
+        Some(annotation_element::Value::Array(_)) => {
+            return invalid_data("inline annotation array values are not used by upstream ABC")
+        }
+        None => return invalid_data("missing annotation element value"),
+    };
+    Ok(AnnotationElementRecord {
+        name: utf8(&element.name)?,
+        value,
+    })
+}
+
+fn annotation_scalar_from_proto(
+    value: &ScalarValue,
+    literal_key_to_index: &BTreeMap<String, usize>,
+    literal_refs: &mut BTreeSet<usize>,
+) -> io::Result<AnnotationValue> {
+    match value.father.as_ref().map(|father| father.r#type) {
+        Some(VALUE_TYPE_U1) => Ok(AnnotationValue::Bool(scalar_u64_value(value)? != 0)),
+        Some(VALUE_TYPE_U32) => Ok(AnnotationValue::U32(to_u32(
+            scalar_u64_value(value)?,
+            "annotation u32 value",
+        )?)),
+        Some(VALUE_TYPE_F64) => Ok(AnnotationValue::F64(scalar_double_value(value)?)),
+        Some(VALUE_TYPE_STRING) => Ok(AnnotationValue::String(scalar_string_value(value)?)),
+        Some(VALUE_TYPE_LITERALARRAY) => {
+            let key = scalar_string_value(value)?;
+            let Some(&index) = literal_key_to_index.get(&key) else {
+                return invalid_data(format!("missing literal array key {key}"));
+            };
+            literal_refs.insert(index);
+            Ok(AnnotationValue::LiteralArray { index, key })
+        }
+        other => invalid_data(format!("unsupported annotation scalar type {other:?}")),
+    }
+}
+
 fn function_annotation_u32(
     function: &Function,
     record_name: &str,
     element_name: &str,
 ) -> io::Result<Option<u32>> {
-    let Some(annotation_metadata) = function
-        .metadata
-        .as_ref()
-        .and_then(|metadata| metadata.father.as_ref())
-        .and_then(|metadata| metadata.father.as_ref())
-    else {
+    let Some(annotation_metadata) = function_annotation_metadata(function) else {
         return Ok(None);
     };
 
@@ -2140,6 +2235,7 @@ fn function_to_proto(
             slots_num,
             method.function_kind,
             &method.concurrent_module_requests,
+            &method.annotations,
         )),
         label_table: Vec::new(),
         ins,
@@ -2941,17 +3037,20 @@ fn function_metadata(
     slots_num: u32,
     function_kind_value: u32,
     concurrent_module_requests: &[u32],
+    custom_annotations: &[AnnotationRecord],
 ) -> FunctionMetadata {
+    let mut annotations = custom_annotations
+        .iter()
+        .map(custom_annotation_to_proto)
+        .collect::<Vec<_>>();
+    annotations.extend(function_annotations(
+        expected_property_count,
+        slots_num,
+        function_kind_value,
+        concurrent_module_requests,
+    ));
     FunctionMetadata {
-        father: Some(item_metadata_with_annotations(
-            access_flags,
-            function_annotations(
-                expected_property_count,
-                slots_num,
-                function_kind_value,
-                concurrent_module_requests,
-            ),
-        )),
+        father: Some(item_metadata_with_annotations(access_flags, annotations)),
     }
 }
 
@@ -2993,6 +3092,34 @@ fn annotation_metadata_with_attributes(
             attributes: Vec::new(),
         }),
         annotations,
+    }
+}
+
+fn custom_annotation_to_proto(annotation: &AnnotationRecord) -> AnnotationData {
+    AnnotationData {
+        record_name: bytes(&annotation.record_name),
+        elements: annotation
+            .elements
+            .iter()
+            .map(annotation_element_to_proto)
+            .collect(),
+    }
+}
+
+fn annotation_element_to_proto(element: &AnnotationElementRecord) -> AnnotationElement {
+    let scalar = match &element.value {
+        AnnotationValue::Bool(value) => scalar_u64(VALUE_TYPE_U1, u64::from(*value)),
+        AnnotationValue::U32(value) => scalar_u64(VALUE_TYPE_U32, *value as u64),
+        AnnotationValue::F64(value) => scalar_double(VALUE_TYPE_F64, *value),
+        AnnotationValue::String(value) => scalar_string(VALUE_TYPE_STRING, value.clone()),
+        AnnotationValue::LiteralArray { key, .. } => {
+            scalar_string(VALUE_TYPE_LITERALARRAY, key.clone())
+        }
+    };
+    AnnotationElement {
+        name: bytes(&element.name),
+        value: Some(annotation_element::Value::Scalar(scalar)),
+        value_type: annotation_element::ValueType::Scalar as i32,
     }
 }
 
@@ -3141,8 +3268,12 @@ fn bytes(value: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::emit::file::AbcFile;
-    use crate::ir::builder::build_record_with_debug_and_package_for_target_with_mode;
+    use crate::abc2program::append_abc_file;
+    use crate::abc_reader::AbcReader;
+    use crate::emit::file::{version_for_target_api, AbcFile, LiteralEntry};
+    use crate::ir::builder::{
+        annotation_records_from_source, build_record_with_debug_and_package_for_target_with_mode,
+    };
     use prost::Message as _;
 
     #[test]
@@ -3344,6 +3475,18 @@ mod tests {
             })
     }
 
+    fn function_annotation_record_names(function: &Function) -> Vec<String> {
+        function
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.father.as_ref())
+            .and_then(|metadata| metadata.father.as_ref())
+            .into_iter()
+            .flat_map(|metadata| metadata.annotations.iter())
+            .map(|annotation| utf8(&annotation.record_name).unwrap())
+            .collect()
+    }
+
     fn function_annotation_u32_values(
         function: &Function,
         record_name: &str,
@@ -3368,6 +3511,340 @@ mod tests {
                     .and_then(|value| u32::try_from(value).ok())
             })
             .collect()
+    }
+
+    fn function_annotation_string_values(
+        function: &Function,
+        record_name: &str,
+        element_name: &str,
+    ) -> Vec<String> {
+        function
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.father.as_ref())
+            .and_then(|metadata| metadata.father.as_ref())
+            .into_iter()
+            .flat_map(|metadata| metadata.annotations.iter())
+            .filter(|annotation| annotation.record_name == record_name.as_bytes())
+            .flat_map(|annotation| annotation.elements.iter())
+            .filter(|element| element.name == element_name.as_bytes())
+            .filter_map(|element| {
+                let annotation_element::Value::Scalar(value) = element.value.as_ref()? else {
+                    return None;
+                };
+                scalar_string_value(value).ok()
+            })
+            .collect()
+    }
+
+    fn function_annotation_literal_array_keys(
+        function: &Function,
+        record_name: &str,
+    ) -> Vec<(String, String)> {
+        function
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.father.as_ref())
+            .and_then(|metadata| metadata.father.as_ref())
+            .into_iter()
+            .flat_map(|metadata| metadata.annotations.iter())
+            .filter(|annotation| annotation.record_name == record_name.as_bytes())
+            .flat_map(|annotation| annotation.elements.iter())
+            .filter_map(|element| {
+                let annotation_element::Value::Scalar(value) = element.value.as_ref()? else {
+                    return None;
+                };
+                if value.father.as_ref().map(|father| father.r#type)
+                    != Some(VALUE_TYPE_LITERALARRAY)
+                {
+                    return None;
+                }
+                Some((utf8(&element.name).ok()?, scalar_string_value(value).ok()?))
+            })
+            .collect()
+    }
+
+    fn annotation_usage_file_from_source(source: &str, record_name: &str) -> AbcFile {
+        let mut file = AbcFile::new();
+        let record = build_record_with_debug_and_package_for_target_with_mode(
+            source,
+            record_name,
+            &mut file.strings,
+            &mut file.literal_arrays,
+            Some(record_name),
+            None,
+            false,
+            false,
+            "ets",
+            true,
+            20,
+            None,
+            true,
+            false,
+            true,
+        )
+        .unwrap();
+        file.add_record(record);
+        for record in annotation_records_from_source(
+            source,
+            record_name,
+            Some(record_name),
+            20,
+            true,
+            &mut file.literal_arrays,
+        )
+        .unwrap()
+        {
+            file.add_record(record);
+        }
+        file
+    }
+
+    fn annotation_usage_file() -> AbcFile {
+        annotation_usage_file_from_source(
+            r#"
+@interface __$$ETS_ANNOTATION$$__Anno {
+    a: string;
+}
+
+@__$$ETS_ANNOTATION$$__Anno({a : 'Hello'})
+class A {
+    @__$$ETS_ANNOTATION$$__Anno({a : 'world'})
+    foo() {}
+}
+"#,
+            "usage_string.ets",
+        )
+    }
+
+    fn annotation_single_value_usage_file() -> AbcFile {
+        annotation_usage_file_from_source(
+            r#"
+@interface __$$ETS_ANNOTATION$$__Anno {
+    value: string;
+}
+
+@__$$ETS_ANNOTATION$$__Anno('single')
+class A {}
+"#,
+            "usage_single.ets",
+        )
+    }
+
+    fn annotation_new_array_usage_file() -> AbcFile {
+        annotation_usage_file_from_source(
+            r#"
+@interface __$$ETS_ANNOTATION$$__Anno {
+    a: number[];
+    b: boolean[];
+    c: string[];
+}
+
+@__$$ETS_ANNOTATION$$__Anno({
+    a: new Array<number>(),
+    b: new Array<boolean>(),
+    c: new Array<string>(),
+})
+class A {}
+"#,
+            "usage_new_array.ets",
+        )
+    }
+
+    #[test]
+    fn annotation_usage_metadata_matches_upstream_constructor_and_method_placement() {
+        let file = annotation_usage_file();
+        let program = program_for_file(&file, 20).unwrap();
+        let record_names = program
+            .record_table
+            .iter()
+            .map(|record| utf8(&record.key).unwrap())
+            .collect::<Vec<_>>();
+        assert!(
+            record_names
+                .iter()
+                .any(|name| name == "usage_string.ets.Anno"),
+            "custom annotation record must be present; records={record_names:?}"
+        );
+
+        let constructor = function_by_short_name(&program, "#~A=#A").unwrap();
+        assert_eq!(
+            function_annotation_record_names(constructor)
+                .first()
+                .map(String::as_str),
+            Some("usage_string.ets.Anno")
+        );
+        assert_eq!(
+            function_annotation_string_values(constructor, "usage_string.ets.Anno", "a"),
+            vec!["Hello".to_string()]
+        );
+
+        let method = function_by_short_name(&program, "#~A>#foo").unwrap();
+        assert_eq!(
+            function_annotation_record_names(method)
+                .first()
+                .map(String::as_str),
+            Some("usage_string.ets.Anno")
+        );
+        assert_eq!(
+            function_annotation_string_values(method, "usage_string.ets.Anno", "a"),
+            vec!["world".to_string()]
+        );
+    }
+
+    #[test]
+    fn annotation_single_value_usage_uses_upstream_value_element_name() {
+        let file = annotation_single_value_usage_file();
+        let program = program_for_file(&file, 20).unwrap();
+        let constructor = function_by_short_name(&program, "#~A=#A").unwrap();
+        assert_eq!(
+            function_annotation_string_values(constructor, "usage_single.ets.Anno", "value"),
+            vec!["single".to_string()]
+        );
+    }
+
+    #[test]
+    fn annotation_new_array_usage_emits_upstream_builtin_type_literal_arrays() {
+        let file = annotation_new_array_usage_file();
+        let builtin_type_values = file
+            .literal_arrays
+            .iter()
+            .filter_map(|array| match array.entries.as_slice() {
+                [LiteralEntry::TaggedBuiltinTypeIndex(value)] => Some(*value),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(builtin_type_values, vec![0, 1, 2]);
+
+        let program = program_for_file(&file, 20).unwrap();
+        let constructor = function_by_short_name(&program, "#~A=#A").unwrap();
+        let mut keys =
+            function_annotation_literal_array_keys(constructor, "usage_new_array.ets.Anno");
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![
+                (
+                    "a".to_string(),
+                    "usage_new_array.ets.#~A=#A_a_0".to_string()
+                ),
+                (
+                    "b".to_string(),
+                    "usage_new_array.ets.#~A=#A_b_1".to_string()
+                ),
+                (
+                    "c".to_string(),
+                    "usage_new_array.ets.#~A=#A_c_2".to_string()
+                ),
+            ]
+        );
+
+        let bytes = file.serialize_with_version(version_for_target_api(20, None));
+        AbcReader::validate(&bytes).unwrap();
+        let mut restored = AbcFile::new();
+        append_abc_file(&mut restored, &bytes).unwrap();
+        let restored_program = program_for_file(&restored, 20).unwrap();
+        let restored_constructor = function_by_short_name(&restored_program, "#~A=#A").unwrap();
+        let restored_keys = function_annotation_literal_array_keys(
+            restored_constructor,
+            "usage_new_array.ets.Anno",
+        );
+        assert_eq!(restored_keys.len(), 3);
+    }
+
+    #[test]
+    fn annotation_usage_binary_writes_method_annotation_tags_before_slot_number() {
+        let file = annotation_usage_file();
+        let bytes = file.serialize_with_version(version_for_target_api(20, None));
+        AbcReader::validate(&bytes).unwrap();
+        let reader = AbcReader::new(&bytes).unwrap();
+        let classes = reader.class_items().unwrap();
+        let user_class = classes
+            .iter()
+            .find(|class| class.name == "Lusage_string.ets;")
+            .expect("user class must be present");
+        let slot_class = classes
+            .iter()
+            .find(|class| class.name == "L_ESSlotNumberAnnotation;")
+            .expect("SlotNumber annotation class must be present");
+        let custom_annotation_class = classes
+            .iter()
+            .find(|class| class.name == "Lusage_string.ets.Anno;")
+            .expect("custom annotation class must be present");
+        let index = reader.index_sections().unwrap().remove(0);
+        let slot_class_idx = index
+            .class_offsets
+            .iter()
+            .position(|offset| *offset == slot_class.offset)
+            .expect("SlotNumber class must be in IndexSection") as u16;
+        let custom_annotation_class_idx = index
+            .class_offsets
+            .iter()
+            .position(|offset| *offset == custom_annotation_class.offset)
+            .expect("custom annotation class must be in IndexSection")
+            as u16;
+
+        let constructor = user_class
+            .methods
+            .iter()
+            .find(|method| method.name == "#~A=#A")
+            .expect("constructor method must be present");
+        assert_eq!(
+            constructor.annotation_offsets.len(),
+            2,
+            "constructor must carry custom annotation + SlotNumber"
+        );
+
+        let method = user_class
+            .methods
+            .iter()
+            .find(|method| method.name == "#~A>#foo")
+            .expect("decorated method must be present");
+        assert_eq!(
+            method.annotation_offsets.len(),
+            2,
+            "method must carry custom annotation + SlotNumber"
+        );
+        let annotation_class_idx = |offset: u32| -> u16 {
+            let offset = offset as usize;
+            u16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap())
+        };
+        assert_eq!(
+            annotation_class_idx(constructor.annotation_offsets[0]),
+            custom_annotation_class_idx
+        );
+        assert_eq!(
+            annotation_class_idx(constructor.annotation_offsets[1]),
+            slot_class_idx
+        );
+        assert_eq!(
+            annotation_class_idx(method.annotation_offsets[0]),
+            custom_annotation_class_idx
+        );
+        assert_eq!(
+            annotation_class_idx(method.annotation_offsets[1]),
+            slot_class_idx
+        );
+    }
+
+    #[test]
+    fn abc_input_preserves_custom_annotation_usage_metadata() {
+        let file = annotation_usage_file();
+        let bytes = file.serialize_with_version(version_for_target_api(20, None));
+        let mut restored = AbcFile::new();
+        append_abc_file(&mut restored, &bytes).unwrap();
+
+        let program = program_for_file(&restored, 20).unwrap();
+        let constructor = function_by_short_name(&program, "#~A=#A").unwrap();
+        assert_eq!(
+            function_annotation_string_values(constructor, "usage_string.ets.Anno", "a"),
+            vec!["Hello".to_string()]
+        );
+        let method = function_by_short_name(&program, "#~A>#foo").unwrap();
+        assert_eq!(
+            function_annotation_string_values(method, "usage_string.ets.Anno", "a"),
+            vec!["world".to_string()]
+        );
     }
 
     #[test]

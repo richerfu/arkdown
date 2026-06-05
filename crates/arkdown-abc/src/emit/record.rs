@@ -208,6 +208,7 @@ pub struct MethodRecord {
     pub concurrent_module_requests: Vec<u32>,
     pub method_pool_entry: bool,
     pub expected_property_count: Option<u32>,
+    pub annotations: Vec<AnnotationRecord>,
     /// Source-order key for `definefunc` operands. MethodItems may be sorted for
     /// upstream file layout, but anonymous `definefunc` opcodes are resolved in
     /// AST discovery order.
@@ -222,8 +223,9 @@ pub struct InstructionDebugInfo {
     pub column_number: u32,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct MethodAnnotationOffsets {
+    pub(crate) custom: Vec<u32>,
     pub(crate) expected_property_count: Option<u32>,
     pub(crate) slot_number: u32,
 }
@@ -411,6 +413,40 @@ pub enum FieldValue {
     String(String),
     /// `u32` file offset of an inline f64 default value.
     F64(f64),
+}
+
+/// Custom annotation metadata attached to a Panda class, method, or field.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnnotationRecord {
+    pub record_name: String,
+    pub elements: Vec<AnnotationElementRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnnotationElementRecord {
+    pub name: String,
+    pub value: AnnotationValue,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AnnotationValue {
+    Bool(bool),
+    U32(u32),
+    F64(f64),
+    String(String),
+    LiteralArray { index: usize, key: String },
+}
+
+impl AnnotationValue {
+    pub(crate) fn tag(&self) -> u8 {
+        match self {
+            Self::Bool(_) => b'1',
+            Self::U32(_) => b'7',
+            Self::F64(_) => b'B',
+            Self::String(_) => b'C',
+            Self::LiteralArray { .. } => b'#',
+        }
+    }
 }
 
 /// A compiled module, represented as a Panda `ClassItem`.
@@ -666,7 +702,7 @@ impl ClassRecord {
         for (i, method) in self.methods.iter().enumerate() {
             let name_off = method_name_offsets[i];
             let code_off = code_offsets[i];
-            let ann_offsets = annotation_offsets[i];
+            let ann_offsets = &annotation_offsets[i];
 
             // class_idx: u16 LE
             buf.extend_from_slice(&class_idx.to_le_bytes());
@@ -686,6 +722,10 @@ impl ClassRecord {
             if let Some(debug_info_off) = debug_info_offsets[i] {
                 buf.push(0x05);
                 buf.extend_from_slice(&debug_info_off.to_le_bytes());
+            }
+            for &custom_off in &ann_offsets.custom {
+                buf.push(0x06);
+                buf.extend_from_slice(&custom_off.to_le_bytes());
             }
             if let Some(expected_off) = ann_offsets.expected_property_count {
                 buf.push(0x06);
@@ -768,6 +808,7 @@ impl MethodRecord {
         let access_flags_len = uleb128(self.access_flags() as u64).len();
         16 + access_flags_len
             + (1 + 4) // MethodTag::ANNOTATION always emitted
+            + self.annotations.len() * (1 + 4)
             + self.expected_property_count.map_or(0, |_| 1 + 4)
             + self.debug_info.as_ref().map_or(0, |_| 1 + 4)
     }
@@ -893,6 +934,7 @@ mod tests {
                 concurrent_module_requests: Vec::new(),
                 method_pool_entry: false,
                 expected_property_count: None,
+                annotations: Vec::new(),
                 definefunc_order: None,
                 label_style: MethodLabelStyle::Source,
             }],
@@ -938,6 +980,7 @@ mod tests {
                 concurrent_module_requests: Vec::new(),
                 method_pool_entry: false,
                 expected_property_count: None,
+                annotations: Vec::new(),
                 definefunc_order: None,
                 label_style: MethodLabelStyle::Source,
             }],
@@ -961,6 +1004,7 @@ mod tests {
             &[0x1a1],
             &[None],
             &[MethodAnnotationOffsets {
+                custom: Vec::new(),
                 expected_property_count: None,
                 slot_number: 0x200,
             }],

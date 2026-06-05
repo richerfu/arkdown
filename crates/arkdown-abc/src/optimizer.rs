@@ -522,6 +522,7 @@ mod tests {
             concurrent_module_requests: Vec::new(),
             method_pool_entry: false,
             expected_property_count: None,
+            annotations: Vec::new(),
             definefunc_order: None,
             label_style: MethodLabelStyle::Source,
         }
