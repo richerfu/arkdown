@@ -2,6 +2,7 @@ use arkdown_abc::cache::{
     abc_input_cache_hash, source_cache_hash, AbcProgramsCacheFile, ProgramCacheFile,
     ProgramProtoFile,
 };
+use arkdown_abc::emit::file::version_for_target_api;
 use arkdown_abc::proto_panda::{annotation_element, scalar_value, Function, Program};
 use arkdown_abc::AbcReader;
 use arkdown_ts2abc::{CompileContextInfo, Ts2abcError, Ts2abcInput, Ts2abcOptions};
@@ -163,7 +164,8 @@ fn compile_to_abc_writes_upstream_program_cache_proto_bin() {
             &source.to_string_lossy(),
             record_name,
             source_file,
-            package_name
+            package_name,
+            version_for_target_api(17, Some("Release")),
         )
     );
     assert_eq!(entry.program.record_table.len(), 3);
@@ -646,6 +648,7 @@ fn compile_to_abc_writes_and_reads_abc_input_programs_cache() {
         "entry/main",
         "",
         "entry",
+        version_for_target_api(17, Some("Release")),
     );
     AbcProgramsCacheFile::write(&corrupt_cache, corrupt_hash, cache_entry.programs).unwrap();
 

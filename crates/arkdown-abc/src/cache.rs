@@ -7,9 +7,9 @@
 //! - `--cache-file @modules.cache` reads a semicolon manifest where column 1 is
 //!   `SourceFile::fileName` and column 2 is the `.protoBin` path;
 //! - source cache validity is `GetHash32String(source + fileName + recordName +
-//!   sourcefile + pkgName + pandaFileVersion)`;
+//!   sourcefile + pkgName + targetPandaFileVersion)`;
 //! - ABC input cache validity is `GetHash32(abcBytes + fileName + recordName +
-//!   sourcefile + pkgName + pandaFileVersion)`;
+//!   sourcefile + pkgName + targetPandaFileVersion)`;
 //! - a hit restores a `Program` into `progsInfo_`; final ABC emission still
 //!   happens normally from all programs.
 
@@ -26,7 +26,6 @@ const MURMUR_C2: u32 = 0x1B87_3593;
 const MURMUR_MAIN_CONSTANT: u32 = 0xE654_6B64;
 const MURMUR_FINALIZE_FIRST_MULTIPLIER: u32 = 0x85EB_CA6B;
 const MURMUR_FINALIZE_SECOND_MULTIPLIER: u32 = 0x0C2B_AE35;
-const CURRENT_PANDA_FILE_VERSION: u32 = 0x0001_000D;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CacheManifestEntry {
@@ -246,21 +245,23 @@ pub fn source_cache_hash(
     record_name: &str,
     source_file: &str,
     package_name: &str,
+    panda_file_version: u32,
 ) -> u32 {
+    let version = panda_file_version_string(panda_file_version);
     let mut bytes = Vec::with_capacity(
         source.len()
             + file_name.len()
             + record_name.len()
             + source_file.len()
             + package_name.len()
-            + current_panda_file_version_string().len(),
+            + version.len(),
     );
     bytes.extend_from_slice(source.as_bytes());
     bytes.extend_from_slice(file_name.as_bytes());
     bytes.extend_from_slice(record_name.as_bytes());
     bytes.extend_from_slice(source_file.as_bytes());
     bytes.extend_from_slice(package_name.as_bytes());
-    bytes.extend_from_slice(current_panda_file_version_string().as_bytes());
+    bytes.extend_from_slice(version.as_bytes());
     get_hash32_string(&bytes)
 }
 
@@ -270,29 +271,27 @@ pub fn abc_input_cache_hash(
     record_name: &str,
     source_file: &str,
     package_name: &str,
+    panda_file_version: u32,
 ) -> u32 {
+    let version = panda_file_version_string(panda_file_version);
     let mut bytes = Vec::with_capacity(
         abc_bytes.len()
             + file_name.len()
             + record_name.len()
             + source_file.len()
             + package_name.len()
-            + current_panda_file_version_string().len(),
+            + version.len(),
     );
     bytes.extend_from_slice(abc_bytes);
     bytes.extend_from_slice(file_name.as_bytes());
     bytes.extend_from_slice(record_name.as_bytes());
     bytes.extend_from_slice(source_file.as_bytes());
     bytes.extend_from_slice(package_name.as_bytes());
-    bytes.extend_from_slice(current_panda_file_version_string().as_bytes());
+    bytes.extend_from_slice(version.as_bytes());
     get_hash32(&bytes)
 }
 
-fn current_panda_file_version_string() -> String {
-    bytecode_version_string(CURRENT_PANDA_FILE_VERSION)
-}
-
-fn bytecode_version_string(version: u32) -> String {
+pub(crate) fn panda_file_version_string(version: u32) -> String {
     let [major, minor, feature, build] = version.to_le_bytes();
     format!("{major}.{minor}.{feature}.{build}")
 }
@@ -363,10 +362,36 @@ mod tests {
                 "entry/main",
                 "entry/main",
                 "main.ts",
-                "entry"
+                "entry",
+                0x0001_000D,
             ),
             0x643f_91c5
         );
+    }
+
+    #[test]
+    fn cache_hash_uses_target_panda_file_version() {
+        assert_eq!(panda_file_version_string(0x0002_000C), "12.0.2.0");
+        assert_eq!(panda_file_version_string(0x0006_000C), "12.0.6.0");
+        assert_eq!(panda_file_version_string(0x0001_000D), "13.0.1.0");
+
+        let api12_hash = source_cache_hash(
+            "export const x = 1;",
+            "entry/main",
+            "entry/main",
+            "main.ts",
+            "entry",
+            0x0002_000C,
+        );
+        let api13_hash = source_cache_hash(
+            "export const x = 1;",
+            "entry/main",
+            "entry/main",
+            "main.ts",
+            "entry",
+            0x0001_000D,
+        );
+        assert_ne!(api12_hash, api13_hash);
     }
 
     #[test]

@@ -557,6 +557,10 @@ impl AbcCompiler {
         inputs: Vec<AbcInputFile>,
         diagnostic_path: &Path,
     ) -> Result<BuiltAbcFile, AbcError> {
+        let panda_file_version = version_for_target_api(
+            self.options.target_api_version,
+            self.options.target_api_sub_version.as_deref(),
+        );
         let mut abc_file = AbcFile::new();
         let mut record_program_keys = Vec::new();
         let mut record_needs_optimization = Vec::new();
@@ -569,6 +573,7 @@ impl AbcCompiler {
                     &input.record_name,
                     &input.source_file,
                     &input.package_name,
+                    panda_file_version,
                 )
             });
             if let (Some(cache_file), Some(hash_code)) = (&input.cache_file, hash_code) {
@@ -726,6 +731,10 @@ impl AbcCompiler {
         let mut pending_cache_writes = Vec::new();
         let mut record_needs_optimization = Vec::new();
         let mut record_program_keys = Vec::new();
+        let panda_file_version = version_for_target_api(
+            self.options.target_api_version,
+            self.options.target_api_sub_version.as_deref(),
+        );
 
         for (module_index, module) in modules.iter().enumerate() {
             let cache_hash_source_file = module.source_file.as_deref().unwrap_or("");
@@ -741,6 +750,7 @@ impl AbcCompiler {
                     &module.record_name,
                     cache_hash_source_file,
                     module.package_name.as_deref().unwrap_or(""),
+                    panda_file_version,
                 )
             });
             if let (Some(cache_input), Some(hash_code)) = (cache_input, cache_hash_code) {

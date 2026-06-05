@@ -4,6 +4,7 @@
 //! without access to crate internals.
 
 use arkdown_abc::cache::{source_cache_hash, ProgramCacheFile};
+use arkdown_abc::emit::file::version_for_target_api;
 use arkdown_abc::{
     AbcCompileOptions, AbcCompiler, AbcError, AbcModule, AbcProgramCacheInput, AbcReader,
 };
@@ -3130,7 +3131,14 @@ fn program_cache_hit_restores_program_and_skips_source_compile() {
         .unwrap();
 
     let entry = ProgramCacheFile::read(&cache_file).unwrap().unwrap();
-    let invalid_source_hash = source_cache_hash(invalid_source, &file_name, record_name, "", "");
+    let invalid_source_hash = source_cache_hash(
+        invalid_source,
+        &file_name,
+        record_name,
+        "",
+        "",
+        version_for_target_api(12, None),
+    );
     ProgramCacheFile::write(&cache_file, invalid_source_hash, entry.program).unwrap();
 
     let result = module_compiler()
