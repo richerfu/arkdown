@@ -2858,21 +2858,37 @@ fn label_table_entry_to_proto(label: &ProgramLabel) -> crate::proto_panda::funct
 }
 
 fn pandasm_type_from_proto(value: &Type) -> io::Result<PandasmTypeRecord> {
-    Ok(PandasmTypeRecord {
-        component_name: utf8(&value.component_name)?,
-        rank: value.rank,
-        name: utf8(&value.name)?,
-        type_id: value.type_id,
-    })
+    let component_name = utf8(&value.component_name)?;
+    Ok(pandasm_type_from_component(component_name, value.rank))
 }
 
 fn pandasm_type_to_proto(value: &PandasmTypeRecord) -> Type {
+    let normalized = pandasm_type_from_component(value.component_name.clone(), value.rank);
     Type {
-        component_name: bytes(&value.component_name),
-        rank: value.rank,
-        name: bytes(&value.name),
-        type_id: value.type_id,
+        component_name: bytes(&normalized.component_name),
+        rank: normalized.rank,
+        name: bytes(&normalized.name),
+        type_id: normalized.type_id,
     }
+}
+
+fn pandasm_type_from_component(component_name: String, rank: u64) -> PandasmTypeRecord {
+    let name = pandasm_type_name(&component_name, rank);
+    let type_id = pandasm_type_id(&name);
+    PandasmTypeRecord {
+        component_name,
+        rank,
+        name,
+        type_id,
+    }
+}
+
+fn pandasm_type_name(component_name: &str, rank: u64) -> String {
+    let mut name = component_name.to_string();
+    for _ in 0..rank {
+        name.push_str("[]");
+    }
+    name
 }
 
 fn source_location_from_proto(value: &SourceLocation) -> io::Result<SourceLocationRecord> {
@@ -3575,9 +3591,11 @@ fn typed_array_element_to_proto(
         (LITERAL_TAG_ARRAY_STRING, LiteralArrayElement::String(value)) => {
             literal_string(LITERAL_TAG_ARRAY_STRING, value)
         }
-        _ => return invalid_data(format!(
-            "typed literal array value {value:?} does not match component tag {component_tag:#x}"
-        )),
+        _ => {
+            return invalid_data(format!(
+                "typed literal array value {value:?} does not match component tag {component_tag:#x}"
+            ));
+        }
     })
 }
 
@@ -5533,7 +5551,7 @@ class A {}
         program.array_types.push(Type {
             component_name: b"u32".to_vec(),
             rank: 1,
-            name: b"u32[]".to_vec(),
+            name: b"wrong[]".to_vec(),
             type_id: 0x08,
         });
 
@@ -5645,7 +5663,9 @@ class A {}
         let roundtrip = program_for_file(&restored, 20).unwrap();
 
         assert_eq!(roundtrip.lang, 4);
+        assert_eq!(roundtrip.array_types[0].component_name, b"u32");
         assert_eq!(roundtrip.array_types[0].name, b"u32[]");
+        assert_eq!(roundtrip.array_types[0].type_id, 0x0d);
 
         let roundtrip_record = roundtrip
             .record_table
