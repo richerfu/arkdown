@@ -3436,6 +3436,38 @@ new C().method();
     }
 
     #[test]
+    fn arrow_expression_body_use_concurrent_string_is_not_a_directive() {
+        let mut file = AbcFile::new();
+        let record = build_record_with_debug_and_package_for_target_with_mode(
+            r#"
+const cf = () => "use concurrent";
+cf();
+"#,
+            "@bundle:demo/entry/ets/pages/Index",
+            &mut file.strings,
+            &mut file.literal_arrays,
+            Some("entry/src/main/ets/pages/Index.ets"),
+            None,
+            false,
+            false,
+            "ets",
+            true,
+            18,
+            None,
+            false,
+            true,
+        )
+        .unwrap();
+        file.add_record(record);
+
+        let program = program_for_record(&file, 0, 18).unwrap().unwrap();
+        assert_eq!(
+            function_kind_by_short_name(&program, "cf"),
+            Some(function_kind::NC_FUNCTION)
+        );
+    }
+
+    #[test]
     fn concurrent_function_rejects_upstream_invalid_forms_and_captures() {
         fn compile_error(source: &str) -> String {
             let mut file = AbcFile::new();

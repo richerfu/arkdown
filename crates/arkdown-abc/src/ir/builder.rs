@@ -897,7 +897,7 @@ impl<'a> Visit<'a> for ConcurrentMetadataBuilder<'_> {
         if self.error.is_some() {
             return;
         }
-        if body_has_directive(&it.body, "use concurrent") {
+        if !it.expression && body_has_directive(&it.body, "use concurrent") {
             self.error = Some(self.invalid_concurrent_function());
             return;
         }
@@ -951,7 +951,7 @@ impl<'a> Visit<'a> for ConcurrentModuleRequestCollector<'a, '_> {
     }
 
     fn visit_arrow_function_expression(&mut self, it: &oxc_ast::ast::ArrowFunctionExpression<'a>) {
-        if body_has_directive(&it.body, "use concurrent") {
+        if !it.expression && body_has_directive(&it.body, "use concurrent") {
             return;
         }
         walk::walk_arrow_function_expression(self, it);
