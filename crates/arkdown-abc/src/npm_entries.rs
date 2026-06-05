@@ -40,6 +40,10 @@ fn npm_entry_record(entry: NpmEntry) -> ClassRecord {
         source_code_strings: vec![],
         access_flags: 1,
         source_lang: 0,
+        conflict: false,
+        params_num: 0,
+        body_presence: false,
+        file_location: None,
         standalone_ecmascript_input: false,
         source_file: None,
         annotations: vec![],
@@ -52,6 +56,7 @@ fn npm_entry_record(entry: NpmEntry) -> ClassRecord {
             access_flags: 0,
             value: Some(FieldValue::U8(0)),
             annotations: vec![],
+            source: Default::default(),
         }],
     }
 }

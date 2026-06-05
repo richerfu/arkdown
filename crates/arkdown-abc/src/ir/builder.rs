@@ -468,6 +468,7 @@ pub fn build_record_with_debug_and_source_map_for_target_with_mode(
         line_ops: func_main.line_ops,
         catch_entries: func_main.catches,
         program_labels: func_main.program_labels,
+        label_table: Vec::new(),
         kind: MethodKind::Module,
         function_kind: function_kind::FUNCTION,
         concurrent_module_requests: Vec::new(),
@@ -477,6 +478,11 @@ pub fn build_record_with_debug_and_source_map_for_target_with_mode(
         param_annotations: Vec::new(),
         definefunc_order: None,
         label_style: MethodLabelStyle::Source,
+        param_types: Vec::new(),
+        return_type: None,
+        body_presence: None,
+        body_location: None,
+        file_location: None,
     });
 
     let tracked_source = source_file.as_ref().map(|_| source);
@@ -592,6 +598,10 @@ pub fn build_record_with_debug_and_source_map_for_target_with_mode(
         source_code_strings,
         access_flags: 1,
         source_lang,
+        conflict: false,
+        params_num: 0,
+        body_presence: false,
+        file_location: None,
         standalone_ecmascript_input,
         source_file,
         annotations: Vec::new(),
@@ -749,6 +759,7 @@ fn annotation_record_from_decl(
             access_flags: 0,
             value,
             annotations: Vec::new(),
+            source: Default::default(),
         });
     }
 
@@ -761,6 +772,10 @@ fn annotation_record_from_decl(
         source_code_strings: Vec::new(),
         access_flags: 0x2000,
         source_lang: 0,
+        conflict: false,
+        params_num: 0,
+        body_presence: false,
+        file_location: None,
         standalone_ecmascript_input: false,
         source_file: None,
         annotations: Vec::new(),
@@ -2154,6 +2169,7 @@ fn compile_function_record(
                 line_ops: compiled.line_ops,
                 catch_entries: compiled.catches,
                 program_labels: compiled.program_labels,
+                label_table: Vec::new(),
                 kind: MethodKind::FunctionLiteral,
                 function_kind: upstream_function_kind,
                 concurrent_module_requests,
@@ -2163,6 +2179,11 @@ fn compile_function_record(
                 param_annotations: Vec::new(),
                 definefunc_order: Some(definefunc_order),
                 label_style: MethodLabelStyle::Source,
+                param_types: Vec::new(),
+                return_type: None,
+                body_presence: None,
+                body_location: None,
+                file_location: None,
             });
         }
         FunctionRecordNode::Arrow(arrow) => {
@@ -2205,6 +2226,7 @@ fn compile_function_record(
                 line_ops: compiled.line_ops,
                 catch_entries: compiled.catches,
                 program_labels: compiled.program_labels,
+                label_table: Vec::new(),
                 kind: MethodKind::Anonymous,
                 function_kind: if arrow.r#async {
                     function_kind::ASYNC_NC_FUNCTION
@@ -2218,6 +2240,11 @@ fn compile_function_record(
                 param_annotations: Vec::new(),
                 definefunc_order: Some(definefunc_order),
                 label_style: MethodLabelStyle::Source,
+                param_types: Vec::new(),
+                return_type: None,
+                body_presence: None,
+                body_location: None,
+                file_location: None,
             });
         }
     }
@@ -2860,6 +2887,7 @@ fn compile_class_elements(
             line_ops: compiled.line_ops,
             catch_entries: compiled.catches,
             program_labels: compiled.program_labels,
+            label_table: Vec::new(),
             kind: MethodKind::Constructor,
             function_kind: function_kind::FUNCTION,
             concurrent_module_requests: Vec::new(),
@@ -2869,6 +2897,11 @@ fn compile_class_elements(
             param_annotations: Vec::new(),
             definefunc_order: None,
             label_style: MethodLabelStyle::Source,
+            param_types: Vec::new(),
+            return_type: None,
+            body_presence: None,
+            body_location: None,
+            file_location: None,
         });
     }
 
@@ -2907,6 +2940,7 @@ fn compile_class_elements(
             line_ops: compiled.line_ops,
             catch_entries: compiled.catches,
             program_labels: compiled.program_labels,
+            label_table: Vec::new(),
             kind: MethodKind::Function,
             function_kind: function_kind::NONE,
             concurrent_module_requests: Vec::new(),
@@ -2916,6 +2950,11 @@ fn compile_class_elements(
             param_annotations: Vec::new(),
             definefunc_order: None,
             label_style: MethodLabelStyle::Source,
+            param_types: Vec::new(),
+            return_type: None,
+            body_presence: None,
+            body_location: None,
+            file_location: None,
         });
     }
 
@@ -2949,6 +2988,7 @@ fn compile_class_elements(
             line_ops: compiled.line_ops,
             catch_entries: compiled.catches,
             program_labels: compiled.program_labels,
+            label_table: Vec::new(),
             kind: MethodKind::Function,
             function_kind: function_kind::NONE,
             concurrent_module_requests: Vec::new(),
@@ -2958,6 +2998,11 @@ fn compile_class_elements(
             param_annotations: Vec::new(),
             definefunc_order: None,
             label_style: MethodLabelStyle::Source,
+            param_types: Vec::new(),
+            return_type: None,
+            body_presence: None,
+            body_location: None,
+            file_location: None,
         });
     }
 
@@ -3135,6 +3180,7 @@ fn compile_class_elements(
                 line_ops: compiled.line_ops,
                 catch_entries: compiled.catches,
                 program_labels: compiled.program_labels,
+                label_table: Vec::new(),
                 kind: if is_constructor {
                     MethodKind::Constructor
                 } else {
@@ -3152,6 +3198,11 @@ fn compile_class_elements(
                 param_annotations: Vec::new(),
                 definefunc_order: None,
                 label_style: MethodLabelStyle::Source,
+                param_types: Vec::new(),
+                return_type: None,
+                body_presence: None,
+                body_location: None,
+                file_location: None,
             });
         }
     }
@@ -3199,6 +3250,7 @@ fn compile_class_elements(
             line_ops: Vec::new(),
             catch_entries: getter_compiled.catches,
             program_labels: getter_compiled.program_labels,
+            label_table: Vec::new(),
             kind: MethodKind::Function,
             function_kind: function_kind::NONE,
             concurrent_module_requests: Vec::new(),
@@ -3208,6 +3260,11 @@ fn compile_class_elements(
             param_annotations: Vec::new(),
             definefunc_order: None,
             label_style: MethodLabelStyle::Source,
+            param_types: Vec::new(),
+            return_type: None,
+            body_presence: None,
+            body_location: None,
+            file_location: None,
         });
 
         // Setter: `set <key>(v) { this.#backing = v; }`
@@ -3242,6 +3299,7 @@ fn compile_class_elements(
             line_ops: Vec::new(),
             catch_entries: setter_compiled.catches,
             program_labels: setter_compiled.program_labels,
+            label_table: Vec::new(),
             kind: MethodKind::Function,
             function_kind: function_kind::NONE,
             concurrent_module_requests: Vec::new(),
@@ -3251,6 +3309,11 @@ fn compile_class_elements(
             param_annotations: Vec::new(),
             definefunc_order: None,
             label_style: MethodLabelStyle::Source,
+            param_types: Vec::new(),
+            return_type: None,
+            body_presence: None,
+            body_location: None,
+            file_location: None,
         });
     }
     Ok(())
@@ -7550,6 +7613,7 @@ impl<'a> CodeGen<'a> {
         self.program_labels.push(ProgramLabel {
             name: name.clone(),
             offset: offset as u32,
+            file_location: None,
         });
         name
     }

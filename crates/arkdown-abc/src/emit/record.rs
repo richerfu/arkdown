@@ -118,6 +118,73 @@ pub struct CatchEntry {
 pub struct ProgramLabel {
     pub name: String,
     pub offset: u32,
+    pub file_location: Option<FileLocationRecord>,
+}
+
+/// Source file position metadata carried by upstream protoPanda/pandasm.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourcePositionRecord {
+    pub line: u64,
+    pub column: u64,
+}
+
+/// Source range metadata carried by upstream protoPanda/pandasm.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceLocationRecord {
+    pub begin: SourcePositionRecord,
+    pub end: SourcePositionRecord,
+}
+
+/// Parser file-location metadata used by upstream pandasm diagnostics/IDE helpers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileLocationRecord {
+    pub whole_line: String,
+    pub bound_left: u64,
+    pub bound_right: u64,
+    pub line_number: u64,
+    pub is_defined: bool,
+}
+
+/// Parser source metadata stored directly on upstream pandasm fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldSourceRecord {
+    pub line_of_def: u64,
+    pub whole_line: String,
+    pub bound_left: u64,
+    pub bound_right: u64,
+    pub is_defined: bool,
+}
+
+impl Default for FieldSourceRecord {
+    fn default() -> Self {
+        Self {
+            line_of_def: 0,
+            whole_line: String::new(),
+            bound_left: 0,
+            bound_right: 0,
+            is_defined: true,
+        }
+    }
+}
+
+/// Complete upstream pandasm type tuple serialized in protoPanda `Type`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PandasmTypeRecord {
+    pub component_name: String,
+    pub rank: u64,
+    pub name: String,
+    pub type_id: u32,
+}
+
+impl PandasmTypeRecord {
+    pub fn any() -> Self {
+        Self {
+            component_name: "any".to_string(),
+            rank: 0,
+            name: "any".to_string(),
+            type_id: 0x0e,
+        }
+    }
 }
 
 /// Encode a Panda `CodeItem`.
@@ -210,6 +277,9 @@ pub struct MethodRecord {
     pub catch_entries: Vec<CatchEntry>,
     /// Ordered pandasm labels for ProgramCache/protoBin materialization.
     pub program_labels: Vec<ProgramLabel>,
+    /// Upstream `Function::label_table` entries, preserving parser
+    /// file-location metadata independently from executable label positions.
+    pub label_table: Vec<ProgramLabel>,
     pub kind: MethodKind,
     /// Raw upstream `panda_file::FunctionKind` value serialized in protoPanda.
     pub function_kind: u32,
@@ -229,6 +299,19 @@ pub struct MethodRecord {
     pub definefunc_order: Option<u32>,
     /// Label naming style used when materializing protoPanda Program snapshots.
     pub label_style: MethodLabelStyle,
+    /// Raw upstream parameter types. Source compilation leaves this empty and
+    /// ProgramCache writes `any` for each parameter, matching current behavior.
+    pub param_types: Vec<PandasmTypeRecord>,
+    /// Raw upstream return type. Source compilation writes `any`.
+    pub return_type: Option<PandasmTypeRecord>,
+    /// Raw upstream function body-presence flag. Source compilation derives it
+    /// from bytecode presence.
+    pub body_presence: Option<bool>,
+    /// Raw upstream function body source location. Source compilation uses the
+    /// upstream default zero location.
+    pub body_location: Option<SourceLocationRecord>,
+    /// Raw upstream function parser file location.
+    pub file_location: Option<FileLocationRecord>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -320,6 +403,9 @@ pub struct FieldRecord {
     pub value: Option<FieldValue>,
     /// Custom annotation metadata attached to this field.
     pub annotations: Vec<AnnotationRecord>,
+    /// Upstream pandasm parser source metadata for ProgramCache/protoBin
+    /// roundtrips.
+    pub source: FieldSourceRecord,
 }
 
 /// Panda field type carried by a [`FieldRecord`].
@@ -533,6 +619,14 @@ pub struct ClassRecord {
     /// Matches libpandafile `SourceLang`: ECMASCRIPT=0, JAVASCRIPT=2,
     /// TYPESCRIPT=3, ARKTS=4.
     pub source_lang: u8,
+    /// Raw upstream `Record::conflict` flag.
+    pub conflict: bool,
+    /// Raw upstream `Record::params_num` value.
+    pub params_num: u64,
+    /// Raw upstream `Record::body_presence` flag.
+    pub body_presence: bool,
+    /// Raw upstream record parser file location.
+    pub file_location: Option<FileLocationRecord>,
     /// True when the record comes from a direct es2abc-style `.js`/`.ts`
     /// source-file input rather than hvigor's filesInfo handoff.
     pub standalone_ecmascript_input: bool,
@@ -1023,6 +1117,7 @@ mod tests {
                 line_ops: vec![],
                 catch_entries: vec![],
                 program_labels: vec![],
+                label_table: vec![],
                 kind: MethodKind::Module,
                 function_kind: function_kind::FUNCTION,
                 concurrent_module_requests: Vec::new(),
@@ -1032,6 +1127,11 @@ mod tests {
                 param_annotations: Vec::new(),
                 definefunc_order: None,
                 label_style: MethodLabelStyle::Source,
+                param_types: Vec::new(),
+                return_type: None,
+                body_presence: None,
+                body_location: None,
+                file_location: None,
             }],
             string_indices: vec![],
             literal_indices: vec![],
@@ -1039,6 +1139,10 @@ mod tests {
             source_code_strings: vec![],
             access_flags: 1,
             source_lang: 0,
+            conflict: false,
+            params_num: 0,
+            body_presence: false,
+            file_location: None,
             standalone_ecmascript_input: false,
             source_file: None,
             annotations: vec![],
@@ -1073,6 +1177,7 @@ mod tests {
                 line_ops: vec![],
                 catch_entries: vec![],
                 program_labels: vec![],
+                label_table: vec![],
                 kind: MethodKind::Module,
                 function_kind: function_kind::FUNCTION,
                 concurrent_module_requests: Vec::new(),
@@ -1082,6 +1187,11 @@ mod tests {
                 param_annotations: Vec::new(),
                 definefunc_order: None,
                 label_style: MethodLabelStyle::Source,
+                param_types: Vec::new(),
+                return_type: None,
+                body_presence: None,
+                body_location: None,
+                file_location: None,
             }],
             string_indices: vec![],
             literal_indices: vec![],
@@ -1089,6 +1199,10 @@ mod tests {
             source_code_strings: vec![],
             access_flags: 1,
             source_lang: 0,
+            conflict: false,
+            params_num: 0,
+            body_presence: false,
+            file_location: None,
             standalone_ecmascript_input: false,
             source_file: None,
             annotations: vec![],

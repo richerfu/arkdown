@@ -116,6 +116,7 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
                         &literal_offset_to_index,
                     )?,
                     annotations,
+                    source: Default::default(),
                 })
             })
             .collect::<Result<Vec<_>, AbcError>>()?;
@@ -182,6 +183,7 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
                         })
                         .collect(),
                     program_labels: Vec::new(),
+                    label_table: Vec::new(),
                     kind,
                     function_kind: abc_default_function_kind(kind),
                     concurrent_module_requests: Vec::new(),
@@ -199,6 +201,11 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
                     )?,
                     definefunc_order: None,
                     label_style: MethodLabelStyle::Abc2Program,
+                    param_types: Vec::new(),
+                    return_type: None,
+                    body_presence: None,
+                    body_location: None,
+                    file_location: None,
                 })
             })
             .collect::<Result<Vec<_>, AbcError>>()?;
@@ -232,6 +239,10 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
             source_code_strings: Vec::new(),
             access_flags: class.access_flags,
             source_lang: class.source_lang.unwrap_or(0),
+            conflict: false,
+            params_num: 0,
+            body_presence: false,
+            file_location: None,
             standalone_ecmascript_input: false,
             source_file: class.source_file,
             annotations: class_annotations,

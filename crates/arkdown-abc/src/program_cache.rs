@@ -11,9 +11,10 @@ use crate::emit::file::{
 };
 use crate::emit::record::{
     function_kind, method_access, AnnotationElementRecord, AnnotationRecord, AnnotationValue,
-    CatchEntry, ClassRecord, DebugInfoRecord, FieldRecord, FieldType, FieldValue,
-    InstructionDebugInfo, LocalVariableDebugRecord, MethodKind, MethodLabelStyle, MethodRecord,
-    ProgramLabel, FIELD_OWNER_CLASS_IDX,
+    CatchEntry, ClassRecord, DebugInfoRecord, FieldRecord, FieldSourceRecord, FieldType,
+    FieldValue, FileLocationRecord, InstructionDebugInfo, LocalVariableDebugRecord, MethodKind,
+    MethodLabelStyle, MethodRecord, PandasmTypeRecord, ProgramLabel, SourceLocationRecord,
+    SourcePositionRecord, FIELD_OWNER_CLASS_IDX,
 };
 use crate::emit::strings::StringTable;
 use crate::ir::debug_lnp::LineTracker;
@@ -27,9 +28,10 @@ use crate::names::{
 };
 use crate::proto_panda::{
     annotation_element, ins, program, scalar_value, variant_value, AnnotationData,
-    AnnotationElement, DebuginfoIns, Field, FieldMetadata, Function, FunctionMetadata, Ins,
-    ItemMetadata, Literal, LocalVariable, Metadata, ParamMetadata, Parameter, Program, Record,
-    RecordMetadata, ScalarValue, SourceLocation, SourcePosition, Type, Value, VariantValue,
+    AnnotationElement, DebuginfoIns, Field, FieldMetadata, FileLocation, Function,
+    FunctionMetadata, Ins, ItemMetadata, Literal, LocalVariable, Metadata, ParamMetadata,
+    Parameter, Program, Record, RecordMetadata, ScalarValue, SourceLocation, SourcePosition, Type,
+    Value, VariantValue,
 };
 
 const VALUE_TYPE_U8: u32 = 2;
@@ -399,6 +401,14 @@ pub(crate) fn append_program_to_file(
                 .collect::<io::Result<Vec<_>>>()?,
             access_flags: record_access_flags(&record_proto),
             source_lang: record_proto.language as u8,
+            conflict: record_proto.conflict,
+            params_num: record_proto.params_num,
+            body_presence: record_proto.body_presence,
+            file_location: record_proto
+                .file_location
+                .as_ref()
+                .map(file_location_from_proto)
+                .transpose()?,
             standalone_ecmascript_input: false,
             source_file: (!record_proto.source_file.is_empty())
                 .then(|| utf8(&record_proto.source_file))
@@ -813,6 +823,13 @@ fn field_from_proto(
         access_flags: field_access_flags(field),
         value,
         annotations: field_custom_annotations(field, literal_key_to_index, literal_refs)?,
+        source: FieldSourceRecord {
+            line_of_def: field.line_of_def,
+            whole_line: utf8(&field.whole_line)?,
+            bound_left: field.bound_left,
+            bound_right: field.bound_right,
+            is_defined: field.is_defined,
+        },
     })
 }
 
@@ -940,6 +957,7 @@ fn method_from_proto(
         line_ops,
         catch_entries,
         program_labels,
+        label_table: label_table_from_proto(function)?,
         kind,
         function_kind: function.function_kind,
         concurrent_module_requests: function.concurrent_module_requests.clone(),
@@ -953,7 +971,56 @@ fn method_from_proto(
         )?,
         definefunc_order: None,
         label_style: MethodLabelStyle::Source,
+        param_types: function
+            .params
+            .iter()
+            .map(|param| {
+                param
+                    .r#type
+                    .as_ref()
+                    .map(pandasm_type_from_proto)
+                    .unwrap_or_else(|| Ok(PandasmTypeRecord::any()))
+            })
+            .collect::<io::Result<Vec<_>>>()?,
+        return_type: function
+            .return_type
+            .as_ref()
+            .map(pandasm_type_from_proto)
+            .transpose()?,
+        body_presence: Some(function.body_presence),
+        body_location: function
+            .body_location
+            .as_ref()
+            .map(source_location_from_proto)
+            .transpose()?,
+        file_location: function
+            .file_location
+            .as_ref()
+            .map(file_location_from_proto)
+            .transpose()?,
     })
+}
+
+fn label_table_from_proto(function: &Function) -> io::Result<Vec<ProgramLabel>> {
+    function
+        .label_table
+        .iter()
+        .map(|entry| {
+            let label = entry.value.as_ref();
+            let name = label
+                .filter(|label| !label.name.is_empty())
+                .map(|label| utf8(&label.name))
+                .unwrap_or_else(|| utf8(&entry.key))?;
+            Ok(ProgramLabel {
+                name,
+                offset: 0,
+                file_location: label
+                    .and_then(|label| label.file_location.as_ref())
+                    .map(file_location_from_proto)
+                    .transpose()?,
+            })
+        })
+        .collect()
 }
 
 fn local_variables_from_proto(function: &Function) -> io::Result<Vec<LocalVariableDebugRecord>> {
@@ -1151,6 +1218,7 @@ fn program_labels_from_items(items: &[DecodedItem]) -> io::Result<Vec<ProgramLab
             DecodedItem::Label(label) => labels.push(ProgramLabel {
                 name: label.clone(),
                 offset: to_u32(offset as u64, "Program label offset")?,
+                file_location: None,
             }),
             DecodedItem::Insn { insn, .. } => {
                 offset += insn.byte_len();
@@ -2260,7 +2328,7 @@ fn invalid_data<T>(message: impl Into<String>) -> io::Result<T> {
 fn record_to_proto(record: &ClassRecord, file: &AbcFile) -> Record {
     Record {
         name: bytes(&pandasm_record_name(&record.name)),
-        conflict: false,
+        conflict: record.conflict,
         language: record.source_lang as u32,
         metadata: Some(record_metadata_with_annotations(
             record.access_flags,
@@ -2275,11 +2343,11 @@ fn record_to_proto(record: &ClassRecord, file: &AbcFile) -> Record {
             .iter()
             .map(|field| field_to_proto(field, record, file))
             .collect(),
-        params_num: 0,
-        body_presence: false,
+        params_num: record.params_num,
+        body_presence: record.body_presence,
         body_location: None,
         source_file: record.source_file.as_deref().map(bytes).unwrap_or_default(),
-        file_location: None,
+        file_location: record.file_location.as_ref().map(file_location_to_proto),
     }
 }
 
@@ -2303,11 +2371,11 @@ fn field_to_proto(field: &FieldRecord, record: &ClassRecord, file: &AbcFile) -> 
                 .as_ref()
                 .map(|value| field_scalar_value(value, record, file)),
         }),
-        line_of_def: 0,
-        whole_line: Vec::new(),
-        bound_left: 0,
-        bound_right: 0,
-        is_defined: true,
+        line_of_def: field.source.line_of_def,
+        whole_line: bytes(&field.source.whole_line),
+        bound_left: field.source.bound_left,
+        bound_right: field.source.bound_right,
+        is_defined: field.source.is_defined,
     }
 }
 
@@ -2394,7 +2462,11 @@ fn function_to_proto(
             &method.concurrent_module_requests,
             &method.annotations,
         )),
-        label_table: Vec::new(),
+        label_table: method
+            .label_table
+            .iter()
+            .map(label_table_entry_to_proto)
+            .collect(),
         ins,
         local_variable_debug: method
             .debug_info
@@ -2459,17 +2531,35 @@ fn function_to_proto(
                     })
                     .unwrap_or_default();
                 Parameter {
-                    r#type: Some(type_named("any")),
+                    r#type: Some(
+                        method
+                            .param_types
+                            .get(param_idx)
+                            .map(pandasm_type_to_proto)
+                            .unwrap_or_else(|| type_named("any")),
+                    ),
                     metadata: (!annotations.is_empty()).then(|| ParamMetadata {
                         father: Some(annotation_metadata_with_attributes(annotations, Vec::new())),
                     }),
                 }
             })
             .collect(),
-        body_presence: !method.bytecode.is_empty(),
-        return_type: Some(type_named("any")),
-        body_location: Some(default_source_location()),
-        file_location: None,
+        body_presence: method.body_presence.unwrap_or(!method.bytecode.is_empty()),
+        return_type: Some(
+            method
+                .return_type
+                .as_ref()
+                .map(pandasm_type_to_proto)
+                .unwrap_or_else(|| type_named("any")),
+        ),
+        body_location: Some(
+            method
+                .body_location
+                .as_ref()
+                .map(source_location_to_proto)
+                .unwrap_or_else(default_source_location),
+        ),
+        file_location: method.file_location.as_ref().map(file_location_to_proto),
         function_kind: method.function_kind,
         slots_num: slots_num.into(),
         concurrent_module_requests: method.concurrent_module_requests.clone(),
@@ -2484,6 +2574,90 @@ fn local_variable_to_proto(local: &LocalVariableDebugRecord) -> LocalVariable {
         reg: local.reg,
         start: local.start,
         length: local.length,
+    }
+}
+
+fn label_table_entry_to_proto(label: &ProgramLabel) -> crate::proto_panda::function::LabelTable {
+    crate::proto_panda::function::LabelTable {
+        key: bytes(&label.name),
+        value: Some(crate::proto_panda::Label {
+            name: bytes(&label.name),
+            file_location: label.file_location.as_ref().map(file_location_to_proto),
+        }),
+    }
+}
+
+fn pandasm_type_from_proto(value: &Type) -> io::Result<PandasmTypeRecord> {
+    Ok(PandasmTypeRecord {
+        component_name: utf8(&value.component_name)?,
+        rank: value.rank,
+        name: utf8(&value.name)?,
+        type_id: value.type_id,
+    })
+}
+
+fn pandasm_type_to_proto(value: &PandasmTypeRecord) -> Type {
+    Type {
+        component_name: bytes(&value.component_name),
+        rank: value.rank,
+        name: bytes(&value.name),
+        type_id: value.type_id,
+    }
+}
+
+fn source_location_from_proto(value: &SourceLocation) -> io::Result<SourceLocationRecord> {
+    Ok(SourceLocationRecord {
+        begin: value
+            .begin
+            .as_ref()
+            .map(source_position_from_proto)
+            .unwrap_or(SourcePositionRecord { line: 0, column: 0 }),
+        end: value
+            .end
+            .as_ref()
+            .map(source_position_from_proto)
+            .unwrap_or(SourcePositionRecord { line: 0, column: 0 }),
+    })
+}
+
+fn source_position_from_proto(value: &SourcePosition) -> SourcePositionRecord {
+    SourcePositionRecord {
+        line: value.line,
+        column: value.column,
+    }
+}
+
+fn source_location_to_proto(value: &SourceLocationRecord) -> SourceLocation {
+    SourceLocation {
+        begin: Some(source_position_to_proto(&value.begin)),
+        end: Some(source_position_to_proto(&value.end)),
+    }
+}
+
+fn source_position_to_proto(value: &SourcePositionRecord) -> SourcePosition {
+    SourcePosition {
+        line: value.line,
+        column: value.column,
+    }
+}
+
+fn file_location_from_proto(value: &FileLocation) -> io::Result<FileLocationRecord> {
+    Ok(FileLocationRecord {
+        whole_line: utf8(&value.whole_line)?,
+        bound_left: value.bound_left,
+        bound_right: value.bound_right,
+        line_number: value.line_number,
+        is_defined: value.is_defined,
+    })
+}
+
+fn file_location_to_proto(value: &FileLocationRecord) -> FileLocation {
+    FileLocation {
+        whole_line: bytes(&value.whole_line),
+        bound_left: value.bound_left,
+        bound_right: value.bound_right,
+        line_number: value.line_number,
+        is_defined: value.is_defined,
     }
 }
 
@@ -3643,6 +3817,24 @@ mod tests {
             .and_then(|entry| entry.value.as_ref())
     }
 
+    fn function_by_short_name_mut<'a>(
+        program: &'a mut Program,
+        name: &str,
+    ) -> Option<&'a mut Function> {
+        program
+            .function_table
+            .iter_mut()
+            .find(|entry| {
+                std::str::from_utf8(&entry.key)
+                    .map(|key| {
+                        let short = key.rsplit('.').next().unwrap_or(key);
+                        short == name || short.ends_with(&format!("#*#{name}"))
+                    })
+                    .unwrap_or(false)
+            })
+            .and_then(|entry| entry.value.as_mut())
+    }
+
     fn functions_by_short_suffix<'a>(program: &'a Program, name: &str) -> Vec<&'a Function> {
         program
             .function_table
@@ -3956,6 +4148,7 @@ class A {
                     value: AnnotationValue::String("field".to_string()),
                 }],
             }],
+            source: Default::default(),
         });
         file
     }
@@ -4615,6 +4808,170 @@ class A {}
             "signature_type local must emit START_LOCAL_EXTENDED"
         );
         assert!(lnp_ops.contains(&0x05), "local end must emit END_LOCAL");
+    }
+
+    #[test]
+    fn pandasm_source_metadata_roundtrips_through_proto_and_abc_input() {
+        let file = annotation_usage_file();
+        let mut program = program_for_file(&file, 20).unwrap();
+
+        let record = program
+            .record_table
+            .iter_mut()
+            .find(|entry| entry.key == b"usage_string.ets")
+            .and_then(|entry| entry.value.as_mut())
+            .expect("usage_string.ets record must exist");
+        record.conflict = true;
+        record.params_num = 5;
+        record.body_presence = true;
+        record.file_location = Some(FileLocation {
+            whole_line: b".record usage_string".to_vec(),
+            bound_left: 1,
+            bound_right: 21,
+            line_number: 7,
+            is_defined: true,
+        });
+        let field = record
+            .field_list
+            .first_mut()
+            .expect("usage_string.ets record must have fields");
+        field.line_of_def = 11;
+        field.whole_line = b"u8 pkgName".to_vec();
+        field.bound_left = 2;
+        field.bound_right = 12;
+        field.is_defined = false;
+
+        let function = function_by_short_name_mut(&mut program, "func_main_0")
+            .expect("func_main_0 function must exist");
+        function
+            .label_table
+            .push(crate::proto_panda::function::LabelTable {
+                key: b"manual_label".to_vec(),
+                value: Some(crate::proto_panda::Label {
+                    name: b"manual_label".to_vec(),
+                    file_location: Some(FileLocation {
+                        whole_line: b"manual_label:".to_vec(),
+                        bound_left: 3,
+                        bound_right: 16,
+                        line_number: 13,
+                        is_defined: true,
+                    }),
+                }),
+            });
+        function.params[0].r#type = Some(Type {
+            component_name: b"f64".to_vec(),
+            rank: 0,
+            name: b"f64".to_vec(),
+            type_id: 0x0a,
+        });
+        function.return_type = Some(Type {
+            component_name: b"u32".to_vec(),
+            rank: 0,
+            name: b"u32".to_vec(),
+            type_id: 0x08,
+        });
+        function.body_presence = false;
+        function.body_location = Some(SourceLocation {
+            begin: Some(SourcePosition {
+                line: 17,
+                column: 4,
+            }),
+            end: Some(SourcePosition {
+                line: 19,
+                column: 2,
+            }),
+        });
+        function.file_location = Some(FileLocation {
+            whole_line: b".function func_main_0".to_vec(),
+            bound_left: 4,
+            bound_right: 25,
+            line_number: 17,
+            is_defined: true,
+        });
+
+        let mut restored = AbcFile::new();
+        append_program_to_file(&mut restored, program).unwrap();
+        let restored_record = restored
+            .records
+            .iter()
+            .find(|record| record.name == "Lusage_string.ets;")
+            .expect("restored usage_string.ets record must exist");
+        assert!(restored_record.conflict);
+        assert_eq!(restored_record.params_num, 5);
+        assert!(restored_record.body_presence);
+        assert_eq!(
+            restored_record.file_location.as_ref().unwrap().whole_line,
+            ".record usage_string"
+        );
+        assert_eq!(restored_record.fields[0].source.line_of_def, 11);
+        assert!(!restored_record.fields[0].source.is_defined);
+        let restored_method = restored_record
+            .methods
+            .iter()
+            .find(|method| method.name == "func_main_0")
+            .expect("restored func_main_0 method must exist");
+        assert_eq!(restored_method.param_types[0].component_name, "f64");
+        assert_eq!(restored_method.return_type.as_ref().unwrap().name, "u32");
+        assert_eq!(restored_method.body_presence, Some(false));
+        assert_eq!(
+            restored_method.body_location.as_ref().unwrap().begin.line,
+            17
+        );
+        assert_eq!(
+            restored_method.label_table[0]
+                .file_location
+                .as_ref()
+                .unwrap()
+                .line_number,
+            13
+        );
+
+        let roundtrip_program = program_for_file(&restored, 20).unwrap();
+        let roundtrip_record = roundtrip_program
+            .record_table
+            .iter()
+            .find(|entry| entry.key == b"usage_string.ets")
+            .and_then(|entry| entry.value.as_ref())
+            .expect("roundtrip usage_string.ets record must exist");
+        assert!(roundtrip_record.conflict);
+        assert_eq!(roundtrip_record.params_num, 5);
+        assert_eq!(roundtrip_record.field_list[0].line_of_def, 11);
+        let roundtrip_function = function_by_short_name(&roundtrip_program, "func_main_0")
+            .expect("roundtrip func_main_0 function must exist");
+        assert_eq!(
+            roundtrip_function.label_table[0]
+                .value
+                .as_ref()
+                .unwrap()
+                .file_location
+                .as_ref()
+                .unwrap()
+                .whole_line,
+            b"manual_label:"
+        );
+        assert_eq!(
+            roundtrip_function.params[0].r#type.as_ref().unwrap().name,
+            b"f64"
+        );
+        assert_eq!(
+            roundtrip_function.return_type.as_ref().unwrap().type_id,
+            0x08
+        );
+        assert!(!roundtrip_function.body_presence);
+        assert_eq!(
+            roundtrip_function
+                .body_location
+                .as_ref()
+                .unwrap()
+                .end
+                .as_ref()
+                .unwrap()
+                .line,
+            19
+        );
+
+        let bytes = restored.serialize_with_version(version_for_target_api(20, None));
+        AbcReader::validate(&bytes).unwrap();
     }
 
     #[test]
