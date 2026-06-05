@@ -1401,11 +1401,13 @@ fn catch_entry_from_proto(
     catch: &crate::proto_panda::CatchBlock,
     labels: &BTreeMap<String, usize>,
 ) -> io::Result<CatchEntry> {
+    let exception_record = utf8(&catch.exception_record)?;
     Ok(CatchEntry {
         try_begin: label_offset(labels, &catch.try_begin_label)?,
         try_end: label_offset(labels, &catch.try_end_label)?,
         catch_begin: label_offset(labels, &catch.catch_begin_label)?,
         catch_end: label_offset(labels, &catch.catch_end_label)?,
+        exception_record: (!exception_record.is_empty()).then_some(exception_record),
     })
 }
 
@@ -2761,7 +2763,11 @@ fn function_to_proto(
             .map(|catch| -> io::Result<crate::proto_panda::CatchBlock> {
                 Ok(crate::proto_panda::CatchBlock {
                     whole_line: Vec::new(),
-                    exception_record: Vec::new(),
+                    exception_record: catch
+                        .exception_record
+                        .as_deref()
+                        .map(bytes)
+                        .unwrap_or_default(),
                     try_begin_label: bytes(label_name_for_offset(
                         label_plan.target_names(),
                         catch.try_begin as usize,
@@ -4048,6 +4054,63 @@ mod tests {
         assert_eq!(label_ins("label_0").opcode, pandasm_invalid_opcode());
         assert_eq!(default_ins_debug().line_number, u64::MAX);
         assert_eq!(default_ins_debug().column_number, 0);
+    }
+
+    #[test]
+    fn catch_exception_record_roundtrips_through_program_cache() {
+        let labels = BTreeMap::from([
+            ("try_begin".to_string(), 0usize),
+            ("try_end".to_string(), 3usize),
+            ("catch_begin".to_string(), 3usize),
+            ("catch_end".to_string(), 5usize),
+        ]);
+        let restored = catch_entry_from_proto(
+            &crate::proto_panda::CatchBlock {
+                whole_line: Vec::new(),
+                exception_record: b"CustomError".to_vec(),
+                try_begin_label: b"try_begin".to_vec(),
+                try_end_label: b"try_end".to_vec(),
+                catch_begin_label: b"catch_begin".to_vec(),
+                catch_end_label: b"catch_end".to_vec(),
+            },
+            &labels,
+        )
+        .unwrap();
+        assert_eq!(restored.exception_record.as_deref(), Some("CustomError"));
+
+        let mut file = AbcFile::new();
+        let mut record = build_record_with_debug_and_package_for_target_with_mode(
+            "try { globalThis.x = 1; } catch (e) { globalThis.x = 2; }",
+            "@bundle:demo/entry/ets/pages/Index",
+            &mut file.strings,
+            &mut file.literal_arrays,
+            Some("entry/src/main/ets/pages/Index.ets"),
+            Some("entry"),
+            false,
+            false,
+            "ets",
+            true,
+            12,
+            None,
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+        let main_idx = record
+            .methods
+            .iter()
+            .position(|method| method.name == "func_main_0")
+            .unwrap();
+        record.methods[main_idx].catch_entries[0].exception_record =
+            Some("CustomError".to_string());
+
+        let function =
+            function_to_proto(&record.methods[main_idx], &record, &file.strings).unwrap();
+        assert_eq!(
+            function.catch_blocks[0].exception_record,
+            b"CustomError".to_vec()
+        );
     }
 
     #[test]

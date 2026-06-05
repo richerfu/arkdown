@@ -186,13 +186,15 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
                     catch_entries: code
                         .catches
                         .iter()
-                        .map(|catch| CatchEntry {
-                            try_begin: catch.try_begin,
-                            try_end: catch.try_end,
-                            catch_begin: catch.handler_pc,
-                            catch_end: catch.handler_pc.saturating_add(catch.code_size),
+                        .map(|catch| {
+                            catch_entry_from_abc(
+                                catch,
+                                method.offset,
+                                &index_sections,
+                                &class_name_by_offset,
+                            )
                         })
-                        .collect(),
+                        .collect::<Result<Vec<_>, AbcError>>()?,
                     program_labels: Vec::new(),
                     label_table: Vec::new(),
                     kind,
@@ -579,6 +581,56 @@ fn field_type_from_abc(
         entity_offset,
         class_name_by_offset,
     ))
+}
+
+fn catch_entry_from_abc(
+    catch: &crate::abc_reader::AbcCatchBlock,
+    method_offset: u32,
+    index_sections: &[crate::abc_reader::AbcIndexSection],
+    class_name_by_offset: &BTreeMap<u32, String>,
+) -> Result<CatchEntry, AbcError> {
+    Ok(CatchEntry {
+        try_begin: catch.try_begin,
+        try_end: catch.try_end,
+        catch_begin: catch.handler_pc,
+        catch_end: catch.handler_pc.saturating_add(catch.code_size),
+        exception_record: catch_exception_record_from_abc(
+            catch,
+            method_offset,
+            index_sections,
+            class_name_by_offset,
+        )?,
+    })
+}
+
+fn catch_exception_record_from_abc(
+    catch: &crate::abc_reader::AbcCatchBlock,
+    method_offset: u32,
+    index_sections: &[crate::abc_reader::AbcIndexSection],
+    class_name_by_offset: &BTreeMap<u32, String>,
+) -> Result<Option<String>, AbcError> {
+    if catch.type_idx == 0 {
+        return Ok(None);
+    }
+    let class_idx = catch.type_idx - 1;
+    let Some(section) = index_sections
+        .iter()
+        .find(|section| section.start <= method_offset && method_offset < section.end)
+        .or_else(|| index_sections.first())
+    else {
+        return Err(AbcError::UnsupportedConstruct {
+            construct: "ABC catch type index without IndexSection".to_string(),
+            file: "<abc input>".to_string(),
+        });
+    };
+    let Some(&entity_offset) = section.class_offsets.get(class_idx as usize) else {
+        return Err(AbcError::UnsupportedConstruct {
+            construct: format!("ABC catch type_idx {class_idx} missing from IndexSection"),
+            file: "<abc input>".to_string(),
+        });
+    };
+    let field_type = field_type_from_index_entity(entity_offset, class_name_by_offset);
+    Ok(Some(field_type.pandasm_name()))
 }
 
 fn field_type_from_index_entity(

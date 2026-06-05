@@ -106,6 +106,12 @@ pub struct CatchEntry {
     pub try_end: u32,
     pub catch_begin: u32,
     pub catch_end: u32,
+    /// Upstream pandasm `CatchBlock.exception_record`.
+    ///
+    /// `None` maps to a catch-all handler and is encoded as type index `0`.
+    /// A typed catch stores the pandasm record name, matching upstream
+    /// abc2program's `Type::FromDescriptor(...).GetName()` result.
+    pub exception_record: Option<String>,
 }
 
 /// A pandasm label emitted into upstream ProgramCache snapshots.
@@ -243,6 +249,16 @@ pub fn encode_code_item(
     bytecode: &[u8],
     catch_entries: &[CatchEntry],
 ) -> Vec<u8> {
+    encode_code_item_with_catch_types(num_vregs, num_args, bytecode, catch_entries, &[])
+}
+
+pub fn encode_code_item_with_catch_types(
+    num_vregs: u16,
+    num_args: u16,
+    bytecode: &[u8],
+    catch_entries: &[CatchEntry],
+    catch_type_indices: &[Option<u16>],
+) -> Vec<u8> {
     let try_table_len = catch_entries.len() * 8;
     let mut out = Vec::with_capacity(7 + bytecode.len() + try_table_len);
     out.extend_from_slice(&uleb128(num_vregs as u64));
@@ -250,13 +266,18 @@ pub fn encode_code_item(
     out.extend_from_slice(&uleb128(bytecode.len() as u64));
     out.extend_from_slice(&uleb128(catch_entries.len() as u64));
     out.extend_from_slice(bytecode);
-    for entry in catch_entries {
+    for (idx, entry) in catch_entries.iter().enumerate() {
         let length = entry.try_end.saturating_sub(entry.try_begin);
         let catch_size = entry.catch_end.saturating_sub(entry.catch_begin);
+        let type_idx = catch_type_indices
+            .get(idx)
+            .and_then(|idx| *idx)
+            .map(|idx| idx as u64 + 1)
+            .unwrap_or(0);
         out.extend_from_slice(&uleb128(entry.try_begin as u64));
         out.extend_from_slice(&uleb128(length as u64));
         out.extend_from_slice(&uleb128(1));
-        out.extend_from_slice(&uleb128(0));
+        out.extend_from_slice(&uleb128(type_idx));
         out.extend_from_slice(&uleb128(entry.catch_begin as u64));
         out.extend_from_slice(&uleb128(catch_size as u64));
     }
@@ -1309,6 +1330,23 @@ mod tests {
         // num_vregs=0, num_args=3, bytecode=[0x65] (ReturnUndefined)
         let ci = encode_code_item(0, 3, &[0x65], &[]);
         assert_eq!(ci, vec![0x00, 0x03, 0x01, 0x00, 0x65]);
+    }
+
+    #[test]
+    fn typed_catch_code_item_writes_class_index_plus_one() {
+        let catch = CatchEntry {
+            try_begin: 0,
+            try_end: 1,
+            catch_begin: 1,
+            catch_end: 2,
+            exception_record: Some("CustomError".to_string()),
+        };
+        let ci = encode_code_item_with_catch_types(0, 0, &[0x65], &[catch], &[Some(4)]);
+
+        assert_eq!(
+            ci,
+            vec![0x00, 0x00, 0x01, 0x01, 0x65, 0x00, 0x01, 0x01, 0x05, 0x01, 0x01]
+        );
     }
 
     #[test]

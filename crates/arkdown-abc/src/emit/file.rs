@@ -9,11 +9,11 @@ use crate::emit::debug_info::{
     local_variable_debug_param_offsets,
 };
 use crate::emit::record::{
-    encode_code_item, inline_string, uleb128, AnnotationRecord, AnnotationValue, ArrayValueRecord,
-    ClassAnnotationOffsets, ClassRecord, DebugInfoRecord, FieldAnnotationOffsets, FieldType,
-    FieldValue, MethodAnnotationOffsets, MethodKind, PandasmTypeRecord, ScalarValueData,
-    ScalarValueRecord, VALUE_TYPE_ANNOTATION, VALUE_TYPE_ARRAY, VALUE_TYPE_ENUM, VALUE_TYPE_F32,
-    VALUE_TYPE_F64, VALUE_TYPE_I16, VALUE_TYPE_I32, VALUE_TYPE_I64, VALUE_TYPE_I8,
+    encode_code_item_with_catch_types, inline_string, uleb128, AnnotationRecord, AnnotationValue,
+    ArrayValueRecord, ClassAnnotationOffsets, ClassRecord, DebugInfoRecord, FieldAnnotationOffsets,
+    FieldType, FieldValue, MethodAnnotationOffsets, MethodKind, MethodRecord, PandasmTypeRecord,
+    ScalarValueData, ScalarValueRecord, VALUE_TYPE_ANNOTATION, VALUE_TYPE_ARRAY, VALUE_TYPE_ENUM,
+    VALUE_TYPE_F32, VALUE_TYPE_F64, VALUE_TYPE_I16, VALUE_TYPE_I32, VALUE_TYPE_I64, VALUE_TYPE_I8,
     VALUE_TYPE_LITERALARRAY, VALUE_TYPE_METHOD, VALUE_TYPE_METHOD_HANDLE, VALUE_TYPE_RECORD,
     VALUE_TYPE_STRING, VALUE_TYPE_STRING_NULLPTR, VALUE_TYPE_U1, VALUE_TYPE_U16, VALUE_TYPE_U32,
     VALUE_TYPE_U64, VALUE_TYPE_U8,
@@ -1588,11 +1588,13 @@ impl AbcFile {
                 let slot_count = assign_inline_cache_slots(&mut bytecode);
                 slot_counts_per_class[class_idx][class_code_items.len()] =
                     method.slots_num.unwrap_or(slot_count);
-                let ci = encode_code_item(
+                let catch_type_indices = catch_type_indices(method, &name_to_index_class_idx);
+                let ci = encode_code_item_with_catch_types(
                     method.num_vregs,
                     method.num_args,
                     &bytecode,
                     &method.catch_entries,
+                    &catch_type_indices,
                 );
                 class_code_items.push(ci);
             }
@@ -2310,6 +2312,31 @@ fn field_type_index(
             unreachable!()
         }
     }
+}
+
+fn catch_type_indices(
+    method: &MethodRecord,
+    name_to_index_class_idx: &FxHashMap<&str, u16>,
+) -> Vec<Option<u16>> {
+    method
+        .catch_entries
+        .iter()
+        .map(|entry| {
+            entry.exception_record.as_ref().map(|record_name| {
+                let descriptor = catch_exception_descriptor(record_name);
+                *name_to_index_class_idx
+                    .get(descriptor.as_str())
+                    .expect("catch exception record must be present in IndexSection")
+            })
+        })
+        .collect()
+}
+
+fn catch_exception_descriptor(record_name: &str) -> String {
+    if record_name.starts_with('L') && record_name.ends_with(';') {
+        return record_name.to_string();
+    }
+    pandasm_reference_descriptor(record_name)
 }
 
 fn pandasm_reference_descriptor(component_name: &str) -> String {

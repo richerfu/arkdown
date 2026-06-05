@@ -7354,6 +7354,7 @@ impl<'a> CodeGen<'a> {
             try_end,
             catch_begin,
             catch_end: after_handler as u32,
+            exception_record: None,
         });
 
         let outer_break = std::mem::take(&mut self.break_patches);
@@ -7417,6 +7418,7 @@ impl<'a> CodeGen<'a> {
             try_end: init_try_end,
             catch_begin: init_catch_begin,
             catch_end: init_catch_end,
+            exception_record: None,
         });
 
         let state = IteratorState {
@@ -7476,6 +7478,7 @@ impl<'a> CodeGen<'a> {
             try_end: body_try_end,
             catch_begin: body_catch_begin,
             catch_end: body_catch_end,
+            exception_record: None,
         });
 
         for patch in std::mem::take(&mut self.continue_patches) {
@@ -7871,6 +7874,7 @@ impl<'a> CodeGen<'a> {
             try_end,
             catch_begin,
             catch_end: catch_begin,
+            exception_record: None,
         });
 
         if abrupt_completion {
@@ -8116,6 +8120,7 @@ impl<'a> CodeGen<'a> {
             try_end: body_try_end,
             catch_begin: body_catch_begin,
             catch_end: body_catch_end,
+            exception_record: None,
         });
 
         // Normal completion: close the iterator.
@@ -8327,6 +8332,7 @@ impl<'a> CodeGen<'a> {
             try_end: body_try_end,
             catch_begin: body_catch_begin,
             catch_end: body_catch_end,
+            exception_record: None,
         });
         self.push(Insn::LdUndefined);
         self.emit_iterator_close(state, false);
@@ -8730,6 +8736,7 @@ impl<'a> CodeGen<'a> {
                 try_end,
                 catch_begin,
                 catch_end: after_catch as u32,
+                exception_record: None,
             });
             self.patch_jump_to(jmp_past_catch, after_catch);
         }
@@ -8788,6 +8795,7 @@ impl<'a> CodeGen<'a> {
                 try_end: inner_try_end,
                 catch_begin,
                 catch_end,
+                exception_record: None,
             });
             self.returned = outer_returned || (try_returned && catch_returned);
         } else {
@@ -8815,6 +8823,7 @@ impl<'a> CodeGen<'a> {
                 try_end: inner_try_end,
                 catch_begin,
                 catch_end,
+                exception_record: None,
             });
             self.returned = outer_returned || try_returned;
         }
@@ -8837,6 +8846,7 @@ impl<'a> CodeGen<'a> {
             try_end: outer_try_end,
             catch_begin: outer_catch_begin,
             catch_end: outer_catch_end,
+            exception_record: None,
         });
 
         self.push(Insn::Lda(finalizer_run));
@@ -10565,6 +10575,7 @@ impl<'a> CodeGen<'a> {
             try_end,
             catch_begin,
             catch_end,
+            exception_record: None,
         });
         self.async_try_begin = None;
     }
@@ -10844,6 +10855,7 @@ impl<'a> CodeGen<'a> {
             try_end,
             catch_begin,
             catch_end: catch_begin,
+            exception_record: None,
         });
 
         self.push(Insn::PopLexEnv);

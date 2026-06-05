@@ -576,6 +576,7 @@ mod tests {
             try_end: 1,
             catch_begin: 1,
             catch_end: 2,
+            exception_record: None,
         });
         let mut file = AbcFile::new();
         file.records.push(crate::emit::record::ClassRecord {
@@ -616,6 +617,7 @@ mod tests {
             try_end: 1,
             catch_begin: 1,
             catch_end: 2,
+            exception_record: None,
         });
         let mut file = AbcFile::new();
         file.records.push(crate::emit::record::ClassRecord {
