@@ -217,7 +217,10 @@ impl ModuleRecordInfo {
             entries.push(LiteralEntry::RawU16(export.module_request_idx));
         }
 
-        LiteralArray { entries }
+        LiteralArray {
+            entries,
+            explicit_key: None,
+        }
     }
 }
 

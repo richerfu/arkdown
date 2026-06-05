@@ -231,11 +231,15 @@ fn static_imports(file: &AbcFile, record: &ClassRecord) -> Vec<String> {
 
     let Some(module_record_idx) = record.fields.iter().find_map(|field| {
         (field.name == MODULE_RECORD_IDX)
-            .then_some(field.value)
+            .then_some(field.value.as_ref())
             .flatten()
             .and_then(|value| match value {
-                FieldValue::LiteralArray(idx) => Some(idx),
-                FieldValue::U8(_) | FieldValue::U32(_) => None,
+                FieldValue::LiteralArray(idx) => Some(*idx),
+                FieldValue::U8(_)
+                | FieldValue::Bool(_)
+                | FieldValue::U32(_)
+                | FieldValue::String(_)
+                | FieldValue::F64(_) => None,
             })
     }) else {
         return Vec::new();

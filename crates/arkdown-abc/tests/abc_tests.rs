@@ -5,6 +5,7 @@
 
 use arkdown_abc::cache::{source_cache_hash, ProgramCacheFile};
 use arkdown_abc::emit::file::version_for_target_api;
+use arkdown_abc::proto_panda::scalar_value;
 use arkdown_abc::{
     AbcCompileOptions, AbcCompiler, AbcError, AbcModule, AbcProgramCacheInput, AbcReader,
 };
@@ -5301,6 +5302,300 @@ fn test_prefixed_annotation_declaration_enabled_compiles() {
             &out,
         )
         .expect("prefixed annotation declarations must pass the upstream parser gate");
+    let bytes = std::fs::read(&out).unwrap();
+    let foreign_off = read_u32(&bytes, 0x14);
+    let foreign_size = read_u32(&bytes, 0x18);
+    assert_ne!(
+        foreign_off, 0,
+        "panda.String must be emitted as ForeignItem"
+    );
+    assert_ne!(foreign_size, 0, "ForeignItem section must not be empty");
+    assert_eq!(
+        class_name_at(&bytes, foreign_off as usize),
+        "Lpanda.String;"
+    );
+    let reader_names = AbcReader::new(&bytes)
+        .expect("annotation abc must have valid magic")
+        .class_names()
+        .expect("reader must accept class-index foreign items");
+    assert!(reader_names.iter().any(|name| name == "Lpanda.String;"));
+    assert!(reader_names
+        .iter()
+        .any(|name| name == "Ltest/annotation_decl.ets.RouteMeta;"));
+
+    let route_off = class_offsets(&bytes)
+        .into_iter()
+        .find(|offset| {
+            class_name_at(&bytes, *offset as usize) == "Ltest/annotation_decl.ets.RouteMeta;"
+        })
+        .expect("prefixed annotation declaration must emit RouteMeta record");
+    let mut pos = route_off as usize;
+    skip_inline_string(&bytes, &mut pos);
+    assert_eq!(read_u32(&bytes, pos), 0);
+    pos += 4;
+    assert_eq!(read_uleb(&bytes, &mut pos), 0x2000);
+    assert_eq!(read_uleb(&bytes, &mut pos), 1);
+    assert_eq!(read_uleb(&bytes, &mut pos), 0);
+    assert_eq!(bytes[pos], 0x02);
+    assert_eq!(bytes[pos + 1], 0);
+    assert_eq!(bytes[pos + 2], 0);
+    pos += 3;
+
+    let field_class_idx = read_u16(&bytes, pos) as usize;
+    pos += 2;
+    let field_type_idx = read_u16(&bytes, pos) as usize;
+    pos += 2;
+    let field_name_off = read_u32(&bytes, pos) as usize;
+    pos += 4;
+    assert_eq!(read_uleb(&bytes, &mut pos), 0);
+    assert_eq!(
+        bytes[pos], 0,
+        "annotation field without default has no value tag"
+    );
+    assert_eq!(inline_string_at(&bytes, field_name_off), "title");
+
+    let idx_off = read_u32(&bytes, 0x38) as usize;
+    let index_class_idx_off = read_u32(&bytes, idx_off + 12) as usize;
+    assert_eq!(
+        read_u32(&bytes, index_class_idx_off + field_class_idx * 4),
+        route_off
+    );
+    assert_eq!(
+        read_u32(&bytes, index_class_idx_off + field_type_idx * 4),
+        foreign_off
+    );
+}
+
+#[test]
+fn test_prefixed_annotation_program_cache_preserves_metadata_records() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("annotation_cache.abc");
+    let cache_file = tmp.path().join("annotation.protoBin");
+    let cache_input = AbcProgramCacheInput {
+        file_name: "entry/src/main/ets/Annotation.ets".to_string(),
+        cache_file: cache_file.clone(),
+    };
+    module_compiler_with_annotations()
+        .compile_with_program_cache(
+            vec![annotation_module(
+                "@interface __$$ETS_ANNOTATION$$__RouteMeta {\n  title: string;\n}",
+            )],
+            &out,
+            vec![Some(cache_input)],
+        )
+        .expect("annotation declaration must write ProgramCache");
+
+    let entry = ProgramCacheFile::read(&cache_file)
+        .unwrap()
+        .expect("ProgramCache must be written");
+    let record_names = entry
+        .program
+        .record_table
+        .iter()
+        .filter_map(|entry| entry.value.as_ref())
+        .map(|record| String::from_utf8(record.name.clone()).unwrap())
+        .collect::<Vec<_>>();
+    assert!(record_names
+        .iter()
+        .any(|name| name == "test/annotation_decl.ets.RouteMeta"));
+    assert!(record_names.iter().any(|name| name == "panda.String"));
+
+    let route_record = entry
+        .program
+        .record_table
+        .iter()
+        .filter_map(|entry| entry.value.as_ref())
+        .find(|record| record.name == b"test/annotation_decl.ets.RouteMeta")
+        .expect("RouteMeta record must be in ProgramCache");
+    let title = route_record
+        .field_list
+        .iter()
+        .find(|field| field.name == b"title")
+        .expect("RouteMeta.title must be in ProgramCache");
+    assert_eq!(
+        title.r#type.as_ref().map(|ty| ty.name.as_slice()),
+        Some(b"panda.String".as_slice())
+    );
+    assert_eq!(
+        title
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.field_type.as_ref())
+            .map(|ty| ty.type_id),
+        Some(1)
+    );
+}
+
+#[test]
+fn test_prefixed_annotation_array_fields_emit_upstream_type_descriptors() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("annotation_array_fields.abc");
+    module_compiler_with_annotations()
+        .compile(
+            vec![annotation_module(
+                "@interface __$$ETS_ANNOTATION$$__Anno {\n  a: number[] = [1, -2]\n  b: string[][]\n  c: boolean[]\n}",
+            )],
+            &out,
+        )
+        .expect("annotation array declarations must compile");
+
+    let bytes = std::fs::read(&out).unwrap();
+    let reader_names = AbcReader::new(&bytes)
+        .expect("annotation abc must have valid magic")
+        .class_names()
+        .expect("reader must accept foreign array items");
+    for expected in [
+        "Ltest/annotation_decl.ets.Anno;",
+        "Lpanda.String;",
+        "[D",
+        "[Z",
+        "[[Lpanda.String;",
+    ] {
+        assert!(
+            reader_names.iter().any(|name| name == expected),
+            "missing class/index item {expected}; names={reader_names:?}"
+        );
+    }
+
+    let anno_off = class_offsets(&bytes)
+        .into_iter()
+        .find(|offset| class_name_at(&bytes, *offset as usize) == "Ltest/annotation_decl.ets.Anno;")
+        .expect("prefixed annotation declaration must emit Anno record");
+    let mut pos = anno_off as usize;
+    skip_inline_string(&bytes, &mut pos);
+    pos += 4;
+    assert_eq!(read_uleb(&bytes, &mut pos), 0x2000);
+    let field_count = read_uleb(&bytes, &mut pos);
+    assert_eq!(field_count, 3);
+    assert_eq!(read_uleb(&bytes, &mut pos), 0);
+    assert_eq!(bytes[pos], 0x02);
+    assert_eq!(bytes[pos + 1], 0);
+    assert_eq!(bytes[pos + 2], 0);
+    pos += 3;
+
+    let idx_off = read_u32(&bytes, 0x38) as usize;
+    let index_class_idx_off = read_u32(&bytes, idx_off + 12) as usize;
+    let mut field_types = BTreeMap::new();
+    let mut field_has_value = BTreeMap::new();
+    for _ in 0..field_count {
+        pos += 2;
+        let field_type_idx = read_u16(&bytes, pos) as usize;
+        pos += 2;
+        let field_name_off = read_u32(&bytes, pos) as usize;
+        pos += 4;
+        let _access_flags = read_uleb(&bytes, &mut pos);
+        let has_value = bytes[pos] != 0;
+        if has_value {
+            assert_eq!(bytes[pos], 0x02);
+            pos += 5;
+        }
+        assert_eq!(bytes[pos], 0);
+        pos += 1;
+
+        let type_offset = read_u32(&bytes, index_class_idx_off + field_type_idx * 4);
+        let field_name = inline_string_at(&bytes, field_name_off);
+        field_types.insert(
+            field_name.clone(),
+            class_name_at(&bytes, type_offset as usize),
+        );
+        field_has_value.insert(field_name, has_value);
+    }
+
+    assert_eq!(field_types.get("a").map(String::as_str), Some("[D"));
+    assert_eq!(
+        field_types.get("b").map(String::as_str),
+        Some("[[Lpanda.String;")
+    );
+    assert_eq!(field_types.get("c").map(String::as_str), Some("[Z"));
+    assert_eq!(field_has_value.get("a"), Some(&true));
+    assert_eq!(field_has_value.get("b"), Some(&false));
+    assert_eq!(field_has_value.get("c"), Some(&false));
+}
+
+#[test]
+fn test_prefixed_annotation_array_program_cache_preserves_rank_and_literal_key() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("annotation_array_cache.abc");
+    let cache_file = tmp.path().join("annotation_array.protoBin");
+    let cache_input = AbcProgramCacheInput {
+        file_name: "entry/src/main/ets/AnnotationArray.ets".to_string(),
+        cache_file: cache_file.clone(),
+    };
+    module_compiler_with_annotations()
+        .compile_with_program_cache(
+            vec![annotation_module(
+                "@interface __$$ETS_ANNOTATION$$__Anno {\n  a: number[] = [1, -2]\n  b: string[][]\n  c: boolean[]\n}",
+            )],
+            &out,
+            vec![Some(cache_input)],
+        )
+        .expect("annotation array declaration must write ProgramCache");
+
+    let entry = ProgramCacheFile::read(&cache_file)
+        .unwrap()
+        .expect("ProgramCache must be written");
+    let anno_record = entry
+        .program
+        .record_table
+        .iter()
+        .filter_map(|entry| entry.value.as_ref())
+        .find(|record| record.name == b"test/annotation_decl.ets.Anno")
+        .expect("Anno record must be in ProgramCache");
+    let field = |name: &[u8]| {
+        anno_record
+            .field_list
+            .iter()
+            .find(|field| field.name == name)
+            .expect("annotation field must be present")
+    };
+    let a = field(b"a");
+    let b = field(b"b");
+    let c = field(b"c");
+
+    let a_type = a.r#type.as_ref().expect("a field type");
+    assert_eq!(a_type.component_name, b"f64");
+    assert_eq!(a_type.rank, 1);
+    assert_eq!(a_type.name, b"f64[]");
+    assert_eq!(a_type.type_id, 13);
+
+    let b_type = b.r#type.as_ref().expect("b field type");
+    assert_eq!(b_type.component_name, b"panda.String");
+    assert_eq!(b_type.rank, 2);
+    assert_eq!(b_type.name, b"panda.String[][]");
+    assert_eq!(b_type.type_id, 13);
+
+    let c_type = c.r#type.as_ref().expect("c field type");
+    assert_eq!(c_type.component_name, b"u1");
+    assert_eq!(c_type.rank, 1);
+    assert_eq!(c_type.name, b"u1[]");
+    assert_eq!(c_type.type_id, 13);
+
+    let literal_keys = entry
+        .program
+        .literal_array_table
+        .iter()
+        .map(|entry| String::from_utf8(entry.key.clone()).unwrap())
+        .collect::<Vec<_>>();
+    assert!(
+        literal_keys
+            .iter()
+            .any(|key| key == "test/annotation_decl.ets.Anno_a_0"),
+        "missing annotation array literal key; keys={literal_keys:?}"
+    );
+    let a_value_key = a
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.value.as_ref())
+        .and_then(|value| match &value.value {
+            Some(scalar_value::Value::ValueStr(value)) => {
+                Some(String::from_utf8(value.clone()).unwrap())
+            }
+            _ => None,
+        });
+    assert_eq!(
+        a_value_key.as_deref(),
+        Some("test/annotation_decl.ets.Anno_a_0")
+    );
 }
 
 #[test]

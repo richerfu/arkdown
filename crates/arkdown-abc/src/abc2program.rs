@@ -11,8 +11,8 @@ use crate::emit::file::{
     LITERAL_TAG_METHOD_AFFILIATE, LITERAL_TAG_SETTER, LITERAL_TAG_STRING,
 };
 use crate::emit::record::{
-    function_kind, method_access, CatchEntry, ClassRecord, FieldRecord, FieldValue, MethodKind,
-    MethodLabelStyle, MethodRecord, FIELD_OWNER_CLASS_IDX,
+    function_kind, method_access, CatchEntry, ClassRecord, FieldRecord, FieldType, FieldValue,
+    MethodKind, MethodLabelStyle, MethodRecord, FIELD_OWNER_CLASS_IDX,
 };
 use crate::error::AbcError;
 use crate::ir::opcodes::{Insn, PandasmInsn};
@@ -94,6 +94,7 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
                     name: field.name.clone(),
                     class_idx: FIELD_OWNER_CLASS_IDX,
                     type_idx: field.type_idx,
+                    field_type: FieldType::from_legacy_idx(field.type_idx),
                     access_flags: field.access_flags,
                     value: field_value_from_abc(
                         field.name.as_str(),
@@ -390,7 +391,10 @@ fn read_tagged_literal_array(
             }
         });
     }
-    Ok(LiteralArray { entries })
+    Ok(LiteralArray {
+        entries,
+        explicit_key: None,
+    })
 }
 
 fn read_module_record_literal_array(
@@ -476,7 +480,10 @@ fn read_module_record_literal_array(
         });
     }
 
-    Ok(LiteralArray { entries })
+    Ok(LiteralArray {
+        entries,
+        explicit_key: None,
+    })
 }
 
 fn read_counted(

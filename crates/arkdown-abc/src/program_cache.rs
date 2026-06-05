@@ -10,7 +10,7 @@ use crate::emit::file::{
     LITERAL_TAG_NULL, LITERAL_TAG_SETTER, LITERAL_TAG_STRING, LITERAL_TAG_TAGVALUE,
 };
 use crate::emit::record::{
-    function_kind, method_access, CatchEntry, ClassRecord, DebugInfoRecord, FieldRecord,
+    function_kind, method_access, CatchEntry, ClassRecord, DebugInfoRecord, FieldRecord, FieldType,
     FieldValue, InstructionDebugInfo, MethodKind, MethodLabelStyle, MethodRecord, ProgramLabel,
     FIELD_OWNER_CLASS_IDX,
 };
@@ -33,6 +33,8 @@ use crate::proto_panda::{
 
 const VALUE_TYPE_U8: u32 = 2;
 const VALUE_TYPE_U32: u32 = 6;
+const VALUE_TYPE_F64: u32 = 10;
+const VALUE_TYPE_STRING: u32 = 11;
 const VALUE_TYPE_LITERALARRAY: u32 = 20;
 
 const VARIANT_BOOL: i32 = variant_value::VariantValueType::Bool as i32;
@@ -44,11 +46,13 @@ const VARIANT_F64: i32 = variant_value::VariantValueType::F64 as i32;
 const VARIANT_STRING: i32 = variant_value::VariantValueType::String as i32;
 
 const SCALAR_UINT64: i32 = scalar_value::VariantValueType::Uint64 as i32;
+const SCALAR_DOUBLE: i32 = scalar_value::VariantValueType::Double as i32;
 const SCALAR_STRING: i32 = scalar_value::VariantValueType::String as i32;
 
 const CONCURRENT_MODULE_REQUEST_RECORD_NAME: &str = "_ESConcurrentModuleRequestsAnnotation";
 const EXPECTED_PROPERTY_COUNT_RECORD_NAME: &str = "_ESExpectedPropertyCountAnnotation";
 const SLOT_NUMBER_RECORD_NAME: &str = "_ESSlotNumberAnnotation";
+const PANDA_STRING_RECORD_NAME: &str = "panda.String";
 const ANNOTATION_RECORD_ACCESS_FLAGS: u32 = 0x2001;
 
 pub(crate) fn program_for_record(
@@ -91,6 +95,7 @@ pub(crate) fn program_for_record(
         &mut record_table,
         include_expected_record(record, target_api_version),
     );
+    push_external_record_tables_for_record(&mut record_table, record);
     insert_record_table(
         &mut record_table,
         bytes(&pandasm_record_name(&record.name)),
@@ -128,7 +133,7 @@ pub(crate) fn program_for_record(
         };
         insert_literal_array_table(
             &mut literal_array_table,
-            bytes(&literal_key(record, idx)),
+            bytes(&literal_key(record, file, idx)),
             literal_array_to_proto(array, &record.name, is_raw_module_literal_array(array))?,
         );
     }
@@ -144,9 +149,21 @@ pub(crate) fn program_for_record(
 }
 
 pub(crate) fn program_for_file(file: &AbcFile, target_api_version: u32) -> io::Result<Program> {
+    let record_indices = (0..file.records.len()).collect::<Vec<_>>();
+    program_for_records(file, &record_indices, target_api_version)
+}
+
+pub(crate) fn program_for_records(
+    file: &AbcFile,
+    record_indices: &[usize],
+    target_api_version: u32,
+) -> io::Result<Program> {
     if file
         .records
         .iter()
+        .enumerate()
+        .filter(|(idx, _)| record_indices.contains(idx))
+        .map(|(_, record)| record)
         .flat_map(|record| &record.methods)
         .any(|method| method.pandasm_insns.is_empty() && !method.bytecode.is_empty())
     {
@@ -155,20 +172,24 @@ pub(crate) fn program_for_file(file: &AbcFile, target_api_version: u32) -> io::R
         );
     }
 
-    let lang = file
-        .records
+    let selected_records = record_indices
+        .iter()
+        .filter_map(|idx| file.records.get(*idx))
+        .collect::<Vec<_>>();
+
+    let lang = selected_records
         .first()
         .map(|record| record.source_lang as u32)
         .unwrap_or_default();
     let mut literal_indices = BTreeSet::new();
     let mut literal_keys = BTreeMap::new();
     let mut literal_record_names = BTreeMap::new();
-    for record in &file.records {
+    for record in &selected_records {
         for &idx in &record.module_literal_indices {
             literal_indices.insert(idx);
             literal_keys
                 .entry(idx)
-                .or_insert_with(|| literal_key(record, idx));
+                .or_insert_with(|| literal_key(record, file, idx));
             literal_record_names
                 .entry(idx)
                 .or_insert_with(|| record.name.clone());
@@ -177,7 +198,7 @@ pub(crate) fn program_for_file(file: &AbcFile, target_api_version: u32) -> io::R
             literal_indices.insert(idx);
             literal_keys
                 .entry(idx)
-                .or_insert_with(|| literal_key(record, idx));
+                .or_insert_with(|| literal_key(record, file, idx));
             literal_record_names
                 .entry(idx)
                 .or_insert_with(|| record.name.clone());
@@ -195,13 +216,13 @@ pub(crate) fn program_for_file(file: &AbcFile, target_api_version: u32) -> io::R
     };
 
     let mut record_table = BTreeMap::new();
-    let include_expected = file
-        .records
+    let include_expected = selected_records
         .iter()
         .any(|record| include_expected_record(record, target_api_version));
     push_annotation_record_tables(&mut record_table, include_expected);
     let mut function_table = BTreeMap::new();
-    for record in &file.records {
+    for record in &selected_records {
+        push_external_record_tables_for_record(&mut record_table, record);
         insert_record_table(
             &mut record_table,
             bytes(&pandasm_record_name(&record.name)),
@@ -290,6 +311,7 @@ pub(crate) fn append_program_to_file(
         let literal = literal_array_from_proto(
             array,
             is_module_literal,
+            key.clone(),
             literal_array_record_name(&key),
             &literal_key_to_index,
             &mut literal_method_refs,
@@ -313,7 +335,7 @@ pub(crate) fn append_program_to_file(
         } else {
             utf8(&record_proto.name)?
         };
-        if is_pandasm_annotation_stub(&proto_record_name) {
+        if is_pandasm_annotation_stub(&proto_record_name) || is_external_record(&record_proto) {
             continue;
         }
         let record_name = class_name_from_pandasm_record(&proto_record_name);
@@ -498,6 +520,41 @@ fn annotation_record_to_proto(name: &str) -> Record {
     }
 }
 
+fn push_external_record_tables_for_record(
+    record_table: &mut BTreeMap<Vec<u8>, Record>,
+    record: &ClassRecord,
+) {
+    if record
+        .fields
+        .iter()
+        .any(|field| field.field_type.requires_panda_string_record())
+    {
+        insert_record_table(
+            record_table,
+            bytes(PANDA_STRING_RECORD_NAME),
+            external_record_to_proto(PANDA_STRING_RECORD_NAME),
+        );
+    }
+}
+
+fn external_record_to_proto(name: &str) -> Record {
+    Record {
+        name: bytes(name),
+        conflict: false,
+        language: 0,
+        metadata: Some(record_metadata_with_attributes(
+            1,
+            vec!["external".to_string()],
+        )),
+        field_list: Vec::new(),
+        params_num: 0,
+        body_presence: false,
+        body_location: None,
+        source_file: Vec::new(),
+        file_location: None,
+    }
+}
+
 fn is_pandasm_annotation_stub(name: &str) -> bool {
     matches!(
         name,
@@ -505,6 +562,21 @@ fn is_pandasm_annotation_stub(name: &str) -> bool {
             | EXPECTED_PROPERTY_COUNT_RECORD_NAME
             | SLOT_NUMBER_RECORD_NAME
     )
+}
+
+fn is_external_record(record: &Record) -> bool {
+    record
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.father.as_ref())
+        .and_then(|metadata| metadata.father.as_ref())
+        .and_then(|metadata| metadata.father.as_ref())
+        .is_some_and(|metadata| {
+            metadata
+                .set_attributes
+                .iter()
+                .any(|attribute| attribute == b"external")
+        })
 }
 
 fn function_belongs_to_record(
@@ -523,6 +595,7 @@ fn function_belongs_to_record(
 fn literal_array_from_proto(
     array: crate::proto_panda::LiteralArray,
     module_style: bool,
+    explicit_key: String,
     record_name: Option<&str>,
     literal_key_to_index: &BTreeMap<String, usize>,
     method_refs: &mut BTreeSet<String>,
@@ -532,7 +605,10 @@ fn literal_array_from_proto(
         for literal in array.literals {
             entries.push(module_literal_from_proto(literal)?);
         }
-        return Ok(LiteralArray { entries });
+        return Ok(LiteralArray {
+            entries,
+            explicit_key: Some(explicit_key),
+        });
     }
 
     if array.literals.len() % 2 != 0 {
@@ -553,7 +629,10 @@ fn literal_array_from_proto(
             method_refs,
         )?);
     }
-    Ok(LiteralArray { entries })
+    Ok(LiteralArray {
+        entries,
+        explicit_key: Some(explicit_key),
+    })
 }
 
 fn module_literal_from_proto(literal: Literal) -> io::Result<LiteralEntry> {
@@ -700,21 +779,26 @@ fn field_from_proto(
     literal_key_to_index: &BTreeMap<String, usize>,
     module_literal_indices: &mut BTreeSet<usize>,
 ) -> io::Result<FieldRecord> {
-    let field_type = field
-        .metadata
-        .as_ref()
-        .and_then(|metadata| metadata.field_type.as_ref())
-        .or(field.r#type.as_ref());
+    let proto_field_type = field.r#type.as_ref().or_else(|| {
+        field
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.field_type.as_ref())
+    });
     let value = field
         .metadata
         .as_ref()
         .and_then(|metadata| metadata.value.as_ref())
         .map(|value| field_value_from_proto(value, literal_key_to_index, module_literal_indices))
         .transpose()?;
+    let field_type = proto_field_type
+        .map(field_type_from_proto)
+        .unwrap_or(FieldType::U8);
     Ok(FieldRecord {
         name: utf8(&field.name)?,
         class_idx: FIELD_OWNER_CLASS_IDX,
-        type_idx: field_type.map(type_idx).unwrap_or(0),
+        type_idx: legacy_type_idx(&field_type),
+        field_type,
         access_flags: field_access_flags(field),
         value,
     })
@@ -730,10 +814,13 @@ fn field_value_from_proto(
             scalar_u64_value(value)?,
             "field u8 value",
         )?)),
+        Some(0) => Ok(FieldValue::Bool(scalar_u64_value(value)? != 0)),
         Some(VALUE_TYPE_U32) => Ok(FieldValue::U32(to_u32(
             scalar_u64_value(value)?,
             "field u32 value",
         )?)),
+        Some(VALUE_TYPE_F64) => Ok(FieldValue::F64(scalar_double_value(value)?)),
+        Some(VALUE_TYPE_STRING) => Ok(FieldValue::String(scalar_string_value(value)?)),
         Some(VALUE_TYPE_LITERALARRAY) => {
             let key = scalar_string_value(value)?;
             let Some(&index) = literal_key_to_index.get(&key) else {
@@ -1737,10 +1824,51 @@ fn function_annotation_u32(
     Ok(None)
 }
 
-fn type_idx(value: &Type) -> u16 {
-    match std::str::from_utf8(&value.name).ok() {
-        Some("u8") => 0,
-        Some("u32") => 1,
+fn field_type_from_proto(value: &Type) -> FieldType {
+    let component_name = proto_type_component_name(value);
+    let rank = u32::try_from(value.rank).unwrap_or(u32::MAX);
+    if rank > 0 {
+        return FieldType::Array {
+            component_name,
+            rank,
+        };
+    }
+    match component_name.as_str() {
+        "u1" => FieldType::U1,
+        "u8" => FieldType::U8,
+        "u32" => FieldType::U32,
+        "f64" => FieldType::F64,
+        "panda.String" => FieldType::PandaString,
+        "any" => FieldType::Any,
+        _ => FieldType::Any,
+    }
+}
+
+fn proto_type_component_name(value: &Type) -> String {
+    if let Ok(component_name) = std::str::from_utf8(&value.component_name) {
+        if !component_name.is_empty() {
+            return component_name.to_string();
+        }
+    }
+    let mut name = std::str::from_utf8(&value.name)
+        .unwrap_or("any")
+        .to_string();
+    for _ in 0..value.rank {
+        if let Some(stripped) = name.strip_suffix("[]") {
+            name = stripped.to_string();
+        }
+    }
+    if name.is_empty() {
+        "any".to_string()
+    } else {
+        name
+    }
+}
+
+fn legacy_type_idx(value: &FieldType) -> u16 {
+    match value {
+        FieldType::U8 => 0,
+        FieldType::U32 => 1,
         _ => 0,
     }
 }
@@ -1749,6 +1877,13 @@ fn scalar_u64_value(value: &ScalarValue) -> io::Result<u64> {
     match &value.value {
         Some(scalar_value::Value::ValueU64(value)) => Ok(*value),
         _ => invalid_data("missing scalar uint64 value"),
+    }
+}
+
+fn scalar_double_value(value: &ScalarValue) -> io::Result<f64> {
+    match &value.value {
+        Some(scalar_value::Value::ValueDouble(value)) => Ok(*value),
+        _ => invalid_data("missing scalar double value"),
     }
 }
 
@@ -1907,32 +2042,45 @@ fn record_to_proto(record: &ClassRecord, file: &AbcFile) -> Record {
 }
 
 fn field_to_proto(field: &FieldRecord, record: &ClassRecord, file: &AbcFile) -> Field {
-    let field_type = field_type(field.type_idx);
+    let field_type = field_type(&field.field_type);
     Field {
         r#type: Some(field_type.clone()),
         name: bytes(&field.name),
         metadata: Some(FieldMetadata {
             father: Some(item_metadata(field.access_flags)),
-            field_type: Some(field_type),
+            field_type: Some(annotation_field_type_sentinel()),
             value: field
                 .value
+                .as_ref()
                 .map(|value| field_scalar_value(value, record, file)),
         }),
         line_of_def: 0,
         whole_line: Vec::new(),
         bound_left: 0,
         bound_right: 0,
-        is_defined: false,
+        is_defined: true,
     }
 }
 
-fn field_scalar_value(value: FieldValue, record: &ClassRecord, _file: &AbcFile) -> ScalarValue {
+fn field_scalar_value(value: &FieldValue, record: &ClassRecord, file: &AbcFile) -> ScalarValue {
     match value {
-        FieldValue::U8(value) => scalar_u64(VALUE_TYPE_U8, value as u64),
-        FieldValue::U32(value) => scalar_u64(VALUE_TYPE_U32, value as u64),
+        FieldValue::U8(value) => scalar_u64(VALUE_TYPE_U8, *value as u64),
+        FieldValue::Bool(value) => scalar_bool(*value),
+        FieldValue::U32(value) => scalar_u64(VALUE_TYPE_U32, *value as u64),
         FieldValue::LiteralArray(index) => {
-            scalar_string(VALUE_TYPE_LITERALARRAY, literal_key(record, index))
+            scalar_string(VALUE_TYPE_LITERALARRAY, literal_key(record, file, *index))
         }
+        FieldValue::String(value) => scalar_string(VALUE_TYPE_STRING, value.clone()),
+        FieldValue::F64(value) => scalar_double(VALUE_TYPE_F64, *value),
+    }
+}
+
+fn annotation_field_type_sentinel() -> Type {
+    Type {
+        component_name: Vec::new(),
+        rank: 0,
+        name: Vec::new(),
+        type_id: 1,
     }
 }
 
@@ -2424,7 +2572,8 @@ fn insn_to_proto(
         | Insn::CreateArrayWithBuffer(count, literal)
         | Insn::CreateObjectWithBuffer(count, literal) => {
             out.imms.push(imm_i64(*count as i64));
-            out.ids.push(bytes(&literal_key(record, *literal as usize)));
+            out.ids
+                .push(bytes(&legacy_literal_key(record, *literal as usize)));
         }
         Insn::NewLexEnv(count) => out.imms.push(imm_i64(*count as i64)),
         Insn::ThrowUndefinedIfHoleWithName(id) => out.ids.push(string_id(strings, *id)?),
@@ -2447,7 +2596,8 @@ fn insn_to_proto(
         }
         Insn::CallRuntimeCreatePrivateProperty(count, literal) => {
             out.imms.push(imm_i64(*count as i64));
-            out.ids.push(bytes(&literal_key(record, *literal as usize)));
+            out.ids
+                .push(bytes(&legacy_literal_key(record, *literal as usize)));
         }
         Insn::DefineFuncShort(slot, id, length) | Insn::DefineMethodShort(slot, id, length) => {
             out.imms
@@ -2461,7 +2611,8 @@ fn insn_to_proto(
                 &next_constructor_name(record, offset)
                     .unwrap_or_else(|| full_method_name(&record.name, "func_main_0")),
             ));
-            out.ids.push(bytes(&literal_key(record, *literal as usize)));
+            out.ids
+                .push(bytes(&legacy_literal_key(record, *literal as usize)));
             out.regs.push(*reg as u32);
         }
         Insn::DefineGetterSetterByValue(a, b, c, d) => {
@@ -2748,7 +2899,14 @@ fn imm_f64(value: f64) -> ins::IType {
     }
 }
 
-fn literal_key(record: &ClassRecord, literal_index: usize) -> String {
+fn literal_key(record: &ClassRecord, file: &AbcFile, literal_index: usize) -> String {
+    file.literal_arrays
+        .get(literal_index)
+        .and_then(|array| array.explicit_key.clone())
+        .unwrap_or_else(|| legacy_literal_key(record, literal_index))
+}
+
+fn legacy_literal_key(record: &ClassRecord, literal_index: usize) -> String {
     literal_array_key(&record.name, literal_index)
 }
 
@@ -2761,8 +2919,19 @@ fn label_name_for_inst_idx(inst_idx: usize) -> String {
 }
 
 fn record_metadata(access_flags: u32) -> RecordMetadata {
+    record_metadata_with_attributes(access_flags, Vec::new())
+}
+
+fn record_metadata_with_attributes(
+    access_flags: u32,
+    set_attributes: Vec<String>,
+) -> RecordMetadata {
     RecordMetadata {
-        father: Some(item_metadata(access_flags)),
+        father: Some(item_metadata_with_attributes(
+            access_flags,
+            Vec::new(),
+            set_attributes,
+        )),
     }
 }
 
@@ -2794,16 +2963,33 @@ fn item_metadata_with_annotations(
     access_flags: u32,
     annotations: Vec<AnnotationData>,
 ) -> ItemMetadata {
+    item_metadata_with_attributes(access_flags, annotations, Vec::new())
+}
+
+fn item_metadata_with_attributes(
+    access_flags: u32,
+    annotations: Vec<AnnotationData>,
+    set_attributes: Vec<String>,
+) -> ItemMetadata {
     ItemMetadata {
-        father: Some(annotation_metadata(annotations)),
+        father: Some(annotation_metadata_with_attributes(
+            annotations,
+            set_attributes,
+        )),
         access_flags,
     }
 }
 
-fn annotation_metadata(annotations: Vec<AnnotationData>) -> crate::proto_panda::AnnotationMetadata {
+fn annotation_metadata_with_attributes(
+    annotations: Vec<AnnotationData>,
+    set_attributes: Vec<String>,
+) -> crate::proto_panda::AnnotationMetadata {
     crate::proto_panda::AnnotationMetadata {
         father: Some(Metadata {
-            set_attributes: Vec::new(),
+            set_attributes: set_attributes
+                .into_iter()
+                .map(|value| bytes(&value))
+                .collect(),
             attributes: Vec::new(),
         }),
         annotations,
@@ -2876,6 +3062,22 @@ fn scalar_u64(value_type: u32, value: u64) -> ScalarValue {
     }
 }
 
+fn scalar_bool(value: bool) -> ScalarValue {
+    ScalarValue {
+        father: Some(Value { r#type: 0 }),
+        value: Some(scalar_value::Value::ValueU64(u64::from(value))),
+        r#type: SCALAR_UINT64,
+    }
+}
+
+fn scalar_double(value_type: u32, value: f64) -> ScalarValue {
+    ScalarValue {
+        father: Some(Value { r#type: value_type }),
+        value: Some(scalar_value::Value::ValueDouble(value)),
+        r#type: SCALAR_DOUBLE,
+    }
+}
+
 fn scalar_string(value_type: u32, value: String) -> ScalarValue {
     ScalarValue {
         father: Some(Value { r#type: value_type }),
@@ -2884,11 +3086,12 @@ fn scalar_string(value_type: u32, value: String) -> ScalarValue {
     }
 }
 
-fn field_type(type_idx: u16) -> Type {
-    match type_idx {
-        0 => type_named("u8"),
-        1 => type_named("u32"),
-        _ => type_named("any"),
+fn field_type(field_type: &FieldType) -> Type {
+    Type {
+        component_name: bytes(field_type.component_name()),
+        rank: field_type.rank() as u64,
+        name: bytes(&field_type.pandasm_name()),
+        type_id: field_type.proto_type_id(),
     }
 }
 
@@ -2990,6 +3193,7 @@ mod tests {
         ];
         let array = LiteralArray {
             entries: entries.clone(),
+            explicit_key: None,
         };
 
         let proto = literal_array_to_proto(&array, "record", false).unwrap();
@@ -3030,6 +3234,7 @@ mod tests {
         let restored = literal_array_from_proto(
             proto,
             false,
+            "record_0".to_string(),
             Some("record"),
             &BTreeMap::new(),
             &mut method_refs,
@@ -3047,6 +3252,7 @@ mod tests {
         ];
         let array = LiteralArray {
             entries: entries.clone(),
+            explicit_key: None,
         };
 
         let proto = literal_array_to_proto(&array, "record", true).unwrap();
@@ -3066,9 +3272,15 @@ mod tests {
         assert!(!tags.contains(&LITERAL_TAG_TAGVALUE));
 
         let mut method_refs = BTreeSet::new();
-        let restored =
-            literal_array_from_proto(proto, true, None, &BTreeMap::new(), &mut method_refs)
-                .unwrap();
+        let restored = literal_array_from_proto(
+            proto,
+            true,
+            "record_1".to_string(),
+            None,
+            &BTreeMap::new(),
+            &mut method_refs,
+        )
+        .unwrap();
         assert_eq!(restored.entries, entries);
     }
 
@@ -3810,14 +4022,20 @@ obj.m(); obj.am(); obj.gm(); obj.agm();
             .iter()
             .map(|field| {
                 field
-                    .metadata
+                    .r#type
                     .as_ref()
-                    .and_then(|metadata| metadata.field_type.as_ref())
                     .map(|field_type| (field.name.as_slice(), field_type.type_id))
                     .unwrap()
             })
             .collect::<Vec<_>>();
         assert!(field_type_ids.contains(&(b"moduleRecordIdx".as_slice(), 0x08)));
+        assert!(user_record.field_list.iter().all(|field| {
+            field
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.field_type.as_ref())
+                .is_some_and(|field_type| field_type.type_id == 1)
+        }));
     }
 
     #[test]

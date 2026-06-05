@@ -262,21 +262,155 @@ pub struct FieldRecord {
     /// Field type index in the owning class. hvigor uses `0` for `u8` metadata
     /// fields and `1` for `u32` metadata fields.
     pub type_idx: u16,
+    /// Structured Panda field type used by ProgramCache and by the ABC
+    /// IndexSection type table.
+    pub field_type: FieldType,
     /// Access flags — 1 = ACC_PUBLIC.
     pub access_flags: u32,
     /// Optional constant value emitted in the field's tagged section.
     pub value: Option<FieldValue>,
 }
 
+/// Panda field type carried by a [`FieldRecord`].
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum FieldType {
+    U1,
+    U8,
+    U32,
+    F64,
+    PandaString,
+    Array { component_name: String, rank: u32 },
+    Any,
+}
+
+impl FieldType {
+    pub(crate) fn from_legacy_idx(type_idx: u16) -> Self {
+        match type_idx {
+            0 => Self::U8,
+            1 => Self::U32,
+            _ => Self::Any,
+        }
+    }
+
+    pub(crate) fn binary_type_id(&self) -> Option<u32> {
+        match self {
+            Self::U1 => Some(0),
+            Self::U8 => Some(2),
+            Self::U32 => Some(6),
+            Self::F64 => Some(8),
+            Self::PandaString | Self::Array { .. } | Self::Any => None,
+        }
+    }
+
+    pub(crate) fn component_name(&self) -> &str {
+        match self {
+            Self::U1 => "u1",
+            Self::U8 => "u8",
+            Self::U32 => "u32",
+            Self::F64 => "f64",
+            Self::PandaString => "panda.String",
+            Self::Array { component_name, .. } => component_name,
+            Self::Any => "any",
+        }
+    }
+
+    pub(crate) fn rank(&self) -> u32 {
+        match self {
+            Self::Array { rank, .. } => *rank,
+            _ => 0,
+        }
+    }
+
+    pub(crate) fn pandasm_name(&self) -> String {
+        let mut name = self.component_name().to_string();
+        for _ in 0..self.rank() {
+            name.push_str("[]");
+        }
+        name
+    }
+
+    pub(crate) fn proto_type_id(&self) -> u32 {
+        if self.rank() > 0 {
+            return 0x0d;
+        }
+        match self.component_name() {
+            "void" => 0x01,
+            "u1" => 0x02,
+            "i8" => 0x03,
+            "u8" => 0x04,
+            "i16" => 0x05,
+            "u16" => 0x06,
+            "i32" => 0x07,
+            "u32" => 0x08,
+            "f32" => 0x09,
+            "f64" => 0x0a,
+            "i64" => 0x0b,
+            "u64" => 0x0c,
+            "any" => 0x0e,
+            _ => 0x0d,
+        }
+    }
+
+    pub(crate) fn foreign_descriptor(&self) -> Option<String> {
+        match self {
+            Self::PandaString => Some("Lpanda.String;".to_string()),
+            Self::Array {
+                component_name,
+                rank,
+            } if *rank > 0 => {
+                let mut descriptor = "[".repeat(*rank as usize);
+                if let Some(shorty) = primitive_descriptor(component_name) {
+                    descriptor.push(shorty);
+                } else {
+                    descriptor.push('L');
+                    descriptor.push_str(component_name);
+                    descriptor.push(';');
+                }
+                Some(descriptor)
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn requires_panda_string_record(&self) -> bool {
+        self.component_name() == "panda.String"
+    }
+}
+
+fn primitive_descriptor(component_name: &str) -> Option<char> {
+    match component_name {
+        "void" => Some('V'),
+        "u1" => Some('Z'),
+        "i8" => Some('B'),
+        "u8" => Some('H'),
+        "i16" => Some('S'),
+        "u16" => Some('C'),
+        "i32" => Some('I'),
+        "u32" => Some('U'),
+        "f32" => Some('F'),
+        "f64" => Some('D'),
+        "i64" => Some('J'),
+        "u64" => Some('Q'),
+        "any" => Some('A'),
+        _ => None,
+    }
+}
+
 /// Constant field values used by hvigor module metadata records.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum FieldValue {
     /// `u8` zero (`FieldTag::VALUE = 0x01`, one-byte payload).
     U8(u8),
+    /// `u1` boolean (`FieldTag::VALUE = 0x01`, one-byte payload).
+    Bool(bool),
     /// `u32` file offset (`FieldTag::VALUE = 0x02`, four-byte payload).
     U32(u32),
     /// `u32` file offset of a literal array, resolved during file layout.
     LiteralArray(usize),
+    /// `u32` file offset of a StringItem default value.
+    String(String),
+    /// `u32` file offset of an inline f64 default value.
+    F64(f64),
 }
 
 /// A compiled module, represented as a Panda `ClassItem`.
@@ -400,7 +534,7 @@ impl ClassRecord {
                 2 + 2
                     + 4
                     + uleb128(field.access_flags as u64).len()
-                    + field.value.map_or(0, FieldValue::encoded_len)
+                    + field.value.as_ref().map_or(0, FieldValue::encoded_len)
                     + 1
             })
             .sum()
@@ -450,8 +584,12 @@ impl ClassRecord {
         debug_info_offsets: &[Option<u32>],
         annotation_offsets: &[MethodAnnotationOffsets],
         literal_array_offsets: &[u32],
+        field_type_indices: &[u16],
+        field_value_offsets: &[Option<u32>],
     ) -> Vec<u8> {
         debug_assert_eq!(field_name_offsets.len(), self.fields.len());
+        debug_assert_eq!(field_type_indices.len(), self.fields.len());
+        debug_assert_eq!(field_value_offsets.len(), self.fields.len());
         debug_assert_eq!(method_name_offsets.len(), self.methods.len());
         debug_assert_eq!(code_offsets.len(), self.methods.len());
         debug_assert_eq!(debug_info_offsets.len(), self.methods.len());
@@ -493,7 +631,12 @@ impl ClassRecord {
         //   [access_flags: ULEB128]  1 = ACC_PUBLIC
         //   [FieldTag::NOTHING = 0x00]
 
-        for (field, &name_off) in self.fields.iter().zip(field_name_offsets.iter()) {
+        for (field_idx, (field, &name_off)) in self
+            .fields
+            .iter()
+            .zip(field_name_offsets.iter())
+            .enumerate()
+        {
             // class_idx/type slot: u16 LE
             let field_class_idx = if field.class_idx == FIELD_OWNER_CLASS_IDX {
                 class_idx
@@ -502,13 +645,17 @@ impl ClassRecord {
             };
             buf.extend_from_slice(&field_class_idx.to_le_bytes());
             // type_idx: u16 LE
-            buf.extend_from_slice(&field.type_idx.to_le_bytes());
+            buf.extend_from_slice(&field_type_indices[field_idx].to_le_bytes());
             // name_off: u32 LE (file offset to field's StringItem)
             buf.extend_from_slice(&name_off.to_le_bytes());
             // access_flags: ULEB128
             buf.extend_from_slice(&uleb128(field.access_flags as u64));
-            if let Some(value) = field.value {
-                value.encode_into(&mut buf, literal_array_offsets);
+            if let Some(value) = &field.value {
+                value.encode_into(
+                    &mut buf,
+                    literal_array_offsets,
+                    field_value_offsets[field_idx],
+                );
             }
             // FieldTag::NOTHING = 0x00
             buf.push(0x00);
@@ -627,18 +774,30 @@ impl MethodRecord {
 }
 
 impl FieldValue {
-    fn encoded_len(self) -> usize {
+    fn encoded_len(&self) -> usize {
         match self {
-            FieldValue::U8(_) => 2,
-            FieldValue::U32(_) | FieldValue::LiteralArray(_) => 5,
+            FieldValue::U8(_) | FieldValue::Bool(_) => 2,
+            FieldValue::U32(_)
+            | FieldValue::LiteralArray(_)
+            | FieldValue::String(_)
+            | FieldValue::F64(_) => 5,
         }
     }
 
-    fn encode_into(self, buf: &mut Vec<u8>, literal_array_offsets: &[u32]) {
+    fn encode_into(
+        &self,
+        buf: &mut Vec<u8>,
+        literal_array_offsets: &[u32],
+        field_value_offset: Option<u32>,
+    ) {
         match self {
             FieldValue::U8(value) => {
                 buf.push(0x01);
-                buf.push(value);
+                buf.push(*value);
+            }
+            FieldValue::Bool(value) => {
+                buf.push(0x01);
+                buf.push(u8::from(*value));
             }
             FieldValue::U32(value) => {
                 buf.push(0x02);
@@ -646,9 +805,14 @@ impl FieldValue {
             }
             FieldValue::LiteralArray(index) => {
                 let value = literal_array_offsets
-                    .get(index)
+                    .get(*index)
                     .copied()
                     .expect("field literal array index must be resolved");
+                buf.push(0x02);
+                buf.extend_from_slice(&value.to_le_bytes());
+            }
+            FieldValue::String(_) | FieldValue::F64(_) => {
+                let value = field_value_offset.expect("field value offset must be resolved");
                 buf.push(0x02);
                 buf.extend_from_slice(&value.to_le_bytes());
             }
@@ -800,6 +964,8 @@ mod tests {
                 expected_property_count: None,
                 slot_number: 0x200,
             }],
+            &[],
+            &[],
             &[],
         );
         assert_eq!(bytes.len(), record.class_item_byte_size());

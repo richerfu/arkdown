@@ -3,15 +3,15 @@ use std::path::Path;
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    AnnotationDeclaration, Argument, ArrayAssignmentTarget, ArrayPattern, AssignmentOperator,
-    AssignmentTarget, AssignmentTargetMaybeDefault, AssignmentTargetProperty, BindingPattern,
-    ClassElement, Declaration, ExportDefaultDeclarationKind, Expression, ForInStatement,
-    ForOfStatement, ForStatementLeft, FormalParameter, Function, FunctionBody,
-    ImportDeclarationSpecifier, ImportOrExportKind, LogicalOperator, MethodDefinitionKind,
-    ObjectAssignmentTarget, ObjectPattern, Program, PropertyKey, SimpleAssignmentTarget, Statement,
-    TSEnumDeclaration, TSEnumMemberName, TSImportEqualsDeclaration, TSModuleDeclaration,
-    TSModuleReference, TSQualifiedName, TSTypeName, UnaryOperator, UpdateExpression,
-    YieldExpression,
+    AnnotationDeclaration, AnnotationElement, Argument, ArrayAssignmentTarget,
+    ArrayExpressionElement, ArrayPattern, AssignmentOperator, AssignmentTarget,
+    AssignmentTargetMaybeDefault, AssignmentTargetProperty, BindingPattern, ClassElement,
+    Declaration, ExportDefaultDeclarationKind, Expression, ForInStatement, ForOfStatement,
+    ForStatementLeft, FormalParameter, Function, FunctionBody, ImportDeclarationSpecifier,
+    ImportOrExportKind, LogicalOperator, MethodDefinitionKind, ObjectAssignmentTarget,
+    ObjectPattern, Program, PropertyKey, SimpleAssignmentTarget, Statement, TSEnumDeclaration,
+    TSEnumMemberName, TSImportEqualsDeclaration, TSModuleDeclaration, TSModuleReference,
+    TSQualifiedName, TSType, TSTypeName, UnaryOperator, UpdateExpression, YieldExpression,
 };
 use oxc_ast_visit::{walk, Visit};
 use oxc_parser::{Parser, ParserReturn};
@@ -22,8 +22,9 @@ use oxc_transformer::{Module as TransformModule, TransformOptions, Transformer};
 
 use crate::emit::file::{LiteralArray, LiteralEntry};
 use crate::emit::record::{
-    function_kind, CatchEntry, ClassRecord, DebugInfoRecord, InstructionDebugInfo, MethodKind,
-    MethodLabelStyle, MethodRecord, ProgramLabel,
+    function_kind, CatchEntry, ClassRecord, DebugInfoRecord, FieldRecord, FieldType, FieldValue,
+    InstructionDebugInfo, MethodKind, MethodLabelStyle, MethodRecord, ProgramLabel,
+    FIELD_OWNER_CLASS_IDX,
 };
 use crate::emit::strings::StringTable;
 use crate::error::AbcError;
@@ -50,6 +51,7 @@ use crate::ir::module_lexical::collect_module_lexical_bindings;
 use crate::ir::module_record::{collect_module_record, DEFAULT_LOCAL_NAME};
 use crate::ir::opcodes::Insn;
 use crate::ir::record_layout::{is_explicit_ecmascript_source_file, RecordLayout};
+use crate::names::pandasm_record_name;
 
 const ARG_SENTINEL_BASE: u8 = 192;
 const ARG_SENTINEL_LIMIT: u8 = 64;
@@ -580,6 +582,659 @@ pub fn build_record_with_debug_and_source_map_for_target_with_mode(
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnnotationEnumValueKind {
+    Number,
+    String,
+}
+
+#[derive(Debug, Clone)]
+enum AnnotationEnumValue {
+    Number(f64),
+    String(String),
+}
+
+#[derive(Debug, Clone)]
+struct AnnotationEnumInfo {
+    value_kind: AnnotationEnumValueKind,
+    members: FxHashMap<String, AnnotationEnumValue>,
+}
+
+pub fn annotation_records_from_source(
+    source: &str,
+    record_name: &str,
+    source_file: Option<&str>,
+    target_api_version: u32,
+    enable_annotations: bool,
+    literal_arrays: &mut Vec<LiteralArray>,
+) -> Result<Vec<ClassRecord>, AbcError> {
+    let allocator = Allocator::default();
+    let is_ets = source_file
+        .or(Some(record_name))
+        .map(|s| s.ends_with(".ets"))
+        .unwrap_or(false);
+    let source_type = if is_ets {
+        SourceType::ets()
+    } else {
+        SourceType::ts().with_module(true)
+    };
+    let ParserReturn {
+        program,
+        panicked,
+        errors,
+        ..
+    } = Parser::new(&allocator, source, source_type).parse();
+    if panicked {
+        return Err(AbcError::Parse {
+            file: record_name.to_string(),
+            message: errors
+                .first()
+                .map(|e| e.message.to_string())
+                .unwrap_or_else(|| "parser panic".to_string()),
+        });
+    }
+
+    let enum_infos = collect_annotation_enum_infos(&program);
+    let mut records = Vec::new();
+    for stmt in &program.body {
+        match stmt {
+            Statement::AnnotationDeclaration(decl) => records.push(annotation_record_from_decl(
+                decl,
+                record_name,
+                target_api_version,
+                enable_annotations,
+                literal_arrays,
+                &enum_infos,
+            )?),
+            Statement::ExportNamedDeclaration(export) => {
+                if let Some(Declaration::AnnotationDeclaration(decl)) = &export.declaration {
+                    records.push(annotation_record_from_decl(
+                        decl,
+                        record_name,
+                        target_api_version,
+                        enable_annotations,
+                        literal_arrays,
+                        &enum_infos,
+                    )?);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(records)
+}
+
+fn annotation_record_from_decl(
+    decl: &AnnotationDeclaration<'_>,
+    record_name: &str,
+    target_api_version: u32,
+    enable_annotations: bool,
+    literal_arrays: &mut Vec<LiteralArray>,
+    enum_infos: &FxHashMap<String, AnnotationEnumInfo>,
+) -> Result<ClassRecord, AbcError> {
+    if !(enable_annotations && target_api_version >= ANNOTATION_SUPPORTED_API_VERSION) {
+        return Err(AbcError::Parse {
+            file: record_name.to_string(),
+            message: ANNOTATION_NOT_ENABLED_MESSAGE.to_string(),
+        });
+    }
+    let annotation_name = decl.id.name.as_str();
+    let Some(record_short_name) = annotation_name.strip_prefix(ANNOTATION_PREFIX) else {
+        return Err(AbcError::Parse {
+            file: record_name.to_string(),
+            message: format!(
+                "Annotation declaration need to be prefixed with '{ANNOTATION_PREFIX}'"
+            ),
+        });
+    };
+    let annotation_record_name = if record_name.is_empty() {
+        record_short_name.to_string()
+    } else {
+        format!("{}.{}", pandasm_record_name(record_name), record_short_name)
+    };
+
+    let mut fields = Vec::with_capacity(decl.body.body.len());
+    let mut literal_indices = Vec::new();
+    for element in &decl.body.body {
+        let AnnotationElement::PropertyDefinition(property) = element;
+        let Some(name) = property.key.static_name() else {
+            return Err(AbcError::UnsupportedConstruct {
+                construct: "AnnotationComputedProperty".to_string(),
+                file: record_name.to_string(),
+            });
+        };
+        let field_type =
+            annotation_field_type(property.type_annotation.as_deref(), enum_infos, record_name)?;
+        let value = annotation_field_value(
+            &field_type,
+            property.value.as_ref(),
+            literal_arrays,
+            &mut literal_indices,
+            &annotation_record_name,
+            name.as_ref(),
+            enum_infos,
+            record_name,
+        )?;
+        fields.push(FieldRecord {
+            name: name.to_string(),
+            class_idx: FIELD_OWNER_CLASS_IDX,
+            type_idx: legacy_annotation_type_idx(&field_type),
+            field_type,
+            access_flags: 0,
+            value,
+        });
+    }
+
+    Ok(ClassRecord {
+        name: format!("L{annotation_record_name};"),
+        methods: Vec::new(),
+        string_indices: Vec::new(),
+        literal_indices,
+        module_literal_indices: Vec::new(),
+        source_code_strings: Vec::new(),
+        access_flags: 0x2000,
+        source_lang: 0,
+        standalone_ecmascript_input: false,
+        source_file: None,
+        module_requests: Vec::new(),
+        fields,
+    })
+}
+
+fn collect_annotation_enum_infos(program: &Program<'_>) -> FxHashMap<String, AnnotationEnumInfo> {
+    let mut infos = FxHashMap::default();
+    for stmt in &program.body {
+        let decl = match stmt {
+            Statement::TSEnumDeclaration(decl) => Some(decl),
+            Statement::ExportNamedDeclaration(export) => match &export.declaration {
+                Some(Declaration::TSEnumDeclaration(decl)) => Some(decl),
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some(decl) = decl else {
+            continue;
+        };
+        infos.insert(
+            decl.id.name.as_str().to_string(),
+            annotation_enum_info(decl),
+        );
+    }
+    infos
+}
+
+fn annotation_enum_info(decl: &TSEnumDeclaration<'_>) -> AnnotationEnumInfo {
+    let mut members = FxHashMap::default();
+    let mut value_kind = AnnotationEnumValueKind::Number;
+    let mut next_number = 0.0;
+
+    for member in &decl.body.members {
+        let Some(member_name) = annotation_enum_member_name(&member.id) else {
+            continue;
+        };
+        let value = if let Some(initializer) = &member.initializer {
+            if let Some(value) = annotation_string_constant(initializer, &members) {
+                value_kind = AnnotationEnumValueKind::String;
+                AnnotationEnumValue::String(value)
+            } else if let Some(value) = annotation_number_constant(initializer, &members) {
+                next_number = value + 1.0;
+                AnnotationEnumValue::Number(value)
+            } else {
+                let value = next_number;
+                next_number += 1.0;
+                AnnotationEnumValue::Number(value)
+            }
+        } else {
+            let value = next_number;
+            next_number += 1.0;
+            AnnotationEnumValue::Number(value)
+        };
+        members.insert(member_name, value);
+    }
+
+    AnnotationEnumInfo {
+        value_kind,
+        members,
+    }
+}
+
+fn annotation_enum_member_name(member_name: &TSEnumMemberName<'_>) -> Option<String> {
+    match member_name {
+        TSEnumMemberName::Identifier(id) => Some(id.name.as_str().to_string()),
+        TSEnumMemberName::String(string) | TSEnumMemberName::ComputedString(string) => {
+            Some(string.value.as_str().to_string())
+        }
+        TSEnumMemberName::ComputedTemplateString(template) => template
+            .single_quasi()
+            .map(|name| name.as_str().to_string()),
+    }
+}
+
+fn annotation_field_type(
+    annotation: Option<&oxc_ast::ast::TSTypeAnnotation<'_>>,
+    enum_infos: &FxHashMap<String, AnnotationEnumInfo>,
+    record_name: &str,
+) -> Result<FieldType, AbcError> {
+    let Some(annotation) = annotation else {
+        return Err(AbcError::UnsupportedConstruct {
+            construct: "AnnotationMissingFieldType".to_string(),
+            file: record_name.to_string(),
+        });
+    };
+    let (base_type, rank) = annotation_array_base_type(&annotation.type_annotation);
+    let component_name = match base_type {
+        TSType::TSStringKeyword(_) => "panda.String",
+        TSType::TSNumberKeyword(_) => "f64",
+        TSType::TSBooleanKeyword(_) => "u1",
+        TSType::TSTypeReference(reference) => {
+            let Some(info) = annotation_enum_info_for_type_name(&reference.type_name, enum_infos)
+            else {
+                return Err(AbcError::UnsupportedConstruct {
+                    construct: "AnnotationFieldType".to_string(),
+                    file: record_name.to_string(),
+                });
+            };
+            match info.value_kind {
+                AnnotationEnumValueKind::Number => "f64",
+                AnnotationEnumValueKind::String => "panda.String",
+            }
+        }
+        _ => Err(AbcError::UnsupportedConstruct {
+            construct: "AnnotationFieldType".to_string(),
+            file: record_name.to_string(),
+        })?,
+    };
+    Ok(annotation_field_type_from_component(component_name, rank))
+}
+
+fn annotation_array_base_type<'a>(mut ty: &'a TSType<'a>) -> (&'a TSType<'a>, u32) {
+    let mut rank = 0;
+    while let TSType::TSArrayType(array) = ty {
+        rank += 1;
+        ty = &array.element_type;
+    }
+    (ty, rank)
+}
+
+fn annotation_field_type_from_component(component_name: &str, rank: u32) -> FieldType {
+    if rank > 0 {
+        return FieldType::Array {
+            component_name: component_name.to_string(),
+            rank,
+        };
+    }
+    match component_name {
+        "panda.String" => FieldType::PandaString,
+        "f64" => FieldType::F64,
+        "u1" => FieldType::U1,
+        "u8" => FieldType::U8,
+        "u32" => FieldType::U32,
+        _ => FieldType::Any,
+    }
+}
+
+fn annotation_field_value(
+    field_type: &FieldType,
+    value: Option<&Expression<'_>>,
+    literal_arrays: &mut Vec<LiteralArray>,
+    literal_indices: &mut Vec<usize>,
+    annotation_record_name: &str,
+    field_name: &str,
+    enum_infos: &FxHashMap<String, AnnotationEnumInfo>,
+    record_name: &str,
+) -> Result<Option<FieldValue>, AbcError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if matches!(field_type, FieldType::Array { .. }) {
+        if let Expression::ArrayExpression(array) = value {
+            let key_prefix = format!("{annotation_record_name}_{field_name}");
+            let mut counter = 0usize;
+            let index = annotation_literal_array_from_expr(
+                array,
+                literal_arrays,
+                &key_prefix,
+                &mut counter,
+                enum_infos,
+                record_name,
+            )?;
+            literal_indices.push(index);
+            return Ok(Some(FieldValue::LiteralArray(index)));
+        }
+        return Err(AbcError::UnsupportedConstruct {
+            construct: "AnnotationArrayDefault".to_string(),
+            file: record_name.to_string(),
+        });
+    }
+    match field_type {
+        FieldType::PandaString => {
+            if let Some(value) = annotation_string_constant(value, &FxHashMap::default()) {
+                return Ok(Some(FieldValue::String(value)));
+            }
+            if let Some(AnnotationEnumValue::String(value)) =
+                annotation_enum_value_from_expr(value, enum_infos)
+            {
+                return Ok(Some(FieldValue::String(value)));
+            }
+            Err(AbcError::UnsupportedConstruct {
+                construct: "AnnotationStringDefault".to_string(),
+                file: record_name.to_string(),
+            })
+        }
+        FieldType::F64 => {
+            if let Some(value) = annotation_number_constant(value, &FxHashMap::default()) {
+                return Ok(Some(FieldValue::F64(value)));
+            }
+            if let Some(AnnotationEnumValue::Number(value)) =
+                annotation_enum_value_from_expr(value, enum_infos)
+            {
+                return Ok(Some(FieldValue::F64(value)));
+            }
+            Err(AbcError::UnsupportedConstruct {
+                construct: "AnnotationNumericDefault".to_string(),
+                file: record_name.to_string(),
+            })
+        }
+        FieldType::U1 => match value {
+            Expression::BooleanLiteral(lit) => Ok(Some(FieldValue::Bool(lit.value))),
+            _ => Err(AbcError::UnsupportedConstruct {
+                construct: "AnnotationBooleanDefault".to_string(),
+                file: record_name.to_string(),
+            }),
+        },
+        FieldType::U8 | FieldType::U32 | FieldType::Any | FieldType::Array { .. } => {
+            Err(AbcError::UnsupportedConstruct {
+                construct: "AnnotationFieldDefault".to_string(),
+                file: record_name.to_string(),
+            })
+        }
+    }
+}
+
+fn annotation_literal_array_from_expr(
+    array: &oxc_ast::ast::ArrayExpression<'_>,
+    literal_arrays: &mut Vec<LiteralArray>,
+    key_prefix: &str,
+    counter: &mut usize,
+    enum_infos: &FxHashMap<String, AnnotationEnumInfo>,
+    record_name: &str,
+) -> Result<usize, AbcError> {
+    let index = literal_arrays.len();
+    let key = format!("{key_prefix}_{counter}");
+    *counter += 1;
+    literal_arrays.push(LiteralArray {
+        entries: Vec::new(),
+        explicit_key: Some(key),
+    });
+
+    let mut entries = Vec::with_capacity(array.elements.len());
+    for element in &array.elements {
+        entries.push(annotation_literal_entry_from_element(
+            element,
+            literal_arrays,
+            key_prefix,
+            counter,
+            enum_infos,
+            record_name,
+        )?);
+    }
+    literal_arrays[index].entries = entries;
+    Ok(index)
+}
+
+fn annotation_literal_entry_from_element(
+    element: &ArrayExpressionElement<'_>,
+    literal_arrays: &mut Vec<LiteralArray>,
+    key_prefix: &str,
+    counter: &mut usize,
+    enum_infos: &FxHashMap<String, AnnotationEnumInfo>,
+    record_name: &str,
+) -> Result<LiteralEntry, AbcError> {
+    match element {
+        ArrayExpressionElement::NumericLiteral(lit) => Ok(LiteralEntry::TaggedDouble(lit.value)),
+        ArrayExpressionElement::UnaryExpression(expr)
+            if matches!(
+                expr.operator,
+                UnaryOperator::UnaryPlus | UnaryOperator::UnaryNegation
+            ) =>
+        {
+            annotation_number_from_unary(expr.operator, &expr.argument)
+                .map(LiteralEntry::TaggedDouble)
+                .ok_or_else(|| AbcError::UnsupportedConstruct {
+                    construct: "AnnotationNumericArrayElement".to_string(),
+                    file: record_name.to_string(),
+                })
+        }
+        ArrayExpressionElement::BooleanLiteral(lit) => Ok(LiteralEntry::TaggedBool(lit.value)),
+        ArrayExpressionElement::StringLiteral(lit) => {
+            Ok(LiteralEntry::TaggedString(lit.value.to_string()))
+        }
+        ArrayExpressionElement::ArrayExpression(array) => {
+            let index = annotation_literal_array_from_expr(
+                array,
+                literal_arrays,
+                key_prefix,
+                counter,
+                enum_infos,
+                record_name,
+            )?;
+            Ok(LiteralEntry::TaggedLiteralArrayIndex(index))
+        }
+        ArrayExpressionElement::StaticMemberExpression(mem) => {
+            annotation_enum_value_from_member(&mem.object, mem.property.name.as_str(), enum_infos)
+                .map(annotation_enum_value_to_literal_entry)
+                .ok_or_else(|| AbcError::UnsupportedConstruct {
+                    construct: "AnnotationEnumArrayElement".to_string(),
+                    file: record_name.to_string(),
+                })
+        }
+        ArrayExpressionElement::ComputedMemberExpression(mem) => {
+            let Some(member_name) = annotation_computed_member_name(&mem.expression) else {
+                return Err(AbcError::UnsupportedConstruct {
+                    construct: "AnnotationEnumArrayElement".to_string(),
+                    file: record_name.to_string(),
+                });
+            };
+            annotation_enum_value_from_member(&mem.object, &member_name, enum_infos)
+                .map(annotation_enum_value_to_literal_entry)
+                .ok_or_else(|| AbcError::UnsupportedConstruct {
+                    construct: "AnnotationEnumArrayElement".to_string(),
+                    file: record_name.to_string(),
+                })
+        }
+        _ => Err(AbcError::UnsupportedConstruct {
+            construct: "AnnotationArrayElement".to_string(),
+            file: record_name.to_string(),
+        }),
+    }
+}
+
+fn annotation_enum_info_for_type_name<'a>(
+    type_name: &TSTypeName<'_>,
+    enum_infos: &'a FxHashMap<String, AnnotationEnumInfo>,
+) -> Option<&'a AnnotationEnumInfo> {
+    let name = annotation_type_name(type_name)?;
+    if let Some(info) = enum_infos.get(&name) {
+        return Some(info);
+    }
+    name.rsplit('.')
+        .next()
+        .and_then(|name| enum_infos.get(name))
+}
+
+fn annotation_type_name(type_name: &TSTypeName<'_>) -> Option<String> {
+    match type_name {
+        TSTypeName::IdentifierReference(id) => Some(id.name.as_str().to_string()),
+        TSTypeName::QualifiedName(qualified) => {
+            let left = annotation_type_name(&qualified.left)?;
+            Some(format!("{left}.{}", qualified.right.name.as_str()))
+        }
+        TSTypeName::ThisExpression(_) => None,
+    }
+}
+
+fn annotation_string_constant(
+    expr: &Expression<'_>,
+    enum_members: &FxHashMap<String, AnnotationEnumValue>,
+) -> Option<String> {
+    match expr {
+        Expression::StringLiteral(lit) => Some(lit.value.to_string()),
+        Expression::TemplateLiteral(template) => template
+            .single_quasi()
+            .map(|value| value.as_str().to_string()),
+        Expression::Identifier(id) => match enum_members.get(id.name.as_str()) {
+            Some(AnnotationEnumValue::String(value)) => Some(value.clone()),
+            _ => None,
+        },
+        Expression::ParenthesizedExpression(expr) => {
+            annotation_string_constant(&expr.expression, enum_members)
+        }
+        Expression::TSAsExpression(expr) => {
+            annotation_string_constant(&expr.expression, enum_members)
+        }
+        Expression::TSSatisfiesExpression(expr) => {
+            annotation_string_constant(&expr.expression, enum_members)
+        }
+        Expression::TSNonNullExpression(expr) => {
+            annotation_string_constant(&expr.expression, enum_members)
+        }
+        Expression::TSTypeAssertion(expr) => {
+            annotation_string_constant(&expr.expression, enum_members)
+        }
+        _ => None,
+    }
+}
+
+fn annotation_number_constant(
+    expr: &Expression<'_>,
+    enum_members: &FxHashMap<String, AnnotationEnumValue>,
+) -> Option<f64> {
+    match expr {
+        Expression::NumericLiteral(lit) => Some(lit.value),
+        Expression::UnaryExpression(expr)
+            if matches!(
+                expr.operator,
+                UnaryOperator::UnaryPlus | UnaryOperator::UnaryNegation
+            ) =>
+        {
+            annotation_number_from_unary(expr.operator, &expr.argument)
+        }
+        Expression::Identifier(id) => match enum_members.get(id.name.as_str()) {
+            Some(AnnotationEnumValue::Number(value)) => Some(*value),
+            _ => None,
+        },
+        Expression::ParenthesizedExpression(expr) => {
+            annotation_number_constant(&expr.expression, enum_members)
+        }
+        Expression::TSAsExpression(expr) => {
+            annotation_number_constant(&expr.expression, enum_members)
+        }
+        Expression::TSSatisfiesExpression(expr) => {
+            annotation_number_constant(&expr.expression, enum_members)
+        }
+        Expression::TSNonNullExpression(expr) => {
+            annotation_number_constant(&expr.expression, enum_members)
+        }
+        Expression::TSTypeAssertion(expr) => {
+            annotation_number_constant(&expr.expression, enum_members)
+        }
+        _ => None,
+    }
+}
+
+fn annotation_number_from_unary(operator: UnaryOperator, argument: &Expression<'_>) -> Option<f64> {
+    let Expression::NumericLiteral(lit) = argument else {
+        return None;
+    };
+    match operator {
+        UnaryOperator::UnaryPlus => Some(lit.value),
+        UnaryOperator::UnaryNegation => Some(-lit.value),
+        _ => None,
+    }
+}
+
+fn annotation_enum_value_from_expr(
+    expr: &Expression<'_>,
+    enum_infos: &FxHashMap<String, AnnotationEnumInfo>,
+) -> Option<AnnotationEnumValue> {
+    match expr {
+        Expression::StaticMemberExpression(mem) => {
+            annotation_enum_value_from_member(&mem.object, mem.property.name.as_str(), enum_infos)
+        }
+        Expression::ComputedMemberExpression(mem) => {
+            let member_name = annotation_computed_member_name(&mem.expression)?;
+            annotation_enum_value_from_member(&mem.object, &member_name, enum_infos)
+        }
+        Expression::CallExpression(call) if call.arguments.is_empty() => {
+            annotation_enum_value_from_expr(&call.callee, enum_infos)
+        }
+        Expression::ParenthesizedExpression(expr) => {
+            annotation_enum_value_from_expr(&expr.expression, enum_infos)
+        }
+        Expression::TSAsExpression(expr) => {
+            annotation_enum_value_from_expr(&expr.expression, enum_infos)
+        }
+        Expression::TSSatisfiesExpression(expr) => {
+            annotation_enum_value_from_expr(&expr.expression, enum_infos)
+        }
+        Expression::TSNonNullExpression(expr) => {
+            annotation_enum_value_from_expr(&expr.expression, enum_infos)
+        }
+        Expression::TSTypeAssertion(expr) => {
+            annotation_enum_value_from_expr(&expr.expression, enum_infos)
+        }
+        _ => None,
+    }
+}
+
+fn annotation_enum_value_from_member(
+    object: &Expression<'_>,
+    member_name: &str,
+    enum_infos: &FxHashMap<String, AnnotationEnumInfo>,
+) -> Option<AnnotationEnumValue> {
+    let enum_name = annotation_member_object_name(object)?;
+    enum_infos
+        .get(&enum_name)
+        .and_then(|info| info.members.get(member_name))
+        .cloned()
+}
+
+fn annotation_member_object_name(object: &Expression<'_>) -> Option<String> {
+    match object {
+        Expression::Identifier(id) => Some(id.name.as_str().to_string()),
+        Expression::StaticMemberExpression(mem) => Some(mem.property.name.as_str().to_string()),
+        Expression::ParenthesizedExpression(expr) => {
+            annotation_member_object_name(&expr.expression)
+        }
+        _ => None,
+    }
+}
+
+fn annotation_computed_member_name(expr: &Expression<'_>) -> Option<String> {
+    match expr {
+        Expression::StringLiteral(lit) => Some(lit.value.to_string()),
+        Expression::TemplateLiteral(template) => template
+            .single_quasi()
+            .map(|value| value.as_str().to_string()),
+        _ => None,
+    }
+}
+
+fn annotation_enum_value_to_literal_entry(value: AnnotationEnumValue) -> LiteralEntry {
+    match value {
+        AnnotationEnumValue::Number(value) => LiteralEntry::TaggedDouble(value),
+        AnnotationEnumValue::String(value) => LiteralEntry::TaggedString(value),
+    }
+}
+
+fn legacy_annotation_type_idx(field_type: &FieldType) -> u16 {
+    match field_type {
+        FieldType::U8 => 0,
+        FieldType::U32 => 1,
+        _ => 0,
+    }
+}
+
 fn source_lang_from_origin_source_lang(origin_source_lang: &str) -> u8 {
     match origin_source_lang {
         "ets" => 0x04,
@@ -608,12 +1263,16 @@ fn scope_names_literal_array(
                 .into_iter()
                 .map(LiteralEntry::TaggedString)
                 .collect(),
+            explicit_key: None,
         };
     }
 
     let Some(owner_method) = first_scope_names_owner_method(stmts) else {
         // No call-arg closures in this class → no scopeNames payload.
-        return LiteralArray { entries: vec![] };
+        return LiteralArray {
+            entries: vec![],
+            explicit_key: None,
+        };
     };
 
     let class_short = record_name
@@ -627,6 +1286,7 @@ fn scope_names_literal_array(
             LiteralEntry::TaggedString(class_short),
             LiteralEntry::TaggedString(owner_method),
         ],
+        explicit_key: None,
     }
 }
 
@@ -8451,7 +9111,10 @@ impl<'a> CodeGen<'a> {
     fn emit_array_expr(&mut self, arr: &oxc_ast::ast::ArrayExpression<'_>) {
         if let Some(entries) = Self::static_array_literal_entries(arr) {
             let lit_id = self.literal_arrays.len() as u16;
-            self.literal_arrays.push(LiteralArray { entries });
+            self.literal_arrays.push(LiteralArray {
+                entries,
+                explicit_key: None,
+            });
             self.push(Insn::CreateArrayWithBuffer(0, lit_id));
             return;
         }
@@ -8956,7 +9619,10 @@ impl<'a> CodeGen<'a> {
             self.push(Insn::CreateEmptyObject);
         } else {
             let lit_id = self.literal_arrays.len() as u16;
-            self.literal_arrays.push(LiteralArray { entries });
+            self.literal_arrays.push(LiteralArray {
+                entries,
+                explicit_key: None,
+            });
             self.push(Insn::CreateObjectWithBuffer(0, lit_id));
         }
 

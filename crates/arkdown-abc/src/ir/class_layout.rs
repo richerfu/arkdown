@@ -110,7 +110,10 @@ pub(super) fn class_buffer_literal_array(
     }
 
     entries.push(LiteralEntry::TaggedInteger(instance_method_count));
-    LiteralArray { entries }
+    LiteralArray {
+        entries,
+        explicit_key: None,
+    }
 }
 
 /// Build the private-methods literal array for `callruntime.createprivateproperty`.
@@ -155,7 +158,10 @@ pub(super) fn class_private_methods_literal_array(elements: &[ClassElement<'_>])
     let mut entries = static_entries;
     entries.extend(instance_entries);
     entries.push(LiteralEntry::TaggedInteger(instance_method_count));
-    LiteralArray { entries }
+    LiteralArray {
+        entries,
+        explicit_key: None,
+    }
 }
 
 pub(super) fn static_initializer_record_name(

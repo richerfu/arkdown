@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use crate::emit::bytecode::{
     assign_inline_cache_slots, collect_bytecode_string_indices, patch_bytecode_index_operands,
 };
@@ -6,7 +8,8 @@ use crate::emit::debug_info::{
     encode_sleb128_bytes, infer_func_main_class_local_events,
 };
 use crate::emit::record::{
-    encode_code_item, inline_string, uleb128, ClassRecord, MethodAnnotationOffsets, MethodKind,
+    encode_code_item, inline_string, uleb128, ClassRecord, FieldType, FieldValue,
+    MethodAnnotationOffsets, MethodKind,
 };
 use crate::emit::strings::StringTable;
 use rustc_hash::FxHashMap;
@@ -75,6 +78,8 @@ pub enum LiteralEntry {
 pub struct LiteralArray {
     /// Entries serialised into the literal-array section.
     pub entries: Vec<LiteralEntry>,
+    /// Optional upstream ProgramCache literal-table key.
+    pub explicit_key: Option<String>,
 }
 
 impl LiteralArray {
@@ -351,10 +356,24 @@ impl AbcFile {
             .map(|cls| cls.with_upstream_method_order())
             .collect();
         let all_classes: Vec<&ClassRecord> = all_classes_owned.iter().collect();
-        let mut class_index_classes = all_classes.clone();
-        class_index_classes.sort_by(|a, b| a.name.cmp(&b.name));
+        let mut foreign_class_name_set = BTreeSet::new();
+        for class in &all_classes {
+            for field in &class.fields {
+                if field.field_type.requires_panda_string_record() {
+                    foreign_class_name_set.insert("Lpanda.String;".to_string());
+                }
+                if let Some(descriptor) = field.field_type.foreign_descriptor() {
+                    foreign_class_name_set.insert(descriptor);
+                }
+            }
+        }
+        let foreign_class_names = foreign_class_name_set.into_iter().collect::<Vec<_>>();
+        let foreign_section_size = foreign_class_names
+            .iter()
+            .map(|name| inline_string(name).len())
+            .sum::<usize>() as u32;
 
-        let total_classes = all_classes.len() as u32;
+        let total_classes = all_classes.len() as u32 + foreign_class_names.len() as u32;
         let class_idx_off = HEADER_SIZE as u32; // 0x3C
         let method_index_count = all_classes
             .iter()
@@ -394,8 +413,12 @@ impl AbcFile {
             0
         };
         let idx_sect_off = class_idx_off + total_classes * 4 + literalarray_idx_size;
-        let index_class_count =
-            2 + u32::from(has_expected_property_count_annotations) + 1 + self.records.len() as u32;
+        let primitive_field_type_ids = primitive_field_type_ids(&all_classes);
+        let index_class_count = primitive_field_type_ids.len() as u32
+            + u32::from(has_expected_property_count_annotations)
+            + 1
+            + self.records.len() as u32
+            + foreign_class_names.len() as u32;
         let index_header_size: u32 = 40;
         let index_class_idx_off = idx_sect_off + index_header_size;
         let index_method_idx_off = index_class_idx_off + index_class_count * 4;
@@ -404,7 +427,8 @@ impl AbcFile {
         // libpandafile writes ClassItems immediately after the IndexSection.
         // The MethodItem/FieldItem string offsets inside those ClassItems may
         // point forward to StringItems emitted later.
-        let class_section_start = idx_sect_off + idx_sect_size;
+        let foreign_section_start = idx_sect_off + idx_sect_size;
+        let class_section_start = foreign_section_start + foreign_section_size;
         let class_item_sizes: Vec<usize> = all_classes
             .iter()
             .map(|c| c.class_item_byte_size())
@@ -420,12 +444,32 @@ impl AbcFile {
             offsets
         };
 
-        // Build a map from class name → ClassItem file offset (for the class index).
-        let name_to_class_offset: FxHashMap<&str, u32> = all_classes
+        let foreign_class_offsets: Vec<u32> = {
+            let mut offsets = Vec::with_capacity(foreign_class_names.len());
+            let mut pos = foreign_section_start;
+            for name in &foreign_class_names {
+                offsets.push(pos);
+                pos += inline_string(name).len() as u32;
+            }
+            offsets
+        };
+
+        // Build a map from class name → item file offset (for the class index).
+        let mut name_to_class_offset: FxHashMap<&str, u32> = all_classes
             .iter()
             .zip(class_item_offsets.iter())
             .map(|(c, &off)| (c.name.as_str(), off))
             .collect();
+        for (name, &off) in foreign_class_names.iter().zip(foreign_class_offsets.iter()) {
+            name_to_class_offset.insert(name.as_str(), off);
+        }
+
+        let mut class_index_names: Vec<&str> = all_classes
+            .iter()
+            .map(|class| class.name.as_str())
+            .collect();
+        class_index_names.extend(foreign_class_names.iter().map(String::as_str));
+        class_index_names.sort();
 
         let string_section_start =
             class_section_start + class_item_sizes.iter().sum::<usize>() as u32;
@@ -454,6 +498,10 @@ impl AbcFile {
         let mut field_name_string_offsets: Vec<Vec<u32>> = all_classes
             .iter()
             .map(|class| vec![0; class.fields.len()])
+            .collect();
+        let mut field_value_offsets: Vec<Vec<Option<u32>>> = all_classes
+            .iter()
+            .map(|class| vec![None; class.fields.len()])
             .collect();
         let mut source_file_string_offsets: Vec<Option<u32>> = vec![None; all_classes.len()];
         let mut literal_string_offsets: Vec<Vec<Option<u32>>> = self
@@ -514,6 +562,10 @@ impl AbcFile {
             for (field_idx, field) in class.fields.iter().enumerate() {
                 field_name_string_offsets[class_idx][field_idx] =
                     string_items.get_or_create(&field.name);
+                if let Some(FieldValue::String(value)) = &field.value {
+                    field_value_offsets[class_idx][field_idx] =
+                        Some(string_items.get_or_create(value));
+                }
             }
 
             let mut function_order: Vec<usize> = (0..class.methods.len()).collect();
@@ -669,6 +721,16 @@ impl AbcFile {
             .then(|| string_items.get_or_create("ExpectedPropertyCount"));
         let slot_number_str_off = string_items.get_or_create("SlotNumber");
         let mut cur = string_items.cur();
+        let mut field_value_section = Vec::new();
+        for (class_idx, class) in all_classes.iter().enumerate() {
+            for (field_idx, field) in class.fields.iter().enumerate() {
+                if let Some(FieldValue::F64(value)) = field.value.as_ref() {
+                    field_value_offsets[class_idx][field_idx] = Some(cur);
+                    field_value_section.extend_from_slice(&value.to_le_bytes());
+                    cur += 8;
+                }
+            }
+        }
 
         let mut method_name_offsets = FxHashMap::default();
         for (class, &class_off) in all_classes.iter().zip(class_item_offsets.iter()) {
@@ -681,12 +743,17 @@ impl AbcFile {
             }
         }
 
-        // Build the IndexHeader class table used by FieldItem/MethodItem/
-        // AnnotationItem `class_idx` values. Upstream keeps two non-EntityId
-        // scalar entries at the front, then classes referenced inside this
-        // IndexSection in IndexedItem creation order.
+        // Build the IndexHeader class/type table used by FieldItem/MethodItem/
+        // AnnotationItem `class_idx`/`type_idx` values. Primitive field types
+        // are stored as scalar type ids at the front, followed by referenced
+        // records/foreign records.
         let mut index_class_offsets = Vec::with_capacity(index_class_count as usize);
-        index_class_offsets.extend_from_slice(&[2, 6]);
+        index_class_offsets.extend(primitive_field_type_ids.iter().copied());
+        let primitive_type_index: FxHashMap<u32, u16> = primitive_field_type_ids
+            .iter()
+            .enumerate()
+            .map(|(idx, value)| (*value, idx as u16))
+            .collect();
         let mut name_to_index_class_idx = FxHashMap::default();
         let expected_property_count_annotation = annotation_stubs
             .iter()
@@ -695,7 +762,9 @@ impl AbcFile {
             .iter()
             .find(|class| class.name == "L_ESSlotNumberAnnotation;")
             .expect("ESSlotNumber annotation stub must be emitted");
-        let mut indexed_classes = Vec::with_capacity(index_class_count.saturating_sub(2) as usize);
+        let mut indexed_classes = Vec::with_capacity(
+            index_class_count.saturating_sub(primitive_field_type_ids.len() as u32) as usize,
+        );
         if has_expected_property_count_annotations {
             indexed_classes.push(
                 expected_property_count_annotation
@@ -709,9 +778,37 @@ impl AbcFile {
                 .get(class.name.as_str())
                 .expect("indexed class name must have a ClassItem offset");
             index_class_offsets.push(off);
-            name_to_index_class_idx.insert(class.name.as_str(), 2u16 + i as u16);
+            name_to_index_class_idx.insert(
+                class.name.as_str(),
+                primitive_field_type_ids.len() as u16 + i as u16,
+            );
+        }
+        for name in &foreign_class_names {
+            let off = *name_to_class_offset
+                .get(name.as_str())
+                .expect("foreign class name must have a ForeignItem offset");
+            let idx = index_class_offsets.len() as u16;
+            index_class_offsets.push(off);
+            name_to_index_class_idx.insert(name.as_str(), idx);
         }
         debug_assert_eq!(index_class_offsets.len() as u32, index_class_count);
+
+        let field_type_indices: Vec<Vec<u16>> = all_classes
+            .iter()
+            .map(|class| {
+                class
+                    .fields
+                    .iter()
+                    .map(|field| {
+                        field_type_index(
+                            &field.field_type,
+                            &primitive_type_index,
+                            &name_to_index_class_idx,
+                        )
+                    })
+                    .collect()
+            })
+            .collect();
 
         let method_pool_layouts = Self::build_method_pool_layouts(&all_classes, &self.strings);
         let literal_emit_order =
@@ -1418,6 +1515,11 @@ impl AbcFile {
         // ── IndexSection values (computed before emission) ────────────────────
         // class_item_offsets is sorted by class name (same order as all_classes).
         let first_class_off = *class_item_offsets.first().expect("at least one class");
+        let entity_region_start = if foreign_section_size == 0 {
+            first_class_off
+        } else {
+            foreign_section_start
+        };
 
         // ── 4. Serialize ClassItems with actual offsets ───────────────────────
         let class_item_bytes: Vec<Vec<u8>> = all_classes
@@ -1436,6 +1538,8 @@ impl AbcFile {
                     &debug_info_offsets[ci],
                     &annotation_offsets_per_class[ci],
                     &literal_array_offsets,
+                    &field_type_indices[ci],
+                    &field_value_offsets[ci],
                 )
             })
             .collect();
@@ -1471,8 +1575,15 @@ impl AbcFile {
         file.extend_from_slice(&0u32.to_le_bytes()); // 0x08 checksum (patched)
         file.extend_from_slice(&version.to_le_bytes()); // 0x0C version
         file.extend_from_slice(&0u32.to_le_bytes()); // 0x10 file_size (patched)
-        file.extend_from_slice(&0u32.to_le_bytes()); // 0x14 foreign_off = 0
-        file.extend_from_slice(&0u32.to_le_bytes()); // 0x18 foreign_size = 0
+        file.extend_from_slice(
+            &(if foreign_section_size == 0 {
+                0
+            } else {
+                foreign_section_start
+            })
+            .to_le_bytes(),
+        ); // 0x14 foreign_off
+        file.extend_from_slice(&foreign_section_size.to_le_bytes()); // 0x18 foreign_size
         file.extend_from_slice(&total_classes.to_le_bytes()); // 0x1C num_classes
         file.extend_from_slice(&class_idx_off.to_le_bytes()); // 0x20 class_idx_off = 0x3C
         file.extend_from_slice(&num_lnp.to_le_bytes()); // 0x24 num_lnp
@@ -1484,9 +1595,9 @@ impl AbcFile {
         debug_assert_eq!(file.len(), HEADER_SIZE, "header must be exactly 0x3C bytes");
 
         // ── Class index (at 0x3C, sorted by class name) ───────────────────────
-        for class in &class_index_classes {
+        for class_name in &class_index_names {
             let off = *name_to_class_offset
-                .get(class.name.as_str())
+                .get(*class_name)
                 .expect("class name must be in class index");
             file.extend_from_slice(&off.to_le_bytes());
         }
@@ -1516,7 +1627,7 @@ impl AbcFile {
         // libpandafile expects a 40-byte IndexHeader followed by EntityId
         // arrays.  The entity region spans from the first ClassItem to the end
         // of the complete file (including the trailing LNP index).
-        file.extend_from_slice(&first_class_off.to_le_bytes()); // start
+        file.extend_from_slice(&entity_region_start.to_le_bytes()); // start
         file.extend_from_slice(&final_size.to_le_bytes()); // end (full file including LNP idx)
         file.extend_from_slice(&index_class_count.to_le_bytes()); // class_idx_size
         file.extend_from_slice(&index_class_idx_off.to_le_bytes()); // class_idx_off
@@ -1539,6 +1650,13 @@ impl AbcFile {
             "IndexSection must match its computed header and array size"
         );
 
+        debug_assert_eq!(file.len() as u32, foreign_section_start);
+
+        // ── ForeignItems ─────────────────────────────────────────────────────
+        for name in &foreign_class_names {
+            file.extend_from_slice(&inline_string(name));
+        }
+
         debug_assert_eq!(file.len() as u32, class_section_start);
 
         // ── ClassItems ────────────────────────────────────────────────────────
@@ -1551,6 +1669,8 @@ impl AbcFile {
         for s in string_items.items() {
             file.extend_from_slice(s);
         }
+
+        file.extend_from_slice(&field_value_section);
 
         if let Some(first_literal_array_off) = literal_array_offsets.iter().min().copied() {
             debug_assert_eq!(file.len() as u32, first_literal_array_off);
@@ -1610,6 +1730,40 @@ impl AbcFile {
         file[0x08..0x0C].copy_from_slice(&checksum.to_le_bytes());
 
         file
+    }
+}
+
+fn primitive_field_type_ids(classes: &[&ClassRecord]) -> Vec<u32> {
+    let mut ids = BTreeSet::new();
+    for class in classes {
+        for field in &class.fields {
+            if let Some(id) = field.field_type.binary_type_id() {
+                ids.insert(id);
+            }
+        }
+    }
+    ids.into_iter().collect()
+}
+
+fn field_type_index(
+    field_type: &FieldType,
+    primitive_type_index: &FxHashMap<u32, u16>,
+    name_to_index_class_idx: &FxHashMap<&str, u16>,
+) -> u16 {
+    if let Some(id) = field_type.binary_type_id() {
+        return *primitive_type_index
+            .get(&id)
+            .expect("primitive field type must be present in IndexSection");
+    }
+    if let Some(descriptor) = field_type.foreign_descriptor() {
+        return *name_to_index_class_idx
+            .get(descriptor.as_str())
+            .expect("foreign field type must be present in IndexSection");
+    }
+    match field_type {
+        FieldType::Any => 0,
+        FieldType::U1 | FieldType::U8 | FieldType::U32 | FieldType::F64 => unreachable!(),
+        FieldType::PandaString | FieldType::Array { .. } => unreachable!(),
     }
 }
 

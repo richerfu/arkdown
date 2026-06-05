@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::emit::record::{ClassRecord, FieldRecord, FieldValue, FIELD_OWNER_CLASS_IDX};
+use crate::emit::record::{ClassRecord, FieldRecord, FieldType, FieldValue, FIELD_OWNER_CLASS_IDX};
 use crate::error::AbcError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +47,7 @@ fn npm_entry_record(entry: NpmEntry) -> ClassRecord {
             name: entry.field_name,
             class_idx: FIELD_OWNER_CLASS_IDX,
             type_idx: 0,
+            field_type: FieldType::U8,
             access_flags: 0,
             value: Some(FieldValue::U8(0)),
         }],

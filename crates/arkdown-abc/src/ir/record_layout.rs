@@ -1,5 +1,5 @@
 use crate::emit::file::{LiteralArray, LiteralEntry};
-use crate::emit::record::{FieldRecord, FieldValue, FIELD_OWNER_CLASS_IDX};
+use crate::emit::record::{FieldRecord, FieldType, FieldValue, FIELD_OWNER_CLASS_IDX};
 
 pub(super) struct RecordLayout<'a> {
     record_name: &'a str,
@@ -71,6 +71,7 @@ impl<'a> RecordLayout<'a> {
                 name: "scopeNames".to_string(),
                 class_idx: FIELD_OWNER_CLASS_IDX,
                 type_idx: 1,
+                field_type: FieldType::U32,
                 access_flags: 0,
                 value: Some(FieldValue::LiteralArray(scope_names_idx)),
             },
@@ -80,6 +81,7 @@ impl<'a> RecordLayout<'a> {
                 name: "moduleRecordIdx".to_string(),
                 class_idx: FIELD_OWNER_CLASS_IDX,
                 type_idx: 1,
+                field_type: FieldType::U32,
                 access_flags: 0,
                 value: Some(FieldValue::LiteralArray(module_record_idx)),
             });
@@ -144,6 +146,7 @@ fn module_u8_field_with_value(name: impl Into<String>, value: u8) -> FieldRecord
         name: name.into(),
         class_idx: FIELD_OWNER_CLASS_IDX,
         type_idx: 0,
+        field_type: FieldType::U8,
         access_flags: 0,
         value: Some(FieldValue::U8(value)),
     }

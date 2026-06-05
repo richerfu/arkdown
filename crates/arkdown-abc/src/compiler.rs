@@ -14,7 +14,7 @@ use crate::dependency::{
     compact_to_retained_programs, resolve_deps_relation, AbcDependencyContext,
 };
 use crate::emit::file::{version_for_target_api, AbcFile};
-use crate::emit::record::{ClassRecord, FieldRecord, FieldValue, FIELD_OWNER_CLASS_IDX};
+use crate::emit::record::{ClassRecord, FieldRecord, FieldType, FieldValue, FIELD_OWNER_CLASS_IDX};
 use crate::error::AbcError;
 use crate::ir::builder;
 use crate::npm_entries::load_npm_entry_records;
@@ -141,7 +141,7 @@ pub struct AbcArtifactResult {
 }
 
 struct PendingProgramCacheWrite {
-    record_index: usize,
+    record_indices: Vec<usize>,
     cache_file: PathBuf,
     hash_code: u32,
 }
@@ -316,6 +316,7 @@ fn u8_metadata_field(name: impl Into<String>, value: u8) -> FieldRecord {
         name: name.into(),
         class_idx: FIELD_OWNER_CLASS_IDX,
         type_idx: 0,
+        field_type: FieldType::U8,
         access_flags: 0,
         value: Some(FieldValue::U8(value)),
     }
@@ -326,6 +327,7 @@ fn literal_metadata_field(name: impl Into<String>, literal_idx: usize) -> FieldR
         name: name.into(),
         class_idx: FIELD_OWNER_CLASS_IDX,
         type_idx: 1,
+        field_type: FieldType::U32,
         access_flags: 0,
         value: Some(FieldValue::LiteralArray(literal_idx)),
     }
@@ -842,15 +844,36 @@ impl AbcCompiler {
                     record_program_keys.push(program_key.clone());
                 }
             }
+            let annotation_records = if self.options.enable_annotations {
+                builder::annotation_records_from_source(
+                    &js_source,
+                    &module.record_name,
+                    module.source_file.as_deref(),
+                    self.options.target_api_version,
+                    self.options.enable_annotations,
+                    &mut abc_file.literal_arrays,
+                )?
+            } else {
+                Vec::new()
+            };
+            let mut cache_record_indices = Vec::new();
+            for annotation_record in annotation_records {
+                let annotation_record_index = abc_file.records.len();
+                abc_file.add_record(annotation_record);
+                record_needs_optimization.push(false);
+                record_program_keys.push(program_key.clone());
+                cache_record_indices.push(annotation_record_index);
+            }
             let record_index = abc_file.records.len();
             abc_file.add_record(record);
             record_needs_optimization.push(true);
             record_program_keys.push(program_key);
+            cache_record_indices.push(record_index);
 
             if write_program_cache {
                 if let (Some(cache_input), Some(hash_code)) = (cache_input, cache_hash_code) {
                     pending_cache_writes.push(PendingProgramCacheWrite {
-                        record_index,
+                        record_indices: cache_record_indices,
                         cache_file: cache_input.cache_file.clone(),
                         hash_code,
                     });
@@ -902,8 +925,12 @@ impl AbcCompiler {
                 pending_cache_writes = pending_cache_writes
                     .into_iter()
                     .filter_map(|mut pending| {
-                        let new_index = record_index_map.get(&pending.record_index).copied()?;
-                        pending.record_index = new_index;
+                        let new_indices = pending
+                            .record_indices
+                            .iter()
+                            .map(|old_index| record_index_map.get(old_index).copied())
+                            .collect::<Option<Vec<_>>>()?;
+                        pending.record_indices = new_indices;
                         Some(pending)
                     })
                     .collect();
@@ -920,16 +947,24 @@ impl AbcCompiler {
         );
 
         for pending in &pending_cache_writes {
-            let Some(program) = crate::program_cache::program_for_record(
-                &abc_file,
-                pending.record_index,
-                self.options.target_api_version,
-            )?
-            else {
+            let program = if pending.record_indices.len() == 1 {
+                crate::program_cache::program_for_record(
+                    &abc_file,
+                    pending.record_indices[0],
+                    self.options.target_api_version,
+                )?
+            } else {
+                Some(crate::program_cache::program_for_records(
+                    &abc_file,
+                    &pending.record_indices,
+                    self.options.target_api_version,
+                )?)
+            };
+            let Some(program) = program else {
                 return Err(AbcError::UnsupportedConstruct {
                     construct: format!(
-                        "failed to materialize upstream ProgramCache Program for record index {}",
-                        pending.record_index
+                        "failed to materialize upstream ProgramCache Program for record indexes {:?}",
+                        pending.record_indices
                     ),
                     file: pending.cache_file.display().to_string(),
                 });

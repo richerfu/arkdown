@@ -393,7 +393,11 @@ impl<'a> AbcReader<'a> {
         let mut classes = Vec::with_capacity(num_classes);
         for i in 0..num_classes {
             let class_off = self.read_u32(class_idx_off + i * 4)?;
-            classes.push(self.read_class_item(class_off)?);
+            if self.is_foreign_item_offset(class_off)? {
+                classes.push(self.read_foreign_item(class_off)?);
+            } else {
+                classes.push(self.read_class_item(class_off)?);
+            }
         }
         Ok(classes)
     }
@@ -803,6 +807,27 @@ impl<'a> AbcReader<'a> {
             source_lang,
             fields,
             methods,
+        })
+    }
+
+    fn is_foreign_item_offset(&self, offset: u32) -> Result<bool, AbcReadError> {
+        let foreign_off = self.read_u32(0x14)?;
+        let foreign_size = self.read_u32(0x18)?;
+        Ok(foreign_size != 0
+            && offset >= foreign_off
+            && offset < foreign_off.saturating_add(foreign_size))
+    }
+
+    fn read_foreign_item(&self, class_off: u32) -> Result<AbcClassItem, AbcReadError> {
+        let name = self.read_string_at(class_off as usize)?;
+        Ok(AbcClassItem {
+            name,
+            offset: class_off,
+            super_class_off: 0,
+            access_flags: 0,
+            source_lang: None,
+            fields: Vec::new(),
+            methods: Vec::new(),
         })
     }
 
