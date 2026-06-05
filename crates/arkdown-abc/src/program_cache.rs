@@ -933,21 +933,17 @@ fn field_from_proto(
     module_literal_indices: &mut BTreeSet<usize>,
     literal_refs: &mut BTreeSet<usize>,
 ) -> io::Result<FieldRecord> {
-    let proto_field_type = field.r#type.as_ref().or_else(|| {
-        field
-            .metadata
-            .as_ref()
-            .and_then(|metadata| metadata.field_type.as_ref())
-    });
     let value = field
         .metadata
         .as_ref()
         .and_then(|metadata| metadata.value.as_ref())
         .map(|value| field_value_from_proto(value, literal_key_to_index, module_literal_indices))
         .transpose()?;
-    let field_type = proto_field_type
+    let field_type = field
+        .r#type
+        .as_ref()
         .map(field_type_from_proto)
-        .unwrap_or(FieldType::U8);
+        .unwrap_or_else(|| field_type_from_proto(&Type::default()));
     let metadata_field_type = field
         .metadata
         .as_ref()
@@ -2417,29 +2413,14 @@ fn field_type_from_proto(value: &Type) -> FieldType {
         "u64" => FieldType::U64,
         "panda.String" => FieldType::PandaString,
         "any" => FieldType::Any,
-        _ => FieldType::Any,
+        _ => FieldType::Record { component_name },
     }
 }
 
 fn proto_type_component_name(value: &Type) -> String {
-    if let Ok(component_name) = std::str::from_utf8(&value.component_name) {
-        if !component_name.is_empty() {
-            return component_name.to_string();
-        }
-    }
-    let mut name = std::str::from_utf8(&value.name)
-        .unwrap_or("any")
-        .to_string();
-    for _ in 0..value.rank {
-        if let Some(stripped) = name.strip_suffix("[]") {
-            name = stripped.to_string();
-        }
-    }
-    if name.is_empty() {
-        "any".to_string()
-    } else {
-        name
-    }
+    std::str::from_utf8(&value.component_name)
+        .unwrap_or_default()
+        .to_string()
 }
 
 fn legacy_type_idx(value: &FieldType) -> u16 {
@@ -4878,6 +4859,130 @@ class A {}
             .find(|field| field.name == "anyField")
             .expect("restored any field must exist");
         assert_eq!(restored_any.field_type, FieldType::Any);
+    }
+
+    #[test]
+    fn reference_field_type_uses_upstream_component_name_not_proto_name_or_metadata() {
+        let mut module_literal_indices = BTreeSet::new();
+        let mut literal_refs = BTreeSet::new();
+        let field = Field {
+            r#type: Some(Type {
+                component_name: b"custom.Record".to_vec(),
+                rank: 0,
+                name: b"any".to_vec(),
+                type_id: 0x0e,
+            }),
+            name: b"refField".to_vec(),
+            metadata: Some(FieldMetadata {
+                father: None,
+                field_type: Some(Type {
+                    component_name: b"u32".to_vec(),
+                    rank: 0,
+                    name: b"u32".to_vec(),
+                    type_id: 0x08,
+                }),
+                value: None,
+            }),
+            line_of_def: 0,
+            whole_line: Vec::new(),
+            bound_left: 0,
+            bound_right: 0,
+            is_defined: false,
+        };
+
+        let restored = field_from_proto(
+            &field,
+            &BTreeMap::new(),
+            &mut module_literal_indices,
+            &mut literal_refs,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.field_type,
+            FieldType::Record {
+                component_name: "custom.Record".to_string()
+            }
+        );
+        assert_eq!(
+            restored
+                .metadata_field_type
+                .as_ref()
+                .unwrap()
+                .component_name,
+            "u32"
+        );
+        assert_eq!(
+            field_type_from_proto(&Type {
+                component_name: Vec::new(),
+                rank: 0,
+                name: b"u32".to_vec(),
+                type_id: 0x08,
+            }),
+            FieldType::Record {
+                component_name: String::new()
+            }
+        );
+    }
+
+    #[test]
+    fn reference_field_type_roundtrips_through_abc_input() {
+        let mut file = annotation_usage_file();
+        let record = file
+            .records
+            .iter_mut()
+            .find(|record| record.name == "Lusage_string.ets;")
+            .expect("user record must exist");
+        record.fields.push(FieldRecord {
+            name: "refField".to_string(),
+            class_idx: FIELD_OWNER_CLASS_IDX,
+            type_idx: 0,
+            field_type: FieldType::Record {
+                component_name: "custom.Record".to_string(),
+            },
+            metadata_field_type: None,
+            access_flags: 0,
+            value: None,
+            annotations: Vec::new(),
+            metadata_attrs: Default::default(),
+            source: Default::default(),
+        });
+
+        let program = program_for_file(&file, 20).unwrap();
+        let record = program
+            .record_table
+            .iter()
+            .find(|entry| entry.key == b"usage_string.ets")
+            .and_then(|entry| entry.value.as_ref())
+            .expect("usage_string.ets record must exist");
+        let field_type = record
+            .field_list
+            .iter()
+            .find(|field| field.name == b"refField")
+            .and_then(|field| field.r#type.as_ref())
+            .expect("refField type must exist");
+        assert_eq!(field_type.component_name, b"custom.Record");
+        assert_eq!(field_type.type_id, 0x0d);
+
+        let bytes = file.serialize_with_version(version_for_target_api(20, None));
+        AbcReader::validate(&bytes).unwrap();
+        let mut restored = AbcFile::new();
+        append_abc_file(&mut restored, &bytes).unwrap();
+        let restored_record = restored
+            .records
+            .iter()
+            .find(|record| record.name == "Lusage_string.ets;")
+            .expect("restored user record must exist");
+        let restored_field = restored_record
+            .fields
+            .iter()
+            .find(|field| field.name == "refField")
+            .expect("restored refField must exist");
+        assert_eq!(
+            restored_field.field_type,
+            FieldType::Record {
+                component_name: "custom.Record".to_string()
+            }
+        );
     }
 
     #[test]

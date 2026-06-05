@@ -2300,7 +2300,9 @@ fn field_type_index(
         | FieldType::I64
         | FieldType::U64
         | FieldType::Any => unreachable!(),
-        FieldType::PandaString | FieldType::Array { .. } => unreachable!(),
+        FieldType::PandaString | FieldType::Record { .. } | FieldType::Array { .. } => {
+            unreachable!()
+        }
     }
 }
 

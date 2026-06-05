@@ -466,6 +466,7 @@ pub enum FieldType {
     I64,
     U64,
     PandaString,
+    Record { component_name: String },
     Array { component_name: String, rank: u32 },
     Any,
 }
@@ -485,7 +486,7 @@ impl FieldType {
             Self::I64 => Some(9),
             Self::U64 => Some(10),
             Self::Any => Some(12),
-            Self::PandaString | Self::Array { .. } => None,
+            Self::PandaString | Self::Record { .. } | Self::Array { .. } => None,
         }
     }
 
@@ -503,6 +504,7 @@ impl FieldType {
             Self::I64 => "i64",
             Self::U64 => "u64",
             Self::PandaString => "panda.String",
+            Self::Record { component_name } => component_name,
             Self::Array { component_name, .. } => component_name,
             Self::Any => "any",
         }
@@ -548,6 +550,13 @@ impl FieldType {
     pub(crate) fn foreign_descriptor(&self) -> Option<String> {
         match self {
             Self::PandaString => Some("Lpanda.String;".to_string()),
+            Self::Record { component_name } => {
+                let mut descriptor = String::with_capacity(component_name.len() + 2);
+                descriptor.push('L');
+                descriptor.push_str(component_name);
+                descriptor.push(';');
+                Some(descriptor)
+            }
             Self::Array {
                 component_name,
                 rank,

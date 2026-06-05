@@ -612,6 +612,14 @@ fn field_type_from_descriptor(descriptor: &str) -> FieldType {
 
     let rank = descriptor.bytes().take_while(|&byte| byte == b'[').count();
     if rank == 0 {
+        if let Some(component_name) = descriptor
+            .strip_prefix('L')
+            .and_then(|value| value.strip_suffix(';'))
+        {
+            return FieldType::Record {
+                component_name: component_name.to_string(),
+            };
+        }
         return FieldType::Any;
     }
     let component_descriptor = &descriptor[rank..];

@@ -924,7 +924,10 @@ fn annotation_field_type_from_component(component_name: &str, rank: u32) -> Fiel
         "i16" => FieldType::I16,
         "u16" => FieldType::U16,
         "u32" => FieldType::U32,
-        _ => FieldType::Any,
+        "any" | "" => FieldType::Any,
+        _ => FieldType::Record {
+            component_name: component_name.to_string(),
+        },
     }
 }
 
@@ -1010,6 +1013,7 @@ fn annotation_field_value(
         | FieldType::I64
         | FieldType::U64
         | FieldType::Any
+        | FieldType::Record { .. }
         | FieldType::Array { .. } => Err(AbcError::UnsupportedConstruct {
             construct: "AnnotationFieldDefault".to_string(),
             file: record_name.to_string(),
