@@ -579,6 +579,7 @@ mod tests {
             source_lang: 0,
             standalone_ecmascript_input: false,
             source_file: None,
+            annotations: vec![],
             module_requests: vec![],
             fields: vec![],
         });
@@ -613,6 +614,7 @@ mod tests {
             source_lang: 0,
             standalone_ecmascript_input: false,
             source_file: None,
+            annotations: vec![],
             module_requests: vec![],
             fields: vec![],
         });

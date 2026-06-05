@@ -587,6 +587,7 @@ pub fn build_record_with_debug_and_source_map_for_target_with_mode(
         source_lang,
         standalone_ecmascript_input,
         source_file,
+        annotations: Vec::new(),
         module_requests: module_record.module_requests,
         fields: module_fields,
     })
@@ -740,6 +741,7 @@ fn annotation_record_from_decl(
             field_type,
             access_flags: 0,
             value,
+            annotations: Vec::new(),
         });
     }
 
@@ -754,6 +756,7 @@ fn annotation_record_from_decl(
         source_lang: 0,
         standalone_ecmascript_input: false,
         source_file: None,
+        annotations: Vec::new(),
         module_requests: Vec::new(),
         fields,
     })

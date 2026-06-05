@@ -42,6 +42,7 @@ fn npm_entry_record(entry: NpmEntry) -> ClassRecord {
         source_lang: 0,
         standalone_ecmascript_input: false,
         source_file: None,
+        annotations: vec![],
         module_requests: vec![],
         fields: vec![FieldRecord {
             name: entry.field_name,
@@ -50,6 +51,7 @@ fn npm_entry_record(entry: NpmEntry) -> ClassRecord {
             field_type: FieldType::U8,
             access_flags: 0,
             value: Some(FieldValue::U8(0)),
+            annotations: vec![],
         }],
     }
 }

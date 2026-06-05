@@ -306,6 +306,7 @@ fn metadata_record(
         source_lang,
         standalone_ecmascript_input: false,
         source_file: None,
+        annotations: vec![],
         module_requests: vec![],
         fields,
     }
@@ -319,6 +320,7 @@ fn u8_metadata_field(name: impl Into<String>, value: u8) -> FieldRecord {
         field_type: FieldType::U8,
         access_flags: 0,
         value: Some(FieldValue::U8(value)),
+        annotations: vec![],
     }
 }
 
@@ -330,6 +332,7 @@ fn literal_metadata_field(name: impl Into<String>, literal_idx: usize) -> FieldR
         field_type: FieldType::U32,
         access_flags: 0,
         value: Some(FieldValue::LiteralArray(literal_idx)),
+        annotations: vec![],
     }
 }
 

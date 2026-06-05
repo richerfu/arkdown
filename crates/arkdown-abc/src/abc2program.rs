@@ -94,6 +94,16 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
             .fields
             .iter()
             .map(|field| {
+                let annotations = custom_annotations_from_abc(
+                    data,
+                    &reader,
+                    &class,
+                    field.offset,
+                    &field.annotation_offsets,
+                    &index_sections,
+                    &class_name_by_offset,
+                    &literal_offset_to_index,
+                )?;
                 Ok(FieldRecord {
                     name: field.name.clone(),
                     class_idx: FIELD_OWNER_CLASS_IDX,
@@ -105,6 +115,7 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
                         field.value,
                         &literal_offset_to_index,
                     )?,
+                    annotations,
                 })
             })
             .collect::<Result<Vec<_>, AbcError>>()?;
@@ -182,6 +193,16 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
             .collect::<Result<Vec<_>, AbcError>>()?;
 
         let record_index = file.records.len();
+        let class_annotations = custom_annotations_from_abc(
+            data,
+            &reader,
+            &class,
+            class.offset,
+            &class.annotation_offsets,
+            &index_sections,
+            &class_name_by_offset,
+            &literal_offset_to_index,
+        )?;
         file.add_record(ClassRecord {
             name: class.name,
             methods,
@@ -201,7 +222,8 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
             access_flags: class.access_flags,
             source_lang: class.source_lang.unwrap_or(0),
             standalone_ecmascript_input: false,
-            source_file: None,
+            source_file: class.source_file,
+            annotations: class_annotations,
             module_requests: Vec::new(),
             fields,
         });
@@ -231,6 +253,52 @@ fn is_ark_annotation_stub(name: &str) -> bool {
 struct AbcDecodedMethodAnnotations {
     expected_property_count: Option<u32>,
     custom: Vec<AnnotationRecord>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn custom_annotations_from_abc(
+    data: &[u8],
+    reader: &AbcReader<'_>,
+    owner_class: &AbcClassItem,
+    owner_offset: u32,
+    annotation_offsets: &[u32],
+    index_sections: &[crate::abc_reader::AbcIndexSection],
+    class_name_by_offset: &BTreeMap<u32, String>,
+    literal_offset_to_index: &BTreeMap<u32, usize>,
+) -> Result<Vec<AnnotationRecord>, AbcError> {
+    let Some(section) = index_sections
+        .iter()
+        .find(|section| section.start <= owner_offset && owner_offset < section.end)
+        .or_else(|| index_sections.first())
+    else {
+        return Ok(Vec::new());
+    };
+
+    let mut annotations = Vec::new();
+    for &annotation_off in annotation_offsets {
+        let Some((record_name, elements)) = annotation_from_abc(
+            data,
+            reader,
+            owner_class,
+            annotation_off,
+            section,
+            class_name_by_offset,
+            literal_offset_to_index,
+        )?
+        else {
+            continue;
+        };
+        if is_system_function_annotation(record_name.as_bytes())
+            || is_system_record_annotation(&record_name)
+        {
+            continue;
+        }
+        annotations.push(AnnotationRecord {
+            record_name,
+            elements,
+        });
+    }
+    Ok(annotations)
 }
 
 fn method_annotations_from_abc(
@@ -313,6 +381,9 @@ fn annotation_from_abc(
     let Some(record_name) = annotation_record_name_from_class_name(class_name) else {
         return Ok(None);
     };
+    if is_system_record_annotation(&record_name) {
+        return Ok(None);
+    }
 
     let count = read_at_u16(data, cursor, "annotation element count")? as usize;
     cursor += 2;
@@ -356,6 +427,24 @@ fn annotation_record_name_from_class_name(class_name: &str) -> Option<String> {
         .and_then(|name| name.strip_suffix(';'))
         .map(str::to_string)
         .or_else(|| is_ark_annotation_stub(class_name).then(|| class_name.to_string()))
+}
+
+fn is_system_function_annotation(record_name: &[u8]) -> bool {
+    record_name == b"_ESConcurrentModuleRequestsAnnotation"
+        || record_name == b"_ESExpectedPropertyCountAnnotation"
+        || record_name == b"_ESSlotNumberAnnotation"
+}
+
+fn is_system_record_annotation(record_name: &str) -> bool {
+    matches!(
+        record_name,
+        "std.annotations.Module"
+            | "std/annotations/Module"
+            | "std.annotations.FunctionalReference"
+            | "std/annotations/FunctionalReference"
+            | "std.annotations.Async"
+            | "std/annotations/Async"
+    )
 }
 
 fn annotation_value_from_abc(

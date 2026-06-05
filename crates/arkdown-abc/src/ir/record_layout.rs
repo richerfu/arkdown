@@ -74,6 +74,7 @@ impl<'a> RecordLayout<'a> {
                 field_type: FieldType::U32,
                 access_flags: 0,
                 value: Some(FieldValue::LiteralArray(scope_names_idx)),
+                annotations: vec![],
             },
         ];
         if let Some(module_record_idx) = module_record_idx {
@@ -84,6 +85,7 @@ impl<'a> RecordLayout<'a> {
                 field_type: FieldType::U32,
                 access_flags: 0,
                 value: Some(FieldValue::LiteralArray(module_record_idx)),
+                annotations: vec![],
             });
         }
         fields
@@ -149,6 +151,7 @@ fn module_u8_field_with_value(name: impl Into<String>, value: u8) -> FieldRecord
         field_type: FieldType::U8,
         access_flags: 0,
         value: Some(FieldValue::U8(value)),
+        annotations: vec![],
     }
 }
 

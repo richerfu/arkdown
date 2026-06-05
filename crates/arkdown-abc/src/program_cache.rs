@@ -369,12 +369,19 @@ pub(crate) fn append_program_to_file(
             finalize_method_kind_and_pool(method, &function_refs);
         }
 
+        let record_annotations =
+            record_custom_annotations(&record_proto, &literal_key_to_index, &mut literal_refs)?;
         let mut module_literal_indices = BTreeSet::new();
         let fields = record_proto
             .field_list
             .iter()
             .map(|field| {
-                field_from_proto(field, &literal_key_to_index, &mut module_literal_indices)
+                field_from_proto(
+                    field,
+                    &literal_key_to_index,
+                    &mut module_literal_indices,
+                    &mut literal_refs,
+                )
             })
             .collect::<io::Result<Vec<_>>>()?;
         literal_refs.retain(|idx| !module_literal_indices.contains(idx));
@@ -396,6 +403,7 @@ pub(crate) fn append_program_to_file(
             source_file: (!record_proto.source_file.is_empty())
                 .then(|| utf8(&record_proto.source_file))
                 .transpose()?,
+            annotations: record_annotations,
             module_requests: Vec::new(),
             fields,
         });
@@ -780,6 +788,7 @@ fn field_from_proto(
     field: &Field,
     literal_key_to_index: &BTreeMap<String, usize>,
     module_literal_indices: &mut BTreeSet<usize>,
+    literal_refs: &mut BTreeSet<usize>,
 ) -> io::Result<FieldRecord> {
     let proto_field_type = field.r#type.as_ref().or_else(|| {
         field
@@ -803,6 +812,7 @@ fn field_from_proto(
         field_type,
         access_flags: field_access_flags(field),
         value,
+        annotations: field_custom_annotations(field, literal_key_to_index, literal_refs)?,
     })
 }
 
@@ -1809,10 +1819,62 @@ fn function_custom_annotations(
         .collect()
 }
 
+fn record_custom_annotations(
+    record: &Record,
+    literal_key_to_index: &BTreeMap<String, usize>,
+    literal_refs: &mut BTreeSet<usize>,
+) -> io::Result<Vec<AnnotationRecord>> {
+    let Some(annotation_metadata) = record_annotation_metadata(record) else {
+        return Ok(Vec::new());
+    };
+
+    annotation_metadata
+        .annotations
+        .iter()
+        .map(|annotation| {
+            annotation_data_from_proto(annotation, literal_key_to_index, literal_refs)
+        })
+        .collect()
+}
+
+fn field_custom_annotations(
+    field: &Field,
+    literal_key_to_index: &BTreeMap<String, usize>,
+    literal_refs: &mut BTreeSet<usize>,
+) -> io::Result<Vec<AnnotationRecord>> {
+    let Some(annotation_metadata) = field_annotation_metadata(field) else {
+        return Ok(Vec::new());
+    };
+
+    annotation_metadata
+        .annotations
+        .iter()
+        .map(|annotation| {
+            annotation_data_from_proto(annotation, literal_key_to_index, literal_refs)
+        })
+        .collect()
+}
+
 fn function_annotation_metadata(
     function: &Function,
 ) -> Option<&crate::proto_panda::AnnotationMetadata> {
     function
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.father.as_ref())
+        .and_then(|metadata| metadata.father.as_ref())
+}
+
+fn record_annotation_metadata(record: &Record) -> Option<&crate::proto_panda::AnnotationMetadata> {
+    record
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.father.as_ref())
+        .and_then(|metadata| metadata.father.as_ref())
+}
+
+fn field_annotation_metadata(field: &Field) -> Option<&crate::proto_panda::AnnotationMetadata> {
+    field
         .metadata
         .as_ref()
         .and_then(|metadata| metadata.father.as_ref())
@@ -2122,7 +2184,14 @@ fn record_to_proto(record: &ClassRecord, file: &AbcFile) -> Record {
         name: bytes(&pandasm_record_name(&record.name)),
         conflict: false,
         language: record.source_lang as u32,
-        metadata: Some(record_metadata(record.access_flags)),
+        metadata: Some(record_metadata_with_annotations(
+            record.access_flags,
+            record
+                .annotations
+                .iter()
+                .map(custom_annotation_to_proto)
+                .collect(),
+        )),
         field_list: record
             .fields
             .iter()
@@ -2142,7 +2211,14 @@ fn field_to_proto(field: &FieldRecord, record: &ClassRecord, file: &AbcFile) -> 
         r#type: Some(field_type.clone()),
         name: bytes(&field.name),
         metadata: Some(FieldMetadata {
-            father: Some(item_metadata(field.access_flags)),
+            father: Some(item_metadata_with_annotations(
+                field.access_flags,
+                field
+                    .annotations
+                    .iter()
+                    .map(custom_annotation_to_proto)
+                    .collect(),
+            )),
             field_type: Some(annotation_field_type_sentinel()),
             value: field
                 .value
@@ -3018,6 +3094,15 @@ fn record_metadata(access_flags: u32) -> RecordMetadata {
     record_metadata_with_attributes(access_flags, Vec::new())
 }
 
+fn record_metadata_with_annotations(
+    access_flags: u32,
+    annotations: Vec<AnnotationData>,
+) -> RecordMetadata {
+    RecordMetadata {
+        father: Some(item_metadata_with_annotations(access_flags, annotations)),
+    }
+}
+
 fn record_metadata_with_attributes(
     access_flags: u32,
     set_attributes: Vec<String>,
@@ -3052,10 +3137,6 @@ fn function_metadata(
     FunctionMetadata {
         father: Some(item_metadata_with_annotations(access_flags, annotations)),
     }
-}
-
-fn item_metadata(access_flags: u32) -> ItemMetadata {
-    item_metadata_with_annotations(access_flags, Vec::new())
 }
 
 fn item_metadata_with_annotations(
@@ -3564,6 +3645,50 @@ mod tests {
             .collect()
     }
 
+    fn annotation_metadata_string_values(
+        metadata: Option<&crate::proto_panda::AnnotationMetadata>,
+        record_name: &str,
+        element_name: &str,
+    ) -> Vec<String> {
+        metadata
+            .into_iter()
+            .flat_map(|metadata| metadata.annotations.iter())
+            .filter(|annotation| annotation.record_name == record_name.as_bytes())
+            .flat_map(|annotation| annotation.elements.iter())
+            .filter(|element| element.name == element_name.as_bytes())
+            .filter_map(|element| {
+                let annotation_element::Value::Scalar(value) = element.value.as_ref()? else {
+                    return None;
+                };
+                scalar_string_value(value).ok()
+            })
+            .collect()
+    }
+
+    fn record_annotation_string_values(
+        record: &Record,
+        record_name: &str,
+        element_name: &str,
+    ) -> Vec<String> {
+        annotation_metadata_string_values(
+            record_annotation_metadata(record),
+            record_name,
+            element_name,
+        )
+    }
+
+    fn field_annotation_string_values(
+        field: &Field,
+        record_name: &str,
+        element_name: &str,
+    ) -> Vec<String> {
+        annotation_metadata_string_values(
+            field_annotation_metadata(field),
+            record_name,
+            element_name,
+        )
+    }
+
     fn annotation_usage_file_from_source(source: &str, record_name: &str) -> AbcFile {
         let mut file = AbcFile::new();
         let record = build_record_with_debug_and_package_for_target_with_mode(
@@ -3615,6 +3740,38 @@ class A {
 "#,
             "usage_string.ets",
         )
+    }
+
+    fn annotated_record_and_field_file() -> AbcFile {
+        let mut file = annotation_usage_file();
+        let record = file
+            .records
+            .iter_mut()
+            .find(|record| record.name == "Lusage_string.ets;")
+            .expect("user record must exist");
+        record.annotations.push(AnnotationRecord {
+            record_name: "usage_string.ets.Anno".to_string(),
+            elements: vec![AnnotationElementRecord {
+                name: "a".to_string(),
+                value: AnnotationValue::String("record".to_string()),
+            }],
+        });
+        record.fields.push(FieldRecord {
+            name: "x".to_string(),
+            class_idx: FIELD_OWNER_CLASS_IDX,
+            type_idx: 1,
+            field_type: FieldType::U32,
+            access_flags: 0,
+            value: None,
+            annotations: vec![AnnotationRecord {
+                record_name: "usage_string.ets.Anno".to_string(),
+                elements: vec![AnnotationElementRecord {
+                    name: "a".to_string(),
+                    value: AnnotationValue::String("field".to_string()),
+                }],
+            }],
+        });
+        file
     }
 
     fn annotation_single_value_usage_file() -> AbcFile {
@@ -3844,6 +4001,122 @@ class A {}
         assert_eq!(
             function_annotation_string_values(method, "usage_string.ets.Anno", "a"),
             vec!["world".to_string()]
+        );
+    }
+
+    #[test]
+    fn record_and_field_annotations_roundtrip_through_program_cache() {
+        let file = annotated_record_and_field_file();
+        let program = program_for_file(&file, 20).unwrap();
+        let user_record = program
+            .record_table
+            .iter()
+            .find_map(|entry| {
+                let record = entry.value.as_ref()?;
+                (entry.key == b"usage_string.ets").then_some(record)
+            })
+            .expect("user record must be present");
+
+        assert_eq!(
+            record_annotation_string_values(user_record, "usage_string.ets.Anno", "a"),
+            vec!["record".to_string()]
+        );
+        let field = user_record
+            .field_list
+            .iter()
+            .find(|field| field.name == b"x")
+            .expect("annotated field must be present");
+        assert_eq!(
+            field_annotation_string_values(field, "usage_string.ets.Anno", "a"),
+            vec!["field".to_string()]
+        );
+
+        let mut restored = AbcFile::new();
+        let appended = append_program_to_file(&mut restored, program).unwrap();
+        let restored_record = &restored.records[appended[0]];
+        assert_eq!(
+            restored_record.annotations[0].elements[0].value,
+            AnnotationValue::String("record".to_string())
+        );
+        let restored_field = restored_record
+            .fields
+            .iter()
+            .find(|field| field.name == "x")
+            .expect("restored annotated field must be present");
+        assert_eq!(
+            restored_field.annotations[0].elements[0].value,
+            AnnotationValue::String("field".to_string())
+        );
+    }
+
+    #[test]
+    fn record_and_field_annotations_write_upstream_class_and_field_tags() {
+        let file = annotated_record_and_field_file();
+        let bytes = file.serialize_with_version(version_for_target_api(20, None));
+        AbcReader::validate(&bytes).unwrap();
+        let reader = AbcReader::new(&bytes).unwrap();
+        let classes = reader.class_items().unwrap();
+        let user_class = classes
+            .iter()
+            .find(|class| class.name == "Lusage_string.ets;")
+            .expect("user class must be present");
+        let custom_annotation_class = classes
+            .iter()
+            .find(|class| class.name == "Lusage_string.ets.Anno;")
+            .expect("custom annotation class must be present");
+        let index = reader.index_sections().unwrap().remove(0);
+        let custom_annotation_class_idx = index
+            .class_offsets
+            .iter()
+            .position(|offset| *offset == custom_annotation_class.offset)
+            .expect("custom annotation class must be in IndexSection")
+            as u16;
+        let annotation_class_idx = |offset: u32| -> u16 {
+            let offset = offset as usize;
+            u16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap())
+        };
+
+        assert_eq!(user_class.annotation_offsets.len(), 1);
+        assert_eq!(
+            annotation_class_idx(user_class.annotation_offsets[0]),
+            custom_annotation_class_idx
+        );
+        let field = user_class
+            .fields
+            .iter()
+            .find(|field| field.name == "x")
+            .expect("annotated field must be present");
+        assert_eq!(field.annotation_offsets.len(), 1);
+        assert_eq!(
+            annotation_class_idx(field.annotation_offsets[0]),
+            custom_annotation_class_idx
+        );
+    }
+
+    #[test]
+    fn abc_input_preserves_record_and_field_annotations() {
+        let file = annotated_record_and_field_file();
+        let bytes = file.serialize_with_version(version_for_target_api(20, None));
+        let mut restored = AbcFile::new();
+        append_abc_file(&mut restored, &bytes).unwrap();
+
+        let restored_record = restored
+            .records
+            .iter()
+            .find(|record| record.name == "Lusage_string.ets;")
+            .expect("restored user record must be present");
+        assert_eq!(
+            restored_record.annotations[0].elements[0].value,
+            AnnotationValue::String("record".to_string())
+        );
+        let restored_field = restored_record
+            .fields
+            .iter()
+            .find(|field| field.name == "x")
+            .expect("restored annotated field must be present");
+        assert_eq!(
+            restored_field.annotations[0].elements[0].value,
+            AnnotationValue::String("field".to_string())
         );
     }
 

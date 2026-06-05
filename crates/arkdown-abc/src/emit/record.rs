@@ -230,12 +230,22 @@ pub(crate) struct MethodAnnotationOffsets {
     pub(crate) slot_number: u32,
 }
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ClassAnnotationOffsets {
+    pub(crate) custom: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FieldAnnotationOffsets {
+    pub(crate) custom: Vec<u32>,
+}
+
 /// Minimal method debug info linked through a Panda LineNumberProgram.
 #[derive(Debug, Clone)]
 pub struct DebugInfoRecord {
     /// Initial 1-based source line for the method.
     pub line_start: u32,
-    /// Source file path stored in the class SOURCE_FILE tag and LNP SET_FILE.
+    /// Source file path stored in the LNP SET_FILE debug opcode.
     pub source_file: String,
     /// Formal parameter names, parallel to the method's parameter list.
     /// Empty for methods whose params are unnamed or not tracked.
@@ -271,6 +281,8 @@ pub struct FieldRecord {
     pub access_flags: u32,
     /// Optional constant value emitted in the field's tagged section.
     pub value: Option<FieldValue>,
+    /// Custom annotation metadata attached to this field.
+    pub annotations: Vec<AnnotationRecord>,
 }
 
 /// Panda field type carried by a [`FieldRecord`].
@@ -487,8 +499,10 @@ pub struct ClassRecord {
     /// True when the record comes from a direct es2abc-style `.js`/`.ts`
     /// source-file input rather than hvigor's filesInfo handoff.
     pub standalone_ecmascript_input: bool,
-    /// Optional source file path written as ClassTag::SOURCE_FILE.
+    /// Optional source file path used by debug/LNP metadata.
     pub source_file: Option<String>,
+    /// Custom annotation metadata attached to this class/record.
+    pub annotations: Vec<AnnotationRecord>,
     /// Module specifiers referenced by `require("@ohos:xxx")` calls in this
     /// module's code.
     ///
@@ -519,8 +533,10 @@ impl ClassRecord {
         let fields_count = uleb128(self.fields.len() as u64).len();
         // methods_count: ULEB128 (1 byte for counts < 128)
         let methods_count = uleb128(self.methods.len() as u64).len();
-        // ClassTag::SOURCE_LANG (1) + lang byte (1) + ClassTag::NOTHING (1)
-        let class_tags = 3;
+        // ClassTag::SOURCE_LANG + custom ClassTag::ANNOTATION entries +
+        // ClassTag::NOTHING. ClassRecord::source_file is debug/LNP metadata;
+        // do not synthesize ClassTag::SOURCE_FILE from it.
+        let class_tags = 2 + self.annotations.len() * (1 + 4) + 1;
         let field_bytes = self.field_items_byte_size();
         // Per-method bytes:
         // class_idx(2) + proto_idx(2) + name_off(4) + access_flags_uleb128(2)
@@ -571,6 +587,7 @@ impl ClassRecord {
                     + 4
                     + uleb128(field.access_flags as u64).len()
                     + field.value.as_ref().map_or(0, FieldValue::encoded_len)
+                    + field.annotations.len() * (1 + 4)
                     + 1
             })
             .sum()
@@ -613,8 +630,10 @@ impl ClassRecord {
     pub(crate) fn serialize_class_item(
         &self,
         class_idx: u16,
+        class_annotation_offsets: &ClassAnnotationOffsets,
         field_name_offsets: &[u32],
         _source_file_offset: Option<u32>,
+        field_annotation_offsets: &[FieldAnnotationOffsets],
         method_name_offsets: &[u32],
         code_offsets: &[u32],
         debug_info_offsets: &[Option<u32>],
@@ -623,7 +642,12 @@ impl ClassRecord {
         field_type_indices: &[u16],
         field_value_offsets: &[Option<u32>],
     ) -> Vec<u8> {
+        debug_assert_eq!(
+            class_annotation_offsets.custom.len(),
+            self.annotations.len()
+        );
         debug_assert_eq!(field_name_offsets.len(), self.fields.len());
+        debug_assert_eq!(field_annotation_offsets.len(), self.fields.len());
         debug_assert_eq!(field_type_indices.len(), self.fields.len());
         debug_assert_eq!(field_value_offsets.len(), self.fields.len());
         debug_assert_eq!(method_name_offsets.len(), self.methods.len());
@@ -655,6 +679,11 @@ impl ClassRecord {
         // ClassTag::SOURCE_LANG = 0x02.
         buf.push(0x02);
         buf.push(self.source_lang);
+        // ClassTag::ANNOTATION = 0x04.
+        for &annotation_off in &class_annotation_offsets.custom {
+            buf.push(0x04);
+            buf.extend_from_slice(&annotation_off.to_le_bytes());
+        }
         // ClassTag::NOTHING = 0x00 (terminates tagged section)
         buf.push(0x00);
 
@@ -692,6 +721,11 @@ impl ClassRecord {
                     literal_array_offsets,
                     field_value_offsets[field_idx],
                 );
+            }
+            // FieldTag::ANNOTATION = 0x04.
+            for &annotation_off in &field_annotation_offsets[field_idx].custom {
+                buf.push(0x04);
+                buf.extend_from_slice(&annotation_off.to_le_bytes());
             }
             // FieldTag::NOTHING = 0x00
             buf.push(0x00);
@@ -946,6 +980,7 @@ mod tests {
             source_lang: 0,
             standalone_ecmascript_input: false,
             source_file: None,
+            annotations: vec![],
             module_requests: vec![],
             fields: vec![],
         };
@@ -992,14 +1027,17 @@ mod tests {
             source_lang: 0,
             standalone_ecmascript_input: false,
             source_file: None,
+            annotations: vec![],
             module_requests: vec![],
             fields: vec![],
         };
         // annotation_offset = 0x200 (dummy annotation offset for test)
         let bytes = record.serialize_class_item(
             4,
+            &ClassAnnotationOffsets::default(),
             &[],
             None,
+            &[],
             &[0x12a],
             &[0x1a1],
             &[None],

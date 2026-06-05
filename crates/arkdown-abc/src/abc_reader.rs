@@ -97,6 +97,8 @@ pub struct AbcClassItem {
     pub super_class_off: u32,
     pub access_flags: u32,
     pub source_lang: Option<u8>,
+    pub source_file: Option<String>,
+    pub annotation_offsets: Vec<u32>,
     pub fields: Vec<AbcFieldItem>,
     pub methods: Vec<AbcMethodItem>,
 }
@@ -110,6 +112,7 @@ pub struct AbcFieldItem {
     pub name_off: u32,
     pub access_flags: u32,
     pub value: Option<AbcFieldValue>,
+    pub annotation_offsets: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -767,6 +770,8 @@ impl<'a> AbcReader<'a> {
         cursor += len;
 
         let mut source_lang = None;
+        let mut source_file = None;
+        let mut annotation_offsets = Vec::new();
         loop {
             let tag = self.read_u8(cursor)?;
             cursor += 1;
@@ -775,6 +780,15 @@ impl<'a> AbcReader<'a> {
                 0x02 => {
                     source_lang = Some(self.read_u8(cursor)?);
                     cursor += 1;
+                }
+                0x04 => {
+                    annotation_offsets.push(self.read_u32(cursor)?);
+                    cursor += 4;
+                }
+                0x07 => {
+                    let source_file_off = self.read_u32(cursor)?;
+                    cursor += 4;
+                    source_file = Some(self.read_string_at(source_file_off as usize)?);
                 }
                 other => {
                     return Err(AbcReadError::MalformedClassItem {
@@ -805,6 +819,8 @@ impl<'a> AbcReader<'a> {
             super_class_off,
             access_flags: access_flags as u32,
             source_lang,
+            source_file,
+            annotation_offsets,
             fields,
             methods,
         })
@@ -826,6 +842,8 @@ impl<'a> AbcReader<'a> {
             super_class_off: 0,
             access_flags: 0,
             source_lang: None,
+            source_file: None,
+            annotation_offsets: Vec::new(),
             fields: Vec::new(),
             methods: Vec::new(),
         })
@@ -848,6 +866,7 @@ impl<'a> AbcReader<'a> {
                 })?;
         cursor += len;
         let mut value = None;
+        let mut annotation_offsets = Vec::new();
         loop {
             let tag = self.read_u8(cursor)?;
             cursor += 1;
@@ -859,6 +878,10 @@ impl<'a> AbcReader<'a> {
                 }
                 0x02 => {
                     value = Some(AbcFieldValue::U32(self.read_u32(cursor)?));
+                    cursor += 4;
+                }
+                0x04 => {
+                    annotation_offsets.push(self.read_u32(cursor)?);
                     cursor += 4;
                 }
                 other => {
@@ -878,6 +901,7 @@ impl<'a> AbcReader<'a> {
                 name_off,
                 access_flags: access_flags as u32,
                 value,
+                annotation_offsets,
             },
             cursor,
         ))

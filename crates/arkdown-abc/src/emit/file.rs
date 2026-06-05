@@ -8,7 +8,8 @@ use crate::emit::debug_info::{
     encode_sleb128_bytes, infer_func_main_class_local_events,
 };
 use crate::emit::record::{
-    encode_code_item, inline_string, uleb128, AnnotationValue, ClassRecord, FieldType, FieldValue,
+    encode_code_item, inline_string, uleb128, AnnotationRecord, AnnotationValue,
+    ClassAnnotationOffsets, ClassRecord, FieldAnnotationOffsets, FieldType, FieldValue,
     MethodAnnotationOffsets, MethodKind,
 };
 use crate::emit::strings::StringTable;
@@ -34,6 +35,13 @@ pub(crate) const LITERAL_TAG_GETTER: u8 = 0x1a;
 pub(crate) const LITERAL_TAG_SETTER: u8 = 0x1b;
 pub(crate) const LITERAL_TAG_ETS_IMPLEMENTS: u8 = 0x1c;
 pub(crate) const LITERAL_TAG_NULL: u8 = 0xff;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum AnnotationOwnerKind {
+    Class,
+    Field,
+    Method,
+}
 
 /// A single entry in a Panda `LiteralArray`.
 ///
@@ -319,6 +327,7 @@ impl AbcFile {
             source_lang: SOURCE_LANG_ECMASCRIPT,
             standalone_ecmascript_input: false,
             source_file: None,
+            annotations: vec![],
             module_requests: vec![],
             fields: vec![],
         });
@@ -334,6 +343,7 @@ impl AbcFile {
                 source_lang: SOURCE_LANG_ECMASCRIPT,
                 standalone_ecmascript_input: false,
                 source_file: None,
+                annotations: vec![],
                 module_requests: vec![],
                 fields: vec![],
             });
@@ -349,6 +359,7 @@ impl AbcFile {
             source_lang: SOURCE_LANG_ECMASCRIPT,
             standalone_ecmascript_input: false,
             source_file: None,
+            annotations: vec![],
             module_requests: vec![],
             fields: vec![],
         });
@@ -563,12 +574,29 @@ impl AbcFile {
                 }
             }
 
+            for annotation in &class.annotations {
+                for element in &annotation.elements {
+                    string_items.get_or_create(&element.name);
+                    if let AnnotationValue::String(value) = &element.value {
+                        string_items.get_or_create(value);
+                    }
+                }
+            }
+
             for (field_idx, field) in class.fields.iter().enumerate() {
                 field_name_string_offsets[class_idx][field_idx] =
                     string_items.get_or_create(&field.name);
                 if let Some(FieldValue::String(value)) = &field.value {
                     field_value_offsets[class_idx][field_idx] =
                         Some(string_items.get_or_create(value));
+                }
+                for annotation in &field.annotations {
+                    for element in &annotation.elements {
+                        string_items.get_or_create(&element.name);
+                        if let AnnotationValue::String(value) = &element.value {
+                            string_items.get_or_create(value);
+                        }
+                    }
                 }
             }
 
@@ -736,8 +764,31 @@ impl AbcFile {
         let mut cur = string_items.cur();
         let mut field_value_section = Vec::new();
         let mut annotation_f64_value_offsets =
-            FxHashMap::<(usize, usize, usize, usize), u32>::default();
+            FxHashMap::<(AnnotationOwnerKind, usize, usize, usize, usize), u32>::default();
         for (class_idx, class) in all_classes.iter().enumerate() {
+            for (annotation_idx, annotation) in class.annotations.iter().enumerate() {
+                for (element_idx, element) in annotation.elements.iter().enumerate() {
+                    if let AnnotationValue::F64(value) = &element.value {
+                        let aligned = align8(cur);
+                        while cur < aligned {
+                            field_value_section.push(0);
+                            cur += 1;
+                        }
+                        annotation_f64_value_offsets.insert(
+                            (
+                                AnnotationOwnerKind::Class,
+                                class_idx,
+                                0,
+                                annotation_idx,
+                                element_idx,
+                            ),
+                            cur,
+                        );
+                        field_value_section.extend_from_slice(&value.to_le_bytes());
+                        cur += 8;
+                    }
+                }
+            }
             for (field_idx, field) in class.fields.iter().enumerate() {
                 if let Some(FieldValue::F64(value)) = field.value.as_ref() {
                     let aligned = align8(cur);
@@ -749,6 +800,29 @@ impl AbcFile {
                     field_value_section.extend_from_slice(&value.to_le_bytes());
                     cur += 8;
                 }
+                for (annotation_idx, annotation) in field.annotations.iter().enumerate() {
+                    for (element_idx, element) in annotation.elements.iter().enumerate() {
+                        if let AnnotationValue::F64(value) = &element.value {
+                            let aligned = align8(cur);
+                            while cur < aligned {
+                                field_value_section.push(0);
+                                cur += 1;
+                            }
+                            annotation_f64_value_offsets.insert(
+                                (
+                                    AnnotationOwnerKind::Field,
+                                    class_idx,
+                                    field_idx,
+                                    annotation_idx,
+                                    element_idx,
+                                ),
+                                cur,
+                            );
+                            field_value_section.extend_from_slice(&value.to_le_bytes());
+                            cur += 8;
+                        }
+                    }
+                }
             }
             for (method_idx, method) in class.methods.iter().enumerate() {
                 for (annotation_idx, annotation) in method.annotations.iter().enumerate() {
@@ -759,8 +833,16 @@ impl AbcFile {
                                 field_value_section.push(0);
                                 cur += 1;
                             }
-                            annotation_f64_value_offsets
-                                .insert((class_idx, method_idx, annotation_idx, element_idx), cur);
+                            annotation_f64_value_offsets.insert(
+                                (
+                                    AnnotationOwnerKind::Method,
+                                    class_idx,
+                                    method_idx,
+                                    annotation_idx,
+                                    element_idx,
+                                ),
+                                cur,
+                            );
                             field_value_section.extend_from_slice(&value.to_le_bytes());
                             cur += 8;
                         }
@@ -1070,7 +1152,62 @@ impl AbcFile {
             }
         }
 
-        // Per-class annotation offsets (parallel to methods).
+        let make_annotation_key =
+            |owner_kind: AnnotationOwnerKind,
+             class_idx: usize,
+             member_idx: usize,
+             annotation_idx: usize,
+             annotation: &AnnotationRecord| {
+                let annotation_class_name = format!("L{};", annotation.record_name);
+                let annotation_class_idx = *name_to_index_class_idx
+                    .get(annotation_class_name.as_str())
+                    .unwrap_or_else(|| {
+                        panic!("custom annotation record {annotation_class_name} must be indexed")
+                    });
+                let elements = annotation
+                    .elements
+                    .iter()
+                    .enumerate()
+                    .map(|(element_idx, element)| {
+                        let name_off = string_items
+                            .id_of(&element.name)
+                            .expect("annotation element name must be interned");
+                        let value = match &element.value {
+                            AnnotationValue::Bool(value) => u32::from(*value),
+                            AnnotationValue::U32(value) => *value,
+                            AnnotationValue::F64(_) => *annotation_f64_value_offsets
+                                .get(&(
+                                    owner_kind,
+                                    class_idx,
+                                    member_idx,
+                                    annotation_idx,
+                                    element_idx,
+                                ))
+                                .expect("annotation f64 value offset must be resolved"),
+                            AnnotationValue::String(value) => string_items
+                                .id_of(value)
+                                .expect("annotation string value must be interned"),
+                            AnnotationValue::LiteralArray { index, .. } => {
+                                literal_array_offsets[*index]
+                            }
+                        };
+                        AnnotationElementKey {
+                            name_off,
+                            value,
+                            tag: element.value.tag(),
+                        }
+                    })
+                    .collect();
+                AnnotationItemKey {
+                    class_idx: annotation_class_idx,
+                    elements,
+                }
+            };
+
+        let mut class_annotation_offsets_per_class: Vec<ClassAnnotationOffsets> =
+            Vec::with_capacity(all_classes.len());
+        let mut field_annotation_offsets_per_class: Vec<Vec<FieldAnnotationOffsets>> =
+            Vec::with_capacity(all_classes.len());
         let mut annotation_offsets_per_class: Vec<Vec<MethodAnnotationOffsets>> =
             Vec::with_capacity(all_classes.len());
         let mut annotation_emit_order = Vec::new();
@@ -1078,52 +1215,39 @@ impl AbcFile {
             let mut annotation_offsets_by_key = FxHashMap::<AnnotationItemKey, u32>::default();
             let mut ann_cur = annotation_section_start;
             for (class_idx, class) in all_classes.iter().enumerate() {
-                let mut class_ann_offs = Vec::with_capacity(class.methods.len());
-                class_ann_offs.resize(class.methods.len(), MethodAnnotationOffsets::default());
-                for &method_idx in &annotation_order_per_class[class_idx] {
-                    for (annotation_idx, annotation) in
-                        class.methods[method_idx].annotations.iter().enumerate()
-                    {
-                        let annotation_class_name = format!("L{};", annotation.record_name);
-                        let annotation_class_idx = *name_to_index_class_idx
-                            .get(annotation_class_name.as_str())
-                            .unwrap_or_else(|| {
-                                panic!(
-                                    "custom annotation record {annotation_class_name} must be indexed"
-                                )
-                            });
-                        let elements = annotation
-                            .elements
-                            .iter()
-                            .enumerate()
-                            .map(|(element_idx, element)| {
-                                let name_off = string_items
-                                    .id_of(&element.name)
-                                    .expect("annotation element name must be interned");
-                                let value = match &element.value {
-                                    AnnotationValue::Bool(value) => u32::from(*value),
-                                    AnnotationValue::U32(value) => *value,
-                                    AnnotationValue::F64(_) => *annotation_f64_value_offsets
-                                        .get(&(class_idx, method_idx, annotation_idx, element_idx))
-                                        .expect("annotation f64 value offset must be resolved"),
-                                    AnnotationValue::String(value) => string_items
-                                        .id_of(value)
-                                        .expect("annotation string value must be interned"),
-                                    AnnotationValue::LiteralArray { index, .. } => {
-                                        literal_array_offsets[*index]
-                                    }
-                                };
-                                AnnotationElementKey {
-                                    name_off,
-                                    value,
-                                    tag: element.value.tag(),
-                                }
-                            })
-                            .collect();
-                        let key = AnnotationItemKey {
-                            class_idx: annotation_class_idx,
-                            elements,
-                        };
+                let mut class_annotation_offsets = ClassAnnotationOffsets::default();
+                for (annotation_idx, annotation) in class.annotations.iter().enumerate() {
+                    let key = make_annotation_key(
+                        AnnotationOwnerKind::Class,
+                        class_idx,
+                        0,
+                        annotation_idx,
+                        annotation,
+                    );
+                    let off = *annotation_offsets_by_key
+                        .entry(key.clone())
+                        .or_insert_with(|| {
+                            let off = ann_cur;
+                            ann_cur += key.byte_size();
+                            annotation_emit_order.push(key);
+                            off
+                        });
+                    class_annotation_offsets.custom.push(off);
+                }
+                class_annotation_offsets_per_class.push(class_annotation_offsets);
+
+                let mut field_annotation_offsets = Vec::with_capacity(class.fields.len());
+                field_annotation_offsets
+                    .resize(class.fields.len(), FieldAnnotationOffsets::default());
+                for (field_idx, field) in class.fields.iter().enumerate() {
+                    for (annotation_idx, annotation) in field.annotations.iter().enumerate() {
+                        let key = make_annotation_key(
+                            AnnotationOwnerKind::Field,
+                            class_idx,
+                            field_idx,
+                            annotation_idx,
+                            annotation,
+                        );
                         let off =
                             *annotation_offsets_by_key
                                 .entry(key.clone())
@@ -1133,7 +1257,34 @@ impl AbcFile {
                                     annotation_emit_order.push(key);
                                     off
                                 });
-                        class_ann_offs[method_idx].custom.push(off);
+                        field_annotation_offsets[field_idx].custom.push(off);
+                    }
+                }
+                field_annotation_offsets_per_class.push(field_annotation_offsets);
+
+                let mut method_ann_offs = Vec::with_capacity(class.methods.len());
+                method_ann_offs.resize(class.methods.len(), MethodAnnotationOffsets::default());
+                for &method_idx in &annotation_order_per_class[class_idx] {
+                    for (annotation_idx, annotation) in
+                        class.methods[method_idx].annotations.iter().enumerate()
+                    {
+                        let key = make_annotation_key(
+                            AnnotationOwnerKind::Method,
+                            class_idx,
+                            method_idx,
+                            annotation_idx,
+                            annotation,
+                        );
+                        let off =
+                            *annotation_offsets_by_key
+                                .entry(key.clone())
+                                .or_insert_with(|| {
+                                    let off = ann_cur;
+                                    ann_cur += key.byte_size();
+                                    annotation_emit_order.push(key);
+                                    off
+                                });
+                        method_ann_offs[method_idx].custom.push(off);
                     }
 
                     if let Some(expected_property_count) =
@@ -1166,7 +1317,7 @@ impl AbcFile {
                             annotation_emit_order.push(key);
                             off
                         });
-                        class_ann_offs[method_idx].expected_property_count = Some(off);
+                        method_ann_offs[method_idx].expected_property_count = Some(off);
                     }
 
                     let key = AnnotationItemKey {
@@ -1188,9 +1339,9 @@ impl AbcFile {
                                 .byte_size();
                             off
                         });
-                    class_ann_offs[method_idx].slot_number = off;
+                    method_ann_offs[method_idx].slot_number = off;
                 }
-                annotation_offsets_per_class.push(class_ann_offs);
+                annotation_offsets_per_class.push(method_ann_offs);
             }
         }
         let annotation_section_size = annotation_emit_order
@@ -1660,8 +1811,10 @@ impl AbcFile {
                     .unwrap_or(&0);
                 class.serialize_class_item(
                     class_idx,
+                    &class_annotation_offsets_per_class[ci],
                     &field_name_string_offsets[ci],
                     source_file_string_offsets[ci],
+                    &field_annotation_offsets_per_class[ci],
                     &method_string_offsets[ci],
                     &code_offsets[ci],
                     &debug_info_offsets[ci],
