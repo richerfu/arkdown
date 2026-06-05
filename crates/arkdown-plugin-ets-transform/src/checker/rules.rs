@@ -117,10 +117,60 @@ pub fn check(source: &str, file: &str) -> Vec<EtsTransformError> {
                 .decorators
                 .iter()
                 .any(|d| decorator_name(d) == "Component");
+            let has_component_v2 = class
+                .decorators
+                .iter()
+                .any(|d| decorator_name(d) == "ComponentV2");
+            let has_observed = class
+                .decorators
+                .iter()
+                .any(|d| decorator_name(d) == "Observed");
+            let has_observed_v2 = class
+                .decorators
+                .iter()
+                .any(|d| decorator_name(d) == "ObservedV2");
             let has_entry = class
                 .decorators
                 .iter()
                 .any(|d| decorator_name(d) == "Entry");
+
+            // Rule: @Observed and @ObservedV2 are data model decorators — cannot
+            // be mixed with @Component, @ComponentV2, or @Entry decorators.
+            // Matches hvigor etsChecker rule for data model classes.
+            if (has_observed || has_observed_v2) && (has_component || has_component_v2) {
+                let obs_name = if has_observed_v2 { "@ObservedV2" } else { "@Observed" };
+                let comp_name = if has_component_v2 { "@ComponentV2" } else { "@Component" };
+                let class_name = class
+                    .id
+                    .as_ref()
+                    .map(|id| id.name.as_str().to_string())
+                    .unwrap_or_else(|| "<anonymous>".to_string());
+                errors.push(EtsTransformError::Diagnostic {
+                    file: file.to_string(),
+                    message: format!(
+                        "Class '{}' cannot be decorated with both '{}' and '{}'",
+                        class_name, obs_name, comp_name
+                    ),
+                    severity: DiagnosticSeverity::Error,
+                });
+            }
+
+            // Rule: @ObservedV2 and @Observed cannot be mixed.
+            if has_observed && has_observed_v2 {
+                let class_name = class
+                    .id
+                    .as_ref()
+                    .map(|id| id.name.as_str().to_string())
+                    .unwrap_or_else(|| "<anonymous>".to_string());
+                errors.push(EtsTransformError::Diagnostic {
+                    file: file.to_string(),
+                    message: format!(
+                        "Class '{}' cannot use both '@Observed' and '@ObservedV2' decorators",
+                        class_name
+                    ),
+                    severity: DiagnosticSeverity::Error,
+                });
+            }
 
             // Rule: @Entry without @Component
             if has_entry && !has_component {
@@ -490,5 +540,69 @@ fn is_void_type(ty: &TSType<'_>) -> bool {
         TSType::TSVoidKeyword(_) => true,
         TSType::TSParenthesizedType(parenthesized) => is_void_type(&parenthesized.type_annotation),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn has_error_containing(source: &str, fragment: &str) -> bool {
+        let errs = check(source, "test.ets");
+        errs.iter().any(|e| match e {
+            EtsTransformError::Diagnostic { message, .. } => message.contains(fragment),
+            _ => false,
+        })
+    }
+
+    #[test]
+    fn test_observed_with_component_is_error() {
+        let src = "@Observed\n@Component\nclass MyData {\n  count: number = 0;\n}";
+        assert!(
+            has_error_containing(src, "@Observed"),
+            "@Observed with @Component must be an error"
+        );
+    }
+
+    #[test]
+    fn test_observed_v2_with_component_v2_is_error() {
+        let src = "@ObservedV2\n@ComponentV2\nclass MyData {\n  count: number = 0;\n}";
+        assert!(
+            has_error_containing(src, "@ObservedV2"),
+            "@ObservedV2 with @ComponentV2 must be an error"
+        );
+    }
+
+    #[test]
+    fn test_observed_and_observed_v2_mixed_is_error() {
+        let src = "@Observed\n@ObservedV2\nclass MyData {\n  count: number = 0;\n}";
+        assert!(
+            has_error_containing(src, "@Observed"),
+            "@Observed with @ObservedV2 must be an error"
+        );
+    }
+
+    #[test]
+    fn test_observed_alone_is_valid() {
+        let src = "@Observed\nclass MyData {\n  count: number = 0;\n}";
+        let errs = check(src, "test.ets");
+        assert!(
+            !errs.iter().any(|e| matches!(e, EtsTransformError::Diagnostic { .. })),
+            "@Observed alone must not produce errors; got: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn test_observed_v2_alone_is_valid() {
+        let src = "@ObservedV2\nclass MyData {\n  count: number = 0;\n}";
+        let errs = check(src, "test.ets");
+        assert!(
+            !errs.iter().any(|e| matches!(e, EtsTransformError::Diagnostic {
+                severity: crate::error::DiagnosticSeverity::Error, ..
+            })),
+            "@ObservedV2 alone must not produce errors; got: {:?}",
+            errs
+        );
     }
 }
