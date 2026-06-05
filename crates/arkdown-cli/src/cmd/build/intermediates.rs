@@ -283,21 +283,29 @@ pub(super) fn write_resource_config_files_with_dirs(
 
 /// Collect ResourceTable.txt paths from declared HSP dependencies in oh_modules/.
 ///
-/// Matches hvigor's restool config generation which includes dependency resource
-/// tables so that HSP resource IDs can be resolved during HAP/HSP compilation.
+/// Uses `LocalDependencyGraph` for BFS-consistent ordering.
+/// All locally-installed packages with a `ResourceTable.txt` contribute,
+/// regardless of type — some pre-built HARs/HSPs ship with a resource table.
+/// Matches hvigor's restool config which includes dependency resource tables so
+/// that HSP resource IDs can be resolved during HAP/HSP compilation.
 fn collect_dependency_resource_tables(
     module_root: &Path,
     project_root: &Path,
 ) -> Vec<serde_json::Value> {
+    use arkdown_profile::dependency_graph::LocalDependencyGraph;
+    let graph = LocalDependencyGraph::build(module_root, project_root);
     let mut tables = Vec::new();
-    for pkg_dir in collect_declared_dependency_roots(project_root, module_root) {
-        // Check target intermediates first (locally-built HSP layout), then
-        // fall back to the package root (remote HSP / pre-built layout).
+
+    for node in graph.nodes.values() {
+        if node.pkg_root.as_os_str().is_empty() {
+            continue; // not installed locally
+        }
+        // Check target intermediates first (locally-built HSP), then package root.
         // Mirrors hvigor DependencyManager which prefers the target intermediates
         // ResourceTable.txt when the dependency was built in the same project.
         let resource_table = [
-            pkg_dir.join("build/default/intermediates/res/default/ResourceTable.txt"),
-            pkg_dir.join("ResourceTable.txt"),
+            node.pkg_root.join("build/default/intermediates/res/default/ResourceTable.txt"),
+            node.pkg_root.join("ResourceTable.txt"),
         ]
         .into_iter()
         .find(|p| p.is_file());
