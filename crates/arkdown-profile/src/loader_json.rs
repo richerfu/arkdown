@@ -206,6 +206,15 @@ impl AotLoaderFields {
             return Self::empty(fallback_an_build);
         }
 
+        // Preview and Test builds do not run AOT compilation.
+        // hvigor skips `anBuildMode`/`anBuildOutPut` for these targets.
+        if matches!(
+            config.output_target,
+            arkdown_core::OutputTarget::Preview | arkdown_core::OutputTarget::Test
+        ) {
+            return Self::empty(false);
+        }
+
         let api_version = config.sdk_config.compile_api_version;
         let an_build_mode = Self::resolve_an_build_mode(config);
         let ap_path = Self::resolve_ap_path(config, module_cfg);
