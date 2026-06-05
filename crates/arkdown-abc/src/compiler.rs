@@ -164,15 +164,24 @@ struct BuiltAbcFile {
 /// now accepts TypeScript source directly via `SourceType::ts()`, so we
 /// no longer need to fully strip the annotations here.
 ///
-/// Falls back to the original source if the TS parser panics hard (e.g.
-/// truly malformed input).
-fn strip_typescript_types(source: &str) -> String {
+fn strip_typescript_types(source: &str, file: &str) -> Result<String, AbcError> {
+    if file.ends_with(".ets") {
+        return Ok(source.to_string());
+    }
+
     let allocator = Allocator::default();
     let parse_ret = Parser::new(&allocator, source, SourceType::ts()).parse();
     if parse_ret.panicked {
-        return source.to_string();
+        return Err(AbcError::Parse {
+            file: file.to_string(),
+            message: parse_ret
+                .errors
+                .first()
+                .map(|error| error.message.to_string())
+                .unwrap_or_else(|| "parser panic".to_string()),
+        });
     }
-    Codegen::new().build(&parse_ret.program).code
+    Ok(Codegen::new().build(&parse_ret.program).code)
 }
 
 fn source_file_from_record_name(record_name: &str) -> String {
@@ -411,7 +420,7 @@ impl AbcCompiler {
                 continue;
             }
             let source = fs_err::read_to_string(&input.path).map_err(AbcError::Io)?;
-            let js_source = strip_typescript_types(&source);
+            let js_source = strip_typescript_types(&source, &input.path.to_string_lossy())?;
             let source_file = input
                 .source_file
                 .as_deref()
@@ -785,7 +794,7 @@ impl AbcCompiler {
             let js_source = if module.source_file.is_some() {
                 module.source.clone()
             } else {
-                strip_typescript_types(&module.source)
+                strip_typescript_types(&module.source, &module.record_name)?
             };
             // Upstream es2abc emits LineNumberProgram entries even when
             // --debug-info is not supplied. The debug flag controls the amount
