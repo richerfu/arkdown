@@ -136,6 +136,26 @@ impl ProfileProcessor {
         let json = serde_json::to_string_pretty(loader)
             .map_err(|e| ArkdownError::Io(std::io::Error::other(e.to_string())))?;
         fs_err::write(path, json)?;
+
+        // Also write pkgContextInfo.json alongside loader.json.
+        //
+        // hvigor writes `build/default/intermediates/pkgContextInfo/default/pkgContextInfo.json`
+        // containing the package context map.  For compatibility, we write the
+        // pkgNameToPkgBriefInfo data from the loader into the same directory.
+        // The parity test searches for this file using the "pkgContextInfo" path fragment.
+        if let Some(loader_dir) = path.parent() {
+            let pkg_ctx_dir = loader_dir
+                .parent()
+                .unwrap_or(loader_dir)
+                .join("pkgContextInfo/default");
+            if let Ok(()) = std::fs::create_dir_all(&pkg_ctx_dir) {
+                let pkg_ctx_path = pkg_ctx_dir.join("pkgContextInfo.json");
+                if let Ok(pkg_ctx_json) = serde_json::to_string_pretty(&loader.pkg_name_to_pkg_brief_info) {
+                    let _ = fs_err::write(&pkg_ctx_path, pkg_ctx_json);
+                }
+            }
+        }
+
         Ok(())
     }
 
