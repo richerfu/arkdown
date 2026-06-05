@@ -9,7 +9,9 @@ use crate::emit::record::{
 use crate::emit::strings::StringTable;
 use crate::ir::debug_lnp::LineTracker;
 use crate::ir::opcodes::{Insn, PandasmImm, PandasmInsn};
-use crate::isa::{encode_pandasm_instruction, IdKind};
+use crate::isa::{
+    encode_pandasm_instruction, pandasm_invalid_opcode, pandasm_opcode_for_bytecode, IdKind,
+};
 use crate::names::{
     class_name_from_pandasm_record, full_method_name, literal_array_key, literal_array_record_name,
     pandasm_record_name, short_method_name,
@@ -804,354 +806,363 @@ fn insn_from_proto(
     refs: &mut MethodDecodeRefs,
 ) -> io::Result<DecodedItem> {
     let mut jump = None;
-    let insn = match ins.opcode {
-        2 => Insn::LdUndefined,
-        3 => Insn::LdNull,
-        5 => Insn::LdGlobal,
-        6 => Insn::LdTrue,
-        7 => Insn::LdFalse,
-        8 => Insn::LdHole,
-        11 => Insn::LdThis,
-        12 => Insn::PopLexEnv,
-        15 => Insn::AsyncFunctionEnter,
-        17 => Insn::Debugger,
-        18 => Insn::GetPropIterator,
-        19 => Insn::GetIterator(imm_u8(ins, 0, "getiterator slot")?),
-        20 => Insn::CloseIterator(imm_u8(ins, 0, "closeiterator slot")?, reg_u8(ins, 0)?),
-        23 => Insn::LdPrivateProperty(
-            imm_u8(ins, 0, "ldprivateproperty ic")?,
-            imm_u16(ins, 1, "ldprivateproperty level")?,
-            imm_u16(ins, 2, "ldprivateproperty slot")?,
-        ),
-        24 => Insn::StPrivateProperty(
-            imm_u8(ins, 0, "stprivateproperty ic")?,
-            imm_u16(ins, 1, "stprivateproperty level")?,
-            imm_u16(ins, 2, "stprivateproperty slot")?,
-            reg_u8(ins, 0)?,
-        ),
-        25 => Insn::TestIn(
-            imm_u8(ins, 0, "testin ic")?,
-            imm_u16(ins, 1, "testin level")?,
-            imm_u16(ins, 2, "testin slot")?,
-        ),
-        26 => Insn::DefineFieldByName(
-            imm_u8(ins, 0, "definefieldbyname slot")?,
-            intern_id(strings, id(ins, 0)?)?,
-            reg_u8(ins, 0)?,
-        ),
-        27 => Insn::DefinePropertyByName(
-            imm_u8(ins, 0, "definepropertybyname slot")?,
-            intern_id(strings, id(ins, 0)?)?,
-            reg_u8(ins, 0)?,
-        ),
-        28 => Insn::CreateEmptyObject,
-        29 => Insn::CreateEmptyArray(imm_u16(ins, 0, "createemptyarray slot")?),
-        30 => Insn::CreateGeneratorObj(reg_u8(ins, 0)?),
-        32 | 33 => Insn::CreateObjectWithExcludedKeys(
-            imm_u16(ins, 0, "createobjectwithexcludedkeys count")?,
-            reg_u8(ins, 0)?,
-            reg_u8(ins, 1)?,
-        ),
-        34 => {
-            let literal = literal_ref(literal_key_to_index, id(ins, 0)?, refs)?;
-            Insn::CreateArrayWithBuffer(imm_u8(ins, 0, "createarraywithbuffer slot")?, literal)
-        }
-        36 => {
-            let literal = literal_ref(literal_key_to_index, id(ins, 0)?, refs)?;
-            Insn::CreateObjectWithBuffer(imm_u8(ins, 0, "createobjectwithbuffer slot")?, literal)
-        }
-        39 => Insn::NewObjApply(imm_u8(ins, 0, "newobjapply slot")?, reg_u8(ins, 0)?),
-        40 => Insn::NewObjRange(
-            imm_u8(ins, 0, "newobjrange slot")?,
-            imm_u8(ins, 1, "newobjrange argc")?,
-            reg_u8(ins, 0)?,
-        ),
-        42 => Insn::NewLexEnv(imm_u8(ins, 0, "newlexenv count")?),
-        44 => {
-            let literal = literal_ref(literal_key_to_index, id(ins, 0)?, refs)?;
-            Insn::NewLexEnvWithName(imm_u8(ins, 0, "newlexenvwithname count")?, literal)
-        }
-        48 => Insn::Add2(imm_u8(ins, 0, "add2 slot")?, reg_u8(ins, 0)?),
-        49 => Insn::Sub2(imm_u8(ins, 0, "sub2 slot")?, reg_u8(ins, 0)?),
-        50 => Insn::Mul2(imm_u8(ins, 0, "mul2 slot")?, reg_u8(ins, 0)?),
-        51 => Insn::Div2(imm_u8(ins, 0, "div2 slot")?, reg_u8(ins, 0)?),
-        52 => Insn::Mod2(imm_u8(ins, 0, "mod2 slot")?, reg_u8(ins, 0)?),
-        53 => Insn::Eq(imm_u8(ins, 0, "eq slot")?, reg_u8(ins, 0)?),
-        54 => Insn::NotEq(imm_u8(ins, 0, "noteq slot")?, reg_u8(ins, 0)?),
-        55 => Insn::Less(imm_u8(ins, 0, "less slot")?, reg_u8(ins, 0)?),
-        56 => Insn::LessEq(imm_u8(ins, 0, "lesseq slot")?, reg_u8(ins, 0)?),
-        57 => Insn::Greater(imm_u8(ins, 0, "greater slot")?, reg_u8(ins, 0)?),
-        58 => Insn::GreaterEq(imm_u8(ins, 0, "greatereq slot")?, reg_u8(ins, 0)?),
-        59 => Insn::Shl2(imm_u8(ins, 0, "shl2 slot")?, reg_u8(ins, 0)?),
-        60 => Insn::Shr2(imm_u8(ins, 0, "shr2 slot")?, reg_u8(ins, 0)?),
-        61 => Insn::Ashr2(imm_u8(ins, 0, "ashr2 slot")?, reg_u8(ins, 0)?),
-        62 => Insn::And2(imm_u8(ins, 0, "and2 slot")?, reg_u8(ins, 0)?),
-        63 => Insn::Or2(imm_u8(ins, 0, "or2 slot")?, reg_u8(ins, 0)?),
-        64 => Insn::Xor2(imm_u8(ins, 0, "xor2 slot")?, reg_u8(ins, 0)?),
-        65 => Insn::Exp(imm_u8(ins, 0, "exp slot")?, reg_u8(ins, 0)?),
-        66 => Insn::TypeOf(imm_u8(ins, 0, "typeof slot")?),
-        67 => Insn::ToNumber(imm_u8(ins, 0, "tonumber slot")?),
-        69 => Insn::ToNumeric(imm_u8(ins, 0, "tonumeric slot")?),
-        71 => Insn::Neg(imm_u8(ins, 0, "neg slot")?),
-        73 => Insn::BitNot(imm_u8(ins, 0, "bitnot slot")?),
-        75 => Insn::Inc(imm_u8(ins, 0, "inc slot")?),
-        77 => Insn::Dec(imm_u8(ins, 0, "dec slot")?),
-        79 => Insn::IsTrue,
-        80 => Insn::IsFalse,
-        81 => Insn::IsIn(imm_u8(ins, 0, "isin slot")?, reg_u8(ins, 0)?),
-        82 => Insn::InstanceOf(imm_u8(ins, 0, "instanceof slot")?, reg_u8(ins, 0)?),
-        83 => Insn::StrictNotEq(imm_u8(ins, 0, "strictnoteq slot")?, reg_u8(ins, 0)?),
-        84 => Insn::StrictEq(imm_u8(ins, 0, "stricteq slot")?, reg_u8(ins, 0)?),
-        86 => Insn::CallRuntimeDefineFieldByValue(
-            imm_u8(ins, 0, "definefieldbyvalue slot")?,
-            reg_u8(ins, 0)?,
-            reg_u8(ins, 1)?,
-        ),
-        89 => {
-            let literal = literal_ref(literal_key_to_index, id(ins, 0)?, refs)?;
-            Insn::CallRuntimeCreatePrivateProperty(
-                imm_u16(ins, 0, "createprivateproperty count")?,
-                literal,
-            )
-        }
-        90 => Insn::CallRuntimeDefinePrivateProperty(
-            imm_u8(ins, 0, "defineprivateproperty ic")?,
-            imm_u16(ins, 1, "defineprivateproperty level")?,
-            imm_u16(ins, 2, "defineprivateproperty slot")?,
-            reg_u8(ins, 0)?,
-        ),
-        91 => Insn::CallRuntimeCallInit(imm_u8(ins, 0, "callinit slot")?, reg_u8(ins, 0)?),
-        102 => Insn::CallRuntimeIsTrue(imm_u8(ins, 0, "callruntime.istrue slot")?),
-        103 => Insn::CallRuntimeIsFalse(imm_u8(ins, 0, "callruntime.isfalse slot")?),
-        109 => Insn::Throw,
-        111 => Insn::ThrowPatternNonCoercible,
-        114 => Insn::ThrowIfNotObject(reg_u8(ins, 0)?),
-        116 => Insn::ThrowIfSuperNotCorrectCall(imm_u8(ins, 0, "throwifsupernotcorrectcall kind")?),
-        117 => Insn::ThrowUndefinedIfHoleWithName(intern_id(strings, id(ins, 0)?)?),
-        120 => Insn::CallArg0(imm_u8(ins, 0, "callarg0 slot")?),
-        122 => Insn::CallArg1(imm_u8(ins, 0, "callarg1 slot")?, reg_u8(ins, 0)?),
-        124 => Insn::CallArgs2(
-            imm_u8(ins, 0, "callargs2 slot")?,
-            reg_u8(ins, 0)?,
-            reg_u8(ins, 1)?,
-        ),
-        126 => Insn::CallArgs3(
-            imm_u8(ins, 0, "callargs3 slot")?,
-            reg_u8(ins, 0)?,
-            reg_u8(ins, 1)?,
-            reg_u8(ins, 2)?,
-        ),
-        128 => Insn::CallRange(
-            imm_u8(ins, 0, "callrange slot")?,
-            imm_u8(ins, 1, "callrange argc")?,
-            reg_u8(ins, 0)?,
-        ),
-        131 => Insn::SuperCallSpread(imm_u8(ins, 0, "supercallspread slot")?, reg_u8(ins, 0)?),
-        132 => Insn::Apply(
-            imm_u8(ins, 0, "apply slot")?,
-            reg_u8(ins, 0)?,
-            reg_u8(ins, 1)?,
-        ),
-        134 => Insn::CallThis0(imm_u8(ins, 0, "callthis0 slot")?, reg_u8(ins, 0)?),
-        135 => Insn::CallThis1(
-            imm_u8(ins, 0, "callthis1 slot")?,
-            reg_u8(ins, 0)?,
-            reg_u8(ins, 1)?,
-        ),
-        136 => Insn::CallThis2(
-            imm_u8(ins, 0, "callthis2 slot")?,
-            reg_u8(ins, 0)?,
-            reg_u8(ins, 1)?,
-            reg_u8(ins, 2)?,
-        ),
-        137 => Insn::CallThis3(
-            imm_u8(ins, 0, "callthis3 slot")?,
-            reg_u8(ins, 0)?,
-            reg_u8(ins, 1)?,
-            reg_u8(ins, 2)?,
-            reg_u8(ins, 3)?,
-        ),
-        138 => Insn::CallThisRange(
-            imm_u8(ins, 0, "callthisrange slot")?,
-            imm_u8(ins, 1, "callthisrange argc")?,
-            reg_u8(ins, 0)?,
-        ),
-        141 => Insn::SuperCallThisRange(
-            imm_u8(ins, 0, "supercallthisrange slot")?,
-            imm_u8(ins, 1, "supercallthisrange argc")?,
-            reg_u8(ins, 0)?,
-        ),
-        143 => Insn::SuperCallArrowRange(
-            imm_u8(ins, 0, "supercallarrowrange slot")?,
-            imm_u8(ins, 1, "supercallarrowrange argc")?,
-            reg_u8(ins, 0)?,
-        ),
-        145 => Insn::DefineGetterSetterByValue(
-            reg_u8(ins, 0)?,
-            reg_u8(ins, 1)?,
-            reg_u8(ins, 2)?,
-            reg_u8(ins, 3)?,
-        ),
-        146 => {
-            let name = short_method_name(record_name, &utf8(id(ins, 0)?)?);
-            let name_id = intern_id(strings, name.as_bytes())?;
-            refs.definefunc_order.push(name.clone());
-            Insn::DefineFuncShort(
-                imm_u8(ins, 0, "definefunc slot")?,
-                name_id,
-                imm_u8(ins, 1, "definefunc length")?,
-            )
-        }
-        147 => {
-            let name = short_method_name(record_name, &utf8(id(ins, 0)?)?);
-            refs.method_pool_entries.insert(name.clone());
-            Insn::DefineMethodShort(
-                imm_u8(ins, 0, "definemethod slot")?,
-                intern_id(strings, name.as_bytes())?,
-                imm_u8(ins, 1, "definemethod length")?,
-            )
-        }
-        148 => {
-            let ctor = short_method_name(record_name, &utf8(id(ins, 0)?)?);
-            refs.constructor_names.insert(ctor.clone());
-            refs.method_pool_entries.insert(ctor);
-            let literal = literal_ref(literal_key_to_index, id(ins, 1)?, refs)?;
-            Insn::DefineClassWithBuffer(
-                imm_u8(ins, 0, "defineclass slot")?,
-                0,
-                literal,
-                imm_u16(ins, 1, "defineclass argc")?,
+    let insn = match program_opcode_alias(ins.opcode) {
+        Some(opcode) => match opcode {
+            2 => Insn::LdUndefined,
+            3 => Insn::LdNull,
+            5 => Insn::LdGlobal,
+            6 => Insn::LdTrue,
+            7 => Insn::LdFalse,
+            8 => Insn::LdHole,
+            11 => Insn::LdThis,
+            12 => Insn::PopLexEnv,
+            15 => Insn::AsyncFunctionEnter,
+            17 => Insn::Debugger,
+            18 => Insn::GetPropIterator,
+            19 => Insn::GetIterator(imm_u8(ins, 0, "getiterator slot")?),
+            20 => Insn::CloseIterator(imm_u8(ins, 0, "closeiterator slot")?, reg_u8(ins, 0)?),
+            23 => Insn::LdPrivateProperty(
+                imm_u8(ins, 0, "ldprivateproperty ic")?,
+                imm_u16(ins, 1, "ldprivateproperty level")?,
+                imm_u16(ins, 2, "ldprivateproperty slot")?,
+            ),
+            24 => Insn::StPrivateProperty(
+                imm_u8(ins, 0, "stprivateproperty ic")?,
+                imm_u16(ins, 1, "stprivateproperty level")?,
+                imm_u16(ins, 2, "stprivateproperty slot")?,
                 reg_u8(ins, 0)?,
-            )
-        }
-        150 => Insn::ResumeGenerator,
-        152 => Insn::GetResumeMode,
-        154 => Insn::GetTemplateObject(imm_u16(ins, 0, "gettemplateobject slot")?),
-        156 => Insn::GetNextPropName(reg_u8(ins, 0)?),
-        157 => Insn::DelObjProp(reg_u8(ins, 0)?),
-        159 => Insn::SuspendGenerator(reg_u8(ins, 0)?),
-        161 => Insn::AsyncFunctionAwaitUncaught(reg_u8(ins, 0)?),
-        163 => Insn::CopyDataProperties(reg_u8(ins, 0)?),
-        165 => Insn::StArraySpread(reg_u8(ins, 0)?, reg_u8(ins, 1)?),
-        166 => {
-            Insn::SetObjectWithProto(imm_u8(ins, 0, "setobjectwithproto slot")?, reg_u8(ins, 0)?)
-        }
-        168 => Insn::LdObjByValue(imm_u8(ins, 0, "ldobjbyvalue slot")?, reg_u8(ins, 0)?),
-        170 => Insn::StObjByValue(
-            imm_u8(ins, 0, "stobjbyvalue slot")?,
-            reg_u8(ins, 0)?,
-            reg_u8(ins, 1)?,
-        ),
-        171 => Insn::StOwnByValue(
-            imm_u8(ins, 0, "stownbyvalue slot")?,
-            reg_u8(ins, 0)?,
-            reg_u8(ins, 1)?,
-        ),
-        172 => Insn::LdSuperByValue(imm_u8(ins, 0, "ldsuperbyvalue slot")?, reg_u8(ins, 0)?),
-        174 => Insn::StSuperByValue(
-            imm_u8(ins, 0, "stsuperbyvalue slot")?,
-            reg_u8(ins, 0)?,
-            reg_u8(ins, 1)?,
-        ),
-        180 | 181 => Insn::StOwnByIndex(
-            imm_u16(ins, 0, "stownbyindex slot")?,
-            reg_u8(ins, 0)?,
-            imm_u16(ins, 1, "stownbyindex index")?,
-        ),
-        182 => Insn::AsyncFunctionResolve(reg_u8(ins, 0)?),
-        184 => Insn::AsyncFunctionReject(reg_u8(ins, 0)?),
-        186 => Insn::CopyRestArgs(imm_u8(ins, 0, "copyrestargs count")?),
-        188 | 189 => Insn::LdLexVar(
-            imm_u8(ins, 0, "ldlexvar level")?,
-            imm_u8(ins, 1, "ldlexvar slot")?,
-        ),
-        190 | 191 => Insn::StLexVar(
-            imm_u8(ins, 0, "stlexvar level")?,
-            imm_u8(ins, 1, "stlexvar slot")?,
-        ),
-        196 => Insn::StModuleVar(imm_u8(ins, 0, "stmodulevar index")?),
-        199 => Insn::TryLdGlobalByName(
-            imm_u8(ins, 0, "tryldglobalbyname slot")?,
-            intern_id(strings, id(ins, 0)?)?,
-        ),
-        200 => Insn::TryStGlobalByName(
-            imm_u8(ins, 0, "trystglobalbyname slot")?,
-            intern_id(strings, id(ins, 0)?)?,
-        ),
-        203 => Insn::LdObjByName(
-            imm_u8(ins, 0, "ldobjbyname slot")?,
-            intern_id(strings, id(ins, 0)?)?,
-        ),
-        205 => Insn::StObjByName(
-            imm_u8(ins, 0, "stobjbyname slot")?,
-            intern_id(strings, id(ins, 0)?)?,
-            reg_u8(ins, 0)?,
-        ),
-        206 => Insn::StOwnByName(
-            imm_u8(ins, 0, "stownbyname slot")?,
-            intern_id(strings, id(ins, 0)?)?,
-            reg_u8(ins, 0)?,
-        ),
-        207 => Insn::LdSuperByName(
-            imm_u8(ins, 0, "ldsuperbyname slot")?,
-            intern_id(strings, id(ins, 0)?)?,
-        ),
-        209 => Insn::StSuperByName(
-            imm_u8(ins, 0, "stsuperbyname slot")?,
-            intern_id(strings, id(ins, 0)?)?,
-            reg_u8(ins, 0)?,
-        ),
-        210 => Insn::LdLocalModuleVar(imm_u8(ins, 0, "ldlocalmodulevar index")?),
-        212 => Insn::LdExternalModuleVar(imm_u8(ins, 0, "ldexternalmodulevar index")?),
-        222 => Insn::StOwnByValueWithNameSet(
-            imm_u8(ins, 0, "stownbyvaluewithnameset slot")?,
-            reg_u8(ins, 0)?,
-            reg_u8(ins, 1)?,
-        ),
-        223 => Insn::StOwnByNameWithNameSet(
-            imm_u8(ins, 0, "stownbynamewithnameset slot")?,
-            intern_id(strings, id(ins, 0)?)?,
-            reg_u8(ins, 0)?,
-        ),
-        224 => Insn::LdBigInt(intern_id(strings, id(ins, 0)?)?),
-        231 => Insn::DynamicImport,
-        236 => Insn::LdaStr(intern_id(strings, id(ins, 0)?)?),
-        237 => {
-            let label = utf8(id(ins, 0)?)?;
-            jump = Some((JumpKind::Jmp, label));
-            Insn::JmpWide(0)
-        }
-        238 => {
-            let label = utf8(id(ins, 0)?)?;
-            jump = Some((JumpKind::Jeqz, label));
-            Insn::JeqzWide(0)
-        }
-        239 => {
-            let label = utf8(id(ins, 0)?)?;
-            jump = Some((JumpKind::Jnez, label));
-            Insn::JnezWide(0)
-        }
-        254 => {
-            let dst = reg_u16(ins, 0)?;
-            let src = reg_u16(ins, 1)?;
-            if dst <= 0x0f && src <= 0x0f {
-                Insn::MovV4(dst as u8, src as u8)
-            } else if dst <= u8::MAX as u16 && src <= u8::MAX as u16 {
-                Insn::MovV8(dst as u8, src as u8)
-            } else {
-                Insn::MovV16(dst, src)
+            ),
+            25 => Insn::TestIn(
+                imm_u8(ins, 0, "testin ic")?,
+                imm_u16(ins, 1, "testin level")?,
+                imm_u16(ins, 2, "testin slot")?,
+            ),
+            26 => Insn::DefineFieldByName(
+                imm_u8(ins, 0, "definefieldbyname slot")?,
+                intern_id(strings, id(ins, 0)?)?,
+                reg_u8(ins, 0)?,
+            ),
+            27 => Insn::DefinePropertyByName(
+                imm_u8(ins, 0, "definepropertybyname slot")?,
+                intern_id(strings, id(ins, 0)?)?,
+                reg_u8(ins, 0)?,
+            ),
+            28 => Insn::CreateEmptyObject,
+            29 => Insn::CreateEmptyArray(imm_u16(ins, 0, "createemptyarray slot")?),
+            30 => Insn::CreateGeneratorObj(reg_u8(ins, 0)?),
+            32 | 33 => Insn::CreateObjectWithExcludedKeys(
+                imm_u16(ins, 0, "createobjectwithexcludedkeys count")?,
+                reg_u8(ins, 0)?,
+                reg_u8(ins, 1)?,
+            ),
+            34 => {
+                let literal = literal_ref(literal_key_to_index, id(ins, 0)?, refs)?;
+                Insn::CreateArrayWithBuffer(imm_u8(ins, 0, "createarraywithbuffer slot")?, literal)
             }
-        }
-        255 => Insn::Lda(reg_u8(ins, 0)?),
-        256 => Insn::Sta(reg_u8(ins, 0)?),
-        257 => Insn::LdAi(imm_i32(ins, 0, "ldai value")?),
-        258 => Insn::FLdAi(read_imm_f64(ins, 0, "fldai value")?),
-        259 => Insn::Return,
-        260 => Insn::ReturnUndefined,
-        261 => Insn::Nop,
-        opcode => generic_insn_from_proto(
+            36 => {
+                let literal = literal_ref(literal_key_to_index, id(ins, 0)?, refs)?;
+                Insn::CreateObjectWithBuffer(
+                    imm_u8(ins, 0, "createobjectwithbuffer slot")?,
+                    literal,
+                )
+            }
+            39 => Insn::NewObjApply(imm_u8(ins, 0, "newobjapply slot")?, reg_u8(ins, 0)?),
+            40 => Insn::NewObjRange(
+                imm_u8(ins, 0, "newobjrange slot")?,
+                imm_u8(ins, 1, "newobjrange argc")?,
+                reg_u8(ins, 0)?,
+            ),
+            42 => Insn::NewLexEnv(imm_u8(ins, 0, "newlexenv count")?),
+            44 => {
+                let literal = literal_ref(literal_key_to_index, id(ins, 0)?, refs)?;
+                Insn::NewLexEnvWithName(imm_u8(ins, 0, "newlexenvwithname count")?, literal)
+            }
+            48 => Insn::Add2(imm_u8(ins, 0, "add2 slot")?, reg_u8(ins, 0)?),
+            49 => Insn::Sub2(imm_u8(ins, 0, "sub2 slot")?, reg_u8(ins, 0)?),
+            50 => Insn::Mul2(imm_u8(ins, 0, "mul2 slot")?, reg_u8(ins, 0)?),
+            51 => Insn::Div2(imm_u8(ins, 0, "div2 slot")?, reg_u8(ins, 0)?),
+            52 => Insn::Mod2(imm_u8(ins, 0, "mod2 slot")?, reg_u8(ins, 0)?),
+            53 => Insn::Eq(imm_u8(ins, 0, "eq slot")?, reg_u8(ins, 0)?),
+            54 => Insn::NotEq(imm_u8(ins, 0, "noteq slot")?, reg_u8(ins, 0)?),
+            55 => Insn::Less(imm_u8(ins, 0, "less slot")?, reg_u8(ins, 0)?),
+            56 => Insn::LessEq(imm_u8(ins, 0, "lesseq slot")?, reg_u8(ins, 0)?),
+            57 => Insn::Greater(imm_u8(ins, 0, "greater slot")?, reg_u8(ins, 0)?),
+            58 => Insn::GreaterEq(imm_u8(ins, 0, "greatereq slot")?, reg_u8(ins, 0)?),
+            59 => Insn::Shl2(imm_u8(ins, 0, "shl2 slot")?, reg_u8(ins, 0)?),
+            60 => Insn::Shr2(imm_u8(ins, 0, "shr2 slot")?, reg_u8(ins, 0)?),
+            61 => Insn::Ashr2(imm_u8(ins, 0, "ashr2 slot")?, reg_u8(ins, 0)?),
+            62 => Insn::And2(imm_u8(ins, 0, "and2 slot")?, reg_u8(ins, 0)?),
+            63 => Insn::Or2(imm_u8(ins, 0, "or2 slot")?, reg_u8(ins, 0)?),
+            64 => Insn::Xor2(imm_u8(ins, 0, "xor2 slot")?, reg_u8(ins, 0)?),
+            65 => Insn::Exp(imm_u8(ins, 0, "exp slot")?, reg_u8(ins, 0)?),
+            66 => Insn::TypeOf(imm_u8(ins, 0, "typeof slot")?),
+            67 => Insn::ToNumber(imm_u8(ins, 0, "tonumber slot")?),
+            69 => Insn::ToNumeric(imm_u8(ins, 0, "tonumeric slot")?),
+            71 => Insn::Neg(imm_u8(ins, 0, "neg slot")?),
+            73 => Insn::BitNot(imm_u8(ins, 0, "bitnot slot")?),
+            75 => Insn::Inc(imm_u8(ins, 0, "inc slot")?),
+            77 => Insn::Dec(imm_u8(ins, 0, "dec slot")?),
+            79 => Insn::IsTrue,
+            80 => Insn::IsFalse,
+            81 => Insn::IsIn(imm_u8(ins, 0, "isin slot")?, reg_u8(ins, 0)?),
+            82 => Insn::InstanceOf(imm_u8(ins, 0, "instanceof slot")?, reg_u8(ins, 0)?),
+            83 => Insn::StrictNotEq(imm_u8(ins, 0, "strictnoteq slot")?, reg_u8(ins, 0)?),
+            84 => Insn::StrictEq(imm_u8(ins, 0, "stricteq slot")?, reg_u8(ins, 0)?),
+            86 => Insn::CallRuntimeDefineFieldByValue(
+                imm_u8(ins, 0, "definefieldbyvalue slot")?,
+                reg_u8(ins, 0)?,
+                reg_u8(ins, 1)?,
+            ),
+            89 => {
+                let literal = literal_ref(literal_key_to_index, id(ins, 0)?, refs)?;
+                Insn::CallRuntimeCreatePrivateProperty(
+                    imm_u16(ins, 0, "createprivateproperty count")?,
+                    literal,
+                )
+            }
+            90 => Insn::CallRuntimeDefinePrivateProperty(
+                imm_u8(ins, 0, "defineprivateproperty ic")?,
+                imm_u16(ins, 1, "defineprivateproperty level")?,
+                imm_u16(ins, 2, "defineprivateproperty slot")?,
+                reg_u8(ins, 0)?,
+            ),
+            91 => Insn::CallRuntimeCallInit(imm_u8(ins, 0, "callinit slot")?, reg_u8(ins, 0)?),
+            102 => Insn::CallRuntimeIsTrue(imm_u8(ins, 0, "callruntime.istrue slot")?),
+            103 => Insn::CallRuntimeIsFalse(imm_u8(ins, 0, "callruntime.isfalse slot")?),
+            109 => Insn::Throw,
+            111 => Insn::ThrowPatternNonCoercible,
+            114 => Insn::ThrowIfNotObject(reg_u8(ins, 0)?),
+            116 => {
+                Insn::ThrowIfSuperNotCorrectCall(imm_u8(ins, 0, "throwifsupernotcorrectcall kind")?)
+            }
+            117 => Insn::ThrowUndefinedIfHoleWithName(intern_id(strings, id(ins, 0)?)?),
+            120 => Insn::CallArg0(imm_u8(ins, 0, "callarg0 slot")?),
+            122 => Insn::CallArg1(imm_u8(ins, 0, "callarg1 slot")?, reg_u8(ins, 0)?),
+            124 => Insn::CallArgs2(
+                imm_u8(ins, 0, "callargs2 slot")?,
+                reg_u8(ins, 0)?,
+                reg_u8(ins, 1)?,
+            ),
+            126 => Insn::CallArgs3(
+                imm_u8(ins, 0, "callargs3 slot")?,
+                reg_u8(ins, 0)?,
+                reg_u8(ins, 1)?,
+                reg_u8(ins, 2)?,
+            ),
+            128 => Insn::CallRange(
+                imm_u8(ins, 0, "callrange slot")?,
+                imm_u8(ins, 1, "callrange argc")?,
+                reg_u8(ins, 0)?,
+            ),
+            131 => Insn::SuperCallSpread(imm_u8(ins, 0, "supercallspread slot")?, reg_u8(ins, 0)?),
+            132 => Insn::Apply(
+                imm_u8(ins, 0, "apply slot")?,
+                reg_u8(ins, 0)?,
+                reg_u8(ins, 1)?,
+            ),
+            134 => Insn::CallThis0(imm_u8(ins, 0, "callthis0 slot")?, reg_u8(ins, 0)?),
+            135 => Insn::CallThis1(
+                imm_u8(ins, 0, "callthis1 slot")?,
+                reg_u8(ins, 0)?,
+                reg_u8(ins, 1)?,
+            ),
+            136 => Insn::CallThis2(
+                imm_u8(ins, 0, "callthis2 slot")?,
+                reg_u8(ins, 0)?,
+                reg_u8(ins, 1)?,
+                reg_u8(ins, 2)?,
+            ),
+            137 => Insn::CallThis3(
+                imm_u8(ins, 0, "callthis3 slot")?,
+                reg_u8(ins, 0)?,
+                reg_u8(ins, 1)?,
+                reg_u8(ins, 2)?,
+                reg_u8(ins, 3)?,
+            ),
+            138 => Insn::CallThisRange(
+                imm_u8(ins, 0, "callthisrange slot")?,
+                imm_u8(ins, 1, "callthisrange argc")?,
+                reg_u8(ins, 0)?,
+            ),
+            141 => Insn::SuperCallThisRange(
+                imm_u8(ins, 0, "supercallthisrange slot")?,
+                imm_u8(ins, 1, "supercallthisrange argc")?,
+                reg_u8(ins, 0)?,
+            ),
+            143 => Insn::SuperCallArrowRange(
+                imm_u8(ins, 0, "supercallarrowrange slot")?,
+                imm_u8(ins, 1, "supercallarrowrange argc")?,
+                reg_u8(ins, 0)?,
+            ),
+            145 => Insn::DefineGetterSetterByValue(
+                reg_u8(ins, 0)?,
+                reg_u8(ins, 1)?,
+                reg_u8(ins, 2)?,
+                reg_u8(ins, 3)?,
+            ),
+            146 => {
+                let name = short_method_name(record_name, &utf8(id(ins, 0)?)?);
+                let name_id = intern_id(strings, name.as_bytes())?;
+                refs.definefunc_order.push(name.clone());
+                Insn::DefineFuncShort(
+                    imm_u8(ins, 0, "definefunc slot")?,
+                    name_id,
+                    imm_u8(ins, 1, "definefunc length")?,
+                )
+            }
+            147 => {
+                let name = short_method_name(record_name, &utf8(id(ins, 0)?)?);
+                refs.method_pool_entries.insert(name.clone());
+                Insn::DefineMethodShort(
+                    imm_u8(ins, 0, "definemethod slot")?,
+                    intern_id(strings, name.as_bytes())?,
+                    imm_u8(ins, 1, "definemethod length")?,
+                )
+            }
+            148 => {
+                let ctor = short_method_name(record_name, &utf8(id(ins, 0)?)?);
+                refs.constructor_names.insert(ctor.clone());
+                refs.method_pool_entries.insert(ctor);
+                let literal = literal_ref(literal_key_to_index, id(ins, 1)?, refs)?;
+                Insn::DefineClassWithBuffer(
+                    imm_u8(ins, 0, "defineclass slot")?,
+                    0,
+                    literal,
+                    imm_u16(ins, 1, "defineclass argc")?,
+                    reg_u8(ins, 0)?,
+                )
+            }
+            150 => Insn::ResumeGenerator,
+            152 => Insn::GetResumeMode,
+            154 => Insn::GetTemplateObject(imm_u16(ins, 0, "gettemplateobject slot")?),
+            156 => Insn::GetNextPropName(reg_u8(ins, 0)?),
+            157 => Insn::DelObjProp(reg_u8(ins, 0)?),
+            159 => Insn::SuspendGenerator(reg_u8(ins, 0)?),
+            161 => Insn::AsyncFunctionAwaitUncaught(reg_u8(ins, 0)?),
+            163 => Insn::CopyDataProperties(reg_u8(ins, 0)?),
+            165 => Insn::StArraySpread(reg_u8(ins, 0)?, reg_u8(ins, 1)?),
+            166 => Insn::SetObjectWithProto(
+                imm_u8(ins, 0, "setobjectwithproto slot")?,
+                reg_u8(ins, 0)?,
+            ),
+            168 => Insn::LdObjByValue(imm_u8(ins, 0, "ldobjbyvalue slot")?, reg_u8(ins, 0)?),
+            170 => Insn::StObjByValue(
+                imm_u8(ins, 0, "stobjbyvalue slot")?,
+                reg_u8(ins, 0)?,
+                reg_u8(ins, 1)?,
+            ),
+            171 => Insn::StOwnByValue(
+                imm_u8(ins, 0, "stownbyvalue slot")?,
+                reg_u8(ins, 0)?,
+                reg_u8(ins, 1)?,
+            ),
+            172 => Insn::LdSuperByValue(imm_u8(ins, 0, "ldsuperbyvalue slot")?, reg_u8(ins, 0)?),
+            174 => Insn::StSuperByValue(
+                imm_u8(ins, 0, "stsuperbyvalue slot")?,
+                reg_u8(ins, 0)?,
+                reg_u8(ins, 1)?,
+            ),
+            180 | 181 => Insn::StOwnByIndex(
+                imm_u16(ins, 0, "stownbyindex slot")?,
+                reg_u8(ins, 0)?,
+                imm_u16(ins, 1, "stownbyindex index")?,
+            ),
+            182 => Insn::AsyncFunctionResolve(reg_u8(ins, 0)?),
+            184 => Insn::AsyncFunctionReject(reg_u8(ins, 0)?),
+            186 => Insn::CopyRestArgs(imm_u8(ins, 0, "copyrestargs count")?),
+            188 | 189 => Insn::LdLexVar(
+                imm_u8(ins, 0, "ldlexvar level")?,
+                imm_u8(ins, 1, "ldlexvar slot")?,
+            ),
+            190 | 191 => Insn::StLexVar(
+                imm_u8(ins, 0, "stlexvar level")?,
+                imm_u8(ins, 1, "stlexvar slot")?,
+            ),
+            196 => Insn::StModuleVar(imm_u8(ins, 0, "stmodulevar index")?),
+            199 => Insn::TryLdGlobalByName(
+                imm_u8(ins, 0, "tryldglobalbyname slot")?,
+                intern_id(strings, id(ins, 0)?)?,
+            ),
+            200 => Insn::TryStGlobalByName(
+                imm_u8(ins, 0, "trystglobalbyname slot")?,
+                intern_id(strings, id(ins, 0)?)?,
+            ),
+            203 => Insn::LdObjByName(
+                imm_u8(ins, 0, "ldobjbyname slot")?,
+                intern_id(strings, id(ins, 0)?)?,
+            ),
+            205 => Insn::StObjByName(
+                imm_u8(ins, 0, "stobjbyname slot")?,
+                intern_id(strings, id(ins, 0)?)?,
+                reg_u8(ins, 0)?,
+            ),
+            206 => Insn::StOwnByName(
+                imm_u8(ins, 0, "stownbyname slot")?,
+                intern_id(strings, id(ins, 0)?)?,
+                reg_u8(ins, 0)?,
+            ),
+            207 => Insn::LdSuperByName(
+                imm_u8(ins, 0, "ldsuperbyname slot")?,
+                intern_id(strings, id(ins, 0)?)?,
+            ),
+            209 => Insn::StSuperByName(
+                imm_u8(ins, 0, "stsuperbyname slot")?,
+                intern_id(strings, id(ins, 0)?)?,
+                reg_u8(ins, 0)?,
+            ),
+            210 => Insn::LdLocalModuleVar(imm_u8(ins, 0, "ldlocalmodulevar index")?),
+            212 => Insn::LdExternalModuleVar(imm_u8(ins, 0, "ldexternalmodulevar index")?),
+            222 => Insn::StOwnByValueWithNameSet(
+                imm_u8(ins, 0, "stownbyvaluewithnameset slot")?,
+                reg_u8(ins, 0)?,
+                reg_u8(ins, 1)?,
+            ),
+            223 => Insn::StOwnByNameWithNameSet(
+                imm_u8(ins, 0, "stownbynamewithnameset slot")?,
+                intern_id(strings, id(ins, 0)?)?,
+                reg_u8(ins, 0)?,
+            ),
+            224 => Insn::LdBigInt(intern_id(strings, id(ins, 0)?)?),
+            231 => Insn::DynamicImport,
+            236 => Insn::LdaStr(intern_id(strings, id(ins, 0)?)?),
+            237 => {
+                let label = utf8(id(ins, 0)?)?;
+                jump = Some((JumpKind::Jmp, label));
+                Insn::JmpWide(0)
+            }
+            238 => {
+                let label = utf8(id(ins, 0)?)?;
+                jump = Some((JumpKind::Jeqz, label));
+                Insn::JeqzWide(0)
+            }
+            239 => {
+                let label = utf8(id(ins, 0)?)?;
+                jump = Some((JumpKind::Jnez, label));
+                Insn::JnezWide(0)
+            }
+            254 => {
+                let dst = reg_u16(ins, 0)?;
+                let src = reg_u16(ins, 1)?;
+                if dst <= 0x0f && src <= 0x0f {
+                    Insn::MovV4(dst as u8, src as u8)
+                } else if dst <= u8::MAX as u16 && src <= u8::MAX as u16 {
+                    Insn::MovV8(dst as u8, src as u8)
+                } else {
+                    Insn::MovV16(dst, src)
+                }
+            }
+            255 => Insn::Lda(reg_u8(ins, 0)?),
+            256 => Insn::Sta(reg_u8(ins, 0)?),
+            257 => Insn::LdAi(imm_i32(ins, 0, "ldai value")?),
+            258 => Insn::FLdAi(read_imm_f64(ins, 0, "fldai value")?),
+            259 => Insn::Return,
+            260 => Insn::ReturnUndefined,
+            261 => Insn::Nop,
+            _ => unreachable!("program opcode alias must map to a handled branch"),
+        },
+        None => generic_insn_from_proto(
             ins,
-            opcode,
+            ins.opcode,
             record_name,
             strings,
             literal_key_to_index,
@@ -1159,6 +1170,170 @@ fn insn_from_proto(
         )?,
     };
     Ok(DecodedItem::Insn { insn, jump })
+}
+
+fn program_opcode_alias(opcode: u32) -> Option<u32> {
+    macro_rules! alias {
+        ($dispatch:literal, $insn:expr) => {
+            if opcode == pandasm_opcode(&$insn) {
+                return Some($dispatch);
+            }
+        };
+    }
+
+    alias!(2, Insn::LdUndefined);
+    alias!(3, Insn::LdNull);
+    alias!(5, Insn::LdGlobal);
+    alias!(6, Insn::LdTrue);
+    alias!(7, Insn::LdFalse);
+    alias!(8, Insn::LdHole);
+    alias!(11, Insn::LdThis);
+    alias!(12, Insn::PopLexEnv);
+    alias!(15, Insn::AsyncFunctionEnter);
+    alias!(17, Insn::Debugger);
+    alias!(18, Insn::GetPropIterator);
+    alias!(19, Insn::GetIterator(0));
+    alias!(20, Insn::CloseIterator(0, 0));
+    alias!(23, Insn::LdPrivateProperty(0, 0, 0));
+    alias!(24, Insn::StPrivateProperty(0, 0, 0, 0));
+    alias!(25, Insn::TestIn(0, 0, 0));
+    alias!(26, Insn::DefineFieldByName(0, 0, 0));
+    alias!(27, Insn::DefinePropertyByName(0, 0, 0));
+    alias!(28, Insn::CreateEmptyObject);
+    alias!(29, Insn::CreateEmptyArray(0));
+    alias!(29, Insn::CreateEmptyArray(u8::MAX as u16 + 1));
+    alias!(30, Insn::CreateGeneratorObj(0));
+    alias!(32, Insn::CreateObjectWithExcludedKeys(0, 0, 0));
+    alias!(
+        33,
+        Insn::CreateObjectWithExcludedKeys(u8::MAX as u16 + 1, 0, 0)
+    );
+    alias!(34, Insn::CreateArrayWithBuffer(0, 0));
+    alias!(36, Insn::CreateObjectWithBuffer(0, 0));
+    alias!(39, Insn::NewObjApply(0, 0));
+    alias!(40, Insn::NewObjRange(0, 0, 0));
+    alias!(42, Insn::NewLexEnv(0));
+    alias!(44, Insn::NewLexEnvWithName(0, 0));
+    alias!(48, Insn::Add2(0, 0));
+    alias!(49, Insn::Sub2(0, 0));
+    alias!(50, Insn::Mul2(0, 0));
+    alias!(51, Insn::Div2(0, 0));
+    alias!(52, Insn::Mod2(0, 0));
+    alias!(53, Insn::Eq(0, 0));
+    alias!(54, Insn::NotEq(0, 0));
+    alias!(55, Insn::Less(0, 0));
+    alias!(56, Insn::LessEq(0, 0));
+    alias!(57, Insn::Greater(0, 0));
+    alias!(58, Insn::GreaterEq(0, 0));
+    alias!(59, Insn::Shl2(0, 0));
+    alias!(60, Insn::Shr2(0, 0));
+    alias!(61, Insn::Ashr2(0, 0));
+    alias!(62, Insn::And2(0, 0));
+    alias!(63, Insn::Or2(0, 0));
+    alias!(64, Insn::Xor2(0, 0));
+    alias!(65, Insn::Exp(0, 0));
+    alias!(66, Insn::TypeOf(0));
+    alias!(67, Insn::ToNumber(0));
+    alias!(69, Insn::ToNumeric(0));
+    alias!(71, Insn::Neg(0));
+    alias!(73, Insn::BitNot(0));
+    alias!(75, Insn::Inc(0));
+    alias!(77, Insn::Dec(0));
+    alias!(79, Insn::IsTrue);
+    alias!(80, Insn::IsFalse);
+    alias!(81, Insn::IsIn(0, 0));
+    alias!(82, Insn::InstanceOf(0, 0));
+    alias!(83, Insn::StrictNotEq(0, 0));
+    alias!(84, Insn::StrictEq(0, 0));
+    alias!(86, Insn::CallRuntimeDefineFieldByValue(0, 0, 0));
+    alias!(89, Insn::CallRuntimeCreatePrivateProperty(0, 0));
+    alias!(90, Insn::CallRuntimeDefinePrivateProperty(0, 0, 0, 0));
+    alias!(91, Insn::CallRuntimeCallInit(0, 0));
+    alias!(102, Insn::CallRuntimeIsTrue(0));
+    alias!(103, Insn::CallRuntimeIsFalse(0));
+    alias!(109, Insn::Throw);
+    alias!(111, Insn::ThrowPatternNonCoercible);
+    alias!(114, Insn::ThrowIfNotObject(0));
+    alias!(116, Insn::ThrowIfSuperNotCorrectCall(0));
+    alias!(117, Insn::ThrowUndefinedIfHoleWithName(0));
+    alias!(120, Insn::CallArg0(0));
+    alias!(122, Insn::CallArg1(0, 0));
+    alias!(124, Insn::CallArgs2(0, 0, 0));
+    alias!(126, Insn::CallArgs3(0, 0, 0, 0));
+    alias!(128, Insn::CallRange(0, 0, 0));
+    alias!(131, Insn::SuperCallSpread(0, 0));
+    alias!(132, Insn::Apply(0, 0, 0));
+    alias!(134, Insn::CallThis0(0, 0));
+    alias!(135, Insn::CallThis1(0, 0, 0));
+    alias!(136, Insn::CallThis2(0, 0, 0, 0));
+    alias!(137, Insn::CallThis3(0, 0, 0, 0, 0));
+    alias!(138, Insn::CallThisRange(0, 0, 0));
+    alias!(141, Insn::SuperCallThisRange(0, 0, 0));
+    alias!(143, Insn::SuperCallArrowRange(0, 0, 0));
+    alias!(145, Insn::DefineGetterSetterByValue(0, 0, 0, 0));
+    alias!(146, Insn::DefineFuncShort(0, 0, 0));
+    alias!(147, Insn::DefineMethodShort(0, 0, 0));
+    alias!(148, Insn::DefineClassWithBuffer(0, 0, 0, 0, 0));
+    alias!(150, Insn::ResumeGenerator);
+    alias!(152, Insn::GetResumeMode);
+    alias!(154, Insn::GetTemplateObject(0));
+    alias!(154, Insn::GetTemplateObject(u8::MAX as u16 + 1));
+    alias!(156, Insn::GetNextPropName(0));
+    alias!(157, Insn::DelObjProp(0));
+    alias!(159, Insn::SuspendGenerator(0));
+    alias!(161, Insn::AsyncFunctionAwaitUncaught(0));
+    alias!(163, Insn::CopyDataProperties(0));
+    alias!(165, Insn::StArraySpread(0, 0));
+    alias!(166, Insn::SetObjectWithProto(0, 0));
+    alias!(168, Insn::LdObjByValue(0, 0));
+    alias!(170, Insn::StObjByValue(0, 0, 0));
+    alias!(171, Insn::StOwnByValue(0, 0, 0));
+    alias!(172, Insn::LdSuperByValue(0, 0));
+    alias!(174, Insn::StSuperByValue(0, 0, 0));
+    alias!(180, Insn::StOwnByIndex(0, 0, 0));
+    alias!(181, Insn::StOwnByIndex(u8::MAX as u16 + 1, 0, 0));
+    alias!(182, Insn::AsyncFunctionResolve(0));
+    alias!(184, Insn::AsyncFunctionReject(0));
+    alias!(186, Insn::CopyRestArgs(0));
+    alias!(188, Insn::LdLexVar(0, 0));
+    alias!(189, Insn::LdLexVar(0x10, 0));
+    alias!(190, Insn::StLexVar(0, 0));
+    alias!(191, Insn::StLexVar(0x10, 0));
+    alias!(196, Insn::StModuleVar(0));
+    alias!(199, Insn::TryLdGlobalByName(0, 0));
+    alias!(200, Insn::TryStGlobalByName(0, 0));
+    alias!(203, Insn::LdObjByName(0, 0));
+    alias!(205, Insn::StObjByName(0, 0, 0));
+    alias!(206, Insn::StOwnByName(0, 0, 0));
+    alias!(207, Insn::LdSuperByName(0, 0));
+    alias!(209, Insn::StSuperByName(0, 0, 0));
+    alias!(210, Insn::LdLocalModuleVar(0));
+    alias!(212, Insn::LdExternalModuleVar(0));
+    alias!(222, Insn::StOwnByValueWithNameSet(0, 0, 0));
+    alias!(223, Insn::StOwnByNameWithNameSet(0, 0, 0));
+    alias!(224, Insn::LdBigInt(0));
+    alias!(231, Insn::DynamicImport);
+    alias!(236, Insn::LdaStr(0));
+    alias!(237, Insn::JmpShort(0));
+    alias!(237, Insn::Jmp(0));
+    alias!(237, Insn::JmpWide(0));
+    alias!(238, Insn::JeqzShort(0));
+    alias!(238, Insn::Jeqz(0));
+    alias!(238, Insn::JeqzWide(0));
+    alias!(239, Insn::JnezShort(0));
+    alias!(239, Insn::Jnez(0));
+    alias!(239, Insn::JnezWide(0));
+    alias!(254, Insn::MovV4(0, 0));
+    alias!(254, Insn::MovV8(0, 0));
+    alias!(254, Insn::MovV16(0, 0));
+    alias!(255, Insn::Lda(0));
+    alias!(256, Insn::Sta(0));
+    alias!(257, Insn::LdAi(0));
+    alias!(258, Insn::FLdAi(0.0));
+    alias!(259, Insn::Return);
+    alias!(260, Insn::ReturnUndefined);
+    alias!(261, Insn::Nop);
+    None
 }
 
 fn generic_insn_from_proto(
@@ -1633,9 +1808,10 @@ fn method_label_names(
     let offsets = instruction_offsets(insns);
     label_offsets
         .iter()
-        .map(|&offset| {
+        .enumerate()
+        .map(|(index, &offset)| {
             let name = match style {
-                MethodLabelStyle::Source => label_name_for_byte_offset(offset),
+                MethodLabelStyle::Source => label_name_for_source_index(index),
                 MethodLabelStyle::Abc2Program => {
                     label_name_for_inst_idx(instruction_index_at_offset(&offsets, offset))
                 }
@@ -1676,7 +1852,7 @@ fn jump_target(offset: usize, insn: &Insn) -> Option<usize> {
 
 fn label_ins(name: &str) -> Ins {
     Ins {
-        opcode: 0,
+        opcode: pandasm_invalid_opcode(),
         regs: Vec::new(),
         ids: Vec::new(),
         imms: Vec::new(),
@@ -1971,148 +2147,12 @@ fn next_constructor_name(record: &ClassRecord, _offset: usize) -> Option<String>
 }
 
 fn pandasm_opcode(insn: &Insn) -> u32 {
-    match insn {
-        Insn::Pandasm(raw) => raw.opcode,
-        Insn::LdUndefined => 2,
-        Insn::LdNull => 3,
-        Insn::LdGlobal => 5,
-        Insn::LdTrue => 6,
-        Insn::LdFalse => 7,
-        Insn::LdHole => 8,
-        Insn::LdThis => 11,
-        Insn::PopLexEnv => 12,
-        Insn::AsyncFunctionEnter => 15,
-        Insn::Debugger => 17,
-        Insn::GetPropIterator => 18,
-        Insn::GetIterator(_) => 19,
-        Insn::CloseIterator(_, _) => 20,
-        Insn::LdPrivateProperty(_, _, _) => 23,
-        Insn::StPrivateProperty(_, _, _, _) => 24,
-        Insn::TestIn(_, _, _) => 25,
-        Insn::DefineFieldByName(_, _, _) => 26,
-        Insn::DefinePropertyByName(_, _, _) => 27,
-        Insn::CreateEmptyObject => 28,
-        Insn::CreateEmptyArray(_) => 29,
-        Insn::CreateGeneratorObj(_) => 30,
-        Insn::CreateObjectWithExcludedKeys(count, _, _) if *count > u8::MAX as u16 => 33,
-        Insn::CreateObjectWithExcludedKeys(_, _, _) => 32,
-        Insn::CreateArrayWithBuffer(_, _) => 34,
-        Insn::CreateObjectWithBuffer(_, _) => 36,
-        Insn::NewObjApply(_, _) => 39,
-        Insn::NewObjRange(_, _, _) => 40,
-        Insn::NewLexEnv(_) => 42,
-        Insn::NewLexEnvWithName(_, _) => 44,
-        Insn::Add2(_, _) => 48,
-        Insn::Sub2(_, _) => 49,
-        Insn::Mul2(_, _) => 50,
-        Insn::Div2(_, _) => 51,
-        Insn::Mod2(_, _) => 52,
-        Insn::Eq(_, _) => 53,
-        Insn::NotEq(_, _) => 54,
-        Insn::Less(_, _) => 55,
-        Insn::LessEq(_, _) => 56,
-        Insn::Greater(_, _) => 57,
-        Insn::GreaterEq(_, _) => 58,
-        Insn::Shl2(_, _) => 59,
-        Insn::Shr2(_, _) => 60,
-        Insn::Ashr2(_, _) => 61,
-        Insn::And2(_, _) => 62,
-        Insn::Or2(_, _) => 63,
-        Insn::Xor2(_, _) => 64,
-        Insn::Exp(_, _) => 65,
-        Insn::TypeOf(_) => 66,
-        Insn::ToNumber(_) => 67,
-        Insn::ToNumeric(_) => 69,
-        Insn::Neg(_) => 71,
-        Insn::BitNot(_) => 73,
-        Insn::Inc(_) => 75,
-        Insn::Dec(_) => 77,
-        Insn::IsTrue => 79,
-        Insn::IsFalse => 80,
-        Insn::IsIn(_, _) => 81,
-        Insn::InstanceOf(_, _) => 82,
-        Insn::StrictNotEq(_, _) => 83,
-        Insn::StrictEq(_, _) => 84,
-        Insn::CallRuntimeDefineFieldByValue(_, _, _) => 86,
-        Insn::CallRuntimeCreatePrivateProperty(_, _) => 89,
-        Insn::CallRuntimeDefinePrivateProperty(_, _, _, _) => 90,
-        Insn::CallRuntimeCallInit(_, _) => 91,
-        Insn::CallRuntimeIsTrue(_) => 102,
-        Insn::CallRuntimeIsFalse(_) => 103,
-        Insn::Throw => 109,
-        Insn::ThrowPatternNonCoercible => 111,
-        Insn::ThrowIfNotObject(_) => 114,
-        Insn::ThrowIfSuperNotCorrectCall(_) => 116,
-        Insn::ThrowUndefinedIfHoleWithName(_) => 117,
-        Insn::CallArg0(_) => 120,
-        Insn::CallArg1(_, _) => 122,
-        Insn::CallArgs2(_, _, _) => 124,
-        Insn::CallArgs3(_, _, _, _) => 126,
-        Insn::CallRange(_, _, _) => 128,
-        Insn::SuperCallSpread(_, _) => 131,
-        Insn::Apply(_, _, _) => 132,
-        Insn::CallThis0(_, _) => 134,
-        Insn::CallThis1(_, _, _) => 135,
-        Insn::CallThis2(_, _, _, _) => 136,
-        Insn::CallThis3(_, _, _, _, _) => 137,
-        Insn::CallThisRange(_, _, _) => 138,
-        Insn::SuperCallThisRange(_, _, _) => 141,
-        Insn::SuperCallArrowRange(_, _, _) => 143,
-        Insn::DefineGetterSetterByValue(_, _, _, _) => 145,
-        Insn::DefineFuncShort(_, _, _) => 146,
-        Insn::DefineMethodShort(_, _, _) => 147,
-        Insn::DefineClassWithBuffer(_, _, _, _, _) => 148,
-        Insn::ResumeGenerator => 150,
-        Insn::GetResumeMode => 152,
-        Insn::GetTemplateObject(_) => 154,
-        Insn::GetNextPropName(_) => 156,
-        Insn::DelObjProp(_) => 157,
-        Insn::SuspendGenerator(_) => 159,
-        Insn::AsyncFunctionAwaitUncaught(_) => 161,
-        Insn::CopyDataProperties(_) => 163,
-        Insn::StArraySpread(_, _) => 165,
-        Insn::SetObjectWithProto(_, _) => 166,
-        Insn::LdObjByValue(_, _) => 168,
-        Insn::StObjByValue(_, _, _) => 170,
-        Insn::StOwnByValue(_, _, _) => 171,
-        Insn::LdSuperByValue(_, _) => 172,
-        Insn::StSuperByValue(_, _, _) => 174,
-        Insn::StOwnByIndex(slot, _, _) if *slot > u8::MAX as u16 => 181,
-        Insn::StOwnByIndex(_, _, _) => 180,
-        Insn::AsyncFunctionResolve(_) => 182,
-        Insn::AsyncFunctionReject(_) => 184,
-        Insn::CopyRestArgs(_) => 186,
-        Insn::LdLexVar(level, slot) if *level > 0x0f || *slot > 0x0f => 189,
-        Insn::LdLexVar(_, _) => 188,
-        Insn::StLexVar(level, slot) if *level > 0x0f || *slot > 0x0f => 191,
-        Insn::StLexVar(_, _) => 190,
-        Insn::StModuleVar(_) => 196,
-        Insn::TryLdGlobalByName(_, _) => 199,
-        Insn::TryStGlobalByName(_, _) => 200,
-        Insn::LdObjByName(_, _) => 203,
-        Insn::StObjByName(_, _, _) => 205,
-        Insn::StOwnByName(_, _, _) => 206,
-        Insn::LdSuperByName(_, _) => 207,
-        Insn::StSuperByName(_, _, _) => 209,
-        Insn::LdLocalModuleVar(_) => 210,
-        Insn::LdExternalModuleVar(_) => 212,
-        Insn::StOwnByValueWithNameSet(_, _, _) => 222,
-        Insn::StOwnByNameWithNameSet(_, _, _) => 223,
-        Insn::LdBigInt(_) => 224,
-        Insn::DynamicImport => 231,
-        Insn::LdaStr(_) => 236,
-        Insn::JmpShort(_) | Insn::Jmp(_) | Insn::JmpWide(_) => 237,
-        Insn::JeqzShort(_) | Insn::Jeqz(_) | Insn::JeqzWide(_) => 238,
-        Insn::JnezShort(_) | Insn::Jnez(_) | Insn::JnezWide(_) => 239,
-        Insn::MovV4(_, _) | Insn::MovV8(_, _) | Insn::MovV16(_, _) => 254,
-        Insn::Lda(_) => 255,
-        Insn::Sta(_) => 256,
-        Insn::LdAi(_) => 257,
-        Insn::FLdAi(_) => 258,
-        Insn::Return => 259,
-        Insn::ReturnUndefined => 260,
-        Insn::Nop | Insn::GetImportMeta => 261,
+    if let Insn::Pandasm(raw) = insn {
+        return raw.opcode;
     }
+    let mut strings = StringTable::default();
+    let bytes = insn.encode(&mut strings);
+    pandasm_opcode_for_bytecode(&bytes).expect("dedicated instruction must exist in Panda ISA")
 }
 
 fn literal_array_to_proto(
@@ -2223,8 +2263,8 @@ fn literal_key(record: &ClassRecord, literal_index: usize) -> String {
     literal_array_key(&record.name, literal_index)
 }
 
-fn label_name_for_byte_offset(offset: usize) -> String {
-    format!("L_{offset:08x}")
+fn label_name_for_source_index(index: usize) -> String {
+    format!("label_{index}")
 }
 
 fn label_name_for_inst_idx(inst_idx: usize) -> String {
@@ -2391,17 +2431,19 @@ mod tests {
 
     #[test]
     fn program_cache_uses_pandasm_opcode_numbers_not_byte_values() {
-        assert_eq!(pandasm_opcode(&Insn::LdaStr(0)), 236);
-        assert_eq!(pandasm_opcode(&Insn::TryLdGlobalByName(0, 0)), 199);
-        assert_ne!(pandasm_opcode(&Insn::LdaStr(0)), 0x3e);
+        assert_eq!(pandasm_opcode(&Insn::LdaStr(0)), 62);
+        assert_eq!(pandasm_opcode(&Insn::TryLdGlobalByName(0, 0)), 63);
+        assert_eq!(pandasm_opcode(&Insn::CallRuntimeIsFalse(0)), 291);
+        assert_eq!(label_ins("label_0").opcode, pandasm_invalid_opcode());
         assert_eq!(default_ins_debug().line_number, u64::MAX);
         assert_eq!(default_ins_debug().column_number, 0);
     }
 
     #[test]
     fn proto_program_restores_generic_pandasm_instruction() {
+        let opcode = pandasm_opcode_for_bytecode(&[0x6a]).unwrap();
         let ins = Ins {
-            opcode: 0,
+            opcode,
             regs: Vec::new(),
             ids: Vec::new(),
             imms: Vec::new(),
@@ -2413,14 +2455,20 @@ mod tests {
         let literals = BTreeMap::new();
         let mut refs = MethodDecodeRefs::default();
 
-        let restored =
-            generic_insn_from_proto(&ins, 0, "Lentry/main;", &mut strings, &literals, &mut refs)
-                .unwrap();
+        let restored = generic_insn_from_proto(
+            &ins,
+            opcode,
+            "Lentry/main;",
+            &mut strings,
+            &literals,
+            &mut refs,
+        )
+        .unwrap();
 
         let Insn::Pandasm(raw) = restored else {
             panic!("generic PB opcode should restore as Insn::Pandasm");
         };
-        assert_eq!(raw.opcode, 0);
+        assert_eq!(raw.opcode, opcode);
         assert_eq!(raw.bytes, vec![0x6a]);
     }
 
@@ -2489,8 +2537,8 @@ mod tests {
             .iter()
             .filter_map(|entry| entry.value.as_ref())
             .flat_map(|function| function.ins.iter())
-            .filter(|ins| matches!(ins.opcode, 237..=239))
             .flat_map(|ins| ins.ids.iter())
+            .filter(|id| id.starts_with(b"label@"))
             .map(Vec::as_slice)
             .collect::<Vec<_>>();
 

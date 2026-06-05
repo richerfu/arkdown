@@ -89,6 +89,20 @@ pub(crate) fn pandasm_spec(prefix: Option<u8>, opcode: u8) -> Option<&'static In
         .find(|spec| spec.prefix == prefix && spec.opcode == opcode)
 }
 
+pub(crate) fn pandasm_opcode_for_bytecode(bytecode: &[u8]) -> Option<u32> {
+    let first = *bytecode.first()?;
+    let (prefix, opcode) = if is_prefix(first) {
+        (Some(first), *bytecode.get(1)?)
+    } else {
+        (None, first)
+    };
+    Some(pandasm_spec(prefix, opcode)?.pandasm_opcode)
+}
+
+pub(crate) fn pandasm_invalid_opcode() -> u32 {
+    specs().len() as u32
+}
+
 pub(crate) fn decode_pandasm_instruction<F>(
     bytecode: &[u8],
     pos: usize,
@@ -298,7 +312,6 @@ fn specs() -> &'static [InstructionSpec] {
         let isa: IsaYaml =
             serde_yaml::from_str(ISA_YAML).expect("embedded Panda ISA yaml is valid");
         let mut specs = Vec::new();
-        let mut pandasm_opcode = 0u32;
         for group in isa.groups {
             let group_jump = group.properties.iter().any(|property| property == "jump");
             let group_properties = group.properties;
@@ -320,7 +333,7 @@ fn specs() -> &'static [InstructionSpec] {
                     .zip(instruction.format.iter().cloned())
                 {
                     specs.push(InstructionSpec {
-                        pandasm_opcode,
+                        pandasm_opcode: opcode_sort_key(prefix, opcode),
                         prefix,
                         opcode,
                         format,
@@ -328,11 +341,21 @@ fn specs() -> &'static [InstructionSpec] {
                         call,
                     });
                 }
-                pandasm_opcode = pandasm_opcode.saturating_add(1);
             }
+        }
+        specs.sort_by_key(|spec| spec.pandasm_opcode);
+        for (index, spec) in specs.iter_mut().enumerate() {
+            spec.pandasm_opcode = index as u32;
         }
         specs
     })
+}
+
+fn opcode_sort_key(prefix: Option<u8>, opcode: u8) -> u32 {
+    match prefix {
+        Some(prefix) => (u32::from(opcode) << 8) | u32::from(prefix),
+        None => u32::from(opcode),
+    }
 }
 
 fn has_property(group: &[String], instruction: &[String], property: &str) -> bool {
@@ -624,7 +647,7 @@ mod tests {
     fn decodes_untyped_no_operand_instruction_from_upstream_isa() {
         let insn =
             decode_pandasm_instruction(&[0x6a], 0, |_, _| None).expect("ldnan decodes from ISA");
-        assert_eq!(insn.opcode, 0);
+        assert_eq!(insn.opcode, 106);
         assert!(insn.regs.is_empty());
         assert!(insn.ids.is_empty());
         assert!(insn.imms.is_empty());
@@ -635,14 +658,14 @@ mod tests {
     fn decodes_prefixed_instruction_from_upstream_isa() {
         let insn = decode_pandasm_instruction(&[0xfc, 0x00], 0, |_, _| None)
             .expect("deprecated.ldlexenv decodes from ISA");
-        assert_eq!(insn.opcode, 9);
+        assert_eq!(insn.opcode, 222);
         assert_eq!(insn.bytes, vec![0xfc, 0x00]);
     }
 
     #[test]
     fn encodes_untyped_instruction_with_shortest_matching_format() {
         let bytes = super::encode_pandasm_instruction(
-            19,
+            103,
             &[],
             &[],
             &[super::PandasmImm::Int(7)],
