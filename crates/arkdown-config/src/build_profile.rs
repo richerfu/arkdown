@@ -569,8 +569,12 @@ pub fn pick_effective_raw_target<'a>(
     {
         return Some(t);
     }
-    // 3. Any target matching the product.
-    if let Some(t) = targets.iter().find(|t| applies_to_product(t, product_name)) {
+    // 3. Any target matching the product with empty buildModeSet (catch-all for all modes).
+    // Targets with a specific buildModeSet that does NOT include the current mode
+    // are intentionally excluded — they only apply for their declared modes.
+    if let Some(t) = targets.iter().find(|t| {
+        applies_to_product(t, product_name) && t.build_mode_set.is_empty()
+    }) {
         return Some(t);
     }
     // 4. Bare "default" (last resort).

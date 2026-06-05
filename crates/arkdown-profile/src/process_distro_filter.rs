@@ -502,4 +502,76 @@ mod tests {
             Some("$profile:ohos_module_distro_filter1")
         );
     }
+
+    /// Verify that when a target has a specific `buildModeSet`, the distro filter
+    /// only applies for that build mode (not for other modes).
+    ///
+    /// Addresses section 3.3: 'distro 多 target 校验/strict oracle'
+    #[test]
+    fn test_process_distro_filter_respects_build_mode_set() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let module_root = tmp.path().join("entry");
+        fs_err::create_dir_all(&module_root.join("src/main")).expect("create module root");
+        fs_err::write(
+            tmp.path().join("build-profile.json5"),
+            r#"{
+              app: { products: [{ name: "default" }] },
+              modules: [{
+                name: "entry",
+                srcPath: "./entry",
+                targets: [
+                  {
+                    name: "release-only",
+                    applyToProducts: ["default"],
+                    buildModeSet: [{ name: "release" }],
+                    config: {
+                      distributionFilter: {
+                        apiVersion: { policy: "include", value: [12] }
+                      }
+                    }
+                  }
+                ]
+              }]
+            }"#,
+        )
+        .expect("write build-profile");
+
+        let out_dir = tmp.path().join("build/res/profile");
+        fs_err::create_dir_all(&out_dir).expect("create out dir");
+
+        // Debug mode: the release-only target should NOT apply → no distro filter.
+        let debug_result = process_distro_filter_profile(DistroFilterProfileInput {
+            project_root: tmp.path(),
+            module_name: "entry",
+            module_root: &module_root,
+            product_name: "default",
+            build_mode_name: Some("debug"),
+            compile_api_version: 12,
+            metadata: &[],
+            output_profile_dir: &out_dir,
+            module_json_path: None,
+        })
+        .expect("process distro");
+        assert!(
+            debug_result.is_none(),
+            "debug mode must not apply release-only distro filter; got: {:?}",
+            debug_result
+        );
+
+        // Release mode: the release-only target SHOULD apply → distro filter written.
+        let release_result = process_distro_filter_profile(DistroFilterProfileInput {
+            project_root: tmp.path(),
+            module_name: "entry",
+            module_root: &module_root,
+            product_name: "default",
+            build_mode_name: Some("release"),
+            compile_api_version: 12,
+            metadata: &[],
+            output_profile_dir: &out_dir,
+            module_json_path: None,
+        })
+        .expect("process distro")
+        .expect("distro filter must apply for release mode");
+        assert_eq!(release_result.profile_name, "ohos_module_distro_filter");
+    }
 }
