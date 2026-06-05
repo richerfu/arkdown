@@ -145,6 +145,7 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
                             catch_end: catch.handler_pc.saturating_add(catch.code_size),
                         })
                         .collect(),
+                    program_labels: Vec::new(),
                     kind: method_kind_from_access_flags(method.name.as_str(), method.access_flags),
                     method_pool_entry: method_pool_offsets.contains(&method.offset),
                     expected_property_count: None,

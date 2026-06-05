@@ -21,7 +21,7 @@ use oxc_transformer::{Module as TransformModule, TransformOptions, Transformer};
 use crate::emit::file::{LiteralArray, LiteralEntry};
 use crate::emit::record::{
     CatchEntry, ClassRecord, DebugInfoRecord, InstructionDebugInfo, MethodKind, MethodLabelStyle,
-    MethodRecord,
+    MethodRecord, ProgramLabel,
 };
 use crate::emit::strings::StringTable;
 use crate::error::AbcError;
@@ -441,6 +441,7 @@ pub fn build_record_with_debug_and_source_map_for_target_with_mode(
         }),
         line_ops: func_main.line_ops,
         catch_entries: func_main.catches,
+        program_labels: func_main.program_labels,
         kind: MethodKind::Module,
         method_pool_entry: false,
         expected_property_count: None,
@@ -842,6 +843,7 @@ fn compile_function_record(
                 }),
                 line_ops: compiled.line_ops,
                 catch_entries: compiled.catches,
+                program_labels: compiled.program_labels,
                 kind: MethodKind::FunctionLiteral,
                 method_pool_entry: true,
                 expected_property_count,
@@ -884,6 +886,7 @@ fn compile_function_record(
                 }),
                 line_ops: compiled.line_ops,
                 catch_entries: compiled.catches,
+                program_labels: compiled.program_labels,
                 kind: MethodKind::Anonymous,
                 method_pool_entry: true,
                 expected_property_count,
@@ -1390,6 +1393,7 @@ fn compile_class_elements(
             debug_info,
             line_ops: compiled.line_ops,
             catch_entries: compiled.catches,
+            program_labels: compiled.program_labels,
             kind: MethodKind::Constructor,
             method_pool_entry: true,
             expected_property_count: class_expected_property_count,
@@ -1428,6 +1432,7 @@ fn compile_class_elements(
             }),
             line_ops: compiled.line_ops,
             catch_entries: compiled.catches,
+            program_labels: compiled.program_labels,
             kind: MethodKind::Function,
             method_pool_entry: true,
             expected_property_count: None,
@@ -1461,6 +1466,7 @@ fn compile_class_elements(
             }),
             line_ops: compiled.line_ops,
             catch_entries: compiled.catches,
+            program_labels: compiled.program_labels,
             kind: MethodKind::Function,
             method_pool_entry: true,
             expected_property_count: None,
@@ -1613,6 +1619,7 @@ fn compile_class_elements(
                 debug_info,
                 line_ops: compiled.line_ops,
                 catch_entries: compiled.catches,
+                program_labels: compiled.program_labels,
                 kind: if is_constructor {
                     MethodKind::Constructor
                 } else {
@@ -1670,6 +1677,7 @@ fn compile_class_elements(
             debug_info: None,
             line_ops: Vec::new(),
             catch_entries: getter_compiled.catches,
+            program_labels: getter_compiled.program_labels,
             kind: MethodKind::Function,
             method_pool_entry: true,
             expected_property_count: None,
@@ -1706,6 +1714,7 @@ fn compile_class_elements(
             debug_info: None,
             line_ops: Vec::new(),
             catch_entries: setter_compiled.catches,
+            program_labels: setter_compiled.program_labels,
             kind: MethodKind::Function,
             method_pool_entry: true,
             expected_property_count: None,
@@ -4206,6 +4215,7 @@ struct BodyCompileResult {
     pandasm_debug: Vec<InstructionDebugInfo>,
     line_ops: Vec<u8>,
     catches: Vec<CatchEntry>,
+    program_labels: Vec<ProgramLabel>,
     vregs: u16,
     debug_line_start: Option<u32>,
 }
@@ -4232,6 +4242,7 @@ impl BodyCompileResult {
             pandasm_debug: Vec::new(),
             line_ops,
             catches,
+            program_labels: Vec::new(),
             vregs,
             debug_line_start: None,
         }
@@ -4262,6 +4273,11 @@ impl BodyCompileResult {
 
     fn with_pandasm_debug(mut self, pandasm_debug: Vec<InstructionDebugInfo>) -> Self {
         self.pandasm_debug = pandasm_debug;
+        self
+    }
+
+    fn with_program_labels(mut self, program_labels: Vec<ProgramLabel>) -> Self {
+        self.program_labels = program_labels;
         self
     }
 
@@ -4464,6 +4480,9 @@ struct CodeGen<'a> {
     continue_patches: Vec<usize>,
     label_stack: Vec<LabelContext>,
     catch_entries: Vec<CatchEntry>,
+    program_labels: Vec<ProgramLabel>,
+    program_label_names: FxHashMap<usize, String>,
+    next_program_label: usize,
     #[allow(dead_code)]
     is_generator: bool,
     gen_reg: Option<u8>,
@@ -4524,6 +4543,9 @@ impl<'a> CodeGen<'a> {
             continue_patches: Vec::new(),
             label_stack: Vec::new(),
             catch_entries: Vec::new(),
+            program_labels: Vec::new(),
+            program_label_names: FxHashMap::default(),
+            next_program_label: 0,
             is_generator: false,
             gen_reg: None,
             is_async: false,
@@ -4988,6 +5010,7 @@ impl<'a> CodeGen<'a> {
         BodyCompileResult::new(self.insns, Vec::new(), self.catch_entries, vregs)
             .with_pandasm_insns(self.pandasm_insns)
             .with_pandasm_debug(self.pandasm_debug)
+            .with_program_labels(self.program_labels)
     }
 
     fn finish_with_line_ops_and_catches(mut self) -> BodyCompileResult {
@@ -5047,6 +5070,7 @@ impl<'a> CodeGen<'a> {
         BodyCompileResult::new(self.insns, line_ops, self.catch_entries, vregs)
             .with_pandasm_insns(self.pandasm_insns)
             .with_pandasm_debug(self.pandasm_debug)
+            .with_program_labels(self.program_labels)
             .with_debug_line_start(debug_line_start)
     }
 
@@ -5135,6 +5159,16 @@ impl<'a> CodeGen<'a> {
                 end,
             ) as u32;
         }
+        for label in &mut self.program_labels {
+            label.offset = translate_offset(
+                label.offset as usize,
+                &original_offsets,
+                &offsets,
+                original_end,
+                end,
+            ) as u32;
+        }
+        self.rebuild_program_label_index();
 
         self.insns.clear();
         for insn in &self.pandasm_insns {
@@ -5732,7 +5766,7 @@ impl<'a> CodeGen<'a> {
         self.push(Insn::Throw);
         let after_handler = self.insns.len();
         self.patch_jump_to(jmp_past_handler, after_handler);
-        self.catch_entries.push(CatchEntry {
+        self.push_catch_entry(CatchEntry {
             try_begin,
             try_end,
             catch_begin,
@@ -5758,10 +5792,7 @@ impl<'a> CodeGen<'a> {
         self.returned = outer_returned;
 
         for patch in std::mem::take(&mut self.continue_patches) {
-            let off = (loop_start as i32 - patch as i32) as i16;
-            let [lo, hi] = off.to_le_bytes();
-            self.insns[patch + 1] = lo;
-            self.insns[patch + 2] = hi;
+            self.patch_jump_to(patch, loop_start);
         }
         let labeled_continues = self.take_labeled_continue_patches(label);
         self.patch_jumps_to(labeled_continues, loop_start);
@@ -5771,16 +5802,10 @@ impl<'a> CodeGen<'a> {
         self.push(Insn::Jmp(back_off));
 
         let exit_byte = self.insns.len();
-        let jnez_off = (exit_byte as i32 - jnez_pos as i32) as i16;
-        let [lo, hi] = jnez_off.to_le_bytes();
-        self.insns[jnez_pos + 1] = lo;
-        self.insns[jnez_pos + 2] = hi;
+        self.patch_jump_to(jnez_pos, exit_byte);
 
         for patch in std::mem::take(&mut self.break_patches) {
-            let off = (exit_byte as i32 - patch as i32) as i16;
-            let [lo, hi] = off.to_le_bytes();
-            self.insns[patch + 1] = lo;
-            self.insns[patch + 2] = hi;
+            self.patch_jump_to(patch, exit_byte);
         }
 
         self.break_patches = outer_break;
@@ -5804,7 +5829,7 @@ impl<'a> CodeGen<'a> {
         self.push(Insn::Throw);
         let init_catch_end = self.insns.len() as u32;
         self.patch_jump_to(init_jmp_past_catch, init_catch_end as usize);
-        self.catch_entries.push(CatchEntry {
+        self.push_catch_entry(CatchEntry {
             try_begin: init_try_begin,
             try_end: init_try_end,
             catch_begin: init_catch_begin,
@@ -5863,7 +5888,7 @@ impl<'a> CodeGen<'a> {
         self.emit_iterator_close(state, true);
         let body_catch_end = self.insns.len() as u32;
         self.patch_jump_to(body_jmp_past_catch, body_catch_end as usize);
-        self.catch_entries.push(CatchEntry {
+        self.push_catch_entry(CatchEntry {
             try_begin: body_try_begin,
             try_end: body_try_end,
             catch_begin: body_catch_begin,
@@ -5871,10 +5896,7 @@ impl<'a> CodeGen<'a> {
         });
 
         for patch in std::mem::take(&mut self.continue_patches) {
-            let off = (loop_start as i32 - patch as i32) as i16;
-            let [lo, hi] = off.to_le_bytes();
-            self.insns[patch + 1] = lo;
-            self.insns[patch + 2] = hi;
+            self.patch_jump_to(patch, loop_start);
         }
         let labeled_continues = self.take_labeled_continue_patches(label);
         self.patch_jumps_to(labeled_continues, loop_start);
@@ -5887,10 +5909,7 @@ impl<'a> CodeGen<'a> {
         self.patch_jump_to(done_pos, exit_byte);
 
         for patch in std::mem::take(&mut self.break_patches) {
-            let off = (exit_byte as i32 - patch as i32) as i16;
-            let [lo, hi] = off.to_le_bytes();
-            self.insns[patch + 1] = lo;
-            self.insns[patch + 2] = hi;
+            self.patch_jump_to(patch, exit_byte);
         }
 
         self.break_patches = outer_break;
@@ -6033,6 +6052,37 @@ impl<'a> CodeGen<'a> {
         }
     }
 
+    fn ensure_program_label(&mut self, offset: usize) -> String {
+        if let Some(name) = self.program_label_names.get(&offset) {
+            return name.clone();
+        }
+        let name = format!("label_{}", self.next_program_label);
+        self.next_program_label += 1;
+        self.program_label_names.insert(offset, name.clone());
+        self.program_labels.push(ProgramLabel {
+            name: name.clone(),
+            offset: offset as u32,
+        });
+        name
+    }
+
+    fn push_catch_entry(&mut self, entry: CatchEntry) {
+        self.ensure_program_label(entry.try_begin as usize);
+        self.ensure_program_label(entry.try_end as usize);
+        self.ensure_program_label(entry.catch_begin as usize);
+        self.ensure_program_label(entry.catch_end as usize);
+        self.catch_entries.push(entry);
+    }
+
+    fn rebuild_program_label_index(&mut self) {
+        self.program_label_names.clear();
+        for label in &self.program_labels {
+            self.program_label_names
+                .entry(label.offset as usize)
+                .or_insert_with(|| label.name.clone());
+        }
+    }
+
     fn patch_jump_to(&mut self, pos: usize, target: usize) {
         let off = target as i32 - pos as i32;
         match self.insns[pos] {
@@ -6048,6 +6098,7 @@ impl<'a> CodeGen<'a> {
                 self.patch_pandasm_jump(pos, off);
             }
         }
+        self.ensure_program_label(target);
     }
 
     fn patch_pandasm_jump(&mut self, pos: usize, off: i32) {
@@ -6231,7 +6282,7 @@ impl<'a> CodeGen<'a> {
         self.push(Insn::Sta(inner_exception));
         let catch_end = self.insns.len() as u32;
         self.patch_jump_to(jump_past_catch, catch_end as usize);
-        self.catch_entries.push(CatchEntry {
+        self.push_catch_entry(CatchEntry {
             try_begin,
             try_end,
             catch_begin,
@@ -6476,7 +6527,7 @@ impl<'a> CodeGen<'a> {
         self.emit_iterator_close(state, true);
         let body_catch_end = self.insns.len() as u32;
         self.patch_jump_to(body_jmp_past_catch, body_catch_end as usize);
-        self.catch_entries.push(CatchEntry {
+        self.push_catch_entry(CatchEntry {
             try_begin: body_try_begin,
             try_end: body_try_end,
             catch_begin: body_catch_begin,
@@ -6687,7 +6738,7 @@ impl<'a> CodeGen<'a> {
         self.emit_iterator_close(state, true);
         let body_catch_end = self.insns.len() as u32;
         self.patch_jump_to(body_jmp_past_catch, body_catch_end as usize);
-        self.catch_entries.push(CatchEntry {
+        self.push_catch_entry(CatchEntry {
             try_begin: body_try_begin,
             try_end: body_try_end,
             catch_begin: body_catch_begin,
@@ -6869,10 +6920,7 @@ impl<'a> CodeGen<'a> {
         self.push(Insn::Jmp(0));
         let loop_exit = self.insns.len();
 
-        let back_off = (loop_start as i32 - jmp_pos as i32) as i16;
-        let [lo, hi] = back_off.to_le_bytes();
-        self.insns[jmp_pos + 1] = lo;
-        self.insns[jmp_pos + 2] = hi;
+        self.patch_jump_to(jmp_pos, loop_start);
 
         self.patch_jump_to(false_branch, loop_exit);
 
@@ -6956,10 +7004,7 @@ impl<'a> CodeGen<'a> {
         self.push(Insn::Jmp(0));
         let loop_exit = self.insns.len();
 
-        let back_off = (loop_start as i32 - jmp_pos as i32) as i16;
-        let [lo, hi] = back_off.to_le_bytes();
-        self.insns[jmp_pos + 1] = lo;
-        self.insns[jmp_pos + 2] = hi;
+        self.patch_jump_to(jmp_pos, loop_start);
 
         if let Some(jpos) = jeqz_pos {
             self.patch_jump_to(jpos, loop_exit);
@@ -7096,16 +7141,13 @@ impl<'a> CodeGen<'a> {
 
             // Patch jmp_past_catch → current position.
             let after_catch = self.insns.len();
-            self.catch_entries.push(CatchEntry {
+            self.push_catch_entry(CatchEntry {
                 try_begin,
                 try_end,
                 catch_begin,
                 catch_end: after_catch as u32,
             });
-            let off = (after_catch as i32 - jmp_past_catch as i32) as i16;
-            let [lo, hi] = off.to_le_bytes();
-            self.insns[jmp_past_catch + 1] = lo;
-            self.insns[jmp_past_catch + 2] = hi;
+            self.patch_jump_to(jmp_past_catch, after_catch);
         }
     }
 
@@ -7157,7 +7199,7 @@ impl<'a> CodeGen<'a> {
             self.returned = false;
             let catch_end = self.insns.len() as u32;
             self.patch_jump_to(jmp_past_catch, catch_end as usize);
-            self.catch_entries.push(CatchEntry {
+            self.push_catch_entry(CatchEntry {
                 try_begin: inner_try_begin,
                 try_end: inner_try_end,
                 catch_begin,
@@ -7184,7 +7226,7 @@ impl<'a> CodeGen<'a> {
             self.push(Insn::Throw);
             let catch_end = self.insns.len() as u32;
             self.patch_jump_to(jmp_past_throw, catch_end as usize);
-            self.catch_entries.push(CatchEntry {
+            self.push_catch_entry(CatchEntry {
                 try_begin: inner_try_begin,
                 try_end: inner_try_end,
                 catch_begin,
@@ -7206,7 +7248,7 @@ impl<'a> CodeGen<'a> {
         self.push(Insn::Sta(exception));
         let outer_catch_end = self.insns.len() as u32;
         self.patch_jump_to(jmp_to_catch_end, outer_catch_end as usize);
-        self.catch_entries.push(CatchEntry {
+        self.push_catch_entry(CatchEntry {
             try_begin: outer_try_begin,
             try_end: outer_try_end,
             catch_begin: outer_catch_begin,
@@ -8928,7 +8970,7 @@ impl<'a> CodeGen<'a> {
         self.push(Insn::AsyncFunctionReject(async_reg));
         self.push(Insn::Return);
         let catch_end = self.insns.len() as u32;
-        self.catch_entries.push(CatchEntry {
+        self.push_catch_entry(CatchEntry {
             try_begin,
             try_end,
             catch_begin,
@@ -9207,7 +9249,7 @@ impl<'a> CodeGen<'a> {
         self.push(Insn::Throw);
         let catch_end = self.insns.len() as u32;
         self.patch_jump_to(jump_past_handler, catch_end as usize);
-        self.catch_entries.push(CatchEntry {
+        self.push_catch_entry(CatchEntry {
             try_begin,
             try_end,
             catch_begin,

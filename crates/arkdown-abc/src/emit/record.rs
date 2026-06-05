@@ -95,6 +95,18 @@ pub struct CatchEntry {
     pub catch_end: u32,
 }
 
+/// A pandasm label emitted into upstream ProgramCache snapshots.
+///
+/// ABC bytecode stores branch targets as byte offsets, but protoPanda stores
+/// labels as explicit `LabelIns` entries plus string references from jump and
+/// catch records.  This metadata preserves generation-time label names and
+/// insertion order without affecting the executable bytecode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgramLabel {
+    pub name: String,
+    pub offset: u32,
+}
+
 /// Encode a Panda `CodeItem`.
 ///
 /// Binary layout:
@@ -174,6 +186,8 @@ pub struct MethodRecord {
     /// (by bytecode byte offset) to its catch handler entry point.  Empty for
     /// methods with no `try`/`catch` blocks.
     pub catch_entries: Vec<CatchEntry>,
+    /// Ordered pandasm labels for ProgramCache/protoBin materialization.
+    pub program_labels: Vec<ProgramLabel>,
     pub kind: MethodKind,
     pub method_pool_entry: bool,
     pub expected_property_count: Option<u32>,
@@ -692,6 +706,7 @@ mod tests {
                 debug_info: None,
                 line_ops: vec![],
                 catch_entries: vec![],
+                program_labels: vec![],
                 kind: MethodKind::Module,
                 method_pool_entry: false,
                 expected_property_count: None,
@@ -734,6 +749,7 @@ mod tests {
                 debug_info: None,
                 line_ops: vec![],
                 catch_entries: vec![],
+                program_labels: vec![],
                 kind: MethodKind::Module,
                 method_pool_entry: false,
                 expected_property_count: None,

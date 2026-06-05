@@ -516,6 +516,7 @@ mod tests {
             debug_info: None,
             line_ops: vec![],
             catch_entries: vec![],
+            program_labels: vec![],
             kind: MethodKind::Module,
             method_pool_entry: false,
             expected_property_count: None,
