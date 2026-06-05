@@ -295,8 +295,8 @@ pub struct Record {
     pub metadata: Option<RecordMetadata>,
     #[prost(message, repeated, tag = "5")]
     pub field_list: Vec<Field>,
-    #[prost(uint64, tag = "6")]
-    pub params_num: u64,
+    #[prost(uint32, tag = "6")]
+    pub params_num: u32,
     #[prost(bool, tag = "7")]
     pub body_presence: bool,
     #[prost(message, optional, tag = "8")]
