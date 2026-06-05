@@ -145,7 +145,31 @@ fn inline_string_at(bytes: &[u8], offset: usize) -> String {
     String::from_utf8(bytes[pos..pos + len].to_vec()).unwrap()
 }
 
-fn class_header_counts(bytes: &[u8], offset: usize) -> (u32, u64, u64, u8, u8, u8) {
+fn read_class_tagged_data(bytes: &[u8], pos: &mut usize) -> (u8, u8, Option<u32>) {
+    let mut source_lang_tag = 0;
+    let mut source_lang = 0;
+    let mut source_file = None;
+    loop {
+        let tag = bytes[*pos];
+        *pos += 1;
+        match tag {
+            0x00 => return (source_lang_tag, source_lang, source_file),
+            0x02 => {
+                source_lang_tag = tag;
+                source_lang = bytes[*pos];
+                *pos += 1;
+            }
+            0x04 => *pos += 4,
+            0x07 => {
+                source_file = Some(read_u32(bytes, *pos));
+                *pos += 4;
+            }
+            other => panic!("unexpected class tag {other:#x}"),
+        }
+    }
+}
+
+fn class_header_counts(bytes: &[u8], offset: usize) -> (u32, u64, u64, u8, u8, Option<u32>) {
     let mut pos = offset;
     skip_inline_string(bytes, &mut pos);
     let super_off = read_u32(bytes, pos);
@@ -154,13 +178,14 @@ fn class_header_counts(bytes: &[u8], offset: usize) -> (u32, u64, u64, u8, u8, u
     let fields_count = read_uleb(bytes, &mut pos);
     let methods_count = read_uleb(bytes, &mut pos);
     assert_eq!(access_flags, 1);
+    let (source_lang_tag, source_lang, source_file) = read_class_tagged_data(bytes, &mut pos);
     (
         super_off,
         fields_count,
         methods_count,
-        bytes[pos],
-        bytes[pos + 1],
-        bytes[pos + 2],
+        source_lang_tag,
+        source_lang,
+        source_file,
     )
 }
 
@@ -174,20 +199,7 @@ fn first_user_method_debug_info(bytes: &[u8], class_offset: usize) -> (Option<u3
     assert_eq!(access_flags, 1);
     assert!(methods_count > 0);
 
-    let mut class_source_file = None;
-    loop {
-        let tag = bytes[pos];
-        pos += 1;
-        match tag {
-            0x00 => break,
-            0x02 => pos += 1,
-            0x07 => {
-                class_source_file = Some(read_u32(bytes, pos));
-                pos += 4;
-            }
-            other => panic!("unexpected class tag {other:#x}"),
-        }
-    }
+    let (_, _, class_source_file) = read_class_tagged_data(bytes, &mut pos);
 
     for _ in 0..fields_count {
         pos += 2 + 2 + 4;
@@ -237,16 +249,7 @@ fn user_field_values(bytes: &[u8], class_offset: usize) -> BTreeMap<String, u32>
     let _methods_count = read_uleb(bytes, &mut pos) as usize;
     assert_eq!(access_flags, 1);
 
-    loop {
-        let tag = bytes[pos];
-        pos += 1;
-        match tag {
-            0x00 => break,
-            0x02 => pos += 1,
-            0x07 => pos += 4,
-            other => panic!("unexpected class tag {other:#x}"),
-        }
-    }
+    read_class_tagged_data(bytes, &mut pos);
 
     let mut fields = BTreeMap::new();
     for _ in 0..fields_count {
@@ -287,16 +290,7 @@ fn class_method_items(bytes: &[u8], class_offset: usize) -> Vec<(usize, String, 
     let methods_count = read_uleb(bytes, &mut pos) as usize;
     assert_eq!(access_flags, 1);
 
-    loop {
-        let tag = bytes[pos];
-        pos += 1;
-        match tag {
-            0x00 => break,
-            0x02 => pos += 1,
-            0x07 => pos += 4,
-            other => panic!("unexpected class tag {other:#x}"),
-        }
-    }
+    read_class_tagged_data(bytes, &mut pos);
 
     for _ in 0..fields_count {
         pos += 2 + 2 + 4;
@@ -1268,12 +1262,14 @@ fn test_user_records_are_marked_arkts_and_npm_entries_have_native_fields() {
         })
         .expect("user record exists") as usize;
 
-    let (_, sdk_fields, _, sdk_tag, sdk_lang, sdk_end) = class_header_counts(&bytes, sdk_off);
+    let (_, sdk_fields, _, sdk_tag, sdk_lang, sdk_source_file) =
+        class_header_counts(&bytes, sdk_off);
     assert_eq!(
         sdk_fields, 1,
         "npm entry records carry one @native field in hvigor output"
     );
-    assert_eq!((sdk_tag, sdk_lang, sdk_end), (0x02, 0x00, 0x00));
+    assert_eq!((sdk_tag, sdk_lang), (0x02, 0x00));
+    assert_eq!(sdk_source_file, None);
     assert!(
         bytes
             .windows(b"@native.ohos.app".len())
@@ -1281,15 +1277,23 @@ fn test_user_records_are_marked_arkts_and_npm_entries_have_native_fields() {
         "SDK native field name must be emitted as a StringItem"
     );
 
-    let (_, user_fields, _, user_tag, user_lang, user_end) = class_header_counts(&bytes, user_off);
+    let (_, user_fields, _, user_tag, user_lang, user_source_file) =
+        class_header_counts(&bytes, user_off);
     assert_eq!(
         user_fields, 6,
         "user module records carry six module metadata fields"
     );
     assert_eq!(
-        (user_tag, user_lang, user_end),
-        (0x02, 0x04, 0x00),
+        (user_tag, user_lang),
+        (0x02, 0x04),
         "user records use ArkTS source language byte 0x04"
+    );
+    assert_eq!(
+        inline_string_at(
+            &bytes,
+            user_source_file.expect("user record source file") as usize
+        ),
+        "entry|entry|1.0.0|ets/entryability/EntryAbility.ts"
     );
     assert!(
         bytes
@@ -1335,11 +1339,18 @@ fn test_origin_source_lang_controls_source_lang_tags() {
             .map(|off| off as usize)
             .find(|&off| class_name_at(&bytes, off) == class_name)
             .expect("sourceLang class exists");
-        let (_, _, _, tag, class_lang, end) = class_header_counts(&bytes, class_off);
+        let (_, _, _, tag, class_lang, source_file) = class_header_counts(&bytes, class_off);
         assert_eq!(
-            (tag, class_lang, end),
-            (0x02, expected_lang, 0x00),
+            (tag, class_lang),
+            (0x02, expected_lang),
             "{record_name} class SOURCE_LANG must match upstream Program::SetSourceLang"
+        );
+        assert_eq!(
+            inline_string_at(
+                &bytes,
+                source_file.expect("sourceLang class source file") as usize
+            ),
+            "entry|entry|1.0.0|src/main/ets/pages/Index.ts"
         );
 
         let func_main = class_method_items(&bytes, class_off)
@@ -2751,14 +2762,22 @@ fn test_source_file_emits_debug_info_and_lnp() {
             class_name_at(&bytes, *off as usize) == "Lcom.example.app/entry/ets/pages/Index;"
         })
         .expect("user record exists") as usize;
-    let (_class_source_file, method_debug_info) = first_user_method_debug_info(&bytes, user_off);
+    let (class_source_file, method_debug_info) = first_user_method_debug_info(&bytes, user_off);
+    assert_eq!(
+        inline_string_at(
+            &bytes,
+            class_source_file.expect("class SOURCE_FILE tag exists") as usize
+        ),
+        source_file,
+        "record source_file is written as ClassTag::SOURCE_FILE"
+    );
     let debug_info = method_debug_info.expect("method DEBUG_INFO tag exists");
 
     // DebugInfo format (libpandafile DebugInfoItem::Write, corrected architecture):
     //   line_num:           ULEB128(0xFFFF_FFFF)
     //   num_params:         ULEB128(0)
     //   constant_pool_size: ULEB128(N)   byte count of operand pool
-    //   constant_pool:      [src_file_off_uleb, scope_var_operands..., epilogue_delta_uleb]
+    //   constant_pool:      [scope var operands..., line operands...]
     //   lnp_index:          ULEB128(0)
     //
     // The constant_pool contains ULEB128-encoded OPERANDS for LNP opcodes
@@ -2770,23 +2789,7 @@ fn test_source_file_emits_debug_info_and_lnp() {
         "standalone es2abc-style input stores the concrete 0-based start line"
     );
     assert_eq!(read_uleb(&bytes, &mut pos), 0, "no parameter names emitted");
-    let cp_size = read_uleb(&bytes, &mut pos) as usize;
-    assert!(
-        cp_size > 0,
-        "constant pool must be non-empty (contains SET_FILE operand + scope var operands)"
-    );
-    // The constant pool starts with SET_FILE, or SET_SOURCE_CODE then SET_FILE
-    // for module func_main_0.
-    let mut sf_from_cp = read_uleb(&bytes, &mut pos);
-    if inline_string_at(&bytes, sf_from_cp as usize) == "not supported" {
-        sf_from_cp = read_uleb(&bytes, &mut pos);
-    }
-    assert_eq!(
-        inline_string_at(&bytes, sf_from_cp as usize),
-        source_file,
-        "constant pool first operand is the source file string offset (for SET_FILE)"
-    );
-    // Skip the rest of the constant pool (scope var operands, epilogue delta)
+    let _cp_size = read_uleb(&bytes, &mut pos) as usize;
     pos = debug_info as usize;
     read_uleb(&bytes, &mut pos); // line_start
     read_uleb(&bytes, &mut pos); // num_params
@@ -2798,13 +2801,13 @@ fn test_source_file_emits_debug_info_and_lnp() {
         "debug info references a valid LNP index; got {lnp_index}, count {num_lnp}"
     );
 
-    // The LNP entry (in the separate LNP data_ stream) starts with SET_FILE
-    // (0x09), or SET_SOURCE_CODE (0x0a) followed by SET_FILE for func_main_0.
-    // The LNP data_ contains opcodes + inline register SLEB128s (no other inline operands).
+    // The LNP entry does not repeat SET_FILE when method source_file equals
+    // the owning record source_file. The LNP data_ contains opcodes + inline
+    // register SLEB128s (no other inline operands).
     let lnp_offset = read_u32(&bytes, lnp_idx_off) as usize;
     assert!(
-        bytes[lnp_offset] == 0x09 || (bytes[lnp_offset] == 0x0a && bytes[lnp_offset + 1] == 0x09),
-        "LNP data_ starts with SET_FILE or SET_SOURCE_CODE+SET_FILE"
+        !matches!(bytes[lnp_offset], 0x09 | 0x0a),
+        "same-source LNP must not start with SET_FILE or SET_SOURCE_CODE"
     );
     // After SET_FILE, the LNP contains START_LOCAL_EXTENDED entries (opcode + reg),
     // SET_PROLOGUE_END, body opcodes, SET_EPILOGUE_BEGIN, ADVANCE_PC, END_SEQUENCE.
@@ -2852,16 +2855,15 @@ fn test_api18_standalone_explicit_constructor_matches_upstream_lnp_layout() {
         .expect("compile explicit constructor fixture");
 
     let bytes = std::fs::read(&out).expect("read .abc");
-    assert_eq!(bytes.len(), 984, "API18 standalone fixture size");
-    assert_eq!(read_u32(&bytes, 0x28), 0x3cc, "LNP index offset");
+    assert_eq!(bytes.len(), 980, "API18 standalone fixture size");
+    assert_eq!(read_u32(&bytes, 0x28), 0x3c8, "LNP index offset");
     assert_eq!(
-        &bytes[0x39f..0x3d8],
+        &bytes[0x3a4..0x3d4],
         &[
-            0x09, 0x0b, 0x00, 0x05, 0x00, 0x03, 0xbb, 0x05, 0x00, 0x00, 0x09, 0x0b, 0x01, 0x02,
-            0x10, 0x65, 0x00, 0x08, 0x00, 0x05, 0xbb, 0x05, 0x00, 0x10, 0x77, 0x01, 0x09, 0x0b,
-            0x01, 0x11, 0x01, 0x02, 0x10, 0x00, 0x05, 0x00, 0x06, 0xbb, 0x05, 0x00, 0x12, 0x0d,
-            0x79, 0x02, 0x00, 0x9f, 0x03, 0x00, 0x00, 0xa9, 0x03, 0x00, 0x00, 0xb9, 0x03, 0x00,
-            0x00,
+            0x0b, 0x00, 0x05, 0x00, 0x01, 0x00, 0x00, 0x0b, 0x01, 0x02, 0x10, 0x65, 0x00, 0x08,
+            0x00, 0x03, 0x00, 0x10, 0x77, 0x01, 0x0b, 0x01, 0x11, 0x01, 0x02, 0x10, 0x00, 0x05,
+            0x00, 0x04, 0x00, 0x12, 0x0d, 0x79, 0x02, 0x00, 0xa4, 0x03, 0x00, 0x00, 0xab, 0x03,
+            0x00, 0x00, 0xb8, 0x03, 0x00, 0x00,
         ],
         "LNP/DebugInfo section matches upstream es2abc for the fixture"
     );
@@ -2906,27 +2908,26 @@ fn test_api18_standalone_lexical_arrow_matches_upstream_abc_tail_layout() {
         .expect("compile lexical arrow fixture");
 
     let bytes = std::fs::read(&out).expect("read .abc");
-    assert_eq!(bytes.len(), 2064, "API18 lexical fixture size");
-    assert_eq!(read_u32(&bytes, 0x28), 0x7f8, "LNP index offset");
+    assert_eq!(bytes.len(), 2048, "API18 lexical fixture size");
+    assert_eq!(read_u32(&bytes, 0x28), 0x7e8, "LNP index offset");
     assert_eq!(
-        bytes[0x76b], 0x00,
+        bytes[0x770], 0x00,
         "standalone lexenv catch-all handler code_size matches upstream"
     );
     assert_eq!(
-        &bytes[0x76c..0x810],
+        &bytes[0x771..0x800],
         &[
-            0x09, 0x0b, 0x01, 0x02, 0x10, 0x00, 0xff, 0xff, 0xff, 0xff, 0x0f, 0x00, 0x05, 0xc7,
-            0x08, 0x00, 0x06, 0x27, 0x00, 0x06, 0x00, 0x05, 0xc7, 0x08, 0x00, 0x0a, 0x79, 0x00,
-            0x09, 0x0b, 0xaf, 0x7e, 0x01, 0x12, 0x00, 0xff, 0xff, 0xff, 0xff, 0x0f, 0x00, 0x04,
-            0xc7, 0x08, 0x00, 0x10, 0x02, 0xff, 0xff, 0xff, 0xff, 0x0f, 0x00, 0x06, 0xc7, 0x08,
-            0x00, 0x06, 0x1e, 0x10, 0x01, 0x09, 0x0b, 0x01, 0x02, 0x10, 0x7f, 0x01, 0x12, 0x00,
-            0xff, 0xff, 0xff, 0xff, 0x0f, 0x00, 0x06, 0xc7, 0x08, 0x00, 0x06, 0x13, 0x10, 0x01,
-            0x09, 0x0b, 0x6b, 0x2f, 0x01, 0x11, 0x00, 0x09, 0x00, 0x04, 0xc7, 0x08, 0x00, 0x10,
-            0x03, 0x09, 0x0b, 0x01, 0x11, 0x6b, 0xfe, 0xaa, 0x00, 0x13, 0x00, 0x04, 0xc7, 0x08,
-            0x00, 0x15, 0x04, 0x09, 0x0b, 0x01, 0x11, 0x2f, 0xfe, 0xaa, 0x00, 0x1e, 0x00, 0x04,
-            0xc7, 0x08, 0x00, 0x15, 0x05, 0x05, 0x00, 0x05, 0xc7, 0x08, 0x00, 0x24, 0x7a, 0x00,
-            0x6c, 0x07, 0x00, 0x00, 0xa9, 0x07, 0x00, 0x00, 0x88, 0x07, 0x00, 0x00, 0xc0, 0x07,
-            0x00, 0x00, 0xcf, 0x07, 0x00, 0x00, 0xdf, 0x07, 0x00, 0x00,
+            0x0b, 0x01, 0x02, 0x10, 0x00, 0xff, 0xff, 0xff, 0xff, 0x0f, 0x00, 0x03, 0x00, 0x06,
+            0x27, 0x00, 0x06, 0x00, 0x03, 0x00, 0x0a, 0x79, 0x00, 0x0b, 0xaf, 0x7e, 0x01, 0x12,
+            0x00, 0xff, 0xff, 0xff, 0xff, 0x0f, 0x00, 0x02, 0x00, 0x10, 0x02, 0xff, 0xff, 0xff,
+            0xff, 0x0f, 0x00, 0x04, 0x00, 0x06, 0x1e, 0x10, 0x01, 0x0b, 0x01, 0x02, 0x10, 0x7f,
+            0x01, 0x12, 0x00, 0xff, 0xff, 0xff, 0xff, 0x0f, 0x00, 0x04, 0x00, 0x06, 0x13, 0x10,
+            0x01, 0x0b, 0x6b, 0x2f, 0x01, 0x11, 0x00, 0x09, 0x00, 0x02, 0x00, 0x10, 0x03, 0x0b,
+            0x01, 0x11, 0x6b, 0xfe, 0xaa, 0x00, 0x13, 0x00, 0x02, 0x00, 0x15, 0x04, 0x0b, 0x01,
+            0x11, 0x2f, 0xfe, 0xaa, 0x00, 0x1e, 0x00, 0x02, 0x00, 0x15, 0x05, 0x05, 0x00, 0x03,
+            0x00, 0x24, 0x7a, 0x00, 0x00, 0x00, 0x00, 0x71, 0x07, 0x00, 0x00, 0xa4, 0x07, 0x00,
+            0x00, 0x88, 0x07, 0x00, 0x00, 0xb8, 0x07, 0x00, 0x00, 0xc4, 0x07, 0x00, 0x00, 0xd1,
+            0x07, 0x00, 0x00,
         ],
         "DebugInfo/LNP tail matches upstream es2abc for lexical fixture"
     );
@@ -3292,6 +3293,21 @@ fn module_func_main_bytecode(bytes: &[u8], record_name: &str) -> Vec<u8> {
         .and_then(|(_, _, code_off)| code_off)
         .expect("func_main_0 must have a code item") as usize;
     code_item_bytecode(bytes, code_off).to_vec()
+}
+
+fn module_method_bytecodes(bytes: &[u8], record_name: &str) -> Vec<Vec<u8>> {
+    let class_name = format!("L{record_name};");
+    let class_off = class_offsets(bytes)
+        .into_iter()
+        .map(|off| off as usize)
+        .find(|&off| class_name_at(bytes, off) == class_name)
+        .expect("module class must exist");
+    class_method_items(bytes, class_off)
+        .into_iter()
+        .filter_map(|(_, _, code_off)| {
+            code_off.map(|code_off| code_item_bytecode(bytes, code_off as usize).to_vec())
+        })
+        .collect()
 }
 
 fn module_method_bytecode_by_suffix(
@@ -6051,21 +6067,24 @@ fn test_void_expression_emits_ldundefined() {
 }
 
 #[test]
-fn test_logical_and_emits_jeqz_branch() {
+fn test_logical_and_emits_jnez_branch() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("test.abc");
+    let record_name = "test/mod";
     module_compiler()
         .compile(
-            vec![module_record("test/mod", r#"const x = a && b;"#)],
+            vec![module_record(record_name, r#"const x = a && b;"#)],
             &out,
         )
         .expect("compile");
     let bytes = std::fs::read(&out).unwrap();
     assert!(bytes.starts_with(b"PANDA\0\0\0"));
-    // jeqz opcode is 0x50 — emitted for short-circuit &&
+    let method_bytecodes = module_method_bytecodes(&bytes, record_name);
     assert!(
-        bytes.contains(&0x50),
-        "jeqz (0x50) must appear for '&&' short-circuit"
+        method_bytecodes
+            .iter()
+            .any(|bytecode| bytecode_contains_jnez(bytecode)),
+        "jnez must appear in module code for '&&' short-circuit"
     );
 }
 
@@ -6073,18 +6092,21 @@ fn test_logical_and_emits_jeqz_branch() {
 fn test_logical_or_emits_jnez_branch() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("test.abc");
+    let record_name = "test/mod";
     module_compiler()
         .compile(
-            vec![module_record("test/mod", r#"const x = a || b;"#)],
+            vec![module_record(record_name, r#"const x = a || b;"#)],
             &out,
         )
         .expect("compile");
     let bytes = std::fs::read(&out).unwrap();
     assert!(bytes.starts_with(b"PANDA\0\0\0"));
-    // jnez opcode is 0x9b — emitted for short-circuit ||
+    let method_bytecodes = module_method_bytecodes(&bytes, record_name);
     assert!(
-        bytes.contains(&0x9b),
-        "jnez (0x9b) must appear for '||' short-circuit"
+        method_bytecodes
+            .iter()
+            .any(|bytecode| bytecode_contains_jnez(bytecode)),
+        "jnez must appear in module code for '||' short-circuit"
     );
 }
 

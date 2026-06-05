@@ -9,8 +9,8 @@ use crate::emit::debug_info::{
 };
 use crate::emit::record::{
     encode_code_item, inline_string, uleb128, AnnotationRecord, AnnotationValue,
-    ClassAnnotationOffsets, ClassRecord, FieldAnnotationOffsets, FieldType, FieldValue,
-    MethodAnnotationOffsets, MethodKind,
+    ClassAnnotationOffsets, ClassRecord, DebugInfoRecord, FieldAnnotationOffsets, FieldType,
+    FieldValue, MethodAnnotationOffsets, MethodKind,
 };
 use crate::emit::strings::StringTable;
 use rustc_hash::FxHashMap;
@@ -519,7 +519,11 @@ impl AbcFile {
             .iter()
             .map(|class| vec![None; class.fields.len()])
             .collect();
-        let mut source_file_string_offsets: Vec<Option<u32>> = vec![None; all_classes.len()];
+        let mut class_source_file_string_offsets: Vec<Option<u32>> = vec![None; all_classes.len()];
+        let mut method_source_file_string_offsets: Vec<Vec<Option<u32>>> = all_classes
+            .iter()
+            .map(|class| vec![None; class.methods.len()])
+            .collect();
         let mut literal_string_offsets: Vec<Vec<Option<u32>>> = self
             .literal_arrays
             .iter()
@@ -584,6 +588,11 @@ impl AbcFile {
                 }
             }
 
+            if let Some(source_file) = &class.source_file {
+                let off = string_items.get_or_create(source_file);
+                class_source_file_string_offsets[class_idx].get_or_insert(off);
+            }
+
             for (field_idx, field) in class.fields.iter().enumerate() {
                 field_name_string_offsets[class_idx][field_idx] =
                     string_items.get_or_create(&field.name);
@@ -609,6 +618,10 @@ impl AbcFile {
                     string_items.get_or_create(&method.name);
 
                 if let Some(debug) = &method.debug_info {
+                    if debug_source_file_differs_from_record(class, debug) {
+                        method_source_file_string_offsets[class_idx][method_idx] =
+                            Some(string_items.get_or_create(&debug.source_file));
+                    }
                     let is_arrow = method.kind == MethodKind::Anonymous;
                     if !class.standalone_ecmascript_input {
                         if is_arrow {
@@ -644,11 +657,6 @@ impl AbcFile {
                         }
                         param_name_offsets_by_method[class_idx][method_idx] = Some(param_offsets);
                     }
-                }
-
-                if let Some(source_file) = &class.source_file {
-                    let off = string_items.get_or_create(source_file);
-                    source_file_string_offsets[class_idx].get_or_insert(off);
                 }
 
                 for annotation in &method.annotations {
@@ -722,13 +730,13 @@ impl AbcFile {
 
         let mut per_lnp_param_name_offsets: Vec<Vec<(String, i32, u32)>> = Vec::new();
         for (class_idx, class) in all_classes.iter().enumerate() {
-            if source_file_string_offsets[class_idx].is_none() {
-                continue;
-            }
             let mut method_order: Vec<usize> = (0..class.methods.len()).collect();
             method_order.sort_by(|&a, &b| class.methods[a].name.cmp(&class.methods[b].name));
             for method_idx in method_order {
-                if class.methods[method_idx].debug_info.is_some() {
+                if class.methods[method_idx].debug_info.is_some()
+                    && (class_source_file_string_offsets[class_idx].is_some()
+                        || method_source_file_string_offsets[class_idx][method_idx].is_some())
+                {
                     per_lnp_param_name_offsets.push(
                         param_name_offsets_by_method[class_idx][method_idx]
                             .clone()
@@ -747,10 +755,12 @@ impl AbcFile {
         });
         let needs_not_supported_source_code = all_classes.iter().any(|class| {
             !class.standalone_ecmascript_input
-                && class
-                    .methods
-                    .iter()
-                    .any(|method| method.name == "func_main_0" && method.debug_info.is_some())
+                && class.methods.iter().any(|method| {
+                    method.name == "func_main_0"
+                        && method.debug_info.as_ref().is_some_and(|debug| {
+                            debug_source_file_differs_from_record(class, debug)
+                        })
+                })
         });
         let scope_offs_regular: Option<[u32; 3]> = needs_scope_debug.then(|| {
             [
@@ -1500,9 +1510,10 @@ impl AbcFile {
         }
 
         // ── Pre-compute DebugInfo and LineNumberProgram sections ─────────────
-        // Each debug method gets an LNP: SET_FILE + optional advance sequences +
-        // END_SEQUENCE.  The source-file offset is stored in the DebugInfo
-        // constant pool, matching libpandafile's EmitSetFile convention.
+        // Each debug method gets an LNP with optional SET_FILE/SET_SOURCE_CODE
+        // prefixes, advance sequences, and END_SEQUENCE.  libpandafile only
+        // emits SET_FILE when the function source file differs from the owner
+        // record source file; otherwise ClassTag::SOURCE_FILE is the default.
         //
         // When the method carries pre-computed `line_ops` (ADVANCE_PC,
         // ADVANCE_LINE, SPECIAL_OPCODE, END_SEQUENCE) from the IR builder, those
@@ -1553,12 +1564,18 @@ impl AbcFile {
             let _epilogue_pc_delta: u32 = 4;
 
             for (class_idx, class) in all_classes.iter().enumerate() {
-                let source_file_off = source_file_string_offsets[class_idx];
+                let class_source_file_off = class_source_file_string_offsets[class_idx];
                 let mut method_order: Vec<usize> = (0..class.methods.len()).collect();
                 method_order.sort_by(|&a, &b| class.methods[a].name.cmp(&class.methods[b].name));
                 for method_idx in method_order {
                     let method = &class.methods[method_idx];
-                    if let (Some(debug), Some(src_off)) = (&method.debug_info, source_file_off) {
+                    if let Some(debug) = &method.debug_info {
+                        let method_source_file_off =
+                            method_source_file_string_offsets[class_idx][method_idx];
+                        if class_source_file_off.is_none() && method_source_file_off.is_none() {
+                            continue;
+                        }
+
                         let param_offs = per_lnp_param_name_offsets
                             .get(lnp_param_cursor)
                             .cloned()
@@ -1599,29 +1616,32 @@ impl AbcFile {
                         // ── Build LNP matching libpandafile BuildLineNumberProgram exactly ──
                         //
                         // Pattern from golden binary analysis:
-                        //   SF → cp: src_off
+                        //   [SC → cp: source_code_off, SF → cp: method_source_file_off]
+                        //     only when function source file differs from record source file
                         //   PC(num_args×2) → cp: prologue_size  [arg-copy prologue]
                         //   SLE(reg) × (3+params) → cp: name,type,typesig per var
                         //   [body from line_ops: LN+SP+SC+PC per instruction]
                         //   EL(reg) × (3+params) → cp: closing_pc=0
                         //   END
 
-                        // SET_SOURCE_CODE is emitted for module func_main_0 by
-                        // es2panda when record debug source is disabled.
-                        if method.name == "func_main_0" {
-                            if let Some(not_supported_source_code_off) =
-                                not_supported_source_code_off
-                            {
-                                lnp_data.push(0x0a);
-                                cp.extend_from_slice(&uleb128(
-                                    not_supported_source_code_off as u64,
-                                ));
+                        if let Some(src_off) = method_source_file_off {
+                            // SET_SOURCE_CODE is emitted for module func_main_0
+                            // inside the same upstream guard as SET_FILE.
+                            if method.name == "func_main_0" {
+                                if let Some(not_supported_source_code_off) =
+                                    not_supported_source_code_off
+                                {
+                                    lnp_data.push(0x0a);
+                                    cp.extend_from_slice(&uleb128(
+                                        not_supported_source_code_off as u64,
+                                    ));
+                                }
                             }
-                        }
 
-                        // SET_FILE
-                        lnp_data.push(0x09);
-                        cp.extend_from_slice(&uleb128(src_off as u64));
+                            // SET_FILE
+                            lnp_data.push(0x09);
+                            cp.extend_from_slice(&uleb128(src_off as u64));
+                        }
 
                         // ADV_PC(prologue_size): skip hidden entry instructions
                         // before the source-visible function scope starts.
@@ -1916,7 +1936,7 @@ impl AbcFile {
                     class_idx,
                     &class_annotation_offsets_per_class[ci],
                     &field_name_string_offsets[ci],
-                    source_file_string_offsets[ci],
+                    class_source_file_string_offsets[ci],
                     &field_annotation_offsets_per_class[ci],
                     &method_string_offsets[ci],
                     &code_offsets[ci],
@@ -2314,6 +2334,11 @@ fn method_index_string_refs(
     }
     refs.sort_by(|a, b| a.value(strings).cmp(b.value(strings)));
     refs
+}
+
+fn debug_source_file_differs_from_record(class: &ClassRecord, debug: &DebugInfoRecord) -> bool {
+    !debug.source_file.is_empty()
+        && class.source_file.as_deref() != Some(debug.source_file.as_str())
 }
 
 /// Compute Adler-32 checksum of `data`.

@@ -505,7 +505,7 @@ pub struct ClassRecord {
     /// True when the record comes from a direct es2abc-style `.js`/`.ts`
     /// source-file input rather than hvigor's filesInfo handoff.
     pub standalone_ecmascript_input: bool,
-    /// Optional source file path used by debug/LNP metadata.
+    /// Optional source file path written as ClassTag::SOURCE_FILE.
     pub source_file: Option<String>,
     /// Custom annotation metadata attached to this class/record.
     pub annotations: Vec<AnnotationRecord>,
@@ -540,9 +540,8 @@ impl ClassRecord {
         // methods_count: ULEB128 (1 byte for counts < 128)
         let methods_count = uleb128(self.methods.len() as u64).len();
         // ClassTag::SOURCE_LANG + custom ClassTag::ANNOTATION entries +
-        // ClassTag::NOTHING. ClassRecord::source_file is debug/LNP metadata;
-        // do not synthesize ClassTag::SOURCE_FILE from it.
-        let class_tags = 2 + self.annotations.len() * (1 + 4) + 1;
+        // optional ClassTag::SOURCE_FILE + ClassTag::NOTHING.
+        let class_tags = self.class_tagged_data_byte_size();
         let field_bytes = self.field_items_byte_size();
         // Per-method bytes:
         // class_idx(2) + proto_idx(2) + name_off(4) + access_flags_uleb128(2)
@@ -581,8 +580,14 @@ impl ClassRecord {
             + uleb128(self.access_flags as u64).len()
             + uleb128(self.fields.len() as u64).len()
             + uleb128(self.methods.len() as u64).len()
-            + 3
+            + self.class_tagged_data_byte_size()
             + self.field_items_byte_size()
+    }
+
+    fn class_tagged_data_byte_size(&self) -> usize {
+        // ClassTag::SOURCE_LANG + custom ClassTag::ANNOTATION entries +
+        // optional ClassTag::SOURCE_FILE + ClassTag::NOTHING.
+        2 + self.annotations.len() * (1 + 4) + self.source_file.as_ref().map_or(0, |_| 1 + 4) + 1
     }
 
     fn field_items_byte_size(&self) -> usize {
@@ -638,7 +643,7 @@ impl ClassRecord {
         class_idx: u16,
         class_annotation_offsets: &ClassAnnotationOffsets,
         field_name_offsets: &[u32],
-        _source_file_offset: Option<u32>,
+        source_file_offset: Option<u32>,
         field_annotation_offsets: &[FieldAnnotationOffsets],
         method_name_offsets: &[u32],
         code_offsets: &[u32],
@@ -689,6 +694,11 @@ impl ClassRecord {
         for &annotation_off in &class_annotation_offsets.custom {
             buf.push(0x04);
             buf.extend_from_slice(&annotation_off.to_le_bytes());
+        }
+        // ClassTag::SOURCE_FILE = 0x07.
+        if let Some(source_file_offset) = source_file_offset {
+            buf.push(0x07);
+            buf.extend_from_slice(&source_file_offset.to_le_bytes());
         }
         // ClassTag::NOTHING = 0x00 (terminates tagged section)
         buf.push(0x00);

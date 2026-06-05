@@ -4205,6 +4205,55 @@ class A {}
     }
 
     #[test]
+    fn record_source_file_roundtrips_through_proto_and_class_source_file_tag() {
+        let file = annotation_usage_file();
+        let program = program_for_file(&file, 20).unwrap();
+        let record = program
+            .record_table
+            .iter()
+            .find_map(|entry| {
+                let record = entry.value.as_ref()?;
+                (entry.key == b"usage_string.ets").then_some(record)
+            })
+            .expect("user record must be present");
+        assert_eq!(record.source_file, b"usage_string.ets");
+
+        let mut restored_from_proto = AbcFile::new();
+        append_program_to_file(&mut restored_from_proto, program).unwrap();
+        let restored_proto_record = restored_from_proto
+            .records
+            .iter()
+            .find(|record| record.name == "Lusage_string.ets;")
+            .expect("restored proto user record must be present");
+        assert_eq!(
+            restored_proto_record.source_file.as_deref(),
+            Some("usage_string.ets")
+        );
+
+        let bytes = restored_from_proto.serialize_with_version(version_for_target_api(20, None));
+        let reader = AbcReader::new(&bytes).unwrap();
+        let class = reader
+            .class_items()
+            .unwrap()
+            .into_iter()
+            .find(|class| class.name == "Lusage_string.ets;")
+            .expect("user class must be present");
+        assert_eq!(class.source_file.as_deref(), Some("usage_string.ets"));
+
+        let mut restored_from_abc = AbcFile::new();
+        append_abc_file(&mut restored_from_abc, &bytes).unwrap();
+        let restored_record = restored_from_abc
+            .records
+            .iter()
+            .find(|record| record.name == "Lusage_string.ets;")
+            .expect("restored user record must be present");
+        assert_eq!(
+            restored_record.source_file.as_deref(),
+            Some("usage_string.ets")
+        );
+    }
+
+    #[test]
     fn parameter_annotations_roundtrip_through_program_cache() {
         let file = annotated_parameter_file();
         let program = program_for_file(&file, 20).unwrap();
