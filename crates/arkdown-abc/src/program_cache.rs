@@ -44,6 +44,7 @@ const ANNOTATION_RECORD_ACCESS_FLAGS: u32 = 0x2001;
 pub(crate) fn program_for_record(
     file: &AbcFile,
     record_index: usize,
+    target_api_version: u32,
 ) -> io::Result<Option<Program>> {
     let Some(record) = file.records.get(record_index) else {
         return Ok(None);
@@ -67,54 +68,72 @@ pub(crate) fn program_for_record(
 
     let mut program = Program {
         lang,
-        record_table: Vec::with_capacity(record.methods.len() + 3),
-        function_table: Vec::with_capacity(record.methods.len()),
+        record_table: Vec::new(),
+        function_table: Vec::new(),
         function_synonyms: Vec::new(),
-        literal_array_table: Vec::with_capacity(literal_indices.len()),
-        strings: record
-            .string_indices
-            .iter()
-            .filter_map(|idx| file.strings.get(*idx).map(bytes))
-            .collect(),
+        literal_array_table: Vec::new(),
+        strings: record_program_strings(record, file),
         array_types: Vec::new(),
     };
 
+    let mut record_table = BTreeMap::new();
     push_annotation_record_tables(
-        &mut program.record_table,
-        record
-            .methods
-            .iter()
-            .any(|method| method.expected_property_count.is_some()),
+        &mut record_table,
+        include_expected_record(record, target_api_version),
     );
-    program.record_table.push(program::RecordTable {
-        key: bytes(&pandasm_record_name(&record.name)),
-        value: Some(record_to_proto(record, file)),
-    });
+    insert_record_table(
+        &mut record_table,
+        bytes(&pandasm_record_name(&record.name)),
+        record_to_proto(record, file),
+    );
+    program.record_table = record_table
+        .into_iter()
+        .map(|(key, value)| program::RecordTable {
+            key,
+            value: Some(value),
+        })
+        .collect();
 
+    let mut function_table = BTreeMap::new();
     for method in &record.methods {
         let function = function_to_proto(method, record, &file.strings)?;
-        program.function_table.push(program::FunctionTable {
-            key: bytes(&full_method_name(&record.name, &method.name)),
-            value: Some(function),
-        });
+        insert_function_table(
+            &mut function_table,
+            bytes(&full_method_name(&record.name, &method.name)),
+            function,
+        );
     }
+    program.function_table = function_table
+        .into_iter()
+        .map(|(key, value)| program::FunctionTable {
+            key,
+            value: Some(value),
+        })
+        .collect();
 
+    let mut literal_array_table = BTreeMap::new();
     for idx in literal_indices {
         let Some(array) = file.literal_arrays.get(idx) else {
             continue;
         };
-        program
-            .literal_array_table
-            .push(program::LiteralArrayTable {
-                key: bytes(&literal_key(record, idx)),
-                value: Some(literal_array_to_proto(array, &record.name)),
-            });
+        insert_literal_array_table(
+            &mut literal_array_table,
+            bytes(&literal_key(record, idx)),
+            literal_array_to_proto(array, &record.name),
+        );
     }
+    program.literal_array_table = literal_array_table
+        .into_iter()
+        .map(|(key, value)| program::LiteralArrayTable {
+            key,
+            value: Some(value),
+        })
+        .collect();
 
     Ok(Some(program))
 }
 
-pub(crate) fn program_for_file(file: &AbcFile) -> io::Result<Program> {
+pub(crate) fn program_for_file(file: &AbcFile, target_api_version: u32) -> io::Result<Program> {
     if file
         .records
         .iter()
@@ -131,12 +150,6 @@ pub(crate) fn program_for_file(file: &AbcFile) -> io::Result<Program> {
         .first()
         .map(|record| record.source_lang as u32)
         .unwrap_or_default();
-    let has_expected_property_count = file.records.iter().any(|record| {
-        record
-            .methods
-            .iter()
-            .any(|method| method.expected_property_count.is_some())
-    });
     let mut literal_indices = BTreeSet::new();
     let mut literal_keys = BTreeMap::new();
     let mut literal_record_names = BTreeMap::new();
@@ -163,51 +176,80 @@ pub(crate) fn program_for_file(file: &AbcFile) -> io::Result<Program> {
 
     let mut program = Program {
         lang,
-        record_table: Vec::with_capacity(file.records.len() + 3),
+        record_table: Vec::new(),
         function_table: Vec::new(),
         function_synonyms: Vec::new(),
-        literal_array_table: Vec::with_capacity(literal_indices.len()),
-        strings: file.strings.iter().map(bytes).collect(),
+        literal_array_table: Vec::new(),
+        strings: sorted_program_strings(file.strings.iter()),
         array_types: Vec::new(),
     };
 
-    push_annotation_record_tables(&mut program.record_table, has_expected_property_count);
+    let mut record_table = BTreeMap::new();
+    let include_expected = file
+        .records
+        .iter()
+        .any(|record| include_expected_record(record, target_api_version));
+    push_annotation_record_tables(&mut record_table, include_expected);
+    let mut function_table = BTreeMap::new();
     for record in &file.records {
-        program.record_table.push(program::RecordTable {
-            key: bytes(&pandasm_record_name(&record.name)),
-            value: Some(record_to_proto(record, file)),
-        });
+        insert_record_table(
+            &mut record_table,
+            bytes(&pandasm_record_name(&record.name)),
+            record_to_proto(record, file),
+        );
         for method in &record.methods {
             let function = function_to_proto(method, record, &file.strings)?;
-            program.function_table.push(program::FunctionTable {
-                key: bytes(&full_method_name(&record.name, &method.name)),
-                value: Some(function),
-            });
+            insert_function_table(
+                &mut function_table,
+                bytes(&full_method_name(&record.name, &method.name)),
+                function,
+            );
         }
     }
+    program.record_table = record_table
+        .into_iter()
+        .map(|(key, value)| program::RecordTable {
+            key,
+            value: Some(value),
+        })
+        .collect();
+    program.function_table = function_table
+        .into_iter()
+        .map(|(key, value)| program::FunctionTable {
+            key,
+            value: Some(value),
+        })
+        .collect();
 
+    let mut literal_array_table = BTreeMap::new();
     for idx in literal_indices {
         let Some(array) = file.literal_arrays.get(idx) else {
             continue;
         };
-        program
-            .literal_array_table
-            .push(program::LiteralArrayTable {
-                key: bytes(
-                    literal_keys
-                        .get(&idx)
-                        .map(String::as_str)
-                        .unwrap_or_default(),
-                ),
-                value: Some(literal_array_to_proto(
-                    array,
-                    literal_record_names
-                        .get(&idx)
-                        .map(String::as_str)
-                        .unwrap_or_default(),
-                )),
-            });
+        insert_literal_array_table(
+            &mut literal_array_table,
+            bytes(
+                literal_keys
+                    .get(&idx)
+                    .map(String::as_str)
+                    .unwrap_or_default(),
+            ),
+            literal_array_to_proto(
+                array,
+                literal_record_names
+                    .get(&idx)
+                    .map(String::as_str)
+                    .unwrap_or_default(),
+            ),
+        );
     }
+    program.literal_array_table = literal_array_table
+        .into_iter()
+        .map(|(key, value)| program::LiteralArrayTable {
+            key,
+            value: Some(value),
+        })
+        .collect();
 
     Ok(program)
 }
@@ -348,15 +390,54 @@ fn collect_module_literal_keys(program: &Program) -> io::Result<BTreeSet<String>
     Ok(keys)
 }
 
+fn include_expected_record(record: &ClassRecord, target_api_version: u32) -> bool {
+    target_api_version >= 18
+        || record
+            .methods
+            .iter()
+            .any(|method| method.expected_property_count.is_some())
+}
+
+fn record_program_strings(record: &ClassRecord, file: &AbcFile) -> Vec<Vec<u8>> {
+    sorted_program_strings(
+        record
+            .string_indices
+            .iter()
+            .filter_map(|idx| file.strings.get(*idx)),
+    )
+}
+
+fn sorted_program_strings<'a>(strings: impl IntoIterator<Item = &'a str>) -> Vec<Vec<u8>> {
+    strings
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(bytes)
+        .collect()
+}
+
+fn insert_record_table(table: &mut BTreeMap<Vec<u8>, Record>, key: Vec<u8>, value: Record) {
+    table.entry(key).or_insert(value);
+}
+
+fn insert_function_table(table: &mut BTreeMap<Vec<u8>, Function>, key: Vec<u8>, value: Function) {
+    table.entry(key).or_insert(value);
+}
+
+fn insert_literal_array_table(
+    table: &mut BTreeMap<Vec<u8>, crate::proto_panda::LiteralArray>,
+    key: Vec<u8>,
+    value: crate::proto_panda::LiteralArray,
+) {
+    table.entry(key).or_insert(value);
+}
+
 fn push_annotation_record_tables(
-    record_table: &mut Vec<program::RecordTable>,
+    record_table: &mut BTreeMap<Vec<u8>, Record>,
     has_expected_property_count: bool,
 ) {
     for name in annotation_record_names(has_expected_property_count) {
-        record_table.push(program::RecordTable {
-            key: bytes(name),
-            value: Some(annotation_record_to_proto(name)),
-        });
+        insert_record_table(record_table, bytes(name), annotation_record_to_proto(name));
     }
 }
 
@@ -2640,7 +2721,7 @@ mod tests {
         }
         file.add_record(record);
 
-        let program = program_for_record(&file, 0).unwrap().unwrap();
+        let program = program_for_record(&file, 0, 12).unwrap().unwrap();
         let labels = program
             .function_table
             .iter()
@@ -2689,13 +2770,21 @@ mod tests {
         .unwrap();
         file.add_record(record);
 
-        let program = program_for_record(&file, 0).unwrap().unwrap();
+        let program = program_for_record(&file, 0, 12).unwrap().unwrap();
         assert_eq!(program.record_table.len(), 3);
         assert_eq!(
             program.record_table[0].key,
+            b"@bundle:demo/entry/ets/pages/Index"
+        );
+        assert_eq!(
+            program.record_table[1].key,
             b"_ESConcurrentModuleRequestsAnnotation"
         );
-        assert_eq!(program.record_table[1].key, b"_ESSlotNumberAnnotation");
+        assert_eq!(program.record_table[2].key, b"_ESSlotNumberAnnotation");
+        assert!(!program
+            .record_table
+            .iter()
+            .any(|record| record.key == EXPECTED_PROPERTY_COUNT_RECORD_NAME.as_bytes()));
         let user_record = program
             .record_table
             .iter()
@@ -2761,6 +2850,130 @@ mod tests {
     }
 
     #[test]
+    fn api18_program_includes_expected_property_count_record_stub() {
+        let mut file = AbcFile::new();
+        let record = build_record_with_debug_and_package_for_target_with_mode(
+            "let x = 1; x;",
+            "@bundle:demo/entry/ets/pages/Index",
+            &mut file.strings,
+            &mut file.literal_arrays,
+            Some("entry/src/main/ets/pages/Index.ets"),
+            None,
+            false,
+            false,
+            "ets",
+            true,
+            18,
+            None,
+            false,
+            false,
+        )
+        .unwrap();
+        file.add_record(record);
+
+        let program = program_for_record(&file, 0, 18).unwrap().unwrap();
+        let record_keys = program
+            .record_table
+            .iter()
+            .map(|record| record.key.as_slice())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            record_keys,
+            vec![
+                b"@bundle:demo/entry/ets/pages/Index".as_slice(),
+                CONCURRENT_MODULE_REQUEST_RECORD_NAME.as_bytes(),
+                EXPECTED_PROPERTY_COUNT_RECORD_NAME.as_bytes(),
+                SLOT_NUMBER_RECORD_NAME.as_bytes(),
+            ]
+        );
+        let main = program
+            .function_table
+            .iter()
+            .find(|entry| entry.key == b"@bundle:demo/entry/ets/pages/Index.func_main_0")
+            .and_then(|entry| entry.value.as_ref())
+            .unwrap();
+        assert_eq!(
+            function_annotation_u32(
+                main,
+                EXPECTED_PROPERTY_COUNT_RECORD_NAME,
+                "ExpectedPropertyCount"
+            )
+            .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn program_for_file_uses_upstream_map_order_for_tables() {
+        let mut file = AbcFile::new();
+        let z_record = build_record_with_debug_and_package_for_target_with_mode(
+            "globalThis.zeta = \"z\";",
+            "z/entry",
+            &mut file.strings,
+            &mut file.literal_arrays,
+            Some("z.ts"),
+            None,
+            false,
+            false,
+            "ets",
+            true,
+            12,
+            None,
+            false,
+            false,
+        )
+        .unwrap();
+        let a_record = build_record_with_debug_and_package_for_target_with_mode(
+            "globalThis.alpha = \"a\";",
+            "a/entry",
+            &mut file.strings,
+            &mut file.literal_arrays,
+            Some("a.ts"),
+            None,
+            false,
+            false,
+            "ets",
+            true,
+            12,
+            None,
+            false,
+            false,
+        )
+        .unwrap();
+        file.add_record(z_record);
+        file.add_record(a_record);
+
+        let program = program_for_file(&file, 12).unwrap();
+        let record_keys = program
+            .record_table
+            .iter()
+            .map(|record| String::from_utf8(record.key.clone()).unwrap())
+            .collect::<Vec<_>>();
+        let mut sorted_record_keys = record_keys.clone();
+        sorted_record_keys.sort();
+        assert_eq!(record_keys, sorted_record_keys);
+
+        let function_keys = program
+            .function_table
+            .iter()
+            .map(|function| String::from_utf8(function.key.clone()).unwrap())
+            .collect::<Vec<_>>();
+        let mut sorted_function_keys = function_keys.clone();
+        sorted_function_keys.sort();
+        assert_eq!(function_keys, sorted_function_keys);
+
+        let strings = program
+            .strings
+            .iter()
+            .map(|value| String::from_utf8(value.clone()).unwrap())
+            .collect::<Vec<_>>();
+        let mut sorted_strings = strings.clone();
+        sorted_strings.sort();
+        sorted_strings.dedup();
+        assert_eq!(strings, sorted_strings);
+    }
+
+    #[test]
     fn compiled_program_uses_generation_ordered_labels() {
         let mut file = AbcFile::new();
         let record = build_record_with_debug_and_package_for_target_with_mode(
@@ -2788,7 +3001,7 @@ mod tests {
         assert!(!expected_labels.is_empty());
         file.add_record(record);
 
-        let program = program_for_record(&file, 0).unwrap().unwrap();
+        let program = program_for_record(&file, 0, 12).unwrap().unwrap();
         let main = program
             .function_table
             .iter()
@@ -2871,7 +3084,7 @@ mod tests {
         .unwrap();
         file.add_record(record);
 
-        let program = program_for_record(&file, 0).unwrap().unwrap();
+        let program = program_for_record(&file, 0, 12).unwrap().unwrap();
         let function_count = program.function_table.len();
         let literal_count = program.literal_array_table.len();
         assert!(program.function_table.iter().all(|entry| entry
@@ -2911,7 +3124,7 @@ mod tests {
         assert_eq!(restored_main.bytecode, original_main.bytecode);
         assert_eq!(restored_main.line_ops, original_main.line_ops);
         assert_eq!(restored_main.pandasm_debug, original_main.pandasm_debug);
-        assert!(program_for_record(&restored, 0).unwrap().is_some());
+        assert!(program_for_record(&restored, 0, 12).unwrap().is_some());
     }
 
     #[test]
@@ -2936,7 +3149,7 @@ mod tests {
         .unwrap();
         file.add_record(record);
 
-        let program = program_for_record(&file, 0).unwrap().unwrap();
+        let program = program_for_record(&file, 0, 12).unwrap().unwrap();
         let mut restored = AbcFile::new();
         append_program_to_file(&mut restored, program).unwrap();
 

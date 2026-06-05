@@ -542,7 +542,7 @@ impl AbcCompiler {
         output_proto: &Path,
     ) -> Result<AbcArtifactResult, AbcError> {
         let built = self.build_abc_input_file(inputs, output_proto)?;
-        let program = program_for_file(&built.file)?;
+        let program = program_for_file(&built.file, self.options.target_api_version)?;
         ProgramProtoFile::write(output_proto, program)?;
 
         Ok(AbcArtifactResult {
@@ -609,8 +609,11 @@ impl AbcCompiler {
             if let (Some(cache_file), Some(hash_code)) = (&input.cache_file, hash_code) {
                 let mut programs = Vec::with_capacity(appended.len());
                 for (record_index, program_key) in appended.iter().zip(appended_program_keys) {
-                    let Some(program) =
-                        crate::program_cache::program_for_record(&abc_file, *record_index)?
+                    let Some(program) = crate::program_cache::program_for_record(
+                        &abc_file,
+                        *record_index,
+                        self.options.target_api_version,
+                    )?
                     else {
                         return Err(AbcError::UnsupportedConstruct {
                             construct: format!(
@@ -677,7 +680,7 @@ impl AbcCompiler {
         cache_inputs: Vec<Option<AbcProgramCacheInput>>,
     ) -> Result<AbcArtifactResult, AbcError> {
         let built = self.build_abc_file(modules, output_proto, cache_inputs, false)?;
-        let program = program_for_file(&built.file)?;
+        let program = program_for_file(&built.file, self.options.target_api_version)?;
         ProgramProtoFile::write(output_proto, program)?;
 
         Ok(AbcArtifactResult {
@@ -905,8 +908,11 @@ impl AbcCompiler {
         );
 
         for pending in &pending_cache_writes {
-            let Some(program) =
-                crate::program_cache::program_for_record(&abc_file, pending.record_index)?
+            let Some(program) = crate::program_cache::program_for_record(
+                &abc_file,
+                pending.record_index,
+                self.options.target_api_version,
+            )?
             else {
                 return Err(AbcError::UnsupportedConstruct {
                     construct: format!(
