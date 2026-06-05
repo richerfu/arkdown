@@ -87,10 +87,7 @@ pub fn generate_har_declarations(
 
             // Skip files already covered by main entry.
             let rel = format!("./src/main/ets/{}", file_name);
-            if main_entry
-                .as_ref()
-                .map_or(false, |m| m.contains(file_name))
-            {
+            if main_entry.as_ref().map_or(false, |m| m.contains(file_name)) {
                 continue;
             }
             declarations.push_str(&format!("export * from '{}';\n", rel));

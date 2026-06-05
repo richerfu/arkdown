@@ -111,7 +111,10 @@ fn encode_proto_bin(hash_hex: &str, abc: &[u8]) -> Vec<u8> {
 /// Decode an ARKD binary, returning `(hash_hex, abc_bytes)` on success.
 fn decode_proto_bin(data: &[u8]) -> io::Result<(String, Vec<u8>)> {
     if data.len() < 8 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "proto_bin too short"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "proto_bin too short",
+        ));
     }
     if &data[0..4] != ARKDOWN_PROTO_BIN_MAGIC {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "bad ARKD magic"));

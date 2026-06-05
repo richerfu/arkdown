@@ -20,7 +20,9 @@ use arkdown_plugin_ets_transform::{EtsTransformPlugin, ResourceReference};
 use arkdown_profile::LoaderJson;
 use arkdown_ts2abc::{compile_to_abc, Ts2abcInput, Ts2abcOptions};
 
-use super::compile_arkts_modules::{compile_source_passthrough, rewrite_compile_module_imports_to_ohm};
+use super::compile_arkts_modules::{
+    compile_source_passthrough, rewrite_compile_module_imports_to_ohm,
+};
 use super::intermediates::{canonical_or_owned, path_string};
 use super::ResolvedImportMap;
 
@@ -106,7 +108,9 @@ pub(super) fn compile_arkdata_pass(
             .strip_prefix(&ets_root)
             .map(|r| r.to_string_lossy().into_owned())
             .unwrap_or_else(|_| source_path.to_string_lossy().into_owned());
-        let stem = rel.trim_end_matches(&format!(".{ext}")).replace(['/', '\\'], "@");
+        let stem = rel
+            .trim_end_matches(&format!(".{ext}"))
+            .replace(['/', '\\'], "@");
         let cache_path = cache_root.join(format!("{}.ts", stem));
         if let Some(parent) = cache_path.parent() {
             std::fs::create_dir_all(parent).ok();
@@ -176,7 +180,11 @@ pub(super) fn compile_arkdata_pass(
         target_api_version: config.sdk_config.compile_api_version,
         target_api_sub_version: config.product.compatible_sdk_version_stage.clone(),
         debug_info: matches!(config.build_mode, BuildMode::Debug),
-        opt_level: if matches!(config.build_mode, BuildMode::Release) { 2 } else { 0 },
+        opt_level: if matches!(config.build_mode, BuildMode::Release) {
+            2
+        } else {
+            0
+        },
         merge_abc: true,
         module: true,
         commonjs: false,

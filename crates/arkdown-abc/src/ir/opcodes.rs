@@ -347,7 +347,6 @@ pub enum Insn {
     //
     // Reference: `pandagen.cpp` `LoadPrivateProperty` / `StorePrivateProperty` /
     // `DefineClassPrivateField` / `TestIn`.
-
     /// `0xD8` `op_imm1_8_imm2_16_imm3_16` — load private field `(level, slot)`
     /// from the object in the accumulator.
     ///

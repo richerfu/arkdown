@@ -15,13 +15,19 @@
 //! ```
 
 pub mod bytecode_har;
+pub mod form_profile;
 pub mod har_abilities;
 pub mod loader_json;
 pub(crate) mod module_json_writer;
+pub mod process_distro_filter;
+pub mod process_permission_reason;
+pub mod process_privacy_profile;
 pub mod process_profile;
 pub mod process_share_config;
+pub mod process_shortcut_profile;
 pub mod process_startup_config;
 pub mod router_map;
+pub mod validate_permissions;
 
 pub use arkdown_core::PkgBriefInfo;
 pub use bytecode_har::{
@@ -29,18 +35,39 @@ pub use bytecode_har::{
     collect_dynamic_import_lib_info, scan_bytecode_har_deps, ByteCodeHarScanEntry,
     DynamicImportLibEntry, HostModuleInfo,
 };
+pub use form_profile::{
+    collect_form_profiles, collect_form_sources, collect_module_form_sources, FormProfileEntry,
+    FormProfileInput, FormSourceEntry, ModuleFormProfileInput,
+};
 pub use har_abilities::{collect_har_abilities, HarAbility};
 pub use loader_json::{ByteCodeHarEntry, LoaderJson};
+pub use process_distro_filter::{
+    process_distro_filter_profile, DistroFilterProfileInput, DistroFilterProfileOutput,
+};
+pub use process_permission_reason::{
+    merge_dependency_permission_reason_resources, process_permission_reason_resources,
+    DependencyPermissionReasonResourceInput, PermissionReasonResourceInput,
+};
+pub use process_privacy_profile::{
+    privacy_profile_is_enabled, process_module_privacy_profile, process_project_privacy_profile,
+    PrivacyProfileInput, PrivacyProfileOutput, ProjectPrivacyProfileInput,
+    ProjectPrivacyProfileOutput,
+};
 pub use process_profile::{
     ark_virtual_machine_from_version, process_profile, process_profile_with_ark_vm_version,
 };
 pub use process_share_config::{
     merge_share_config, write_share_config, ShareConfigInput, ShareConfigOutput,
 };
+pub use process_shortcut_profile::{process_shortcut_profiles, ShortcutProfileInput};
 pub use process_startup_config::{
     merge_startup_config, write_startup_config, StartupConfigInput, StartupConfigOutput,
 };
 pub use router_map::{collect_router_entries, RouterMapEntry};
+pub use validate_permissions::{
+    collect_sdk_permission_data, collect_sdk_permission_names, validate_request_permissions,
+    RequestPermissionValidationInput, SdkPermissionData,
+};
 
 use rustc_hash::FxHashMap;
 use std::path::Path;
@@ -95,7 +122,7 @@ impl ProfileProcessor {
                 CompileMode::EsModule,
             )
         };
-        let loader = LoaderJson::generate(&self.config, module_cfg, &manifest);
+        let loader = LoaderJson::try_generate(&self.config, module_cfg, &manifest)?;
         Ok((manifest, loader))
     }
 
@@ -171,10 +198,12 @@ mod tests {
                     ark_options: None,
                     res_options: None,
                     source_option: None,
+                    preload_system_so: false,
                     preload_so: vec![],
-                remove_permissions: vec![],
-                aot_compile_mode: None,
-                ap_path: None,
+                    remove_permissions: vec![],
+                    aot_compile_mode: None,
+                    host_pgo: None,
+                    ap_path: None,
                 },
             },
             modules: vec![],
@@ -214,7 +243,7 @@ mod tests {
                 src_entry: None,
                 metadata: vec![],
                 app_startup: None,
-                cross_app_shared_config: vec![],
+                cross_app_shared_config: Default::default(),
                 ..Default::default()
             },
         }
@@ -387,7 +416,7 @@ fi
                 src_entry: None,
                 metadata: vec![],
                 app_startup: None,
-                cross_app_shared_config: vec![],
+                cross_app_shared_config: Default::default(),
                 ..Default::default()
             },
         };

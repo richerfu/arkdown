@@ -71,7 +71,9 @@ pub fn process_profile_with_ark_vm_version(
         // Populate HSP dependencies from module.json5#module.dependencies.
         // Hvigor's ProcessProfile.addModuleDependencies() collects HSP dependency
         // metadata; we use the raw field from module.json5 for each dep entry.
-        dependencies: module_json5.module.dependencies
+        dependencies: module_json5
+            .module
+            .dependencies
             .iter()
             .filter_map(|dep| {
                 let bundle = dep.get("bundleName").and_then(|v| v.as_str())?;
@@ -129,7 +131,7 @@ mod tests {
                 src_entry: None,
                 metadata: vec![],
                 app_startup: None,
-                cross_app_shared_config: vec![],
+                cross_app_shared_config: Default::default(),
                 ..Default::default()
             },
         }
@@ -186,6 +188,26 @@ mod tests {
             let manifest = process_profile(&mj, 10, "com.example.app", CompileMode::EsModule);
             assert_eq!(manifest.module_type, expected, "type_ = {type_str}");
         }
+    }
+
+    #[test]
+    fn test_process_profile_maps_hsp_dependencies() {
+        let mut mj = make_module_json5("entry", "entry");
+        mj.module.dependencies = vec![
+            serde_json::json!({
+                "bundleName": "com.example.shared",
+                "moduleName": "shared_hsp"
+            }),
+            serde_json::json!({
+                "bundleName": "com.example.incomplete"
+            }),
+        ];
+
+        let manifest = process_profile(&mj, 12, "com.example.app", CompileMode::EsModule);
+
+        assert_eq!(manifest.dependencies.len(), 1);
+        assert_eq!(manifest.dependencies[0].bundle_name, "com.example.shared");
+        assert_eq!(manifest.dependencies[0].module_name, "shared_hsp");
     }
 
     #[test]

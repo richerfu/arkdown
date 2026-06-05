@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 use crate::error::ConfigError;
 
@@ -154,6 +154,10 @@ pub struct RawApp {
     pub signing_configs: Vec<RawSigningConfig>,
     #[serde(default)]
     pub build_mode_set: Vec<RawBuildMode>,
+    /// Real OHOS projects configure `multiProjects` under build-profile `app`.
+    /// Hvigor ignores the same field when it is written in AppScope/app.json5.
+    #[serde(default)]
+    pub multi_projects: bool,
 }
 
 /// Top-level signing config entry (under `app.signingConfigs` in real OHOS projects).
@@ -234,6 +238,9 @@ pub struct RawBuildOption {
     pub ark_options: Option<RawArkOptions>,
     #[serde(default)]
     pub source_option: Option<RawSourceOption>,
+    /// Whether `buildOption.preloadSystemSo` enables system SO preload handling.
+    #[serde(default)]
+    pub preload_system_so: bool,
     /// SO file paths listed under `buildOption.preloadSo` in `build-profile.json5`.
     #[serde(default)]
     pub preload_so: Vec<std::path::PathBuf>,
@@ -242,9 +249,14 @@ pub struct RawBuildOption {
     pub res_options: Option<RawResOptions>,
     /// Permissions to remove from HAR/HSP dependency `requestPermissions` lists.
     /// Matches hvigor's `MergeProfile.getRemovePermissionSet()` behavior.
-    #[serde(rename = "removePermissions", default)]
+    #[serde(
+        rename = "removePermissions",
+        default,
+        deserialize_with = "deserialize_remove_permissions"
+    )]
     pub remove_permissions: Vec<String>,
-    /// AOT compile mode: "type" | "method" | "speed". Controls anBuildMode in loader.json.
+    /// AOT compile mode: `""` | `"type"` | `"partial"`. API 10+ ignores
+    /// this field and derives AOT mode from `arkOptions.hostPGO`.
     #[serde(rename = "aotCompileMode", default)]
     pub aot_compile_mode: Option<String>,
     /// Path to AOT profile data (`.ap` file) for PGO-based AOT compilation.
@@ -263,7 +275,28 @@ pub struct RawResOptions {
     pub directories: Vec<std::path::PathBuf>,
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
+
+fn deserialize_remove_permissions<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let values = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(values
+        .into_iter()
+        .filter_map(|value| match value {
+            serde_json::Value::String(name) => (!name.is_empty()).then_some(name),
+            serde_json::Value::Object(object) => object
+                .get("name")
+                .and_then(|value| value.as_str())
+                .filter(|name| !name.is_empty())
+                .map(str::to_string),
+            _ => None,
+        })
+        .collect())
+}
 
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -290,6 +323,12 @@ pub struct RawArkOptions {
     pub runtime_only: Option<RawRuntimeOnly>,
     #[serde(default)]
     pub support_chunks: Option<bool>,
+    #[serde(rename = "aotCompileMode", default)]
+    pub aot_compile_mode: Option<String>,
+    #[serde(rename = "apPath", default)]
+    pub ap_path: Option<std::path::PathBuf>,
+    #[serde(rename = "hostPGO", default)]
+    pub host_pgo: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -330,11 +369,49 @@ pub struct RawModule {
 #[serde(rename_all = "camelCase")]
 pub struct RawTarget {
     pub name: String,
+    /// Products this target applies to.  Empty means the target applies only to
+    /// the product named `"default"` (hvigor's default-product fallback).
     #[serde(default)]
     pub apply_to_products: Vec<String>,
+    #[serde(default)]
+    pub config: Option<RawTargetConfig>,
+    /// Target-specific resource directories, relative to the module root.
+    #[serde(default)]
+    pub resource: Option<RawTargetResource>,
     /// Source-set overlay: abilities with per-target icon/label/launchType overrides.
     #[serde(default)]
     pub source: Option<RawTargetSource>,
+    /// Optional build-mode filter.  When present this target is only selected
+    /// for builds whose mode appears in this list.  Empty list means the target
+    /// is active for all build modes (hvigor's default).
+    ///
+    /// Example `build-profile.json5` fragment:
+    /// ```json5
+    /// targets: [{
+    ///   name: "release-target",
+    ///   applyToProducts: ["default"],
+    ///   buildModeSet: [{ name: "release" }],
+    ///   resource: { directories: ["src/release/resources"] }
+    /// }]
+    /// ```
+    #[serde(default)]
+    pub build_mode_set: Vec<RawBuildMode>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RawTargetResource {
+    #[serde(default)]
+    pub directories: Vec<PathBuf>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RawTargetConfig {
+    #[serde(default)]
+    pub distro_filter: Option<serde_json::Value>,
+    #[serde(default)]
+    pub distribution_filter: Option<serde_json::Value>,
 }
 
 /// Source overlay for a target, allowing per-target ability configuration.
@@ -445,6 +522,40 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_target_resource_directories() {
+        let json = r#"{
+            app: {
+                products: [{ name: "default", bundleName: "com.test", compatibleSdkVersion: "5.0.0(12)", runtimeOS: "HarmonyOS" }],
+            },
+            modules: [{
+                name: "entry",
+                srcPath: "./entry",
+                targets: [{
+                    name: "phone",
+                    applyToProducts: ["default"],
+                    resource: {
+                        directories: ["src/phone/resources", "custom/resources"]
+                    }
+                }]
+            }]
+        }"#;
+        let profile =
+            RawBuildProfile::parse(json, std::path::Path::new("build-profile.json5")).unwrap();
+        let directories = &profile.modules[0].targets[0]
+            .resource
+            .as_ref()
+            .expect("target resource")
+            .directories;
+        assert_eq!(
+            directories,
+            &vec![
+                PathBuf::from("src/phone/resources"),
+                PathBuf::from("custom/resources")
+            ]
+        );
+    }
+
+    #[test]
     fn test_parse_build_profile_bundle_name_access() {
         let json = r#"{
             app: {
@@ -460,6 +571,119 @@ mod tests {
         let profile =
             RawBuildProfile::parse(json, std::path::Path::new("build-profile.json5")).unwrap();
         assert_eq!(profile.app.products[0].bundle_name, "com.example.myapp");
+    }
+
+    #[test]
+    fn test_parse_build_profile_app_multi_projects() {
+        let json = r#"{
+            app: {
+                multiProjects: true,
+                products: [{
+                    name: "default",
+                    bundleName: "com.example.app",
+                    compatibleSdkVersion: "5.0.0(12)",
+                    runtimeOS: "HarmonyOS",
+                }],
+            },
+            modules: [{ name: "entry", srcPath: "./entry" }]
+        }"#;
+        let profile =
+            RawBuildProfile::parse(json, std::path::Path::new("build-profile.json5")).unwrap();
+        assert!(profile.app.multi_projects);
+    }
+
+    #[test]
+    fn test_parse_remove_permissions_accepts_hvigor_named_objects() {
+        let json = r#"{
+            app: {
+                products: [{
+                    name: "default",
+                    bundleName: "com.example.app",
+                    compatibleSdkVersion: "5.0.0(12)",
+                    runtimeOS: "HarmonyOS",
+                    buildOption: {
+                        removePermissions: [
+                            { name: "ohos.permission.CAMERA" },
+                            { name: "ohos.permission.MICROPHONE" },
+                            "ohos.permission.LOCATION"
+                        ]
+                    }
+                }],
+            },
+            modules: [{ name: "entry", srcPath: "./entry" }]
+        }"#;
+        let profile =
+            RawBuildProfile::parse(json, std::path::Path::new("build-profile.json5")).unwrap();
+        let build_option = profile.app.products[0].build_option.as_ref().unwrap();
+        assert_eq!(
+            build_option.remove_permissions,
+            vec![
+                "ohos.permission.CAMERA",
+                "ohos.permission.MICROPHONE",
+                "ohos.permission.LOCATION"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_preload_system_so() {
+        let json = r#"{
+            app: {
+                products: [{
+                    name: "default",
+                    bundleName: "com.example.app",
+                    compatibleSdkVersion: "5.0.0(12)",
+                    runtimeOS: "HarmonyOS",
+                    buildOption: {
+                        preloadSystemSo: true
+                    }
+                }],
+            },
+            modules: [{ name: "entry", srcPath: "./entry" }]
+        }"#;
+        let profile =
+            RawBuildProfile::parse(json, std::path::Path::new("build-profile.json5")).unwrap();
+        let build_option = profile.app.products[0].build_option.as_ref().unwrap();
+        assert!(build_option.preload_system_so);
+    }
+
+    #[test]
+    fn test_parse_aot_fields_under_ark_options() {
+        let json = r#"{
+            app: {
+                products: [{
+                    name: "default",
+                    bundleName: "com.example.app",
+                    compatibleSdkVersion: "5.0.0(12)",
+                    runtimeOS: "HarmonyOS",
+                    buildOption: {
+                        aotCompileMode: "type",
+                        apPath: "./top.ap",
+                        arkOptions: {
+                            aotCompileMode: "partial",
+                            apPath: "./modules.ap",
+                            hostPGO: true
+                        }
+                    }
+                }],
+            },
+            modules: [{ name: "entry", srcPath: "./entry" }]
+        }"#;
+        let profile =
+            RawBuildProfile::parse(json, std::path::Path::new("build-profile.json5")).unwrap();
+        let build_option = profile.app.products[0].build_option.as_ref().unwrap();
+        let ark_options = build_option.ark_options.as_ref().unwrap();
+        assert_eq!(build_option.aot_compile_mode.as_deref(), Some("type"));
+        assert_eq!(
+            build_option.ap_path.as_deref(),
+            Some(std::path::Path::new("./top.ap"))
+        );
+        assert_eq!(ark_options.aot_compile_mode.as_deref(), Some("partial"));
+        assert_eq!(
+            ark_options.ap_path.as_deref(),
+            Some(std::path::Path::new("./modules.ap"))
+        );
+        assert_eq!(ark_options.host_pgo, Some(true));
     }
 
     #[test]
@@ -744,5 +968,67 @@ mod tests {
         assert!(!RawAppJson5::is_valid_hvigor_bundle_name(
             "com.example.app_"
         ));
+    }
+
+    /// Verify that `buildModeSet` on a target is parsed correctly.
+    ///
+    /// hvigor supports per-target mode filtering:
+    /// ```json5
+    /// targets: [{
+    ///   name: "release-target",
+    ///   applyToProducts: ["default"],
+    ///   buildModeSet: [{ name: "release" }],
+    ///   resource: { directories: ["src/release/resources"] }
+    /// }]
+    /// ```
+    #[test]
+    fn test_target_build_mode_set_parsed() {
+        let json = r#"{
+            app: { products: [{ name: "default" }] },
+            modules: [{
+              name: "entry",
+              srcPath: "./entry",
+              targets: [
+                {
+                  name: "debug-target",
+                  applyToProducts: ["default"],
+                  buildModeSet: [{ name: "debug" }],
+                  resource: { directories: ["src/debug/resources"] }
+                },
+                {
+                  name: "release-target",
+                  applyToProducts: ["default"],
+                  buildModeSet: [{ name: "release" }],
+                  resource: { directories: ["src/release/resources"] }
+                },
+                {
+                  name: "all-modes-target",
+                  applyToProducts: ["default"]
+                }
+              ]
+            }]
+        }"#;
+
+        let profile =
+            RawBuildProfile::parse(json, std::path::Path::new("build-profile.json5")).unwrap();
+        let module = &profile.modules[0];
+        assert_eq!(module.targets.len(), 3);
+
+        let debug_target = &module.targets[0];
+        assert_eq!(debug_target.name, "debug-target");
+        assert_eq!(debug_target.build_mode_set.len(), 1);
+        assert_eq!(debug_target.build_mode_set[0].name, "debug");
+
+        let release_target = &module.targets[1];
+        assert_eq!(release_target.name, "release-target");
+        assert_eq!(release_target.build_mode_set.len(), 1);
+        assert_eq!(release_target.build_mode_set[0].name, "release");
+
+        let all_modes_target = &module.targets[2];
+        assert_eq!(all_modes_target.name, "all-modes-target");
+        assert!(
+            all_modes_target.build_mode_set.is_empty(),
+            "target without buildModeSet should match all modes"
+        );
     }
 }

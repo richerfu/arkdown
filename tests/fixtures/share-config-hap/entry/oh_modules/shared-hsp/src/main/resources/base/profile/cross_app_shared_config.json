@@ -1,0 +1,8 @@
+{
+  "crossAppSharedConfig": [
+    {
+      "uri": "arkdown://shared/ProfileCard",
+      "srcEntry": "./ets/components/ProfileCard.ets"
+    }
+  ]
+}

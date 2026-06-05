@@ -6,11 +6,11 @@ use oxc_ast::ast::{
     Argument, ArrayAssignmentTarget, ArrayPattern, AssignmentOperator, AssignmentTarget,
     AssignmentTargetMaybeDefault, AssignmentTargetProperty, BindingPattern, ClassElement,
     Declaration, ExportDefaultDeclarationKind, Expression, ForInStatement, ForOfStatement,
-    ForStatementLeft, FormalParameter, Function, FunctionBody, ImportOrExportKind,
-    LogicalOperator, MethodDefinitionKind, ObjectAssignmentTarget, ObjectPattern, Program,
-    PropertyKey, SimpleAssignmentTarget, Statement, TSEnumDeclaration, TSEnumMemberName,
-    TSImportEqualsDeclaration, TSModuleDeclaration, TSModuleReference, TSQualifiedName,
-    TSTypeName, UnaryOperator, UpdateExpression, YieldExpression,
+    ForStatementLeft, FormalParameter, Function, FunctionBody, ImportOrExportKind, LogicalOperator,
+    MethodDefinitionKind, ObjectAssignmentTarget, ObjectPattern, Program, PropertyKey,
+    SimpleAssignmentTarget, Statement, TSEnumDeclaration, TSEnumMemberName,
+    TSImportEqualsDeclaration, TSModuleDeclaration, TSModuleReference, TSQualifiedName, TSTypeName,
+    UnaryOperator, UpdateExpression, YieldExpression,
 };
 use oxc_parser::{Parser, ParserReturn};
 use oxc_semantic::{Reference, Scoping, SemanticBuilder};
@@ -29,9 +29,10 @@ use crate::ir::ast_analysis::{
 };
 use crate::ir::class_layout::{
     class_buffer_literal_array, class_method_inferred_name, class_method_num_args,
-    class_method_record_name, class_private_methods_literal_array, computed_class_method_record_name,
-    computed_instance_class_field_key_name, constructor_required_param_count,
-    is_class_buffer_method, method_key_name, static_initializer_record_name,
+    class_method_record_name, class_private_methods_literal_array,
+    computed_class_method_record_name, computed_instance_class_field_key_name,
+    constructor_required_param_count, is_class_buffer_method, method_key_name,
+    static_initializer_record_name,
 };
 use crate::ir::debug_lnp::{argument_span_start, col_at, line_at, LineTracker, SourceMapper};
 use crate::ir::function_lexical::collect_function_lexical_bindings;
@@ -857,28 +858,32 @@ fn compile_class_elements(
     let (private_field_slots, _private_field_count) = collect_class_private_slots(elements);
     let private_instance_fields: Vec<ClassPrivateFieldInit<'_>> = elements
         .iter()
-        .filter_map(|e| {
-            match e {
-                ClassElement::PropertyDefinition(prop) => {
-                    if prop.r#static {
-                        return None;
-                    }
-                    let PropertyKey::PrivateIdentifier(id) = &prop.key else {
-                        return None;
-                    };
-                    let slot = *private_field_slots.get(id.name.as_str())?;
-                    Some(ClassPrivateFieldInit { slot, value: prop.value.as_ref() })
+        .filter_map(|e| match e {
+            ClassElement::PropertyDefinition(prop) => {
+                if prop.r#static {
+                    return None;
                 }
-                ClassElement::AccessorProperty(accessor) => {
-                    if accessor.r#static {
-                        return None;
-                    }
-                    let backing_name = accessor_backing_field_name(accessor);
-                    let slot = *private_field_slots.get(&backing_name)?;
-                    Some(ClassPrivateFieldInit { slot, value: accessor.value.as_ref() })
-                }
-                _ => None,
+                let PropertyKey::PrivateIdentifier(id) = &prop.key else {
+                    return None;
+                };
+                let slot = *private_field_slots.get(id.name.as_str())?;
+                Some(ClassPrivateFieldInit {
+                    slot,
+                    value: prop.value.as_ref(),
+                })
             }
+            ClassElement::AccessorProperty(accessor) => {
+                if accessor.r#static {
+                    return None;
+                }
+                let backing_name = accessor_backing_field_name(accessor);
+                let slot = *private_field_slots.get(&backing_name)?;
+                Some(ClassPrivateFieldInit {
+                    slot,
+                    value: accessor.value.as_ref(),
+                })
+            }
+            _ => None,
         })
         .collect();
 
@@ -891,7 +896,8 @@ fn compile_class_elements(
     });
     if !has_constructor {
         // Synthesize a default constructor that still runs field initializers.
-        let is_default_derived_constructor = has_super_class && instance_fields.is_empty() && private_instance_fields.is_empty();
+        let is_default_derived_constructor =
+            has_super_class && instance_fields.is_empty() && private_instance_fields.is_empty();
         let compiled = if is_default_derived_constructor {
             let (bytecode, catches) = compile_default_derived_constructor();
             let line_ops = if source.is_some() {
@@ -1043,7 +1049,12 @@ fn compile_class_elements(
                 .unwrap_or_else(BodyCompileResult::empty)
             } else if let Some(src) = source {
                 compile_body_stmts_tracked_with_private(
-                    method.value.body.as_deref().map(|fb| fb.statements.as_slice()).unwrap_or(&[]),
+                    method
+                        .value
+                        .body
+                        .as_deref()
+                        .map(|fb| fb.statements.as_slice())
+                        .unwrap_or(&[]),
                     strings,
                     literal_arrays,
                     lowering,
@@ -1058,7 +1069,12 @@ fn compile_class_elements(
             } else {
                 // No source tracking but private slots still need to be set.
                 compile_body_stmts_with_private(
-                    method.value.body.as_deref().map(|fb| fb.statements.as_slice()).unwrap_or(&[]),
+                    method
+                        .value
+                        .body
+                        .as_deref()
+                        .map(|fb| fb.statements.as_slice())
+                        .unwrap_or(&[]),
                     strings,
                     literal_arrays,
                     lowering,
@@ -1096,7 +1112,6 @@ fn compile_class_elements(
                 definefunc_order: None,
             });
         }
-
     }
 
     // Compile getter/setter MethodRecords for each auto-accessor property.
@@ -1386,6 +1401,11 @@ fn compile_arrow_body_with_line_ops<'src>(
 /// When `is_async` is `true`, follows es2panda's `AsyncFunctionBuilder`:
 /// `asyncfunctionenter` creates the async function object, return sites resolve
 /// it, and the protected body has a catch-all cleanup that rejects it.
+///
+/// Note: the live code paths use `compile_function_body_ext_tracked_with_private`
+/// (which handles private class fields).  These simpler variants are kept as
+/// fallback entry points for callers that do not need a private-field slot map.
+#[allow(dead_code)]
 fn compile_function_body_ext(
     body: Option<&FunctionBody<'_>>,
     rest_param: Option<(String, u8)>,
@@ -1411,6 +1431,7 @@ fn compile_function_body_ext(
     .unwrap_or_else(BodyCompileResult::empty)
 }
 
+#[allow(dead_code)]
 fn compile_function_body_ext_tracked(
     body: Option<&FunctionBody<'_>>,
     rest_param: Option<(String, u8)>,
@@ -1673,7 +1694,9 @@ fn compile_constructor_with_fields<'src>(
         } else {
             cg.push(Insn::LdUndefined);
         }
-        cg.push(Insn::CallRuntimeDefinePrivateProperty(0, 0, pf.slot, this_reg));
+        cg.push(Insn::CallRuntimeDefinePrivateProperty(
+            0, 0, pf.slot, this_reg,
+        ));
     }
     for stmt in stmts {
         cg.emit_stmt(stmt);
@@ -1737,7 +1760,9 @@ fn compile_constructor_with_fields_tracked<'src>(
         } else {
             cg.push(Insn::LdUndefined);
         }
-        cg.push(Insn::CallRuntimeDefinePrivateProperty(0, 0, pf.slot, this_reg));
+        cg.push(Insn::CallRuntimeDefinePrivateProperty(
+            0, 0, pf.slot, this_reg,
+        ));
     }
     for stmt in stmts {
         cg.emit_stmt(stmt);
@@ -1917,17 +1942,24 @@ fn stmts_have_top_level_await(stmts: &[Statement<'_>]) -> bool {
 fn stmt_has_await(stmt: &Statement<'_>) -> bool {
     match stmt {
         Statement::ExpressionStatement(es) => expr_has_await(&es.expression),
-        Statement::VariableDeclaration(decl) => decl.declarations.iter().any(|d| {
-            d.init.as_ref().map(|e| expr_has_await(e)).unwrap_or(false)
-        }),
-        Statement::ReturnStatement(ret) => {
-            ret.argument.as_ref().map(|e| expr_has_await(e)).unwrap_or(false)
-        }
+        Statement::VariableDeclaration(decl) => decl
+            .declarations
+            .iter()
+            .any(|d| d.init.as_ref().map(|e| expr_has_await(e)).unwrap_or(false)),
+        Statement::ReturnStatement(ret) => ret
+            .argument
+            .as_ref()
+            .map(|e| expr_has_await(e))
+            .unwrap_or(false),
         Statement::BlockStatement(block) => stmts_have_top_level_await(&block.body),
         Statement::IfStatement(if_) => {
             expr_has_await(&if_.test)
                 || stmt_has_await(&if_.consequent)
-                || if_.alternate.as_ref().map(|a| stmt_has_await(a)).unwrap_or(false)
+                || if_
+                    .alternate
+                    .as_ref()
+                    .map(|a| stmt_has_await(a))
+                    .unwrap_or(false)
         }
         _ => false,
     }
@@ -2169,9 +2201,7 @@ fn accessor_backing_field_name(accessor: &oxc_ast::ast::AccessorProperty<'_>) ->
     format!("__accessor_{key_part}_{}", accessor.span.start)
 }
 
-fn collect_class_private_slots(
-    elements: &[ClassElement<'_>],
-) -> (FxHashMap<String, u16>, u16) {
+fn collect_class_private_slots(elements: &[ClassElement<'_>]) -> (FxHashMap<String, u16>, u16) {
     let mut slots: FxHashMap<String, u16> = FxHashMap::default();
     let mut slot = 0u16;
     // Private fields first.
@@ -2179,11 +2209,13 @@ fn collect_class_private_slots(
         match element {
             ClassElement::PropertyDefinition(prop) => {
                 if let PropertyKey::PrivateIdentifier(id) = &prop.key {
-                    slots.entry(id.name.as_str().to_string()).or_insert_with(|| {
-                        let s = slot;
-                        slot += 1;
-                        s
-                    });
+                    slots
+                        .entry(id.name.as_str().to_string())
+                        .or_insert_with(|| {
+                            let s = slot;
+                            slot += 1;
+                            s
+                        });
                 }
             }
             ClassElement::AccessorProperty(accessor) => {
@@ -2205,11 +2237,13 @@ fn collect_class_private_slots(
             continue;
         };
         if let PropertyKey::PrivateIdentifier(id) = &method.key {
-            slots.entry(id.name.as_str().to_string()).or_insert_with(|| {
-                let s = slot;
-                slot += 1;
-                s
-            });
+            slots
+                .entry(id.name.as_str().to_string())
+                .or_insert_with(|| {
+                    let s = slot;
+                    slot += 1;
+                    s
+                });
         }
     }
     (slots, field_count)
@@ -2976,7 +3010,8 @@ impl UnsupportedScanner<'_> {
                     // Allow private identifier keys (#name) and computed keys;
                     // only reject other non-string keys.
                     let is_private = matches!(&property.key, PropertyKey::PrivateIdentifier(_));
-                    if !is_private && !property.computed && method_key_name(&property.key).is_none() {
+                    if !is_private && !property.computed && method_key_name(&property.key).is_none()
+                    {
                         return Err(self.unsupported("UnsupportedClassFieldKey"));
                     }
                     if let Some(value) = &property.value {
@@ -3455,10 +3490,13 @@ impl<'a> CodeGen<'a> {
                 self.push(Insn::Sta(param_reg));
             } else if let Some(value) = negative_integer_literal(initializer) {
                 let init_start = initializer.span().start;
-                let literal_start = initializer
-                    .span()
-                    .source_text(self.source.unwrap_or_default())
-                    .strip_prefix('-')
+                let literal_start = self
+                    .source
+                    .and_then(|source| {
+                        let span = initializer.span();
+                        (span.end as usize <= source.len()).then(|| span.source_text(source))
+                    })
+                    .and_then(|text| text.strip_prefix('-'))
                     .map(|_| init_start.saturating_add(1))
                     .unwrap_or(init_start);
                 self.set_debug_pos(literal_start);
@@ -4936,11 +4974,7 @@ impl<'a> CodeGen<'a> {
 
     /// Assign `rhs_reg` (result of evaluating the RHS) into assignment target
     /// `target`.  Mirrors upstream `es2abc` destructuring assignment lowering.
-    fn emit_destructure_assignment(
-        &mut self,
-        target: &AssignmentTarget<'_>,
-        rhs_reg: u8,
-    ) {
+    fn emit_destructure_assignment(&mut self, target: &AssignmentTarget<'_>, rhs_reg: u8) {
         match target {
             AssignmentTarget::AssignmentTargetIdentifier(id) => {
                 self.push(Insn::Lda(rhs_reg));
@@ -5033,19 +5067,23 @@ impl<'a> CodeGen<'a> {
             Expression::ParenthesizedExpression(p) => {
                 self.emit_destructure_from_expr(&p.expression, rhs_reg);
             }
-            Expression::TSAsExpression(e) => self.emit_destructure_from_expr(&e.expression, rhs_reg),
-            Expression::TSSatisfiesExpression(e) => self.emit_destructure_from_expr(&e.expression, rhs_reg),
-            Expression::TSNonNullExpression(e) => self.emit_destructure_from_expr(&e.expression, rhs_reg),
-            Expression::TSTypeAssertion(e) => self.emit_destructure_from_expr(&e.expression, rhs_reg),
+            Expression::TSAsExpression(e) => {
+                self.emit_destructure_from_expr(&e.expression, rhs_reg)
+            }
+            Expression::TSSatisfiesExpression(e) => {
+                self.emit_destructure_from_expr(&e.expression, rhs_reg)
+            }
+            Expression::TSNonNullExpression(e) => {
+                self.emit_destructure_from_expr(&e.expression, rhs_reg)
+            }
+            Expression::TSTypeAssertion(e) => {
+                self.emit_destructure_from_expr(&e.expression, rhs_reg)
+            }
             _ => {}
         }
     }
 
-    fn emit_destructure_array_assignment(
-        &mut self,
-        arr: &ArrayAssignmentTarget<'_>,
-        rhs_reg: u8,
-    ) {
+    fn emit_destructure_array_assignment(&mut self, arr: &ArrayAssignmentTarget<'_>, rhs_reg: u8) {
         let state = IteratorState {
             closed_reg: self.alloc_reg(),
             method_reg: self.alloc_reg(),
@@ -7702,7 +7740,9 @@ impl<'a> CodeGen<'a> {
                 PropertyKey::StringLiteral(s) => s.value.as_str().to_string(),
                 _ => continue,
             };
-            let target_reg = if accessor.r#static { class_reg } else {
+            let target_reg = if accessor.r#static {
+                class_reg
+            } else {
                 // prototype
                 self.push(Insn::Lda(class_reg));
                 self.push(Insn::LdObjByName(0, prototype_id));
@@ -7742,8 +7782,12 @@ impl<'a> CodeGen<'a> {
         let (private_slots, private_field_count) = collect_class_private_slots(elements);
         if !private_slots.is_empty() {
             let priv_lit_id = self.literal_arrays.len() as u16;
-            self.literal_arrays.push(class_private_methods_literal_array(elements));
-            self.push(Insn::CallRuntimeCreatePrivateProperty(private_field_count, priv_lit_id));
+            self.literal_arrays
+                .push(class_private_methods_literal_array(elements));
+            self.push(Insn::CallRuntimeCreatePrivateProperty(
+                private_field_count,
+                priv_lit_id,
+            ));
             // Reload class_reg into acc (createprivateproperty clobbers it).
             self.push(Insn::Lda(class_reg));
         }
@@ -7995,7 +8039,8 @@ impl<'a> CodeGen<'a> {
                 // `this.#x++` — private field update.
                 let name = expr.field.name.as_str().to_string();
                 self.emit_private_field_load(&name, &expr.object);
-                let (original_reg, updated_reg) = self.emit_update_acc(update.operator, update.prefix);
+                let (original_reg, updated_reg) =
+                    self.emit_update_acc(update.operator, update.prefix);
                 let obj_reg = self.alloc_reg();
                 let slot = self.private_field_slots.get(name.as_str()).copied();
                 self.emit_expr(&expr.object);

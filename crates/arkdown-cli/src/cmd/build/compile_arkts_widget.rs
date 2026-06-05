@@ -4,20 +4,9 @@ use super::compile_arkts_modules::{
 };
 use super::compile_arkts_package_entries::PackageEntryInfos;
 use super::*;
+use arkdown_config::build_profile::parse_api_version;
+use arkdown_profile::{collect_module_form_sources, ModuleFormProfileInput};
 use rustc_hash::{FxHashMap, FxHashSet};
-
-#[derive(Debug, serde::Deserialize)]
-struct FormConfigFile {
-    #[serde(default)]
-    forms: Vec<FormConfigEntry>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct FormConfigEntry {
-    src: Option<String>,
-    #[serde(rename = "uiSyntax")]
-    ui_syntax: Option<String>,
-}
 
 pub(super) fn compile_widget_pass(
     module: &ModuleConfig,
@@ -30,7 +19,7 @@ pub(super) fn compile_widget_pass(
         return Ok(());
     }
 
-    let widget_sources = widget_sources(module, &manifest.extension_abilities)?;
+    let widget_sources = widget_sources(config, module, manifest)?;
     if widget_sources.is_empty() {
         return Ok(());
     }
@@ -178,62 +167,31 @@ pub(super) fn compile_widget_pass(
 }
 
 fn widget_sources(
+    config: &ArkdownConfig,
     module: &ModuleConfig,
-    extension_abilities: &[ExtensionAbilityEntry],
+    manifest: &arkdown_core::HapManifest,
 ) -> Result<Vec<PathBuf>> {
     let mut sources = Vec::new();
     let mut seen = FxHashSet::default();
-    for ability in extension_abilities {
-        let extension_type = ability.extension_type.to_ascii_lowercase();
-        if extension_type != "form" && extension_type != "formextension" {
+    let module_json_path = module.src_path.join("src/main/module.json5");
+    let form_sources = collect_module_form_sources(ModuleFormProfileInput {
+        module_name: &module.name,
+        module_root: &module.src_path,
+        module_type: &module.module_type,
+        module_json_path: &module_json_path,
+        extension_abilities: &manifest.extension_abilities,
+        project_modules: &config.modules,
+        compatible_api_version: parse_api_version(&config.product.compatible_sdk_version)
+            .or(Some(config.sdk_config.compile_api_version)),
+    })?;
+    for source in form_sources {
+        if !source.is_arkts() {
             continue;
         }
-        let profile_names = form_profile_names(ability);
-        for profile_name in profile_names {
-            let profile_path = module
-                .src_path
-                .join("src/main/resources/base/profile")
-                .join(format!("{profile_name}.json"));
-            if !profile_path.exists() {
-                continue;
-            }
-            let content = fs_err::read_to_string(&profile_path)?;
-            let form_config: FormConfigFile = json5::from_str(&content)
-                .with_context(|| format!("failed to parse {}", profile_path.display()))?;
-            for form in form_config.forms {
-                if let Some(ui_syntax) = &form.ui_syntax {
-                    if ui_syntax != "arkts" {
-                        continue;
-                    }
-                }
-                let Some(src) = form.src else {
-                    continue;
-                };
-                let source_path = module
-                    .src_path
-                    .join("src/main")
-                    .join(src.trim_start_matches("./"));
-                if seen.insert(source_path.clone()) {
-                    sources.push(source_path);
-                }
-            }
+        if seen.insert(source.source_path.clone()) {
+            sources.push(source.source_path);
         }
     }
     sources.sort();
     Ok(sources)
-}
-
-fn form_profile_names(ability: &ExtensionAbilityEntry) -> Vec<String> {
-    let names: Vec<String> = ability
-        .metadata
-        .iter()
-        .filter_map(|metadata| metadata.resource.as_deref())
-        .filter_map(|resource| resource.strip_prefix("$profile:"))
-        .map(str::to_string)
-        .collect();
-    if names.is_empty() {
-        vec!["form_config".to_string()]
-    } else {
-        names
-    }
 }

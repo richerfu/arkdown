@@ -29,6 +29,10 @@ struct OhPkgMinimal {
     dynamic_dependencies: IndexMap<String, String>,
     #[serde(default)]
     metadata: Option<OhPkgMetadata>,
+    /// Root-level `byteCodeHar: true` — older hvigor format used before the
+    /// field was moved inside `metadata`.  Both forms are supported.
+    #[serde(default)]
+    byte_code_har: bool,
 }
 
 impl OhPkgMinimal {
@@ -42,11 +46,14 @@ impl OhPkgMinimal {
     }
 
     fn resolve_abc_path(&self, pkg_dir: &Path) -> Option<PathBuf> {
-        if self
-            .metadata
-            .as_ref()
-            .is_some_and(|metadata| metadata.byte_code_har)
-        {
+        // Support both root-level `byteCodeHar: true` (older hvigor format) and
+        // the newer `metadata.byteCodeHar: true` form.
+        let is_bytecode_har = self.byte_code_har
+            || self
+                .metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.byte_code_har);
+        if is_bytecode_har {
             let abc_path = pkg_dir.join("ets").join("modules.abc");
             if abc_path.exists() {
                 return Some(abc_path);
@@ -171,6 +178,36 @@ pub struct ByteCodeHarScanEntry {
     pub declaration_entry: Vec<String>,
     /// Extra importee strings from `metadata.extraImportees`.
     pub extra_importees: Vec<String>,
+    /// Main entry path from `oh-package.json5#main`, used to compute the
+    /// compiled-importee OHM URL for this package.
+    pub main_entry: Option<String>,
+}
+
+impl ByteCodeHarScanEntry {
+    /// Build the OHM URL for this ByteCode HAR package.
+    ///
+    /// Format: `@bundle:<bundleName>/<packageName>/<mainEntryStem>`
+    ///
+    /// `mainEntryStem` is the `main` field with the file extension stripped.
+    /// When `main` is absent or empty, returns `None`.
+    ///
+    /// hvigor generates this URL via `OhmUrlUtils.genOhmUrlForByteCodeHar()` and
+    /// adds it to `compiledImportees` so ArkRuntime can locate the HAR's compiled
+    /// module graph.
+    pub fn ohm_url(&self, bundle_name: &str) -> Option<String> {
+        let main = self.main_entry.as_deref().filter(|s| !s.is_empty())?;
+        // Strip file extension — "index.abc" → "index", "index" → "index".
+        let stem = std::path::Path::new(main)
+            .with_extension("")
+            .to_string_lossy()
+            .into_owned();
+        // Normalise path separators to forward slashes (Windows safety).
+        let stem = stem.replace('\\', "/");
+        Some(format!(
+            "@bundle:{}/{}/{}",
+            bundle_name, self.package_name, stem
+        ))
+    }
 }
 
 impl ByteCodeHarScanEntry {
@@ -283,6 +320,7 @@ impl ByteCodeHarScanEntry {
             .as_ref()
             .map(|metadata| metadata.extra_importees.clone())
             .unwrap_or_default();
+        let main_entry = pkg.main.clone();
 
         seen.insert(package_name.clone());
         out.push(Self {
@@ -294,6 +332,7 @@ impl ByteCodeHarScanEntry {
             insight_intent,
             declaration_entry,
             extra_importees,
+            main_entry,
         });
     }
 }
@@ -1445,6 +1484,7 @@ mod tests {
             )),
             declaration_entry: vec![],
             extra_importees: vec![],
+            main_entry: Some("index".to_string()),
         };
         let (key, loader_entry) = entry.into_loader_entry();
         assert_eq!(key, "@scope/pkg");
@@ -1506,5 +1546,145 @@ mod tests {
         let deps = vec!["@missing/pkg".to_string()];
         let results = collect_dynamic_import_lib_info("entry", &deps, tmp.path(), tmp.path());
         assert!(results.is_empty());
+    }
+
+    // ── ohm_url ─────────────────────────────────────────────────────────────
+
+    fn make_entry(pkg: &str, main: Option<&str>) -> ByteCodeHarScanEntry {
+        ByteCodeHarScanEntry {
+            package_name: pkg.to_string(),
+            package_root: PathBuf::from("/oh_modules").join(pkg),
+            abc_path: PathBuf::from("/oh_modules").join(pkg).join("ets/modules.abc"),
+            compatible_sdk_version: "12".to_string(),
+            source_maps_path: None,
+            insight_intent: None,
+            declaration_entry: vec![],
+            extra_importees: vec![],
+            main_entry: main.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn test_ohm_url_basic() {
+        let entry = make_entry("bc-har-dep", Some("index"));
+        assert_eq!(
+            entry.ohm_url("com.example.app"),
+            Some("@bundle:com.example.app/bc-har-dep/index".to_string())
+        );
+    }
+
+    #[test]
+    fn test_ohm_url_strips_extension() {
+        let entry = make_entry("my-har", Some("index.abc"));
+        assert_eq!(
+            entry.ohm_url("com.example"),
+            Some("@bundle:com.example/my-har/index".to_string())
+        );
+    }
+
+    #[test]
+    fn test_ohm_url_scoped_package() {
+        let entry = make_entry("@scope/pkg", Some("src/main/ets/index"));
+        assert_eq!(
+            entry.ohm_url("com.example"),
+            Some("@bundle:com.example/@scope/pkg/src/main/ets/index".to_string())
+        );
+    }
+
+    #[test]
+    fn test_ohm_url_no_main_returns_none() {
+        let entry = make_entry("no-main", None);
+        assert_eq!(entry.ohm_url("com.example"), None);
+    }
+
+    #[test]
+    fn test_ohm_url_empty_main_returns_none() {
+        let entry = make_entry("empty-main", Some(""));
+        assert_eq!(entry.ohm_url("com.example"), None);
+    }
+
+    // ── root-level byteCodeHar detection ─────────────────────────────────────
+
+    #[test]
+    fn test_scan_bytecode_har_detects_root_level_bytecodehar() {
+        // Fixture mirrors tests/fixtures/minimal-hap-with-bc-har/entry/oh_modules/bc-har-dep
+        let tmp = make_temp_dir();
+        let oh_modules = tmp.path().join("oh_modules");
+        let pkg_dir = oh_modules.join("bc-har-dep");
+
+        write_abc(&pkg_dir.join("ets").join("modules.abc"));
+        write_file(
+            &pkg_dir.join("oh-package.json5"),
+            r#"{
+              "name": "bc-har-dep",
+              "version": "1.0.0",
+              "main": "index",
+              "byteCodeHar": true,
+              "dependencies": {}
+            }"#,
+        );
+
+        let results = scan_bytecode_har_deps(tmp.path(), tmp.path());
+        assert_eq!(results.len(), 1, "root-level byteCodeHar must be detected");
+        assert_eq!(results[0].package_name, "bc-har-dep");
+        assert!(results[0].abc_path.ends_with("ets/modules.abc"));
+        assert_eq!(
+            results[0].main_entry.as_deref(),
+            Some("index"),
+            "main_entry must be populated from oh-package.json5#main"
+        );
+    }
+
+    #[test]
+    fn test_scan_bytecode_har_root_level_ohm_url() {
+        let tmp = make_temp_dir();
+        let oh_modules = tmp.path().join("oh_modules");
+        let pkg_dir = oh_modules.join("bc-har-dep");
+
+        write_abc(&pkg_dir.join("ets").join("modules.abc"));
+        write_file(
+            &pkg_dir.join("oh-package.json5"),
+            r#"{
+              "name": "bc-har-dep",
+              "main": "index",
+              "byteCodeHar": true
+            }"#,
+        );
+
+        let results = scan_bytecode_har_deps(tmp.path(), tmp.path());
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].ohm_url("com.example.arkdown.test"),
+            Some("@bundle:com.example.arkdown.test/bc-har-dep/index".to_string())
+        );
+    }
+
+    #[test]
+    fn test_scan_bytecode_har_metadata_and_root_level_equivalent() {
+        let tmp = make_temp_dir();
+        let oh_modules = tmp.path().join("oh_modules");
+
+        // Package A: root-level byteCodeHar
+        let pkg_a = oh_modules.join("pkg-a");
+        write_abc(&pkg_a.join("ets").join("modules.abc"));
+        write_file(
+            &pkg_a.join("oh-package.json5"),
+            r#"{ "name": "pkg-a", "byteCodeHar": true }"#,
+        );
+
+        // Package B: metadata.byteCodeHar
+        let pkg_b = oh_modules.join("pkg-b");
+        write_abc(&pkg_b.join("ets").join("modules.abc"));
+        write_file(
+            &pkg_b.join("oh-package.json5"),
+            r#"{ "name": "pkg-b", "metadata": { "byteCodeHar": true } }"#,
+        );
+
+        let results = scan_bytecode_har_deps(tmp.path(), tmp.path());
+        assert_eq!(results.len(), 2, "both forms of byteCodeHar must be detected");
+        let names: std::collections::HashSet<&str> =
+            results.iter().map(|e| e.package_name.as_str()).collect();
+        assert!(names.contains("pkg-a"));
+        assert!(names.contains("pkg-b"));
     }
 }

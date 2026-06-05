@@ -1,0 +1,9 @@
+/node_modules
+/oh_modules
+!/oh_modules
+!/oh_modules/shared-hsp
+!/oh_modules/shared-hsp/**
+/.preview
+/build
+/.cxx
+/.test

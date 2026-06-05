@@ -138,15 +138,15 @@ fn default_target_api_version_is_24() {
 /// Upstream options.cpp rejects --module and --commonjs together.
 #[test]
 fn rejects_module_and_commonjs_together() {
-    let err = Ts2abcCommand::parse(["--module", "--commonjs", "--output", "x.abc", "x.js"])
-        .unwrap_err();
+    let err =
+        Ts2abcCommand::parse(["--module", "--commonjs", "--output", "x.abc", "x.js"]).unwrap_err();
     assert!(
         matches!(err, Ts2abcError::ConflictingFlags),
         "expected ConflictingFlags, got {err:?}"
     );
     // Same if commonjs comes first.
-    let err2 = Ts2abcCommand::parse(["--commonjs", "--module", "--output", "x.abc", "x.js"])
-        .unwrap_err();
+    let err2 =
+        Ts2abcCommand::parse(["--commonjs", "--module", "--output", "x.abc", "x.js"]).unwrap_err();
     assert!(
         matches!(err2, Ts2abcError::ConflictingFlags),
         "expected ConflictingFlags, got {err2:?}"
@@ -162,11 +162,7 @@ fn filelist_expands_lines_as_inputs() {
     let b = dir.path().join("b.js");
     std::fs::write(&a, "").unwrap();
     std::fs::write(&b, "").unwrap();
-    std::fs::write(
-        &list_path,
-        format!("{}\n\n{}\n", a.display(), b.display()),
-    )
-    .unwrap();
+    std::fs::write(&list_path, format!("{}\n\n{}\n", a.display(), b.display())).unwrap();
 
     let command = Ts2abcCommand::parse([
         "--module",

@@ -134,9 +134,7 @@ impl EtsTransformPlugin {
         let Some(module) = config.modules.first() else {
             return;
         };
-        let cache_dir = module
-            .src_path
-            .join("build/default/cache/ets_transform");
+        let cache_dir = module.src_path.join("build/default/cache/ets_transform");
         let _ = std::fs::create_dir_all(&cache_dir);
         if let Ok(json) = serde_json::to_string(cache) {
             let _ = std::fs::write(cache_dir.join("transform_cache.json"), json);
@@ -417,7 +415,10 @@ impl Plugin for EtsTransformPlugin {
                         cache.insert(hash, transformed_code.clone());
                     }
                     // Async-persist to disk so future builds can reuse the result.
-                    EtsTransformPlugin::save_transform_cache(&config, &transform_cache.lock().unwrap_or_else(|p| p.into_inner()));
+                    EtsTransformPlugin::save_transform_cache(
+                        &config,
+                        &transform_cache.lock().unwrap_or_else(|p| p.into_inner()),
+                    );
                 }
             }
             result
@@ -518,10 +519,12 @@ mod tests {
                     ark_options: None,
                     res_options: None,
                     source_option: None,
+                    preload_system_so: false,
                     preload_so: vec![],
-                remove_permissions: vec![],
-                aot_compile_mode: None,
-                ap_path: None,
+                    remove_permissions: vec![],
+                    aot_compile_mode: None,
+                    host_pgo: None,
+                    ap_path: None,
                 },
             },
             modules: vec![],

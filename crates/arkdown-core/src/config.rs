@@ -135,6 +135,10 @@ pub struct BuildOption {
     pub ark_options: Option<ArkOptions>,
     pub res_options: Option<ResOptions>,
     pub source_option: Option<SourceOption>,
+    /// Whether hvigor's `buildOption.preloadSystemSo` collection is enabled.
+    /// This gates startup/resource handling for ByteCode HAR `META-INF/preload.json`.
+    #[serde(default)]
+    pub preload_system_so: bool,
     /// SO file paths listed under `buildOption.preloadSo` in `build-profile.json5`.
     /// Each path is resolved relative to the project root; files are embedded in the
     /// HAP under `libs/arm64-v8a/`.
@@ -144,11 +148,16 @@ pub struct BuildOption {
     /// Matches hvigor's `MergeProfile.getRemovePermissionSet()` behavior.
     #[serde(default)]
     pub remove_permissions: Vec<String>,
-    /// AOT compile mode from `buildOption.aotCompileMode`: "type" | "method" | "speed".
-    /// Controls `anBuildMode` field in loader.json.
+    /// AOT compile mode from `buildOption.aotCompileMode` or
+    /// `buildOption.arkOptions.aotCompileMode`: `""`, `"type"`, or `"partial"`.
+    /// API 10+ ignores this value in hvigor and derives the mode from `hostPGO`.
     #[serde(default)]
     pub aot_compile_mode: Option<String>,
-    /// Path to AOT profile data (`.ap` file) for PGO-based AOT.
+    /// Whether `buildOption.arkOptions.hostPGO` requests partial AOT on API 10+.
+    #[serde(default)]
+    pub host_pgo: Option<bool>,
+    /// Path to AOT profile data (`.ap` file) for PGO-based AOT. Relative paths
+    /// are module-root relative, matching hvigor's `TargetTaskService.getApPath()`.
     #[serde(default)]
     pub ap_path: Option<PathBuf>,
 }
@@ -256,6 +265,36 @@ impl SdkConfig {
     /// ETS root is two levels up: `<sdk>/ets`.
     fn ets_root(&self) -> Option<&std::path::Path> {
         self.ets_loader_path.parent()?.parent()
+    }
+
+    /// Derive the SDK component root from `ets_loader_path`.
+    ///
+    /// `ets_loader_path` is e.g. `<sdk>/ets/build-tools/ets-loader`, so the
+    /// component root is three levels up: `<sdk>`.
+    fn component_root(&self) -> Option<&std::path::Path> {
+        self.ets_root()?.parent()
+    }
+
+    /// Return the SDK PAC schema path when this SDK provides one.
+    ///
+    /// hvigor skips PAC/privacy processing when `toolchains/paccheck/pacSchema.json`
+    /// is absent, so callers should treat `None` as "task should not run".
+    pub fn pac_schema_path(&self) -> Option<std::path::PathBuf> {
+        let path = self
+            .component_root()?
+            .join("toolchains/paccheck/pacSchema.json");
+        path.is_file().then_some(path)
+    }
+
+    /// SDK permission oracle used by hvigor for requestPermissions checks.
+    ///
+    /// The previewer component stores SDK `definePermissions` in
+    /// `<sdk>/previewer/common/resources/module.json`.
+    pub fn permission_module_json_path(&self) -> Option<std::path::PathBuf> {
+        let path = self
+            .component_root()?
+            .join("previewer/common/resources/module.json");
+        path.is_file().then_some(path)
     }
 
     /// Candidate directories containing `@ohos/*` API declaration files.

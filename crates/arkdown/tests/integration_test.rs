@@ -42,9 +42,11 @@ fn make_test_config(fixture: &PathBuf) -> ArkdownConfig {
             runtime_os: "HarmonyOS".to_string(),
             signing_config: None,
             build_option: BuildOption {
+                preload_system_so: false,
                 preload_so: vec![],
                 remove_permissions: vec![],
                 aot_compile_mode: None,
+                host_pgo: None,
                 ap_path: None,
                 strict_mode: StrictModeConfig {
                     case_sensitive_check: false,
@@ -316,9 +318,11 @@ fn make_minimal_config(project_root: &PathBuf, build_mode: BuildMode) -> Arkdown
             runtime_os: "HarmonyOS".to_string(),
             signing_config: None,
             build_option: BuildOption {
+                preload_system_so: false,
                 preload_so: vec![],
                 remove_permissions: vec![],
                 aot_compile_mode: None,
+                host_pgo: None,
                 ap_path: None,
                 strict_mode: StrictModeConfig {
                     case_sensitive_check: false,
@@ -368,8 +372,11 @@ fn make_minimal_loader_json(
         router_map: vec![],
         hsp_resources_map: FxHashMap::default(),
         update_version_info: FxHashMap::default(),
-        an_build_out_put: format!("{}/an", root_str),
-        an_build_mode: "type".to_string(),
+        an_build_out_put: Some(format!("{}/an", root_str)),
+        an_build_mode: Some("type".to_string()),
+        ap_path: None,
+        build_config_path: None,
+        patch_config: None,
         non_entry_importees: vec![],
         compiled_importees: vec![],
         compile_entry,

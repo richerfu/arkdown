@@ -35,7 +35,9 @@ pub enum AbcReadError {
     TooShort { expected: usize, actual: usize },
     #[error("invalid magic bytes: expected b\"PANDA\\x00\\x00\\x00\", got {found:?}")]
     BadMagic { found: [u8; 8] },
-    #[error("class index out of bounds: offset {offset} + {size} bytes exceeds file length {file_len}")]
+    #[error(
+        "class index out of bounds: offset {offset} + {size} bytes exceeds file length {file_len}"
+    )]
     ClassIndexOob {
         offset: usize,
         size: usize,
@@ -160,7 +162,9 @@ impl<'a> AbcReader<'a> {
                     offset: 0x28,
                     reason: format!(
                         "LNP index region [{:#x}, {:#x}) exceeds file length {}",
-                        lnp_idx_off, lnp_end, data.len()
+                        lnp_idx_off,
+                        lnp_end,
+                        data.len()
                     ),
                 });
             }
@@ -176,7 +180,9 @@ impl<'a> AbcReader<'a> {
                     offset: 0x30,
                     reason: format!(
                         "LiteralArray index region [{:#x}, {:#x}) exceeds file length {}",
-                        literal_idx_off, lit_end, data.len()
+                        literal_idx_off,
+                        lit_end,
+                        data.len()
                     ),
                 });
             }
@@ -218,19 +224,24 @@ impl<'a> AbcReader<'a> {
 
     /// Return the class names present in this ABC file, in class-index order.
     pub fn class_names(&self) -> Result<Vec<String>, AbcReadError> {
-        Ok(self.read_summary()?.classes.into_iter().map(|c| c.name).collect())
+        Ok(self
+            .read_summary()?
+            .classes
+            .into_iter()
+            .map(|c| c.name)
+            .collect())
     }
 
     // ── Private helpers ──────────────────────────────────────────────────────
 
     fn read_class_info(&self, class_off: usize) -> Result<AbcClassInfo, AbcReadError> {
         // ClassItem starts with an inline StringItem for the class name.
-        let (name, name_len) = self.read_inline_string(class_off).map_err(|e| {
-            AbcReadError::MalformedClassItem {
-                offset: class_off,
-                reason: format!("class name string: {e}"),
-            }
-        })?;
+        let (name, name_len) =
+            self.read_inline_string(class_off)
+                .map_err(|e| AbcReadError::MalformedClassItem {
+                    offset: class_off,
+                    reason: format!("class name string: {e}"),
+                })?;
 
         // After the inline class name:
         // super_class_off: u32 (4 bytes)
@@ -238,30 +249,30 @@ impl<'a> AbcReader<'a> {
         let after_super = after_name + 4;
 
         // access_flags: ULEB128
-        let (_access_flags, acc_len) = self.read_uleb128(after_super).map_err(|e| {
-            AbcReadError::MalformedClassItem {
-                offset: class_off,
-                reason: format!("access_flags: {e}"),
-            }
-        })?;
+        let (_access_flags, acc_len) =
+            self.read_uleb128(after_super)
+                .map_err(|e| AbcReadError::MalformedClassItem {
+                    offset: class_off,
+                    reason: format!("access_flags: {e}"),
+                })?;
         let after_acc = after_super + acc_len;
 
         // fields_count: ULEB128
-        let (_fields_count, fc_len) = self.read_uleb128(after_acc).map_err(|e| {
-            AbcReadError::MalformedClassItem {
-                offset: class_off,
-                reason: format!("fields_count: {e}"),
-            }
-        })?;
+        let (_fields_count, fc_len) =
+            self.read_uleb128(after_acc)
+                .map_err(|e| AbcReadError::MalformedClassItem {
+                    offset: class_off,
+                    reason: format!("fields_count: {e}"),
+                })?;
         let after_fc = after_acc + fc_len;
 
         // methods_count: ULEB128
-        let (methods_count, _) = self.read_uleb128(after_fc).map_err(|e| {
-            AbcReadError::MalformedClassItem {
-                offset: class_off,
-                reason: format!("methods_count: {e}"),
-            }
-        })?;
+        let (methods_count, _) =
+            self.read_uleb128(after_fc)
+                .map_err(|e| AbcReadError::MalformedClassItem {
+                    offset: class_off,
+                    reason: format!("methods_count: {e}"),
+                })?;
 
         Ok(AbcClassInfo {
             name,
@@ -289,10 +300,8 @@ impl<'a> AbcReader<'a> {
                 });
             }
             let bytes = &self.data[data_start..data_end];
-            let s = String::from_utf8(bytes.to_vec()).map_err(|e| AbcReadError::InvalidUtf8 {
-                offset,
-                source: e,
-            })?;
+            let s = String::from_utf8(bytes.to_vec())
+                .map_err(|e| AbcReadError::InvalidUtf8 { offset, source: e })?;
             let total_len = prefix_len + utf16_len + 1; // +1 for null terminator
             Ok((s, total_len))
         } else {
@@ -322,7 +331,9 @@ impl<'a> AbcReader<'a> {
                 actual: self.data.len(),
             });
         }
-        Ok(u32::from_le_bytes(self.data[offset..offset + 4].try_into().unwrap()))
+        Ok(u32::from_le_bytes(
+            self.data[offset..offset + 4].try_into().unwrap(),
+        ))
     }
 
     fn read_uleb128(&self, offset: usize) -> Result<(u64, usize), AbcReadError> {
@@ -474,10 +485,7 @@ fn fnv1a_hash_bytes(bytes: &[u8]) -> u64 {
     h
 }
 
-pub fn diff_class_names(
-    base_data: &[u8],
-    dep_data: &[u8],
-) -> Result<Vec<String>, AbcReadError> {
+pub fn diff_class_names(base_data: &[u8], dep_data: &[u8]) -> Result<Vec<String>, AbcReadError> {
     let base_names: std::collections::HashSet<String> = AbcReader::new(base_data)?
         .class_names()?
         .into_iter()
@@ -581,7 +589,10 @@ mod tests {
         let bytes2 = compile_to_bytes(source, "module/ets/math");
         let h1 = AbcSectionHashes::compute(&bytes1).unwrap();
         let h2 = AbcSectionHashes::compute(&bytes2).unwrap();
-        assert!(h1.is_identical(&h2), "identical sources must produce identical ABC");
+        assert!(
+            h1.is_identical(&h2),
+            "identical sources must produce identical ABC"
+        );
     }
 
     #[test]

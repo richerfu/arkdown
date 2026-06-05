@@ -1,17 +1,20 @@
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
 use clap::Args;
+use indexmap::IndexMap;
 
 use arkdown::{compile_entry::CompileEntryNamer, BundleOutput, Bundler};
 use arkdown_abc::AbcReader;
+use arkdown_config::build_profile::{parse_api_version, RawBuildProfile};
 use arkdown_config::load_config;
 use arkdown_core::{
-    ArkdownConfig, BuildMode, ChunkGraph, ExtensionAbilityEntry, ModuleConfig, ModuleJson5,
-    ModuleJson5Module, OhosModuleType, OutputTarget,
+    ArkdownConfig, BuildMode, ChunkGraph, ModuleConfig, ModuleJson5, ModuleJson5Module,
+    OhosModuleType, OutputTarget,
 };
 use arkdown_obfuscate::{should_obfuscate, ObfuscationOptions, Obfuscator};
 use arkdown_pack::{HarPackInput, PackAbility, PackInput, Packager};
@@ -36,6 +39,7 @@ use arkdown_ts2abc::{compile_to_abc, Ts2abcInput, Ts2abcOptions};
 use arkdown_watcher::FileWatcher;
 use rolldown_plugin::__inner::SharedPluginable;
 
+use arkdown_cache::{BuildCache, BundleCacheKey, CacheKey};
 use crate::progress::Progress;
 use crate::task_cache::TaskInputs;
 
@@ -189,6 +193,37 @@ pub async fn run(args: BuildArgs) -> Result<()> {
     // Parallel list of ByteCode HAR dependencies per module, indexed identically
     // to loader_jsons.
     let mut all_bc_har_deps: Vec<Vec<ByteCodeHarScanEntry>> = Vec::new();
+    // Parallel list of processed module PAC/privacy profile paths per module.
+    let mut privacy_profile_paths: Vec<Option<PathBuf>> = Vec::new();
+    let sdk_permissions = if should_use_sdk_permission_validation(config_arc.as_ref()) {
+        if let Some(module_json_path) = config_arc.sdk_config.permission_module_json_path() {
+            arkdown_profile::collect_sdk_permission_data(&module_json_path).map_err(|e| {
+                anyhow::anyhow!(
+                    "collect SDK permission data failed from {}: {}",
+                    module_json_path.display(),
+                    e
+                )
+            })?
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let app_scope_bundle_name = read_app_scope_bundle_name(&project_root)
+        .unwrap_or_else(|| config_arc.product.bundle_name.clone());
+    let pac_schema_path = config_arc.sdk_config.pac_schema_path();
+    if matches!(&config_arc.output_target, OutputTarget::Hap) {
+        arkdown_profile::process_project_privacy_profile(
+            arkdown_profile::ProjectPrivacyProfileInput {
+                project_root: &project_root,
+                product_name: &config_arc.product.name,
+                modules: &config_arc.modules,
+                pac_schema_path: pac_schema_path.as_deref(),
+            },
+        )
+        .map_err(|e| anyhow::anyhow!("ProcessProjectPrivacyProfile failed: {}", e))?;
+    }
     for module in build_modules {
         // --- Resource compilation (precedes profile so IDs are available) ---
         let resource_compiler = ResourceCompiler::new(ResourceCompileConfig {
@@ -206,13 +241,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             .src_path
             .join("build/default/intermediates/res/default");
         // Include AppScope/resources so app-level icon/label IDs are assigned.
-        // Respects resOptions.includeAppScopeRes (default true per hvigor).
-        let include_app_scope = config_arc
-            .product
-            .build_option
-            .res_options
-            .as_ref()
-            .map_or(true, |ro| ro.include_app_scope_res);
+        let include_app_scope = include_app_scope_resources(config_arc.as_ref(), module);
         let mut res_dirs: Vec<PathBuf> = vec![];
         let app_scope_res = project_root.join("AppScope/resources");
         if include_app_scope && app_scope_res.exists() {
@@ -227,9 +256,10 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             }
         }
         for resource_module in resource_modules_for_build(config_arc.as_ref(), module) {
-            let module_res_dir = resource_module.src_path.join("src/main/resources");
-            if module_res_dir.exists() && !res_dirs.contains(&module_res_dir) {
-                res_dirs.push(module_res_dir);
+            for module_res_dir in module_resource_dirs(config_arc.as_ref(), resource_module) {
+                if module_res_dir.exists() && !res_dirs.contains(&module_res_dir) {
+                    res_dirs.push(module_res_dir);
+                }
             }
         }
         let mut resource_refs = FxHashMap::default();
@@ -270,10 +300,11 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             &module.name,
         )?);
 
-        // --- C3: ProcessCompiledResources — preloaded system SO file list ---
-        // Matches hvigor `addPreloadSystemSoFileList()`: when `buildOption.preloadSo`
-        // lists system SO files, write them to an intermediate JSON so the packager
-        // and installer can propagate the preload metadata.
+        // Legacy explicit preloadSo list. Current hvigor gates system preload on
+        // `buildOption.preloadSystemSo` and writes
+        // `intermediates/preload/<target>/preload.json` from ArkCompile's source
+        // entry analysis; this older arkdown artifact is kept only for projects
+        // that still inspect `buildOption.preloadSo` diagnostics.
         let preload_so_paths = &config_arc.product.build_option.preload_so;
         if !preload_so_paths.is_empty() {
             let preload_so_out = module
@@ -283,34 +314,91 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             let so_list: Vec<String> = preload_so_paths
                 .iter()
                 .map(|p| {
-                    p.to_str().unwrap_or_default().replace('\\', "/").to_string()
+                    p.to_str()
+                        .unwrap_or_default()
+                        .replace('\\', "/")
+                        .to_string()
                 })
                 .collect();
             let json = serde_json::json!({ "soFileList": so_list });
-            write_json_pretty(
-                &preload_so_out.join("preload_so_list.json"),
-                &json,
-            )
-            .unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "failed to write preload_so_list.json");
-            });
+            write_json_pretty(&preload_so_out.join("preload_so_list.json"), &json).unwrap_or_else(
+                |e| {
+                    tracing::warn!(error = %e, "failed to write preload_so_list.json");
+                },
+            );
         }
 
         // --- Profile processing ---
         let module_json5_path = module.src_path.join("src/main/module.json5");
         let module_json5 = read_module_json5(&module_json5_path)?;
-
-        // --- Share config (B4): collect crossAppSharedConfig from oh_modules HSPs ---
-        let share_out = arkdown_profile::merge_share_config(
-            arkdown_profile::ShareConfigInput {
-                module_root: &module.src_path,
-                self_entries: module_json5.module.cross_app_shared_config.clone(),
+        arkdown_profile::validate_request_permissions(
+            arkdown_profile::RequestPermissionValidationInput {
+                module_type: &module_json5.module.type_,
+                module_json5_path: Some(&module_json5_path),
+                request_permissions: &module_json5.module.request_permissions,
+                define_permissions: &module_json5.module.define_permissions,
+                sdk_permissions: sdk_permissions.as_ref(),
             },
         )
+        .map_err(|e| anyhow::anyhow!("validate request permissions failed: {}", e))?;
+
+        // --- Permission reason resources (B9): HSP/HAR resource_str intermediate ---
+        if matches!(module_json5.module.type_.as_str(), "shared" | "har")
+            || matches!(
+                &config_arc.output_target,
+                OutputTarget::Hsp | OutputTarget::Har
+            )
+        {
+            arkdown_profile::process_permission_reason_resources(
+                arkdown_profile::PermissionReasonResourceInput {
+                    module_root: &module.src_path,
+                    target_name: "default",
+                    request_permissions: &module_json5.module.request_permissions,
+                },
+            )
+            .map_err(|e| anyhow::anyhow!("process permission reason resources failed: {}", e))?;
+        } else if matches!(&config_arc.output_target, OutputTarget::Hap) {
+            arkdown_profile::merge_dependency_permission_reason_resources(
+                arkdown_profile::DependencyPermissionReasonResourceInput {
+                    module_root: &module.src_path,
+                    project_root: &project_root,
+                    target_name: "default",
+                },
+            )
+            .map_err(|e| {
+                anyhow::anyhow!("merge dependency permission reason resources failed: {}", e)
+            })?;
+        }
+
+        // --- Shortcut profile (B10): hvigor CompileResource.customizeShortcut ---
+        arkdown_profile::process_shortcut_profiles(arkdown_profile::ShortcutProfileInput {
+            module_root: &module.src_path,
+            metadata: &module_json5.module.metadata,
+            app_bundle_name: &app_scope_bundle_name,
+            product_bundle_name: &config_arc.product.bundle_name,
+            output_profile_dir: &res_out.join("resources/base/profile"),
+        })
+        .map_err(|e| anyhow::anyhow!("process shortcut profiles failed: {}", e))?;
+
+        // --- Share config (B4): collect crossAppSharedConfig from oh_modules HSPs ---
+        let share_out = arkdown_profile::merge_share_config(arkdown_profile::ShareConfigInput {
+            project_root: &config_arc.project_root,
+            module_root: &module.src_path,
+            self_entries: module_json5
+                .module
+                .cross_app_shared_config
+                .inline_entries()
+                .to_vec(),
+            self_profile_name: module_json5
+                .module
+                .cross_app_shared_config
+                .profile_name()
+                .map(str::to_string),
+        })
         .map_err(|e| anyhow::anyhow!("ProcessShareConfig failed: {}", e))?;
-        let share_config_out = module.src_path.join(
-            "build/default/intermediates/share_config/default/temp-share-config.json",
-        );
+        let share_config_out = module
+            .src_path
+            .join("build/default/intermediates/share_config/default/temp-share-config.json");
         arkdown_profile::write_share_config(&share_out, &share_config_out)
             .map_err(|e| anyhow::anyhow!("write share config failed: {}", e))?;
 
@@ -346,18 +434,27 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         }
 
         // --- Startup config (B5): collect appStartup task configs ---
-        let startup_out = arkdown_profile::merge_startup_config(
-            arkdown_profile::StartupConfigInput {
+        let startup_out =
+            arkdown_profile::merge_startup_config(arkdown_profile::StartupConfigInput {
+                project_root: &config_arc.project_root,
                 module_root: &module.src_path,
                 module_name: &module.name,
                 bundle_name: Some(config_arc.product.bundle_name.as_str()),
                 app_startup: module_json5.module.app_startup.clone(),
-            },
-        )
-        .map_err(|e| anyhow::anyhow!("ProcessStartupConfig failed: {}", e))?;
-        let startup_config_out = module.src_path.join(
-            "build/default/intermediates/startup_config/default/temp-startup-config.json",
-        );
+                collect_preload_system_so: config_arc.product.build_option.preload_system_so
+                    && matches!(
+                        module.module_type,
+                        OhosModuleType::Entry | OhosModuleType::Feature
+                    )
+                    && !matches!(
+                        config_arc.output_target,
+                        OutputTarget::Preview | OutputTarget::Test
+                    ),
+            })
+            .map_err(|e| anyhow::anyhow!("ProcessStartupConfig failed: {}", e))?;
+        let startup_config_out = module
+            .src_path
+            .join("build/default/intermediates/startup_config/default/temp-startup-config.json");
         arkdown_profile::write_startup_config(&startup_out, &startup_config_out)
             .map_err(|e| anyhow::anyhow!("write startup config failed: {}", e))?;
 
@@ -369,6 +466,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         if let Some(ref startup_config) = startup_out.config {
             if !startup_config.startup_tasks.is_empty()
                 || !startup_config.app_preload_hint_startup_tasks.is_empty()
+                || !startup_config.system_preload_hint_startup_tasks.is_empty()
             {
                 let profile_dir = module
                     .src_path
@@ -402,12 +500,38 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                         .iter()
                         .map(|t| serde_json::json!({"name": t.name, "srcEntry": t.src_entry}))
                         .collect::<Vec<_>>(),
+                    "systemPreloadHintStartupTasks": startup_config.system_preload_hint_startup_tasks
+                        .iter()
+                        .map(|t| {
+                            let mut obj = serde_json::json!({
+                                "name": t.name,
+                                "srcEntry": t.src_entry,
+                            });
+                            if let Some(ref ohmurl) = t.ohmurl {
+                                obj["ohmurl"] = ohmurl.clone().into();
+                            }
+                            obj
+                        })
+                        .collect::<Vec<_>>(),
                 });
                 if let Err(e) = write_json_pretty(&profile_path, &profile_json) {
                     tracing::warn!(error = %e, "failed to write startup_config resource profile");
                 }
             }
         }
+
+        // --- PAC/privacy profile (B8): validate and copy non-HAP module pac.json5 ---
+        let privacy_profile_path = if should_process_module_privacy_profile(&module.module_type) {
+            arkdown_profile::process_module_privacy_profile(arkdown_profile::PrivacyProfileInput {
+                module_root: &module.src_path,
+                target_name: "default",
+                pac_schema_path: pac_schema_path.as_deref(),
+            })
+            .map_err(|e| anyhow::anyhow!("ProcessModulePrivacyProfile failed: {}", e))?
+            .map(|output| output.processed_path)
+        } else {
+            None
+        };
 
         let (manifest, mut loader_json) = processor
             .process_module(module, &module_json5)
@@ -419,6 +543,24 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         processor
             .write_module_json(&manifest, &module_json_out, Some(&resource_ids))
             .map_err(|e| anyhow::anyhow!("write module.json failed: {}", e))?;
+        ensure_startup_profile_ref_in_module_json(&module_json_out, &startup_out)
+            .map_err(|e| anyhow::anyhow!("update startup module.json failed: {}", e))?;
+        // --- Distro filter profile (B11): hvigor CompileResource.customizeDistroFilter ---
+        arkdown_profile::process_distro_filter_profile(arkdown_profile::DistroFilterProfileInput {
+            project_root: &project_root,
+            module_name: &module.name,
+            module_root: &module.src_path,
+            product_name: &config_arc.product.name,
+            build_mode_name: Some(match config_arc.build_mode {
+                BuildMode::Debug => "debug",
+                BuildMode::Release => "release",
+            }),
+            compile_api_version: config_arc.sdk_config.compile_api_version,
+            metadata: &module_json5.module.metadata,
+            output_profile_dir: &res_out.join("resources/base/profile"),
+            module_json_path: Some(&module_json_out),
+        })
+        .map_err(|e| anyhow::anyhow!("process distro filter profile failed: {}", e))?;
         write_profile_intermediates(&module.src_path, &module_json_out)?;
         write_resource_config_files(&project_root, module, &config_arc, &res_out)?;
 
@@ -463,6 +605,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
 
         loader_jsons.push((module.clone(), manifest, loader_json, resource_refs));
         all_bc_har_deps.push(bc_har_deps);
+        privacy_profile_paths.push(privacy_profile_path);
     }
     progress.done();
 
@@ -592,15 +735,16 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "F14: HAR dedup real_build failed, falling back to collect_pass");
-                        Arc::new(arkdown_plugin_har_dedup::HarDeduplicatePlugin::collect_pass(
-                            collect_file,
-                        )) as SharedPluginable
+                        Arc::new(
+                            arkdown_plugin_har_dedup::HarDeduplicatePlugin::collect_pass(
+                                collect_file,
+                            ),
+                        ) as SharedPluginable
                     }
                 }
             } else {
-                Arc::new(arkdown_plugin_har_dedup::HarDeduplicatePlugin::collect_pass(
-                    collect_file,
-                )) as SharedPluginable
+                Arc::new(arkdown_plugin_har_dedup::HarDeduplicatePlugin::collect_pass(collect_file))
+                    as SharedPluginable
             };
             plugins.push(plugin);
         }
@@ -630,6 +774,38 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         )?;
         bundle_outs.push((bundle_out, false));
         compile_arkts_handoffs_by_bundle.push(compile_arkts_handoff);
+
+        // Write bundle-level cache manifest after a successful bundle run.
+        // Mirrors hvigor's `build/default/cache/bundle/bundle.json` write after
+        // each successful Rollup bundle step.  Subsequent builds read this file
+        // to detect bundle cache hits and skip re-bundling unchanged modules.
+        {
+            let bundle_cache_dir = module.src_path.join("build/default/cache/bundle");
+            let bundle_cache = BuildCache::new(bundle_cache_dir);
+            let source_hash = {
+                let mut h: u64 = 0xcbf29ce484222325;
+                let mut sorted = loader_json.compile_entry.clone();
+                sorted.sort();
+                for entry in &sorted {
+                    for b in entry.bytes() {
+                        h ^= b as u64;
+                        h = h.wrapping_mul(0x100000001b3);
+                    }
+                }
+                h
+            };
+            let bundle_key = BundleCacheKey {
+                inner: CacheKey {
+                    content_hash: format!("{source_hash:x}"),
+                    config_hash: 0,
+                    dependency_hash: 0,
+                },
+                compile_env: String::new(),
+            };
+            if let Err(e) = bundle_cache.write_bundle_manifest(&bundle_key) {
+                tracing::debug!(error = %e, "failed to write bundle cache manifest (non-fatal)");
+            }
+        }
     }
     progress.done();
 
@@ -644,7 +820,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
     //   2. intermediates/importee/default/{module_name}/importee.json  (cache)
     for (
         ((module, _manifest, loader_json, _resource_refs), (bundle_out, from_cache)),
-        _bc_har_deps,
+        bc_har_deps,
     ) in loader_jsons
         .iter_mut()
         .zip(bundle_outs.iter())
@@ -701,10 +877,24 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             );
         }
 
-        // Add ByteCode HAR OHM URLs to compiledImportees. They are pre-compiled
-        // and therefore absent from the bundle's ChunkGraph; process_importees
-        // cannot discover them automatically.
-        // ByteCode HAR OHM URLs not yet populated in loader.json
+        // Add ByteCode HAR OHM URLs to compiledImportees.
+        //
+        // ByteCode HAR packages are pre-compiled ABC files; process_importees
+        // cannot discover them from the bundle's ChunkGraph.  hvigor adds each
+        // HAR's OHM URL to compiledImportees so ArkRuntime can locate the module
+        // graph compiled into the HAR's .abc file.
+        //
+        // Format: `@bundle:<bundleName>/<packageName>/<mainEntryStem>`
+        // Matches hvigor OhmUrlUtils.genOhmUrlForByteCodeHar().
+        let bundle_name = &config_arc.product.bundle_name;
+        for dep in bc_har_deps {
+            if let Some(ohm_url) = dep.ohm_url(bundle_name) {
+                if !loader_json.compiled_importees.contains(&ohm_url) {
+                    loader_json.compiled_importees.push(ohm_url);
+                }
+            }
+        }
+
         // Re-write loader.json with the updated importee fields.
         let loader_json_out = module
             .src_path
@@ -822,12 +1012,9 @@ pub async fn run(args: BuildArgs) -> Result<()> {
     if coverage_mode {
         for (bundle_out, _) in &bundle_outs {
             for (_chunk_name, path) in &bundle_out.chunk_files {
-                if path.extension().and_then(|e| e.to_str()) == Some("js")
-                    && path.exists()
-                {
+                if path.extension().and_then(|e| e.to_str()) == Some("js") && path.exists() {
                     if let Ok(source) = fs_err::read_to_string(path) {
-                        let instrumented =
-                            instrument_coverage(&source, &path.to_string_lossy());
+                        let instrumented = instrument_coverage(&source, &path.to_string_lossy());
                         let _ = fs_err::write(path, instrumented);
                     }
                 }
@@ -967,8 +1154,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 BuildMode::Release => "release",
             };
             let compile_info_path = cache_dir.join("compileInfo.json");
-            let compile_info =
-                serde_json::json!({ "buildMode": build_mode_str });
+            let compile_info = serde_json::json!({ "buildMode": build_mode_str });
             if let Err(e) = fs_err::write(
                 &compile_info_path,
                 serde_json::to_string(&compile_info).unwrap_or_default(),
@@ -1007,18 +1193,23 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                         dep.abc_path.display()
                     );
                 }
-                let abc_data = std::fs::read(&dep.abc_path)
-                    .with_context(|| format!(
+                let abc_data = std::fs::read(&dep.abc_path).with_context(|| {
+                    format!(
                         "ByteCode HAR '{}': failed to read ABC at '{}'",
-                        dep.package_name, dep.abc_path.display()
-                    ))?;
-                AbcReader::validate(&abc_data)
-                    .map_err(|e| anyhow::anyhow!(
+                        dep.package_name,
+                        dep.abc_path.display()
+                    )
+                })?;
+                AbcReader::validate(&abc_data).map_err(|e| {
+                    anyhow::anyhow!(
                         "ByteCode HAR '{}': ABC at '{}' failed validation: {} \
                          (magic, file_size, class/LNP/literal index bounds). \
                          Rebuild the HAR or remove the invalid dependency (SPEC-041).",
-                        dep.package_name, dep.abc_path.display(), e
-                    ))?;
+                        dep.package_name,
+                        dep.abc_path.display(),
+                        e
+                    )
+                })?;
                 tracing::debug!(
                     package = %dep.package_name,
                     abc_path = %dep.abc_path.display(),
@@ -1033,8 +1224,13 @@ pub async fn run(args: BuildArgs) -> Result<()> {
     progress.step(6, 6, "Packaging");
     let packager = Packager::new(config_arc.clone());
     let mut output_paths = Vec::new();
-    for ((module, manifest, _loader_json, _resource_refs), (bundle_out, _from_cache)) in
-        loader_jsons.iter().zip(bundle_outs.iter())
+    for (
+        ((module, manifest, _loader_json, _resource_refs), (bundle_out, _from_cache)),
+        privacy_profile_path,
+    ) in loader_jsons
+        .iter()
+        .zip(bundle_outs.iter())
+        .zip(privacy_profile_paths.iter())
     {
         let module_json = module
             .src_path
@@ -1070,6 +1266,12 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                             module_name: module.name.clone(),
                             source_dir: source_dir.clone(),
                             resources_dir: module.src_path.join("src/main/resources"),
+                            resource_str_dir: {
+                                let dir = module
+                                    .src_path
+                                    .join("build/default/intermediates/res/default/resource_str");
+                                dir.exists().then_some(dir)
+                            },
                             oh_package_json: oh_package_json.clone(),
                             output_path: output.clone(),
                         })
@@ -1086,24 +1288,23 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                         std::fs::create_dir_all(parent).ok();
                     }
                     // Collect exported .ets source files.
-                    let exported_sources: Vec<String> =
-                        walkdir::WalkDir::new(&source_dir)
-                            .into_iter()
-                            .filter_map(|e| e.ok())
-                            .filter(|e| {
-                                e.file_type().is_file()
-                                    && e.path()
-                                        .extension()
-                                        .and_then(|x| x.to_str())
-                                        .map_or(false, |x| x == "ets")
-                            })
-                            .filter_map(|e| {
-                                e.path()
-                                    .strip_prefix(&source_dir)
-                                    .ok()
-                                    .map(|r| r.to_string_lossy().replace('\\', "/"))
-                            })
-                            .collect();
+                    let exported_sources: Vec<String> = walkdir::WalkDir::new(&source_dir)
+                        .into_iter()
+                        .filter_map(|e| e.ok())
+                        .filter(|e| {
+                            e.file_type().is_file()
+                                && e.path()
+                                    .extension()
+                                    .and_then(|x| x.to_str())
+                                    .map_or(false, |x| x == "ets")
+                        })
+                        .filter_map(|e| {
+                            e.path()
+                                .strip_prefix(&source_dir)
+                                .ok()
+                                .map(|r| r.to_string_lossy().replace('\\', "/"))
+                        })
+                        .collect();
                     let har_info = serde_json::json!({
                         "moduleName": module.name,
                         "moduleType": "har",
@@ -1120,14 +1321,10 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                     // K4: Generate basic .d.ts / .d.ets declaration stubs.
                     // Emits re-export declarations so downstream consumers can
                     // resolve types from this source HAR without full tsc.
-                    generate_har_declarations(
-                        &module.src_path,
-                        &source_dir,
-                        &module.name,
-                    )
-                    .unwrap_or_else(|e| {
-                        tracing::warn!(error = %e, "failed to generate HAR declarations");
-                    });
+                    generate_har_declarations(&module.src_path, &source_dir, &module.name)
+                        .unwrap_or_else(|e| {
+                            tracing::warn!(error = %e, "failed to generate HAR declarations");
+                        });
 
                     Some(packed)
                 } else {
@@ -1172,6 +1369,10 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                                 label: a.label.clone(),
                             })
                             .collect();
+                        let bundle_version_code = read_bundle_version_code(&project_root);
+                        let bundle_version_name = read_bundle_version_name(&project_root);
+                        let bundle_type = read_bundle_type(&project_root, &config_arc);
+                        let delivery_with_install = read_delivery_with_install(&module.src_path);
                         Some(
                             packager
                                 .pack_hap(PackInput {
@@ -1186,36 +1387,26 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                                             "build/default/intermediates/res/default/resources",
                                         ),
                                     ),
-                                    bundle_version_code: read_bundle_version_code(&project_root),
-                                    bundle_version_name: read_bundle_version_name(&project_root),
+                                    bundle_version_code,
+                                    bundle_version_name,
                                     // HSP packages use bundle_type "shared"; HAP/HSP modules
                                     // with atomicService type use "atomicService"; default is "app".
-                                    bundle_type: read_bundle_type(&project_root, &config_arc),
+                                    bundle_type: bundle_type.clone(),
                                     source_maps_path,
                                     abilities,
                                     integrated_hsps: collect_integrated_hsps(
                                         module,
-                                        &project_root,
+                                        config_arc.as_ref(),
                                         &config_arc.product.bundle_name,
-                                        1000000,
-                                    ),
+                                        bundle_version_code,
+                                    )?,
                                     device_types: manifest.device_types.clone(),
                                     // installationFree: true for atomicService bundles
-                                    installation_free: read_bundle_type(&project_root, &config_arc)
-                                        == "atomicService",
+                                    installation_free: bundle_type == "atomicService",
                                     // deliveryWithInstall defaults to true per OHOS spec;
                                     // HSP modules may set it false in module.json5
-                                    delivery_with_install: true,
-                                    privacy_profile_path: {
-                                        let p = module
-                                            .src_path
-                                            .join("src/main/resources/base/profile/privacy.json");
-                                        if p.exists() {
-                                            Some(p)
-                                        } else {
-                                            None
-                                        }
-                                    },
+                                    delivery_with_install,
+                                    privacy_profile_path: privacy_profile_path.clone(),
                                 })
                                 .map_err(|e| anyhow::anyhow!("Pack failed: {}", e))?,
                         )
@@ -1330,9 +1521,9 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 let map_path = m
                     .src_path
                     .join("build/default/intermediates/importer_map/default/importer_map.json");
-                std::fs::read_to_string(&map_path).ok().and_then(|s| {
-                    serde_json::from_str::<FxHashMap<String, Vec<String>>>(&s).ok()
-                })
+                std::fs::read_to_string(&map_path)
+                    .ok()
+                    .and_then(|s| serde_json::from_str::<FxHashMap<String, Vec<String>>>(&s).ok())
             })
             .flatten()
             .collect();
@@ -1400,7 +1591,11 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                     "\n[watch] {} file(s) changed — {}... (affected: {} chunks)",
                     changed.len(),
                     mode_label,
-                    if affected_chunks.is_empty() { "all".to_string() } else { affected_chunks.len().to_string() }
+                    if affected_chunks.is_empty() {
+                        "all".to_string()
+                    } else {
+                        affected_chunks.len().to_string()
+                    }
                 );
                 let rebuild_args = BuildArgs {
                     target: target_str_w.clone(),
@@ -1445,40 +1640,349 @@ fn read_module_json5(path: &std::path::Path) -> Result<ModuleJson5> {
     json5::from_str(&content).context("Failed to parse module.json5")
 }
 
+fn ensure_startup_profile_ref_in_module_json(
+    module_json_path: &Path,
+    startup_out: &arkdown_profile::StartupConfigOutput,
+) -> Result<()> {
+    let Some(startup_config) = startup_out.config.as_ref() else {
+        return Ok(());
+    };
+    if startup_config.startup_tasks.is_empty()
+        && startup_config.app_preload_hint_startup_tasks.is_empty()
+        && startup_config.system_preload_hint_startup_tasks.is_empty()
+    {
+        return Ok(());
+    }
+
+    let content = fs_err::read_to_string(module_json_path)?;
+    let mut value: serde_json::Value = serde_json::from_str(&content)?;
+    let module = value
+        .get_mut("module")
+        .and_then(|value| value.as_object_mut())
+        .context("module.json missing module object")?;
+    if module.contains_key("appStartup") {
+        return Ok(());
+    }
+
+    module.insert(
+        "appStartup".to_string(),
+        serde_json::Value::String("$profile:startup_config".to_string()),
+    );
+    write_json_pretty(module_json_path, &value)
+}
+
+fn should_use_sdk_permission_validation(config: &ArkdownConfig) -> bool {
+    config.sdk_config.compile_api_version >= 12
+        || config.product.runtime_os.eq_ignore_ascii_case("HarmonyOS")
+}
+
+fn should_process_module_privacy_profile(module_type: &OhosModuleType) -> bool {
+    matches!(module_type, OhosModuleType::Shared | OhosModuleType::Har)
+}
+
+fn include_app_scope_resources(config: &ArkdownConfig, module: &ModuleConfig) -> bool {
+    let Some(res_options) = config.product.build_option.res_options.as_ref() else {
+        return true;
+    };
+    if res_options.include_app_scope_res {
+        return true;
+    }
+    if matches!(module.module_type, OhosModuleType::Shared) {
+        return false;
+    }
+
+    tracing::warn!(
+        module = %module.name,
+        module_type = %module.module_type,
+        "'IncludeAppScopeRes' configured at 'build-profile.json5' only works for HSP module, \
+         and will not take effect in HAP/HAR module '{}'.",
+        module.name
+    );
+    true
+}
+
+fn read_app_scope_bundle_name(project_root: &Path) -> Option<String> {
+    let path = project_root.join("AppScope/app.json5");
+    let content = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = json5::from_str(&content).ok()?;
+    value
+        .get("app")
+        .and_then(|app| app.get("bundleName"))
+        .and_then(|bundle_name| bundle_name.as_str())
+        .map(str::to_string)
+}
+
+fn module_resource_dirs(config: &ArkdownConfig, module: &ModuleConfig) -> Vec<PathBuf> {
+    let build_mode_name = match config.build_mode {
+        BuildMode::Debug => "debug",
+        BuildMode::Release => "release",
+    };
+    let Some(target) = select_effective_module_target(
+        &config.project_root,
+        module,
+        &config.product.name,
+        build_mode_name,
+    ) else {
+        return vec![module.src_path.join("src/main/resources")];
+    };
+
+    let target_dirs = resolve_target_resource_dirs(module, &target.resource_directories);
+    if !target_dirs.is_empty() {
+        return target_dirs;
+    }
+
+    if let Some(source_set_res) = target_source_set_resource_dir(module, &target.name) {
+        return vec![source_set_res];
+    }
+
+    vec![module.src_path.join("src/main/resources")]
+}
+
+/// Computed effective target for a module/product/build-mode combination.
+///
+/// hvigor resolves a single "effective target" per module by selecting the
+/// first target in declaration order that matches both `applyToProducts` and
+/// `buildModeSet` constraints.  This struct carries the resolved target name
+/// and its resource directory list to the build pipeline.
+struct EffectiveResourceTarget {
+    name: String,
+    resource_directories: Vec<PathBuf>,
+}
+
+fn select_effective_module_target(
+    project_root: &Path,
+    module: &ModuleConfig,
+    product_name: &str,
+    build_mode_name: &str,
+) -> Option<EffectiveResourceTarget> {
+    let Ok(profile) = RawBuildProfile::load(project_root) else {
+        return None;
+    };
+    let Some(raw_module) = profile
+        .modules
+        .iter()
+        .find(|raw_module| raw_module.name == module.name)
+    else {
+        return None;
+    };
+    let target =
+        select_effective_resource_target(&raw_module.targets, product_name, build_mode_name)?;
+    Some(EffectiveResourceTarget {
+        name: target.name.clone(),
+        resource_directories: target
+            .resource
+            .as_ref()
+            .map(|resource| resource.directories.clone())
+            .unwrap_or_default(),
+    })
+}
+
+fn resolve_target_resource_dirs(module: &ModuleConfig, directories: &[PathBuf]) -> Vec<PathBuf> {
+    directories
+        .iter()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .map(|dir| {
+            if dir.is_absolute() {
+                dir.clone()
+            } else {
+                module.src_path.join(dir)
+            }
+        })
+        .collect()
+}
+
+fn target_source_set_resource_dir(module: &ModuleConfig, target_name: &str) -> Option<PathBuf> {
+    if target_name == "default" {
+        return None;
+    }
+    let dir = module
+        .src_path
+        .join("src")
+        .join(target_name)
+        .join("resources");
+    dir.exists().then_some(dir)
+}
+
+/// Select the effective target for the given `product_name` and
+/// `build_mode_name` using hvigor's precedence rules:
+///
+/// 1. A target named `"default"` that matches both product AND build mode.
+/// 2. Any target that matches both product AND build mode.
+/// 3. Fall back to any target that matches only the product (ignoring mode).
+/// 4. Last resort: the bare `"default"` target.
+///
+/// The `build_mode_name` filter is applied via `target_applies_to_build_mode`.
+/// A target with an empty `buildModeSet` matches all modes.
+fn select_effective_resource_target<'a>(
+    targets: &'a [arkdown_config::build_profile::RawTarget],
+    product_name: &str,
+    build_mode_name: &str,
+) -> Option<&'a arkdown_config::build_profile::RawTarget> {
+    // 1. Named "default" + matches product + matches build mode.
+    if let Some(t) = targets.iter().find(|target| {
+        target.name == "default"
+            && target_applies_to_product(target, product_name)
+            && target_applies_to_build_mode(target, build_mode_name)
+    }) {
+        return Some(t);
+    }
+    // 2. Any target matching product + build mode.
+    if let Some(t) = targets.iter().find(|target| {
+        target_applies_to_product(target, product_name)
+            && target_applies_to_build_mode(target, build_mode_name)
+    }) {
+        return Some(t);
+    }
+    // 3. Product match without build mode constraint (target has no buildModeSet).
+    if let Some(t) = targets
+        .iter()
+        .find(|target| target_applies_to_product(target, product_name))
+    {
+        return Some(t);
+    }
+    // 4. Bare "default" target.
+    targets.iter().find(|target| target.name == "default")
+}
+
+fn target_applies_to_product(
+    target: &arkdown_config::build_profile::RawTarget,
+    product_name: &str,
+) -> bool {
+    if target.apply_to_products.is_empty() {
+        product_name == "default"
+    } else {
+        target
+            .apply_to_products
+            .iter()
+            .any(|product| product == product_name)
+    }
+}
+
+/// Return `true` if `target.buildModeSet` is either empty (matches all modes)
+/// or contains the given `build_mode_name` (e.g. `"debug"` or `"release"`).
+///
+/// Mirrors hvigor's target-selection logic which gates each target on the
+/// current build mode when `buildModeSet` is non-empty.
+fn target_applies_to_build_mode(
+    target: &arkdown_config::build_profile::RawTarget,
+    build_mode_name: &str,
+) -> bool {
+    if target.build_mode_set.is_empty() {
+        return true; // no restriction: matches all build modes
+    }
+    target
+        .build_mode_set
+        .iter()
+        .any(|mode| mode.name == build_mode_name)
+}
+
 fn collect_native_libs(project_root: &Path, module: &ModuleConfig) -> Vec<PathBuf> {
     let mut libs = Vec::new();
     let mut seen = FxHashSet::default();
     for root in [
         module.src_path.join("src/main/libs"),
         module.src_path.join("libs"),
-        module.src_path.join("oh_modules"),
-        project_root.join("oh_modules"),
     ] {
-        if !root.exists() {
-            continue;
-        }
-        for entry in walkdir::WalkDir::new(root)
-            .into_iter()
-            .filter_map(|entry| entry.ok())
-            .filter(|entry| entry.file_type().is_file())
-        {
-            let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("so") {
-                continue;
-            }
-            if path
-                .components()
-                .any(|component| component.as_os_str().to_string_lossy().as_ref() == "arm64-v8a")
-            {
-                let path = canonical_or_owned(path);
-                if seen.insert(path.clone()) {
-                    libs.push(path);
-                }
-            }
-        }
+        collect_native_libs_from_root(&root, &mut seen, &mut libs);
+    }
+    for dep_root in collect_declared_dependency_roots_for_native(&module.src_path, project_root) {
+        collect_native_libs_from_root(&dep_root, &mut seen, &mut libs);
     }
     libs.sort();
     libs
+}
+
+fn collect_native_libs_from_root(
+    root: &Path,
+    seen: &mut FxHashSet<PathBuf>,
+    libs: &mut Vec<PathBuf>,
+) {
+    if !root.exists() {
+        return;
+    }
+    for entry in walkdir::WalkDir::new(root)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_file())
+    {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("so") {
+            continue;
+        }
+        if path
+            .components()
+            .any(|component| component.as_os_str().to_string_lossy().as_ref() == "arm64-v8a")
+        {
+            let path = canonical_or_owned(path);
+            if seen.insert(path.clone()) {
+                libs.push(path);
+            }
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct NativeDependencyPackageJson {
+    #[serde(default)]
+    dependencies: IndexMap<String, String>,
+}
+
+fn collect_declared_dependency_roots_for_native(
+    module_root: &Path,
+    project_root: &Path,
+) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    let mut queue = VecDeque::new();
+    let mut seen = FxHashSet::default();
+    queue.push_back(module_root.to_path_buf());
+    if project_root != module_root {
+        queue.push_back(project_root.to_path_buf());
+    }
+
+    while let Some(pkg_root) = queue.pop_front() {
+        let Some(pkg) = read_native_dependency_package_json(&pkg_root) else {
+            continue;
+        };
+        for dep_name in pkg.dependencies.keys() {
+            let Some(dep_root) = resolve_native_dependency_root(&pkg_root, project_root, dep_name)
+            else {
+                continue;
+            };
+            let key = dep_root.to_string_lossy().replace('\\', "/");
+            if !seen.insert(key) {
+                continue;
+            }
+            queue.push_back(dep_root.clone());
+            roots.push(dep_root);
+        }
+    }
+
+    roots
+}
+
+fn read_native_dependency_package_json(pkg_root: &Path) -> Option<NativeDependencyPackageJson> {
+    let content = std::fs::read_to_string(pkg_root.join("oh-package.json5")).ok()?;
+    json5::from_str::<NativeDependencyPackageJson>(&content).ok()
+}
+
+fn resolve_native_dependency_root(
+    issuer_root: &Path,
+    project_root: &Path,
+    dep_name: &str,
+) -> Option<PathBuf> {
+    let mut current = Some(issuer_root);
+    while let Some(root) = current {
+        let candidate = root.join("oh_modules").join(dep_name);
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+        if root == project_root {
+            break;
+        }
+        current = root.parent();
+    }
+    let candidate = project_root.join("oh_modules").join(dep_name);
+    candidate.is_dir().then_some(candidate)
 }
 
 /// Read versionCode from AppScope/app.json5.
@@ -1562,6 +2066,30 @@ fn read_bundle_type(project_root: &Path, config: &ArkdownConfig) -> String {
         .unwrap_or_else(|| "app".to_string())
 }
 
+/// Read module.deliveryWithInstall from src/main/module.json5.
+///
+/// Hvigor defaults this to true when the field is absent.
+fn read_delivery_with_install(module_root: &Path) -> bool {
+    let path = module_root.join("src/main/module.json5");
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return true;
+    };
+    #[derive(serde::Deserialize)]
+    struct ModuleJson {
+        module: ModuleSection,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ModuleSection {
+        #[serde(default)]
+        delivery_with_install: Option<bool>,
+    }
+    json5::from_str::<ModuleJson>(&content)
+        .ok()
+        .and_then(|module_json| module_json.module.delivery_with_install)
+        .unwrap_or(true)
+}
+
 fn write_compile_arkts_cache(
     module: &ModuleConfig,
     loader_json: &arkdown_profile::LoaderJson,
@@ -1583,17 +2111,11 @@ fn write_compile_arkts_cache(
 /// Mirrors hvigor's `ProcessIntegratedHsp` / `getIntegratedHspDependencies()`.
 fn collect_integrated_hsps(
     module: &ModuleConfig,
-    project_root: &Path,
+    config: &ArkdownConfig,
     bundle_name: &str,
     version_code: u64,
-) -> Vec<arkdown_pack::IntegratedHspEntry> {
+) -> Result<Vec<arkdown_pack::IntegratedHspEntry>> {
     use arkdown_pack::{normalize_integrated_hsps, IntegratedHspEntry};
-
-    #[derive(serde::Deserialize)]
-    struct OhPkgMinimal {
-        #[serde(default)]
-        dependencies: std::collections::HashMap<String, String>,
-    }
 
     #[derive(serde::Deserialize)]
     struct DepMetadata {
@@ -1607,31 +2129,10 @@ fn collect_integrated_hsps(
         metadata: Option<DepMetadata>,
     }
 
-    let pkg_json_path = module.src_path.join("oh-package.json5");
-    let Ok(content) = std::fs::read_to_string(&pkg_json_path) else {
-        return vec![];
-    };
-    let Ok(pkg) = json5::from_str::<OhPkgMinimal>(&content) else {
-        return vec![];
-    };
-
-    let oh_modules_roots = [
-        module.src_path.join("oh_modules"),
-        project_root.join("oh_modules"),
-    ];
-
     let mut raw_entries: Vec<IntegratedHspEntry> = Vec::new();
-    for (dep_name, _dep_ver) in &pkg.dependencies {
-        // Find the package directory.
-        let pkg_dir = oh_modules_roots
-            .iter()
-            .map(|r| r.join(dep_name))
-            .find(|p| p.is_dir());
-        let Some(pkg_dir) = pkg_dir else {
-            continue;
-        };
-
-        // Check if this dep is marked as an integrated HSP.
+    for (dep_name, pkg_dir) in
+        collect_declared_dependency_roots_with_alias(&module.src_path, &config.project_root)
+    {
         let dep_pkg_json = pkg_dir.join("oh-package.json5");
         let Ok(dep_content) = std::fs::read_to_string(&dep_pkg_json) else {
             continue;
@@ -1644,7 +2145,7 @@ fn collect_integrated_hsps(
         }
 
         // Look for a pre-built .hsp file.
-        let hsp_name = dep_name.rsplit('/').next().unwrap_or(dep_name);
+        let hsp_name = dep_name.rsplit('/').next().unwrap_or(dep_name.as_str());
         let hsp_path = pkg_dir.join(format!("{}.hsp", hsp_name));
         if !hsp_path.exists() {
             tracing::warn!(
@@ -1662,7 +2163,15 @@ fn collect_integrated_hsps(
     }
 
     if raw_entries.is_empty() {
-        return vec![];
+        return Ok(vec![]);
+    }
+
+    let compatible_api = parse_api_version(&config.product.compatible_sdk_version)
+        .unwrap_or(config.sdk_config.compile_api_version);
+    if config.sdk_config.compile_api_version <= 11 || compatible_api <= 11 {
+        return Err(anyhow::anyhow!(
+            "INTEGRATED_HSP_UNSUPPORTED_API: integrated HSP requires compile and compatible API greater than 11"
+        ));
     }
 
     let out_dir = module
@@ -1674,18 +2183,580 @@ fn collect_integrated_hsps(
     // the normalized output files for the packer.
     match normalize_integrated_hsps(&raw_entries, bundle_name, version_code, &out_dir) {
         Ok(normalized_paths) => {
-            raw_entries
+            let entries = raw_entries
                 .into_iter()
                 .zip(normalized_paths)
                 .map(|(mut entry, normalized_path)| {
                     entry.hsp_path = normalized_path;
                     entry
                 })
-                .collect()
+                .collect::<Vec<_>>();
+            Ok(entries)
         }
         Err(e) => {
             tracing::warn!(error = %e, "K5: failed to normalize integrated HSPs");
-            vec![]
+            Ok(vec![])
         }
+    }
+}
+
+fn collect_declared_dependency_roots_with_alias(
+    module_root: &Path,
+    project_root: &Path,
+) -> Vec<(String, PathBuf)> {
+    let mut roots = Vec::new();
+    let mut queue = VecDeque::new();
+    let mut seen = FxHashSet::default();
+    queue.push_back(module_root.to_path_buf());
+    if project_root != module_root {
+        queue.push_back(project_root.to_path_buf());
+    }
+
+    while let Some(pkg_root) = queue.pop_front() {
+        let Some(pkg) = read_native_dependency_package_json(&pkg_root) else {
+            continue;
+        };
+        for dep_name in pkg.dependencies.keys() {
+            let Some(dep_root) = resolve_native_dependency_root(&pkg_root, project_root, dep_name)
+            else {
+                continue;
+            };
+            let key = dep_root.to_string_lossy().replace('\\', "/");
+            if !seen.insert(key) {
+                continue;
+            }
+            queue.push_back(dep_root.clone());
+            roots.push((dep_name.clone(), dep_root));
+        }
+    }
+
+    roots
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arkdown_core::{
+        BuildOption, MergedStartupConfig, ProductConfig, ResOptions, SdkConfig, StartupTask,
+        StrictModeConfig,
+    };
+    use std::io::Write;
+
+    fn test_config(project_root: &Path, output_target: OutputTarget) -> ArkdownConfig {
+        ArkdownConfig {
+            project_root: project_root.to_path_buf(),
+            build_mode: BuildMode::Debug,
+            output_target,
+            product: ProductConfig {
+                name: "default".to_string(),
+                bundle_name: "com.example.app".to_string(),
+                compatible_sdk_version: "5.0.0(12)".to_string(),
+                compatible_sdk_version_stage: None,
+                runtime_os: "HarmonyOS".to_string(),
+                signing_config: None,
+                build_option: BuildOption {
+                    strict_mode: StrictModeConfig {
+                        case_sensitive_check: false,
+                        use_normalized_ohm_url: true,
+                    },
+                    ark_options: None,
+                    res_options: None,
+                    source_option: None,
+                    preload_system_so: false,
+                    preload_so: vec![],
+                    remove_permissions: vec![],
+                    aot_compile_mode: None,
+                    host_pgo: None,
+                    ap_path: None,
+                },
+            },
+            modules: vec![],
+            sdk_config: SdkConfig {
+                ets_loader_path: project_root.join("sdk/ets-loader"),
+                es2abc_path: project_root.join("sdk/es2abc"),
+                restool_path: project_root.join("sdk/restool"),
+                compile_api_version: 12,
+                has_rollup_plugin: true,
+                compile_sdk_version: "6.0.0.47".to_string(),
+            },
+        }
+    }
+
+    fn write_minimal_hsp(path: &Path, bundle_name: &str, version_code: u64) {
+        let file = std::fs::File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        let pack_info = serde_json::json!({
+            "summary": {
+                "app": {
+                    "bundleName": bundle_name,
+                    "bundleType": "shared",
+                    "version": { "code": version_code, "name": "1.0.0" }
+                },
+                "modules": []
+            },
+            "packages": []
+        });
+        zip.start_file("pack.info", opts).unwrap();
+        zip.write_all(serde_json::to_string(&pack_info).unwrap().as_bytes())
+            .unwrap();
+        zip.finish().unwrap();
+    }
+
+    #[test]
+    fn test_include_app_scope_false_only_effective_for_shared_modules() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut config = test_config(tmp.path(), OutputTarget::Hap);
+        config.product.build_option.res_options = Some(ResOptions {
+            res_path: None,
+            include_app_scope_res: false,
+            resource_directories: vec![],
+        });
+
+        for module_type in [
+            OhosModuleType::Entry,
+            OhosModuleType::Feature,
+            OhosModuleType::Har,
+        ] {
+            let module = ModuleConfig {
+                name: "module".to_string(),
+                src_path: tmp.path().join("module"),
+                module_type: module_type.clone(),
+            };
+            assert!(
+                include_app_scope_resources(&config, &module),
+                "{module_type} should ignore includeAppScopeRes=false"
+            );
+        }
+
+        let module = ModuleConfig {
+            name: "shared".to_string(),
+            src_path: tmp.path().join("shared"),
+            module_type: OhosModuleType::Shared,
+        };
+        assert!(!include_app_scope_resources(&config, &module));
+    }
+
+    #[test]
+    fn test_module_resource_dirs_use_target_resource_directories() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let project_root = tmp.path();
+        let module_root = project_root.join("entry");
+        std::fs::create_dir_all(module_root.join("src/main/resources")).unwrap();
+        std::fs::create_dir_all(module_root.join("src/phone/resources")).unwrap();
+        std::fs::write(
+            project_root.join("build-profile.json5"),
+            r#"{
+                app: {
+                    products: [{
+                        name: "default",
+                        bundleName: "com.example.app",
+                        compatibleSdkVersion: "5.0.0(12)",
+                        runtimeOS: "HarmonyOS"
+                    }]
+                },
+                modules: [{
+                    name: "entry",
+                    srcPath: "./entry",
+                    targets: [{
+                        name: "default",
+                        applyToProducts: ["default"],
+                        resource: {
+                            directories: ["src/phone/resources"]
+                        }
+                    }]
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        let module = ModuleConfig {
+            name: "entry".to_string(),
+            src_path: module_root.clone(),
+            module_type: OhosModuleType::Entry,
+        };
+        let config = test_config(project_root, OutputTarget::Hap);
+
+        assert_eq!(
+            module_resource_dirs(&config, &module),
+            vec![module_root.join("src/phone/resources")]
+        );
+    }
+
+    #[test]
+    fn test_module_resource_dirs_fall_back_to_src_main_resources() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let project_root = tmp.path();
+        let module_root = project_root.join("entry");
+        std::fs::create_dir_all(module_root.join("src/main/resources")).unwrap();
+        std::fs::write(
+            project_root.join("build-profile.json5"),
+            r#"{
+                app: {
+                    products: [{
+                        name: "default",
+                        bundleName: "com.example.app",
+                        compatibleSdkVersion: "5.0.0(12)",
+                        runtimeOS: "HarmonyOS"
+                    }]
+                },
+                modules: [{
+                    name: "entry",
+                    srcPath: "./entry",
+                    targets: [{ name: "default", applyToProducts: ["default"] }]
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        let module = ModuleConfig {
+            name: "entry".to_string(),
+            src_path: module_root.clone(),
+            module_type: OhosModuleType::Entry,
+        };
+        let config = test_config(project_root, OutputTarget::Hap);
+
+        assert_eq!(
+            module_resource_dirs(&config, &module),
+            vec![module_root.join("src/main/resources")]
+        );
+    }
+
+    #[test]
+    fn test_module_resource_dirs_fall_back_to_target_source_set_resources() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let project_root = tmp.path();
+        let module_root = project_root.join("entry");
+        std::fs::create_dir_all(module_root.join("src/main/resources")).unwrap();
+        std::fs::create_dir_all(module_root.join("src/phone/resources")).unwrap();
+        std::fs::write(
+            project_root.join("build-profile.json5"),
+            r#"{
+                app: {
+                    products: [{
+                        name: "default",
+                        bundleName: "com.example.app",
+                        compatibleSdkVersion: "5.0.0(12)",
+                        runtimeOS: "HarmonyOS"
+                    }]
+                },
+                modules: [{
+                    name: "entry",
+                    srcPath: "./entry",
+                    targets: [{ name: "phone", applyToProducts: ["default"] }]
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        let module = ModuleConfig {
+            name: "entry".to_string(),
+            src_path: module_root.clone(),
+            module_type: OhosModuleType::Entry,
+        };
+        let config = test_config(project_root, OutputTarget::Hap);
+
+        assert_eq!(
+            module_resource_dirs(&config, &module),
+            vec![module_root.join("src/phone/resources")]
+        );
+    }
+
+    #[test]
+    fn test_read_pack_metadata_from_appscope() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let app_scope = tmp.path().join("AppScope");
+        std::fs::create_dir_all(&app_scope).unwrap();
+        std::fs::write(
+            app_scope.join("app.json5"),
+            r#"{
+                "app": {
+                    "bundleType": "atomicService",
+                    "versionCode": 42,
+                    "versionName": "2.3.4"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(read_bundle_version_code(tmp.path()), 42);
+        assert_eq!(read_bundle_version_name(tmp.path()), "2.3.4");
+        assert_eq!(
+            read_bundle_type(tmp.path(), &test_config(tmp.path(), OutputTarget::Hap)),
+            "atomicService"
+        );
+        assert_eq!(
+            read_bundle_type(tmp.path(), &test_config(tmp.path(), OutputTarget::Hsp)),
+            "shared",
+            "HSP output must override AppScope bundleType in pack.info"
+        );
+    }
+
+    #[test]
+    fn test_ensure_startup_profile_ref_adds_app_startup_when_generated() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let module_json = tmp.path().join("module.json");
+        std::fs::write(
+            &module_json,
+            r#"{"module":{"name":"entry","type":"entry"}}"#,
+        )
+        .unwrap();
+
+        let startup_out = arkdown_profile::StartupConfigOutput {
+            config: Some(MergedStartupConfig {
+                system_preload_hint_startup_tasks: vec![StartupTask {
+                    name: "PreloadLib".to_string(),
+                    src_entry: "libcrypto.z.so".to_string(),
+                    run_on_thread: None,
+                    wait_on_main_thread: None,
+                    exclude_from_auto_start: None,
+                    dependencies: vec![],
+                    module_name: None,
+                    ohmurl: None,
+                    src_entry_absolute_path: None,
+                    startup_config_path: None,
+                    is_remote_byte_code_har: None,
+                }],
+                ..Default::default()
+            }),
+        };
+
+        ensure_startup_profile_ref_in_module_json(&module_json, &startup_out)
+            .expect("ensure appStartup");
+
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(module_json).unwrap()).unwrap();
+        assert_eq!(
+            value.pointer("/module/appStartup").and_then(|v| v.as_str()),
+            Some("$profile:startup_config")
+        );
+    }
+
+    #[test]
+    fn test_ensure_startup_profile_ref_preserves_existing_app_startup() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let module_json = tmp.path().join("module.json");
+        std::fs::write(
+            &module_json,
+            r#"{"module":{"name":"entry","type":"entry","appStartup":"$profile:custom"}}"#,
+        )
+        .unwrap();
+
+        let startup_out = arkdown_profile::StartupConfigOutput {
+            config: Some(MergedStartupConfig {
+                startup_tasks: vec![StartupTask {
+                    name: "Task".to_string(),
+                    src_entry: "./ets/startup/Task.ets".to_string(),
+                    run_on_thread: None,
+                    wait_on_main_thread: None,
+                    exclude_from_auto_start: None,
+                    dependencies: vec![],
+                    module_name: None,
+                    ohmurl: None,
+                    src_entry_absolute_path: None,
+                    startup_config_path: None,
+                    is_remote_byte_code_har: None,
+                }],
+                ..Default::default()
+            }),
+        };
+
+        ensure_startup_profile_ref_in_module_json(&module_json, &startup_out)
+            .expect("ensure appStartup");
+
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(module_json).unwrap()).unwrap();
+        assert_eq!(
+            value.pointer("/module/appStartup").and_then(|v| v.as_str()),
+            Some("$profile:custom")
+        );
+    }
+
+    #[test]
+    fn test_collect_native_libs_follows_declared_transitive_scoped_dependencies() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let project_root = tmp.path();
+        let module_root = project_root.join("entry");
+        std::fs::create_dir_all(module_root.join("src/main/libs/arm64-v8a")).unwrap();
+        std::fs::write(
+            module_root.join("src/main/libs/arm64-v8a/libself.so"),
+            b"self",
+        )
+        .unwrap();
+        std::fs::write(
+            module_root.join("oh-package.json5"),
+            r#"{ dependencies: { "source-har": "1.0.0" } }"#,
+        )
+        .unwrap();
+
+        let source_har = module_root.join("oh_modules/source-har");
+        std::fs::create_dir_all(&source_har).unwrap();
+        std::fs::write(
+            source_har.join("oh-package.json5"),
+            r#"{ dependencies: { "@scope/native-hsp": "1.0.0" } }"#,
+        )
+        .unwrap();
+
+        let native_hsp = source_har.join("oh_modules/@scope/native-hsp/libs/arm64-v8a");
+        std::fs::create_dir_all(&native_hsp).unwrap();
+        std::fs::write(native_hsp.join("libdeclared.so"), b"declared").unwrap();
+
+        let undeclared = module_root.join("oh_modules/undeclared-hsp/libs/arm64-v8a");
+        std::fs::create_dir_all(&undeclared).unwrap();
+        std::fs::write(undeclared.join("libundeclared.so"), b"undeclared").unwrap();
+
+        let module = ModuleConfig {
+            name: "entry".to_string(),
+            src_path: module_root,
+            module_type: OhosModuleType::Entry,
+        };
+        let libs = collect_native_libs(project_root, &module);
+        let names: Vec<_> = libs
+            .iter()
+            .filter_map(|path| path.file_name().and_then(|name| name.to_str()))
+            .collect();
+
+        assert!(names.contains(&"libself.so"));
+        assert!(names.contains(&"libdeclared.so"));
+        assert!(!names.contains(&"libundeclared.so"));
+    }
+
+    #[test]
+    fn test_collect_integrated_hsps_requires_api12() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let project_root = tmp.path();
+        let module_root = project_root.join("entry");
+        std::fs::create_dir_all(&module_root).unwrap();
+        std::fs::write(
+            module_root.join("oh-package.json5"),
+            r#"{ dependencies: { "remote-hsp": "1.0.0" } }"#,
+        )
+        .unwrap();
+
+        let remote_hsp = module_root.join("oh_modules/remote-hsp");
+        std::fs::create_dir_all(&remote_hsp).unwrap();
+        std::fs::write(
+            remote_hsp.join("oh-package.json5"),
+            r#"{ metadata: { isIntegratedHsp: true } }"#,
+        )
+        .unwrap();
+        write_minimal_hsp(&remote_hsp.join("remote-hsp.hsp"), "com.remote.hsp", 1);
+
+        let module = ModuleConfig {
+            name: "entry".to_string(),
+            src_path: module_root,
+            module_type: OhosModuleType::Entry,
+        };
+        let mut config = test_config(project_root, OutputTarget::Hap);
+        config.sdk_config.compile_api_version = 11;
+        config.product.compatible_sdk_version = "4.1.0(11)".to_string();
+
+        let err = collect_integrated_hsps(&module, &config, "com.host.app", 1000000)
+            .expect_err("integrated HSP must require API > 11");
+        assert!(
+            err.to_string().contains("INTEGRATED_HSP_UNSUPPORTED_API"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_collect_integrated_hsps_follows_declared_transitive_scoped_dependencies() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let project_root = tmp.path();
+        let module_root = project_root.join("entry");
+        std::fs::create_dir_all(&module_root).unwrap();
+        std::fs::write(
+            module_root.join("oh-package.json5"),
+            r#"{ dependencies: { "source-har": "1.0.0" } }"#,
+        )
+        .unwrap();
+
+        let source_har = module_root.join("oh_modules/source-har");
+        std::fs::create_dir_all(&source_har).unwrap();
+        std::fs::write(
+            source_har.join("oh-package.json5"),
+            r#"{ dependencies: { "@scope/remote-hsp": "1.0.0" } }"#,
+        )
+        .unwrap();
+
+        let remote_hsp = source_har.join("oh_modules/@scope/remote-hsp");
+        std::fs::create_dir_all(&remote_hsp).unwrap();
+        std::fs::write(
+            remote_hsp.join("oh-package.json5"),
+            r#"{ metadata: { isIntegratedHsp: true } }"#,
+        )
+        .unwrap();
+        write_minimal_hsp(&remote_hsp.join("remote-hsp.hsp"), "com.remote.hsp", 1);
+
+        let undeclared_hsp = module_root.join("oh_modules/undeclared-hsp");
+        std::fs::create_dir_all(&undeclared_hsp).unwrap();
+        std::fs::write(
+            undeclared_hsp.join("oh-package.json5"),
+            r#"{ metadata: { isIntegratedHsp: true } }"#,
+        )
+        .unwrap();
+        write_minimal_hsp(
+            &undeclared_hsp.join("undeclared-hsp.hsp"),
+            "com.undeclared.hsp",
+            1,
+        );
+
+        let module = ModuleConfig {
+            name: "entry".to_string(),
+            src_path: module_root,
+            module_type: OhosModuleType::Entry,
+        };
+        let config = test_config(project_root, OutputTarget::Hap);
+        let entries = collect_integrated_hsps(&module, &config, "com.host.app", 1000000)
+            .expect("collect integrated HSPs");
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].hsp_dir_name, "remote-hsp@1.0.0");
+        assert_eq!(entries[0].hsp_file_name, "remote-hsp.hsp");
+        assert!(entries[0].hsp_path.exists());
+    }
+
+    #[test]
+    fn test_should_process_module_privacy_profile_skips_hap_modules() {
+        assert!(!should_process_module_privacy_profile(
+            &OhosModuleType::Entry
+        ));
+        assert!(!should_process_module_privacy_profile(
+            &OhosModuleType::Feature
+        ));
+        assert!(should_process_module_privacy_profile(
+            &OhosModuleType::Shared
+        ));
+        assert!(should_process_module_privacy_profile(&OhosModuleType::Har));
+    }
+
+    #[test]
+    fn test_read_delivery_with_install_from_module_json5() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let module_root = tmp.path().join("entry");
+        std::fs::create_dir_all(module_root.join("src/main")).unwrap();
+
+        assert!(
+            read_delivery_with_install(&module_root),
+            "deliveryWithInstall defaults to true when absent"
+        );
+
+        std::fs::write(
+            module_root.join("src/main/module.json5"),
+            r#"{
+                "module": {
+                    "name": "entry",
+                    "type": "entry",
+                    "deliveryWithInstall": false
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert!(
+            !read_delivery_with_install(&module_root),
+            "deliveryWithInstall=false must be passed to pack.info"
+        );
     }
 }

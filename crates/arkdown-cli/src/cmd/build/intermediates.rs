@@ -1,8 +1,12 @@
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use arkdown_core::{ArkdownConfig, ModuleConfig};
 use arkdown_pack::minify_package_intermediate_module_json;
+use indexmap::IndexMap;
+use rustc_hash::FxHashSet;
+use serde::Deserialize;
 
 use super::compile_arkts_modules::slash_path;
 
@@ -202,13 +206,11 @@ pub(super) fn write_resource_config_files(
     let res_out = canonical_or_owned(res_out);
     let toolchains_dir = resource_toolchains_dir(&config.sdk_config.restool_path);
 
-    // Build the dependencies list from HSP/HAR resource tables installed in oh_modules/.
-    // Matches hvigor's restool config generation which includes dependency resource tables
-    // so that HSP resource IDs can be resolved during compilation.
-    let dependencies: Vec<serde_json::Value> = collect_dependency_resource_tables(
-        &module_root,
-        &project_root,
-    );
+    // Build the dependencies list from declared HSP resource tables installed in oh_modules/.
+    // Matches hvigor's DependencyManager-driven restool config generation closely enough
+    // for local/transitive dependencies, while avoiding undeclared installed packages.
+    let dependencies: Vec<serde_json::Value> =
+        collect_dependency_resource_tables(&module_root, &project_root);
 
     write_json_minified_newline(
         &res_out.join("opt-compression.json"),
@@ -251,7 +253,7 @@ pub(super) fn write_resource_config_files(
     Ok(())
 }
 
-/// Collect ResourceTable.txt paths from HSP dependencies in oh_modules/.
+/// Collect ResourceTable.txt paths from declared HSP dependencies in oh_modules/.
 ///
 /// Matches hvigor's restool config generation which includes dependency resource
 /// tables so that HSP resource IDs can be resolved during HAP/HSP compilation.
@@ -260,31 +262,75 @@ fn collect_dependency_resource_tables(
     project_root: &Path,
 ) -> Vec<serde_json::Value> {
     let mut tables = Vec::new();
-    for base in &[
-        module_root.join("oh_modules"),
-        project_root.join("oh_modules"),
-    ] {
-        if !base.is_dir() {
-            continue;
-        }
-        let Ok(entries) = std::fs::read_dir(base) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let pkg_dir = entry.path();
-            if !pkg_dir.is_dir() {
-                continue;
-            }
-            // Check for a ResourceTable.txt (HSP packages with resources).
-            let resource_table = pkg_dir.join("ResourceTable.txt");
-            if resource_table.is_file() {
-                tables.push(serde_json::json!({
-                    "resourceTable": path_string(&resource_table),
-                }));
-            }
+    for pkg_dir in collect_declared_dependency_roots(project_root, module_root) {
+        let resource_table = pkg_dir.join("ResourceTable.txt");
+        if resource_table.is_file() {
+            tables.push(serde_json::json!({
+                "resourceTable": path_string(&resource_table),
+            }));
         }
     }
     tables
+}
+
+#[derive(Deserialize)]
+struct ResourceDependencyPackageJson {
+    #[serde(default)]
+    dependencies: IndexMap<String, String>,
+}
+
+fn collect_declared_dependency_roots(project_root: &Path, module_root: &Path) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    let mut queue = VecDeque::new();
+    let mut seen = FxHashSet::default();
+    queue.push_back(module_root.to_path_buf());
+    if project_root != module_root {
+        queue.push_back(project_root.to_path_buf());
+    }
+
+    while let Some(pkg_root) = queue.pop_front() {
+        let Some(pkg) = read_dependency_package_json(&pkg_root) else {
+            continue;
+        };
+        for dep_name in pkg.dependencies.keys() {
+            let Some(dep_root) = resolve_dependency_root(&pkg_root, project_root, dep_name) else {
+                continue;
+            };
+            let dep_key = dep_root.to_string_lossy().into_owned();
+            if !seen.insert(dep_key) {
+                continue;
+            }
+            queue.push_back(dep_root.clone());
+            roots.push(dep_root);
+        }
+    }
+
+    roots
+}
+
+fn read_dependency_package_json(pkg_root: &Path) -> Option<ResourceDependencyPackageJson> {
+    let content = std::fs::read_to_string(pkg_root.join("oh-package.json5")).ok()?;
+    json5::from_str::<ResourceDependencyPackageJson>(&content).ok()
+}
+
+fn resolve_dependency_root(
+    issuer_root: &Path,
+    project_root: &Path,
+    dep_name: &str,
+) -> Option<PathBuf> {
+    let mut current = Some(issuer_root);
+    while let Some(root) = current {
+        let candidate = root.join("oh_modules").join(dep_name);
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+        if root == project_root {
+            break;
+        }
+        current = root.parent();
+    }
+    let candidate = project_root.join("oh_modules").join(dep_name);
+    candidate.is_dir().then_some(candidate)
 }
 
 pub(super) fn write_static_intermediate_files(module_root: &Path) -> Result<()> {
@@ -292,14 +338,18 @@ pub(super) fn write_static_intermediate_files(module_root: &Path) -> Result<()> 
         &module_root.join("build/default/intermediates/patch/default/base_native_libs.json"),
         br#"{"libs":{},"stripped":{}}"#,
     )?;
-    write_bytes(
+    write_bytes_if_missing(
         &module_root.join("build/default/intermediates/router_map/default/loader-router-map.json"),
         br#"{"routerMap":[]}"#,
     )?;
-    write_bytes(
+    write_bytes_if_missing(
         &module_root.join("build/default/intermediates/router_map/default/temp-router-map.json"),
         br#"{"routerMap":[]}"#,
     )?;
+    // NOTE: router map files are written by write_router_map_intermediates()
+    // before this function when router entries exist. Keep placeholders only
+    // for modules without router data; overwriting real maps loses hvigor's
+    // ProcessRouterMap output.
     // NOTE: temp-share-config.json is written by merge_share_config() before this
     // function is called. Do NOT write a placeholder here — it would overwrite the
     // real merged share config. (Bug fix: previously this overwrote the real config
@@ -313,6 +363,13 @@ pub(super) fn write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     }
     fs_err::write(path, bytes)?;
     Ok(())
+}
+
+fn write_bytes_if_missing(path: &Path, bytes: &[u8]) -> Result<()> {
+    if path.exists() {
+        return Ok(());
+    }
+    write_bytes(path, bytes)
 }
 
 pub(super) fn write_json_pretty(path: &Path, value: &serde_json::Value) -> Result<()> {
@@ -415,4 +472,206 @@ pub(super) fn copy_if_exists(from: &Path, to: &Path) -> Result<()> {
     }
     fs_err::copy(from, to)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arkdown_core::{
+        BuildMode, BuildOption, OhosModuleType, OutputTarget, ProductConfig, SdkConfig,
+        StrictModeConfig,
+    };
+
+    fn test_config(project_root: &Path) -> ArkdownConfig {
+        ArkdownConfig {
+            project_root: project_root.to_path_buf(),
+            build_mode: BuildMode::Debug,
+            output_target: OutputTarget::Hap,
+            product: ProductConfig {
+                name: "default".to_string(),
+                bundle_name: "com.example.app".to_string(),
+                compatible_sdk_version: "5.0.0(12)".to_string(),
+                compatible_sdk_version_stage: None,
+                runtime_os: "HarmonyOS".to_string(),
+                signing_config: None,
+                build_option: BuildOption {
+                    strict_mode: StrictModeConfig {
+                        case_sensitive_check: false,
+                        use_normalized_ohm_url: true,
+                    },
+                    ark_options: None,
+                    res_options: None,
+                    source_option: None,
+                    preload_system_so: false,
+                    preload_so: vec![],
+                    remove_permissions: vec![],
+                    aot_compile_mode: None,
+                    host_pgo: None,
+                    ap_path: None,
+                },
+            },
+            modules: vec![],
+            sdk_config: SdkConfig {
+                ets_loader_path: project_root.join("sdk/ets-loader"),
+                es2abc_path: project_root.join("sdk/es2abc"),
+                restool_path: project_root.join("sdk/default/openharmony/toolchains/restool"),
+                compile_api_version: 12,
+                has_rollup_plugin: true,
+                compile_sdk_version: "6.0.0.47".to_string(),
+            },
+        }
+    }
+
+    /// Regression test: write_static_intermediate_files() must NOT overwrite
+    /// the share config written by merge_share_config().
+    ///
+    /// This was a P0 bug: previously temp-share-config.json was written as
+    /// {"crossAppSharedConfig":[]} by write_static_intermediate_files() AFTER
+    /// the real merged share config was written, losing all entries.
+    #[test]
+    fn test_write_static_intermediates_does_not_overwrite_share_config() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let module_root = tmp.path();
+
+        // Simulate writing the real share config first.
+        let share_config_path = module_root
+            .join("build/default/intermediates/share_config/default/temp-share-config.json");
+        std::fs::create_dir_all(share_config_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &share_config_path,
+            r#"{"crossAppSharedConfig":[{"uri":"myapp://shared/Foo","packageName":"com.example.hsp"}]}"#,
+        )
+        .unwrap();
+
+        // Now call write_static_intermediate_files.
+        write_static_intermediate_files(module_root).expect("write_static_intermediate_files");
+
+        // The share config should still have the real content, NOT be overwritten.
+        let content = std::fs::read_to_string(&share_config_path).expect("read share config");
+        assert!(
+            content.contains("myapp://shared/Foo"),
+            "share config must not be overwritten by write_static_intermediate_files; got: {content}"
+        );
+        assert!(
+            !content.contains("[]"),
+            "share config must not be empty after write_static_intermediate_files; got: {content}"
+        );
+    }
+
+    #[test]
+    fn test_write_static_intermediates_does_not_overwrite_router_map() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let module_root = tmp.path();
+
+        let router_dir = module_root.join("build/default/intermediates/router_map/default");
+        let loader_router_map = router_dir.join("loader-router-map.json");
+        let temp_router_map = router_dir.join("temp-router-map.json");
+        std::fs::create_dir_all(&router_dir).unwrap();
+        let real_map = r#"{"routerMap":[{"name":"Home","ohmurl":"@bundle:com.example/entry/ets/pages/Home"}]}"#;
+        std::fs::write(&loader_router_map, real_map).unwrap();
+        std::fs::write(&temp_router_map, real_map).unwrap();
+
+        write_static_intermediate_files(module_root).expect("write_static_intermediate_files");
+
+        let loader_content =
+            std::fs::read_to_string(&loader_router_map).expect("read loader router map");
+        let temp_content = std::fs::read_to_string(&temp_router_map).expect("read temp router map");
+        assert!(loader_content.contains("@bundle:com.example/entry/ets/pages/Home"));
+        assert!(temp_content.contains("@bundle:com.example/entry/ets/pages/Home"));
+        assert!(
+            !loader_content.contains(r#""routerMap":[]"#),
+            "loader router map must not be overwritten: {loader_content}"
+        );
+        assert!(
+            !temp_content.contains(r#""routerMap":[]"#),
+            "temp router map must not be overwritten: {temp_content}"
+        );
+    }
+
+    #[test]
+    fn test_resource_config_includes_dependency_resource_tables() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let project_root = tmp.path();
+        let module_root = project_root.join("entry");
+        let hsp_root = module_root.join("oh_modules/shared-hsp");
+        let res_out = module_root.join("build/default/intermediates/res/default");
+        std::fs::create_dir_all(&hsp_root).unwrap();
+        std::fs::write(
+            module_root.join("oh-package.json5"),
+            r#"{ dependencies: { "shared-hsp": "1.0.0" } }"#,
+        )
+        .unwrap();
+        std::fs::write(hsp_root.join("ResourceTable.txt"), "res table").unwrap();
+
+        let module = ModuleConfig {
+            name: "entry".to_string(),
+            src_path: module_root.clone(),
+            module_type: OhosModuleType::Entry,
+        };
+        write_resource_config_files(project_root, &module, &test_config(project_root), &res_out)
+            .expect("write resource config");
+
+        let content =
+            std::fs::read_to_string(res_out.join("resConfig.json")).expect("read resConfig");
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let dependencies = parsed["dependencies"].as_array().unwrap();
+        assert_eq!(dependencies.len(), 1);
+        assert!(
+            dependencies[0]["resourceTable"]
+                .as_str()
+                .unwrap()
+                .ends_with("entry/oh_modules/shared-hsp/ResourceTable.txt"),
+            "dependency resource table must be written into resConfig.json: {content}"
+        );
+    }
+
+    #[test]
+    fn test_resource_config_follows_declared_transitive_scoped_resource_tables() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let project_root = tmp.path();
+        let module_root = project_root.join("entry");
+        let source_har = module_root.join("oh_modules/source-har");
+        let scoped_hsp = module_root.join("oh_modules/@scope/shared-hsp");
+        let undeclared_hsp = module_root.join("oh_modules/undeclared-hsp");
+        let res_out = module_root.join("build/default/intermediates/res/default");
+
+        std::fs::create_dir_all(&source_har).unwrap();
+        std::fs::create_dir_all(&scoped_hsp).unwrap();
+        std::fs::create_dir_all(&undeclared_hsp).unwrap();
+        std::fs::write(
+            module_root.join("oh-package.json5"),
+            r#"{ dependencies: { "source-har": "1.0.0" } }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            source_har.join("oh-package.json5"),
+            r#"{ dependencies: { "@scope/shared-hsp": "1.0.0" } }"#,
+        )
+        .unwrap();
+        std::fs::write(scoped_hsp.join("ResourceTable.txt"), "scoped table").unwrap();
+        std::fs::write(undeclared_hsp.join("ResourceTable.txt"), "undeclared table").unwrap();
+
+        let module = ModuleConfig {
+            name: "entry".to_string(),
+            src_path: module_root.clone(),
+            module_type: OhosModuleType::Entry,
+        };
+        write_resource_config_files(project_root, &module, &test_config(project_root), &res_out)
+            .expect("write resource config");
+
+        let content =
+            std::fs::read_to_string(res_out.join("resConfig.json")).expect("read resConfig");
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let dependencies = parsed["dependencies"].as_array().unwrap();
+        assert_eq!(dependencies.len(), 1);
+        let resource_table = dependencies[0]["resourceTable"].as_str().unwrap();
+        assert!(
+            resource_table.ends_with("entry/oh_modules/@scope/shared-hsp/ResourceTable.txt"),
+            "transitive scoped HSP table must be written into resConfig.json: {content}"
+        );
+        assert!(
+            !content.contains("undeclared-hsp"),
+            "undeclared HSP resource table must not be included: {content}"
+        );
+    }
 }

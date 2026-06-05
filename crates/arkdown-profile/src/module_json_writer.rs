@@ -6,10 +6,45 @@
 //! Do not use `#[serde(rename_all)]` derives here; order is controlled
 //! manually via `serde_json::Map::insert` call order.
 
-use rustc_hash::FxHashMap;
-use std::path::Path;
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 
-use arkdown_core::{ArkdownConfig, ArkdownError, HapManifest};
+use arkdown_config::build_profile::{parse_api_version, RawBuildProfile, RawTarget};
+use arkdown_core::{ArkdownConfig, ArkdownError, HapManifest, OhosModuleType};
+use indexmap::IndexMap;
+use serde::Deserialize;
+
+#[derive(Debug, Clone)]
+struct TargetAbilityOverride {
+    name: String,
+    icon: Option<String>,
+    label: Option<String>,
+    launch_type: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct DependencyProfileMerge {
+    metadata: Option<Vec<serde_json::Value>>,
+    request_permissions: Option<Vec<serde_json::Value>>,
+}
+
+#[derive(Debug)]
+struct DependencyModuleProfile {
+    module_name: String,
+    module_type: String,
+    source_path: PathBuf,
+    min_api_version: Option<u32>,
+    device_types: Vec<String>,
+    metadata: Vec<serde_json::Value>,
+    request_permissions: Vec<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct DependencyPackageJson {
+    #[serde(default)]
+    dependencies: IndexMap<String, String>,
+}
 
 /// Write the processed `module.json` for inclusion in the HAP.
 ///
@@ -26,6 +61,7 @@ pub fn write_module_json(
     resource_ids: Option<&FxHashMap<String, u32>>,
 ) -> Result<(), ArkdownError> {
     let app_json5_fields = ModuleJsonWriter::read_app_json5_fields(config)?;
+    let project_multi_projects = ModuleJsonWriter::read_project_multi_projects(config);
     let numeric_api =
         ModuleJsonWriter::compute_numeric_api_version(&config.product.compatible_sdk_version);
     let is_debug = matches!(config.build_mode, arkdown_core::BuildMode::Debug);
@@ -45,6 +81,10 @@ pub fn write_module_json(
     // Read raw module.json5 for preserve-and-mutate: unknown fields from the
     // source are appended verbatim after all known fields are emitted.
     let raw_module5 = ModuleJsonWriter::read_raw_module5(manifest, config);
+    let target_ability_overrides =
+        ModuleJsonWriter::read_target_ability_overrides(manifest, config);
+    let dependency_profile_merge =
+        ModuleJsonWriter::read_dependency_profile_merge(manifest, config, raw_module5.as_ref())?;
 
     let app_section = ModuleJsonWriter::build_app_section(
         &app_json5_fields,
@@ -52,35 +92,18 @@ pub fn write_module_json(
         is_debug,
         &config.sdk_config.compile_sdk_version,
         &config.product.bundle_name,
+        project_multi_projects,
         resource_ids,
     );
-    let remove_permissions = &config.product.build_option.remove_permissions;
-    let mut module_section = ModuleJsonWriter::manifest_to_json(
+    let module_section = ModuleJsonWriter::manifest_to_json(
         manifest,
         raw_module5.as_ref(),
         resource_ids,
         &package_name,
         &bundle_type,
+        &target_ability_overrides,
+        &dependency_profile_merge,
     );
-
-    // Apply removePermissions filter (hvigor MergeProfile.getRemovePermissionSet()).
-    // Removes any permissions in the remove_permissions list from the output module.json.
-    if !remove_permissions.is_empty() {
-        if let serde_json::Value::Object(ref mut obj) = module_section {
-            if let Some(serde_json::Value::Array(ref mut perms)) =
-                obj.get_mut("requestPermissions")
-            {
-                perms.retain(|perm| {
-                    let name = perm
-                        .get("name")
-                        .or_else(|| perm.as_str().map(|_| perm))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default();
-                    !remove_permissions.iter().any(|r| r == name)
-                });
-            }
-        }
-    }
 
     let mut combined = serde_json::Map::new();
     combined.insert("app".into(), serde_json::Value::Object(app_section));
@@ -141,6 +164,7 @@ impl ModuleJsonWriter {
         is_debug: bool,
         compile_sdk_version: &str,
         bundle_name_fallback: &str,
+        project_multi_projects: bool,
         resource_ids: Option<&FxHashMap<String, u32>>,
     ) -> serde_json::Map<String, serde_json::Value> {
         let icon_ref = src.get("icon").and_then(|v| v.as_str()).map(str::to_string);
@@ -208,13 +232,22 @@ impl ModuleJsonWriter {
         );
         obj.insert("apiReleaseType".into(), "Release".into());
         obj.insert("targetMinorAPIVersion".into(), 0u64.into());
+        if project_multi_projects {
+            obj.insert("multiProjects".into(), true.into());
+        }
 
         // Preserve-and-mutate passthrough: append any app.json5 `app` keys that
         // are not already emitted above.  Matches hvigor's cloneDeep + targeted
-        // mutation approach so that `sanitizer`, `multiProjects`, `deviceTypes`,
+        // mutation approach so that `sanitizer`, `deviceTypes`,
         // `car`, `wearable`, `tablet`, `startWindowBackgroundColor`, and any
         // future fields survive the build without needing explicit support here.
+        //
+        // `multiProjects` is special: hvigor ignores it from AppScope/app.json5
+        // and only writes the build-profile top-level `app.multiProjects`.
         for (key, value) in src {
+            if key == "multiProjects" {
+                continue;
+            }
             if !obj.contains_key(key.as_str()) {
                 // Skip empty arrays to avoid emitting noise.
                 if let serde_json::Value::Array(arr) = value {
@@ -227,6 +260,12 @@ impl ModuleJsonWriter {
         }
 
         obj
+    }
+
+    fn read_project_multi_projects(config: &ArkdownConfig) -> bool {
+        RawBuildProfile::load(&config.project_root)
+            .map(|profile| profile.app.multi_projects)
+            .unwrap_or(false)
     }
 
     /// Build the `module` JSON object from a processed [`HapManifest`].
@@ -244,6 +283,8 @@ impl ModuleJsonWriter {
         resource_ids: Option<&FxHashMap<String, u32>>,
         package_name: &str,
         bundle_type: &str,
+        target_ability_overrides: &[TargetAbilityOverride],
+        dependency_profile_merge: &DependencyProfileMerge,
     ) -> serde_json::Value {
         // Build a name→raw-ability lookup for preserve-and-mutate.
         // Hvigor cloneDeep-copies the ability array and mutates selected fields
@@ -251,11 +292,7 @@ impl ModuleJsonWriter {
         let raw_abilities: Vec<serde_json::Map<String, serde_json::Value>> = raw_module5
             .and_then(|m| m.get("abilities"))
             .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_object().cloned())
-                    .collect()
-            })
+            .map(|arr| arr.iter().filter_map(|v| v.as_object().cloned()).collect())
             .unwrap_or_default();
         let find_raw_ability = |name: &str| {
             raw_abilities
@@ -268,11 +305,22 @@ impl ModuleJsonWriter {
             .abilities
             .iter()
             .map(|a| {
+                let target_override = target_ability_overrides
+                    .iter()
+                    .find(|target_override| target_override.name == a.name);
+                let icon = target_override
+                    .and_then(|target_override| target_override.icon.as_deref())
+                    .or(a.icon.as_deref());
+                let label = target_override
+                    .and_then(|target_override| target_override.label.as_deref())
+                    .or(a.label.as_deref());
+                let launch_type = target_override
+                    .and_then(|target_override| target_override.launch_type.as_deref());
                 let icon_id = resource_ids
-                    .zip(a.icon.as_deref())
+                    .zip(icon)
                     .and_then(|(ids, r)| Self::resolve_res_ref(r, ids));
                 let label_id = resource_ids
-                    .zip(a.label.as_deref())
+                    .zip(label)
                     .and_then(|(ids, r)| Self::resolve_res_ref(r, ids));
                 let description_id = resource_ids
                     .zip(a.description.as_deref())
@@ -297,8 +345,8 @@ impl ModuleJsonWriter {
                 if let Some(id) = start_window_icon_id {
                     obj.insert("startWindowIconId".into(), (id as u64).into());
                 }
-                if let Some(v) = &a.icon {
-                    obj.insert("icon".into(), v.clone().into());
+                if let Some(v) = icon {
+                    obj.insert("icon".into(), v.into());
                 }
                 if let Some(v) = &a.start_window_icon {
                     obj.insert("startWindowIcon".into(), v.clone().into());
@@ -309,11 +357,14 @@ impl ModuleJsonWriter {
                 if let Some(v) = &a.description {
                     obj.insert("description".into(), v.clone().into());
                 }
-                if let Some(v) = &a.label {
-                    obj.insert("label".into(), v.clone().into());
+                if let Some(v) = label {
+                    obj.insert("label".into(), v.into());
                 }
                 if !a.skills.is_empty() {
                     obj.insert("skills".into(), serde_json::json!(a.skills));
+                }
+                if let Some(v) = launch_type {
+                    obj.insert("launchType".into(), v.into());
                 }
                 obj.insert("srcEntry".into(), a.src_entry.clone().into());
                 if let Some(id) = description_id {
@@ -334,11 +385,7 @@ impl ModuleJsonWriter {
         let raw_ext_abilities: Vec<serde_json::Map<String, serde_json::Value>> = raw_module5
             .and_then(|m| m.get("extensionAbilities"))
             .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_object().cloned())
-                    .collect()
-            })
+            .map(|arr| arr.iter().filter_map(|v| v.as_object().cloned()).collect())
             .unwrap_or_default();
         let find_raw_ext_ability = |name: &str| {
             raw_ext_abilities
@@ -451,10 +498,19 @@ impl ModuleJsonWriter {
             })
             .collect();
         obj.insert("dependencies".into(), serde_json::Value::Array(deps));
-        // requestPermissions: preserved from module.json5, filtered by
-        // buildOption.removePermissions (hvigor MergeProfile.getRemovePermissionSet()).
-        if let Some(perms) = raw_module5.and_then(|v| v.get("requestPermissions")) {
-            if perms.as_array().map_or(false, |a| !a.is_empty()) {
+        // requestPermissions: start with the current module permissions, then
+        // append HAR/HSP dependency permissions by name. Hvigor's
+        // removePermissions only filters dependency permissions after removing
+        // names already declared by the current module from the removal set.
+        if let Some(perms) = dependency_profile_merge.request_permissions.as_ref() {
+            if !perms.is_empty() {
+                obj.insert(
+                    "requestPermissions".into(),
+                    serde_json::Value::Array(perms.clone()),
+                );
+            }
+        } else if let Some(perms) = raw_module5.and_then(|v| v.get("requestPermissions")) {
+            if perms.as_array().is_some_and(|a| !a.is_empty()) {
                 obj.insert("requestPermissions".into(), perms.clone());
             }
         }
@@ -519,7 +575,14 @@ impl ModuleJsonWriter {
                 }
             }
         }
-
+        if let Some(metadata) = dependency_profile_merge.metadata.as_ref() {
+            if !metadata.is_empty() {
+                obj.insert(
+                    "metadata".into(),
+                    serde_json::Value::Array(metadata.clone()),
+                );
+            }
+        }
         serde_json::Value::Object(obj)
     }
 
@@ -543,7 +606,10 @@ impl ModuleJsonWriter {
     ///
     /// Used for preserve-and-mutate field passthrough.  Returns `None` when the
     /// module is not in `config.modules`, the file is absent, or parsing fails.
-    fn read_raw_module5(manifest: &HapManifest, config: &ArkdownConfig) -> Option<serde_json::Value> {
+    fn read_raw_module5(
+        manifest: &HapManifest,
+        config: &ArkdownConfig,
+    ) -> Option<serde_json::Value> {
         let src_path = config
             .modules
             .iter()
@@ -553,6 +619,567 @@ impl ModuleJsonWriter {
         let content = fs_err::read_to_string(&path).ok()?;
         let raw: serde_json::Value = json5::from_str(&content).ok()?;
         raw.get("module").cloned()
+    }
+
+    fn read_dependency_profile_merge(
+        manifest: &HapManifest,
+        config: &ArkdownConfig,
+        raw_module5: Option<&serde_json::Value>,
+    ) -> Result<DependencyProfileMerge, ArkdownError> {
+        if matches!(manifest.module_type, OhosModuleType::Har) {
+            return Ok(DependencyProfileMerge::default());
+        }
+
+        let Some(module_cfg) = config
+            .modules
+            .iter()
+            .find(|module| module.name == manifest.module_name)
+        else {
+            return Ok(DependencyProfileMerge::default());
+        };
+
+        let dependency_profiles =
+            Self::read_dependency_module_profiles(&module_cfg.src_path, &config.project_root)?;
+        if dependency_profiles.is_empty() {
+            return Ok(DependencyProfileMerge::default());
+        }
+        let compatible_api = parse_api_version(&config.product.compatible_sdk_version)
+            .unwrap_or(config.sdk_config.compile_api_version);
+        for profile in dependency_profiles.iter().filter(|profile| {
+            !profile.metadata.is_empty() || !profile.request_permissions.is_empty()
+        }) {
+            Self::validate_dependency_module_profile(
+                profile,
+                &manifest.device_types,
+                compatible_api,
+            )?;
+        }
+
+        let current_metadata = Self::array_field(raw_module5, "metadata");
+        let current_request_permissions = Self::array_field(raw_module5, "requestPermissions");
+
+        let mut merge = DependencyProfileMerge::default();
+        if dependency_profiles
+            .iter()
+            .any(|profile| !profile.metadata.is_empty())
+        {
+            merge.metadata = Some(Self::merge_named_arrays_from_dependencies(
+                current_metadata,
+                dependency_profiles
+                    .iter()
+                    .map(|profile| (profile.module_name.as_str(), profile.metadata.as_slice())),
+                "metadata",
+            ));
+        }
+
+        if dependency_profiles
+            .iter()
+            .any(|profile| !profile.request_permissions.is_empty())
+        {
+            let remove_permissions = Self::effective_remove_permission_set(
+                &config.product.build_option.remove_permissions,
+                &current_request_permissions,
+            );
+            merge.request_permissions = Some(Self::merge_request_permissions_from_dependencies(
+                current_request_permissions,
+                dependency_profiles.iter().map(|profile| {
+                    (
+                        profile.module_name.as_str(),
+                        profile.request_permissions.as_slice(),
+                    )
+                }),
+                &remove_permissions,
+            ));
+        }
+
+        Ok(merge)
+    }
+
+    fn read_dependency_module_profiles(
+        module_root: &Path,
+        project_root: &Path,
+    ) -> Result<Vec<DependencyModuleProfile>, ArkdownError> {
+        let mut profiles = Vec::new();
+        for package_dir in Self::collect_dependency_package_dirs(module_root, project_root)? {
+            if let Some(profile) = Self::read_dependency_module_profile(&package_dir) {
+                profiles.push(profile);
+            }
+        }
+        Ok(profiles)
+    }
+
+    fn collect_dependency_package_dirs(
+        module_root: &Path,
+        project_root: &Path,
+    ) -> Result<Vec<PathBuf>, ArkdownError> {
+        let mut queue = VecDeque::new();
+        let mut seen = FxHashSet::default();
+        let mut packages = Vec::new();
+        queue.push_back(module_root.to_path_buf());
+        if project_root != module_root {
+            queue.push_back(project_root.to_path_buf());
+        }
+
+        while let Some(pkg_root) = queue.pop_front() {
+            let Some(pkg) = Self::read_dependency_package_json(&pkg_root) else {
+                continue;
+            };
+
+            for dep_name in pkg.dependencies.keys() {
+                let Some(dep_root) =
+                    Self::resolve_dependency_root(&pkg_root, project_root, dep_name)
+                else {
+                    continue;
+                };
+                let key = dep_root.to_string_lossy().replace('\\', "/");
+                if !seen.insert(key) {
+                    continue;
+                }
+                queue.push_back(dep_root.clone());
+                packages.push(dep_root);
+            }
+        }
+
+        Ok(packages)
+    }
+
+    fn read_dependency_package_json(pkg_root: &Path) -> Option<DependencyPackageJson> {
+        let content = std::fs::read_to_string(pkg_root.join("oh-package.json5")).ok()?;
+        json5::from_str::<DependencyPackageJson>(&content).ok()
+    }
+
+    fn resolve_dependency_root(
+        issuer_root: &Path,
+        project_root: &Path,
+        dep_name: &str,
+    ) -> Option<PathBuf> {
+        let mut current = Some(issuer_root);
+        while let Some(root) = current {
+            let candidate = root.join("oh_modules").join(dep_name);
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
+            if root == project_root {
+                break;
+            }
+            current = root.parent();
+        }
+        let candidate = project_root.join("oh_modules").join(dep_name);
+        candidate.is_dir().then_some(candidate)
+    }
+
+    fn read_dependency_module_profile(package_dir: &Path) -> Option<DependencyModuleProfile> {
+        for candidate in Self::dependency_module_json_candidates(package_dir) {
+            if !candidate.is_file() {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(&candidate) else {
+                continue;
+            };
+            let Ok(raw) = json5::from_str::<serde_json::Value>(&content) else {
+                continue;
+            };
+            let Some(module) = raw.get("module").and_then(|value| value.as_object()) else {
+                continue;
+            };
+            let Some(module_type) = module.get("type").and_then(|value| value.as_str()) else {
+                continue;
+            };
+            if module_type != "har" && module_type != "shared" {
+                return None;
+            }
+            let app = raw.get("app").and_then(|value| value.as_object());
+            let module_name = module
+                .get("packageName")
+                .or_else(|| module.get("name"))
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+                .or_else(|| {
+                    package_dir
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(|| "unknown".to_string());
+            let module_value = serde_json::Value::Object(module.clone());
+            return Some(DependencyModuleProfile {
+                module_name,
+                module_type: module_type.to_string(),
+                source_path: candidate,
+                min_api_version: app
+                    .and_then(|app| app.get("minAPIVersion"))
+                    .and_then(Self::parse_dependency_min_api_version),
+                device_types: module
+                    .get("deviceTypes")
+                    .and_then(|value| value.as_array())
+                    .map(|values| {
+                        values
+                            .iter()
+                            .filter_map(|value| value.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                metadata: Self::array_field(Some(&module_value), "metadata"),
+                request_permissions: Self::array_field(Some(&module_value), "requestPermissions"),
+            });
+        }
+        None
+    }
+
+    fn dependency_module_json_candidates(package_dir: &Path) -> Vec<PathBuf> {
+        vec![
+            package_dir.join("build/default/intermediates/merge_profile/default/module.json"),
+            package_dir.join("build/default/intermediates/res/default/module.json"),
+            package_dir.join("src/main/module.json5"),
+            package_dir.join("src/main/module.json"),
+            package_dir.join("module.json5"),
+            package_dir.join("module.json"),
+        ]
+    }
+
+    fn array_field(raw_module: Option<&serde_json::Value>, field: &str) -> Vec<serde_json::Value> {
+        raw_module
+            .and_then(|module| module.get(field))
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn effective_remove_permission_set(
+        configured: &[String],
+        current_request_permissions: &[serde_json::Value],
+    ) -> FxHashSet<String> {
+        let mut remove_permissions: FxHashSet<String> = configured.iter().cloned().collect();
+        if remove_permissions.is_empty() {
+            return remove_permissions;
+        }
+
+        let mut kept_current = Vec::new();
+        for permission in current_request_permissions {
+            let Some(name) = Self::object_name(permission) else {
+                continue;
+            };
+            if remove_permissions.remove(name) {
+                kept_current.push(name.to_string());
+            }
+        }
+        if !kept_current.is_empty() {
+            tracing::warn!(
+                permissions = kept_current.join(", "),
+                "permissions configured in removePermissions also exist in the current module and will not be removed"
+            );
+        }
+        remove_permissions
+    }
+
+    fn merge_request_permissions_from_dependencies<'a, I>(
+        current: Vec<serde_json::Value>,
+        dependencies: I,
+        remove_permissions: &FxHashSet<String>,
+    ) -> Vec<serde_json::Value>
+    where
+        I: IntoIterator<Item = (&'a str, &'a [serde_json::Value])>,
+    {
+        let mut merged = Vec::new();
+        let mut seen = FxHashSet::default();
+        for permission in current {
+            if let Some(name) = Self::object_name(&permission) {
+                seen.insert(name.to_string());
+            }
+            merged.push(permission);
+        }
+
+        for (module_name, permissions) in dependencies {
+            for permission in permissions {
+                let Some(name) = Self::object_name(permission) else {
+                    tracing::warn!(
+                        module = module_name,
+                        "dependency requestPermissions entry with empty name will not be merged"
+                    );
+                    continue;
+                };
+                if seen.contains(name) || remove_permissions.contains(name) {
+                    continue;
+                }
+                seen.insert(name.to_string());
+                merged.push(permission.clone());
+            }
+        }
+        merged
+    }
+
+    fn merge_named_arrays_from_dependencies<'a, I>(
+        current: Vec<serde_json::Value>,
+        dependencies: I,
+        field_name: &str,
+    ) -> Vec<serde_json::Value>
+    where
+        I: IntoIterator<Item = (&'a str, &'a [serde_json::Value])>,
+    {
+        let mut merged = Vec::new();
+        let mut seen = FxHashSet::default();
+        for item in current {
+            if let Some(name) = Self::object_name(&item) {
+                seen.insert(name.to_string());
+            }
+            merged.push(item);
+        }
+
+        for (module_name, items) in dependencies {
+            for item in items {
+                let Some(name) = Self::object_name(item) else {
+                    tracing::warn!(
+                        module = module_name,
+                        field = field_name,
+                        "dependency profile array entry with empty name will not be merged"
+                    );
+                    continue;
+                };
+                if seen.contains(name) {
+                    continue;
+                }
+                seen.insert(name.to_string());
+                merged.push(item.clone());
+            }
+        }
+        merged
+    }
+
+    fn object_name(value: &serde_json::Value) -> Option<&str> {
+        value
+            .get("name")
+            .and_then(|name| name.as_str())
+            .filter(|name| !name.is_empty())
+    }
+
+    fn validate_dependency_module_profile(
+        profile: &DependencyModuleProfile,
+        current_device_types: &[String],
+        compatible_api: u32,
+    ) -> Result<(), ArkdownError> {
+        let Some(min_api_version) = profile.min_api_version else {
+            return Err(ArkdownError::ParseError {
+                file: profile.source_path.to_string_lossy().into_owned(),
+                message: format!(
+                    "EMPTY_MIN_API_VERSION: dependency {} app.minAPIVersion is required",
+                    profile.module_name
+                ),
+            });
+        };
+        if compatible_api < min_api_version {
+            return Err(ArkdownError::ParseError {
+                file: profile.source_path.to_string_lossy().into_owned(),
+                message: format!(
+                    "HAR_UNSUPPORTED_API_VERSION: dependency {} requires minAPIVersion {}, current compatible API is {}",
+                    profile.module_name, min_api_version, compatible_api
+                ),
+            });
+        }
+
+        if profile.module_type != "har" {
+            Self::validate_dependency_device_types(profile, current_device_types)?;
+        }
+        Ok(())
+    }
+
+    fn validate_dependency_device_types(
+        profile: &DependencyModuleProfile,
+        current_device_types: &[String],
+    ) -> Result<(), ArkdownError> {
+        let mut supported: FxHashSet<&str> =
+            profile.device_types.iter().map(String::as_str).collect();
+        if supported.contains("default") || supported.contains("phone") {
+            supported.insert("default");
+            supported.insert("phone");
+        }
+
+        let unsupported: Vec<&str> = current_device_types
+            .iter()
+            .map(String::as_str)
+            .filter(|device_type| !supported.contains(device_type))
+            .collect();
+        if unsupported.is_empty() {
+            return Ok(());
+        }
+
+        Err(ArkdownError::ParseError {
+            file: profile.source_path.to_string_lossy().into_owned(),
+            message: format!(
+                "CURRENT_MODULE_NOT_SUPPORT_THE_DEVICE_TYPE: dependency {} module type {} does not support {}",
+                profile.module_name,
+                profile.module_type,
+                unsupported.join(", ")
+            ),
+        })
+    }
+
+    fn parse_dependency_min_api_version(value: &serde_json::Value) -> Option<u32> {
+        let text = match value {
+            serde_json::Value::Number(number) => number.to_string(),
+            serde_json::Value::String(text) => text.clone(),
+            _ => return None,
+        };
+        let candidate = if text.len() >= 4 {
+            &text[text.len().saturating_sub(3)..]
+        } else {
+            text.as_str()
+        };
+        let digits: String = candidate
+            .chars()
+            .skip_while(|ch| !ch.is_ascii_digit())
+            .take_while(|ch| ch.is_ascii_digit())
+            .collect();
+        digits.parse().ok()
+    }
+
+    /// Read the current effective target's `source.abilities` overrides from
+    /// build-profile.json5 and apply hvigor's HAP-only merge-profile rule.
+    fn read_target_ability_overrides(
+        manifest: &HapManifest,
+        config: &ArkdownConfig,
+    ) -> Vec<TargetAbilityOverride> {
+        let Some(module_cfg) = config
+            .modules
+            .iter()
+            .find(|module| module.name == manifest.module_name)
+        else {
+            return Vec::new();
+        };
+
+        let Ok(profile) = RawBuildProfile::load(&config.project_root) else {
+            return Vec::new();
+        };
+        let Some(raw_module) = profile
+            .modules
+            .into_iter()
+            .find(|module| module.name == manifest.module_name)
+        else {
+            return Vec::new();
+        };
+        let build_mode_name = match config.build_mode {
+            arkdown_core::BuildMode::Debug => "debug",
+            arkdown_core::BuildMode::Release => "release",
+        };
+        let Some(target) = Self::select_effective_target(
+            &raw_module.targets,
+            &config.product.name,
+            build_mode_name,
+        ) else {
+            return Vec::new();
+        };
+        let Some(source) = target.source.as_ref() else {
+            return Vec::new();
+        };
+        if source.abilities.is_empty() {
+            return Vec::new();
+        }
+
+        if !matches!(
+            module_cfg.module_type,
+            OhosModuleType::Entry | OhosModuleType::Feature
+        ) {
+            if matches!(module_cfg.module_type, OhosModuleType::Shared) {
+                tracing::warn!(
+                    module = manifest.module_name,
+                    "hsp module does not support custom icon/label/lauchType in buildProfile"
+                );
+            }
+            return Vec::new();
+        }
+
+        let ability_names: FxHashSet<&str> = manifest
+            .abilities
+            .iter()
+            .map(|ability| ability.name.as_str())
+            .collect();
+        source
+            .abilities
+            .iter()
+            .filter_map(|ability| {
+                if ability.name.is_empty() {
+                    return None;
+                }
+                if !ability_names.contains(ability.name.as_str()) {
+                    tracing::warn!(
+                        ability = ability.name,
+                        "The ability name in build-profile can't find correspond ability name in module.json"
+                    );
+                    return None;
+                }
+                Some(TargetAbilityOverride {
+                    name: ability.name.clone(),
+                    icon: ability.icon.clone(),
+                    label: ability.label.clone(),
+                    launch_type: ability.launch_type.clone(),
+                })
+            })
+            .collect()
+    }
+
+    /// Select the single effective target arkdown can currently materialize.
+    ///
+    /// Hvigor can execute multiple targets for one product and emit multiple
+    /// artifacts.  Until arkdown has that execution model, prefer the applied
+    /// `default` target, then the first target applied to the selected product
+    /// and build mode.
+    ///
+    /// Selection priority (mirrors hvigor):
+    /// 1. Named `"default"` + matches product + matches build mode.
+    /// 2. Any target matching product + build mode.
+    /// 3. Product match without build mode constraint.
+    /// 4. Bare `"default"` target.
+    fn select_effective_target<'a>(
+        targets: &'a [RawTarget],
+        product_name: &str,
+        build_mode_name: &str,
+    ) -> Option<&'a RawTarget> {
+        // 1. Named "default" + matches product + matches build mode.
+        if let Some(t) = targets.iter().find(|target| {
+            target.name == "default"
+                && Self::target_applies_to_product(target, product_name)
+                && Self::target_applies_to_build_mode(target, build_mode_name)
+        }) {
+            return Some(t);
+        }
+        // 2. Any target matching product + build mode.
+        if let Some(t) = targets.iter().find(|target| {
+            Self::target_applies_to_product(target, product_name)
+                && Self::target_applies_to_build_mode(target, build_mode_name)
+        }) {
+            return Some(t);
+        }
+        // 3. Product match without build mode constraint.
+        if let Some(t) = targets
+            .iter()
+            .find(|target| Self::target_applies_to_product(target, product_name))
+        {
+            return Some(t);
+        }
+        // 4. Bare "default".
+        targets.iter().find(|target| target.name == "default")
+    }
+
+    fn target_applies_to_product(target: &RawTarget, product_name: &str) -> bool {
+        if target.apply_to_products.is_empty() {
+            product_name == "default"
+        } else {
+            target
+                .apply_to_products
+                .iter()
+                .any(|product| product == product_name)
+        }
+    }
+
+    /// Return `true` if the target's `buildModeSet` is empty (matches all
+    /// modes) or contains `build_mode_name`.
+    fn target_applies_to_build_mode(target: &RawTarget, build_mode_name: &str) -> bool {
+        if target.build_mode_set.is_empty() {
+            return true;
+        }
+        target
+            .build_mode_set
+            .iter()
+            .any(|mode| mode.name == build_mode_name)
     }
 
     /// Resolve a `$type:name` resource reference to a numeric ID.

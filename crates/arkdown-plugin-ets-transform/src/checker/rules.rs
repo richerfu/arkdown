@@ -44,7 +44,11 @@ pub fn check(source: &str, file: &str) -> Vec<EtsTransformError> {
             Statement::StructStatement(statement) => {
                 check_struct_component(statement, file, &mut seen_component_names, &mut errors);
                 // Count @Entry decorators — at most one per file.
-                if statement.decorators.iter().any(|d| decorator_name(d) == "Entry") {
+                if statement
+                    .decorators
+                    .iter()
+                    .any(|d| decorator_name(d) == "Entry")
+                {
                     entry_count += 1;
                 }
             }

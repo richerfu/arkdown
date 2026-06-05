@@ -382,10 +382,10 @@ fn bytecode_insn_len(bytecode: &[u8], pos: usize, opcode: u8) -> usize {
         0xfe if matches!(bytecode.get(pos + 1), Some(0x05 | 0x07)) => 3,
         0xfe => 2,
         // callruntime (0xfb) prefix — length depends on sub-opcode
-        0xfb if bytecode.get(pos + 1) == Some(&0x04) => 6,  // createprivateproperty
-        0xfb if bytecode.get(pos + 1) == Some(&0x05) => 8,  // defineprivateproperty
+        0xfb if bytecode.get(pos + 1) == Some(&0x04) => 6, // createprivateproperty
+        0xfb if bytecode.get(pos + 1) == Some(&0x05) => 8, // defineprivateproperty
         0xfb if matches!(bytecode.get(pos + 1), Some(0x13 | 0x14)) => 3, // istrue/isfalse
-        0xfb => 5,  // default callruntime (e.g. 0x01 definefieldbyvalue)
+        0xfb => 5, // default callruntime (e.g. 0x01 definefieldbyvalue)
         _ => 1,
     }
 }
@@ -627,6 +627,28 @@ class B { constructor() { this.b = 2; } }"#,
         defineclass_ctor_offsets, constructor_offsets,
         "defineclasswithbuffer must reference the matching constructor MethodItem offsets"
     );
+}
+
+#[test]
+fn test_constructor_default_negative_parameter_compiles_without_debug_source() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = tmp.path().join("constructor-default-negative.abc");
+    module_compiler()
+        .compile(
+            vec![module_record(
+                "com.example.app/entry/ets/pages/Index",
+                r#"class A {
+  constructor(value = -1) {
+    this.value = value;
+  }
+}
+new A();"#,
+            )],
+            &out,
+        )
+        .expect("constructor default negative parameter must compile without debug source");
+
+    assert!(out.exists());
 }
 
 #[test]
@@ -4635,7 +4657,10 @@ fn test_generator_function_uses_state_machine_opcodes() {
     let record_name = "test/generator";
     module_compiler()
         .compile(
-            vec![module_record(record_name, r#"function* ids() { yield 1; yield 2; }"#)],
+            vec![module_record(
+                record_name,
+                r#"function* ids() { yield 1; yield 2; }"#,
+            )],
             &out,
         )
         .expect("generator function must compile via state-machine lowering");

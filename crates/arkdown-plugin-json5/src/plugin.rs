@@ -57,6 +57,7 @@ impl Plugin for Json5Plugin {
 }
 
 // Keep pub(crate) wrapper for tests
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn load_json_file(id: &str) -> HookLoadReturn {
     Json5Plugin::load_json_file_impl(id)
 }

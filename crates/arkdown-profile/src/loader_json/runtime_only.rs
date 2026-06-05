@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use arkdown_core::{ArkdownConfig, ModuleConfig};
+use indexmap::IndexMap;
 
 use super::{to_absolute_path_string, to_unix_path};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -104,12 +105,8 @@ fn read_dependency_runtime_only_package_names(
     module_root: &Path,
     project_root: &Path,
 ) -> Vec<String> {
-    let dep_names = read_package_dep_names(module_root);
     let mut names = Vec::new();
-    for dep_name in dep_names {
-        let Some(pkg_dir) = resolve_oh_module_dir(&dep_name, module_root, project_root) else {
-            continue;
-        };
+    for pkg_dir in collect_declared_dependency_roots(module_root, project_root) {
         names.extend(read_pkg_runtime_only_packages(&pkg_dir));
     }
     names
@@ -125,7 +122,7 @@ fn read_package_dep_names(module_root: &Path) -> Vec<String> {
     #[serde(rename_all = "camelCase")]
     struct PkgDeps {
         #[serde(default)]
-        dependencies: FxHashMap<String, String>,
+        dependencies: IndexMap<String, String>,
     }
 
     json5::from_str::<PkgDeps>(&content)
@@ -251,14 +248,8 @@ pub(super) fn collect_runtime_only_source_files(
     }
 
     // D3: also collect sources from dependency metadata.runtimeOnly.sources.
-    // Matches hvigor's processIndirectDependency() for transitive runtimeOnly.sources.
-    let dep_names = read_package_dep_names(&module_cfg.src_path);
-    for dep_name in &dep_names {
-        let Some(pkg_dir) =
-            resolve_oh_module_dir(dep_name, &module_cfg.src_path, &config.project_root)
-        else {
-            continue;
-        };
+    // Matches hvigor's processIndirectDependency() over the dependency graph.
+    for pkg_dir in collect_declared_dependency_roots(&module_cfg.src_path, &config.project_root) {
         let rt = read_pkg_runtime_only(&pkg_dir);
         for source in &rt.sources {
             let path = Path::new(source);
@@ -297,15 +288,9 @@ pub(super) fn collect_runtime_only_package_source_files(
             .unwrap_or_default(),
     );
 
-    // D3: also include runtimeOnly.packages from direct dependency metadata
-    // (matches hvigor's processIndirectDependency() transitive runtimeOnly traversal).
-    let dep_names = read_package_dep_names(&module_cfg.src_path);
-    for dep_name in dep_names {
-        let Some(pkg_dir) =
-            resolve_oh_module_dir(&dep_name, &module_cfg.src_path, &config.project_root)
-        else {
-            continue;
-        };
+    // D3: also include runtimeOnly.packages from dependency metadata
+    // (matches hvigor's processIndirectDependency() over the dependency graph).
+    for pkg_dir in collect_declared_dependency_roots(&module_cfg.src_path, &config.project_root) {
         packages.extend(read_pkg_runtime_only_packages(&pkg_dir));
     }
 
@@ -328,6 +313,54 @@ pub(super) fn collect_runtime_only_package_source_files(
     }
     dedupe_paths(&mut files);
     files
+}
+
+fn collect_declared_dependency_roots(module_root: &Path, project_root: &Path) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    let mut visited: FxHashSet<String> = FxHashSet::default();
+    let mut queue: std::collections::VecDeque<PathBuf> = std::collections::VecDeque::new();
+    queue.push_back(module_root.to_path_buf());
+    if project_root != module_root {
+        queue.push_back(project_root.to_path_buf());
+    }
+
+    while let Some(pkg_root) = queue.pop_front() {
+        for dep_name in read_package_dep_names(&pkg_root) {
+            let Some(dep_root) =
+                resolve_declared_dep_dir(&dep_name, &pkg_root, module_root, project_root)
+            else {
+                continue;
+            };
+
+            if !visited.insert(to_absolute_path_string(&dep_root)) {
+                continue;
+            }
+
+            roots.push(dep_root.clone());
+            queue.push_back(dep_root);
+        }
+    }
+
+    roots
+}
+
+fn resolve_declared_dep_dir(
+    dep_name: &str,
+    issuer_root: &Path,
+    module_root: &Path,
+    project_root: &Path,
+) -> Option<PathBuf> {
+    for base in [
+        issuer_root.join("oh_modules"),
+        module_root.join("oh_modules"),
+        project_root.join("oh_modules"),
+    ] {
+        let candidate = base.join(dep_name);
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 fn collect_package_source_files(pkg_dir: &Path) -> Vec<PathBuf> {

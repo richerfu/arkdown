@@ -253,6 +253,37 @@ impl BuildCache {
         self.memory.is_empty()
     }
 
+    /// Return the path to the bundle-level cache manifest file.
+    ///
+    /// hvigor writes `build/default/cache/bundle/bundle.json` after each
+    /// successful Rollup/Rolldown bundle run.  Subsequent builds read this file
+    /// to verify that the bundle inputs are unchanged before skipping the
+    /// bundle step.
+    pub fn bundle_manifest_path(&self) -> std::path::PathBuf {
+        self.cache_dir.join("bundle.json")
+    }
+
+    /// Persist `key` as the bundle-level cache manifest.
+    ///
+    /// Written to `<cache_dir>/bundle.json` after each successful bundle run.
+    /// Returns `Ok(())` on success; IO/serialization errors are returned to the
+    /// caller so they can be treated as non-fatal warnings.
+    pub fn write_bundle_manifest(&self, key: &BundleCacheKey) -> Result<(), CacheError> {
+        fs_err::create_dir_all(&self.cache_dir)?;
+        let json = serde_json::to_string_pretty(key)?;
+        fs_err::write(self.bundle_manifest_path(), json)?;
+        Ok(())
+    }
+
+    /// Read the stored bundle-level cache manifest and return it if it exists
+    /// and parses successfully.  Returns `None` on a cache miss (first build,
+    /// corrupt file, etc.).
+    pub fn read_bundle_manifest(&self) -> Option<BundleCacheKey> {
+        let path = self.bundle_manifest_path();
+        let content = fs_err::read_to_string(&path).ok()?;
+        serde_json::from_str(&content).ok()
+    }
+
     fn hash_id(id: &str) -> String {
         format!("{:016x}", arkdown_utils::fnv1a_hash(id))
     }

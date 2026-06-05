@@ -35,8 +35,7 @@
 //! ```
 //!
 //! - `form_json_paths` — the list of `form.json` / `form_config.json` paths
-//!   collected from the module's extension abilities with `extensionType == "form"`
-//!   (or `"formExtension"`).
+//!   collected from the module's extension abilities with `extensionType == "form"`.
 //! - `module_type` — must **not** be `"har"` for widget compilation to activate.
 
 use std::path::PathBuf;
@@ -92,8 +91,8 @@ pub fn need_widget_compile(form_json_paths: &[PathBuf], module_type: &str) -> bo
 /// module's `module.json5`.
 ///
 /// hvigor's `TargetTaskService.getFormJsonArr()` walks the extension abilities
-/// and collects the `form.json` / `form_config.json` side-car files for every
-/// ability whose `extensionType` is `"form"` or `"formExtension"`.
+/// and collects form profile files for every ability whose `extensionType` is
+/// exactly `"form"`. Full metadata validation lives in `arkdown-profile`.
 ///
 /// # Parameters
 /// - `module_src_main` — absolute path to `<module>/src/main/`
@@ -104,10 +103,7 @@ pub fn collect_form_json_paths(
 ) -> Vec<PathBuf> {
     extension_abilities
         .iter()
-        .filter(|e| {
-            let t = e.extension_type.to_ascii_lowercase();
-            t == "form" || t == "formextension"
-        })
+        .filter(|e| e.extension_type == "form")
         .filter_map(|e| {
             // src_entry is e.g. "./ets/widget/pages/WidgetCard.ets"
             // The form.json lives at:
@@ -187,17 +183,13 @@ mod tests {
     }
 
     #[test]
-    fn collect_form_json_paths_case_insensitive() {
-        // "Form" (capitalised) should still match.
+    fn collect_form_json_paths_is_case_sensitive() {
         let abilities = vec![ExtensionAbilityRef {
             extension_type: "Form",
             src_entry: "./ets/widget/pages/WidgetCard.ets",
         }];
-        // We cannot assert the file exists in tests, but we can verify the
-        // function returns *something* (the fallback path) rather than nothing.
         let result =
             collect_form_json_paths(std::path::Path::new("/project/entry/src/main"), &abilities);
-        // The fallback path is always returned when the JSON sidecar is absent.
-        assert_eq!(result.len(), 1);
+        assert!(result.is_empty());
     }
 }

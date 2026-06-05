@@ -28,9 +28,11 @@ fn make_config() -> Arc<ArkdownConfig> {
             runtime_os: "HarmonyOS".to_string(),
             signing_config: None,
             build_option: BuildOption {
+                preload_system_so: false,
                 preload_so: vec![],
                 remove_permissions: vec![],
                 aot_compile_mode: None,
+                host_pgo: None,
                 ap_path: None,
                 strict_mode: StrictModeConfig {
                     case_sensitive_check: false,
@@ -217,6 +219,29 @@ fn test_hap_contains_abc_at_ets_path_for_api12() {
 }
 
 #[test]
+fn test_hap_contains_profile_guided_ap_from_hvigor_intermediate() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let module_root = tmp.path().join("entry");
+    fs::create_dir_all(&module_root).expect("create module root");
+    let (abc, res, modj) = write_minimal_inputs(&module_root);
+    let ap_dir = module_root.join("build/default/intermediates/ap");
+    fs::create_dir_all(&ap_dir).expect("create ap dir");
+    fs::write(ap_dir.join("entry.ap"), b"profile guided data").expect("write ap");
+    let out = module_root.join("build/default/outputs/default/entry-default-unsigned.hap");
+
+    Packager::new(make_config())
+        .pack_hap(minimal_pack_input(abc, res, modj, out.clone()))
+        .expect("pack_hap must succeed");
+
+    let file = fs::File::open(&out).expect("open HAP");
+    let mut archive = zip::ZipArchive::new(file).expect("valid ZIP");
+    let mut entry = archive.by_name("ap/entry.ap").expect("embedded ap");
+    let mut contents = Vec::new();
+    entry.read_to_end(&mut contents).expect("read embedded ap");
+    assert_eq!(contents, b"profile guided data");
+}
+
+#[test]
 fn test_hap_contains_resources_index() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (abc, res, modj) = write_minimal_inputs(tmp.path());
@@ -273,9 +298,9 @@ fn test_hap_resource_files_copied_from_processed_dir() {
             abilities: vec![],
             integrated_hsps: vec![],
             privacy_profile_path: None,
-        device_types: vec![],
-        installation_free: false,
-        delivery_with_install: true,
+            device_types: vec![],
+            installation_free: false,
+            delivery_with_install: true,
         })
         .expect("pack_hap must succeed");
 
@@ -399,14 +424,58 @@ fn test_hsp_output_is_valid_zip() {
             abilities: vec![],
             integrated_hsps: vec![],
             privacy_profile_path: None,
-        device_types: vec![],
-        installation_free: false,
-        delivery_with_install: true,
+            device_types: vec![],
+            installation_free: false,
+            delivery_with_install: true,
         })
         .expect("pack_hsp must succeed");
 
     let bytes = fs::read(&out).expect("read HSP");
     assert_eq!(&bytes[0..4], b"PK\x03\x04", "HSP must be a ZIP file");
+}
+
+#[test]
+fn test_hsp_pack_info_uses_shared_bundle_type() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (abc, res, modj) = write_minimal_inputs(tmp.path());
+    let out = tmp.path().join("shared_pack_info.hsp");
+    fs::write(&modj, r#"{"module":{"name":"shared","type":"shared"}}"#).unwrap();
+
+    Packager::new(make_config())
+        .pack_hsp(PackInput {
+            module_name: "shared".into(),
+            abc_path: abc,
+            resources_index: res,
+            module_json: modj,
+            native_libs: vec![],
+            output_path: out.clone(),
+            resources_src_dir: None,
+            bundle_version_code: 1000000,
+            bundle_version_name: "1.0.0".to_string(),
+            bundle_type: "app".to_string(),
+            source_maps_path: None,
+            abilities: vec![],
+            integrated_hsps: vec![],
+            privacy_profile_path: None,
+            device_types: vec!["phone".to_string()],
+            installation_free: false,
+            delivery_with_install: true,
+        })
+        .expect("pack_hsp must succeed");
+
+    let file = fs::File::open(&out).expect("open HSP");
+    let mut archive = zip::ZipArchive::new(file).expect("valid ZIP");
+    let mut entry = archive.by_name("pack.info").expect("pack.info");
+    let mut content = String::new();
+    entry.read_to_string(&mut content).unwrap();
+    let pack_info: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+    assert_eq!(pack_info["summary"]["app"]["bundleType"], "shared");
+    assert_eq!(
+        pack_info["summary"]["modules"][0]["distro"]["moduleType"],
+        "shared"
+    );
+    assert_eq!(pack_info["packages"][0]["moduleType"], "shared");
 }
 
 // ---------------------------------------------------------------------------
@@ -430,6 +499,7 @@ fn test_har_contains_ets_source_files() {
             module_name: "mylib".into(),
             source_dir: src_dir,
             resources_dir: tmp.path().join("src/main/resources"),
+            resource_str_dir: None,
             oh_package_json: pkg_json,
             output_path: out.clone(),
         })
@@ -466,6 +536,7 @@ fn test_har_contains_oh_package_json5() {
             module_name: "lib".into(),
             source_dir: src_dir,
             resources_dir: tmp.path().join("src/main/resources"),
+            resource_str_dir: None,
             oh_package_json: pkg_json,
             output_path: out.clone(),
         })
@@ -478,6 +549,59 @@ fn test_har_contains_oh_package_json5() {
         names.iter().any(|n| *n == "oh-package.json5"),
         "HAR must contain oh-package.json5; entries: {:?}",
         names
+    );
+}
+
+#[test]
+fn test_har_contains_permission_reason_resource_str() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src_dir = tmp.path().join("src/main/ets");
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::write(src_dir.join("Entry.ets"), b"export class Entry {}").unwrap();
+
+    let resource_str_dir = tmp.path().join("resource_str");
+    fs::create_dir_all(resource_str_dir.join("base/element")).unwrap();
+    fs::write(
+        resource_str_dir.join("base/element/string.json"),
+        r#"{"string":[{"name":"camera_reason","value":"Need camera"}]}"#,
+    )
+    .unwrap();
+
+    let pkg_json = tmp.path().join("oh-package.json5");
+    fs::write(&pkg_json, r#"{"name":"lib","version":"0.1.0"}"#).unwrap();
+
+    let out = tmp.path().join("lib.har");
+    Packager::new(make_config())
+        .pack_har(HarPackInput {
+            module_name: "lib".into(),
+            source_dir: src_dir,
+            resources_dir: tmp.path().join("src/main/resources"),
+            resource_str_dir: Some(resource_str_dir),
+            oh_package_json: pkg_json,
+            output_path: out.clone(),
+        })
+        .expect("pack_har must succeed");
+
+    let file = fs::File::open(&out).expect("open HAR");
+    let mut archive = zip::ZipArchive::new(file).expect("valid ZIP");
+    let names: Vec<_> = archive.file_names().map(str::to_string).collect();
+    assert!(
+        names
+            .iter()
+            .any(|n| n == "src/main/resource/base/element/string.json"),
+        "HAR must contain permission reason resource_str; entries: {:?}",
+        names
+    );
+
+    let mut content = String::new();
+    archive
+        .by_name("src/main/resource/base/element/string.json")
+        .expect("resource_str entry")
+        .read_to_string(&mut content)
+        .unwrap();
+    assert_eq!(
+        content,
+        r#"{"string":[{"name":"camera_reason","value":"Need camera"}]}"#
     );
 }
 
@@ -602,9 +726,9 @@ fn test_pack_hap_embeds_integrated_hsp() {
             abilities: vec![],
             integrated_hsps: vec![integrated_entry],
             privacy_profile_path: None,
-        device_types: vec![],
-        installation_free: false,
-        delivery_with_install: true,
+            device_types: vec![],
+            installation_free: false,
+            delivery_with_install: true,
         })
         .expect("pack_hap must succeed");
 

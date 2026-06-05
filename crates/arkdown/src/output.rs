@@ -1,9 +1,7 @@
 use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
 
-use arkdown_core::{
-    ArkdownError, ChunkGraph, HvigorSourceMapEntry, HvigorSourceMapOptions,
-};
+use arkdown_core::{ArkdownError, ChunkGraph, HvigorSourceMapEntry, HvigorSourceMapOptions};
 
 pub const MODULES_ABC_FILE_NAME: &str = "modules.abc";
 pub const SOURCE_MAPS_FILE_NAME: &str = "sourceMaps.map";

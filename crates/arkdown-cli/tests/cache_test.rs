@@ -156,7 +156,12 @@ fn run_bundle_miss(
         .block_on(bundler.bundle(loader_json))
         .expect("bundle (cache miss)");
 
-    // bundle cache save not implemented (BundleCacheManifest removed)
+    // Write the bundle cache manifest so subsequent builds can detect a hit.
+    // Mirrors hvigor's behaviour of persisting the bundle key to
+    // `build/default/cache/bundle/bundle.json` after each successful Rollup run.
+    if let Err(e) = bundle_cache.write_bundle_manifest(bundle_key) {
+        tracing::warn!(error = %e, "failed to write bundle cache manifest");
+    }
 
     bundle_out
 }
@@ -405,8 +410,8 @@ fn run_pipeline(fixture: &Path) -> PathBuf {
             integrated_hsps: vec![],
             privacy_profile_path: None,
             device_types: vec![],
-        installation_free: false,
-        delivery_with_install: true,
+            installation_free: false,
+            delivery_with_install: true,
             source_maps_path: bundle_out.source_maps_path,
             abilities: vec![],
         })
@@ -481,7 +486,6 @@ fn test_first_build_writes_abc_cache_file() {
 /// After a first build the bundle cache manifest file exists at
 /// `build/default/cache/bundle/bundle.json`.
 #[test]
-#[ignore = "bundle cache manifest not wired in current state"]
 fn test_bundle_cache_manifest_written_after_first_build() {
     let fixture = fresh_fixture_copy(&fixture_root());
     run_pipeline(&fixture);
@@ -503,7 +507,6 @@ fn test_bundle_cache_manifest_written_after_first_build() {
 /// On a second build with unchanged sources the bundle cache is a hit:
 /// the manifest still exists and both builds produce byte-identical `modules.abc`.
 #[test]
-#[ignore = "bundle cache not wired in current state"]
 fn test_second_build_uses_bundle_cache_and_produces_identical_abc() {
     let fixture = fresh_fixture_copy(&fixture_root());
 

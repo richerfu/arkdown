@@ -114,8 +114,7 @@ pub(super) fn class_private_methods_literal_array(elements: &[ClassElement<'_>])
             continue;
         }
         let key_name = id.name.as_str().to_string();
-        let affiliate =
-            LiteralEntry::TaggedMethodAffiliate(method.value.params.items.len() as u16);
+        let affiliate = LiteralEntry::TaggedMethodAffiliate(method.value.params.items.len() as u16);
         if method.r#static {
             static_entries.push(LiteralEntry::TaggedMethodName(key_name));
             static_entries.push(affiliate);

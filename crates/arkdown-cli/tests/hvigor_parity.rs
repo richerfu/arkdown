@@ -1,8 +1,10 @@
 //! hvigor/arkdown artifact parity harness for HAP, HAR, and HSP fixtures.
 //!
-//! This is intentionally ignored: local hvigor availability, signing material,
-//! and current arkdown parity are machine-dependent while the implementation is
-//! still converging. Run it explicitly to generate a structured JSON report.
+//! Artifact parity tests are environment-gated: without local hvigor
+//! configuration they print a skip line and return. Set `ARKDOWN_PARITY_HVIGORW`
+//! or `ARKDOWN_PARITY_RUN=1` to generate reports, and set
+//! `ARKDOWN_PARITY_STRICT=1` to turn differences or missing hvigor into hard
+//! failures.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
@@ -19,6 +21,7 @@ use zip::ZipArchive;
 const ENV_HVIGORW: &str = "ARKDOWN_PARITY_HVIGORW";
 const ENV_ARKDOWN_BIN: &str = "ARKDOWN_PARITY_ARKDOWN_BIN";
 const ENV_REPORT: &str = "ARKDOWN_PARITY_REPORT";
+const ENV_RUN: &str = "ARKDOWN_PARITY_RUN";
 const ENV_STRICT: &str = "ARKDOWN_PARITY_STRICT";
 
 // ---------------------------------------------------------------------------
@@ -58,144 +61,161 @@ impl ArtifactType {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParityBuildMode {
+    Debug,
+    Release,
+}
+
+impl ParityBuildMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            ParityBuildMode::Debug => "debug",
+            ParityBuildMode::Release => "release",
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Top-level test functions
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "requires local hvigorw/DevEco toolchain; run explicitly for artifact parity"]
 fn minimal_hap_hvigor_parity_report() {
-    let repo_root = repo_root();
-    let fixture = "tests/fixtures/minimal-hap";
-    let report_path = report_path_for(&repo_root, "minimal-hap");
-    let report = parity_for_fixture(fixture, ArtifactType::Hap, report_path)
-        .expect("parity harness failed before report generation");
-    print_report_summary(&report);
-
-    if env_truthy(ENV_STRICT) && !report["equal"].as_bool().unwrap_or(false) {
-        panic!(
-            "strict parity failed; see {}",
-            report["report_path"].as_str().unwrap_or("<unknown>")
-        );
-    }
+    run_parity_report_test(
+        "tests/fixtures/minimal-hap",
+        "minimal-hap",
+        ArtifactType::Hap,
+        ParityBuildMode::Debug,
+    );
 }
 
 #[test]
-#[ignore = "requires local hvigorw/DevEco toolchain; run explicitly for artifact parity"]
 fn minimal_har_hvigor_parity_report() {
-    let repo_root = repo_root();
-    let fixture = "tests/fixtures/minimal-har";
-    let report_path = report_path_for(&repo_root, "minimal-har");
-    let report = parity_for_fixture(fixture, ArtifactType::Har, report_path)
-        .expect("parity harness failed before report generation");
-    print_report_summary(&report);
-
-    if env_truthy(ENV_STRICT) && !report["equal"].as_bool().unwrap_or(false) {
-        panic!(
-            "strict parity failed; see {}",
-            report["report_path"].as_str().unwrap_or("<unknown>")
-        );
-    }
+    run_parity_report_test(
+        "tests/fixtures/minimal-har",
+        "minimal-har",
+        ArtifactType::Har,
+        ParityBuildMode::Debug,
+    );
 }
 
 #[test]
-#[ignore = "requires local hvigorw/DevEco toolchain; run explicitly for artifact parity"]
 fn minimal_hsp_hvigor_parity_report() {
-    let repo_root = repo_root();
-    let fixture = "tests/fixtures/minimal-hsp";
-    let report_path = report_path_for(&repo_root, "minimal-hsp");
-    let report = parity_for_fixture(fixture, ArtifactType::Hsp, report_path)
-        .expect("parity harness failed before report generation");
-    print_report_summary(&report);
-
-    if env_truthy(ENV_STRICT) && !report["equal"].as_bool().unwrap_or(false) {
-        panic!(
-            "strict parity failed; see {}",
-            report["report_path"].as_str().unwrap_or("<unknown>")
-        );
-    }
+    run_parity_report_test(
+        "tests/fixtures/minimal-hsp",
+        "minimal-hsp",
+        ArtifactType::Hsp,
+        ParityBuildMode::Debug,
+    );
 }
 
 /// Parity test for share config — validates that crossAppSharedConfig entries
 /// survive profile processing and are written to the correct resource profile.
 /// Covers the P0 fix: share config was being overwritten by static intermediate files.
 #[test]
-#[ignore = "requires local hvigorw/DevEco toolchain; run explicitly for artifact parity"]
 fn share_config_hap_hvigor_parity_report() {
-    let repo_root = repo_root();
-    let fixture = "tests/fixtures/share-config-hap";
-    let report_path = report_path_for(&repo_root, "share-config-hap");
-    let report = parity_for_fixture(fixture, ArtifactType::Hap, report_path)
-        .expect("parity harness failed before report generation");
-    print_report_summary(&report);
-
-    if env_truthy(ENV_STRICT) && !report["equal"].as_bool().unwrap_or(false) {
-        panic!(
-            "strict parity failed for share-config-hap; see {}",
-            report["report_path"].as_str().unwrap_or("<unknown>")
-        );
-    }
+    run_parity_report_test(
+        "tests/fixtures/share-config-hap",
+        "share-config-hap",
+        ArtifactType::Hap,
+        ParityBuildMode::Debug,
+    );
 }
 
 /// Parity test for startup config — validates appStartup task compilation and
 /// startup profile resource rewrite.
 #[test]
-#[ignore = "requires local hvigorw/DevEco toolchain; run explicitly for artifact parity"]
 fn startup_config_hap_hvigor_parity_report() {
-    let repo_root = repo_root();
-    let fixture = "tests/fixtures/startup-config-hap";
-    let report_path = report_path_for(&repo_root, "startup-config-hap");
-    let report = parity_for_fixture(fixture, ArtifactType::Hap, report_path)
-        .expect("parity harness failed before report generation");
-    print_report_summary(&report);
-
-    if env_truthy(ENV_STRICT) && !report["equal"].as_bool().unwrap_or(false) {
-        panic!(
-            "strict parity failed for startup-config-hap; see {}",
-            report["report_path"].as_str().unwrap_or("<unknown>")
-        );
-    }
+    run_parity_report_test(
+        "tests/fixtures/startup-config-hap",
+        "startup-config-hap",
+        ArtifactType::Hap,
+        ParityBuildMode::Debug,
+    );
 }
 
 /// Parity test for release HAP — validates that release obfuscation is applied
 /// to the CompileArkTS handoff inputs (the .ts files that feed into es2abc),
 /// not just the intermediate .js chunks.
 #[test]
-#[ignore = "requires local hvigorw/DevEco toolchain; run explicitly for artifact parity"]
 fn release_hap_obfuscation_parity_report() {
-    let repo_root = repo_root();
-    let fixture = "tests/fixtures/release-obfuscation-hap";
-    let report_path = report_path_for(&repo_root, "release-obfuscation-hap");
-    let report = parity_for_fixture(fixture, ArtifactType::Hap, report_path)
-        .expect("parity harness failed before report generation");
-    print_report_summary(&report);
-
-    if env_truthy(ENV_STRICT) && !report["equal"].as_bool().unwrap_or(false) {
-        panic!(
-            "strict parity failed for release-obfuscation-hap; see {}",
-            report["report_path"].as_str().unwrap_or("<unknown>")
-        );
-    }
+    run_parity_report_test(
+        "tests/fixtures/release-obfuscation-hap",
+        "release-obfuscation-hap",
+        ArtifactType::Hap,
+        ParityBuildMode::Release,
+    );
 }
 
 /// Parity test for minimal release HAP (no obfuscation) — validates that the
 /// pack.info has correct bundle type, version, and device types.
 #[test]
-#[ignore = "requires local hvigorw/DevEco toolchain; run explicitly for artifact parity"]
 fn minimal_hap_release_hvigor_parity_report() {
+    run_parity_report_test(
+        "tests/fixtures/minimal-hap",
+        "minimal-hap-release",
+        ArtifactType::Hap,
+        ParityBuildMode::Release,
+    );
+}
+
+fn run_parity_report_test(
+    fixture: &str,
+    report_name: &str,
+    artifact_type: ArtifactType,
+    build_mode: ParityBuildMode,
+) {
     let repo_root = repo_root();
-    let fixture = "tests/fixtures/minimal-hap";
-    let report_path = report_path_for(&repo_root, "minimal-hap-release");
-    let report = parity_for_fixture(fixture, ArtifactType::Hap, report_path)
+    let fixture_abs = repo_root.join(fixture);
+    if !should_run_parity(&fixture_abs) {
+        eprintln!(
+            "skipping hvigor parity [{fixture}]; set {ENV_HVIGORW}, {ENV_RUN}=1, or {ENV_STRICT}=1"
+        );
+        return;
+    }
+
+    let report_path = report_path_for(&repo_root, report_name);
+    let report = parity_for_fixture(fixture, artifact_type, build_mode, report_path)
         .expect("parity harness failed before report generation");
     print_report_summary(&report);
+    assert_strict_parity(report_name, &report);
+}
 
+fn assert_strict_parity(report_name: &str, report: &Value) {
     if env_truthy(ENV_STRICT) && !report["equal"].as_bool().unwrap_or(false) {
         panic!(
-            "strict parity failed for minimal-hap-release; see {}",
+            "strict parity failed for {report_name}; see {}",
             report["report_path"].as_str().unwrap_or("<unknown>")
         );
     }
+}
+
+fn should_run_parity(fixture_root: &Path) -> bool {
+    should_run_parity_with_options(
+        env_truthy(ENV_STRICT),
+        env_truthy(ENV_RUN),
+        std::env::var_os(ENV_HVIGORW).is_some(),
+        fixture_root.join("hvigorw").exists(),
+    )
+}
+
+fn should_run_parity_with_options(
+    strict: bool,
+    force_run: bool,
+    hvigorw_env: bool,
+    fixture_hvigorw: bool,
+) -> bool {
+    strict || force_run || hvigorw_env || fixture_hvigorw
+}
+
+#[test]
+fn parity_run_gate_defaults_to_skip_without_hvigor_config() {
+    assert!(!should_run_parity_with_options(false, false, false, false));
+    assert!(should_run_parity_with_options(true, false, false, false));
+    assert!(should_run_parity_with_options(false, true, false, false));
+    assert!(should_run_parity_with_options(false, false, true, false));
+    assert!(should_run_parity_with_options(false, false, false, true));
 }
 
 fn print_report_summary(report: &Value) {
@@ -214,6 +234,38 @@ fn print_report_summary(report: &Value) {
     );
 }
 
+#[test]
+fn parity_command_args_include_selected_build_mode() {
+    assert_eq!(
+        hvigor_args(ArtifactType::Hap, ParityBuildMode::Debug),
+        vec!["assembleHap", "--mode", "debug"]
+    );
+    assert_eq!(
+        hvigor_args(ArtifactType::Hap, ParityBuildMode::Release),
+        vec!["assembleHap", "--mode", "release"]
+    );
+    assert_eq!(
+        arkdown_args(ArtifactType::Hap, ParityBuildMode::Release),
+        vec!["build", "--target", "hap", "--mode", "release"]
+    );
+}
+
+#[test]
+fn parity_referenced_fixtures_exist() {
+    let repo_root = repo_root();
+    for fixture in [
+        "tests/fixtures/minimal-hap",
+        "tests/fixtures/minimal-har",
+        "tests/fixtures/minimal-hsp",
+        "tests/fixtures/share-config-hap",
+        "tests/fixtures/startup-config-hap",
+        "tests/fixtures/release-obfuscation-hap",
+    ] {
+        let path = repo_root.join(fixture);
+        assert!(path.is_dir(), "parity fixture must exist: {fixture}");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Core parity harness — generic over fixture path and artifact type
 // ---------------------------------------------------------------------------
@@ -221,6 +273,7 @@ fn print_report_summary(report: &Value) {
 fn parity_for_fixture(
     fixture: &str,
     artifact_type: ArtifactType,
+    build_mode: ParityBuildMode,
     report_path: PathBuf,
 ) -> Result<Value, Box<dyn std::error::Error>> {
     let repo_root = repo_root();
@@ -242,21 +295,11 @@ fn parity_for_fixture(
 
     let hvigorw = hvigorw_program(&hvigor_root);
     let arkdown_bin = arkdown_program();
+    let hvigor_args = hvigor_args(artifact_type, build_mode);
 
-    let hvigor_command = run_command(
-        "hvigor",
-        &hvigorw,
-        &[artifact_type.hvigor_task()],
-        &hvigor_root,
-    );
+    let hvigor_command = run_command("hvigor", &hvigorw, &hvigor_args, &hvigor_root);
     let arkdown_project_arg = arkdown_root.to_string_lossy().into_owned();
-    let mut arkdown_args = vec![
-        "build",
-        "--target",
-        artifact_type.arkdown_target(),
-        "--mode",
-        "debug",
-    ];
+    let mut arkdown_args = arkdown_args(artifact_type, build_mode);
     arkdown_args.push("--project");
     arkdown_args.push(arkdown_project_arg.as_str());
     let arkdown_command = run_command("arkdown", &arkdown_bin, &arkdown_args, &arkdown_root);
@@ -274,6 +317,7 @@ fn parity_for_fixture(
     let mut report = json!({
         "fixture": fixture,
         "artifact_type": artifact_type.ext(),
+        "build_mode": build_mode.as_str(),
         "report_path": report_path.to_string_lossy(),
         "equal": equal,
         "strict": env_truthy(ENV_STRICT),
@@ -293,6 +337,20 @@ fn parity_for_fixture(
     fs::write(&report_path, pretty)?;
     report["report_path"] = json!(report_path.to_string_lossy());
     Ok(report)
+}
+
+fn hvigor_args(artifact_type: ArtifactType, build_mode: ParityBuildMode) -> Vec<&'static str> {
+    vec![artifact_type.hvigor_task(), "--mode", build_mode.as_str()]
+}
+
+fn arkdown_args(artifact_type: ArtifactType, build_mode: ParityBuildMode) -> Vec<&'static str> {
+    vec![
+        "build",
+        "--target",
+        artifact_type.arkdown_target(),
+        "--mode",
+        build_mode.as_str(),
+    ]
 }
 
 fn repo_root() -> PathBuf {

@@ -101,8 +101,7 @@ pub fn run(args: CheckArgs) -> Result<()> {
 
             // Run the transform (struct validation is embedded in the transform).
             // Any diagnostic errors are printed to stderr by the transform plugin.
-            if let Err(e) =
-                transformer.do_transform(&source, &path.to_string_lossy().into_owned())
+            if let Err(e) = transformer.do_transform(&source, &path.to_string_lossy().into_owned())
             {
                 eprintln!("check: {}: {e}", path.display());
                 total_errors += 1;

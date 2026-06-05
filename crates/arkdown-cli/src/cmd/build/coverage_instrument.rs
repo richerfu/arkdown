@@ -68,7 +68,9 @@ fn count_function_declarations(source: &str) -> usize {
             let delim = bytes[i];
             i += 1;
             while i < len && bytes[i] != delim {
-                if bytes[i] == b'\\' { i += 1; }
+                if bytes[i] == b'\\' {
+                    i += 1;
+                }
                 i += 1;
             }
         } else if i + 7 < len && &source[i..i + 8] == "function" {
@@ -85,7 +87,8 @@ fn count_function_declarations(source: &str) -> usize {
 
 fn count_statement_boundaries(source: &str) -> usize {
     // Count semicolons + closing braces as a rough statement count.
-    source.chars()
+    source
+        .chars()
         .filter(|&c| c == ';' || c == '{')
         .count()
         .max(1)
