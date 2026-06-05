@@ -3116,6 +3116,32 @@ mod tests {
             })
     }
 
+    fn function_annotation_u32_values(
+        function: &Function,
+        record_name: &str,
+        element_name: &str,
+    ) -> Vec<u32> {
+        function
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.father.as_ref())
+            .and_then(|metadata| metadata.father.as_ref())
+            .into_iter()
+            .flat_map(|metadata| metadata.annotations.iter())
+            .filter(|annotation| annotation.record_name == record_name.as_bytes())
+            .flat_map(|annotation| annotation.elements.iter())
+            .filter(|element| element.name == element_name.as_bytes())
+            .filter_map(|element| {
+                let annotation_element::Value::Scalar(value) = element.value.as_ref()? else {
+                    return None;
+                };
+                scalar_u64_value(value)
+                    .ok()
+                    .and_then(|value| u32::try_from(value).ok())
+            })
+            .collect()
+    }
+
     #[test]
     fn proto_program_restores_generic_pandasm_instruction() {
         let opcode = pandasm_opcode_for_bytecode(&[0x6a]).unwrap();
@@ -3253,6 +3279,50 @@ af(); gf(); ag(); ar(); aa(); cf(); sf(); saf();
             concurrent,
             CONCURRENT_MODULE_REQUEST_RECORD_NAME
         ));
+    }
+
+    #[test]
+    fn concurrent_function_records_upstream_module_request_sequence() {
+        let mut file = AbcFile::new();
+        let record = build_record_with_debug_and_package_for_target_with_mode(
+            r#"
+import { a, b } from "./dep1";
+import { c } from "./dep2";
+function cf() {
+  "use concurrent";
+  return a + a + b + c;
+}
+cf();
+"#,
+            "@bundle:demo/entry/ets/pages/Index",
+            &mut file.strings,
+            &mut file.literal_arrays,
+            Some("entry/src/main/ets/pages/Index.ets"),
+            None,
+            false,
+            false,
+            "ets",
+            true,
+            18,
+            None,
+            false,
+            true,
+        )
+        .unwrap();
+        file.add_record(record);
+
+        let program = program_for_record(&file, 0, 18).unwrap().unwrap();
+        let concurrent = function_by_short_name(&program, "cf").unwrap();
+        assert_eq!(concurrent.function_kind, function_kind::CONCURRENT_FUNCTION);
+        assert_eq!(concurrent.concurrent_module_requests, vec![0, 0, 0, 1]);
+        assert_eq!(
+            function_annotation_u32_values(
+                concurrent,
+                CONCURRENT_MODULE_REQUEST_RECORD_NAME,
+                "ConcurrentModuleRequest",
+            ),
+            vec![0, 0, 0, 1]
+        );
     }
 
     #[test]

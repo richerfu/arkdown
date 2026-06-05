@@ -6,14 +6,15 @@ use oxc_ast::ast::{
     Argument, ArrayAssignmentTarget, ArrayPattern, AssignmentOperator, AssignmentTarget,
     AssignmentTargetMaybeDefault, AssignmentTargetProperty, BindingPattern, ClassElement,
     Declaration, ExportDefaultDeclarationKind, Expression, ForInStatement, ForOfStatement,
-    ForStatementLeft, FormalParameter, Function, FunctionBody, ImportOrExportKind, LogicalOperator,
-    MethodDefinitionKind, ObjectAssignmentTarget, ObjectPattern, Program, PropertyKey,
-    SimpleAssignmentTarget, Statement, TSEnumDeclaration, TSEnumMemberName,
-    TSImportEqualsDeclaration, TSModuleDeclaration, TSModuleReference, TSQualifiedName, TSTypeName,
-    UnaryOperator, UpdateExpression, YieldExpression,
+    ForStatementLeft, FormalParameter, Function, FunctionBody, ImportDeclarationSpecifier,
+    ImportOrExportKind, LogicalOperator, MethodDefinitionKind, ObjectAssignmentTarget,
+    ObjectPattern, Program, PropertyKey, SimpleAssignmentTarget, Statement, TSEnumDeclaration,
+    TSEnumMemberName, TSImportEqualsDeclaration, TSModuleDeclaration, TSModuleReference,
+    TSQualifiedName, TSTypeName, UnaryOperator, UpdateExpression, YieldExpression,
 };
+use oxc_ast_visit::Visit;
 use oxc_parser::{Parser, ParserReturn};
-use oxc_semantic::{Reference, Scoping, SemanticBuilder};
+use oxc_semantic::{Reference, Scoping, SemanticBuilder, SymbolId};
 use oxc_span::{GetSpan, SourceType};
 use oxc_syntax::operator::UpdateOperator;
 use oxc_transformer::{Module as TransformModule, TransformOptions, Transformer};
@@ -363,6 +364,8 @@ pub fn build_record_with_debug_and_source_map_for_target_with_mode(
     // Collect module import/export records before lowering so bytecode can use
     // hvigor/es2abc's module-variable opcodes instead of global lookups.
     let module_record = collect_module_record(&program, is_module, scoping_ref);
+    let concurrent_import_requests =
+        ConcurrentImportRequests::new(&program, &module_record, scoping_ref);
     let lexical_bindings = collect_module_lexical_bindings(&program, is_module, &module_record);
     let function_lexical_infos = collect_function_lexical_bindings(&program);
     let scan_stmts: &[Statement<'_>] = statement_scan_body(&program, is_module);
@@ -465,6 +468,7 @@ pub fn build_record_with_debug_and_source_map_for_target_with_mode(
             tracked_source,
             source_file,
             source_mapper,
+            &concurrent_import_requests,
         );
     }
 
@@ -726,6 +730,106 @@ fn first_scope_names_owner_in_class(elements: &[ClassElement<'_>]) -> Option<Str
     None
 }
 
+struct ConcurrentImportRequests<'a> {
+    by_symbol: FxHashMap<SymbolId, u32>,
+    by_name: FxHashMap<String, u32>,
+    scoping: Option<&'a Scoping>,
+}
+
+impl<'a> ConcurrentImportRequests<'a> {
+    fn new(
+        program: &Program<'_>,
+        module_record: &crate::ir::module_record::ModuleRecordInfo,
+        scoping: Option<&'a Scoping>,
+    ) -> Self {
+        let by_name = module_record
+            .regular_imports
+            .iter()
+            .map(|import| (import.local_name.clone(), import.module_request_idx as u32))
+            .collect::<FxHashMap<_, _>>();
+        let mut by_symbol = FxHashMap::default();
+
+        if scoping.is_some() {
+            for stmt in &program.body {
+                let Statement::ImportDeclaration(import) = stmt else {
+                    continue;
+                };
+                if import.import_kind == ImportOrExportKind::Type {
+                    continue;
+                }
+                let Some(specifiers) = &import.specifiers else {
+                    continue;
+                };
+                for specifier in specifiers {
+                    let local = match specifier {
+                        ImportDeclarationSpecifier::ImportDefaultSpecifier(default) => {
+                            &default.local
+                        }
+                        ImportDeclarationSpecifier::ImportSpecifier(named)
+                            if named.import_kind != ImportOrExportKind::Type =>
+                        {
+                            &named.local
+                        }
+                        ImportDeclarationSpecifier::ImportSpecifier(_) => continue,
+                        ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => continue,
+                    };
+                    let Some(request_idx) = by_name.get(local.name.as_str()).copied() else {
+                        continue;
+                    };
+                    if let Some(symbol_id) = local.symbol_id.get() {
+                        by_symbol.insert(symbol_id, request_idx);
+                    }
+                }
+            }
+        }
+
+        Self {
+            by_symbol,
+            by_name,
+            scoping,
+        }
+    }
+
+    fn collect_for_function(&self, function: &Function<'_>) -> Vec<u32> {
+        if !function_has_directive(function, "use concurrent") {
+            return Vec::new();
+        }
+        let Some(body) = &function.body else {
+            return Vec::new();
+        };
+        let mut collector = ConcurrentModuleRequestCollector {
+            imports: self,
+            requests: Vec::new(),
+        };
+        collector.visit_function_body(body);
+        collector.requests
+    }
+}
+
+struct ConcurrentModuleRequestCollector<'a, 'b> {
+    imports: &'b ConcurrentImportRequests<'a>,
+    requests: Vec<u32>,
+}
+
+impl<'a> Visit<'a> for ConcurrentModuleRequestCollector<'a, '_> {
+    fn visit_identifier_reference(&mut self, it: &oxc_ast::ast::IdentifierReference<'a>) {
+        if let Some(scoping) = self.imports.scoping {
+            if let Some(reference_id) = it.reference_id.get() {
+                if let Some(symbol_id) = scoping.get_reference(reference_id).symbol_id() {
+                    if let Some(request_idx) = self.imports.by_symbol.get(&symbol_id) {
+                        self.requests.push(*request_idx);
+                    }
+                }
+            }
+            return;
+        }
+
+        if let Some(request_idx) = self.imports.by_name.get(it.name.as_str()) {
+            self.requests.push(*request_idx);
+        }
+    }
+}
+
 // ── Program-level compilation ─────────────────────────────────────────────────
 
 /// Always returns the top-level statement slice — IIFE/CJS unwrapping removed.
@@ -744,6 +848,7 @@ fn compile_function_record(
     source: Option<&str>,
     source_file_path: Option<&str>,
     source_mapper: Option<&SourceMapper>,
+    concurrent_import_requests: &ConcurrentImportRequests<'_>,
 ) {
     match function.node {
         FunctionRecordNode::Function(func) => {
@@ -830,6 +935,7 @@ fn compile_function_record(
             );
             let upstream_function_kind =
                 function_record_function_kind(func, function.flavor, lowering.target_api_version());
+            let concurrent_module_requests = concurrent_import_requests.collect_for_function(func);
             methods.push(MethodRecord {
                 name: function.name,
                 bytecode: compiled.bytecode,
@@ -851,7 +957,7 @@ fn compile_function_record(
                 program_labels: compiled.program_labels,
                 kind: MethodKind::FunctionLiteral,
                 function_kind: upstream_function_kind,
-                concurrent_module_requests: Vec::new(),
+                concurrent_module_requests,
                 method_pool_entry: true,
                 expected_property_count,
                 definefunc_order: Some(definefunc_order),
