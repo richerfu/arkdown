@@ -108,11 +108,13 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
                     &class_name_by_offset,
                     &literal_offset_to_index,
                 )?;
+                let field_type =
+                    field_type_from_abc(field, &index_sections, &class_name_by_offset)?;
                 Ok(FieldRecord {
                     name: field.name.clone(),
                     class_idx: FIELD_OWNER_CLASS_IDX,
                     type_idx: field.type_idx,
-                    field_type: FieldType::from_legacy_idx(field.type_idx),
+                    field_type,
                     metadata_field_type: None,
                     access_flags: field.access_flags,
                     value: field_value_from_abc(
@@ -544,6 +546,93 @@ fn is_system_record_annotation(record_name: &str) -> bool {
             | "std.annotations.Async"
             | "std/annotations/Async"
     )
+}
+
+fn field_type_from_abc(
+    field: &crate::abc_reader::AbcFieldItem,
+    index_sections: &[crate::abc_reader::AbcIndexSection],
+    class_name_by_offset: &BTreeMap<u32, String>,
+) -> Result<FieldType, AbcError> {
+    let Some(section) = index_sections
+        .iter()
+        .find(|section| section.start <= field.offset && field.offset < section.end)
+        .or_else(|| index_sections.first())
+    else {
+        return Err(AbcError::UnsupportedConstruct {
+            construct: "ABC field type index without IndexSection".to_string(),
+            file: field.name.clone(),
+        });
+    };
+    let Some(&entity_offset) = section.class_offsets.get(field.type_idx as usize) else {
+        return Err(AbcError::UnsupportedConstruct {
+            construct: format!(
+                "ABC field type_idx {} missing from IndexSection",
+                field.type_idx
+            ),
+            file: field.name.clone(),
+        });
+    };
+    Ok(field_type_from_index_entity(
+        entity_offset,
+        class_name_by_offset,
+    ))
+}
+
+fn field_type_from_index_entity(
+    entity_offset: u32,
+    class_name_by_offset: &BTreeMap<u32, String>,
+) -> FieldType {
+    match entity_offset {
+        0 => FieldType::U1,
+        1 => FieldType::I8,
+        2 => FieldType::U8,
+        3 => FieldType::I16,
+        4 => FieldType::U16,
+        5 => FieldType::I32,
+        6 => FieldType::U32,
+        7 => FieldType::F32,
+        8 => FieldType::F64,
+        9 => FieldType::I64,
+        10 => FieldType::U64,
+        12 => FieldType::Any,
+        _ => class_name_by_offset
+            .get(&entity_offset)
+            .map(|descriptor| field_type_from_descriptor(descriptor))
+            .unwrap_or(FieldType::Any),
+    }
+}
+
+fn field_type_from_descriptor(descriptor: &str) -> FieldType {
+    if descriptor == "Lpanda.String;" {
+        return FieldType::PandaString;
+    }
+
+    let rank = descriptor.bytes().take_while(|&byte| byte == b'[').count();
+    if rank == 0 {
+        return FieldType::Any;
+    }
+    let component_descriptor = &descriptor[rank..];
+    let component_name = match component_descriptor {
+        "Z" => "u1".to_string(),
+        "B" => "i8".to_string(),
+        "H" => "u8".to_string(),
+        "S" => "i16".to_string(),
+        "C" => "u16".to_string(),
+        "I" => "i32".to_string(),
+        "U" => "u32".to_string(),
+        "F" => "f32".to_string(),
+        "D" => "f64".to_string(),
+        "J" => "i64".to_string(),
+        "Q" => "u64".to_string(),
+        value if value.starts_with('L') && value.ends_with(';') => {
+            value[1..value.len() - 1].replace('/', ".")
+        }
+        _ => "any".to_string(),
+    };
+    FieldType::Array {
+        component_name,
+        rank: rank as u32,
+    }
 }
 
 fn annotation_value_from_abc(

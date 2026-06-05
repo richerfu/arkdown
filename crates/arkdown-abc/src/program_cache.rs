@@ -4608,6 +4608,81 @@ class A {}
     }
 
     #[test]
+    fn any_field_type_uses_upstream_tagged_field_encoding() {
+        let mut file = annotation_usage_file();
+        let record = file
+            .records
+            .iter_mut()
+            .find(|record| record.name == "Lusage_string.ets;")
+            .expect("user record must exist");
+        record.fields.push(FieldRecord {
+            name: "u8Field".to_string(),
+            class_idx: FIELD_OWNER_CLASS_IDX,
+            type_idx: 0,
+            field_type: FieldType::U8,
+            metadata_field_type: None,
+            access_flags: 0,
+            value: None,
+            annotations: Vec::new(),
+            metadata_attrs: Default::default(),
+            source: Default::default(),
+        });
+        record.fields.push(FieldRecord {
+            name: "anyField".to_string(),
+            class_idx: FIELD_OWNER_CLASS_IDX,
+            type_idx: 0,
+            field_type: FieldType::Any,
+            metadata_field_type: None,
+            access_flags: 0,
+            value: None,
+            annotations: Vec::new(),
+            metadata_attrs: Default::default(),
+            source: Default::default(),
+        });
+
+        let bytes = file.serialize_with_version(version_for_target_api(20, None));
+        AbcReader::validate(&bytes).unwrap();
+        let reader = AbcReader::new(&bytes).unwrap();
+        let classes = reader.class_items().unwrap();
+        let user_class = classes
+            .iter()
+            .find(|class| class.name == "Lusage_string.ets;")
+            .expect("user class must be present");
+        let u8_field = user_class
+            .fields
+            .iter()
+            .find(|field| field.name == "u8Field")
+            .expect("u8 field must be present");
+        let any_field = user_class
+            .fields
+            .iter()
+            .find(|field| field.name == "anyField")
+            .expect("any field must be present");
+        let index = reader
+            .index_sections()
+            .unwrap()
+            .into_iter()
+            .find(|section| section.start <= any_field.offset && any_field.offset < section.end)
+            .expect("field must be covered by IndexSection");
+        assert_eq!(index.class_offsets[u8_field.type_idx as usize], 2);
+        assert_eq!(index.class_offsets[any_field.type_idx as usize], 12);
+
+        let mut restored = AbcFile::new();
+        append_abc_file(&mut restored, &bytes).unwrap();
+        let restored_record = restored
+            .records
+            .iter()
+            .find(|record| record.name == "Lusage_string.ets;")
+            .expect("restored user record must exist");
+        let restored_any = restored_record
+            .fields
+            .iter()
+            .find(|field| field.name == "anyField")
+            .expect("restored any field must exist");
+        assert_eq!(restored_any.field_type, FieldType::Any);
+    }
+
+    #[test]
     fn annotation_usage_binary_writes_method_annotation_tags_before_slot_number() {
         let file = annotation_usage_file();
         let bytes = file.serialize_with_version(version_for_target_api(20, None));

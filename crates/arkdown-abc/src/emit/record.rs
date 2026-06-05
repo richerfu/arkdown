@@ -471,14 +471,6 @@ pub enum FieldType {
 }
 
 impl FieldType {
-    pub(crate) fn from_legacy_idx(type_idx: u16) -> Self {
-        match type_idx {
-            0 => Self::U8,
-            1 => Self::U32,
-            _ => Self::Any,
-        }
-    }
-
     pub(crate) fn binary_type_id(&self) -> Option<u32> {
         match self {
             Self::U1 => Some(0),
@@ -492,7 +484,8 @@ impl FieldType {
             Self::F64 => Some(8),
             Self::I64 => Some(9),
             Self::U64 => Some(10),
-            Self::PandaString | Self::Array { .. } | Self::Any => None,
+            Self::Any => Some(12),
+            Self::PandaString | Self::Array { .. } => None,
         }
     }
 
@@ -977,7 +970,7 @@ impl ClassRecord {
         //
         // Binary layout per FieldItem (from Panda ABC spec / es2abc output):
         //   [class_idx: u16 LE]      index of the owning class
-        //   [type_idx: u16 LE]       0 = generic/Any type
+        //   [type_idx: u16 LE]       IndexSection class/type index
         //   [name_off: u32 LE]       file offset of the field name StringItem
         //   [access_flags: ULEB128]  1 = ACC_PUBLIC
         //   [FieldTag::NOTHING = 0x00]

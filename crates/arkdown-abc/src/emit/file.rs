@@ -2261,7 +2261,6 @@ fn field_type_index(
             .expect("foreign field type must be present in IndexSection");
     }
     match field_type {
-        FieldType::Any => 0,
         FieldType::U1
         | FieldType::I8
         | FieldType::U8
@@ -2272,7 +2271,8 @@ fn field_type_index(
         | FieldType::F32
         | FieldType::F64
         | FieldType::I64
-        | FieldType::U64 => unreachable!(),
+        | FieldType::U64
+        | FieldType::Any => unreachable!(),
         FieldType::PandaString | FieldType::Array { .. } => unreachable!(),
     }
 }
