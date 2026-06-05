@@ -3195,7 +3195,9 @@ async function* ag() { yield 1; }
 const ar = () => 1;
 const aa = async () => 1;
 function cf() { "use concurrent"; return 1; }
-af(); gf(); ag(); ar(); aa(); cf();
+function sf() { "use sendable"; return 1; }
+async function saf() { "use sendable"; return 1; }
+af(); gf(); ag(); ar(); aa(); cf(); sf(); saf();
 "#,
             "@bundle:demo/entry/ets/pages/Index",
             &mut file.strings,
@@ -3235,6 +3237,14 @@ af(); gf(); ag(); ar(); aa(); cf();
             function_kind_by_short_name(&program, "aa"),
             Some(function_kind::ASYNC_NC_FUNCTION)
         );
+        assert_eq!(
+            function_kind_by_short_name(&program, "sf"),
+            Some(function_kind::FUNCTION | function_kind::SENDABLE_FUNCTION)
+        );
+        assert_eq!(
+            function_kind_by_short_name(&program, "saf"),
+            Some(function_kind::ASYNC_FUNCTION | function_kind::SENDABLE_FUNCTION)
+        );
 
         let concurrent = function_by_short_name(&program, "cf").unwrap();
         assert_eq!(concurrent.function_kind, function_kind::CONCURRENT_FUNCTION);
@@ -3243,6 +3253,58 @@ af(); gf(); ag(); ar(); aa(); cf();
             concurrent,
             CONCURRENT_MODULE_REQUEST_RECORD_NAME
         ));
+    }
+
+    #[test]
+    fn sendable_function_kind_bit_follows_upstream_api_gate() {
+        fn compile_for_target(target_api_version: u32) -> Program {
+            let mut file = AbcFile::new();
+            let record = build_record_with_debug_and_package_for_target_with_mode(
+                r#"
+function sf() { "use sendable"; return 1; }
+async function saf() { "use sendable"; return 1; }
+sf(); saf();
+"#,
+                "@bundle:demo/entry/ets/pages/Index",
+                &mut file.strings,
+                &mut file.literal_arrays,
+                Some("entry/src/main/ets/pages/Index.ets"),
+                None,
+                false,
+                false,
+                "ets",
+                true,
+                target_api_version,
+                None,
+                false,
+                true,
+            )
+            .unwrap();
+            file.add_record(record);
+            program_for_record(&file, 0, target_api_version)
+                .unwrap()
+                .unwrap()
+        }
+
+        let api11 = compile_for_target(11);
+        assert_eq!(
+            function_kind_by_short_name(&api11, "sf"),
+            Some(function_kind::FUNCTION)
+        );
+        assert_eq!(
+            function_kind_by_short_name(&api11, "saf"),
+            Some(function_kind::ASYNC_FUNCTION)
+        );
+
+        let api18 = compile_for_target(18);
+        assert_eq!(
+            function_kind_by_short_name(&api18, "sf"),
+            Some(function_kind::FUNCTION | function_kind::SENDABLE_FUNCTION)
+        );
+        assert_eq!(
+            function_kind_by_short_name(&api18, "saf"),
+            Some(function_kind::ASYNC_FUNCTION | function_kind::SENDABLE_FUNCTION)
+        );
     }
 
     #[test]

@@ -29,6 +29,18 @@ fn assert_main_function_matches_upstream_program_shape(program: &Program, key: &
     );
 }
 
+fn function_by_short_name<'a>(program: &'a Program, name: &str) -> Option<&'a Function> {
+    let suffix = format!("#{name}");
+    program.function_table.iter().find_map(|entry| {
+        let key = std::str::from_utf8(&entry.key).ok()?;
+        let short_name = key.rsplit('.').next().unwrap_or(key);
+        let matches = short_name == name
+            || short_name == format!("#*#{name}")
+            || short_name.ends_with(suffix.as_str());
+        matches.then(|| entry.value.as_ref()).flatten()
+    })
+}
+
 fn function_annotation_u32(
     function: &Function,
     record_name: &str,
@@ -59,6 +71,70 @@ fn function_annotation_u32(
         }
     }
     None
+}
+
+#[test]
+fn compile_to_abc_output_proto_preserves_upstream_sendable_function_kind() {
+    let tmp = tempfile::tempdir().unwrap();
+    let source = tmp.path().join("Index.ts");
+    let output = tmp.path().join("modules.abc");
+    let output_proto = tmp.path().join("Index.protoBin");
+    fs_err::write(
+        &source,
+        r#"
+function sf() { "use sendable"; return 1; }
+async function saf() { "use sendable"; return 1; }
+sf(); saf();
+"#,
+    )
+    .unwrap();
+
+    Ts2abcOptions {
+        inputs: vec![Ts2abcInput {
+            path: source,
+            output: None,
+            cache_file: None,
+            record_name: "entry|entry|1.0.0|src/main/ets/pages/Index".to_string(),
+            source_file: Some("entry/src/main/ets/pages/Index.ets".to_string()),
+            package_name: Some("entry".to_string()),
+            is_commonjs: false,
+            is_shared_module: false,
+            origin_source_lang: "ets".to_string(),
+            source_map: None,
+        }],
+        output,
+        target_api_version: 18,
+        target_api_sub_version: Some("Release".to_string()),
+        debug_info: false,
+        opt_level: 2,
+        optimize_try_catch_func: true,
+        merge_abc: true,
+        module: true,
+        commonjs: false,
+        input_extension: "ts".to_string(),
+        module_record_field_name: None,
+        cache_file: None,
+        output_proto: Some(output_proto.clone()),
+        compile_context_info: Default::default(),
+        enable_abc_input: false,
+        dump_deps_info: false,
+        remove_redundant_file: false,
+        npm_module_entry_list: None,
+    }
+    .compile()
+    .unwrap();
+
+    let program = ProgramProtoFile::read(&output_proto)
+        .unwrap()
+        .expect("output proto is a protoPanda Program");
+    assert_eq!(
+        function_by_short_name(&program, "sf").map(|function| function.function_kind),
+        Some(9)
+    );
+    assert_eq!(
+        function_by_short_name(&program, "saf").map(|function| function.function_kind),
+        Some(12)
+    );
 }
 
 #[test]

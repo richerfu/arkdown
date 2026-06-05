@@ -44,6 +44,7 @@ pub(crate) mod function_kind {
     pub(crate) const ASYNC_GENERATOR_FUNCTION: u32 = 5;
     pub(crate) const ASYNC_NC_FUNCTION: u32 = 6;
     pub(crate) const CONCURRENT_FUNCTION: u32 = 7;
+    pub(crate) const SENDABLE_FUNCTION: u32 = 8;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

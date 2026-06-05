@@ -828,7 +828,8 @@ fn compile_function_record(
             let expected_property_count = expected_property_count_option(
                 function_body_expected_property_count(func.body.as_deref(), lowering),
             );
-            let upstream_function_kind = function_record_function_kind(func, function.flavor);
+            let upstream_function_kind =
+                function_record_function_kind(func, function.flavor, lowering.target_api_version());
             methods.push(MethodRecord {
                 name: function.name,
                 bytecode: compiled.bytecode,
@@ -909,7 +910,11 @@ fn compile_function_record(
     }
 }
 
-fn function_record_function_kind(function: &Function<'_>, flavor: FunctionRecordFlavor) -> u32 {
+fn function_record_function_kind(
+    function: &Function<'_>,
+    flavor: FunctionRecordFlavor,
+    target_api_version: u32,
+) -> u32 {
     if function_has_directive(function, "use concurrent") {
         return function_kind::CONCURRENT_FUNCTION;
     }
@@ -922,12 +927,21 @@ fn function_record_function_kind(function: &Function<'_>, flavor: FunctionRecord
         };
     }
 
-    match (function.r#async, function.generator) {
+    let kind = match (function.r#async, function.generator) {
         (true, true) => function_kind::ASYNC_GENERATOR_FUNCTION,
         (true, false) => function_kind::ASYNC_FUNCTION,
         (false, true) => function_kind::GENERATOR_FUNCTION,
         (false, false) => function_kind::FUNCTION,
+    };
+
+    if target_api_version >= 12
+        && !function.generator
+        && function_has_directive(function, "use sendable")
+    {
+        return kind | function_kind::SENDABLE_FUNCTION;
     }
+
+    kind
 }
 
 fn function_has_directive(function: &Function<'_>, directive: &str) -> bool {
