@@ -109,9 +109,18 @@ impl OhPkgMinimal {
 
     fn dependency_names(&self) -> Vec<String> {
         let mut seen = FxHashSet::default();
+        // Include standard deps, dynamic deps, AND metadata.runtimeOnly.packages.
+        // runtimeOnly packages can be BC HARs that need to appear in byteCodeHarInfo.
+        let runtime_only_pkgs: Vec<&String> = self
+            .metadata
+            .as_ref()
+            .and_then(|m| m.runtime_only.as_ref())
+            .map(|ro| ro.packages.iter().collect())
+            .unwrap_or_default();
         self.dependencies
             .keys()
             .chain(self.dynamic_dependencies.keys())
+            .chain(runtime_only_pkgs.into_iter())
             .filter(|name| seen.insert((*name).clone()))
             .cloned()
             .collect()
@@ -135,6 +144,20 @@ struct OhPkgMetadata {
     dependency_pkg_version: IndexMap<String, String>,
     #[serde(default)]
     extra_importees: Vec<String>,
+    /// runtimeOnly packages — may contain BC HAR package names that should
+    /// be included in `byteCodeHarInfo` and `compiledImportees`.
+    #[serde(default)]
+    runtime_only: Option<OhPkgRuntimeOnly>,
+}
+
+/// `metadata.runtimeOnly` section of `oh-package.json5`.
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct OhPkgRuntimeOnly {
+    #[serde(default)]
+    packages: Vec<String>,
+    #[serde(default)]
+    sources: Vec<String>,
 }
 
 /// `compatibleSdkVersion` can be a plain integer (`12`) or a string (`"5.0.0(12)"`).
@@ -1686,5 +1709,55 @@ mod tests {
             results.iter().map(|e| e.package_name.as_str()).collect();
         assert!(names.contains("pkg-a"));
         assert!(names.contains("pkg-b"));
+    }
+
+    /// Verify that BC HAR packages listed in `metadata.runtimeOnly.packages`
+    /// are also scanned and appear in byteCodeHarInfo.
+    ///
+    /// Addresses section 3.4: 'runtimeOnly ByteCode HAR、bundled edge 未证明'
+    #[test]
+    fn test_scan_bytecode_har_finds_runtime_only_packages() {
+        let tmp = make_temp_dir();
+        let oh_modules = tmp.path().join("oh_modules");
+
+        // Host module declares a regular dep that has runtimeOnly.packages.
+        write_file(
+            &tmp.path().join("oh-package.json5"),
+            r#"{ "dependencies": { "host-lib": "1.0.0" } }"#,
+        );
+
+        // host-lib itself declares a runtimeOnly BC HAR.
+        let host_lib = oh_modules.join("host-lib");
+        write_file(
+            &host_lib.join("oh-package.json5"),
+            r#"{
+              "name": "host-lib",
+              "metadata": {
+                "runtimeOnly": {
+                  "packages": ["runtime-bc-har"]
+                }
+              }
+            }"#,
+        );
+        write_file(&host_lib.join("src/main/ets/index.ets"), "export default 1;");
+
+        // runtime-bc-har is a ByteCode HAR.
+        let runtime_bc_har = oh_modules.join("runtime-bc-har");
+        write_abc(&runtime_bc_har.join("ets").join("modules.abc"));
+        write_file(
+            &runtime_bc_har.join("oh-package.json5"),
+            r#"{ "name": "runtime-bc-har", "metadata": { "byteCodeHar": true } }"#,
+        );
+
+        let results = scan_bytecode_har_deps(tmp.path(), tmp.path());
+        let names: Vec<_> = results
+            .iter()
+            .map(|e| e.package_name.as_str())
+            .collect();
+        assert!(
+            names.contains(&"runtime-bc-har"),
+            "BC HAR in metadata.runtimeOnly.packages must be detected; got: {:?}",
+            names
+        );
     }
 }
