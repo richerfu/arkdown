@@ -853,7 +853,13 @@ impl AbcFile {
                             }
                         }
                     }
-                    if !class.standalone_ecmascript_input && !has_structured_local_variables {
+                    for param_name in &debug.param_names {
+                        string_items.get_or_create(param_name);
+                    }
+                    if debug.infer_scope_locals
+                        && !class.standalone_ecmascript_input
+                        && !has_structured_local_variables
+                    {
                         if is_arrow {
                             string_items.get_or_create("0newTarget");
                             string_items.get_or_create("0this");
@@ -950,10 +956,12 @@ impl AbcFile {
 
         let needs_scope_debug = all_classes.iter().any(|class| {
             !class.standalone_ecmascript_input
-                && class
-                    .methods
-                    .iter()
-                    .any(|method| method.debug_info.is_some())
+                && class.methods.iter().any(|method| {
+                    method
+                        .debug_info
+                        .as_ref()
+                        .is_some_and(|debug| debug.infer_scope_locals)
+                })
         });
         let scope_offs_regular: Option<[u32; 3]> = needs_scope_debug.then(|| {
             [
@@ -1632,7 +1640,7 @@ impl AbcFile {
                 constant_pool: Vec<u8>,
                 line_start: u32,
                 param_name_offsets: Vec<u32>,
-                emit_scope_locals: bool,
+                no_line_number: bool,
             }
 
             struct UniqueLnp {
@@ -1698,12 +1706,17 @@ impl AbcFile {
                         //   Arrow:   r1=newTarget, r2=this, r0=funcObj
                         let is_arrow = method.kind == MethodKind::Anonymous;
                         let has_structured_local_variables = !debug.local_variables.is_empty();
-                        let emit_scope_locals =
-                            !class.standalone_ecmascript_input && !has_structured_local_variables;
+                        let emit_scope_locals = debug.infer_scope_locals
+                            && !class.standalone_ecmascript_input
+                            && !has_structured_local_variables;
                         let debug_param_name_offsets = if has_structured_local_variables {
                             local_variable_debug_param_offsets(method, &string_items)
                         } else {
-                            Vec::new()
+                            debug
+                                .param_names
+                                .iter()
+                                .filter_map(|name| string_items.id_of(name))
+                                .collect()
                         };
                         let mut param_offs = param_offs;
                         let is_generated_constructor = method.kind == MethodKind::Constructor
@@ -1831,7 +1844,15 @@ impl AbcFile {
                         // stream. This matches libpandafile
                         // BuildLineNumberProgram, which flushes pending PC
                         // before local start/end events.
-                        if has_structured_local_variables {
+                        if debug.line_ops_include_local_variables {
+                            append_line_ops_with_mid_locals(
+                                method_ops,
+                                0,
+                                &[],
+                                &mut lnp_data,
+                                &mut cp,
+                            );
+                        } else if has_structured_local_variables {
                             let mid_locals = local_variable_debug_events(method, &string_items);
                             append_line_ops_with_mid_locals(
                                 method_ops,
@@ -1896,7 +1917,8 @@ impl AbcFile {
                             constant_pool: cp,
                             line_start: debug.line_start,
                             param_name_offsets: debug_param_name_offsets,
-                            emit_scope_locals: !class.standalone_ecmascript_input,
+                            no_line_number: debug.infer_scope_locals
+                                && !class.standalone_ecmascript_input,
                         });
                         lnp_param_cursor += 1;
                     }
@@ -1971,7 +1993,7 @@ impl AbcFile {
                     &pending.param_name_offsets,
                     &pending.constant_pool,
                     unique_lnps[unique_idx].index,
-                    pending.emit_scope_locals,
+                    pending.no_line_number,
                 );
                 section_buf.extend_from_slice(&di_bytes);
                 cur += di_bytes.len() as u32;

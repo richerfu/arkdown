@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use rustc_hash::FxHashMap;
 
 use crate::abc_reader::{
-    AbcClassItem, AbcFieldValue, AbcLiteralArrayValue, AbcLiteralEntry, AbcReader,
+    AbcClassItem, AbcDebugInfo, AbcFieldValue, AbcLiteralArrayValue, AbcLiteralEntry, AbcReader,
 };
 use crate::emit::bytecode::instruction_len;
 use crate::emit::file::{
@@ -15,10 +15,11 @@ use crate::emit::file::{
 };
 use crate::emit::record::{
     function_kind, method_access, AnnotationElementRecord, AnnotationRecord, AnnotationValue,
-    ArrayValueRecord, CatchEntry, ClassRecord, FieldRecord, FieldType, FieldValue, MethodKind,
-    MethodLabelStyle, MethodRecord, ScalarValueData, ScalarValueRecord, FIELD_OWNER_CLASS_IDX,
-    VALUE_TYPE_ANNOTATION, VALUE_TYPE_ENUM, VALUE_TYPE_F32, VALUE_TYPE_F64, VALUE_TYPE_I16,
-    VALUE_TYPE_I32, VALUE_TYPE_I64, VALUE_TYPE_I8, VALUE_TYPE_LITERALARRAY, VALUE_TYPE_METHOD,
+    ArrayValueRecord, CatchEntry, ClassRecord, DebugInfoRecord, FieldRecord, FieldType, FieldValue,
+    InstructionDebugInfo, LocalVariableDebugRecord, MethodKind, MethodLabelStyle, MethodRecord,
+    ScalarValueData, ScalarValueRecord, FIELD_OWNER_CLASS_IDX, VALUE_TYPE_ANNOTATION,
+    VALUE_TYPE_ENUM, VALUE_TYPE_F32, VALUE_TYPE_F64, VALUE_TYPE_I16, VALUE_TYPE_I32,
+    VALUE_TYPE_I64, VALUE_TYPE_I8, VALUE_TYPE_LITERALARRAY, VALUE_TYPE_METHOD,
     VALUE_TYPE_METHOD_HANDLE, VALUE_TYPE_RECORD, VALUE_TYPE_STRING, VALUE_TYPE_STRING_NULLPTR,
     VALUE_TYPE_U1, VALUE_TYPE_U16, VALUE_TYPE_U32, VALUE_TYPE_U64, VALUE_TYPE_U8,
 };
@@ -172,17 +173,36 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
                     &class_name_by_offset,
                     &literal_offset_to_index,
                 )?;
+                let abc_debug = method
+                    .debug_info_off
+                    .map(|offset| {
+                        reader
+                            .read_debug_info_item(offset, class.source_file.as_deref())
+                            .map_err(read_error("<abc debug>"))
+                    })
+                    .transpose()?;
+                let pandasm_debug = abc_debug
+                    .as_ref()
+                    .map(|debug| instruction_debug_from_abc(debug, &pandasm_insns))
+                    .unwrap_or_default();
+                let line_ops = abc_debug
+                    .as_ref()
+                    .map(|debug| debug.line_ops.clone())
+                    .unwrap_or_default();
+                let debug_info = abc_debug
+                    .as_ref()
+                    .map(|debug| debug_info_from_abc(debug, &pandasm_insns, code));
                 Ok(MethodRecord {
                     name: method.name.clone(),
                     bytecode,
                     pandasm_insns,
-                    pandasm_debug: Vec::new(),
+                    pandasm_debug,
                     num_vregs: code.num_vregs as u16,
                     num_args: code.num_args as u16,
                     value_of_first_param: -1,
                     slots_num: annotations.slot_number,
-                    debug_info: None,
-                    line_ops: Vec::new(),
+                    debug_info,
+                    line_ops,
                     catch_entries: code
                         .catches
                         .iter()
@@ -284,6 +304,182 @@ fn is_ark_annotation_stub(name: &str) -> bool {
             | "L_ESExpectedPropertyCountAnnotation;"
             | "L_ESSlotNumberAnnotation;"
     )
+}
+
+fn instruction_debug_from_abc(debug: &AbcDebugInfo, insns: &[Insn]) -> Vec<InstructionDebugInfo> {
+    let pcs = instruction_start_pcs(insns);
+    let mut out = vec![
+        InstructionDebugInfo {
+            line_number: u32::MAX,
+            column_number: u32::MAX,
+        };
+        insns.len()
+    ];
+
+    let mut line_idx = 0usize;
+    let mut line_start = u32::MAX;
+    let mut line_end = u32::MAX;
+    let mut line = u32::MAX;
+    for (idx, &pc) in pcs.iter().enumerate() {
+        while line_idx < debug.line_number_table.len() && (pc < line_start || pc >= line_end) {
+            line_start = debug.line_number_table[line_idx].offset;
+            line_idx += 1;
+            line_end = debug
+                .line_number_table
+                .get(line_idx)
+                .map(|entry| entry.offset)
+                .unwrap_or(u32::MAX);
+        }
+        if line_idx > 0 {
+            line = debug.line_number_table[line_idx - 1].line;
+        }
+        out[idx].line_number = line;
+    }
+
+    let mut column_idx = 0usize;
+    let mut column_start = 0u32;
+    let mut column_end = debug
+        .column_number_table
+        .first()
+        .map(|entry| entry.offset)
+        .unwrap_or(u32::MAX);
+    let mut column = u32::MAX;
+    for (idx, &pc) in pcs.iter().enumerate() {
+        while column_idx < debug.column_number_table.len()
+            && (pc < column_start || pc >= column_end)
+        {
+            column_start = debug.column_number_table[column_idx].offset;
+            column_idx += 1;
+            column_end = debug
+                .column_number_table
+                .get(column_idx)
+                .map(|entry| entry.offset)
+                .unwrap_or(u32::MAX);
+        }
+        if column_idx > 0 {
+            column = debug.column_number_table[column_idx - 1].column;
+        }
+        out[idx].column_number = column;
+    }
+
+    out
+}
+
+fn debug_info_from_abc(
+    debug: &AbcDebugInfo,
+    insns: &[Insn],
+    code: &crate::abc_reader::AbcCodeItem,
+) -> DebugInfoRecord {
+    let local_variables = local_variables_from_abc_debug(debug, insns, code);
+    DebugInfoRecord {
+        line_start: debug.line_start,
+        source_file: debug.source_file.clone(),
+        source_code: debug.source_code.clone(),
+        param_names: debug.param_names.clone(),
+        lexical_this: false,
+        local_variables,
+        infer_scope_locals: false,
+        line_ops_include_local_variables: true,
+    }
+}
+
+fn local_variables_from_abc_debug(
+    debug: &AbcDebugInfo,
+    insns: &[Insn],
+    code: &crate::abc_reader::AbcCodeItem,
+) -> Vec<LocalVariableDebugRecord> {
+    let pcs = instruction_start_pcs(insns);
+    let label_indices = abc2program_label_indices(insns, code);
+    debug
+        .local_variable_table
+        .iter()
+        .map(|variable| {
+            let start = abc2program_instruction_index(
+                variable.start_offset,
+                &pcs,
+                &label_indices,
+                insns.len(),
+            );
+            let end = abc2program_instruction_index(
+                variable.end_offset,
+                &pcs,
+                &label_indices,
+                insns.len(),
+            );
+            LocalVariableDebugRecord {
+                name: variable.name.clone(),
+                signature: variable.signature.clone(),
+                signature_type: variable.signature_type.clone(),
+                reg: variable.reg_number,
+                start: start as u32,
+                length: end.saturating_sub(start) as u32,
+            }
+        })
+        .collect()
+}
+
+fn abc2program_label_indices(
+    insns: &[Insn],
+    code: &crate::abc_reader::AbcCodeItem,
+) -> BTreeSet<usize> {
+    let pcs = instruction_start_pcs(insns);
+    let mut labels = BTreeSet::new();
+    for (idx, insn) in insns.iter().enumerate() {
+        if let Some(target) = jump_target_pc(pcs[idx], insn) {
+            labels.insert(instruction_index_at_pc(target, &pcs, insns.len()));
+        }
+    }
+    for catch in &code.catches {
+        labels.insert(instruction_index_at_pc(catch.try_begin, &pcs, insns.len()));
+        labels.insert(instruction_index_at_pc(catch.try_end, &pcs, insns.len()));
+        labels.insert(instruction_index_at_pc(catch.handler_pc, &pcs, insns.len()));
+        labels.insert(instruction_index_at_pc(
+            catch.handler_pc.saturating_add(catch.code_size),
+            &pcs,
+            insns.len(),
+        ));
+    }
+    labels
+}
+
+fn abc2program_instruction_index(
+    pc: u32,
+    pcs: &[u32],
+    label_indices: &BTreeSet<usize>,
+    insn_count: usize,
+) -> usize {
+    let base = instruction_index_at_pc(pc, pcs, insn_count);
+    base + label_indices.range(..=base).count()
+}
+
+fn instruction_index_at_pc(pc: u32, pcs: &[u32], insn_count: usize) -> usize {
+    pcs.binary_search(&pc).unwrap_or(insn_count)
+}
+
+fn instruction_start_pcs(insns: &[Insn]) -> Vec<u32> {
+    let mut pcs = Vec::with_capacity(insns.len());
+    let mut pc = 0u32;
+    for insn in insns {
+        pcs.push(pc);
+        pc = pc.saturating_add(insn.byte_len() as u32);
+    }
+    pcs
+}
+
+fn jump_target_pc(pc: u32, insn: &Insn) -> Option<u32> {
+    let rel = match insn {
+        Insn::JmpShort(offset) => i32::from(*offset),
+        Insn::Jmp(offset) => i32::from(*offset),
+        Insn::JmpWide(offset) => *offset,
+        Insn::JeqzShort(offset) => i32::from(*offset),
+        Insn::Jeqz(offset) => i32::from(*offset),
+        Insn::JeqzWide(offset) => *offset,
+        Insn::JnezShort(offset) => i32::from(*offset),
+        Insn::Jnez(offset) => i32::from(*offset),
+        Insn::JnezWide(offset) => *offset,
+        _ => return None,
+    };
+    (i64::from(pc) + i64::from(rel)).try_into().ok()
 }
 
 #[derive(Default)]
@@ -2036,8 +2232,13 @@ fn unsupported_prefixed_error(prefix: &str, sub_opcode: u8, pos: usize) -> AbcEr
 
 #[cfg(test)]
 mod tests {
-    use super::{trim_call_regs_for_method, AbcMethodCallInfo};
+    use super::{append_abc_file, trim_call_regs_for_method, AbcMethodCallInfo};
+    use crate::emit::file::{AbcFile, LiteralArray};
+    use crate::emit::record::LocalVariableDebugRecord;
+    use crate::emit::strings::StringTable;
+    use crate::ir::builder;
     use crate::ir::opcodes::PandasmInsn;
+    use crate::AbcReader;
 
     fn pandasm_with_regs(regs: &[u32]) -> PandasmInsn {
         PandasmInsn {
@@ -2047,6 +2248,102 @@ mod tests {
             imms: Vec::new(),
             bytes: Vec::new(),
         }
+    }
+
+    fn first_debug_method_with_locals(
+        bytes: &[u8],
+    ) -> (String, String, crate::abc_reader::AbcDebugInfo) {
+        let reader = AbcReader::new(bytes).expect("reader");
+        for class in reader.class_items().expect("classes") {
+            for method in &class.methods {
+                let Some(debug_off) = method.debug_info_off else {
+                    continue;
+                };
+                let debug = reader
+                    .read_debug_info_item(debug_off, class.source_file.as_deref())
+                    .expect("debug info");
+                if !debug.local_variable_table.is_empty() {
+                    return (class.name, method.name.clone(), debug);
+                }
+            }
+        }
+        panic!("debug method with local-variable info not found");
+    }
+
+    fn local_variable_debug_abc() -> Vec<u8> {
+        let mut strings = StringTable::default();
+        let mut literal_arrays: Vec<LiteralArray> = Vec::new();
+        let mut record = builder::build_record_with_debug(
+            "let value = 1;\nvalue += 2;\n",
+            "entry/src/main/ets/pages/Index",
+            &mut strings,
+            &mut literal_arrays,
+            Some("entry/src/main/ets/pages/Index.ts"),
+            false,
+        )
+        .expect("debug record");
+        let method = record
+            .methods
+            .iter_mut()
+            .find(|method| method.name == "func_main_0")
+            .expect("func_main_0");
+        let debug = method.debug_info.as_mut().expect("debug info");
+        debug.local_variables = vec![LocalVariableDebugRecord {
+            name: "value".to_string(),
+            signature: "any".to_string(),
+            signature_type: "any".to_string(),
+            reg: 0,
+            start: 0,
+            length: 1,
+        }];
+
+        let mut file = AbcFile::new();
+        file.literal_arrays = literal_arrays;
+        file.add_record(record);
+        file.serialize()
+    }
+
+    #[test]
+    fn abc_input_preserves_upstream_debug_info_and_lnp_locals() {
+        let bytes = local_variable_debug_abc();
+        let (_, method_name, original_debug) = first_debug_method_with_locals(&bytes);
+        assert!(
+            !original_debug.local_variable_table.is_empty(),
+            "fixture must carry upstream LNP local-variable events"
+        );
+
+        let mut file = AbcFile::new();
+        let appended = append_abc_file(&mut file, &bytes).expect("append abc");
+        assert!(!appended.is_empty());
+        let method = file.records[appended[0]]
+            .methods
+            .iter()
+            .find(|method| method.name == method_name)
+            .expect("debug method");
+        assert_eq!(method.pandasm_debug.len(), method.pandasm_insns.len());
+        assert!(
+            method
+                .pandasm_debug
+                .iter()
+                .any(|debug| debug.column_number != u32::MAX),
+            "ABC debug column table must be materialized like upstream FillInsDebug"
+        );
+        let debug = method.debug_info.as_ref().expect("method debug");
+        assert_eq!(debug.source_file, "entry/src/main/ets/pages/Index.ts");
+        assert!(!debug.infer_scope_locals);
+        assert!(debug.line_ops_include_local_variables);
+        assert_eq!(
+            debug.local_variables.len(),
+            original_debug.local_variable_table.len()
+        );
+
+        let roundtrip = file.serialize();
+        let (_, _, roundtrip_debug) = first_debug_method_with_locals(&roundtrip);
+        assert_eq!(
+            roundtrip_debug.local_variable_table.len(),
+            original_debug.local_variable_table.len(),
+            "ABC input LNP locals must not be inserted a second time on re-emit"
+        );
     }
 
     #[test]

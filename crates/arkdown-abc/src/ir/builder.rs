@@ -464,6 +464,8 @@ pub fn build_record_with_debug_and_source_map_for_target_with_mode(
             param_names: Vec::new(),
             lexical_this: false,
             local_variables: Vec::new(),
+            infer_scope_locals: true,
+            line_ops_include_local_variables: false,
         }),
         line_ops: func_main.line_ops,
         catch_entries: func_main.catches,
@@ -577,6 +579,8 @@ pub fn build_record_with_debug_and_source_map_for_target_with_mode(
                     param_names: vec![],
                     lexical_this: false,
                     local_variables: Vec::new(),
+                    infer_scope_locals: true,
+                    line_ops_include_local_variables: false,
                 });
             }
         }
@@ -2189,6 +2193,8 @@ fn compile_function_record(
                         .as_deref()
                         .is_some_and(|body| stmts_capture_this_in_arrow(&body.statements)),
                     local_variables: Vec::new(),
+                    infer_scope_locals: true,
+                    line_ops_include_local_variables: false,
                 }),
                 line_ops: compiled.line_ops,
                 catch_entries: compiled.catches,
@@ -2247,6 +2253,8 @@ fn compile_function_record(
                     param_names,
                     lexical_this: captures.this_slot.is_some(),
                     local_variables: Vec::new(),
+                    infer_scope_locals: true,
+                    line_ops_include_local_variables: false,
                 }),
                 line_ops: compiled.line_ops,
                 catch_entries: compiled.catches,
@@ -2899,6 +2907,8 @@ fn compile_class_elements(
             param_names: Vec::new(),
             lexical_this: false,
             local_variables: Vec::new(),
+            infer_scope_locals: true,
+            line_ops_include_local_variables: false,
         });
         methods.push(MethodRecord {
             name: constructor_name,
@@ -2963,6 +2973,8 @@ fn compile_class_elements(
                 param_names: Vec::new(),
                 lexical_this: false,
                 local_variables: Vec::new(),
+                infer_scope_locals: true,
+                line_ops_include_local_variables: false,
             }),
             line_ops: compiled.line_ops,
             catch_entries: compiled.catches,
@@ -3012,6 +3024,8 @@ fn compile_class_elements(
                 param_names: Vec::new(),
                 lexical_this: false,
                 local_variables: Vec::new(),
+                infer_scope_locals: true,
+                line_ops_include_local_variables: false,
             }),
             line_ops: compiled.line_ops,
             catch_entries: compiled.catches,
@@ -3195,6 +3209,8 @@ fn compile_class_elements(
                     .as_deref()
                     .is_some_and(|body| stmts_capture_this_in_arrow(&body.statements)),
                 local_variables: Vec::new(),
+                infer_scope_locals: true,
+                line_ops_include_local_variables: false,
             });
             methods.push(MethodRecord {
                 name: key_name,

@@ -149,6 +149,52 @@ pub struct AbcCodeItem {
     pub catches: Vec<AbcCatchBlock>,
 }
 
+#[derive(Debug, Clone)]
+pub struct AbcDebugInfo {
+    pub line_start: u32,
+    pub param_names: Vec<String>,
+    pub source_file: String,
+    pub source_code: Option<String>,
+    pub line_number_table: Vec<AbcLineTableEntry>,
+    pub column_number_table: Vec<AbcColumnTableEntry>,
+    pub local_variable_table: Vec<AbcLocalVariableInfo>,
+    /// Local internal LineNumberProgram representation:
+    /// `[lnp_data including END_SEQUENCE][cp_len: u32 LE][constant_pool]`.
+    pub line_ops: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AbcLineTableEntry {
+    pub offset: u32,
+    pub line: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AbcColumnTableEntry {
+    pub offset: u32,
+    pub column: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AbcLocalVariableInfo {
+    pub name: String,
+    pub signature: String,
+    pub signature_type: String,
+    pub reg_number: i32,
+    pub start_offset: u32,
+    pub end_offset: u32,
+}
+
+#[derive(Debug)]
+struct ParsedLineNumberProgram {
+    raw_lnp: Vec<u8>,
+    source_file: String,
+    source_code: Option<String>,
+    line_number_table: Vec<AbcLineTableEntry>,
+    column_number_table: Vec<AbcColumnTableEntry>,
+    local_variable_table: Vec<AbcLocalVariableInfo>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AbcCatchBlock {
     pub try_begin: u32,
@@ -794,7 +840,313 @@ impl<'a> AbcReader<'a> {
         self.read_string_at(offset as usize)
     }
 
+    /// Decode a Panda `DebugInfoItem` and its referenced LineNumberProgram.
+    ///
+    /// This mirrors upstream `DebugInfoDataAccessor` plus
+    /// `LineNumberProgramProcessor`: the DebugInfo item owns the constant pool
+    /// while the LNP index resolves to the opcode stream.
+    pub fn read_debug_info_item(
+        &self,
+        debug_info_off: u32,
+        default_source_file: Option<&str>,
+    ) -> Result<AbcDebugInfo, AbcReadError> {
+        let offset = debug_info_off as usize;
+        let mut cursor = offset;
+        let (line_start, len) =
+            self.read_uleb128(cursor)
+                .map_err(|e| AbcReadError::MalformedClassItem {
+                    offset,
+                    reason: format!("debug line_start: {e}"),
+                })?;
+        cursor += len;
+
+        let (num_params, len) =
+            self.read_uleb128(cursor)
+                .map_err(|e| AbcReadError::MalformedClassItem {
+                    offset,
+                    reason: format!("debug num_params: {e}"),
+                })?;
+        cursor += len;
+        let mut param_names = Vec::with_capacity(num_params as usize);
+        for _ in 0..num_params {
+            let (param_off, len) =
+                self.read_uleb128(cursor)
+                    .map_err(|e| AbcReadError::MalformedClassItem {
+                        offset,
+                        reason: format!("debug parameter offset: {e}"),
+                    })?;
+            cursor += len;
+            if param_off == 0 {
+                continue;
+            }
+            param_names.push(self.read_string_at(param_off as usize)?);
+        }
+
+        let (cp_size, len) =
+            self.read_uleb128(cursor)
+                .map_err(|e| AbcReadError::MalformedClassItem {
+                    offset,
+                    reason: format!("debug constant_pool_size: {e}"),
+                })?;
+        cursor += len;
+        let cp_start = cursor;
+        let cp_end = cp_start.saturating_add(cp_size as usize);
+        if cp_end > self.data.len() {
+            return Err(AbcReadError::TooShort {
+                expected: cp_end,
+                actual: self.data.len(),
+            });
+        }
+        let constant_pool = &self.data[cp_start..cp_end];
+        cursor = cp_end;
+
+        let (lnp_index, _) =
+            self.read_uleb128(cursor)
+                .map_err(|e| AbcReadError::MalformedClassItem {
+                    offset,
+                    reason: format!("debug line_number_program index: {e}"),
+                })?;
+        let lnp_offsets = self.line_number_program_offsets()?;
+        let Some(&lnp_off) = lnp_offsets.get(lnp_index as usize) else {
+            return Err(AbcReadError::MalformedClassItem {
+                offset,
+                reason: format!("debug LNP index {lnp_index} out of range"),
+            });
+        };
+
+        let parsed = self.read_line_number_program(
+            lnp_off as usize,
+            constant_pool,
+            line_start as u32,
+            default_source_file,
+        )?;
+        let mut line_ops = parsed.raw_lnp;
+        line_ops.extend_from_slice(&(constant_pool.len() as u32).to_le_bytes());
+        line_ops.extend_from_slice(constant_pool);
+
+        Ok(AbcDebugInfo {
+            line_start: line_start as u32,
+            param_names,
+            source_file: parsed.source_file,
+            source_code: parsed.source_code,
+            line_number_table: parsed.line_number_table,
+            column_number_table: parsed.column_number_table,
+            local_variable_table: parsed.local_variable_table,
+            line_ops,
+        })
+    }
+
+    /// Return the absolute file offsets of LineNumberProgram items.
+    pub fn line_number_program_offsets(&self) -> Result<Vec<u32>, AbcReadError> {
+        let count = self.read_u32(0x24)? as usize;
+        let table_off = self.read_u32(0x28)? as usize;
+        if count == 0 || table_off == 0 {
+            return Ok(Vec::new());
+        }
+        let end = table_off.saturating_add(count * 4);
+        if end > self.data.len() {
+            return Err(AbcReadError::MalformedClassItem {
+                offset: table_off,
+                reason: format!(
+                    "LineNumberProgram index table [{:#x}, {:#x}) exceeds file length {}",
+                    table_off,
+                    end,
+                    self.data.len()
+                ),
+            });
+        }
+        (0..count)
+            .map(|idx| self.read_u32(table_off + idx * 4))
+            .collect()
+    }
+
     // ── Private helpers ──────────────────────────────────────────────────────
+
+    fn read_line_number_program(
+        &self,
+        lnp_off: usize,
+        constant_pool: &[u8],
+        line_start: u32,
+        default_source_file: Option<&str>,
+    ) -> Result<ParsedLineNumberProgram, AbcReadError> {
+        let mut program_pos = lnp_off;
+        let mut cp_pos = 0usize;
+        let mut address = 0u32;
+        let mut line = line_start;
+        let mut source_file = default_source_file.unwrap_or_default().to_string();
+        let mut source_code = None;
+        let mut line_number_table = vec![AbcLineTableEntry {
+            offset: address,
+            line,
+        }];
+        let mut column_number_table = Vec::new();
+        let mut local_variable_table: Vec<AbcLocalVariableInfo> = Vec::new();
+
+        loop {
+            let op_pos = program_pos;
+            let op = self.read_u8(program_pos)?;
+            program_pos += 1;
+            match op {
+                0x00 => {
+                    for local in &mut local_variable_table {
+                        if local.end_offset == 0 {
+                            local.end_offset = address;
+                        }
+                    }
+                    let raw_lnp = self.data[lnp_off..program_pos].to_vec();
+                    return Ok(ParsedLineNumberProgram {
+                        raw_lnp,
+                        source_file,
+                        source_code,
+                        line_number_table,
+                        column_number_table,
+                        local_variable_table,
+                    });
+                }
+                0x01 => {
+                    let delta = read_uleb128_from_slice(
+                        constant_pool,
+                        &mut cp_pos,
+                        op_pos,
+                        "LNP ADVANCE_PC",
+                    )?;
+                    address = address.wrapping_add(delta);
+                }
+                0x02 => {
+                    let delta = read_sleb128_from_slice(
+                        constant_pool,
+                        &mut cp_pos,
+                        op_pos,
+                        "LNP ADVANCE_LINE",
+                    )?;
+                    line = add_line_delta(line, delta, op_pos)?;
+                }
+                0x03 | 0x04 => {
+                    let (reg, len) = self.read_sleb128(program_pos).map_err(|e| {
+                        AbcReadError::MalformedClassItem {
+                            offset: op_pos,
+                            reason: format!("LNP local register: {e}"),
+                        }
+                    })?;
+                    program_pos += len;
+                    let name_off = read_uleb128_from_slice(
+                        constant_pool,
+                        &mut cp_pos,
+                        op_pos,
+                        "LNP local name",
+                    )?;
+                    let type_off = read_uleb128_from_slice(
+                        constant_pool,
+                        &mut cp_pos,
+                        op_pos,
+                        "LNP local type",
+                    )?;
+                    let signature_off = if op == 0x04 {
+                        read_uleb128_from_slice(
+                            constant_pool,
+                            &mut cp_pos,
+                            op_pos,
+                            "LNP local type signature",
+                        )?
+                    } else {
+                        type_off
+                    };
+                    let signature = self.read_string_at(type_off as usize)?;
+                    local_variable_table.push(AbcLocalVariableInfo {
+                        name: self.read_string_at(name_off as usize)?,
+                        signature: signature.clone(),
+                        signature_type: self.read_string_at(signature_off as usize)?,
+                        reg_number: to_i32(reg, op_pos, "LNP local register")?,
+                        start_offset: address,
+                        end_offset: 0,
+                    });
+                }
+                0x05 => {
+                    let (reg, len) = self.read_sleb128(program_pos).map_err(|e| {
+                        AbcReadError::MalformedClassItem {
+                            offset: op_pos,
+                            reason: format!("LNP END_LOCAL register: {e}"),
+                        }
+                    })?;
+                    program_pos += len;
+                    let reg = to_i32(reg, op_pos, "LNP END_LOCAL register")?;
+                    let Some(local) = local_variable_table
+                        .iter_mut()
+                        .rev()
+                        .find(|local| local.reg_number == reg)
+                    else {
+                        return Err(AbcReadError::MalformedClassItem {
+                            offset: op_pos,
+                            reason: format!("LNP END_LOCAL for unknown register {reg}"),
+                        });
+                    };
+                    local.end_offset = address;
+                }
+                0x06 => {
+                    return Err(AbcReadError::MalformedClassItem {
+                        offset: op_pos,
+                        reason: "LNP RESTART_LOCAL is not supported upstream".to_string(),
+                    });
+                }
+                0x07 | 0x08 => {}
+                0x09 => {
+                    let source_file_off = read_uleb128_from_slice(
+                        constant_pool,
+                        &mut cp_pos,
+                        op_pos,
+                        "LNP SET_FILE",
+                    )?;
+                    source_file = if source_file_off == 0 {
+                        String::new()
+                    } else {
+                        self.read_string_at(source_file_off as usize)?
+                    };
+                }
+                0x0a => {
+                    let source_code_off = read_uleb128_from_slice(
+                        constant_pool,
+                        &mut cp_pos,
+                        op_pos,
+                        "LNP SET_SOURCE_CODE",
+                    )?;
+                    source_code = if source_code_off == 0 {
+                        None
+                    } else {
+                        Some(self.read_string_at(source_code_off as usize)?)
+                    };
+                }
+                0x0b => {
+                    let column = read_uleb128_from_slice(
+                        constant_pool,
+                        &mut cp_pos,
+                        op_pos,
+                        "LNP SET_COLUMN",
+                    )?;
+                    column_number_table.push(AbcColumnTableEntry {
+                        offset: address,
+                        column,
+                    });
+                }
+                op if op >= 0x0c => {
+                    let adjusted = u32::from(op - 0x0c);
+                    let pc_offset = adjusted / 15;
+                    let line_offset = adjusted % 15;
+                    address = address.wrapping_add(pc_offset);
+                    line = add_line_delta(line, line_offset as i64 - 4, op_pos)?;
+                    line_number_table.push(AbcLineTableEntry {
+                        offset: address,
+                        line,
+                    });
+                }
+                _ => {
+                    return Err(AbcReadError::MalformedClassItem {
+                        offset: op_pos,
+                        reason: format!("unsupported LNP opcode {op:#x}"),
+                    });
+                }
+            }
+        }
+    }
 
     fn read_class_info(&self, class_off: usize) -> Result<AbcClassInfo, AbcReadError> {
         // ClassItem starts with an inline StringItem for the class name.
@@ -1405,6 +1757,90 @@ impl<'a> AbcReader<'a> {
         }
         Ok((value, pos - offset))
     }
+}
+
+fn read_uleb128_from_slice(
+    data: &[u8],
+    pos: &mut usize,
+    source_offset: usize,
+    name: &str,
+) -> Result<u32, AbcReadError> {
+    let start = *pos;
+    let mut value = 0u64;
+    let mut shift = 0u32;
+    loop {
+        let Some(&byte) = data.get(*pos) else {
+            return Err(AbcReadError::MalformedClassItem {
+                offset: source_offset,
+                reason: format!("{name} operand exceeds DebugInfo constant pool"),
+            });
+        };
+        *pos += 1;
+        value |= u64::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            break;
+        }
+        shift += 7;
+        if shift >= 64 {
+            return Err(AbcReadError::MalformedClassItem {
+                offset: source_offset,
+                reason: format!("{name} ULEB128 value is too large"),
+            });
+        }
+    }
+    u32::try_from(value).map_err(|_| AbcReadError::MalformedClassItem {
+        offset: source_offset.saturating_add(start),
+        reason: format!("{name} value {value} exceeds u32"),
+    })
+}
+
+fn read_sleb128_from_slice(
+    data: &[u8],
+    pos: &mut usize,
+    source_offset: usize,
+    name: &str,
+) -> Result<i64, AbcReadError> {
+    let mut result = 0i64;
+    let mut shift = 0u32;
+    let byte = loop {
+        let Some(&byte) = data.get(*pos) else {
+            return Err(AbcReadError::MalformedClassItem {
+                offset: source_offset,
+                reason: format!("{name} operand exceeds DebugInfo constant pool"),
+            });
+        };
+        *pos += 1;
+        result |= i64::from(byte & 0x7f) << shift;
+        shift += 7;
+        if byte & 0x80 == 0 {
+            break byte;
+        }
+        if shift >= 64 {
+            return Err(AbcReadError::MalformedClassItem {
+                offset: source_offset,
+                reason: format!("{name} SLEB128 value is too large"),
+            });
+        }
+    };
+    if shift < 64 && byte & 0x40 != 0 {
+        result |= !0i64 << shift;
+    }
+    Ok(result)
+}
+
+fn add_line_delta(line: u32, delta: i64, offset: usize) -> Result<u32, AbcReadError> {
+    let delta = i32::try_from(delta).map_err(|_| AbcReadError::MalformedClassItem {
+        offset,
+        reason: format!("LNP line delta {delta} exceeds i32"),
+    })?;
+    Ok(line.wrapping_add_signed(delta))
+}
+
+fn to_i32(value: i64, offset: usize, name: &str) -> Result<i32, AbcReadError> {
+    i32::try_from(value).map_err(|_| AbcReadError::MalformedClassItem {
+        offset,
+        reason: format!("{name} value {value} exceeds i32"),
+    })
 }
 
 /// Check whether all class names in `dep_data` are already present in `base_data`.

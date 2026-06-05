@@ -1091,6 +1091,8 @@ fn method_from_proto(
             param_names: Vec::new(),
             lexical_this: false,
             local_variables,
+            infer_scope_locals: false,
+            line_ops_include_local_variables: false,
         }),
         line_ops,
         catch_entries,
@@ -3125,7 +3127,7 @@ fn proto_debug_line(line_number: u32) -> u64 {
 fn default_ins_debug() -> DebuginfoIns {
     DebuginfoIns {
         line_number: u64::MAX,
-        column_number: 0,
+        column_number: u32::MAX,
         whole_line: Vec::new(),
         bound_left: 0,
         bound_right: 0,
@@ -4053,7 +4055,7 @@ mod tests {
         assert_eq!(pandasm_opcode(&Insn::CallRuntimeIsFalse(0)), 291);
         assert_eq!(label_ins("label_0").opcode, pandasm_invalid_opcode());
         assert_eq!(default_ins_debug().line_number, u64::MAX);
-        assert_eq!(default_ins_debug().column_number, 0);
+        assert_eq!(default_ins_debug().column_number, u32::MAX);
     }
 
     #[test]
@@ -6196,7 +6198,7 @@ class A {}
             set_label_val: false,
             ins_debug: Some(DebuginfoIns {
                 line_number: u64::MAX,
-                column_number: 0,
+                column_number: u32::MAX,
                 whole_line: Vec::new(),
                 bound_left: 0,
                 bound_right: 0,
@@ -6207,7 +6209,7 @@ class A {}
             instruction_debug_from_proto(&ins).unwrap(),
             Some(InstructionDebugInfo {
                 line_number: u32::MAX,
-                column_number: 0,
+                column_number: u32::MAX,
             })
         );
         assert_eq!(

@@ -418,6 +418,14 @@ pub struct DebugInfoRecord {
     /// `length` fields are instruction indexes, matching pandasm
     /// `Function::local_variable_debug`.
     pub local_variables: Vec<LocalVariableDebugRecord>,
+    /// Source lowering asks the emitter to synthesize es2panda scope-local LNP
+    /// events. ABC/proto inputs already carry upstream debug tables and must
+    /// not invent these records on re-emit.
+    pub infer_scope_locals: bool,
+    /// ABC input preserves the original LineNumberProgram, including
+    /// START_LOCAL/END_LOCAL events. When this is set, `local_variables` are
+    /// serialized to protoPanda only and are not reinserted into the LNP body.
+    pub line_ops_include_local_variables: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
