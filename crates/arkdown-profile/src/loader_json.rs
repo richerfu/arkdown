@@ -1740,29 +1740,44 @@ impl LoaderJson {
             );
         }
 
-        // Add declared source dependencies with `src/main/ets`.
-        // This mirrors hvigor's pkg context being based on resolved dependency
-        // graph nodes rather than a blind `oh_modules` directory listing.
-        for pkg_dir in Self::collect_declared_dependency_roots(config, module_cfg) {
-            let ets_dir = pkg_dir.join("src/main/ets");
-            if !ets_dir.is_dir() {
-                continue; // skip non-source packages (ByteCode HAR, etc.)
+        // Add source-type dependency packages using LocalDependencyGraph.
+        // BytecodeHar and NativeSo are excluded (no ETS sources to compile).
+        // RemoteOrUnknown packages with src/main/ets/ are also included — they
+        // may lack module.json5 (common in simple test packages and some HAR
+        // fixtures that only have src/main/ets/ without a module.json5).
+        {
+            use crate::dependency_graph::{DependencyNodeType, LocalDependencyGraph};
+            let graph = LocalDependencyGraph::build(&module_cfg.src_path, &config.project_root);
+            for node in graph.nodes.values() {
+                if matches!(
+                    node.node_type,
+                    DependencyNodeType::BytecodeHar | DependencyNodeType::NativeSo
+                ) {
+                    continue; // pre-compiled or native-only: no ETS sources
+                }
+                if node.pkg_root.as_os_str().is_empty() {
+                    continue; // remote package not installed locally
+                }
+                let ets_dir = node.pkg_root.join("src/main/ets");
+                if !ets_dir.is_dir() {
+                    continue; // no source tree → skip
+                }
+                let pkg_name = &node.package_name;
+                if map.contains_key(pkg_name.as_str()) {
+                    continue; // prefer workspace module entry
+                }
+                let pkg_root_str = to_absolute_path_string(&node.pkg_root);
+                let pkg_ets_src = to_absolute_path_string(&ets_dir);
+                map.insert(
+                    pkg_name.clone(),
+                    PkgBriefInfo {
+                        pkg_root: pkg_root_str,
+                        pkg_name: pkg_name.clone(),
+                        source_roots: vec![pkg_ets_src.clone()],
+                        original_source_roots: vec![pkg_ets_src],
+                    },
+                );
             }
-            let pkg_name = Self::dependency_package_name(&pkg_dir);
-            if map.contains_key(&pkg_name) {
-                continue; // already present (prefer workspace module)
-            }
-            let pkg_root_str = to_absolute_path_string(&pkg_dir);
-            let pkg_ets_src = to_absolute_path_string(&ets_dir);
-            map.insert(
-                pkg_name.clone(),
-                PkgBriefInfo {
-                    pkg_root: pkg_root_str,
-                    pkg_name,
-                    source_roots: vec![pkg_ets_src.clone()],
-                    original_source_roots: vec![pkg_ets_src],
-                },
-            );
         }
 
         map
