@@ -1494,10 +1494,19 @@ impl LoaderJson {
                 continue;
             }
 
-            // Check for ResourceTable.txt at the dep root (remote HSP layout).
-            let resource_table = pkg_dir.join("ResourceTable.txt");
-            if resource_table.is_file() {
-                let pkg_name = Self::dependency_package_name(&pkg_dir);
+            // Check for ResourceTable.txt in priority order:
+            // 1. Build output intermediates (hvigor target intermediates layout)
+            // 2. Dep root (remote HSP / pre-packaged layout)
+            // This matches hvigor's DependencyManager which uses the target
+            // intermediates ResourceTable.txt when the HSP was built locally.
+            let pkg_name = Self::dependency_package_name(&pkg_dir);
+            let resource_table = [
+                pkg_dir.join("build/default/intermediates/res/default/ResourceTable.txt"),
+                pkg_dir.join("ResourceTable.txt"),
+            ]
+            .into_iter()
+            .find(|p| p.is_file());
+            if let Some(resource_table) = resource_table {
                 map.entry(pkg_name)
                     .or_insert_with(|| to_absolute_path_string(&resource_table));
             }

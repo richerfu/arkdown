@@ -291,8 +291,17 @@ fn collect_dependency_resource_tables(
 ) -> Vec<serde_json::Value> {
     let mut tables = Vec::new();
     for pkg_dir in collect_declared_dependency_roots(project_root, module_root) {
-        let resource_table = pkg_dir.join("ResourceTable.txt");
-        if resource_table.is_file() {
+        // Check target intermediates first (locally-built HSP layout), then
+        // fall back to the package root (remote HSP / pre-built layout).
+        // Mirrors hvigor DependencyManager which prefers the target intermediates
+        // ResourceTable.txt when the dependency was built in the same project.
+        let resource_table = [
+            pkg_dir.join("build/default/intermediates/res/default/ResourceTable.txt"),
+            pkg_dir.join("ResourceTable.txt"),
+        ]
+        .into_iter()
+        .find(|p| p.is_file());
+        if let Some(resource_table) = resource_table {
             tables.push(serde_json::json!({
                 "resourceTable": path_string(&resource_table),
             }));

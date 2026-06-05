@@ -14,8 +14,6 @@
 
 use std::path::{Path, PathBuf};
 
-use rustc_hash::FxHashMap;
-
 /// Classification of a dependency node in the local dependency graph.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DependencyNodeType {
