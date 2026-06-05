@@ -2130,6 +2130,8 @@ fn collect_integrated_hsps(
     struct DepPkg {
         #[serde(default)]
         metadata: Option<DepMetadata>,
+        #[serde(default)]
+        version: Option<String>,
     }
 
     let mut raw_entries: Vec<IntegratedHspEntry> = Vec::new();
@@ -2143,7 +2145,8 @@ fn collect_integrated_hsps(
         let Ok(dep_pkg) = json5::from_str::<DepPkg>(&dep_content) else {
             continue;
         };
-        if !dep_pkg.metadata.map_or(false, |m| m.is_integrated_hsp) {
+        let is_integrated = dep_pkg.metadata.as_ref().map_or(false, |m| m.is_integrated_hsp);
+        if !is_integrated {
             continue;
         }
 
@@ -2158,8 +2161,16 @@ fn collect_integrated_hsps(
             continue;
         }
 
+        // Use the declared package version for the hsp directory name.
+        // hvigor's packageNormalize writes the version into the directory name
+        // (e.g. `myhsp@1.2.3`) so that multiple versions can coexist in the HAP.
+        let version = dep_pkg
+            .version
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "1.0.0".to_string());
+
         raw_entries.push(IntegratedHspEntry {
-            hsp_dir_name: format!("{}@1.0.0", hsp_name),
+            hsp_dir_name: format!("{}@{}", hsp_name, version),
             hsp_file_name: format!("{}.hsp", hsp_name),
             hsp_path,
         });
