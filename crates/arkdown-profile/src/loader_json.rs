@@ -1684,8 +1684,8 @@ impl LoaderJson {
             .iter()
             .find(|m| m.name == module_name)?;
 
-        // Select the effective target using the same 4-priority rules as build.rs.
-        let target = select_effective_target_for_info(
+        // Use centralised target selection for consistent priority rules.
+        let target = arkdown_config::build_profile::pick_effective_raw_target(
             &raw_module.targets,
             product_name,
             build_mode_name,
@@ -1707,53 +1707,8 @@ impl LoaderJson {
 
 /// Select the effective target for pkgBriefInfo source-root detection.
 ///
-/// Uses the same 4-priority rules as build.rs `select_effective_resource_target`:
-/// 1. Named "default" + product + build mode.
-/// 2. Any target matching product + build mode.
-/// 3. Product match (any mode).
-/// 4. Bare "default".
-fn select_effective_target_for_info<'a>(
-    targets: &'a [arkdown_config::build_profile::RawTarget],
-    product_name: &str,
-    build_mode_name: &str,
-) -> Option<&'a arkdown_config::build_profile::RawTarget> {
-    fn applies_to_product(
-        target: &arkdown_config::build_profile::RawTarget,
-        product: &str,
-    ) -> bool {
-        if target.apply_to_products.is_empty() {
-            product == "default"
-        } else {
-            target.apply_to_products.iter().any(|p| p == product)
-        }
-    }
-
-    fn applies_to_mode(
-        target: &arkdown_config::build_profile::RawTarget,
-        mode: &str,
-    ) -> bool {
-        if target.build_mode_set.is_empty() {
-            true
-        } else {
-            target.build_mode_set.iter().any(|m| m.name == mode)
-        }
-    }
-
-    targets
-        .iter()
-        .find(|t| {
-            t.name == "default"
-                && applies_to_product(t, product_name)
-                && applies_to_mode(t, build_mode_name)
-        })
-        .or_else(|| {
-            targets.iter().find(|t| {
-                applies_to_product(t, product_name) && applies_to_mode(t, build_mode_name)
-            })
-        })
-        .or_else(|| targets.iter().find(|t| applies_to_product(t, product_name)))
-        .or_else(|| targets.iter().find(|t| t.name == "default"))
-}
+// Target selection is now centralised in
+// arkdown_config::build_profile::pick_effective_raw_target.
 
 fn default_build_mode() -> String {
     "debug".to_string()

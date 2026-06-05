@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use arkdown_config::build_profile::{RawBuildProfile, RawTarget};
+use arkdown_config::build_profile::RawBuildProfile;
 use arkdown_config::ConfigError;
 use arkdown_core::{ArkdownError, MetadataEntry};
 
@@ -157,8 +157,12 @@ fn read_target_distribution_filter(
     else {
         return Ok(None);
     };
-    let Some(target) = select_effective_target(&raw_module.targets, product_name, build_mode_name)
-    else {
+    // Use centralised target selection from arkdown_config for consistent priority rules.
+    let Some(target) = arkdown_config::build_profile::pick_effective_raw_target(
+        &raw_module.targets,
+        product_name,
+        build_mode_name,
+    ) else {
         return Ok(None);
     };
     let Some(config) = target.config.as_ref() else {
@@ -170,57 +174,8 @@ fn read_target_distribution_filter(
         .or_else(|| config.distro_filter.clone()))
 }
 
-fn select_effective_target<'a>(
-    targets: &'a [RawTarget],
-    product_name: &str,
-    build_mode_name: &str,
-) -> Option<&'a RawTarget> {
-    // 1. Named "default" + matches product + matches build mode.
-    if let Some(t) = targets.iter().find(|target| {
-        target.name == "default"
-            && target_applies_to_product(target, product_name)
-            && target_applies_to_build_mode(target, build_mode_name)
-    }) {
-        return Some(t);
-    }
-    // 2. Any target matching product + build mode.
-    if let Some(t) = targets.iter().find(|target| {
-        target_applies_to_product(target, product_name)
-            && target_applies_to_build_mode(target, build_mode_name)
-    }) {
-        return Some(t);
-    }
-    // 3. Product match without build mode constraint.
-    if let Some(t) = targets
-        .iter()
-        .find(|target| target_applies_to_product(target, product_name))
-    {
-        return Some(t);
-    }
-    // 4. Bare "default".
-    targets.iter().find(|target| target.name == "default")
-}
-
-fn target_applies_to_product(target: &RawTarget, product_name: &str) -> bool {
-    if target.apply_to_products.is_empty() {
-        product_name == "default"
-    } else {
-        target
-            .apply_to_products
-            .iter()
-            .any(|product| product == product_name)
-    }
-}
-
-fn target_applies_to_build_mode(target: &RawTarget, build_mode_name: &str) -> bool {
-    if target.build_mode_set.is_empty() {
-        return true;
-    }
-    target
-        .build_mode_set
-        .iter()
-        .any(|mode| mode.name == build_mode_name)
-}
+// Target selection now uses arkdown_config::build_profile::pick_effective_raw_target
+// in read_target_distribution_filter above.
 
 fn distro_filter_field_name(compile_api_version: u32) -> &'static str {
     if compile_api_version == 9 {

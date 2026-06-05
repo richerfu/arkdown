@@ -10,7 +10,7 @@ use indexmap::IndexMap;
 
 use arkdown::{compile_entry::CompileEntryNamer, BundleOutput, Bundler};
 use arkdown_abc::AbcReader;
-use arkdown_config::build_profile::{parse_api_version, RawBuildProfile};
+use arkdown_config::build_profile::parse_api_version;
 use arkdown_config::load_config;
 use arkdown_core::{
     ArkdownConfig, BuildMode, ChunkGraph, ModuleConfig, ModuleJson5, ModuleJson5Module,
@@ -1766,25 +1766,17 @@ fn select_effective_module_target(
     product_name: &str,
     build_mode_name: &str,
 ) -> Option<EffectiveResourceTarget> {
-    let Ok(profile) = RawBuildProfile::load(project_root) else {
-        return None;
-    };
-    let Some(raw_module) = profile
-        .modules
-        .iter()
-        .find(|raw_module| raw_module.name == module.name)
-    else {
-        return None;
-    };
-    let target =
-        select_effective_resource_target(&raw_module.targets, product_name, build_mode_name)?;
+    // Use the centralised target selection from arkdown_config to ensure all
+    // pipeline stages apply the same priority rules consistently.
+    let cfg = arkdown_config::build_profile::select_effective_target(
+        project_root,
+        &module.name,
+        product_name,
+        build_mode_name,
+    )?;
     Some(EffectiveResourceTarget {
-        name: target.name.clone(),
-        resource_directories: target
-            .resource
-            .as_ref()
-            .map(|resource| resource.directories.clone())
-            .unwrap_or_default(),
+        name: cfg.name,
+        resource_directories: cfg.resource_directories,
     })
 }
 
@@ -1814,78 +1806,11 @@ fn target_source_set_resource_dir(module: &ModuleConfig, target_name: &str) -> O
     dir.exists().then_some(dir)
 }
 
-/// Select the effective target for the given `product_name` and
-/// `build_mode_name` using hvigor's precedence rules:
-///
-/// 1. A target named `"default"` that matches both product AND build mode.
-/// 2. Any target that matches both product AND build mode.
-/// 3. Fall back to any target that matches only the product (ignoring mode).
-/// 4. Last resort: the bare `"default"` target.
-///
-/// The `build_mode_name` filter is applied via `target_applies_to_build_mode`.
-/// A target with an empty `buildModeSet` matches all modes.
-fn select_effective_resource_target<'a>(
-    targets: &'a [arkdown_config::build_profile::RawTarget],
-    product_name: &str,
-    build_mode_name: &str,
-) -> Option<&'a arkdown_config::build_profile::RawTarget> {
-    // 1. Named "default" + matches product + matches build mode.
-    if let Some(t) = targets.iter().find(|target| {
-        target.name == "default"
-            && target_applies_to_product(target, product_name)
-            && target_applies_to_build_mode(target, build_mode_name)
-    }) {
-        return Some(t);
-    }
-    // 2. Any target matching product + build mode.
-    if let Some(t) = targets.iter().find(|target| {
-        target_applies_to_product(target, product_name)
-            && target_applies_to_build_mode(target, build_mode_name)
-    }) {
-        return Some(t);
-    }
-    // 3. Product match without build mode constraint (target has no buildModeSet).
-    if let Some(t) = targets
-        .iter()
-        .find(|target| target_applies_to_product(target, product_name))
-    {
-        return Some(t);
-    }
-    // 4. Bare "default" target.
-    targets.iter().find(|target| target.name == "default")
-}
-
-fn target_applies_to_product(
-    target: &arkdown_config::build_profile::RawTarget,
-    product_name: &str,
-) -> bool {
-    if target.apply_to_products.is_empty() {
-        product_name == "default"
-    } else {
-        target
-            .apply_to_products
-            .iter()
-            .any(|product| product == product_name)
-    }
-}
-
-/// Return `true` if `target.buildModeSet` is either empty (matches all modes)
-/// or contains the given `build_mode_name` (e.g. `"debug"` or `"release"`).
-///
-/// Mirrors hvigor's target-selection logic which gates each target on the
-/// current build mode when `buildModeSet` is non-empty.
-fn target_applies_to_build_mode(
-    target: &arkdown_config::build_profile::RawTarget,
-    build_mode_name: &str,
-) -> bool {
-    if target.build_mode_set.is_empty() {
-        return true; // no restriction: matches all build modes
-    }
-    target
-        .build_mode_set
-        .iter()
-        .any(|mode| mode.name == build_mode_name)
-}
+// Target selection (select_effective_resource_target and related helpers) have
+// been moved to arkdown_config::build_profile::pick_effective_raw_target and
+// arkdown_config::build_profile::select_effective_target, which are now used
+// by select_effective_module_target above.  This avoids duplicating the priority
+// logic across multiple pipeline stages.
 
 fn collect_native_libs(project_root: &Path, module: &ModuleConfig) -> Vec<PathBuf> {
     let mut libs = Vec::new();

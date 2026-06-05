@@ -10,7 +10,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
-use arkdown_config::build_profile::{parse_api_version, RawBuildProfile, RawTarget};
+use arkdown_config::build_profile::{parse_api_version, RawBuildProfile};
 use arkdown_core::{ArkdownConfig, ArkdownError, HapManifest, OhosModuleType};
 use indexmap::IndexMap;
 use serde::Deserialize;
@@ -1060,7 +1060,10 @@ impl ModuleJsonWriter {
             arkdown_core::BuildMode::Debug => "debug",
             arkdown_core::BuildMode::Release => "release",
         };
-        let Some(target) = Self::select_effective_target(
+        // Use centralised target selection so all pipeline stages apply the
+        // same priority: explicit buildModeSet targets take precedence over
+        // catch-all "default" targets.
+        let Some(target) = arkdown_config::build_profile::pick_effective_raw_target(
             &raw_module.targets,
             &config.product.name,
             build_mode_name,
@@ -1116,71 +1119,8 @@ impl ModuleJsonWriter {
             .collect()
     }
 
-    /// Select the single effective target arkdown can currently materialize.
-    ///
-    /// Hvigor can execute multiple targets for one product and emit multiple
-    /// artifacts.  Until arkdown has that execution model, prefer the applied
-    /// `default` target, then the first target applied to the selected product
-    /// and build mode.
-    ///
-    /// Selection priority (mirrors hvigor):
-    /// 1. Named `"default"` + matches product + matches build mode.
-    /// 2. Any target matching product + build mode.
-    /// 3. Product match without build mode constraint.
-    /// 4. Bare `"default"` target.
-    fn select_effective_target<'a>(
-        targets: &'a [RawTarget],
-        product_name: &str,
-        build_mode_name: &str,
-    ) -> Option<&'a RawTarget> {
-        // 1. Named "default" + matches product + matches build mode.
-        if let Some(t) = targets.iter().find(|target| {
-            target.name == "default"
-                && Self::target_applies_to_product(target, product_name)
-                && Self::target_applies_to_build_mode(target, build_mode_name)
-        }) {
-            return Some(t);
-        }
-        // 2. Any target matching product + build mode.
-        if let Some(t) = targets.iter().find(|target| {
-            Self::target_applies_to_product(target, product_name)
-                && Self::target_applies_to_build_mode(target, build_mode_name)
-        }) {
-            return Some(t);
-        }
-        // 3. Product match without build mode constraint.
-        if let Some(t) = targets
-            .iter()
-            .find(|target| Self::target_applies_to_product(target, product_name))
-        {
-            return Some(t);
-        }
-        // 4. Bare "default".
-        targets.iter().find(|target| target.name == "default")
-    }
-
-    fn target_applies_to_product(target: &RawTarget, product_name: &str) -> bool {
-        if target.apply_to_products.is_empty() {
-            product_name == "default"
-        } else {
-            target
-                .apply_to_products
-                .iter()
-                .any(|product| product == product_name)
-        }
-    }
-
-    /// Return `true` if the target's `buildModeSet` is empty (matches all
-    /// modes) or contains `build_mode_name`.
-    fn target_applies_to_build_mode(target: &RawTarget, build_mode_name: &str) -> bool {
-        if target.build_mode_set.is_empty() {
-            return true;
-        }
-        target
-            .build_mode_set
-            .iter()
-            .any(|mode| mode.name == build_mode_name)
-    }
+    // Target selection methods (select_effective_target etc.) have been moved
+    // to arkdown_config::build_profile::pick_effective_raw_target for centralisation.
 
     /// Resolve a `$type:name` resource reference to a numeric ID.
     ///

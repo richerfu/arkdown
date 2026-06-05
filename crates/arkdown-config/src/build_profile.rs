@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Deserializer};
 
@@ -424,7 +424,7 @@ pub struct RawTargetSource {
 }
 
 /// Per-target ability configuration override.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RawTargetAbility {
     pub name: String,
@@ -432,6 +432,134 @@ pub struct RawTargetAbility {
     pub label: Option<String>,
     #[serde(default)]
     pub launch_type: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Effective target resolution
+// ---------------------------------------------------------------------------
+
+/// The resolved effective target for a specific module/product/build-mode
+/// combination.
+///
+/// hvigor resolves one "effective target" per module by selecting the first
+/// target in declaration order that matches both `applyToProducts` and
+/// `buildModeSet` constraints. This struct carries the resolved configuration
+/// that downstream pipeline stages need.
+#[derive(Debug, Clone, Default)]
+pub struct EffectiveTargetConfig {
+    /// Target name, e.g. `"default"` or `"phone"`.
+    pub name: String,
+    /// Target-specific resource directories (from `target.resource.directories`).
+    /// Empty when the target has no resource override.
+    pub resource_directories: Vec<PathBuf>,
+    /// Source ability overrides for this target.
+    /// Empty when the target has no `source.abilities`.
+    pub source_abilities: Vec<RawTargetAbility>,
+    /// Distribution/distro filter configuration from `target.config`.
+    /// `None` when the target has no filter configured.
+    pub distribution_filter: Option<serde_json::Value>,
+    /// Build modes this target applies to; empty means all modes.
+    pub build_mode_set: Vec<String>,
+}
+
+/// Select the effective target for `module_name` given the current
+/// `product_name` and `build_mode_name`.
+///
+/// Reads `build-profile.json5` from `project_root` and returns the resolved
+/// [`EffectiveTargetConfig`].  Returns `None` when:
+/// - `build-profile.json5` cannot be read.
+/// - The module is not declared in the profile.
+/// - No target at all is declared for the module.
+///
+/// Priority order (matches hvigor):
+/// 1. Named `"default"` + matches product + matches build mode.
+/// 2. Any target matching product + build mode.
+/// 3. Product match without build-mode constraint.
+/// 4. Bare `"default"` target.
+pub fn select_effective_target(
+    project_root: &Path,
+    module_name: &str,
+    product_name: &str,
+    build_mode_name: &str,
+) -> Option<EffectiveTargetConfig> {
+    let profile = RawBuildProfile::load(project_root).ok()?;
+    let raw_module = profile.modules.iter().find(|m| m.name == module_name)?;
+    let target = pick_effective_raw_target(&raw_module.targets, product_name, build_mode_name)?;
+
+    Some(EffectiveTargetConfig {
+        name: target.name.clone(),
+        resource_directories: target
+            .resource
+            .as_ref()
+            .map(|r| r.directories.clone())
+            .unwrap_or_default(),
+        source_abilities: target
+            .source
+            .as_ref()
+            .map(|s| s.abilities.iter().cloned().collect())
+            .unwrap_or_default(),
+        distribution_filter: target
+            .config
+            .as_ref()
+            .and_then(|c| c.distribution_filter.clone().or_else(|| c.distro_filter.clone())),
+        build_mode_set: target
+            .build_mode_set
+            .iter()
+            .map(|m| m.name.clone())
+            .collect(),
+    })
+}
+
+/// Pick the first [`RawTarget`] matching the given product and build mode.
+///
+/// Priority (matches hvigor's effective-target selection):
+/// 1. Target with a SPECIFIC `buildModeSet` (non-empty) that includes the current
+///    mode AND matches the product.  This allows build-mode overrides to take
+///    precedence over the catch-all "default" target.
+/// 2. Target named `"default"` that matches the product (catch-all).
+/// 3. Any target matching the product (broader fallback).
+/// 4. Bare `"default"` target (last resort).
+///
+/// Use this to ensure all pipeline stages apply the same priority rules.
+pub fn pick_effective_raw_target<'a>(
+    targets: &'a [RawTarget],
+    product_name: &str,
+    build_mode_name: &str,
+) -> Option<&'a RawTarget> {
+    fn applies_to_product(t: &RawTarget, product: &str) -> bool {
+        if t.apply_to_products.is_empty() {
+            product == "default"
+        } else {
+            t.apply_to_products.iter().any(|p| p == product)
+        }
+    }
+
+    fn has_specific_mode_match(t: &RawTarget, mode: &str) -> bool {
+        // "specific" means the target explicitly restricts to certain modes.
+        !t.build_mode_set.is_empty() && t.build_mode_set.iter().any(|m| m.name == mode)
+    }
+
+    // 1. Target with EXPLICIT buildModeSet matching this mode + product.
+    //    These override catch-all targets for the specific build mode.
+    if let Some(t) = targets
+        .iter()
+        .find(|t| has_specific_mode_match(t, build_mode_name) && applies_to_product(t, product_name))
+    {
+        return Some(t);
+    }
+    // 2. Named "default" + product match (catch-all for all modes).
+    if let Some(t) = targets
+        .iter()
+        .find(|t| t.name == "default" && applies_to_product(t, product_name))
+    {
+        return Some(t);
+    }
+    // 3. Any target matching the product.
+    if let Some(t) = targets.iter().find(|t| applies_to_product(t, product_name)) {
+        return Some(t);
+    }
+    // 4. Bare "default" (last resort).
+    targets.iter().find(|t| t.name == "default")
 }
 
 // ---------------------------------------------------------------------------
@@ -1030,5 +1158,81 @@ mod tests {
             all_modes_target.build_mode_set.is_empty(),
             "target without buildModeSet should match all modes"
         );
+    }
+
+    /// Verify `pick_effective_raw_target` selects the correct target using
+    /// the 4-priority hvigor rules.
+    #[test]
+    fn test_pick_effective_raw_target_priority() {
+        let targets: Vec<RawTarget> = vec![
+            // All-modes "default" target.
+            RawTarget {
+                name: "default".to_string(),
+                apply_to_products: vec!["default".to_string()],
+                config: None,
+                resource: None,
+                source: None,
+                build_mode_set: vec![],
+            },
+            // Release-only override target.
+            RawTarget {
+                name: "release-override".to_string(),
+                apply_to_products: vec!["default".to_string()],
+                config: None,
+                resource: Some(RawTargetResource {
+                    directories: vec![PathBuf::from("src/release/resources")],
+                }),
+                source: None,
+                build_mode_set: vec![RawBuildMode {
+                    name: "release".to_string(),
+                }],
+            },
+        ];
+
+        // Debug mode → picks "default" (release-override has release-only buildModeSet).
+        let debug_target =
+            pick_effective_raw_target(&targets, "default", "debug").expect("debug target");
+        assert_eq!(debug_target.name, "default");
+
+        // Release mode → picks "release-override" (matches product + mode).
+        let release_target =
+            pick_effective_raw_target(&targets, "default", "release").expect("release target");
+        assert_eq!(release_target.name, "release-override");
+    }
+
+    /// Verify `EffectiveTargetConfig` carries the resource directories correctly.
+    #[test]
+    fn test_effective_target_config_resource_dirs() {
+        let targets: Vec<RawTarget> = vec![RawTarget {
+            name: "default".to_string(),
+            apply_to_products: vec!["default".to_string()],
+            config: None,
+            resource: Some(RawTargetResource {
+                directories: vec![
+                    PathBuf::from("src/main/resources"),
+                    PathBuf::from("src/extra/resources"),
+                ],
+            }),
+            source: None,
+            build_mode_set: vec![],
+        }];
+
+        let target = pick_effective_raw_target(&targets, "default", "debug").unwrap();
+        let cfg = EffectiveTargetConfig {
+            name: target.name.clone(),
+            resource_directories: target
+                .resource
+                .as_ref()
+                .map(|r| r.directories.clone())
+                .unwrap_or_default(),
+            source_abilities: vec![],
+            distribution_filter: None,
+            build_mode_set: vec![],
+        };
+
+        assert_eq!(cfg.name, "default");
+        assert_eq!(cfg.resource_directories.len(), 2);
+        assert_eq!(cfg.resource_directories[0], PathBuf::from("src/main/resources"));
+        assert_eq!(cfg.resource_directories[1], PathBuf::from("src/extra/resources"));
     }
 }
