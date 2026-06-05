@@ -1100,6 +1100,7 @@ fn method_from_proto(
         label_table: label_table_from_proto(function)?,
         kind,
         function_kind: function.function_kind,
+        source_lang: Some(to_u8(function.language as u64, "function language")?),
         concurrent_module_requests: function.concurrent_module_requests.clone(),
         method_pool_entry: false,
         expected_property_count: function_expected_property_count(function)?,
@@ -2721,7 +2722,7 @@ fn function_to_proto(
 
     Ok(Function {
         name: bytes(&full_method_name(&record.name, &method.name)),
-        language: record.source_lang as u32,
+        language: method.effective_source_lang(record.source_lang) as u32,
         metadata: Some(function_metadata(
             method.access_flags(),
             method.expected_property_count,
@@ -5354,6 +5355,92 @@ class A {}
             restored_record.source_file.as_deref(),
             Some("usage_string.ets")
         );
+    }
+
+    #[test]
+    fn method_source_lang_roundtrips_independently_from_record_language() {
+        let file = annotation_usage_file();
+        let mut program = program_for_file(&file, 20).unwrap();
+        let record = program
+            .record_table
+            .iter()
+            .find_map(|entry| {
+                let record = entry.value.as_ref()?;
+                (entry.key == b"usage_string.ets").then_some(record)
+            })
+            .expect("user record must be present");
+        assert_eq!(record.language, 0x04);
+
+        let function = function_by_short_name_mut(&mut program, "func_main_0")
+            .expect("func_main_0 function must be present");
+        assert_eq!(function.language, 0x04);
+        function.language = 0x02;
+
+        let mut restored = AbcFile::new();
+        append_program_to_file(&mut restored, program).unwrap();
+        let restored_record = restored
+            .records
+            .iter()
+            .find(|record| record.name == "Lusage_string.ets;")
+            .expect("restored user record must be present");
+        assert_eq!(restored_record.source_lang, 0x04);
+        let restored_method = restored_record
+            .methods
+            .iter()
+            .find(|method| method.name == "func_main_0")
+            .expect("restored func_main_0 method must exist");
+        assert_eq!(restored_method.source_lang, Some(0x02));
+        assert_eq!(
+            restored_method.effective_source_lang(restored_record.source_lang),
+            0x02
+        );
+
+        let program_after_proto = program_for_file(&restored, 20).unwrap();
+        let proto_record = program_after_proto
+            .record_table
+            .iter()
+            .find_map(|entry| {
+                let record = entry.value.as_ref()?;
+                (entry.key == b"usage_string.ets").then_some(record)
+            })
+            .expect("roundtrip user record must be present");
+        assert_eq!(proto_record.language, 0x04);
+        let proto_function = function_by_short_name(&program_after_proto, "func_main_0")
+            .expect("roundtrip func_main_0 function must exist");
+        assert_eq!(proto_function.language, 0x02);
+
+        let bytes = restored.serialize_with_version(version_for_target_api(20, None));
+        let reader = AbcReader::new(&bytes).unwrap();
+        let class = reader
+            .class_items()
+            .unwrap()
+            .into_iter()
+            .find(|class| class.name == "Lusage_string.ets;")
+            .expect("user class must be present");
+        assert_eq!(class.source_lang, Some(0x04));
+        let method = class
+            .methods
+            .iter()
+            .find(|method| method.name == "func_main_0")
+            .expect("func_main_0 method item must exist");
+        assert_eq!(method.source_lang, Some(0x02));
+
+        let mut restored_from_abc = AbcFile::new();
+        append_abc_file(&mut restored_from_abc, &bytes).unwrap();
+        let abc_method = restored_from_abc
+            .records
+            .iter()
+            .find(|record| record.name == "Lusage_string.ets;")
+            .expect("ABC-imported user record must be present")
+            .methods
+            .iter()
+            .find(|method| method.name == "func_main_0")
+            .expect("ABC-imported func_main_0 method must exist");
+        assert_eq!(abc_method.source_lang, Some(0x02));
+        let roundtrip_program = program_for_file(&restored_from_abc, 20).unwrap();
+        let roundtrip_function = function_by_short_name(&roundtrip_program, "func_main_0")
+            .expect("ABC roundtrip func_main_0 function must exist");
+        assert_eq!(roundtrip_function.language, 0x02);
     }
 
     #[test]

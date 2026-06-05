@@ -473,6 +473,7 @@ pub fn build_record_with_debug_and_source_map_for_target_with_mode(
         label_table: Vec::new(),
         kind: MethodKind::Module,
         function_kind: function_kind::FUNCTION,
+        source_lang: None,
         concurrent_module_requests: Vec::new(),
         method_pool_entry: false,
         expected_property_count: None,
@@ -2202,6 +2203,7 @@ fn compile_function_record(
                 label_table: Vec::new(),
                 kind: MethodKind::FunctionLiteral,
                 function_kind: upstream_function_kind,
+                source_lang: None,
                 concurrent_module_requests,
                 method_pool_entry: true,
                 expected_property_count,
@@ -2266,6 +2268,7 @@ fn compile_function_record(
                 } else {
                     function_kind::NC_FUNCTION
                 },
+                source_lang: None,
                 concurrent_module_requests: Vec::new(),
                 method_pool_entry: true,
                 expected_property_count,
@@ -2926,6 +2929,7 @@ fn compile_class_elements(
             label_table: Vec::new(),
             kind: MethodKind::Constructor,
             function_kind: function_kind::FUNCTION,
+            source_lang: None,
             concurrent_module_requests: Vec::new(),
             method_pool_entry: true,
             expected_property_count: class_expected_property_count,
@@ -2982,6 +2986,7 @@ fn compile_class_elements(
             label_table: Vec::new(),
             kind: MethodKind::Function,
             function_kind: function_kind::NONE,
+            source_lang: None,
             concurrent_module_requests: Vec::new(),
             method_pool_entry: true,
             expected_property_count: None,
@@ -3033,6 +3038,7 @@ fn compile_class_elements(
             label_table: Vec::new(),
             kind: MethodKind::Function,
             function_kind: function_kind::NONE,
+            source_lang: None,
             concurrent_module_requests: Vec::new(),
             method_pool_entry: true,
             expected_property_count: None,
@@ -3232,6 +3238,7 @@ fn compile_class_elements(
                     MethodKind::Function
                 },
                 function_kind: upstream_function_kind,
+                source_lang: None,
                 concurrent_module_requests,
                 method_pool_entry: !(lowering.standalone_ecmascript_input()
                     && !is_constructor
@@ -3299,6 +3306,7 @@ fn compile_class_elements(
             label_table: Vec::new(),
             kind: MethodKind::Function,
             function_kind: function_kind::NONE,
+            source_lang: None,
             concurrent_module_requests: Vec::new(),
             method_pool_entry: true,
             expected_property_count: None,
@@ -3349,6 +3357,7 @@ fn compile_class_elements(
             label_table: Vec::new(),
             kind: MethodKind::Function,
             function_kind: function_kind::NONE,
+            source_lang: None,
             concurrent_module_requests: Vec::new(),
             method_pool_entry: true,
             expected_property_count: None,

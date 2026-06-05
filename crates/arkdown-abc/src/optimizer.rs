@@ -522,6 +522,7 @@ mod tests {
             label_table: vec![],
             kind: MethodKind::Module,
             function_kind: function_kind::FUNCTION,
+            source_lang: None,
             concurrent_module_requests: Vec::new(),
             method_pool_entry: false,
             expected_property_count: None,

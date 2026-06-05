@@ -340,6 +340,12 @@ pub struct MethodRecord {
     pub kind: MethodKind,
     /// Raw upstream `panda_file::FunctionKind` value serialized in protoPanda.
     pub function_kind: u32,
+    /// Method-level source-language byte.
+    ///
+    /// ABC stores SourceLang independently on ClassItem and MethodItem.
+    /// Source-built methods inherit their owning record language (`None`);
+    /// ABC/proto inputs set this explicitly to preserve upstream Function.language.
+    pub source_lang: Option<u8>,
     /// Module request indices captured for `"use concurrent"` functions.
     pub concurrent_module_requests: Vec<u32>,
     pub method_pool_entry: bool,
@@ -760,7 +766,7 @@ pub struct ClassRecord {
     /// Regular JS module classes use `1` (ACC_PUBLIC).
     /// Annotation stub classes (API 13+) use `0x2001` (ACC_PUBLIC | ACC_ANNOTATION).
     pub access_flags: u32,
-    /// Class and method source-language byte.
+    /// Class source-language byte.
     ///
     /// Matches libpandafile `SourceLang`: ECMASCRIPT=0, JAVASCRIPT=2,
     /// TYPESCRIPT=3, ARKTS=4.
@@ -1062,7 +1068,7 @@ impl ClassRecord {
             buf.extend_from_slice(&code_off.to_le_bytes());
             // MethodTag::SOURCE_LANG = 0x02.
             buf.push(0x02);
-            buf.push(self.source_lang);
+            buf.push(method.effective_source_lang(self.source_lang));
             if let Some(debug_info_off) = debug_info_offsets[i] {
                 buf.push(0x05);
                 buf.extend_from_slice(&debug_info_off.to_le_bytes());
@@ -1106,6 +1112,10 @@ impl ClassRecord {
 }
 
 impl MethodRecord {
+    pub(crate) fn effective_source_lang(&self, record_source_lang: u8) -> u8 {
+        self.source_lang.unwrap_or(record_source_lang)
+    }
+
     /// Compute the Panda access flags for this method.
     ///
     /// Matches upstream es2panda's access flag assignment:
@@ -1390,6 +1400,7 @@ mod tests {
                 label_table: vec![],
                 kind: MethodKind::Module,
                 function_kind: function_kind::FUNCTION,
+                source_lang: None,
                 concurrent_module_requests: Vec::new(),
                 method_pool_entry: false,
                 expected_property_count: None,
@@ -1452,6 +1463,7 @@ mod tests {
                 label_table: vec![],
                 kind: MethodKind::Module,
                 function_kind: function_kind::FUNCTION,
+                source_lang: None,
                 concurrent_module_requests: Vec::new(),
                 method_pool_entry: false,
                 expected_property_count: None,

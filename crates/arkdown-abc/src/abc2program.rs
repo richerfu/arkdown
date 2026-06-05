@@ -219,6 +219,7 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
                     label_table: Vec::new(),
                     kind,
                     function_kind: abc_default_function_kind(kind),
+                    source_lang: Some(method.source_lang.unwrap_or(0)),
                     concurrent_module_requests: Vec::new(),
                     method_pool_entry: method_pool_offsets.contains(&method.offset),
                     expected_property_count: annotations.expected_property_count,
