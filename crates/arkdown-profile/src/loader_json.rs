@@ -1031,9 +1031,13 @@ impl LoaderJson {
         config: &ArkdownConfig,
         host_module: &ModuleConfig,
     ) -> Vec<PathBuf> {
-        Self::collect_declared_dependency_roots(config, host_module)
+        use crate::dependency_graph::{DependencyNodeType, LocalDependencyGraph};
+        let graph = LocalDependencyGraph::build(&host_module.src_path, &config.project_root);
+        graph
+            .source_hars()
             .into_iter()
-            .filter(|dep_root| Self::is_source_har_package(dep_root))
+            .filter(|node| !node.pkg_root.as_os_str().is_empty())
+            .map(|node| node.pkg_root.clone())
             .collect()
     }
 
