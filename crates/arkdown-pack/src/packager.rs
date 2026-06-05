@@ -615,9 +615,26 @@ impl Packager {
         }
         let mut writer = zip_writer::create_zip(&input.output_path)?;
 
-        // oh-package.json5 — deflate
+        // oh-package.json5 — deflate.
+        //
+        // When declaration stubs are present, add `"types": "index.d.ts"` to
+        // the package manifest so downstream consumers can locate declarations
+        // without guessing the path (mirrors hvigor processDeclarationEntry).
         if input.oh_package_json.exists() {
-            zip_writer::add_file_deflate(&mut writer, "oh-package.json5", &input.oh_package_json)?;
+            let has_declarations = input.declarations_dir.as_ref().map_or(false, |dir| {
+                dir.exists() && dir.join("index.d.ts").is_file()
+            });
+            if has_declarations {
+                // Read, parse (json5), add types field, and write modified JSON.
+                let modified = Self::inject_types_field(&input.oh_package_json)
+                    .unwrap_or_else(|_| {
+                        // Fall back to the original file on any error.
+                        std::fs::read(input.oh_package_json.as_path()).unwrap_or_default()
+                    });
+                zip_writer::add_bytes_deflate(&mut writer, "oh-package.json5", &modified)?;
+            } else {
+                zip_writer::add_file_deflate(&mut writer, "oh-package.json5", &input.oh_package_json)?;
+            }
         }
 
         // Source .ets files from source_dir/
@@ -713,6 +730,27 @@ impl Packager {
 
         writer.finish()?;
         Ok(input.output_path)
+    }
+}
+
+// Private helpers for HAR assembly
+impl Packager {
+    /// Read `oh-package.json5`, add/update `"types": "index.d.ts"`, and return the
+    /// modified JSON bytes.
+    ///
+    /// hvigor's `processDeclarationEntry()` writes this field so downstream consumers
+    /// can locate the TypeScript/ArkTS declaration stubs without guessing.
+    fn inject_types_field(path: &std::path::Path) -> Result<Vec<u8>, PackError> {
+        let content = fs_err::read_to_string(path)?;
+        let mut pkg: serde_json::Value =
+            json5::from_str(&content).map_err(|e| PackError::MalformedPackInfo(e.to_string()))?;
+        if let Some(obj) = pkg.as_object_mut() {
+            // Only add if not already set; preserve existing value if present.
+            obj.entry("types")
+                .or_insert_with(|| serde_json::Value::String("index.d.ts".to_string()));
+        }
+        serde_json::to_vec_pretty(&pkg)
+            .map_err(|e| PackError::MalformedPackInfo(e.to_string()))
     }
 }
 

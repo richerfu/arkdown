@@ -905,3 +905,76 @@ fn test_har_includes_consumer_rules() {
         content
     );
 }
+
+/// Verify that when declaration stubs exist, `oh-package.json5` in the HAR
+/// archive has a `"types": "index.d.ts"` field added.
+///
+/// hvigor's `processDeclarationEntry()` writes this so downstream consumers can
+/// locate TypeScript declaration stubs without guessing the path.
+#[test]
+fn test_har_oh_package_json5_has_types_field_when_declarations_present() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src_dir = tmp.path().join("src/main/ets");
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::write(src_dir.join("Index.ets"), b"export class Index {}").unwrap();
+
+    // Create declaration directory with stubs.
+    let declarations_dir = tmp.path().join("declarations");
+    fs::create_dir_all(&declarations_dir).unwrap();
+    fs::write(
+        declarations_dir.join("index.d.ts"),
+        b"export declare class Index {}\n",
+    )
+    .unwrap();
+    fs::write(
+        declarations_dir.join("index.d.ets"),
+        b"export declare class Index {}\n",
+    )
+    .unwrap();
+
+    let pkg_json = tmp.path().join("oh-package.json5");
+    // Source oh-package.json5 without types field.
+    fs::write(
+        &pkg_json,
+        r#"{ "name": "mylib", "version": "1.0.0", "main": "src/main/ets/Index.ets" }"#,
+    )
+    .unwrap();
+
+    let out = tmp.path().join("mylib.har");
+    Packager::new(make_config())
+        .pack_har(HarPackInput {
+            module_name: "mylib".into(),
+            source_dir: src_dir,
+            resources_dir: tmp.path().join("src/main/resources"),
+            resource_str_dir: None,
+            oh_package_json: pkg_json,
+            output_path: out.clone(),
+            declarations_dir: Some(declarations_dir),
+            consumer_rules_path: None,
+        })
+        .expect("pack_har must succeed");
+
+    let file = fs::File::open(&out).expect("open HAR");
+    let mut archive = zip::ZipArchive::new(file).expect("valid ZIP");
+
+    // Read the oh-package.json5 from the archive.
+    let mut content = String::new();
+    archive
+        .by_name("oh-package.json5")
+        .expect("oh-package.json5 entry")
+        .read_to_string(&mut content)
+        .expect("read oh-package.json5");
+
+    let pkg: serde_json::Value = serde_json::from_str(&content).expect("parse oh-package.json5");
+    assert_eq!(
+        pkg.get("types").and_then(|v| v.as_str()),
+        Some("index.d.ts"),
+        "oh-package.json5 must have types: 'index.d.ts' when declarations are present; got: {}",
+        content
+    );
+    assert_eq!(
+        pkg.get("name").and_then(|v| v.as_str()),
+        Some("mylib"),
+        "name field must be preserved"
+    );
+}
