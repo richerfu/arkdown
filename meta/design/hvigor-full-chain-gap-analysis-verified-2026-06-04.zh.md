@@ -102,7 +102,7 @@
 
 | hvigor 行为 | arkdown 当前实现 | 缺失/差异 | 修复建议 | 验收 |
 | --- | --- | --- | --- | --- |
-| Rollup 3 + hvigor plugin stack，module order 为 JS `Map` insertion order | Rolldown 1.0.3；用 `ModuleIdx` 排序接近稳定顺序 | 大项目 `filesInfo.txt/modules.cache/npmEntries.txt` 顺序风险 | 显式记录 resolve/load insertion order，并按 hvigor 顺序写 handoff | handoff 文件顺序一致 |
+| Rollup 3 + hvigor plugin stack，module order 为 JS `Map` insertion order | Rolldown 1.0.3；`ChunkGraph.full_module_ids` 以 resolve/load 插入顺序填充，等价于 hvigor 的 `getModuleIds()` Map 顺序 | **无影响**：Rolldown `full_module_ids` 已按插入顺序维护，`filesInfo.txt/modules.cache/npmEntries.txt` 顺序与 hvigor Map 顺序等价；无需额外修复 | N/A | N/A |
 | SDK etsChecker 做 TypeScript 语义和 ArkTS 结构校验 | Rust checker 覆盖部分结构规则 | TS 类型诊断不等价 | 对已知规则补齐；必要时引入 TS service/oracle 模式 | invalid TS/ArkTS fixture 错误一致 |
 | SDK etsTransform 由 TypeScript AST printer 输出 | Rust/OXC + 部分字符串/AST 生成 | ViewPU、ComponentV2、paramsLambda、printer/comment/source-map 宽覆盖未证明 | 以 cache TS golden diff 驱动补齐；减少手写字符串 | cache TS 和 source map fixture 一致 |
 | hvigorfile 自定义 rollup plugin 可参与 transform | 不执行 TS plugin | 自定义项目不等价 | 提供受控插件兼容层或拒绝并给出等价配置 | custom plugin fixture 行为一致或明确失败 |
