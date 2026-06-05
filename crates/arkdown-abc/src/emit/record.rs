@@ -263,6 +263,26 @@ pub struct DebugInfoRecord {
     /// Upstream `GenScopeVariableInfo()` skips local-variable debug entries for
     /// `LexicalBound()` variables, so such methods must not emit a `this` local.
     pub lexical_this: bool,
+    /// Upstream protoPanda local-variable debug records. Their `start` and
+    /// `length` fields are instruction indexes, matching pandasm
+    /// `Function::local_variable_debug`.
+    pub local_variables: Vec<LocalVariableDebugRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalVariableDebugRecord {
+    pub name: String,
+    pub signature: String,
+    pub signature_type: String,
+    pub reg: i32,
+    pub start: u32,
+    pub length: u32,
+}
+
+impl LocalVariableDebugRecord {
+    pub(crate) fn is_parameter(&self, num_vregs: u16) -> bool {
+        self.reg >= i32::from(num_vregs)
+    }
 }
 
 /// A field (instance or static) in a Panda `ClassItem`.

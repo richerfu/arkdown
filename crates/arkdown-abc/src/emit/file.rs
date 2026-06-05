@@ -5,7 +5,8 @@ use crate::emit::bytecode::{
 };
 use crate::emit::debug_info::{
     append_line_ops_with_mid_locals, debug_scope_start_pc, encode_debug_info_with_cp,
-    encode_sleb128_bytes, infer_func_main_class_local_events,
+    encode_sleb128_bytes, infer_func_main_class_local_events, local_variable_debug_events,
+    local_variable_debug_param_offsets,
 };
 use crate::emit::record::{
     encode_code_item, inline_string, uleb128, AnnotationRecord, AnnotationValue,
@@ -635,7 +636,17 @@ impl AbcFile {
                             Some(string_items.get_or_create(source_code));
                     }
                     let is_arrow = method.kind == MethodKind::Anonymous;
-                    if !class.standalone_ecmascript_input {
+                    let has_structured_local_variables = !debug.local_variables.is_empty();
+                    for local in &debug.local_variables {
+                        string_items.get_or_create(&local.name);
+                        if !local.is_parameter(method.num_vregs) {
+                            string_items.get_or_create(&local.signature);
+                            if !local.signature_type.is_empty() {
+                                string_items.get_or_create(&local.signature_type);
+                            }
+                        }
+                    }
+                    if !class.standalone_ecmascript_input && !has_structured_local_variables {
                         if is_arrow {
                             string_items.get_or_create("0newTarget");
                             string_items.get_or_create("0this");
@@ -745,10 +756,7 @@ impl AbcFile {
             let mut method_order: Vec<usize> = (0..class.methods.len()).collect();
             method_order.sort_by(|&a, &b| class.methods[a].name.cmp(&class.methods[b].name));
             for method_idx in method_order {
-                if class.methods[method_idx].debug_info.is_some()
-                    && (class_source_file_string_offsets[class_idx].is_some()
-                        || method_source_file_string_offsets[class_idx][method_idx].is_some())
-                {
+                if class.methods[method_idx].debug_info.is_some() {
                     per_lnp_param_name_offsets.push(
                         param_name_offsets_by_method[class_idx][method_idx]
                             .clone()
@@ -1532,6 +1540,7 @@ impl AbcFile {
                 lnp_data: Vec<u8>,
                 constant_pool: Vec<u8>,
                 line_start: u32,
+                param_name_offsets: Vec<u32>,
                 emit_scope_locals: bool,
             }
 
@@ -1565,7 +1574,6 @@ impl AbcFile {
             let _epilogue_pc_delta: u32 = 4;
 
             for (class_idx, class) in all_classes.iter().enumerate() {
-                let class_source_file_off = class_source_file_string_offsets[class_idx];
                 let mut method_order: Vec<usize> = (0..class.methods.len()).collect();
                 method_order.sort_by(|&a, &b| class.methods[a].name.cmp(&class.methods[b].name));
                 for method_idx in method_order {
@@ -1575,9 +1583,6 @@ impl AbcFile {
                             method_source_file_string_offsets[class_idx][method_idx];
                         let method_source_code_off =
                             method_source_code_string_offsets[class_idx][method_idx];
-                        if class_source_file_off.is_none() && method_source_file_off.is_none() {
-                            continue;
-                        }
 
                         let param_offs = per_lnp_param_name_offsets
                             .get(lnp_param_cursor)
@@ -1601,7 +1606,14 @@ impl AbcFile {
                         //   Regular: r0=funcObj, r1=newTarget, r2=this
                         //   Arrow:   r1=newTarget, r2=this, r0=funcObj
                         let is_arrow = method.kind == MethodKind::Anonymous;
-                        let emit_scope_locals = !class.standalone_ecmascript_input;
+                        let has_structured_local_variables = !debug.local_variables.is_empty();
+                        let emit_scope_locals =
+                            !class.standalone_ecmascript_input && !has_structured_local_variables;
+                        let debug_param_name_offsets = if has_structured_local_variables {
+                            local_variable_debug_param_offsets(method, &string_items)
+                        } else {
+                            Vec::new()
+                        };
                         let mut param_offs = param_offs;
                         let is_generated_constructor = method.kind == MethodKind::Constructor
                             && param_offs.is_empty()
@@ -1728,14 +1740,26 @@ impl AbcFile {
                         // stream. This matches libpandafile
                         // BuildLineNumberProgram, which flushes pending PC
                         // before local start/end events.
-                        if emit_scope_locals {
-                            let mid_locals =
-                                infer_func_main_class_local_events(method, class, &string_items);
+                        if has_structured_local_variables {
+                            let mid_locals = local_variable_debug_events(method, &string_items);
+                            append_line_ops_with_mid_locals(
+                                method_ops,
+                                0,
+                                &mid_locals,
+                                &mut lnp_data,
+                                &mut cp,
+                            );
+                        } else if emit_scope_locals {
+                            let mid_locals = infer_func_main_class_local_events(
+                                method,
+                                class,
+                                &string_items,
+                                any_type_off,
+                            );
                             append_line_ops_with_mid_locals(
                                 method_ops,
                                 prologue_size,
                                 &mid_locals,
-                                any_type_off,
                                 &mut lnp_data,
                                 &mut cp,
                             );
@@ -1744,7 +1768,6 @@ impl AbcFile {
                                 method_ops,
                                 0,
                                 &[],
-                                0,
                                 &mut lnp_data,
                                 &mut cp,
                             );
@@ -1781,6 +1804,7 @@ impl AbcFile {
                             lnp_data,
                             constant_pool: cp,
                             line_start: debug.line_start,
+                            param_name_offsets: debug_param_name_offsets,
                             emit_scope_locals: !class.standalone_ecmascript_input,
                         });
                         lnp_param_cursor += 1;
@@ -1853,7 +1877,7 @@ impl AbcFile {
                 per_class_offsets[pending.class_idx][pending.method_idx] = Some(cur);
                 let di_bytes = encode_debug_info_with_cp(
                     pending.line_start,
-                    &[],
+                    &pending.param_name_offsets,
                     &pending.constant_pool,
                     unique_lnps[unique_idx].index,
                     pending.emit_scope_locals,

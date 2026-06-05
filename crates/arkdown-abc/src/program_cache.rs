@@ -12,8 +12,8 @@ use crate::emit::file::{
 use crate::emit::record::{
     function_kind, method_access, AnnotationElementRecord, AnnotationRecord, AnnotationValue,
     CatchEntry, ClassRecord, DebugInfoRecord, FieldRecord, FieldType, FieldValue,
-    InstructionDebugInfo, MethodKind, MethodLabelStyle, MethodRecord, ProgramLabel,
-    FIELD_OWNER_CLASS_IDX,
+    InstructionDebugInfo, LocalVariableDebugRecord, MethodKind, MethodLabelStyle, MethodRecord,
+    ProgramLabel, FIELD_OWNER_CLASS_IDX,
 };
 use crate::emit::strings::StringTable;
 use crate::ir::debug_lnp::LineTracker;
@@ -28,8 +28,8 @@ use crate::names::{
 use crate::proto_panda::{
     annotation_element, ins, program, scalar_value, variant_value, AnnotationData,
     AnnotationElement, DebuginfoIns, Field, FieldMetadata, Function, FunctionMetadata, Ins,
-    ItemMetadata, Literal, Metadata, ParamMetadata, Parameter, Program, Record, RecordMetadata,
-    ScalarValue, SourceLocation, SourcePosition, Type, Value, VariantValue,
+    ItemMetadata, Literal, LocalVariable, Metadata, ParamMetadata, Parameter, Program, Record,
+    RecordMetadata, ScalarValue, SourceLocation, SourcePosition, Type, Value, VariantValue,
 };
 
 const VALUE_TYPE_U8: u32 = 2;
@@ -911,6 +911,14 @@ fn method_from_proto(
         function_access_flags(function),
         function.function_kind,
     );
+    let source_file = utf8(&function.source_file)?;
+    let source_code = (!function.source_code.is_empty())
+        .then(|| utf8(&function.source_code))
+        .transpose()?;
+    let local_variables = local_variables_from_proto(function)?;
+    let has_debug_info =
+        !source_file.is_empty() || source_code.is_some() || !local_variables.is_empty();
+    let line_start = function_debug_line_start(&pandasm_debug);
 
     Ok(MethodRecord {
         name,
@@ -919,19 +927,14 @@ fn method_from_proto(
         pandasm_debug,
         num_vregs: to_u16(function.regs_num, "function regs_num")?,
         num_args: to_u16(function.params.len() as u64, "function params")?,
-        debug_info: if function.source_file.is_empty() {
-            None
-        } else {
-            Some(DebugInfoRecord {
-                line_start: 1,
-                source_file: utf8(&function.source_file)?,
-                source_code: (!function.source_code.is_empty())
-                    .then(|| utf8(&function.source_code))
-                    .transpose()?,
-                param_names: Vec::new(),
-                lexical_this: false,
-            })
-        },
+        debug_info: has_debug_info.then(|| DebugInfoRecord {
+            line_start,
+            source_file,
+            source_code,
+            param_names: Vec::new(),
+            lexical_this: false,
+            local_variables,
+        }),
         line_ops,
         catch_entries,
         program_labels,
@@ -949,6 +952,41 @@ fn method_from_proto(
         definefunc_order: None,
         label_style: MethodLabelStyle::Source,
     })
+}
+
+fn local_variables_from_proto(function: &Function) -> io::Result<Vec<LocalVariableDebugRecord>> {
+    function
+        .local_variable_debug
+        .iter()
+        .map(|local| {
+            let name = utf8(&local.name)?;
+            let signature = utf8(&local.signature)?;
+            if name.is_empty() {
+                return invalid_data("function local variable debug entry has an empty name");
+            }
+            if signature.is_empty() {
+                return invalid_data("function local variable debug entry has an empty signature");
+            }
+            if local.reg < 0 {
+                return invalid_data(format!(
+                    "function local variable debug entry '{}' has a negative register {}",
+                    name, local.reg
+                ));
+            }
+            Ok(LocalVariableDebugRecord {
+                name,
+                signature,
+                signature_type: utf8(&local.signature_type)?,
+                reg: local.reg,
+                start: local.start,
+                length: local.length,
+            })
+        })
+        .collect()
+}
+
+fn function_debug_line_start(debug: &[InstructionDebugInfo]) -> u32 {
+    debug.first().map(|debug| debug.line_number).unwrap_or(1)
 }
 
 fn finalize_method_kind_and_pool(method: &mut MethodRecord, refs: &FunctionRefs) {
@@ -1002,7 +1040,7 @@ fn function_insns_from_proto(
     if pandasm_debug.len() != pandasm_insns.len() {
         pandasm_debug.clear();
     }
-    let line_ops = if !function.source_file.is_empty() && !pandasm_debug.is_empty() {
+    let line_ops = if !pandasm_debug.is_empty() {
         line_ops_from_instruction_debug(&pandasm_insns, &pandasm_debug)
     } else {
         Vec::new()
@@ -2353,7 +2391,17 @@ fn function_to_proto(
         )),
         label_table: Vec::new(),
         ins,
-        local_variable_debug: Vec::new(),
+        local_variable_debug: method
+            .debug_info
+            .as_ref()
+            .map(|debug| {
+                debug
+                    .local_variables
+                    .iter()
+                    .map(local_variable_to_proto)
+                    .collect()
+            })
+            .unwrap_or_default(),
         source_file: method
             .debug_info
             .as_ref()
@@ -2421,6 +2469,17 @@ fn function_to_proto(
         slots_num: slots_num.into(),
         concurrent_module_requests: method.concurrent_module_requests.clone(),
     })
+}
+
+fn local_variable_to_proto(local: &LocalVariableDebugRecord) -> LocalVariable {
+    LocalVariable {
+        name: bytes(&local.name),
+        signature: bytes(&local.signature),
+        signature_type: bytes(&local.signature_type),
+        reg: local.reg,
+        start: local.start,
+        length: local.length,
+    }
 }
 
 fn assign_inline_cache_slots(insns: &mut [Insn]) -> u32 {
@@ -3838,6 +3897,32 @@ class A {
         String::from_utf8(bytes[pos..pos + len].to_vec()).unwrap()
     }
 
+    fn test_lnp_opcodes(bytes: &[u8], offset: usize) -> Vec<u8> {
+        let mut pos = offset;
+        let mut opcodes = Vec::new();
+        loop {
+            let op = bytes[pos];
+            pos += 1;
+            opcodes.push(op);
+            match op {
+                0x00 => break,
+                0x03..=0x06 => test_skip_sleb(bytes, &mut pos),
+                _ => {}
+            }
+        }
+        opcodes
+    }
+
+    fn test_skip_sleb(bytes: &[u8], offset: &mut usize) {
+        loop {
+            let byte = bytes[*offset];
+            *offset += 1;
+            if byte & 0x80 == 0 {
+                break;
+            }
+        }
+    }
+
     fn annotated_record_and_field_file() -> AbcFile {
         let mut file = annotation_usage_file();
         let record = file
@@ -4382,6 +4467,117 @@ class A {}
             &[0x0a, 0x09],
             "LNP must emit SET_SOURCE_CODE before SET_FILE"
         );
+    }
+
+    #[test]
+    fn function_local_variable_debug_roundtrips_through_proto_and_lnp() {
+        let file = annotation_usage_file();
+        let mut program = program_for_file(&file, 20).unwrap();
+        let function = program
+            .function_table
+            .iter_mut()
+            .find(|entry| {
+                std::str::from_utf8(&entry.key)
+                    .map(|key| key.rsplit('.').next().unwrap_or(key) == "func_main_0")
+                    .unwrap_or(false)
+            })
+            .and_then(|entry| entry.value.as_mut())
+            .expect("func_main_0 function must be present");
+
+        let param_reg = function.regs_num as i32;
+        let second_local_reg = if function.regs_num > 1 { 1 } else { 0 };
+        function.local_variable_debug = vec![
+            LocalVariable {
+                name: b"param0".to_vec(),
+                signature: b"any".to_vec(),
+                signature_type: Vec::new(),
+                reg: param_reg,
+                start: 0,
+                length: function.ins.len() as u32,
+            },
+            LocalVariable {
+                name: b"local0".to_vec(),
+                signature: b"any".to_vec(),
+                signature_type: Vec::new(),
+                reg: 0,
+                start: 0,
+                length: 1,
+            },
+            LocalVariable {
+                name: b"local1".to_vec(),
+                signature: b"any".to_vec(),
+                signature_type: b"sig1".to_vec(),
+                reg: second_local_reg as i32,
+                start: 1,
+                length: 1,
+            },
+        ];
+        let expected_locals = function.local_variable_debug.clone();
+
+        let mut restored = AbcFile::new();
+        append_program_to_file(&mut restored, program).unwrap();
+        let restored_method = restored
+            .records
+            .iter()
+            .find(|record| record.name == "Lusage_string.ets;")
+            .and_then(|record| {
+                record
+                    .methods
+                    .iter()
+                    .find(|method| method.name == "func_main_0")
+            })
+            .expect("restored func_main_0 method must exist");
+        let restored_debug = restored_method
+            .debug_info
+            .as_ref()
+            .expect("local variables require DebugInfo");
+        assert_eq!(restored_debug.local_variables.len(), expected_locals.len());
+        assert_eq!(restored_debug.local_variables[0].name, "param0");
+        assert_eq!(restored_debug.local_variables[1].name, "local0");
+        assert_eq!(restored_debug.local_variables[2].signature_type, "sig1");
+
+        let roundtrip_program = program_for_file(&restored, 20).unwrap();
+        let roundtrip_function = function_by_short_name(&roundtrip_program, "func_main_0")
+            .expect("roundtrip func_main_0 function must exist");
+        assert_eq!(roundtrip_function.local_variable_debug, expected_locals);
+
+        let bytes = restored.serialize_with_version(version_for_target_api(20, None));
+        let reader = AbcReader::new(&bytes).unwrap();
+        let class = reader
+            .class_items()
+            .unwrap()
+            .into_iter()
+            .find(|class| class.name == "Lusage_string.ets;")
+            .expect("user class must be present");
+        let method = class
+            .methods
+            .iter()
+            .find(|method| method.name == "func_main_0")
+            .expect("func_main_0 method item must exist");
+        let debug_info = method
+            .debug_info_off
+            .expect("method DEBUG_INFO tag must exist") as usize;
+        let mut pos = debug_info;
+        test_read_uleb(&bytes, &mut pos); // line_start
+        let num_params = test_read_uleb(&bytes, &mut pos);
+        assert_eq!(num_params, 1);
+        let param_name_off = test_read_uleb(&bytes, &mut pos) as usize;
+        assert_eq!(test_inline_string_at(&bytes, param_name_off), "param0");
+        let cp_size = test_read_uleb(&bytes, &mut pos) as usize;
+        pos += cp_size;
+        let lnp_index = test_read_uleb(&bytes, &mut pos) as usize;
+        let lnp_idx_off = test_read_u32(&bytes, 0x28) as usize;
+        let lnp_offset = test_read_u32(&bytes, lnp_idx_off + lnp_index * 4) as usize;
+        let lnp_ops = test_lnp_opcodes(&bytes, lnp_offset);
+        assert!(
+            lnp_ops.contains(&0x03),
+            "signature_type-less local must emit START_LOCAL"
+        );
+        assert!(
+            lnp_ops.contains(&0x04),
+            "signature_type local must emit START_LOCAL_EXTENDED"
+        );
+        assert!(lnp_ops.contains(&0x05), "local end must emit END_LOCAL");
     }
 
     #[test]
