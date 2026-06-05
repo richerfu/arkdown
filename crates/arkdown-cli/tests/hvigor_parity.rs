@@ -693,7 +693,8 @@ fn collect_build(
             )?;
         }
         ArtifactType::Har => {
-            // HAR archives contain oh-package.json5, source ETS files, and optionally index.abc
+            // HAR archives contain oh-package.json5, source ETS files, declaration stubs,
+            // and optionally index.abc
             collect_named_artifact(
                 &mut artifacts,
                 root,
@@ -701,6 +702,25 @@ fn collect_build(
                 "oh-package.json5",
                 Some("oh-package.json5"),
                 &["outputs/har", "build/default/outputs"],
+                false,
+            )?;
+            // HAR declaration stubs (hvigor processDeclarationEntry).
+            collect_named_artifact(
+                &mut artifacts,
+                root,
+                archive.as_ref(),
+                "index.d.ts",
+                Some("index.d.ts"),
+                &["intermediates/har", "build/default/outputs/har"],
+                false,
+            )?;
+            collect_named_artifact(
+                &mut artifacts,
+                root,
+                archive.as_ref(),
+                "index.d.ets",
+                Some("index.d.ets"),
+                &["intermediates/har", "build/default/outputs/har"],
                 false,
             )?;
             collect_named_artifact(
