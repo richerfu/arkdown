@@ -594,6 +594,63 @@ pub fn pick_effective_raw_target<'a>(
     targets.iter().find(|t| t.name == "default")
 }
 
+/// Count how many targets in `targets` are applicable to the given product and
+/// build mode.
+///
+/// Used by the CLI to detect when a project declares multiple targets that
+/// could apply to the current build, but only one is being used.  In hvigor's
+/// multi-target execution model, each applicable target produces a separate
+/// artifact; arkdown currently builds only the highest-priority target.
+///
+/// When this returns > 1, the CLI should warn that only one target is built
+/// per invocation.
+///
+/// Section 3.1: "多 target 产物执行模型：需 CLI 架构重构支持同 product 多 artifact"
+pub fn count_applicable_targets(
+    targets: &[RawTarget],
+    product_name: &str,
+    build_mode_name: &str,
+) -> usize {
+    fn applies_to_product(t: &RawTarget, product: &str) -> bool {
+        if t.apply_to_products.is_empty() {
+            product == "default"
+        } else {
+            t.apply_to_products.iter().any(|p| p == product)
+        }
+    }
+    targets
+        .iter()
+        .filter(|t| {
+            if !applies_to_product(t, product_name) {
+                return false;
+            }
+            // A target applies when it has no buildModeSet (catch-all) or when
+            // its buildModeSet explicitly includes the current mode.
+            t.build_mode_set.is_empty()
+                || t.build_mode_set.iter().any(|m| m.name == build_mode_name)
+        })
+        .count()
+}
+
+/// Count applicable targets for a specific module, loading `build-profile.json5`
+/// from `project_root`.  Returns 0 when the file is absent or the module is
+/// not found.  This is a convenience wrapper over `count_applicable_targets`
+/// for use in the CLI build loop.
+pub fn count_applicable_targets_for_module(
+    project_root: &Path,
+    module_name: &str,
+    product_name: &str,
+    build_mode_name: &str,
+) -> usize {
+    let Ok(profile) = RawBuildProfile::load(project_root) else {
+        return 0;
+    };
+    let Some(raw_module) = profile.modules.iter().find(|m| m.name == module_name) else {
+        return 0;
+    };
+    count_applicable_targets(&raw_module.targets, product_name, build_mode_name)
+}
+
 // ---------------------------------------------------------------------------
 // Parsing helpers
 // ---------------------------------------------------------------------------

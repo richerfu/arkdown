@@ -765,6 +765,35 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         // Build source-set overlays for target-specific source directories.
         // When the effective target is non-default and has src/<target>/ets/,
         // that directory shadows src/main/ets/ for relative imports (source-set overlay).
+        // Section 3.1: multi-target product execution model.
+        // Detect when multiple targets apply to the current product + build mode.
+        // hvigor would build a separate artifact for each; arkdown currently
+        // builds only the highest-priority target.  Warn so users know that
+        // additional targets are skipped.  Blocked by CLI architecture refactor.
+        {
+            let bm_name = match config_arc.build_mode {
+                BuildMode::Debug => "debug",
+                BuildMode::Release => "release",
+            };
+            let n = arkdown_config::build_profile::count_applicable_targets_for_module(
+                &project_root,
+                &module.name,
+                &config_arc.product.name,
+                bm_name,
+            );
+            if n > 1 {
+                tracing::warn!(
+                    module = %module.name,
+                    product = %config_arc.product.name,
+                    applicable_targets = n,
+                    "multi-target: {} targets apply to module '{}' for product '{}' in {} mode; \
+                     arkdown builds only the highest-priority target. \
+                     Use --build-target-name to select a specific target.",
+                    n, module.name, config_arc.product.name, bm_name
+                );
+            }
+        }
+
         let source_set_overlays: Vec<(PathBuf, PathBuf)> = {
             let build_mode_name = match config_arc.build_mode {
                 BuildMode::Debug => "debug",
