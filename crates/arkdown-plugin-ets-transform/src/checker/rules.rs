@@ -456,6 +456,21 @@ fn check_struct_component(
         });
     }
 
+    // Rule: @Reusable cannot be combined with @Entry.
+    // @Reusable components are designed for reuse, not as page entry points.
+    // Matches hvigor etsChecker's validateReusableNotEntry() rule.
+    if has_entry && (has_reusable || has_reusable_v2) {
+        let reusable_dec = if has_reusable_v2 { "@ReusableV2" } else { "@Reusable" };
+        errors.push(EtsTransformError::Diagnostic {
+            file: file.to_string(),
+            message: format!(
+                "The struct '{}' cannot be decorated with both '@Entry' and '{}'",
+                component_name, reusable_dec
+            ),
+            severity: DiagnosticSeverity::Error,
+        });
+    }
+
     if has_component {
         if !seen_component_names.insert(component_name.to_string()) {
             errors.push(EtsTransformError::Diagnostic {
