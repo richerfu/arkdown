@@ -3444,33 +3444,6 @@ fn compile_function_body(
     }
 }
 
-/// Like `compile_function_body` but also returns LNP line-advance opcodes.
-/// Returns `(bytecode, line_ops, catch_entries)`.
-#[allow(dead_code)]
-fn compile_function_body_tracked(
-    body: Option<&FunctionBody<'_>>,
-    strings: &mut StringTable,
-    literal_arrays: &mut Vec<LiteralArray>,
-    lowering: &LoweringContext,
-    param_names: &[String],
-    source: &str,
-    source_mapper: Option<&SourceMapper>,
-    current_function_span: Option<(u32, u32)>,
-) -> (Vec<u8>, Vec<u8>, Vec<CatchEntry>) {
-    let compiled = compile_function_body_tracked_with_end(
-        body,
-        strings,
-        literal_arrays,
-        lowering,
-        param_names,
-        source,
-        source_mapper,
-        None,
-        current_function_span,
-    );
-    (compiled.bytecode, compiled.line_ops, compiled.catches)
-}
-
 #[allow(clippy::too_many_arguments)]
 fn compile_function_body_tracked_with_end(
     body: Option<&FunctionBody<'_>>,
@@ -6091,7 +6064,6 @@ struct CodeGen<'a> {
     program_labels: Vec<ProgramLabel>,
     program_label_names: FxHashMap<usize, String>,
     next_program_label: usize,
-    #[allow(dead_code)]
     is_generator: bool,
     gen_reg: Option<u8>,
     is_async: bool,
@@ -6189,18 +6161,6 @@ impl<'a> CodeGen<'a> {
         gen.emit_debugger = gen.lowering.emit_debugger();
         gen.current_line = u32::MAX;
         gen.current_col = 0;
-        gen
-    }
-
-    #[allow(dead_code)]
-    fn new_arrow(
-        strings: &'a mut StringTable,
-        literal_arrays: &'a mut Vec<LiteralArray>,
-        lowering: &'a LoweringContext,
-        arrow_captures: ArrowCaptures,
-    ) -> Self {
-        let mut gen = Self::new(strings, literal_arrays, lowering);
-        gen.arrow_captures = arrow_captures;
         gen
     }
 

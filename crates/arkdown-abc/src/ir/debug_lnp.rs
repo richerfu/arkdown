@@ -277,21 +277,6 @@ impl LineTracker {
         self.pending_pc += insn_size;
     }
 
-    /// Per-statement advance (no column). Kept for compatibility.
-    #[allow(dead_code)]
-    fn advance(&mut self, new_pc: u32, new_line: u32) {
-        let pc_delta = new_pc.saturating_sub(self.current_pc);
-        let line_delta = new_line as i32 - self.current_line as i32;
-        if pc_delta == 0 && line_delta == 0 {
-            return;
-        }
-        self.pending_pc += pc_delta;
-        if line_delta != 0 {
-            self.emit_number(self.pending_pc, line_delta);
-            self.pending_pc = 0;
-        }
-    }
-
     /// Finish and return encoded bytes: [ops][0x00=END][cp_len:u32LE][cp].
     ///
     /// Mirrors libpandafile `BuildLineNumberProgram`: after the last
@@ -304,10 +289,5 @@ impl LineTracker {
         self_.ops.extend_from_slice(&cp_len.to_le_bytes());
         self_.ops.extend_from_slice(&self_.cp);
         self_.ops
-    }
-
-    #[allow(dead_code)]
-    pub(super) fn finish_without_final_pc(self) -> Vec<u8> {
-        self.finish()
     }
 }
