@@ -957,6 +957,8 @@ mod tests {
                     ap_path: None,
                     abi_filters: vec![],
                 },
+                version_code: None,
+                version_name: None,
             },
             modules: vec![ModuleConfig {
                 name: "phone".to_string(),

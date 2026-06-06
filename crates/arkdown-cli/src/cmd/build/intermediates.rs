@@ -555,6 +555,8 @@ mod tests {
                     ap_path: None,
                     abi_filters: vec![],
                 },
+                version_code: None,
+                version_name: None,
             },
             modules: vec![],
             sdk_config: SdkConfig {

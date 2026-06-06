@@ -94,6 +94,8 @@ pub fn write_module_json(
         &config.product.bundle_name,
         project_multi_projects,
         resource_ids,
+        config.product.version_code,
+        config.product.version_name.as_deref(),
     );
     let module_section = ModuleJsonWriter::manifest_to_json(
         manifest,
@@ -158,6 +160,12 @@ impl ModuleJsonWriter {
     ///   bundleType, versionName, versionCode, appEnvironments, compileSdkType, labelId,
     ///   compileSdkVersion, targetAPIVersion, vendor, bundleName, apiReleaseType,
     ///   targetMinorAPIVersion
+    ///
+    /// `version_code_override` / `version_name_override`: when present, these
+    /// product-level values from `build-profile.json5` take priority over the
+    /// corresponding fields in `AppScope/app.json5`.  Matches hvigor's
+    /// product-level app override semantics.
+    #[allow(clippy::too_many_arguments)]
     fn build_app_section(
         src: &serde_json::Map<String, serde_json::Value>,
         numeric_api: u64,
@@ -166,6 +174,8 @@ impl ModuleJsonWriter {
         bundle_name_fallback: &str,
         project_multi_projects: bool,
         resource_ids: Option<&FxHashMap<String, u32>>,
+        version_code_override: Option<u64>,
+        version_name_override: Option<&str>,
     ) -> serde_json::Map<String, serde_json::Value> {
         let icon_ref = src.get("icon").and_then(|v| v.as_str()).map(str::to_string);
         let label_ref = src
@@ -203,10 +213,16 @@ impl ModuleJsonWriter {
                 .cloned()
                 .unwrap_or_else(|| "app".into()),
         );
-        if let Some(v) = src.get("versionName") {
+        // versionName: product override takes priority over app.json5.
+        if let Some(name) = version_name_override {
+            obj.insert("versionName".into(), name.into());
+        } else if let Some(v) = src.get("versionName") {
             obj.insert("versionName".into(), v.clone());
         }
-        if let Some(v) = src.get("versionCode") {
+        // versionCode: product override takes priority over app.json5.
+        if let Some(code) = version_code_override {
+            obj.insert("versionCode".into(), code.into());
+        } else if let Some(v) = src.get("versionCode") {
             obj.insert("versionCode".into(), v.clone());
         }
         obj.insert(
@@ -1198,5 +1214,83 @@ impl ModuleJsonWriter {
         let patch = parts.get(2).copied().unwrap_or(0);
 
         major * 10_000_000 + minor * 100_000 + patch * 1_000 + api_int
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_app_json5_src(version_code: u64, version_name: &str) -> serde_json::Map<String, serde_json::Value> {
+        let mut m = serde_json::Map::new();
+        m.insert("bundleName".into(), "com.example.app".into());
+        m.insert("versionCode".into(), version_code.into());
+        m.insert("versionName".into(), version_name.into());
+        m
+    }
+
+    /// When no product-level overrides are present, `build_app_section` uses
+    /// the values from `AppScope/app.json5` unchanged.
+    #[test]
+    fn test_build_app_section_uses_app_json5_when_no_override() {
+        let src = make_app_json5_src(1_000_000, "1.0.0");
+        let obj = ModuleJsonWriter::build_app_section(
+            &src,
+            12,
+            true,
+            "5.0.0",
+            "com.example.app",
+            false,
+            None,
+            None,   // no version_code override
+            None,   // no version_name override
+        );
+        assert_eq!(obj.get("versionCode"), Some(&serde_json::Value::Number(1_000_000u64.into())));
+        assert_eq!(obj.get("versionName"), Some(&serde_json::Value::String("1.0.0".to_string())));
+    }
+
+    /// When product-level overrides are present, `build_app_section` uses them
+    /// and ignores the corresponding values from `AppScope/app.json5`.
+    /// This implements hvigor's product-level app override semantics.
+    #[test]
+    fn test_build_app_section_product_version_overrides_app_json5() {
+        let src = make_app_json5_src(1_000_000, "1.0.0");
+        let obj = ModuleJsonWriter::build_app_section(
+            &src,
+            12,
+            true,
+            "5.0.0",
+            "com.example.app",
+            false,
+            None,
+            Some(2_000_000),        // product override: versionCode
+            Some("2.0.0-alpha"),    // product override: versionName
+        );
+        assert_eq!(obj.get("versionCode"), Some(&serde_json::Value::Number(2_000_000u64.into())));
+        assert_eq!(
+            obj.get("versionName"),
+            Some(&serde_json::Value::String("2.0.0-alpha".to_string()))
+        );
+    }
+
+    /// When a product override is present for only one field, the other field
+    /// still falls back to `AppScope/app.json5`.
+    #[test]
+    fn test_build_app_section_partial_version_override() {
+        let src = make_app_json5_src(1_000_000, "1.0.0");
+        // Only versionCode overridden; versionName comes from app.json5.
+        let obj = ModuleJsonWriter::build_app_section(
+            &src,
+            12,
+            false,
+            "5.0.0",
+            "com.example.app",
+            false,
+            None,
+            Some(1_500_000),
+            None,
+        );
+        assert_eq!(obj.get("versionCode"), Some(&serde_json::Value::Number(1_500_000u64.into())));
+        assert_eq!(obj.get("versionName"), Some(&serde_json::Value::String("1.0.0".to_string())));
     }
 }

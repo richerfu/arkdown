@@ -57,6 +57,8 @@ fn make_test_config(fixture: &PathBuf) -> ArkdownConfig {
                 res_options: None,
                 source_option: None,
             },
+            version_code: None,
+            version_name: None,
         },
         modules: vec![ModuleConfig {
             name: "entry".to_string(),
@@ -335,6 +337,8 @@ fn make_minimal_config(project_root: &PathBuf, build_mode: BuildMode) -> Arkdown
                 res_options: None,
                 source_option: None,
             },
+            version_code: None,
+            version_name: None,
         },
         modules: vec![],
         sdk_config: SdkConfig {

@@ -37,6 +37,8 @@ fn make_config(use_normalized_ohm_url: bool) -> ArkdownConfig {
                 ap_path: None,
                 abi_filters: vec![],
             },
+            version_code: None,
+            version_name: None,
         },
         modules: vec![],
         sdk_config: SdkConfig {

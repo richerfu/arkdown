@@ -127,6 +127,19 @@ pub struct ProductConfig {
     pub runtime_os: String,
     pub signing_config: Option<SigningConfig>,
     pub build_option: BuildOption,
+    /// Product-level `versionCode` override from `build-profile.json5`.
+    ///
+    /// When present, overrides the `versionCode` field from `AppScope/app.json5`
+    /// in the compiled `module.json` app section.  Matches hvigor's product-level
+    /// app override semantics.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub version_code: Option<u64>,
+    /// Product-level `versionName` override from `build-profile.json5`.
+    ///
+    /// When present, overrides the `versionName` field from `AppScope/app.json5`
+    /// in the compiled `module.json` app section.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub version_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

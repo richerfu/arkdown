@@ -203,6 +203,8 @@ mod tests {
                     res_options: None,
                     source_option: None,
                 },
+                version_code: None,
+                version_name: None,
             },
             modules: vec![ModuleConfig {
                 name: "entry".to_string(),

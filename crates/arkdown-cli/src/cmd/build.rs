@@ -1704,6 +1704,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                     module: module_filter_w.clone(),
                     product: product_filter_w.clone(),
                     project: Some(project_root_w.clone()),
+                    build_target_name: None,
                     watch: false, // inner rebuild does not recurse into watch
                     coverage: false,
                     preview: false, // inner rebuild handles resource compilation
@@ -2321,6 +2322,8 @@ mod tests {
                     ap_path: None,
                     abi_filters: vec![],
                 },
+                version_code: None,
+                version_name: None,
             },
             modules: vec![],
             sdk_config: SdkConfig {

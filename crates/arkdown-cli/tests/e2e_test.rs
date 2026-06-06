@@ -600,6 +600,7 @@ fn run_full_cli_build_hap(fixture_src: &PathBuf) -> PathBuf {
             module: None,
             product: None,
             project: Some(fixture.clone()),
+            build_target_name: None,
             watch: false,
             coverage: false,
             preview: false,

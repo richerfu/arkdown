@@ -132,13 +132,22 @@ pub fn check(source: &str, file: &str) -> Vec<EtsTransformError> {
                 .decorators
                 .iter()
                 .any(|d| decorator_name(d) == "AnimatableExtend");
-            if is_builder || is_styles || is_animatable_extend {
+            // @Extend(Component) must have void return type — it declares extra style
+            // methods for an existing component.  Matches hvigor etsChecker's
+            // validateExtendDecorator() rule.
+            let is_extend = func
+                .decorators
+                .iter()
+                .any(|d| decorator_name(d) == "Extend");
+            if is_builder || is_styles || is_animatable_extend || is_extend {
                 if let Some(ret_ty) = func.return_type.as_ref() {
                     if !is_void_type(&ret_ty.type_annotation) {
                         let decorator = if is_builder {
                             "@Builder"
                         } else if is_styles {
                             "@Styles"
+                        } else if is_extend {
+                            "@Extend"
                         } else {
                             "@AnimatableExtend"
                         };
@@ -348,6 +357,39 @@ pub fn check(source: &str, file: &str) -> Vec<EtsTransformError> {
                     }
                 }
 
+                // Rule: @LocalBuilder methods must have void return type.
+                // @LocalBuilder declares a builder function scoped to the class; like @Builder
+                // it produces UI elements and must not return a value.
+                // Matches hvigor etsChecker's validateLocalBuilderReturnType() rule.
+                for elem in &class.body.body {
+                    if let ClassElement::MethodDefinition(method) = elem {
+                        let is_local_builder = method
+                            .decorators
+                            .iter()
+                            .any(|d| decorator_name(d) == "LocalBuilder");
+                        if is_local_builder {
+                            if let Some(ret_ty) = method.value.return_type.as_ref() {
+                                if !is_void_type(&ret_ty.type_annotation) {
+                                    let method_name = match &method.key {
+                                        PropertyKey::StaticIdentifier(id) => {
+                                            id.name.as_str().to_string()
+                                        }
+                                        _ => "<anonymous>".to_string(),
+                                    };
+                                    errors.push(EtsTransformError::Diagnostic {
+                                        file: file.to_string(),
+                                        message: format!(
+                                            "@LocalBuilder method '{}' must have void return type",
+                                            method_name
+                                        ),
+                                        severity: DiagnosticSeverity::Error,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Rule: worker file must not use UI decorators
                 if file.contains("workers/") || file.contains("/worker/") {
                     errors.push(EtsTransformError::Diagnostic {
@@ -533,6 +575,21 @@ fn check_struct_component(
         });
     }
 
+    // Rule: @CustomDialog cannot be combined with @Entry.
+    // @CustomDialog defines a dialog component shown as an overlay; it cannot
+    // serve as an application page entry point.
+    // Matches hvigor etsChecker's validateCustomDialogNotEntry() rule.
+    if has_entry && has_custom_dialog {
+        errors.push(EtsTransformError::Diagnostic {
+            file: file.to_string(),
+            message: format!(
+                "The struct '{}' cannot be decorated with both '@Entry' and '@CustomDialog'",
+                component_name
+            ),
+            severity: DiagnosticSeverity::Error,
+        });
+    }
+
     // Rule: @Preview can only be used on @Component structs.
     // Matches hvigor etsChecker's validatePreviewDecorator() rule.
     if has_preview && !has_component {
@@ -683,6 +740,30 @@ fn check_struct_component(
                 severity: DiagnosticSeverity::Warning,
             });
         }
+
+        // Rule: @Require can only be combined with @Prop, @State, @Provide, or @BuilderParam.
+        // Using @Require with other decorators (e.g. @Link, @StorageLink) or alone is an error.
+        // Matches hvigor etsChecker's validateRequireDecorator() rule.
+        let has_require = prop.decorators.iter().any(|d| decorator_name(d) == "Require");
+        if has_require {
+            let has_allowed = prop.decorators.iter().any(|d| {
+                matches!(
+                    decorator_name(d),
+                    "State" | "Prop" | "Provide" | "BuilderParam"
+                )
+            });
+            if !has_allowed {
+                errors.push(EtsTransformError::Diagnostic {
+                    file: file.to_string(),
+                    message: format!(
+                        "'@Require' on field '{}' can only be combined with '@Prop', \
+                         '@State', '@Provide', or '@BuilderParam'",
+                        field_name
+                    ),
+                    severity: DiagnosticSeverity::Error,
+                });
+            }
+        }
     }
 
     // Validate @Watch decorator arguments reference valid methods in this struct.
@@ -755,6 +836,31 @@ fn check_struct_component(
                     errors.push(EtsTransformError::Diagnostic {
                         file: file.to_string(),
                         message: "build() must have a void return type".to_string(),
+                        severity: DiagnosticSeverity::Error,
+                    });
+                }
+            }
+        }
+
+        // Rule: @LocalBuilder method in a struct must have void return type.
+        // Matches hvigor etsChecker's validateLocalBuilderReturnType() rule.
+        let is_local_builder = method
+            .decorators
+            .iter()
+            .any(|d| decorator_name(d) == "LocalBuilder");
+        if is_local_builder {
+            if let Some(ret_ty) = method.value.return_type.as_ref() {
+                if !is_void_type(&ret_ty.type_annotation) {
+                    let method_name = match &method.key {
+                        PropertyKey::StaticIdentifier(id) => id.name.as_str().to_string(),
+                        _ => "<anonymous>".to_string(),
+                    };
+                    errors.push(EtsTransformError::Diagnostic {
+                        file: file.to_string(),
+                        message: format!(
+                            "@LocalBuilder method '{}' must have void return type",
+                            method_name
+                        ),
                         severity: DiagnosticSeverity::Error,
                     });
                 }
@@ -870,6 +976,220 @@ mod tests {
             })),
             "@ObservedV2 alone must not produce errors; got: {:?}",
             errs
+        );
+    }
+
+    // ── @Entry + @CustomDialog ────────────────────────────────────────────────
+
+    #[test]
+    fn test_entry_with_custom_dialog_is_error() {
+        let src = r#"
+@Entry
+@CustomDialog
+@Component
+struct MyDialog {
+  controller: CustomDialogController;
+  build() {}
+}
+"#;
+        assert!(
+            has_error_containing(src, "@Entry"),
+            "@Entry + @CustomDialog must be an error"
+        );
+    }
+
+    #[test]
+    fn test_custom_dialog_without_entry_is_valid() {
+        let src = r#"
+@CustomDialog
+@Component
+struct MyDialog {
+  controller: CustomDialogController;
+  build() {}
+}
+"#;
+        let errs = check(src, "test.ets");
+        let entry_errors: Vec<_> = errs
+            .iter()
+            .filter(|e| {
+                matches!(e, EtsTransformError::Diagnostic { message, severity, .. }
+                    if message.contains("@CustomDialog") && message.contains("@Entry")
+                    && matches!(severity, crate::error::DiagnosticSeverity::Error))
+            })
+            .collect();
+        assert!(
+            entry_errors.is_empty(),
+            "@CustomDialog without @Entry must not produce conflict error; got: {:?}",
+            errs
+        );
+    }
+
+    // ── @Require ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_require_on_prop_is_valid() {
+        let src = r#"
+@Component
+struct MyComp {
+  @Require @Prop title: string = '';
+  build() {}
+}
+"#;
+        let errs = check(src, "test.ets");
+        let require_errors: Vec<_> = errs
+            .iter()
+            .filter(|e| {
+                matches!(e, EtsTransformError::Diagnostic { message, severity, .. }
+                    if message.contains("@Require")
+                    && matches!(severity, crate::error::DiagnosticSeverity::Error))
+            })
+            .collect();
+        assert!(
+            require_errors.is_empty(),
+            "@Require + @Prop must be valid; got: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn test_require_on_link_is_error() {
+        let src = r#"
+@Component
+struct MyComp {
+  @Require @Link count: number;
+  build() {}
+}
+"#;
+        assert!(
+            has_error_containing(src, "@Require"),
+            "@Require on @Link must be an error"
+        );
+    }
+
+    #[test]
+    fn test_require_alone_is_error() {
+        let src = r#"
+@Component
+struct MyComp {
+  @Require name: string = '';
+  build() {}
+}
+"#;
+        assert!(
+            has_error_containing(src, "@Require"),
+            "@Require without @Prop/@State/@Provide/@BuilderParam must be an error"
+        );
+    }
+
+    #[test]
+    fn test_require_on_state_is_valid() {
+        let src = r#"
+@Component
+struct MyComp {
+  @Require @State count: number = 0;
+  build() {}
+}
+"#;
+        let errs = check(src, "test.ets");
+        let require_errors: Vec<_> = errs
+            .iter()
+            .filter(|e| {
+                matches!(e, EtsTransformError::Diagnostic { message, severity, .. }
+                    if message.contains("@Require")
+                    && matches!(severity, crate::error::DiagnosticSeverity::Error))
+            })
+            .collect();
+        assert!(
+            require_errors.is_empty(),
+            "@Require + @State must be valid; got: {:?}",
+            errs
+        );
+    }
+
+    // ── @Extend ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_extend_with_non_void_return_is_error() {
+        let src = r#"@Extend(Button) function myButton(): string {}"#;
+        assert!(
+            has_error_containing(src, "@Extend"),
+            "@Extend function with non-void return must be an error"
+        );
+    }
+
+    #[test]
+    fn test_extend_with_void_return_is_valid() {
+        let src = r#"@Extend(Button) function myButton(): void {}"#;
+        let errs = check(src, "test.ets");
+        let extend_errors: Vec<_> = errs
+            .iter()
+            .filter(|e| {
+                matches!(e, EtsTransformError::Diagnostic { message, severity, .. }
+                    if message.contains("@Extend")
+                    && matches!(severity, crate::error::DiagnosticSeverity::Error))
+            })
+            .collect();
+        assert!(
+            extend_errors.is_empty(),
+            "@Extend with void return must be valid; got: {:?}",
+            errs
+        );
+    }
+
+    // ── @LocalBuilder ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_local_builder_with_non_void_return_in_struct_is_error() {
+        let src = r#"
+@Component
+struct MyComp {
+  @LocalBuilder myBuilder(): string { return ''; }
+  build() {}
+}
+"#;
+        assert!(
+            has_error_containing(src, "@LocalBuilder"),
+            "@LocalBuilder method with non-void return in struct must be an error"
+        );
+    }
+
+    #[test]
+    fn test_local_builder_with_void_return_in_struct_is_valid() {
+        let src = r#"
+@Component
+struct MyComp {
+  @LocalBuilder myBuilder(): void {}
+  build() {}
+}
+"#;
+        let errs = check(src, "test.ets");
+        let lb_errors: Vec<_> = errs
+            .iter()
+            .filter(|e| {
+                matches!(e, EtsTransformError::Diagnostic { message, severity, .. }
+                    if message.contains("@LocalBuilder")
+                    && matches!(severity, crate::error::DiagnosticSeverity::Error))
+            })
+            .collect();
+        assert!(
+            lb_errors.is_empty(),
+            "@LocalBuilder with void return in struct must be valid; got: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn test_local_builder_with_non_void_return_in_class_is_error() {
+        let src = r#"
+@Component
+class MyComp {
+  @LocalBuilder myBuilder(): string { return ''; }
+  build(): void {}
+}
+"#;
+        assert!(
+            has_error_containing(src, "@LocalBuilder"),
+            "@LocalBuilder method with non-void return in class must be an error"
         );
     }
 }

@@ -195,6 +195,19 @@ pub struct RawProduct {
     pub signing_configs: Vec<RawSigningConfigEntry>,
     #[serde(default)]
     pub build_option: Option<RawBuildOption>,
+    /// Optional product-level `versionCode` override.
+    ///
+    /// When set, overrides the `versionCode` in `AppScope/app.json5` for this
+    /// product.  Matches hvigor's product-level app override semantics.
+    /// Real OHOS projects usually leave this absent and use `app.json5`.
+    #[serde(default)]
+    pub version_code: Option<u64>,
+    /// Optional product-level `versionName` override.
+    ///
+    /// When set, overrides the `versionName` in `AppScope/app.json5` for this
+    /// product.  Matches hvigor's product-level app override semantics.
+    #[serde(default)]
+    pub version_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1281,5 +1294,59 @@ mod tests {
         assert_eq!(cfg.resource_directories.len(), 2);
         assert_eq!(cfg.resource_directories[0], PathBuf::from("src/main/resources"));
         assert_eq!(cfg.resource_directories[1], PathBuf::from("src/extra/resources"));
+    }
+
+    /// Verify that product-level `versionCode` and `versionName` are parsed
+    /// correctly from `build-profile.json5`.  These fields are optional; when
+    /// absent the product carries `None` so the resolver falls back to
+    /// `AppScope/app.json5`.
+    #[test]
+    fn test_product_version_override_parsed() {
+        let raw: RawBuildProfile = json5::from_str(r#"{
+            app: {
+                products: [
+                    {
+                        name: "default",
+                        bundleName: "com.example.app",
+                        compatibleSdkVersion: "5.0.0(12)",
+                        runtimeOS: "HarmonyOS",
+                        versionCode: 2000000,
+                        versionName: "2.0.0",
+                    }
+                ],
+                signingConfigs: []
+            },
+            modules: []
+        }"#)
+        .unwrap();
+
+        let product = &raw.app.products[0];
+        assert_eq!(product.version_code, Some(2000000));
+        assert_eq!(product.version_name.as_deref(), Some("2.0.0"));
+    }
+
+    /// Verify that when no product-level version override is present, the
+    /// fields are `None` so the resolver falls back to `AppScope/app.json5`.
+    #[test]
+    fn test_product_version_override_absent_is_none() {
+        let raw: RawBuildProfile = json5::from_str(r#"{
+            app: {
+                products: [
+                    {
+                        name: "default",
+                        bundleName: "com.example.app",
+                        compatibleSdkVersion: "5.0.0(12)",
+                        runtimeOS: "HarmonyOS",
+                    }
+                ],
+                signingConfigs: []
+            },
+            modules: []
+        }"#)
+        .unwrap();
+
+        let product = &raw.app.products[0];
+        assert_eq!(product.version_code, None);
+        assert_eq!(product.version_name, None);
     }
 }

@@ -263,6 +263,8 @@ pub fn load_config(
         runtime_os: raw_product.runtime_os,
         signing_config,
         build_option,
+        version_code: raw_product.version_code,
+        version_name: raw_product.version_name,
     };
 
     // -----------------------------------------------------------------------
