@@ -121,6 +121,18 @@ pub struct BuildArgs {
     /// resource-only rebuilds during DevEco IDE preview sessions.
     #[arg(long, default_value = "false")]
     pub preview: bool,
+    /// Disable the ABC compile cache (parity mode).
+    ///
+    /// When set, the ABC compilation step skips the coarse-grained `TaskInputs`
+    /// cache hit check and always recompiles from source.  This is the equivalent
+    /// of hvigor's `--no-cache` flag for the ABC compilation stage.
+    ///
+    /// Section 3.6: "实现 upstream ProgramCache/protoBin 或 parity 模式禁用 cache".
+    /// Use this flag when comparing arkdown ABC output with hvigor's output to
+    /// ensure both tools run the full compilation pipeline rather than returning
+    /// a cached artifact.
+    #[arg(long = "disable-abc-cache", default_value = "false")]
+    pub disable_abc_cache: bool,
 }
 
 pub async fn run(args: BuildArgs) -> Result<()> {
@@ -143,6 +155,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             named
         );
     }
+    let disable_abc_cache = args.disable_abc_cache;
     let project_root = args
         .project
         .unwrap_or_else(|| std::env::current_dir().expect("failed to get current directory"));
@@ -719,7 +732,12 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         let output_dir = PathBuf::from(&loader_json.ace_module_build);
         let cached_abc = output_dir.join("modules.abc");
         let task_inputs = TaskInputs::compute(&config_arc, loader_json);
-        if task_inputs.matches_cached(&cache_dir) && cached_abc.exists() {
+        // Skip cache hit check when --disable-abc-cache is set (parity mode).
+        // Section 3.6: allows comparing arkdown vs hvigor output without cache interference.
+        let cache_hit = !disable_abc_cache
+            && task_inputs.matches_cached(&cache_dir)
+            && cached_abc.exists();
+        if cache_hit {
             bundle_outs.push((
                 BundleOutput {
                     chunk_graph: ChunkGraph::default(),
@@ -1782,6 +1800,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                     watch: false, // inner rebuild does not recurse into watch
                     coverage: false,
                     preview: false, // inner rebuild handles resource compilation
+                    disable_abc_cache: false,
                 };
                 if let Err(e) = rt.block_on(run(rebuild_args)) {
                     eprintln!("[watch] rebuild failed: {e:#}");

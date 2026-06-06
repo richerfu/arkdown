@@ -604,6 +604,7 @@ fn run_full_cli_build_hap(fixture_src: &PathBuf) -> PathBuf {
             watch: false,
             coverage: false,
             preview: false,
+            disable_abc_cache: false,
         },
     ))
     .expect("full CLI build");

@@ -16,6 +16,9 @@
 
 pub mod bytecode_har;
 pub mod dependency_graph;
+pub use dependency_graph::{
+    DependencyGraphService, DependencyNode, DependencyNodeType, LocalDependencyGraph,
+};
 pub mod form_profile;
 pub mod har_abilities;
 pub mod loader_json;
