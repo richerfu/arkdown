@@ -19,6 +19,11 @@ pub mod dependency_graph;
 pub use dependency_graph::{
     DependencyGraphService, DependencyNode, DependencyNodeType, LocalDependencyGraph,
 };
+pub mod ohpm_registry;
+pub use ohpm_registry::{
+    OhpmRegistryClient, OhpmRegistryError, PackageMetadata, VersionInfo,
+    cache_dir_for,
+};
 pub mod lockfile;
 pub use lockfile::{LockfileEntry, OhPackageLockfile};
 pub mod form_profile;

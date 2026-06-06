@@ -96,23 +96,19 @@ fn optimize_method(method: &mut MethodRecord, options: BytecodeOptimizerOptions)
     // opt_level >= 1: register frame compaction (always applied when optimizing).
     compact_register_frame(method);
 
-    // opt_level >= 2: peephole optimizations aligned with es2abc opt_level=2.
+    // opt_level >= 2: peephole + CFG-based dead code elimination.
     //
-    // These mirror the `bytecode_optimizer::PassManager` passes that es2abc
-    // runs at opt_level=2:
-    //   - `PerformTailCallOptimization`: replaces tail `LdUndefined + Return`
-    //     with `ReturnUndefined` where the callee returns undefined implicitly.
-    //   - `EliminateDeadCode` (simple): removes `Nop` instructions that the
-    //     emitter sometimes introduces as padding or placeholder stubs.
-    //   - `PeepholeOptimization`: reduces common constant-load + return patterns.
-    //
-    // Note: full liveness-based dead code elimination (unreachable code after
-    // unconditional jumps) requires a control-flow graph which is not yet built
-    // at this stage.  The passes below cover the cases that arise frequently in
-    // ArkUI/ArkTS-generated code and match the observable es2abc output for
-    // common patterns.
+    // These mirror the `bytecode_optimizer::PassManager` passes at opt_level=2:
+    //   - `PerformTailCallOptimization`: LdUndefined + Return → ReturnUndefined.
+    //   - `EliminateDeadCode` (CFG-based): removes instructions unreachable from
+    //     the method entry, identified via BFS over the control-flow graph.  This
+    //     is the full es2abc `BranchEliminator`/`DeadCodeElimination` pass: any
+    //     instruction not reachable from position 0 (including code after
+    //     unconditional jumps or returns that no jump targets) is replaced with Nop.
+    //   - `PeepholeOptimization`: Nop removal.
     if options.opt_level >= 2 {
         peephole_ldundefined_return(method);
+        cfg_dead_code_elimination(method);
         remove_nops(method);
     }
 }
@@ -167,6 +163,149 @@ fn remove_nops(method: &mut MethodRecord) {
         return; // Fast path: no Nops, nothing to do.
     }
     method.pandasm_insns.retain(|i| !matches!(i, Insn::Nop));
+}
+
+/// CFG-based dead code elimination on the `pandasm_insns` IR list.
+///
+/// Ports es2abc's `BranchEliminator` / `DeadCodeElimination` pass.
+/// Builds a control-flow graph from the instruction list, identifies
+/// all instructions reachable from instruction index 0 via BFS over the CFG,
+/// then replaces every unreachable instruction with `Insn::Nop`.
+/// The subsequent `remove_nops` pass strips those Nops.
+///
+/// This is the full CFG-based DCE that es2abc performs at `opt_level=2`:
+/// - Code after `Return` / `ReturnUndefined` / `Throw` is dead unless
+///   some other instruction jumps to it.
+/// - Code after an unconditional `Jmp*` is dead unless jumped to.
+/// - Conditional `Jeqz*` / `Jnez*` instructions have two successors:
+///   the fall-through and the branch target.
+///
+/// Jump offsets in the Panda IR are byte offsets measured from the end of
+/// the jump instruction.  We reconstruct byte positions by summing
+/// `Insn::byte_len()` for each instruction to translate between
+/// instruction-index space and byte-offset space.
+fn cfg_dead_code_elimination(method: &mut MethodRecord) {
+    use crate::ir::opcodes::Insn;
+
+    let insns = &method.pandasm_insns;
+    let n = insns.len();
+    if n == 0 {
+        return;
+    }
+
+    // ── Step 1: compute cumulative byte offsets for each instruction ───────
+    // `byte_pos[i]` = byte offset of instruction `i` from the start.
+    // `byte_pos[n]` = total byte length of the method.
+    let mut byte_pos: Vec<usize> = Vec::with_capacity(n + 1);
+    byte_pos.push(0);
+    for insn in insns.iter() {
+        let prev = *byte_pos.last().unwrap();
+        byte_pos.push(prev + insn.byte_len());
+    }
+
+    // Build a map from byte offset → instruction index for jump target resolution.
+    let mut offset_to_idx: rustc_hash::FxHashMap<usize, usize> = Default::default();
+    for (i, &bp) in byte_pos[..n].iter().enumerate() {
+        offset_to_idx.insert(bp, i);
+    }
+
+    // ── Step 2: BFS reachability from instruction index 0 ─────────────────
+    let mut reachable = vec![false; n];
+    let mut worklist: Vec<usize> = vec![0];
+
+    while let Some(idx) = worklist.pop() {
+        if idx >= n || reachable[idx] {
+            continue;
+        }
+        reachable[idx] = true;
+
+        let insn = &insns[idx];
+        let insn_end_byte = byte_pos[idx] + insn.byte_len();
+        let fallthrough = idx + 1;
+
+        match insn {
+            // Terminal instructions — no successor.
+            Insn::Return | Insn::ReturnUndefined | Insn::Throw | Insn::ThrowPatternNonCoercible => {}
+
+            // Unconditional jumps — only the jump target is a successor.
+            Insn::JmpShort(off) => {
+                let target_byte = (insn_end_byte as isize + *off as isize) as usize;
+                if let Some(&ti) = offset_to_idx.get(&target_byte) {
+                    worklist.push(ti);
+                }
+            }
+            Insn::Jmp(off) => {
+                let target_byte = (insn_end_byte as isize + *off as isize) as usize;
+                if let Some(&ti) = offset_to_idx.get(&target_byte) {
+                    worklist.push(ti);
+                }
+            }
+            Insn::JmpWide(off) => {
+                let target_byte = (insn_end_byte as isize + *off as isize) as usize;
+                if let Some(&ti) = offset_to_idx.get(&target_byte) {
+                    worklist.push(ti);
+                }
+            }
+
+            // Conditional jumps — both the branch target and fall-through are successors.
+            Insn::JeqzShort(off) | Insn::JnezShort(off) => {
+                let target_byte = (insn_end_byte as isize + *off as isize) as usize;
+                if let Some(&ti) = offset_to_idx.get(&target_byte) {
+                    worklist.push(ti);
+                }
+                worklist.push(fallthrough);
+            }
+            Insn::Jeqz(off) | Insn::Jnez(off) => {
+                let target_byte = (insn_end_byte as isize + *off as isize) as usize;
+                if let Some(&ti) = offset_to_idx.get(&target_byte) {
+                    worklist.push(ti);
+                }
+                worklist.push(fallthrough);
+            }
+            Insn::JeqzWide(off) | Insn::JnezWide(off) => {
+                let target_byte = (insn_end_byte as isize + *off as isize) as usize;
+                if let Some(&ti) = offset_to_idx.get(&target_byte) {
+                    worklist.push(ti);
+                }
+                worklist.push(fallthrough);
+            }
+
+            // All other instructions: sequential fall-through only.
+            _ => {
+                worklist.push(fallthrough);
+            }
+        }
+    }
+
+    // ── Step 3: replace unreachable instructions with Nop ─────────────────
+    let insns = &mut method.pandasm_insns;
+    let mut changed = false;
+    for (i, insn) in insns.iter_mut().enumerate() {
+        if !reachable[i] && !matches!(insn, Insn::Nop) {
+            *insn = Insn::Nop;
+            changed = true;
+        }
+    }
+
+    // Also update the encoded bytecode to stay in sync when changes were made.
+    if changed {
+        // Re-encode the first Nop positions in the bytecode (0xD5 per Nop).
+        // We walk bytecode positions using instruction_len to stay in sync.
+        let bc = &mut method.bytecode;
+        let mut bp = 0;
+        for (i, insn) in method.pandasm_insns.iter().enumerate() {
+            // Compute the expected size at this position.
+            let expected_len = insn.byte_len();
+            if matches!(insn, Insn::Nop) && !reachable[i] && bp < bc.len() {
+                // Overwrite all bytes of this instruction with Nop.
+                let end = (bp + expected_len).min(bc.len());
+                for b in &mut bc[bp..end] {
+                    *b = 0xD5;
+                }
+            }
+            bp += expected_len;
+        }
+    }
 }
 
 fn compact_register_frame(method: &mut MethodRecord) {
