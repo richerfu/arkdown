@@ -36,6 +36,20 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
     let reader = AbcReader::new(data).map_err(read_error("<abc input>"))?;
     let classes = reader.class_items().map_err(read_error("<abc input>"))?;
     file.program_lang.get_or_insert(0);
+    let method_names = classes
+        .iter()
+        .flat_map(|class| {
+            class
+                .methods
+                .iter()
+                .map(|method| (method.offset, method.name.clone()))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let index_sections = reader.index_sections().map_err(read_error("<abc input>"))?;
+    let class_name_by_offset = classes
+        .iter()
+        .map(|class| (class.offset, class.name.clone()))
+        .collect::<BTreeMap<_, _>>();
 
     let module_literal_offsets = classes
         .iter()
@@ -51,10 +65,32 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
             AbcFieldValue::U8(_) => None,
         })
         .collect::<BTreeSet<_>>();
+    let module_request_phase_offsets = classes
+        .iter()
+        .flat_map(|class| {
+            class.fields.iter().filter_map(|field| {
+                (field.name == "moduleRequestPhaseIdx")
+                    .then_some(field.value)
+                    .flatten()
+            })
+        })
+        .filter_map(|value| match value {
+            AbcFieldValue::U32(offset) => Some(offset),
+            AbcFieldValue::U8(_) => None,
+        })
+        .collect::<BTreeSet<_>>();
 
-    let literal_offsets = reader
+    let mut literal_offsets = reader
         .literal_array_offsets()
-        .map_err(read_error("<abc input>"))?;
+        .map_err(read_error("<abc input>"))?
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    literal_offsets.extend(collect_array_field_literal_offsets(
+        &classes,
+        &index_sections,
+        &class_name_by_offset,
+    )?);
+    let literal_offsets = literal_offsets.into_iter().collect::<Vec<_>>();
     let literal_base_index = file.literal_arrays.len();
     let literal_offset_to_index = literal_offsets
         .iter()
@@ -64,26 +100,14 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
     for offset in literal_offsets {
         let literal = if module_literal_offsets.contains(&offset) {
             read_module_record_literal_array(data, &reader, offset)?
+        } else if module_request_phase_offsets.contains(&offset) {
+            read_module_request_phase_literal_array(data, offset)?
         } else {
             read_tagged_literal_array(&reader, offset, &literal_offset_to_index)?
         };
         file.literal_arrays.push(literal);
     }
 
-    let method_names = classes
-        .iter()
-        .flat_map(|class| {
-            class
-                .methods
-                .iter()
-                .map(|method| (method.offset, method.name.clone()))
-        })
-        .collect::<BTreeMap<_, _>>();
-    let index_sections = reader.index_sections().map_err(read_error("<abc input>"))?;
-    let class_name_by_offset = classes
-        .iter()
-        .map(|class| (class.offset, class.name.clone()))
-        .collect::<BTreeMap<_, _>>();
     let method_pool_offsets = index_sections
         .iter()
         .flat_map(|section| section.method_offsets.iter().copied())
@@ -113,8 +137,19 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
                     &class_name_by_offset,
                     &literal_offset_to_index,
                 )?;
+                mark_annotation_literal_refs(file, &annotations, &mut record_literal_indices);
                 let field_type =
                     field_type_from_abc(field, &index_sections, &class_name_by_offset)?;
+                let value =
+                    field_value_from_abc(field, &field_type, &reader, &literal_offset_to_index)?;
+                if let (Some(FieldValue::LiteralArray(index)), Some(AbcFieldValue::U32(offset))) =
+                    (&value, field.value)
+                {
+                    mark_literal_explicit_key(file, *index, &class.name, offset);
+                    if !is_module_literal_field(&class.name, &field.name) {
+                        record_literal_indices.insert(*index);
+                    }
+                }
                 Ok(FieldRecord {
                     name: field.name.clone(),
                     class_idx: FIELD_OWNER_CLASS_IDX,
@@ -122,11 +157,7 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
                     field_type,
                     metadata_field_type: None,
                     access_flags: field.access_flags,
-                    value: field_value_from_abc(
-                        field.name.as_str(),
-                        field.value,
-                        &literal_offset_to_index,
-                    )?,
+                    value,
                     annotations,
                     metadata_attrs: Default::default(),
                     source: Default::default(),
@@ -148,6 +179,7 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
                 let bytecode = unpatch_bytecode_index_operands(
                     &reader,
                     file,
+                    class.name.as_str(),
                     method.offset,
                     &code.bytecode,
                     &literal_offset_to_index,
@@ -174,6 +206,23 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
                     &class_name_by_offset,
                     &literal_offset_to_index,
                 )?;
+                mark_annotation_literal_refs(
+                    file,
+                    &annotations.custom,
+                    &mut record_literal_indices,
+                );
+                let param_annotations = method_param_annotations_from_abc(
+                    data,
+                    &reader,
+                    &class,
+                    method,
+                    &index_sections,
+                    &class_name_by_offset,
+                    &literal_offset_to_index,
+                )?;
+                for annotations in &param_annotations {
+                    mark_annotation_literal_refs(file, annotations, &mut record_literal_indices);
+                }
                 let abc_debug = method
                     .debug_info_off
                     .map(|offset| {
@@ -226,15 +275,7 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
                     expected_property_count: annotations.expected_property_count,
                     annotations: annotations.custom,
                     metadata_attrs: Default::default(),
-                    param_annotations: method_param_annotations_from_abc(
-                        data,
-                        &reader,
-                        &class,
-                        method,
-                        &index_sections,
-                        &class_name_by_offset,
-                        &literal_offset_to_index,
-                    )?,
+                    param_annotations,
                     definefunc_order: None,
                     label_style: MethodLabelStyle::Abc2Program,
                     param_types: Vec::new(),
@@ -257,6 +298,7 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
             &class_name_by_offset,
             &literal_offset_to_index,
         )?;
+        mark_annotation_literal_refs(file, &class_annotations, &mut record_literal_indices);
         file.add_record(ClassRecord {
             name: class.name,
             methods,
@@ -267,6 +309,9 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
                 .iter()
                 .filter_map(|field| match (field.name.as_str(), field.value) {
                     ("moduleRecordIdx" | "scopeNames", Some(AbcFieldValue::U32(offset))) => {
+                        literal_offset_to_index.get(&offset).copied()
+                    }
+                    ("moduleRequestPhaseIdx", Some(AbcFieldValue::U32(offset))) => {
                         literal_offset_to_index.get(&offset).copied()
                     }
                     _ => None,
@@ -928,7 +973,7 @@ fn annotation_value_from_abc(
             };
             Ok(AnnotationValue::LiteralArray {
                 index,
-                key: literal_array_key(&owner_class.name, index),
+                key: literal_array_key(&owner_class.name, value as usize),
             })
         }
         b'2' => Ok(raw_u64_annotation_value(VALUE_TYPE_I8, value as u64)),
@@ -1262,20 +1307,24 @@ fn build_method_call_infos(
 }
 
 fn field_value_from_abc(
-    field_name: &str,
-    value: Option<AbcFieldValue>,
+    field: &crate::abc_reader::AbcFieldItem,
+    field_type: &FieldType,
+    reader: &AbcReader<'_>,
     literal_offset_to_index: &BTreeMap<u32, usize>,
 ) -> Result<Option<FieldValue>, AbcError> {
+    let field_name = field.name.as_str();
+    let value = field.value;
     let Some(value) = value else {
         return Ok(None);
     };
     match value {
+        AbcFieldValue::U8(value) if matches!(field_type, FieldType::U1) => {
+            Ok(Some(FieldValue::Bool(value != 0)))
+        }
         AbcFieldValue::U8(value) => Ok(Some(FieldValue::U8(value))),
         AbcFieldValue::U32(offset)
-            if matches!(
-                field_name,
-                "moduleRecordIdx" | "scopeNames" | "moduleRequestPhaseIdx"
-            ) =>
+            if is_module_literal_field("", field_name)
+                || matches!(field_type, FieldType::Array { .. }) =>
         {
             let Some(index) = literal_offset_to_index.get(&offset).copied() else {
                 return Err(AbcError::UnsupportedConstruct {
@@ -1287,7 +1336,98 @@ fn field_value_from_abc(
             };
             Ok(Some(FieldValue::LiteralArray(index)))
         }
+        AbcFieldValue::U32(offset) if field_name == "jsonFileContent" => {
+            Ok(Some(FieldValue::String(
+                reader
+                    .string_at(offset)
+                    .map_err(read_error("<abc input>"))?,
+            )))
+        }
         AbcFieldValue::U32(value) => Ok(Some(FieldValue::U32(value))),
+    }
+}
+
+fn is_module_literal_field(record_name: &str, field_name: &str) -> bool {
+    matches!(
+        field_name,
+        "moduleRecordIdx" | "scopeNames" | "moduleRequestPhaseIdx"
+    ) || (record_name == "_ESModuleRecord" && field_name == "moduleRecordIdx")
+        || (record_name == "_ESScopeNamesRecord" && field_name == "scopeNames")
+}
+
+fn collect_array_field_literal_offsets(
+    classes: &[AbcClassItem],
+    index_sections: &[crate::abc_reader::AbcIndexSection],
+    class_name_by_offset: &BTreeMap<u32, String>,
+) -> Result<BTreeSet<u32>, AbcError> {
+    let mut offsets = BTreeSet::new();
+    for class in classes {
+        for field in &class.fields {
+            let Some(AbcFieldValue::U32(offset)) = field.value else {
+                continue;
+            };
+            let field_type = field_type_from_abc(field, index_sections, class_name_by_offset)?;
+            if matches!(field_type, FieldType::Array { .. }) {
+                offsets.insert(offset);
+            }
+        }
+    }
+    Ok(offsets)
+}
+
+fn mark_literal_explicit_key(file: &mut AbcFile, index: usize, record_name: &str, offset: u32) {
+    let key = literal_array_key(record_name, offset as usize);
+    mark_literal_explicit_key_by_key(file, index, &key);
+}
+
+fn mark_literal_explicit_key_by_key(file: &mut AbcFile, index: usize, key: &str) {
+    if let Some(array) = file.literal_arrays.get_mut(index) {
+        array.explicit_key.get_or_insert_with(|| key.to_string());
+    }
+}
+
+fn mark_annotation_literal_refs(
+    file: &mut AbcFile,
+    annotations: &[AnnotationRecord],
+    literal_refs: &mut BTreeSet<usize>,
+) {
+    for annotation in annotations {
+        mark_annotation_record_literal_refs(file, annotation, literal_refs);
+    }
+}
+
+fn mark_annotation_record_literal_refs(
+    file: &mut AbcFile,
+    annotation: &AnnotationRecord,
+    literal_refs: &mut BTreeSet<usize>,
+) {
+    for element in &annotation.elements {
+        mark_annotation_value_literal_refs(file, &element.value, literal_refs);
+    }
+}
+
+fn mark_annotation_value_literal_refs(
+    file: &mut AbcFile,
+    value: &AnnotationValue,
+    literal_refs: &mut BTreeSet<usize>,
+) {
+    match value {
+        AnnotationValue::LiteralArray { index, key } => {
+            literal_refs.insert(*index);
+            mark_literal_explicit_key_by_key(file, *index, key);
+        }
+        AnnotationValue::RawScalar(ScalarValueRecord {
+            value: ScalarValueData::Annotation(annotation),
+            ..
+        }) => mark_annotation_record_literal_refs(file, annotation, literal_refs),
+        AnnotationValue::Array(array) => {
+            for value in &array.values {
+                if let ScalarValueData::Annotation(annotation) = &value.value {
+                    mark_annotation_record_literal_refs(file, annotation, literal_refs);
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1503,6 +1643,22 @@ fn read_module_record_literal_array(
     })
 }
 
+fn read_module_request_phase_literal_array(
+    data: &[u8],
+    offset: u32,
+) -> Result<LiteralArray, AbcError> {
+    let mut cursor = offset as usize;
+    let item_count = read_u32(data, &mut cursor)? as usize;
+    let mut entries = Vec::with_capacity(item_count);
+    for _ in 0..item_count {
+        read_raw_u8(data, &mut cursor, &mut entries)?;
+    }
+    Ok(LiteralArray {
+        entries,
+        explicit_key: None,
+    })
+}
+
 fn read_counted(
     data: &[u8],
     reader: &AbcReader<'_>,
@@ -1537,6 +1693,22 @@ fn read_raw_u32(
     let value = read_u32(data, cursor)?;
     entries.push(LiteralEntry::RawU32(value));
     *consumed += 1;
+    Ok(())
+}
+
+fn read_raw_u8(
+    data: &[u8],
+    cursor: &mut usize,
+    entries: &mut Vec<LiteralEntry>,
+) -> Result<(), AbcError> {
+    let Some(&value) = data.get(*cursor) else {
+        return Err(AbcError::UnsupportedConstruct {
+            construct: "truncated module request phase literal u8".to_string(),
+            file: "<abc input>".to_string(),
+        });
+    };
+    *cursor += 1;
+    entries.push(LiteralEntry::RawU8(value));
     Ok(())
 }
 
@@ -1615,6 +1787,7 @@ fn abc_default_function_kind(kind: MethodKind) -> u32 {
 fn unpatch_bytecode_index_operands(
     reader: &AbcReader<'_>,
     file: &mut AbcFile,
+    record_name: &str,
     method_off: u32,
     bytecode: &[u8],
     literal_offset_to_index: &BTreeMap<u32, usize>,
@@ -1634,6 +1807,7 @@ fn unpatch_bytecode_index_operands(
         let pool_index = pool_index as u32;
         if let Some(&literal_index) = literal_offset_to_index.get(&offset) {
             literal_pool.insert(pool_index, literal_index as u32);
+            mark_literal_explicit_key(file, literal_index, record_name, offset);
         } else if let Some(name) = method_names.get(&offset) {
             let string_id = file.strings.intern(name);
             record_string_indices.insert(string_id);
@@ -2218,7 +2392,13 @@ fn resolve_pandasm_id(
             .strings
             .get(index)
             .map(|value| full_method_name(record_name, value).into_bytes()),
-        IdKind::LiteralArray => Some(literal_array_key(record_name, index as usize).into_bytes()),
+        IdKind::LiteralArray => Some(
+            file.literal_arrays
+                .get(index as usize)
+                .and_then(|array| array.explicit_key.clone())
+                .unwrap_or_else(|| literal_array_key(record_name, index as usize))
+                .into_bytes(),
+        ),
         IdKind::Other => None,
     }
 }

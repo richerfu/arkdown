@@ -260,6 +260,7 @@ pub enum LiteralEntry {
         values: Vec<LiteralArrayElement>,
     },
     TaggedNull,
+    RawU8(u8),
     RawU32(u32),
     RawU16(u16),
     RawString(String),
@@ -351,7 +352,10 @@ impl LiteralEntry {
             | LiteralEntry::TaggedEtsImplements(_)
             | LiteralEntry::TaggedNull => 2,
             LiteralEntry::TaggedArray { values, .. } => 2 + values.len() as u32,
-            LiteralEntry::RawU32(_) | LiteralEntry::RawU16(_) | LiteralEntry::RawString(_) => 1,
+            LiteralEntry::RawU8(_)
+            | LiteralEntry::RawU32(_)
+            | LiteralEntry::RawU16(_)
+            | LiteralEntry::RawString(_) => 1,
         }
     }
 }
@@ -1267,6 +1271,9 @@ impl AbcFile {
                         LiteralEntry::TaggedNull => {
                             buf.push(LITERAL_TAG_NULL);
                             buf.push(0);
+                        }
+                        LiteralEntry::RawU8(value) => {
+                            buf.push(*value);
                         }
                         LiteralEntry::RawU32(value) => {
                             buf.extend_from_slice(&value.to_le_bytes());

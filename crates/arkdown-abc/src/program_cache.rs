@@ -87,10 +87,10 @@ pub(crate) fn program_for_record(
     let lang = file.program_lang.unwrap_or(record.source_lang as u32);
     let mut literal_indices = BTreeSet::new();
     for &idx in &record.module_literal_indices {
-        literal_indices.insert(idx);
+        insert_literal_index_with_nested(file, &mut literal_indices, idx);
     }
     for &idx in &record.literal_indices {
-        literal_indices.insert(idx);
+        insert_literal_index_with_nested(file, &mut literal_indices, idx);
     }
 
     let mut program = Program {
@@ -124,7 +124,7 @@ pub(crate) fn program_for_record(
 
     let mut function_table = BTreeMap::new();
     for method in &record.methods {
-        let function = function_to_proto(method, record, &file.strings)?;
+        let function = function_to_proto(method, record, file)?;
         insert_function_table(
             &mut function_table,
             bytes(&full_method_name(&record.name, &method.name)),
@@ -147,7 +147,12 @@ pub(crate) fn program_for_record(
         insert_literal_array_table(
             &mut literal_array_table,
             bytes(&literal_key(record, file, idx)),
-            literal_array_to_proto(array, &record.name, is_raw_module_literal_array(array))?,
+            literal_array_to_proto(
+                array,
+                &record.name,
+                Some(file),
+                is_raw_module_literal_array(array),
+            )?,
         );
     }
     program.literal_array_table = literal_array_table
@@ -201,22 +206,24 @@ pub(crate) fn program_for_records(
     let mut literal_record_names = BTreeMap::new();
     for record in &selected_records {
         for &idx in &record.module_literal_indices {
-            literal_indices.insert(idx);
-            literal_keys
-                .entry(idx)
-                .or_insert_with(|| literal_key(record, file, idx));
-            literal_record_names
-                .entry(idx)
-                .or_insert_with(|| record.name.clone());
+            insert_literal_index_with_nested_for_record(
+                file,
+                &mut literal_indices,
+                &mut literal_keys,
+                &mut literal_record_names,
+                record,
+                idx,
+            );
         }
         for &idx in &record.literal_indices {
-            literal_indices.insert(idx);
-            literal_keys
-                .entry(idx)
-                .or_insert_with(|| literal_key(record, file, idx));
-            literal_record_names
-                .entry(idx)
-                .or_insert_with(|| record.name.clone());
+            insert_literal_index_with_nested_for_record(
+                file,
+                &mut literal_indices,
+                &mut literal_keys,
+                &mut literal_record_names,
+                record,
+                idx,
+            );
         }
     }
 
@@ -244,7 +251,7 @@ pub(crate) fn program_for_records(
             record_to_proto(record, file),
         );
         for method in &record.methods {
-            let function = function_to_proto(method, record, &file.strings)?;
+            let function = function_to_proto(method, record, file)?;
             insert_function_table(
                 &mut function_table,
                 bytes(&full_method_name(&record.name, &method.name)),
@@ -286,6 +293,7 @@ pub(crate) fn program_for_records(
                     .get(&idx)
                     .map(String::as_str)
                     .unwrap_or_default(),
+                Some(file),
                 is_raw_module_literal_array(array),
             )?,
         );
@@ -504,9 +512,64 @@ fn is_raw_module_literal_array(array: &LiteralArray) -> bool {
         && array.entries.iter().all(|entry| {
             matches!(
                 entry,
-                LiteralEntry::RawU32(_) | LiteralEntry::RawU16(_) | LiteralEntry::RawString(_)
+                LiteralEntry::RawU8(_)
+                    | LiteralEntry::RawU32(_)
+                    | LiteralEntry::RawU16(_)
+                    | LiteralEntry::RawString(_)
             )
         })
+}
+
+fn insert_literal_index_with_nested(
+    file: &AbcFile,
+    literal_indices: &mut BTreeSet<usize>,
+    index: usize,
+) {
+    if !literal_indices.insert(index) {
+        return;
+    }
+    let Some(array) = file.literal_arrays.get(index) else {
+        return;
+    };
+    for entry in &array.entries {
+        if let LiteralEntry::TaggedLiteralArrayIndex(nested) = entry {
+            insert_literal_index_with_nested(file, literal_indices, *nested);
+        }
+    }
+}
+
+fn insert_literal_index_with_nested_for_record(
+    file: &AbcFile,
+    literal_indices: &mut BTreeSet<usize>,
+    literal_keys: &mut BTreeMap<usize, String>,
+    literal_record_names: &mut BTreeMap<usize, String>,
+    record: &ClassRecord,
+    index: usize,
+) {
+    if !literal_indices.insert(index) {
+        return;
+    }
+    literal_keys
+        .entry(index)
+        .or_insert_with(|| literal_key(record, file, index));
+    literal_record_names
+        .entry(index)
+        .or_insert_with(|| record.name.clone());
+    let Some(array) = file.literal_arrays.get(index) else {
+        return;
+    };
+    for entry in &array.entries {
+        if let LiteralEntry::TaggedLiteralArrayIndex(nested) = entry {
+            insert_literal_index_with_nested_for_record(
+                file,
+                literal_indices,
+                literal_keys,
+                literal_record_names,
+                record,
+                *nested,
+            );
+        }
+    }
 }
 
 fn insert_record_table(table: &mut BTreeMap<Vec<u8>, Record>, key: Vec<u8>, value: Record) {
@@ -700,6 +763,9 @@ fn module_literal_from_proto(literal: Literal) -> io::Result<LiteralEntry> {
         return invalid_data("missing literal value");
     };
     match (literal.tag as u8, value.value, value.r#type) {
+        (LITERAL_TAG_TAGVALUE, Some(variant_value::Value::ValueInt(value)), _) => {
+            Ok(LiteralEntry::RawU8(to_u8(value, "module literal u8")?))
+        }
         (LITERAL_TAG_INTEGER, Some(variant_value::Value::ValueInt(value)), _) => {
             Ok(LiteralEntry::RawU32(to_u32(value, "module literal u32")?))
         }
@@ -2673,7 +2739,7 @@ fn annotation_field_type_sentinel() -> Type {
 fn function_to_proto(
     method: &MethodRecord,
     record: &ClassRecord,
-    strings: &StringTable,
+    file: &AbcFile,
 ) -> io::Result<Function> {
     let mut pandasm_insns = method.pandasm_insns.clone();
     let slots_num = match method.slots_num {
@@ -2709,7 +2775,7 @@ fn function_to_proto(
             method.pandasm_debug.get(idx).copied(),
             offset,
             record,
-            strings,
+            file,
             label_plan.target_names(),
         )?);
     }
@@ -3140,9 +3206,10 @@ fn insn_to_proto(
     debug: Option<InstructionDebugInfo>,
     offset: usize,
     record: &ClassRecord,
-    strings: &StringTable,
+    file: &AbcFile,
     label_names: &BTreeMap<usize, String>,
 ) -> io::Result<Ins> {
+    let strings = &file.strings;
     let mut out = Ins {
         opcode: pandasm_opcode(insn),
         regs: Vec::new(),
@@ -3316,7 +3383,7 @@ fn insn_to_proto(
         | Insn::CreateObjectWithBuffer(count, literal) => {
             out.imms.push(imm_i64(*count as i64));
             out.ids
-                .push(bytes(&legacy_literal_key(record, *literal as usize)));
+                .push(bytes(&literal_key(record, file, *literal as usize)));
         }
         Insn::NewLexEnv(count) => out.imms.push(imm_i64(*count as i64)),
         Insn::ThrowUndefinedIfHoleWithName(id) => out.ids.push(string_id(strings, *id)?),
@@ -3340,7 +3407,7 @@ fn insn_to_proto(
         Insn::CallRuntimeCreatePrivateProperty(count, literal) => {
             out.imms.push(imm_i64(*count as i64));
             out.ids
-                .push(bytes(&legacy_literal_key(record, *literal as usize)));
+                .push(bytes(&literal_key(record, file, *literal as usize)));
         }
         Insn::DefineFuncShort(slot, id, length) | Insn::DefineMethodShort(slot, id, length) => {
             out.imms
@@ -3355,7 +3422,7 @@ fn insn_to_proto(
                     .unwrap_or_else(|| full_method_name(&record.name, "func_main_0")),
             ));
             out.ids
-                .push(bytes(&legacy_literal_key(record, *literal as usize)));
+                .push(bytes(&literal_key(record, file, *literal as usize)));
             out.regs.push(*reg as u32);
         }
         Insn::DefineGetterSetterByValue(a, b, c, d) => {
@@ -3411,6 +3478,7 @@ fn pandasm_opcode(insn: &Insn) -> u32 {
 fn literal_array_to_proto(
     array: &LiteralArray,
     record_name: &str,
+    file: Option<&AbcFile>,
     module_style: bool,
 ) -> io::Result<crate::proto_panda::LiteralArray> {
     let mut literals = Vec::new();
@@ -3418,7 +3486,7 @@ fn literal_array_to_proto(
         if module_style {
             literals.push(module_literal_to_proto(entry)?);
         } else {
-            push_tagged_literal_to_proto(&mut literals, entry, record_name)?;
+            push_tagged_literal_to_proto(&mut literals, entry, record_name, file)?;
         }
     }
     Ok(crate::proto_panda::LiteralArray { literals })
@@ -3426,6 +3494,7 @@ fn literal_array_to_proto(
 
 fn module_literal_to_proto(entry: &LiteralEntry) -> io::Result<Literal> {
     match entry {
+        LiteralEntry::RawU8(value) => Ok(literal_u8(LITERAL_TAG_TAGVALUE, *value)),
         LiteralEntry::RawU32(value) => Ok(literal_u32(LITERAL_TAG_INTEGER, *value)),
         LiteralEntry::RawU16(value) => Ok(literal_u16(LITERAL_TAG_METHOD_AFFILIATE, *value)),
         LiteralEntry::RawString(value) => Ok(literal_string(LITERAL_TAG_STRING, value)),
@@ -3439,6 +3508,7 @@ fn push_tagged_literal_to_proto(
     literals: &mut Vec<Literal>,
     entry: &LiteralEntry,
     record_name: &str,
+    file: Option<&AbcFile>,
 ) -> io::Result<()> {
     if let LiteralEntry::TaggedArray {
         component_tag,
@@ -3455,7 +3525,7 @@ fn push_tagged_literal_to_proto(
 
     let tag = tagged_literal_tag(entry)?;
     literals.push(literal_u8(LITERAL_TAG_TAGVALUE, tag));
-    literals.push(tagged_literal_value_to_proto(entry, record_name)?);
+    literals.push(tagged_literal_value_to_proto(entry, record_name, file)?);
     Ok(())
 }
 
@@ -3489,7 +3559,11 @@ fn tagged_literal_tag(entry: &LiteralEntry) -> io::Result<u8> {
     })
 }
 
-fn tagged_literal_value_to_proto(entry: &LiteralEntry, record_name: &str) -> io::Result<Literal> {
+fn tagged_literal_value_to_proto(
+    entry: &LiteralEntry,
+    record_name: &str,
+    file: Option<&AbcFile>,
+) -> io::Result<Literal> {
     Ok(match entry {
         LiteralEntry::TaggedBool(value) => literal_bool(LITERAL_TAG_BOOL, *value),
         LiteralEntry::TaggedInteger(value) => literal_u32(LITERAL_TAG_INTEGER, *value),
@@ -3531,7 +3605,7 @@ fn tagged_literal_value_to_proto(entry: &LiteralEntry, record_name: &str) -> io:
         }
         LiteralEntry::TaggedLiteralArrayIndex(index) => literal_string(
             LITERAL_TAG_LITERAL_ARRAY,
-            &literal_key_for_index(record_name, *index),
+            &literal_key_for_index(record_name, file, *index),
         ),
         LiteralEntry::TaggedBuiltinTypeIndex(value) => {
             literal_u8(LITERAL_TAG_BUILTIN_TYPE_INDEX, *value)
@@ -3548,8 +3622,13 @@ fn tagged_literal_value_to_proto(entry: &LiteralEntry, record_name: &str) -> io:
     })
 }
 
-fn literal_key_for_index(record_name: &str, index: usize) -> String {
-    literal_array_key(record_name, index)
+fn literal_key_for_index(record_name: &str, file: Option<&AbcFile>, index: usize) -> String {
+    file.and_then(|file| {
+        file.literal_arrays
+            .get(index)
+            .and_then(|array| array.explicit_key.clone())
+    })
+    .unwrap_or_else(|| literal_array_key(record_name, index))
 }
 
 fn typed_array_element_to_proto(
@@ -4108,8 +4187,7 @@ mod tests {
         record.methods[main_idx].catch_entries[0].exception_record =
             Some("CustomError".to_string());
 
-        let function =
-            function_to_proto(&record.methods[main_idx], &record, &file.strings).unwrap();
+        let function = function_to_proto(&record.methods[main_idx], &record, &file).unwrap();
         assert_eq!(
             function.catch_blocks[0].exception_record,
             b"CustomError".to_vec()
@@ -4157,7 +4235,7 @@ mod tests {
             explicit_key: None,
         };
 
-        let proto = literal_array_to_proto(&array, "record", false).unwrap();
+        let proto = literal_array_to_proto(&array, "record", None, false).unwrap();
         let tags = proto
             .literals
             .iter()
@@ -4216,7 +4294,7 @@ mod tests {
             explicit_key: None,
         };
 
-        let proto = literal_array_to_proto(&array, "record", true).unwrap();
+        let proto = literal_array_to_proto(&array, "record", None, true).unwrap();
         let tags = proto
             .literals
             .iter()
@@ -4753,6 +4831,85 @@ class A {}
             "usage_new_array.ets.Anno",
         );
         assert_eq!(restored_keys.len(), 3);
+        let literal_table_keys = restored_program
+            .literal_array_table
+            .iter()
+            .map(|entry| std::str::from_utf8(&entry.key).unwrap().to_string())
+            .collect::<BTreeSet<_>>();
+        for (_, key) in restored_keys {
+            assert!(
+                key.starts_with("usage_new_array.ets_"),
+                "ABC input literal key must use upstream record_offset form, got {key}"
+            );
+            assert!(
+                !key.contains("#~A=#A"),
+                "ABC input must not preserve source-built annotation key {key}"
+            );
+            let suffix = key.rsplit_once('_').unwrap().1;
+            let offset = suffix.parse::<u32>().expect("literal key suffix offset");
+            assert!(offset > 0);
+            assert!(
+                literal_table_keys.contains(&key),
+                "annotation literal key {key} must be present in Program.literalarray_table"
+            );
+        }
+    }
+
+    #[test]
+    fn abc_input_array_field_values_use_upstream_literalarray_metadata() {
+        let mut file = annotation_usage_file();
+        let literal_idx = file.literal_arrays.len();
+        file.literal_arrays.push(LiteralArray {
+            entries: vec![LiteralEntry::TaggedArray {
+                component_tag: LITERAL_TAG_ARRAY_U8,
+                values: vec![LiteralArrayElement::U8(7)],
+            }],
+            explicit_key: None,
+        });
+        let record = file
+            .records
+            .iter_mut()
+            .find(|record| record.name == "Lusage_string.ets;")
+            .expect("user record must exist");
+        record.fields.push(FieldRecord {
+            name: "arrayField".to_string(),
+            class_idx: FIELD_OWNER_CLASS_IDX,
+            type_idx: 0,
+            field_type: FieldType::Array {
+                component_name: "u8".to_string(),
+                rank: 1,
+            },
+            metadata_field_type: None,
+            access_flags: 0,
+            value: Some(FieldValue::LiteralArray(literal_idx)),
+            annotations: Vec::new(),
+            metadata_attrs: Default::default(),
+            source: Default::default(),
+        });
+
+        let bytes = file.serialize_with_version(version_for_target_api(20, None));
+        AbcReader::validate(&bytes).unwrap();
+        let mut restored = AbcFile::new();
+        append_abc_file(&mut restored, &bytes).unwrap();
+        let restored_record = restored
+            .records
+            .iter()
+            .find(|record| record.name == "Lusage_string.ets;")
+            .expect("restored user record must exist");
+        let restored_field = restored_record
+            .fields
+            .iter()
+            .find(|field| field.name == "arrayField")
+            .expect("restored array field must exist");
+        let restored_literal_idx = match restored_field.value {
+            Some(FieldValue::LiteralArray(index)) => index,
+            ref other => panic!("array field must restore as LiteralArray, got {other:?}"),
+        };
+        let key = restored.literal_arrays[restored_literal_idx]
+            .explicit_key
+            .as_deref()
+            .expect("ABC input array field literal must keep upstream key");
+        assert!(key.starts_with("usage_string.ets_"));
     }
 
     #[test]
