@@ -640,11 +640,56 @@ impl ModuleJsonWriter {
 
         let dependency_profiles =
             Self::read_dependency_module_profiles(&module_cfg.src_path, &config.project_root)?;
+        let compatible_api = parse_api_version(&config.product.compatible_sdk_version)
+            .unwrap_or(config.sdk_config.compile_api_version);
+
+        // Validate ALL local dependency nodes (SourceHar + SharedHsp) for API/device
+        // compatibility, not just those that contribute metadata/requestPermissions.
+        // Matches hvigor's checkHarApiStatus() / checkHarDeviceTypes() behavior
+        // which validates the entire dependency graph, not just the merging subset.
+        {
+            use crate::dependency_graph::{DependencyNodeType, LocalDependencyGraph};
+            let graph = LocalDependencyGraph::build(&module_cfg.src_path, &config.project_root);
+            for node in graph.nodes.values() {
+                if !matches!(
+                    node.node_type,
+                    DependencyNodeType::SourceHar | DependencyNodeType::SharedHsp
+                ) {
+                    continue;
+                }
+                if node.pkg_root.as_os_str().is_empty() {
+                    continue;
+                }
+                // Read module profile for this node and validate API/device.
+                let profile_path = node.pkg_root.join("src/main/module.json5");
+                if !profile_path.is_file() {
+                    continue;
+                }
+                let Ok(content) = std::fs::read_to_string(&profile_path) else {
+                    continue;
+                };
+                // Only validate API/device; skip nodes without minAPIVersion info.
+                if let Ok(profile_json) = json5::from_str::<serde_json::Value>(&content) {
+                    let app_min_api = profile_json
+                        .pointer("/app/minAPIVersion")
+                        .or_else(|| profile_json.pointer("/module/minAPIVersion"));
+                    if let Some(min_api) = app_min_api.and_then(|v| v.as_u64()) {
+                        if min_api > compatible_api as u64 {
+                            return Err(ArkdownError::Bundler(format!(
+                                "HAR_UNSUPPORTED_API_VERSION: dependency '{}' requires \
+                                 minAPIVersion {}, current compatible API is {}",
+                                node.package_name, min_api, compatible_api
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+
         if dependency_profiles.is_empty() {
             return Ok(DependencyProfileMerge::default());
         }
-        let compatible_api = parse_api_version(&config.product.compatible_sdk_version)
-            .unwrap_or(config.sdk_config.compile_api_version);
+
         for profile in dependency_profiles.iter().filter(|profile| {
             !profile.metadata.is_empty() || !profile.request_permissions.is_empty()
         }) {
