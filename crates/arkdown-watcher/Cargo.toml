@@ -12,3 +12,7 @@ crossbeam-channel = { workspace = true }
 thiserror = { workspace = true }
 fs-err = { workspace = true }
 tracing = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -1,3 +1,5 @@
+pub mod hot_reload;
+
 use rustc_hash::FxHashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

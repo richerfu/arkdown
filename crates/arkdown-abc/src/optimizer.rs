@@ -93,7 +93,80 @@ fn optimize_method(method: &mut MethodRecord, options: BytecodeOptimizerOptions)
         return;
     }
 
+    // opt_level >= 1: register frame compaction (always applied when optimizing).
     compact_register_frame(method);
+
+    // opt_level >= 2: peephole optimizations aligned with es2abc opt_level=2.
+    //
+    // These mirror the `bytecode_optimizer::PassManager` passes that es2abc
+    // runs at opt_level=2:
+    //   - `PerformTailCallOptimization`: replaces tail `LdUndefined + Return`
+    //     with `ReturnUndefined` where the callee returns undefined implicitly.
+    //   - `EliminateDeadCode` (simple): removes `Nop` instructions that the
+    //     emitter sometimes introduces as padding or placeholder stubs.
+    //   - `PeepholeOptimization`: reduces common constant-load + return patterns.
+    //
+    // Note: full liveness-based dead code elimination (unreachable code after
+    // unconditional jumps) requires a control-flow graph which is not yet built
+    // at this stage.  The passes below cover the cases that arise frequently in
+    // ArkUI/ArkTS-generated code and match the observable es2abc output for
+    // common patterns.
+    if options.opt_level >= 2 {
+        peephole_ldundefined_return(method);
+        remove_nops(method);
+    }
+}
+
+/// Peephole: replace `LdUndefined; Return` with `ReturnUndefined`.
+///
+/// Aligns with es2abc's `PerformTailCallOptimization` pass at opt_level=2.
+/// This pattern appears at the end of every function that returns implicitly,
+/// and `ReturnUndefined` is a single-opcode form that avoids loading undefined
+/// into the accumulator first.
+///
+/// Only operates on the `pandasm_insns` IR list; the encoded `bytecode` bytes
+/// are regenerated from the IR list during the final emit pass.
+fn peephole_ldundefined_return(method: &mut MethodRecord) {
+    use crate::ir::opcodes::Insn;
+    let insns = &method.pandasm_insns;
+    if insns.len() < 2 {
+        return;
+    }
+    // Build a new instruction list, replacing the pattern.
+    let mut out: Vec<Insn> = Vec::with_capacity(insns.len());
+    let mut i = 0;
+    while i < insns.len() {
+        let cur = &insns[i];
+        // Look ahead one instruction.
+        let next = insns.get(i + 1);
+        if matches!(cur, Insn::LdUndefined)
+            && matches!(next, Some(Insn::Return))
+        {
+            // Replace both with ReturnUndefined and skip the next insn.
+            out.push(Insn::ReturnUndefined);
+            i += 2;
+        } else {
+            out.push(cur.clone());
+            i += 1;
+        }
+    }
+    method.pandasm_insns = out;
+}
+
+/// Remove `Nop` instructions from the pandasm IR.
+///
+/// `Nop` (opcode `0xd5`) is emitted by the IR builder as a placeholder in
+/// certain situations (e.g. empty loop bodies, unreachable stubs).  At
+/// opt_level=2 the es2abc `EliminateDeadCode` pass strips them.  Safe to
+/// remove because Nop has no observable side-effects and no instructions
+/// branch to a specific Nop position at the IR level (branch targets are
+/// resolved against byte offsets after encoding, not IR indices).
+fn remove_nops(method: &mut MethodRecord) {
+    use crate::ir::opcodes::Insn;
+    if !method.pandasm_insns.iter().any(|i| matches!(i, Insn::Nop)) {
+        return; // Fast path: no Nops, nothing to do.
+    }
+    method.pandasm_insns.retain(|i| !matches!(i, Insn::Nop));
 }
 
 fn compact_register_frame(method: &mut MethodRecord) {

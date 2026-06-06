@@ -2003,12 +2003,36 @@ fn collect_native_libs(
 ) -> Vec<PathBuf> {
     let mut libs = Vec::new();
     let mut seen = FxHashSet::default();
-    for root in [
-        module.src_path.join("src/main/libs"),
-        module.src_path.join("libs"),
-    ] {
-        collect_native_libs_from_root(&root, &mut seen, &mut libs, abi_filters);
+
+    // Section 3.1/3.8: use NativeBuildConfig to scan all standard locations
+    // including CMake build output and NDK output directories.
+    // NativeBuildConfig covers: src/main/libs/, libs/,
+    // build/default/intermediates/cmake/default/obj/, and
+    // build/default/intermediates/ndk/default/.
+    let native_cfg = super::native_build::NativeBuildConfig {
+        module_root: module.src_path.clone(),
+        abi_filters: abi_filters.to_vec(),
+        enable_cmake_build: false, // Import-only mode by default; use --enable-cmake-build to build.
+    };
+    // Detect and warn about CMakeLists.txt without cmake build enabled.
+    if super::native_build::module_has_native_code(&module.src_path) {
+        tracing::debug!(
+            module = %module.src_path.display(),
+            "native: module has native code; scanning for pre-built .so files"
+        );
     }
+    let native_out = native_cfg.run();
+    for warning in &native_out.warnings {
+        tracing::warn!("{}", warning);
+    }
+    for (_, so_path) in native_out.libs_by_abi {
+        let canonical = std::fs::canonicalize(&so_path).unwrap_or(so_path.clone());
+        if seen.insert(canonical.clone()) {
+            libs.push(so_path);
+        }
+    }
+
+    // Also collect from declared dependency oh_modules/ roots (existing logic).
     for dep_root in collect_declared_dependency_roots_for_native(&module.src_path, project_root) {
         collect_native_libs_from_root(&dep_root, &mut seen, &mut libs, abi_filters);
     }

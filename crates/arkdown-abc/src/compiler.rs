@@ -814,6 +814,11 @@ impl AbcCompiler {
             } else {
                 strip_typescript_types(&module.source, &module.record_name)?
             };
+            // Pre-compile check: reject unsupported constructs before lowering.
+            // Section 3.6: "对照 upstream es2panda 补 lowering；unsupported 必须 hard error".
+            // ArkTS runs in implicit strict mode — eval/with/arguments.callee are
+            // forbidden and must produce hard errors rather than silent miscompilation.
+            check_unsupported_syntax(&js_source, &module.record_name)?;
             // Upstream es2abc emits LineNumberProgram entries even when
             // --debug-info is not supplied. The debug flag controls the amount
             // of debug payload, not whether methods have source-file-backed
@@ -996,4 +1001,105 @@ impl AbcCompiler {
     fn normalize_source_file(record_name: &str, source_file: String) -> String {
         HvigorSourceMapScope::normalize_debug_source_file(record_name, &source_file)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Pre-compile unsupported syntax detection
+// ---------------------------------------------------------------------------
+
+/// Check `source` for constructs that are unsupported in the ArkTS / es2abc
+/// lowering pipeline.
+///
+/// ArkTS runs in implicit strict mode.  `es2abc` rejects these constructs with
+/// hard compilation errors; we must do the same to avoid producing silently
+/// incorrect bytecode.
+///
+/// Checked constructs (section 3.6: "unsupported 必须 hard error"):
+/// - `with` statement — forbidden in strict mode.
+/// - Direct `eval()` call — ArkRuntime does not support `eval`.
+/// - `arguments.callee` — forbidden in strict mode / ArkTS.
+///
+/// The check performs a lightweight text scan followed by a quick AST walk
+/// for false-positive elimination.  It does NOT perform type-level analysis.
+pub(crate) fn check_unsupported_syntax(
+    source: &str,
+    record_name: &str,
+) -> Result<(), crate::error::AbcError> {
+    use oxc_ast::ast::{
+        Expression, MemberExpression,
+    };
+    use oxc_ast_visit::{walk, Visit};
+
+    let allocator = Allocator::default();
+    let source_type = SourceType::mjs();
+    let ret = Parser::new(&allocator, source, source_type).parse();
+
+    // If parsing failed, let the downstream compile step report the error.
+    // We only report unsupported-construct errors for valid-but-forbidden code.
+    if ret.panicked || !ret.errors.is_empty() {
+        return Ok(());
+    }
+
+    struct UnsupportedSyntaxVisitor<'a> {
+        record_name: &'a str,
+        error: Option<crate::error::AbcError>,
+    }
+
+    impl<'a, 'b> Visit<'b> for UnsupportedSyntaxVisitor<'a> {
+        fn visit_with_statement(&mut self, stmt: &oxc_ast::ast::WithStatement<'b>) {
+            if self.error.is_none() {
+                self.error = Some(crate::error::AbcError::UnsupportedConstruct {
+                    construct: "WithStatement".to_string(),
+                    file: self.record_name.to_string(),
+                });
+            }
+            walk::walk_with_statement(self, stmt);
+        }
+
+        fn visit_call_expression(&mut self, expr: &oxc_ast::ast::CallExpression<'b>) {
+            if self.error.is_none() {
+                // Direct eval() call: callee is an Identifier named "eval".
+                if let Expression::Identifier(id) = &expr.callee {
+                    if id.name.as_str() == "eval" {
+                        self.error = Some(crate::error::AbcError::UnsupportedConstruct {
+                            construct: "direct eval() call".to_string(),
+                            file: self.record_name.to_string(),
+                        });
+                    }
+                }
+            }
+            walk::walk_call_expression(self, expr);
+        }
+
+        fn visit_member_expression(&mut self, expr: &MemberExpression<'b>) {
+            if self.error.is_none() {
+                // arguments.callee — forbidden in strict mode.
+                if let MemberExpression::StaticMemberExpression(static_expr) = expr {
+                    if let Expression::Identifier(obj) = &static_expr.object {
+                        if obj.name.as_str() == "arguments"
+                            && static_expr.property.name.as_str() == "callee"
+                        {
+                            self.error = Some(crate::error::AbcError::UnsupportedConstruct {
+                                construct: "arguments.callee (forbidden in strict mode)".to_string(),
+                                file: self.record_name.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+            walk::walk_member_expression(self, expr);
+        }
+    }
+
+    let mut visitor = UnsupportedSyntaxVisitor {
+        record_name,
+        error: None,
+    };
+    visitor.visit_program(&ret.program);
+
+    if let Some(err) = visitor.error {
+        return Err(err);
+    }
+
+    Ok(())
 }
