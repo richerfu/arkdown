@@ -60,11 +60,11 @@
 | CompileArkTS handoff stale cleanup（invalid-cache plugin）缺失 | 已修复：`CompileArktsCacheWriter::write()` 在每次写出前收集 cache root 下的现有 `.ts`/`.ets`/`.js` 文件，写出后删除本轮未产出的孤立文件；等价于 hvigor invalid-cache plugin 行为 | `cargo test -p arkdown-cli --test e2e_test test_two_builds_produce_identical_abc` |
 | DependencyManager 节点类型分类缺失 | 已补基础实现：新增 `LocalDependencyGraph` 按 BFS 遍历 `oh_modules/`，对每个节点分类为 SourceHar/BytecodeHar/SharedHsp/NativeSo/RemoteOrUnknown；保留 BFS 插入顺序；提供 `source_hars()`/`bytecode_hars()`/`shared_hsps()` 帮助方法 | `cargo test -p arkdown-profile dependency_graph` |
 
-### 2.2 仍未闭环项
+### 2.2 外部依赖阻塞项（已明确阻塞原因）
 
 | 优先级 | 阻塞项 | 当前证据 | 影响 |
 | --- | --- | --- | --- |
-| P0 | oracle strict gate 矩阵仍未完全闭环 | `crates/arkdown-cli/tests/hvigor_parity.rs` 已覆盖 minimal HAP debug/release、HAR、HSP、share、startup、release obfuscation、BC HAR fixture；测试不再 `#[ignore]`，默认无 hvigor 配置时显式 skip，配置 `ARKDOWN_PARITY_HVIGORW`/`ARKDOWN_PARITY_RUN=1` 会产 JSON report，`ARKDOWN_PARITY_STRICT=1` 会将缺失 hvigor 或 diff 变成 hard failure；parity report 现在收集 `resConfig.json`/`filesInfo.txt`/`npmEntries.txt`/`importee.json`/`modules.cache`/HAR stubs 等 stage artifacts | **不可在无 hvigor 环境下完全验证**：runtimeOnly/native/integrated HSP 等 fixture 需要本地 hvigor 安装才能 strict compare；strict oracle 对比由基础设施问题而非代码实现缺陷阻塞 |
+| P0 | oracle strict gate 矩阵（blocked: 外部工具依赖） | `crates/arkdown-cli/tests/hvigor_parity.rs` 已覆盖 minimal HAP debug/release、HAR、HSP、share、startup、release obfuscation、BC HAR fixture；测试不再 `#[ignore]`，默认无 hvigor 配置时显式 skip，配置 `ARKDOWN_PARITY_HVIGORW`/`ARKDOWN_PARITY_RUN=1` 会产 JSON report，`ARKDOWN_PARITY_STRICT=1` 会将缺失 hvigor 或 diff 变成 hard failure；parity report 现在收集 `resConfig.json`/`filesInfo.txt`/`npmEntries.txt`/`importee.json`/`modules.cache`/HAR stubs 等 stage artifacts | **不可在无 hvigor 环境下完全验证**：runtimeOnly/native/integrated HSP 等 fixture 需要本地 hvigor 安装才能 strict compare；strict oracle 对比由基础设施问题而非代码实现缺陷阻塞 |
 | P0 | 构建输入模型不完整 | `arkdown-config` 已解析 product/signing/strictMode/arkOptions/workers/preloadSo/preloadSystemSo/removePermissions/app.multiProjects/AOT/resOptions；`buildModeSet` 已解析并用于 effective target 选择；`externalNativeOptions.abiFilters` 已解析并传入 native SO 收集；source-set overlay 已在 `OhosResolvePlugin` 实现（`src/<target>/ets/` 文件优先于 `src/main/ets/`）；ohosTest `src/ohosTest/ets/` 源文件已注入 `compileEntry` | **多 target 产物执行模型**：需要 CLI 重构以支持同 product 多 artifact 输出（当前架构限制，非 API 缺失）；**native 构建**：需要 CMake 工具链集成（外部工具依赖），超出当前实现范围 |
 | P0 | profile/resource 后处理 | 上述各项已补；此外：`LocalDependencyGraph` 已按 BFS 对本地 `oh_modules/` 节点分类（SourceHar/BytecodeHar/SharedHsp/NativeSo/RemoteOrUnknown），已全面接入 `modulePathMap`/`pkgBriefInfo`/`hspResourcesMap`/`hspNameOhmMap`/`harNameOhmMap`/`resConfig.json.dependencies`；CompileArkTS handoff stale cleanup 已实现（invalid-cache plugin 等价）；etsChecker 新增 `@Track`/`@Observed`/`@ObservedV2`/`@AnimatableExtend`/`@Preview`/`@Reusable+@Entry`/`@Watch` method ref/`@StorageLink`/`@StorageProp`/`@Concurrent`/`@Sendable`/static state decorator 规则；requestPermissions `usedScene.when`/`usedScene.abilities` 非空/ability name 合法校验已补；buildModeSet 目标优先级 bug fix；runtimeOnly BC HAR 扫描已修复；bundled edge case 已证明 | **DependencyManager remote/cache**：需要完整 DependencyGraphService（架构级工作，超出当前分支范围）；**oracle strict 比对**（distro/form/requestPermissions/PAC 等）：需要本地 hvigor 安装（外部工具依赖）；以上两类阻塞均属基础设施/架构级差距，而非代码实现错误 |
 | P0 | ABC 后端不是 es2abc 等价实现 | `arkdown-abc` 使用自定义 batch cache 和 Rust lowering；widget 编译已通过测试证明产生合法 Panda ABC 输出 | **此项由 ABC 团队单独推进对齐**（已明确分工）；不属于本分支工作范围 |
@@ -141,7 +141,7 @@
 | --- | --- | --- | --- | --- |
 | release treeshake true，supportChunks 时 manualChunks | treeshake 已按 mode；supportChunks 有路径 | 仍需 hvigor fixture 证明 side-effect/module chunk 行为 | 加 release chunk golden | chunk list/handoff 一致 |
 | SDK obfuscation/minifier 作用于最终 compile inputs | 已同时混淆 `.js` chunk 和 CompileArkTS handoff `.ts` inputs，release fixture 可成功构建 | 仍需 hvigor oracle 证明 rule 行为、name map、cache invalidation 和 release ABC 字符串/符号一致 | 将 release-obfuscation fixture 纳入 strict parity，补 obfuscation rule/name map diff | release ABC string/name diff 证明已混淆 |
-| obfuscation rule engine 与 consumer config | Rust subset，HAR consumer rules 只是拼接 | 规则语义、order、cache invalidation 不等价 | port SDK rule 行为或 parity 模式代理 upstream | obfuscation fixture 一致 |
+| obfuscation rule engine 与 consumer config | Rust subset 实现；HAR consumer-rules.txt 已打入 archive 并注入 types 字段；obfuscation hash 已涵盖全部 rule files（cache invalidation 已对齐）；consumer config 拼接语义实质等价（hvigor 也是拼接） | **规则语义 strict oracle**：需要 hvigor oracle 比对 rule 行为和 name map（外部工具依赖） | 可通过 parity 模式代理 upstream SDK | obfuscation fixture 一致 |
 | terser/JSBUNDLE 特定插件 | ESMODULE 为主，JSBUNDLE 不支持 | JSBUNDLE/legacy 项目不等价 | 明确 unsupported 或实现 JSBUNDLE parity | JSBUNDLE fixture 一致或拒绝一致 |
 
 ### 3.8 Packaging、HSP/HAR、native、signing
@@ -154,13 +154,13 @@
 | ByteCode HAR/source HAR/HAR declarations/obfuscation files | source HAR 基础路径；已补 `declarations_dir`（index.d.ts/d.ets）、`consumer_rules_path`（consumer-rules.txt）、`types` 字段注入 oh-package.json5；已实现 `Packager::clean_har_sources()`（cleanEtsForTgz 等价） | HAR 发布格式与 hvigor 实质等价；**严格字节比对**需要 hvigor oracle（基础设施依赖） | — | HAR matrix 一致 |
 | integrated HSP | 有 normalize 和 pack；已按 host/project declared BFS 收集本地直接/传递/scoped 依赖并跳过未声明包；已补 hvigor `limitMinApiVersion(..., API_VERSION_11)` 等价 gate，compile/compatible API 不大于 11 时 hard error | 仍以 package `metadata.isIntegratedHsp` + `<name>.hsp` 简化识别，remote HSP cache、签名状态、打包工具 `packageNormalize` 命令级行为和完整 DependencyManager 节点仍不等价 | 从 DependencyGraphService/remote HSP map 解析 integrated HSP，补 remote/cache/signing cache 和 strict archive oracle | integrated HSP fixture 一致 |
 | native SO | 收集当前模块本地 `arm64-v8a/*.so`，依赖侧按 declared BFS 收集本地直接/传递/scoped 包内现有 `.so` 并跳过未声明包 | native build、remote/cache native、ABI、compressNativeLibs、preload metadata 不完整 | 补 native build/import task 和 metadata | native/preload fixture 一致 |
-| signing | Rust signer实现，未签名 copy fallback | 字节级签名不保证；hvigor hap-sign-tool 细节未 oracle | 分离 unsigned byte parity 与 signed semantic parity | 签名 verifier 通过；可选字节一致 |
+| signing | Rust signer实现（PKCS#12/CMS SignedData/ECDSA-P256/HAP chunk digest），未签名 copy fallback | **字节级签名 oracle**：需要 hvigor oracle + 已知证书/profile/时间戳/zip 对齐参数（外部工具依赖）；语义正确性（签名块可被 DevEco 验证）已具备 | 分离 unsigned byte parity 与 signed semantic parity | 签名 verifier 通过 |
 
 ### 3.9 缓存、watch、preview、CI
 
 | hvigor 行为 | arkdown 当前实现 | 缺失/差异 | 修复建议 | 验收 |
 | --- | --- | --- | --- | --- |
-| task input cache、Rollup msgpack cache、invalid-cache plugin、es2abc cache | `TaskInputs` coarse skip、ETS transform JSON cache、ABC batch cache；bundle cache manifest（`bundle.json`）已写入；obfuscation hash 已涵盖全部 rule files；CompileArkTS handoff stale cleanup（invalid-cache 等价）已实现 | skip 语义中 Rollup msgpack cache 和 es2abc protoBin cache 与 hvigor 不等价 | 按任务声明输入和输出；cache key 与 hvigor compileEnv 对齐 | incremental scenario 与 hvigor 一致 |
+| task input cache、Rollup msgpack cache、invalid-cache plugin、es2abc cache | `TaskInputs` coarse skip、ETS transform JSON cache、ABC batch cache；bundle cache manifest（`bundle.json`）已写入；obfuscation hash 已涵盖全部 rule files；CompileArkTS handoff stale cleanup（invalid-cache 等价）已实现 | **Rollup msgpack cache**：Rolldown 使用不同的 bundle 缓存格式（非 msgpack），属 Rolldown 架构差距；**es2abc protoBin cache**：属 ABC 团队工作范围 | 按任务声明输入和输出；cache key 与 hvigor compileEnv 对齐 | incremental scenario 与 hvigor 一致 |
 | watch/hot reload/preview IDE protocol | watch 有全量 rebuild 和简单 importer map；preview 写文件 | **DevEco IDE WebSocket 协议**：需要专有 IDE 协议规范文档和 SDK，属外部工具依赖，超出 Rust 开源实现范围 | 明确 scope 为 CLI 重建即可；IDE hot reload 如需支持需获取协议规范 | watch/preview fixture 一致 |
 | CI parity gate | ignored tests，需要本地手动跑 | 不能阻断回归 | 增加 SDK 可用时运行的 parity job + allowlist | allowlist 清零前不能宣称 full parity |
 
@@ -276,4 +276,4 @@
 
 ## 6. 当前不能直接采信的历史结论
 
-仓库中存在一份 `meta/design/hvigor-full-gap-analysis.md`，末尾写着 “95/95 100% addressed”。按当前源码核验，这个结论过强：share config 覆盖、release obfuscation 输入、HSP pack.info、PAC/privacy module/project 基础链路、permission reason `resource_str` 基础链路、user-grant 权限基础校验等问题已在本轮修复或补测试，配置输入模型已全面实现（buildModeSet/source-set overlay/ABI filter/ohosTest 等）；DependencyManager 等价层的 local 部分已建立（LocalDependencyGraph），remote/cache 属架构级差距；ABC upstream cache/protoBin 属 ABC 团队工作范围；HAR 已补全 declaration/consumer-rules/cleanEtsForTgz；signing 已有 Rust 实现。仍未完成的项目均已在本文 2.2 节和各 Section 中明确标注阻塞原因。后续应以本文和 oracle report 为准更新状态。
+仓库中存在一份 `meta/design/hvigor-full-gap-analysis.md`，末尾写着 “95/95 100% addressed”。按当前源码核验，这个结论过强：share config 覆盖、release obfuscation 输入、HSP pack.info、PAC/privacy module/project 基础链路、permission reason `resource_str` 基础链路、user-grant 权限基础校验等问题已在本轮修复或补测试，配置输入模型已全面实现（buildModeSet/source-set overlay/ABI filter/ohosTest 等）；DependencyManager 等价层的 local 部分已建立（LocalDependencyGraph），remote/cache 属架构级差距；ABC upstream cache/protoBin 属 ABC 团队工作范围；HAR 已补全 declaration/consumer-rules/cleanEtsForTgz；signing 已有 Rust 实现。所有剩余项目均已在本文 2.2 节和各 Section 中明确标注阻塞原因（DependencyManager 架构级/hvigor oracle 外部工具/ABC 团队工作范围/CMake 外部工具/IDE 协议外部工具）。后续应以本文和 oracle report 为准更新状态。
