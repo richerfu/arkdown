@@ -106,9 +106,9 @@ pub fn validate_request_permissions(
         if let Some(all_permissions) = &all_permissions {
             if !all_permissions.contains(name) {
                 return Err(ArkdownError::Bundler(format!(
-                    "The {name} permission under requestPermissions must be a value that is \
-                     predefined within the SDK or a custom one that you have included under \
-                     definePermissions.\nat {profile_path}"
+                    "PERMISSION_VERIFY_ERROR: The '{name}' permission in requestPermissions \
+                     must be predefined in the SDK or declared under definePermissions.\
+                     \nat {profile_path}"
                 )));
             }
         }
@@ -116,14 +116,14 @@ pub fn validate_request_permissions(
         if user_grant_permissions.contains(name) {
             if is_hap && (!has_field(permission, "reason") || !has_field(permission, "usedScene")) {
                 return Err(ArkdownError::Bundler(format!(
-                    "The reason and usedScene attributes are mandatory for user_grant \
-                     permissions. \n at {profile_path}"
+                    "PERMISSION_REASON_AND_USEDSCENE_REQUIRED: The 'reason' and 'usedScene' \
+                     attributes are mandatory for user_grant permissions.\nat {profile_path}"
                 )));
             }
             if !is_hap && !has_field(permission, "reason") {
                 return Err(ArkdownError::Bundler(format!(
-                    "The reason attribute are mandatory for user_grant permissions. \n at \
-                     {profile_path}"
+                    "PERMISSION_REASON_REQUIRED: The 'reason' attribute is mandatory for \
+                     user_grant permissions.\nat {profile_path}"
                 )));
             }
             // Validate usedScene fields when present.
@@ -173,8 +173,8 @@ pub fn validate_request_permissions(
     let duplicated = duplicated_permission_names(input.request_permissions);
     if !duplicated.is_empty() {
         return Err(ArkdownError::Bundler(format!(
-            "Duplicate permission names detected under \"requestPermissions\": \"{}\". At file: \
-             {profile_path}",
+            "PERMISSION_DUPLICATE: Duplicate permission names detected in requestPermissions: \
+             \"{}\". At {profile_path}",
             duplicated.join("\",\"")
         )));
     }
@@ -369,7 +369,7 @@ mod tests {
         })
         .unwrap_err();
 
-        assert!(err.to_string().contains("reason and usedScene"));
+        assert!(err.to_string().contains("PERMISSION_REASON_AND_USEDSCENE_REQUIRED"));
     }
 
     #[test]
@@ -385,7 +385,7 @@ mod tests {
             ability_names: None,
         })
         .unwrap_err();
-        assert!(err.to_string().contains("reason attribute"));
+        assert!(err.to_string().contains("PERMISSION_REASON_REQUIRED"));
 
         validate_request_permissions(RequestPermissionValidationInput {
             module_type: "shared",
@@ -418,7 +418,7 @@ mod tests {
             ability_names: None,
         })
         .unwrap_err();
-        assert!(custom_err.to_string().contains("reason and usedScene"));
+        assert!(custom_err.to_string().contains("PERMISSION_REASON_AND_USEDSCENE_REQUIRED"));
 
         validate_request_permissions(RequestPermissionValidationInput {
             module_type: "entry",
@@ -453,7 +453,7 @@ mod tests {
             ability_names: None,
         })
         .unwrap_err();
-        assert!(err.to_string().contains("predefined within the SDK"));
+        assert!(err.to_string().contains("PERMISSION_VERIFY_ERROR"));
 
         validate_request_permissions(RequestPermissionValidationInput {
             module_type: "entry",
@@ -507,7 +507,7 @@ mod tests {
             ability_names: None,
         })
         .unwrap_err();
-        assert!(err.to_string().contains("reason and usedScene"));
+        assert!(err.to_string().contains("PERMISSION_REASON_AND_USEDSCENE_REQUIRED"));
     }
 
     #[test]
@@ -533,7 +533,7 @@ mod tests {
         })
         .unwrap_err();
 
-        assert!(err.to_string().contains("Duplicate permission names"));
+        assert!(err.to_string().contains("PERMISSION_DUPLICATE"));
     }
 
     #[test]

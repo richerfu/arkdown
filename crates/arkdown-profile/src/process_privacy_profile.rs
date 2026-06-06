@@ -435,8 +435,15 @@ fn json_schema_matches(value: &serde_json::Value, schema: &serde_json::Value) ->
     true
 }
 
+/// Generate a PAC schema validation error matching hvigor's pacFileValidate() error format.
+///
+/// hvigor uses `PRIVACY_PROFILE_VALIDATION_FAILED` as the primary error code
+/// for pac.json5 schema validation failures (from ValidateUtil.validatePacFileSchema()).
 fn pac_schema_error(path: &Path, message: &str) -> ArkdownError {
-    ArkdownError::Bundler(format!("PAC_SCHEMA_INVALID: {}: {message}", path.display()))
+    ArkdownError::Bundler(format!(
+        "PRIVACY_PROFILE_VALIDATION_FAILED: {}: {message}",
+        path.display()
+    ))
 }
 
 fn read_json5_value(path: &Path) -> Result<Option<serde_json::Value>, ArkdownError> {
@@ -864,7 +871,7 @@ mod tests {
         })
         .unwrap_err();
 
-        assert!(error.to_string().contains("PAC_SCHEMA_INVALID"));
+        assert!(error.to_string().contains("PRIVACY_PROFILE_VALIDATION_FAILED"));
     }
 
     #[test]
@@ -889,7 +896,7 @@ mod tests {
         })
         .unwrap_err();
 
-        assert!(error.to_string().contains("PAC_SCHEMA_INVALID"));
+        assert!(error.to_string().contains("PRIVACY_PROFILE_VALIDATION_FAILED"));
     }
 
     #[test]
