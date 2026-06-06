@@ -594,6 +594,64 @@ fn check_struct_component(
         }
     }
 
+    // Validate @Watch decorator arguments reference valid methods in this struct.
+    // Collect method names first, then check @Watch("name") properties.
+    // Matches hvigor etsChecker's validateWatchDecoratorReference() rule.
+    if has_component {
+        let method_names: FxHashSet<&str> = statement
+            .body
+            .body
+            .iter()
+            .filter_map(|elem| {
+                if let StructElement::MethodDefinition(method) = elem {
+                    if let PropertyKey::StaticIdentifier(id) = &method.key {
+                        return Some(id.name.as_str());
+                    }
+                }
+                None
+            })
+            .collect();
+
+        for element in &statement.body.body {
+            let StructElement::PropertyDefinition(prop) = element else {
+                continue;
+            };
+            for decorator in &prop.decorators {
+                if decorator_name(decorator) != "Watch" {
+                    continue;
+                }
+                // Extract the string argument: @Watch("methodName")
+                let method_ref = if let Expression::CallExpression(call) = &decorator.expression {
+                    call.arguments.first().and_then(|arg| {
+                        if let oxc_ast::ast::Argument::StringLiteral(s) = arg {
+                            Some(s.value.as_str())
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                };
+                if let Some(method_name) = method_ref {
+                    if !method_name.is_empty() && !method_names.contains(method_name) {
+                        let field_name = match &prop.key {
+                            PropertyKey::StaticIdentifier(id) => id.name.as_str().to_string(),
+                            _ => "<unknown>".to_string(),
+                        };
+                        errors.push(EtsTransformError::Diagnostic {
+                            file: file.to_string(),
+                            message: format!(
+                                "@Watch on field '{}' references method '{}' which does not exist in struct '{}'",
+                                field_name, method_name, component_name
+                            ),
+                            severity: DiagnosticSeverity::Error,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     for element in &statement.body.body {
         let StructElement::MethodDefinition(method) = element else {
             continue;
