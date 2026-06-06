@@ -404,6 +404,7 @@ fn check_struct_component(
     let has_reusable = decorator_names.iter().any(|name| *name == "Reusable");
     let has_reusable_v2 = decorator_names.iter().any(|name| *name == "ReusableV2");
     let has_entry = decorator_names.iter().any(|name| *name == "Entry");
+    let has_preview = decorator_names.iter().any(|name| *name == "Preview");
     let has_component = has_component_v1 || has_component_v2 || has_custom_dialog;
 
     if !has_component {
@@ -466,6 +467,20 @@ fn check_struct_component(
             message: format!(
                 "The struct '{}' cannot be decorated with both '@Entry' and '{}'",
                 component_name, reusable_dec
+            ),
+            severity: DiagnosticSeverity::Error,
+        });
+    }
+
+    // Rule: @Preview can only be used on @Component structs.
+    // Matches hvigor etsChecker's validatePreviewDecorator() rule.
+    if has_preview && !has_component {
+        errors.push(EtsTransformError::Diagnostic {
+            file: file.to_string(),
+            message: format!(
+                "'@Preview' can only be applied to '@Component' structs; \
+                 struct '{}' is missing '@Component'",
+                component_name
             ),
             severity: DiagnosticSeverity::Error,
         });
