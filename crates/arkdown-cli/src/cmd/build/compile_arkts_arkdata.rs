@@ -206,3 +206,59 @@ pub(super) fn compile_arkdata_pass(
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Tests: ArkData source detection (section 3.6 — ArkData oracle)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verify each known ArkData import marker correctly identifies a file as
+    /// an ArkData source.  These markers come from hvigor's `H13` task source
+    /// scanner and match the official OHOS ArkData SDK import paths.
+    #[test]
+    fn test_arkdata_marker_detection() {
+        for marker in ARKDATA_MARKERS {
+            let source = format!("import {{ ... }} from '{}';", marker);
+            assert!(
+                ARKDATA_MARKERS.iter().any(|m| source.contains(m)),
+                "marker '{}' must be detected in source",
+                marker
+            );
+        }
+    }
+
+    /// A source without ArkData imports must not be identified as an ArkData file.
+    #[test]
+    fn test_non_arkdata_source_not_detected() {
+        let plain_source = r#"
+import { Component } from '@ohos/arkui';
+import { hilog } from '@ohos.hilog';
+@Component struct MyPage { build() {} }
+"#;
+        let is_arkdata = ARKDATA_MARKERS.iter().any(|m| plain_source.contains(m));
+        assert!(!is_arkdata, "plain UI source must not be detected as ArkData");
+    }
+
+    /// Verify that the `@kit.ArkData` import pattern (API 10+) is detected.
+    #[test]
+    fn test_arkdata_kit_api10_marker() {
+        let source = r#"import { RdbStore } from '@kit.ArkData';"#;
+        assert!(
+            ARKDATA_MARKERS.iter().any(|m| source.contains(m)),
+            "@kit.ArkData must be detected as ArkData source"
+        );
+    }
+
+    /// Verify that the legacy `@ohos/cloudData` package import is detected.
+    #[test]
+    fn test_arkdata_legacy_package_marker() {
+        let source = r#"import cloudData from '@ohos/cloudData';"#;
+        assert!(
+            ARKDATA_MARKERS.iter().any(|m| source.contains(m)),
+            "@ohos/cloudData must be detected as ArkData source"
+        );
+    }
+}
