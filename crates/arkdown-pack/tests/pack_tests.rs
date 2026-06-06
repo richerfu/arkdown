@@ -979,3 +979,48 @@ fn test_har_oh_package_json5_has_types_field_when_declarations_present() {
         "name field must be preserved"
     );
 }
+
+/// Verify `clean_har_sources` (hvigor `cleanEtsForTgz`): produces a cleaned HAR
+/// directory where original .ets/.ts sources are replaced by declaration stubs.
+///
+/// Addresses section 3.8: 'cleanEtsForTgz' gap
+#[test]
+fn test_clean_har_sources_removes_ets_adds_declarations() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src_dir = tmp.path().join("src/main/ets");
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::write(src_dir.join("Index.ets"), b"export class Index {}").unwrap();
+    fs::write(src_dir.join("Utils.ts"), b"export function util() {}").unwrap();
+    // A JSON config file should be preserved.
+    let cfg_dir = tmp.path().join("src/main/resources/base/profile");
+    fs::create_dir_all(&cfg_dir).unwrap();
+    fs::write(cfg_dir.join("main_pages.json"), b"{\"src\":[]}").unwrap();
+
+    // Declarations directory with stubs.
+    let decl_dir = tmp.path().join("declarations");
+    fs::create_dir_all(&decl_dir).unwrap();
+    fs::write(decl_dir.join("index.d.ts"), b"export declare class Index {}").unwrap();
+    fs::write(decl_dir.join("index.d.ets"), b"export declare class Index {}").unwrap();
+
+    let output_dir = tmp.path().join("cleaned");
+    let cleaned_ets = Packager::clean_har_sources(
+        &tmp.path().join("src/main"),
+        Some(&decl_dir),
+        &output_dir,
+    )
+    .expect("clean_har_sources must succeed");
+
+    // The cleaned/ets directory should contain declaration stubs.
+    assert!(cleaned_ets.join("index.d.ts").exists(), "index.d.ts must be in cleaned ets");
+    assert!(cleaned_ets.join("index.d.ets").exists(), "index.d.ets must be in cleaned ets");
+
+    // Original .ets/.ts files must NOT be present.
+    assert!(
+        !output_dir.join("ets/Index.ets").exists(),
+        "original .ets source must be removed (cleanEtsForTgz)"
+    );
+    assert!(
+        !output_dir.join("ets/Utils.ts").exists(),
+        "original .ts source must be removed (cleanEtsForTgz)"
+    );
+}

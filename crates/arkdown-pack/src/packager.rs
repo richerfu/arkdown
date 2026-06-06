@@ -602,6 +602,77 @@ impl Packager {
         self.pack_hap(input)
     }
 
+    /// Produce a "cleaned" source HAR for tgz publishing.
+    ///
+    /// Implements hvigor's `cleanEtsForTgz` step: when a source HAR is published
+    /// as a tgz package, the original `.ets` source files are replaced by the
+    /// generated declaration stubs (`index.d.ts`, `index.d.ets`) so that consumers
+    /// get type information without accessing the original source code.
+    ///
+    /// Returns `(cleaned_source_dir, declarations_dir_copy)` where
+    /// `cleaned_source_dir` can be passed to `pack_har` in place of `source_dir`.
+    /// The cleaned directory is written to `output_dir` on disk.
+    pub fn clean_har_sources(
+        source_dir: &std::path::Path,
+        declarations_dir: Option<&std::path::Path>,
+        output_dir: &std::path::Path,
+    ) -> Result<std::path::PathBuf, PackError> {
+        // Create the output directory.
+        fs_err::create_dir_all(output_dir)?;
+
+        let cleaned_ets = output_dir.join("ets");
+        fs_err::create_dir_all(&cleaned_ets)?;
+
+        // Copy declaration stubs (if present) into the cleaned ets directory.
+        if let Some(decl_dir) = declarations_dir {
+            for entry in walkdir::WalkDir::new(decl_dir)
+                .min_depth(1)
+                .max_depth(1)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_file())
+            {
+                let file_name = entry
+                    .path()
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default();
+                if file_name.ends_with(".d.ts") || file_name.ends_with(".d.ets") {
+                    fs_err::copy(entry.path(), cleaned_ets.join(file_name))?;
+                }
+            }
+        }
+
+        // Copy non-ETS source files (resources, config files) preserving structure.
+        // Original .ets/.ts source files are NOT copied (cleanEtsForTgz removes them).
+        if source_dir.is_dir() {
+            let parent = source_dir.parent().unwrap_or(source_dir);
+            for entry in walkdir::WalkDir::new(source_dir)
+                .min_depth(1)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_file())
+            {
+                let path = entry.path();
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                // Skip original source files (they're replaced by declarations).
+                if matches!(ext, "ets" | "ts") && !path.to_string_lossy().ends_with(".d.ts") && !path.to_string_lossy().ends_with(".d.ets") {
+                    continue;
+                }
+                // Copy everything else (JSON, resources, etc.).
+                if let Ok(rel) = path.strip_prefix(parent) {
+                    let dest = output_dir.join(rel);
+                    if let Some(dest_parent) = dest.parent() {
+                        fs_err::create_dir_all(dest_parent)?;
+                    }
+                    fs_err::copy(path, &dest)?;
+                }
+            }
+        }
+
+        Ok(cleaned_ets)
+    }
+
     /// Package a source HAR archive.
     ///
     /// Layout:
