@@ -363,7 +363,7 @@ Every crate gets a single reason to exist:
 | `arkdown-core` | stable domain types, errors, build enums, artifact-neutral structs | old `ArkdownPlugin`, cache lifecycle structs, path string logic | depended on by most crates; must not depend on `arkdown-session` |
 | `arkdown-config` | raw JSON5 parsers and config normalization | project/module discovery loops, repeated SDK probing, downstream path policy | used by `arkdown-session`; no plugin or CLI policy |
 | `arkdown-session` | startup discovery, snapshots, dependency graph, profile store, SDK snapshot, path resolver, fingerprints | nothing legacy | depends on core/config/resolver/utils/profile data types as needed |
-| `arkdown-resolver` | pure OHOS resolution over indexes and specifiers | package graph discovery, hot-path `oh-package.json5` reads | consumes `PackageIndex` from session |
+| `arkdown-resolver` | pure OHOS resolution over indexes and specifiers | package graph discovery, hot-path `oh-package.json5` reads | owns resolver input types; `arkdown-session` builds them |
 | `arkdown-utils` | generic path/hash helpers only | build policy, OHOS package logic, artifact policy that needs module context | low-level dependency only |
 | `arkdown-loader` | delete or quarantine legacy loader tests if rolldown is sole pipeline | `PluginDriver`, old `ArkdownPlugin` orchestration | no production build dependency after migration |
 | `arkdown` | rolldown-backed bundler, chunk output writer, source map writer | entry/path inference from strings, loader JSON path parsing | consumes `ModuleCompileContext` |
@@ -569,6 +569,417 @@ Other crate layout targets:
   when needed. Single-file plugins are acceptable only when they do not own
   filesystem discovery.
 
+### Per-crate target file map
+
+The tables below define the target production file map after the refactor. They
+are intentionally explicit so file moves do not create new "helper" buckets.
+`mod.rs` files should only wire module exports and keep no build policy.
+
+#### `arkdown-core`
+
+| Path | Responsibility |
+| --- | --- |
+| `src/lib.rs` | Public exports for domain-neutral core types. |
+| `src/config.rs` | Build mode, output target, module type, and config value objects that do not read files. |
+| `src/error.rs` | Shared `ArkdownError` and error conversions. |
+| `src/module.rs` | Module identity, source kind, and module metadata structs independent of session lifecycle. |
+| `src/chunk.rs` | Bundler chunk data structures shared with output writers. |
+| `src/graph.rs` | Graph-neutral structs only; no package graph discovery. |
+| `src/manifest.rs` | Artifact-neutral manifest structs shared by profile/package writers. |
+| `src/artifact.rs` | Artifact kind and artifact metadata value objects; no filesystem layout policy. |
+| `src/paths.rs` | Domain-neutral path newtypes and traits; no project-specific path resolver. |
+| `src/source_maps.rs` | Source map options and data structs; path serialization delegated to artifact serializers. |
+| `src/resolution.rs` | Delete or move into `arkdown-resolver`; no core path-to-OHM policy. |
+| `src/plugin.rs` | Delete from production exports after all callers use `rolldown_plugin::Plugin`. |
+
+#### `arkdown-config`
+
+| Path | Responsibility |
+| --- | --- |
+| `src/lib.rs` | Export raw parsers and normalization APIs only. |
+| `src/error.rs` | Config parse and normalization errors. |
+| `src/raw/mod.rs` | Re-export raw JSON5 model modules. |
+| `src/raw/build_profile.rs` | Parse `build-profile.json5` into raw structs. |
+| `src/raw/module_json.rs` | Parse `module.json5` into raw structs. |
+| `src/raw/oh_package.rs` | Parse `oh-package.json5` into raw structs. |
+| `src/raw/app_json.rs` | Parse app-level JSON5 when present. |
+| `src/normalize/mod.rs` | Re-export normalization modules. |
+| `src/normalize/build_profile.rs` | Convert raw build profile fields into normalized config values. |
+| `src/normalize/module.rs` | Normalize module targets, source sets, products, and build options. |
+| `src/sdk_manifest.rs` | Low-level SDK manifest probing and parsing. |
+| `src/sdk.rs` | Delete or reduce to `sdk_manifest.rs`; selected SDK state moves to `SdkSnapshot`. |
+| `src/resolve.rs` | Delete project discovery logic; discovery moves to `ProjectSnapshotBuilder`. |
+
+#### `arkdown-session`
+
+| Path | Responsibility |
+| --- | --- |
+| `src/lib.rs` | Public session, snapshot, plan, and context exports. |
+| `src/builder.rs` | Top-level `BuildSessionBuilder`; owns startup discovery order and diagnostics. |
+| `src/session.rs` | `BuildSession` and `ModuleCompileContext` definitions. |
+| `src/project/mod.rs` | Project snapshot module exports. |
+| `src/project/snapshot.rs` | `ProjectSnapshot` data: root, app profile, modules, products, root package. |
+| `src/project/builder.rs` | Reads project-level files once and builds `ProjectSnapshot`. |
+| `src/module/mod.rs` | Module snapshot module exports. |
+| `src/module/snapshot.rs` | `ModuleSnapshot` data: module JSON, package, roots, profiles, target. |
+| `src/module/builder.rs` | Reads module-level files once and builds `ModuleSnapshot`. |
+| `src/module/target.rs` | Effective target and product/source-set selection. |
+| `src/module/source_set.rs` | Source-set overlay calculation and source root inventory. |
+| `src/package/mod.rs` | Package snapshot module exports. |
+| `src/package/snapshot.rs` | Parsed package metadata and package root identity. |
+| `src/package/index.rs` | Session-built package index and adapters for `arkdown-resolver`. |
+| `src/dependency_graph/mod.rs` | Dependency graph exports. |
+| `src/dependency_graph/builder.rs` | Builds one dependency graph per host module from package snapshots. |
+| `src/dependency_graph/snapshot.rs` | Immutable dependency graph, nodes, aliases, and classifications. |
+| `src/dependency_graph/classifiers.rs` | Bytecode HAR, integrated HSP, native SO, source HAR, and runtime-only classification. |
+| `src/profiles/mod.rs` | Profile store exports. |
+| `src/profiles/store.rs` | Lazily indexed but session-owned profile JSON/JSON5 store. |
+| `src/profiles/index.rs` | Maps module/profile references to absolute input files and fingerprints. |
+| `src/resources/mod.rs` | Resource plan exports. |
+| `src/resources/plan.rs` | Resource roots, app-scope inclusion, source-set overlays, and dependency resources. |
+| `src/sdk/mod.rs` | SDK snapshot exports. |
+| `src/sdk/snapshot.rs` | Selected SDK, tool paths, API version, and component metadata loaded once. |
+| `src/artifacts/mod.rs` | Artifact layout exports. |
+| `src/artifacts/layout.rs` | Per-module output directories and artifact paths. |
+| `src/paths.rs` | Session path resolver for project/module/package-relative paths and artifact serialization. |
+| `src/fingerprint.rs` | `InputFingerprintSet` and file/content hash inventory. |
+| `src/diagnostics.rs` | Startup and planning diagnostics with stable file references. |
+
+#### `arkdown-resolver`
+
+| Path | Responsibility |
+| --- | --- |
+| `src/lib.rs` | Public resolver exports. |
+| `src/error.rs` | Resolver errors and diagnostics. |
+| `src/resolver.rs` | `OhosResolver` implementation over resolver-owned indexes. |
+| `src/specifier.rs` | `ModuleSpecifier` parsing and classification. |
+| `src/package_index.rs` | Resolver input index types built by `arkdown-session`; no file reads. |
+| `src/source_set.rs` | Source-set aware path candidates and extension probing. |
+| `src/ohm_url.rs` | OHM URL builder and parser. |
+| `src/case_check.rs` | Case-sensitive path verification used by resolver when enabled. |
+| `src/oh_modules.rs` | Delete filesystem package root scanning or keep only test fixtures. |
+| `src/sdk.rs` | Delete resolver-owned SDK probing; selected SDK comes from `SdkSnapshot`. |
+
+#### `arkdown-utils`
+
+| Path | Responsibility |
+| --- | --- |
+| `src/lib.rs` | Re-export generic utilities. |
+| `src/path.rs` | Lexical normalization, safe relative path helpers, stable display, component predicates. |
+| `src/hash.rs` | Generic stable hash primitives. |
+
+#### `arkdown-loader`
+
+| Path | Responsibility |
+| --- | --- |
+| `src/lib.rs` | Temporary compatibility exports only during migration. |
+| `src/loader.rs` | Delete from production path once rolldown is the only loader. |
+| `src/plugin_driver.rs` | Delete with old `ArkdownPlugin` API. |
+| `src/parse.rs` | Move useful parser utilities to `arkdown` or the owning plugin. |
+| `src/transform.rs` | Delete or move production transforms to plugin crates. |
+
+#### `arkdown`
+
+| Path | Responsibility |
+| --- | --- |
+| `src/lib.rs` | Public bundler facade. |
+| `src/bundler.rs` | Rolldown-backed bundler using `ModuleCompileContext`. |
+| `src/bundle_plan.rs` | Entry, plugin, output, source map, and loader plans derived from session context. |
+| `src/output/mod.rs` | Output writer exports. |
+| `src/output/chunks.rs` | Chunk file naming and chunk metadata. |
+| `src/output/source_maps.rs` | Source map artifact writer using `ArtifactPathSerializer`. |
+| `src/output/writer.rs` | Writes JS chunks and metadata to `ArtifactLayout`. |
+| `src/compile_entry.rs` | Delete or fold into `bundle_plan.rs`; no detached entry string helpers. |
+| `src/output.rs` | Split into `output/*`. |
+
+#### `arkdown-profile`
+
+| Path | Responsibility |
+| --- | --- |
+| `src/lib.rs` | Public profile processing facade. |
+| `src/processor.rs` | `ProfileProcessor` orchestration over typed processors. |
+| `src/loader_json/mod.rs` | Loader JSON builder exports. |
+| `src/loader_json/builder.rs` | Assembles final loader JSON from snapshots and typed sub-builders. |
+| `src/loader_json/entries.rs` | Entry ability, page, worker, form, and extension entry collection. |
+| `src/loader_json/dependency_maps.rs` | `modulePathMap`, HAR/HSP maps, and dependency map generation from graph. |
+| `src/loader_json/bytecode_har.rs` | Loader JSON bytecode HAR fields from dependency classifications. |
+| `src/loader_json/importees.rs` | Importee JSON data consumed by CompileArkTS handoff. |
+| `src/loader_json/runtime_only.rs` | Runtime-only dependency view over `DependencyGraphSnapshot`. |
+| `src/module_json/mod.rs` | Module JSON writer exports. |
+| `src/module_json/writer.rs` | Writes final `module.json` from module snapshot and profile outputs. |
+| `src/module_json/app_fields.rs` | App-level fields copied from `ProjectSnapshot`. |
+| `src/profiles/mod.rs` | Profile processor exports. |
+| `src/profiles/share.rs` | Cross-app share profile merge over dependency graph. |
+| `src/profiles/startup.rs` | Startup profile merge and preload handling over dependency graph. |
+| `src/profiles/router.rs` | Router map profile processing. |
+| `src/profiles/forms.rs` | Form profile processing and widget/extension profile lookup. |
+| `src/profiles/shortcut.rs` | Shortcut profile processing. |
+| `src/profiles/privacy.rs` | Privacy profile processing and package metadata merge. |
+| `src/profiles/permission_reason.rs` | Permission reason resource filtering and merging. |
+| `src/profiles/distro_filter.rs` | Distro filter profile processing. |
+| `src/permissions/mod.rs` | Permission validation exports. |
+| `src/permissions/validate.rs` | SDK permission validation using session SDK metadata. |
+| `src/dependency_graph.rs` | Delete after `DependencyGraphSnapshot` is production source. |
+| `src/process_*.rs` | Delete after processors move under `profiles/*`. |
+| `src/loader_json.rs` | Split into `loader_json/*`. |
+| `src/module_json_writer.rs` | Move to `module_json/writer.rs`. |
+
+#### `arkdown-plugin-duplicate-check`
+
+| Path | Responsibility |
+| --- | --- |
+| `src/lib.rs` | Public plugin export. |
+| `src/plugin.rs` | Duplicate filename plugin using context-normalized module IDs. |
+
+#### `arkdown-plugin-ets-transform`
+
+| Path | Responsibility |
+| --- | --- |
+| `src/lib.rs` | Public transform plugin facade and constructor. |
+| `src/plugin.rs` | Rolldown plugin implementation using `ModuleCompileContext` and `SdkSnapshot`. |
+| `src/error.rs` | Transform errors. |
+| `src/hvigor_format.rs` | Hvigor-compatible formatting/parsing shims. |
+| `src/kit_map.rs` | ArkUI kit import mapping. |
+| `src/module_emit.rs` | Structured module emit helpers. |
+| `src/module_rewrite.rs` | Module specifier rewrite pass. |
+| `src/resource_transform.rs` | Resource reference transform. |
+| `src/source_edit.rs` | Source patch primitives. |
+| `src/source_map.rs` | Transform source map builder with artifact path serialization. |
+| `src/sys_resource.rs` | System resource reference handling. |
+| `src/typescript_emit.rs` | TypeScript-specific emit helpers. |
+| `src/api_transform/mod.rs` | API transform exports. |
+| `src/api_transform/version_table.rs` | API version compatibility table. |
+| `src/checker/mod.rs` | Transform checker exports. |
+| `src/checker/rules.rs` | Static transform validation rules. |
+| `src/transform/mod.rs` | Transform pass exports. |
+| `src/transform/build_fn.rs` | Build function transform. |
+| `src/transform/component.rs` | Component transform model. |
+| `src/transform/component_analysis.rs` | Component AST analysis using SDK component metadata from session. |
+| `src/transform/component_collection.rs` | Pure component name collection helpers. |
+| `src/transform/component_field.rs` | Component field transform logic. |
+| `src/transform/component_meta.rs` | Component metadata adapter; file loading moves to `SdkSnapshot`. |
+| `src/transform/declaration_emit.rs` | Declaration emit helpers. |
+| `src/transform/decorator.rs` | Decorator transform logic. |
+| `src/transform/entry.rs` | Entry transform logic. |
+| `src/transform/global_rewrite.rs` | Global call rewrite pass. |
+| `src/transform/source_emit.rs` | Source emit helpers. |
+| `src/transform/source_text.rs` | Span-to-source helpers. |
+| `src/transform/syntax.rs` | Syntax classification helpers. |
+| `src/transform/viewpu_emit.rs` | ViewPU emit helpers. |
+| `src/transform/viewpu_finalize.rs` | ViewPU finalization pass. |
+| `src/transform/viewpu_source_map.rs` | ViewPU source map handling. |
+| `src/transform/tests.rs` | Keep test-only helpers behind `#[cfg(test)]` or move to tests. |
+
+#### `arkdown-cache`
+
+| Path | Responsibility |
+| --- | --- |
+| `src/lib.rs` | Public cache exports. |
+| `src/key.rs` | Cache key structs derived from `InputFingerprintSet`. |
+| `src/manifest.rs` | Bundle and task cache manifest read/write. |
+| `src/store.rs` | Persistent cache storage and invalidation operations. |
+| `src/fingerprint.rs` | Cache-facing fingerprint adapters and validation helpers. |
+
+#### `arkdown-plugin-json5`
+
+| Path | Responsibility |
+| --- | --- |
+| `src/lib.rs` | Public plugin export. |
+| `src/plugin.rs` | JSON5 rolldown plugin; source reads go through rolldown or `SourceStore`. |
+| `src/module_emit.rs` | Structured JS module emit for JSON values. |
+
+#### `arkdown-plugin-module-meta`
+
+| Path | Responsibility |
+| --- | --- |
+| `src/lib.rs` | Public plugin export. |
+| `src/plugin.rs` | Module meta plugin using `ModuleCompileContext`. |
+| `src/records.rs` | Host/module metadata record construction from package index. |
+| `src/pkg_brief_info.rs` | Delete production upward walking; keep test adapter only if needed. |
+| `src/meta_compute.rs` | Replace with `records.rs` or restrict to pure record helpers. |
+
+#### `arkdown-plugin-ohos-resolve`
+
+| Path | Responsibility |
+| --- | --- |
+| `src/lib.rs` | Public plugin export. |
+| `src/plugin.rs` | Rolldown resolver plugin using context-backed `OhosResolver`. |
+| `src/importee.rs` | Importee collection and serialization from resolved module graph. |
+| `src/case_check.rs` | Delete or move into `arkdown-resolver::case_check`. |
+
+#### `arkdown-plugin-har-dedup`
+
+| Path | Responsibility |
+| --- | --- |
+| `src/lib.rs` | Public plugin export. |
+| `src/plugin.rs` | HAR dedup plugin using dependency ownership metadata. |
+| `src/collect_file.rs` | Hvigor-compatible collect file read/write only. |
+
+#### `arkdown-plugin-router-map`
+
+| Path | Responsibility |
+| --- | --- |
+| `src/lib.rs` | Temporary public export during migration. |
+| `src/plugin.rs` | Optional context-backed router map plugin if still needed. |
+| `src/cache.rs` | Delete standalone invalidation; use `ProfileStore` fingerprints. |
+
+#### `arkdown-plugin-sensitive-check`
+
+| Path | Responsibility |
+| --- | --- |
+| `src/lib.rs` | Temporary compatibility export. |
+| `src/plugin.rs` | Delete if case checking folds into `arkdown-resolver`; otherwise context-backed hook only. |
+
+#### `arkdown-abc`
+
+| Path | Responsibility |
+| --- | --- |
+| `src/lib.rs` | Public ABC compiler facade. |
+| `src/error.rs` | ABC compiler errors. |
+| `src/compiler.rs` | High-level Rust ABC compiler entry over explicit compile plans. |
+| `src/dependency.rs` | Bytecode dependency relation model, not package graph discovery. |
+| `src/cache.rs` | ABC cache adapters using session/cache fingerprints. |
+| `src/program_cache.rs` | Program cache read/write and validation. |
+| `src/proto_panda.rs` | Proto panda model and conversion. |
+| `src/abc_reader.rs` | ABC reader and validation. |
+| `src/abc2program.rs` | ABC to program conversion. |
+| `src/npm_entries.rs` | NPM entry metadata consumed from compile plans. |
+| `src/names.rs` | Record and symbol naming primitives. |
+| `src/optimizer.rs` | Bytecode/IR optimization passes. |
+| `src/widget.rs` | Widget-specific compile support. |
+| `src/isa.rs` | Generated/parsed ISA definitions. |
+| `src/isa.yaml` | Source ISA data. |
+| `src/emit/mod.rs` | Emit module exports. |
+| `src/emit/bytecode.rs` | Bytecode instruction emission. |
+| `src/emit/debug_info.rs` | Debug info emission. |
+| `src/emit/file.rs` | ABC file emission. |
+| `src/emit/record.rs` | Record emission. |
+| `src/emit/strings.rs` | String table emission. |
+| `src/ir/mod.rs` | IR module exports. |
+| `src/ir/ast_analysis.rs` | AST to IR analysis. |
+| `src/ir/builder.rs` | IR builder. |
+| `src/ir/class_layout.rs` | Class layout planning. |
+| `src/ir/debug_lnp.rs` | Line-number program data. |
+| `src/ir/function_lexical.rs` | Function lexical environment planning. |
+| `src/ir/function_records.rs` | Function record planning. |
+| `src/ir/lowering_context.rs` | Lowering context and state. |
+| `src/ir/module_lexical.rs` | Module lexical environment planning. |
+| `src/ir/module_record.rs` | Module record model. |
+| `src/ir/opcodes.rs` | IR opcode model. |
+| `src/ir/record_layout.rs` | Record layout planning. |
+
+#### `arkdown-ts2abc`
+
+| Path | Responsibility |
+| --- | --- |
+| `src/lib.rs` | Public ts2abc compatibility facade. |
+| `src/error.rs` | ts2abc compatibility errors. |
+| `src/args.rs` | Upstream-compatible argument parsing for CLI parity and tests. |
+| `src/driver.rs` | Converts `Ts2abcPlan` or parsed args into ABC compiler calls. |
+| `src/compile_context.rs` | Compile context info parsing. |
+| `src/version.rs` | Bytecode version selection. |
+| `src/plan.rs` | Production compile plan supplied by CLI/session stage. |
+| `src/record_name.rs` | Record-name builder shared by args and production paths. |
+
+#### `arkdown-resource`
+
+| Path | Responsibility |
+| --- | --- |
+| `src/lib.rs` | Public resource compiler facade. |
+| `src/error.rs` | Resource compiler errors. |
+| `src/compiler.rs` | Compiles a `ResourcePlan` into resource artifacts. |
+| `src/scanner.rs` | Resource directory scanner; replaces `scan.rs`. |
+| `src/element.rs` | Element JSON parsing. |
+| `src/media.rs` | Media resource handling. |
+| `src/profile.rs` | Profile resource copying. |
+| `src/ids.rs` | Resource ID assignment. |
+| `src/index.rs` | `resources.index` writer. |
+| `src/table.rs` | `ResourceTable.txt` writer. |
+| `src/output_layout.rs` | Resource output layout supplied by `ArtifactLayout`. |
+| `src/layout.rs` | Delete or fold into `output_layout.rs`. |
+| `src/scan.rs` | Delete after `scanner.rs` migration. |
+
+#### `arkdown-pack`
+
+| Path | Responsibility |
+| --- | --- |
+| `src/lib.rs` | Public packager facade. |
+| `src/error.rs` | Packaging errors. |
+| `src/input.rs` | Typed package inputs from module pipeline outputs. |
+| `src/package_plan.rs` | HAP/HSP/HAR package plan including artifact layout. |
+| `src/packager.rs` | Archive assembly over `PackagePlan`. |
+| `src/integrated_hsp.rs` | Integrated HSP packaging records from dependency classifications. |
+| `src/zip_writer.rs` | ZIP entry writer using `ArtifactPath`. |
+
+#### `arkdown-sign`
+
+| Path | Responsibility |
+| --- | --- |
+| `src/lib.rs` | Public signing facade. |
+| `src/error.rs` | Signing errors. |
+| `src/sign_plan.rs` | Typed signing inputs and output paths. |
+| `src/digest.rs` | Digest calculation. |
+| `src/keystore.rs` | Keystore loading and key extraction. |
+| `src/pkcs7.rs` | PKCS7 signature generation. |
+| `src/signing_block.rs` | OHOS signing block generation. |
+| `src/zip.rs` | ZIP signing integration. |
+
+#### `arkdown-cli`
+
+| Path | Responsibility |
+| --- | --- |
+| `src/main.rs` | Binary entry point only. |
+| `src/lib.rs` | CLI library exports for tests. |
+| `src/progress.rs` | Progress display and user-facing status. |
+| `src/task_cache.rs` | Delete or move task cache policy into `arkdown-cache` and build stages. |
+| `src/cmd/mod.rs` | Command module exports. |
+| `src/cmd/check.rs` | Check command orchestration using session diagnostics where possible. |
+| `src/cmd/clean.rs` | Clean command orchestration over artifact layout/cache locations. |
+| `src/cmd/build/mod.rs` | Build command module exports. |
+| `src/cmd/build/args.rs` | Clap args for `arkdown build`. |
+| `src/cmd/build/runner.rs` | `BuildRunner`: command-level orchestration, progress, errors. |
+| `src/cmd/build/session.rs` | CLI adapter that calls `BuildSessionBuilder`. |
+| `src/cmd/build/module_pipeline.rs` | Runs stages for one `ModuleBuildPlan`. |
+| `src/cmd/build/module_state.rs` | Mutable per-module state; replaces parallel vectors. |
+| `src/cmd/build/stages/mod.rs` | Stage exports. |
+| `src/cmd/build/stages/resources.rs` | Resource compile stage. |
+| `src/cmd/build/stages/profiles.rs` | Profile and module JSON stage. |
+| `src/cmd/build/stages/bundle.rs` | Rolldown bundle stage. |
+| `src/cmd/build/stages/importees.rs` | Importee and loader handoff stage. |
+| `src/cmd/build/stages/compile_arkts.rs` | CompileArkTS/ts2abc/ABC handoff stage. |
+| `src/cmd/build/stages/abc.rs` | Rust ABC compile stage when used directly. |
+| `src/cmd/build/stages/package.rs` | Pack and sign stage orchestration. |
+| `src/cmd/build/stages/obfuscation.rs` | Obfuscation stage over `ObfuscationPlan`. |
+| `src/cmd/build/stages/coverage.rs` | Coverage instrumentation stage. |
+| `src/cmd/build/stages/watch.rs` | Watch-mode rebuild stage adapter. |
+| `src/cmd/build/writers/mod.rs` | Writer exports. |
+| `src/cmd/build/writers/intermediates.rs` | Hvigor-compatible intermediate artifact writes. |
+| `src/cmd/build/writers/hvigor_artifacts.rs` | Final hvigor parity artifact writes. |
+| `src/cmd/build.rs` | Delete after staged layout migration. |
+
+#### `arkdown-obfuscate`
+
+| Path | Responsibility |
+| --- | --- |
+| `src/lib.rs` | Public obfuscation facade. |
+| `src/plan.rs` | `ObfuscationPlan` and enablement decision. |
+| `src/minifier.rs` | Minification implementation. |
+| `src/rename.rs` | Identifier rename generator and reserved names. |
+| `src/transform.rs` | AST/source transform orchestration. |
+| `src/rules/mod.rs` | Rule module exports. |
+| `src/rules/parser.rs` | Parses obfuscation rules. |
+| `src/rules/store.rs` | Session/stage-owned rule file loading and fingerprints. |
+| `src/rules.rs` | Split into `rules/*`. |
+
+#### `arkdown-watcher`
+
+| Path | Responsibility |
+| --- | --- |
+| `src/lib.rs` | Public watcher facade. |
+| `src/watcher.rs` | Notify integration and debounce loop. |
+| `src/input_set.rs` | Watch inputs derived from `InputFingerprintSet`. |
+| `src/invalidation.rs` | Maps changed paths to affected snapshots and module contexts. |
+
 ### `crates/arkdown-cli`
 
 Current `src/cmd/build.rs` is too large and owns too many stages. Replace it
@@ -584,8 +995,8 @@ crates/arkdown-cli/src/cmd/build/
   module_state.rs
   stages/
     mod.rs
-    resource.rs
-    profile.rs
+    resources.rs
+    profiles.rs
     bundle.rs
     importees.rs
     compile_arkts.rs
@@ -738,7 +1149,9 @@ crates/arkdown-resolver/src/
 
 Changes:
 
-- `OhosResolver::new` accepts `Arc<PackageIndex>` and `Arc<PathResolver>`.
+- `OhosResolver::new` accepts resolver-owned indexes and path policy types built
+  by `arkdown-session`; `arkdown-resolver` must not depend on
+  `arkdown-session`.
 - `PackageRootIndex::build` is removed or moved into `arkdown-session`.
 - `OhPackage::load_from_root` remains available for tests and session scanning,
   but hot-path resolution should use parsed `PackageSnapshot`.
@@ -971,6 +1384,245 @@ The legacy loader stack should not remain as a parallel architecture:
 - If any parser utility is still needed, move it into the owning plugin or
   bundler module.
 - Do not keep `Arc<dyn ArkdownPlugin>` as a public production entry point.
+
+---
+
+## Post-Refactor Execution and Dependency Flow
+
+The refactored build is split into four layers:
+
+1. CLI orchestration chooses the command and displays progress.
+2. Session construction reads and indexes stable inputs once.
+3. Build planning creates typed per-module plans.
+4. Stage execution consumes plans and writes artifacts.
+
+The split keeps repeated IO and package discovery out of plugins and late build
+stages. It also gives watch mode and cache invalidation a single input
+inventory.
+
+### Command execution flow
+
+```mermaid
+flowchart TD
+    A[arkdown-cli main.rs] --> B[cmd::build::args parses CLI flags]
+    B --> C[BuildRunner]
+    C --> D[cmd::build::session creates BuildSessionBuilder]
+
+    D --> E[ProjectSnapshotBuilder]
+    D --> F[ModuleSnapshotBuilder]
+    D --> G[SdkSnapshot builder]
+    D --> H[ProfileStore indexer]
+    D --> I[DependencyGraphBuilder]
+    D --> J[InputFingerprintBuilder]
+    D --> K[ArtifactLayout builder]
+
+    E --> L[BuildSession]
+    F --> L
+    G --> L
+    H --> L
+    I --> L
+    J --> L
+    K --> L
+
+    L --> M[BuildPlanBuilder]
+    M --> N[ModuleBuildPlan per output module]
+    N --> O[ModulePipeline]
+
+    O --> P[ResourcesStage]
+    O --> Q[ProfilesStage]
+    O --> R[BundleStage]
+    O --> S[ImporteesStage]
+    O --> T[CompileArktsStage or AbcStage]
+    O --> U[PackageStage]
+    O --> V[ObfuscationStage when enabled]
+    O --> W[CoverageStage when enabled]
+
+    P --> X[ModuleBuildState]
+    Q --> X
+    R --> X
+    S --> X
+    T --> X
+    U --> X
+    V --> X
+    W --> X
+    X --> Y[Final HAP/HSP/HAR artifacts]
+```
+
+Important ordering:
+
+- `BuildSessionBuilder` is the only phase that scans project/module/package
+  metadata.
+- `BuildPlanBuilder` decides module selection, dependency resource inclusion,
+  output layout, and packaging inputs before stages run.
+- `ModulePipeline` stages exchange data through `ModuleBuildState`, not through
+  parallel vectors or ad hoc path recomputation.
+- Plugins run inside `BundleStage` and receive `ModuleCompileContext`, so they
+  resolve and transform with the same snapshots as the CLI.
+
+### Session construction detail
+
+```mermaid
+flowchart LR
+    A[Project root] --> B[ProjectSnapshot]
+    B --> C[ModuleSnapshot list]
+    B --> D[Root PackageSnapshot]
+    C --> E[PackageSnapshot per module]
+    C --> F[ProfileFileIndex]
+    C --> G[ResourcePlan seed]
+    E --> H[DependencyGraphSnapshot]
+    D --> H
+    H --> I[Resolver PackageIndex]
+    F --> J[ProfileStore]
+    G --> K[ResourcePlan]
+    B --> L[ArtifactLayout]
+    C --> L
+    B --> M[InputFingerprintSet]
+    C --> M
+    H --> M
+    J --> M
+    K --> M
+```
+
+This is why session owns startup discovery: the same parsed package/profile
+data feeds resolver, profile processors, loader JSON, bytecode HAR handling,
+resource compilation, package plans, cache keys, and watch inputs.
+
+### Per-module pipeline flow
+
+```mermaid
+flowchart TD
+    A[ModuleBuildPlan] --> B[ModuleBuildState]
+
+    B --> C[ResourcesStage]
+    C --> C1[arkdown-resource ResourceCompiler]
+    C1 --> B
+
+    B --> D[ProfilesStage]
+    D --> D1[arkdown-profile ProfileProcessor]
+    D1 --> B
+
+    B --> E[BundleStage]
+    E --> E1[arkdown Bundler]
+    E1 --> E2[rolldown plugins with ModuleCompileContext]
+    E2 --> B
+
+    B --> F[ImporteesStage]
+    F --> F1[importee and loader handoff artifacts]
+    F1 --> B
+
+    B --> G[CompileArktsStage]
+    G --> G1[arkdown-ts2abc facade]
+    G1 --> G2[arkdown-abc compiler]
+    G2 --> B
+
+    B --> H[PackageStage]
+    H --> H1[arkdown-pack Packager]
+    H1 --> H2[arkdown-sign Signer when configured]
+    H2 --> I[Final artifact]
+```
+
+Stage boundaries are intentionally aligned to artifact ownership:
+
+- Resource stage owns resource outputs only.
+- Profile stage owns generated profile files and final `module.json`.
+- Bundle stage owns JS chunks, source maps, and plugin outputs.
+- Importee stage owns CompileArkTS handoff metadata.
+- Compile stage owns ABC/proto/cache outputs.
+- Package stage owns archive layout and signing.
+
+### Crate dependency flow
+
+Arrows mean "depends on". The final graph must stay acyclic.
+
+```mermaid
+flowchart LR
+    CORE[arkdown-core]
+    UTILS[arkdown-utils]
+    CONFIG[arkdown-config]
+    RESOLVER[arkdown-resolver]
+    SESSION[arkdown-session]
+    CACHE[arkdown-cache]
+    PROFILE[arkdown-profile]
+    RESOURCE[arkdown-resource]
+    BUNDLER[arkdown]
+    ABC[arkdown-abc]
+    TS2ABC[arkdown-ts2abc]
+    PACK[arkdown-pack]
+    SIGN[arkdown-sign]
+    OBF[arkdown-obfuscate]
+    WATCH[arkdown-watcher]
+    CLI[arkdown-cli]
+    PLUGINS[plugin crates]
+
+    CONFIG --> CORE
+    CONFIG --> UTILS
+    RESOLVER --> CORE
+    RESOLVER --> UTILS
+    SESSION --> CORE
+    SESSION --> CONFIG
+    SESSION --> RESOLVER
+    SESSION --> UTILS
+    CACHE --> CORE
+    PROFILE --> CORE
+    PROFILE --> SESSION
+    RESOURCE --> CORE
+    RESOURCE --> SESSION
+    BUNDLER --> CORE
+    BUNDLER --> SESSION
+    PLUGINS --> CORE
+    PLUGINS --> SESSION
+    PLUGINS --> RESOLVER
+    TS2ABC --> ABC
+    TS2ABC --> CORE
+    PACK --> CORE
+    PACK --> SESSION
+    SIGN --> CORE
+    OBF --> CORE
+    WATCH --> SESSION
+    CLI --> SESSION
+    CLI --> CACHE
+    CLI --> PROFILE
+    CLI --> RESOURCE
+    CLI --> BUNDLER
+    CLI --> PLUGINS
+    CLI --> TS2ABC
+    CLI --> ABC
+    CLI --> PACK
+    CLI --> SIGN
+    CLI --> OBF
+    CLI --> WATCH
+```
+
+Dependency rules:
+
+- `arkdown-core` and `arkdown-utils` never depend on higher-level crates.
+- `arkdown-resolver` does not depend on `arkdown-session`; session builds
+  resolver input indexes and passes them in.
+- Plugins may depend on `arkdown-session`, but they must not perform project
+  discovery or package/profile reads during hooks.
+- Domain crates such as `arkdown-resource`, `arkdown-pack`,
+  `arkdown-obfuscate`, and `arkdown-abc` consume typed plans and do not know CLI
+  details.
+- `arkdown-cli` is the only crate that composes all stages.
+
+### Maintenance rationale
+
+This structure makes maintenance easier because each change has one owner:
+
+- Adding a new project input changes `BuildSessionBuilder`,
+  `InputFingerprintBuilder`, and possibly one snapshot type.
+- Adding a new profile format changes `ProfileStore` and one
+  `profiles::*Processor`.
+- Adding a new dependency classification changes
+  `DependencyGraphBuilder::classifiers`, then consumers read the typed node.
+- Changing output paths changes `ArtifactLayout` and artifact serializers, not
+  every stage.
+- Changing resolver behavior changes `arkdown-resolver` and its session-built
+  index inputs, not plugins independently.
+- Changing build order changes `ModulePipeline`, while individual stage
+  implementations stay local.
+- Watch mode and cache invalidation reuse `InputFingerprintSet`, so they do not
+  need parallel file-discovery implementations.
 
 ---
 

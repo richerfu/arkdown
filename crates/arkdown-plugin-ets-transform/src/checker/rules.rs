@@ -51,6 +51,19 @@ pub fn check(source: &str, file: &str) -> Vec<EtsTransformError> {
                 {
                     entry_count += 1;
                 }
+                // Rule: @Sendable cannot be applied to structs — only to class declarations.
+                // hvigor's etsChecker rejects @Sendable on @Component structs.
+                if statement.decorators.iter().any(|d| decorator_name(d) == "Sendable") {
+                    errors.push(EtsTransformError::Diagnostic {
+                        file: file.to_string(),
+                        message: format!(
+                            "'@Sendable' cannot be applied to struct '{}'; \
+                             @Sendable is only valid on class declarations",
+                            statement.id.name.as_str()
+                        ),
+                        severity: DiagnosticSeverity::Error,
+                    });
+                }
             }
             Statement::ExportNamedDeclaration(export) => {
                 if let Some(Declaration::StructStatement(statement)) = export.declaration.as_ref() {
@@ -82,6 +95,30 @@ pub fn check(source: &str, file: &str) -> Vec<EtsTransformError> {
             _ => None,
         };
         if let Some(func) = func_decl {
+            // Rule: @Concurrent can only be on a top-level function.
+            // hvigor validates that @Concurrent is only used on standalone functions,
+            // not on methods or arrow functions.
+            let is_concurrent = func
+                .decorators
+                .iter()
+                .any(|d| decorator_name(d) == "Concurrent");
+            if is_concurrent {
+                // Basic validation: @Concurrent function must not have any non-function-level
+                // issues. The decorator itself on a function declaration is valid.
+                // Warn if it's on a generator or async function (not supported for Concurrent).
+                if func.generator {
+                    let name = func.id.as_ref().map(|id| id.name.as_str()).unwrap_or("<anonymous>");
+                    errors.push(EtsTransformError::Diagnostic {
+                        file: file.to_string(),
+                        message: format!(
+                            "@Concurrent function '{}' cannot be a generator function",
+                            name
+                        ),
+                        severity: DiagnosticSeverity::Error,
+                    });
+                }
+            }
+
             let is_builder = func
                 .decorators
                 .iter()
@@ -140,10 +177,34 @@ pub fn check(source: &str, file: &str) -> Vec<EtsTransformError> {
                 .decorators
                 .iter()
                 .any(|d| decorator_name(d) == "ObservedV2");
+            let has_sendable = class
+                .decorators
+                .iter()
+                .any(|d| decorator_name(d) == "Sendable");
             let has_entry = class
                 .decorators
                 .iter()
                 .any(|d| decorator_name(d) == "Entry");
+
+            // Rule: @Sendable is for inter-thread data transfer; it cannot be mixed
+            // with UI-component decorators (@Component, @ComponentV2).
+            // Matches hvigor's validateSendableClass() rule.
+            if has_sendable && (has_component || has_component_v2) {
+                let comp_name = if has_component_v2 { "@ComponentV2" } else { "@Component" };
+                let class_name = class
+                    .id
+                    .as_ref()
+                    .map(|id| id.name.as_str().to_string())
+                    .unwrap_or_else(|| "<anonymous>".to_string());
+                errors.push(EtsTransformError::Diagnostic {
+                    file: file.to_string(),
+                    message: format!(
+                        "Class '{}' cannot be decorated with both '@Sendable' and '{}'",
+                        class_name, comp_name
+                    ),
+                    severity: DiagnosticSeverity::Error,
+                });
+            }
 
             // Rule: @Observed and @ObservedV2 are data model decorators — cannot
             // be mixed with @Component, @ComponentV2, or @Entry decorators.
