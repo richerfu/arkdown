@@ -302,6 +302,9 @@ pub fn compute_content_hash(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT_TEMP_ID: AtomicUsize = AtomicUsize::new(0);
 
     fn make_entry(id: &str, content_hash: &str) -> CachedEntry {
         CachedEntry {
@@ -316,9 +319,18 @@ mod tests {
         }
     }
 
+    fn temp_cache_dir(name: &str) -> PathBuf {
+        let seq = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "arkdown_cache_{name}_{}_{}",
+            std::process::id(),
+            seq
+        ))
+    }
+
     #[test]
     fn test_cache_roundtrip() {
-        let tmp = std::env::temp_dir().join("arkdown_cache_roundtrip_test");
+        let tmp = temp_cache_dir("roundtrip_test");
         let _ = std::fs::remove_dir_all(&tmp);
 
         let mut cache = BuildCache::new(tmp.clone());
@@ -343,7 +355,7 @@ mod tests {
 
     #[test]
     fn test_cache_miss_on_changed_content_hash() {
-        let tmp = std::env::temp_dir().join("arkdown_cache_miss_test");
+        let tmp = temp_cache_dir("miss_test");
         let _ = std::fs::remove_dir_all(&tmp);
 
         let mut cache = BuildCache::new(tmp.clone());
@@ -361,7 +373,7 @@ mod tests {
 
     #[test]
     fn test_cache_miss_on_changed_config_hash() {
-        let tmp = std::env::temp_dir().join("arkdown_cache_config_miss_test");
+        let tmp = temp_cache_dir("config_miss_test");
         let _ = std::fs::remove_dir_all(&tmp);
 
         let mut cache = BuildCache::new(tmp.clone());
@@ -379,7 +391,7 @@ mod tests {
 
     #[test]
     fn test_invalidate_all_clears_memory_and_disk() {
-        let tmp = std::env::temp_dir().join("arkdown_cache_invalidate_test");
+        let tmp = temp_cache_dir("invalidate_test");
         let _ = std::fs::remove_dir_all(&tmp);
 
         let mut cache = BuildCache::new(tmp.clone());
@@ -399,7 +411,7 @@ mod tests {
 
     #[test]
     fn test_load_from_empty_dir_is_ok() {
-        let tmp = std::env::temp_dir().join("arkdown_cache_empty_dir_test");
+        let tmp = temp_cache_dir("empty_dir_test");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
 
@@ -412,7 +424,7 @@ mod tests {
 
     #[test]
     fn test_load_from_nonexistent_dir_is_ok() {
-        let tmp = std::env::temp_dir().join("arkdown_cache_nodir_test_nonexistent");
+        let tmp = temp_cache_dir("nodir_test_nonexistent");
         let _ = std::fs::remove_dir_all(&tmp);
 
         let mut cache = BuildCache::new(tmp);
@@ -424,7 +436,7 @@ mod tests {
 
     #[test]
     fn test_get_returns_inserted_entry() {
-        let tmp = std::env::temp_dir().join("arkdown_cache_get_test");
+        let tmp = temp_cache_dir("get_test");
         let _ = std::fs::remove_dir_all(&tmp);
 
         let mut cache = BuildCache::new(tmp.clone());
@@ -440,7 +452,7 @@ mod tests {
 
     #[test]
     fn test_get_returns_none_for_unknown_id() {
-        let tmp = std::env::temp_dir().join("arkdown_cache_get_none_test");
+        let tmp = temp_cache_dir("get_none_test");
         let _ = std::fs::remove_dir_all(&tmp);
 
         let mut cache = BuildCache::new(tmp.clone());
@@ -456,7 +468,7 @@ mod tests {
 
     #[test]
     fn test_len_tracks_insertions() {
-        let tmp = std::env::temp_dir().join("arkdown_cache_len_test");
+        let tmp = temp_cache_dir("len_test");
         let _ = std::fs::remove_dir_all(&tmp);
 
         let mut cache = BuildCache::new(tmp.clone());
@@ -538,7 +550,7 @@ mod tests {
     #[test]
     fn test_concurrent_inserts_to_different_dirs_do_not_corrupt() {
         // Each thread gets its own cache directory so they never conflict.
-        let base = std::env::temp_dir().join("arkdown_cache_concurrent_test");
+        let base = temp_cache_dir("concurrent_test");
         let _ = std::fs::remove_dir_all(&base);
 
         let dir_a = base.join("a");
@@ -614,7 +626,7 @@ mod tests {
 
     #[test]
     fn test_compile_env_same_env_no_invalidation() {
-        let tmp = std::env::temp_dir().join("arkdown_cache_compile_env_same");
+        let tmp = temp_cache_dir("compile_env_same");
         let _ = std::fs::remove_dir_all(&tmp);
 
         let env = "sdk12#12#OpenHarmony#/sdk/ets-loader#false#Entry#/tmp/cache";
@@ -646,7 +658,7 @@ mod tests {
 
     #[test]
     fn test_compile_env_different_env_invalidates_all() {
-        let tmp = std::env::temp_dir().join("arkdown_cache_compile_env_diff");
+        let tmp = temp_cache_dir("compile_env_diff");
         let _ = std::fs::remove_dir_all(&tmp);
 
         let mut cache = BuildCache::new(tmp.clone());
