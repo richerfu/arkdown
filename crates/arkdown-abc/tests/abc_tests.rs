@@ -7200,3 +7200,125 @@ registerNamedRoute(() => new Index(void 0, {}), "", {bundleName: "x"});
         main_method.line_ops
     );
 }
+
+// ── ProgramCache / protoBin integration tests ────────────────────────────────
+
+/// Compile a simple module with a `cache_file` (`.protoBin`) destination,
+/// then verify:
+///
+/// 1. The `.abc` output starts with the Panda magic bytes `PANDA\x00\x00\x00`.
+/// 2. The `.protoBin` file exists and is non-empty.
+/// 3. The `.protoBin` decodes as a valid `ProgramCache` protobuf (has a
+///    `program` field with at least one function entry — the module body).
+/// 4. The hash stored in the cache matches the source hash computed by
+///    `source_cache_hash()`.
+///
+/// This mirrors the upstream `es2abc --cache-file file.protoBin` behavior
+/// described in `cache.rs`: the cache stores a `ProgramCache { hash_code,
+/// program }` proto whose `hash_code` is `GetHash32String(source + fileName +
+/// recordName + sourceFile + pkgName + targetPandaFileVersion)`.
+#[test]
+fn proto_bin_cache_file_written_with_correct_format() {
+    let tmp = tempfile::tempdir().unwrap();
+    let abc_out = tmp.path().join("module.abc");
+    let proto_bin = tmp.path().join("module.protoBin");
+
+    let record_name = "@bundle:com.example.app/entry/ets/pages/Index";
+    let file_name = tmp
+        .path()
+        .join("Index.js")
+        .to_string_lossy()
+        .into_owned();
+    let source = "export const greeting = 'hello';";
+
+    let compiler = AbcCompiler::new(AbcCompileOptions {
+        debug_info: false,
+        opt_level: 0,
+        optimize_try_catch_func: true,
+        target_api_version: 12,
+        target_api_sub_version: None,
+        enable_annotations: false,
+        merge_abc: true,
+        module: true,
+        module_record_field_name: None,
+        npm_entries: None,
+        dependency_context: None,
+        remove_redundant_file: false,
+        dump_deps_info: false,
+    });
+
+    let cache_input = AbcProgramCacheInput {
+        file_name: file_name.clone(),
+        cache_file: proto_bin.clone(),
+    };
+
+    let result = compiler
+        .compile_with_program_cache(
+            vec![AbcModule {
+                record_name: record_name.to_string(),
+                source: source.to_string(),
+                source_map: None,
+                source_file: None,
+                package_name: None,
+                is_commonjs: false,
+                is_shared_module: false,
+                origin_source_lang: String::new(),
+            }],
+            &abc_out,
+            vec![Some(cache_input)],
+        )
+        .expect("compile_with_program_cache must succeed");
+
+    // 1. ABC output path is correct.
+    assert_eq!(result.path, abc_out, "artifact path must equal the output path");
+
+    // 2. ABC output starts with Panda magic bytes.
+    let abc_bytes = std::fs::read(&abc_out).expect("abc output must exist");
+    assert!(
+        abc_bytes.len() >= 8,
+        "ABC output must be at least 8 bytes, got {}",
+        abc_bytes.len()
+    );
+    assert_eq!(
+        &abc_bytes[0..8],
+        b"PANDA\x00\x00\x00",
+        "ABC magic bytes must be PANDA\\x00\\x00\\x00"
+    );
+
+    // 3. .protoBin file exists and is non-empty.
+    assert!(proto_bin.exists(), ".protoBin file must be written by compile_with_program_cache");
+    let proto_bytes = std::fs::read(&proto_bin).expect(".protoBin must be readable");
+    assert!(
+        !proto_bytes.is_empty(),
+        ".protoBin file must not be empty"
+    );
+
+    // 4. .protoBin decodes as a valid ProgramCache with a program field.
+    let entry = ProgramCacheFile::read(&proto_bin)
+        .expect("ProgramCacheFile::read must not return Err")
+        .expect(".protoBin must decode as a valid ProgramCache");
+
+    // The program must have at least one function entry (the module body
+    // func_main_0 is always emitted for module-mode inputs).
+    assert!(
+        !entry.program.function_table.is_empty(),
+        "ProgramCache program must contain at least one function (func_main_0); \
+         got function_table len={}",
+        entry.program.function_table.len()
+    );
+
+    // 5. The stored hash matches the source_cache_hash for this input.
+    let expected_hash = source_cache_hash(
+        source,
+        &file_name,
+        record_name,
+        "",  // source_file (None → empty string in hash)
+        "",  // package_name (None → empty string in hash)
+        version_for_target_api(12, None),
+    );
+    assert_eq!(
+        entry.hash_code, expected_hash,
+        "ProgramCache hash_code must match source_cache_hash(source, file_name, \
+         record_name, \"\", \"\", panda_file_version)"
+    );
+}

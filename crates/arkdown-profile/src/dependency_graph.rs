@@ -482,6 +482,10 @@ fn is_runtime_only_package(
 /// 4. OHPM global cache: `$OHPM_HOME/<dep_name>@<ver>/oh_modules/<dep_name>`
 ///    where `$OHPM_HOME` defaults to `~/.ohpm` and `<ver>` is read from the
 ///    issuer's declared dependency version.
+/// 5. Offline cache lookup via `oh-package-lock.json5` at `project_root`.
+///    Uses [`crate::ohpm_registry::OfflineOhpmCache::resolve_from_lockfile`]
+///    to find packages that are in the global cache but whose version is only
+///    known from the lockfile (e.g. after a `ohpm install --prefer-offline`).
 fn resolve_dep_dir(
     dep_name: &str,
     issuer_root: &Path,
@@ -531,6 +535,29 @@ fn resolve_dep_dir(
                         std::fs::canonicalize(&scoped).unwrap_or(scoped),
                     );
                 }
+            }
+        }
+
+        // Step 5: offline cache lookup via lockfile.
+        //
+        // When the declared version in `oh-package.json5` doesn't match what
+        // is actually cached (e.g. the lockfile pins a different resolved
+        // version), load the lockfile from `project_root` and ask
+        // `OfflineOhpmCache` to resolve the path from it.  This covers the
+        // common case where the developer has run `ohpm install` once and the
+        // packages are present in the global cache, but the `oh_modules/`
+        // directories haven't been re-materialised (e.g. after a `git clean`).
+        let lockfile = crate::lockfile::OhPackageLockfile::load(project_root);
+        if !lockfile.is_empty() {
+            // Use an empty version string so resolve_from_lockfile falls back
+            // to the lockfile's recorded version.
+            if let Some(path) = crate::ohpm_registry::OfflineOhpmCache::resolve_from_lockfile(
+                &lockfile,
+                dep_name,
+                "",
+                &cache_root,
+            ) {
+                return Some(path);
             }
         }
     }

@@ -133,6 +133,16 @@ pub struct BuildArgs {
     /// a cached artifact.
     #[arg(long = "disable-abc-cache", default_value = "false")]
     pub disable_abc_cache: bool,
+    /// Override the ABC ProgramCache `.protoBin` file path (upstream `es2abc --cache-file`).
+    ///
+    /// When specified, this path is used as the `--cache-file` argument for the ABC
+    /// compilation step instead of the automatically derived per-module cache path.
+    /// Supports both a bare path (`file.protoBin`) and a manifest reference
+    /// (`@modules.cache`) matching upstream es2abc semantics.
+    ///
+    /// Section 3.6: "实现 upstream ProgramCache/protoBin".
+    #[arg(long = "cache-file")]
+    pub cache_file: Option<PathBuf>,
 }
 
 pub async fn run(args: BuildArgs) -> Result<()> {
@@ -156,6 +166,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         );
     }
     let disable_abc_cache = args.disable_abc_cache;
+    let cli_cache_file = args.cache_file.clone();
     let project_root = args
         .project
         .unwrap_or_else(|| std::env::current_dir().expect("failed to get current directory"));
@@ -1272,6 +1283,10 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             .cloned()
             .unwrap_or_default();
         let modules_cache_path = compile_arkts_handoff.modules_cache_path.clone();
+        // --cache-file CLI override takes precedence over the automatically derived
+        // per-module cache path from the handoff. This matches upstream es2abc
+        // --cache-file semantics: a bare path or @manifest reference.
+        let effective_cache_file = cli_cache_file.clone().or(modules_cache_path);
         let ts2abc_inputs = compile_arkts_handoff.inputs;
         if ts2abc_inputs.is_empty() {
             return Err(anyhow::anyhow!(
@@ -1297,7 +1312,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 commonjs: false,
                 input_extension: "js".to_string(),
                 module_record_field_name: None,
-                cache_file: modules_cache_path,
+                cache_file: effective_cache_file,
                 output_proto: None,
                 compile_context_info: Default::default(),
                 enable_abc_input: false,
@@ -1864,6 +1879,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                     coverage: false,
                     preview: false, // inner rebuild handles resource compilation
                     disable_abc_cache: false,
+                    cache_file: None,
                 };
                 if let Err(e) = rt.block_on(run(rebuild_args)) {
                     eprintln!("[watch] rebuild failed: {e:#}");

@@ -21,8 +21,8 @@ pub use dependency_graph::{
 };
 pub mod ohpm_registry;
 pub use ohpm_registry::{
-    OhpmRegistryClient, OhpmRegistryError, PackageMetadata, VersionInfo,
-    cache_dir_for,
+    OhpmRegistryClient, OhpmRegistryError, OhpmInstallOptions, OfflineOhpmCache,
+    PackageMetadata, VersionInfo, cache_dir_for,
 };
 pub mod lockfile;
 pub use lockfile::{LockfileEntry, OhPackageLockfile};
