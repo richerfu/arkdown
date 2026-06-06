@@ -31,6 +31,66 @@ The goal is not a minimal patch. The goal is a maintainable architecture:
 
 ---
 
+## Breaking Rewrite Directive
+
+This SPEC intentionally allows breaking changes to internal Rust APIs. The
+compatibility boundary is:
+
+- Preserve CLI flags and generated artifacts unless this SPEC explicitly says
+  otherwise.
+- Preserve fixture behavior and hvigor parity expectations.
+- Do not preserve old internal helper APIs, old crate exports, or old plugin
+  constructors when they block ownership cleanup.
+
+The refactor should not introduce thin compatibility wrappers that keep the old
+architecture alive. When a caller is migrated to the new session/context API,
+the old helper should be deleted in the same change unless another production
+caller still depends on it. If another caller still depends on it, that helper
+must be marked as a migration blocker in this SPEC or in the task PR.
+
+No "minimum viable" implementation is acceptable for the core session model.
+The first session implementation must own real startup reads, dependency graph
+construction, profile indexing, SDK metadata, path normalization, and input
+fingerprints. Narrow adapters are acceptable only inside tests.
+
+---
+
+## Workspace Audit Snapshot
+
+Current scan summary from `crates/*/src`:
+
+| Crate | Files | Function count | IO hits | Path smell hits | Refactor pressure |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `arkdown-core` | 10 | 128 | 2 | 11 | stale plugin/context types and string path helpers |
+| `arkdown-config` | 7 | 87 | 24 | 48 | raw config parsing mixed with discovery and SDK probing |
+| `arkdown-resolver` | 6 | 58 | 22 | 10 | package index built from filesystem in resolver lifecycle |
+| `arkdown-utils` | 1 | 4 | 0 | 1 | too small to host path policy; needs focused modules |
+| `arkdown-loader` | 5 | 23 | 1 | 3 | legacy plugin/loader stack separate from rolldown |
+| `arkdown` | 4 | 33 | 9 | 19 | bundler derives paths and entries from strings |
+| `arkdown-profile` | 18 | 453 | 419 | 122 | largest repeated-read and helper concentration |
+| `arkdown-plugin-duplicate-check` | 1 | 9 | 0 | 1 | simple plugin; context constructor still needed |
+| `arkdown-plugin-ets-transform` | 38 | 600 | 32 | 28 | SDK/component metadata and transform cache not session-owned |
+| `arkdown-cache` | 1 | 36 | 14 | 2 | cache keys not tied to full input fingerprints |
+| `arkdown-plugin-json5` | 3 | 31 | 3 | 5 | plugin reads files during hooks; needs source abstraction |
+| `arkdown-plugin-module-meta` | 4 | 18 | 4 | 11 | upward package walking and string package ownership |
+| `arkdown-plugin-ohos-resolve` | 4 | 42 | 7 | 18 | resolver plugin owns path parsing and importee side effects |
+| `arkdown-plugin-har-dedup` | 1 | 16 | 4 | 5 | detects HAR ownership with `contains("oh_modules")` |
+| `arkdown-plugin-router-map` | 1 | 8 | 6 | 1 | standalone cache invalidation duplicates profile fingerprints |
+| `arkdown-plugin-sensitive-check` | 1 | 12 | 4 | 3 | duplicate case-check implementation |
+| `arkdown-abc` | 32 | 1254 | 29 | 15 | mostly cohesive compiler, but cache/path entry naming leaks |
+| `arkdown-ts2abc` | 6 | 33 | 6 | 20 | CLI-style argument parsing owns path/record derivation |
+| `arkdown-resource` | 11 | 52 | 34 | 3 | scanner/writers should consume `ResourcePlan` |
+| `arkdown-pack` | 5 | 48 | 37 | 2 | packager reads module JSON and integrated HSP inputs late |
+| `arkdown-sign` | 7 | 108 | 11 | 4 | signing can remain isolated but should use artifact layout |
+| `arkdown-cli` | 20 | 175 | 176 | 75 | orchestration owns too many stage policies and helpers |
+| `arkdown-obfuscate` | 5 | 44 | 11 | 5 | file traversal and rule loading should become a stage plan |
+| `arkdown-watcher` | 1 | 12 | 0 | 7 | watches raw directories instead of session input inventory |
+
+This means the refactor must touch every crate at the ownership boundary, even
+if some crates only need constructor/API changes.
+
+---
+
 ## Current Architectural Problems
 
 ### Repeated startup data reads
@@ -294,6 +354,221 @@ This keeps path conversion explicit and localized.
 
 ## File and Directory Reorganization
 
+### Workspace ownership target
+
+Every crate gets a single reason to exist:
+
+| Crate | Keep | Move out / delete | New dependency direction |
+| --- | --- | --- | --- |
+| `arkdown-core` | stable domain types, errors, build enums, artifact-neutral structs | old `ArkdownPlugin`, cache lifecycle structs, path string logic | depended on by most crates; must not depend on `arkdown-session` |
+| `arkdown-config` | raw JSON5 parsers and config normalization | project/module discovery loops, repeated SDK probing, downstream path policy | used by `arkdown-session`; no plugin or CLI policy |
+| `arkdown-session` | startup discovery, snapshots, dependency graph, profile store, SDK snapshot, path resolver, fingerprints | nothing legacy | depends on core/config/resolver/utils/profile data types as needed |
+| `arkdown-resolver` | pure OHOS resolution over indexes and specifiers | package graph discovery, hot-path `oh-package.json5` reads | consumes `PackageIndex` from session |
+| `arkdown-utils` | generic path/hash helpers only | build policy, OHOS package logic, artifact policy that needs module context | low-level dependency only |
+| `arkdown-loader` | delete or quarantine legacy loader tests if rolldown is sole pipeline | `PluginDriver`, old `ArkdownPlugin` orchestration | no production build dependency after migration |
+| `arkdown` | rolldown-backed bundler, chunk output writer, source map writer | entry/path inference from strings, loader JSON path parsing | consumes `ModuleCompileContext` |
+| `arkdown-profile` | profile algorithms, module.json writer, loader JSON artifact construction | dependency scanning, repeated profile reads, app/module config reads | consumes `ProfileStore`, `ModuleSnapshot`, `DependencyGraphSnapshot` |
+| `arkdown-cache` | persistent cache storage and manifest IO | deciding what inputs matter | consumes `InputFingerprintSet` |
+| `arkdown-abc` | Rust ABC compiler, IR, emit, program cache | build-session path naming, package graph decisions | consumes explicit compiler inputs only |
+| `arkdown-ts2abc` | compatibility facade for upstream ts2abc arguments | record-name/path derivation duplicated in CLI | receives `Ts2abcPlan` from CLI/session stages |
+| `arkdown-resource` | resource compiler/scanner/writers | resource root selection, app/module overlay policy | consumes `ResourcePlan` |
+| `arkdown-pack` | HAP/HSP/HAR archive construction | late module JSON reads, integrated HSP discovery | consumes `PackagePlan` and artifact layout |
+| `arkdown-sign` | signing block, digest, keystore, zip signing | path guessing and output layout policy | consumes explicit artifact paths |
+| `arkdown-cli` | CLI args, build runner, progress, stage orchestration | config discovery, dependency traversal, profile/resource/package policy helpers | constructs session, then passes contexts |
+| `arkdown-obfuscate` | AST minify/rename/rule application | rule file discovery and directory traversal policy | consumes `ObfuscationPlan` |
+| `arkdown-watcher` | file watching and debounce | deciding watch directories from raw module paths | watches session input inventory |
+| plugin crates | rolldown hooks only | filesystem discovery and private caches | constructors accept `Arc<ModuleCompileContext>` or narrower context |
+
+### Full directory target
+
+The target layout is not only a CLI split. All crates should be made ownership
+shaped.
+
+```text
+crates/arkdown-core/src/
+  lib.rs
+  config.rs
+  error.rs
+  module.rs
+  artifact.rs
+  paths.rs
+  source_maps.rs
+```
+
+Remove `plugin.rs` from production exports after rolldown plugin propagation is
+complete.
+
+```text
+crates/arkdown-config/src/
+  lib.rs
+  raw/
+    mod.rs
+    build_profile.rs
+    module_json.rs
+    oh_package.rs
+    app_json.rs
+  normalize/
+    mod.rs
+    build_profile.rs
+    module.rs
+  sdk_manifest.rs
+  error.rs
+```
+
+`resolve.rs` should be deleted or reduced to config normalization only.
+Project discovery moves to `arkdown-session`.
+
+```text
+crates/arkdown-session/src/
+  lib.rs
+  builder.rs
+  session.rs
+  project/
+    mod.rs
+    snapshot.rs
+    builder.rs
+  module/
+    mod.rs
+    snapshot.rs
+    builder.rs
+    target.rs
+    source_set.rs
+  package/
+    mod.rs
+    snapshot.rs
+    index.rs
+  dependency_graph/
+    mod.rs
+    builder.rs
+    snapshot.rs
+    classifiers.rs
+  profiles/
+    mod.rs
+    store.rs
+    index.rs
+  resources/
+    mod.rs
+    plan.rs
+  sdk/
+    mod.rs
+    snapshot.rs
+  artifacts/
+    mod.rs
+    layout.rs
+  paths.rs
+  fingerprint.rs
+  diagnostics.rs
+```
+
+```text
+crates/arkdown-resolver/src/
+  lib.rs
+  resolver.rs
+  specifier.rs
+  package_index.rs
+  source_set.rs
+  ohm_url.rs
+  case_check.rs
+  error.rs
+```
+
+```text
+crates/arkdown/src/
+  lib.rs
+  bundler.rs
+  bundle_plan.rs
+  output/
+    mod.rs
+    chunks.rs
+    source_maps.rs
+    writer.rs
+```
+
+```text
+crates/arkdown-profile/src/
+  lib.rs
+  processor.rs
+  loader_json/
+    mod.rs
+    builder.rs
+    entries.rs
+    dependency_maps.rs
+    bytecode_har.rs
+    importees.rs
+    runtime_only.rs
+  module_json/
+    mod.rs
+    writer.rs
+    app_fields.rs
+  profiles/
+    mod.rs
+    share.rs
+    startup.rs
+    router.rs
+    forms.rs
+    shortcut.rs
+    privacy.rs
+    permission_reason.rs
+    distro_filter.rs
+  permissions/
+    mod.rs
+    validate.rs
+```
+
+```text
+crates/arkdown-cli/src/
+  main.rs
+  lib.rs
+  progress.rs
+  cmd/
+    mod.rs
+    build/
+      mod.rs
+      args.rs
+      runner.rs
+      session.rs
+      module_pipeline.rs
+      module_state.rs
+      stages/
+        mod.rs
+        resources.rs
+        profiles.rs
+        bundle.rs
+        importees.rs
+        compile_arkts.rs
+        abc.rs
+        package.rs
+        obfuscation.rs
+        coverage.rs
+        watch.rs
+      writers/
+        mod.rs
+        intermediates.rs
+        hvigor_artifacts.rs
+    check.rs
+    clean.rs
+```
+
+Other crate layout targets:
+
+- `arkdown-cache`: split `lib.rs` into `key.rs`, `manifest.rs`, `store.rs`,
+  `fingerprint.rs`.
+- `arkdown-resource`: keep `compiler.rs`, but move scanning into
+  `scanner.rs`, output layout into `output_layout.rs`, and make all entry points
+  accept `ResourcePlan`.
+- `arkdown-pack`: split archive writing from input planning:
+  `input.rs`, `package_plan.rs`, `packager.rs`, `zip_writer.rs`,
+  `integrated_hsp.rs`.
+- `arkdown-sign`: keep cryptographic modules as-is; add `sign_plan.rs` for
+  artifact paths instead of passing loose paths through CLI code.
+- `arkdown-obfuscate`: add `plan.rs` and `rules/store.rs`; directory traversal
+  moves to CLI/session stage planning.
+- `arkdown-watcher`: add `input_set.rs` and watch `InputFingerprintSet`
+  members instead of raw guessed directories.
+- plugin crates: split each into `plugin.rs` plus focused domain modules only
+  when needed. Single-file plugins are acceptable only when they do not own
+  filesystem discovery.
+
 ### `crates/arkdown-cli`
 
 Current `src/cmd/build.rs` is too large and owns too many stages. Replace it
@@ -348,6 +623,32 @@ Old free functions in `build.rs` move as follows:
 | `write_compile_arkts_cache` | `CompileArktsStage` |
 | startup module.json patching | `ProfileStage` or `ModuleJsonWriter` |
 
+`build_modules_for_target` and `resource_modules_for_build` should not survive
+as free functions. They should become part of a single build planning object:
+
+```rust
+pub struct BuildPlanBuilder<'a> {
+    session: &'a BuildSession,
+    selected_module: Option<&'a str>,
+}
+
+pub struct BuildPlan {
+    pub modules: Vec<ModuleBuildPlan>,
+}
+
+pub struct ModuleBuildPlan {
+    pub module: Arc<ModuleSnapshot>,
+    pub resource_inputs: ResourcePlan,
+    pub dependency_graph: Arc<DependencyGraphSnapshot>,
+    pub artifacts: ArtifactLayout,
+}
+```
+
+This turns target selection, output compatibility, dependency resource
+inclusion, and artifact layout into one owned plan. It removes the current
+pattern where the CLI separately asks which modules build, which modules
+contribute resources, where outputs live, and what dependencies are integrated.
+
 ### `crates/arkdown-profile`
 
 Reorganize around processors that consume snapshots:
@@ -400,6 +701,24 @@ pub struct StartupConfigPlan<'a> {
 dependency graph construction, bytecode HAR metadata, router map loading, AOT
 fields, build config loading, and path serialization. Each submodule should
 consume snapshots and return typed pieces.
+
+Current `process_*` free functions should become processors:
+
+| Current file | Replacement owner |
+| --- | --- |
+| `process_profile.rs` | `ProfileProcessor` facade over concrete processors |
+| `process_share_config.rs` | `profiles::share::ShareProfileProcessor` |
+| `process_startup_config.rs` | `profiles::startup::StartupProfileProcessor` |
+| `process_permission_reason.rs` | `profiles::permission_reason::PermissionReasonProcessor` |
+| `process_privacy_profile.rs` | `profiles::privacy::PrivacyProfileProcessor` |
+| `process_shortcut_profile.rs` | `profiles::shortcut::ShortcutProfileProcessor` |
+| `process_distro_filter.rs` | `profiles::distro_filter::DistroFilterProcessor` |
+| `form_profile.rs` | `profiles::forms::FormProfileProcessor` |
+| `router_map.rs` | `profiles::router::RouterMapProcessor` |
+
+Each processor accepts a `ProfileProcessorContext` containing
+`ModuleCompileContext`, `ProfileStore`, output artifact layout, and diagnostics.
+Processors must not read `oh-package.json5` or walk dependency roots.
 
 ### `crates/arkdown-resolver`
 
@@ -478,6 +797,24 @@ The plugin may still write hvigor-compatible collect artifacts, but it should
 not discover HAR nodes by string matching module IDs. The collect set should
 come from `DependencyGraphSnapshot` and rolldown module ownership metadata.
 
+### `crates/arkdown-plugin-duplicate-check`
+
+Keep the behavior small, but align the constructor and diagnostics:
+
+- `DuplicateCheckPlugin::new(ctx: Arc<ModuleCompileContext>)`.
+- Use context path normalization for module IDs before comparing filenames.
+- Do not introduce file reads.
+
+### `crates/arkdown-plugin-json5`
+
+JSON5 transformation can remain a plugin, but file reads during hooks should be
+replaced with rolldown-provided source content or session-managed source reads:
+
+- `Json5Plugin` should parse content from the load context when available.
+- If a direct read is still required, it must go through `SourceStore`.
+- `module_emit.rs` remains a structured serializer, not raw string assembly
+  beyond JSON module boilerplate.
+
 ### `crates/arkdown`
 
 `Bundler` should accept module context:
@@ -491,6 +828,76 @@ pub struct Bundler {
 
 `BundlePlan` should derive entries and import paths through `PathResolver` and
 `LoaderPlan`, not by checking `entry.starts_with('/')`.
+
+### `crates/arkdown-abc`
+
+The ABC compiler is mostly cohesive and should not be reshaped around build
+policy. Required changes are at the boundary:
+
+- Accept explicit `AbcCompilePlan` inputs from the CLI/session stage.
+- Move package graph and record naming policy out of ABC internals unless it is
+  required by bytecode format.
+- Keep IR, lowering, optimizer, emit, and reader modules owned by this crate.
+- `program_cache` should consume fingerprints from `arkdown-session` or
+  `arkdown-cache`, not recompute build input identity from lossy path strings.
+
+### `crates/arkdown-ts2abc`
+
+This crate should become a compatibility facade around ABC compile plans:
+
+- Keep parsing of upstream-compatible CLI args for tests and parity.
+- Add `Ts2abcPlan` or reuse `AbcCompilePlan` for production callers.
+- Move `default_record_name` into a record-name builder used by both arg parsing
+  and production compile stages.
+- Stop deriving output paths with string suffix logic in production callers.
+
+### `crates/arkdown-resource`
+
+Resource compilation stays here, but root selection moves out:
+
+- `ResourceCompiler::compile(plan: &ResourcePlan)` replaces loose root lists.
+- `scan_resources` becomes `ResourceScanner`.
+- Output layout is provided by `ArtifactLayout`.
+- All copied profile/media paths are serialized through `ArtifactPathSerializer`
+  only when writing artifacts.
+
+### `crates/arkdown-pack`
+
+Packaging should consume a typed package plan:
+
+- `Packager::pack(plan: PackagePlan)` replaces loosely assembled input structs.
+- Integrated HSP discovery moves to `DependencyGraphSnapshot` classifiers.
+- Late `module.json` reads inside packager are removed; module JSON content/path
+  comes from profile stage outputs.
+- ZIP entry paths use `ArtifactPath`.
+
+### `crates/arkdown-sign`
+
+Signing can remain algorithmically isolated:
+
+- Add `SignPlan` with input archive, output archive, keystore, and profile.
+- Do not let CLI construct signing paths manually.
+- Keep crypto, PKCS7, digest, zip signing, and keystore modules unchanged unless
+  path ownership leaks through their APIs.
+
+### `crates/arkdown-obfuscate`
+
+Obfuscation should be an owned build stage:
+
+- `ObfuscationPlan` contains mode, rule files from session, cache dir, source
+  inputs, and outputs.
+- `should_obfuscate` becomes `ObfuscationPlan::is_enabled`.
+- Rule file loading moves to `RuleStore`.
+- Directory traversal moves to session/CLI stage planning.
+
+### `crates/arkdown-watcher`
+
+Watcher should be driven by the session input inventory:
+
+- `FileWatcher::new(session: Arc<BuildSession>)`.
+- Watch dirs/files come from `InputFingerprintSet` and `ProjectSnapshot`.
+- On change, rebuild affected snapshots first, then affected module contexts.
+- Do not guess `src/main` or resource directories from raw module paths.
 
 ### `crates/arkdown-cache`
 
@@ -532,6 +939,39 @@ Allowed utilities:
 
 Do not turn `arkdown-utils` into a dumping ground for build policy.
 
+### `crates/arkdown-config`
+
+`arkdown-config` should parse and normalize, not own the build session:
+
+- Keep `RawBuildProfile`, `RawModuleJson`, `RawOhPackage`, and SDK manifest
+  parsing.
+- Move project/module discovery from `resolve.rs` into
+  `ProjectSnapshotBuilder`.
+- SDK search can remain as a low-level probe, but selected SDK metadata and
+  component maps are owned by `SdkSnapshot`.
+- Config structs should keep `PathBuf` fields, never pre-serialize artifact
+  slash paths.
+
+### `crates/arkdown-core`
+
+`arkdown-core` becomes the dependency-safe domain crate:
+
+- Keep build modes, output targets, module kinds, shared errors, graph-neutral
+  module/chunk structs.
+- Remove old plugin APIs after rolldown plugin propagation.
+- Move path-to-OHM and source-map path policy to domain-specific crates unless
+  the type is truly core.
+
+### `crates/arkdown-loader`
+
+The legacy loader stack should not remain as a parallel architecture:
+
+- If production uses rolldown exclusively, remove `PluginDriver` and quarantine
+  old loader tests under compatibility fixtures or delete them.
+- If any parser utility is still needed, move it into the owning plugin or
+  bundler module.
+- Do not keep `Arc<dyn ArkdownPlugin>` as a public production entry point.
+
 ---
 
 ## Free Function Ownership Policy
@@ -571,6 +1011,40 @@ Preferred owners:
 Avoid broad helper names such as `utils`, `helpers`, `common`, or `misc` for
 feature logic. Use domain names such as `package_index`, `profile_store`,
 `artifact_layout`, `source_set`, and `fingerprint`.
+
+### Delete-or-move matrix
+
+These helpers should be deleted or moved during migration:
+
+| Current helper/family | Problem | Final owner |
+| --- | --- | --- |
+| `build_modules_for_target` | target policy as detached helper | `BuildPlanBuilder` |
+| `resource_modules_for_build` | dependency resource inclusion detached from resource plan | `BuildPlanBuilder` and `ResourcePlanBuilder` |
+| CLI `read_module_json5` | repeats session startup read | `ModuleSnapshotBuilder` |
+| CLI `module_resource_dirs` | resource overlay policy in CLI | `ResourcePlanBuilder` |
+| CLI `collect_integrated_hsps` | dependency classification in CLI | `DependencyGraphBuilder` plus `PackagePlanBuilder` |
+| CLI native dependency root collectors | duplicate package traversal | `DependencyGraphBuilder` |
+| CLI/intermediates dependency root collectors | duplicate package traversal | `DependencyGraphBuilder` |
+| `process_share_config` dependency collectors | duplicate package traversal | `ShareProfileProcessor` over `DependencyGraphSnapshot` |
+| `process_startup_config` dependency collectors | duplicate package traversal | `StartupProfileProcessor` over `DependencyGraphSnapshot` |
+| `process_permission_reason` dependency collectors | duplicate package traversal | `PermissionReasonProcessor` over `DependencyGraphSnapshot` |
+| `process_privacy_profile` dependency readers | duplicate package traversal | `PrivacyProfileProcessor` over `DependencyGraphSnapshot` |
+| `loader_json` dependency readers | repeated package/module reads | `LoaderJsonBuilder` over snapshots |
+| `loader_json/runtime_only` collectors | repeated package traversal | `RuntimeOnlyDependencyView` from graph |
+| `scan_bytecode_har_deps` | separate graph and package classifier | `DependencyGraphBuilder::classify_bytecode_har` |
+| `build_pkg_brief_info` | package lookup by upward walking | `PackageIndex` and `ModuleMetaRecords` |
+| `find_pkg_root` style walkers | hot-path filesystem scanning | session package index |
+| `arkdown-plugin-router-map::should_invalidate` | separate cache key logic | `ProfileStore` fingerprints |
+| `arkdown-obfuscate::should_obfuscate` | stage decision as global helper | `ObfuscationPlan::is_enabled` |
+| `arkdown-cache::compute_content_hash` | acceptable primitive, but too broad as build identity | keep as hash primitive; build keys come from `InputFingerprintBuilder` |
+| `arkdown-ts2abc::default_record_name` | record policy hidden in driver | `RecordNameBuilder` |
+| `arkdown-utils::slash_path` | global string conversion encourages misuse | `ArtifactPathSerializer` |
+
+Pure AST or binary-format helpers may remain free functions when they do not
+read files, do not hold state, and live in a narrowly named module. Examples:
+small opcode encoders in `arkdown-abc`, small syntax classifiers in
+`arkdown-plugin-ets-transform`, and JSON module emit primitives in
+`arkdown-plugin-json5`.
 
 ---
 
@@ -705,7 +1179,8 @@ Tasks:
 1. Add path-domain wrappers and serializer.
 2. Replace low-risk slash conversion call sites with serializer calls.
 3. Add cross-platform path tests.
-4. Keep compatibility adapters for existing APIs during migration.
+4. Do not add broad compatibility adapters. Change internal callers to the new
+   path APIs and delete old helpers as each caller moves.
 
 Acceptance:
 
@@ -935,6 +1410,7 @@ This refactor should land in multiple focused PRs:
 7. Cache/fingerprint hardening.
 8. Legacy cleanup.
 
-Each PR must preserve existing behavior and add tests for the ownership boundary
-it changes. Do not combine large file moves with behavioral changes unless the
-tests isolate the behavior clearly.
+Each PR should preserve CLI/artifact behavior, but internal API compatibility is
+not a goal. Do not combine large file moves with behavioral changes unless the
+tests isolate the behavior clearly. Do not leave old helper APIs exported after
+their production callers have moved.
