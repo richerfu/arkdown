@@ -691,6 +691,16 @@ fn collect_build(
                 &["cache/default/default@CompileArkTS", "cache/default"],
                 false,
             )?;
+            // modules.cache: module → protoBin cache paths for es2abc incremental cache.
+            collect_named_artifact(
+                &mut artifacts,
+                root,
+                archive.as_ref(),
+                "modules.cache",
+                None,
+                &["cache/default/default@CompileArkTS", "cache/default"],
+                false,
+            )?;
             // importee.json: compiledImportees / nonEntryImportees (includes BC HAR OHM URLs).
             collect_named_artifact(
                 &mut artifacts,
