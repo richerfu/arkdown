@@ -585,19 +585,6 @@ pub(super) fn encode_debug_info_with_cp(
     out
 }
 
-/// Encode a Panda `DebugInfoItem` with a minimal constant_pool containing only
-/// the SET_FILE operand. Used as a fallback when no LNP tracking is available.
-#[allow(dead_code)]
-fn encode_debug_info(
-    line_start: u32,
-    param_name_offsets: &[u32],
-    source_file_offset: u32,
-    lnp_index: u32,
-) -> Vec<u8> {
-    let cp = uleb128(source_file_offset as u64);
-    encode_debug_info_with_cp(line_start, param_name_offsets, &cp, lnp_index, true)
-}
-
 pub(super) fn debug_scope_start_pc(method: &MethodRecord) -> u32 {
     let mut pc = argument_copy_prologue_size(method);
 

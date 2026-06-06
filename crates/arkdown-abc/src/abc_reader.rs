@@ -320,7 +320,7 @@ impl<'a> AbcReader<'a> {
     /// - LNP (LineNumberProgram) index region is within bounds when present.
     /// - LiteralArray index region is within bounds when present.
     ///
-    /// Use this in security/correctness paths (e.g. ByteCode HAR integration)
+    /// Use this in bytecode correctness paths (e.g. ByteCode HAR integration)
     /// rather than `is_valid_magic()`, which only checks the first 8 bytes.
     pub fn validate(data: &[u8]) -> Result<(), AbcReadError> {
         // Use a local reader bound to `data`'s lifetime.
