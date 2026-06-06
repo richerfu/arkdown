@@ -1,0 +1,7 @@
+interface:
+  display_name: "Arkdown Performance Memory"
+  short_description: "Parallelism and memory ownership rules"
+  default_prompt: "Use $arkdown-performance-memory to enforce arkdown performance and memory rules."
+
+policy:
+  allow_implicit_invocation: true

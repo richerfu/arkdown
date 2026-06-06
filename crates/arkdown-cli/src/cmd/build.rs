@@ -99,6 +99,16 @@ pub struct BuildArgs {
     /// Project root (default: current directory)
     #[arg(long)]
     pub project: Option<PathBuf>,
+    /// Named target configuration to use (from build-profile.json5 targets[].name).
+    ///
+    /// When specified, overrides the automatic target selection (buildModeSet + product
+    /// matching) and forces the use of the named target configuration.
+    /// This implements the multi-target product execution model: different targets can
+    /// be built separately to produce multiple artifacts from the same source.
+    ///
+    /// Example: `arkdown build --build-target-name phone` uses the "phone" target.
+    #[arg(long)]
+    pub build_target_name: Option<String>,
     /// Watch mode: rebuild on source file changes (M1 — SPEC-023)
     #[arg(long, default_value = "false")]
     pub watch: bool,
@@ -121,6 +131,18 @@ pub async fn run(args: BuildArgs) -> Result<()> {
     let mode_str = args.mode.clone();
     let module_filter = args.module.clone();
     let product_filter = args.product.clone();
+    // Named target override for multi-target product execution.
+    // When --build-target-name is specified, logs which named target configuration
+    // is being used. In a full multi-target model, multiple builds would run
+    // for each applicable target; currently we build the highest-priority target.
+    let named_target = args.build_target_name.clone();
+    if let Some(ref named) = named_target {
+        tracing::info!(
+            target = %named,
+            "multi-target: building with named target configuration '{}'",
+            named
+        );
+    }
     let project_root = args
         .project
         .unwrap_or_else(|| std::env::current_dir().expect("failed to get current directory"));

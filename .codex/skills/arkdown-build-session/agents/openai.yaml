@@ -1,0 +1,7 @@
+interface:
+  display_name: "Arkdown Build Session"
+  short_description: "Build session and context propagation rules"
+  default_prompt: "Use $arkdown-build-session to implement arkdown build session context propagation."
+
+policy:
+  allow_implicit_invocation: true
