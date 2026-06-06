@@ -1,3 +1,5 @@
+pub mod deveco_ws;
+pub use deveco_ws::{DevEcoEvent, DevEcoServerHandle, DevEcoWsServer, DEVECO_WS_PORT};
 pub mod hot_reload;
 
 use rustc_hash::FxHashSet;

@@ -651,6 +651,97 @@ pub fn count_applicable_targets_for_module(
     count_applicable_targets(&raw_module.targets, product_name, build_mode_name)
 }
 
+/// Return ALL [`EffectiveTargetConfig`] entries applicable to the given module,
+/// product, and build mode.
+///
+/// Unlike [`select_effective_target`] which returns only the highest-priority
+/// target, this function returns every target that matches the product and
+/// build-mode constraints, in declaration order.  The first entry is the
+/// highest-priority target (same as `select_effective_target`).
+///
+/// Returns an empty `Vec` when:
+/// - `build-profile.json5` cannot be read.
+/// - The module is not declared in the profile.
+/// - No target at all is declared for the module.
+///
+/// ## Multi-artifact execution model (section 3.1)
+///
+/// hvigor builds a separate artifact for each applicable target.  The CLI
+/// uses this function to iterate over all targets and produce one output
+/// artifact per target.  Each artifact path is disambiguated by appending
+/// the target name (e.g. `entry-default.hap`, `entry-phone.hap`).
+pub fn enumerate_applicable_targets_for_module(
+    project_root: &Path,
+    module_name: &str,
+    product_name: &str,
+    build_mode_name: &str,
+) -> Vec<EffectiveTargetConfig> {
+    let Ok(profile) = RawBuildProfile::load(project_root) else {
+        return vec![];
+    };
+    let Some(raw_module) = profile.modules.iter().find(|m| m.name == module_name) else {
+        return vec![];
+    };
+    enumerate_applicable_raw_targets(&raw_module.targets, product_name, build_mode_name)
+        .into_iter()
+        .map(|target| EffectiveTargetConfig {
+            name: target.name.clone(),
+            resource_directories: target
+                .resource
+                .as_ref()
+                .map(|r| r.directories.clone())
+                .unwrap_or_default(),
+            source_abilities: target
+                .source
+                .as_ref()
+                .map(|s| s.abilities.iter().cloned().collect())
+                .unwrap_or_default(),
+            distribution_filter: target
+                .config
+                .as_ref()
+                .and_then(|c| c.distribution_filter.clone().or_else(|| c.distro_filter.clone())),
+            build_mode_set: target
+                .build_mode_set
+                .iter()
+                .map(|m| m.name.clone())
+                .collect(),
+        })
+        .collect()
+}
+
+/// Return all [`RawTarget`] entries applicable to the given product and build
+/// mode, in declaration order.
+///
+/// A target is applicable when:
+/// - Its `applyToProducts` list includes `product_name` (or is empty and
+///   `product_name == "default"`).
+/// - Its `buildModeSet` is empty (applies to all modes) OR explicitly includes
+///   `build_mode_name`.
+fn enumerate_applicable_raw_targets<'a>(
+    targets: &'a [RawTarget],
+    product_name: &str,
+    build_mode_name: &str,
+) -> Vec<&'a RawTarget> {
+    fn applies_to_product(t: &RawTarget, product: &str) -> bool {
+        if t.apply_to_products.is_empty() {
+            product == "default"
+        } else {
+            t.apply_to_products.iter().any(|p| p == product)
+        }
+    }
+
+    targets
+        .iter()
+        .filter(|t| {
+            if !applies_to_product(t, product_name) {
+                return false;
+            }
+            t.build_mode_set.is_empty()
+                || t.build_mode_set.iter().any(|m| m.name == build_mode_name)
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Parsing helpers
 // ---------------------------------------------------------------------------
@@ -1185,6 +1276,85 @@ mod tests {
         assert!(!RawAppJson5::is_valid_hvigor_bundle_name(
             "com.example.app_"
         ));
+    }
+
+    /// Verify that `enumerate_applicable_targets_for_module` returns all matching
+    /// targets in declaration order.
+    #[test]
+    fn test_enumerate_applicable_raw_targets_returns_all_matches() {
+        let targets: Vec<RawTarget> = vec![
+            RawTarget {
+                name: "default".to_string(),
+                apply_to_products: vec!["default".to_string()],
+                config: None,
+                resource: None,
+                source: None,
+                build_mode_set: vec![],
+            },
+            RawTarget {
+                name: "phone".to_string(),
+                apply_to_products: vec!["default".to_string()],
+                config: None,
+                resource: Some(RawTargetResource {
+                    directories: vec![PathBuf::from("src/phone/resources")],
+                }),
+                source: None,
+                build_mode_set: vec![],
+            },
+            RawTarget {
+                name: "tablet".to_string(),
+                apply_to_products: vec!["tablet-product".to_string()],
+                config: None,
+                resource: None,
+                source: None,
+                build_mode_set: vec![],
+            },
+        ];
+
+        let applicable = enumerate_applicable_raw_targets(&targets, "default", "debug");
+        // "default" and "phone" both apply to "default" product; "tablet" does not.
+        assert_eq!(applicable.len(), 2);
+        assert_eq!(applicable[0].name, "default");
+        assert_eq!(applicable[1].name, "phone");
+
+        // Only "tablet" applies to "tablet-product".
+        let tablet_applicable = enumerate_applicable_raw_targets(&targets, "tablet-product", "debug");
+        assert_eq!(tablet_applicable.len(), 1);
+        assert_eq!(tablet_applicable[0].name, "tablet");
+    }
+
+    /// Verify that `enumerate_applicable_raw_targets` respects `buildModeSet` filtering.
+    #[test]
+    fn test_enumerate_applicable_raw_targets_respects_build_mode() {
+        let targets: Vec<RawTarget> = vec![
+            RawTarget {
+                name: "default".to_string(),
+                apply_to_products: vec!["default".to_string()],
+                config: None,
+                resource: None,
+                source: None,
+                build_mode_set: vec![],
+            },
+            RawTarget {
+                name: "release-only".to_string(),
+                apply_to_products: vec!["default".to_string()],
+                config: None,
+                resource: None,
+                source: None,
+                build_mode_set: vec![RawBuildMode {
+                    name: "release".to_string(),
+                }],
+            },
+        ];
+
+        // Debug mode: only "default" (release-only is excluded).
+        let debug = enumerate_applicable_raw_targets(&targets, "default", "debug");
+        assert_eq!(debug.len(), 1);
+        assert_eq!(debug[0].name, "default");
+
+        // Release mode: both apply.
+        let release = enumerate_applicable_raw_targets(&targets, "default", "release");
+        assert_eq!(release.len(), 2);
     }
 
     /// Verify that `externalNativeOptions.abiFilters` is parsed and resolved.

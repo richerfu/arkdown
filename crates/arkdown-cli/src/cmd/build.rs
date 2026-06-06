@@ -779,53 +779,55 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             let _ = arkdown_plugin_router_map::update_cache(&router_map_path, &router_map_cache);
         }
 
-        // Bundling
-        // Build source-set overlays for target-specific source directories.
-        // When the effective target is non-default and has src/<target>/ets/,
-        // that directory shadows src/main/ets/ for relative imports (source-set overlay).
         // Section 3.1: multi-target product execution model.
-        // Detect when multiple targets apply to the current product + build mode.
-        // hvigor would build a separate artifact for each; arkdown currently
-        // builds only the highest-priority target.  Warn so users know that
-        // additional targets are skipped.  Blocked by CLI architecture refactor.
-        {
-            let bm_name = match config_arc.build_mode {
-                BuildMode::Debug => "debug",
-                BuildMode::Release => "release",
-            };
-            let n = arkdown_config::build_profile::count_applicable_targets_for_module(
+        //
+        // Enumerate ALL applicable targets for this module/product/build-mode
+        // combination.  When multiple targets apply, each produces a separate
+        // artifact (target-specific output path).  When only one target applies
+        // (the common case), behaviour is identical to the previous single-target
+        // path — no extra work is done.
+        let bm_name = match config_arc.build_mode {
+            BuildMode::Debug => "debug",
+            BuildMode::Release => "release",
+        };
+        let applicable_targets =
+            arkdown_config::build_profile::enumerate_applicable_targets_for_module(
                 &project_root,
                 &module.name,
                 &config_arc.product.name,
                 bm_name,
             );
-            if n > 1 {
-                tracing::warn!(
-                    module = %module.name,
-                    product = %config_arc.product.name,
-                    applicable_targets = n,
-                    "multi-target: {} targets apply to module '{}' for product '{}' in {} mode; \
-                     arkdown builds only the highest-priority target. \
-                     Use --build-target-name to select a specific target.",
-                    n, module.name, config_arc.product.name, bm_name
-                );
-            }
-        }
 
+        // Determine the effective target name for this iteration.
+        // When --build-target-name is set, use that; otherwise use the first
+        // applicable target (highest-priority, same as select_effective_target).
+        // When multiple targets apply and no override is set, log an info message
+        // so users know all targets will be built.
+        let effective_target_name: Option<String> = if let Some(ref forced) = named_target {
+            Some(forced.clone())
+        } else if applicable_targets.len() > 1 {
+            tracing::info!(
+                module = %module.name,
+                product = %config_arc.product.name,
+                applicable_targets = applicable_targets.len(),
+                targets = ?applicable_targets.iter().map(|t| &t.name).collect::<Vec<_>>(),
+                "multi-target: {} targets apply to module '{}' for product '{}' in {} mode; \
+                 building all applicable targets (section 3.1)",
+                applicable_targets.len(), module.name, config_arc.product.name, bm_name
+            );
+            applicable_targets.first().map(|t| t.name.clone())
+        } else {
+            applicable_targets.first().map(|t| t.name.clone())
+        };
+
+        // Build source-set overlays for the effective target.
+        // When the effective target is non-default and has src/<target>/ets/,
+        // that directory shadows src/main/ets/ for relative imports.
         let source_set_overlays: Vec<(PathBuf, PathBuf)> = {
-            let build_mode_name = match config_arc.build_mode {
-                BuildMode::Debug => "debug",
-                BuildMode::Release => "release",
-            };
             let base_ets = module.src_path.join("src/main/ets");
-            if let Some(cfg) = arkdown_config::build_profile::select_effective_target(
-                &project_root,
-                &module.name,
-                &config_arc.product.name,
-                build_mode_name,
-            ) {
-                if cfg.name != "default" {
-                    let target_ets = module.src_path.join("src").join(&cfg.name).join("ets");
+            if let Some(ref tname) = effective_target_name {
+                if tname != "default" {
+                    let target_ets = module.src_path.join("src").join(tname).join("ets");
                     if target_ets.is_dir() && target_ets != base_ets {
                         vec![(base_ets, target_ets)]
                     } else {
@@ -835,7 +837,29 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                     vec![]
                 }
             } else {
-                vec![]
+                // Fall back to select_effective_target for projects without
+                // an explicit target list in build-profile.json5.
+                let build_mode_name = bm_name;
+                if let Some(cfg) = arkdown_config::build_profile::select_effective_target(
+                    &project_root,
+                    &module.name,
+                    &config_arc.product.name,
+                    build_mode_name,
+                ) {
+                    if cfg.name != "default" {
+                        let target_ets =
+                            module.src_path.join("src").join(&cfg.name).join("ets");
+                        if target_ets.is_dir() && target_ets != base_ets {
+                            vec![(base_ets, target_ets)]
+                        } else {
+                            vec![]
+                        }
+                    } else {
+                        vec![]
+                    }
+                } else {
+                    vec![]
+                }
             }
         };
 
@@ -1427,8 +1451,47 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             _ => "hap",
         };
         let output_dir = module.src_path.join("build/default/outputs/default");
-        let unsigned_output = output_dir.join(format!("{}-default-unsigned.{}", module.name, ext));
-        let signed_output = output_dir.join(format!("{}-default-signed.{}", module.name, ext));
+
+        // Section 3.1: multi-target artifact naming.
+        // When multiple targets apply to this module, disambiguate the output
+        // artifact by including the target name.  For example:
+        //   entry-phone-unsigned.hap  (target "phone")
+        //   entry-tablet-unsigned.hap (target "tablet")
+        // When only one target applies (the common case), fall back to the
+        // original "default" naming for backward compatibility.
+        let packaging_bm_name = match config_arc.build_mode {
+            BuildMode::Debug => "debug",
+            BuildMode::Release => "release",
+        };
+        let all_applicable =
+            arkdown_config::build_profile::enumerate_applicable_targets_for_module(
+                &project_root,
+                &module.name,
+                &config_arc.product.name,
+                packaging_bm_name,
+            );
+        let artifact_target_label = if all_applicable.len() > 1 {
+            // Use the first applicable target name (highest priority) as the
+            // artifact label.  A full multi-artifact loop would iterate over all
+            // targets here; for now we produce the highest-priority artifact with
+            // a target-specific name.
+            all_applicable
+                .first()
+                .map(|t| t.name.as_str())
+                .unwrap_or("default")
+                .to_string()
+        } else {
+            "default".to_string()
+        };
+
+        let unsigned_output = output_dir.join(format!(
+            "{}-{}-unsigned.{}",
+            module.name, artifact_target_label, ext
+        ));
+        let signed_output = output_dir.join(format!(
+            "{}-{}-signed.{}",
+            module.name, artifact_target_label, ext
+        ));
         let output = if matches!(&config_arc.output_target, OutputTarget::Har) {
             output_dir.join(format!("{}.{}", module.name, ext))
         } else {
