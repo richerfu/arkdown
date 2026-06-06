@@ -108,7 +108,7 @@ impl ProfileProcessor {
             &self.config.sdk_config.ets_loader_path,
             self.config.sdk_config.compile_api_version,
         );
-        let manifest = if let Some(ark_vm_version) = discovered_ark_vm_version {
+        let mut manifest = if let Some(ark_vm_version) = discovered_ark_vm_version {
             process_profile_with_ark_vm_version(
                 module_json5,
                 &ark_vm_version,
@@ -123,6 +123,42 @@ impl ProfileProcessor {
                 CompileMode::EsModule,
             )
         };
+
+        // Auto-derive HSP dependencies from workspace modules.
+        //
+        // hvigor's ProcessProfile.addModuleDependencies() automatically collects
+        // Shared-type workspace modules (HSPs) and adds them to module.dependencies
+        // so the HAP's module.json correctly lists all HSP dependencies.
+        //
+        // For workspace HSPs, the bundleName is the app's bundleName (they share
+        // the same app bundle).  We add workspace HSPs not already in the list.
+        if matches!(
+            manifest.module_type,
+            arkdown_core::OhosModuleType::Entry | arkdown_core::OhosModuleType::Feature
+        ) {
+            let existing_module_names: std::collections::HashSet<String> = manifest
+                .dependencies
+                .iter()
+                .map(|d| d.module_name.clone())
+                .collect();
+            for workspace_module in &self.config.modules {
+                if workspace_module.name == module_cfg.name {
+                    continue; // skip self
+                }
+                if workspace_module.module_type != arkdown_core::OhosModuleType::Shared {
+                    continue; // only SharedHsp
+                }
+                if existing_module_names.contains(&workspace_module.name) {
+                    continue; // already declared
+                }
+                // Workspace SharedHsp: bundleName = app bundleName (same project)
+                manifest.dependencies.push(arkdown_core::HspDependency {
+                    bundle_name: self.config.product.bundle_name.clone(),
+                    module_name: workspace_module.name.clone(),
+                });
+            }
+        }
+
         let loader = LoaderJson::try_generate(&self.config, module_cfg, &manifest)?;
         Ok((manifest, loader))
     }
@@ -572,5 +608,53 @@ fi
 
         // Cleanup
         let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    /// Verify that workspace SharedHsp modules are automatically added to
+    /// manifest.dependencies in process_module().
+    ///
+    /// This mirrors hvigor's ProcessProfile.addModuleDependencies() which
+    /// collects all Shared-type workspace modules and adds them to the HAP's
+    /// module.dependencies so the final module.json lists HSP dependencies.
+    ///
+    /// Addresses section 3.2: '由依赖图自动派生的 HSP metadata、transitive/order'
+    #[test]
+    fn test_process_module_auto_derives_workspace_hsp_dependencies() {
+        let mut config = make_config();
+        // Add a SharedHsp workspace module alongside the entry module.
+        config.modules = vec![
+            ModuleConfig {
+                name: "entry".to_string(),
+                src_path: PathBuf::from("/project/entry"),
+                module_type: OhosModuleType::Entry,
+            },
+            ModuleConfig {
+                name: "mySharedHsp".to_string(),
+                src_path: PathBuf::from("/project/mySharedHsp"),
+                module_type: OhosModuleType::Shared,
+            },
+        ];
+
+        let processor = ProfileProcessor::new(Arc::new(config.clone()));
+        let module_cfg = make_module_cfg(); // entry module
+        let module_json5 = make_module_json5(); // no explicit dependencies
+
+        let (manifest, _) = processor
+            .process_module(&module_cfg, &module_json5)
+            .expect("process_module failed");
+
+        // The SharedHsp workspace module must be auto-derived into dependencies.
+        assert!(
+            manifest.dependencies.iter().any(|d| d.module_name == "mySharedHsp"),
+            "workspace SharedHsp must be auto-added to manifest.dependencies; got: {:?}",
+            manifest.dependencies
+        );
+        // bundleName should be the app's bundleName.
+        let hsp_dep = manifest
+            .dependencies
+            .iter()
+            .find(|d| d.module_name == "mySharedHsp")
+            .unwrap();
+        assert_eq!(hsp_dep.bundle_name, "com.example.testapp");
     }
 }
