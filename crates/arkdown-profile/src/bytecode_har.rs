@@ -1717,6 +1717,48 @@ mod tests {
         assert!(names.contains("pkg-b"));
     }
 
+    /// Verify that a BC HAR bundled INSIDE another HAR's own `oh_modules/` is detected.
+    /// This proves the "bundled edge" case: the HAR hosts the BC HAR in its package.
+    ///
+    /// Addresses section 3.4: 'runtimeOnly ByteCode HAR、bundled edge 未证明'
+    #[test]
+    fn test_scan_bytecode_har_finds_bundled_bc_har_in_nested_oh_modules() {
+        let tmp = make_temp_dir();
+        let oh_modules = tmp.path().join("oh_modules");
+
+        write_file(
+            &tmp.path().join("oh-package.json5"),
+            r#"{ "dependencies": { "host-har": "1.0.0" } }"#,
+        );
+
+        // host-har has a BC HAR bundled in ITS OWN oh_modules/ (bundled dependency).
+        let host_har = oh_modules.join("host-har");
+        write_file(
+            &host_har.join("oh-package.json5"),
+            r#"{ "name": "host-har", "dependencies": { "bundled-bc-har": "1.0.0" } }"#,
+        );
+        write_file(
+            &host_har.join("src/main/ets/index.ets"),
+            "export default 1;",
+        );
+
+        // bundled-bc-har lives inside host-har's own oh_modules/ (bundled).
+        let bundled_bc = host_har.join("oh_modules/bundled-bc-har");
+        write_abc(&bundled_bc.join("ets/modules.abc"));
+        write_file(
+            &bundled_bc.join("oh-package.json5"),
+            r#"{ "name": "bundled-bc-har", "metadata": { "byteCodeHar": true } }"#,
+        );
+
+        let results = scan_bytecode_har_deps(tmp.path(), tmp.path());
+        let names: Vec<_> = results.iter().map(|e| e.package_name.as_str()).collect();
+        assert!(
+            names.contains(&"bundled-bc-har"),
+            "BC HAR bundled inside a HAR's own oh_modules/ must be detected; got: {:?}",
+            names
+        );
+    }
+
     /// Verify that BC HAR packages listed in `metadata.runtimeOnly.packages`
     /// are also scanned and appear in byteCodeHarInfo.
     ///
