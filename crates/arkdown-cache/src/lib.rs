@@ -10,6 +10,10 @@ use arkdown_core::ArkdownConfig;
 /// Mirrors hvigor's `getCompileEnv()` which joins these fields with `"#"` to
 /// produce a cache-invalidation key.  When any field changes between builds,
 /// ALL per-module cache entries must be discarded.
+///
+/// `build_mode` is included so that switching between debug and release builds
+/// always invalidates the cache — hvigor similarly gates its ProgramCache on
+/// the build mode as part of the compileEnv key.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CompileEnv {
     pub compile_sdk_version: String,
@@ -19,6 +23,9 @@ pub struct CompileEnv {
     pub obfuscation_enabled: bool,
     pub module_type: String,
     pub cache_path: String,
+    /// `"debug"` or `"release"`.  Ensures a release build never reuses
+    /// cached debug ABC (or vice-versa), matching hvigor compileEnv semantics.
+    pub build_mode: String,
 }
 
 impl CompileEnv {
@@ -37,6 +44,11 @@ impl CompileEnv {
             .first()
             .map(|m| format!("{:?}", m.module_type))
             .unwrap_or_default();
+        let build_mode = match config.build_mode {
+            arkdown_core::BuildMode::Debug => "debug",
+            arkdown_core::BuildMode::Release => "release",
+        }
+        .to_string();
         CompileEnv {
             compile_sdk_version: config.sdk_config.compile_sdk_version.clone(),
             compatible_sdk_version: config.product.compatible_sdk_version.clone(),
@@ -49,13 +61,16 @@ impl CompileEnv {
             obfuscation_enabled,
             module_type,
             cache_path: cache_path.to_string(),
+            build_mode,
         }
     }
 
     /// Produce the `#`-joined key string used for cache invalidation.
+    ///
+    /// Field order matches hvigor's `getCompileEnv()` concatenation.
     pub fn to_key_string(&self) -> String {
         format!(
-            "{}#{}#{}#{}#{}#{}#{}",
+            "{}#{}#{}#{}#{}#{}#{}#{}",
             self.compile_sdk_version,
             self.compatible_sdk_version,
             self.runtime_os,
@@ -63,6 +78,7 @@ impl CompileEnv {
             self.obfuscation_enabled,
             self.module_type,
             self.cache_path,
+            self.build_mode,
         )
     }
 }
@@ -710,11 +726,35 @@ mod tests {
             obfuscation_enabled: false,
             module_type: "Entry".to_string(),
             cache_path: "/tmp/cache".to_string(),
+            build_mode: "debug".to_string(),
         };
         let key = env.to_key_string();
+        // build_mode is appended last, matching hvigor compileEnv key semantics.
         assert_eq!(
             key,
-            "6.0.0.47#12#OpenHarmony#/sdk/ets-loader#false#Entry#/tmp/cache"
+            "6.0.0.47#12#OpenHarmony#/sdk/ets-loader#false#Entry#/tmp/cache#debug"
+        );
+    }
+
+    /// Switching build_mode from debug to release must produce a different key,
+    /// preventing stale debug ABC from being reused for release builds.
+    #[test]
+    fn test_compile_env_debug_and_release_produce_different_keys() {
+        let make_env = |mode: &str| CompileEnv {
+            compile_sdk_version: "6.0.0.47".to_string(),
+            compatible_sdk_version: "12".to_string(),
+            runtime_os: "OpenHarmony".to_string(),
+            ets_loader_path: "/sdk/ets-loader".to_string(),
+            obfuscation_enabled: false,
+            module_type: "Entry".to_string(),
+            cache_path: "/tmp/cache".to_string(),
+            build_mode: mode.to_string(),
+        };
+        let debug_key = make_env("debug").to_key_string();
+        let release_key = make_env("release").to_key_string();
+        assert_ne!(
+            debug_key, release_key,
+            "debug and release must produce distinct cache keys"
         );
     }
 }

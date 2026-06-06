@@ -185,6 +185,14 @@ pub struct ModuleJson5Module {
     /// Raw `deliveryWithInstall` flag used by hvigor's form module checks.
     #[serde(rename = "deliveryWithInstall", default)]
     pub delivery_with_install: Option<bool>,
+    /// Raw `compileMode` field from `module.json5`.
+    ///
+    /// Valid hvigor values are `"esmodule"` (default, Stage model) and
+    /// `"jsbundle"` (legacy FA model).  arkdown only supports `"esmodule"`.
+    /// The value is stored as a raw `Option<String>` so the CLI can detect
+    /// and reject `"jsbundle"` before starting the build pipeline.
+    #[serde(rename = "compileMode", default)]
+    pub compile_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

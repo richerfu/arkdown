@@ -190,19 +190,42 @@ pub async fn run(args: BuildArgs) -> Result<()> {
     }
 
     // F24: Custom compile plugins (hvigorfile.ts equivalent).
-    // If a `hvigorfile.ts` exists at the project root, warn the user that
-    // TypeScript plugin execution is not supported.  Users can instead place
-    // a `arkdown.config.json` file at the project root with build overrides.
+    // Detect all known hvigorfile variants at the project root and each module
+    // root.  hvigor executes these TypeScript/JavaScript files as plugins that
+    // can modify tasks, profiles, and rollup config.  arkdown does not execute
+    // them; if detected we warn so the user knows their customisations will be
+    // skipped.
     //
-    // For projects that only use hvigorfile.ts to configure standard hvigor
-    // options (not custom rollup plugins), this warning can be ignored.
-    let hvigorfile_path = project_root.join("hvigorfile.ts");
-    if hvigorfile_path.exists() {
-        tracing::warn!(
-            path = %hvigorfile_path.display(),
-            "F24: hvigorfile.ts detected — TypeScript plugin execution is not supported; \
-             use arkdown.config.json for build customizations that arkdown supports"
-        );
+    // Variants checked (matches hvigor's plugin discovery logic):
+    //   <root>/hvigorfile.ts  — TypeScript (most common)
+    //   <root>/hvigorfile.ets — ETS syntax
+    //   <root>/hvigorfile.js  — plain JavaScript
+    //   <module>/hvigorfile.ts — module-level plugin
+    //   <module>/hvigorfile.ets
+    //   <module>/hvigorfile.js
+    //
+    // Section 3.1: "定义兼容扩展面；无法执行 TS 时，提供 hvigor effective-config
+    // oracle dump 对齐模式" — detection is the first step; effective-config dump
+    // is gated on oracle availability (blocked by external hvigor dependency).
+    {
+        let roots_to_check: Vec<PathBuf> = std::iter::once(project_root.clone())
+            .chain(config_arc.modules.iter().map(|m| m.src_path.clone()))
+            .collect();
+        for check_root in &roots_to_check {
+            for variant in &["hvigorfile.ts", "hvigorfile.ets", "hvigorfile.js"] {
+                let path = check_root.join(variant);
+                if path.exists() {
+                    tracing::warn!(
+                        path = %path.display(),
+                        "F24: {} detected — hvigor TypeScript plugin execution is not \
+                         supported; custom rollup plugins, task overrides, and profile \
+                         mutations in this file will NOT be applied. Use \
+                         arkdown.config.json for arkdown-supported build customizations.",
+                        variant
+                    );
+                }
+            }
+        }
     }
     // Load arkdown.config.json for JSON-based custom build configuration.
     let custom_cfg = load_custom_config(&project_root);
@@ -248,6 +271,27 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("ProcessProjectPrivacyProfile failed: {}", e))?;
     }
     for module in build_modules {
+        // Read module.json5 early so device_types are available for resource
+        // compilation (which must precede profile processing so IDs are known).
+        let module_json5_path = module.src_path.join("src/main/module.json5");
+        let module_json5_early = read_module_json5(&module_json5_path)?;
+        // Reject legacy FA model (JSBUNDLE) as early as possible.
+        // Section 3.7: JSBUNDLE fixture must consistently reject.
+        arkdown_profile::validate_compile_mode(
+            &module_json5_early,
+            &module_json5_path.display().to_string(),
+        )
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+        // device_types from the manifest drives resource compilation so that
+        // device-specific resource directories (resources/phone/, resources/tablet/)
+        // are processed correctly.  Falls back to ["phone"] when the manifest
+        // declares no device types.
+        let manifest_device_types: Vec<String> = if module_json5_early.module.device_types.is_empty() {
+            vec!["phone".to_string()]
+        } else {
+            module_json5_early.module.device_types.clone()
+        };
+
         // --- Resource compilation (precedes profile so IDs are available) ---
         let resource_compiler = ResourceCompiler::new(ResourceCompileConfig {
             package_name: config_arc.product.bundle_name.clone(),
@@ -257,7 +301,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 .iter()
                 .map(|module| module.name.clone())
                 .collect(),
-            device_types: vec!["phone".to_string()],
+            device_types: manifest_device_types,
             is_debug: matches!(config_arc.build_mode, BuildMode::Debug),
         });
         let res_out = module
@@ -352,8 +396,9 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         }
 
         // --- Profile processing ---
-        let module_json5_path = module.src_path.join("src/main/module.json5");
-        let module_json5 = read_module_json5(&module_json5_path)?;
+        // module_json5_early is already loaded above for resource compilation.
+        // Re-bind here under the canonical name used by the rest of the pipeline.
+        let module_json5 = module_json5_early;
         // Collect ability names for usedScene.abilities validation.
         let ability_names: Vec<String> = module_json5
             .module

@@ -56,6 +56,7 @@ pub use process_privacy_profile::{
 };
 pub use process_profile::{
     ark_virtual_machine_from_version, process_profile, process_profile_with_ark_vm_version,
+    validate_compile_mode,
 };
 pub use process_share_config::{
     merge_share_config, write_share_config, ShareConfigInput, ShareConfigOutput,
