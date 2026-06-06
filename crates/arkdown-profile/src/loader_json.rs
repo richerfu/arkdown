@@ -1048,6 +1048,10 @@ impl LoaderJson {
             .collect()
     }
 
+    /// Legacy BFS-based dependency root collection.
+    /// Superseded by `LocalDependencyGraph` in most pipeline stages.
+    /// Kept for reference; use `LocalDependencyGraph::build()` for new code.
+    #[allow(dead_code)]
     fn collect_declared_dependency_roots(
         config: &ArkdownConfig,
         host_module: &ModuleConfig,
@@ -1091,6 +1095,7 @@ impl LoaderJson {
         roots
     }
 
+    #[allow(dead_code)]
     fn is_source_har_package(pkg_root: &Path) -> bool {
         if Self::is_bytecode_har_package(pkg_root) {
             return false;
@@ -1213,6 +1218,7 @@ impl LoaderJson {
             .ok()
     }
 
+    #[allow(dead_code)]
     fn is_bytecode_har_package(pkg_root: &Path) -> bool {
         let Some(pkg) = Self::read_dependency_package_json(pkg_root) else {
             return false;
@@ -1522,6 +1528,7 @@ impl LoaderJson {
         map
     }
 
+    #[allow(dead_code)]
     fn dependency_package_name(pkg_dir: &Path) -> String {
         Self::read_dependency_package_json(pkg_dir)
             .and_then(|pkg| pkg.name)
@@ -1529,6 +1536,7 @@ impl LoaderJson {
             .unwrap_or_else(|| Self::dependency_package_name_from_path(pkg_dir))
     }
 
+    #[allow(dead_code)]
     fn dependency_package_name_from_path(pkg_dir: &Path) -> String {
         let name = pkg_dir
             .file_name()
@@ -1634,6 +1642,7 @@ impl LoaderJson {
     }
 
     /// Resolve a dependency alias to its package directory under `oh_modules/`.
+    #[allow(dead_code)]
     fn resolve_dep_dir(
         dep_alias: &str,
         module_oh_modules: &Path,
