@@ -42,9 +42,9 @@ compatibility boundary is:
 - Do not preserve old internal helper APIs, old crate exports, or old plugin
   constructors when they block ownership cleanup.
 
-The refactor should not introduce thin compatibility wrappers that keep the old
+The refactor must not introduce thin compatibility wrappers that keep the old
 architecture alive. When a caller is migrated to the new session/context API,
-the old helper should be deleted in the same change unless another production
+the old helper must be deleted in the same change unless another production
 caller still depends on it. If another caller still depends on it, that helper
 must be marked as a migration blocker in this SPEC or in the task PR.
 
@@ -79,11 +79,11 @@ Current scan summary from `crates/*/src`:
 | `arkdown-plugin-sensitive-check` | 1 | 12 | 4 | 3 | duplicate case-check implementation |
 | `arkdown-abc` | 32 | 1254 | 29 | 15 | mostly cohesive compiler, but cache/path entry naming leaks |
 | `arkdown-ts2abc` | 6 | 33 | 6 | 20 | CLI-style argument parsing owns path/record derivation |
-| `arkdown-resource` | 11 | 52 | 34 | 3 | scanner/writers should consume `ResourcePlan` |
+| `arkdown-resource` | 11 | 52 | 34 | 3 | scanner/writers must consume `ResourcePlan` |
 | `arkdown-pack` | 5 | 48 | 37 | 2 | packager reads module JSON and integrated HSP inputs late |
-| `arkdown-sign` | 7 | 108 | 11 | 4 | signing can remain isolated but should use artifact layout |
+| `arkdown-sign` | 7 | 108 | 11 | 4 | signing remains isolated and must use artifact layout |
 | `arkdown-cli` | 20 | 175 | 176 | 75 | orchestration owns too many stage policies and helpers |
-| `arkdown-obfuscate` | 5 | 44 | 11 | 5 | file traversal and rule loading should become a stage plan |
+| `arkdown-obfuscate` | 5 | 44 | 11 | 5 | file traversal and rule loading move into a stage plan |
 | `arkdown-watcher` | 1 | 12 | 0 | 7 | watches raw directories instead of session input inventory |
 
 This means the refactor must touch every crate at the ownership boundary, even
@@ -246,12 +246,348 @@ Hard dependency rules:
 - `arkdown-session` must not depend on profile/resource/pack/sign/cache/plugin
   crates.
 - `arkdown` must not depend on concrete plugin crates.
-- Plugins may carry `Arc<ModuleCompileContext>`, but the bundler crate must receive
+- Plugins are allowed to carry `Arc<ModuleCompileContext>`, but the bundler crate must receive
   plugins through `rolldown_plugin` trait objects and does not depend on
   concrete plugin crates.
 - `arkdown-cli` is the only crate allowed to compose all stages.
 - Any dependency edge that violates this table must be removed before the
   refactor is considered complete.
+
+---
+
+## Mandatory Rust Code Style Rules
+
+These rules are part of the refactor acceptance criteria. They align arkdown
+with OXC's phase-crate style and Rolldown's plugin/bundler ownership model.
+
+### Ownership and modules
+
+- Every non-trivial operation must have an owning type:
+  `BuildSessionBuilder`, `DependencyGraphBuilder`, `ProfileStore`,
+  `BuildPlanBuilder`, `ModulePipeline`, `ResourceCompiler`, `Packager`,
+  `Signer`, `OhosResolver`, or a named transform pass.
+- Free functions are allowed only for pure local algorithms that do not read
+  files, do not write files, do not cache state, do not inspect global config,
+  and do not encode stage lifecycle.
+- Modules named `utils`, `helpers`, `common`, or `misc` are forbidden for build
+  policy. Use domain names such as `paths`, `fingerprint`, `package_index`,
+  `artifact_layout`, `source_set`, `profile_store`, or `record_name`.
+- `mod.rs` files must only declare modules and re-export narrow public APIs.
+  They must not contain stage policy or filesystem logic.
+- Public exports must be minimal. Internal APIs use `pub(crate)` or private
+  items. Crate roots do not re-export implementation modules by wildcard.
+
+### State and context
+
+- Long parameter chains are forbidden when the parameters represent build state.
+  Use state structs such as `ModuleCompileContext`, `ModuleBuildState`,
+  `ResourceCompilePlan`, `ProfileProcessPlan`, `PackagePlan`, or `Ts2abcPlan`.
+- Shared build data must be immutable snapshots behind `Arc`.
+- Mutable data must stay inside the current builder/stage object. Cross-stage
+  mutation is allowed only through `ModuleBuildState`.
+- Global singletons are forbidden for build state, SDK state, package indexes,
+  profile caches, and path policy.
+- Constructors must make ownership obvious. A type that needs session data must
+  accept context or a narrow plan, not raw project/module path strings.
+
+### Filesystem and paths
+
+- Filesystem paths must use `Path`, `PathBuf`, `AbsPath`, or `RelPath`.
+- Artifact paths must use `ArtifactPath`.
+- Module import/export text must use `ModuleSpecifier`.
+- Runtime OHM URLs must use `OhmUrl`.
+- `.to_string_lossy()` is allowed only for diagnostics or final artifact
+  serialization. It is forbidden for identity, cache keys, package matching,
+  resolver matching, and dependency graph keys.
+- Inline slash conversion with `.replace('\\', "/")` is forbidden outside
+  `arkdown-path::serializer`.
+- `starts_with('/')`, `contains("oh_modules")`, and path classification by
+  substring are forbidden.
+- Output paths that do not exist must be lexically normalized. They must not be
+  canonicalized.
+- Existing input paths are canonicalized only inside `PathResolver` or
+  startup builders.
+
+### IO and caching
+
+- Startup discovery IO must live in `arkdown-session`.
+- Source content reads during bundling must come from rolldown hook input or a
+  session-owned source store.
+- Plugin hooks must not read `module.json5`, `oh-package.json5`, SDK metadata,
+  profile JSON, or dependency roots.
+- Cache keys must be built from `InputFingerprintSet` or explicit content
+  hashes. Placeholder hashes are forbidden.
+- Directory traversal output must be sorted before it affects artifacts, cache
+  keys, diagnostics, or tests.
+- Library crates must expose typed errors. `anyhow` is allowed in CLI and tests
+  only.
+
+### OXC usage
+
+- JavaScript/TypeScript/ArkTS parsing must use OXC parser APIs.
+- AST transforms must use OXC AST visitors, builders, spans, and codegen. Raw
+  string rewriting is forbidden when an OXC AST/codegen route exists.
+- If raw source patches are required for an upstream-compatible transform, they
+  must be represented as span-based patch objects and applied in a deterministic
+  order.
+- OXC allocator lifetimes must not leak into session snapshots, cache entries,
+  or long-lived build state. Persisted transform output must be owned strings,
+  source maps, or typed metadata.
+- Generated JS/TS must be emitted through OXC codegen or a structured serializer
+  such as `module_emit`. Ad hoc string assembly is limited to fixed wrappers
+  that cannot be represented by OXC APIs.
+
+### Rolldown usage
+
+- `arkdown` owns rolldown bundler setup and output conversion.
+- Concrete plugin construction belongs to `arkdown-cli` or build planning, not
+  `arkdown`.
+- Plugin crates implement `rolldown_plugin::Plugin` directly. No adapter from
+  `arkdown-core::ArkdownPlugin` is allowed.
+- A plugin adapter must be thin: hook input plus context goes into a domain
+  operation, then hook output is returned.
+- Plugin `HookUsage` must list only hooks the plugin actually implements.
+- Source maps must use `rolldown_sourcemap` or `string_wizard` compatible
+  structures. Source map path fields must go through `ArtifactPathSerializer`.
+
+### Determinism and tests
+
+- Public artifact order must be deterministic. Use `IndexMap` or sorted vectors
+  where ordering reaches artifacts, cache keys, or diagnostics.
+- Hash maps with nondeterministic iteration must not be serialized directly.
+- Tests for path handling must include Unix, Windows-drive, UNC, non-UTF-8
+  display boundaries where the platform supports them, and component-based
+  `oh_modules` classification.
+- Every moved helper must have one owner test at the new owner boundary.
+- Every deleted crate must have its old production behavior covered by the
+  replacement crate's tests before deletion.
+
+---
+
+## Performance and Memory Refactor Plan
+
+Performance and memory ownership are part of the architecture contract. This
+refactor moves parallel work to explicit build executors, removes duplicate
+input reads, replaces non-OXC dense-index infrastructure, and makes deterministic
+merge order a mandatory part of every parallel stage.
+
+### Current performance audit
+
+| Area | Current evidence | Mandatory refactor |
+| --- | --- | --- |
+| Dense indexes | The workspace declares `index_vec = "0.1"` and direct users exist in `arkdown-core`, `arkdown`, `arkdown-cli`, and `arkdown-plugin-ohos-resolve`. | Remove `index_vec` from the workspace and replace all uses with `oxc_index`. |
+| Parallel runtime | `rayon` is a workspace dependency, but the only discovered production `into_par_iter` path is in `arkdown-loader`, which is deleted by this spec. | Parallelism must move into `arkdown-session` inventory builders and `arkdown-cli` stage executors. Domain crates expose batch APIs; they do not spawn ad hoc parallel work. |
+| Startup IO | `module.json5`, `oh-package.json5`, profile JSON, SDK component metadata, resource trees, and package roots are read by multiple crates and plugin hooks. | `BuildSessionBuilder` reads and fingerprints startup inputs once. Later stages consume snapshots, source-store entries, or typed plans. |
+| Plugin collectors | `arkdown-plugin-module-meta`, `arkdown-plugin-har-dedup`, and bundler-side collectors use `Arc<Mutex<...>>`-style shared mutation. | Plugin structs must not own mutex-backed hot-path collectors. Bundle outputs are collected into stage-owned buffers and merged by typed IDs after bundling. |
+| String identities | Package names, module names, import specifiers, source paths, record names, and artifact paths are repeatedly cloned as `String`. | Stable identities use typed IDs plus `Arc<str>`, `Box<str>`, or `CompactString` according to lifetime. Large structs are moved by ID, not cloned across stages. |
+| Directory traversal | Resource, profile, resolver, pack, and CLI code walk directories independently and often sort locally. | Traversal belongs to session inventory or a stage planner. Directory output is normalized once, stored in typed inventories, and merged deterministically. |
+| Final writers | Loader JSON, source maps, pack entries, ABC records, and signed artifacts require stable output order. | Collection work is parallel; serialization and format writers run in explicit sorted order. |
+
+### Dependency and data-structure mandates
+
+- The root workspace dependency `index_vec` must be removed.
+- The root workspace dependency `oxc_index = "4.1.0"` must be added and versioned
+  with the OXC dependency set already used by the workspace.
+- All existing `index_vec::Idx` and `index_vec::IndexVec` users must migrate to
+  `oxc_index::Idx` and `oxc_index::IndexVec`.
+- Dense IDs must live in the owning crate and be exported only when the ID
+  crosses a crate boundary:
+  - `arkdown-core`: `ModuleId`, `ChunkId`, `BundleOutputId`
+  - `arkdown-session`: `ProjectId`, `PackageId`, `DependencyNodeId`,
+    `ProfileFileId`, `ResourceFileId`, `SourceFileId`, `SdkFileId`
+  - `arkdown-resource`: `ResourceEntryId`, `ResourceOutputId`
+  - `arkdown-profile`: `ProfileArtifactId`
+  - `arkdown-abc`: `RecordId`, `FunctionId`, `LiteralArrayId`,
+    `CompileUnitId`
+  - `arkdown-pack`: `PackEntryId`
+- Dense collections use `IndexVec<Id, T>`.
+- Lookup side tables use `FxHashMap<Key, Id>` and never serialize directly.
+- `IndexMap` is reserved for semantic user-facing order or golden artifact
+  order. Internal lookup order uses typed IDs plus sorted vectors.
+- Long-lived snapshot strings use `Arc<str>` when shared by multiple stages.
+- Owned non-shared schema strings use `Box<str>`.
+- Hot short identifiers copied inside resolver, bundle output, and transform
+  metadata use `CompactString`; add `compact_str` to root
+  `[workspace.dependencies]`.
+- `String` remains allowed for mutation buffers, serde scratch values,
+  diagnostics, and final serialization.
+- Source contents in the session source store use `Arc<[u8]>` for raw bytes and
+  `Arc<str>` for validated UTF-8 source text.
+- Parsed OXC AST data must not be stored in session snapshots. Each parallel
+  transform task owns its allocator and emits owned metadata or source output.
+- Resource binary contents must not be cached in memory by default. The session
+  stores path, stat metadata, and content fingerprint; bytes are streamed by
+  resource or pack writers.
+
+### Parallel execution model
+
+Parallelism is centralized in two places:
+
+1. `arkdown-session::ParallelInventoryBuilder`
+2. `arkdown-cli::StageExecutor`
+
+Every parallel job returns `(TypedId, Output)` or `(TypedId, Diagnostic,
+Output)`. The caller writes results into `IndexVec` by ID and performs a sorted
+merge before serialization, diagnostics, cache key construction, or artifact
+writing.
+
+### Startup parallelization
+
+`BuildSessionBuilder` must split startup discovery into deterministic parallel
+inventories:
+
+- Project and build profile selection remain sequential because CLI arguments
+  and build-profile precedence define root policy.
+- Module roots are discovered sequentially, assigned `ModuleId`, then parsed in
+  parallel.
+- `module.json5` files are read, parsed, and fingerprinted in parallel.
+- `oh-package.json5` files for project modules, dependency roots, HAR/HSP
+  packages, and integrated HSP roots are read, parsed, and fingerprinted in
+  parallel.
+- Profile JSON inventories are discovered in parallel by profile kind and
+  stored by `ProfileFileId`.
+- Resource roots are scanned in parallel by module and source-set overlay.
+- SDK component metadata and SDK API metadata are read in parallel and stored
+  in `SdkSnapshot`.
+- Source-file inventories for ArkTS/TS/JS are collected in parallel by source
+  root. File contents are read on demand through `SourceStore`, but content
+  fingerprints are built during session startup when cache mode requires them.
+- Dependency graph node parsing is parallel. Edge normalization and
+  topological ordering are deterministic and run by `DependencyGraphBuilder`
+  after all node inputs exist.
+
+### Stage parallelization
+
+`BuildRunner` executes modules in dependency waves:
+
+```text
+BuildSession
+  -> BuildPlan
+  -> Dependency wave 0: modules without build-time dependency barriers
+  -> Dependency wave 1: modules whose dependencies completed
+  -> ...
+```
+
+Within a dependency wave, modules run in parallel when their output directories,
+cache keys, and package destinations are disjoint. Cross-module shared writes
+are forbidden.
+
+Inside one module, `ModulePipeline` executes this stage graph:
+
+```text
+ModuleCompileContext
+  -> resource inventory normalization
+  -> profile source processing
+  -> bundle
+  -> ETS transform output reuse
+  -> ABC compile units
+  -> pack entry collection
+  -> deterministic package writer
+  -> signer
+```
+
+Mandatory parallel boundaries:
+
+- Resource scanning and profile source processing run in parallel after
+  `ModuleCompileContext` exists.
+- Resource copy/compile work is parallel by `ResourceEntryId`; duplicate
+  destination detection happens before writes.
+- Profile processors parse independent profile files in parallel and merge by
+  dependency graph order plus artifact path order.
+- Rolldown bundling remains owned by `arkdown::Bundler`; plugin hooks must
+  consume context snapshots and must not perform their own package/profile
+  discovery.
+- ETS source transforms are parallel by `SourceFileId` or rolldown module ID.
+  Each task owns its OXC allocator and returns span patches, generated code,
+  source map fragments, and transform metadata.
+- CompileArkTS and ABC lowering are parallel by `CompileUnitId` where inputs are
+  independent. Final ABC emission, record table ordering, string table ordering,
+  and binary writing are deterministic.
+- Pack entry discovery and hashing are parallel by `PackEntryId`. Zip/package
+  writing is sequential in sorted artifact order.
+- Signing is sequential. It consumes the final package bytes and writes a single
+  signed artifact.
+
+### Non-parallel boundaries
+
+The following operations must remain sequential or must have a sequential final
+merge:
+
+- CLI argument parsing and build-profile selection.
+- Final dependency graph topological ordering.
+- Loader JSON serialization.
+- `module.json` and merged profile artifact serialization.
+- Source map concatenation and path serialization.
+- ABC final binary table layout.
+- Zip/HAP/HSP/HAR writer order.
+- Signing.
+- Cache database commit and manifest update.
+
+### Plugin hot-path rules
+
+- Plugin constructors accept `Arc<ModuleCompileContext>` or a narrower
+  context-backed plan.
+- Plugin `resolve_id`, `load`, and `transform` hooks must not call
+  `std::fs::*`, `fs_err::*`, `WalkDir`, or package/profile loaders.
+- Plugin structs must not contain `Arc<Mutex<FxHashMap<...>>>`,
+  `Arc<Mutex<Vec<...>>>`, or equivalent shared mutable collectors for hot
+  hooks.
+- A plugin that needs post-bundle data must write typed hook facts into a
+  stage-owned collector keyed by `ModuleId`, `SourceFileId`, or rolldown module
+  ID. The collector merges after bundling and before artifact writing.
+- Resolver plugins use `PackageIndex`, `SourceSetIndex`, and `PathResolver`
+  snapshots. Upward filesystem walking is deleted from production code.
+- JSON5 plugin content reads go through rolldown-provided source or
+  `SourceStore`; direct file reads in the hook are forbidden.
+
+### Crate-level performance mandates
+
+| Crate | Mandatory performance and memory changes |
+| --- | --- |
+| `arkdown-core` | Replace `index_vec` with `oxc_index`; keep dense graph/chunk storage in `IndexVec`; expose typed IDs instead of cloning graph nodes. |
+| `arkdown-path` | Provide allocation-minimal path normalization and artifact serialization; own all slash conversion; return borrowed path components where possible. |
+| `arkdown-ohos-schema` | Store parsed schema strings as `Box<str>` unless shared by session snapshots; no filesystem reads. |
+| `arkdown-config` | Normalize config into typed values and stop re-reading manifests after session construction starts. |
+| `arkdown-session` | Own parallel startup inventory, `SourceStore`, fingerprint sets, package indexes, profile inventories, resource inventories, and SDK snapshots. |
+| `arkdown-resolver` | Use session-built indexes as resolver input; no `read_dir` or package manifest reads in hot resolution. |
+| `arkdown` | Own rolldown execution and output conversion; replace mutex collectors with typed bundle output buffers; migrate dense chunk/module data to `oxc_index`. |
+| `arkdown-ets-transform` | Own reusable transform passes, per-file OXC allocator usage, transform cache keys, and parallel transform batch APIs. |
+| `arkdown-plugin-ohos-resolve` | Use context indexes only; replace string package ownership checks with `PackageId` lookups. |
+| `arkdown-plugin-module-meta` | Delete upward package-root search; collect module metadata through typed bundle facts, not mutex maps. |
+| `arkdown-plugin-json5` | Parse rolldown or source-store content; no direct file reads in hook bodies. |
+| `arkdown-plugin-har-dedup` | Use dependency graph ownership metadata; no string matching over absolute module IDs for package ownership. |
+| `arkdown-plugin-duplicate-check` | Normalize IDs through `arkdown-path`; keep comparisons allocation-light and read-free. |
+| `arkdown-plugin-sensitive-check` | Delete crate; case checking moves into resolver path validation. |
+| `arkdown-plugin-router-map` | Delete crate; router map loading moves into `ProfileStore` and router profile processing. |
+| `arkdown-profile` | Parse profile inputs from `ProfileStore`; parallel parse by `ProfileFileId`; deterministic merge by dependency graph and artifact path. |
+| `arkdown-resource` | Parallel scan/compile by resource entry; store inventories in session; write outputs by deterministic artifact path order. |
+| `arkdown-pack` | Parallel collect/hash entries; keep final archive writer sequential and sorted. |
+| `arkdown-sign` | Keep signing sequential; stream package bytes instead of retaining duplicate buffers. |
+| `arkdown-cache` | Hash inventories in parallel; commit cache manifests sequentially; use typed fingerprint sets as keys. |
+| `arkdown-abc` | Use `oxc_index` for record/function/literal tables; parallelize independent lowering units; keep final binary layout sequential and deterministic. |
+| `arkdown-ts2abc` | Represent compile inputs as typed compile units; avoid cloning argument strings into multiple vectors. |
+| `arkdown-obfuscate` | Store rename maps with compact identifiers; apply span patches in deterministic order; no raw whole-source clone unless output changes. |
+| `arkdown-watcher` | Reuse session inventories; recompute changed fingerprints in parallel; rebuild only affected module waves. |
+| `arkdown-cli` | Own `StageExecutor`, dependency-wave scheduling, and per-module `ModuleBuildState`; delete index-coupled parallel vectors. |
+| `arkdown-utils` | Delete crate; no performance helper crate replaces it. |
+| `arkdown-loader` | Delete crate; its BFS parallel loader is not carried forward. |
+
+### Measurement and regression gates
+
+- `rg "index_vec"` must return no production dependency or source use after the
+  migration.
+- `rg "Arc<Mutex" crates/arkdown-plugin-* crates/arkdown/src` must return no
+  hot-path collector in production code.
+- `rg "read_to_string|fs::read|read_dir|WalkDir" crates/arkdown-plugin-*` must
+  return no hook-time production reads.
+- Build output for the same fixture must be byte-for-byte identical with
+  `RAYON_NUM_THREADS=1` and `RAYON_NUM_THREADS=8`.
+- Session inventory tests must prove each manifest/profile/package input is
+  read once per session build.
+- Cache tests must prove fingerprint changes invalidate the owning stage
+  without invalidating unrelated module waves.
+- Memory tests or targeted assertions must prove resource binary contents are
+  not stored in `BuildSession` snapshots.
 
 ---
 
@@ -285,7 +621,7 @@ identical behavior:
 - CLI integrated HSP scanning
 - loader JSON HSP/HAR map collection
 
-These should be backed by one dependency snapshot with typed node metadata.
+These must be backed by one dependency snapshot with typed node metadata.
 
 ### Split plugin systems
 
@@ -298,7 +634,7 @@ ownership ambiguous.
 
 Many free functions are not pure helpers. They read files, scan directories,
 derive cache keys, mutate artifacts, or encode target-specific policy. Those
-functions should belong to stateful objects such as builders, stores, writers,
+functions must belong to stateful objects such as builders, stores, writers,
 or stage structs.
 
 ### Path handling is not portable enough
@@ -343,9 +679,10 @@ crates/arkdown-session/
     diagnostics.rs
 ```
 
-This crate owns startup discovery and session-level reuse. It may depend on
-`arkdown-core`, `arkdown-config`, `arkdown-resolver`, and `arkdown-utils`, but
-`arkdown-core` must not depend on it.
+This crate owns startup discovery and session-level reuse. It is allowed to depend on
+`arkdown-core`, `arkdown-path`, `arkdown-ohos-schema`, `arkdown-config`, and
+`arkdown-resolver`. It must not depend on profile/resource/pack/sign/cache,
+plugin, bundler, CLI, or watcher crates.
 
 Primary API:
 
@@ -476,7 +813,7 @@ Owns profile file loading and JSON parsing for:
 - permission reason resources
 - distro filter profile
 
-It should provide typed APIs:
+It must provide typed APIs:
 
 ```rust
 impl ProfileStore {
@@ -491,7 +828,7 @@ Feature code no longer constructs profile paths manually.
 
 ### `PathResolver` and path types
 
-Add path-domain types in `arkdown-session::paths` or `arkdown-utils::path`:
+Add path-domain types in `arkdown-path`:
 
 ```rust
 pub struct AbsPath(PathBuf);
@@ -503,7 +840,7 @@ pub struct OhmUrl(String);
 
 Rules:
 
-- `AbsPath` is absolute and lexically normalized. It may be canonicalized when
+- `AbsPath` is absolute and lexically normalized. It is canonicalized when
   the path exists.
 - `RelPath` has no prefix, no root, and no parent traversal above its base.
 - `ArtifactPath` is a slash-separated UTF-8 path for hvigor-compatible JSON,
@@ -548,7 +885,7 @@ Every crate gets a single reason to exist:
 
 ### Full directory target
 
-The target layout is not only a CLI split. All crates should be made ownership
+The target layout is not only a CLI split. All crates must be made ownership
 shaped.
 
 ```text
@@ -611,7 +948,7 @@ crates/arkdown-config/src/
   error.rs
 ```
 
-`resolve.rs` should be deleted or reduced to config normalization only.
+`resolve.rs` must be deleted or reduced to config normalization only.
 Project discovery moves to `arkdown-session`.
 
 ```text
@@ -772,7 +1109,7 @@ Other crate layout targets:
 
 The tables below define the target production file map after the refactor. They
 are intentionally explicit so file moves do not create new "helper" buckets.
-`mod.rs` files should only wire module exports and keep no build policy.
+`mod.rs` files must only wire module exports and keep no build policy.
 
 #### `arkdown-core`
 
@@ -913,7 +1250,7 @@ are intentionally explicit so file moves do not create new "helper" buckets.
 | Path | Responsibility |
 | --- | --- |
 | `src/lib.rs` | Public bundler facade. |
-| `src/bundler.rs` | Rolldown-backed bundler using `ModuleCompileContext`. |
+| `src/bundler.rs` | Rolldown-backed bundler using `BundlePlan` and rolldown plugin trait objects. |
 | `src/bundle_plan.rs` | Entry, plugin, output, source map, and loader plans derived from session context. |
 | `src/output/mod.rs` | Output writer exports. |
 | `src/output/chunks.rs` | Chunk file naming and chunk metadata. |
@@ -1057,16 +1394,16 @@ are intentionally explicit so file moves do not create new "helper" buckets.
 
 | Path | Responsibility |
 | --- | --- |
-| `src/lib.rs` | Temporary public export during migration. |
-| `src/plugin.rs` | Optional context-backed router map plugin if still needed. |
-| `src/cache.rs` | Delete standalone invalidation; use `ProfileStore` fingerprints. |
+| crate | Delete. Router map invalidation is owned by `ProfileStore` fingerprints. |
+| `src/lib.rs` | Removed with the crate. |
+| `src/cache.rs` | Removed with the crate. |
 
 #### `arkdown-plugin-sensitive-check`
 
 | Path | Responsibility |
 | --- | --- |
-| `src/lib.rs` | Temporary compatibility export. |
-| `src/plugin.rs` | Delete if case checking folds into `arkdown-resolver`; otherwise context-backed hook only. |
+| crate | Delete. Case-sensitive path checking is owned by `arkdown-resolver::case_check`. |
+| `src/lib.rs` | Removed with the crate. |
 
 #### `arkdown-abc`
 
@@ -1272,8 +1609,8 @@ Old free functions in `build.rs` move as follows:
 | `write_compile_arkts_cache` | `CompileArktsStage` |
 | startup module.json patching | `ProfileStage` or `ModuleJsonWriter` |
 
-`build_modules_for_target` and `resource_modules_for_build` should not survive
-as free functions. They should become part of a single build planning object:
+`build_modules_for_target` and `resource_modules_for_build` must not survive
+as free functions. They must become part of a single build planning object:
 
 ```rust
 pub struct BuildPlanBuilder<'a> {
@@ -1328,7 +1665,7 @@ crates/arkdown-profile/src/
   dependency_views.rs
 ```
 
-`process_share_config.rs` and `process_startup_config.rs` should stop scanning
+`process_share_config.rs` and `process_startup_config.rs` must stop scanning
 dependencies themselves. They become algorithms over:
 
 ```rust
@@ -1346,12 +1683,12 @@ pub struct StartupConfigPlan<'a> {
 }
 ```
 
-`loader_json.rs` should be split. It currently mixes entry collection,
+`loader_json.rs` must be split. It currently mixes entry collection,
 dependency graph construction, bytecode HAR metadata, router map loading, AOT
-fields, build config loading, and path serialization. Each submodule should
+fields, build config loading, and path serialization. Each submodule must
 consume snapshots and return typed pieces.
 
-Current `process_*` free functions should become processors:
+Current `process_*` free functions must become processors:
 
 | Current file | Replacement owner |
 | --- | --- |
@@ -1392,8 +1729,8 @@ Changes:
   `arkdown-session`.
 - `PackageRootIndex::build` is removed or moved into `arkdown-session`.
 - `OhPackage::load_from_root` remains available for tests and session scanning,
-  but hot-path resolution should use parsed `PackageSnapshot`.
-- Case-sensitive checking should be integrated into path resolution when enabled,
+  but hot-path resolution must use parsed `PackageSnapshot`.
+- Case-sensitive checking must be integrated into path resolution when enabled,
   not left as an unused field.
 
 ### `crates/arkdown-plugin-ohos-resolve`
@@ -1422,7 +1759,7 @@ pub struct ModuleMetaPlugin {
 }
 ```
 
-`meta_compute::find_pkg_root` should be deleted or restricted to tests. Package
+`meta_compute::find_pkg_root` must be deleted or restricted to tests. Package
 metadata comes from the dependency graph's package index.
 
 ### `crates/arkdown-plugin-ets-transform`
@@ -1433,19 +1770,19 @@ Move SDK component metadata and transform cache ownership:
 - `EtsTransformPlugin` receives `Arc<SdkSnapshot>`.
 - Transform cache is owned by a session or module stage cache, not recreated by
   constructing temporary plugin instances.
-- `load` and `transform` should share the same cache instance.
-- CompileArkTS handoff should reuse transform output when possible instead of
+- `load` and `transform` must share the same cache instance.
+- CompileArkTS handoff must reuse transform output when possible instead of
   reading and transforming the same file independently.
 
 ### `crates/arkdown-plugin-sensitive-check`
 
-Either remove the standalone plugin and fold behavior into OHOS resolution, or
-make it consume `PathResolver`. Do not keep two case-check implementations.
+The standalone plugin is deleted. Case checking is folded into OHOS resolution.
+Do not keep two case-check implementations.
 
 ### `crates/arkdown-plugin-har-dedup`
 
-The plugin may still write hvigor-compatible collect artifacts, but it should
-not discover HAR nodes by string matching module IDs. The collect set should
+The plugin is allowed to write hvigor-compatible collect artifacts, but it must
+not discover HAR nodes by string matching module IDs. The collect set must
 come from `DependencyGraphSnapshot` and rolldown module ownership metadata.
 
 ### `crates/arkdown-plugin-duplicate-check`
@@ -1458,43 +1795,43 @@ Keep the behavior small, but align the constructor and diagnostics:
 
 ### `crates/arkdown-plugin-json5`
 
-JSON5 transformation can remain a plugin, but file reads during hooks should be
+JSON5 transformation remains a plugin, but file reads during hooks must be
 replaced with rolldown-provided source content or session-managed source reads:
 
-- `Json5Plugin` should parse content from the load context when available.
+- `Json5Plugin` must parse content from the load context when available.
 - If a direct read is still required, it must go through `SourceStore`.
 - `module_emit.rs` remains a structured serializer, not raw string assembly
   beyond JSON module boilerplate.
 
 ### `crates/arkdown`
 
-`Bundler` should accept module context:
+`Bundler` must accept a bundle plan and rolldown plugin trait objects:
 
 ```rust
 pub struct Bundler {
-    pub ctx: Arc<ModuleCompileContext>,
+    pub plan: BundlePlan,
     pub plugins: Vec<SharedPluginable>,
 }
 ```
 
-`BundlePlan` should derive entries and import paths through `PathResolver` and
+`BundlePlan` must derive entries and import paths through `PathResolver` and
 `LoaderPlan`, not by checking `entry.starts_with('/')`.
 
 ### `crates/arkdown-abc`
 
-The ABC compiler is mostly cohesive and should not be reshaped around build
+The ABC compiler is compiler-cohesive and must not be reshaped around build
 policy. Required changes are at the boundary:
 
 - Accept explicit `AbcCompilePlan` inputs from the CLI/session stage.
 - Move package graph and record naming policy out of ABC internals unless it is
   required by bytecode format.
 - Keep IR, lowering, optimizer, emit, and reader modules owned by this crate.
-- `program_cache` should consume fingerprints from `arkdown-session` or
+- `program_cache` must consume fingerprints from `arkdown-session` or
   `arkdown-cache`, not recompute build input identity from lossy path strings.
 
 ### `crates/arkdown-ts2abc`
 
-This crate should become a compatibility facade around ABC compile plans:
+This crate must become a compatibility facade around ABC compile plans:
 
 - Keep parsing of upstream-compatible CLI args for tests and parity.
 - Add `Ts2abcPlan` or reuse `AbcCompilePlan` for production callers.
@@ -1514,7 +1851,7 @@ Resource compilation stays here, but root selection moves out:
 
 ### `crates/arkdown-pack`
 
-Packaging should consume a typed package plan:
+Packaging must consume a typed package plan:
 
 - `Packager::pack(plan: PackagePlan)` replaces loosely assembled input structs.
 - Integrated HSP discovery moves to `DependencyGraphSnapshot` classifiers.
@@ -1524,7 +1861,7 @@ Packaging should consume a typed package plan:
 
 ### `crates/arkdown-sign`
 
-Signing can remain algorithmically isolated:
+Signing remains algorithmically isolated:
 
 - Add `SignPlan` with input archive, output archive, keystore, and profile.
 - Do not let CLI construct signing paths manually.
@@ -1533,7 +1870,7 @@ Signing can remain algorithmically isolated:
 
 ### `crates/arkdown-obfuscate`
 
-Obfuscation should be an owned build stage:
+Obfuscation must be an owned build stage:
 
 - `ObfuscationPlan` contains mode, rule files from session, cache dir, source
   inputs, and outputs.
@@ -1543,7 +1880,7 @@ Obfuscation should be an owned build stage:
 
 ### `crates/arkdown-watcher`
 
-Watcher should be driven by the session input inventory:
+Watcher must be driven by the session input inventory:
 
 - `FileWatcher::new(session: Arc<BuildSession>)`.
 - Watch dirs/files come from `InputFingerprintSet` and `ProjectSnapshot`.
@@ -1552,7 +1889,7 @@ Watcher should be driven by the session input inventory:
 
 ### `crates/arkdown-cache`
 
-Cache keys should be built from session fingerprints:
+Cache keys must be built from session fingerprints:
 
 ```rust
 pub struct InputFingerprintSet {
@@ -1571,36 +1908,27 @@ verification, not only compile entry strings. `config_hash` and
 
 ### `crates/arkdown-utils`
 
-Create a small path module for generic operations only:
+Delete this crate. A generic utility crate is forbidden in the final workspace.
 
-```text
-crates/arkdown-utils/src/
-  lib.rs
-  path.rs
-  hash.rs
-```
+Required migrations:
 
-Allowed utilities:
-
-- lexical path normalization
-- stable path display
-- slash artifact serialization
-- path component predicates
-- relative path calculation with diagnostics
-
-Do not turn `arkdown-utils` into a dumping ground for build policy.
+- path normalization, display, artifact serialization, and component predicates
+  move to `arkdown-path`;
+- cache and content hash helpers move to `arkdown-cache` or
+  `arkdown-session::fingerprint`;
+- feature-specific helpers move to the owning domain crate.
 
 ### `crates/arkdown-config`
 
-`arkdown-config` should parse and normalize, not own the build session:
+`arkdown-config` must parse and normalize, not own the build session:
 
 - Keep `RawBuildProfile`, `RawModuleJson`, `RawOhPackage`, and SDK manifest
   parsing.
 - Move project/module discovery from `resolve.rs` into
   `ProjectSnapshotBuilder`.
-- SDK search can remain as a low-level probe, but selected SDK metadata and
+- SDK search remains as a low-level probe, but selected SDK metadata and
   component maps are owned by `SdkSnapshot`.
-- Config structs should keep `PathBuf` fields, never pre-serialize artifact
+- Config structs must keep `PathBuf` fields, never pre-serialize artifact
   slash paths.
 
 ### `crates/arkdown-core`
@@ -1615,7 +1943,7 @@ Do not turn `arkdown-utils` into a dumping ground for build policy.
 
 ### `crates/arkdown-loader`
 
-The legacy loader stack should not remain as a parallel architecture:
+The legacy loader stack must not remain as a parallel architecture:
 
 - If production uses rolldown exclusively, remove `PluginDriver` and quarantine
   old loader tests under compatibility fixtures or delete them.
@@ -1775,7 +2103,8 @@ Arrows mean "depends on". The final graph must stay acyclic.
 ```mermaid
 flowchart LR
     CORE[arkdown-core]
-    UTILS[arkdown-utils]
+    PATH[arkdown-path]
+    SCHEMA[arkdown-ohos-schema]
     CONFIG[arkdown-config]
     RESOLVER[arkdown-resolver]
     SESSION[arkdown-session]
@@ -1788,35 +2117,49 @@ flowchart LR
     PACK[arkdown-pack]
     SIGN[arkdown-sign]
     OBF[arkdown-obfuscate]
+    ETSCORE[arkdown-ets-transform]
     WATCH[arkdown-watcher]
     CLI[arkdown-cli]
     PLUGINS[plugin crates]
 
     CONFIG --> CORE
-    CONFIG --> UTILS
+    CONFIG --> PATH
+    CONFIG --> SCHEMA
     RESOLVER --> CORE
-    RESOLVER --> UTILS
+    RESOLVER --> PATH
     SESSION --> CORE
+    SESSION --> PATH
+    SESSION --> SCHEMA
     SESSION --> CONFIG
     SESSION --> RESOLVER
-    SESSION --> UTILS
     CACHE --> CORE
+    CACHE --> PATH
     PROFILE --> CORE
-    PROFILE --> SESSION
+    PROFILE --> PATH
+    PROFILE --> SCHEMA
     RESOURCE --> CORE
-    RESOURCE --> SESSION
+    RESOURCE --> PATH
+    RESOURCE --> SCHEMA
     BUNDLER --> CORE
-    BUNDLER --> SESSION
+    BUNDLER --> PATH
     PLUGINS --> CORE
+    PLUGINS --> PATH
     PLUGINS --> SESSION
     PLUGINS --> RESOLVER
+    PLUGINS --> ETSCORE
+    ETSCORE --> CORE
+    ETSCORE --> PATH
+    ETSCORE --> SCHEMA
     TS2ABC --> ABC
     TS2ABC --> CORE
     PACK --> CORE
-    PACK --> SESSION
+    PACK --> PATH
+    PACK --> SCHEMA
     SIGN --> CORE
     OBF --> CORE
+    OBF --> PATH
     WATCH --> SESSION
+    WATCH --> PATH
     CLI --> SESSION
     CLI --> CACHE
     CLI --> PROFILE
@@ -1833,14 +2176,17 @@ flowchart LR
 
 Dependency rules:
 
-- `arkdown-core` and `arkdown-utils` never depend on higher-level crates.
+- `arkdown-core`, `arkdown-path`, and `arkdown-ohos-schema` never depend on
+  higher-level crates.
 - `arkdown-resolver` does not depend on `arkdown-session`; session builds
   resolver input indexes and passes them in.
-- Plugins may depend on `arkdown-session`, but they must not perform project
+- Plugins are allowed to depend on `arkdown-session`, but they must not perform project
   discovery or package/profile reads during hooks.
 - Domain crates such as `arkdown-resource`, `arkdown-pack`,
   `arkdown-obfuscate`, and `arkdown-abc` consume typed plans and do not know CLI
   details.
+- Domain crates do not depend on `arkdown-session`.
+- `arkdown` does not depend on concrete plugin crates or `arkdown-session`.
 - `arkdown-cli` is the only crate that composes all stages.
 
 ### Maintenance rationale
@@ -1904,7 +2250,7 @@ feature logic. Use domain names such as `package_index`, `profile_store`,
 
 ### Delete-or-move matrix
 
-These helpers should be deleted or moved during migration:
+These helpers must be deleted or moved during migration:
 
 | Current helper/family | Problem | Final owner |
 | --- | --- | --- |
@@ -1930,7 +2276,7 @@ These helpers should be deleted or moved during migration:
 | `arkdown-ts2abc::default_record_name` | record policy hidden in driver | `RecordNameBuilder` |
 | `arkdown-utils::slash_path` | global string conversion encourages misuse | `ArtifactPathSerializer` |
 
-Pure AST or binary-format helpers may remain free functions when they do not
+Pure AST or binary-format helpers are allowed to remain free functions when they do not
 read files, do not hold state, and live in a narrowly named module. Examples:
 small opcode encoders in `arkdown-abc`, small syntax classifiers in
 `arkdown-plugin-ets-transform`, and JSON module emit primitives in
@@ -1986,13 +2332,13 @@ impl PathResolver {
 
 Canonicalization policy:
 
-- Existing input paths may be canonicalized.
+- Existing input paths are allowed to be canonicalized.
 - Output paths that do not exist yet must be lexically normalized, not
   canonicalized.
-- Symlink behavior must be explicit. Resolver identity may canonicalize,
-  artifact output should preserve configured roots where hvigor compatibility
+- Symlink behavior must be explicit. Resolver identity is allowed to canonicalize;
+  artifact output must preserve configured roots where hvigor compatibility
   requires it.
-- Cache identity should use normalized absolute paths plus content hashes, not
+- Cache identity must use normalized absolute paths plus content hashes, not
   lossy display strings.
 
 ### Artifact serialization policy
@@ -2019,11 +2365,11 @@ Allowed call sites:
 - zip entry names
 - hvigor parity intermediates
 
-Every other crate should keep `PathBuf`.
+Every other crate must keep `PathBuf`.
 
 ### Tests for path portability
 
-Add tests in `arkdown-utils`, `arkdown-session`, `arkdown-resolver`, and
+Add tests in `arkdown-path`, `arkdown-session`, `arkdown-resolver`, and
 `arkdown-cli`:
 
 - Unix absolute path detection uses `Path::is_absolute`.
@@ -2039,8 +2385,8 @@ Add tests in `arkdown-utils`, `arkdown-session`, `arkdown-resolver`, and
   entries, not lowercasing full paths.
 - cache fingerprints are identical for semantically equivalent normalized paths.
 
-Windows-only tests should be guarded with `#[cfg(windows)]` where real drive or
-UNC behavior is required. Pure serializer tests should run on every platform.
+Windows-only tests must be guarded with `#[cfg(windows)]` where real drive or
+UNC behavior is required. Pure serializer tests must run on every platform.
 
 ---
 
@@ -2049,7 +2395,7 @@ UNC behavior is required. Pure serializer tests should run on every platform.
 ### Phase 0: Documentation and guardrails
 
 1. Add this SPEC.
-2. Add a developer note to `AGENTS.md` or a follow-up design doc for path rules.
+2. Add a developer note to `AGENTS.md` for path and crate-boundary rules.
 3. Add `rg`-based CI checks or clippy notes for banned patterns:
    - `starts_with('/')`
    - `.contains("oh_modules")`
@@ -2060,7 +2406,8 @@ UNC behavior is required. Pure serializer tests should run on every platform.
 
 Crates:
 
-- `arkdown-utils`
+- `arkdown-path`
+- `arkdown-ohos-schema`
 - `arkdown-core`
 - new `arkdown-session`
 
@@ -2077,29 +2424,70 @@ Acceptance:
 - No behavior changes in generated artifacts.
 - New path tests pass on the current platform.
 
+### Phase 1A: Performance and memory foundations
+
+Crates:
+
+- root workspace manifest
+- `arkdown-core`
+- `arkdown-session`
+- `arkdown-path`
+- `arkdown`
+- `arkdown-cli`
+
+Tasks:
+
+1. Remove the root `index_vec` dependency.
+2. Add root workspace dependencies for `oxc_index` and `compact_str`.
+3. Migrate existing `ModuleIdx`, `ChunkIdx`, and bundle output dense stores to
+   `oxc_index`.
+4. Define typed dense IDs for session inventories, resources, profiles, compile
+   units, pack entries, and ABC tables in their owning crates.
+5. Add `ParallelInventoryBuilder`, `SourceStore`, and deterministic merge
+   primitives to `arkdown-session`.
+6. Add `StageExecutor` and dependency-wave scheduling primitives to
+   `arkdown-cli`.
+7. Add guardrail checks for forbidden `index_vec`, plugin hot-path filesystem
+   reads, and plugin mutex collectors.
+
+Acceptance:
+
+- `rg "index_vec" Cargo.toml crates` finds no production dependency or source
+  use.
+- Core graph/chunk storage uses `oxc_index::IndexVec`.
+- Session inventories store data by typed IDs and merge parallel results by ID.
+- Fixture output is byte-for-byte identical with `RAYON_NUM_THREADS=1` and
+  `RAYON_NUM_THREADS=8`.
+
 ### Phase 2: Build session snapshots
 
 Crates:
 
 - `arkdown-session`
 - `arkdown-config`
+- `arkdown-ohos-schema`
 - `arkdown-core`
 
 Tasks:
 
 1. Implement `BuildSessionBuilder`.
-2. Build `ProjectSnapshot` and `ModuleSnapshot`.
-3. Reuse `arkdown-config` raw parsers instead of adding new JSON structs.
-4. Build `ProfileStore`.
-5. Build `SdkSnapshot` including component metadata currently loaded by
+2. Implement parallel startup inventory for modules, packages, profiles,
+   resources, SDK metadata, source files, and fingerprints.
+3. Build `ProjectSnapshot` and `ModuleSnapshot`.
+4. Move raw OHOS JSON schemas into `arkdown-ohos-schema`; `arkdown-config`
+   consumes them for normalization.
+5. Build `ProfileStore`.
+6. Build `SdkSnapshot` including component metadata currently loaded by
    `EtsTransformPlugin`.
 
 Acceptance:
 
-- A fixture project can build a session and print module/dependency/profile
+- A fixture project builds a session and prints module/dependency/profile
   inventory without running the full build.
 - The snapshot contains every file currently read by config/profile/loader
   startup logic.
+- Session tests prove manifest, package, profile, and SDK metadata files are
+  read once per session build.
 
 ### Phase 3: Unified dependency graph
 
@@ -2164,11 +2552,16 @@ Tasks:
 4. Load SDK component metadata from `SdkSnapshot`.
 5. Integrate case checking into resolution or a context-backed plugin.
 6. Replace HAR dedup string matching with dependency ownership metadata.
+7. Replace plugin mutex collectors with typed post-bundle facts merged by
+   module/source IDs.
+8. Replace hook-time JSON5 direct reads with rolldown source content or
+   `SourceStore`.
 
 Acceptance:
 
 - Plugin tests use session fixtures.
 - No plugin reads `oh-package.json5` or `module.json5` during hooks.
+- No production plugin struct owns a hot-path `Arc<Mutex<...>>` collector.
 
 ### Phase 6: CLI pipeline reorganization
 
@@ -2180,9 +2573,13 @@ Tasks:
 
 1. Replace giant `build.rs` with the new `cmd/build/` layout.
 2. Introduce `BuildRunner` and `ModuleBuildState`.
-3. Replace parallel vectors with one state object per module.
-4. Stage outputs become typed fields on `ModuleBuildState`.
-5. Watch mode rebuilds session snapshots instead of recursively calling the
+3. Introduce `StageExecutor` dependency-wave scheduling.
+4. Replace parallel vectors with one state object per module.
+5. Stage outputs become typed fields on `ModuleBuildState`.
+6. Run independent modules in the same dependency wave in parallel.
+7. Run resource/profile work inside a module in parallel where outputs are
+   disjoint.
+8. Watch mode rebuilds session snapshots instead of recursively calling the
    whole CLI function with fresh ad hoc state.
 
 Acceptance:
@@ -2190,6 +2587,8 @@ Acceptance:
 - `cargo run -p arkdown-cli -- build --project tests/fixtures/minimal-hap`
   remains equivalent.
 - Module state has no index-coupled parallel vectors.
+- Fixture output is deterministic across single-threaded and multi-threaded
+  stage execution.
 
 ### Phase 7: Cache and fingerprint hardening
 
@@ -2203,12 +2602,13 @@ Crates:
 Tasks:
 
 1. Implement `InputFingerprintSet`.
-2. Hash content for source files, profile files, package manifests, module
+2. Hash content in parallel for source files, profile files, package manifests, module
    manifests, SDK component metadata, and resource inputs.
 3. Populate real config and dependency hashes.
 4. Feed fingerprints into task skip, rolldown cache, and CompileArkTS cache.
 5. Ensure transform cache keys include transform options, SDK metadata hash,
    resource reference hash, and source content hash.
+6. Commit cache manifests sequentially after all parallel hash jobs finish.
 
 Acceptance:
 
@@ -2217,6 +2617,7 @@ Acceptance:
 - Changing an `oh-package.json5` dependency invalidates resolver and loader
   outputs.
 - Changing SDK component metadata invalidates ETS transform cache.
+- Changing one module's input does not invalidate unrelated dependency waves.
 
 ### Phase 8: Legacy removal
 
@@ -2246,11 +2647,15 @@ Acceptance:
 ### Unit tests
 
 - `arkdown-session`: project snapshot, module snapshot, dependency graph,
-  profile store, path resolver, fingerprint builder.
-- `arkdown-utils`: path normalization and artifact serializer.
+  profile store, path resolver, fingerprint builder, source store,
+  deterministic parallel inventory merge.
+- `arkdown-path`: path normalization and artifact serializer.
 - `arkdown-resolver`: resolver from package index with no filesystem scan.
 - `arkdown-profile`: share/startup/loader builders from snapshots.
 - plugin crates: context-backed constructors and hook behavior.
+- `arkdown-core`: `oxc_index`-backed dense graph and chunk IDs.
+- `arkdown-abc`: deterministic record/function/literal table ordering with
+  typed IDs.
 
 ### Integration tests
 
@@ -2259,12 +2664,18 @@ Acceptance:
 - Startup/share fixtures produce the same merged profile artifacts.
 - Bytecode HAR fixture still emits `byteCodeHarInfo` and compiled importees.
 - Watch mode rebuild invalidates only changed snapshots where possible.
+- The same fixture build produces identical artifacts with
+  `RAYON_NUM_THREADS=1` and `RAYON_NUM_THREADS=8`.
+- Session read-count tests prove manifests, package files, profile files, and
+  SDK metadata are read once per session build.
+- Resource memory tests prove binary resource contents are streamed by writers
+  and not retained in `BuildSession`.
 
 ### Cross-platform tests
 
 - Path serializer tests run on all platforms.
 - Windows-specific path behavior has `#[cfg(windows)]` tests.
-- CI should eventually include at least one Windows job for `arkdown-utils`,
+- CI must include at least one Windows job for `arkdown-path`,
   `arkdown-session`, `arkdown-resolver`, and `arkdown-profile`.
 
 ---
@@ -2284,12 +2695,20 @@ Acceptance:
 - Generated hvigor-compatible artifacts remain byte-for-byte stable where
   existing tests assert golden output.
 - Cache invalidation uses real input fingerprints, not placeholder hashes.
+- `index_vec` is removed from workspace dependencies and production source.
+- Dense graph, chunk, inventory, resource, profile, compile-unit, pack-entry,
+  and ABC table stores use `oxc_index::IndexVec` with typed IDs.
+- Parallel execution is deterministic across `RAYON_NUM_THREADS=1` and
+  `RAYON_NUM_THREADS=8`.
+- Plugin hot paths contain no direct filesystem reads and no mutex-backed
+  collectors.
+- Resource binary bytes are not stored in session snapshots.
 
 ---
 
 ## Rollout Strategy
 
-This refactor should land in multiple focused PRs:
+This refactor lands in multiple focused PRs:
 
 1. Path foundation and tests.
 2. `arkdown-session` snapshot crate.
@@ -2300,7 +2719,7 @@ This refactor should land in multiple focused PRs:
 7. Cache/fingerprint hardening.
 8. Legacy cleanup.
 
-Each PR should preserve CLI/artifact behavior, but internal API compatibility is
+Each PR must preserve CLI/artifact behavior, but internal API compatibility is
 not a goal. Do not combine large file moves with behavioral changes unless the
 tests isolate the behavior clearly. Do not leave old helper APIs exported after
 their production callers have moved.

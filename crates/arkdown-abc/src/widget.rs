@@ -192,4 +192,68 @@ mod tests {
             collect_form_json_paths(std::path::Path::new("/project/entry/src/main"), &abilities);
         assert!(result.is_empty());
     }
+
+    /// Prove that the widget compile pass produces a valid Panda ABC binary.
+    ///
+    /// This tests the core widget compilation path (compile_widget_pass equivalent)
+    /// to address section 3.6: 'widget loader/cache/ABC 字节未证明'.
+    #[test]
+    fn test_widget_compile_produces_valid_panda_abc() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let out = tmp.path().join("widgets.abc");
+
+        // Write a minimal widget source file.
+        // Note: the widget compile pass receives bundled .js output (not raw .ets),
+        // so we use standard JavaScript as the input.
+        let widget_src = tmp.path().join("Card.js");
+        std::fs::write(
+            &widget_src,
+            "\"use strict\";\nfunction Card() { return null; }\nexports.Card = Card;\n",
+        )
+        .expect("write widget source");
+
+        let config = crate::WidgetCompileConfig {
+            inputs: vec![crate::WidgetInput {
+                path: widget_src.clone(),
+                record_name: "com.example/entry/ets/widget/pages/Card".to_string(),
+                source_file: Some("ets/widget/pages/Card.ets".to_string()),
+            }],
+            output: out.clone(),
+            cache_dir: std::path::PathBuf::new(), // no cache
+            target_api_version: 12,
+            debug_info: true,
+        };
+
+        let compiler = crate::compiler::AbcCompiler::new(crate::compiler::AbcCompileOptions {
+            debug_info: true,
+            opt_level: 0,
+            optimize_try_catch_func: false,
+            target_api_version: 12,
+            target_api_sub_version: None,
+            enable_annotations: false,
+            merge_abc: true,
+            module: false,
+            module_record_field_name: None,
+            npm_entries: None,
+            dependency_context: None,
+            remove_redundant_file: false,
+            dump_deps_info: false,
+        });
+
+        let result = compiler.compile_widget(&config);
+        assert!(
+            result.is_ok(),
+            "widget compilation must succeed; err: {:?}",
+            result.err()
+        );
+
+        // Output file must exist and start with the PANDA magic bytes.
+        assert!(out.exists(), "widgets.abc must be written");
+        let bytes = std::fs::read(&out).expect("read widgets.abc");
+        assert_eq!(
+            &bytes[..8],
+            b"PANDA\x00\x00\x00",
+            "widgets.abc must start with PANDA magic"
+        );
+    }
 }
