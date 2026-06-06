@@ -4891,6 +4891,13 @@ class A {}
         AbcReader::validate(&bytes).unwrap();
         let mut restored = AbcFile::new();
         append_abc_file(&mut restored, &bytes).unwrap();
+        assert!(
+            !restored
+                .records
+                .iter()
+                .any(|record| record.name.contains('[')),
+            "ABC input must skip upstream array type class records"
+        );
         let restored_record = restored
             .records
             .iter()

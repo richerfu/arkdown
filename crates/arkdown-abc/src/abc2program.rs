@@ -117,7 +117,7 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
 
     let mut appended = Vec::new();
     for class in classes {
-        if is_ark_annotation_stub(&class.name) {
+        if is_ark_annotation_stub(&class.name) || is_array_type_name(&class.name) {
             continue;
         }
 
@@ -351,6 +351,10 @@ fn is_ark_annotation_stub(name: &str) -> bool {
             | "L_ESExpectedPropertyCountAnnotation;"
             | "L_ESSlotNumberAnnotation;"
     )
+}
+
+fn is_array_type_name(name: &str) -> bool {
+    name.contains('[')
 }
 
 fn instruction_debug_from_abc(debug: &AbcDebugInfo, insns: &[Insn]) -> Vec<InstructionDebugInfo> {
