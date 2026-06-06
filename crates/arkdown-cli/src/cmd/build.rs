@@ -332,6 +332,13 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         // --- Profile processing ---
         let module_json5_path = module.src_path.join("src/main/module.json5");
         let module_json5 = read_module_json5(&module_json5_path)?;
+        // Collect ability names for usedScene.abilities validation.
+        let ability_names: Vec<String> = module_json5
+            .module
+            .abilities
+            .iter()
+            .map(|a| a.name.clone())
+            .collect();
         arkdown_profile::validate_request_permissions(
             arkdown_profile::RequestPermissionValidationInput {
                 module_type: &module_json5.module.type_,
@@ -339,6 +346,11 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 request_permissions: &module_json5.module.request_permissions,
                 define_permissions: &module_json5.module.define_permissions,
                 sdk_permissions: sdk_permissions.as_ref(),
+                ability_names: if ability_names.is_empty() {
+                    None
+                } else {
+                    Some(&ability_names)
+                },
             },
         )
         .map_err(|e| anyhow::anyhow!("validate request permissions failed: {}", e))?;

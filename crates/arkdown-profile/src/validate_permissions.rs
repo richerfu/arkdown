@@ -70,6 +70,12 @@ pub struct RequestPermissionValidationInput<'a> {
     /// permission names are rejected unless they are declared under
     /// `definePermissions`.
     pub sdk_permissions: Option<&'a SdkPermissionData>,
+    /// Ability names from `module.json5#module.abilities[].name`.
+    ///
+    /// When provided, `usedScene.abilities` entries are validated against
+    /// this list (with `"all"` as the special catch-all value).
+    /// Omit to skip ability name validation (e.g. when abilities list is unavailable).
+    pub ability_names: Option<&'a [String]>,
 }
 
 /// Permission data extracted from SDK `previewer/common/resources/module.json`.
@@ -141,6 +147,23 @@ pub fn validate_request_permissions(
                              provide at least one ability name or use [\"all\"].\nat {profile_path}",
                             name
                         )));
+                    }
+                    // When ability_names is provided, validate each entry.
+                    if let Some(valid_abilities) = input.ability_names {
+                        for ability in abilities {
+                            if let Some(ability_name) = ability.as_str() {
+                                if ability_name == "all" {
+                                    continue; // special catch-all value is always valid
+                                }
+                                if !valid_abilities.iter().any(|a| a == ability_name) {
+                                    return Err(ArkdownError::Bundler(format!(
+                                        "The usedScene.abilities entry '{}' for permission '{}' \
+                                         does not match any ability in this module.\nat {profile_path}",
+                                        ability_name, name
+                                    )));
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -342,6 +365,7 @@ mod tests {
             })],
             define_permissions: &[],
             sdk_permissions: None,
+            ability_names: None,
         })
         .unwrap_err();
 
@@ -358,6 +382,7 @@ mod tests {
             })],
             define_permissions: &[],
             sdk_permissions: None,
+            ability_names: None,
         })
         .unwrap_err();
         assert!(err.to_string().contains("reason attribute"));
@@ -371,6 +396,7 @@ mod tests {
             })],
             define_permissions: &[],
             sdk_permissions: None,
+            ability_names: None,
         })
         .unwrap();
     }
@@ -389,6 +415,7 @@ mod tests {
                 "grantMode": "user_grant",
             })],
             sdk_permissions: None,
+            ability_names: None,
         })
         .unwrap_err();
         assert!(custom_err.to_string().contains("reason and usedScene"));
@@ -404,6 +431,7 @@ mod tests {
                 "grantMode": "system_grant",
             })],
             sdk_permissions: None,
+            ability_names: None,
         })
         .unwrap();
     }
@@ -422,6 +450,7 @@ mod tests {
             })],
             define_permissions: &[],
             sdk_permissions: Some(&sdk_permissions),
+            ability_names: None,
         })
         .unwrap_err();
         assert!(err.to_string().contains("predefined within the SDK"));
@@ -437,6 +466,7 @@ mod tests {
                 "grantMode": "system_grant",
             })],
             sdk_permissions: Some(&sdk_permissions),
+            ability_names: None,
         })
         .unwrap();
     }
@@ -459,6 +489,7 @@ mod tests {
             })],
             define_permissions: &[],
             sdk_permissions: Some(&sdk_permissions),
+            ability_names: None,
         })
         .unwrap();
 
@@ -473,6 +504,7 @@ mod tests {
                 "grantMode": "user_grant",
             })],
             sdk_permissions: Some(&sdk_permissions),
+            ability_names: None,
         })
         .unwrap_err();
         assert!(err.to_string().contains("reason and usedScene"));
@@ -497,6 +529,7 @@ mod tests {
             ],
             define_permissions: &[],
             sdk_permissions: None,
+            ability_names: None,
         })
         .unwrap_err();
 
@@ -549,6 +582,7 @@ mod tests {
             })],
             define_permissions: &[],
             sdk_permissions: Some(&sdk),
+            ability_names: None,
         })
         .unwrap_err();
         assert!(
@@ -570,6 +604,7 @@ mod tests {
                 })],
                 define_permissions: &[],
                 sdk_permissions: Some(&sdk),
+                ability_names: None,
             });
             assert!(
                 result.is_ok(),
