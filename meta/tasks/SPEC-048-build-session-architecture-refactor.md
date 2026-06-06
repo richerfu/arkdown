@@ -1755,12 +1755,17 @@ Replace upward filesystem walking with snapshot lookup:
 ```rust
 pub struct ModuleMetaPlugin {
     ctx: Arc<ModuleCompileContext>,
-    reverse_map: Arc<Mutex<FxHashMap<String, Vec<HostModuleInfo>>>>,
+}
+
+pub struct ModuleMetaFacts {
+    pub hosts_by_source: IndexVec<SourceFileId, Vec<HostModuleInfo>>,
 }
 ```
 
 `meta_compute::find_pkg_root` must be deleted or restricted to tests. Package
-metadata comes from the dependency graph's package index.
+metadata comes from the dependency graph's package index. The bundler stage
+returns `ModuleMetaFacts` as part of `BundleOutput`; the plugin does not own a
+shared mutable reverse map.
 
 ### `crates/arkdown-plugin-ets-transform`
 
