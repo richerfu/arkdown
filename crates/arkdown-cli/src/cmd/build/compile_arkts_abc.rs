@@ -1,9 +1,8 @@
 use std::path::PathBuf;
 
+use arkdown_config::build_profile::parse_api_version;
 use arkdown_core::{ArkdownConfig, BuildMode};
 use arkdown_ts2abc::{Ts2abcInput, Ts2abcOptions};
-
-const ANNOTATION_SUPPORTED_API_VERSION: u32 = 20;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct AbcCompilePlan {
@@ -24,12 +23,16 @@ pub(super) struct AbcCompileRequest {
 
 impl AbcCompilePlan {
     pub(super) fn from_config(config: &ArkdownConfig) -> Self {
-        let target_api_version = config.sdk_config.compile_api_version;
+        let target_api_version = parse_api_version(&config.product.compatible_sdk_version)
+            .unwrap_or(config.sdk_config.compile_api_version);
 
         Self {
             target_api_version,
             target_api_sub_version: config.product.compatible_sdk_version_stage.clone(),
-            enable_annotations: target_api_version >= ANNOTATION_SUPPORTED_API_VERSION,
+            // Upstream ets-loader initializes `projectConfig.allowEtsAnnotations`
+            // to true and passes `--enable-annotations` for esmodule builds. The
+            // ABC backend still gates annotation records by target API.
+            enable_annotations: true,
             debug_info: matches!(config.build_mode, BuildMode::Debug),
             opt_level: if matches!(config.build_mode, BuildMode::Release) {
                 2
@@ -72,7 +75,11 @@ mod tests {
         ArkOptions, BuildOption, OutputTarget, ProductConfig, SdkConfig, StrictModeConfig,
     };
 
-    fn config_for(api: u32, build_mode: BuildMode) -> ArkdownConfig {
+    fn config_for(
+        compatible_sdk_version: impl Into<String>,
+        compile_api_version: u32,
+        build_mode: BuildMode,
+    ) -> ArkdownConfig {
         ArkdownConfig {
             project_root: PathBuf::from("/project"),
             build_mode,
@@ -80,7 +87,7 @@ mod tests {
             product: ProductConfig {
                 name: "default".to_string(),
                 bundle_name: "com.example.app".to_string(),
-                compatible_sdk_version: format!("6.0.0({api})"),
+                compatible_sdk_version: compatible_sdk_version.into(),
                 compatible_sdk_version_stage: Some("beta".to_string()),
                 runtime_os: "HarmonyOS".to_string(),
                 signing_config: None,
@@ -113,7 +120,7 @@ mod tests {
                 ets_loader_path: PathBuf::from("/sdk/ets-loader"),
                 es2abc_path: PathBuf::from("/sdk/es2abc"),
                 restool_path: PathBuf::from("/sdk/restool"),
-                compile_api_version: api,
+                compile_api_version,
                 has_rollup_plugin: true,
                 compile_sdk_version: "6.0.0.0".to_string(),
             },
@@ -130,19 +137,28 @@ mod tests {
     }
 
     #[test]
-    fn api_below_20_keeps_annotations_disabled() {
-        let plan = AbcCompilePlan::from_config(&config_for(19, BuildMode::Debug));
+    fn target_api_uses_compatible_sdk_version() {
+        let plan = AbcCompilePlan::from_config(&config_for("5.0.0(12)", 20, BuildMode::Debug));
         let options = plan.ts2abc_options(empty_request());
 
-        assert_eq!(options.target_api_version, 19);
-        assert!(!options.enable_annotations);
+        assert_eq!(options.target_api_version, 12);
+        assert!(options.enable_annotations);
         assert!(options.debug_info);
         assert_eq!(options.opt_level, 0);
     }
 
     #[test]
-    fn api_20_enables_annotations_and_preserves_stage() {
-        let plan = AbcCompilePlan::from_config(&config_for(20, BuildMode::Release));
+    fn target_api_falls_back_to_discovered_sdk_api() {
+        let plan = AbcCompilePlan::from_config(&config_for("6.0.0", 19, BuildMode::Debug));
+        let options = plan.ts2abc_options(empty_request());
+
+        assert_eq!(options.target_api_version, 19);
+        assert!(options.enable_annotations);
+    }
+
+    #[test]
+    fn release_build_preserves_stage_and_optimization() {
+        let plan = AbcCompilePlan::from_config(&config_for("6.0.0(20)", 20, BuildMode::Release));
         let options = plan.ts2abc_options(empty_request());
 
         assert_eq!(options.target_api_version, 20);
