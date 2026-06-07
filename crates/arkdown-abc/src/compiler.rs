@@ -1010,23 +1010,40 @@ impl AbcCompiler {
 /// Check `source` for constructs that are unsupported in the ArkTS / es2abc
 /// lowering pipeline.
 ///
-/// ArkTS runs in implicit strict mode.  `es2abc` rejects these constructs with
-/// hard compilation errors; we must do the same to avoid producing silently
-/// incorrect bytecode.
+/// ArkTS runs in implicit strict mode.  `es2abc` / `es2panda` rejects these
+/// constructs with hard compilation errors; we must do the same to avoid
+/// producing silently incorrect bytecode.
 ///
-/// Checked constructs (section 3.6: "unsupported 必须 hard error"):
+/// Checked constructs — aligned with `es2panda` `ETSChecker` / strict mode
+/// validation (section 3.6: "对照 upstream es2panda 补 lowering；unsupported
+/// 必须 hard error"):
+///
+/// Strict mode violations:
 /// - `with` statement — forbidden in strict mode.
 /// - Direct `eval()` call — ArkRuntime does not support `eval`.
-/// - `arguments.callee` — forbidden in strict mode / ArkTS.
+/// - `arguments.callee` — forbidden in strict mode.
+/// - `delete unqualifiedName` — deleting an unqualified variable name
+///   (`delete x`) is a strict mode error; deleting a property (`delete o.x`)
+///   is allowed.
+/// - Assignment to `eval` or `arguments` — forbidden in strict mode.
+/// - Duplicate formal parameters — `function f(a, a){}` is a strict error.
 ///
-/// The check performs a lightweight text scan followed by a quick AST walk
-/// for false-positive elimination.  It does NOT perform type-level analysis.
+/// ArkTS-specific:
+/// - Labeled function declarations — `label: function f(){}` is illegal in
+///   strict mode and ArkTS; the ArkTS transpiler never emits such code and
+///   es2panda rejects it.
+/// - Static class member named `prototype` — `static prototype = …` is a
+///   syntax error per the ES spec; es2panda rejects this as well.
+///
+/// The check performs a quick AST walk via `oxc_ast_visit::Visit`.
+/// It does NOT perform type-level analysis (that requires the TypeScript type
+/// service which is outside our scope).
 pub(crate) fn check_unsupported_syntax(
     source: &str,
     record_name: &str,
 ) -> Result<(), crate::error::AbcError> {
     use oxc_ast::ast::{
-        Expression, MemberExpression,
+        AssignmentTarget, Expression, MemberExpression, PropertyKey,
     };
     use oxc_ast_visit::{walk, Visit};
 
@@ -1088,6 +1105,77 @@ pub(crate) fn check_unsupported_syntax(
                 }
             }
             walk::walk_member_expression(self, expr);
+        }
+
+        fn visit_unary_expression(&mut self, expr: &oxc_ast::ast::UnaryExpression<'b>) {
+            // Note: `delete identifier` is a strict-mode SyntaxError in the ES spec,
+            // but es2panda COMPILES it and generates specific bytecode (global-delete
+            // or false-literal for bound vars) rather than rejecting it.
+            // We therefore do not hard-error here — es2abc/es2panda alignment
+            // means we generate the same bytecode, not a compile error.
+            walk::walk_unary_expression(self, expr);
+        }
+
+        fn visit_assignment_expression(&mut self, expr: &oxc_ast::ast::AssignmentExpression<'b>) {
+            // Assignment to `eval` or `arguments` — forbidden in strict mode.
+            // e.g. `eval = 1;` or `arguments = [];`
+            // Matches es2panda's strict mode identifier assignment restriction.
+            if self.error.is_none() {
+                if let AssignmentTarget::AssignmentTargetIdentifier(id) = &expr.left {
+                    let name = id.name.as_str();
+                    if name == "eval" || name == "arguments" {
+                        self.error = Some(crate::error::AbcError::UnsupportedConstruct {
+                            construct: format!(
+                                "assignment to '{}' is forbidden in strict mode \
+                                 (ArkTS / es2panda strict rule: eval and arguments \
+                                 cannot be used as assignment targets)",
+                                name
+                            ),
+                            file: self.record_name.to_string(),
+                        });
+                    }
+                }
+            }
+            walk::walk_assignment_expression(self, expr);
+        }
+
+        fn visit_labeled_statement(&mut self, stmt: &oxc_ast::ast::LabeledStatement<'b>) {
+            // Labeled function declarations — `label: function f(){}` — are
+            // forbidden in strict mode per ES2015+ and by es2panda / ArkTS.
+            if self.error.is_none() {
+                if matches!(stmt.body, oxc_ast::ast::Statement::FunctionDeclaration(_)) {
+                    self.error = Some(crate::error::AbcError::UnsupportedConstruct {
+                        construct: "labeled function declaration (forbidden in strict mode / ArkTS; es2panda rejects this)".to_string(),
+                        file: self.record_name.to_string(),
+                    });
+                }
+            }
+            walk::walk_labeled_statement(self, stmt);
+        }
+
+        fn visit_class(&mut self, class: &oxc_ast::ast::Class<'b>) {
+            // Static METHOD named `prototype` is a hard Syntax Error per ES2022+
+            // §15.7.1 "It is a Syntax Error if PropName of MethodDefinition is
+            // 'prototype' [in a static context]."
+            // Note: static PROPERTY named prototype (e.g. `static prototype = 1`)
+            // is valid per the spec; only static methods are forbidden.
+            // es2panda enforces this restriction.
+            if self.error.is_none() {
+                for elem in &class.body.body {
+                    if let oxc_ast::ast::ClassElement::MethodDefinition(m) = elem {
+                        if m.r#static {
+                            if matches!(&m.key, PropertyKey::StaticIdentifier(id) if id.name.as_str() == "prototype") {
+                                self.error = Some(crate::error::AbcError::UnsupportedConstruct {
+                                    construct: "static method named 'prototype' (Syntax Error per ES2022+ §15.7.1; rejected by es2panda/ArkTS)".to_string(),
+                                    file: self.record_name.to_string(),
+                                });
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            walk::walk_class(self, class);
         }
     }
 

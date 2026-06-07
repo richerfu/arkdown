@@ -4062,6 +4062,55 @@ with (obj) { value = 2; }"#,
     );
 }
 
+/// Assignment to `eval` is forbidden in strict mode.
+/// es2panda rejects this at compile time (strict mode violation).
+#[test]
+fn test_assignment_to_eval_is_rejected_strict_mode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("eval_assign.abc");
+    let result = module_compiler().compile(
+        vec![module_record("test/eval_assign", "eval = 42;")],
+        &out,
+    );
+    assert!(
+        matches!(result, Err(AbcError::UnsupportedConstruct { .. })),
+        "assignment to 'eval' must be rejected (es2panda strict rule)"
+    );
+}
+
+/// Assignment to `arguments` is forbidden in strict mode.
+/// es2panda rejects this at compile time (strict mode violation).
+#[test]
+fn test_assignment_to_arguments_is_rejected_strict_mode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("args_assign.abc");
+    let result = module_compiler().compile(
+        vec![module_record("test/args_assign", "arguments = [];")],
+        &out,
+    );
+    assert!(
+        matches!(result, Err(AbcError::UnsupportedConstruct { .. })),
+        "assignment to 'arguments' must be rejected (es2panda strict rule)"
+    );
+}
+
+/// Labeled function declarations are forbidden in strict mode.
+/// es2panda / ArkTS transpiler never emits this pattern.
+#[test]
+fn test_labeled_function_declaration_is_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("labeled_fn.abc");
+    let result = module_compiler().compile(
+        vec![module_record("test/labeled_fn", "myLabel: function foo() {}")],
+        &out,
+    );
+    assert!(
+        matches!(result, Err(AbcError::UnsupportedConstruct { .. })),
+        "labeled function declaration must be rejected (strict mode / es2panda rule)"
+    );
+}
+
+
 #[test]
 fn test_delete_global_identifier_uses_global_object_delete() {
     let tmp = tempfile::tempdir().unwrap();

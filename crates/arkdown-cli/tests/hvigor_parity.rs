@@ -822,6 +822,11 @@ fn collect_build(
                 &["intermediates/importee"],
                 false,
             )?;
+            // Section 3.5 "扩展 oracle 收集 cache root 所有文件":
+            // Collect ALL files from the CompileArkTS cache root so the oracle
+            // can compare every intermediate file (handoff .ts/.js, .protoBin,
+            // filesInfo.txt, modules.cache, npmEntries.txt) against hvigor.
+            collect_all_cache_root_files(&mut artifacts, root)?;
         }
         ArtifactType::Har => {
             // HAR archives contain oh-package.json5, source ETS files, declaration stubs,
@@ -1575,4 +1580,75 @@ fn stable_hash_hex(bytes: &[u8]) -> String {
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     format!("{hash:016x}")
+}
+
+/// Collect ALL files from the CompileArkTS cache root directory.
+///
+/// Section 3.5: "扩展 oracle 收集 cache root 所有文件" — the oracle should
+/// compare every file in the cache root, not just the named artifacts.
+///
+/// In hvigor's CompileArkTS stage, the cache root contains:
+/// - `filesInfo.txt` — module list fed to es2abc
+/// - `modules.cache` — es2abc ProgramCache entry map
+/// - `npmEntries.txt` — npm package entries
+/// - `sourceMaps.json` / `sourceMaps.map` — source map outputs
+/// - `*.ts` / `*.ets` — compiled TypeScript handoff files
+/// - `*.js` — bundled JavaScript output files
+/// - `*.protoBin` — per-module ProgramCache binary files
+///
+/// This function discovers all of these and adds them to `artifacts` under
+/// their project-relative path, enabling full cache-root content comparison.
+fn collect_all_cache_root_files(
+    artifacts: &mut BTreeMap<String, ArtifactSnapshot>,
+    root: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Look for the CompileArkTS cache root under known paths.
+    let cache_roots: Vec<PathBuf> = [
+        root.join("build/default/cache/default/default@CompileArkTS"),
+        root.join("build/default/cache/default"),
+    ]
+    .into_iter()
+    .filter(|p| p.is_dir())
+    .collect();
+
+    for cache_root in &cache_roots {
+        let entries = WalkDir::new(cache_root)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().is_file());
+
+        for entry in entries {
+            let path = entry.path();
+            let rel = path
+                .strip_prefix(root)
+                .map(|r| format!("cache:{}", r.display()))
+                .unwrap_or_else(|_| format!("cache:{}", path.display()));
+
+            // Skip extremely large files (e.g. final .abc files) — we only
+            // want the intermediate/handoff files.
+            let metadata = std::fs::metadata(path);
+            if let Ok(m) = metadata {
+                if m.len() > 10 * 1024 * 1024 {
+                    continue; // skip files > 10 MiB
+                }
+            }
+
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("");
+            // Binary files compared by content hash; text files by content.
+            let is_binary = matches!(ext, "abc" | "protoBin" | "bin" | "map");
+
+            if let Ok(bytes) = fs::read(path) {
+                artifacts.insert(
+                    rel.clone(),
+                    ArtifactSnapshot::from_bytes(rel, bytes, root, is_binary),
+                );
+            }
+        }
+        // Only use the first existing cache root found.
+        break;
+    }
+    Ok(())
 }
