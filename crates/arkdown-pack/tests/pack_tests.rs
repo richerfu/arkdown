@@ -181,6 +181,111 @@ fn test_hap_contains_pack_info() {
 }
 
 #[test]
+fn test_hap_metadata_entries_are_stored() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (abc, res, modj) = write_minimal_inputs(tmp.path());
+    let out = tmp.path().join("stored_metadata.hap");
+
+    Packager::new(make_config())
+        .pack_hap(minimal_pack_input(abc, res, modj, out.clone()))
+        .expect("pack_hap must succeed");
+
+    let file = fs::File::open(&out).expect("open HAP");
+    let mut archive = zip::ZipArchive::new(file).expect("valid ZIP");
+    assert_eq!(
+        archive.by_name("module.json").unwrap().compression(),
+        zip::CompressionMethod::Stored
+    );
+    assert_eq!(
+        archive.by_name("pack.info").unwrap().compression(),
+        zip::CompressionMethod::Stored
+    );
+}
+
+#[test]
+fn test_pack_info_splits_api_versions_and_includes_form_extensions() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (abc, res, modj) = write_minimal_inputs(tmp.path());
+    let out = tmp.path().join("form_pack_info.hap");
+    fs::write(
+        &modj,
+        r#"{
+          "module": {
+            "name": "entry",
+            "type": "entry",
+            "extensionAbilities": [{
+              "name": "EntryFormAbility",
+              "type": "form",
+              "metadata": [{
+                "name": "ohos.extension.form",
+                "resource": "$profile:form_config"
+              }]
+            }]
+          }
+        }"#,
+    )
+    .unwrap();
+
+    let resources_dir = tmp.path().join("compiled/resources/base/profile");
+    fs::create_dir_all(&resources_dir).unwrap();
+    fs::write(
+        resources_dir.join("form_config.json"),
+        r#"{
+          "forms": [{
+            "name": "widget",
+            "src": "./ets/widget/pages/WidgetCard.ets",
+            "updateEnabled": false,
+            "scheduledUpdateTime": "10:30",
+            "updateDuration": 1,
+            "supportDimensions": ["4*4"],
+            "defaultDimension": "4*4"
+          }]
+        }"#,
+    )
+    .unwrap();
+
+    let mut config = (*make_config()).clone();
+    config.product.compatible_sdk_version = "6.0.0(20)".to_string();
+    config.sdk_config.compile_api_version = 21;
+
+    let mut input = minimal_pack_input(abc, res, modj, out.clone());
+    input.resources_src_dir = Some(tmp.path().join("compiled/resources"));
+
+    Packager::new(Arc::new(config))
+        .pack_hap(input)
+        .expect("pack_hap must succeed");
+
+    let file = fs::File::open(&out).expect("open HAP");
+    let mut archive = zip::ZipArchive::new(file).expect("valid ZIP");
+    let mut entry = archive.by_name("pack.info").expect("pack.info");
+    let mut content = String::new();
+    entry.read_to_string(&mut content).unwrap();
+    let pack_info: serde_json::Value = serde_json::from_str(&content).unwrap();
+    let module = &pack_info["summary"]["modules"][0];
+
+    assert_eq!(module["apiVersion"]["compatible"].as_u64(), Some(20));
+    assert_eq!(module["apiVersion"]["target"].as_u64(), Some(21));
+    assert_eq!(
+        module["extensionAbilities"][0]["name"].as_str(),
+        Some("EntryFormAbility")
+    );
+    assert_eq!(
+        module["extensionAbilities"][0]["forms"][0]["name"].as_str(),
+        Some("widget")
+    );
+    assert_eq!(
+        module["extensionAbilities"][0]["forms"][0]["type"].as_str(),
+        Some("JS")
+    );
+    assert!(
+        module["extensionAbilities"][0]["forms"][0]
+            .get("src")
+            .is_none(),
+        "pack.info form summary must not include source-only fields"
+    );
+}
+
+#[test]
 fn test_hap_does_not_package_pkg_context_info_for_hap() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (abc, res, modj) = write_minimal_inputs(tmp.path());

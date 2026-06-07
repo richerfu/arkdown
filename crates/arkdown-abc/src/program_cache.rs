@@ -3039,11 +3039,18 @@ impl FunctionLabelPlan {
     }
 
     fn add(&mut self, offset: usize, name: String) {
+        self.add_target(offset, offset, name);
+    }
+
+    fn add_target(&mut self, label_offset: usize, target_offset: usize, name: String) {
         self.labels_by_offset
-            .entry(offset)
+            .entry(label_offset)
             .or_default()
             .push(name.clone());
-        self.target_names.entry(offset).or_insert(name);
+        self.target_names
+            .entry(target_offset)
+            .or_insert(name.clone());
+        self.target_names.entry(label_offset).or_insert(name);
         self.len += 1;
     }
 
@@ -3089,7 +3096,7 @@ fn method_label_plan(
             .cloned()
             .unwrap_or_else(|| label_name_for_source_index(plan.len()));
         let name = unique_label_name(base, &mut used_names);
-        plan.add(offset, name);
+        plan.add_target(offset.min(end_offset), offset, name);
     }
 
     plan
@@ -6996,6 +7003,54 @@ obj.m(); obj.am(); obj.gm(); obj.agm();
         assert!(jump_ids.iter().all(|id| id.starts_with(b"label@")));
         assert!(labels.iter().all(|label| !label.starts_with(b"L_")));
         assert!(jump_ids.iter().all(|id| !id.starts_with(b"L_")));
+    }
+
+    #[test]
+    fn source_label_plan_materializes_jump_aliases_at_function_end() {
+        let mut file = AbcFile::new();
+        let record = build_record_with_debug_and_package_for_target_with_mode(
+            "let x = 1; x;",
+            "@bundle:demo/entry/ets/pages/Index",
+            &mut file.strings,
+            &mut file.literal_arrays,
+            Some("entry/src/main/ets/pages/Index.ets"),
+            None,
+            false,
+            false,
+            "ets",
+            true,
+            12,
+            None,
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+        let mut method = record.methods[0].clone();
+        method.label_style = MethodLabelStyle::Source;
+        method.program_labels = vec![ProgramLabel {
+            name: "label_0".to_string(),
+            offset: 2,
+            file_location: None,
+        }];
+
+        let insns = vec![Insn::JmpShort(4)];
+        let required_offsets = BTreeSet::from([2usize, 4usize]);
+        let plan = method_label_plan(&insns, &required_offsets, &method);
+
+        let names_at_end = plan.names_at(2).unwrap();
+        assert_eq!(
+            names_at_end,
+            &["label_0".to_string(), "label_1".to_string()]
+        );
+        assert_eq!(
+            plan.target_names().get(&2).map(String::as_str),
+            Some("label_0")
+        );
+        assert_eq!(
+            plan.target_names().get(&4).map(String::as_str),
+            Some("label_1")
+        );
     }
 
     #[test]

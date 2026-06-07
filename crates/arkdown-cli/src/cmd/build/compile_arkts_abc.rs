@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 
-use arkdown_config::build_profile::parse_api_version;
 use arkdown_core::{ArkdownConfig, BuildMode};
 use arkdown_ts2abc::{Ts2abcInput, Ts2abcOptions};
 
@@ -23,11 +22,8 @@ pub(super) struct AbcCompileRequest {
 
 impl AbcCompilePlan {
     pub(super) fn from_config(config: &ArkdownConfig) -> Self {
-        let target_api_version = parse_api_version(&config.product.compatible_sdk_version)
-            .unwrap_or(config.sdk_config.compile_api_version);
-
         Self {
-            target_api_version,
+            target_api_version: config.sdk_config.compile_api_version,
             target_api_sub_version: config.product.compatible_sdk_version_stage.clone(),
             // Upstream ets-loader initializes `projectConfig.allowEtsAnnotations`
             // to true and passes `--enable-annotations` for esmodule builds. The
@@ -137,11 +133,11 @@ mod tests {
     }
 
     #[test]
-    fn target_api_uses_compatible_sdk_version() {
+    fn target_api_uses_discovered_sdk_api() {
         let plan = AbcCompilePlan::from_config(&config_for("5.0.0(12)", 20, BuildMode::Debug));
         let options = plan.ts2abc_options(empty_request());
 
-        assert_eq!(options.target_api_version, 12);
+        assert_eq!(options.target_api_version, 20);
         assert!(options.enable_annotations);
         assert!(options.debug_info);
         assert_eq!(options.opt_level, 0);

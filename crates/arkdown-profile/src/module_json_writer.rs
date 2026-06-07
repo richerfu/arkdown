@@ -62,8 +62,12 @@ pub fn write_module_json(
 ) -> Result<(), ArkdownError> {
     let app_json5_fields = ModuleJsonWriter::read_app_json5_fields(config)?;
     let project_multi_projects = ModuleJsonWriter::read_project_multi_projects(config);
-    let numeric_api =
+    let min_numeric_api =
         ModuleJsonWriter::compute_numeric_api_version(&config.product.compatible_sdk_version);
+    let target_numeric_api = ModuleJsonWriter::compute_numeric_target_api_version(
+        &config.sdk_config.compile_sdk_version,
+        config.sdk_config.compile_api_version,
+    );
     let is_debug = matches!(config.build_mode, arkdown_core::BuildMode::Debug);
 
     // Derive packageName from oh-package.json5#name for this module.
@@ -88,7 +92,8 @@ pub fn write_module_json(
 
     let app_section = ModuleJsonWriter::build_app_section(
         &app_json5_fields,
-        numeric_api,
+        min_numeric_api,
+        target_numeric_api,
         is_debug,
         &config.sdk_config.compile_sdk_version,
         &config.product.bundle_name,
@@ -168,7 +173,8 @@ impl ModuleJsonWriter {
     #[allow(clippy::too_many_arguments)]
     fn build_app_section(
         src: &serde_json::Map<String, serde_json::Value>,
-        numeric_api: u64,
+        min_numeric_api: u64,
+        target_numeric_api: u64,
         is_debug: bool,
         compile_sdk_version: &str,
         bundle_name_fallback: &str,
@@ -196,7 +202,7 @@ impl ModuleJsonWriter {
         }
         obj.insert("debug".into(), is_debug.into());
         obj.insert("targetPatchAPIVersion".into(), 0u64.into());
-        obj.insert("minAPIVersion".into(), numeric_api.into());
+        obj.insert("minAPIVersion".into(), min_numeric_api.into());
         if let Some(v) = src.get("icon") {
             obj.insert("icon".into(), v.clone());
         }
@@ -236,7 +242,7 @@ impl ModuleJsonWriter {
             obj.insert("labelId".into(), (id as u64).into());
         }
         obj.insert("compileSdkVersion".into(), compile_sdk_version.into());
-        obj.insert("targetAPIVersion".into(), numeric_api.into());
+        obj.insert("targetAPIVersion".into(), target_numeric_api.into());
         if let Some(v) = src.get("vendor") {
             obj.insert("vendor".into(), v.clone());
         }
@@ -522,12 +528,22 @@ impl ModuleJsonWriter {
             if !perms.is_empty() {
                 obj.insert(
                     "requestPermissions".into(),
-                    serde_json::Value::Array(perms.clone()),
+                    serde_json::Value::Array(Self::annotate_permission_reason_ids(
+                        perms.clone(),
+                        resource_ids,
+                    )),
                 );
             }
         } else if let Some(perms) = raw_module5.and_then(|v| v.get("requestPermissions")) {
             if perms.as_array().is_some_and(|a| !a.is_empty()) {
-                obj.insert("requestPermissions".into(), perms.clone());
+                let permissions = perms.as_array().cloned().unwrap_or_default();
+                obj.insert(
+                    "requestPermissions".into(),
+                    serde_json::Value::Array(Self::annotate_permission_reason_ids(
+                        permissions,
+                        resource_ids,
+                    )),
+                );
             }
         }
         // definePermissions: preserved verbatim from module.json5.
@@ -563,6 +579,9 @@ impl ModuleJsonWriter {
         );
         if let Some(pages) = &manifest.pages {
             obj.insert("pages".into(), pages.clone().into());
+        }
+        if let Some(router_map) = &manifest.router_map {
+            obj.insert("routerMap".into(), router_map.clone().into());
         }
         if let (Some(desc_ref), Some(ids)) = (manifest.description.as_deref(), resource_ids) {
             if let Some(id) = Self::resolve_res_ref(desc_ref, ids) {
@@ -969,6 +988,34 @@ impl ModuleJsonWriter {
         merged
     }
 
+    fn annotate_permission_reason_ids(
+        permissions: Vec<serde_json::Value>,
+        resource_ids: Option<&FxHashMap<String, u32>>,
+    ) -> Vec<serde_json::Value> {
+        let Some(resource_ids) = resource_ids else {
+            return permissions;
+        };
+
+        permissions
+            .into_iter()
+            .map(|mut permission| {
+                let Some(object) = permission.as_object_mut() else {
+                    return permission;
+                };
+                if object.contains_key("reasonId") {
+                    return permission;
+                }
+                let Some(reason) = object.get("reason").and_then(|value| value.as_str()) else {
+                    return permission;
+                };
+                if let Some(id) = Self::resolve_res_ref(reason, resource_ids) {
+                    object.insert("reasonId".to_string(), (id as u64).into());
+                }
+                permission
+            })
+            .collect()
+    }
+
     fn merge_named_arrays_from_dependencies<'a, I>(
         current: Vec<serde_json::Value>,
         dependencies: I,
@@ -1215,6 +1262,19 @@ impl ModuleJsonWriter {
 
         major * 10_000_000 + minor * 100_000 + patch * 1_000 + api_int
     }
+
+    pub(crate) fn compute_numeric_target_api_version(
+        compile_sdk_version: &str,
+        target_api_version: u32,
+    ) -> u64 {
+        let prefix = compile_sdk_version.trim_end_matches('.');
+        let parts: Vec<u64> = prefix.split('.').filter_map(|s| s.parse().ok()).collect();
+        let major = parts.first().copied().unwrap_or(0);
+        let minor = parts.get(1).copied().unwrap_or(0);
+        let patch = parts.get(2).copied().unwrap_or(0);
+
+        major * 10_000_000 + minor * 100_000 + patch * 1_000 + target_api_version as u64
+    }
 }
 
 #[cfg(test)]
@@ -1240,6 +1300,7 @@ mod tests {
         let obj = ModuleJsonWriter::build_app_section(
             &src,
             12,
+            20,
             true,
             "5.0.0",
             "com.example.app",
@@ -1267,6 +1328,7 @@ mod tests {
         let obj = ModuleJsonWriter::build_app_section(
             &src,
             12,
+            20,
             true,
             "5.0.0",
             "com.example.app",
@@ -1294,6 +1356,7 @@ mod tests {
         let obj = ModuleJsonWriter::build_app_section(
             &src,
             12,
+            20,
             false,
             "5.0.0",
             "com.example.app",
@@ -1309,6 +1372,32 @@ mod tests {
         assert_eq!(
             obj.get("versionName"),
             Some(&serde_json::Value::String("1.0.0".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_build_app_section_splits_min_and_target_api() {
+        let src = make_app_json5_src(1_000_000, "1.0.0");
+        let obj = ModuleJsonWriter::build_app_section(
+            &src,
+            60000020,
+            60001021,
+            false,
+            "6.0.1.112",
+            "com.example.app",
+            false,
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(
+            obj.get("minAPIVersion"),
+            Some(&serde_json::Value::Number(60000020u64.into()))
+        );
+        assert_eq!(
+            obj.get("targetAPIVersion"),
+            Some(&serde_json::Value::Number(60001021u64.into()))
         );
     }
 }

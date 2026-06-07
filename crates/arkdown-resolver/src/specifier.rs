@@ -52,12 +52,18 @@ mod tests {
 
     #[test]
     fn test_relative_dot_slash() {
-        assert_eq!(classify_specifier("./pages/Index"), SpecifierClass::Relative);
+        assert_eq!(
+            classify_specifier("./pages/Index"),
+            SpecifierClass::Relative
+        );
     }
 
     #[test]
     fn test_relative_dot_dot() {
-        assert_eq!(classify_specifier("../utils/helper"), SpecifierClass::Relative);
+        assert_eq!(
+            classify_specifier("../utils/helper"),
+            SpecifierClass::Relative
+        );
     }
 
     #[test]
@@ -70,7 +76,10 @@ mod tests {
 
     #[test]
     fn test_scoped_ohos_package() {
-        assert_eq!(classify_specifier("@ohos/hilog"), SpecifierClass::ScopedPackage);
+        assert_eq!(
+            classify_specifier("@ohos/hilog"),
+            SpecifierClass::ScopedPackage
+        );
     }
 
     #[test]

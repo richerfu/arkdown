@@ -35,8 +35,8 @@ pub fn extract_tgz(tarball_data: &[u8], dest_dir: &Path) -> Result<(), OhpmError
         .entries()
         .map_err(|e| OhpmError::TarballExtract("archive".into(), e.to_string()))?
     {
-        let mut entry = entry
-            .map_err(|e| OhpmError::TarballExtract("entry".into(), e.to_string()))?;
+        let mut entry =
+            entry.map_err(|e| OhpmError::TarballExtract("entry".into(), e.to_string()))?;
 
         let path = entry
             .path()
@@ -59,10 +59,7 @@ pub fn extract_tgz(tarball_data: &[u8], dest_dir: &Path) -> Result<(), OhpmError
         }
 
         // Reject path traversal.
-        if stripped
-            .components()
-            .any(|c| c.as_os_str() == "..")
-        {
+        if stripped.components().any(|c| c.as_os_str() == "..") {
             return Err(OhpmError::UnsafeTarballEntry(
                 stripped.to_string_lossy().into_owned(),
             ));
@@ -84,8 +81,7 @@ pub fn extract_tgz(tarball_data: &[u8], dest_dir: &Path) -> Result<(), OhpmError
         }
 
         let mut file = std::fs::File::create(&dest).map_err(|e| OhpmError::io(&dest, e))?;
-        std::io::copy(&mut entry, &mut file)
-            .map_err(|e| OhpmError::io(&dest, e))?;
+        std::io::copy(&mut entry, &mut file).map_err(|e| OhpmError::io(&dest, e))?;
     }
 
     Ok(())

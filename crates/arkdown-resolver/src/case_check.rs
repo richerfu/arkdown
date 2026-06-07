@@ -104,7 +104,10 @@ mod tests {
         let _ = std::fs::write(&file, "");
         let result = check_path_case(&file);
         assert!(
-            matches!(result, CaseCheckResult::Ok | CaseCheckResult::SkippedOnLinux),
+            matches!(
+                result,
+                CaseCheckResult::Ok | CaseCheckResult::SkippedOnLinux
+            ),
             "expected Ok or SkippedOnLinux, got: {:?}",
             result
         );

@@ -47,3 +47,15 @@ pub fn add_bytes_deflate<W: Write + std::io::Seek>(
     writer.write_all(content)?;
     Ok(())
 }
+
+/// Add raw bytes to the zip with STORE (no compression).
+pub fn add_bytes_stored<W: Write + std::io::Seek>(
+    writer: &mut ZipWriter<W>,
+    archive_path: &str,
+    content: &[u8],
+) -> Result<(), crate::error::PackError> {
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+    writer.start_file(archive_path, options)?;
+    writer.write_all(content)?;
+    Ok(())
+}

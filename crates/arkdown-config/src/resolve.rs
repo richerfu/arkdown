@@ -299,14 +299,13 @@ pub fn load_config(
     // -----------------------------------------------------------------------
     // 7. Discover SDK
     // -----------------------------------------------------------------------
-    // targetSdkVersion (new format) takes priority over compatibleSdkVersion.
-    let sdk_version_str = raw_product
+    // Explicit targetSdkVersion overrides the SDK component apiVersion. When
+    // targetSdkVersion is absent, hvigor compiles for the selected SDK API.
+    let target_api_version = raw_product
         .target_sdk_version
         .as_deref()
-        .unwrap_or(&raw_product.compatible_sdk_version);
-    let compile_api_version = parse_api_version(sdk_version_str).unwrap_or(12);
-
-    let sdk_config = discover_sdk(compile_api_version)?;
+        .and_then(parse_api_version);
+    let sdk_config = discover_sdk(target_api_version)?;
 
     // -----------------------------------------------------------------------
     // 6. Assemble and return

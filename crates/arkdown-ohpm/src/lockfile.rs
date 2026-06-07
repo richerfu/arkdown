@@ -165,10 +165,9 @@ impl OhPackageLockfile {
 pub(crate) fn strip_version_suffix(key: &str) -> &str {
     let bytes = key.as_bytes();
     for i in (1..bytes.len()).rev() {
-        if bytes[i] == b'@'
-            && bytes.get(i + 1).is_some_and(|b| b.is_ascii_digit()) {
-                return &key[..i];
-            }
+        if bytes[i] == b'@' && bytes.get(i + 1).is_some_and(|b| b.is_ascii_digit()) {
+            return &key[..i];
+        }
     }
     key
 }
@@ -244,7 +243,10 @@ mod tests {
 
     #[test]
     fn test_strip_version_suffix_scoped() {
-        assert_eq!(strip_version_suffix("@ohos/crypto-js@1.0.0"), "@ohos/crypto-js");
+        assert_eq!(
+            strip_version_suffix("@ohos/crypto-js@1.0.0"),
+            "@ohos/crypto-js"
+        );
     }
 
     #[test]

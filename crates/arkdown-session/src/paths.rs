@@ -23,8 +23,7 @@ impl PathResolver {
     /// normalizing lexically if it does not.
     pub fn abs_existing_or_lexical(&self, path: &Path) -> AbsPath {
         if path.exists() {
-            AbsPath::canonicalize(path)
-                .unwrap_or_else(|_| AbsPath::from_absolute(path).unwrap())
+            AbsPath::canonicalize(path).unwrap_or_else(|_| AbsPath::from_absolute(path).unwrap())
         } else if path.is_absolute() {
             AbsPath::from_absolute(path).unwrap()
         } else {

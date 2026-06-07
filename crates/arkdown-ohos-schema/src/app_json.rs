@@ -55,7 +55,8 @@ mod tests {
 
     #[test]
     fn test_parse_minimal_app_json5() {
-        let json = r#"{"app":{"bundleName":"com.example.app","versionCode":1,"versionName":"1.0.0"}}"#;
+        let json =
+            r#"{"app":{"bundleName":"com.example.app","versionCode":1,"versionName":"1.0.0"}}"#;
         let app: RawAppJson5 = serde_json::from_str(json).unwrap();
         assert_eq!(app.app.bundle_name, "com.example.app");
         assert_eq!(app.app.version_code, 1);

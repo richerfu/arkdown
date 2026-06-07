@@ -781,28 +781,41 @@ impl AbcCompiler {
                     cache_hash_source_file,
                     module.package_name.as_deref().unwrap_or(""),
                     panda_file_version,
+                    self.options.target_api_version,
                 )
             });
             if let (Some(cache_input), Some(hash_code)) = (cache_input, cache_hash_code) {
                 if let Some(program) =
                     ProgramCacheFile::read_if_hash_matches(&cache_input.cache_file, hash_code)?
                 {
-                    let appended_records = append_program_to_file(&mut abc_file, program)?;
-                    record_needs_optimization
-                        .extend(std::iter::repeat_n(false, appended_records.len()));
-                    record_program_keys.extend(std::iter::repeat_n(
-                        program_key.clone(),
-                        appended_records.len(),
-                    ));
-                    has_debug_info |= effective_debug_info;
-                    tracing::debug!(
-                        source = %cache_input.file_name,
-                        cache_file = %cache_input.cache_file.display(),
-                        hash_code,
-                        record_count = appended_records.len(),
-                        "restored upstream ProgramCache hit"
-                    );
-                    continue;
+                    match append_program_to_file(&mut abc_file, program) {
+                        Ok(appended_records) => {
+                            record_needs_optimization
+                                .extend(std::iter::repeat_n(false, appended_records.len()));
+                            record_program_keys.extend(std::iter::repeat_n(
+                                program_key.clone(),
+                                appended_records.len(),
+                            ));
+                            has_debug_info |= effective_debug_info;
+                            tracing::debug!(
+                                source = %cache_input.file_name,
+                                cache_file = %cache_input.cache_file.display(),
+                                hash_code,
+                                record_count = appended_records.len(),
+                                "restored upstream ProgramCache hit"
+                            );
+                            continue;
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                source = %cache_input.file_name,
+                                cache_file = %cache_input.cache_file.display(),
+                                hash_code,
+                                error = %error,
+                                "ignored invalid upstream ProgramCache hit"
+                            );
+                        }
+                    }
                 }
             }
 

@@ -76,15 +76,13 @@ impl ArtifactPathSerializer {
         project_root: &Path,
         source_path: &Path,
     ) -> Result<ArtifactPath, SerializerError> {
-        let rel = source_path
-            .strip_prefix(project_root)
-            .map_err(|_| {
-                SerializerError::NonUtf8(format!(
-                    "path {} is not inside project root {}",
-                    source_path.display(),
-                    project_root.display()
-                ))
-            })?;
+        let rel = source_path.strip_prefix(project_root).map_err(|_| {
+            SerializerError::NonUtf8(format!(
+                "path {} is not inside project root {}",
+                source_path.display(),
+                project_root.display()
+            ))
+        })?;
         Self::path_to_slash(rel)
     }
 }
@@ -96,9 +94,7 @@ fn path_to_slash_string(path: &Path) -> Result<String, SerializerError> {
     // OsStr is valid UTF-8. On Windows we iterate components.
     let s: String = path
         .to_str()
-        .ok_or_else(|| {
-            SerializerError::NonUtf8(path.to_string_lossy().into_owned())
-        })?
+        .ok_or_else(|| SerializerError::NonUtf8(path.to_string_lossy().into_owned()))?
         .replace('\\', "/");
     Ok(s)
 }

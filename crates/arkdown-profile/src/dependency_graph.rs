@@ -947,8 +947,7 @@ mod tests {
         let config = DependencyResolutionConfig {
             ohpm_cache_root: Some(tmp.path().join("empty-cache")), // non-existent
         };
-        let graph =
-            LocalDependencyGraph::build_with_config(tmp.path(), tmp.path(), Some(&config));
+        let graph = LocalDependencyGraph::build_with_config(tmp.path(), tmp.path(), Some(&config));
         let node = graph.nodes.get("not-installed").expect("node in graph");
         assert_eq!(
             node.node_type,
@@ -956,5 +955,4 @@ mod tests {
             "packages not found locally must be classified as RemoteOrUnknown"
         );
     }
-
 }

@@ -74,30 +74,31 @@ impl ModuleSnapshot {
 
         // Read module.json5.
         let module_json_path = src_main.join("module.json5");
-        let (module_json_path_opt, module_json, module_type) =
-            if module_json_path.is_file() {
-                let content = std::fs::read_to_string(&module_json_path)?;
-                let parsed: Option<RawModuleJson> = json5::from_str(&content).ok();
-                let mtype = parsed
-                    .as_ref()
-                    .map(|m| OhosModuleType::parse(&m.module.module_type))
-                    .unwrap_or(OhosModuleType::Entry);
-                (Some(module_json_path), parsed, mtype)
-            } else {
-                (None, None, OhosModuleType::Entry)
-            };
+        let (module_json_path_opt, module_json, module_type) = if module_json_path.is_file() {
+            let content = std::fs::read_to_string(&module_json_path)?;
+            let parsed: Option<RawModuleJson> = json5::from_str(&content).ok();
+            let mtype = parsed
+                .as_ref()
+                .map(|m| OhosModuleType::parse(&m.module.module_type))
+                .unwrap_or(OhosModuleType::Entry);
+            (Some(module_json_path), parsed, mtype)
+        } else {
+            (None, None, OhosModuleType::Entry)
+        };
 
         // Read oh-package.json5.
         let package_path = root.join("oh-package.json5");
         let (package_path_opt, package) = if package_path.is_file() {
             let content = std::fs::read_to_string(&package_path)?;
             let parsed: Option<RawOhPackage> = json5::from_str(&content).ok();
-            let snap = parsed.map(|p| Arc::new(PackageSnapshot {
-                name: p.name.clone(),
-                version: p.version.clone(),
-                root: root.to_path_buf(),
-                package_json: p,
-            }));
+            let snap = parsed.map(|p| {
+                Arc::new(PackageSnapshot {
+                    name: p.name.clone(),
+                    version: p.version.clone(),
+                    root: root.to_path_buf(),
+                    package_json: p,
+                })
+            });
             (Some(package_path), snap)
         } else {
             (None, None)

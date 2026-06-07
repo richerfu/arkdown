@@ -478,6 +478,79 @@ fn test_write_module_json_resolves_resource_ids_into_abilities() {
 }
 
 #[test]
+fn test_write_module_json_adds_permission_reason_ids_and_router_map() {
+    use arkdown_core::{CompileMode, HapManifest, ModuleConfig, OhosModuleType};
+    use rustc_hash::FxHashMap;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let module_src = tmp.path().join("entry");
+    std::fs::create_dir_all(module_src.join("src/main")).expect("create module dirs");
+    std::fs::write(
+        module_src.join("src/main/module.json5"),
+        r#"{
+          "module": {
+            "name": "entry",
+            "type": "entry",
+            "deviceTypes": ["phone"],
+            "requestPermissions": [
+              {
+                "name": "ohos.permission.INTERNET",
+                "reason": "$string:internet_reason",
+                "usedScene": { "abilities": ["EntryAbility"], "when": "inuse" }
+              }
+            ]
+          }
+        }"#,
+    )
+    .expect("write module.json5");
+
+    let mut config = (*default_config()).clone();
+    config.project_root = tmp.path().to_path_buf();
+    config.modules = vec![ModuleConfig {
+        name: "entry".to_string(),
+        src_path: module_src,
+        module_type: OhosModuleType::Entry,
+    }];
+    let processor = ProfileProcessor::new(Arc::new(config));
+
+    let manifest = HapManifest {
+        module_name: "entry".to_string(),
+        module_type: OhosModuleType::Entry,
+        device_types: vec!["phone".to_string()],
+        virtual_machine: "ark12.0.6.0".to_string(),
+        compile_mode: CompileMode::EsModule,
+        src_entry: None,
+        abilities: vec![],
+        extension_abilities: vec![],
+        dependencies: vec![],
+        router_map: Some("$profile:default-router-map".to_string()),
+        pages: None,
+        main_element: None,
+        description: None,
+    };
+
+    let mut resource_ids: FxHashMap<String, u32> = FxHashMap::default();
+    resource_ids.insert("internet_reason".to_string(), 201326602);
+
+    let out_path = tmp.path().join("module.json");
+    processor
+        .write_module_json(&manifest, &out_path, Some(&resource_ids))
+        .expect("write module.json");
+
+    let content = std::fs::read_to_string(&out_path).expect("read module.json");
+    let parsed: serde_json::Value = serde_json::from_str(&content).expect("valid module.json");
+
+    assert_eq!(
+        parsed["module"]["requestPermissions"][0]["reasonId"].as_u64(),
+        Some(201326602)
+    );
+    assert_eq!(
+        parsed["module"]["routerMap"].as_str(),
+        Some("$profile:default-router-map")
+    );
+}
+
+#[test]
 fn test_write_module_json_applies_target_source_ability_overrides() {
     use arkdown_core::{AbilityEntry, CompileMode, HapManifest, ModuleConfig, OhosModuleType};
     use rustc_hash::FxHashMap;

@@ -3148,6 +3148,7 @@ fn program_cache_hit_restores_program_and_skips_source_compile() {
         "",
         "",
         version_for_target_api(12, None),
+        12,
     );
     ProgramCacheFile::write(&cache_file, invalid_source_hash, entry.program).unwrap();
 
@@ -7489,6 +7490,7 @@ fn proto_bin_cache_file_written_with_correct_format() {
         "", // source_file (None → empty string in hash)
         "", // package_name (None → empty string in hash)
         version_for_target_api(12, None),
+        12,
     );
     assert_eq!(
         entry.hash_code, expected_hash,

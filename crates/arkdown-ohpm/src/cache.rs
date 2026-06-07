@@ -68,16 +68,15 @@ pub fn cache_path(cache_root: &Path, name: &PackageName, version: &str) -> PathB
 /// - `cache_root` — the OHPM home directory (`$OHPM_HOME` / `~/.ohpm`).
 /// - `name` — the package name.
 /// - `version` — the resolved version (from lockfile or explicit spec).
-pub fn lookup_cache(
-    cache_root: &Path,
-    name: &PackageName,
-    version: &str,
-) -> Option<CacheHit> {
+pub fn lookup_cache(cache_root: &Path, name: &PackageName, version: &str) -> Option<CacheHit> {
     let path = cache_path(cache_root, name, version);
     if path.is_dir() {
         // Canonicalize to resolve any symlinks.
         let root = std::fs::canonicalize(&path).unwrap_or(path);
-        return Some(CacheHit { root, version: version.into() });
+        return Some(CacheHit {
+            root,
+            version: version.into(),
+        });
     }
     None
 }

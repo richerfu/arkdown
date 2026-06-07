@@ -65,13 +65,16 @@ impl ProjectSnapshot {
         let app_json_path = root.join("AppScope/app.json5");
         let (bundle_name, version_code, version_name) = if app_json_path.is_file() {
             let content = std::fs::read_to_string(&app_json_path)?;
-            let app: RawAppJson5 = json5::from_str(&content).map_err(|e| {
-                ProjectSnapshotError::Parse {
+            let app: RawAppJson5 =
+                json5::from_str(&content).map_err(|e| ProjectSnapshotError::Parse {
                     file: app_json_path.clone(),
                     message: e.to_string(),
-                }
-            })?;
-            (app.app.bundle_name, app.app.version_code, app.app.version_name)
+                })?;
+            (
+                app.app.bundle_name,
+                app.app.version_code,
+                app.app.version_name,
+            )
         } else {
             (String::new(), 0, String::new())
         };
@@ -81,12 +84,11 @@ impl ProjectSnapshot {
         let bp_path = root.join("build-profile.json5");
         let (module_order, modules_map) = if bp_path.is_file() {
             let content = std::fs::read_to_string(&bp_path)?;
-            let bp: RawBuildProfile = json5::from_str(&content).map_err(|e| {
-                ProjectSnapshotError::Parse {
+            let bp: RawBuildProfile =
+                json5::from_str(&content).map_err(|e| ProjectSnapshotError::Parse {
                     file: bp_path.clone(),
                     message: e.to_string(),
-                }
-            })?;
+                })?;
             let mut order = Vec::new();
             let mut modules = IndexMap::new();
             for m in &bp.modules {

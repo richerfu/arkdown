@@ -81,10 +81,17 @@ pub fn find_sdk_root() -> Option<PathBuf> {
     None
 }
 
-/// Build [`SdkConfig`] from a known SDK root path and a numeric API version.
-pub fn sdk_config_from_root(sdk_root: &Path, compile_api_version: u32) -> SdkConfig {
+/// Build [`SdkConfig`] from a known SDK root path.
+///
+/// `target_api_version` comes from an explicit `targetSdkVersion`. When it is
+/// absent, hvigor uses the selected SDK component `apiVersion`.
+pub fn sdk_config_from_root(sdk_root: &Path, target_api_version: Option<u32>) -> SdkConfig {
     let ohos_base = openharmony_base_from_root(sdk_root);
     let platform = platform_dir();
+    let sdk_metadata = discover_sdk_metadata(&ohos_base);
+    let compile_api_version = target_api_version
+        .or(sdk_metadata.api_version)
+        .unwrap_or(12);
 
     let es2abc_path = ohos_base
         .join("ets")
@@ -108,31 +115,30 @@ pub fn sdk_config_from_root(sdk_root: &Path, compile_api_version: u32) -> SdkCon
         ets_loader_path,
         compile_api_version,
         has_rollup_plugin,
-        compile_sdk_version: discover_compile_sdk_version(&ohos_base)
+        compile_sdk_version: sdk_metadata
+            .compile_sdk_version
             .unwrap_or_else(default_compile_sdk_version),
     }
 }
 
 /// Discover the SDK and build an [`SdkConfig`].
 ///
-/// `compile_api_version` is derived from `compatibleSdkVersion` in the build profile.
+/// `target_api_version` is derived from explicit `targetSdkVersion`; when
+/// missing, the SDK component metadata decides the API.
 /// If the SDK root is not found, returns [`ConfigError::SdkNotFound`].
-pub fn discover_sdk(compile_api_version: u32) -> Result<SdkConfig, ConfigError> {
+pub fn discover_sdk(target_api_version: Option<u32>) -> Result<SdkConfig, ConfigError> {
     let sdk_root = find_sdk_root().ok_or(ConfigError::SdkNotFound)?;
-    Ok(sdk_config_from_root(&sdk_root, compile_api_version))
+    Ok(sdk_config_from_root(&sdk_root, target_api_version))
 }
 
 /// Discover `app.compileSdkVersion` from SDK component metadata.
 pub fn discover_compile_sdk_version(ohos_base: &Path) -> Option<String> {
-    [
-        ohos_base.join("ets").join("oh-uni-package.json"),
-        ohos_base.join("native").join("oh-uni-package.json"),
-        ohos_base.join("toolchains").join("oh-uni-package.json"),
-        ohos_base.join("js").join("oh-uni-package.json"),
-        ohos_base.join("previewer").join("oh-uni-package.json"),
-    ]
-    .into_iter()
-    .find_map(|path| read_json_string_field(&path, "version"))
+    discover_sdk_metadata(ohos_base).compile_sdk_version
+}
+
+/// Discover the selected SDK `apiVersion`.
+pub fn discover_sdk_api_version(ohos_base: &Path) -> Option<u32> {
+    discover_sdk_metadata(ohos_base).api_version
 }
 
 /// Discover the raw Ark VM version from the same SDK tooling hvigor uses.
@@ -173,6 +179,41 @@ fn openharmony_base_from_root(sdk_root: &Path) -> PathBuf {
     }
 
     default_openharmony
+}
+
+#[derive(Debug, Default)]
+struct SdkMetadata {
+    api_version: Option<u32>,
+    compile_sdk_version: Option<String>,
+}
+
+fn discover_sdk_metadata(ohos_base: &Path) -> SdkMetadata {
+    let mut metadata = SdkMetadata::default();
+    for path in sdk_metadata_paths(ohos_base) {
+        let Some(value) = read_json_value(&path) else {
+            continue;
+        };
+        if metadata.compile_sdk_version.is_none() {
+            metadata.compile_sdk_version = json_string_field(&value, "version");
+        }
+        if metadata.api_version.is_none() {
+            metadata.api_version = json_u32_field(&value, "apiVersion");
+        }
+        if metadata.compile_sdk_version.is_some() && metadata.api_version.is_some() {
+            break;
+        }
+    }
+    metadata
+}
+
+fn sdk_metadata_paths(ohos_base: &Path) -> [PathBuf; 5] {
+    [
+        ohos_base.join("ets").join("oh-uni-package.json"),
+        ohos_base.join("native").join("oh-uni-package.json"),
+        ohos_base.join("toolchains").join("oh-uni-package.json"),
+        ohos_base.join("js").join("oh-uni-package.json"),
+        ohos_base.join("previewer").join("oh-uni-package.json"),
+    ]
 }
 
 fn looks_like_openharmony_base(path: &Path) -> bool {
@@ -283,16 +324,40 @@ fn is_dotted_numeric_version(version: &str) -> bool {
 }
 
 fn read_json_string_field(path: &Path, field: &str) -> Option<String> {
+    let value = read_json_value(path)?;
+    json_string_field(&value, field)
+}
+
+fn read_json_value(path: &Path) -> Option<serde_json::Value> {
     let content = std::fs::read_to_string(path).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&content).ok()?;
-    let field_value = value
+    serde_json::from_str(&content).ok()
+}
+
+fn json_field<'a>(value: &'a serde_json::Value, field: &str) -> Option<&'a serde_json::Value> {
+    value
         .get(field)
-        .or_else(|| value.get("data").and_then(|data| data.get(field)))?;
+        .or_else(|| value.get("data").and_then(|data| data.get(field)))
+}
+
+fn json_string_field(value: &serde_json::Value, field: &str) -> Option<String> {
+    let field_value = json_field(value, field)?;
     field_value
         .as_str()
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn json_u32_field(value: &serde_json::Value, field: &str) -> Option<u32> {
+    let field_value = json_field(value, field)?;
+    if let Some(number) = field_value.as_u64() {
+        return u32::try_from(number).ok();
+    }
+    field_value
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| value.parse().ok())
 }
 
 // ---------------------------------------------------------------------------
@@ -338,7 +403,7 @@ mod tests {
         // Override OHOS_SDK_HOME to a nonexistent path to ensure controlled behaviour.
         // (We cannot unset the env var in a portable way inside a test, so we just call
         // discover_sdk and accept either Ok or SdkNotFound.)
-        let result = discover_sdk(12);
+        let result = discover_sdk(Some(12));
         match result {
             Ok(cfg) => {
                 // If an SDK root was found, verify version propagation.
@@ -355,7 +420,7 @@ mod tests {
     #[test]
     fn test_sdk_config_from_root_paths() {
         let root = PathBuf::from("/fake/sdk");
-        let cfg = sdk_config_from_root(&root, 12);
+        let cfg = sdk_config_from_root(&root, Some(12));
         assert_eq!(cfg.compile_api_version, 12);
         assert!(cfg.has_rollup_plugin);
         assert_eq!(cfg.compile_sdk_version, "6.0.0.47");
@@ -377,12 +442,34 @@ mod tests {
         )
         .expect("write sdk metadata");
 
-        let cfg = sdk_config_from_root(&root, 12);
+        let cfg = sdk_config_from_root(&root, Some(12));
 
         assert_eq!(cfg.compile_sdk_version, "6.0.1.112");
         assert!(cfg
             .ets_loader_path
             .starts_with(root.join("default").join("openharmony")));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn test_sdk_config_from_root_uses_sdk_api_when_target_absent() {
+        let root = temp_root("sdk-api-version");
+        let ets_dir = root.join("default").join("openharmony").join("ets");
+        fs::create_dir_all(&ets_dir).expect("create sdk metadata dir");
+        fs::write(
+            ets_dir.join("oh-uni-package.json"),
+            r#"{"apiVersion":"21","version":"6.0.1.112","releaseType":"Release"}"#,
+        )
+        .expect("write sdk metadata");
+
+        let cfg = sdk_config_from_root(&root, None);
+
+        assert_eq!(cfg.compile_api_version, 21);
+        assert_eq!(
+            discover_sdk_api_version(&root.join("default/openharmony")),
+            Some(21)
+        );
 
         let _ = fs::remove_dir_all(root);
     }
@@ -399,7 +486,7 @@ mod tests {
         fs::create_dir_all(schema.parent().unwrap()).expect("create pac schema dir");
         fs::write(&schema, "{}").expect("write pac schema");
 
-        let cfg = sdk_config_from_root(&root, 12);
+        let cfg = sdk_config_from_root(&root, Some(12));
 
         assert_eq!(cfg.pac_schema_path().as_deref(), Some(schema.as_path()));
 
@@ -419,7 +506,7 @@ mod tests {
             .expect("create permission module dir");
         fs::write(&permission_module, "{}").expect("write permission module");
 
-        let cfg = sdk_config_from_root(&root, 12);
+        let cfg = sdk_config_from_root(&root, Some(12));
 
         assert_eq!(
             cfg.permission_module_json_path().as_deref(),
@@ -440,7 +527,7 @@ mod tests {
         )
         .expect("write direct sdk metadata");
 
-        let cfg = sdk_config_from_root(&root, 17);
+        let cfg = sdk_config_from_root(&root, Some(17));
 
         assert_eq!(cfg.compile_sdk_version, "6.1.0.31");
         assert!(cfg.ets_loader_path.starts_with(&root));
@@ -506,9 +593,9 @@ fi
     #[test]
     fn test_has_rollup_plugin_threshold() {
         let root = PathBuf::from("/fake/sdk");
-        let cfg_v9 = sdk_config_from_root(&root, 9);
+        let cfg_v9 = sdk_config_from_root(&root, Some(9));
         assert!(cfg_v9.has_rollup_plugin);
-        let cfg_v8 = sdk_config_from_root(&root, 8);
+        let cfg_v8 = sdk_config_from_root(&root, Some(8));
         assert!(!cfg_v8.has_rollup_plugin);
     }
 }

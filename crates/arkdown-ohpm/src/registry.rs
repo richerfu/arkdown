@@ -105,13 +105,13 @@ impl OhpmRegistryClient {
                 message: "no version or latest dist-tag found".into(),
             })?;
 
-        let entry = meta
-            .versions
-            .get(&resolved_version)
-            .ok_or_else(|| OhpmError::RegistryNotFound {
-                name: name.to_string(),
-                message: format!("version {resolved_version} not found in registry"),
-            })?;
+        let entry =
+            meta.versions
+                .get(&resolved_version)
+                .ok_or_else(|| OhpmError::RegistryNotFound {
+                    name: name.to_string(),
+                    message: format!("version {resolved_version} not found in registry"),
+                })?;
 
         Ok(RegistryVersionMetadata {
             version: entry.version.clone().into_boxed_str(),

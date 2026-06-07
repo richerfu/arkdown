@@ -61,10 +61,7 @@ impl BuildSessionBuilder {
     }
 
     /// Set the OHPM resolution mode.
-    pub fn with_ohpm_mode(
-        mut self,
-        mode: crate::package::acquisition::AcquisitionMode,
-    ) -> Self {
+    pub fn with_ohpm_mode(mut self, mode: crate::package::acquisition::AcquisitionMode) -> Self {
         self.ohpm_mode = mode;
         self
     }
@@ -87,8 +84,7 @@ impl BuildSessionBuilder {
             .map_err(|e| BuildSessionError::Config(e.to_string()))?;
 
         // Phase 2: Build SDK snapshot.
-        let sdk = SdkSnapshot::from_env()
-            .unwrap_or_else(|_| SdkSnapshot::placeholder());
+        let sdk = SdkSnapshot::from_env().unwrap_or_else(|_| SdkSnapshot::placeholder());
 
         // Phase 3: Build path resolver.
         let paths = PathResolver::new(self.project_root.clone());

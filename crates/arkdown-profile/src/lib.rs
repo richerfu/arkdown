@@ -167,6 +167,9 @@ impl ProfileProcessor {
         }
 
         let loader = LoaderJson::try_generate(&self.config, module_cfg, &manifest)?;
+        if manifest.router_map.is_none() && !loader.router_map.is_empty() {
+            manifest.router_map = Some("$profile:default-router-map".to_string());
+        }
         Ok((manifest, loader))
     }
 
@@ -378,6 +381,128 @@ fi
             "./ets/entryability/EntryAbility.ets"
         );
         assert_eq!(loader.build_mode, "debug");
+    }
+
+    #[test]
+    fn test_process_module_derives_default_router_map_ref() {
+        let temp_dir = tempfile::tempdir().expect("create temp project");
+        let project_root = temp_dir.path().to_path_buf();
+        let entry_root = project_root.join("entry");
+        let feature_root = project_root.join("feature");
+        let feature_profile_dir = feature_root.join("src/main/resources/base/profile");
+        fs::create_dir_all(&feature_profile_dir).expect("create feature profile dir");
+        fs::create_dir_all(feature_root.join("src/main")).expect("create feature module dir");
+        fs::write(
+            feature_root.join("src/main/module.json5"),
+            r#"{"module":{"name":"feature","type":"har","routerMap":"$profile:router_map"}}"#,
+        )
+        .expect("write feature module.json5");
+        fs::write(
+            feature_profile_dir.join("router_map.json"),
+            r#"{"routerMap":[{"name":"detail","pageSourceFile":"src/main/ets/pages/Detail.ets","buildFunction":"DetailBuilder"}]}"#,
+        )
+        .expect("write feature router map");
+
+        let mut config = make_config();
+        config.project_root = project_root;
+        config.modules = vec![
+            ModuleConfig {
+                name: "entry".to_string(),
+                src_path: entry_root.clone(),
+                module_type: OhosModuleType::Entry,
+            },
+            ModuleConfig {
+                name: "feature".to_string(),
+                src_path: feature_root,
+                module_type: OhosModuleType::Har,
+            },
+        ];
+        let processor = ProfileProcessor::new(Arc::new(config));
+        let module_cfg = ModuleConfig {
+            name: "entry".to_string(),
+            src_path: entry_root,
+            module_type: OhosModuleType::Entry,
+        };
+
+        let (manifest, loader) = processor
+            .process_module(&module_cfg, &make_module_json5())
+            .expect("process_module failed");
+
+        assert!(!loader.router_map.is_empty());
+        assert_eq!(
+            manifest.router_map.as_deref(),
+            Some("$profile:default-router-map")
+        );
+    }
+
+    #[test]
+    fn test_router_map_uses_host_dependency_order() {
+        let temp_dir = tempfile::tempdir().expect("create temp project");
+        let project_root = temp_dir.path().to_path_buf();
+        let entry_root = project_root.join("entry");
+        fs::create_dir_all(&entry_root).expect("create entry root");
+        fs::write(
+            entry_root.join("oh-package.json5"),
+            r#"{"name":"entry","dependencies":{"@ohos/beta":"file:../beta","@ohos/alpha":"file:../alpha"}}"#,
+        )
+        .expect("write entry package");
+
+        for module_name in ["alpha", "beta"] {
+            let module_root = project_root.join(module_name);
+            let profile_dir = module_root.join("src/main/resources/base/profile");
+            fs::create_dir_all(&profile_dir).expect("create profile dir");
+            fs::write(
+                module_root.join("src/main/module.json5"),
+                format!(
+                    r#"{{"module":{{"name":"{module_name}","type":"har","routerMap":"$profile:router_map"}}}}"#
+                ),
+            )
+            .expect("write module.json5");
+            fs::write(
+                profile_dir.join("router_map.json"),
+                format!(
+                    r#"{{"routerMap":[{{"name":"{module_name}","pageSourceFile":"src/main/ets/pages/{module_name}.ets","buildFunction":"{module_name}Builder"}}]}}"#
+                ),
+            )
+            .expect("write router map");
+        }
+
+        let mut config = make_config();
+        config.project_root = project_root.clone();
+        config.modules = vec![
+            ModuleConfig {
+                name: "entry".to_string(),
+                src_path: entry_root.clone(),
+                module_type: OhosModuleType::Entry,
+            },
+            ModuleConfig {
+                name: "alpha".to_string(),
+                src_path: project_root.join("alpha"),
+                module_type: OhosModuleType::Har,
+            },
+            ModuleConfig {
+                name: "beta".to_string(),
+                src_path: project_root.join("beta"),
+                module_type: OhosModuleType::Har,
+            },
+        ];
+        let processor = ProfileProcessor::new(Arc::new(config));
+        let module_cfg = ModuleConfig {
+            name: "entry".to_string(),
+            src_path: entry_root,
+            module_type: OhosModuleType::Entry,
+        };
+
+        let (_, loader) = processor
+            .process_module(&module_cfg, &make_module_json5())
+            .expect("process_module failed");
+        let names = loader
+            .router_map
+            .iter()
+            .filter_map(|entry| entry.get("name").and_then(serde_json::Value::as_str))
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, vec!["beta", "alpha"]);
     }
 
     #[cfg(unix)]

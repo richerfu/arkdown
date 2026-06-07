@@ -13,9 +13,7 @@ pub enum OhpmError {
 
     /// A package is not present in the offline cache and offline mode is
     /// enabled.
-    #[error(
-        "package {name}@{version} not in OHPM cache and offline mode is enabled"
-    )]
+    #[error("package {name}@{version} not in OHPM cache and offline mode is enabled")]
     OfflineMiss { name: String, version: String },
 
     /// The package was not found in the registry.
@@ -63,6 +61,9 @@ pub enum OhpmError {
 impl OhpmError {
     /// Construct an I/O error with a path.
     pub fn io(path: impl Into<PathBuf>, source: std::io::Error) -> Self {
-        Self::Io { path: path.into(), source }
+        Self::Io {
+            path: path.into(),
+            source,
+        }
     }
 }

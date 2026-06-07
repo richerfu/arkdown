@@ -27,9 +27,7 @@ impl PackageIndex {
     }
 
     /// Build from a list of package snapshots.
-    pub fn from_snapshots<'a>(
-        snapshots: impl IntoIterator<Item = &'a PackageSnapshot>,
-    ) -> Self {
+    pub fn from_snapshots<'a>(snapshots: impl IntoIterator<Item = &'a PackageSnapshot>) -> Self {
         let mut index = Self::default();
         for snap in snapshots {
             if !snap.name.is_empty() {

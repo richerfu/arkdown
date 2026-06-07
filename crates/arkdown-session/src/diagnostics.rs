@@ -48,9 +48,7 @@ impl SessionDiagnostics {
 
     /// Return `true` if there are any error-severity diagnostics.
     pub fn has_errors(&self) -> bool {
-        self.items
-            .iter()
-            .any(|d| d.severity == Severity::Error)
+        self.items.iter().any(|d| d.severity == Severity::Error)
     }
 
     /// Merge another diagnostic collection into this one.

@@ -9,7 +9,9 @@ pub struct DependencyGraphBuilder {
 
 impl DependencyGraphBuilder {
     pub fn new(host_module: impl Into<String>) -> Self {
-        Self { host_module: host_module.into() }
+        Self {
+            host_module: host_module.into(),
+        }
     }
 
     /// Build the dependency graph snapshot.

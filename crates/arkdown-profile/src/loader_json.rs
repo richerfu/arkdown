@@ -515,7 +515,9 @@ impl LoaderJson {
             config, module_cfg,
         ));
         serialized_compile_entry.extend(Self::collect_dependency_ability_source_files(&dep_graph));
-        serialized_compile_entry.extend(Self::collect_dependency_insight_intent_src_entries(&dep_graph));
+        serialized_compile_entry.extend(Self::collect_dependency_insight_intent_src_entries(
+            &dep_graph,
+        ));
         dedupe_paths(&mut serialized_compile_entry);
 
         let hvigor_compile_entry: Vec<String> = serialized_compile_entry
@@ -874,10 +876,7 @@ impl LoaderJson {
             router_map_ref,
         ));
 
-        for module_cfg in &config.modules {
-            if module_cfg.name == host_module.name {
-                continue;
-            }
+        for module_cfg in Self::router_map_module_order(config, host_module) {
             let Some(router_map_ref) = Self::read_module_router_map_ref(module_cfg) else {
                 continue;
             };
@@ -890,6 +889,58 @@ impl LoaderJson {
         }
 
         router_maps
+    }
+
+    fn router_map_module_order<'a>(
+        config: &'a ArkdownConfig,
+        host_module: &ModuleConfig,
+    ) -> Vec<&'a ModuleConfig> {
+        let candidates = config
+            .modules
+            .iter()
+            .filter(|module_cfg| module_cfg.name != host_module.name)
+            .map(|module_cfg| {
+                (
+                    module_cfg,
+                    Self::dependency_package_name(&module_cfg.src_path),
+                )
+            })
+            .collect::<Vec<_>>();
+        let dependencies = Self::read_dependency_package_json(&host_module.src_path)
+            .map(|package| package.dependencies)
+            .unwrap_or_default();
+
+        let mut ordered = Vec::new();
+        let mut seen = FxHashSet::default();
+        for dep_name in dependencies.keys() {
+            let Some((module_cfg, _)) = candidates.iter().find(|(module_cfg, package_name)| {
+                !seen.contains(module_cfg.name.as_str())
+                    && Self::dependency_matches_module(dep_name, module_cfg, package_name)
+            }) else {
+                continue;
+            };
+            seen.insert(module_cfg.name.clone());
+            ordered.push(*module_cfg);
+        }
+        for (module_cfg, _) in candidates {
+            if seen.insert(module_cfg.name.clone()) {
+                ordered.push(module_cfg);
+            }
+        }
+        ordered
+    }
+
+    fn dependency_matches_module(
+        dep_name: &str,
+        module_cfg: &ModuleConfig,
+        package_name: &str,
+    ) -> bool {
+        dep_name == package_name
+            || dep_name == module_cfg.name
+            || dep_name
+                .rsplit('/')
+                .next()
+                .is_some_and(|name| name == package_name || name == module_cfg.name)
     }
 
     fn read_loader_router_map(

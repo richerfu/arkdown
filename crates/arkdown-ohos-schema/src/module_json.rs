@@ -79,10 +79,7 @@ mod tests {
         let m: RawModuleJson = serde_json::from_str(json).unwrap();
         assert_eq!(m.module.name, "entry");
         assert_eq!(m.module.module_type, "entry");
-        assert_eq!(
-            m.module.src_entry,
-            "./ets/entryability/EntryAbility.ets"
-        );
+        assert_eq!(m.module.src_entry, "./ets/entryability/EntryAbility.ets");
     }
 
     #[test]

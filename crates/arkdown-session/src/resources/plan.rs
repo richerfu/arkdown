@@ -21,10 +21,7 @@ pub struct ResourcePlan {
 
 impl ResourcePlan {
     /// Build a resource plan for a module from its snapshot and dependency graph.
-    pub fn for_module(
-        module: &Arc<ModuleSnapshot>,
-        _deps: &Arc<DependencyGraphSnapshot>,
-    ) -> Self {
+    pub fn for_module(module: &Arc<ModuleSnapshot>, _deps: &Arc<DependencyGraphSnapshot>) -> Self {
         let roots = module.resource_roots.clone();
         Self {
             roots,

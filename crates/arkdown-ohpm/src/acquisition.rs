@@ -96,7 +96,11 @@ impl OhpmResolver {
         registry_url: Option<Box<str>>,
         mode: OhpmResolutionMode,
     ) -> Self {
-        Self { cache_root, registry_url, mode }
+        Self {
+            cache_root,
+            registry_url,
+            mode,
+        }
     }
 
     /// Construct using the system OHPM home directory.
@@ -133,8 +137,7 @@ impl OhpmResolver {
         // 1. Check local oh_modules/ first.
         let local_candidate = req.issuer_root.join("oh_modules").join(req.name.as_str());
         if local_candidate.is_dir() {
-            let root = std::fs::canonicalize(&local_candidate)
-                .unwrap_or(local_candidate);
+            let root = std::fs::canonicalize(&local_candidate).unwrap_or(local_candidate);
             return Ok(PackageAcquisitionResult {
                 name: req.name.clone(),
                 root: Some(root),
@@ -159,12 +162,10 @@ impl OhpmResolver {
 
         // 3. Registry fetch if not offline.
         match self.mode {
-            OhpmResolutionMode::Offline => {
-                Err(OhpmError::OfflineMiss {
-                    name: req.name.to_string(),
-                    version: req.version.as_deref().unwrap_or("latest").to_string(),
-                })
-            }
+            OhpmResolutionMode::Offline => Err(OhpmError::OfflineMiss {
+                name: req.name.to_string(),
+                version: req.version.as_deref().unwrap_or("latest").to_string(),
+            }),
             OhpmResolutionMode::PreferOffline | OhpmResolutionMode::Online => {
                 self.fetch_and_install(req)
             }
@@ -176,9 +177,10 @@ impl OhpmResolver {
         &self,
         req: &PackageAcquisitionRequest,
     ) -> Result<PackageAcquisitionResult, OhpmError> {
-        let registry_url = self.registry_url.as_deref().unwrap_or(
-            "https://registry.ohpm.openharmony.cn",
-        );
+        let registry_url = self
+            .registry_url
+            .as_deref()
+            .unwrap_or("https://registry.ohpm.openharmony.cn");
         let client = OhpmRegistryClient::new(registry_url);
         let meta = client.fetch_version_metadata(&req.name, req.version.as_deref())?;
 
@@ -186,13 +188,14 @@ impl OhpmResolver {
 
         // Verify integrity if provided.
         if let Some(ref int_str) = meta.integrity {
-            integrity::verify(&tarball_data, int_str)
-                .map_err(|e| OhpmError::IntegrityMismatch {
+            integrity::verify(&tarball_data, int_str).map_err(|e| {
+                OhpmError::IntegrityMismatch {
                     name: req.name.to_string(),
                     version: meta.version.to_string(),
                     expected: int_str.to_string(),
                     actual: e.to_string(),
-                })?;
+                }
+            })?;
         }
 
         // Install into cache.

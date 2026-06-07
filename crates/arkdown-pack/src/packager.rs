@@ -7,11 +7,6 @@ use crate::error::PackError;
 use crate::integrated_hsp::IntegratedHspEntry;
 use crate::zip_writer;
 
-fn minify_hap_module_json(content: &str) -> Result<String, serde_json::Error> {
-    let value: serde_json::Value = serde_json::from_str(content)?;
-    serde_json::to_string(&order_hap_module_json(value))
-}
-
 pub fn minify_package_intermediate_module_json(content: &str) -> Result<String, serde_json::Error> {
     let value: serde_json::Value = serde_json::from_str(content)?;
     serde_json::to_string(&order_package_module_json(value))
@@ -117,15 +112,23 @@ fn order_hap_module(module: &serde_json::Value) -> serde_json::Value {
     for key in [
         "virtualMachine",
         "mainElement",
+        "metadata",
         "installationFree",
         "deliveryWithInstall",
+        "requestPermissions",
         "description",
+        "extensionAbilities",
         "compileMode",
         "type",
         "dependencies",
     ] {
         if let Some(value) = object.get(key) {
-            out.insert(key.to_string(), value.clone());
+            let value = match key {
+                "requestPermissions" => order_hap_request_permissions(value),
+                "extensionAbilities" => order_hap_extension_abilities(value),
+                _ => value.clone(),
+            };
+            out.insert(key.to_string(), value);
         }
     }
     if let Some(abilities) = object.get("abilities") {
@@ -136,6 +139,7 @@ fn order_hap_module(module: &serde_json::Value) -> serde_json::Value {
         "pages",
         "descriptionId",
         "name",
+        "routerMap",
         "packageName",
     ] {
         if let Some(value) = object.get(key) {
@@ -164,6 +168,7 @@ fn order_module(module: &serde_json::Value) -> serde_json::Value {
         "deliveryWithInstall",
         "installationFree",
         "pages",
+        "routerMap",
     ] {
         if let Some(value) = object.get(key) {
             out.insert(key.to_string(), value.clone());
@@ -204,13 +209,17 @@ fn order_hap_abilities(abilities: &serde_json::Value) -> serde_json::Value {
                     &[
                         "exported",
                         "iconId",
+                        "continuable",
                         "startWindowIconId",
+                        "minWindowHeight",
+                        "backgroundModes",
                         "icon",
                         "startWindowIcon",
                         "startWindowBackgroundId",
                         "description",
                         "label",
                         "skills",
+                        "minWindowWidth",
                         "srcEntry",
                         "descriptionId",
                         "labelId",
@@ -226,6 +235,76 @@ fn order_hap_abilities(abilities: &serde_json::Value) -> serde_json::Value {
                 }
                 serde_json::Value::Object(object)
             })
+            .collect(),
+    )
+}
+
+fn order_hap_request_permissions(permissions: &serde_json::Value) -> serde_json::Value {
+    let Some(array) = permissions.as_array() else {
+        return permissions.clone();
+    };
+    serde_json::Value::Array(
+        array
+            .iter()
+            .map(|permission| {
+                let ordered =
+                    order_object(permission, &["reason", "reasonId", "usedScene", "name"]);
+                let serde_json::Value::Object(mut object) = ordered else {
+                    return ordered;
+                };
+                if let Some(used_scene) = object.get("usedScene").cloned() {
+                    object.insert(
+                        "usedScene".to_string(),
+                        order_object(&used_scene, &["abilities", "when"]),
+                    );
+                }
+                serde_json::Value::Object(object)
+            })
+            .collect(),
+    )
+}
+
+fn order_hap_extension_abilities(abilities: &serde_json::Value) -> serde_json::Value {
+    let Some(array) = abilities.as_array() else {
+        return abilities.clone();
+    };
+    serde_json::Value::Array(
+        array
+            .iter()
+            .map(|ability| {
+                let ordered = order_object(
+                    ability,
+                    &[
+                        "metadata",
+                        "srcEntry",
+                        "descriptionId",
+                        "labelId",
+                        "name",
+                        "description",
+                        "label",
+                        "type",
+                    ],
+                );
+                let serde_json::Value::Object(mut object) = ordered else {
+                    return ordered;
+                };
+                if let Some(metadata) = object.get("metadata").cloned() {
+                    object.insert("metadata".to_string(), order_hap_metadata(&metadata));
+                }
+                serde_json::Value::Object(object)
+            })
+            .collect(),
+    )
+}
+
+fn order_hap_metadata(metadata: &serde_json::Value) -> serde_json::Value {
+    let Some(array) = metadata.as_array() else {
+        return metadata.clone();
+    };
+    serde_json::Value::Array(
+        array
+            .iter()
+            .map(|entry| order_object(entry, &["resourceId", "resource", "name", "value"]))
             .collect(),
     )
 }
@@ -398,7 +477,11 @@ impl Packager {
     /// libs/arm64-v8a/*.so   (stored, optional)
     /// ```
 
-    fn generate_pack_info(&self, input: &PackInput) -> String {
+    fn generate_pack_info(
+        &self,
+        input: &PackInput,
+        module_json: Option<&serde_json::Value>,
+    ) -> String {
         let abilities_json: Vec<serde_json::Value> = input
             .abilities
             .iter()
@@ -416,6 +499,10 @@ impl Packager {
             .first()
             .map(|a| a.name.as_str())
             .unwrap_or("EntryAbility");
+        let extension_abilities = Self::pack_info_extension_abilities(input, module_json);
+        let compatible_api_version =
+            compatible_api_version(&self.config.product.compatible_sdk_version)
+                .unwrap_or(self.config.sdk_config.compile_api_version);
 
         // HSP uses bundle_type "shared"; all other module types use "entry" as the
         // distro moduleType (HAP entry modules) unless extended in future.
@@ -424,6 +511,46 @@ impl Packager {
         } else {
             "entry"
         };
+
+        let device_types = if input.device_types.is_empty() {
+            vec!["phone".to_string()]
+        } else {
+            input.device_types.clone()
+        };
+
+        let mut module = serde_json::Map::new();
+        module.insert("mainAbility".to_string(), main_ability.into());
+        module.insert(
+            "deviceType".to_string(),
+            serde_json::json!(device_types.clone()),
+        );
+        module.insert(
+            "abilities".to_string(),
+            serde_json::Value::Array(abilities_json),
+        );
+        if !extension_abilities.is_empty() {
+            module.insert(
+                "extensionAbilities".to_string(),
+                serde_json::Value::Array(extension_abilities),
+            );
+        }
+        module.insert(
+            "distro".to_string(),
+            serde_json::json!({
+                "moduleType": module_type,
+                "installationFree": input.installation_free,
+                "deliveryWithInstall": input.delivery_with_install,
+                "moduleName": input.module_name
+            }),
+        );
+        module.insert(
+            "apiVersion".to_string(),
+            serde_json::json!({
+                "compatible": compatible_api_version,
+                "releaseType": "Release",
+                "target": self.config.sdk_config.compile_api_version
+            }),
+        );
 
         serde_json::json!({
             "summary": {
@@ -435,28 +562,11 @@ impl Packager {
                         "name": input.bundle_version_name
                     }
                 },
-                "modules": [
-                    {
-                        "mainAbility": main_ability,
-                        "deviceType": if input.device_types.is_empty() { vec!["phone".to_string()] } else { input.device_types.clone() },
-                        "abilities": abilities_json,
-                        "distro": {
-                            "moduleType": module_type,
-                            "installationFree": input.installation_free,
-                            "deliveryWithInstall": input.delivery_with_install,
-                            "moduleName": input.module_name
-                        },
-                        "apiVersion": {
-                            "compatible": self.config.sdk_config.compile_api_version,
-                            "releaseType": "Release",
-                            "target": self.config.sdk_config.compile_api_version
-                        }
-                    }
-                ]
+                "modules": [serde_json::Value::Object(module)]
             },
             "packages": [
                 {
-                    "deviceType": if input.device_types.is_empty() { vec!["phone".to_string()] } else { input.device_types.clone() },
+                    "deviceType": device_types,
                     "moduleType": module_type,
                     "deliveryWithInstall": input.delivery_with_install,
                     "name": format!("{}-default", input.module_name)
@@ -466,17 +576,123 @@ impl Packager {
         .to_string()
     }
 
+    fn pack_info_extension_abilities(
+        input: &PackInput,
+        module_json: Option<&serde_json::Value>,
+    ) -> Vec<serde_json::Value> {
+        let Some(resources_src_dir) = input.resources_src_dir.as_deref() else {
+            return Vec::new();
+        };
+        let Some(extension_abilities) = module_json
+            .and_then(|value| value.pointer("/module/extensionAbilities"))
+            .and_then(|value| value.as_array())
+        else {
+            return Vec::new();
+        };
+
+        let mut out = Vec::new();
+        for ability in extension_abilities {
+            let Some(ability_object) = ability.as_object() else {
+                continue;
+            };
+            if ability_object.get("type").and_then(|value| value.as_str()) != Some("form") {
+                continue;
+            }
+            let Some(name) = ability_object.get("name").and_then(|value| value.as_str()) else {
+                continue;
+            };
+            let forms = Self::pack_info_forms(resources_src_dir, ability_object);
+            if forms.is_empty() {
+                continue;
+            }
+
+            let mut entry = serde_json::Map::new();
+            entry.insert("name".to_string(), name.into());
+            entry.insert("forms".to_string(), serde_json::Value::Array(forms));
+            out.push(serde_json::Value::Object(entry));
+        }
+        out
+    }
+
+    fn pack_info_forms(
+        resources_src_dir: &std::path::Path,
+        ability: &serde_json::Map<String, serde_json::Value>,
+    ) -> Vec<serde_json::Value> {
+        let profile_names = ability
+            .get("metadata")
+            .and_then(|value| value.as_array())
+            .into_iter()
+            .flatten()
+            .filter(|metadata| {
+                metadata.get("name").and_then(|value| value.as_str()) == Some("ohos.extension.form")
+            })
+            .filter_map(|metadata| {
+                metadata
+                    .get("resource")
+                    .and_then(|value| value.as_str())
+                    .and_then(|resource| resource.strip_prefix("$profile:"))
+            });
+
+        let mut forms = Vec::new();
+        for profile_name in profile_names {
+            let profile_path = resources_src_dir
+                .join("base")
+                .join("profile")
+                .join(format!("{profile_name}.json"));
+            let Ok(content) = fs_err::read_to_string(&profile_path) else {
+                continue;
+            };
+            let Ok(profile) = json5::from_str::<serde_json::Value>(&content) else {
+                continue;
+            };
+            let Some(profile_forms) = profile.get("forms").and_then(|value| value.as_array())
+            else {
+                continue;
+            };
+            forms.extend(profile_forms.iter().filter_map(Self::pack_info_form_entry));
+        }
+        forms
+    }
+
+    fn pack_info_form_entry(form: &serde_json::Value) -> Option<serde_json::Value> {
+        let object = form.as_object()?;
+        let mut out = serde_json::Map::new();
+        for key in [
+            "name",
+            "type",
+            "updateEnabled",
+            "scheduledUpdateTime",
+            "updateDuration",
+            "supportDimensions",
+            "defaultDimension",
+        ] {
+            if key == "type" {
+                let value = object.get(key).cloned().unwrap_or_else(|| "JS".into());
+                out.insert(key.to_string(), value);
+            } else if let Some(value) = object.get(key) {
+                out.insert(key.to_string(), value.clone());
+            }
+        }
+        (!out.is_empty()).then_some(serde_json::Value::Object(out))
+    }
+
     pub fn pack_hap(&self, input: PackInput) -> Result<PathBuf, PackError> {
         if let Some(parent) = input.output_path.parent() {
             fs_err::create_dir_all(parent)?;
         }
         let mut writer = zip_writer::create_zip(&input.output_path)?;
 
-        // module.json — deflate compressed, minified as in hvigor PackageHap output.
+        // module.json — minified and stored, matching hvigor PackageHap output.
+        let module_json_value;
         if input.module_json.exists() {
             let module_json = fs_err::read_to_string(&input.module_json)?;
-            let module_json = minify_hap_module_json(&module_json).unwrap_or(module_json);
-            zip_writer::add_bytes_deflate(&mut writer, "module.json", module_json.as_bytes())?;
+            let parsed_module_json = serde_json::from_str::<serde_json::Value>(&module_json).ok();
+            let module_json_entry = parsed_module_json
+                .as_ref()
+                .and_then(|value| serde_json::to_string(&order_hap_module_json(value.clone())).ok())
+                .unwrap_or(module_json);
+            module_json_value = parsed_module_json;
+            zip_writer::add_bytes_stored(&mut writer, "module.json", module_json_entry.as_bytes())?;
         } else {
             return Err(PackError::MissingInput("module.json".to_string()));
         }
@@ -505,9 +721,9 @@ impl Packager {
                         .and_then(|e| e.to_str())
                         .unwrap_or("");
                     if ext == "json" {
-                        add_json_resource_deflate(&mut writer, &dest, entry.path())?;
+                        add_json_resource_stored(&mut writer, &dest, entry.path())?;
                     } else if matches!(ext, "json5" | "xml" | "txt" | "html") {
-                        zip_writer::add_file_deflate(&mut writer, &dest, entry.path())?;
+                        zip_writer::add_file_stored(&mut writer, &dest, entry.path())?;
                     } else {
                         zip_writer::add_file_stored(&mut writer, &dest, entry.path())?;
                     }
@@ -527,10 +743,10 @@ impl Packager {
             return Err(PackError::MissingInput("modules.abc".to_string()));
         }
 
-        // ets/sourceMaps.map — deflated; only included if the bundler produced it
+        // ets/sourceMaps.map — stored; only included if the bundler produced it
         if let Some(ref sm_path) = input.source_maps_path {
             if sm_path.exists() {
-                zip_writer::add_file_deflate(&mut writer, "ets/sourceMaps.map", sm_path)?;
+                zip_writer::add_file_stored(&mut writer, "ets/sourceMaps.map", sm_path)?;
             }
         }
 
@@ -563,7 +779,7 @@ impl Packager {
 
         Self::add_profile_guided_ap(&mut writer, &input)?;
 
-        // module.privacy.json — PAC/privacy profile (deflated), written when
+        // module.privacy.json — PAC/privacy profile (stored), written when
         // `ProcessModulePrivacyProfile` produced a processed privacy profile.
         // Hvigor accepts `pac.json5`; the archive entry remains JSON.
         if let Some(ref privacy_path) = input.privacy_profile_path {
@@ -572,7 +788,7 @@ impl Packager {
                     if let Ok(value) = json5::from_str::<serde_json::Value>(&content) {
                         let bytes = serde_json::to_vec(&value)
                             .expect("serializing parsed privacy JSON should not fail");
-                        zip_writer::add_bytes_deflate(&mut writer, "module.privacy.json", &bytes)?;
+                        zip_writer::add_bytes_stored(&mut writer, "module.privacy.json", &bytes)?;
                     } else {
                         tracing::warn!(
                             path = %privacy_path.display(),
@@ -583,11 +799,11 @@ impl Packager {
             }
         }
 
-        // pack.info — bundle metadata (deflated JSON), written last by hvigor
+        // pack.info — bundle metadata (stored JSON), written last by hvigor
         // for a normal HAP.
-        let mut pack_info = self.generate_pack_info(&input);
+        let mut pack_info = self.generate_pack_info(&input, module_json_value.as_ref());
         pack_info.push('\n');
-        zip_writer::add_bytes_deflate(&mut writer, "pack.info", pack_info.as_bytes())?;
+        zip_writer::add_bytes_stored(&mut writer, "pack.info", pack_info.as_bytes())?;
 
         writer.finish()?;
         Ok(input.output_path)
@@ -856,9 +1072,9 @@ impl Packager {
             let dest = ArchivePath::ets(&rel_text);
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
             if ext == "json" {
-                add_json_resource_deflate(writer, &dest, path)?;
+                add_json_resource_stored(writer, &dest, path)?;
             } else if matches!(ext, "json5" | "xml" | "txt" | "html") {
-                zip_writer::add_file_deflate(writer, &dest, path)?;
+                zip_writer::add_file_stored(writer, &dest, path)?;
             } else {
                 zip_writer::add_file_stored(writer, &dest, path)?;
             }
@@ -937,7 +1153,7 @@ impl ArchivePath {
     }
 }
 
-fn add_json_resource_deflate<W: std::io::Write + std::io::Seek>(
+fn add_json_resource_stored<W: std::io::Write + std::io::Seek>(
     writer: &mut zip::ZipWriter<W>,
     archive_path: &str,
     file_path: &std::path::Path,
@@ -945,8 +1161,17 @@ fn add_json_resource_deflate<W: std::io::Write + std::io::Seek>(
     let bytes = fs_err::read(file_path)?;
     if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
         let minified = serde_json::to_vec(&value).expect("serializing parsed JSON should not fail");
-        zip_writer::add_bytes_deflate(writer, archive_path, &minified)
+        zip_writer::add_bytes_stored(writer, archive_path, &minified)
     } else {
-        zip_writer::add_bytes_deflate(writer, archive_path, &bytes)
+        zip_writer::add_bytes_stored(writer, archive_path, &bytes)
     }
+}
+
+fn compatible_api_version(version: &str) -> Option<u32> {
+    let open = version.rfind('(')?;
+    let close = version.rfind(')')?;
+    if close <= open {
+        return None;
+    }
+    version[open + 1..close].parse().ok()
 }

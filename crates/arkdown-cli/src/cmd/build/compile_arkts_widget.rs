@@ -1,7 +1,7 @@
 use super::compile_arkts_abc::{AbcCompilePlan, AbcCompileRequest};
 use super::compile_arkts_handoff::{write_compile_arkts_abc_handoff, CompileArkTsInfo};
 use super::compile_arkts_modules::{
-    compile_source_passthrough, rewrite_compile_module_imports_to_ohm, slash_path,
+    compile_source_passthrough, rewrite_compile_module_imports_to_ohm,
 };
 use super::compile_arkts_package_entries::PackageEntryInfos;
 use super::*;
@@ -88,12 +88,10 @@ pub(super) fn compile_widget_pass(
                         entry_info.source_path.display()
                     )
                 })?;
-        let collection_key = entry_info
-            .source_path
-            .strip_prefix(&config.project_root)
-            .ok()
-            .map(slash_path)
-            .unwrap_or_else(|| slash_path(&entry_info.source_path));
+        let collection_key = widget_component_collection_key(
+            &entry_info.source_path,
+            &canonical_or_owned(&config.project_root),
+        );
         component_collection.insert(collection_key, serde_json::json!(components));
 
         compile_infos.push(CompileArkTsInfo {
@@ -182,4 +180,61 @@ fn widget_sources(
     }
     sources.sort();
     Ok(sources)
+}
+
+fn widget_component_collection_key(source_path: &Path, project_root: &Path) -> String {
+    for source_root in ["products", "features", "commons"] {
+        if let Some(rel) = path_from_named_component(source_path, source_root) {
+            return arkdown_path::to_slash(&rel);
+        }
+    }
+
+    source_path
+        .strip_prefix(project_root)
+        .map(arkdown_path::to_slash)
+        .unwrap_or_else(|_| arkdown_path::to_slash(source_path))
+}
+
+fn path_from_named_component(path: &Path, component_name: &str) -> Option<PathBuf> {
+    let mut rel = PathBuf::new();
+    let mut found = false;
+    for component in path.components() {
+        let component_os = component.as_os_str();
+        if found {
+            rel.push(component_os);
+        } else if component_os == std::ffi::OsStr::new(component_name) {
+            found = true;
+            rel.push(component_os);
+        }
+    }
+    found.then_some(rel)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn widget_collection_key_prefers_hvigor_source_root_components() {
+        let source = Path::new(
+            "/private/tmp/arkdown-hmosworld/products/phone/src/main/ets/widget/pages/WidgetCard.ets",
+        );
+        let project_root = Path::new("/tmp/arkdown-hmosworld");
+
+        assert_eq!(
+            widget_component_collection_key(source, project_root),
+            "products/phone/src/main/ets/widget/pages/WidgetCard.ets"
+        );
+    }
+
+    #[test]
+    fn widget_collection_key_falls_back_to_project_relative_path() {
+        let project_root = Path::new("/workspace/app");
+        let source = Path::new("/workspace/app/entry/src/main/ets/widget/pages/Card.ets");
+
+        assert_eq!(
+            widget_component_collection_key(source, project_root),
+            "entry/src/main/ets/widget/pages/Card.ets"
+        );
+    }
 }

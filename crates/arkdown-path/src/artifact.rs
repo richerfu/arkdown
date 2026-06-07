@@ -51,7 +51,10 @@ impl ArtifactPath {
 
     /// Append a path segment with `/` as separator.
     pub fn join(&self, segment: &str) -> Self {
-        debug_assert!(!segment.contains('\\'), "segment must not contain backslashes");
+        debug_assert!(
+            !segment.contains('\\'),
+            "segment must not contain backslashes"
+        );
         if self.0.is_empty() {
             Self(segment.to_owned())
         } else {

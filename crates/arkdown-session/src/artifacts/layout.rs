@@ -29,7 +29,11 @@ pub struct ArtifactLayout {
 impl ArtifactLayout {
     /// Build the artifact layout for a module.
     pub fn for_module(module: &Arc<ModuleSnapshot>, paths: &Arc<PathResolver>) -> Self {
-        let output_root = paths.project_root.join(".hvigor").join("build").join(&module.name);
+        let output_root = paths
+            .project_root
+            .join(".hvigor")
+            .join("build")
+            .join(&module.name);
         Self {
             js_output: output_root.join("js"),
             source_map_output: output_root.join("sourceMaps"),

@@ -152,7 +152,10 @@ mod tests {
     #[test]
     fn test_ohm_bundle_url() {
         let url = OhmUrl::bundle("com.example.app", "entry", "ets/pages/Index");
-        assert_eq!(url.as_str(), "@bundle:com.example.app/entry/ets/pages/Index");
+        assert_eq!(
+            url.as_str(),
+            "@bundle:com.example.app/entry/ets/pages/Index"
+        );
         assert_eq!(url.schema(), Some(OhmSchema::Bundle));
     }
 

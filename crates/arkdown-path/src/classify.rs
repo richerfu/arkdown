@@ -41,8 +41,7 @@ pub enum PathKind {
 /// assert!(!is_inside_oh_modules(Path::new("/project/my_oh_modules_backup")));
 /// ```
 pub fn is_inside_oh_modules(path: &Path) -> bool {
-    path.components()
-        .any(|c| c.as_os_str() == "oh_modules")
+    path.components().any(|c| c.as_os_str() == "oh_modules")
 }
 
 /// Return `true` if any component of `path` is exactly `AppScope`.
@@ -138,7 +137,9 @@ mod tests {
 
     #[test]
     fn test_classify_app_scope() {
-        let k = classify_path(Path::new("/project/AppScope/resources/base/profile/main_pages.json"));
+        let k = classify_path(Path::new(
+            "/project/AppScope/resources/base/profile/main_pages.json",
+        ));
         assert_eq!(k, PathKind::AppScope);
     }
 
@@ -158,9 +159,7 @@ mod tests {
     fn test_oh_modules_takes_precedence_over_src_main() {
         // A path that is both in oh_modules and happens to have src/main should
         // be classified as OhModule.
-        let k = classify_path(Path::new(
-            "/project/oh_modules/lib/src/main/ets/Index.ets",
-        ));
+        let k = classify_path(Path::new("/project/oh_modules/lib/src/main/ets/Index.ets"));
         assert_eq!(k, PathKind::OhModule);
     }
 }
