@@ -53,7 +53,11 @@ pub fn check(source: &str, file: &str) -> Vec<EtsTransformError> {
                 }
                 // Rule: @Sendable cannot be applied to structs — only to class declarations.
                 // hvigor's etsChecker rejects @Sendable on @Component structs.
-                if statement.decorators.iter().any(|d| decorator_name(d) == "Sendable") {
+                if statement
+                    .decorators
+                    .iter()
+                    .any(|d| decorator_name(d) == "Sendable")
+                {
                     errors.push(EtsTransformError::Diagnostic {
                         file: file.to_string(),
                         message: format!(
@@ -107,7 +111,11 @@ pub fn check(source: &str, file: &str) -> Vec<EtsTransformError> {
                 // issues. The decorator itself on a function declaration is valid.
                 // Warn if it's on a generator or async function (not supported for Concurrent).
                 if func.generator {
-                    let name = func.id.as_ref().map(|id| id.name.as_str()).unwrap_or("<anonymous>");
+                    let name = func
+                        .id
+                        .as_ref()
+                        .map(|id| id.name.as_str())
+                        .unwrap_or("<anonymous>");
                     errors.push(EtsTransformError::Diagnostic {
                         file: file.to_string(),
                         message: format!(
@@ -199,7 +207,11 @@ pub fn check(source: &str, file: &str) -> Vec<EtsTransformError> {
             // with UI-component decorators (@Component, @ComponentV2).
             // Matches hvigor's validateSendableClass() rule.
             if has_sendable && (has_component || has_component_v2) {
-                let comp_name = if has_component_v2 { "@ComponentV2" } else { "@Component" };
+                let comp_name = if has_component_v2 {
+                    "@ComponentV2"
+                } else {
+                    "@Component"
+                };
                 let class_name = class
                     .id
                     .as_ref()
@@ -219,8 +231,16 @@ pub fn check(source: &str, file: &str) -> Vec<EtsTransformError> {
             // be mixed with @Component, @ComponentV2, or @Entry decorators.
             // Matches hvigor etsChecker rule for data model classes.
             if (has_observed || has_observed_v2) && (has_component || has_component_v2) {
-                let obs_name = if has_observed_v2 { "@ObservedV2" } else { "@Observed" };
-                let comp_name = if has_component_v2 { "@ComponentV2" } else { "@Component" };
+                let obs_name = if has_observed_v2 {
+                    "@ObservedV2"
+                } else {
+                    "@Observed"
+                };
+                let comp_name = if has_component_v2 {
+                    "@ComponentV2"
+                } else {
+                    "@Component"
+                };
                 let class_name = class
                     .id
                     .as_ref()
@@ -564,7 +584,11 @@ fn check_struct_component(
     // @Reusable components are designed for reuse, not as page entry points.
     // Matches hvigor etsChecker's validateReusableNotEntry() rule.
     if has_entry && (has_reusable || has_reusable_v2) {
-        let reusable_dec = if has_reusable_v2 { "@ReusableV2" } else { "@Reusable" };
+        let reusable_dec = if has_reusable_v2 {
+            "@ReusableV2"
+        } else {
+            "@Reusable"
+        };
         errors.push(EtsTransformError::Diagnostic {
             file: file.to_string(),
             message: format!(
@@ -708,7 +732,12 @@ fn check_struct_component(
         // Rule: @StorageLink/@StorageProp/@AppStorageLink/@AppStorageProp require
         // a string key argument — e.g. @StorageLink("myKey").
         // Matches hvigor etsChecker's validateStorageDecoratorHasKey() rule.
-        for storage_dec in &["StorageLink", "StorageProp", "AppStorageLink", "AppStorageProp"] {
+        for storage_dec in &[
+            "StorageLink",
+            "StorageProp",
+            "AppStorageLink",
+            "AppStorageProp",
+        ] {
             let found_without_key = prop.decorators.iter().any(|d| {
                 let name = decorator_name(d);
                 if name != *storage_dec {
@@ -744,7 +773,10 @@ fn check_struct_component(
         // Rule: @Require can only be combined with @Prop, @State, @Provide, or @BuilderParam.
         // Using @Require with other decorators (e.g. @Link, @StorageLink) or alone is an error.
         // Matches hvigor etsChecker's validateRequireDecorator() rule.
-        let has_require = prop.decorators.iter().any(|d| decorator_name(d) == "Require");
+        let has_require = prop
+            .decorators
+            .iter()
+            .any(|d| decorator_name(d) == "Require");
         if has_require {
             let has_allowed = prop.decorators.iter().any(|d| {
                 matches!(
@@ -960,7 +992,9 @@ mod tests {
         let src = "@Observed\nclass MyData {\n  count: number = 0;\n}";
         let errs = check(src, "test.ets");
         assert!(
-            !errs.iter().any(|e| matches!(e, EtsTransformError::Diagnostic { .. })),
+            !errs
+                .iter()
+                .any(|e| matches!(e, EtsTransformError::Diagnostic { .. })),
             "@Observed alone must not produce errors; got: {:?}",
             errs
         );
@@ -971,9 +1005,13 @@ mod tests {
         let src = "@ObservedV2\nclass MyData {\n  count: number = 0;\n}";
         let errs = check(src, "test.ets");
         assert!(
-            !errs.iter().any(|e| matches!(e, EtsTransformError::Diagnostic {
-                severity: crate::error::DiagnosticSeverity::Error, ..
-            })),
+            !errs.iter().any(|e| matches!(
+                e,
+                EtsTransformError::Diagnostic {
+                    severity: crate::error::DiagnosticSeverity::Error,
+                    ..
+                }
+            )),
             "@ObservedV2 alone must not produce errors; got: {:?}",
             errs
         );

@@ -100,7 +100,10 @@ impl GoldenStore {
 pub fn assert_golden(store: &GoldenStore, name: &str, actual: &str) {
     if GoldenStore::update_mode() {
         store.write(name, actual);
-        eprintln!("[golden] Updated golden '{}' (ARKDOWN_UPDATE_GOLDEN=1)", name);
+        eprintln!(
+            "[golden] Updated golden '{}' (ARKDOWN_UPDATE_GOLDEN=1)",
+            name
+        );
         return;
     }
 
@@ -213,7 +216,8 @@ fn default_golden_dir() -> PathBuf {
 fn test_loader_json_golden_minimal_hap() {
     use arkdown_core::{
         AbilityConfig, ArkdownConfig, BuildMode, BuildOption, ModuleConfig, ModuleJson5,
-        ModuleJson5Module, OhosModuleType, OutputTarget, ProductConfig, SdkConfig, StrictModeConfig,
+        ModuleJson5Module, OhosModuleType, OutputTarget, ProductConfig, SdkConfig,
+        StrictModeConfig,
     };
     use arkdown_profile::ProfileProcessor;
     use std::sync::Arc;
@@ -471,14 +475,8 @@ fn test_release_chunk_golden_format() {
     copy_dir(&fixture_src, &fixture);
 
     // Load config in release mode.
-    let config = load_config(
-        &fixture,
-        BuildMode::Release,
-        OutputTarget::Hap,
-        None,
-        None,
-    )
-    .expect("load_config for release mode must succeed");
+    let config = load_config(&fixture, BuildMode::Release, OutputTarget::Hap, None, None)
+        .expect("load_config for release mode must succeed");
     let config = Arc::new(config);
 
     let processor = ProfileProcessor::new(config.clone());
@@ -558,8 +556,7 @@ fn test_release_chunk_golden_format() {
         "chunk_count": chunk_count,
         "chunk_names": chunk_names,
     });
-    let canonical = serde_json::to_string_pretty(&golden_data)
-        .expect("serialize chunk golden");
+    let canonical = serde_json::to_string_pretty(&golden_data).expect("serialize chunk golden");
 
     // Store the golden in the default golden directory so it is checked into
     // the repository and compared on subsequent runs.
@@ -608,10 +605,21 @@ fn test_support_chunks_golden_produces_multiple_chunks() {
     let canonical = serde_json::to_string_pretty(&chunks_json).unwrap();
     store.write("support_chunks_structure", &canonical);
 
-    let stored = store.read("support_chunks_structure").expect("golden must exist");
-    assert_eq!(stored, canonical, "supportChunks golden must be deterministic");
-    assert!(canonical.contains("\"support_chunks\": true"), "must record supportChunks");
-    assert!(canonical.contains("\"utils\""), "must include the split chunk");
+    let stored = store
+        .read("support_chunks_structure")
+        .expect("golden must exist");
+    assert_eq!(
+        stored, canonical,
+        "supportChunks golden must be deterministic"
+    );
+    assert!(
+        canonical.contains("\"support_chunks\": true"),
+        "must record supportChunks"
+    );
+    assert!(
+        canonical.contains("\"utils\""),
+        "must include the split chunk"
+    );
 
     let _ = std::fs::remove_dir_all(&tmp);
 }

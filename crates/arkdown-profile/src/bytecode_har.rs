@@ -156,8 +156,6 @@ struct OhPkgMetadata {
 struct OhPkgRuntimeOnly {
     #[serde(default)]
     packages: Vec<String>,
-    #[serde(default)]
-    sources: Vec<String>,
 }
 
 /// `compatibleSdkVersion` can be a plain integer (`12`) or a string (`"5.0.0(12)"`).
@@ -1787,7 +1785,10 @@ mod tests {
               }
             }"#,
         );
-        write_file(&host_lib.join("src/main/ets/index.ets"), "export default 1;");
+        write_file(
+            &host_lib.join("src/main/ets/index.ets"),
+            "export default 1;",
+        );
 
         // runtime-bc-har is a ByteCode HAR.
         let runtime_bc_har = oh_modules.join("runtime-bc-har");
@@ -1798,10 +1799,7 @@ mod tests {
         );
 
         let results = scan_bytecode_har_deps(tmp.path(), tmp.path());
-        let names: Vec<_> = results
-            .iter()
-            .map(|e| e.package_name.as_str())
-            .collect();
+        let names: Vec<_> = results.iter().map(|e| e.package_name.as_str()).collect();
         assert!(
             names.contains(&"runtime-bc-har"),
             "BC HAR in metadata.runtimeOnly.packages must be detected; got: {:?}",

@@ -656,7 +656,10 @@ impl Packager {
                 let path = entry.path();
                 let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
                 // Skip original source files (they're replaced by declarations).
-                if matches!(ext, "ets" | "ts") && !path.to_string_lossy().ends_with(".d.ts") && !path.to_string_lossy().ends_with(".d.ets") {
+                if matches!(ext, "ets" | "ts")
+                    && !path.to_string_lossy().ends_with(".d.ts")
+                    && !path.to_string_lossy().ends_with(".d.ets")
+                {
                     continue;
                 }
                 // Copy everything else (JSON, resources, etc.).
@@ -697,14 +700,18 @@ impl Packager {
             });
             if has_declarations {
                 // Read, parse (json5), add types field, and write modified JSON.
-                let modified = Self::inject_types_field(&input.oh_package_json)
-                    .unwrap_or_else(|_| {
+                let modified =
+                    Self::inject_types_field(&input.oh_package_json).unwrap_or_else(|_| {
                         // Fall back to the original file on any error.
                         std::fs::read(input.oh_package_json.as_path()).unwrap_or_default()
                     });
                 zip_writer::add_bytes_deflate(&mut writer, "oh-package.json5", &modified)?;
             } else {
-                zip_writer::add_file_deflate(&mut writer, "oh-package.json5", &input.oh_package_json)?;
+                zip_writer::add_file_deflate(
+                    &mut writer,
+                    "oh-package.json5",
+                    &input.oh_package_json,
+                )?;
             }
         }
 
@@ -820,8 +827,7 @@ impl Packager {
             obj.entry("types")
                 .or_insert_with(|| serde_json::Value::String("index.d.ts".to_string()));
         }
-        serde_json::to_vec_pretty(&pkg)
-            .map_err(|e| PackError::MalformedPackInfo(e.to_string()))
+        serde_json::to_vec_pretty(&pkg).map_err(|e| PackError::MalformedPackInfo(e.to_string()))
     }
 }
 

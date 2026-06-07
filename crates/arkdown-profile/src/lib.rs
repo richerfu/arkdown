@@ -22,8 +22,8 @@ pub use dependency_graph::{
 };
 pub mod ohpm_registry;
 pub use ohpm_registry::{
-    OhpmRegistryClient, OhpmRegistryError, OhpmInstallOptions, OfflineOhpmCache,
-    PackageMetadata, VersionInfo, cache_dir_for,
+    cache_dir_for, OfflineOhpmCache, OhpmInstallOptions, OhpmRegistryClient, OhpmRegistryError,
+    PackageMetadata, VersionInfo,
 };
 pub mod lockfile;
 pub use lockfile::{LockfileEntry, OhPackageLockfile};
@@ -199,7 +199,9 @@ impl ProfileProcessor {
                 .join("pkgContextInfo/default");
             if let Ok(()) = std::fs::create_dir_all(&pkg_ctx_dir) {
                 let pkg_ctx_path = pkg_ctx_dir.join("pkgContextInfo.json");
-                if let Ok(pkg_ctx_json) = serde_json::to_string_pretty(&loader.pkg_name_to_pkg_brief_info) {
+                if let Ok(pkg_ctx_json) =
+                    serde_json::to_string_pretty(&loader.pkg_name_to_pkg_brief_info)
+                {
                     let _ = fs_err::write(&pkg_ctx_path, pkg_ctx_json);
                 }
             }
@@ -659,7 +661,10 @@ fi
 
         // The SharedHsp workspace module must be auto-derived into dependencies.
         assert!(
-            manifest.dependencies.iter().any(|d| d.module_name == "mySharedHsp"),
+            manifest
+                .dependencies
+                .iter()
+                .any(|d| d.module_name == "mySharedHsp"),
             "workspace SharedHsp must be auto-added to manifest.dependencies; got: {:?}",
             manifest.dependencies
         );

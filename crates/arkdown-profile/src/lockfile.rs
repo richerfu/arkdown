@@ -136,9 +136,7 @@ impl OhPackageLockfile {
     ///
     /// Returns `None` when the package is not recorded in the lockfile.
     pub fn resolved_version(&self, package_name: &str) -> Option<&str> {
-        self.entries
-            .get(package_name)
-            .map(|e| e.version.as_str())
+        self.entries.get(package_name).map(|e| e.version.as_str())
     }
 
     /// Look up a full [`LockfileEntry`] by package name.
@@ -358,10 +356,7 @@ mod tests {
             strip_version_suffix("@ohos/crypto-js@1.0.0"),
             "@ohos/crypto-js"
         );
-        assert_eq!(
-            strip_version_suffix("@scope/my-lib@2.3.4"),
-            "@scope/my-lib"
-        );
+        assert_eq!(strip_version_suffix("@scope/my-lib@2.3.4"), "@scope/my-lib");
     }
 
     #[test]

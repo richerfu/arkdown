@@ -29,6 +29,7 @@ Required additions:
 
 - `arkdown-path`
 - `arkdown-ohos-schema`
+- `arkdown-ohpm`
 - `arkdown-session`
 - `arkdown-ets-transform`
 
@@ -49,8 +50,10 @@ Required retained crates keep their narrowed ownership from SPEC-048:
 ## Dependency Direction
 
 - Foundation: `arkdown-core`, `arkdown-path`, `arkdown-ohos-schema`.
+- Package acquisition: `arkdown-ohpm` depends on foundation and owns OHPM
+  lockfile/cache/registry mechanics.
 - Config/resolver depend on foundation only.
-- `arkdown-session` depends on foundation, config, and resolver.
+- `arkdown-session` depends on foundation, config, resolver, and `arkdown-ohpm`.
 - Domain crates consume typed plans and depend on foundation, not session.
 - Plugin crates are thin rolldown adapters and consume session context.
 - `arkdown` owns rolldown bundling and must not depend on concrete plugin crates
@@ -63,6 +66,8 @@ Required retained crates keep their narrowed ownership from SPEC-048:
 
 - Move path logic to `arkdown-path`.
 - Move raw OHOS JSON/JSON5 schemas to `arkdown-ohos-schema`.
+- Move OHPM lockfile, cache, registry, integrity, tarball extraction, and
+  package acquisition mechanics to `arkdown-ohpm`.
 - Move startup discovery, snapshots, dependency graph, profile store, SDK
   snapshot, resource inventory, artifact layout, and fingerprints to
   `arkdown-session`.
@@ -86,12 +91,13 @@ Follow the SPEC phase order:
 2. Path foundations.
 3. Performance and memory foundations.
 4. Build session snapshots.
-5. Unified dependency graph.
-6. Profile and loader refactor.
-7. Resolver and plugin context propagation.
-8. CLI pipeline reorganization.
-9. Cache and fingerprint hardening.
-10. Legacy removal.
+5. OHPM package acquisition.
+6. Unified dependency graph.
+7. Profile and loader refactor.
+8. Resolver and plugin context propagation.
+9. CLI pipeline reorganization.
+10. Cache and fingerprint hardening.
+11. Legacy removal.
 
 ## Verification
 

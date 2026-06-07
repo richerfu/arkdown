@@ -1221,7 +1221,10 @@ impl ModuleJsonWriter {
 mod tests {
     use super::*;
 
-    fn make_app_json5_src(version_code: u64, version_name: &str) -> serde_json::Map<String, serde_json::Value> {
+    fn make_app_json5_src(
+        version_code: u64,
+        version_name: &str,
+    ) -> serde_json::Map<String, serde_json::Value> {
         let mut m = serde_json::Map::new();
         m.insert("bundleName".into(), "com.example.app".into());
         m.insert("versionCode".into(), version_code.into());
@@ -1242,11 +1245,17 @@ mod tests {
             "com.example.app",
             false,
             None,
-            None,   // no version_code override
-            None,   // no version_name override
+            None, // no version_code override
+            None, // no version_name override
         );
-        assert_eq!(obj.get("versionCode"), Some(&serde_json::Value::Number(1_000_000u64.into())));
-        assert_eq!(obj.get("versionName"), Some(&serde_json::Value::String("1.0.0".to_string())));
+        assert_eq!(
+            obj.get("versionCode"),
+            Some(&serde_json::Value::Number(1_000_000u64.into()))
+        );
+        assert_eq!(
+            obj.get("versionName"),
+            Some(&serde_json::Value::String("1.0.0".to_string()))
+        );
     }
 
     /// When product-level overrides are present, `build_app_section` uses them
@@ -1263,10 +1272,13 @@ mod tests {
             "com.example.app",
             false,
             None,
-            Some(2_000_000),        // product override: versionCode
-            Some("2.0.0-alpha"),    // product override: versionName
+            Some(2_000_000),     // product override: versionCode
+            Some("2.0.0-alpha"), // product override: versionName
         );
-        assert_eq!(obj.get("versionCode"), Some(&serde_json::Value::Number(2_000_000u64.into())));
+        assert_eq!(
+            obj.get("versionCode"),
+            Some(&serde_json::Value::Number(2_000_000u64.into()))
+        );
         assert_eq!(
             obj.get("versionName"),
             Some(&serde_json::Value::String("2.0.0-alpha".to_string()))
@@ -1290,7 +1302,13 @@ mod tests {
             Some(1_500_000),
             None,
         );
-        assert_eq!(obj.get("versionCode"), Some(&serde_json::Value::Number(1_500_000u64.into())));
-        assert_eq!(obj.get("versionName"), Some(&serde_json::Value::String("1.0.0".to_string())));
+        assert_eq!(
+            obj.get("versionCode"),
+            Some(&serde_json::Value::Number(1_500_000u64.into()))
+        );
+        assert_eq!(
+            obj.get("versionName"),
+            Some(&serde_json::Value::String("1.0.0".to_string()))
+        );
     }
 }

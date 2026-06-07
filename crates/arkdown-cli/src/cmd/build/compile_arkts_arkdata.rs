@@ -239,7 +239,10 @@ import { hilog } from '@ohos.hilog';
 @Component struct MyPage { build() {} }
 "#;
         let is_arkdata = ARKDATA_MARKERS.iter().any(|m| plain_source.contains(m));
-        assert!(!is_arkdata, "plain UI source must not be detected as ArkData");
+        assert!(
+            !is_arkdata,
+            "plain UI source must not be detected as ArkData"
+        );
     }
 
     /// Verify that the `@kit.ArkData` import pattern (API 10+) is detected.

@@ -207,13 +207,7 @@ pub(super) fn write_resource_config_files(
     // know the effective resource directories should call the variant that
     // accepts an explicit list.
     let default_res_dir = module.src_path.join("src/main/resources");
-    write_resource_config_files_with_dirs(
-        project_root,
-        module,
-        config,
-        res_out,
-        &[default_res_dir],
-    )
+    write_resource_config_files_with_dirs(project_root, module, config, res_out, &[default_res_dir])
 }
 
 /// Like [`write_resource_config_files`] but uses `module_res_dirs` for
@@ -304,7 +298,8 @@ fn collect_dependency_resource_tables(
         // Mirrors hvigor DependencyManager which prefers the target intermediates
         // ResourceTable.txt when the dependency was built in the same project.
         let resource_table = [
-            node.pkg_root.join("build/default/intermediates/res/default/ResourceTable.txt"),
+            node.pkg_root
+                .join("build/default/intermediates/res/default/ResourceTable.txt"),
             node.pkg_root.join("ResourceTable.txt"),
         ]
         .into_iter()

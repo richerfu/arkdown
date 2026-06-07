@@ -1385,7 +1385,10 @@ fn test_loader_json_hsp_har_ohm_maps_normalized_mode() {
 
     let loader = LoaderJson::generate(&config, &module_cfg, &make_manifest());
 
-    let ohm = loader.hsp_name_ohm_map.get("my-hsp").expect("my-hsp must be in map");
+    let ohm = loader
+        .hsp_name_ohm_map
+        .get("my-hsp")
+        .expect("my-hsp must be in map");
     assert!(
         ohm.starts_with("@normalized:N&"),
         "normalized mode must use @normalized:N& prefix; got: {ohm}"
@@ -1407,7 +1410,10 @@ fn test_loader_json_hsp_har_ohm_maps_normalized_mode() {
 
     let loader2 = LoaderJson::generate(&config2, &module_cfg2, &make_manifest());
 
-    let ohm2 = loader2.hsp_name_ohm_map.get("my-hsp").expect("my-hsp must be in map");
+    let ohm2 = loader2
+        .hsp_name_ohm_map
+        .get("my-hsp")
+        .expect("my-hsp must be in map");
     assert!(
         ohm2.starts_with("@bundle:"),
         "non-normalized mode must use @bundle: prefix; got: {ohm2}"
@@ -2488,7 +2494,10 @@ fn test_loader_json_target_ets_src_added_to_source_roots() {
         "sourceRoots must include target-specific dir; got: {:?}",
         pkg_info.source_roots
     );
-    let has_target_ets = pkg_info.source_roots.iter().any(|r| r.contains("src/phone/ets"));
+    let has_target_ets = pkg_info
+        .source_roots
+        .iter()
+        .any(|r| r.contains("src/phone/ets"));
     assert!(
         has_target_ets,
         "sourceRoots must contain src/phone/ets; got: {:?}",
@@ -2527,8 +2536,13 @@ fn test_loader_json_ohos_test_sources_injected_in_test_mode() {
     // Create src/ohosTest/ets/ with test sources
     let test_ets = module_root.join("src/ohosTest/ets");
     fs::create_dir_all(&test_ets).expect("create test ets");
-    fs::write(test_ets.join("TestRunner.ets"), "export class TestRunner {}").expect("write test runner");
-    fs::write(test_ets.join("index.ets"), "export * from './TestRunner'").expect("write test index");
+    fs::write(
+        test_ets.join("TestRunner.ets"),
+        "export class TestRunner {}",
+    )
+    .expect("write test runner");
+    fs::write(test_ets.join("index.ets"), "export * from './TestRunner'")
+        .expect("write test index");
     // A .d.ts file should NOT be included
     fs::write(test_ets.join("TestTypes.d.ts"), "export type T = {}").expect("write types");
 
@@ -2541,19 +2555,28 @@ fn test_loader_json_ohos_test_sources_injected_in_test_mode() {
 
     let loader = LoaderJson::generate(&test_config, &module_cfg, &make_manifest());
 
-    let has_test_runner = loader.hvigor_compile_entry.iter().any(|e| e.contains("TestRunner"));
+    let has_test_runner = loader
+        .hvigor_compile_entry
+        .iter()
+        .any(|e| e.contains("TestRunner"));
     assert!(
         has_test_runner,
         "TestRunner.ets must be in compileEntry for ohosTest mode; entries: {:?}",
         loader.hvigor_compile_entry
     );
-    let has_test_index = loader.hvigor_compile_entry.iter().any(|e| e.contains("ohosTest") && e.contains("index"));
+    let has_test_index = loader
+        .hvigor_compile_entry
+        .iter()
+        .any(|e| e.contains("ohosTest") && e.contains("index"));
     assert!(
         has_test_index,
         "index.ets must be in compileEntry for ohosTest mode; entries: {:?}",
         loader.hvigor_compile_entry
     );
-    let has_types = loader.hvigor_compile_entry.iter().any(|e| e.ends_with(".d.ts"));
+    let has_types = loader
+        .hvigor_compile_entry
+        .iter()
+        .any(|e| e.ends_with(".d.ts"));
     assert!(
         !has_types,
         "declaration files must not be included in ohosTest compileEntry; entries: {:?}",

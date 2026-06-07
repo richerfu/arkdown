@@ -10,7 +10,8 @@ description: Mandatory arkdown performance, memory ownership, high-performance d
 - Remove `index_vec`; use `oxc_index::IndexVec` and typed dense IDs.
 - Use typed IDs for modules, chunks, packages, dependency nodes, profile files,
   resource files, source files, SDK files, compile units, pack entries, ABC
-  records, functions, and literal arrays.
+  records, functions, literal arrays, OHPM packages, cache entries, and registry
+  requests.
 - Dense collections use `IndexVec<Id, T>`.
 - Lookup side tables use `FxHashMap<Key, Id>`.
 - Do not serialize hash-map iteration directly.
@@ -54,10 +55,15 @@ Build session startup parallelizes:
 - SDK component/API metadata
 - source file inventories
 - dependency node parsing
+- OHPM local install lookup, global cache lookup, lockfile lookup, and bounded
+  registry acquisition
 - content hashing when cache mode requires it
 
 Project root selection and build-profile precedence remain sequential.
 Dependency graph topological ordering has a deterministic final merge.
+Offline mode schedules no network tasks. Prefer-offline resolves cache hits
+before registry requests. Cache installation for the same package/version is
+serialized by cache entry ID.
 
 ## Stage Parallelization
 
@@ -91,6 +97,7 @@ Keep these sequential or give them a sequential final merge:
 - archive writer order
 - signing
 - cache database commit
+- cache installation for the same OHPM package/version
 
 ## Plugin Hot Path
 
@@ -113,3 +120,6 @@ Keep these sequential or give them a sequential final merge:
   `BuildSession`.
 - Cache tests prove one module input change does not invalidate unrelated
   dependency waves.
+- OHPM tests prove offline mode avoids HTTP, prefer-offline uses cache first,
+  registry fetch installs into cache, and tarball extraction is safe and
+  deterministic.

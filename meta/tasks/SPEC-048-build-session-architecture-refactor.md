@@ -57,34 +57,36 @@ fingerprints. Narrow adapters are acceptable only inside tests.
 
 ## Workspace Audit Snapshot
 
-Current scan summary from `crates/*/src`:
+Current scan summary from `crates/*/src` on 2026-06-07. The scan includes the
+current working tree changes in `arkdown-profile::dependency_graph` and
+`arkdown-profile::ohpm_registry`.
 
 | Crate | Files | Function count | IO hits | Path smell hits | Refactor pressure |
 | --- | ---: | ---: | ---: | ---: | --- |
-| `arkdown-core` | 10 | 128 | 2 | 11 | stale plugin/context types and string path helpers |
-| `arkdown-config` | 7 | 87 | 24 | 48 | raw config parsing mixed with discovery and SDK probing |
-| `arkdown-resolver` | 6 | 58 | 22 | 10 | package index built from filesystem in resolver lifecycle |
-| `arkdown-utils` | 1 | 4 | 0 | 1 | too small to host path policy; needs focused modules |
-| `arkdown-loader` | 5 | 23 | 1 | 3 | legacy plugin/loader stack separate from rolldown |
-| `arkdown` | 4 | 33 | 9 | 19 | bundler derives paths and entries from strings |
-| `arkdown-profile` | 18 | 453 | 419 | 122 | largest repeated-read and helper concentration |
-| `arkdown-plugin-duplicate-check` | 1 | 9 | 0 | 1 | simple plugin; context constructor still needed |
-| `arkdown-plugin-ets-transform` | 38 | 600 | 32 | 28 | SDK/component metadata and transform cache not session-owned |
-| `arkdown-cache` | 1 | 36 | 14 | 2 | cache keys not tied to full input fingerprints |
-| `arkdown-plugin-json5` | 3 | 31 | 3 | 5 | plugin reads files during hooks; needs source abstraction |
-| `arkdown-plugin-module-meta` | 4 | 18 | 4 | 11 | upward package walking and string package ownership |
-| `arkdown-plugin-ohos-resolve` | 4 | 42 | 7 | 18 | resolver plugin owns path parsing and importee side effects |
-| `arkdown-plugin-har-dedup` | 1 | 16 | 4 | 5 | detects HAR ownership with `contains("oh_modules")` |
-| `arkdown-plugin-router-map` | 1 | 8 | 6 | 1 | standalone cache invalidation duplicates profile fingerprints |
-| `arkdown-plugin-sensitive-check` | 1 | 12 | 4 | 3 | duplicate case-check implementation |
-| `arkdown-abc` | 32 | 1254 | 29 | 15 | mostly cohesive compiler, but cache/path entry naming leaks |
-| `arkdown-ts2abc` | 6 | 33 | 6 | 20 | CLI-style argument parsing owns path/record derivation |
-| `arkdown-resource` | 11 | 52 | 34 | 3 | scanner/writers must consume `ResourcePlan` |
-| `arkdown-pack` | 5 | 48 | 37 | 2 | packager reads module JSON and integrated HSP inputs late |
-| `arkdown-sign` | 7 | 108 | 11 | 4 | signing remains isolated and must use artifact layout |
-| `arkdown-cli` | 20 | 175 | 176 | 75 | orchestration owns too many stage policies and helpers |
-| `arkdown-obfuscate` | 5 | 44 | 11 | 5 | file traversal and rule loading move into a stage plan |
-| `arkdown-watcher` | 1 | 12 | 0 | 7 | watches raw directories instead of session input inventory |
+| `arkdown-core` | 10 | 128 | 0 | 3 | stale plugin/context types and string path helpers |
+| `arkdown-config` | 7 | 97 | 19 | 3 | raw config parsing mixed with discovery and SDK probing |
+| `arkdown-resolver` | 6 | 58 | 19 | 8 | package index built from filesystem in resolver lifecycle |
+| `arkdown-utils` | 1 | 4 | 1 | 1 | generic path helpers block typed path ownership |
+| `arkdown-loader` | 5 | 23 | 1 | 1 | legacy plugin/loader stack separate from rolldown |
+| `arkdown` | 4 | 33 | 13 | 4 | bundler derives paths and entries from strings |
+| `arkdown-profile` | 20 | 544 | 325 | 53 | largest repeated-read concentration; now also owns dependency graph, lockfile, OHPM cache, registry download, and tarball extraction |
+| `arkdown-plugin-duplicate-check` | 1 | 9 | 0 | 0 | simple plugin; context constructor still needed |
+| `arkdown-plugin-ets-transform` | 38 | 611 | 19 | 0 | SDK/component metadata and transform cache not session-owned |
+| `arkdown-cache` | 1 | 37 | 36 | 1 | cache keys not tied to full input fingerprints |
+| `arkdown-plugin-json5` | 3 | 31 | 1 | 3 | plugin reads files during hooks; needs source abstraction |
+| `arkdown-plugin-module-meta` | 4 | 18 | 4 | 4 | upward package walking and mutex-backed reverse map |
+| `arkdown-plugin-ohos-resolve` | 4 | 42 | 7 | 5 | resolver plugin owns path parsing and importee side effects |
+| `arkdown-plugin-har-dedup` | 1 | 16 | 3 | 1 | detects HAR ownership with `contains("oh_modules")` and mutex collection |
+| `arkdown-plugin-router-map` | 1 | 8 | 7 | 0 | standalone cache invalidation duplicates profile fingerprints |
+| `arkdown-plugin-sensitive-check` | 1 | 12 | 4 | 2 | duplicate case-check implementation |
+| `arkdown-abc` | 32 | 1266 | 35 | 2 | compiler is cohesive; dense tables still need typed ID/index cleanup |
+| `arkdown-ts2abc` | 6 | 33 | 5 | 6 | CLI-style argument parsing owns path/record derivation |
+| `arkdown-resource` | 11 | 52 | 21 | 1 | scanner/writers must consume `ResourcePlan` and artifact serializer |
+| `arkdown-pack` | 5 | 49 | 29 | 3 | packager reads module JSON and integrated HSP inputs late |
+| `arkdown-sign` | 7 | 108 | 12 | 0 | signing remains isolated and must use artifact layout |
+| `arkdown-cli` | 22 | 193 | 159 | 31 | orchestration owns too many stage policies and helpers despite partial build module split |
+| `arkdown-obfuscate` | 5 | 44 | 11 | 1 | file traversal and rule loading move into a stage plan |
+| `arkdown-watcher` | 3 | 133 | 1 | 0 | watches raw directories instead of session input inventory |
 
 This means the refactor must touch every crate at the ownership boundary, even
 if some crates only need constructor/API changes.
@@ -141,6 +143,10 @@ the session model is added without adjusting crate boundaries:
   cycle appears.
 - If `arkdown` keeps depending on concrete plugin crates while plugins need
   bundler/session types, plugin composition becomes a high-level back edge.
+- If `arkdown-profile` keeps owning OHPM registry/cache acquisition while
+  `arkdown-session` needs package acquisition to build dependency snapshots,
+  profile becomes a hidden upstream crate for the whole build and creates an
+  orchestration back edge.
 
 The target design must avoid these by keeping schemas, path types, and plan
 types below orchestration.
@@ -173,13 +179,14 @@ their production callers are migrated.
 | Keep | `arkdown-core` | Domain-neutral types and errors only. Old plugin API and resolver/path policy are deleted. |
 | Add | `arkdown-path` | Owns path-domain newtypes, lexical normalization, path classification, and artifact path serialization. |
 | Add | `arkdown-ohos-schema` | Owns raw OHOS JSON/JSON5 schemas for app, module, package, profile, loader, package info, and signing metadata. |
+| Add | `arkdown-ohpm` | Owns OHPM lockfile parsing, global cache layout, offline/prefer-offline lookup, registry metadata fetch, tarball integrity verification, and cache installation. It does not own dependency graph classification or profile processing. |
 | Keep | `arkdown-config` | Owns config normalization and SDK manifest probing only. Raw schemas move to `arkdown-ohos-schema`. |
-| Add | `arkdown-session` | Owns startup snapshots, dependency graph, profile store, SDK snapshot, resource input inventory, artifact layout, and fingerprints. |
+| Add | `arkdown-session` | Owns startup snapshots, package acquisition orchestration, dependency graph, profile store, SDK snapshot, resource input inventory, artifact layout, and fingerprints. |
 | Keep | `arkdown-resolver` | Owns pure OHOS resolution over resolver input indexes. It does not read package files in hot paths. |
 | Delete | `arkdown-utils` | Generic helper bucket is removed. Path helpers move to `arkdown-path`; hash/cache helpers move to `arkdown-cache` or `arkdown-session::fingerprint`. |
 | Delete | `arkdown-loader` | Legacy `ArkdownPlugin`/`PluginDriver` loader stack is removed. Rolldown is the only production plugin pipeline. |
 | Keep | `arkdown` | Owns rolldown bundling and output conversion. It receives plugins as trait objects and never imports concrete plugin crates. |
-| Keep | `arkdown-profile` | Owns profile processors and module/loader JSON writers over typed plans. It does not depend on `arkdown-session`. |
+| Keep | `arkdown-profile` | Owns profile processors and module/loader JSON writers over typed plans. It does not depend on `arkdown-session` or own OHPM registry/cache acquisition. |
 | Keep | `arkdown-cache` | Owns cache storage, manifests, and cache keys over supplied fingerprints. It does not decide build inputs. |
 | Keep | `arkdown-abc` | Owns Rust ABC compiler, IR, emit, reader, optimizer, and program cache. No new split in this refactor. |
 | Keep | `arkdown-ts2abc` | Owns upstream-compatible ts2abc facade and production `Ts2abcPlan` mapping to `arkdown-abc`. |
@@ -208,13 +215,14 @@ foundation:
   arkdown-core
   arkdown-path
   arkdown-ohos-schema
+  arkdown-ohpm -> foundation
 
 configuration and resolution:
   arkdown-config -> foundation
   arkdown-resolver -> foundation
 
 session:
-  arkdown-session -> foundation + arkdown-config + arkdown-resolver
+  arkdown-session -> foundation + arkdown-config + arkdown-resolver + arkdown-ohpm
 
 domain crates:
   arkdown-profile -> foundation
@@ -242,6 +250,9 @@ Hard dependency rules:
   `PackagePlan`, `ProfileProcessPlan`, `ObfuscationPlan`, and `Ts2abcPlan`.
 - `BuildPlanBuilder` must convert `ModuleCompileContext` into those plan
   structs.
+- OHPM package acquisition belongs to `arkdown-ohpm` plus
+  `arkdown-session` orchestration. It must not be owned or re-exported by
+  `arkdown-profile`.
 - Domain crates must not depend on `arkdown-session`.
 - `arkdown-session` must not depend on profile/resource/pack/sign/cache/plugin
   crates.
@@ -378,6 +389,7 @@ merge order a mandatory part of every parallel stage.
 | Dense indexes | The workspace declares `index_vec = "0.1"` and direct users exist in `arkdown-core`, `arkdown`, `arkdown-cli`, and `arkdown-plugin-ohos-resolve`. | Remove `index_vec` from the workspace and replace all uses with `oxc_index`. |
 | Parallel runtime | `rayon` is a workspace dependency, but the only discovered production `into_par_iter` path is in `arkdown-loader`, which is deleted by this spec. | Parallelism must move into `arkdown-session` inventory builders and `arkdown-cli` stage executors. Domain crates expose batch APIs; they do not spawn ad hoc parallel work. |
 | Startup IO | `module.json5`, `oh-package.json5`, profile JSON, SDK component metadata, resource trees, and package roots are read by multiple crates and plugin hooks. | `BuildSessionBuilder` reads and fingerprints startup inputs once. Later stages consume snapshots, source-store entries, or typed plans. |
+| Package acquisition | Latest code places `DependencyGraphService`, `DependencyResolutionConfig`, `OhPackageLockfile`, `OfflineOhpmCache`, `OhpmRegistryClient`, registry HTTP fetch, integrity verification, and `.tgz` extraction in `arkdown-profile`. | Move OHPM lockfile/cache/registry acquisition to `arkdown-ohpm`; `arkdown-session` orchestrates package inventory and graph classification; `arkdown-profile` consumes dependency views only. |
 | Plugin collectors | `arkdown-plugin-module-meta`, `arkdown-plugin-har-dedup`, and bundler-side collectors use `Arc<Mutex<...>>`-style shared mutation. | Plugin structs must not own mutex-backed hot-path collectors. Bundle outputs are collected into stage-owned buffers and merged by typed IDs after bundling. |
 | String identities | Package names, module names, import specifiers, source paths, record names, and artifact paths are repeatedly cloned as `String`. | Stable identities use typed IDs plus `Arc<str>`, `Box<str>`, or `CompactString` according to lifetime. Large structs are moved by ID, not cloned across stages. |
 | Directory traversal | Resource, profile, resolver, pack, and CLI code walk directories independently and often sort locally. | Traversal belongs to session inventory or a stage planner. Directory output is normalized once, stored in typed inventories, and merged deterministically. |
@@ -399,7 +411,8 @@ merge order a mandatory part of every parallel stage.
   - `arkdown-profile`: `ProfileArtifactId`
   - `arkdown-abc`: `RecordId`, `FunctionId`, `LiteralArrayId`,
     `CompileUnitId`
-  - `arkdown-pack`: `PackEntryId`
+- `arkdown-pack`: `PackEntryId`
+- `arkdown-ohpm`: `OhpmPackageId`, `OhpmCacheEntryId`, `RegistryRequestId`
 - Dense collections use `IndexVec<Id, T>`.
 - Lookup side tables use `FxHashMap<Key, Id>` and never serialize directly.
 - `IndexMap` is reserved for semantic user-facing order or golden artifact
@@ -455,6 +468,15 @@ inventories:
 - Dependency graph node parsing is parallel. Edge normalization and
   topological ordering are deterministic and run by `DependencyGraphBuilder`
   after all node inputs exist.
+- OHPM package acquisition runs before graph classification. Local
+  `oh_modules`, module/project installs, global cache lookup, lockfile lookup,
+  and registry fetch are modeled as `PackageAcquisitionTask`s owned by
+  `arkdown-session` and executed through `arkdown-ohpm`.
+- Registry metadata requests and tarball downloads are parallel only through a
+  bounded executor. Cache installation for the same package/version is
+  serialized by `OhpmCacheEntryId` to avoid corrupting `$OHPM_HOME`.
+- Offline mode and prefer-offline mode are resolved before any network task is
+  scheduled. Offline mode must never create a network request.
 
 ### Stage parallelization
 
@@ -547,8 +569,9 @@ merge:
 | `arkdown-core` | Replace `index_vec` with `oxc_index`; keep dense graph/chunk storage in `IndexVec`; expose typed IDs instead of cloning graph nodes. |
 | `arkdown-path` | Provide allocation-minimal path normalization and artifact serialization; own all slash conversion; return borrowed path components where possible. |
 | `arkdown-ohos-schema` | Store parsed schema strings as `Box<str>` unless shared by session snapshots; no filesystem reads. |
+| `arkdown-ohpm` | Own lockfile parsing, OHPM cache path encoding, offline/prefer-offline lookup, registry metadata fetch, tarball integrity verification, `.tgz` extraction with safe path stripping, and cache installation. Expose typed acquisition results; do not classify dependency graph nodes. |
 | `arkdown-config` | Normalize config into typed values and stop re-reading manifests after session construction starts. |
-| `arkdown-session` | Own parallel startup inventory, `SourceStore`, fingerprint sets, package indexes, profile inventories, resource inventories, and SDK snapshots. |
+| `arkdown-session` | Own parallel startup inventory, `SourceStore`, fingerprint sets, package acquisition orchestration, package indexes, profile inventories, resource inventories, and SDK snapshots. |
 | `arkdown-resolver` | Use session-built indexes as resolver input; no `read_dir` or package manifest reads in hot resolution. |
 | `arkdown` | Own rolldown execution and output conversion; replace mutex collectors with typed bundle output buffers; migrate dense chunk/module data to `oxc_index`. |
 | `arkdown-ets-transform` | Own reusable transform passes, per-file OXC allocator usage, transform cache keys, and parallel transform batch APIs. |
@@ -559,7 +582,7 @@ merge:
 | `arkdown-plugin-duplicate-check` | Normalize IDs through `arkdown-path`; keep comparisons allocation-light and read-free. |
 | `arkdown-plugin-sensitive-check` | Delete crate; case checking moves into resolver path validation. |
 | `arkdown-plugin-router-map` | Delete crate; router map loading moves into `ProfileStore` and router profile processing. |
-| `arkdown-profile` | Parse profile inputs from `ProfileStore`; parallel parse by `ProfileFileId`; deterministic merge by dependency graph and artifact path. |
+| `arkdown-profile` | Parse profile inputs from `ProfileStore`; parallel parse by `ProfileFileId`; deterministic merge by dependency graph and artifact path; remove `dependency_graph.rs`, `lockfile.rs`, and `ohpm_registry.rs` production ownership. |
 | `arkdown-resource` | Parallel scan/compile by resource entry; store inventories in session; write outputs by deterministic artifact path order. |
 | `arkdown-pack` | Parallel collect/hash entries; keep final archive writer sequential and sorted. |
 | `arkdown-sign` | Keep signing sequential; stream package bytes instead of retaining duplicate buffers. |
@@ -584,6 +607,10 @@ merge:
   `RAYON_NUM_THREADS=1` and `RAYON_NUM_THREADS=8`.
 - Session inventory tests must prove each manifest/profile/package input is
   read once per session build.
+- OHPM tests must prove offline mode never performs HTTP, prefer-offline uses
+  cache before network, registry fetch installs into the expected cache layout,
+  tarball extraction strips the top-level `package/` directory safely, and
+  graph classification happens after installation.
 - Cache tests must prove fingerprint changes invalidate the owning stage
   without invalidating unrelated module waves.
 - Memory tests or targeted assertions must prove resource binary contents are
@@ -620,8 +647,28 @@ identical behavior:
 - `OhosResolver::PackageRootIndex`
 - CLI integrated HSP scanning
 - loader JSON HSP/HAR map collection
+- `arkdown-profile::dependency_graph::DependencyGraphService`
+- `arkdown-profile::ohpm_registry::{OfflineOhpmCache, OhpmRegistryClient}`
 
 These must be backed by one dependency snapshot with typed node metadata.
+
+### Package acquisition is owned by the wrong crate
+
+The latest profile crate owns OHPM lockfile parsing, global cache lookup,
+offline/prefer-offline policy, registry metadata fetch, tarball integrity
+verification, and `.tgz` extraction. That behavior is build input acquisition,
+not profile processing.
+
+Production ownership must be:
+
+- `arkdown-ohpm`: package registry/cache/lockfile acquisition mechanics;
+- `arkdown-session`: package acquisition orchestration and dependency graph
+  snapshot construction;
+- `arkdown-profile`: pure profile/module/loader artifact algorithms over
+  supplied dependency views.
+
+`arkdown-profile` must not expose `OhpmRegistryClient`, `OfflineOhpmCache`,
+`OhPackageLockfile`, or `DependencyResolutionConfig` in the final public API.
 
 ### Split plugin systems
 
@@ -655,6 +702,64 @@ case-insensitive filesystems, and paths containing non-UTF-8 bytes.
 
 ## Target Architecture
 
+### New crate: `arkdown-ohpm`
+
+Add a new workspace crate:
+
+```text
+crates/arkdown-ohpm/
+  Cargo.toml
+  src/
+    lib.rs
+    lockfile.rs
+    cache.rs
+    registry.rs
+    package_name.rs
+    tarball.rs
+    integrity.rs
+    acquisition.rs
+    error.rs
+```
+
+This crate owns OHPM package acquisition mechanics. It is allowed to depend on
+`arkdown-core`, `arkdown-path`, `arkdown-ohos-schema`, `fs-err`, `json5`,
+`reqwest`, `flate2`, `tar`, `base64`, and hash/serde crates. It must not depend
+on `arkdown-profile`, `arkdown-session`, `arkdown-resolver`, plugin, bundler,
+CLI, resource, pack, sign, or cache crates.
+
+Primary API:
+
+```rust
+pub struct OhpmResolver {
+    pub cache_root: AbsPath,
+    pub registry_url: Option<String>,
+    pub mode: OhpmResolutionMode,
+}
+
+pub enum OhpmResolutionMode {
+    Offline,
+    PreferOffline,
+    Online,
+}
+
+pub struct PackageAcquisitionRequest {
+    pub name: PackageName,
+    pub version: Option<Box<str>>,
+    pub issuer_root: AbsPath,
+}
+
+pub struct PackageAcquisitionResult {
+    pub name: PackageName,
+    pub root: Option<AbsPath>,
+    pub source: PackageAcquisitionSource,
+    pub integrity: Option<Box<str>>,
+}
+```
+
+`arkdown-ohpm` performs no dependency graph classification. It locates or
+installs package roots and returns typed acquisition results to
+`arkdown-session`.
+
 ### New crate: `arkdown-session`
 
 Add a new workspace crate:
@@ -680,9 +785,9 @@ crates/arkdown-session/
 ```
 
 This crate owns startup discovery and session-level reuse. It is allowed to depend on
-`arkdown-core`, `arkdown-path`, `arkdown-ohos-schema`, `arkdown-config`, and
-`arkdown-resolver`. It must not depend on profile/resource/pack/sign/cache,
-plugin, bundler, CLI, or watcher crates.
+`arkdown-core`, `arkdown-path`, `arkdown-ohos-schema`, `arkdown-config`,
+`arkdown-resolver`, and `arkdown-ohpm`. It must not depend on
+profile/resource/pack/sign/cache, plugin, bundler, CLI, or watcher crates.
 
 Primary API:
 
@@ -779,6 +884,11 @@ pub struct DependencyNodeSnapshot {
     pub module_json: Option<ModuleJson5>,
     pub module_type: DependencyNodeType,
     pub direct_deps: Vec<PackageName>,
+    pub acquisition_source: PackageAcquisitionSource,
+    pub is_runtime_only: bool,
+    pub is_dynamic: bool,
+    pub is_transitive: bool,
+    pub is_bundled: bool,
     pub source_roots: Vec<AbsPath>,
     pub resource_roots: Vec<AbsPath>,
     pub bytecode_har: Option<BytecodeHarSnapshot>,
@@ -797,6 +907,8 @@ Consumers:
 - resolver package root lookup
 - module meta package lookup
 - CompileArkTS package metadata
+- runtime-only ByteCode HAR tracking
+- remote/cache package acquisition diagnostics
 
 ### `ProfileStore`
 
@@ -864,13 +976,14 @@ Every crate gets a single reason to exist:
 | `arkdown-core` | stable domain types, errors, build enums, artifact-neutral structs | old `ArkdownPlugin`, cache lifecycle structs, path string logic | depended on by most crates; must not depend on `arkdown-session` |
 | `arkdown-path` | typed path domains, lexical normalization, artifact serialization | build policy and OHOS package logic | foundation only |
 | `arkdown-ohos-schema` | raw OHOS JSON/JSON5 schemas | filesystem discovery and processing policy | foundation only |
+| `arkdown-ohpm` | OHPM lockfile, global cache, offline/prefer-offline lookup, registry metadata fetch, tarball integrity, cache installation | dependency graph classification and profile processing | lower package acquisition crate used by `arkdown-session` |
 | `arkdown-config` | config normalization and SDK manifest probing | raw schema ownership, project/module discovery loops, repeated SDK probing, downstream path policy | used by `arkdown-session`; no plugin or CLI policy |
-| `arkdown-session` | startup discovery, snapshots, dependency graph, profile store, SDK snapshot, path resolver, fingerprints | nothing legacy | depends on core/config/resolver/path/schema only; must not depend on domain processors |
+| `arkdown-session` | startup discovery, package acquisition orchestration, snapshots, dependency graph, profile store, SDK snapshot, path resolver, fingerprints | nothing legacy | depends on core/config/resolver/path/schema/ohpm only; must not depend on domain processors |
 | `arkdown-resolver` | pure OHOS resolution over indexes and specifiers | package graph discovery, hot-path `oh-package.json5` reads | owns resolver input types; `arkdown-session` builds them |
 | `arkdown-utils` | nothing | all helpers move to typed owner crates | crate deleted |
 | `arkdown-loader` | nothing | `PluginDriver`, old `ArkdownPlugin` orchestration | crate deleted |
 | `arkdown` | rolldown-backed bundler, chunk output writer, source map writer | entry/path inference from strings, loader JSON path parsing, concrete plugin construction | consumes `BundlePlan` and plugin trait objects |
-| `arkdown-profile` | profile algorithms, module.json writer, loader JSON artifact construction | dependency scanning, repeated profile reads, app/module config reads, session dependency | consumes `ProfileProcessPlan` |
+| `arkdown-profile` | profile algorithms, module.json writer, loader JSON artifact construction | dependency scanning, OHPM lockfile/cache/registry code, repeated profile reads, app/module config reads, session dependency | consumes `ProfileProcessPlan` |
 | `arkdown-cache` | persistent cache storage and manifest IO | deciding what inputs matter | consumes supplied fingerprints |
 | `arkdown-abc` | Rust ABC compiler, IR, emit, program cache | build-session path naming, package graph decisions | consumes explicit compiler inputs only |
 | `arkdown-ts2abc` | compatibility facade for upstream ts2abc arguments | record-name/path derivation duplicated in CLI | receives `Ts2abcPlan` from CLI/session stages |
@@ -938,6 +1051,19 @@ crates/arkdown-ohos-schema/src/
 ```
 
 ```text
+crates/arkdown-ohpm/src/
+  lib.rs
+  lockfile.rs
+  cache.rs
+  registry.rs
+  package_name.rs
+  tarball.rs
+  integrity.rs
+  acquisition.rs
+  error.rs
+```
+
+```text
 crates/arkdown-config/src/
   lib.rs
   normalize/
@@ -970,6 +1096,7 @@ crates/arkdown-session/src/
     mod.rs
     snapshot.rs
     index.rs
+    acquisition.rs
   dependency_graph/
     mod.rs
     builder.rs
@@ -1164,6 +1291,20 @@ are intentionally explicit so file moves do not create new "helper" buckets.
 | `src/pack_info.rs` | Pack info schema. |
 | `src/signing.rs` | Signing config/profile schema. |
 
+#### `arkdown-ohpm`
+
+| Path | Responsibility |
+| --- | --- |
+| `src/lib.rs` | Public OHPM acquisition exports. |
+| `src/error.rs` | Typed errors for cache lookup, registry HTTP, integrity, tarball extraction, and offline misses. |
+| `src/package_name.rs` | OHPM package name validation and disk-name encoding, including scoped package `@scope/name` to `@scope+name`. |
+| `src/lockfile.rs` | `oh-package-lock.json5` parsing and resolved-version lookup. |
+| `src/cache.rs` | Global cache root discovery, cache path construction, offline/prefer-offline lookup, and cache hit metadata. |
+| `src/registry.rs` | npm-compatible OHPM registry metadata and tarball download client. |
+| `src/integrity.rs` | SRI integrity verification for `sha512`/`sha256` and legacy shasum fallback if required. |
+| `src/tarball.rs` | Safe `.tgz` extraction into cache; strips the top-level `package/` directory and rejects path traversal. |
+| `src/acquisition.rs` | `OhpmResolver`, `PackageAcquisitionRequest`, `PackageAcquisitionResult`, and bounded acquisition execution policy. |
+
 #### `arkdown-config`
 
 | Path | Responsibility |
@@ -1195,6 +1336,7 @@ are intentionally explicit so file moves do not create new "helper" buckets.
 | `src/package/mod.rs` | Package snapshot module exports. |
 | `src/package/snapshot.rs` | Parsed package metadata and package root identity. |
 | `src/package/index.rs` | Session-built package index and adapters for `arkdown-resolver`. |
+| `src/package/acquisition.rs` | Builds `PackageAcquisitionTask`s, calls `arkdown-ohpm`, stores acquisition source, cache metadata, and diagnostics. |
 | `src/dependency_graph/mod.rs` | Dependency graph exports. |
 | `src/dependency_graph/builder.rs` | Builds one dependency graph per host module from package snapshots. |
 | `src/dependency_graph/snapshot.rs` | Immutable dependency graph, nodes, aliases, and classifications. |
@@ -1665,6 +1807,22 @@ crates/arkdown-profile/src/
   dependency_views.rs
 ```
 
+Current `dependency_graph.rs`, `lockfile.rs`, and `ohpm_registry.rs` must leave
+`arkdown-profile`:
+
+| Current file | Final owner |
+| --- | --- |
+| `dependency_graph.rs` graph construction and classification | `arkdown-session::dependency_graph` |
+| `dependency_graph.rs` dependency resolution config | `arkdown-session::package::acquisition` plus `arkdown-ohpm::acquisition` |
+| `lockfile.rs` | `arkdown-ohpm::lockfile` |
+| `ohpm_registry.rs` offline cache and registry client | `arkdown-ohpm::{cache, registry, acquisition}` |
+| `ohpm_registry.rs` integrity verification | `arkdown-ohpm::integrity` |
+| `ohpm_registry.rs` tarball extraction | `arkdown-ohpm::tarball` |
+
+`arkdown-profile` keeps only dependency view adapters that format loader/profile
+outputs from `DependencyGraphSnapshot`; it must not own package acquisition,
+network access, OHPM cache writes, lockfile parsing, or dependency graph BFS.
+
 `process_share_config.rs` and `process_startup_config.rs` must stop scanning
 dependencies themselves. They become algorithms over:
 
@@ -1983,7 +2141,9 @@ flowchart TD
     D --> F[ModuleSnapshotBuilder]
     D --> G[SdkSnapshot builder]
     D --> H[ProfileStore indexer]
-    D --> I[DependencyGraphBuilder]
+    D --> I[PackageAcquisitionPlanner]
+    I --> I1[arkdown-ohpm cache/registry acquisition]
+    I1 --> I2[DependencyGraphBuilder]
     D --> J[InputFingerprintBuilder]
     D --> K[ArtifactLayout builder]
 
@@ -1991,7 +2151,7 @@ flowchart TD
     F --> L
     G --> L
     H --> L
-    I --> L
+    I2 --> L
     J --> L
     K --> L
 
@@ -2023,6 +2183,9 @@ Important ordering:
 
 - `BuildSessionBuilder` is the only phase that scans project/module/package
   metadata.
+- OHPM cache lookup, lockfile lookup, and registry fetch happen before
+  dependency graph classification. `arkdown-profile` is not involved in package
+  acquisition.
 - `BuildPlanBuilder` decides module selection, dependency resource inclusion,
   output layout, and packaging inputs before stages run.
 - `ModulePipeline` stages exchange data through `ModuleBuildState`, not through
@@ -2040,9 +2203,13 @@ flowchart LR
     C --> E[PackageSnapshot per module]
     C --> F[ProfileFileIndex]
     C --> G[ResourcePlan seed]
-    E --> H[DependencyGraphSnapshot]
+    E --> H[PackageAcquisitionTask list]
     D --> H
-    H --> I[Resolver PackageIndex]
+    H --> I[arkdown-ohpm acquisition results]
+    I --> N[DependencyGraphSnapshot]
+    E --> N
+    D --> N
+    N --> O[Resolver PackageIndex]
     F --> J[ProfileStore]
     G --> K[ResourcePlan]
     B --> L[ArtifactLayout]
@@ -2050,6 +2217,8 @@ flowchart LR
     B --> M[InputFingerprintSet]
     C --> M
     H --> M
+    I --> M
+    N --> M
     J --> M
     K --> M
 ```
@@ -2110,6 +2279,7 @@ flowchart LR
     CORE[arkdown-core]
     PATH[arkdown-path]
     SCHEMA[arkdown-ohos-schema]
+    OHPM[arkdown-ohpm]
     CONFIG[arkdown-config]
     RESOLVER[arkdown-resolver]
     SESSION[arkdown-session]
@@ -2130,11 +2300,15 @@ flowchart LR
     CONFIG --> CORE
     CONFIG --> PATH
     CONFIG --> SCHEMA
+    OHPM --> CORE
+    OHPM --> PATH
+    OHPM --> SCHEMA
     RESOLVER --> CORE
     RESOLVER --> PATH
     SESSION --> CORE
     SESSION --> PATH
     SESSION --> SCHEMA
+    SESSION --> OHPM
     SESSION --> CONFIG
     SESSION --> RESOLVER
     CACHE --> CORE
@@ -2181,8 +2355,10 @@ flowchart LR
 
 Dependency rules:
 
-- `arkdown-core`, `arkdown-path`, and `arkdown-ohos-schema` never depend on
-  higher-level crates.
+- `arkdown-core`, `arkdown-path`, `arkdown-ohos-schema`, and `arkdown-ohpm`
+  never depend on higher-level crates.
+- `arkdown-ohpm` owns package acquisition mechanics only; dependency graph node
+  classification is owned by `arkdown-session`.
 - `arkdown-resolver` does not depend on `arkdown-session`; session builds
   resolver input indexes and passes them in.
 - Plugins are allowed to depend on `arkdown-session`, but they must not perform project
@@ -2204,6 +2380,8 @@ This structure makes maintenance easier because each change has one owner:
   `profiles::*Processor`.
 - Adding a new dependency classification changes
   `DependencyGraphBuilder::classifiers`, then consumers read the typed node.
+- Adding a new OHPM registry/cache behavior changes `arkdown-ohpm` and
+  `arkdown-session::package::acquisition`; profile processors do not change.
 - Changing output paths changes `ArtifactLayout` and artifact serializers, not
   every stage.
 - Changing resolver behavior changes `arkdown-resolver` and its session-built
@@ -2471,6 +2649,7 @@ Crates:
 - `arkdown-session`
 - `arkdown-config`
 - `arkdown-ohos-schema`
+- `arkdown-ohpm`
 - `arkdown-core`
 
 Tasks:
@@ -2494,6 +2673,38 @@ Acceptance:
 - Session tests prove manifest, package, profile, and SDK metadata files are
   read once per session build.
 
+### Phase 2A: OHPM package acquisition
+
+Crates:
+
+- `arkdown-ohpm`
+- `arkdown-session`
+- `arkdown-profile`
+
+Tasks:
+
+1. Create `arkdown-ohpm`.
+2. Move `OhPackageLockfile` from `arkdown-profile::lockfile` to
+   `arkdown-ohpm::lockfile`.
+3. Move `OfflineOhpmCache`, `OhpmRegistryClient`, registry response schemas,
+   integrity verification, cache directory encoding, and `.tgz` extraction from
+   `arkdown-profile::ohpm_registry` to `arkdown-ohpm`.
+4. Add safe tarball extraction that strips the top-level `package/` component
+   and rejects path traversal or absolute archive entries.
+5. Add `PackageAcquisitionRequest`, `PackageAcquisitionResult`, and
+   `OhpmResolutionMode`.
+6. Move dependency resolution config into session package acquisition planning.
+7. Remove OHPM registry/cache/lockfile re-exports from `arkdown-profile`.
+
+Acceptance:
+
+- Offline mode never performs HTTP.
+- Prefer-offline uses a cache hit before network.
+- Local registry tests prove a missing package is downloaded, extracted into
+  the OHPM cache layout, and then classified by the session graph.
+- `arkdown-profile` no longer exports `OhpmRegistryClient`,
+  `OfflineOhpmCache`, `OhPackageLockfile`, or `DependencyResolutionConfig`.
+
 ### Phase 3: Unified dependency graph
 
 Crates:
@@ -2501,20 +2712,27 @@ Crates:
 - `arkdown-session`
 - `arkdown-profile`
 - `arkdown-resolver`
+- `arkdown-ohpm`
 
 Tasks:
 
 1. Implement `DependencyGraphSnapshot`.
-2. Port `LocalDependencyGraph` tests to the new graph.
-3. Make bytecode HAR, source HAR, shared HSP, native SO, and unknown packages
-   node classifications.
+2. Port `LocalDependencyGraph` and `DependencyGraphService` tests to the new
+   session graph.
+3. Make bytecode HAR, source HAR, shared HSP, native SO, runtime-only, dynamic,
+   bundled, remote, and unknown packages node classifications or typed node
+   flags.
 4. Expose `PackageIndex` for resolver and module meta.
-5. Mark old graph builders deprecated.
+5. Move package root search order out of `arkdown-profile` and into
+   `arkdown-session::package::acquisition`.
+6. Delete old graph builders from production code after consumers move.
 
 Acceptance:
 
 - Share config, startup config, loader maps, bytecode HAR scan, and resolver all
   use the same graph in tests.
+- Runtime-only ByteCode HAR and remote-cache package fixtures use the same graph
+  as loader JSON and permission/resource/profile merging.
 
 ### Phase 4: Profile and loader refactor
 
@@ -2530,12 +2748,16 @@ Tasks:
 3. Remove duplicate dependency traversal in share/startup processors.
 4. Move artifact writing into writer structs.
 5. Replace direct profile path construction with `ProfileStore`.
+6. Delete production ownership of `dependency_graph.rs`, `lockfile.rs`, and
+   `ohpm_registry.rs` from `arkdown-profile`.
 
 Acceptance:
 
 - Existing profile tests still pass.
 - Add regression tests proving share/startup use the same dependency order as
   loader dependency maps.
+- `arkdown-profile` contains no registry HTTP client, cache installer, tarball
+  extraction, lockfile parser, or package BFS traversal.
 
 ### Phase 5: Resolver and plugin context propagation
 
@@ -2655,6 +2877,9 @@ Acceptance:
   profile store, path resolver, fingerprint builder, source store,
   deterministic parallel inventory merge.
 - `arkdown-path`: path normalization and artifact serializer.
+- `arkdown-ohpm`: lockfile parsing, scoped package disk encoding, offline cache
+  lookup, prefer-offline lookup, registry metadata parsing, integrity
+  verification, safe tarball extraction, and acquisition results.
 - `arkdown-resolver`: resolver from package index with no filesystem scan.
 - `arkdown-profile`: share/startup/loader builders from snapshots.
 - plugin crates: context-backed constructors and hook behavior.
@@ -2673,6 +2898,10 @@ Acceptance:
   `RAYON_NUM_THREADS=1` and `RAYON_NUM_THREADS=8`.
 - Session read-count tests prove manifests, package files, profile files, and
   SDK metadata are read once per session build.
+- Local OHPM registry fixture proves remote package acquisition installs into
+  cache and then becomes a classified dependency graph node.
+- Offline OHPM fixture proves missing cache entries remain remote/unknown
+  without network access.
 - Resource memory tests prove binary resource contents are streamed by writers
   and not retained in `BuildSession`.
 
@@ -2708,6 +2937,10 @@ Acceptance:
 - Plugin hot paths contain no direct filesystem reads and no mutex-backed
   collectors.
 - Resource binary bytes are not stored in session snapshots.
+- `arkdown-profile` does not own or re-export OHPM registry/cache/lockfile
+  types, dependency graph builders, or package acquisition config.
+- `arkdown-ohpm` owns registry/cache mechanics and never depends on session,
+  profile, resolver, plugin, bundler, CLI, resource, pack, sign, or cache crates.
 
 ---
 
@@ -2717,12 +2950,13 @@ This refactor lands in multiple focused PRs:
 
 1. Path foundation and tests.
 2. `arkdown-session` snapshot crate.
-3. Unified dependency graph.
-4. Profile and loader consumers.
-5. Resolver and plugin consumers.
-6. CLI stage reorganization.
-7. Cache/fingerprint hardening.
-8. Legacy cleanup.
+3. `arkdown-ohpm` package acquisition crate.
+4. Unified dependency graph.
+5. Profile and loader consumers.
+6. Resolver and plugin consumers.
+7. CLI stage reorganization.
+8. Cache/fingerprint hardening.
+9. Legacy cleanup.
 
 Each PR must preserve CLI/artifact behavior, but internal API compatibility is
 not a goal. Do not combine large file moves with behavioral changes unless the

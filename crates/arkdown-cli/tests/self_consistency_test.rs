@@ -133,19 +133,13 @@ impl DiffReport {
         }
         let mut out = String::from("self-consistency check FAILED\n");
         if !self.only_in_run1.is_empty() {
-            out.push_str(&format!(
-                "  only in run1 ({}):\n",
-                self.only_in_run1.len()
-            ));
+            out.push_str(&format!("  only in run1 ({}):\n", self.only_in_run1.len()));
             for p in &self.only_in_run1 {
                 out.push_str(&format!("    - {p}\n"));
             }
         }
         if !self.only_in_run2.is_empty() {
-            out.push_str(&format!(
-                "  only in run2 ({}):\n",
-                self.only_in_run2.len()
-            ));
+            out.push_str(&format!("  only in run2 ({}):\n", self.only_in_run2.len()));
             for p in &self.only_in_run2 {
                 out.push_str(&format!("    + {p}\n"));
             }
@@ -244,14 +238,8 @@ impl SelfConsistencyOracle {
         let keys1: std::collections::BTreeSet<&String> = run1.files.keys().collect();
         let keys2: std::collections::BTreeSet<&String> = run2.files.keys().collect();
 
-        let only_in_run1: Vec<String> = keys1
-            .difference(&keys2)
-            .map(|k| (*k).clone())
-            .collect();
-        let only_in_run2: Vec<String> = keys2
-            .difference(&keys1)
-            .map(|k| (*k).clone())
-            .collect();
+        let only_in_run1: Vec<String> = keys1.difference(&keys2).map(|k| (*k).clone()).collect();
+        let only_in_run2: Vec<String> = keys2.difference(&keys1).map(|k| (*k).clone()).collect();
 
         let mut changed = Vec::new();
         for key in keys1.intersection(&keys2) {
@@ -270,8 +258,7 @@ impl SelfConsistencyOracle {
             }
         }
 
-        let identical =
-            only_in_run1.is_empty() && only_in_run2.is_empty() && changed.is_empty();
+        let identical = only_in_run1.is_empty() && only_in_run2.is_empty() && changed.is_empty();
         DiffReport {
             identical,
             only_in_run1,
@@ -481,10 +468,7 @@ fn fresh_fixture_copy(src: &Path) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let dst = std::env::temp_dir().join(format!(
-        "arkdown-sc-{}-{n}-{nonce}",
-        std::process::id()
-    ));
+    let dst = std::env::temp_dir().join(format!("arkdown-sc-{}-{n}-{nonce}", std::process::id()));
     copy_dir_skip_build(src, &dst);
     dst
 }
@@ -711,7 +695,10 @@ fn test_compare_identical_outputs() {
     let out2 = make_output(&[("a.json", b"{\"key\": 1}"), ("b.txt", b"hello")]);
 
     let report = SelfConsistencyOracle::compare(&out1, &out2);
-    assert!(report.identical, "identical outputs must produce identical=true");
+    assert!(
+        report.identical,
+        "identical outputs must produce identical=true"
+    );
 }
 
 /// Verify that `FingerprintOracle::compute` produces stable SHA-256 hashes.
@@ -760,7 +747,10 @@ fn test_fingerprint_oracle_write_then_match() {
     // First call — no stored file → writes baseline and passes.
     let oracle = FingerprintOracle::new(&tmp, "test_fixture");
     oracle.assert_matches(&output);
-    assert!(oracle.fingerprint_path().exists(), "fingerprint file must be created");
+    assert!(
+        oracle.fingerprint_path().exists(),
+        "fingerprint file must be created"
+    );
 
     // Second call — stored file matches → passes.
     let oracle2 = FingerprintOracle::new(&tmp, "test_fixture");

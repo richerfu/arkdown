@@ -169,7 +169,6 @@ pub enum DevEcoMessage {
     // ------------------------------------------------------------------
     // Server → client notifications
     // ------------------------------------------------------------------
-
     /// Hot-reload result: the named module was reloaded successfully or not.
     HotReload {
         /// OHOS module name (e.g. `"entry"`).
@@ -243,7 +242,6 @@ pub enum DevEcoMessage {
     //   {"cmd":"cancelHotReload","sessionId":"xxx"}
     //   {"cmd":"ping"}
     // ------------------------------------------------------------------
-
     /// Server → Client: hot-reload completed successfully for the named module.
     ///
     /// Field names match the official DevEco Studio 4.0+ API exactly.
@@ -332,7 +330,6 @@ pub enum DevEcoMessage {
     // ------------------------------------------------------------------
     // Client → server requests
     // ------------------------------------------------------------------
-
     /// Request the list of currently connected devices.
     GetDeviceList,
 
@@ -357,7 +354,6 @@ pub enum DevEcoMessage {
     // ------------------------------------------------------------------
     // Bidirectional keep-alive
     // ------------------------------------------------------------------
-
     /// Keep-alive ping (either side may send).
     Ping,
 
@@ -537,7 +533,10 @@ impl DevEcoEvent {
 
     /// Create a custom event with an arbitrary JSON payload.
     pub fn custom(payload: String) -> Self {
-        DevEcoEvent { payload, room: None }
+        DevEcoEvent {
+            payload,
+            room: None,
+        }
     }
 
     /// Scope this event to a specific room.
@@ -843,9 +842,9 @@ impl DevEcoWsServer {
     ///
     /// The server runs in a background `tokio` task.
     pub async fn start(self) -> Result<DevEcoServerHandle, std::io::Error> {
-        let addr: SocketAddr = format!("127.0.0.1:{}", self.port).parse().map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{}", e))
-        })?;
+        let addr: SocketAddr = format!("127.0.0.1:{}", self.port)
+            .parse()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{}", e)))?;
         let listener = TcpListener::bind(addr).await?;
         let bound_addr = listener.local_addr()?;
 
@@ -1067,12 +1066,7 @@ async fn read_http_upgrade(stream: &mut TcpStream) -> Result<String, String> {
     for line in request.lines() {
         let lower = line.to_ascii_lowercase();
         if lower.starts_with("sec-websocket-key:") {
-            let key = line
-                .splitn(2, ':')
-                .nth(1)
-                .unwrap_or("")
-                .trim()
-                .to_string();
+            let key = line.splitn(2, ':').nth(1).unwrap_or("").trim().to_string();
             if !key.is_empty() {
                 return Ok(key);
             }
@@ -1255,9 +1249,7 @@ async fn read_ws_frame(
 /// SHA-1 is only used for the handshake key derivation — not for any
 /// security-sensitive operation.
 fn sha1_bytes(input: &[u8]) -> [u8; 20] {
-    let mut h: [u32; 5] = [
-        0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0,
-    ];
+    let mut h: [u32; 5] = [0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0];
 
     let bit_len = (input.len() as u64).wrapping_mul(8);
     let mut msg: Vec<u8> = input.to_vec();
@@ -1319,8 +1311,7 @@ fn sha1_bytes(input: &[u8]) -> [u8; 20] {
 
 /// Minimal base64 encoder (RFC 4648 §4) for the WebSocket handshake.
 fn base64_encode(input: &[u8]) -> String {
-    const ALPHABET: &[u8] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
     let mut out = String::new();
     let mut i = 0;
@@ -1388,8 +1379,7 @@ mod tests {
 
     #[test]
     fn test_parse_hot_reload_failed_resource() {
-        let json =
-            r#"{"cmd":"hotReload","module":"feature","status":"failed","type":"resource"}"#;
+        let json = r#"{"cmd":"hotReload","module":"feature","status":"failed","type":"resource"}"#;
         let msg = parse_message(json).expect("parse hotReload failed");
         assert_eq!(
             msg,
@@ -1506,7 +1496,11 @@ mod tests {
         let json = r#"{"cmd":"previewRefresh","module":"entry","entry":"Index","params":{"width":360,"height":780}}"#;
         let msg = parse_message(json).expect("parse previewRefresh");
         match msg {
-            DevEcoMessage::PreviewRefresh { module, entry, params } => {
+            DevEcoMessage::PreviewRefresh {
+                module,
+                entry,
+                params,
+            } => {
                 assert_eq!(module, "entry");
                 assert_eq!(entry, "Index");
                 assert_eq!(params.width, Some(360));
@@ -1624,11 +1618,23 @@ mod tests {
         };
         let json = serialize_message(&msg).expect("serialize");
         // Verify the JSON contains the expected fields.
-        assert!(json.contains("\"cmd\":\"previewRefresh\""), "cmd field: {}", json);
-        assert!(json.contains("\"module\":\"entry\""), "module field: {}", json);
+        assert!(
+            json.contains("\"cmd\":\"previewRefresh\""),
+            "cmd field: {}",
+            json
+        );
+        assert!(
+            json.contains("\"module\":\"entry\""),
+            "module field: {}",
+            json
+        );
         assert!(json.contains("\"width\":360"), "width field: {}", json);
         // density must appear as a numeric value in the JSON.
-        assert!(json.contains("density"), "density field must appear: {}", json);
+        assert!(
+            json.contains("density"),
+            "density field must appear: {}",
+            json
+        );
     }
 
     #[test]
@@ -1644,8 +1650,7 @@ mod tests {
     #[test]
     fn test_event_build_complete_success() {
         let ev = DevEcoEvent::build_complete("entry", true);
-        let v: serde_json::Value =
-            serde_json::from_str(&ev.payload).expect("valid json");
+        let v: serde_json::Value = serde_json::from_str(&ev.payload).expect("valid json");
         assert_eq!(v["cmd"], "buildComplete");
         assert_eq!(v["success"], true);
         assert_eq!(v["module"], "entry");
@@ -1654,8 +1659,7 @@ mod tests {
     #[test]
     fn test_event_build_complete_failure() {
         let ev = DevEcoEvent::build_complete("feature", false);
-        let v: serde_json::Value =
-            serde_json::from_str(&ev.payload).expect("valid json");
+        let v: serde_json::Value = serde_json::from_str(&ev.payload).expect("valid json");
         assert_eq!(v["success"], false);
     }
 
@@ -1669,8 +1673,7 @@ mod tests {
     #[test]
     fn test_event_build_error() {
         let ev = DevEcoEvent::build_error("entry", "compile failed");
-        let v: serde_json::Value =
-            serde_json::from_str(&ev.payload).expect("valid json");
+        let v: serde_json::Value = serde_json::from_str(&ev.payload).expect("valid json");
         assert_eq!(v["cmd"], "error");
         assert_eq!(v["message"], "compile failed");
         assert_eq!(v["code"], "BUILD_ERROR");
@@ -1679,8 +1682,7 @@ mod tests {
     #[test]
     fn test_event_hot_reload_success() {
         let ev = DevEcoEvent::hot_reload_success("entry", ReloadType::Ets);
-        let v: serde_json::Value =
-            serde_json::from_str(&ev.payload).expect("valid json");
+        let v: serde_json::Value = serde_json::from_str(&ev.payload).expect("valid json");
         assert_eq!(v["cmd"], "hotReload");
         assert_eq!(v["status"], "success");
         assert_eq!(v["type"], "ets");
@@ -1689,8 +1691,7 @@ mod tests {
     #[test]
     fn test_event_hot_reload_failed() {
         let ev = DevEcoEvent::hot_reload_failed("entry", ReloadType::Resource);
-        let v: serde_json::Value =
-            serde_json::from_str(&ev.payload).expect("valid json");
+        let v: serde_json::Value = serde_json::from_str(&ev.payload).expect("valid json");
         assert_eq!(v["status"], "failed");
         assert_eq!(v["type"], "resource");
     }
@@ -1700,10 +1701,13 @@ mod tests {
         let ev = DevEcoEvent::preview_refresh(
             "entry",
             "Index",
-            PreviewParams { width: Some(360), height: Some(780), ..Default::default() },
+            PreviewParams {
+                width: Some(360),
+                height: Some(780),
+                ..Default::default()
+            },
         );
-        let v: serde_json::Value =
-            serde_json::from_str(&ev.payload).expect("valid json");
+        let v: serde_json::Value = serde_json::from_str(&ev.payload).expect("valid json");
         assert_eq!(v["cmd"], "previewRefresh");
         assert_eq!(v["entry"], "Index");
         assert_eq!(v["params"]["width"], 360);
@@ -1716,8 +1720,7 @@ mod tests {
             content: "aGVsbG8=".to_string(),
             file_type: "ets".to_string(),
         }]);
-        let v: serde_json::Value =
-            serde_json::from_str(&ev.payload).expect("valid json");
+        let v: serde_json::Value = serde_json::from_str(&ev.payload).expect("valid json");
         assert_eq!(v["cmd"], "syncFiles");
         assert_eq!(v["files"][0]["path"], "entry/src/main/ets/pages/Index.ets");
     }
@@ -1765,7 +1768,10 @@ mod tests {
         state.join_room(id, "entry", ClientType::Ide);
         state.join_room(id, "feature", ClientType::Device);
         // Should have left "entry" and joined "feature".
-        assert!(!state.rooms.contains_key("entry"), "empty room must be removed");
+        assert!(
+            !state.rooms.contains_key("entry"),
+            "empty room must be removed"
+        );
         assert!(state.rooms["feature"].client_ids.contains(&id));
         assert_eq!(state.clients[&id].room.as_deref(), Some("feature"));
     }
@@ -1777,7 +1783,10 @@ mod tests {
         state.register_client(id);
         state.join_room(id, "entry", ClientType::Ide);
         state.remove_client(id);
-        assert!(!state.rooms.contains_key("entry"), "room must be removed when empty");
+        assert!(
+            !state.rooms.contains_key("entry"),
+            "room must be removed when empty"
+        );
         assert!(!state.clients.contains_key(&id));
     }
 
@@ -1825,9 +1834,18 @@ mod tests {
 
         let payload = r#"{"cmd":"hotReload","module":"entry","status":"success","type":"ets"}"#;
         let recipients = state.recipients(payload, Some("entry"));
-        assert!(recipients.contains(&id1), "id1 must receive entry-room broadcast");
-        assert!(!recipients.contains(&id2), "id2 must not receive entry-room broadcast");
-        assert!(!recipients.contains(&id3), "id3 (no room) must not receive entry-room broadcast");
+        assert!(
+            recipients.contains(&id1),
+            "id1 must receive entry-room broadcast"
+        );
+        assert!(
+            !recipients.contains(&id2),
+            "id2 must not receive entry-room broadcast"
+        );
+        assert!(
+            !recipients.contains(&id3),
+            "id3 (no room) must not receive entry-room broadcast"
+        );
     }
 
     #[test]
@@ -1857,8 +1875,7 @@ mod tests {
         state.register_client(id2);
         state.set_subscriptions(id2, vec!["error".to_string()]);
 
-        let hot_payload =
-            r#"{"cmd":"hotReload","module":"entry","status":"success","type":"ets"}"#;
+        let hot_payload = r#"{"cmd":"hotReload","module":"entry","status":"success","type":"ets"}"#;
         let recipients = state.recipients(hot_payload, None);
         assert!(recipients.contains(&id1));
         assert!(!recipients.contains(&id2));
@@ -1908,7 +1925,7 @@ mod tests {
     fn test_ws_text_frame_small_payload() {
         let frame = encode_ws_text_frame("hello");
         assert_eq!(frame[0], 0x81); // FIN + text opcode
-        assert_eq!(frame[1], 5);    // unmasked, length 5
+        assert_eq!(frame[1], 5); // unmasked, length 5
         assert_eq!(&frame[2..], b"hello");
     }
 
@@ -1965,7 +1982,9 @@ mod tests {
         let handle = server.start().await.expect("server must start");
         let handle2 = handle.clone();
         let _ = handle.broadcast(DevEcoEvent::build_start("entry")).await;
-        let _ = handle2.broadcast(DevEcoEvent::build_complete("entry", true)).await;
+        let _ = handle2
+            .broadcast(DevEcoEvent::build_complete("entry", true))
+            .await;
     }
 
     #[tokio::test]
@@ -2207,8 +2226,14 @@ mod tests {
         let json = serialize_message(&msg).expect("serialize");
         let v: serde_json::Value = serde_json::from_str(&json).expect("valid json");
         assert_eq!(v["cmd"], "hotReloadSuccess", "cmd must be hotReloadSuccess");
-        assert_eq!(v["sessionId"], "abc-001", "sessionId field name must match official API");
-        assert_eq!(v["moduleName"], "entry", "moduleName field name must match official API");
+        assert_eq!(
+            v["sessionId"], "abc-001",
+            "sessionId field name must match official API"
+        );
+        assert_eq!(
+            v["moduleName"], "entry",
+            "moduleName field name must match official API"
+        );
     }
 
     /// Verify that `buildStarted` serializes with the exact field names
@@ -2223,9 +2248,18 @@ mod tests {
         let json = serialize_message(&msg).expect("serialize");
         let v: serde_json::Value = serde_json::from_str(&json).expect("valid json");
         assert_eq!(v["cmd"], "buildStarted", "cmd must be buildStarted");
-        assert_eq!(v["sessionId"], "build-001", "sessionId field name must match official API");
-        assert_eq!(v["moduleName"], "feature", "moduleName field name must match official API");
-        assert_eq!(v["buildMode"], "debug", "buildMode field name must match official API");
+        assert_eq!(
+            v["sessionId"], "build-001",
+            "sessionId field name must match official API"
+        );
+        assert_eq!(
+            v["moduleName"], "feature",
+            "moduleName field name must match official API"
+        );
+        assert_eq!(
+            v["buildMode"], "debug",
+            "buildMode field name must match official API"
+        );
     }
 
     /// Verify that `buildFinished` serializes with the exact field names
@@ -2241,8 +2275,14 @@ mod tests {
         let json = serialize_message(&msg).expect("serialize");
         let v: serde_json::Value = serde_json::from_str(&json).expect("valid json");
         assert_eq!(v["cmd"], "buildFinished", "cmd must be buildFinished");
-        assert_eq!(v["sessionId"], "finish-001", "sessionId field name must match official API");
-        assert_eq!(v["moduleName"], "entry", "moduleName field name must match official API");
+        assert_eq!(
+            v["sessionId"], "finish-001",
+            "sessionId field name must match official API"
+        );
+        assert_eq!(
+            v["moduleName"], "entry",
+            "moduleName field name must match official API"
+        );
         assert_eq!(v["success"], true, "success field must be present");
         assert_eq!(v["cost"], 3000, "cost field name must match official API");
     }

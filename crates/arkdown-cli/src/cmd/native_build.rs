@@ -43,13 +43,7 @@ use std::path::{Path, PathBuf};
 
 /// The set of ABI directories that hvigor's native pipeline produces under
 /// the CMake / NDK build intermediates.
-const KNOWN_ABI_DIRS: &[&str] = &[
-    "arm64-v8a",
-    "armeabi-v7a",
-    "x86_64",
-    "x86",
-    "armeabi",
-];
+const KNOWN_ABI_DIRS: &[&str] = &["arm64-v8a", "armeabi-v7a", "x86_64", "x86", "armeabi"];
 
 /// Result of a native build or import scan.
 #[derive(Debug, Clone, Default)]
@@ -104,7 +98,8 @@ impl NativeBuildConfig {
                     output.warnings.push(format!(
                         "native: CMake build failed for '{}': {}. \
                          Falling back to pre-built library import.",
-                        self.module_root.display(), e
+                        self.module_root.display(),
+                        e
                     ));
                 }
             }
@@ -144,7 +139,10 @@ impl NativeBuildConfig {
                 "native: no .so files found for module '{}' after build/import scan. \
                  Expected paths: {:?}",
                 self.module_root.display(),
-                search_roots.iter().map(|p| p.display().to_string()).collect::<Vec<_>>()
+                search_roots
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
             ));
         }
 
@@ -193,10 +191,7 @@ impl NativeBuildConfig {
         configure_cmd
             .arg("-G")
             .arg("Ninja")
-            .arg(format!(
-                "-DCMAKE_TOOLCHAIN_FILE={}",
-                toolchain.display()
-            ))
+            .arg(format!("-DCMAKE_TOOLCHAIN_FILE={}", toolchain.display()))
             .arg("-DCMAKE_BUILD_TYPE=Release")
             .args(&abi_flags)
             .arg(source_dir.display().to_string())
@@ -269,14 +264,11 @@ fn which_cmake() -> Result<PathBuf, String> {
 fn ohos_cmake_toolchain() -> Result<PathBuf, String> {
     let candidates = [
         // $OHOS_NDK_HOME/build/cmake/ohos.toolchain.cmake
-        std::env::var_os("OHOS_NDK_HOME").map(|h| {
-            PathBuf::from(h)
-                .join("build/cmake/ohos.toolchain.cmake")
-        }),
+        std::env::var_os("OHOS_NDK_HOME")
+            .map(|h| PathBuf::from(h).join("build/cmake/ohos.toolchain.cmake")),
         // $OHOS_SDK_HOME/<api>/native/build/cmake/ohos.toolchain.cmake
         std::env::var_os("OHOS_SDK_HOME").map(|h| {
-            PathBuf::from(h)
-                .join("default/openharmony/native/build/cmake/ohos.toolchain.cmake")
+            PathBuf::from(h).join("default/openharmony/native/build/cmake/ohos.toolchain.cmake")
         }),
     ];
 
@@ -345,7 +337,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cpp_dir = tmp.path().join("src/main/cpp");
         fs::create_dir_all(&cpp_dir).unwrap();
-        fs::write(cpp_dir.join("CMakeLists.txt"), "cmake_minimum_required(VERSION 3.16)").unwrap();
+        fs::write(
+            cpp_dir.join("CMakeLists.txt"),
+            "cmake_minimum_required(VERSION 3.16)",
+        )
+        .unwrap();
         assert!(module_has_native_code(tmp.path()));
     }
 

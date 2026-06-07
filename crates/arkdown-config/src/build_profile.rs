@@ -526,10 +526,11 @@ pub fn select_effective_target(
             .as_ref()
             .map(|s| s.abilities.iter().cloned().collect())
             .unwrap_or_default(),
-        distribution_filter: target
-            .config
-            .as_ref()
-            .and_then(|c| c.distribution_filter.clone().or_else(|| c.distro_filter.clone())),
+        distribution_filter: target.config.as_ref().and_then(|c| {
+            c.distribution_filter
+                .clone()
+                .or_else(|| c.distro_filter.clone())
+        }),
         build_mode_set: target
             .build_mode_set
             .iter()
@@ -569,10 +570,9 @@ pub fn pick_effective_raw_target<'a>(
 
     // 1. Target with EXPLICIT buildModeSet matching this mode + product.
     //    These override catch-all targets for the specific build mode.
-    if let Some(t) = targets
-        .iter()
-        .find(|t| has_specific_mode_match(t, build_mode_name) && applies_to_product(t, product_name))
-    {
+    if let Some(t) = targets.iter().find(|t| {
+        has_specific_mode_match(t, build_mode_name) && applies_to_product(t, product_name)
+    }) {
         return Some(t);
     }
     // 2. Named "default" + product match (catch-all for all modes).
@@ -585,9 +585,10 @@ pub fn pick_effective_raw_target<'a>(
     // 3. Any target matching the product with empty buildModeSet (catch-all for all modes).
     // Targets with a specific buildModeSet that does NOT include the current mode
     // are intentionally excluded — they only apply for their declared modes.
-    if let Some(t) = targets.iter().find(|t| {
-        applies_to_product(t, product_name) && t.build_mode_set.is_empty()
-    }) {
+    if let Some(t) = targets
+        .iter()
+        .find(|t| applies_to_product(t, product_name) && t.build_mode_set.is_empty())
+    {
         return Some(t);
     }
     // 4. Bare "default" (last resort).
@@ -696,10 +697,11 @@ pub fn enumerate_applicable_targets_for_module(
                 .as_ref()
                 .map(|s| s.abilities.iter().cloned().collect())
                 .unwrap_or_default(),
-            distribution_filter: target
-                .config
-                .as_ref()
-                .and_then(|c| c.distribution_filter.clone().or_else(|| c.distro_filter.clone())),
+            distribution_filter: target.config.as_ref().and_then(|c| {
+                c.distribution_filter
+                    .clone()
+                    .or_else(|| c.distro_filter.clone())
+            }),
             build_mode_set: target
                 .build_mode_set
                 .iter()
@@ -1318,7 +1320,8 @@ mod tests {
         assert_eq!(applicable[1].name, "phone");
 
         // Only "tablet" applies to "tablet-product".
-        let tablet_applicable = enumerate_applicable_raw_targets(&targets, "tablet-product", "debug");
+        let tablet_applicable =
+            enumerate_applicable_raw_targets(&targets, "tablet-product", "debug");
         assert_eq!(tablet_applicable.len(), 1);
         assert_eq!(tablet_applicable[0].name, "tablet");
     }
@@ -1379,10 +1382,7 @@ mod tests {
         let product = &profile.app.products[0];
         let build_option = product.build_option.as_ref().unwrap();
         let eno = build_option.external_native_options.as_ref().unwrap();
-        assert_eq!(
-            eno.abi_filters,
-            vec!["arm64-v8a", "armeabi-v7a", "x86_64"]
-        );
+        assert_eq!(eno.abi_filters, vec!["arm64-v8a", "armeabi-v7a", "x86_64"]);
     }
 
     /// Verify that `buildModeSet` on a target is parsed correctly.
@@ -1519,8 +1519,14 @@ mod tests {
 
         assert_eq!(cfg.name, "default");
         assert_eq!(cfg.resource_directories.len(), 2);
-        assert_eq!(cfg.resource_directories[0], PathBuf::from("src/main/resources"));
-        assert_eq!(cfg.resource_directories[1], PathBuf::from("src/extra/resources"));
+        assert_eq!(
+            cfg.resource_directories[0],
+            PathBuf::from("src/main/resources")
+        );
+        assert_eq!(
+            cfg.resource_directories[1],
+            PathBuf::from("src/extra/resources")
+        );
     }
 
     /// Verify that product-level `versionCode` and `versionName` are parsed
@@ -1529,7 +1535,8 @@ mod tests {
     /// `AppScope/app.json5`.
     #[test]
     fn test_product_version_override_parsed() {
-        let raw: RawBuildProfile = json5::from_str(r#"{
+        let raw: RawBuildProfile = json5::from_str(
+            r#"{
             app: {
                 products: [
                     {
@@ -1544,7 +1551,8 @@ mod tests {
                 signingConfigs: []
             },
             modules: []
-        }"#)
+        }"#,
+        )
         .unwrap();
 
         let product = &raw.app.products[0];
@@ -1556,7 +1564,8 @@ mod tests {
     /// fields are `None` so the resolver falls back to `AppScope/app.json5`.
     #[test]
     fn test_product_version_override_absent_is_none() {
-        let raw: RawBuildProfile = json5::from_str(r#"{
+        let raw: RawBuildProfile = json5::from_str(
+            r#"{
             app: {
                 products: [
                     {
@@ -1569,7 +1578,8 @@ mod tests {
                 signingConfigs: []
             },
             modules: []
-        }"#)
+        }"#,
+        )
         .unwrap();
 
         let product = &raw.app.products[0];

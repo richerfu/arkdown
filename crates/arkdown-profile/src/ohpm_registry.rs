@@ -213,7 +213,10 @@ impl OhpmRegistryClient {
             .user_agent("arkdown/0.1 (OHOS bundler; compatible with ohpm)")
             .build()
             .map_err(OhpmRegistryError::Http)?;
-        Ok(Self { registry_url: url, client })
+        Ok(Self {
+            registry_url: url,
+            client,
+        })
     }
 
     /// Fetch the package metadata for `name` from the registry.
@@ -362,8 +365,7 @@ impl OhpmRegistryClient {
         // Install into cache: ~/.ohpm/<name>@<version>/oh_modules/<name>/
         let pkg_dir = cache_dir_for(name, version, cache_root);
         let install_root = pkg_dir.join("oh_modules").join(name);
-        fs_err::create_dir_all(&install_root)
-            .map_err(|e| OhpmRegistryError::Io(e.into()))?;
+        fs_err::create_dir_all(&install_root).map_err(|e| OhpmRegistryError::Io(e.into()))?;
 
         // Extract the tarball (gzip-compressed tar archive).
         extract_tgz(&tarball_bytes, &install_root)?;
@@ -397,7 +399,10 @@ impl OhpmRegistryClient {
             name,
             version,
             cache_root,
-            &OhpmInstallOptions { prefer_offline: true, ..Default::default() },
+            &OhpmInstallOptions {
+                prefer_offline: true,
+                ..Default::default()
+            },
         )
     }
 
@@ -601,10 +606,8 @@ fn verify_integrity(
     };
 
     // Encode actual as base64 and compare.
-    let actual_b64 = base64::Engine::encode(
-        &base64::engine::general_purpose::STANDARD,
-        &actual_bytes,
-    );
+    let actual_b64 =
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &actual_bytes);
 
     if actual_b64 != expected_b64 {
         return Err(OhpmRegistryError::IntegrityMismatch {
@@ -619,21 +622,55 @@ fn verify_integrity(
 }
 
 /// Extract a gzip-compressed tar archive to `dest`.
+/// Extract a gzip-compressed tar archive to `dest`, stripping the first path
+/// component.
+///
+/// OHPM (like npm) tarballs contain a top-level `package/` directory:
+/// ```text
+/// package/oh-package.json5
+/// package/src/main/module.json5
+/// ```
+/// We strip that prefix so that `oh-package.json5` is placed directly in
+/// `dest/`, matching the directory layout expected by
+/// `LocalDependencyGraph::classify_package()`.
 fn extract_tgz(bytes: &[u8], dest: &Path) -> Result<(), OhpmRegistryError> {
     use std::io::Cursor;
+    use std::path::PathBuf;
 
     let cursor = Cursor::new(bytes);
     let gz = flate2::read::GzDecoder::new(cursor);
     let mut archive = tar::Archive::new(gz);
 
-    archive
-        .unpack(dest)
-        .map_err(|e| OhpmRegistryError::TarExtract(e.to_string()))?;
+    for entry in archive
+        .entries()
+        .map_err(|e| OhpmRegistryError::TarExtract(e.to_string()))?
+    {
+        let mut entry = entry.map_err(|e| OhpmRegistryError::TarExtract(e.to_string()))?;
+        let raw_path = entry
+            .path()
+            .map_err(|e| OhpmRegistryError::TarExtract(e.to_string()))?
+            .to_path_buf();
+
+        // Strip the leading `package/` component (npm/ohpm tarball convention).
+        let stripped: PathBuf = raw_path.components().skip(1).collect();
+        if stripped.as_os_str().is_empty() {
+            continue; // skip the directory entry itself
+        }
+
+        let out_path = dest.join(&stripped);
+        if let Some(parent) = out_path.parent() {
+            fs_err::create_dir_all(parent).map_err(|e| OhpmRegistryError::Io(e.into()))?;
+        }
+        entry
+            .unpack(&out_path)
+            .map_err(|e| OhpmRegistryError::TarExtract(e.to_string()))?;
+    }
 
     Ok(())
 }
 
 /// Compute the SHA-256 hex digest of `data` using the `sha2` crate.
+#[cfg(test)]
 fn sha256_hex(data: &[u8]) -> String {
     use sha2::Digest;
     let mut hasher = sha2::Sha256::new();
@@ -705,7 +742,10 @@ mod tests {
         // SHA-256("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
         // This is a universally-known test vector (FIPS 180-4).
         let hex = sha256_hex(b"");
-        assert_eq!(hex, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        assert_eq!(
+            hex,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
     }
 
     #[test]
@@ -732,7 +772,10 @@ mod tests {
         assert_eq!(meta.name, "@ohos/crypto-js");
         assert_eq!(meta.latest_version(), Some("1.0.0"));
         let ver = &meta.versions["1.0.0"];
-        assert_eq!(ver.dist.tarball, "https://registry.ohpm.openharmony.cn/@ohos/crypto-js/-/@ohos/crypto-js-1.0.0.tgz");
+        assert_eq!(
+            ver.dist.tarball,
+            "https://registry.ohpm.openharmony.cn/@ohos/crypto-js/-/@ohos/crypto-js-1.0.0.tgz"
+        );
         assert_eq!(ver.dist.integrity.as_deref(), Some("sha512-abc123"));
     }
 
@@ -765,16 +808,28 @@ mod tests {
     #[test]
     fn test_is_cached_returns_false_when_package_absent() {
         let tmp = tempfile::tempdir().unwrap();
-        assert!(!OfflineOhpmCache::is_cached("nonexistent", "1.0.0", tmp.path()));
+        assert!(!OfflineOhpmCache::is_cached(
+            "nonexistent",
+            "1.0.0",
+            tmp.path()
+        ));
     }
 
     #[test]
     fn test_is_cached_scoped_package() {
         let tmp = tempfile::tempdir().unwrap();
         make_fake_cached_pkg(tmp.path(), "@ohos/crypto-js", "2.0.0");
-        assert!(OfflineOhpmCache::is_cached("@ohos/crypto-js", "2.0.0", tmp.path()));
+        assert!(OfflineOhpmCache::is_cached(
+            "@ohos/crypto-js",
+            "2.0.0",
+            tmp.path()
+        ));
         // A different version must not be reported as cached.
-        assert!(!OfflineOhpmCache::is_cached("@ohos/crypto-js", "1.0.0", tmp.path()));
+        assert!(!OfflineOhpmCache::is_cached(
+            "@ohos/crypto-js",
+            "1.0.0",
+            tmp.path()
+        ));
     }
 
     #[test]
@@ -827,8 +882,12 @@ mod tests {
         }"#;
         let lockfile = crate::lockfile::OhPackageLockfile::parse(lockfile_content);
 
-        let result =
-            OfflineOhpmCache::resolve_from_lockfile(&lockfile, "@ohos/crypto-js", "1.0.0", tmp.path());
+        let result = OfflineOhpmCache::resolve_from_lockfile(
+            &lockfile,
+            "@ohos/crypto-js",
+            "1.0.0",
+            tmp.path(),
+        );
         assert!(result.is_some(), "should resolve cached package");
         // Resolved path must point to the package directory.
         let resolved = result.unwrap();
@@ -853,7 +912,10 @@ mod tests {
         let lockfile = crate::lockfile::OhPackageLockfile::parse(lockfile_content);
         let result =
             OfflineOhpmCache::resolve_from_lockfile(&lockfile, "some-pkg", "1.0.0", tmp.path());
-        assert!(result.is_none(), "should return None when package not on disk");
+        assert!(
+            result.is_none(),
+            "should return None when package not on disk"
+        );
     }
 
     #[test]
@@ -873,9 +935,11 @@ mod tests {
         let lockfile = crate::lockfile::OhPackageLockfile::parse(lockfile_content);
 
         // Pass "*" as version — should resolve via lockfile.
-        let result =
-            OfflineOhpmCache::resolve_from_lockfile(&lockfile, "my-lib", "*", tmp.path());
-        assert!(result.is_some(), "wildcard version should resolve via lockfile");
+        let result = OfflineOhpmCache::resolve_from_lockfile(&lockfile, "my-lib", "*", tmp.path());
+        assert!(
+            result.is_some(),
+            "wildcard version should resolve via lockfile"
+        );
     }
 
     #[test]
@@ -885,7 +949,10 @@ mod tests {
         // With offline=true the network must never be reached, so the registry
         // URL is irrelevant; we only care about the error variant.
         let client = OhpmRegistryClient::with_registry("http://127.0.0.1:0").unwrap();
-        let opts = OhpmInstallOptions { offline: true, ..Default::default() };
+        let opts = OhpmInstallOptions {
+            offline: true,
+            ..Default::default()
+        };
         let result = client.install("missing-pkg", "1.0.0", tmp.path(), &opts);
         assert!(
             matches!(result, Err(OhpmRegistryError::PackageNotCached { .. })),
@@ -901,9 +968,15 @@ mod tests {
 
         // Client with a bogus registry URL — offline mode must not hit it.
         let client = OhpmRegistryClient::with_registry("http://127.0.0.1:0").unwrap();
-        let opts = OhpmInstallOptions { offline: true, ..Default::default() };
+        let opts = OhpmInstallOptions {
+            offline: true,
+            ..Default::default()
+        };
         let result = client.install("my-pkg", "1.0.0", tmp.path(), &opts);
-        assert!(result.is_ok(), "offline install of cached package must succeed");
+        assert!(
+            result.is_ok(),
+            "offline install of cached package must succeed"
+        );
         assert_eq!(result.unwrap(), expected);
     }
 
@@ -914,9 +987,15 @@ mod tests {
 
         // Bogus registry — prefer_offline must use the cache and never reach it.
         let client = OhpmRegistryClient::with_registry("http://127.0.0.1:0").unwrap();
-        let opts = OhpmInstallOptions { prefer_offline: true, ..Default::default() };
+        let opts = OhpmInstallOptions {
+            prefer_offline: true,
+            ..Default::default()
+        };
         let result = client.install("@ohos/util", "3.0.0", tmp.path(), &opts);
-        assert!(result.is_ok(), "prefer_offline must succeed when package is cached");
+        assert!(
+            result.is_ok(),
+            "prefer_offline must succeed when package is cached"
+        );
         assert_eq!(result.unwrap(), expected);
     }
 
@@ -927,7 +1006,10 @@ mod tests {
 
         let client = OhpmRegistryClient::with_registry("http://127.0.0.1:0").unwrap();
         let result = client.install_or_use_cache("fast-lib", "0.9.0", tmp.path());
-        assert!(result.is_ok(), "install_or_use_cache must succeed for cached package");
+        assert!(
+            result.is_ok(),
+            "install_or_use_cache must succeed for cached package"
+        );
         assert_eq!(result.unwrap(), expected);
     }
 
@@ -946,7 +1028,11 @@ mod tests {
         // if not cached → PackageNotCached (no network).
         let tmp = tempfile::tempdir().unwrap();
         let client = OhpmRegistryClient::with_registry("http://127.0.0.1:0").unwrap();
-        let opts = OhpmInstallOptions { offline: true, prefer_offline: true, ..Default::default() };
+        let opts = OhpmInstallOptions {
+            offline: true,
+            prefer_offline: true,
+            ..Default::default()
+        };
         let result = client.install("absent-pkg", "1.0.0", tmp.path(), &opts);
         assert!(
             matches!(result, Err(OhpmRegistryError::PackageNotCached { .. })),

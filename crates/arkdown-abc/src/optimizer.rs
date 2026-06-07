@@ -135,9 +135,7 @@ fn peephole_ldundefined_return(method: &mut MethodRecord) {
         let cur = &insns[i];
         // Look ahead one instruction.
         let next = insns.get(i + 1);
-        if matches!(cur, Insn::LdUndefined)
-            && matches!(next, Some(Insn::Return))
-        {
+        if matches!(cur, Insn::LdUndefined) && matches!(next, Some(Insn::Return)) {
             // Replace both with ReturnUndefined and skip the next insn.
             out.push(Insn::ReturnUndefined);
             i += 2;
@@ -225,7 +223,8 @@ fn cfg_dead_code_elimination(method: &mut MethodRecord) {
 
         match insn {
             // Terminal instructions — no successor.
-            Insn::Return | Insn::ReturnUndefined | Insn::Throw | Insn::ThrowPatternNonCoercible => {}
+            Insn::Return | Insn::ReturnUndefined | Insn::Throw | Insn::ThrowPatternNonCoercible => {
+            }
 
             // Unconditional jumps — only the jump target is a successor.
             Insn::JmpShort(off) => {

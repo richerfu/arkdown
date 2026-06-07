@@ -3212,7 +3212,10 @@ fn test_program_cache_proto_bin_has_correct_protobuf_layout() {
         .expect("compile with program cache must succeed");
 
     // Verify the .protoBin file was created.
-    assert!(cache_file.exists(), ".protoBin file must be created after compile");
+    assert!(
+        cache_file.exists(),
+        ".protoBin file must be created after compile"
+    );
 
     let raw_bytes = std::fs::read(&cache_file).expect("must be able to read .protoBin file");
     assert!(!raw_bytes.is_empty(), ".protoBin must not be empty");
@@ -4158,10 +4161,8 @@ with (obj) { value = 2; }"#,
 fn test_assignment_to_eval_is_rejected_strict_mode() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("eval_assign.abc");
-    let result = module_compiler().compile(
-        vec![module_record("test/eval_assign", "eval = 42;")],
-        &out,
-    );
+    let result =
+        module_compiler().compile(vec![module_record("test/eval_assign", "eval = 42;")], &out);
     assert!(
         matches!(result, Err(AbcError::UnsupportedConstruct { .. })),
         "assignment to 'eval' must be rejected (es2panda strict rule)"
@@ -4191,7 +4192,10 @@ fn test_labeled_function_declaration_is_rejected() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("labeled_fn.abc");
     let result = module_compiler().compile(
-        vec![module_record("test/labeled_fn", "myLabel: function foo() {}")],
+        vec![module_record(
+            "test/labeled_fn",
+            "myLabel: function foo() {}",
+        )],
         &out,
     );
     assert!(
@@ -4199,7 +4203,6 @@ fn test_labeled_function_declaration_is_rejected() {
         "labeled function declaration must be rejected (strict mode / es2panda rule)"
     );
 }
-
 
 #[test]
 fn test_delete_global_identifier_uses_global_object_delete() {
@@ -7363,11 +7366,7 @@ fn proto_bin_cache_file_written_with_correct_format() {
     let proto_bin = tmp.path().join("module.protoBin");
 
     let record_name = "@bundle:com.example.app/entry/ets/pages/Index";
-    let file_name = tmp
-        .path()
-        .join("Index.js")
-        .to_string_lossy()
-        .into_owned();
+    let file_name = tmp.path().join("Index.js").to_string_lossy().into_owned();
     let source = "export const greeting = 'hello';";
 
     let compiler = AbcCompiler::new(AbcCompileOptions {
@@ -7409,7 +7408,10 @@ fn proto_bin_cache_file_written_with_correct_format() {
         .expect("compile_with_program_cache must succeed");
 
     // 1. ABC output path is correct.
-    assert_eq!(result.path, abc_out, "artifact path must equal the output path");
+    assert_eq!(
+        result.path, abc_out,
+        "artifact path must equal the output path"
+    );
 
     // 2. ABC output starts with Panda magic bytes.
     let abc_bytes = std::fs::read(&abc_out).expect("abc output must exist");
@@ -7425,12 +7427,12 @@ fn proto_bin_cache_file_written_with_correct_format() {
     );
 
     // 3. .protoBin file exists and is non-empty.
-    assert!(proto_bin.exists(), ".protoBin file must be written by compile_with_program_cache");
-    let proto_bytes = std::fs::read(&proto_bin).expect(".protoBin must be readable");
     assert!(
-        !proto_bytes.is_empty(),
-        ".protoBin file must not be empty"
+        proto_bin.exists(),
+        ".protoBin file must be written by compile_with_program_cache"
     );
+    let proto_bytes = std::fs::read(&proto_bin).expect(".protoBin must be readable");
+    assert!(!proto_bytes.is_empty(), ".protoBin file must not be empty");
 
     // 4. .protoBin decodes as a valid ProgramCache with a program field.
     let entry = ProgramCacheFile::read(&proto_bin)
@@ -7451,8 +7453,8 @@ fn proto_bin_cache_file_written_with_correct_format() {
         source,
         &file_name,
         record_name,
-        "",  // source_file (None → empty string in hash)
-        "",  // package_name (None → empty string in hash)
+        "", // source_file (None → empty string in hash)
+        "", // package_name (None → empty string in hash)
         version_for_target_api(12, None),
     );
     assert_eq!(

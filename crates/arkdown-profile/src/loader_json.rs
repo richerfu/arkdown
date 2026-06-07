@@ -1038,7 +1038,7 @@ impl LoaderJson {
         config: &ArkdownConfig,
         host_module: &ModuleConfig,
     ) -> Vec<PathBuf> {
-        use crate::dependency_graph::{DependencyNodeType, LocalDependencyGraph};
+        use crate::dependency_graph::LocalDependencyGraph;
         let graph = LocalDependencyGraph::build(&host_module.src_path, &config.project_root);
         graph
             .source_hars()
@@ -1359,7 +1359,10 @@ impl LoaderJson {
                     stack.push(path);
                 } else if path.is_file() {
                     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                        if matches!(ext, "ets" | "ts") && !path.to_string_lossy().ends_with(".d.ts") && !path.to_string_lossy().ends_with(".d.ets") {
+                        if matches!(ext, "ets" | "ts")
+                            && !path.to_string_lossy().ends_with(".d.ts")
+                            && !path.to_string_lossy().ends_with(".d.ets")
+                        {
                             entries.push(path);
                         }
                     }
@@ -1503,7 +1506,7 @@ impl LoaderJson {
         config: &ArkdownConfig,
         module_cfg: &ModuleConfig,
     ) -> FxHashMap<String, String> {
-        use crate::dependency_graph::{DependencyNodeType, LocalDependencyGraph};
+        use crate::dependency_graph::LocalDependencyGraph;
         let mut map = FxHashMap::default();
         let graph = LocalDependencyGraph::build(&module_cfg.src_path, &config.project_root);
 
@@ -1515,7 +1518,8 @@ impl LoaderJson {
             // 1. Build output intermediates (hvigor target intermediates layout)
             // 2. Dep root (remote HSP / pre-packaged layout)
             let resource_table = [
-                node.pkg_root.join("build/default/intermediates/res/default/ResourceTable.txt"),
+                node.pkg_root
+                    .join("build/default/intermediates/res/default/ResourceTable.txt"),
                 node.pkg_root.join("ResourceTable.txt"),
             ]
             .into_iter()
@@ -1822,10 +1826,7 @@ impl LoaderJson {
         use arkdown_config::build_profile::RawBuildProfile;
 
         let profile = RawBuildProfile::load(project_root).ok()?;
-        let raw_module = profile
-            .modules
-            .iter()
-            .find(|m| m.name == module_name)?;
+        let raw_module = profile.modules.iter().find(|m| m.name == module_name)?;
 
         // Use centralised target selection for consistent priority rules.
         let target = arkdown_config::build_profile::pick_effective_raw_target(

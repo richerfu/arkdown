@@ -969,8 +969,7 @@ mod tests {
         match result2 {
             OhosResolvedModule::LocalSource { path, .. } => {
                 let canonical = std::fs::canonicalize(&path).unwrap_or(path.clone());
-                let base_canonical =
-                    std::fs::canonicalize(&base_ets.join("Utils.ets")).unwrap();
+                let base_canonical = std::fs::canonicalize(&base_ets.join("Utils.ets")).unwrap();
                 assert_eq!(
                     canonical, base_canonical,
                     "without overlay, must resolve to base file; got: {:?}",

@@ -246,9 +246,7 @@ fn assert_strict_parity(report_name: &str, report: &Value) {
             );
         }
 
-        eprintln!(
-            "[parity] NOTE: {report_name} has known diff covered by allowlist"
-        );
+        eprintln!("[parity] NOTE: {report_name} has known diff covered by allowlist");
     }
 }
 
@@ -1633,10 +1631,7 @@ fn collect_all_cache_root_files(
                 }
             }
 
-            let ext = path
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("");
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
             // Binary files compared by content hash; text files by content.
             let is_binary = matches!(ext, "abc" | "protoBin" | "bin" | "map");
 
@@ -1808,7 +1803,11 @@ fn test_single_target_uses_default_label() {
         "debug",
     );
 
-    assert_eq!(targets.len(), 1, "single target must return exactly one result");
+    assert_eq!(
+        targets.len(),
+        1,
+        "single target must return exactly one result"
+    );
     assert_eq!(targets[0].name, "default");
 
     // Single-target artifact uses "default" label.

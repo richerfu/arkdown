@@ -863,11 +863,7 @@ fn test_har_includes_consumer_rules() {
     fs::write(src_dir.join("Index.ets"), b"export class Index {}").unwrap();
 
     let consumer_rules = tmp.path().join("consumer-rules.txt");
-    fs::write(
-        &consumer_rules,
-        b"-keep public class com.example.lib.*\n",
-    )
-    .unwrap();
+    fs::write(&consumer_rules, b"-keep public class com.example.lib.*\n").unwrap();
 
     let pkg_json = tmp.path().join("oh-package.json5");
     fs::write(&pkg_json, r#"{"name":"lib"}"#).unwrap();
@@ -1001,20 +997,31 @@ fn test_clean_har_sources_removes_ets_adds_declarations() {
     // Declarations directory with stubs.
     let decl_dir = tmp.path().join("declarations");
     fs::create_dir_all(&decl_dir).unwrap();
-    fs::write(decl_dir.join("index.d.ts"), b"export declare class Index {}").unwrap();
-    fs::write(decl_dir.join("index.d.ets"), b"export declare class Index {}").unwrap();
+    fs::write(
+        decl_dir.join("index.d.ts"),
+        b"export declare class Index {}",
+    )
+    .unwrap();
+    fs::write(
+        decl_dir.join("index.d.ets"),
+        b"export declare class Index {}",
+    )
+    .unwrap();
 
     let output_dir = tmp.path().join("cleaned");
-    let cleaned_ets = Packager::clean_har_sources(
-        &tmp.path().join("src/main"),
-        Some(&decl_dir),
-        &output_dir,
-    )
-    .expect("clean_har_sources must succeed");
+    let cleaned_ets =
+        Packager::clean_har_sources(&tmp.path().join("src/main"), Some(&decl_dir), &output_dir)
+            .expect("clean_har_sources must succeed");
 
     // The cleaned/ets directory should contain declaration stubs.
-    assert!(cleaned_ets.join("index.d.ts").exists(), "index.d.ts must be in cleaned ets");
-    assert!(cleaned_ets.join("index.d.ets").exists(), "index.d.ets must be in cleaned ets");
+    assert!(
+        cleaned_ets.join("index.d.ts").exists(),
+        "index.d.ts must be in cleaned ets"
+    );
+    assert!(
+        cleaned_ets.join("index.d.ets").exists(),
+        "index.d.ets must be in cleaned ets"
+    );
 
     // Original .ets/.ts files must NOT be present.
     assert!(

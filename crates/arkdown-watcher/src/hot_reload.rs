@@ -148,8 +148,10 @@ impl HotReloadEvent {
             HotReloadEvent::ResourceChange { files }
             | HotReloadEvent::SourceChange { files }
             | HotReloadEvent::ProfileChange { files } => {
-                let files_json: Vec<String> =
-                    files.iter().map(|f| format!("\"{}\"", escape_json(f))).collect();
+                let files_json: Vec<String> = files
+                    .iter()
+                    .map(|f| format!("\"{}\"", escape_json(f)))
+                    .collect();
                 obj.push_str(&format!(r#","files":[{}]"#, files_json.join(",")));
             }
             HotReloadEvent::PreviewRefresh { entry } => {
@@ -313,8 +315,8 @@ mod tests {
 
         // Verify each line is valid JSON.
         for line in lines {
-            let v: serde_json::Value = serde_json::from_str(line)
-                .expect("each event line must be valid JSON");
+            let v: serde_json::Value =
+                serde_json::from_str(line).expect("each event line must be valid JSON");
             assert!(v.get("type").is_some());
             assert!(v.get("ts").is_some());
         }

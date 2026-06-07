@@ -176,11 +176,7 @@ impl LocalDependencyGraph {
             }
 
             // Is this package listed as a runtimeOnly package?
-            let is_runtime_only = is_runtime_only_package(
-                &dep_name,
-                module_root,
-                project_root,
-            );
+            let is_runtime_only = is_runtime_only_package(&dep_name, module_root, project_root);
 
             let Some(pkg_root) = resolve_dep_dir_with_config(
                 &dep_name,
@@ -470,8 +466,6 @@ fn runtime_only_package_names(pkg_root: &Path) -> Vec<String> {
     struct RuntimeOnlySection {
         #[serde(default)]
         packages: Vec<String>,
-        #[serde(default)]
-        sources: Vec<String>,
     }
     json5::from_str::<Pkg>(&content)
         .map(|p| p.metadata.runtime_only.packages)
@@ -480,11 +474,7 @@ fn runtime_only_package_names(pkg_root: &Path) -> Vec<String> {
 
 /// Check whether `dep_name` appears in any `runtimeOnly.packages` list
 /// reachable from `module_root` or `project_root`.
-fn is_runtime_only_package(
-    dep_name: &str,
-    module_root: &Path,
-    project_root: &Path,
-) -> bool {
+fn is_runtime_only_package(dep_name: &str, module_root: &Path, project_root: &Path) -> bool {
     runtime_only_package_names(module_root)
         .iter()
         .chain(runtime_only_package_names(project_root).iter())
@@ -519,16 +509,6 @@ pub struct DependencyResolutionConfig {
     pub ohpm_cache_root: Option<PathBuf>,
 }
 
-///    known from the lockfile (e.g. after a `ohpm install --prefer-offline`).
-fn resolve_dep_dir(
-    dep_name: &str,
-    issuer_root: &Path,
-    module_root: &Path,
-    project_root: &Path,
-) -> Option<PathBuf> {
-    resolve_dep_dir_with_config(dep_name, issuer_root, module_root, project_root, None)
-}
-
 /// Full dependency directory resolution with optional network fetch.
 ///
 /// Implements hvigor's `DependencyManager` resolution order:
@@ -557,16 +537,18 @@ fn resolve_dep_dir_with_config(
     ] {
         let candidate = base.join(dep_name);
         if candidate.is_dir() {
-            return Some(
-                std::fs::canonicalize(&candidate).unwrap_or(candidate),
-            );
+            return Some(std::fs::canonicalize(&candidate).unwrap_or(candidate));
         }
     }
 
     // Fallback: OHPM global cache.
     // ohpm stores packages under `$OHPM_HOME/<name>@<version>/oh_modules/<name>/`.
-    // We need the declared version from the issuer's oh-package.json5.
-    if let Some(cache_root) = ohpm_global_cache_root() {
+    // Uses config.ohpm_cache_root when set (enables test isolation), else
+    // falls back to $OHPM_HOME / ~/.ohpm.
+    if let Some(cache_root) = config
+        .and_then(|c| c.ohpm_cache_root.clone())
+        .or_else(ohpm_global_cache_root)
+    {
         // Try with the declared version first.
         if let Some(version) = declared_dep_version(issuer_root, dep_name) {
             let versioned = cache_root
@@ -574,9 +556,7 @@ fn resolve_dep_dir_with_config(
                 .join("oh_modules")
                 .join(dep_name);
             if versioned.is_dir() {
-                return Some(
-                    std::fs::canonicalize(&versioned).unwrap_or(versioned),
-                );
+                return Some(std::fs::canonicalize(&versioned).unwrap_or(versioned));
             }
         }
         // Try the scoped package format (@scope+name@version).
@@ -589,9 +569,7 @@ fn resolve_dep_dir_with_config(
                     .join("oh_modules")
                     .join(dep_name);
                 if scoped.is_dir() {
-                    return Some(
-                        std::fs::canonicalize(&scoped).unwrap_or(scoped),
-                    );
+                    return Some(std::fs::canonicalize(&scoped).unwrap_or(scoped));
                 }
             }
         }
@@ -699,7 +677,11 @@ fn ohpm_global_cache_root() -> Option<PathBuf> {
     }
     let home = home_dir()?;
     let p = home.join(".ohpm");
-    if p.is_dir() { Some(p) } else { Some(p) } // always return the path, even if not yet created
+    if p.is_dir() {
+        Some(p)
+    } else {
+        Some(p)
+    } // always return the path, even if not yet created
 }
 
 /// Portable home-directory resolution.
@@ -749,12 +731,19 @@ mod tests {
         let pkg = tmp.path().join("oh_modules/my-har");
         write_pkg(&pkg, "my-har", "");
         write_module_json(&pkg, "har");
-        fs::write(tmp.path().join("oh-package.json5"), r#"{ "dependencies": { "my-har": "1.0.0" } }"#).unwrap();
+        fs::write(
+            tmp.path().join("oh-package.json5"),
+            r#"{ "dependencies": { "my-har": "1.0.0" } }"#,
+        )
+        .unwrap();
 
         let graph = LocalDependencyGraph::build(tmp.path(), tmp.path());
         let node = graph.nodes.get("my-har").expect("my-har must be in graph");
         assert_eq!(node.node_type, DependencyNodeType::SourceHar);
-        assert!(!node.is_transitive, "direct dependency must not be transitive");
+        assert!(
+            !node.is_transitive,
+            "direct dependency must not be transitive"
+        );
     }
 
     #[test]
@@ -765,10 +754,15 @@ mod tests {
         fs::write(
             pkg.join("oh-package.json5"),
             r#"{ "name": "bc-har", "byteCodeHar": true, "dependencies": {} }"#,
-        ).unwrap();
+        )
+        .unwrap();
         fs::create_dir_all(pkg.join("ets")).unwrap();
         fs::write(pkg.join("ets/modules.abc"), b"PANDA\x00\x00\x00").unwrap();
-        fs::write(tmp.path().join("oh-package.json5"), r#"{ "dependencies": { "bc-har": "1.0.0" } }"#).unwrap();
+        fs::write(
+            tmp.path().join("oh-package.json5"),
+            r#"{ "dependencies": { "bc-har": "1.0.0" } }"#,
+        )
+        .unwrap();
 
         let graph = LocalDependencyGraph::build(tmp.path(), tmp.path());
         let node = graph.nodes.get("bc-har").expect("bc-har must be in graph");
@@ -781,7 +775,11 @@ mod tests {
         let pkg = tmp.path().join("oh_modules/my-hsp");
         write_pkg(&pkg, "my-hsp", "");
         write_module_json(&pkg, "shared");
-        fs::write(tmp.path().join("oh-package.json5"), r#"{ "dependencies": { "my-hsp": "1.0.0" } }"#).unwrap();
+        fs::write(
+            tmp.path().join("oh-package.json5"),
+            r#"{ "dependencies": { "my-hsp": "1.0.0" } }"#,
+        )
+        .unwrap();
 
         let graph = LocalDependencyGraph::build(tmp.path(), tmp.path());
         let node = graph.nodes.get("my-hsp").expect("my-hsp must be in graph");
@@ -792,10 +790,17 @@ mod tests {
     fn test_classify_remote_or_unknown() {
         let tmp = tempfile::tempdir().unwrap();
         // No oh_modules directory — package not found locally.
-        fs::write(tmp.path().join("oh-package.json5"), r#"{ "dependencies": { "remote-pkg": "1.0.0" } }"#).unwrap();
+        fs::write(
+            tmp.path().join("oh-package.json5"),
+            r#"{ "dependencies": { "remote-pkg": "1.0.0" } }"#,
+        )
+        .unwrap();
 
         let graph = LocalDependencyGraph::build(tmp.path(), tmp.path());
-        let node = graph.nodes.get("remote-pkg").expect("remote-pkg must be in graph");
+        let node = graph
+            .nodes
+            .get("remote-pkg")
+            .expect("remote-pkg must be in graph");
         assert_eq!(node.node_type, DependencyNodeType::RemoteOrUnknown);
     }
 
@@ -814,12 +819,19 @@ mod tests {
                     }
                 }
             }"#,
-        ).unwrap();
+        )
+        .unwrap();
 
         let graph = LocalDependencyGraph::build(tmp.path(), tmp.path());
-        let node = graph.nodes.get("@runtime/deviceLib").expect("runtimeOnly pkg must be in graph");
-        assert_eq!(node.node_type, DependencyNodeType::RuntimeOnly,
-            "runtimeOnly packages must be classified as RuntimeOnly");
+        let node = graph
+            .nodes
+            .get("@runtime/deviceLib")
+            .expect("runtimeOnly pkg must be in graph");
+        assert_eq!(
+            node.node_type,
+            DependencyNodeType::RuntimeOnly,
+            "runtimeOnly packages must be classified as RuntimeOnly"
+        );
     }
 
     /// A package that is installed locally AND listed in runtimeOnly should
@@ -836,12 +848,16 @@ mod tests {
                 "dependencies": { "rt-har": "1.0.0" },
                 "metadata": { "runtimeOnly": { "packages": ["rt-har"] } }
             }"#,
-        ).unwrap();
+        )
+        .unwrap();
 
         let graph = LocalDependencyGraph::build(tmp.path(), tmp.path());
         let node = graph.nodes.get("rt-har").expect("rt-har must be in graph");
-        assert_eq!(node.node_type, DependencyNodeType::RuntimeOnly,
-            "RuntimeOnly must override SourceHar classification");
+        assert_eq!(
+            node.node_type,
+            DependencyNodeType::RuntimeOnly,
+            "RuntimeOnly must override SourceHar classification"
+        );
     }
 
     /// Transitive dependencies (deps of deps) must have is_transitive = true.
@@ -854,14 +870,22 @@ mod tests {
         let dep_a = oh.join("dep-a");
         fs::create_dir_all(&dep_a).unwrap();
         write_module_json(&dep_a, "har");
-        fs::write(dep_a.join("oh-package.json5"), r#"{ "name": "dep-a", "dependencies": { "dep-b": "1.0.0" } }"#).unwrap();
+        fs::write(
+            dep_a.join("oh-package.json5"),
+            r#"{ "name": "dep-a", "dependencies": { "dep-b": "1.0.0" } }"#,
+        )
+        .unwrap();
 
         // dep-b: installed inside dep-a's oh_modules (bundled).
         let dep_b = dep_a.join("oh_modules/dep-b");
         write_pkg(&dep_b, "dep-b", "");
         write_module_json(&dep_b, "har");
 
-        fs::write(tmp.path().join("oh-package.json5"), r#"{ "dependencies": { "dep-a": "1.0.0" } }"#).unwrap();
+        fs::write(
+            tmp.path().join("oh-package.json5"),
+            r#"{ "dependencies": { "dep-a": "1.0.0" } }"#,
+        )
+        .unwrap();
 
         let graph = LocalDependencyGraph::build(tmp.path(), tmp.path());
 
@@ -885,26 +909,41 @@ mod tests {
         fs::create_dir_all(&outer).unwrap();
         write_module_json(&outer, "har");
         // outer depends on inner, which is nested inside outer's oh_modules.
-        fs::write(outer.join("oh-package.json5"), r#"{ "name": "outer", "dependencies": { "inner": "1.0.0" } }"#).unwrap();
+        fs::write(
+            outer.join("oh-package.json5"),
+            r#"{ "name": "outer", "dependencies": { "inner": "1.0.0" } }"#,
+        )
+        .unwrap();
 
         let inner = outer.join("oh_modules/inner");
         write_pkg(&inner, "inner", "");
         write_module_json(&inner, "har");
 
-        fs::write(tmp.path().join("oh-package.json5"), r#"{ "dependencies": { "outer": "1.0.0" } }"#).unwrap();
+        fs::write(
+            tmp.path().join("oh-package.json5"),
+            r#"{ "dependencies": { "outer": "1.0.0" } }"#,
+        )
+        .unwrap();
 
         let graph = LocalDependencyGraph::build(tmp.path(), tmp.path());
         let inner_node = graph.nodes.get("inner").expect("inner in graph");
         // The nested package is still a SourceHar by artifact type.
-        assert_eq!(inner_node.node_type, DependencyNodeType::SourceHar,
-            "bundled package must retain its artifact type classification");
+        assert_eq!(
+            inner_node.node_type,
+            DependencyNodeType::SourceHar,
+            "bundled package must retain its artifact type classification"
+        );
         // But it is flagged as bundled (lives inside another package's oh_modules/).
-        assert!(inner_node.is_bundled,
-            "nested package must have is_bundled = true");
+        assert!(
+            inner_node.is_bundled,
+            "nested package must have is_bundled = true"
+        );
         // The outer package is NOT bundled.
         let outer_node = graph.nodes.get("outer").expect("outer in graph");
-        assert!(!outer_node.is_bundled,
-            "top-level oh_modules package must not be bundled");
+        assert!(
+            !outer_node.is_bundled,
+            "top-level oh_modules package must not be bundled"
+        );
     }
 
     #[test]
@@ -920,11 +959,16 @@ mod tests {
         fs::write(
             tmp.path().join("oh-package.json5"),
             r#"{ "dependencies": { "alpha": "1.0.0", "beta": "1.0.0", "gamma": "1.0.0" } }"#,
-        ).unwrap();
+        )
+        .unwrap();
 
         let graph = LocalDependencyGraph::build(tmp.path(), tmp.path());
         let names: Vec<_> = graph.nodes.keys().cloned().collect();
-        assert_eq!(names, vec!["alpha", "beta", "gamma"], "BFS insertion order must be preserved");
+        assert_eq!(
+            names,
+            vec!["alpha", "beta", "gamma"],
+            "BFS insertion order must be preserved"
+        );
     }
 
     /// helper_methods: source_hars(), bytecode_hars(), shared_hsps(), runtime_only_nodes()
@@ -947,7 +991,8 @@ mod tests {
                 "dependencies": { "src-har": "1.0.0", "my-hsp": "1.0.0" },
                 "metadata": { "runtimeOnly": { "packages": ["rt-pkg"] } }
             }"#,
-        ).unwrap();
+        )
+        .unwrap();
 
         let graph = LocalDependencyGraph::build(tmp.path(), tmp.path());
         assert_eq!(graph.source_hars().len(), 1);
@@ -968,19 +1013,20 @@ mod tests {
         fs::write(
             tmp.path().join("oh-package.json5"),
             r#"{ "dependencies": { "not-installed": "1.0.0" } }"#,
-        ).unwrap();
+        )
+        .unwrap();
 
         let offline_config = DependencyResolutionConfig {
             offline: true,
             registry_url: None,
             ohpm_cache_root: Some(tmp.path().join("empty-cache")), // non-existent cache
         };
-        let graph = LocalDependencyGraph::build_with_config(
-            tmp.path(),
-            tmp.path(),
-            Some(&offline_config),
-        );
-        let node = graph.nodes.get("not-installed").expect("node must be in graph");
+        let graph =
+            LocalDependencyGraph::build_with_config(tmp.path(), tmp.path(), Some(&offline_config));
+        let node = graph
+            .nodes
+            .get("not-installed")
+            .expect("node must be in graph");
         assert_eq!(
             node.node_type,
             DependencyNodeType::RemoteOrUnknown,
@@ -989,69 +1035,77 @@ mod tests {
     }
 
     /// Integration test: DependencyManager remote resolution (step 6) using a
-    /// real local HTTP server serving OHPM-compatible registry responses.
+    /// real local HTTP server.
     ///
-    /// This test mirrors hvigor's `DependencyManager.resolveRemotePackage()`
-    /// behavior: when a package is not found locally, the DependencyManager
-    /// fetches it from the OHPM registry.
+    /// This test verifies that `build_with_config()` with `offline=false`
+    /// ACTUALLY fetches and installs a package from an OHPM-compatible registry
+    /// when the package is not found locally.  It uses a local TCP server so
+    /// the test is deterministic and does not require internet access.
     ///
-    /// We spin up a minimal HTTP server, create a minimal .tgz package,
-    /// and verify that build_with_config() resolves the package to an
-    /// installed directory in the OHPM global cache.
+    /// The test asserts `SourceHar` unconditionally — if the HTTP server is
+    /// up and serving, the DependencyManager MUST successfully install the
+    /// package and classify it.  Any fallback to `RemoteOrUnknown` is a
+    /// test failure.  This mirrors hvigor's `DependencyManager.resolveRemotePackage()`
+    /// contract: given a reachable registry, remote nodes are always resolved.
     #[test]
     fn test_dependency_resolution_config_remote_fetch_via_local_registry() {
         use std::io::{Read, Write};
         use std::net::TcpListener;
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc as StdArc,
+        };
 
         let tmp_project = tempfile::tempdir().unwrap();
         let tmp_cache = tempfile::tempdir().unwrap();
-
-        // Create a minimal .tgz for "test-remote-pkg@1.0.0".
-        // The tgz must contain oh-package.json5 with type "har".
         let pkg_tgz = create_minimal_har_tgz("test-remote-pkg", "1.0.0");
 
-        // Start a local HTTP server serving the OHPM registry API.
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let registry_url = format!("http://{}", addr);
 
+        // Track whether the tarball was actually served (proof of HTTP roundtrip).
+        let tarball_served = StdArc::new(AtomicBool::new(false));
+        let tarball_served_clone = tarball_served.clone();
+
         let tgz_bytes = pkg_tgz.clone();
         std::thread::spawn(move || {
-            // Serve two requests: metadata and tarball.
-            for _ in 0..2 {
-                let Ok((mut stream, _)) = listener.accept() else { break };
-                let mut buf = [0u8; 4096];
+            for _ in 0..4 {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let mut buf = [0u8; 8192];
                 let n = stream.read(&mut buf).unwrap_or(0);
                 let req = std::str::from_utf8(&buf[..n]).unwrap_or("");
 
-                if req.contains("GET /test-remote-pkg ") {
-                    // Serve package metadata (npm registry format).
-                    let body = format!(r#"{{"name":"test-remote-pkg","versions":{{"1.0.0":{{"version":"1.0.0","dist":{{"tarball":"http://{addr}/test-remote-pkg/-/test-remote-pkg-1.0.0.tgz"}}}}}}}}"#);
+                if req.contains("/test-remote-pkg") && !req.contains(".tgz") {
+                    let body = format!(
+                        r#"{{"name":"test-remote-pkg","versions":{{"1.0.0":{{"version":"1.0.0","dist":{{"tarball":"http://{addr}/test-remote-pkg/-/test-remote-pkg-1.0.0.tgz"}}}}}}}}"#
+                    );
                     let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                         body.len(), body
                     );
                     let _ = stream.write_all(response.as_bytes());
                 } else if req.contains(".tgz") {
-                    // Serve the tarball.
                     let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n",
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                         tgz_bytes.len()
                     );
                     let _ = stream.write_all(response.as_bytes());
                     let _ = stream.write_all(&tgz_bytes);
+                    tarball_served_clone.store(true, Ordering::Relaxed);
                 }
             }
         });
 
-        // Give the server a moment to start.
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::thread::sleep(std::time::Duration::from_millis(100));
 
-        // Set up project with the package declared but not installed.
         fs::write(
             tmp_project.path().join("oh-package.json5"),
             r#"{ "dependencies": { "test-remote-pkg": "1.0.0" } }"#,
-        ).unwrap();
+        )
+        .unwrap();
 
         let config = DependencyResolutionConfig {
             offline: false,
@@ -1065,22 +1119,43 @@ mod tests {
             Some(&config),
         );
 
-        let node = graph.nodes.get("test-remote-pkg").expect("node must be in graph");
+        let node = graph
+            .nodes
+            .get("test-remote-pkg")
+            .expect("node must be in graph");
 
-        // If the HTTP server served the tarball and we extracted it correctly,
-        // the package should no longer be RemoteOrUnknown.
-        // The extracted package contains module.json5 with type="har", so it
-        // should be classified as SourceHar.
-        if matches!(node.node_type, DependencyNodeType::SourceHar) {
-            // Success: remote package was fetched, installed, and classified.
-            assert!(!node.pkg_root.as_os_str().is_empty(), "installed pkg must have a path");
-        } else {
-            // If fetch failed (network issue in CI), allow RemoteOrUnknown
-            // but verify the resolution path was actually attempted.
-            assert!(
-                matches!(node.node_type, DependencyNodeType::RemoteOrUnknown),
-                "unfetched remote package must be RemoteOrUnknown, got {:?}",
+        if tarball_served.load(Ordering::Relaxed) {
+            // The HTTP server DID serve the tarball — verify the DependencyManager
+            // resolved the package correctly.  This is the hvigor-equivalent
+            // assertion: resolveRemotePackage() must produce a concrete node type.
+            assert_eq!(
+                node.node_type,
+                DependencyNodeType::SourceHar,
+                "After tarball was served and extracted, package must be SourceHar \
+                 (module.json5 type=har).  Got {:?}.  \
+                 This means the DependencyManager did NOT reclassify the remote package \
+                 after installation, which breaks hvigor DependencyManager equivalence.",
                 node.node_type
+            );
+            assert!(
+                !node.pkg_root.as_os_str().is_empty(),
+                "installed package must have a non-empty pkg_root path"
+            );
+            assert!(
+                node.pkg_root.is_dir(),
+                "pkg_root must point to an actual directory: {}",
+                node.pkg_root.display()
+            );
+        } else {
+            // The HTTP server did NOT serve the tarball (reqwest connection issue
+            // or race condition).  Fail with a diagnostic rather than silently
+            // passing — the test is intended to exercise the HTTP path.
+            panic!(
+                "DependencyManager integration test FAILED: the local HTTP server \
+                 did not serve the tarball.  The remote resolution path (step 6) \
+                 was not exercised.  \
+                 node_type = {:?}, pkg_root = {:?}",
+                node.node_type, node.pkg_root
             );
         }
     }

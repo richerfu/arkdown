@@ -1042,9 +1042,7 @@ pub(crate) fn check_unsupported_syntax(
     source: &str,
     record_name: &str,
 ) -> Result<(), crate::error::AbcError> {
-    use oxc_ast::ast::{
-        AssignmentTarget, Expression, MemberExpression, PropertyKey,
-    };
+    use oxc_ast::ast::{AssignmentTarget, Expression, MemberExpression, PropertyKey};
     use oxc_ast_visit::{walk, Visit};
 
     let allocator = Allocator::default();
@@ -1097,7 +1095,8 @@ pub(crate) fn check_unsupported_syntax(
                             && static_expr.property.name.as_str() == "callee"
                         {
                             self.error = Some(crate::error::AbcError::UnsupportedConstruct {
-                                construct: "arguments.callee (forbidden in strict mode)".to_string(),
+                                construct: "arguments.callee (forbidden in strict mode)"
+                                    .to_string(),
                                 file: self.record_name.to_string(),
                             });
                         }
@@ -1164,7 +1163,8 @@ pub(crate) fn check_unsupported_syntax(
                 for elem in &class.body.body {
                     if let oxc_ast::ast::ClassElement::MethodDefinition(m) = elem {
                         if m.r#static {
-                            if matches!(&m.key, PropertyKey::StaticIdentifier(id) if id.name.as_str() == "prototype") {
+                            if matches!(&m.key, PropertyKey::StaticIdentifier(id) if id.name.as_str() == "prototype")
+                            {
                                 self.error = Some(crate::error::AbcError::UnsupportedConstruct {
                                     construct: "static method named 'prototype' (Syntax Error per ES2022+ §15.7.1; rejected by es2panda/ArkTS)".to_string(),
                                     file: self.record_name.to_string(),

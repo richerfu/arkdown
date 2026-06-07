@@ -871,7 +871,9 @@ mod tests {
         })
         .unwrap_err();
 
-        assert!(error.to_string().contains("PRIVACY_PROFILE_VALIDATION_FAILED"));
+        assert!(error
+            .to_string()
+            .contains("PRIVACY_PROFILE_VALIDATION_FAILED"));
     }
 
     #[test]
@@ -896,7 +898,9 @@ mod tests {
         })
         .unwrap_err();
 
-        assert!(error.to_string().contains("PRIVACY_PROFILE_VALIDATION_FAILED"));
+        assert!(error
+            .to_string()
+            .contains("PRIVACY_PROFILE_VALIDATION_FAILED"));
     }
 
     #[test]

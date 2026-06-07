@@ -76,8 +76,8 @@ use intermediates::{
     canonical_or_owned, copy_ets_assets_to_loader_out, copy_if_exists, extract_zip_entry,
     path_string, rewrite_package_intermediate_module_json, write_bytes, write_hap_metadata,
     write_json_pretty, write_profile_intermediates, write_resource_config_files,
-    write_resource_config_files_with_dirs,
-    write_router_map_intermediates, write_static_intermediate_files,
+    write_resource_config_files_with_dirs, write_router_map_intermediates,
+    write_static_intermediate_files,
 };
 mod module_plan;
 use module_plan::{build_modules_for_target, resource_modules_for_build};
@@ -310,11 +310,12 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         // device-specific resource directories (resources/phone/, resources/tablet/)
         // are processed correctly.  Falls back to ["phone"] when the manifest
         // declares no device types.
-        let manifest_device_types: Vec<String> = if module_json5_early.module.device_types.is_empty() {
-            vec!["phone".to_string()]
-        } else {
-            module_json5_early.module.device_types.clone()
-        };
+        let manifest_device_types: Vec<String> =
+            if module_json5_early.module.device_types.is_empty() {
+                vec!["phone".to_string()]
+            } else {
+                module_json5_early.module.device_types.clone()
+            };
 
         // --- Resource compilation (precedes profile so IDs are available) ---
         let resource_compiler = ResourceCompiler::new(ResourceCompileConfig {
@@ -671,11 +672,10 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         // the default `src/main/resources/`) so the hvigor parity report
         // compares the correct resource inputs.
         {
-            let module_res_dirs: Vec<PathBuf> =
-                module_resource_dirs(config_arc.as_ref(), module)
-                    .into_iter()
-                    .filter(|d| d.exists())
-                    .collect();
+            let module_res_dirs: Vec<PathBuf> = module_resource_dirs(config_arc.as_ref(), module)
+                .into_iter()
+                .filter(|d| d.exists())
+                .collect();
             if module_res_dirs.is_empty() {
                 write_resource_config_files(&project_root, module, &config_arc, &res_out)?;
             } else {
@@ -745,9 +745,8 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         let task_inputs = TaskInputs::compute(&config_arc, loader_json);
         // Skip cache hit check when --disable-abc-cache is set (parity mode).
         // Section 3.6: allows comparing arkdown vs hvigor output without cache interference.
-        let cache_hit = !disable_abc_cache
-            && task_inputs.matches_cached(&cache_dir)
-            && cached_abc.exists();
+        let cache_hit =
+            !disable_abc_cache && task_inputs.matches_cached(&cache_dir) && cached_abc.exists();
         if cache_hit {
             bundle_outs.push((
                 BundleOutput {
@@ -858,8 +857,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                     build_mode_name,
                 ) {
                     if cfg.name != "default" {
-                        let target_ets =
-                            module.src_path.join("src").join(&cfg.name).join("ets");
+                        let target_ets = module.src_path.join("src").join(&cfg.name).join("ets");
                         if target_ets.is_dir() && target_ets != base_ets {
                             vec![(base_ets, target_ets)]
                         } else {
@@ -1485,13 +1483,12 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             BuildMode::Debug => "debug",
             BuildMode::Release => "release",
         };
-        let all_applicable =
-            arkdown_config::build_profile::enumerate_applicable_targets_for_module(
-                &project_root,
-                &module.name,
-                &config_arc.product.name,
-                packaging_bm_name,
-            );
+        let all_applicable = arkdown_config::build_profile::enumerate_applicable_targets_for_module(
+            &project_root,
+            &module.name,
+            &config_arc.product.name,
+            packaging_bm_name,
+        );
 
         // Determine the set of target labels to produce artifacts for.
         // When multiple targets apply, iterate over all of them.
@@ -1517,235 +1514,245 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         // `module_json`, `modules_abc`, and `resources_index` are cloned for each
         // iteration since they are moved into PackInput.
         for artifact_target_label in &target_labels {
-        let module_json = module_json.clone();
-        let modules_abc = modules_abc.clone();
-        let resources_index = resources_index.clone();
-        let unsigned_output = output_dir.join(format!(
-            "{}-{}-unsigned.{}",
-            module.name, artifact_target_label, ext
-        ));
-        let signed_output = output_dir.join(format!(
-            "{}-{}-signed.{}",
-            module.name, artifact_target_label, ext
-        ));
-        let output = if matches!(&config_arc.output_target, OutputTarget::Har) {
-            output_dir.join(format!("{}.{}", module.name, ext))
-        } else {
-            unsigned_output.clone()
-        };
+            let module_json = module_json.clone();
+            let modules_abc = modules_abc.clone();
+            let resources_index = resources_index.clone();
+            let unsigned_output = output_dir.join(format!(
+                "{}-{}-unsigned.{}",
+                module.name, artifact_target_label, ext
+            ));
+            let signed_output = output_dir.join(format!(
+                "{}-{}-signed.{}",
+                module.name, artifact_target_label, ext
+            ));
+            let output = if matches!(&config_arc.output_target, OutputTarget::Har) {
+                output_dir.join(format!("{}.{}", module.name, ext))
+            } else {
+                unsigned_output.clone()
+            };
 
-        let out = match &config_arc.output_target {
-            OutputTarget::Har => {
-                // HAR: package ETS sources rather than compiled ABC
-                let source_dir = module.src_path.join("src/main/ets");
-                let oh_package_json = module.src_path.join("oh-package.json5");
-                if source_dir.exists() {
-                    // K4: Generate basic .d.ts / .d.ets declaration stubs BEFORE packing.
-                    // Emits re-export declarations so downstream consumers can resolve
-                    // types from this source HAR without full tsc.
-                    // Generated to intermediates/har/default/ so pack_har can include them.
-                    let declarations_dir =
-                        module.src_path.join("build/default/intermediates/har/default");
-                    generate_har_declarations(&module.src_path, &source_dir, &module.name)
-                        .unwrap_or_else(|e| {
-                            tracing::warn!(error = %e, "failed to generate HAR declarations");
+            let out = match &config_arc.output_target {
+                OutputTarget::Har => {
+                    // HAR: package ETS sources rather than compiled ABC
+                    let source_dir = module.src_path.join("src/main/ets");
+                    let oh_package_json = module.src_path.join("oh-package.json5");
+                    if source_dir.exists() {
+                        // K4: Generate basic .d.ts / .d.ets declaration stubs BEFORE packing.
+                        // Emits re-export declarations so downstream consumers can resolve
+                        // types from this source HAR without full tsc.
+                        // Generated to intermediates/har/default/ so pack_har can include them.
+                        let declarations_dir = module
+                            .src_path
+                            .join("build/default/intermediates/har/default");
+                        generate_har_declarations(&module.src_path, &source_dir, &module.name)
+                            .unwrap_or_else(|e| {
+                                tracing::warn!(error = %e, "failed to generate HAR declarations");
+                            });
+
+                        // Consumer obfuscation rules for the HAR (written by obfuscation pass above).
+                        let consumer_rules_path = project_root.join(
+                            "build/default/intermediates/obfuscation/default/consumer-rules.txt",
+                        );
+
+                        let packed = packager
+                            .pack_har(HarPackInput {
+                                module_name: module.name.clone(),
+                                source_dir: source_dir.clone(),
+                                resources_dir: module.src_path.join("src/main/resources"),
+                                resource_str_dir: {
+                                    let dir = module.src_path.join(
+                                        "build/default/intermediates/res/default/resource_str",
+                                    );
+                                    dir.exists().then_some(dir)
+                                },
+                                oh_package_json: oh_package_json.clone(),
+                                output_path: output.clone(),
+                                declarations_dir: declarations_dir
+                                    .exists()
+                                    .then_some(declarations_dir),
+                                consumer_rules_path: consumer_rules_path
+                                    .exists()
+                                    .then_some(consumer_rules_path),
+                            })
+                            .map_err(|e| anyhow::anyhow!("Pack failed: {}", e))?;
+
+                        // B7: Generate HAR module-info (har-extend-info.json).
+                        // Mirrors hvigor CreateHarModuleInfo → har/har-extend-info.js:
+                        // writes metadata about the HAR's exported API surface so
+                        // downstream consumers can understand what the HAR provides.
+                        let har_info_out = module
+                            .src_path
+                            .join("build/default/intermediates/har/default/har-extend-info.json");
+                        if let Some(parent) = har_info_out.parent() {
+                            std::fs::create_dir_all(parent).ok();
+                        }
+                        // Collect exported .ets source files.
+                        let exported_sources: Vec<String> = walkdir::WalkDir::new(&source_dir)
+                            .into_iter()
+                            .filter_map(|e| e.ok())
+                            .filter(|e| {
+                                e.file_type().is_file()
+                                    && e.path()
+                                        .extension()
+                                        .and_then(|x| x.to_str())
+                                        .map_or(false, |x| x == "ets")
+                            })
+                            .filter_map(|e| {
+                                e.path()
+                                    .strip_prefix(&source_dir)
+                                    .ok()
+                                    .map(|r| r.to_string_lossy().replace('\\', "/"))
+                            })
+                            .collect();
+                        let har_info = serde_json::json!({
+                            "moduleName": module.name,
+                            "moduleType": "har",
+                            "exportedSources": exported_sources,
+                            "abilities": manifest.abilities.iter().map(|a| serde_json::json!({
+                                "name": a.name,
+                                "srcEntry": a.src_entry,
+                            })).collect::<Vec<_>>(),
+                        });
+                        write_json_pretty(&har_info_out, &har_info).unwrap_or_else(|e| {
+                            tracing::warn!(error = %e, "failed to write har-extend-info.json");
                         });
 
-                    // Consumer obfuscation rules for the HAR (written by obfuscation pass above).
-                    let consumer_rules_path = project_root
-                        .join("build/default/intermediates/obfuscation/default/consumer-rules.txt");
-
-                    let packed = packager
-                        .pack_har(HarPackInput {
-                            module_name: module.name.clone(),
-                            source_dir: source_dir.clone(),
-                            resources_dir: module.src_path.join("src/main/resources"),
-                            resource_str_dir: {
-                                let dir = module
-                                    .src_path
-                                    .join("build/default/intermediates/res/default/resource_str");
-                                dir.exists().then_some(dir)
-                            },
-                            oh_package_json: oh_package_json.clone(),
-                            output_path: output.clone(),
-                            declarations_dir: declarations_dir.exists().then_some(declarations_dir),
-                            consumer_rules_path: consumer_rules_path
-                                .exists()
-                                .then_some(consumer_rules_path),
-                        })
-                        .map_err(|e| anyhow::anyhow!("Pack failed: {}", e))?;
-
-                    // B7: Generate HAR module-info (har-extend-info.json).
-                    // Mirrors hvigor CreateHarModuleInfo → har/har-extend-info.js:
-                    // writes metadata about the HAR's exported API surface so
-                    // downstream consumers can understand what the HAR provides.
-                    let har_info_out = module
-                        .src_path
-                        .join("build/default/intermediates/har/default/har-extend-info.json");
-                    if let Some(parent) = har_info_out.parent() {
-                        std::fs::create_dir_all(parent).ok();
+                        Some(packed)
+                    } else {
+                        None
                     }
-                    // Collect exported .ets source files.
-                    let exported_sources: Vec<String> = walkdir::WalkDir::new(&source_dir)
-                        .into_iter()
-                        .filter_map(|e| e.ok())
-                        .filter(|e| {
-                            e.file_type().is_file()
-                                && e.path()
-                                    .extension()
-                                    .and_then(|x| x.to_str())
-                                    .map_or(false, |x| x == "ets")
-                        })
-                        .filter_map(|e| {
-                            e.path()
-                                .strip_prefix(&source_dir)
-                                .ok()
-                                .map(|r| r.to_string_lossy().replace('\\', "/"))
-                        })
-                        .collect();
-                    let har_info = serde_json::json!({
-                        "moduleName": module.name,
-                        "moduleType": "har",
-                        "exportedSources": exported_sources,
-                        "abilities": manifest.abilities.iter().map(|a| serde_json::json!({
-                            "name": a.name,
-                            "srcEntry": a.src_entry,
-                        })).collect::<Vec<_>>(),
-                    });
-                    write_json_pretty(&har_info_out, &har_info).unwrap_or_else(|e| {
-                        tracing::warn!(error = %e, "failed to write har-extend-info.json");
-                    });
-
-                    Some(packed)
-                } else {
-                    None
                 }
-            }
-            _ => {
-                // HAP / HSP: need module.json and modules.abc; resources.index is optional
-                if module_json.exists() && modules_abc.exists() {
-                    // Create an empty resources.index placeholder if resources were not compiled
-                    if !resources_index.exists() {
-                        if let Some(parent) = resources_index.parent() {
-                            std::fs::create_dir_all(parent)?;
+                _ => {
+                    // HAP / HSP: need module.json and modules.abc; resources.index is optional
+                    if module_json.exists() && modules_abc.exists() {
+                        // Create an empty resources.index placeholder if resources were not compiled
+                        if !resources_index.exists() {
+                            if let Some(parent) = resources_index.parent() {
+                                std::fs::create_dir_all(parent)?;
+                            }
+                            std::fs::write(&resources_index, &[])?;
                         }
-                        std::fs::write(&resources_index, &[])?;
-                    }
-                    {
-                        // I5 — moveReleaseMap: source maps are not embedded in
-                        // the HAP for release builds (hvigor ArkCompile::moveReleaseMap).
-                        // The map is still copied to the outputs/mapping/ directory
-                        // below for developer use; it just doesn't end up inside the
-                        // signed archive.
-                        let raw_source_maps_path =
+                        {
+                            // I5 — moveReleaseMap: source maps are not embedded in
+                            // the HAP for release builds (hvigor ArkCompile::moveReleaseMap).
+                            // The map is still copied to the outputs/mapping/ directory
+                            // below for developer use; it just doesn't end up inside the
+                            // signed archive.
+                            let raw_source_maps_path =
                             bundle_out.source_maps_path.clone().or_else(|| {
                                 let candidate = module.src_path.join(
                                     "build/default/intermediates/loader_out/default/ets/sourceMaps.map",
                                 );
                                 candidate.exists().then_some(candidate)
                             });
-                        let source_maps_path =
-                            if matches!(config_arc.build_mode, BuildMode::Release) {
-                                None // excluded from HAP in release; moved to mapping/ below
-                            } else {
-                                raw_source_maps_path.clone()
-                            };
-                        // Abilities from the processed manifest
-                        let abilities: Vec<PackAbility> = manifest
-                            .abilities
-                            .iter()
-                            .map(|a| PackAbility {
-                                name: a.name.clone(),
-                                label: a.label.clone(),
-                            })
-                            .collect();
-                        let bundle_version_code = read_bundle_version_code(&project_root);
-                        let bundle_version_name = read_bundle_version_name(&project_root);
-                        let bundle_type = read_bundle_type(&project_root, &config_arc);
-                        let delivery_with_install = read_delivery_with_install(&module.src_path);
-                        Some(
-                            packager
-                                .pack_hap(PackInput {
-                                    module_name: module.name.clone(),
-                                    abc_path: modules_abc,
-                                    resources_index,
-                                    module_json,
-                                    native_libs: collect_native_libs(&project_root, module, &config_arc.product.build_option.abi_filters),
-                                    output_path: output.clone(),
-                                    resources_src_dir: Some(
-                                        module.src_path.join(
-                                            "build/default/intermediates/res/default/resources",
-                                        ),
-                                    ),
-                                    bundle_version_code,
-                                    bundle_version_name,
-                                    // HSP packages use bundle_type "shared"; HAP/HSP modules
-                                    // with atomicService type use "atomicService"; default is "app".
-                                    bundle_type: bundle_type.clone(),
-                                    source_maps_path,
-                                    abilities,
-                                    integrated_hsps: collect_integrated_hsps(
-                                        module,
-                                        config_arc.as_ref(),
-                                        &config_arc.product.bundle_name,
-                                        bundle_version_code,
-                                    )?,
-                                    device_types: manifest.device_types.clone(),
-                                    // installationFree: true for atomicService bundles
-                                    installation_free: bundle_type == "atomicService",
-                                    // deliveryWithInstall defaults to true per OHOS spec;
-                                    // HSP modules may set it false in module.json5
-                                    delivery_with_install,
-                                    privacy_profile_path: privacy_profile_path.clone(),
+                            let source_maps_path =
+                                if matches!(config_arc.build_mode, BuildMode::Release) {
+                                    None // excluded from HAP in release; moved to mapping/ below
+                                } else {
+                                    raw_source_maps_path.clone()
+                                };
+                            // Abilities from the processed manifest
+                            let abilities: Vec<PackAbility> = manifest
+                                .abilities
+                                .iter()
+                                .map(|a| PackAbility {
+                                    name: a.name.clone(),
+                                    label: a.label.clone(),
                                 })
-                                .map_err(|e| anyhow::anyhow!("Pack failed: {}", e))?,
+                                .collect();
+                            let bundle_version_code = read_bundle_version_code(&project_root);
+                            let bundle_version_name = read_bundle_version_name(&project_root);
+                            let bundle_type = read_bundle_type(&project_root, &config_arc);
+                            let delivery_with_install =
+                                read_delivery_with_install(&module.src_path);
+                            Some(
+                                packager
+                                    .pack_hap(PackInput {
+                                        module_name: module.name.clone(),
+                                        abc_path: modules_abc,
+                                        resources_index,
+                                        module_json,
+                                        native_libs: collect_native_libs(
+                                            &project_root,
+                                            module,
+                                            &config_arc.product.build_option.abi_filters,
+                                        ),
+                                        output_path: output.clone(),
+                                        resources_src_dir: Some(module.src_path.join(
+                                            "build/default/intermediates/res/default/resources",
+                                        )),
+                                        bundle_version_code,
+                                        bundle_version_name,
+                                        // HSP packages use bundle_type "shared"; HAP/HSP modules
+                                        // with atomicService type use "atomicService"; default is "app".
+                                        bundle_type: bundle_type.clone(),
+                                        source_maps_path,
+                                        abilities,
+                                        integrated_hsps: collect_integrated_hsps(
+                                            module,
+                                            config_arc.as_ref(),
+                                            &config_arc.product.bundle_name,
+                                            bundle_version_code,
+                                        )?,
+                                        device_types: manifest.device_types.clone(),
+                                        // installationFree: true for atomicService bundles
+                                        installation_free: bundle_type == "atomicService",
+                                        // deliveryWithInstall defaults to true per OHOS spec;
+                                        // HSP modules may set it false in module.json5
+                                        delivery_with_install,
+                                        privacy_profile_path: privacy_profile_path.clone(),
+                                    })
+                                    .map_err(|e| anyhow::anyhow!("Pack failed: {}", e))?,
+                            )
+                        }
+                    } else {
+                        None
+                    }
+                }
+            };
+            if let Some(path) = out {
+                let final_path = if matches!(&config_arc.output_target, OutputTarget::Har) {
+                    // L3: HAR signing (optional).
+                    // When a signing config is present, sign the HAR archive using
+                    // the same HAP signing pipeline (both are ZIP-based archives).
+                    // Matches hvigor's optional har-sign-command-build.js behavior.
+                    if config_arc.product.signing_config.is_some() {
+                        HapSigner::sign_or_skip(
+                            &path,
+                            &signed_output,
+                            config_arc.product.signing_config.as_ref(),
+                            config_arc.sdk_config.compile_api_version,
                         )
+                        .map_err(|e| anyhow::anyhow!("HAR sign failed: {}", e))?;
+                        signed_output.clone()
+                    } else {
+                        path
                     }
                 } else {
-                    None
-                }
-            }
-        };
-        if let Some(path) = out {
-            let final_path = if matches!(&config_arc.output_target, OutputTarget::Har) {
-                // L3: HAR signing (optional).
-                // When a signing config is present, sign the HAR archive using
-                // the same HAP signing pipeline (both are ZIP-based archives).
-                // Matches hvigor's optional har-sign-command-build.js behavior.
-                if config_arc.product.signing_config.is_some() {
                     HapSigner::sign_or_skip(
                         &path,
                         &signed_output,
                         config_arc.product.signing_config.as_ref(),
                         config_arc.sdk_config.compile_api_version,
                     )
-                    .map_err(|e| anyhow::anyhow!("HAR sign failed: {}", e))?;
+                    .map_err(|e| anyhow::anyhow!("Sign failed: {}", e))?;
+                    let package_module_json = module
+                        .src_path
+                        .join("build/default/intermediates/package/default/module.json");
+                    extract_zip_entry(&path, "module.json", &package_module_json)?;
+                    rewrite_package_intermediate_module_json(&package_module_json)?;
+                    write_hap_metadata(&module.src_path, &module.name, &manifest.device_types)?;
+                    extract_zip_entry(&path, "pack.info", &output_dir.join("pack.info"))?;
+                    if let Some(source_maps_path) = &bundle_out.source_maps_path {
+                        copy_if_exists(
+                            source_maps_path,
+                            &output_dir.join("mapping/sourceMaps.map"),
+                        )?;
+                    }
                     signed_output.clone()
-                } else {
-                    path
-                }
-            } else {
-                HapSigner::sign_or_skip(
-                    &path,
-                    &signed_output,
-                    config_arc.product.signing_config.as_ref(),
-                    config_arc.sdk_config.compile_api_version,
-                )
-                .map_err(|e| anyhow::anyhow!("Sign failed: {}", e))?;
-                let package_module_json = module
-                    .src_path
-                    .join("build/default/intermediates/package/default/module.json");
-                extract_zip_entry(&path, "module.json", &package_module_json)?;
-                rewrite_package_intermediate_module_json(&package_module_json)?;
-                write_hap_metadata(&module.src_path, &module.name, &manifest.device_types)?;
-                extract_zip_entry(&path, "pack.info", &output_dir.join("pack.info"))?;
-                if let Some(source_maps_path) = &bundle_out.source_maps_path {
-                    copy_if_exists(source_maps_path, &output_dir.join("mapping/sourceMaps.map"))?;
-                }
-                signed_output.clone()
-            };
-            output_paths.push(final_path);
-        }
+                };
+                output_paths.push(final_path);
+            }
         } // end for artifact_target_label in &target_labels
     }
     progress.done();
@@ -2399,7 +2406,10 @@ fn collect_integrated_hsps(
         let Ok(dep_pkg) = json5::from_str::<DepPkg>(&dep_content) else {
             continue;
         };
-        let is_integrated = dep_pkg.metadata.as_ref().map_or(false, |m| m.is_integrated_hsp);
+        let is_integrated = dep_pkg
+            .metadata
+            .as_ref()
+            .map_or(false, |m| m.is_integrated_hsp);
         if !is_integrated {
             continue;
         }
@@ -2910,12 +2920,7 @@ mod tests {
         // Filter: only arm64-v8a — lib32.so should be excluded.
         let mut libs = Vec::new();
         let mut seen = rustc_hash::FxHashSet::default();
-        collect_native_libs_from_root(
-            &libs_root,
-            &mut seen,
-            &mut libs,
-            &["arm64-v8a".to_string()],
-        );
+        collect_native_libs_from_root(&libs_root, &mut seen, &mut libs, &["arm64-v8a".to_string()]);
         let names: Vec<_> = libs
             .iter()
             .filter_map(|p| p.file_name().and_then(|n| n.to_str()))

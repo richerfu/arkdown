@@ -369,7 +369,9 @@ mod tests {
         })
         .unwrap_err();
 
-        assert!(err.to_string().contains("PERMISSION_REASON_AND_USEDSCENE_REQUIRED"));
+        assert!(err
+            .to_string()
+            .contains("PERMISSION_REASON_AND_USEDSCENE_REQUIRED"));
     }
 
     #[test]
@@ -418,7 +420,9 @@ mod tests {
             ability_names: None,
         })
         .unwrap_err();
-        assert!(custom_err.to_string().contains("PERMISSION_REASON_AND_USEDSCENE_REQUIRED"));
+        assert!(custom_err
+            .to_string()
+            .contains("PERMISSION_REASON_AND_USEDSCENE_REQUIRED"));
 
         validate_request_permissions(RequestPermissionValidationInput {
             module_type: "entry",
@@ -507,7 +511,9 @@ mod tests {
             ability_names: None,
         })
         .unwrap_err();
-        assert!(err.to_string().contains("PERMISSION_REASON_AND_USEDSCENE_REQUIRED"));
+        assert!(err
+            .to_string()
+            .contains("PERMISSION_REASON_AND_USEDSCENE_REQUIRED"));
     }
 
     #[test]
