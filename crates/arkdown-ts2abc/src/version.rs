@@ -1,7 +1,10 @@
 use std::fmt;
 
-/// Upstream es2abc defaults this argument to the current compiler API.
-pub const DEFAULT_TARGET_API_VERSION: u32 = 20;
+/// Default target API version, matching upstream es2abc (options.cpp:571 sets 24).
+///
+/// Previously this was set to 20, which caused mismatched bytecode-version
+/// selection on any build that omits `--target-api-version`.
+pub const DEFAULT_TARGET_API_VERSION: u32 = 24;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BytecodeVersion {

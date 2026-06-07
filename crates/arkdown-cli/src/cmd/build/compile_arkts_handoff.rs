@@ -9,6 +9,7 @@ pub(super) struct CompileArkTsInfo {
     pub(super) source_file: String,
     pub(super) package_name: String,
     pub(super) origin_source_lang: String,
+    pub(super) is_shared_module: bool,
     pub(super) abc_cache_path: Option<PathBuf>,
 }
 
@@ -16,6 +17,7 @@ pub(super) struct CompileArkTsInfo {
 pub(super) struct CompileArkTsHandoff {
     pub(super) inputs: Vec<Ts2abcInput>,
     pub(super) npm_entries_path: Option<PathBuf>,
+    pub(super) modules_cache_path: Option<PathBuf>,
 }
 
 pub(super) fn write_compile_arkts_abc_handoff(
@@ -38,10 +40,14 @@ pub(super) fn write_compile_arkts_abc_handoff(
         writer.push_file_info(info, &ts_path, &abc_cache_path);
         inputs.push(Ts2abcInput {
             path: ts_path,
+            output: None,
+            cache_file: Some(abc_cache_path),
             record_name: info.record_name.clone(),
             source_file: Some(info.source_file.clone()),
             package_name: Some(info.package_name.clone()),
             is_commonjs: info.module_type == "commonjs",
+            is_shared_module: info.is_shared_module,
+            origin_source_lang: info.origin_source_lang.clone(),
             source_map: None,
         });
     }
@@ -57,6 +63,7 @@ pub(super) fn write_compile_arkts_abc_handoff(
     Ok(CompileArkTsHandoff {
         inputs,
         npm_entries_path: Some(npm_entries_path),
+        modules_cache_path: Some(cache_root.join("modules.cache")),
     })
 }
 
@@ -78,12 +85,13 @@ impl<'a> CompileArkTsHandoffWriter<'a> {
     fn push_file_info(&mut self, info: &CompileArkTsInfo, ts_path: &Path, abc_cache_path: &Path) {
         let _ = writeln!(
             self.files_info,
-            "{};{};{};{};{};false;{}",
+            "{};{};{};{};{};{};{}",
             path_string(ts_path),
             info.record_name,
             info.module_type,
             info.source_file,
             info.package_name,
+            info.is_shared_module,
             info.origin_source_lang
         );
         self.push_modules_cache_entry(ts_path, abc_cache_path);

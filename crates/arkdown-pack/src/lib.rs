@@ -12,6 +12,7 @@ pub use packager::{
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io::Read;
     use std::sync::Arc;
 
     use arkdown_core::{
@@ -34,7 +35,13 @@ mod tests {
                 runtime_os: "HarmonyOS".to_string(),
                 signing_config: None,
                 build_option: BuildOption {
+                    preload_system_so: false,
                     preload_so: vec![],
+                    remove_permissions: vec![],
+                    aot_compile_mode: None,
+                    host_pgo: None,
+                    ap_path: None,
+                    abi_filters: vec![],
                     strict_mode: StrictModeConfig {
                         case_sensitive_check: false,
                         use_normalized_ohm_url: true,
@@ -43,6 +50,8 @@ mod tests {
                     res_options: None,
                     source_option: None,
                 },
+                version_code: None,
+                version_name: None,
             },
             modules: vec![],
             sdk_config: SdkConfig {
@@ -82,6 +91,9 @@ mod tests {
             bundle_type: "app".to_string(),
             integrated_hsps: vec![],
             privacy_profile_path: None,
+            device_types: vec![],
+            installation_free: false,
+            delivery_with_install: true,
             source_maps_path: None,
             abilities: vec![],
         });
@@ -133,6 +145,9 @@ mod tests {
                 abilities: vec![],
                 integrated_hsps: vec![],
                 privacy_profile_path: None,
+                device_types: vec![],
+                installation_free: false,
+                delivery_with_install: true,
             })
             .unwrap();
 
@@ -163,6 +178,9 @@ mod tests {
             bundle_type: "app".to_string(),
             integrated_hsps: vec![],
             privacy_profile_path: None,
+            device_types: vec![],
+            installation_free: false,
+            delivery_with_install: true,
             source_maps_path: None,
             abilities: vec![],
         });
@@ -192,8 +210,11 @@ mod tests {
             module_name: "mylib".to_string(),
             source_dir: src_dir.clone(),
             resources_dir: tmp.path().join("src/main/resources"),
+            resource_str_dir: None,
             oh_package_json: pkg_json,
             output_path: out.clone(),
+            declarations_dir: None,
+            consumer_rules_path: None,
         });
         assert!(result.is_ok(), "{:?}", result.err());
         assert!(out.exists());
@@ -239,6 +260,9 @@ mod tests {
             bundle_type: "app".to_string(),
             integrated_hsps: vec![],
             privacy_profile_path: None,
+            device_types: vec![],
+            installation_free: false,
+            delivery_with_install: true,
             source_maps_path: None,
             abilities: vec![],
         });
@@ -247,8 +271,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "preload SO embedding not yet functional"]
-    fn test_pack_hap_embeds_preload_so() {
+    fn test_pack_hap_does_not_embed_build_option_preload_so_as_native_lib() {
         let tmp = tempfile::tempdir().unwrap();
         let abc = tmp.path().join("modules.abc");
         let res = tmp.path().join("resources.index");
@@ -280,6 +303,9 @@ mod tests {
                 source_maps_path: None,
                 abilities: vec![],
                 privacy_profile_path: None,
+                device_types: vec![],
+                installation_free: false,
+                delivery_with_install: true,
                 integrated_hsps: vec![],
             })
             .unwrap();
@@ -288,26 +314,25 @@ mod tests {
         let archive = zip::ZipArchive::new(file).unwrap();
         let names: Vec<_> = archive.file_names().collect();
         assert!(
-            names.iter().any(|n| *n == "libs/arm64-v8a/libpreload.so"),
-            "missing preload SO in HAP; got: {:?}",
+            !names.iter().any(|n| *n == "libs/arm64-v8a/libpreload.so"),
+            "buildOption.preloadSo must not be treated as a native lib; got: {:?}",
             names
         );
     }
 
     #[test]
-    #[ignore = "privacy profile embedding not yet functional"]
     fn test_pack_hap_embeds_privacy_profile() {
         let tmp = tempfile::tempdir().unwrap();
         let abc = tmp.path().join("modules.abc");
         let res = tmp.path().join("resources.index");
         let modj = tmp.path().join("module.json");
-        let privacy = tmp.path().join("privacy.json");
+        let privacy = tmp.path().join("pac.json5");
         let out = tmp.path().join("entry.hap");
 
         fs::write(&abc, b"PAND").unwrap();
         fs::write(&res, b"\x00\x00").unwrap();
         fs::write(&modj, r#"{"module":{"name":"entry","type":"entry"}}"#).unwrap();
-        fs::write(&privacy, r#"{"dataProcess":[]}"#).unwrap();
+        fs::write(&privacy, r#"{ dataProcess: [], specialAPIs: [] }"#).unwrap();
 
         let packager = Packager::new(make_config());
         packager
@@ -327,16 +352,26 @@ mod tests {
                 abilities: vec![],
                 privacy_profile_path: Some(privacy),
                 integrated_hsps: vec![],
+                device_types: vec![],
+                installation_free: false,
+                delivery_with_install: true,
             })
             .unwrap();
 
         let file = fs::File::open(&out).unwrap();
-        let archive = zip::ZipArchive::new(file).unwrap();
-        let names: Vec<_> = archive.file_names().collect();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let names: Vec<_> = archive.file_names().map(str::to_string).collect();
         assert!(
-            names.iter().any(|n| *n == "module.privacy.json"),
+            names.iter().any(|n| n == "module.privacy.json"),
             "missing module.privacy.json in HAP; got: {:?}",
             names
         );
+        let mut privacy_entry = String::new();
+        archive
+            .by_name("module.privacy.json")
+            .unwrap()
+            .read_to_string(&mut privacy_entry)
+            .unwrap();
+        assert_eq!(privacy_entry, r#"{"dataProcess":[],"specialAPIs":[]}"#);
     }
 }

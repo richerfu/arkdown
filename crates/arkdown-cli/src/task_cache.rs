@@ -98,7 +98,10 @@ impl TaskInputs {
 
     /// Derive a stable obfuscation hash from the config's obfuscation settings.
     ///
-    /// Returns 0 when obfuscation is disabled (no rules file to hash).
+    /// Hashes the content of ALL rule files (not just the first) so that a
+    /// change to any rule file invalidates the ABC compile cache.
+    ///
+    /// Returns 0 when obfuscation is disabled or no rule files are configured.
     fn compute_obfuscation_hash(config: &ArkdownConfig) -> u64 {
         let Some(ark) = config.product.build_option.ark_options.as_ref() else {
             return 0;
@@ -106,18 +109,21 @@ impl TaskInputs {
         let Some(obf) = ark.obfuscation.as_ref() else {
             return 0;
         };
-        if !obf.enable_obfuscation {
+        if !obf.enable_obfuscation || obf.rule_files.is_empty() {
             return 0;
         }
-        let Some(rules_path) = obf.rule_files.first() else {
-            return 0;
-        };
-        let Ok(content) = std::fs::read(rules_path) else {
-            return 0;
-        };
         let mut h: u64 = 0xcbf29ce484222325;
-        for b in content {
-            h ^= b as u64;
+        // Hash all rule files in order — a change to any file invalidates the cache.
+        for rules_path in &obf.rule_files {
+            let Ok(content) = std::fs::read(rules_path) else {
+                continue;
+            };
+            for b in content {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+            // Separator between files so that [A, AB] ≠ [AA, B].
+            h ^= b'\0' as u64;
             h = h.wrapping_mul(0x100000001b3);
         }
         h
@@ -147,8 +153,11 @@ mod tests {
             router_map: vec![],
             hsp_resources_map: Default::default(),
             update_version_info: Default::default(),
-            an_build_out_put: String::new(),
-            an_build_mode: String::new(),
+            an_build_out_put: None,
+            an_build_mode: None,
+            ap_path: None,
+            build_config_path: None,
+            patch_config: None,
             non_entry_importees: vec![],
             compiled_importees: vec![],
             compile_entry,
@@ -179,7 +188,13 @@ mod tests {
                 runtime_os: "OpenHarmony".to_string(),
                 signing_config: None,
                 build_option: BuildOption {
+                    preload_system_so: false,
                     preload_so: vec![],
+                    remove_permissions: vec![],
+                    aot_compile_mode: None,
+                    host_pgo: None,
+                    ap_path: None,
+                    abi_filters: vec![],
                     strict_mode: StrictModeConfig {
                         case_sensitive_check: false,
                         use_normalized_ohm_url: true,
@@ -188,6 +203,8 @@ mod tests {
                     res_options: None,
                     source_option: None,
                 },
+                version_code: None,
+                version_name: None,
             },
             modules: vec![ModuleConfig {
                 name: "entry".to_string(),

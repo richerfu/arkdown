@@ -8,15 +8,14 @@
 //!    `ets/modules.abc` (deterministic output / cache correctness).
 
 use rustc_hash::FxHashMap;
+use std::fmt::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arkdown::Bundler;
 use arkdown_cache::{compute_content_hash, BuildCache, BundleCacheKey, CacheKey, CachedEntry};
 use arkdown_config::load_config;
-use arkdown_core::{
-    ArkChunk, ArkdownConfig, BuildMode, ChunkIdx, ModuleConfig, ModuleJson5, OutputTarget,
-};
+use arkdown_core::{ArkdownConfig, BuildMode, ModuleConfig, ModuleJson5, OutputTarget};
 use arkdown_pack::{PackInput, Packager};
 use arkdown_plugin_duplicate_check::DuplicateCheckPlugin;
 use arkdown_plugin_ets_transform::EtsTransformPlugin;
@@ -27,7 +26,6 @@ use arkdown_profile::ProfileProcessor;
 use arkdown_resolver::ResolverConfig;
 use arkdown_resource::{ResourceCompileConfig, ResourceCompileInput, ResourceCompiler};
 use arkdown_ts2abc::{Ts2abcInput, Ts2abcOptions};
-use index_vec::IndexVec;
 use rolldown_plugin::__inner::SharedPluginable;
 
 fn fixture_root() -> PathBuf {
@@ -76,6 +74,12 @@ fn copy_dir_no_build(src: &Path, dst: &Path) {
     }
 }
 
+fn compile_arkts_cache_root(module: &ModuleConfig) -> PathBuf {
+    module
+        .src_path
+        .join("build/default/cache/default/default@CompileArkTS/esmodule/debug")
+}
+
 #[derive(Debug, Clone)]
 struct ChunkCompileMeta {
     record_name: String,
@@ -93,12 +97,16 @@ fn collect_js_chunks(
             let meta = record_name_map.get(name.as_str());
             Ts2abcInput {
                 path: path.clone(),
+                output: None,
+                cache_file: None,
                 record_name: meta
                     .map(|m| m.record_name.clone())
                     .unwrap_or_else(|| name.clone()),
                 source_file: meta.and_then(|m| m.source_file.clone()),
                 package_name: None,
                 is_commonjs: false,
+                is_shared_module: false,
+                origin_source_lang: String::new(),
                 source_map: None,
             }
         })
@@ -140,6 +148,7 @@ fn run_bundle_miss(
                 use_normalized_ohm_url: false,
                 case_sensitive_check: false,
                 oh_modules_roots: vec![],
+                source_set_overlays: vec![],
             },
             fixture.to_path_buf(),
             false,
@@ -156,7 +165,12 @@ fn run_bundle_miss(
         .block_on(bundler.bundle(loader_json))
         .expect("bundle (cache miss)");
 
-    // bundle cache save not implemented (BundleCacheManifest removed)
+    // Write the bundle cache manifest so subsequent builds can detect a hit.
+    // Mirrors hvigor's behaviour of persisting the bundle key to
+    // `build/default/cache/bundle/bundle.json` after each successful Rollup run.
+    if let Err(e) = bundle_cache.write_bundle_manifest(bundle_key) {
+        tracing::warn!(error = %e, "failed to write bundle cache manifest");
+    }
 
     bundle_out
 }
@@ -233,21 +247,6 @@ fn run_pipeline(fixture: &Path) -> PathBuf {
             }
             h
         };
-        let config_hash = {
-            let mut h: u64 = 0xcbf29ce484222325;
-            let fp = format!(
-                "debug:{}:{}:false:{}:{}",
-                config.product.bundle_name,
-                config.sdk_config.compile_api_version,
-                loader_json.support_chunks,
-                loader_json.module_name,
-            );
-            for b in fp.bytes() {
-                h ^= b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            h
-        };
         BundleCacheKey {
             inner: CacheKey {
                 content_hash: format!("{source_hash:x}"),
@@ -292,20 +291,30 @@ fn run_pipeline(fixture: &Path) -> PathBuf {
         })
         .collect();
 
-    let ts2abc_inputs = collect_js_chunks(&bundle_out.chunk_files, &record_name_map);
+    let mut ts2abc_inputs = collect_js_chunks(&bundle_out.chunk_files, &record_name_map);
     let modules_abc = bundle_out.modules_abc_path.clone();
 
     if !ts2abc_inputs.is_empty() {
-        let abc_cache_file = module
-            .src_path
-            .join("build/default/cache/abc/modules.abc.cache");
-        if let Some(parent) = abc_cache_file.parent() {
-            std::fs::create_dir_all(parent).ok();
+        let abc_cache_root = compile_arkts_cache_root(module);
+        let abc_cache_file = abc_cache_root.join("modules.cache");
+        fs_err::create_dir_all(&abc_cache_root).expect("create CompileArkTS cache root");
+        let mut modules_cache = String::new();
+        for input in &mut ts2abc_inputs {
+            let cache_stem = input
+                .path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("module");
+            let cache_file = abc_cache_root.join(format!("{cache_stem}.protoBin"));
+            let _ = writeln!(
+                modules_cache,
+                "{};{}",
+                input.path.display(),
+                cache_file.display()
+            );
+            input.cache_file = Some(cache_file);
         }
-        // Create the cache marker file (mirrors build.rs behaviour).
-        if !abc_cache_file.exists() {
-            let _ = std::fs::write(&abc_cache_file, &[]);
-        }
+        fs_err::write(&abc_cache_file, modules_cache).expect("write CompileArkTS modules.cache");
 
         // Load module build cache (mirrors build.rs logic).
         let cache_dir = module.src_path.join("build/default/cache/modules");
@@ -351,12 +360,21 @@ fn run_pipeline(fixture: &Path) -> PathBuf {
                 output: modules_abc.clone(),
                 target_api_version: config.sdk_config.compile_api_version,
                 target_api_sub_version: None,
+                enable_annotations: false,
                 debug_info: true,
                 opt_level: 0,
+                optimize_try_catch_func: true,
                 merge_abc: true,
                 module: true,
                 commonjs: false,
+                input_extension: "js".to_string(),
+                module_record_field_name: None,
                 cache_file: Some(abc_cache_file),
+                output_proto: None,
+                compile_context_info: Default::default(),
+                enable_abc_input: false,
+                dump_deps_info: false,
+                remove_redundant_file: false,
                 npm_module_entry_list: None,
             }
             .compile()
@@ -411,6 +429,9 @@ fn run_pipeline(fixture: &Path) -> PathBuf {
             bundle_type: "app".to_string(),
             integrated_hsps: vec![],
             privacy_profile_path: None,
+            device_types: vec![],
+            installation_free: false,
+            delivery_with_install: true,
             source_maps_path: bundle_out.source_maps_path,
             abilities: vec![],
         })
@@ -458,7 +479,7 @@ fn test_first_build_writes_cache_entries() {
     );
 }
 
-/// After a first build the ABC compiler cache file exists.
+/// After a first build the CompileArkTS handoff cache manifest exists.
 #[test]
 fn test_first_build_writes_abc_cache_file() {
     let fixture = fresh_fixture_copy(&fixture_root());
@@ -467,12 +488,10 @@ fn test_first_build_writes_abc_cache_file() {
     let config =
         load_config(&fixture, BuildMode::Debug, OutputTarget::Hap, None, None).expect("config");
     let module = &config.modules[0];
-    let abc_cache = module
-        .src_path
-        .join("build/default/cache/abc/modules.abc.cache");
+    let abc_cache = compile_arkts_cache_root(module).join("modules.cache");
     assert!(
         abc_cache.exists(),
-        "ABC compiler cache file must exist after first build: {abc_cache:?}"
+        "CompileArkTS modules.cache must exist after first build: {abc_cache:?}"
     );
 
     let _ = std::fs::remove_dir_all(&fixture);
@@ -483,7 +502,6 @@ fn test_first_build_writes_abc_cache_file() {
 /// After a first build the bundle cache manifest file exists at
 /// `build/default/cache/bundle/bundle.json`.
 #[test]
-#[ignore = "bundle cache manifest not wired in current state"]
 fn test_bundle_cache_manifest_written_after_first_build() {
     let fixture = fresh_fixture_copy(&fixture_root());
     run_pipeline(&fixture);
@@ -505,7 +523,6 @@ fn test_bundle_cache_manifest_written_after_first_build() {
 /// On a second build with unchanged sources the bundle cache is a hit:
 /// the manifest still exists and both builds produce byte-identical `modules.abc`.
 #[test]
-#[ignore = "bundle cache not wired in current state"]
 fn test_second_build_uses_bundle_cache_and_produces_identical_abc() {
     let fixture = fresh_fixture_copy(&fixture_root());
 

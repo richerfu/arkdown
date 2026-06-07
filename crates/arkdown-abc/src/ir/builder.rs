@@ -3,23 +3,30 @@ use std::path::Path;
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    Argument, ArrayAssignmentTarget, ArrayPattern, AssignmentOperator, AssignmentTarget,
+    AnnotationDeclaration, AnnotationElement, Argument, ArrayAssignmentTarget,
+    ArrayExpressionElement, ArrayPattern, AssignmentOperator, AssignmentTarget,
     AssignmentTargetMaybeDefault, AssignmentTargetProperty, BindingPattern, ClassElement,
-    Declaration, ExportDefaultDeclarationKind, Expression, ForInStatement, ForOfStatement,
-    ForStatementLeft, FormalParameter, Function, FunctionBody, ImportOrExportKind,
-    LogicalOperator, MethodDefinitionKind, ObjectAssignmentTarget, ObjectPattern, Program,
-    PropertyKey, SimpleAssignmentTarget, Statement, TSEnumDeclaration, TSEnumMemberName,
-    TSImportEqualsDeclaration, TSModuleDeclaration, TSModuleReference, TSQualifiedName,
+    Declaration, Decorator, ExportDefaultDeclarationKind, Expression, ForInStatement,
+    ForOfStatement, ForStatementLeft, FormalParameter, Function, FunctionBody,
+    ImportDeclarationSpecifier, ImportOrExportKind, LogicalOperator, MethodDefinitionKind,
+    NewExpression, ObjectAssignmentTarget, ObjectPattern, ObjectPropertyKind, Program, PropertyKey,
+    SimpleAssignmentTarget, Statement, TSEnumDeclaration, TSEnumMemberName,
+    TSImportEqualsDeclaration, TSModuleDeclaration, TSModuleReference, TSQualifiedName, TSType,
     TSTypeName, UnaryOperator, UpdateExpression, YieldExpression,
 };
+use oxc_ast_visit::{walk, Visit};
 use oxc_parser::{Parser, ParserReturn};
-use oxc_semantic::{Reference, Scoping, SemanticBuilder};
+use oxc_semantic::{Reference, ScopeFlags, ScopeId, Scoping, SemanticBuilder, SymbolId};
 use oxc_span::{GetSpan, SourceType};
 use oxc_syntax::operator::UpdateOperator;
 use oxc_transformer::{Module as TransformModule, TransformOptions, Transformer};
 
 use crate::emit::file::{LiteralArray, LiteralEntry};
-use crate::emit::record::{CatchEntry, ClassRecord, DebugInfoRecord, MethodKind, MethodRecord};
+use crate::emit::record::{
+    function_kind, AnnotationElementRecord, AnnotationRecord, AnnotationValue, CatchEntry,
+    ClassRecord, DebugInfoRecord, FieldRecord, FieldType, FieldValue, InstructionDebugInfo,
+    MethodKind, MethodLabelStyle, MethodRecord, ProgramLabel, FIELD_OWNER_CLASS_IDX,
+};
 use crate::emit::strings::StringTable;
 use crate::error::AbcError;
 use crate::ir::ast_analysis::{
@@ -29,26 +36,29 @@ use crate::ir::ast_analysis::{
 };
 use crate::ir::class_layout::{
     class_buffer_literal_array, class_method_inferred_name, class_method_num_args,
-    class_method_record_name, class_private_methods_literal_array, computed_class_method_record_name,
-    computed_instance_class_field_key_name, constructor_required_param_count,
-    is_class_buffer_method, method_key_name, static_initializer_record_name,
+    class_method_record_name, class_method_upstream_name, class_private_methods_literal_array,
+    computed_class_method_record_name, computed_instance_class_field_key_name,
+    constructor_required_param_count, is_class_buffer_method, method_key_name,
+    static_initializer_record_name,
 };
 use crate::ir::debug_lnp::{argument_span_start, col_at, line_at, LineTracker, SourceMapper};
 use crate::ir::function_lexical::collect_function_lexical_bindings;
 use crate::ir::function_records::{
-    collect_function_records, FunctionNameAllocator, FunctionRecord, FunctionRecordNode,
+    collect_function_records, FunctionNameAllocator, FunctionRecord, FunctionRecordFlavor,
+    FunctionRecordNode,
 };
 use crate::ir::lowering_context::LoweringContext;
 use crate::ir::module_lexical::collect_module_lexical_bindings;
 use crate::ir::module_record::{collect_module_record, DEFAULT_LOCAL_NAME};
 use crate::ir::opcodes::Insn;
-use crate::ir::record_layout::RecordLayout;
+use crate::ir::record_layout::{is_explicit_ecmascript_source_file, RecordLayout};
+use crate::names::pandasm_record_name;
 
-const ARG_PLACEHOLDER_BASE: u8 = 192;
-const ARG_PLACEHOLDER_LIMIT: u8 = 64;
-const MANDATORY_PARAM_FUNCTION_REG: u8 = ARG_PLACEHOLDER_BASE;
-const MANDATORY_PARAM_NEW_TARGET_REG: u8 = ARG_PLACEHOLDER_BASE + 1;
-const MANDATORY_PARAM_THIS_REG: u8 = ARG_PLACEHOLDER_BASE + 2;
+const ARG_SENTINEL_BASE: u8 = 192;
+const ARG_SENTINEL_LIMIT: u8 = 64;
+const MANDATORY_PARAM_FUNCTION_REG: u8 = ARG_SENTINEL_BASE;
+const MANDATORY_PARAM_NEW_TARGET_REG: u8 = ARG_SENTINEL_BASE + 1;
+const MANDATORY_PARAM_THIS_REG: u8 = ARG_SENTINEL_BASE + 2;
 const MAX_RANGE_CALL_ARG: usize = 128;
 
 fn is_type_only_function(func: &Function<'_>) -> bool {
@@ -154,7 +164,7 @@ pub fn build_record_with_debug_and_package_for_target(
     target_api_version: u32,
     target_api_sub_version: Option<&str>,
 ) -> Result<ClassRecord, AbcError> {
-    build_record_with_debug_and_source_map_for_target(
+    build_record_with_debug_and_package_for_target_with_mode(
         source,
         record_name,
         strings,
@@ -162,10 +172,52 @@ pub fn build_record_with_debug_and_package_for_target(
         source_file,
         package_name,
         is_commonjs,
+        false,
+        "",
+        is_module,
+        target_api_version,
+        target_api_sub_version,
+        false,
+        source_file.is_some(),
+        source_file.is_some_and(is_explicit_ecmascript_source_file),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_record_with_debug_and_package_for_target_with_mode(
+    source: &str,
+    record_name: &str,
+    strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
+    source_file: Option<&str>,
+    package_name: Option<&str>,
+    is_commonjs: bool,
+    is_shared_module: bool,
+    origin_source_lang: &str,
+    is_module: bool,
+    target_api_version: u32,
+    target_api_sub_version: Option<&str>,
+    enable_annotations: bool,
+    emit_debugger: bool,
+    standalone_ecmascript_input: bool,
+) -> Result<ClassRecord, AbcError> {
+    build_record_with_debug_and_source_map_for_target_with_mode(
+        source,
+        record_name,
+        strings,
+        literal_arrays,
+        source_file,
+        package_name,
+        is_commonjs,
+        is_shared_module,
+        origin_source_lang,
         is_module,
         None,
         target_api_version,
         target_api_sub_version,
+        enable_annotations,
+        emit_debugger,
+        standalone_ecmascript_input,
     )
 }
 
@@ -208,6 +260,45 @@ pub fn build_record_with_debug_and_source_map_for_target(
     source_map: Option<&str>,
     target_api_version: u32,
     target_api_sub_version: Option<&str>,
+) -> Result<ClassRecord, AbcError> {
+    build_record_with_debug_and_source_map_for_target_with_mode(
+        source,
+        record_name,
+        strings,
+        literal_arrays,
+        source_file,
+        package_name,
+        is_commonjs,
+        false,
+        "",
+        is_module,
+        source_map,
+        target_api_version,
+        target_api_sub_version,
+        false,
+        source_file.is_some(),
+        source_file.is_some_and(is_explicit_ecmascript_source_file),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_record_with_debug_and_source_map_for_target_with_mode(
+    source: &str,
+    record_name: &str,
+    strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
+    source_file: Option<&str>,
+    package_name: Option<&str>,
+    is_commonjs: bool,
+    is_shared_module: bool,
+    origin_source_lang: &str,
+    is_module: bool,
+    source_map: Option<&str>,
+    target_api_version: u32,
+    target_api_sub_version: Option<&str>,
+    enable_annotations: bool,
+    emit_debugger: bool,
+    standalone_ecmascript_input: bool,
 ) -> Result<ClassRecord, AbcError> {
     let source_mapper = SourceMapper::from_json(source_map);
     let source_mapper = source_mapper.as_ref();
@@ -277,16 +368,33 @@ pub fn build_record_with_debug_and_source_map_for_target(
     };
     let scoping_ref = scoping.as_ref();
     let runtime_ts_import_equals = collect_runtime_ts_import_equals(&program, scoping_ref);
-    reject_unsupported_constructs(&program, record_name)?;
+    reject_unsupported_constructs(
+        &program,
+        record_name,
+        target_api_version,
+        enable_annotations,
+    )?;
+    let enum_infos = collect_annotation_enum_infos(&program);
+    let mut annotation_literal_array_counter = 0usize;
+    let annotations_enabled =
+        enable_annotations && target_api_version >= ANNOTATION_SUPPORTED_API_VERSION;
 
     // Collect module import/export records before lowering so bytecode can use
     // hvigor/es2abc's module-variable opcodes instead of global lookups.
     let module_record = collect_module_record(&program, is_module, scoping_ref);
+    let concurrent_import_requests =
+        ConcurrentImportRequests::new(&program, &module_record, scoping_ref, record_name)?;
     let lexical_bindings = collect_module_lexical_bindings(&program, is_module, &module_record);
     let function_lexical_infos = collect_function_lexical_bindings(&program);
     let scan_stmts: &[Statement<'_>] = statement_scan_body(&program, is_module);
+    let has_top_level_await = is_module && stmts_have_top_level_await(scan_stmts);
     let mut function_names = FunctionNameAllocator::new(source);
-    let function_records = collect_function_records(&program, scan_stmts, &mut function_names);
+    let function_records = collect_function_records(
+        &program,
+        scan_stmts,
+        &mut function_names,
+        standalone_ecmascript_input,
+    );
     let function_names_by_span = function_records
         .iter()
         .map(|record| (record.span(), record.name.clone()))
@@ -298,6 +406,8 @@ pub fn build_record_with_debug_and_source_map_for_target(
         function_lexical_infos,
         target_api_version,
         target_api_sub_version.map(str::to_string),
+        emit_debugger,
+        standalone_ecmascript_input,
     );
 
     let mut methods: Vec<MethodRecord> = Vec::new();
@@ -319,6 +429,7 @@ pub fn build_record_with_debug_and_source_map_for_target(
             is_module,
             source,
             source_mapper,
+            has_top_level_await,
             &runtime_ts_import_equals,
         )
     } else {
@@ -329,20 +440,53 @@ pub fn build_record_with_debug_and_source_map_for_target(
             &lowering,
             is_module,
             source,
+            has_top_level_await,
             &runtime_ts_import_equals,
         )
     };
     methods.push(MethodRecord {
         name: "func_main_0".to_string(),
         bytecode: func_main.bytecode,
+        pandasm_insns: func_main.pandasm_insns,
+        pandasm_debug: func_main.pandasm_debug,
         num_vregs: func_main.vregs,
         num_args: 3,
-        debug_info: None,
+        value_of_first_param: -1,
+        slots_num: None,
+        debug_info: source_file.map(|path| DebugInfoRecord {
+            line_start: func_main.debug_line_start.unwrap_or_else(|| {
+                first_runtime_stmt_start(scan_stmts)
+                    .map(|start| debug_line_start(Some(source), source_mapper, start))
+                    .unwrap_or(1)
+            }),
+            source_file: path.to_string(),
+            source_code: None,
+            param_names: Vec::new(),
+            lexical_this: false,
+            local_variables: Vec::new(),
+            infer_scope_locals: true,
+            line_ops_include_local_variables: false,
+        }),
         line_ops: func_main.line_ops,
         catch_entries: func_main.catches,
+        program_labels: func_main.program_labels,
+        label_table: Vec::new(),
         kind: MethodKind::Module,
+        function_kind: function_kind::FUNCTION,
+        source_lang: None,
+        concurrent_module_requests: Vec::new(),
         method_pool_entry: false,
+        expected_property_count: None,
+        annotations: Vec::new(),
+        metadata_attrs: Default::default(),
+        param_annotations: Vec::new(),
         definefunc_order: None,
+        label_style: MethodLabelStyle::Source,
+        param_types: Vec::new(),
+        return_type: None,
+        body_presence: None,
+        body_location: None,
+        file_location: None,
     });
 
     let tracked_source = source_file.as_ref().map(|_| source);
@@ -358,6 +502,7 @@ pub fn build_record_with_debug_and_source_map_for_target(
             tracked_source,
             source_file,
             source_mapper,
+            &concurrent_import_requests,
         );
     }
 
@@ -374,9 +519,23 @@ pub fn build_record_with_debug_and_source_map_for_target(
         source_file,
         source_mapper,
         &mut function_names,
-    );
+        &concurrent_import_requests,
+        record_name,
+        annotations_enabled,
+        &enum_infos,
+        &mut annotation_literal_array_counter,
+    )?;
 
-    let record_layout = RecordLayout::new(record_name, package_name, source, is_commonjs);
+    let record_layout = RecordLayout::new(
+        record_name,
+        package_name,
+        standalone_ecmascript_input,
+        source,
+        is_commonjs,
+        is_shared_module,
+        has_top_level_await,
+    );
+    let source_lang = source_lang_from_origin_source_lang(origin_source_lang);
     let class_name = record_layout.class_name();
 
     // Literal arrays produced before this point are bytecode operands.  The
@@ -385,7 +544,11 @@ pub fn build_record_with_debug_and_source_map_for_target(
     let bytecode_literal_end = literal_arrays.len();
 
     let scope_names_idx = literal_arrays.len();
-    literal_arrays.push(scope_names_literal_array(scan_stmts, record_name));
+    literal_arrays.push(scope_names_literal_array(
+        scan_stmts,
+        record_name,
+        standalone_ecmascript_input,
+    ));
     // Collect module import/export records so that the ABC serializer can emit
     // the compact libpandafile module record buffer used by hvigor/es2abc.
     // Upstream only runs CompileModuleRecordJob for ScriptKind::MODULE;
@@ -413,8 +576,12 @@ pub fn build_record_with_debug_and_source_map_for_target(
                 method.debug_info = Some(DebugInfoRecord {
                     line_start: 1,
                     source_file: file.clone(),
+                    source_code: None,
                     param_names: vec![],
                     lexical_this: false,
+                    local_variables: Vec::new(),
+                    infer_scope_locals: true,
+                    line_ops_include_local_variables: false,
                 });
             }
         }
@@ -436,11 +603,1081 @@ pub fn build_record_with_debug_and_source_map_for_target(
         ),
         source_code_strings,
         access_flags: 1,
-        source_lang: 0x04,
+        source_lang,
+        metadata_attrs: Default::default(),
+        conflict: false,
+        params_num: 0,
+        body_presence: false,
+        file_location: None,
+        standalone_ecmascript_input,
         source_file,
+        annotations: Vec::new(),
         module_requests: module_record.module_requests,
         fields: module_fields,
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnnotationEnumValueKind {
+    Number,
+    String,
+}
+
+#[derive(Debug, Clone)]
+enum AnnotationEnumValue {
+    Number(f64),
+    String(String),
+}
+
+#[derive(Debug, Clone)]
+struct AnnotationEnumInfo {
+    value_kind: AnnotationEnumValueKind,
+    members: FxHashMap<String, AnnotationEnumValue>,
+}
+
+pub fn annotation_records_from_source(
+    source: &str,
+    record_name: &str,
+    source_file: Option<&str>,
+    target_api_version: u32,
+    enable_annotations: bool,
+    literal_arrays: &mut Vec<LiteralArray>,
+) -> Result<Vec<ClassRecord>, AbcError> {
+    let allocator = Allocator::default();
+    let is_ets = source_file
+        .or(Some(record_name))
+        .map(|s| s.ends_with(".ets"))
+        .unwrap_or(false);
+    let source_type = if is_ets {
+        SourceType::ets()
+    } else {
+        SourceType::ts().with_module(true)
+    };
+    let ParserReturn {
+        program,
+        panicked,
+        errors,
+        ..
+    } = Parser::new(&allocator, source, source_type).parse();
+    if panicked {
+        return Err(AbcError::Parse {
+            file: record_name.to_string(),
+            message: errors
+                .first()
+                .map(|e| e.message.to_string())
+                .unwrap_or_else(|| "parser panic".to_string()),
+        });
+    }
+
+    let enum_infos = collect_annotation_enum_infos(&program);
+    let mut annotation_literal_array_counter = literal_arrays
+        .iter()
+        .filter(|array| array.explicit_key.is_some())
+        .count();
+    let mut records = Vec::new();
+    for stmt in &program.body {
+        match stmt {
+            Statement::AnnotationDeclaration(decl) => records.push(annotation_record_from_decl(
+                decl,
+                record_name,
+                target_api_version,
+                enable_annotations,
+                literal_arrays,
+                &enum_infos,
+                &mut annotation_literal_array_counter,
+            )?),
+            Statement::ExportNamedDeclaration(export) => {
+                if let Some(Declaration::AnnotationDeclaration(decl)) = &export.declaration {
+                    records.push(annotation_record_from_decl(
+                        decl,
+                        record_name,
+                        target_api_version,
+                        enable_annotations,
+                        literal_arrays,
+                        &enum_infos,
+                        &mut annotation_literal_array_counter,
+                    )?);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(records)
+}
+
+fn annotation_record_from_decl(
+    decl: &AnnotationDeclaration<'_>,
+    record_name: &str,
+    target_api_version: u32,
+    enable_annotations: bool,
+    literal_arrays: &mut Vec<LiteralArray>,
+    enum_infos: &FxHashMap<String, AnnotationEnumInfo>,
+    annotation_literal_array_counter: &mut usize,
+) -> Result<ClassRecord, AbcError> {
+    if !(enable_annotations && target_api_version >= ANNOTATION_SUPPORTED_API_VERSION) {
+        return Err(AbcError::Parse {
+            file: record_name.to_string(),
+            message: ANNOTATION_NOT_ENABLED_MESSAGE.to_string(),
+        });
+    }
+    let annotation_name = decl.id.name.as_str();
+    let Some(record_short_name) = annotation_name.strip_prefix(ANNOTATION_PREFIX) else {
+        return Err(AbcError::Parse {
+            file: record_name.to_string(),
+            message: format!(
+                "Annotation declaration need to be prefixed with '{ANNOTATION_PREFIX}'"
+            ),
+        });
+    };
+    let annotation_record_name = if record_name.is_empty() {
+        record_short_name.to_string()
+    } else {
+        format!("{}.{}", pandasm_record_name(record_name), record_short_name)
+    };
+
+    let mut fields = Vec::with_capacity(decl.body.body.len());
+    let mut literal_indices = Vec::new();
+    for element in &decl.body.body {
+        let AnnotationElement::PropertyDefinition(property) = element;
+        let Some(name) = property.key.static_name() else {
+            return Err(AbcError::UnsupportedConstruct {
+                construct: "AnnotationComputedProperty".to_string(),
+                file: record_name.to_string(),
+            });
+        };
+        let field_type =
+            annotation_field_type(property.type_annotation.as_deref(), enum_infos, record_name)?;
+        let value = annotation_field_value(
+            &field_type,
+            property.value.as_ref(),
+            literal_arrays,
+            &mut literal_indices,
+            &annotation_record_name,
+            name.as_ref(),
+            enum_infos,
+            record_name,
+            annotation_literal_array_counter,
+        )?;
+        fields.push(FieldRecord {
+            name: name.to_string(),
+            class_idx: FIELD_OWNER_CLASS_IDX,
+            type_idx: legacy_annotation_type_idx(&field_type),
+            field_type,
+            metadata_field_type: None,
+            access_flags: 0,
+            value,
+            annotations: Vec::new(),
+            metadata_attrs: Default::default(),
+            source: Default::default(),
+        });
+    }
+
+    Ok(ClassRecord {
+        name: format!("L{annotation_record_name};"),
+        methods: Vec::new(),
+        string_indices: Vec::new(),
+        literal_indices,
+        module_literal_indices: Vec::new(),
+        source_code_strings: Vec::new(),
+        access_flags: 0x2000,
+        source_lang: 0,
+        metadata_attrs: Default::default(),
+        conflict: false,
+        params_num: 0,
+        body_presence: false,
+        file_location: None,
+        standalone_ecmascript_input: false,
+        source_file: None,
+        annotations: Vec::new(),
+        module_requests: Vec::new(),
+        fields,
+    })
+}
+
+fn collect_annotation_enum_infos(program: &Program<'_>) -> FxHashMap<String, AnnotationEnumInfo> {
+    let mut infos = FxHashMap::default();
+    for stmt in &program.body {
+        let decl = match stmt {
+            Statement::TSEnumDeclaration(decl) => Some(decl),
+            Statement::ExportNamedDeclaration(export) => match &export.declaration {
+                Some(Declaration::TSEnumDeclaration(decl)) => Some(decl),
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some(decl) = decl else {
+            continue;
+        };
+        infos.insert(
+            decl.id.name.as_str().to_string(),
+            annotation_enum_info(decl),
+        );
+    }
+    infos
+}
+
+fn annotation_enum_info(decl: &TSEnumDeclaration<'_>) -> AnnotationEnumInfo {
+    let mut members = FxHashMap::default();
+    let mut value_kind = AnnotationEnumValueKind::Number;
+    let mut next_number = 0.0;
+
+    for member in &decl.body.members {
+        let Some(member_name) = annotation_enum_member_name(&member.id) else {
+            continue;
+        };
+        let value = if let Some(initializer) = &member.initializer {
+            if let Some(value) = annotation_string_constant(initializer, &members) {
+                value_kind = AnnotationEnumValueKind::String;
+                AnnotationEnumValue::String(value)
+            } else if let Some(value) = annotation_number_constant(initializer, &members) {
+                next_number = value + 1.0;
+                AnnotationEnumValue::Number(value)
+            } else {
+                let value = next_number;
+                next_number += 1.0;
+                AnnotationEnumValue::Number(value)
+            }
+        } else {
+            let value = next_number;
+            next_number += 1.0;
+            AnnotationEnumValue::Number(value)
+        };
+        members.insert(member_name, value);
+    }
+
+    AnnotationEnumInfo {
+        value_kind,
+        members,
+    }
+}
+
+fn annotation_enum_member_name(member_name: &TSEnumMemberName<'_>) -> Option<String> {
+    match member_name {
+        TSEnumMemberName::Identifier(id) => Some(id.name.as_str().to_string()),
+        TSEnumMemberName::String(string) | TSEnumMemberName::ComputedString(string) => {
+            Some(string.value.as_str().to_string())
+        }
+        TSEnumMemberName::ComputedTemplateString(template) => template
+            .single_quasi()
+            .map(|name| name.as_str().to_string()),
+    }
+}
+
+fn annotation_field_type(
+    annotation: Option<&oxc_ast::ast::TSTypeAnnotation<'_>>,
+    enum_infos: &FxHashMap<String, AnnotationEnumInfo>,
+    record_name: &str,
+) -> Result<FieldType, AbcError> {
+    let Some(annotation) = annotation else {
+        return Err(AbcError::UnsupportedConstruct {
+            construct: "AnnotationMissingFieldType".to_string(),
+            file: record_name.to_string(),
+        });
+    };
+    let (base_type, rank) = annotation_array_base_type(&annotation.type_annotation);
+    let component_name = match base_type {
+        TSType::TSStringKeyword(_) => "panda.String",
+        TSType::TSNumberKeyword(_) => "f64",
+        TSType::TSBooleanKeyword(_) => "u1",
+        TSType::TSTypeReference(reference) => {
+            let Some(info) = annotation_enum_info_for_type_name(&reference.type_name, enum_infos)
+            else {
+                return Err(AbcError::UnsupportedConstruct {
+                    construct: "AnnotationFieldType".to_string(),
+                    file: record_name.to_string(),
+                });
+            };
+            match info.value_kind {
+                AnnotationEnumValueKind::Number => "f64",
+                AnnotationEnumValueKind::String => "panda.String",
+            }
+        }
+        _ => Err(AbcError::UnsupportedConstruct {
+            construct: "AnnotationFieldType".to_string(),
+            file: record_name.to_string(),
+        })?,
+    };
+    Ok(annotation_field_type_from_component(component_name, rank))
+}
+
+fn annotation_array_base_type<'a>(mut ty: &'a TSType<'a>) -> (&'a TSType<'a>, u32) {
+    let mut rank = 0;
+    while let TSType::TSArrayType(array) = ty {
+        rank += 1;
+        ty = &array.element_type;
+    }
+    (ty, rank)
+}
+
+fn annotation_field_type_from_component(component_name: &str, rank: u32) -> FieldType {
+    if rank > 0 {
+        return FieldType::Array {
+            component_name: component_name.to_string(),
+            rank,
+        };
+    }
+    match component_name {
+        "panda.String" => FieldType::PandaString,
+        "f64" => FieldType::F64,
+        "f32" => FieldType::F32,
+        "i64" => FieldType::I64,
+        "u64" => FieldType::U64,
+        "i32" => FieldType::I32,
+        "u1" => FieldType::U1,
+        "i8" => FieldType::I8,
+        "u8" => FieldType::U8,
+        "i16" => FieldType::I16,
+        "u16" => FieldType::U16,
+        "u32" => FieldType::U32,
+        "any" | "" => FieldType::Any,
+        _ => FieldType::Record {
+            component_name: component_name.to_string(),
+        },
+    }
+}
+
+fn annotation_field_value(
+    field_type: &FieldType,
+    value: Option<&Expression<'_>>,
+    literal_arrays: &mut Vec<LiteralArray>,
+    literal_indices: &mut Vec<usize>,
+    annotation_record_name: &str,
+    field_name: &str,
+    enum_infos: &FxHashMap<String, AnnotationEnumInfo>,
+    record_name: &str,
+    annotation_literal_array_counter: &mut usize,
+) -> Result<Option<FieldValue>, AbcError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if matches!(field_type, FieldType::Array { .. }) {
+        if matches!(
+            annotation_unwrap_expression(value),
+            Expression::ArrayExpression(_) | Expression::NewExpression(_)
+        ) {
+            let key_prefix = format!("{annotation_record_name}_{field_name}");
+            let index = annotation_literal_array_from_expr(
+                value,
+                literal_arrays,
+                &key_prefix,
+                annotation_literal_array_counter,
+                enum_infos,
+                record_name,
+            )?;
+            literal_indices.push(index);
+            return Ok(Some(FieldValue::LiteralArray(index)));
+        }
+        return Err(AbcError::UnsupportedConstruct {
+            construct: "AnnotationArrayDefault".to_string(),
+            file: record_name.to_string(),
+        });
+    }
+    match field_type {
+        FieldType::PandaString => {
+            if let Some(value) = annotation_string_constant(value, &FxHashMap::default()) {
+                return Ok(Some(FieldValue::String(value)));
+            }
+            if let Some(AnnotationEnumValue::String(value)) =
+                annotation_enum_value_from_expr(value, enum_infos)
+            {
+                return Ok(Some(FieldValue::String(value)));
+            }
+            Err(AbcError::UnsupportedConstruct {
+                construct: "AnnotationStringDefault".to_string(),
+                file: record_name.to_string(),
+            })
+        }
+        FieldType::F64 => {
+            if let Some(value) = annotation_number_constant(value, &FxHashMap::default()) {
+                return Ok(Some(FieldValue::F64(value)));
+            }
+            if let Some(AnnotationEnumValue::Number(value)) =
+                annotation_enum_value_from_expr(value, enum_infos)
+            {
+                return Ok(Some(FieldValue::F64(value)));
+            }
+            Err(AbcError::UnsupportedConstruct {
+                construct: "AnnotationNumericDefault".to_string(),
+                file: record_name.to_string(),
+            })
+        }
+        FieldType::U1 => match value {
+            Expression::BooleanLiteral(lit) => Ok(Some(FieldValue::Bool(lit.value))),
+            _ => Err(AbcError::UnsupportedConstruct {
+                construct: "AnnotationBooleanDefault".to_string(),
+                file: record_name.to_string(),
+            }),
+        },
+        FieldType::I8
+        | FieldType::U8
+        | FieldType::I16
+        | FieldType::U16
+        | FieldType::I32
+        | FieldType::U32
+        | FieldType::F32
+        | FieldType::I64
+        | FieldType::U64
+        | FieldType::Any
+        | FieldType::Record { .. }
+        | FieldType::Array { .. } => Err(AbcError::UnsupportedConstruct {
+            construct: "AnnotationFieldDefault".to_string(),
+            file: record_name.to_string(),
+        }),
+    }
+}
+
+fn annotation_literal_array_from_expr(
+    expr: &Expression<'_>,
+    literal_arrays: &mut Vec<LiteralArray>,
+    key_prefix: &str,
+    counter: &mut usize,
+    enum_infos: &FxHashMap<String, AnnotationEnumInfo>,
+    record_name: &str,
+) -> Result<usize, AbcError> {
+    let expr = annotation_unwrap_expression(expr);
+    if let Expression::NewExpression(new_expr) = expr {
+        return annotation_literal_array_from_new_expr(
+            new_expr,
+            literal_arrays,
+            key_prefix,
+            counter,
+            record_name,
+        );
+    }
+    let Expression::ArrayExpression(array) = expr else {
+        return Err(AbcError::UnsupportedConstruct {
+            construct: "AnnotationArrayValue".to_string(),
+            file: record_name.to_string(),
+        });
+    };
+    annotation_literal_array_from_array(
+        array,
+        literal_arrays,
+        key_prefix,
+        counter,
+        enum_infos,
+        record_name,
+    )
+}
+
+fn annotation_literal_array_from_array(
+    array: &oxc_ast::ast::ArrayExpression<'_>,
+    literal_arrays: &mut Vec<LiteralArray>,
+    key_prefix: &str,
+    counter: &mut usize,
+    enum_infos: &FxHashMap<String, AnnotationEnumInfo>,
+    record_name: &str,
+) -> Result<usize, AbcError> {
+    let index = literal_arrays.len();
+    let key = format!("{key_prefix}_{counter}");
+    *counter += 1;
+    literal_arrays.push(LiteralArray {
+        entries: Vec::new(),
+        explicit_key: Some(key),
+    });
+
+    let mut entries = Vec::with_capacity(array.elements.len());
+    for element in &array.elements {
+        entries.push(annotation_literal_entry_from_element(
+            element,
+            literal_arrays,
+            key_prefix,
+            counter,
+            enum_infos,
+            record_name,
+        )?);
+    }
+    literal_arrays[index].entries = entries;
+    Ok(index)
+}
+
+fn annotation_literal_array_from_new_expr(
+    new_expr: &NewExpression<'_>,
+    literal_arrays: &mut Vec<LiteralArray>,
+    key_prefix: &str,
+    counter: &mut usize,
+    record_name: &str,
+) -> Result<usize, AbcError> {
+    let Some(type_arguments) = &new_expr.type_arguments else {
+        return Err(AbcError::UnsupportedConstruct {
+            construct: "AnnotationNewArrayType".to_string(),
+            file: record_name.to_string(),
+        });
+    };
+    let Some(element_type) = type_arguments.params.first() else {
+        return Err(AbcError::UnsupportedConstruct {
+            construct: "AnnotationNewArrayType".to_string(),
+            file: record_name.to_string(),
+        });
+    };
+    let builtin_type = match element_type {
+        TSType::TSNumberKeyword(_) => 0,
+        TSType::TSBooleanKeyword(_) => 1,
+        TSType::TSStringKeyword(_) => 2,
+        TSType::TSTypeReference(_) => {
+            let Some(marker) = new_expr.arguments.first().and_then(|arg| {
+                arg.as_expression()
+                    .and_then(|expr| annotation_number_constant(expr, &FxHashMap::default()))
+            }) else {
+                return Err(AbcError::UnsupportedConstruct {
+                    construct: "AnnotationNewArrayEnumMarker".to_string(),
+                    file: record_name.to_string(),
+                });
+            };
+            match marker as u8 {
+                1 => 0,
+                3 => 2,
+                _ => {
+                    return Err(AbcError::UnsupportedConstruct {
+                        construct: "AnnotationNewArrayEnumMarker".to_string(),
+                        file: record_name.to_string(),
+                    })
+                }
+            }
+        }
+        _ => {
+            return Err(AbcError::UnsupportedConstruct {
+                construct: "AnnotationNewArrayType".to_string(),
+                file: record_name.to_string(),
+            })
+        }
+    };
+
+    let index = literal_arrays.len();
+    let key = format!("{key_prefix}_{counter}");
+    *counter += 1;
+    literal_arrays.push(LiteralArray {
+        entries: vec![LiteralEntry::TaggedBuiltinTypeIndex(builtin_type)],
+        explicit_key: Some(key),
+    });
+    Ok(index)
+}
+
+fn annotation_literal_entry_from_element(
+    element: &ArrayExpressionElement<'_>,
+    literal_arrays: &mut Vec<LiteralArray>,
+    key_prefix: &str,
+    counter: &mut usize,
+    enum_infos: &FxHashMap<String, AnnotationEnumInfo>,
+    record_name: &str,
+) -> Result<LiteralEntry, AbcError> {
+    match element {
+        ArrayExpressionElement::NumericLiteral(lit) => Ok(LiteralEntry::TaggedDouble(lit.value)),
+        ArrayExpressionElement::UnaryExpression(expr)
+            if matches!(
+                expr.operator,
+                UnaryOperator::UnaryPlus | UnaryOperator::UnaryNegation
+            ) =>
+        {
+            annotation_number_from_unary(expr.operator, &expr.argument)
+                .map(LiteralEntry::TaggedDouble)
+                .ok_or_else(|| AbcError::UnsupportedConstruct {
+                    construct: "AnnotationNumericArrayElement".to_string(),
+                    file: record_name.to_string(),
+                })
+        }
+        ArrayExpressionElement::BooleanLiteral(lit) => Ok(LiteralEntry::TaggedBool(lit.value)),
+        ArrayExpressionElement::StringLiteral(lit) => {
+            Ok(LiteralEntry::TaggedString(lit.value.to_string()))
+        }
+        ArrayExpressionElement::ArrayExpression(array) => {
+            let index = annotation_literal_array_from_array(
+                array,
+                literal_arrays,
+                key_prefix,
+                counter,
+                enum_infos,
+                record_name,
+            )?;
+            Ok(LiteralEntry::TaggedLiteralArrayIndex(index))
+        }
+        ArrayExpressionElement::NewExpression(new_expr) => {
+            let index = annotation_literal_array_from_new_expr(
+                new_expr,
+                literal_arrays,
+                key_prefix,
+                counter,
+                record_name,
+            )?;
+            Ok(LiteralEntry::TaggedLiteralArrayIndex(index))
+        }
+        ArrayExpressionElement::StaticMemberExpression(mem) => {
+            annotation_enum_value_from_member(&mem.object, mem.property.name.as_str(), enum_infos)
+                .map(annotation_enum_value_to_literal_entry)
+                .ok_or_else(|| AbcError::UnsupportedConstruct {
+                    construct: "AnnotationEnumArrayElement".to_string(),
+                    file: record_name.to_string(),
+                })
+        }
+        ArrayExpressionElement::ComputedMemberExpression(mem) => {
+            let Some(member_name) = annotation_computed_member_name(&mem.expression) else {
+                return Err(AbcError::UnsupportedConstruct {
+                    construct: "AnnotationEnumArrayElement".to_string(),
+                    file: record_name.to_string(),
+                });
+            };
+            annotation_enum_value_from_member(&mem.object, &member_name, enum_infos)
+                .map(annotation_enum_value_to_literal_entry)
+                .ok_or_else(|| AbcError::UnsupportedConstruct {
+                    construct: "AnnotationEnumArrayElement".to_string(),
+                    file: record_name.to_string(),
+                })
+        }
+        _ => Err(AbcError::UnsupportedConstruct {
+            construct: "AnnotationArrayElement".to_string(),
+            file: record_name.to_string(),
+        }),
+    }
+}
+
+fn annotation_enum_info_for_type_name<'a>(
+    type_name: &TSTypeName<'_>,
+    enum_infos: &'a FxHashMap<String, AnnotationEnumInfo>,
+) -> Option<&'a AnnotationEnumInfo> {
+    let name = annotation_type_name(type_name)?;
+    if let Some(info) = enum_infos.get(&name) {
+        return Some(info);
+    }
+    name.rsplit('.')
+        .next()
+        .and_then(|name| enum_infos.get(name))
+}
+
+fn annotation_type_name(type_name: &TSTypeName<'_>) -> Option<String> {
+    match type_name {
+        TSTypeName::IdentifierReference(id) => Some(id.name.as_str().to_string()),
+        TSTypeName::QualifiedName(qualified) => {
+            let left = annotation_type_name(&qualified.left)?;
+            Some(format!("{left}.{}", qualified.right.name.as_str()))
+        }
+        TSTypeName::ThisExpression(_) => None,
+    }
+}
+
+fn annotation_string_constant(
+    expr: &Expression<'_>,
+    enum_members: &FxHashMap<String, AnnotationEnumValue>,
+) -> Option<String> {
+    match expr {
+        Expression::StringLiteral(lit) => Some(lit.value.to_string()),
+        Expression::TemplateLiteral(template) => template
+            .single_quasi()
+            .map(|value| value.as_str().to_string()),
+        Expression::Identifier(id) => match enum_members.get(id.name.as_str()) {
+            Some(AnnotationEnumValue::String(value)) => Some(value.clone()),
+            _ => None,
+        },
+        Expression::ParenthesizedExpression(expr) => {
+            annotation_string_constant(&expr.expression, enum_members)
+        }
+        Expression::TSAsExpression(expr) => {
+            annotation_string_constant(&expr.expression, enum_members)
+        }
+        Expression::TSSatisfiesExpression(expr) => {
+            annotation_string_constant(&expr.expression, enum_members)
+        }
+        Expression::TSNonNullExpression(expr) => {
+            annotation_string_constant(&expr.expression, enum_members)
+        }
+        Expression::TSTypeAssertion(expr) => {
+            annotation_string_constant(&expr.expression, enum_members)
+        }
+        _ => None,
+    }
+}
+
+fn annotation_number_constant(
+    expr: &Expression<'_>,
+    enum_members: &FxHashMap<String, AnnotationEnumValue>,
+) -> Option<f64> {
+    match expr {
+        Expression::NumericLiteral(lit) => Some(lit.value),
+        Expression::UnaryExpression(expr)
+            if matches!(
+                expr.operator,
+                UnaryOperator::UnaryPlus | UnaryOperator::UnaryNegation
+            ) =>
+        {
+            annotation_number_from_unary(expr.operator, &expr.argument)
+        }
+        Expression::Identifier(id) => match enum_members.get(id.name.as_str()) {
+            Some(AnnotationEnumValue::Number(value)) => Some(*value),
+            _ => None,
+        },
+        Expression::ParenthesizedExpression(expr) => {
+            annotation_number_constant(&expr.expression, enum_members)
+        }
+        Expression::TSAsExpression(expr) => {
+            annotation_number_constant(&expr.expression, enum_members)
+        }
+        Expression::TSSatisfiesExpression(expr) => {
+            annotation_number_constant(&expr.expression, enum_members)
+        }
+        Expression::TSNonNullExpression(expr) => {
+            annotation_number_constant(&expr.expression, enum_members)
+        }
+        Expression::TSTypeAssertion(expr) => {
+            annotation_number_constant(&expr.expression, enum_members)
+        }
+        _ => None,
+    }
+}
+
+fn annotation_number_from_unary(operator: UnaryOperator, argument: &Expression<'_>) -> Option<f64> {
+    let Expression::NumericLiteral(lit) = argument else {
+        return None;
+    };
+    match operator {
+        UnaryOperator::UnaryPlus => Some(lit.value),
+        UnaryOperator::UnaryNegation => Some(-lit.value),
+        _ => None,
+    }
+}
+
+fn annotation_enum_value_from_expr(
+    expr: &Expression<'_>,
+    enum_infos: &FxHashMap<String, AnnotationEnumInfo>,
+) -> Option<AnnotationEnumValue> {
+    match expr {
+        Expression::StaticMemberExpression(mem) => {
+            annotation_enum_value_from_member(&mem.object, mem.property.name.as_str(), enum_infos)
+        }
+        Expression::ComputedMemberExpression(mem) => {
+            let member_name = annotation_computed_member_name(&mem.expression)?;
+            annotation_enum_value_from_member(&mem.object, &member_name, enum_infos)
+        }
+        Expression::CallExpression(call) if call.arguments.is_empty() => {
+            annotation_enum_value_from_expr(&call.callee, enum_infos)
+        }
+        Expression::ParenthesizedExpression(expr) => {
+            annotation_enum_value_from_expr(&expr.expression, enum_infos)
+        }
+        Expression::TSAsExpression(expr) => {
+            annotation_enum_value_from_expr(&expr.expression, enum_infos)
+        }
+        Expression::TSSatisfiesExpression(expr) => {
+            annotation_enum_value_from_expr(&expr.expression, enum_infos)
+        }
+        Expression::TSNonNullExpression(expr) => {
+            annotation_enum_value_from_expr(&expr.expression, enum_infos)
+        }
+        Expression::TSTypeAssertion(expr) => {
+            annotation_enum_value_from_expr(&expr.expression, enum_infos)
+        }
+        _ => None,
+    }
+}
+
+fn annotation_enum_value_from_member(
+    object: &Expression<'_>,
+    member_name: &str,
+    enum_infos: &FxHashMap<String, AnnotationEnumInfo>,
+) -> Option<AnnotationEnumValue> {
+    let enum_name = annotation_member_object_name(object)?;
+    enum_infos
+        .get(&enum_name)
+        .and_then(|info| info.members.get(member_name))
+        .cloned()
+}
+
+fn annotation_member_object_name(object: &Expression<'_>) -> Option<String> {
+    match object {
+        Expression::Identifier(id) => Some(id.name.as_str().to_string()),
+        Expression::StaticMemberExpression(mem) => Some(mem.property.name.as_str().to_string()),
+        Expression::ParenthesizedExpression(expr) => {
+            annotation_member_object_name(&expr.expression)
+        }
+        _ => None,
+    }
+}
+
+fn annotation_computed_member_name(expr: &Expression<'_>) -> Option<String> {
+    match expr {
+        Expression::StringLiteral(lit) => Some(lit.value.to_string()),
+        Expression::TemplateLiteral(template) => template
+            .single_quasi()
+            .map(|value| value.as_str().to_string()),
+        _ => None,
+    }
+}
+
+fn annotation_enum_value_to_literal_entry(value: AnnotationEnumValue) -> LiteralEntry {
+    match value {
+        AnnotationEnumValue::Number(value) => LiteralEntry::TaggedDouble(value),
+        AnnotationEnumValue::String(value) => LiteralEntry::TaggedString(value),
+    }
+}
+
+fn annotation_records_from_decorators(
+    decorators: &[Decorator<'_>],
+    method_full_name: &str,
+    record_name: &str,
+    literal_arrays: &mut Vec<LiteralArray>,
+    annotations_enabled: bool,
+    enum_infos: &FxHashMap<String, AnnotationEnumInfo>,
+    annotation_literal_array_counter: &mut usize,
+) -> Result<Vec<AnnotationRecord>, AbcError> {
+    if decorators.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !annotations_enabled {
+        return Err(AbcError::Parse {
+            file: record_name.to_string(),
+            message: ANNOTATION_NOT_ENABLED_MESSAGE.to_string(),
+        });
+    }
+
+    decorators
+        .iter()
+        .map(|decorator| {
+            annotation_record_from_decorator(
+                decorator,
+                method_full_name,
+                record_name,
+                literal_arrays,
+                enum_infos,
+                annotation_literal_array_counter,
+            )
+        })
+        .collect()
+}
+
+fn annotation_record_from_decorator(
+    decorator: &Decorator<'_>,
+    method_full_name: &str,
+    record_name: &str,
+    literal_arrays: &mut Vec<LiteralArray>,
+    enum_infos: &FxHashMap<String, AnnotationEnumInfo>,
+    annotation_literal_array_counter: &mut usize,
+) -> Result<AnnotationRecord, AbcError> {
+    let (annotation_name, properties) = annotation_usage_parts(&decorator.expression, record_name)?;
+    let record_name_for_usage = annotation_usage_record_name(&annotation_name, record_name)?;
+    let properties = match properties {
+        AnnotationUsageProperties::None => {
+            return Ok(AnnotationRecord {
+                record_name: record_name_for_usage,
+                elements: Vec::new(),
+            });
+        }
+        AnnotationUsageProperties::Single(value_expr) => {
+            let key_prefix = format!("{method_full_name}_value");
+            let value = annotation_usage_value_from_expr(
+                value_expr,
+                literal_arrays,
+                &key_prefix,
+                annotation_literal_array_counter,
+                enum_infos,
+                record_name,
+            )?;
+            return Ok(AnnotationRecord {
+                record_name: record_name_for_usage,
+                elements: vec![AnnotationElementRecord {
+                    name: "value".to_string(),
+                    value,
+                }],
+            });
+        }
+        AnnotationUsageProperties::Object(properties) => properties,
+    };
+
+    let mut elements = Vec::with_capacity(properties.properties.len());
+    for property in &properties.properties {
+        let ObjectPropertyKind::ObjectProperty(property) = property else {
+            return Err(AbcError::UnsupportedConstruct {
+                construct: "AnnotationSpreadProperty".to_string(),
+                file: record_name.to_string(),
+            });
+        };
+        let Some(name) = property.key.static_name() else {
+            return Err(AbcError::UnsupportedConstruct {
+                construct: "AnnotationComputedProperty".to_string(),
+                file: record_name.to_string(),
+            });
+        };
+        let element_name = name.to_string();
+        let key_prefix = format!("{method_full_name}_{element_name}");
+        let value = annotation_usage_value_from_expr(
+            &property.value,
+            literal_arrays,
+            &key_prefix,
+            annotation_literal_array_counter,
+            enum_infos,
+            record_name,
+        )?;
+        elements.push(AnnotationElementRecord {
+            name: element_name,
+            value,
+        });
+    }
+
+    Ok(AnnotationRecord {
+        record_name: record_name_for_usage,
+        elements,
+    })
+}
+
+enum AnnotationUsageProperties<'a> {
+    None,
+    Object(&'a oxc_ast::ast::ObjectExpression<'a>),
+    Single(&'a Expression<'a>),
+}
+
+fn annotation_usage_parts<'a>(
+    expr: &'a Expression<'a>,
+    record_name: &str,
+) -> Result<(String, AnnotationUsageProperties<'a>), AbcError> {
+    let expr = annotation_unwrap_expression(expr);
+    match expr {
+        Expression::CallExpression(call) => {
+            let name = annotation_usage_name(&call.callee, record_name)?;
+            let Some(argument) = call.arguments.first() else {
+                return Ok((name, AnnotationUsageProperties::None));
+            };
+            if call.arguments.len() > 1 {
+                return Err(AbcError::UnsupportedConstruct {
+                    construct: "AnnotationArguments".to_string(),
+                    file: record_name.to_string(),
+                });
+            };
+            let Some(argument_expr) = argument.as_expression() else {
+                return Err(AbcError::UnsupportedConstruct {
+                    construct: "AnnotationSpreadArgument".to_string(),
+                    file: record_name.to_string(),
+                });
+            };
+            match annotation_unwrap_expression(argument_expr) {
+                Expression::ObjectExpression(object) => {
+                    Ok((name, AnnotationUsageProperties::Object(object)))
+                }
+                expr => Ok((name, AnnotationUsageProperties::Single(expr))),
+            }
+        }
+        _ => Ok((
+            annotation_usage_name(expr, record_name)?,
+            AnnotationUsageProperties::None,
+        )),
+    }
+}
+
+fn annotation_usage_name(expr: &Expression<'_>, record_name: &str) -> Result<String, AbcError> {
+    match annotation_unwrap_expression(expr) {
+        Expression::Identifier(id) => Ok(id.name.as_str().to_string()),
+        Expression::StaticMemberExpression(mem) => Ok(mem.property.name.as_str().to_string()),
+        Expression::CallExpression(call) if call.arguments.is_empty() => {
+            annotation_usage_name(&call.callee, record_name)
+        }
+        _ => Err(AbcError::UnsupportedConstruct {
+            construct: "AnnotationUsage".to_string(),
+            file: record_name.to_string(),
+        }),
+    }
+}
+
+fn annotation_usage_record_name(
+    annotation_name: &str,
+    record_name: &str,
+) -> Result<String, AbcError> {
+    let Some(short_name) = annotation_name.strip_prefix(ANNOTATION_PREFIX) else {
+        return Err(AbcError::Parse {
+            file: record_name.to_string(),
+            message: format!(
+                "Annotation declaration need to be prefixed with '{ANNOTATION_PREFIX}'"
+            ),
+        });
+    };
+    if record_name.is_empty() {
+        Ok(short_name.to_string())
+    } else {
+        Ok(format!(
+            "{}.{}",
+            pandasm_record_name(record_name),
+            short_name
+        ))
+    }
+}
+
+fn annotation_method_base_name(record_name: &str, method_name: &str) -> String {
+    if record_name.is_empty() {
+        method_name.to_string()
+    } else {
+        format!("{}.{}", pandasm_record_name(record_name), method_name)
+    }
+}
+
+fn annotation_usage_value_from_expr(
+    expr: &Expression<'_>,
+    literal_arrays: &mut Vec<LiteralArray>,
+    key_prefix: &str,
+    counter: &mut usize,
+    enum_infos: &FxHashMap<String, AnnotationEnumInfo>,
+    record_name: &str,
+) -> Result<AnnotationValue, AbcError> {
+    let expr = annotation_unwrap_expression(expr);
+    if matches!(
+        expr,
+        Expression::ArrayExpression(_) | Expression::NewExpression(_)
+    ) {
+        let index = annotation_literal_array_from_expr(
+            expr,
+            literal_arrays,
+            key_prefix,
+            counter,
+            enum_infos,
+            record_name,
+        )?;
+        let key = literal_arrays[index]
+            .explicit_key
+            .clone()
+            .expect("annotation literal array must carry explicit key");
+        return Ok(AnnotationValue::LiteralArray { index, key });
+    }
+    if let Expression::BooleanLiteral(lit) = expr {
+        return Ok(AnnotationValue::Bool(lit.value));
+    }
+    if let Some(value) = annotation_string_constant(expr, &FxHashMap::default()) {
+        return Ok(AnnotationValue::String(value));
+    }
+    if let Some(value) = annotation_number_constant(expr, &FxHashMap::default()) {
+        return Ok(AnnotationValue::F64(value));
+    }
+    if let Some(value) = annotation_enum_value_from_expr(expr, enum_infos) {
+        return Ok(match value {
+            AnnotationEnumValue::Number(value) => AnnotationValue::F64(value),
+            AnnotationEnumValue::String(value) => AnnotationValue::String(value),
+        });
+    }
+    Err(AbcError::UnsupportedConstruct {
+        construct: "AnnotationElementValue".to_string(),
+        file: record_name.to_string(),
+    })
+}
+
+fn annotation_unwrap_expression<'a>(expr: &'a Expression<'a>) -> &'a Expression<'a> {
+    match expr {
+        Expression::ParenthesizedExpression(expr) => annotation_unwrap_expression(&expr.expression),
+        Expression::TSAsExpression(expr) => annotation_unwrap_expression(&expr.expression),
+        Expression::TSSatisfiesExpression(expr) => annotation_unwrap_expression(&expr.expression),
+        Expression::TSNonNullExpression(expr) => annotation_unwrap_expression(&expr.expression),
+        Expression::TSTypeAssertion(expr) => annotation_unwrap_expression(&expr.expression),
+        _ => expr,
+    }
+}
+
+fn legacy_annotation_type_idx(field_type: &FieldType) -> u16 {
+    match field_type {
+        FieldType::U8 => 0,
+        FieldType::U32 => 1,
+        _ => 0,
+    }
+}
+
+fn source_lang_from_origin_source_lang(origin_source_lang: &str) -> u8 {
+    match origin_source_lang {
+        "ets" => 0x04,
+        "ts" => 0x03,
+        "js" => 0x02,
+        _ => 0x00,
+    }
 }
 
 fn lexical_indices<'a>(names: impl IntoIterator<Item = &'a str>) -> FxHashMap<String, u8> {
@@ -451,10 +1688,27 @@ fn lexical_indices<'a>(names: impl IntoIterator<Item = &'a str>) -> FxHashMap<St
         .collect()
 }
 
-fn scope_names_literal_array(stmts: &[Statement<'_>], record_name: &str) -> LiteralArray {
+fn scope_names_literal_array(
+    stmts: &[Statement<'_>],
+    record_name: &str,
+    standalone_ecmascript_input: bool,
+) -> LiteralArray {
+    if standalone_ecmascript_input {
+        return LiteralArray {
+            entries: standalone_scope_names(stmts)
+                .into_iter()
+                .map(LiteralEntry::TaggedString)
+                .collect(),
+            explicit_key: None,
+        };
+    }
+
     let Some(owner_method) = first_scope_names_owner_method(stmts) else {
         // No call-arg closures in this class → no scopeNames payload.
-        return LiteralArray { entries: vec![] };
+        return LiteralArray {
+            entries: vec![],
+            explicit_key: None,
+        };
     };
 
     let class_short = record_name
@@ -468,6 +1722,55 @@ fn scope_names_literal_array(stmts: &[Statement<'_>], record_name: &str) -> Lite
             LiteralEntry::TaggedString(class_short),
             LiteralEntry::TaggedString(owner_method),
         ],
+        explicit_key: None,
+    }
+}
+
+fn standalone_scope_names(stmts: &[Statement<'_>]) -> Vec<String> {
+    let mut names = Vec::new();
+    for stmt in stmts {
+        match stmt {
+            Statement::ClassDeclaration(class) if !class.declare => {
+                collect_class_scope_names(&class.body.body, &mut names);
+            }
+            Statement::ExportDefaultDeclaration(export) => {
+                if let ExportDefaultDeclarationKind::ClassDeclaration(class) = &export.declaration {
+                    if !class.declare {
+                        collect_class_scope_names(&class.body.body, &mut names);
+                    }
+                }
+            }
+            Statement::ExportNamedDeclaration(export) => {
+                if let Some(Declaration::ClassDeclaration(class)) = &export.declaration {
+                    if !class.declare {
+                        collect_class_scope_names(&class.body.body, &mut names);
+                    }
+                }
+            }
+            Statement::VariableDeclaration(decl) => {
+                for declarator in &decl.declarations {
+                    if let Some(Expression::ClassExpression(class)) = &declarator.init {
+                        collect_class_scope_names(&class.body.body, &mut names);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
+fn collect_class_scope_names(elements: &[ClassElement<'_>], names: &mut Vec<String>) {
+    for element in elements {
+        let ClassElement::MethodDefinition(method) = element else {
+            continue;
+        };
+        if method.kind == MethodDefinitionKind::Constructor || method.r#static {
+            continue;
+        }
+        if let Some(name) = method_key_name(&method.key) {
+            names.push(name);
+        }
     }
 }
 
@@ -535,6 +1838,239 @@ fn first_scope_names_owner_in_class(elements: &[ClassElement<'_>]) -> Option<Str
     None
 }
 
+struct ConcurrentImportRequests<'a> {
+    by_name: FxHashMap<String, u32>,
+    requests_by_scope: FxHashMap<ScopeId, Vec<u32>>,
+    scoping: Option<&'a Scoping>,
+}
+
+impl<'a> ConcurrentImportRequests<'a> {
+    fn new(
+        program: &Program<'_>,
+        module_record: &crate::ir::module_record::ModuleRecordInfo,
+        scoping: Option<&'a Scoping>,
+        record_name: &str,
+    ) -> Result<Self, AbcError> {
+        let by_name = module_record
+            .regular_imports
+            .iter()
+            .map(|import| (import.local_name.clone(), import.module_request_idx as u32))
+            .collect::<FxHashMap<_, _>>();
+        let mut by_symbol = FxHashMap::default();
+
+        if let Some(scoping) = scoping {
+            for stmt in &program.body {
+                let Statement::ImportDeclaration(import) = stmt else {
+                    continue;
+                };
+                if import.import_kind == ImportOrExportKind::Type {
+                    continue;
+                }
+                let Some(specifiers) = &import.specifiers else {
+                    continue;
+                };
+                for specifier in specifiers {
+                    let local = match specifier {
+                        ImportDeclarationSpecifier::ImportDefaultSpecifier(default) => {
+                            &default.local
+                        }
+                        ImportDeclarationSpecifier::ImportSpecifier(named)
+                            if named.import_kind != ImportOrExportKind::Type =>
+                        {
+                            &named.local
+                        }
+                        ImportDeclarationSpecifier::ImportSpecifier(_) => continue,
+                        ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => continue,
+                    };
+                    let Some(request_idx) = by_name.get(local.name.as_str()).copied() else {
+                        continue;
+                    };
+                    if let Some(symbol_id) = local.symbol_id.get() {
+                        by_symbol.insert(symbol_id, request_idx);
+                    }
+                }
+            }
+
+            let mut builder = ConcurrentMetadataBuilder {
+                scoping,
+                import_requests_by_symbol: &by_symbol,
+                requests_by_scope: FxHashMap::default(),
+                concurrent_stack: Vec::new(),
+                record_name,
+                error: None,
+            };
+            builder.visit_program(program);
+            if let Some(error) = builder.error {
+                return Err(error);
+            }
+
+            return Ok(Self {
+                by_name,
+                requests_by_scope: builder.requests_by_scope,
+                scoping: Some(scoping),
+            });
+        }
+
+        Ok(Self {
+            by_name,
+            requests_by_scope: FxHashMap::default(),
+            scoping,
+        })
+    }
+
+    fn collect_for_function(&self, function: &Function<'_>) -> Vec<u32> {
+        if !function_has_directive(function, "use concurrent") {
+            return Vec::new();
+        }
+        if self.scoping.is_some() {
+            if let Some(scope_id) = function.scope_id.get() {
+                return self
+                    .requests_by_scope
+                    .get(&scope_id)
+                    .cloned()
+                    .unwrap_or_default();
+            }
+        }
+        let Some(body) = &function.body else {
+            return Vec::new();
+        };
+        let mut collector = ConcurrentModuleRequestCollector {
+            imports: self,
+            requests: Vec::new(),
+        };
+        collector.visit_function_body(body);
+        collector.requests
+    }
+}
+
+struct ConcurrentMetadataBuilder<'b> {
+    scoping: &'b Scoping,
+    import_requests_by_symbol: &'b FxHashMap<SymbolId, u32>,
+    requests_by_scope: FxHashMap<ScopeId, Vec<u32>>,
+    concurrent_stack: Vec<ScopeId>,
+    record_name: &'b str,
+    error: Option<AbcError>,
+}
+
+impl ConcurrentMetadataBuilder<'_> {
+    fn invalid_concurrent_function(&self) -> AbcError {
+        AbcError::Parse {
+            file: self.record_name.to_string(),
+            message: "Concurrent function should only be function declaration".to_string(),
+        }
+    }
+
+    fn invalid_concurrent_variable(&self, name: &str) -> AbcError {
+        AbcError::Parse {
+            file: self.record_name.to_string(),
+            message: format!(
+                "Concurrent function should only use import variable or local variable, '{name}' is not one of them"
+            ),
+        }
+    }
+
+    fn scope_contains(&self, ancestor: ScopeId, scope: ScopeId) -> bool {
+        self.scoping
+            .scope_ancestors(scope)
+            .any(|scope| scope == ancestor)
+    }
+}
+
+impl<'a> Visit<'a> for ConcurrentMetadataBuilder<'_> {
+    fn visit_function(&mut self, it: &Function<'a>, flags: ScopeFlags) {
+        if self.error.is_some() {
+            return;
+        }
+
+        let is_concurrent = function_has_directive(it, "use concurrent");
+        if is_concurrent && it.generator {
+            self.error = Some(self.invalid_concurrent_function());
+            return;
+        }
+
+        if is_concurrent {
+            if let Some(scope_id) = it.scope_id.get() {
+                self.concurrent_stack.push(scope_id);
+                walk::walk_function(self, it, flags);
+                self.concurrent_stack.pop();
+                return;
+            }
+        }
+
+        walk::walk_function(self, it, flags);
+    }
+
+    fn visit_arrow_function_expression(&mut self, it: &oxc_ast::ast::ArrowFunctionExpression<'a>) {
+        if self.error.is_some() {
+            return;
+        }
+        if !it.expression && body_has_directive(&it.body, "use concurrent") {
+            self.error = Some(self.invalid_concurrent_function());
+            return;
+        }
+        walk::walk_arrow_function_expression(self, it);
+    }
+
+    fn visit_identifier_reference(&mut self, it: &oxc_ast::ast::IdentifierReference<'a>) {
+        if self.error.is_some() {
+            return;
+        }
+        let Some(concurrent_scope) = self.concurrent_stack.last().copied() else {
+            return;
+        };
+        let Some(reference_id) = it.reference_id.get() else {
+            return;
+        };
+        let reference = self.scoping.get_reference(reference_id);
+        if reference.is_type() {
+            return;
+        }
+        let Some(symbol_id) = reference.symbol_id() else {
+            return;
+        };
+        if self.scope_contains(concurrent_scope, self.scoping.symbol_scope_id(symbol_id)) {
+            return;
+        }
+
+        if let Some(request_idx) = self.import_requests_by_symbol.get(&symbol_id) {
+            self.requests_by_scope
+                .entry(concurrent_scope)
+                .or_default()
+                .push(*request_idx);
+            return;
+        }
+
+        self.error = Some(self.invalid_concurrent_variable(self.scoping.symbol_name(symbol_id)));
+    }
+}
+
+struct ConcurrentModuleRequestCollector<'a, 'b> {
+    imports: &'b ConcurrentImportRequests<'a>,
+    requests: Vec<u32>,
+}
+
+impl<'a> Visit<'a> for ConcurrentModuleRequestCollector<'a, '_> {
+    fn visit_function(&mut self, it: &Function<'a>, flags: ScopeFlags) {
+        if function_has_directive(it, "use concurrent") {
+            return;
+        }
+        walk::walk_function(self, it, flags);
+    }
+
+    fn visit_arrow_function_expression(&mut self, it: &oxc_ast::ast::ArrowFunctionExpression<'a>) {
+        if !it.expression && body_has_directive(&it.body, "use concurrent") {
+            return;
+        }
+        walk::walk_arrow_function_expression(self, it);
+    }
+
+    fn visit_identifier_reference(&mut self, it: &oxc_ast::ast::IdentifierReference<'a>) {
+        if let Some(request_idx) = self.imports.by_name.get(it.name.as_str()) {
+            self.requests.push(*request_idx);
+        }
+    }
+}
+
 // ── Program-level compilation ─────────────────────────────────────────────────
 
 /// Always returns the top-level statement slice — IIFE/CJS unwrapping removed.
@@ -553,6 +2089,7 @@ fn compile_function_record(
     source: Option<&str>,
     source_file_path: Option<&str>,
     source_mapper: Option<&SourceMapper>,
+    concurrent_import_requests: &ConcurrentImportRequests<'_>,
 ) {
     match function.node {
         FunctionRecordNode::Function(func) => {
@@ -593,7 +2130,6 @@ fn compile_function_record(
                         source_mapper,
                         Some((func.span.start, func.span.end)),
                     )
-                    .unwrap_or_else(BodyCompileResult::empty)
                 } else {
                     compile_function_body_with_destructure_params(
                         func.body.as_deref(),
@@ -608,7 +2144,6 @@ fn compile_function_record(
                         None,
                         Some((func.span.start, func.span.end)),
                     )
-                    .unwrap_or_else(BodyCompileResult::empty)
                 }
             } else if let Some(src) = source {
                 compile_function_body_tracked_with_end(
@@ -634,25 +2169,54 @@ fn compile_function_record(
             };
             let num_vregs = compiled.vregs;
             let num_args = func.params.items.len() as u16 + 3;
+            let expected_property_count = expected_property_count_option(
+                function_body_expected_property_count(func.body.as_deref(), lowering),
+            );
+            let upstream_function_kind =
+                function_record_function_kind(func, function.flavor, lowering.target_api_version());
+            let concurrent_module_requests = concurrent_import_requests.collect_for_function(func);
             methods.push(MethodRecord {
                 name: function.name,
                 bytecode: compiled.bytecode,
+                pandasm_insns: compiled.pandasm_insns,
+                pandasm_debug: compiled.pandasm_debug,
                 num_vregs,
                 num_args,
+                value_of_first_param: -1,
+                slots_num: None,
                 debug_info: source_file_path.map(|path| DebugInfoRecord {
-                    line_start: 1,
+                    line_start: compiled.debug_line_start.unwrap_or(1),
                     source_file: path.to_string(),
+                    source_code: None,
                     param_names,
                     lexical_this: func
                         .body
                         .as_deref()
                         .is_some_and(|body| stmts_capture_this_in_arrow(&body.statements)),
+                    local_variables: Vec::new(),
+                    infer_scope_locals: true,
+                    line_ops_include_local_variables: false,
                 }),
                 line_ops: compiled.line_ops,
                 catch_entries: compiled.catches,
+                program_labels: compiled.program_labels,
+                label_table: Vec::new(),
                 kind: MethodKind::FunctionLiteral,
+                function_kind: upstream_function_kind,
+                source_lang: None,
+                concurrent_module_requests,
                 method_pool_entry: true,
+                expected_property_count,
+                annotations: Vec::new(),
+                metadata_attrs: Default::default(),
+                param_annotations: Vec::new(),
                 definefunc_order: Some(definefunc_order),
+                label_style: MethodLabelStyle::Source,
+                param_types: Vec::new(),
+                return_type: None,
+                body_presence: None,
+                body_location: None,
+                file_location: None,
             });
         }
         FunctionRecordNode::Arrow(arrow) => {
@@ -672,24 +2236,146 @@ fn compile_function_record(
             );
             let num_vregs = compiled.vregs;
             let num_args = arrow.params.items.len() as u16 + 3;
+            let expected_property_count = expected_property_count_option(
+                function_body_expected_property_count(Some(arrow.body.as_ref()), lowering),
+            );
             methods.push(MethodRecord {
                 name: function.name,
                 bytecode: compiled.bytecode,
+                pandasm_insns: compiled.pandasm_insns,
+                pandasm_debug: compiled.pandasm_debug,
                 num_vregs,
                 num_args,
+                value_of_first_param: -1,
+                slots_num: None,
                 debug_info: source_file_path.map(|path| DebugInfoRecord {
-                    line_start: 1,
+                    line_start: compiled.debug_line_start.unwrap_or(1),
                     source_file: path.to_string(),
+                    source_code: None,
                     param_names,
                     lexical_this: captures.this_slot.is_some(),
+                    local_variables: Vec::new(),
+                    infer_scope_locals: true,
+                    line_ops_include_local_variables: false,
                 }),
                 line_ops: compiled.line_ops,
                 catch_entries: compiled.catches,
+                program_labels: compiled.program_labels,
+                label_table: Vec::new(),
                 kind: MethodKind::Anonymous,
+                function_kind: if arrow.r#async {
+                    function_kind::ASYNC_NC_FUNCTION
+                } else {
+                    function_kind::NC_FUNCTION
+                },
+                source_lang: None,
+                concurrent_module_requests: Vec::new(),
                 method_pool_entry: true,
+                expected_property_count,
+                annotations: Vec::new(),
+                metadata_attrs: Default::default(),
+                param_annotations: Vec::new(),
                 definefunc_order: Some(definefunc_order),
+                label_style: MethodLabelStyle::Source,
+                param_types: Vec::new(),
+                return_type: None,
+                body_presence: None,
+                body_location: None,
+                file_location: None,
             });
         }
+    }
+}
+
+fn function_record_function_kind(
+    function: &Function<'_>,
+    flavor: FunctionRecordFlavor,
+    target_api_version: u32,
+) -> u32 {
+    if function_has_directive(function, "use concurrent") {
+        return function_kind::CONCURRENT_FUNCTION;
+    }
+
+    if flavor == FunctionRecordFlavor::ObjectMethod {
+        return if function.r#async {
+            function_kind::ASYNC_FUNCTION
+        } else {
+            function_kind::NONE
+        };
+    }
+
+    let kind = match (function.r#async, function.generator) {
+        (true, true) => function_kind::ASYNC_GENERATOR_FUNCTION,
+        (true, false) => function_kind::ASYNC_FUNCTION,
+        (false, true) => function_kind::GENERATOR_FUNCTION,
+        (false, false) => function_kind::FUNCTION,
+    };
+
+    if target_api_version >= 12
+        && !function.generator
+        && function_has_directive(function, "use sendable")
+    {
+        return kind | function_kind::SENDABLE_FUNCTION;
+    }
+
+    kind
+}
+
+fn function_has_directive(function: &Function<'_>, directive: &str) -> bool {
+    let Some(body) = &function.body else {
+        return false;
+    };
+    body_has_directive(body, directive)
+}
+
+fn body_has_directive(body: &FunctionBody<'_>, directive: &str) -> bool {
+    if body
+        .directives
+        .iter()
+        .any(|item| item.expression.value.as_str() == directive)
+    {
+        return true;
+    }
+    for stmt in &body.statements {
+        let Statement::ExpressionStatement(expr) = stmt else {
+            return false;
+        };
+        let Expression::StringLiteral(value) = &expr.expression else {
+            return false;
+        };
+        if value.value.as_str() == directive {
+            return true;
+        }
+    }
+    false
+}
+
+fn class_method_function_kind(
+    function: &Function<'_>,
+    is_constructor: bool,
+    is_async: bool,
+) -> u32 {
+    if function_has_directive(function, "use concurrent") {
+        return function_kind::CONCURRENT_FUNCTION;
+    }
+    if is_constructor {
+        function_kind::FUNCTION
+    } else if is_async {
+        function_kind::ASYNC_FUNCTION
+    } else {
+        function_kind::NONE
+    }
+}
+
+fn object_method_literal_entry(record_name: String, function: &Function<'_>) -> LiteralEntry {
+    if function.generator {
+        if function.r#async {
+            LiteralEntry::TaggedAsyncGeneratorMethodName(record_name)
+        } else {
+            LiteralEntry::TaggedGeneratorMethodName(record_name)
+        }
+    } else {
+        LiteralEntry::TaggedMethodName(record_name)
     }
 }
 
@@ -708,7 +2394,12 @@ fn compile_class_method_bodies(
     source_file_path: Option<&str>,
     source_mapper: Option<&SourceMapper>,
     function_names: &mut FunctionNameAllocator<'_>,
-) {
+    concurrent_import_requests: &ConcurrentImportRequests<'_>,
+    record_name: &str,
+    annotations_enabled: bool,
+    enum_infos: &FxHashMap<String, AnnotationEnumInfo>,
+    annotation_literal_array_counter: &mut usize,
+) -> Result<(), AbcError> {
     for stmt in stmts {
         // Handle `class Foo { ... }` (ClassDeclaration)
         if let Statement::ClassDeclaration(cls) = stmt {
@@ -719,6 +2410,9 @@ fn compile_class_method_bodies(
             compile_class_elements(
                 class_name,
                 cls.super_class.is_some(),
+                cls.span.start,
+                cls.span.end,
+                &cls.decorators,
                 &cls.body.body,
                 strings,
                 literal_arrays,
@@ -728,7 +2422,12 @@ fn compile_class_method_bodies(
                 source_file_path,
                 source_mapper,
                 function_names,
-            );
+                concurrent_import_requests,
+                record_name,
+                annotations_enabled,
+                enum_infos,
+                annotation_literal_array_counter,
+            )?;
             continue;
         }
         if let Statement::ExportDefaultDeclaration(export) = stmt {
@@ -743,6 +2442,9 @@ fn compile_class_method_bodies(
                 compile_class_elements(
                     Some(class_name),
                     cls.super_class.is_some(),
+                    cls.span.start,
+                    cls.span.end,
+                    &cls.decorators,
                     &cls.body.body,
                     strings,
                     literal_arrays,
@@ -752,7 +2454,12 @@ fn compile_class_method_bodies(
                     source_file_path,
                     source_mapper,
                     function_names,
-                );
+                    concurrent_import_requests,
+                    record_name,
+                    annotations_enabled,
+                    enum_infos,
+                    annotation_literal_array_counter,
+                )?;
             }
             continue;
         }
@@ -765,6 +2472,9 @@ fn compile_class_method_bodies(
                 compile_class_elements(
                     class_name,
                     cls.super_class.is_some(),
+                    cls.span.start,
+                    cls.span.end,
+                    &cls.decorators,
                     &cls.body.body,
                     strings,
                     literal_arrays,
@@ -774,7 +2484,12 @@ fn compile_class_method_bodies(
                     source_file_path,
                     source_mapper,
                     function_names,
-                );
+                    concurrent_import_requests,
+                    record_name,
+                    annotations_enabled,
+                    enum_infos,
+                    annotation_literal_array_counter,
+                )?;
             }
             continue;
         }
@@ -793,6 +2508,9 @@ fn compile_class_method_bodies(
                     compile_class_elements(
                         Some(class_name),
                         cls.super_class.is_some(),
+                        cls.span.start,
+                        cls.span.end,
+                        &cls.decorators,
                         &cls.body.body,
                         strings,
                         literal_arrays,
@@ -802,12 +2520,219 @@ fn compile_class_method_bodies(
                         source_file_path,
                         source_mapper,
                         function_names,
-                    );
+                        concurrent_import_requests,
+                        record_name,
+                        annotations_enabled,
+                        enum_infos,
+                        annotation_literal_array_counter,
+                    )?;
                     continue;
                 }
             }
         }
     }
+    Ok(())
+}
+
+fn expected_property_count_enabled(lowering: &LoweringContext) -> bool {
+    lowering.target_api_version() >= 18
+}
+
+fn expected_property_count_option(count: u32) -> Option<u32> {
+    (count != 0).then_some(count)
+}
+
+fn function_body_expected_property_count(
+    body: Option<&FunctionBody<'_>>,
+    lowering: &LoweringContext,
+) -> u32 {
+    if !expected_property_count_enabled(lowering) {
+        return 0;
+    }
+    let Some(body) = body else {
+        return 0;
+    };
+
+    let mut property_names = FxHashSet::default();
+    for stmt in &body.statements {
+        if let Some(name) = function_this_assignment_property_name(stmt) {
+            property_names.insert(name);
+        }
+    }
+    property_names.len() as u32
+}
+
+fn compute_class_expected_property_count(
+    elements: &[ClassElement<'_>],
+    lowering: &LoweringContext,
+) -> u32 {
+    if !expected_property_count_enabled(lowering) {
+        return 0;
+    }
+
+    let mut count = 0u32;
+    let mut public_property_names = FxHashSet::default();
+    for element in elements {
+        match element {
+            ClassElement::PropertyDefinition(prop) if !prop.r#static => {
+                if matches!(prop.key, PropertyKey::PrivateIdentifier(_)) {
+                    count += 1;
+                } else if let Some(name) = expected_property_key_name(&prop.key) {
+                    add_expected_property_name(&mut public_property_names, &mut count, name);
+                }
+            }
+            ClassElement::AccessorProperty(prop) if !prop.r#static => {
+                if matches!(prop.key, PropertyKey::PrivateIdentifier(_)) {
+                    count += 1;
+                } else if let Some(name) = expected_property_key_name(&prop.key) {
+                    add_expected_property_name(&mut public_property_names, &mut count, name);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for element in elements {
+        let ClassElement::MethodDefinition(method) = element else {
+            continue;
+        };
+        if method.kind != MethodDefinitionKind::Constructor {
+            continue;
+        }
+        let Some(body) = method.value.body.as_deref() else {
+            continue;
+        };
+        for stmt in &body.statements {
+            if let Some(name) = class_constructor_this_assignment_property_name(stmt) {
+                add_expected_property_name(&mut public_property_names, &mut count, name);
+            }
+        }
+    }
+
+    count
+}
+
+fn add_expected_property_name(names: &mut FxHashSet<String>, count: &mut u32, name: String) {
+    if names.insert(name) {
+        *count += 1;
+    }
+}
+
+fn expected_property_key_name(key: &PropertyKey<'_>) -> Option<String> {
+    match key {
+        PropertyKey::StaticIdentifier(id) => Some(id.name.as_str().to_string()),
+        PropertyKey::Identifier(id) => Some(id.name.as_str().to_string()),
+        PropertyKey::StringLiteral(s) => Some(s.value.as_str().to_string()),
+        PropertyKey::NumericLiteral(n) => n
+            .raw
+            .as_deref()
+            .map(str::to_string)
+            .or_else(|| Some(n.value.to_string())),
+        _ => None,
+    }
+}
+
+fn function_this_assignment_property_name(stmt: &Statement<'_>) -> Option<String> {
+    let Statement::ExpressionStatement(expr_stmt) = stmt else {
+        return None;
+    };
+    let Expression::AssignmentExpression(assign) = &expr_stmt.expression else {
+        return None;
+    };
+    static_this_assignment_target_name(&assign.left)
+}
+
+fn class_constructor_this_assignment_property_name(stmt: &Statement<'_>) -> Option<String> {
+    let Statement::ExpressionStatement(expr_stmt) = stmt else {
+        return None;
+    };
+    let Expression::AssignmentExpression(assign) = &expr_stmt.expression else {
+        return None;
+    };
+    class_this_assignment_target_name(&assign.left)
+}
+
+fn static_this_assignment_target_name(target: &AssignmentTarget<'_>) -> Option<String> {
+    match target {
+        AssignmentTarget::StaticMemberExpression(mem) if is_this_expression(&mem.object) => {
+            Some(mem.property.name.as_str().to_string())
+        }
+        AssignmentTarget::TSAsExpression(expr) => {
+            static_this_assignment_expression_name(&expr.expression)
+        }
+        AssignmentTarget::TSSatisfiesExpression(expr) => {
+            static_this_assignment_expression_name(&expr.expression)
+        }
+        AssignmentTarget::TSNonNullExpression(expr) => {
+            static_this_assignment_expression_name(&expr.expression)
+        }
+        AssignmentTarget::TSTypeAssertion(expr) => {
+            static_this_assignment_expression_name(&expr.expression)
+        }
+        _ => None,
+    }
+}
+
+fn class_this_assignment_target_name(target: &AssignmentTarget<'_>) -> Option<String> {
+    match target {
+        AssignmentTarget::StaticMemberExpression(mem) if is_this_expression(&mem.object) => {
+            Some(mem.property.name.as_str().to_string())
+        }
+        AssignmentTarget::ComputedMemberExpression(mem) if is_this_expression(&mem.object) => {
+            expected_property_expression_name(&mem.expression)
+        }
+        AssignmentTarget::TSAsExpression(expr) => {
+            class_this_assignment_expression_name(&expr.expression)
+        }
+        AssignmentTarget::TSSatisfiesExpression(expr) => {
+            class_this_assignment_expression_name(&expr.expression)
+        }
+        AssignmentTarget::TSNonNullExpression(expr) => {
+            class_this_assignment_expression_name(&expr.expression)
+        }
+        AssignmentTarget::TSTypeAssertion(expr) => {
+            class_this_assignment_expression_name(&expr.expression)
+        }
+        _ => None,
+    }
+}
+
+fn static_this_assignment_expression_name(expr: &Expression<'_>) -> Option<String> {
+    match expr {
+        Expression::StaticMemberExpression(mem) if is_this_expression(&mem.object) => {
+            Some(mem.property.name.as_str().to_string())
+        }
+        _ => None,
+    }
+}
+
+fn class_this_assignment_expression_name(expr: &Expression<'_>) -> Option<String> {
+    match expr {
+        Expression::StaticMemberExpression(mem) if is_this_expression(&mem.object) => {
+            Some(mem.property.name.as_str().to_string())
+        }
+        Expression::ComputedMemberExpression(mem) if is_this_expression(&mem.object) => {
+            expected_property_expression_name(&mem.expression)
+        }
+        _ => None,
+    }
+}
+
+fn expected_property_expression_name(expr: &Expression<'_>) -> Option<String> {
+    match expr {
+        Expression::Identifier(id) => Some(id.name.as_str().to_string()),
+        Expression::StringLiteral(s) => Some(s.value.as_str().to_string()),
+        Expression::NumericLiteral(n) => n
+            .raw
+            .as_deref()
+            .map(str::to_string)
+            .or_else(|| Some(n.value.to_string())),
+        _ => None,
+    }
+}
+
+fn is_this_expression(expr: &Expression<'_>) -> bool {
+    matches!(expr, Expression::ThisExpression(_))
 }
 
 /// Compile method bodies from a class element list and append MethodRecords.
@@ -815,6 +2740,9 @@ fn compile_class_method_bodies(
 fn compile_class_elements(
     class_name: Option<&str>,
     has_super_class: bool,
+    class_span_start: u32,
+    class_span_end: u32,
+    class_decorators: &[Decorator<'_>],
     elements: &[ClassElement<'_>],
     strings: &mut StringTable,
     literal_arrays: &mut Vec<LiteralArray>,
@@ -824,7 +2752,12 @@ fn compile_class_elements(
     source_file_path: Option<&str>,
     source_mapper: Option<&SourceMapper>,
     function_names: &mut FunctionNameAllocator<'_>,
-) {
+    concurrent_import_requests: &ConcurrentImportRequests<'_>,
+    record_name: &str,
+    annotations_enabled: bool,
+    enum_infos: &FxHashMap<String, AnnotationEnumInfo>,
+    annotation_literal_array_counter: &mut usize,
+) -> Result<(), AbcError> {
     let class_name = class_name.unwrap_or("_");
 
     // Collect non-static instance fields for injection into the constructor.
@@ -848,6 +2781,7 @@ fn compile_class_elements(
             Some(ClassFieldInit {
                 key,
                 value: prop.value.as_ref(),
+                span_start: prop.span.start,
             })
         })
         .collect();
@@ -856,30 +2790,38 @@ fn compile_class_elements(
     let (private_field_slots, _private_field_count) = collect_class_private_slots(elements);
     let private_instance_fields: Vec<ClassPrivateFieldInit<'_>> = elements
         .iter()
-        .filter_map(|e| {
-            match e {
-                ClassElement::PropertyDefinition(prop) => {
-                    if prop.r#static {
-                        return None;
-                    }
-                    let PropertyKey::PrivateIdentifier(id) = &prop.key else {
-                        return None;
-                    };
-                    let slot = *private_field_slots.get(id.name.as_str())?;
-                    Some(ClassPrivateFieldInit { slot, value: prop.value.as_ref() })
+        .filter_map(|e| match e {
+            ClassElement::PropertyDefinition(prop) => {
+                if prop.r#static {
+                    return None;
                 }
-                ClassElement::AccessorProperty(accessor) => {
-                    if accessor.r#static {
-                        return None;
-                    }
-                    let backing_name = accessor_backing_field_name(accessor);
-                    let slot = *private_field_slots.get(&backing_name)?;
-                    Some(ClassPrivateFieldInit { slot, value: accessor.value.as_ref() })
-                }
-                _ => None,
+                let PropertyKey::PrivateIdentifier(id) = &prop.key else {
+                    return None;
+                };
+                let slot = *private_field_slots.get(id.name.as_str())?;
+                Some(ClassPrivateFieldInit {
+                    slot,
+                    value: prop.value.as_ref(),
+                    span_start: prop.span.start,
+                })
             }
+            ClassElement::AccessorProperty(accessor) => {
+                if accessor.r#static {
+                    return None;
+                }
+                let backing_name = accessor_backing_field_name(accessor);
+                let slot = *private_field_slots.get(&backing_name)?;
+                Some(ClassPrivateFieldInit {
+                    slot,
+                    value: accessor.value.as_ref(),
+                    span_start: accessor.span.start,
+                })
+            }
+            _ => None,
         })
         .collect();
+    let class_expected_property_count =
+        expected_property_count_option(compute_class_expected_property_count(elements, lowering));
 
     let has_constructor = elements.iter().any(|element| {
         matches!(
@@ -890,15 +2832,41 @@ fn compile_class_elements(
     });
     if !has_constructor {
         // Synthesize a default constructor that still runs field initializers.
-        let is_default_derived_constructor = has_super_class && instance_fields.is_empty() && private_instance_fields.is_empty();
-        let compiled = if is_default_derived_constructor {
-            let (bytecode, catches) = compile_default_derived_constructor();
+        let is_default_derived_constructor =
+            has_super_class && instance_fields.is_empty() && private_instance_fields.is_empty();
+        let is_standalone_base_default_constructor = lowering.standalone_ecmascript_input()
+            && !has_super_class
+            && instance_fields.is_empty()
+            && private_instance_fields.is_empty();
+        let is_standalone_base_callinit_constructor = lowering.standalone_ecmascript_input()
+            && !has_super_class
+            && (!instance_fields.is_empty() || !private_instance_fields.is_empty());
+        let compiled = if is_standalone_base_default_constructor {
+            compile_default_base_constructor(
+                strings,
+                literal_arrays,
+                lowering,
+                source,
+                source_mapper,
+                class_span_start,
+            )
+        } else if is_standalone_base_callinit_constructor {
+            compile_standalone_callinit_constructor(
+                strings,
+                literal_arrays,
+                lowering,
+                source,
+                source_mapper,
+                class_span_start,
+                class_span_end,
+            )
+        } else if is_default_derived_constructor {
             let line_ops = if source.is_some() {
                 default_derived_constructor_line_ops()
             } else {
                 Vec::new()
             };
-            BodyCompileResult::new(bytecode, line_ops, catches, 6)
+            compile_default_derived_constructor(line_ops)
         } else {
             compile_constructor_with_fields(
                 None,
@@ -915,17 +2883,123 @@ fn compile_class_elements(
                 private_field_slots.clone(),
             )
         };
+        let constructor_name = if lowering.standalone_ecmascript_input() {
+            format!("#~{class_name}=#{class_name}")
+        } else {
+            function_names.bind(0, 0, Some(class_name))
+        };
+        let constructor_num_args =
+            if is_standalone_base_default_constructor || is_standalone_base_callinit_constructor {
+                3
+            } else {
+                4
+            };
+        let constructor_annotations = annotation_records_from_decorators(
+            class_decorators,
+            &annotation_method_base_name(record_name, &constructor_name),
+            record_name,
+            literal_arrays,
+            annotations_enabled,
+            enum_infos,
+            annotation_literal_array_counter,
+        )?;
+        let debug_info = source_file_path.map(|path| DebugInfoRecord {
+            line_start: compiled.debug_line_start.unwrap_or(1),
+            source_file: path.to_string(),
+            source_code: None,
+            param_names: Vec::new(),
+            lexical_this: false,
+            local_variables: Vec::new(),
+            infer_scope_locals: true,
+            line_ops_include_local_variables: false,
+        });
         methods.push(MethodRecord {
-            name: function_names.bind(0, 0, Some(class_name)),
+            name: constructor_name,
             bytecode: compiled.bytecode,
+            pandasm_insns: compiled.pandasm_insns,
+            pandasm_debug: compiled.pandasm_debug,
             num_vregs: compiled.vregs,
-            num_args: 4,
-            debug_info: None,
+            num_args: constructor_num_args,
+            value_of_first_param: -1,
+            slots_num: None,
+            debug_info,
             line_ops: compiled.line_ops,
             catch_entries: compiled.catches,
+            program_labels: compiled.program_labels,
+            label_table: Vec::new(),
             kind: MethodKind::Constructor,
+            function_kind: function_kind::FUNCTION,
+            source_lang: None,
+            concurrent_module_requests: Vec::new(),
             method_pool_entry: true,
+            expected_property_count: class_expected_property_count,
+            annotations: constructor_annotations,
+            metadata_attrs: Default::default(),
+            param_annotations: Vec::new(),
             definefunc_order: None,
+            label_style: MethodLabelStyle::Source,
+            param_types: Vec::new(),
+            return_type: None,
+            body_presence: None,
+            body_location: None,
+            file_location: None,
+        });
+    }
+
+    if lowering.standalone_ecmascript_input()
+        && (!instance_fields.is_empty() || !private_instance_fields.is_empty())
+    {
+        let initializer_name = format!("#~{class_name}>#instance_initializer");
+        let compiled = compile_standalone_instance_initializer(
+            &instance_fields,
+            &private_instance_fields,
+            strings,
+            literal_arrays,
+            lowering,
+            source,
+            source_mapper,
+            class_span_start,
+            private_field_slots.clone(),
+        );
+        methods.push(MethodRecord {
+            name: initializer_name,
+            bytecode: compiled.bytecode,
+            pandasm_insns: compiled.pandasm_insns,
+            pandasm_debug: compiled.pandasm_debug,
+            num_vregs: compiled.vregs,
+            num_args: 3,
+            value_of_first_param: -1,
+            slots_num: None,
+            debug_info: source_file_path.map(|path| DebugInfoRecord {
+                line_start: compiled.debug_line_start.unwrap_or(1),
+                source_file: path.to_string(),
+                source_code: None,
+                param_names: Vec::new(),
+                lexical_this: false,
+                local_variables: Vec::new(),
+                infer_scope_locals: true,
+                line_ops_include_local_variables: false,
+            }),
+            line_ops: compiled.line_ops,
+            catch_entries: compiled.catches,
+            program_labels: compiled.program_labels,
+            label_table: Vec::new(),
+            kind: MethodKind::Function,
+            function_kind: function_kind::NONE,
+            source_lang: None,
+            concurrent_module_requests: Vec::new(),
+            method_pool_entry: true,
+            expected_property_count: None,
+            annotations: Vec::new(),
+            metadata_attrs: Default::default(),
+            param_annotations: Vec::new(),
+            definefunc_order: None,
+            label_style: MethodLabelStyle::Source,
+            param_types: Vec::new(),
+            return_type: None,
+            body_presence: None,
+            body_location: None,
+            file_location: None,
         });
     }
 
@@ -942,26 +3016,53 @@ fn compile_class_elements(
         methods.push(MethodRecord {
             name: static_initializer_name,
             bytecode: compiled.bytecode,
+            pandasm_insns: compiled.pandasm_insns,
+            pandasm_debug: compiled.pandasm_debug,
             num_vregs: compiled.vregs,
             num_args: 3 + static_key_count,
+            value_of_first_param: -1,
+            slots_num: None,
             debug_info: source_file_path.map(|path| DebugInfoRecord {
-                line_start: 1,
+                line_start: compiled.debug_line_start.unwrap_or(1),
                 source_file: path.to_string(),
+                source_code: None,
                 param_names: Vec::new(),
                 lexical_this: false,
+                local_variables: Vec::new(),
+                infer_scope_locals: true,
+                line_ops_include_local_variables: false,
             }),
             line_ops: compiled.line_ops,
             catch_entries: compiled.catches,
+            program_labels: compiled.program_labels,
+            label_table: Vec::new(),
             kind: MethodKind::Function,
+            function_kind: function_kind::NONE,
+            source_lang: None,
+            concurrent_module_requests: Vec::new(),
             method_pool_entry: true,
+            expected_property_count: None,
+            annotations: Vec::new(),
+            metadata_attrs: Default::default(),
+            param_annotations: Vec::new(),
             definefunc_order: None,
+            label_style: MethodLabelStyle::Source,
+            param_types: Vec::new(),
+            return_type: None,
+            body_presence: None,
+            body_location: None,
+            file_location: None,
         });
     }
 
     for element in elements {
         if let ClassElement::MethodDefinition(method) = element {
-            let Some(key_name) = class_method_record_name(method, class_name, function_names)
-            else {
+            let Some(key_name) = class_method_record_name(
+                method,
+                class_name,
+                function_names,
+                lowering.standalone_ecmascript_input(),
+            ) else {
                 continue;
             };
             let param_names: Vec<String> = method
@@ -1039,10 +3140,14 @@ fn compile_class_elements(
                     Some((method.value.span.start, method.value.span.end)),
                     private_field_slots.clone(),
                 )
-                .unwrap_or_else(BodyCompileResult::empty)
             } else if let Some(src) = source {
                 compile_body_stmts_tracked_with_private(
-                    method.value.body.as_deref().map(|fb| fb.statements.as_slice()).unwrap_or(&[]),
+                    method
+                        .value
+                        .body
+                        .as_deref()
+                        .map(|fb| fb.statements.as_slice())
+                        .unwrap_or(&[]),
                     strings,
                     literal_arrays,
                     lowering,
@@ -1057,7 +3162,12 @@ fn compile_class_elements(
             } else {
                 // No source tracking but private slots still need to be set.
                 compile_body_stmts_with_private(
-                    method.value.body.as_deref().map(|fb| fb.statements.as_slice()).unwrap_or(&[]),
+                    method
+                        .value
+                        .body
+                        .as_deref()
+                        .map(|fb| fb.statements.as_slice())
+                        .unwrap_or(&[]),
                     strings,
                     literal_arrays,
                     lowering,
@@ -1068,108 +3178,202 @@ fn compile_class_elements(
             };
             let num_vregs = compiled.vregs;
             let num_args = class_method_num_args(method);
+            let upstream_function_kind =
+                class_method_function_kind(&method.value, is_constructor, is_method_async);
+            let concurrent_module_requests =
+                concurrent_import_requests.collect_for_function(&method.value);
+            let mut annotations = if is_constructor {
+                annotation_records_from_decorators(
+                    class_decorators,
+                    &annotation_method_base_name(record_name, &key_name),
+                    record_name,
+                    literal_arrays,
+                    annotations_enabled,
+                    enum_infos,
+                    annotation_literal_array_counter,
+                )?
+            } else {
+                Vec::new()
+            };
+            annotations.extend(annotation_records_from_decorators(
+                &method.decorators,
+                &annotation_method_base_name(record_name, &key_name),
+                record_name,
+                literal_arrays,
+                annotations_enabled,
+                enum_infos,
+                annotation_literal_array_counter,
+            )?);
             let debug_info = source_file_path.map(|path| DebugInfoRecord {
-                line_start: 1,
+                line_start: compiled.debug_line_start.unwrap_or(1),
                 source_file: path.to_string(),
+                source_code: None,
                 param_names: param_names.clone(),
                 lexical_this: method
                     .value
                     .body
                     .as_deref()
                     .is_some_and(|body| stmts_capture_this_in_arrow(&body.statements)),
+                local_variables: Vec::new(),
+                infer_scope_locals: true,
+                line_ops_include_local_variables: false,
             });
             methods.push(MethodRecord {
                 name: key_name,
                 bytecode: compiled.bytecode,
+                pandasm_insns: compiled.pandasm_insns,
+                pandasm_debug: compiled.pandasm_debug,
                 num_vregs,
                 num_args,
+                value_of_first_param: -1,
+                slots_num: None,
                 debug_info,
                 line_ops: compiled.line_ops,
                 catch_entries: compiled.catches,
+                program_labels: compiled.program_labels,
+                label_table: Vec::new(),
                 kind: if is_constructor {
                     MethodKind::Constructor
                 } else {
                     MethodKind::Function
                 },
-                method_pool_entry: true,
+                function_kind: upstream_function_kind,
+                source_lang: None,
+                concurrent_module_requests,
+                method_pool_entry: !(lowering.standalone_ecmascript_input()
+                    && !is_constructor
+                    && is_class_buffer_method(method)),
+                expected_property_count: is_constructor
+                    .then_some(class_expected_property_count)
+                    .flatten(),
+                annotations,
+                metadata_attrs: Default::default(),
+                param_annotations: Vec::new(),
                 definefunc_order: None,
-            });
-        }
-
-        // Compile getter/setter MethodRecords for each auto-accessor property.
-        // Mirrors upstream Transformer::ProcessAutoAccessorProperty: the backing field
-        // is a synthesized private field; the getter reads it; the setter writes it.
-        for element in elements {
-            let ClassElement::AccessorProperty(accessor) = element else {
-                continue;
-            };
-            let backing_name = accessor_backing_field_name(accessor);
-            let Some(&slot) = private_field_slots.get(&backing_name) else {
-                continue;
-            };
-            let key_name = match &accessor.key {
-                PropertyKey::StaticIdentifier(id) => id.name.as_str().to_string(),
-                PropertyKey::StringLiteral(s) => s.value.as_str().to_string(),
-                _ => continue, // skip computed accessors for now
-            };
-
-            // Getter: `get <key>() { return this.#backing; }`
-            let getter_name = format!("#{class_name}_get_{key_name}#");
-            let getter_compiled = {
-                let mut cg = CodeGen::new(strings, literal_arrays, lowering);
-                cg.private_field_slots = private_field_slots.clone();
-                cg.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
-                cg.push(Insn::LdPrivateProperty(0, 0, slot));
-                cg.push_with_epilogue(Insn::Return);
-                cg.returned = true;
-                cg.finish_with_catches()
-            };
-            methods.push(MethodRecord {
-                name: getter_name,
-                bytecode: getter_compiled.bytecode,
-                num_vregs: getter_compiled.vregs,
-                num_args: 3,
-                debug_info: None,
-                line_ops: Vec::new(),
-                catch_entries: getter_compiled.catches,
-                kind: MethodKind::Function,
-                method_pool_entry: true,
-                definefunc_order: None,
-            });
-
-            // Setter: `set <key>(v) { this.#backing = v; }`
-            let setter_name = format!("#{class_name}_set_{key_name}#");
-            let setter_compiled = {
-                let mut cg = CodeGen::new(strings, literal_arrays, lowering);
-                cg.private_field_slots = private_field_slots.clone();
-                let val_reg = cg.alloc_reg();
-                let this_reg = cg.alloc_reg();
-                // Load the value argument (first user param = arg index 3 = placeholder).
-                cg.push(Insn::Lda(function_arg_placeholder(3)));
-                cg.push(Insn::Sta(val_reg));
-                cg.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
-                cg.push(Insn::Sta(this_reg));
-                // Load value, then store to private field.
-                cg.push(Insn::Lda(val_reg));
-                cg.push(Insn::StPrivateProperty(0, 0, slot, this_reg));
-                cg.push_with_epilogue(Insn::ReturnUndefined);
-                cg.returned = true;
-                cg.finish_with_catches()
-            };
-            methods.push(MethodRecord {
-                name: setter_name,
-                bytecode: setter_compiled.bytecode,
-                num_vregs: setter_compiled.vregs,
-                num_args: 4, // 3 mandatory + 1 value param
-                debug_info: None,
-                line_ops: Vec::new(),
-                catch_entries: setter_compiled.catches,
-                kind: MethodKind::Function,
-                method_pool_entry: true,
-                definefunc_order: None,
+                label_style: MethodLabelStyle::Source,
+                param_types: Vec::new(),
+                return_type: None,
+                body_presence: None,
+                body_location: None,
+                file_location: None,
             });
         }
     }
+
+    // Compile getter/setter MethodRecords for each auto-accessor property.
+    //
+    // Mirrors upstream Transformer::ProcessAutoAccessorProperty: the backing field
+    // is a synthesized private field; the getter reads it; the setter writes it.
+    //
+    // NOTE: this loop must run *outside* the MethodDefinition loop above.
+    // Previously it was nested inside that loop, causing each accessor's
+    // getter+setter pair to be emitted once per class element (N duplicates
+    // instead of 1).  Upstream ProcessAutoAccessorProperty is a single-pass
+    // class-level transform, not a per-method operation.
+    //
+    for element in elements {
+        let ClassElement::AccessorProperty(accessor) = element else {
+            continue;
+        };
+        let backing_name = accessor_backing_field_name(accessor);
+        let Some(&slot) = private_field_slots.get(&backing_name) else {
+            continue;
+        };
+        // Getter: `get <key>() { return this.#backing; }`
+        let getter_name = auto_accessor_getter_record_name(class_name, accessor);
+        let getter_compiled = {
+            let mut cg = CodeGen::new(strings, literal_arrays, lowering);
+            cg.private_field_slots = private_field_slots.clone();
+            cg.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
+            cg.push(Insn::LdPrivateProperty(0, 0, slot));
+            cg.push_with_epilogue(Insn::Return);
+            cg.returned = true;
+            cg.finish_with_catches()
+        };
+        methods.push(MethodRecord {
+            name: getter_name,
+            bytecode: getter_compiled.bytecode,
+            pandasm_insns: getter_compiled.pandasm_insns,
+            pandasm_debug: getter_compiled.pandasm_debug,
+            num_vregs: getter_compiled.vregs,
+            num_args: 3,
+            value_of_first_param: -1,
+            slots_num: None,
+            debug_info: None,
+            line_ops: Vec::new(),
+            catch_entries: getter_compiled.catches,
+            program_labels: getter_compiled.program_labels,
+            label_table: Vec::new(),
+            kind: MethodKind::Function,
+            function_kind: function_kind::NONE,
+            source_lang: None,
+            concurrent_module_requests: Vec::new(),
+            method_pool_entry: true,
+            expected_property_count: None,
+            annotations: Vec::new(),
+            metadata_attrs: Default::default(),
+            param_annotations: Vec::new(),
+            definefunc_order: None,
+            label_style: MethodLabelStyle::Source,
+            param_types: Vec::new(),
+            return_type: None,
+            body_presence: None,
+            body_location: None,
+            file_location: None,
+        });
+
+        // Setter: `set <key>(v) { this.#backing = v; }`
+        let setter_name = auto_accessor_setter_record_name(class_name, accessor);
+        let setter_compiled = {
+            let mut cg = CodeGen::new(strings, literal_arrays, lowering);
+            cg.private_field_slots = private_field_slots.clone();
+            let val_reg = cg.alloc_reg();
+            let this_reg = cg.alloc_reg();
+            // Load the value argument (first user param = arg index 3).
+            cg.push(Insn::Lda(function_arg_register(3)));
+            cg.push(Insn::Sta(val_reg));
+            cg.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
+            cg.push(Insn::Sta(this_reg));
+            // Load value, then store to private field.
+            cg.push(Insn::Lda(val_reg));
+            cg.push(Insn::StPrivateProperty(0, 0, slot, this_reg));
+            cg.push_with_epilogue(Insn::ReturnUndefined);
+            cg.returned = true;
+            cg.finish_with_catches()
+        };
+        methods.push(MethodRecord {
+            name: setter_name,
+            bytecode: setter_compiled.bytecode,
+            pandasm_insns: setter_compiled.pandasm_insns,
+            pandasm_debug: setter_compiled.pandasm_debug,
+            num_vregs: setter_compiled.vregs,
+            num_args: 4, // 3 mandatory + 1 value param
+            value_of_first_param: -1,
+            slots_num: None,
+            debug_info: None,
+            line_ops: Vec::new(),
+            catch_entries: setter_compiled.catches,
+            program_labels: setter_compiled.program_labels,
+            label_table: Vec::new(),
+            kind: MethodKind::Function,
+            function_kind: function_kind::NONE,
+            source_lang: None,
+            concurrent_module_requests: Vec::new(),
+            method_pool_entry: true,
+            expected_property_count: None,
+            annotations: Vec::new(),
+            metadata_attrs: Default::default(),
+            param_annotations: Vec::new(),
+            definefunc_order: None,
+            label_style: MethodLabelStyle::Source,
+            param_types: Vec::new(),
+            return_type: None,
+            body_presence: None,
+            body_location: None,
+            file_location: None,
+        });
+    }
+    Ok(())
 }
 
 fn static_computed_class_field_count(elements: &[ClassElement<'_>]) -> u16 {
@@ -1197,6 +3401,7 @@ fn compile_program_body(
     lowering: &LoweringContext,
     _is_module: bool,
     source: &str,
+    has_top_level_await: bool,
     runtime_ts_import_equals: &FxHashSet<(u32, u32)>,
 ) -> BodyCompileResult {
     compile_body_stmts(
@@ -1208,6 +3413,7 @@ fn compile_program_body(
         &[],
         None,
         Some(source),
+        has_top_level_await,
         runtime_ts_import_equals,
     )
 }
@@ -1231,40 +3437,11 @@ fn compile_function_body(
             param_names,
             current_function_span,
             None,
+            false,
             &FxHashSet::default(),
         ),
-        None => {
-            let mut st = StringTable::default();
-            BodyCompileResult::new(Insn::ReturnUndefined.encode(&mut st), vec![], vec![], 0)
-        }
+        None => BodyCompileResult::return_undefined(),
     }
-}
-
-/// Like `compile_function_body` but also returns LNP line-advance opcodes.
-/// Returns `(bytecode, line_ops, catch_entries)`.
-#[allow(dead_code)]
-fn compile_function_body_tracked(
-    body: Option<&FunctionBody<'_>>,
-    strings: &mut StringTable,
-    literal_arrays: &mut Vec<LiteralArray>,
-    lowering: &LoweringContext,
-    param_names: &[String],
-    source: &str,
-    source_mapper: Option<&SourceMapper>,
-    current_function_span: Option<(u32, u32)>,
-) -> (Vec<u8>, Vec<u8>, Vec<CatchEntry>) {
-    let compiled = compile_function_body_tracked_with_end(
-        body,
-        strings,
-        literal_arrays,
-        lowering,
-        param_names,
-        source,
-        source_mapper,
-        None,
-        current_function_span,
-    );
-    (compiled.bytecode, compiled.line_ops, compiled.catches)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1291,12 +3468,10 @@ fn compile_function_body_tracked_with_end(
             source_mapper,
             function_end,
             current_function_span,
+            false,
             &FxHashSet::default(),
         ),
-        None => {
-            let mut st = StringTable::default();
-            BodyCompileResult::new(Insn::ReturnUndefined.encode(&mut st), vec![], vec![], 0)
-        }
+        None => BodyCompileResult::return_undefined(),
     }
 }
 
@@ -1320,6 +3495,11 @@ fn compile_arrow_body_with_line_ops<'src>(
         source,
         source_mapper,
     );
+    if source.is_some() {
+        if let Some(start) = first_runtime_stmt_start(&body.statements) {
+            gen.reset_line_tracker_start(start);
+        }
+    }
     gen.use_function_lexical_env(current_function_span);
     gen.emit_function_lex_env_prologue();
     gen.bind_function_mandatory_lexical_names();
@@ -1345,86 +3525,6 @@ fn compile_arrow_body_with_line_ops<'src>(
     gen.finish_with_line_ops_and_catches()
 }
 
-/// Compile a function body with optional rest-parameter and async-function support.
-///
-/// When `rest_param` is `Some((name, n))`:
-/// - Emits `copyrestargs n` at the start of the body.
-/// - Stores the result to a fresh register named `name`.
-///
-/// When `is_async` is `true`, follows es2panda's `AsyncFunctionBuilder`:
-/// `asyncfunctionenter` creates the async function object, return sites resolve
-/// it, and the protected body has a catch-all cleanup that rejects it.
-fn compile_function_body_ext(
-    body: Option<&FunctionBody<'_>>,
-    rest_param: Option<(String, u8)>,
-    is_async: bool,
-    strings: &mut StringTable,
-    literal_arrays: &mut Vec<LiteralArray>,
-    lowering: &LoweringContext,
-    param_names: &[String],
-    current_function_span: Option<(u32, u32)>,
-) -> BodyCompileResult {
-    compile_function_body_ext_tracked(
-        body,
-        rest_param,
-        is_async,
-        strings,
-        literal_arrays,
-        lowering,
-        param_names,
-        None,
-        None,
-        current_function_span,
-    )
-    .unwrap_or_else(BodyCompileResult::empty)
-}
-
-fn compile_function_body_ext_tracked(
-    body: Option<&FunctionBody<'_>>,
-    rest_param: Option<(String, u8)>,
-    is_async: bool,
-    strings: &mut StringTable,
-    literal_arrays: &mut Vec<LiteralArray>,
-    lowering: &LoweringContext,
-    param_names: &[String],
-    source: Option<&str>,
-    source_mapper: Option<&SourceMapper>,
-    current_function_span: Option<(u32, u32)>,
-) -> Option<BodyCompileResult> {
-    let stmts: &[_] = match body {
-        Some(fb) => fb.statements.as_slice(),
-        None => {
-            let mut st = StringTable::default();
-            let bc = Insn::ReturnUndefined.encode(&mut st);
-            return Some(BodyCompileResult::new(bc, vec![], vec![], 0));
-        }
-    };
-    let mut cg = if let Some(src) = source {
-        CodeGen::new_with_source(strings, literal_arrays, lowering, src, source_mapper)
-    } else {
-        CodeGen::new(strings, literal_arrays, lowering)
-    };
-    cg.is_async = is_async;
-    cg.use_function_lexical_env(current_function_span);
-    cg.emit_function_lex_env_prologue();
-    cg.bind_function_mandatory_lexical_names();
-    cg.emit_async_function_prologue();
-    cg.bind_function_param_names(param_names);
-    if let Some((name, count)) = rest_param {
-        let reg = cg.alloc_reg();
-        cg.push(Insn::CopyRestArgs(count));
-        cg.push(Insn::Sta(reg));
-        cg.var_regs.insert(name, reg);
-    }
-    for stmt in stmts {
-        cg.emit_stmt(stmt);
-        if cg.returned {
-            break;
-        }
-    }
-    Some(cg.finish_with_line_ops_and_catches())
-}
-
 /// Like `compile_function_body_ext_tracked` but also emits destructuring
 /// bindings for function parameters that use array/object patterns.
 #[allow(clippy::too_many_arguments)]
@@ -1440,13 +3540,11 @@ fn compile_function_body_with_destructure_params<'src>(
     source: Option<&str>,
     source_mapper: Option<&SourceMapper>,
     current_function_span: Option<(u32, u32)>,
-) -> Option<BodyCompileResult> {
+) -> BodyCompileResult {
     let stmts: &[_] = match body {
         Some(fb) => fb.statements.as_slice(),
         None => {
-            let mut st = StringTable::default();
-            let bc = Insn::ReturnUndefined.encode(&mut st);
-            return Some(BodyCompileResult::new(bc, vec![], vec![], 0));
+            return BodyCompileResult::return_undefined();
         }
     };
     let mut cg = if let Some(src) = source {
@@ -1474,7 +3572,7 @@ fn compile_function_body_with_destructure_params<'src>(
             break;
         }
     }
-    Some(cg.finish_with_line_ops_and_catches())
+    cg.finish_with_line_ops_and_catches()
 }
 
 /// Compile a generator (or async-generator) function body.
@@ -1499,9 +3597,7 @@ fn compile_generator_body<'src>(
     let stmts: &[_] = match body {
         Some(fb) => fb.statements.as_slice(),
         None => {
-            let mut st = StringTable::default();
-            let bc = Insn::ReturnUndefined.encode(&mut st);
-            return BodyCompileResult::new(bc, vec![], vec![], 0);
+            return BodyCompileResult::return_undefined();
         }
     };
     let mut cg = if let Some(src) = source {
@@ -1535,7 +3631,116 @@ fn compile_generator_body<'src>(
     cg.finish_with_line_ops_and_catches()
 }
 
-fn compile_default_derived_constructor() -> (Vec<u8>, Vec<CatchEntry>) {
+fn compile_default_base_constructor<'src>(
+    strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
+    lowering: &LoweringContext,
+    source: Option<&'src str>,
+    source_mapper: Option<&'src SourceMapper>,
+    class_span_start: u32,
+) -> BodyCompileResult {
+    let mut cg = if let Some(src) = source {
+        CodeGen::new_with_source(strings, literal_arrays, lowering, src, source_mapper)
+    } else {
+        CodeGen::new(strings, literal_arrays, lowering)
+    };
+    if lowering.standalone_ecmascript_input() {
+        cg.reset_line_tracker_start(class_span_start);
+    }
+    cg.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
+    cg.push(Insn::Return);
+    cg.returned = true;
+    cg.finish_with_line_ops_and_catches()
+}
+
+fn compile_standalone_callinit_constructor<'src>(
+    strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
+    lowering: &LoweringContext,
+    source: Option<&'src str>,
+    source_mapper: Option<&'src SourceMapper>,
+    _class_span_start: u32,
+    class_span_end: u32,
+) -> BodyCompileResult {
+    let mut cg = if let Some(src) = source {
+        CodeGen::new_with_source(strings, literal_arrays, lowering, src, source_mapper)
+    } else {
+        CodeGen::new(strings, literal_arrays, lowering)
+    };
+    cg.push(Insn::LdLexVar(0, 0));
+    cg.push(Insn::CallRuntimeCallInit(0, MANDATORY_PARAM_THIS_REG));
+    cg.set_debug_pos(class_span_end);
+    cg.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
+    cg.push(Insn::Return);
+    cg.returned = true;
+    cg.finish_with_line_ops_and_catches()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compile_standalone_instance_initializer<'src>(
+    fields: &[ClassFieldInit<'src>],
+    private_fields: &[ClassPrivateFieldInit<'src>],
+    strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
+    lowering: &LoweringContext,
+    source: Option<&'src str>,
+    source_mapper: Option<&'src SourceMapper>,
+    class_span_start: u32,
+    private_field_slots: FxHashMap<String, u16>,
+) -> BodyCompileResult {
+    let mut cg = if let Some(src) = source {
+        CodeGen::new_with_source(strings, literal_arrays, lowering, src, source_mapper)
+    } else {
+        CodeGen::new(strings, literal_arrays, lowering)
+    };
+    cg.private_field_slots = private_field_slots;
+    let initializer_start = fields
+        .first()
+        .map(|field| field.span_start)
+        .or_else(|| private_fields.first().map(|field| field.span_start))
+        .unwrap_or(class_span_start);
+    cg.reset_line_tracker_start(initializer_start);
+    for field in fields {
+        match &field.key {
+            ClassFieldKey::Static(name) => {
+                if let Some(value) = field.value {
+                    cg.emit_expr(value);
+                } else {
+                    cg.push(Insn::LdUndefined);
+                }
+                let name_id = cg.intern(name);
+                cg.push(Insn::DefinePropertyByName(
+                    0,
+                    name_id,
+                    MANDATORY_PARAM_THIS_REG,
+                ));
+            }
+            ClassFieldKey::CapturedComputed { .. } => {
+                cg.emit_class_field_definition(field, MANDATORY_PARAM_THIS_REG, None);
+            }
+        }
+    }
+    for field in private_fields {
+        if let Some(value) = field.value {
+            cg.emit_expr(value);
+        } else {
+            cg.push(Insn::LdUndefined);
+        }
+        cg.push(Insn::CallRuntimeDefinePrivateProperty(
+            0,
+            0,
+            field.slot,
+            MANDATORY_PARAM_THIS_REG,
+        ));
+    }
+    cg.current_line = u32::MAX;
+    cg.current_col = 0;
+    cg.push(Insn::ReturnUndefined);
+    cg.returned = true;
+    cg.finish_with_line_ops_and_catches()
+}
+
+fn compile_default_derived_constructor(line_ops: Vec<u8>) -> BodyCompileResult {
     // Upstream es2panda emits a GENERATED_CONSTRUCTOR as `super(...args)`.
     // See:
     // - compiler/core/function.cpp: CompileFunctionParameterDeclaration
@@ -1544,27 +3749,27 @@ fn compile_default_derived_constructor() -> (Vec<u8>, Vec<CatchEntry>) {
     //
     // This is the API<13 path used by the fixture: copy rest args, call
     // supercallspread, validate/set `this`, then return `this`.
-    let bytecode = vec![
-        0x44, 0x60, // mov v0, v6
-        0x44, 0x71, // mov v1, v7
-        0x44, 0x82, // mov v2, v8
-        0x44, 0x93, // mov v3, v9
-        0xcf, 0x00, // copyrestargs 0
-        0x61, 0x03, // sta v3
-        0x60, 0x03, // lda v3
-        0x61, 0x05, // sta v5
-        0x60, 0x00, // lda v0
-        0xb9, 0x00, 0x05, // supercallspread 0, v5
-        0x61, 0x05, // sta v5
-        0x60, 0x02, // lda v2
-        0xfe, 0x07, 0x01, // throwifsupernotcorrectcall 1
-        0x60, 0x05, // lda v5
-        0x61, 0x02, // sta v2
-        0x60, 0x02, // lda v2
-        0xfe, 0x07, 0x00, // throwifsupernotcorrectcall 0
-        0x64, // return
+    let insns = vec![
+        Insn::MovV4(0, 6),
+        Insn::MovV4(1, 7),
+        Insn::MovV4(2, 8),
+        Insn::MovV4(3, 9),
+        Insn::CopyRestArgs(0),
+        Insn::Sta(3),
+        Insn::Lda(3),
+        Insn::Sta(5),
+        Insn::Lda(0),
+        Insn::SuperCallSpread(0, 5),
+        Insn::Sta(5),
+        Insn::Lda(2),
+        Insn::ThrowIfSuperNotCorrectCall(1),
+        Insn::Lda(5),
+        Insn::Sta(2),
+        Insn::Lda(2),
+        Insn::ThrowIfSuperNotCorrectCall(0),
+        Insn::Return,
     ];
-    (bytecode, vec![])
+    BodyCompileResult::from_static_insns(insns, line_ops, Vec::new(), 6)
 }
 
 fn default_derived_constructor_line_ops() -> Vec<u8> {
@@ -1626,10 +3831,18 @@ fn compile_constructor_with_fields<'src>(
     cg.bind_function_mandatory_lexical_names();
     cg.bind_function_param_names(param_names);
     cg.emit_default_parameters(params, Some(function_span_start));
-    let this_reg = cg.alloc_reg();
-    cg.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
-    cg.push(Insn::Sta(this_reg));
+    let this_reg =
+        if fields.is_empty() && private_fields.is_empty() && lowering.standalone_ecmascript_input()
+        {
+            None
+        } else {
+            let reg = cg.alloc_reg();
+            cg.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
+            cg.push(Insn::Sta(reg));
+            Some(reg)
+        };
     if !fields.is_empty() {
+        let this_reg = this_reg.expect("field initializers need a this register");
         for field in fields {
             cg.emit_class_field_definition(field, this_reg, None);
         }
@@ -1641,7 +3854,12 @@ fn compile_constructor_with_fields<'src>(
         } else {
             cg.push(Insn::LdUndefined);
         }
-        cg.push(Insn::CallRuntimeDefinePrivateProperty(0, 0, pf.slot, this_reg));
+        cg.push(Insn::CallRuntimeDefinePrivateProperty(
+            0,
+            0,
+            pf.slot,
+            this_reg.expect("private field initializers need a this register"),
+        ));
     }
     for stmt in stmts {
         cg.emit_stmt(stmt);
@@ -1650,8 +3868,14 @@ fn compile_constructor_with_fields<'src>(
         }
     }
     if has_super_class && !cg.returned {
-        cg.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
-        cg.push(Insn::ThrowIfSuperNotCorrectCall(0));
+        if let Some(new_this_reg) = cg.derived_new_this_reg {
+            cg.push(Insn::Lda(new_this_reg));
+            cg.push(Insn::ThrowIfSuperNotCorrectCall(0));
+            cg.push(Insn::Lda(new_this_reg));
+        } else {
+            cg.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
+            cg.push(Insn::ThrowIfSuperNotCorrectCall(0));
+        }
         cg.push(Insn::Return);
         cg.returned = true;
     }
@@ -1680,6 +3904,12 @@ fn compile_constructor_with_fields_tracked<'src>(
         None => &[],
     };
     let mut cg = CodeGen::new_with_source(strings, literal_arrays, lowering, source, source_mapper);
+    if lowering.standalone_ecmascript_input() {
+        if let Some(start) = first_runtime_stmt_start(stmts) {
+            cg.reset_line_tracker_start(start);
+        }
+    }
+    let _ = function_span_start;
     cg.derived_constructor = has_super_class;
     cg.private_field_slots = private_field_slots;
     cg.use_function_lexical_env(current_function_span);
@@ -1690,10 +3920,18 @@ fn compile_constructor_with_fields_tracked<'src>(
     cg.bind_function_mandatory_lexical_names();
     cg.bind_function_param_names(param_names);
     cg.emit_default_parameters(params, Some(function_span_start));
-    let this_reg = cg.alloc_reg();
-    cg.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
-    cg.push(Insn::Sta(this_reg));
+    let this_reg =
+        if fields.is_empty() && private_fields.is_empty() && lowering.standalone_ecmascript_input()
+        {
+            None
+        } else {
+            let reg = cg.alloc_reg();
+            cg.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
+            cg.push(Insn::Sta(reg));
+            Some(reg)
+        };
     if !fields.is_empty() {
+        let this_reg = this_reg.expect("field initializers need a this register");
         for field in fields {
             cg.emit_class_field_definition(field, this_reg, None);
         }
@@ -1705,7 +3943,12 @@ fn compile_constructor_with_fields_tracked<'src>(
         } else {
             cg.push(Insn::LdUndefined);
         }
-        cg.push(Insn::CallRuntimeDefinePrivateProperty(0, 0, pf.slot, this_reg));
+        cg.push(Insn::CallRuntimeDefinePrivateProperty(
+            0,
+            0,
+            pf.slot,
+            this_reg.expect("private field initializers need a this register"),
+        ));
     }
     for stmt in stmts {
         cg.emit_stmt(stmt);
@@ -1714,10 +3957,33 @@ fn compile_constructor_with_fields_tracked<'src>(
         }
     }
     if has_super_class && !cg.returned {
-        cg.current_line = u32::MAX;
-        cg.current_col = u32::MAX;
-        cg.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
-        cg.push(Insn::ThrowIfSuperNotCorrectCall(0));
+        let standalone_ecmascript_input = lowering.standalone_ecmascript_input();
+        if !standalone_ecmascript_input {
+            cg.current_line = u32::MAX;
+            cg.current_col = u32::MAX;
+        }
+        if let Some(new_this_reg) = cg.derived_new_this_reg {
+            if standalone_ecmascript_input {
+                let tracker = cg.line_tracker.take();
+                cg.push(Insn::Lda(new_this_reg));
+                cg.line_tracker = tracker;
+                cg.current_line = u32::MAX;
+            } else {
+                cg.push(Insn::Lda(new_this_reg));
+            }
+            cg.push(Insn::ThrowIfSuperNotCorrectCall(0));
+            cg.push(Insn::Lda(new_this_reg));
+        } else {
+            if standalone_ecmascript_input {
+                let tracker = cg.line_tracker.take();
+                cg.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
+                cg.line_tracker = tracker;
+                cg.current_line = u32::MAX;
+            } else {
+                cg.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
+            }
+            cg.push(Insn::ThrowIfSuperNotCorrectCall(0));
+        }
         cg.set_debug_pos(function_span_end);
         cg.push(Insn::Return);
         cg.returned = true;
@@ -1749,7 +4015,7 @@ fn compile_static_class_initializer<'src>(
                     continue;
                 }
                 let key = if property.computed {
-                    let key_reg = function_arg_placeholder(3 + computed_key_index);
+                    let key_reg = function_arg_register(3 + computed_key_index);
                     computed_key_index = computed_key_index.saturating_add(1);
                     ClassFieldRuntimeKey::ComputedReg(key_reg)
                 } else {
@@ -1787,6 +4053,7 @@ fn compile_body_stmts(
     param_names: &[String],
     current_function_span: Option<(u32, u32)>,
     source: Option<&str>,
+    has_top_level_await: bool,
     runtime_ts_import_equals: &FxHashSet<(u32, u32)>,
 ) -> BodyCompileResult {
     let mut cg = CodeGen::new(strings, literal_arrays, lowering);
@@ -1800,7 +4067,7 @@ fn compile_body_stmts(
         cg.emit_ts_enum_var_hoists(stmts);
         cg.emit_function_hoists(stmts);
         // Top-level await (TLA): emit async prologue so `await` is valid.
-        if stmts_have_top_level_await(stmts) {
+        if has_top_level_await {
             cg.is_async = true;
             cg.emit_async_function_prologue();
         }
@@ -1837,9 +4104,15 @@ fn compile_body_stmts_tracked(
     source_mapper: Option<&SourceMapper>,
     function_end: Option<u32>,
     current_function_span: Option<(u32, u32)>,
+    has_top_level_await: bool,
     runtime_ts_import_equals: &FxHashSet<(u32, u32)>,
 ) -> BodyCompileResult {
     let mut cg = CodeGen::new_with_source(strings, literal_arrays, lowering, source, source_mapper);
+    if lowering.standalone_ecmascript_input() && module_body {
+        if let Some(start) = first_runtime_stmt_start(stmts) {
+            cg.reset_line_tracker_start(start);
+        }
+    }
     cg.function_end = function_end;
     cg.runtime_ts_import_equals = runtime_ts_import_equals.clone();
     cg.module_body = module_body;
@@ -1850,7 +4123,7 @@ fn compile_body_stmts_tracked(
         cg.emit_ts_enum_var_hoists(stmts);
         cg.emit_function_hoists(stmts);
         // Top-level await (TLA): emit async prologue so `await` is valid.
-        if stmts_have_top_level_await(stmts) {
+        if has_top_level_await {
             cg.is_async = true;
             cg.emit_async_function_prologue();
         }
@@ -1879,49 +4152,490 @@ fn compile_body_stmts_tracked(
 /// detected, emitting `asyncfunctionenter` and treating the module's
 /// `func_main_0` as async.
 fn stmts_have_top_level_await(stmts: &[Statement<'_>]) -> bool {
-    stmts.iter().any(stmt_has_await)
+    stmts.iter().any(stmt_has_top_level_await)
 }
 
-fn stmt_has_await(stmt: &Statement<'_>) -> bool {
-    match stmt {
-        Statement::ExpressionStatement(es) => expr_has_await(&es.expression),
-        Statement::VariableDeclaration(decl) => decl.declarations.iter().any(|d| {
-            d.init.as_ref().map(|e| expr_has_await(e)).unwrap_or(false)
-        }),
-        Statement::ReturnStatement(ret) => {
-            ret.argument.as_ref().map(|e| expr_has_await(e)).unwrap_or(false)
+fn simple_numeric_for_parts<'a>(
+    for_stmt: &'a oxc_ast::ast::ForStatement<'a>,
+) -> Option<(&'a str, i32, i32)> {
+    use oxc_ast::ast::{BinaryOperator, ForStatementInit};
+
+    let ForStatementInit::VariableDeclaration(decl) = for_stmt.init.as_ref()? else {
+        return None;
+    };
+    let [declarator] = decl.declarations.as_slice() else {
+        return None;
+    };
+    let BindingPattern::BindingIdentifier(id) = &declarator.id else {
+        return None;
+    };
+    let name = id.name.as_str();
+    let init_value = numeric_i32_literal(declarator.init.as_ref()?)?;
+
+    let Expression::BinaryExpression(test) = for_stmt.test.as_ref()? else {
+        return None;
+    };
+    if test.operator != BinaryOperator::LessThan || identifier_expr_name(&test.left)? != name {
+        return None;
+    }
+    let limit_value = numeric_i32_literal(&test.right)?;
+
+    let Expression::UpdateExpression(update) = for_stmt.update.as_ref()? else {
+        return None;
+    };
+    if update.operator != UpdateOperator::Increment || update.prefix {
+        return None;
+    }
+    let SimpleAssignmentTarget::AssignmentTargetIdentifier(update_id) = &update.argument else {
+        return None;
+    };
+    if update_id.name.as_str() != name {
+        return None;
+    }
+
+    Some((name, init_value, limit_value))
+}
+
+fn identifier_expr_name<'a>(expr: &'a Expression<'a>) -> Option<&'a str> {
+    match expr {
+        Expression::Identifier(identifier) => Some(identifier.name.as_str()),
+        _ => None,
+    }
+}
+
+fn numeric_i32_literal(expr: &Expression<'_>) -> Option<i32> {
+    match expr {
+        Expression::NumericLiteral(number)
+            if number.value.fract() == 0.0
+                && number.value >= i32::MIN as f64
+                && number.value <= i32::MAX as f64 =>
+        {
+            Some(number.value as i32)
         }
+        Expression::UnaryExpression(unary)
+            if unary.operator == UnaryOperator::UnaryNegation
+                && matches!(&unary.argument, Expression::NumericLiteral(_)) =>
+        {
+            let Expression::NumericLiteral(number) = &unary.argument else {
+                return None;
+            };
+            if number.value.fract() == 0.0 && number.value >= 0.0 && number.value <= i32::MAX as f64
+            {
+                Some(-(number.value as i32))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn is_simple_standalone_class(elements: &[ClassElement<'_>]) -> bool {
+    elements.iter().all(|element| {
+        matches!(
+            element,
+            ClassElement::MethodDefinition(method)
+                if method.kind == MethodDefinitionKind::Constructor
+        )
+    })
+}
+
+fn has_standalone_instance_initializer(elements: &[ClassElement<'_>]) -> bool {
+    elements.iter().any(|element| match element {
+        ClassElement::PropertyDefinition(property) => !property.r#static,
+        ClassElement::AccessorProperty(accessor) => !accessor.r#static,
+        _ => false,
+    })
+}
+
+fn debug_line_start(
+    source: Option<&str>,
+    source_mapper: Option<&SourceMapper>,
+    offset: u32,
+) -> u32 {
+    let Some(source) = source else {
+        return 1;
+    };
+    source_mapper
+        .and_then(|mapper| mapper.map_offset(source, offset))
+        .map_or_else(|| line_at(source, offset), |(line, _)| line)
+}
+
+fn first_runtime_stmt_start(stmts: &[Statement<'_>]) -> Option<u32> {
+    stmts
+        .iter()
+        .find(|stmt| !is_hoisted_function_declaration(stmt))
+        .map(|stmt| stmt.span().start)
+}
+
+fn stmt_has_top_level_await(stmt: &Statement<'_>) -> bool {
+    match stmt {
+        Statement::ExpressionStatement(es) => expr_has_top_level_await(&es.expression),
+        Statement::VariableDeclaration(decl) => decl
+            .declarations
+            .iter()
+            .any(|d| d.init.as_ref().is_some_and(expr_has_top_level_await)),
+        Statement::ReturnStatement(ret) => {
+            ret.argument.as_ref().is_some_and(expr_has_top_level_await)
+        }
+        Statement::ThrowStatement(throw) => expr_has_top_level_await(&throw.argument),
         Statement::BlockStatement(block) => stmts_have_top_level_await(&block.body),
         Statement::IfStatement(if_) => {
-            expr_has_await(&if_.test)
-                || stmt_has_await(&if_.consequent)
-                || if_.alternate.as_ref().map(|a| stmt_has_await(a)).unwrap_or(false)
+            expr_has_top_level_await(&if_.test)
+                || stmt_has_top_level_await(&if_.consequent)
+                || if_.alternate.as_ref().is_some_and(stmt_has_top_level_await)
         }
+        Statement::LabeledStatement(labeled) => stmt_has_top_level_await(&labeled.body),
+        Statement::WithStatement(with) => {
+            expr_has_top_level_await(&with.object) || stmt_has_top_level_await(&with.body)
+        }
+        Statement::WhileStatement(while_) => {
+            expr_has_top_level_await(&while_.test) || stmt_has_top_level_await(&while_.body)
+        }
+        Statement::DoWhileStatement(do_while) => {
+            stmt_has_top_level_await(&do_while.body) || expr_has_top_level_await(&do_while.test)
+        }
+        Statement::ForStatement(for_) => {
+            for_.init.as_ref().is_some_and(for_init_has_top_level_await)
+                || for_.test.as_ref().is_some_and(expr_has_top_level_await)
+                || for_.update.as_ref().is_some_and(expr_has_top_level_await)
+                || stmt_has_top_level_await(&for_.body)
+        }
+        Statement::ForInStatement(for_in) => {
+            for_left_has_top_level_await(&for_in.left)
+                || expr_has_top_level_await(&for_in.right)
+                || stmt_has_top_level_await(&for_in.body)
+        }
+        Statement::ForOfStatement(for_of) => {
+            for_left_has_top_level_await(&for_of.left)
+                || expr_has_top_level_await(&for_of.right)
+                || stmt_has_top_level_await(&for_of.body)
+        }
+        Statement::SwitchStatement(switch) => {
+            expr_has_top_level_await(&switch.discriminant)
+                || switch.cases.iter().any(|case| {
+                    case.test.as_ref().is_some_and(expr_has_top_level_await)
+                        || stmts_have_top_level_await(&case.consequent)
+                })
+        }
+        Statement::TryStatement(try_) => {
+            stmts_have_top_level_await(&try_.block.body)
+                || try_
+                    .handler
+                    .as_ref()
+                    .is_some_and(|handler| stmts_have_top_level_await(&handler.body.body))
+                || try_
+                    .finalizer
+                    .as_ref()
+                    .is_some_and(|finalizer| stmts_have_top_level_await(&finalizer.body))
+        }
+        Statement::ClassDeclaration(class) => {
+            class
+                .super_class
+                .as_ref()
+                .is_some_and(expr_has_top_level_await)
+                || class_elements_have_top_level_await(&class.body.body)
+        }
+        Statement::ExportDefaultDeclaration(export) => match &export.declaration {
+            ExportDefaultDeclarationKind::ClassDeclaration(class) => {
+                class
+                    .super_class
+                    .as_ref()
+                    .is_some_and(expr_has_top_level_await)
+                    || class_elements_have_top_level_await(&class.body.body)
+            }
+            ExportDefaultDeclarationKind::FunctionDeclaration(_) => false,
+            kind => kind.as_expression().is_some_and(expr_has_top_level_await),
+        },
+        Statement::ExportNamedDeclaration(export) => export
+            .declaration
+            .as_ref()
+            .is_some_and(declaration_has_top_level_await),
         _ => false,
     }
 }
 
-fn expr_has_await(expr: &Expression<'_>) -> bool {
+fn declaration_has_top_level_await(decl: &Declaration<'_>) -> bool {
+    match decl {
+        Declaration::VariableDeclaration(decl) => decl
+            .declarations
+            .iter()
+            .any(|d| d.init.as_ref().is_some_and(expr_has_top_level_await)),
+        Declaration::ClassDeclaration(class) => {
+            class
+                .super_class
+                .as_ref()
+                .is_some_and(expr_has_top_level_await)
+                || class_elements_have_top_level_await(&class.body.body)
+        }
+        Declaration::TSEnumDeclaration(decl) => decl.body.members.iter().any(|member| {
+            member
+                .initializer
+                .as_ref()
+                .is_some_and(expr_has_top_level_await)
+        }),
+        _ => false,
+    }
+}
+
+fn for_init_has_top_level_await(init: &oxc_ast::ast::ForStatementInit<'_>) -> bool {
+    match init {
+        oxc_ast::ast::ForStatementInit::VariableDeclaration(decl) => decl
+            .declarations
+            .iter()
+            .any(|d| d.init.as_ref().is_some_and(expr_has_top_level_await)),
+        oxc_ast::ast::ForStatementInit::AssignmentExpression(assign) => {
+            assignment_target_has_top_level_await(&assign.left)
+                || expr_has_top_level_await(&assign.right)
+        }
+        oxc_ast::ast::ForStatementInit::SequenceExpression(seq) => {
+            seq.expressions.iter().any(expr_has_top_level_await)
+        }
+        oxc_ast::ast::ForStatementInit::PrivateFieldExpression(expr) => {
+            expr_has_top_level_await(&expr.object)
+        }
+        expr => expr.as_expression().is_some_and(expr_has_top_level_await),
+    }
+}
+
+fn for_left_has_top_level_await(left: &ForStatementLeft<'_>) -> bool {
+    match left {
+        ForStatementLeft::VariableDeclaration(decl) => decl
+            .declarations
+            .iter()
+            .any(|d| d.init.as_ref().is_some_and(expr_has_top_level_await)),
+        ForStatementLeft::PrivateFieldExpression(expr) => expr_has_top_level_await(&expr.object),
+        ForStatementLeft::ArrayAssignmentTarget(arr) => {
+            array_assignment_target_has_top_level_await(arr)
+        }
+        ForStatementLeft::ObjectAssignmentTarget(obj) => {
+            object_assignment_target_has_top_level_await(obj)
+        }
+        ForStatementLeft::ComputedMemberExpression(expr) => {
+            expr_has_top_level_await(&expr.object) || expr_has_top_level_await(&expr.expression)
+        }
+        ForStatementLeft::StaticMemberExpression(expr) => expr_has_top_level_await(&expr.object),
+        _ => false,
+    }
+}
+
+fn assignment_target_has_top_level_await(target: &AssignmentTarget<'_>) -> bool {
+    match target {
+        AssignmentTarget::ComputedMemberExpression(expr) => {
+            expr_has_top_level_await(&expr.object) || expr_has_top_level_await(&expr.expression)
+        }
+        AssignmentTarget::StaticMemberExpression(expr) => expr_has_top_level_await(&expr.object),
+        AssignmentTarget::PrivateFieldExpression(expr) => expr_has_top_level_await(&expr.object),
+        AssignmentTarget::ArrayAssignmentTarget(arr) => {
+            array_assignment_target_has_top_level_await(arr)
+        }
+        AssignmentTarget::ObjectAssignmentTarget(obj) => {
+            object_assignment_target_has_top_level_await(obj)
+        }
+        AssignmentTarget::TSAsExpression(expr) => expr_has_top_level_await(&expr.expression),
+        AssignmentTarget::TSSatisfiesExpression(expr) => expr_has_top_level_await(&expr.expression),
+        AssignmentTarget::TSNonNullExpression(expr) => expr_has_top_level_await(&expr.expression),
+        AssignmentTarget::TSTypeAssertion(expr) => expr_has_top_level_await(&expr.expression),
+        _ => false,
+    }
+}
+
+fn assignment_target_maybe_default_has_top_level_await(
+    target: &AssignmentTargetMaybeDefault<'_>,
+) -> bool {
+    match target {
+        AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(default) => {
+            assignment_target_has_top_level_await(&default.binding)
+                || expr_has_top_level_await(&default.init)
+        }
+        target => target
+            .as_assignment_target()
+            .is_some_and(assignment_target_has_top_level_await),
+    }
+}
+
+fn array_assignment_target_has_top_level_await(arr: &ArrayAssignmentTarget<'_>) -> bool {
+    arr.elements
+        .iter()
+        .flatten()
+        .any(|element| assignment_target_maybe_default_has_top_level_await(element))
+        || arr
+            .rest
+            .as_ref()
+            .is_some_and(|rest| assignment_target_has_top_level_await(&rest.target))
+}
+
+fn object_assignment_target_has_top_level_await(obj: &ObjectAssignmentTarget<'_>) -> bool {
+    obj.properties.iter().any(|prop| match prop {
+        AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(identifier) => identifier
+            .init
+            .as_ref()
+            .is_some_and(expr_has_top_level_await),
+        AssignmentTargetProperty::AssignmentTargetPropertyProperty(property) => {
+            (property.computed && property_key_has_top_level_await(&property.name))
+                || assignment_target_maybe_default_has_top_level_await(&property.binding)
+        }
+    }) || obj
+        .rest
+        .as_ref()
+        .is_some_and(|rest| assignment_target_has_top_level_await(&rest.target))
+}
+
+fn class_elements_have_top_level_await(elements: &[ClassElement<'_>]) -> bool {
+    elements.iter().any(|element| match element {
+        ClassElement::PropertyDefinition(property) => {
+            property
+                .value
+                .as_ref()
+                .is_some_and(expr_has_top_level_await)
+                || (property.computed && property_key_has_top_level_await(&property.key))
+        }
+        ClassElement::AccessorProperty(accessor) => {
+            accessor
+                .value
+                .as_ref()
+                .is_some_and(expr_has_top_level_await)
+                || (accessor.computed && property_key_has_top_level_await(&accessor.key))
+        }
+        ClassElement::StaticBlock(block) => stmts_have_top_level_await(&block.body),
+        ClassElement::MethodDefinition(method) => {
+            method.computed && property_key_has_top_level_await(&method.key)
+        }
+        ClassElement::TSIndexSignature(_) => false,
+    })
+}
+
+fn property_key_has_top_level_await(key: &PropertyKey<'_>) -> bool {
+    match key {
+        PropertyKey::PrivateIdentifier(_) => false,
+        key => key.as_expression().is_some_and(expr_has_top_level_await),
+    }
+}
+
+fn scanable_property_key_expression<'a>(key: &'a PropertyKey<'a>) -> Option<&'a Expression<'a>> {
+    match key {
+        PropertyKey::PrivateIdentifier(_) => None,
+        key => key.as_expression(),
+    }
+}
+
+fn expr_has_top_level_await(expr: &Expression<'_>) -> bool {
     match expr {
         Expression::AwaitExpression(_) => true,
-        Expression::BinaryExpression(b) => expr_has_await(&b.left) || expr_has_await(&b.right),
+        Expression::AssignmentExpression(assign) => {
+            assignment_target_has_top_level_await(&assign.left)
+                || expr_has_top_level_await(&assign.right)
+        }
+        Expression::BinaryExpression(b) => {
+            expr_has_top_level_await(&b.left) || expr_has_top_level_await(&b.right)
+        }
+        Expression::LogicalExpression(logical) => {
+            expr_has_top_level_await(&logical.left) || expr_has_top_level_await(&logical.right)
+        }
+        Expression::UnaryExpression(unary) => expr_has_top_level_await(&unary.argument),
+        Expression::UpdateExpression(update) => match &update.argument {
+            SimpleAssignmentTarget::ComputedMemberExpression(expr) => {
+                expr_has_top_level_await(&expr.object) || expr_has_top_level_await(&expr.expression)
+            }
+            SimpleAssignmentTarget::StaticMemberExpression(expr) => {
+                expr_has_top_level_await(&expr.object)
+            }
+            SimpleAssignmentTarget::PrivateFieldExpression(expr) => {
+                expr_has_top_level_await(&expr.object)
+            }
+            _ => false,
+        },
         Expression::CallExpression(c) => {
-            expr_has_await(&c.callee)
+            expr_has_top_level_await(&c.callee)
                 || c.arguments.iter().any(|a| match a {
-                    Argument::SpreadElement(s) => expr_has_await(&s.argument),
-                    _ => {
-                        let e: &Expression<'_> = a.as_expression().unwrap();
-                        expr_has_await(e)
-                    }
+                    Argument::SpreadElement(s) => expr_has_top_level_await(&s.argument),
+                    _ => a.as_expression().is_some_and(expr_has_top_level_await),
                 })
         }
-        Expression::StaticMemberExpression(m) => expr_has_await(&m.object),
-        Expression::ComputedMemberExpression(m) => expr_has_await(&m.object),
-        Expression::SequenceExpression(s) => s.expressions.iter().any(expr_has_await),
-        Expression::ParenthesizedExpression(p) => expr_has_await(&p.expression),
-        Expression::ConditionalExpression(c) => {
-            expr_has_await(&c.test) || expr_has_await(&c.consequent) || expr_has_await(&c.alternate)
+        Expression::NewExpression(new) => {
+            expr_has_top_level_await(&new.callee)
+                || new.arguments.iter().any(|a| match a {
+                    Argument::SpreadElement(s) => expr_has_top_level_await(&s.argument),
+                    _ => a.as_expression().is_some_and(expr_has_top_level_await),
+                })
         }
+        Expression::StaticMemberExpression(m) => expr_has_top_level_await(&m.object),
+        Expression::ComputedMemberExpression(m) => {
+            expr_has_top_level_await(&m.object) || expr_has_top_level_await(&m.expression)
+        }
+        Expression::PrivateFieldExpression(expr) => expr_has_top_level_await(&expr.object),
+        Expression::ChainExpression(chain) => match &chain.expression {
+            oxc_ast::ast::ChainElement::CallExpression(call) => {
+                expr_has_top_level_await(&call.callee)
+                    || call.arguments.iter().any(|arg| match arg {
+                        Argument::SpreadElement(spread) => {
+                            expr_has_top_level_await(&spread.argument)
+                        }
+                        _ => arg.as_expression().is_some_and(expr_has_top_level_await),
+                    })
+            }
+            oxc_ast::ast::ChainElement::StaticMemberExpression(expr) => {
+                expr_has_top_level_await(&expr.object)
+            }
+            oxc_ast::ast::ChainElement::ComputedMemberExpression(expr) => {
+                expr_has_top_level_await(&expr.object) || expr_has_top_level_await(&expr.expression)
+            }
+            oxc_ast::ast::ChainElement::PrivateFieldExpression(expr) => {
+                expr_has_top_level_await(&expr.object)
+            }
+            oxc_ast::ast::ChainElement::TSNonNullExpression(expr) => {
+                expr_has_top_level_await(&expr.expression)
+            }
+        },
+        Expression::SequenceExpression(s) => s.expressions.iter().any(expr_has_top_level_await),
+        Expression::ParenthesizedExpression(p) => expr_has_top_level_await(&p.expression),
+        Expression::ConditionalExpression(c) => {
+            expr_has_top_level_await(&c.test)
+                || expr_has_top_level_await(&c.consequent)
+                || expr_has_top_level_await(&c.alternate)
+        }
+        Expression::ObjectExpression(obj) => obj.properties.iter().any(|prop| match prop {
+            oxc_ast::ast::ObjectPropertyKind::ObjectProperty(property) => {
+                property_key_has_top_level_await(&property.key)
+                    || expr_has_top_level_await(&property.value)
+            }
+            oxc_ast::ast::ObjectPropertyKind::SpreadProperty(spread) => {
+                expr_has_top_level_await(&spread.argument)
+            }
+        }),
+        Expression::ArrayExpression(arr) => arr
+            .elements
+            .iter()
+            .any(|elem| elem.as_expression().is_some_and(expr_has_top_level_await)),
+        Expression::TemplateLiteral(tmpl) => tmpl.expressions.iter().any(expr_has_top_level_await),
+        Expression::TaggedTemplateExpression(tagged) => {
+            expr_has_top_level_await(&tagged.tag)
+                || tagged
+                    .quasi
+                    .expressions
+                    .iter()
+                    .any(expr_has_top_level_await)
+        }
+        Expression::ImportExpression(import) => {
+            expr_has_top_level_await(&import.source)
+                || import
+                    .options
+                    .as_ref()
+                    .is_some_and(expr_has_top_level_await)
+        }
+        Expression::TSAsExpression(expr) => expr_has_top_level_await(&expr.expression),
+        Expression::TSSatisfiesExpression(expr) => expr_has_top_level_await(&expr.expression),
+        Expression::TSNonNullExpression(expr) => expr_has_top_level_await(&expr.expression),
+        Expression::TSTypeAssertion(expr) => expr_has_top_level_await(&expr.expression),
+        Expression::TSInstantiationExpression(expr) => expr_has_top_level_await(&expr.expression),
+        Expression::ClassExpression(class) => {
+            class
+                .super_class
+                .as_ref()
+                .is_some_and(expr_has_top_level_await)
+                || class_elements_have_top_level_await(&class.body.body)
+        }
+        Expression::FunctionExpression(_) | Expression::ArrowFunctionExpression(_) => false,
         _ => false,
     }
 }
@@ -2010,13 +4724,11 @@ fn compile_function_body_ext_tracked_with_private<'src>(
     source_mapper: Option<&SourceMapper>,
     current_function_span: Option<(u32, u32)>,
     private_field_slots: FxHashMap<String, u16>,
-) -> Option<BodyCompileResult> {
+) -> BodyCompileResult {
     let stmts: &[_] = match body {
         Some(fb) => fb.statements.as_slice(),
         None => {
-            let mut st = StringTable::default();
-            let bc = Insn::ReturnUndefined.encode(&mut st);
-            return Some(BodyCompileResult::new(bc, vec![], vec![], 0));
+            return BodyCompileResult::return_undefined();
         }
     };
     let mut cg = if let Some(src) = source {
@@ -2049,7 +4761,7 @@ fn compile_function_body_ext_tracked_with_private<'src>(
             break;
         }
     }
-    Some(cg.finish_with_line_ops_and_catches())
+    cg.finish_with_line_ops_and_catches()
 }
 
 fn is_hoisted_function_declaration(stmt: &Statement<'_>) -> bool {
@@ -2078,6 +4790,7 @@ fn compile_program_body_tracked(
     _is_module: bool,
     source: &str,
     source_mapper: Option<&SourceMapper>,
+    has_top_level_await: bool,
     runtime_ts_import_equals: &FxHashSet<(u32, u32)>,
 ) -> BodyCompileResult {
     compile_body_stmts_tracked(
@@ -2091,6 +4804,7 @@ fn compile_program_body_tracked(
         source_mapper,
         None,
         None,
+        has_top_level_await,
         runtime_ts_import_equals,
     )
 }
@@ -2119,6 +4833,58 @@ fn function_param_names(function: &oxc_ast::ast::Function<'_>) -> Vec<String> {
         .collect()
 }
 
+/// Internal slot key for an auto-accessor backing field.
+///
+/// Upstream `Transformer::ProcessAutoAccessorProperty` rewrites every
+/// `accessor` into a private `auto_accessor_storage` property. The exact source
+/// name is only used to assign a private slot inside this Rust lowering; the
+/// emitted ABC addresses private fields by slot.
+fn accessor_backing_field_name(accessor: &oxc_ast::ast::AccessorProperty<'_>) -> String {
+    format!(
+        "auto_accessor_storage_{}_{}",
+        accessor.span.start, accessor.span.end
+    )
+}
+
+fn auto_accessor_key_record_part(accessor: &oxc_ast::ast::AccessorProperty<'_>) -> String {
+    if accessor.computed {
+        return format!(
+            "computed_auto_accessor_{}_{}",
+            accessor.key.span().start,
+            accessor.key.span().end
+        );
+    }
+    match &accessor.key {
+        PropertyKey::StaticIdentifier(id) => id.name.as_str().to_string(),
+        PropertyKey::StringLiteral(s) => s.value.as_str().to_string(),
+        PropertyKey::NumericLiteral(n) => n
+            .raw
+            .as_ref()
+            .map(|raw| raw.as_str().to_string())
+            .unwrap_or_else(|| n.value.to_string()),
+        PropertyKey::BigIntLiteral(bigint) => bigint.value.as_str().to_string(),
+        PropertyKey::Identifier(id) => id.name.as_str().to_string(),
+        PropertyKey::PrivateIdentifier(id) => format!("#{}", id.name.as_str()),
+        _ => unreachable!("unsupported non-computed auto-accessor key"),
+    }
+}
+
+fn auto_accessor_getter_record_name(
+    class_name: &str,
+    accessor: &oxc_ast::ast::AccessorProperty<'_>,
+) -> String {
+    let key_part = auto_accessor_key_record_part(accessor);
+    format!("#{class_name}_get_{key_part}#")
+}
+
+fn auto_accessor_setter_record_name(
+    class_name: &str,
+    accessor: &oxc_ast::ast::AccessorProperty<'_>,
+) -> String {
+    let key_part = auto_accessor_key_record_part(accessor);
+    format!("#{class_name}_set_{key_part}#")
+}
+
 /// Build a private field name → slot map for a class.
 ///
 /// Private fields (#name) are assigned slots 0, 1, 2... in declaration order.
@@ -2126,20 +4892,7 @@ fn function_param_names(function: &oxc_ast::ast::Function<'_>) -> Vec<String> {
 /// (matching upstream `ClassScope::AddPrivateName`).
 /// Returns `(field_slots, field_count)` where `field_count` is the number of
 /// private *fields* (not methods).
-/// Synthesized backing-field name for an `accessor` property.
-/// Format: `__accessor_<key>_<span_start>` (the leading `#` is implicit).
-fn accessor_backing_field_name(accessor: &oxc_ast::ast::AccessorProperty<'_>) -> String {
-    let key_part = match &accessor.key {
-        PropertyKey::StaticIdentifier(id) => id.name.as_str().to_string(),
-        PropertyKey::StringLiteral(s) => s.value.as_str().to_string(),
-        _ => format!("computed_{}", accessor.span.start),
-    };
-    format!("__accessor_{key_part}_{}", accessor.span.start)
-}
-
-fn collect_class_private_slots(
-    elements: &[ClassElement<'_>],
-) -> (FxHashMap<String, u16>, u16) {
+fn collect_class_private_slots(elements: &[ClassElement<'_>]) -> (FxHashMap<String, u16>, u16) {
     let mut slots: FxHashMap<String, u16> = FxHashMap::default();
     let mut slot = 0u16;
     // Private fields first.
@@ -2147,11 +4900,13 @@ fn collect_class_private_slots(
         match element {
             ClassElement::PropertyDefinition(prop) => {
                 if let PropertyKey::PrivateIdentifier(id) = &prop.key {
-                    slots.entry(id.name.as_str().to_string()).or_insert_with(|| {
-                        let s = slot;
-                        slot += 1;
-                        s
-                    });
+                    slots
+                        .entry(id.name.as_str().to_string())
+                        .or_insert_with(|| {
+                            let s = slot;
+                            slot += 1;
+                            s
+                        });
                 }
             }
             ClassElement::AccessorProperty(accessor) => {
@@ -2173,11 +4928,13 @@ fn collect_class_private_slots(
             continue;
         };
         if let PropertyKey::PrivateIdentifier(id) = &method.key {
-            slots.entry(id.name.as_str().to_string()).or_insert_with(|| {
-                let s = slot;
-                slot += 1;
-                s
-            });
+            slots
+                .entry(id.name.as_str().to_string())
+                .or_insert_with(|| {
+                    let s = slot;
+                    slot += 1;
+                    s
+                });
         }
     }
     (slots, field_count)
@@ -2206,9 +4963,29 @@ fn function_rest_param(function: &oxc_ast::ast::Function<'_>) -> Option<(String,
     })
 }
 
-fn reject_unsupported_constructs(program: &Program<'_>, record_name: &str) -> Result<(), AbcError> {
+const ANNOTATION_SUPPORTED_API_VERSION: u32 = 20;
+const ANNOTATION_PREFIX: &str = "__$$ETS_ANNOTATION$$__";
+const ANNOTATION_NOT_ENABLED_MESSAGE: &str = concat!(
+    "Current configuration does not support using annotations. ",
+    "Annotations can be used in the version of API 20 or higher versions.\n",
+    "Solutions: > Check the compatibleSdkVersion in build-profile.json5.",
+    "> If compatibleSdkVersion is set to API 20 or higher version.",
+    "> If you're running es2abc in commandline without IDE, please check whether target-api-version and ",
+    "enable-annotations options are correctly configured."
+);
+
+fn reject_unsupported_constructs(
+    program: &Program<'_>,
+    record_name: &str,
+    target_api_version: u32,
+    enable_annotations: bool,
+) -> Result<(), AbcError> {
     let body = statement_scan_body(program, true);
-    let mut scanner = UnsupportedScanner { record_name };
+    let mut scanner = UnsupportedScanner {
+        record_name,
+        target_api_version,
+        enable_annotations,
+    };
     scanner.scan_statements(body)
 }
 
@@ -2299,6 +5076,8 @@ fn collect_runtime_ts_import_equals_decl(
 
 struct UnsupportedScanner<'a> {
     record_name: &'a str,
+    target_api_version: u32,
+    enable_annotations: bool,
 }
 
 impl UnsupportedScanner<'_> {
@@ -2307,6 +5086,32 @@ impl UnsupportedScanner<'_> {
             construct: construct.to_string(),
             file: self.record_name.to_string(),
         }
+    }
+
+    fn parse_error(&self, message: impl Into<String>) -> AbcError {
+        AbcError::Parse {
+            file: self.record_name.to_string(),
+            message: message.into(),
+        }
+    }
+
+    fn annotations_enabled(&self) -> bool {
+        self.enable_annotations && self.target_api_version >= ANNOTATION_SUPPORTED_API_VERSION
+    }
+
+    fn scan_annotation_declaration(
+        &self,
+        decl: &AnnotationDeclaration<'_>,
+    ) -> Result<(), AbcError> {
+        if !self.annotations_enabled() {
+            return Err(self.parse_error(ANNOTATION_NOT_ENABLED_MESSAGE));
+        }
+        if !decl.id.name.as_str().starts_with(ANNOTATION_PREFIX) {
+            return Err(self.parse_error(format!(
+                "Annotation declaration need to be prefixed with '{ANNOTATION_PREFIX}'"
+            )));
+        }
+        Ok(())
     }
 
     fn scan_statements(&mut self, statements: &[Statement<'_>]) -> Result<(), AbcError> {
@@ -2464,9 +5269,7 @@ impl UnsupportedScanner<'_> {
                 self.scan_ts_import_equals_declaration(decl)
             }
             Statement::StructStatement(_) => Err(self.unsupported("StructStatement")),
-            // AnnotationDeclaration is metadata-only; no runtime bytecode is emitted.
-            // These are erased at the ETS transform stage but may survive to the ABC pass.
-            Statement::AnnotationDeclaration(_) => Ok(()),
+            Statement::AnnotationDeclaration(decl) => self.scan_annotation_declaration(decl),
             Statement::LazyImportDeclaration(_) => Err(self.unsupported("LazyImportDeclaration")),
         }
     }
@@ -2493,8 +5296,7 @@ impl UnsupportedScanner<'_> {
                 self.scan_ts_import_equals_declaration(decl)
             }
             Declaration::StructStatement(_) => Err(self.unsupported("StructStatement")),
-            // AnnotationDeclaration is metadata-only; no runtime bytecode is emitted.
-            Declaration::AnnotationDeclaration(_) => Ok(()),
+            Declaration::AnnotationDeclaration(decl) => self.scan_annotation_declaration(decl),
         }
     }
 
@@ -2793,25 +5595,9 @@ impl UnsupportedScanner<'_> {
                 // Scan the object; the private name (#name) is a class-scope identifier.
                 self.scan_expression(&expr.object)
             }
-            AssignmentTarget::ArrayAssignmentTarget(arr) => {
-                // Array assignment destructuring — recurse into elements and rest.
-                for element in arr.elements.iter().flatten() {
-                    self.scan_assignment_target_maybe_default(element)?;
-                }
-                if let Some(rest) = &arr.rest {
-                    self.scan_assignment_target(&rest.target)?;
-                }
-                Ok(())
-            }
+            AssignmentTarget::ArrayAssignmentTarget(arr) => self.scan_array_assignment_target(arr),
             AssignmentTarget::ObjectAssignmentTarget(obj) => {
-                // Object assignment destructuring — recurse into properties and rest.
-                for prop in &obj.properties {
-                    self.scan_assignment_target_property(prop)?;
-                }
-                if let Some(rest) = &obj.rest {
-                    self.scan_assignment_target(&rest.target)?;
-                }
-                Ok(())
+                self.scan_object_assignment_target(obj)
             }
             AssignmentTarget::TSAsExpression(expr) => self.scan_expression(&expr.expression),
             AssignmentTarget::TSSatisfiesExpression(expr) => self.scan_expression(&expr.expression),
@@ -2824,6 +5610,32 @@ impl UnsupportedScanner<'_> {
             AssignmentTarget::StaticMemberExpression(expr) => self.scan_expression(&expr.object),
             _ => Ok(()),
         }
+    }
+
+    fn scan_array_assignment_target(
+        &mut self,
+        arr: &ArrayAssignmentTarget<'_>,
+    ) -> Result<(), AbcError> {
+        for element in arr.elements.iter().flatten() {
+            self.scan_assignment_target_maybe_default(element)?;
+        }
+        if let Some(rest) = &arr.rest {
+            self.scan_assignment_target(&rest.target)?;
+        }
+        Ok(())
+    }
+
+    fn scan_object_assignment_target(
+        &mut self,
+        obj: &ObjectAssignmentTarget<'_>,
+    ) -> Result<(), AbcError> {
+        for prop in &obj.properties {
+            self.scan_assignment_target_property(prop)?;
+        }
+        if let Some(rest) = &obj.rest {
+            self.scan_assignment_target(&rest.target)?;
+        }
+        Ok(())
     }
 
     fn scan_assignment_target_maybe_default(
@@ -2892,9 +5704,9 @@ impl UnsupportedScanner<'_> {
                 // Private field on for-left — scan the object expression.
                 self.scan_expression(&expr.object)
             }
-            ForStatementLeft::ArrayAssignmentTarget(_)
-            | ForStatementLeft::ObjectAssignmentTarget(_) => {
-                Err(self.unsupported("DestructuringAssignment"))
+            ForStatementLeft::ArrayAssignmentTarget(arr) => self.scan_array_assignment_target(arr),
+            ForStatementLeft::ObjectAssignmentTarget(obj) => {
+                self.scan_object_assignment_target(obj)
             }
             ForStatementLeft::ComputedMemberExpression(expr) => {
                 self.scan_expression(&expr.object)?;
@@ -2912,11 +5724,12 @@ impl UnsupportedScanner<'_> {
             PropertyKey::PrivateFieldExpression(_) => {
                 Err(self.unsupported("PrivateFieldExpression"))
             }
-            PropertyKey::ComputedMemberExpression(expr) => {
-                self.scan_expression(&expr.object)?;
-                self.scan_expression(&expr.expression)
+            key => {
+                if let Some(expr) = scanable_property_key_expression(key) {
+                    self.scan_expression(expr)?;
+                }
+                Ok(())
             }
-            _ => Ok(()),
         }
     }
 
@@ -2944,7 +5757,8 @@ impl UnsupportedScanner<'_> {
                     // Allow private identifier keys (#name) and computed keys;
                     // only reject other non-string keys.
                     let is_private = matches!(&property.key, PropertyKey::PrivateIdentifier(_));
-                    if !is_private && !property.computed && method_key_name(&property.key).is_none() {
+                    if !is_private && !property.computed && method_key_name(&property.key).is_none()
+                    {
                         return Err(self.unsupported("UnsupportedClassFieldKey"));
                     }
                     if let Some(value) = &property.value {
@@ -2953,6 +5767,19 @@ impl UnsupportedScanner<'_> {
                 }
                 ClassElement::AccessorProperty(accessor) => {
                     // auto-accessor is lowered to private backing field + getter/setter.
+                    self.scan_property_key(&accessor.key)?;
+                    let supported_static_key = matches!(
+                        &accessor.key,
+                        PropertyKey::StaticIdentifier(_)
+                            | PropertyKey::StringLiteral(_)
+                            | PropertyKey::NumericLiteral(_)
+                            | PropertyKey::BigIntLiteral(_)
+                            | PropertyKey::Identifier(_)
+                            | PropertyKey::PrivateIdentifier(_)
+                    );
+                    if !accessor.computed && !supported_static_key {
+                        return Err(self.unsupported("UnsupportedAutoAccessorKey"));
+                    }
                     if let Some(value) = &accessor.value {
                         self.scan_expression(value)?;
                     }
@@ -2969,9 +5796,20 @@ impl UnsupportedScanner<'_> {
 
 struct BodyCompileResult {
     bytecode: Vec<u8>,
+    pandasm_insns: Vec<Insn>,
+    pandasm_debug: Vec<InstructionDebugInfo>,
     line_ops: Vec<u8>,
     catches: Vec<CatchEntry>,
+    program_labels: Vec<ProgramLabel>,
     vregs: u16,
+    debug_line_start: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum JumpKind {
+    Jmp,
+    Jeqz,
+    Jnez,
 }
 
 #[derive(Clone, Copy)]
@@ -2985,25 +5823,64 @@ impl BodyCompileResult {
     fn new(bytecode: Vec<u8>, line_ops: Vec<u8>, catches: Vec<CatchEntry>, vregs: u16) -> Self {
         Self {
             bytecode,
+            pandasm_insns: Vec::new(),
+            pandasm_debug: Vec::new(),
             line_ops,
             catches,
+            program_labels: Vec::new(),
             vregs,
+            debug_line_start: None,
         }
     }
 
-    fn empty() -> Self {
-        Self::new(Vec::new(), Vec::new(), Vec::new(), 0)
+    fn from_static_insns(
+        pandasm_insns: Vec<Insn>,
+        line_ops: Vec<u8>,
+        catches: Vec<CatchEntry>,
+        vregs: u16,
+    ) -> Self {
+        let mut strings = StringTable::default();
+        let bytecode = pandasm_insns
+            .iter()
+            .flat_map(|insn| insn.encode(&mut strings))
+            .collect();
+        Self::new(bytecode, line_ops, catches, vregs).with_pandasm_insns(pandasm_insns)
+    }
+
+    fn return_undefined() -> Self {
+        Self::from_static_insns(vec![Insn::ReturnUndefined], Vec::new(), Vec::new(), 0)
+    }
+
+    fn with_pandasm_insns(mut self, pandasm_insns: Vec<Insn>) -> Self {
+        self.pandasm_insns = pandasm_insns;
+        self
+    }
+
+    fn with_pandasm_debug(mut self, pandasm_debug: Vec<InstructionDebugInfo>) -> Self {
+        self.pandasm_debug = pandasm_debug;
+        self
+    }
+
+    fn with_program_labels(mut self, program_labels: Vec<ProgramLabel>) -> Self {
+        self.program_labels = program_labels;
+        self
+    }
+
+    fn with_debug_line_start(mut self, debug_line_start: Option<u32>) -> Self {
+        self.debug_line_start = debug_line_start;
+        self
     }
 }
 
-fn function_arg_placeholder(arg_index: u16) -> u8 {
-    let max_index = (ARG_PLACEHOLDER_LIMIT - 1) as u16;
+fn function_arg_register(arg_index: u16) -> u8 {
+    let max_index = (ARG_SENTINEL_LIMIT - 1) as u16;
     let bounded = arg_index.min(max_index);
-    ARG_PLACEHOLDER_BASE + bounded as u8
+    ARG_SENTINEL_BASE + bounded as u8
 }
 
 fn physicalize_argument_registers(
     bytecode: &mut [u8],
+    pandasm_insns: &mut [Insn],
     register_operand_offsets: &[usize],
     num_vregs: u16,
 ) {
@@ -3011,20 +5888,103 @@ fn physicalize_argument_registers(
         let Some(byte) = bytecode.get_mut(offset) else {
             continue;
         };
-        if *byte < ARG_PLACEHOLDER_BASE {
+        if *byte < ARG_SENTINEL_BASE {
             continue;
         }
-        let arg_index = (*byte - ARG_PLACEHOLDER_BASE) as u16;
+        let arg_index = (*byte - ARG_SENTINEL_BASE) as u16;
         let physical = num_vregs + arg_index;
         if let Ok(reg) = u8::try_from(physical) {
             *byte = reg;
         }
     }
+
+    for insn in pandasm_insns {
+        insn.physicalize_argument_registers(num_vregs);
+    }
+}
+
+fn instruction_offsets(insns: &[Insn]) -> Vec<usize> {
+    let mut offsets = Vec::with_capacity(insns.len());
+    let mut offset = 0usize;
+    for insn in insns {
+        offsets.push(offset);
+        offset += insn.byte_len();
+    }
+    offsets
+}
+
+fn instruction_stream_len(insns: &[Insn]) -> usize {
+    insns.iter().map(Insn::byte_len).sum()
+}
+
+fn jump_target(offset: usize, insn: &Insn) -> Option<(JumpKind, usize)> {
+    let (kind, rel) = match insn {
+        Insn::JmpShort(value) => (JumpKind::Jmp, *value as i32),
+        Insn::Jmp(value) => (JumpKind::Jmp, *value as i32),
+        Insn::JmpWide(value) => (JumpKind::Jmp, *value),
+        Insn::JeqzShort(value) => (JumpKind::Jeqz, *value as i32),
+        Insn::Jeqz(value) => (JumpKind::Jeqz, *value as i32),
+        Insn::JeqzWide(value) => (JumpKind::Jeqz, *value),
+        Insn::JnezShort(value) => (JumpKind::Jnez, *value as i32),
+        Insn::Jnez(value) => (JumpKind::Jnez, *value as i32),
+        Insn::JnezWide(value) => (JumpKind::Jnez, *value),
+        _ => return None,
+    };
+    let target = offset as i64 + rel as i64;
+    Some((kind, target as usize))
+}
+
+fn translate_offset(
+    original: usize,
+    original_offsets: &[usize],
+    offsets: &[usize],
+    original_end: usize,
+    end: usize,
+) -> usize {
+    if original == original_end {
+        return end;
+    }
+    let index = original_offsets
+        .iter()
+        .position(|offset| *offset == original)
+        .expect("branch/catch target must point at an instruction boundary");
+    offsets[index]
+}
+
+fn jump_insn(kind: JumpKind, rel: i64) -> Insn {
+    let rel_i32 = i32::try_from(rel).expect("jump offset must fit i32");
+    match kind {
+        JumpKind::Jmp if i8::try_from(rel_i32).is_ok() => Insn::JmpShort(rel_i32 as i8),
+        JumpKind::Jmp if i16::try_from(rel_i32).is_ok() => Insn::Jmp(rel_i32 as i16),
+        JumpKind::Jmp => Insn::JmpWide(rel_i32),
+        JumpKind::Jeqz if i8::try_from(rel_i32).is_ok() => Insn::JeqzShort(rel_i32 as i8),
+        JumpKind::Jeqz if i16::try_from(rel_i32).is_ok() => Insn::Jeqz(rel_i32 as i16),
+        JumpKind::Jeqz => Insn::JeqzWide(rel_i32),
+        JumpKind::Jnez if i8::try_from(rel_i32).is_ok() => Insn::JnezShort(rel_i32 as i8),
+        JumpKind::Jnez if i16::try_from(rel_i32).is_ok() => Insn::Jnez(rel_i32 as i16),
+        JumpKind::Jnez => Insn::JnezWide(rel_i32),
+    }
+}
+
+fn line_ops_from_instruction_debug(insns: &[Insn], debug: &[InstructionDebugInfo]) -> Vec<u8> {
+    if debug.is_empty() {
+        return Vec::new();
+    }
+    let mut tracker = LineTracker::new(u32::MAX);
+    for (insn, debug) in insns.iter().zip(debug) {
+        tracker.advance_with_col(
+            debug.line_number,
+            debug.column_number,
+            insn.byte_len() as u32,
+        );
+    }
+    tracker.finish()
 }
 
 struct ClassFieldInit<'a> {
     key: ClassFieldKey<'a>,
     value: Option<&'a Expression<'a>>,
+    span_start: u32,
 }
 
 /// A private instance field initializer: `#name = value`.
@@ -3033,6 +5993,7 @@ struct ClassPrivateFieldInit<'a> {
     slot: u16,
     /// The optional initializer expression (None → `undefined`).
     value: Option<&'a Expression<'a>>,
+    span_start: u32,
 }
 
 enum ClassFieldKey<'a> {
@@ -3050,6 +6011,7 @@ enum ClassFieldRuntimeKey {
 
 struct ClassComputedKeys {
     method_regs: Vec<u8>,
+    auto_accessor_regs: Vec<u8>,
     static_field_regs: Vec<u8>,
 }
 
@@ -3060,6 +6022,13 @@ struct CodeGen<'a> {
     lowering: &'a LoweringContext,
     /// Raw bytecode bytes accumulated so far.
     insns: Vec<u8>,
+    /// Structured pandasm instructions in the same order as `insns`.
+    pandasm_insns: Vec<Insn>,
+    /// Per-pandasm-instruction source positions in the same order as
+    /// `pandasm_insns`.
+    pandasm_debug: Vec<InstructionDebugInfo>,
+    /// Byte offset of each entry in `pandasm_insns`.
+    pandasm_insn_offsets: Vec<usize>,
     /// Encoded byte offsets whose bytes are vreg operands.
     register_operand_offsets: Vec<usize>,
     /// Maps JS binding name → virtual register number.
@@ -3073,22 +6042,28 @@ struct CodeGen<'a> {
     returned: bool,
     arrow_captures: ArrowCaptures,
     derived_constructor: bool,
+    derived_new_this_reg: Option<u8>,
     /// Original source text used for line-number computation, or `None` when
     /// debug line tracking is disabled for this compilation unit.
     source: Option<&'a str>,
     source_mapper: Option<&'a SourceMapper>,
     /// Line number program accumulator.  Present only when `source` is `Some`.
     line_tracker: Option<LineTracker>,
+    /// Whether `debugger;` statements lower to Panda Debugger instructions.
+    emit_debugger: bool,
     /// Current source line number for the instruction being emitted.
     current_line: u32,
     /// Current source column number (0-based) for the instruction being emitted.
     current_col: u32,
+    suppress_next_expr_debug_pos: bool,
     function_end: Option<u32>,
     break_patches: Vec<usize>,
     continue_patches: Vec<usize>,
     label_stack: Vec<LabelContext>,
     catch_entries: Vec<CatchEntry>,
-    #[allow(dead_code)]
+    program_labels: Vec<ProgramLabel>,
+    program_label_names: FxHashMap<usize, String>,
+    next_program_label: usize,
     is_generator: bool,
     gen_reg: Option<u8>,
     is_async: bool,
@@ -3125,6 +6100,9 @@ impl<'a> CodeGen<'a> {
             literal_arrays,
             lowering,
             insns: Vec::new(),
+            pandasm_insns: Vec::new(),
+            pandasm_debug: Vec::new(),
+            pandasm_insn_offsets: Vec::new(),
             register_operand_offsets: Vec::new(),
             var_regs: FxHashMap::default(),
             next_reg: 0,
@@ -3132,16 +6110,22 @@ impl<'a> CodeGen<'a> {
             returned: false,
             arrow_captures: ArrowCaptures::default(),
             derived_constructor: false,
+            derived_new_this_reg: None,
             source: None,
             source_mapper: None,
             line_tracker: None,
+            emit_debugger: false,
             current_line: 1,
             current_col: 0,
+            suppress_next_expr_debug_pos: false,
             function_end: None,
             break_patches: Vec::new(),
             continue_patches: Vec::new(),
             label_stack: Vec::new(),
             catch_entries: Vec::new(),
+            program_labels: Vec::new(),
+            program_label_names: FxHashMap::default(),
+            next_program_label: 0,
             is_generator: false,
             gen_reg: None,
             is_async: false,
@@ -3174,18 +6158,9 @@ impl<'a> CodeGen<'a> {
         gen.source = Some(source);
         gen.source_mapper = source_mapper;
         gen.line_tracker = Some(LineTracker::new(u32::MAX));
-        gen
-    }
-
-    #[allow(dead_code)]
-    fn new_arrow(
-        strings: &'a mut StringTable,
-        literal_arrays: &'a mut Vec<LiteralArray>,
-        lowering: &'a LoweringContext,
-        arrow_captures: ArrowCaptures,
-    ) -> Self {
-        let mut gen = Self::new(strings, literal_arrays, lowering);
-        gen.arrow_captures = arrow_captures;
+        gen.emit_debugger = gen.lowering.emit_debugger();
+        gen.current_line = u32::MAX;
+        gen.current_col = 0;
         gen
     }
 
@@ -3203,6 +6178,9 @@ impl<'a> CodeGen<'a> {
             gen.source = Some(src);
             gen.source_mapper = source_mapper;
             gen.line_tracker = Some(LineTracker::new(u32::MAX));
+            gen.emit_debugger = gen.lowering.emit_debugger();
+            gen.current_line = u32::MAX;
+            gen.current_col = 0;
         }
         gen
     }
@@ -3263,9 +6241,7 @@ impl<'a> CodeGen<'a> {
         if self.current_lexical_names.is_empty() {
             return;
         }
-        let tracker = self.line_tracker.take();
         self.push(Insn::NewLexEnv(self.current_lexical_names.len() as u8));
-        self.line_tracker = tracker;
         let reserves_class_binding = self.current_lexical_names.iter().any(|name| {
             name.chars().next().is_some_and(char::is_uppercase)
                 && name.chars().any(char::is_lowercase)
@@ -3277,9 +6253,10 @@ impl<'a> CodeGen<'a> {
         if self.current_lexical_names.is_empty() {
             return;
         }
-        let tracker = self.line_tracker.take();
         self.push(Insn::NewLexEnv(self.current_lexical_names.len() as u8));
-        self.line_tracker = tracker;
+        if self.lowering.standalone_ecmascript_input() {
+            return;
+        }
         for slot in 0..self.current_lexical_names.len() {
             self.push(Insn::LdUndefined);
             self.push(Insn::StLexVar(0, slot as u8));
@@ -3380,7 +6357,7 @@ impl<'a> CodeGen<'a> {
             if self.var_regs.contains_key(name) {
                 continue;
             }
-            let reg = function_arg_placeholder(3 + idx as u16);
+            let reg = function_arg_register(3 + idx as u16);
             self.var_regs.insert(name.clone(), reg);
             if let Some(slot) = self.current_lexical_slot(name) {
                 self.push(Insn::Lda(reg));
@@ -3423,10 +6400,13 @@ impl<'a> CodeGen<'a> {
                 self.push(Insn::Sta(param_reg));
             } else if let Some(value) = negative_integer_literal(initializer) {
                 let init_start = initializer.span().start;
-                let literal_start = initializer
-                    .span()
-                    .source_text(self.source.unwrap_or_default())
-                    .strip_prefix('-')
+                let literal_start = self
+                    .source
+                    .and_then(|source| {
+                        let span = initializer.span();
+                        (span.end as usize <= source.len()).then(|| span.source_text(source))
+                    })
+                    .and_then(|text| text.strip_prefix('-'))
                     .map(|_| init_start.saturating_add(1))
                     .unwrap_or(init_start);
                 self.set_debug_pos(literal_start);
@@ -3463,12 +6443,12 @@ impl<'a> CodeGen<'a> {
                 }
                 BindingPattern::ArrayPattern(_) | BindingPattern::ObjectPattern(_) => {
                     // Destructuring parameter: the value comes in via the argument register.
-                    let param_reg = function_arg_placeholder(3 + idx as u16);
+                    let param_reg = function_arg_register(3 + idx as u16);
                     self.emit_destructure_binding(pattern, param_reg);
                 }
                 BindingPattern::AssignmentPattern(assign) => {
                     // Pattern with default in parameter position (e.g. `f([a] = [])`).
-                    let param_reg = function_arg_placeholder(3 + idx as u16);
+                    let param_reg = function_arg_register(3 + idx as u16);
                     self.emit_destructure_binding(pattern, param_reg);
                     let _ = assign; // inner default value handled by emit_destructure_binding
                 }
@@ -3492,7 +6472,15 @@ impl<'a> CodeGen<'a> {
         if let Some(tracker) = self.line_tracker.as_mut() {
             tracker.advance_with_col(self.current_line, self.current_col, insn_size);
         }
+        if self.source.is_some() {
+            self.pandasm_debug.push(InstructionDebugInfo {
+                line_number: self.current_line,
+                column_number: self.current_col,
+            });
+        }
         self.insns.extend_from_slice(&bytes);
+        self.pandasm_insn_offsets.push(start);
+        self.pandasm_insns.push(insn);
     }
 
     /// Push the final return instruction, emitting SC(RESET) epilogue marker first.
@@ -3502,8 +6490,10 @@ impl<'a> CodeGen<'a> {
     fn push_with_epilogue(&mut self, insn: Insn) {
         // Emit SC(RESET=0xFFFFFFFF) to mark the epilogue start.
         // This matches the golden binary pattern: ...SC(R) PC(1)...
-        if let Some(tracker) = self.line_tracker.as_mut() {
-            tracker.emit_epilogue_column_reset();
+        if !self.lowering.standalone_ecmascript_input() {
+            if let Some(tracker) = self.line_tracker.as_mut() {
+                tracker.emit_epilogue_column_reset();
+            }
         }
         self.push(insn);
     }
@@ -3515,14 +6505,32 @@ impl<'a> CodeGen<'a> {
                 .and_then(|mapper| mapper.map_offset(source, offset))
                 .unwrap_or_else(|| (line_at(source, offset), col_at(source, offset)));
             self.current_line = line;
-            self.current_col = col;
+            self.current_col = if self.lowering.standalone_ecmascript_input() {
+                0
+            } else {
+                col
+            };
+        }
+    }
+
+    fn reset_line_tracker_start(&mut self, offset: u32) {
+        if let Some(source) = self.source {
+            let line = self
+                .source_mapper
+                .and_then(|mapper| mapper.map_offset(source, offset))
+                .map_or_else(|| line_at(source, offset), |(line, _)| line);
+            self.current_line = line;
+            self.current_col = 0;
+            if self.line_tracker.is_some() {
+                self.line_tracker = Some(LineTracker::new(line));
+            }
         }
     }
 
     /// Allocate the next virtual register (capped at 254 to leave one spare).
     fn alloc_reg(&mut self) -> u8 {
         let r = self.next_reg;
-        if self.next_reg < ARG_PLACEHOLDER_BASE - 1 {
+        if self.next_reg < ARG_SENTINEL_BASE - 1 {
             self.next_reg += 1;
         }
         self.note_current_reg_count();
@@ -3560,8 +6568,17 @@ impl<'a> CodeGen<'a> {
         }
         self.emit_async_cleanup();
         let vregs = self.vreg_count();
-        physicalize_argument_registers(&mut self.insns, &self.register_operand_offsets, vregs);
+        physicalize_argument_registers(
+            &mut self.insns,
+            &mut self.pandasm_insns,
+            &self.register_operand_offsets,
+            vregs,
+        );
+        self.finalize_pandasm_layout();
         BodyCompileResult::new(self.insns, Vec::new(), self.catch_entries, vregs)
+            .with_pandasm_insns(self.pandasm_insns)
+            .with_pandasm_debug(self.pandasm_debug)
+            .with_program_labels(self.program_labels)
     }
 
     fn finish_with_line_ops_and_catches(mut self) -> BodyCompileResult {
@@ -3576,14 +6593,22 @@ impl<'a> CodeGen<'a> {
                     self.push_with_epilogue(Insn::Return);
                 }
             } else if self.module_body && self.source.is_some() {
-                self.current_line = u32::MAX;
-                self.current_col = u32::MAX;
-                self.push(Insn::LdUndefined);
+                if self.lowering.standalone_ecmascript_input() {
+                    self.current_line = u32::MAX;
+                } else {
+                    self.current_line = u32::MAX;
+                    self.current_col = u32::MAX;
+                }
+                if !self.lowering.standalone_ecmascript_input() {
+                    self.push(Insn::LdUndefined);
+                }
                 self.push(Insn::ReturnUndefined);
             } else if let Some(end) = self.function_end {
                 self.current_line = u32::MAX;
                 self.current_col = u32::MAX;
-                self.push(Insn::LdUndefined);
+                if !self.lowering.standalone_ecmascript_input() {
+                    self.push(Insn::LdUndefined);
+                }
                 self.set_debug_pos(end);
                 self.push(Insn::ReturnUndefined);
             } else {
@@ -3593,9 +6618,136 @@ impl<'a> CodeGen<'a> {
         }
         self.emit_async_cleanup();
         let vregs = self.vreg_count();
-        physicalize_argument_registers(&mut self.insns, &self.register_operand_offsets, vregs);
-        let line_ops = self.line_tracker.map(|t| t.finish()).unwrap_or_default();
+        physicalize_argument_registers(
+            &mut self.insns,
+            &mut self.pandasm_insns,
+            &self.register_operand_offsets,
+            vregs,
+        );
+        let debug_line_start = self.line_tracker.as_ref().map(LineTracker::start_line);
+        let layout_changed = self.finalize_pandasm_layout();
+        let original_line_ops = self
+            .line_tracker
+            .map(LineTracker::finish)
+            .unwrap_or_default();
+        let line_ops = if layout_changed && !self.pandasm_debug.is_empty() {
+            line_ops_from_instruction_debug(&self.pandasm_insns, &self.pandasm_debug)
+        } else {
+            original_line_ops
+        };
         BodyCompileResult::new(self.insns, line_ops, self.catch_entries, vregs)
+            .with_pandasm_insns(self.pandasm_insns)
+            .with_pandasm_debug(self.pandasm_debug)
+            .with_program_labels(self.program_labels)
+            .with_debug_line_start(debug_line_start)
+    }
+
+    fn finalize_pandasm_layout(&mut self) -> bool {
+        if self.pandasm_insns.is_empty() {
+            return false;
+        }
+
+        let original_offsets = instruction_offsets(&self.pandasm_insns);
+        let original_end = instruction_stream_len(&self.pandasm_insns);
+        let original_lens = self
+            .pandasm_insns
+            .iter()
+            .map(Insn::byte_len)
+            .collect::<Vec<_>>();
+        let jump_targets = self
+            .pandasm_insns
+            .iter()
+            .enumerate()
+            .map(|(index, insn)| jump_target(original_offsets[index], insn))
+            .collect::<Vec<_>>();
+
+        for _ in 0..8 {
+            let offsets = instruction_offsets(&self.pandasm_insns);
+            let end = instruction_stream_len(&self.pandasm_insns);
+            let old_lens = self
+                .pandasm_insns
+                .iter()
+                .map(Insn::byte_len)
+                .collect::<Vec<_>>();
+
+            for (index, target) in jump_targets.iter().enumerate() {
+                let Some((kind, original_target)) = target else {
+                    continue;
+                };
+                let target = translate_offset(
+                    *original_target,
+                    &original_offsets,
+                    &offsets,
+                    original_end,
+                    end,
+                );
+                let rel = target as i64 - offsets[index] as i64;
+                self.pandasm_insns[index] = jump_insn(*kind, rel);
+            }
+
+            let new_lens = self
+                .pandasm_insns
+                .iter()
+                .map(Insn::byte_len)
+                .collect::<Vec<_>>();
+            if old_lens == new_lens {
+                break;
+            }
+        }
+
+        let offsets = instruction_offsets(&self.pandasm_insns);
+        let end = instruction_stream_len(&self.pandasm_insns);
+        for catch in &mut self.catch_entries {
+            catch.try_begin = translate_offset(
+                catch.try_begin as usize,
+                &original_offsets,
+                &offsets,
+                original_end,
+                end,
+            ) as u32;
+            catch.try_end = translate_offset(
+                catch.try_end as usize,
+                &original_offsets,
+                &offsets,
+                original_end,
+                end,
+            ) as u32;
+            catch.catch_begin = translate_offset(
+                catch.catch_begin as usize,
+                &original_offsets,
+                &offsets,
+                original_end,
+                end,
+            ) as u32;
+            catch.catch_end = translate_offset(
+                catch.catch_end as usize,
+                &original_offsets,
+                &offsets,
+                original_end,
+                end,
+            ) as u32;
+        }
+        for label in &mut self.program_labels {
+            label.offset = translate_offset(
+                label.offset as usize,
+                &original_offsets,
+                &offsets,
+                original_end,
+                end,
+            ) as u32;
+        }
+        self.rebuild_program_label_index();
+
+        self.insns.clear();
+        for insn in &self.pandasm_insns {
+            self.insns.extend(insn.encode(self.strings));
+        }
+        original_lens
+            != self
+                .pandasm_insns
+                .iter()
+                .map(Insn::byte_len)
+                .collect::<Vec<_>>()
     }
 
     // ── Statement dispatcher ──────────────────────────────────────────────────
@@ -3628,12 +6780,18 @@ impl<'a> CodeGen<'a> {
                 self.next_reg = saved_next_reg;
             }
             Statement::DebuggerStatement(_) => {
-                if self.line_tracker.is_some() {
+                if self.emit_debugger {
                     self.push(Insn::Debugger);
                 }
             }
             Statement::ReturnStatement(ret) => {
                 if let Some(arg) = &ret.argument {
+                    if self.lowering.standalone_ecmascript_input() {
+                        if let Some(end) = self.function_end {
+                            self.set_debug_pos(end);
+                            self.suppress_next_expr_debug_pos = true;
+                        }
+                    }
                     self.emit_expr(arg);
                     self.emit_control_flow_exit(true);
                     if self.returned {
@@ -3681,6 +6839,16 @@ impl<'a> CodeGen<'a> {
                 }
                 let super_class = cls.super_class.as_ref();
                 let class_name = cls.id.as_ref().map(|id| id.name.as_str());
+                if self.lowering.standalone_ecmascript_input() {
+                    if let Some(class_name) = class_name {
+                        if self.emit_standalone_class_with_instance_initializer(class_name, cls) {
+                            return;
+                        }
+                        if self.emit_simple_standalone_class_declaration(class_name, cls) {
+                            return;
+                        }
+                    }
+                }
                 if let Some(id) = &cls.id {
                     let name = id.name.as_str().to_string();
                     if let Some(export_index) = self.lowering.export_index(&name) {
@@ -3703,6 +6871,7 @@ impl<'a> CodeGen<'a> {
                         self.literal_arrays.push(class_buffer_literal_array(
                             class_name.unwrap_or(&name),
                             &cls.body.body,
+                            self.lowering.standalone_ecmascript_input(),
                         ));
                         let formal_count = constructor_required_param_count(&cls.body.body);
                         self.set_debug_pos(cls.body.span.start);
@@ -3723,6 +6892,7 @@ impl<'a> CodeGen<'a> {
                             class_reg,
                             cls.body.span.start,
                             &computed_keys.method_regs,
+                            &computed_keys.auto_accessor_regs,
                         );
                         self.emit_class_static_initializer(
                             class_name.unwrap_or(&name),
@@ -3763,6 +6933,7 @@ impl<'a> CodeGen<'a> {
                     self.literal_arrays.push(class_buffer_literal_array(
                         class_name.unwrap_or(&name),
                         &cls.body.body,
+                        self.lowering.standalone_ecmascript_input(),
                     ));
                     let formal_count = constructor_required_param_count(&cls.body.body);
                     self.set_debug_pos(cls.body.span.start);
@@ -3783,6 +6954,7 @@ impl<'a> CodeGen<'a> {
                         class_reg,
                         cls.body.span.start,
                         &computed_keys.method_regs,
+                        &computed_keys.auto_accessor_regs,
                     );
                     self.emit_class_static_initializer(
                         class_name.unwrap_or(&name),
@@ -3834,8 +7006,11 @@ impl<'a> CodeGen<'a> {
                     };
                     let computed_keys = self.emit_class_computed_keys(&cls.body.body);
                     let lit_arr_id = self.literal_arrays.len() as u16;
-                    self.literal_arrays
-                        .push(class_buffer_literal_array(class_name, &cls.body.body));
+                    self.literal_arrays.push(class_buffer_literal_array(
+                        class_name,
+                        &cls.body.body,
+                        self.lowering.standalone_ecmascript_input(),
+                    ));
                     let formal_count = constructor_required_param_count(&cls.body.body);
                     self.set_debug_pos(cls.body.span.start);
                     self.push(Insn::DefineClassWithBuffer(
@@ -3858,6 +7033,7 @@ impl<'a> CodeGen<'a> {
                             class_reg,
                             cls.body.span.start,
                             &computed_keys.method_regs,
+                            &computed_keys.auto_accessor_regs,
                         );
                         self.emit_class_static_initializer(
                             class_name,
@@ -3880,6 +7056,7 @@ impl<'a> CodeGen<'a> {
                             class_reg,
                             cls.body.span.start,
                             &computed_keys.method_regs,
+                            &computed_keys.auto_accessor_regs,
                         );
                         self.emit_class_static_initializer(
                             class_name,
@@ -4157,11 +7334,12 @@ impl<'a> CodeGen<'a> {
         self.push(Insn::Throw);
         let after_handler = self.insns.len();
         self.patch_jump_to(jmp_past_handler, after_handler);
-        self.catch_entries.push(CatchEntry {
+        self.push_catch_entry(CatchEntry {
             try_begin,
             try_end,
             catch_begin,
             catch_end: after_handler as u32,
+            exception_record: None,
         });
 
         let outer_break = std::mem::take(&mut self.break_patches);
@@ -4183,10 +7361,7 @@ impl<'a> CodeGen<'a> {
         self.returned = outer_returned;
 
         for patch in std::mem::take(&mut self.continue_patches) {
-            let off = (loop_start as i32 - patch as i32) as i16;
-            let [lo, hi] = off.to_le_bytes();
-            self.insns[patch + 1] = lo;
-            self.insns[patch + 2] = hi;
+            self.patch_jump_to(patch, loop_start);
         }
         let labeled_continues = self.take_labeled_continue_patches(label);
         self.patch_jumps_to(labeled_continues, loop_start);
@@ -4196,16 +7371,10 @@ impl<'a> CodeGen<'a> {
         self.push(Insn::Jmp(back_off));
 
         let exit_byte = self.insns.len();
-        let jnez_off = (exit_byte as i32 - jnez_pos as i32) as i16;
-        let [lo, hi] = jnez_off.to_le_bytes();
-        self.insns[jnez_pos + 1] = lo;
-        self.insns[jnez_pos + 2] = hi;
+        self.patch_jump_to(jnez_pos, exit_byte);
 
         for patch in std::mem::take(&mut self.break_patches) {
-            let off = (exit_byte as i32 - patch as i32) as i16;
-            let [lo, hi] = off.to_le_bytes();
-            self.insns[patch + 1] = lo;
-            self.insns[patch + 2] = hi;
+            self.patch_jump_to(patch, exit_byte);
         }
 
         self.break_patches = outer_break;
@@ -4229,11 +7398,12 @@ impl<'a> CodeGen<'a> {
         self.push(Insn::Throw);
         let init_catch_end = self.insns.len() as u32;
         self.patch_jump_to(init_jmp_past_catch, init_catch_end as usize);
-        self.catch_entries.push(CatchEntry {
+        self.push_catch_entry(CatchEntry {
             try_begin: init_try_begin,
             try_end: init_try_end,
             catch_begin: init_catch_begin,
             catch_end: init_catch_end,
+            exception_record: None,
         });
 
         let state = IteratorState {
@@ -4288,18 +7458,16 @@ impl<'a> CodeGen<'a> {
         self.emit_iterator_close(state, true);
         let body_catch_end = self.insns.len() as u32;
         self.patch_jump_to(body_jmp_past_catch, body_catch_end as usize);
-        self.catch_entries.push(CatchEntry {
+        self.push_catch_entry(CatchEntry {
             try_begin: body_try_begin,
             try_end: body_try_end,
             catch_begin: body_catch_begin,
             catch_end: body_catch_end,
+            exception_record: None,
         });
 
         for patch in std::mem::take(&mut self.continue_patches) {
-            let off = (loop_start as i32 - patch as i32) as i16;
-            let [lo, hi] = off.to_le_bytes();
-            self.insns[patch + 1] = lo;
-            self.insns[patch + 2] = hi;
+            self.patch_jump_to(patch, loop_start);
         }
         let labeled_continues = self.take_labeled_continue_patches(label);
         self.patch_jumps_to(labeled_continues, loop_start);
@@ -4312,10 +7480,7 @@ impl<'a> CodeGen<'a> {
         self.patch_jump_to(done_pos, exit_byte);
 
         for patch in std::mem::take(&mut self.break_patches) {
-            let off = (exit_byte as i32 - patch as i32) as i16;
-            let [lo, hi] = off.to_le_bytes();
-            self.insns[patch + 1] = lo;
-            self.insns[patch + 2] = hi;
+            self.patch_jump_to(patch, exit_byte);
         }
 
         self.break_patches = outer_break;
@@ -4443,7 +7608,7 @@ impl<'a> CodeGen<'a> {
 
     // ── Loop helpers ──────────────────────────────────────────────────────────
 
-    /// Patch a list of `jmp(0)` placeholders to the current byte position.
+    /// Patch a list of pending `jmp(0)` sites to the current byte position.
     fn patch_jumps_to_here(&mut self, positions: Vec<usize>) {
         let here = self.insns.len();
         for pos in positions {
@@ -4451,10 +7616,42 @@ impl<'a> CodeGen<'a> {
         }
     }
 
-    /// Patch a list of `jmp(0)` placeholders to a specific byte position.
+    /// Patch a list of pending `jmp(0)` sites to a specific byte position.
     fn patch_jumps_to(&mut self, positions: Vec<usize>, target: usize) {
         for pos in positions {
             self.patch_jump_to(pos, target);
+        }
+    }
+
+    fn ensure_program_label(&mut self, offset: usize) -> String {
+        if let Some(name) = self.program_label_names.get(&offset) {
+            return name.clone();
+        }
+        let name = format!("label_{}", self.next_program_label);
+        self.next_program_label += 1;
+        self.program_label_names.insert(offset, name.clone());
+        self.program_labels.push(ProgramLabel {
+            name: name.clone(),
+            offset: offset as u32,
+            file_location: None,
+        });
+        name
+    }
+
+    fn push_catch_entry(&mut self, entry: CatchEntry) {
+        self.ensure_program_label(entry.try_begin as usize);
+        self.ensure_program_label(entry.try_end as usize);
+        self.ensure_program_label(entry.catch_begin as usize);
+        self.ensure_program_label(entry.catch_end as usize);
+        self.catch_entries.push(entry);
+    }
+
+    fn rebuild_program_label_index(&mut self) {
+        self.program_label_names.clear();
+        for label in &self.program_labels {
+            self.program_label_names
+                .entry(label.offset as usize)
+                .or_insert_with(|| label.name.clone());
         }
     }
 
@@ -4464,13 +7661,27 @@ impl<'a> CodeGen<'a> {
             0x4d | 0x4f | 0x51 => {
                 debug_assert!((i8::MIN as i32..=i8::MAX as i32).contains(&off));
                 self.insns[pos + 1] = off as i8 as u8;
+                self.patch_pandasm_jump(pos, off);
             }
             _ => {
                 let [lo, hi] = (off as i16).to_le_bytes();
                 self.insns[pos + 1] = lo;
                 self.insns[pos + 2] = hi;
+                self.patch_pandasm_jump(pos, off);
             }
         }
+        self.ensure_program_label(target);
+    }
+
+    fn patch_pandasm_jump(&mut self, pos: usize, off: i32) {
+        let Some(index) = self
+            .pandasm_insn_offsets
+            .iter()
+            .position(|offset| *offset == pos)
+        else {
+            return;
+        };
+        self.pandasm_insns[index].patch_jump_offset(off);
     }
 
     fn emit_branch_if_false(&mut self, expr: &Expression<'_>) -> usize {
@@ -4643,11 +7854,12 @@ impl<'a> CodeGen<'a> {
         self.push(Insn::Sta(inner_exception));
         let catch_end = self.insns.len() as u32;
         self.patch_jump_to(jump_past_catch, catch_end as usize);
-        self.catch_entries.push(CatchEntry {
+        self.push_catch_entry(CatchEntry {
             try_begin,
             try_end,
             catch_begin,
-            catch_end,
+            catch_end: catch_begin,
+            exception_record: None,
         });
 
         if abrupt_completion {
@@ -4888,11 +8100,12 @@ impl<'a> CodeGen<'a> {
         self.emit_iterator_close(state, true);
         let body_catch_end = self.insns.len() as u32;
         self.patch_jump_to(body_jmp_past_catch, body_catch_end as usize);
-        self.catch_entries.push(CatchEntry {
+        self.push_catch_entry(CatchEntry {
             try_begin: body_try_begin,
             try_end: body_try_end,
             catch_begin: body_catch_begin,
             catch_end: body_catch_end,
+            exception_record: None,
         });
 
         // Normal completion: close the iterator.
@@ -4904,11 +8117,7 @@ impl<'a> CodeGen<'a> {
 
     /// Assign `rhs_reg` (result of evaluating the RHS) into assignment target
     /// `target`.  Mirrors upstream `es2abc` destructuring assignment lowering.
-    fn emit_destructure_assignment(
-        &mut self,
-        target: &AssignmentTarget<'_>,
-        rhs_reg: u8,
-    ) {
+    fn emit_destructure_assignment(&mut self, target: &AssignmentTarget<'_>, rhs_reg: u8) {
         match target {
             AssignmentTarget::AssignmentTargetIdentifier(id) => {
                 self.push(Insn::Lda(rhs_reg));
@@ -5001,19 +8210,23 @@ impl<'a> CodeGen<'a> {
             Expression::ParenthesizedExpression(p) => {
                 self.emit_destructure_from_expr(&p.expression, rhs_reg);
             }
-            Expression::TSAsExpression(e) => self.emit_destructure_from_expr(&e.expression, rhs_reg),
-            Expression::TSSatisfiesExpression(e) => self.emit_destructure_from_expr(&e.expression, rhs_reg),
-            Expression::TSNonNullExpression(e) => self.emit_destructure_from_expr(&e.expression, rhs_reg),
-            Expression::TSTypeAssertion(e) => self.emit_destructure_from_expr(&e.expression, rhs_reg),
+            Expression::TSAsExpression(e) => {
+                self.emit_destructure_from_expr(&e.expression, rhs_reg)
+            }
+            Expression::TSSatisfiesExpression(e) => {
+                self.emit_destructure_from_expr(&e.expression, rhs_reg)
+            }
+            Expression::TSNonNullExpression(e) => {
+                self.emit_destructure_from_expr(&e.expression, rhs_reg)
+            }
+            Expression::TSTypeAssertion(e) => {
+                self.emit_destructure_from_expr(&e.expression, rhs_reg)
+            }
             _ => {}
         }
     }
 
-    fn emit_destructure_array_assignment(
-        &mut self,
-        arr: &ArrayAssignmentTarget<'_>,
-        rhs_reg: u8,
-    ) {
+    fn emit_destructure_array_assignment(&mut self, arr: &ArrayAssignmentTarget<'_>, rhs_reg: u8) {
         let state = IteratorState {
             closed_reg: self.alloc_reg(),
             method_reg: self.alloc_reg(),
@@ -5099,11 +8312,12 @@ impl<'a> CodeGen<'a> {
         self.emit_iterator_close(state, true);
         let body_catch_end = self.insns.len() as u32;
         self.patch_jump_to(body_jmp_past_catch, body_catch_end as usize);
-        self.catch_entries.push(CatchEntry {
+        self.push_catch_entry(CatchEntry {
             try_begin: body_try_begin,
             try_end: body_try_end,
             catch_begin: body_catch_begin,
             catch_end: body_catch_end,
+            exception_record: None,
         });
         self.push(Insn::LdUndefined);
         self.emit_iterator_close(state, false);
@@ -5281,10 +8495,7 @@ impl<'a> CodeGen<'a> {
         self.push(Insn::Jmp(0));
         let loop_exit = self.insns.len();
 
-        let back_off = (loop_start as i32 - jmp_pos as i32) as i16;
-        let [lo, hi] = back_off.to_le_bytes();
-        self.insns[jmp_pos + 1] = lo;
-        self.insns[jmp_pos + 2] = hi;
+        self.patch_jump_to(jmp_pos, loop_start);
 
         self.patch_jump_to(false_branch, loop_exit);
 
@@ -5338,6 +8549,10 @@ impl<'a> CodeGen<'a> {
         for_stmt: &'a oxc_ast::ast::ForStatement<'a>,
         label: Option<&str>,
     ) {
+        if self.emit_standalone_simple_numeric_for_stmt(for_stmt, label) {
+            return;
+        }
+
         if let Some(init) = &for_stmt.init {
             self.emit_for_init(init);
         }
@@ -5355,17 +8570,16 @@ impl<'a> CodeGen<'a> {
 
         let continue_target = self.insns.len();
         if let Some(update) = &for_stmt.update {
+            self.set_debug_pos(update.span().start);
             self.emit_expr(update);
         }
 
+        self.set_debug_pos(for_stmt.span.start);
         let jmp_pos = self.insns.len();
         self.push(Insn::Jmp(0));
         let loop_exit = self.insns.len();
 
-        let back_off = (loop_start as i32 - jmp_pos as i32) as i16;
-        let [lo, hi] = back_off.to_le_bytes();
-        self.insns[jmp_pos + 1] = lo;
-        self.insns[jmp_pos + 2] = hi;
+        self.patch_jump_to(jmp_pos, loop_start);
 
         if let Some(jpos) = jeqz_pos {
             self.patch_jump_to(jpos, loop_exit);
@@ -5377,6 +8591,67 @@ impl<'a> CodeGen<'a> {
         self.patch_jumps_to(continues, continue_target);
         let labeled_continues = self.take_labeled_continue_patches(label);
         self.patch_jumps_to(labeled_continues, continue_target);
+    }
+
+    fn emit_standalone_simple_numeric_for_stmt(
+        &mut self,
+        for_stmt: &'a oxc_ast::ast::ForStatement<'a>,
+        label: Option<&str>,
+    ) -> bool {
+        if !self.lowering.standalone_ecmascript_input() {
+            return false;
+        }
+        let Some((name, init_value, limit_value)) = simple_numeric_for_parts(for_stmt) else {
+            return false;
+        };
+
+        let limit_reg = self.alloc_reg();
+        self.push(Insn::LdAi(limit_value));
+        self.push(Insn::Sta(limit_reg));
+        let loop_reg = self.alloc_reg();
+        self.push(Insn::LdAi(init_value));
+        self.push(Insn::Sta(loop_reg));
+        let previous_binding = self.var_regs.insert(name.to_string(), loop_reg);
+
+        let loop_start = self.insns.len();
+        self.push(Insn::Lda(limit_reg));
+        self.push(Insn::Less(0, loop_reg));
+        let jeqz_pos = self.insns.len();
+        self.push(Insn::JeqzShort(0));
+
+        let outer_break = std::mem::take(&mut self.break_patches);
+        let outer_continue = std::mem::take(&mut self.continue_patches);
+        self.emit_stmt(&for_stmt.body);
+
+        let continue_target = self.insns.len();
+        if let Some(update) = &for_stmt.update {
+            self.set_debug_pos(update.span().start);
+        }
+        self.push(Insn::Lda(loop_reg));
+        self.push(Insn::ToNumeric(0));
+        self.push(Insn::Inc(0));
+        self.push(Insn::Sta(loop_reg));
+
+        self.set_debug_pos(for_stmt.span.start);
+        let jmp_pos = self.insns.len();
+        self.push(Insn::JmpShort(0));
+        let loop_exit = self.insns.len();
+        self.patch_jump_to(jmp_pos, loop_start);
+        self.patch_jump_to(jeqz_pos, loop_exit);
+
+        let breaks = std::mem::replace(&mut self.break_patches, outer_break);
+        let continues = std::mem::replace(&mut self.continue_patches, outer_continue);
+        self.patch_jumps_to_here(breaks);
+        self.patch_jumps_to(continues, continue_target);
+        let labeled_continues = self.take_labeled_continue_patches(label);
+        self.patch_jumps_to(labeled_continues, continue_target);
+
+        if let Some(previous) = previous_binding {
+            self.var_regs.insert(name.to_string(), previous);
+        } else {
+            self.var_regs.remove(name);
+        }
+        true
     }
 
     fn emit_for_init(&mut self, init: &oxc_ast::ast::ForStatementInit<'_>) {
@@ -5441,16 +8716,14 @@ impl<'a> CodeGen<'a> {
 
             // Patch jmp_past_catch → current position.
             let after_catch = self.insns.len();
-            self.catch_entries.push(CatchEntry {
+            self.push_catch_entry(CatchEntry {
                 try_begin,
                 try_end,
                 catch_begin,
                 catch_end: after_catch as u32,
+                exception_record: None,
             });
-            let off = (after_catch as i32 - jmp_past_catch as i32) as i16;
-            let [lo, hi] = off.to_le_bytes();
-            self.insns[jmp_past_catch + 1] = lo;
-            self.insns[jmp_past_catch + 2] = hi;
+            self.patch_jump_to(jmp_past_catch, after_catch);
         }
     }
 
@@ -5502,11 +8775,12 @@ impl<'a> CodeGen<'a> {
             self.returned = false;
             let catch_end = self.insns.len() as u32;
             self.patch_jump_to(jmp_past_catch, catch_end as usize);
-            self.catch_entries.push(CatchEntry {
+            self.push_catch_entry(CatchEntry {
                 try_begin: inner_try_begin,
                 try_end: inner_try_end,
                 catch_begin,
                 catch_end,
+                exception_record: None,
             });
             self.returned = outer_returned || (try_returned && catch_returned);
         } else {
@@ -5529,11 +8803,12 @@ impl<'a> CodeGen<'a> {
             self.push(Insn::Throw);
             let catch_end = self.insns.len() as u32;
             self.patch_jump_to(jmp_past_throw, catch_end as usize);
-            self.catch_entries.push(CatchEntry {
+            self.push_catch_entry(CatchEntry {
                 try_begin: inner_try_begin,
                 try_end: inner_try_end,
                 catch_begin,
                 catch_end,
+                exception_record: None,
             });
             self.returned = outer_returned || try_returned;
         }
@@ -5551,11 +8826,12 @@ impl<'a> CodeGen<'a> {
         self.push(Insn::Sta(exception));
         let outer_catch_end = self.insns.len() as u32;
         self.patch_jump_to(jmp_to_catch_end, outer_catch_end as usize);
-        self.catch_entries.push(CatchEntry {
+        self.push_catch_entry(CatchEntry {
             try_begin: outer_try_begin,
             try_end: outer_try_end,
             catch_begin: outer_catch_begin,
             catch_end: outer_catch_end,
+            exception_record: None,
         });
 
         self.push(Insn::Lda(finalizer_run));
@@ -5929,7 +9205,11 @@ impl<'a> CodeGen<'a> {
     fn emit_expr(&mut self, expr: &Expression<'_>) {
         // Update current_line and current_col from the expression's source position
         // for per-instruction LNP tracking.
-        self.set_debug_pos(expr.span().start);
+        if self.suppress_next_expr_debug_pos {
+            self.suppress_next_expr_debug_pos = false;
+        } else {
+            self.set_debug_pos(expr.span().start);
+        }
         match expr {
             Expression::NumericLiteral(n) => {
                 if n.value.fract() == 0.0
@@ -6418,7 +9698,10 @@ impl<'a> CodeGen<'a> {
     fn emit_array_expr(&mut self, arr: &oxc_ast::ast::ArrayExpression<'_>) {
         if let Some(entries) = Self::static_array_literal_entries(arr) {
             let lit_id = self.literal_arrays.len() as u16;
-            self.literal_arrays.push(LiteralArray { entries });
+            self.literal_arrays.push(LiteralArray {
+                entries,
+                explicit_key: None,
+            });
             self.push(Insn::CreateArrayWithBuffer(0, lit_id));
             return;
         }
@@ -6595,7 +9878,7 @@ impl<'a> CodeGen<'a> {
                     .function_name(func.span.start, func.span.end)
                     .map(str::to_string)
                     .unwrap_or_else(|| key_name.to_string());
-                entries.push(LiteralEntry::TaggedMethodName(record_name));
+                entries.push(object_method_literal_entry(record_name, func));
                 entries.push(LiteralEntry::TaggedMethodAffiliate(
                     func.params.items.len() as u16
                 ));
@@ -6688,12 +9971,34 @@ impl<'a> CodeGen<'a> {
                 let name_id = self.intern(id.name.as_str());
                 self.push(Insn::LdaStr(name_id));
             }
+            PropertyKey::PrivateIdentifier(_) => {
+                unreachable!("private property key cannot be emitted as a computed key");
+            }
+            key => {
+                if let Some(expr) = key.as_expression() {
+                    self.emit_expr(expr);
+                } else {
+                    unreachable!("unsupported non-expression computed property key");
+                }
+            }
+        }
+        self.push(Insn::Sta(key_reg));
+        key_reg
+    }
+
+    fn emit_auto_accessor_static_key_to_reg(
+        &mut self,
+        accessor: &oxc_ast::ast::AccessorProperty<'_>,
+    ) -> Option<u8> {
+        let key_reg = self.alloc_reg();
+        match &accessor.key {
+            PropertyKey::StaticIdentifier(id) => {
+                let name_id = self.intern(id.name.as_str());
+                self.push(Insn::LdaStr(name_id));
+            }
             PropertyKey::StringLiteral(s) => {
                 let name_id = self.intern(s.value.as_str());
                 self.push(Insn::LdaStr(name_id));
-            }
-            PropertyKey::Identifier(id) => {
-                self.emit_identifier_load(id.name.as_str());
             }
             PropertyKey::NumericLiteral(n) => {
                 if n.value.fract() == 0.0
@@ -6705,15 +10010,18 @@ impl<'a> CodeGen<'a> {
                     self.push(Insn::FLdAi(n.value));
                 }
             }
-            PropertyKey::ComputedMemberExpression(expr) => {
-                self.emit_computed_member(expr);
+            PropertyKey::BigIntLiteral(bigint) => {
+                self.emit_bigint_literal(bigint);
             }
-            _ => {
-                self.push(Insn::LdUndefined);
+            PropertyKey::Identifier(id) => {
+                let name_id = self.intern(id.name.as_str());
+                self.push(Insn::LdaStr(name_id));
             }
+            PropertyKey::PrivateIdentifier(_) => return None,
+            _ => return None,
         }
         self.push(Insn::Sta(key_reg));
-        key_reg
+        Some(key_reg)
     }
 
     fn define_own_property_by_value(&mut self, key_reg: u8, obj_reg: u8) {
@@ -6898,7 +10206,10 @@ impl<'a> CodeGen<'a> {
             self.push(Insn::CreateEmptyObject);
         } else {
             let lit_id = self.literal_arrays.len() as u16;
-            self.literal_arrays.push(LiteralArray { entries });
+            self.literal_arrays.push(LiteralArray {
+                entries,
+                explicit_key: None,
+            });
             self.push(Insn::CreateObjectWithBuffer(0, lit_id));
         }
 
@@ -7207,7 +10518,7 @@ impl<'a> CodeGen<'a> {
         }
         let reg = self.alloc_reg();
         // CreateGeneratorObj takes the function object (mandatory arg 0).
-        self.push(Insn::CreateGeneratorObj(function_arg_placeholder(0)));
+        self.push(Insn::CreateGeneratorObj(function_arg_register(0)));
         self.push(Insn::Sta(reg));
         self.gen_reg = Some(reg);
         // Initial suspension: the function call site gets the generator object.
@@ -7244,11 +10555,12 @@ impl<'a> CodeGen<'a> {
         self.push(Insn::AsyncFunctionReject(async_reg));
         self.push(Insn::Return);
         let catch_end = self.insns.len() as u32;
-        self.catch_entries.push(CatchEntry {
+        self.push_catch_entry(CatchEntry {
             try_begin,
             try_end,
             catch_begin,
             catch_end,
+            exception_record: None,
         });
         self.async_try_begin = None;
     }
@@ -7363,6 +10675,7 @@ impl<'a> CodeGen<'a> {
         self.literal_arrays.push(class_buffer_literal_array(
             class_name.unwrap_or("_"),
             elements,
+            self.lowering.standalone_ecmascript_input(),
         ));
 
         let formal_count = constructor_required_param_count(elements);
@@ -7385,6 +10698,7 @@ impl<'a> CodeGen<'a> {
             class_reg,
             0,
             &computed_keys.method_regs,
+            &computed_keys.auto_accessor_regs,
         );
         self.emit_class_static_initializer(
             class_name.unwrap_or("_"),
@@ -7426,8 +10740,11 @@ impl<'a> CodeGen<'a> {
         let computed_keys = self.emit_class_computed_keys(&cls.body.body);
 
         let lit_arr_id = self.literal_arrays.len() as u16;
-        self.literal_arrays
-            .push(class_buffer_literal_array(class_name, &cls.body.body));
+        self.literal_arrays.push(class_buffer_literal_array(
+            class_name,
+            &cls.body.body,
+            self.lowering.standalone_ecmascript_input(),
+        ));
         let formal_count = constructor_required_param_count(&cls.body.body);
         self.set_debug_pos(cls.body.span.start);
         self.push(Insn::DefineClassWithBuffer(
@@ -7449,6 +10766,7 @@ impl<'a> CodeGen<'a> {
             class_reg,
             cls.body.span.start,
             &computed_keys.method_regs,
+            &computed_keys.auto_accessor_regs,
         );
         self.emit_class_static_initializer(
             class_name,
@@ -7470,9 +10788,125 @@ impl<'a> CodeGen<'a> {
         }
     }
 
+    fn emit_standalone_class_with_instance_initializer(
+        &mut self,
+        class_name: &str,
+        cls: &oxc_ast::ast::Class<'_>,
+    ) -> bool {
+        if cls.super_class.is_some() || !has_standalone_instance_initializer(&cls.body.body) {
+            return false;
+        }
+
+        self.ensure_next_reg_at_least(2);
+        self.push(Insn::Nop);
+        self.push(Insn::NewLexEnv(1));
+
+        let try_begin = self.insns.len() as u32;
+        self.push(Insn::LdHole);
+        self.push(Insn::Sta(1));
+
+        let lit_arr_id = self.literal_arrays.len() as u16;
+        self.literal_arrays
+            .push(class_buffer_literal_array(class_name, &cls.body.body, true));
+        let formal_count = constructor_required_param_count(&cls.body.body);
+        self.set_debug_pos(cls.body.span.start);
+        self.push(Insn::DefineClassWithBuffer(
+            0,
+            lit_arr_id,
+            lit_arr_id,
+            formal_count,
+            1,
+        ));
+
+        let prototype_id = self.intern("prototype");
+        self.push(Insn::LdObjByName(0, prototype_id));
+        let initializer_name = format!("#~{class_name}>#instance_initializer");
+        let initializer_id = self.intern(&initializer_name);
+        self.push(Insn::DefineMethodShort(0, initializer_id, 0));
+        self.push(Insn::StLexVar(0, 0));
+        let try_end = self.insns.len() as u32;
+
+        let jump_past_handler = self.insns.len();
+        self.push(Insn::JmpShort(0));
+        let catch_begin = self.insns.len() as u32;
+        self.push(Insn::Sta(0));
+        self.push(Insn::PopLexEnv);
+        self.push(Insn::Lda(0));
+        self.push(Insn::Throw);
+        let catch_end = self.insns.len() as u32;
+        self.patch_jump_to(jump_past_handler, catch_end as usize);
+        self.push_catch_entry(CatchEntry {
+            try_begin,
+            try_end,
+            catch_begin,
+            catch_end: catch_begin,
+            exception_record: None,
+        });
+
+        self.push(Insn::PopLexEnv);
+        self.current_line = u32::MAX;
+        self.current_col = 0;
+        self.push(Insn::ReturnUndefined);
+        self.returned = true;
+        true
+    }
+
+    fn emit_simple_standalone_class_declaration(
+        &mut self,
+        class_name: &str,
+        cls: &oxc_ast::ast::Class<'_>,
+    ) -> bool {
+        if !is_simple_standalone_class(&cls.body.body) {
+            return false;
+        }
+        let proto_vreg = if let Some(super_class) = &cls.super_class {
+            let Some(reg) = self.standalone_super_class_reg(super_class) else {
+                return false;
+            };
+            reg
+        } else {
+            let reg = self.alloc_reg();
+            self.push(Insn::LdHole);
+            self.push(Insn::Sta(reg));
+            self.var_regs.insert(class_name.to_string(), reg);
+            reg
+        };
+
+        let lit_arr_id = self.literal_arrays.len() as u16;
+        self.literal_arrays
+            .push(class_buffer_literal_array(class_name, &cls.body.body, true));
+        let formal_count = constructor_required_param_count(&cls.body.body);
+        self.set_debug_pos(cls.body.span.start);
+        self.push(Insn::DefineClassWithBuffer(
+            0,
+            lit_arr_id,
+            lit_arr_id,
+            formal_count,
+            proto_vreg,
+        ));
+        if cls.super_class.is_none() {
+            if let Some(reg) = self.var_regs.get(class_name).copied() {
+                self.push(Insn::Sta(reg));
+            }
+        }
+        let prototype_id = self.intern("prototype");
+        self.push(Insn::LdObjByName(0, prototype_id));
+        true
+    }
+
+    fn standalone_super_class_reg(&self, super_class: &Expression<'_>) -> Option<u8> {
+        match super_class {
+            Expression::Identifier(identifier) => {
+                self.var_regs.get(identifier.name.as_str()).copied()
+            }
+            _ => None,
+        }
+    }
+
     fn emit_class_computed_keys(&mut self, elements: &[ClassElement<'_>]) -> ClassComputedKeys {
         let mut keys = ClassComputedKeys {
             method_regs: Vec::new(),
+            auto_accessor_regs: Vec::new(),
             static_field_regs: Vec::new(),
         };
         for element in elements {
@@ -7496,6 +10930,10 @@ impl<'a> CodeGen<'a> {
                 ClassElement::MethodDefinition(method) if method.computed => {
                     keys.method_regs
                         .push(self.emit_property_key_to_reg(&method.key));
+                }
+                ClassElement::AccessorProperty(accessor) if accessor.computed => {
+                    keys.auto_accessor_regs
+                        .push(self.emit_property_key_to_reg(&accessor.key));
                 }
                 _ => {}
             }
@@ -7549,6 +10987,7 @@ impl<'a> CodeGen<'a> {
         class_reg: u8,
         class_span_start: u32,
         computed_method_key_regs: &[u8],
+        computed_auto_accessor_key_regs: &[u8],
     ) {
         let prototype_id = self.intern("prototype");
         self.set_debug_pos(class_span_start);
@@ -7573,14 +11012,20 @@ impl<'a> CodeGen<'a> {
             if method.kind == MethodDefinitionKind::Constructor || is_class_buffer_method(method) {
                 continue;
             }
-            let record_name = if method.computed {
+            let public_name = if method.computed {
                 computed_class_method_record_name(method)
             } else if let Some(public_name) = method_key_name(&method.key) {
                 public_name
             } else {
                 continue;
             };
-            let method_name_id = self.intern(&record_name);
+            let method_record_name = if self.lowering.standalone_ecmascript_input() {
+                class_method_upstream_name(method, class_name)
+                    .unwrap_or_else(|| public_name.clone())
+            } else {
+                public_name.clone()
+            };
+            let method_name_id = self.intern(&method_record_name);
             let length = method.value.params.items.len() as u8;
             let target_reg = if method.r#static {
                 class_reg
@@ -7594,7 +11039,7 @@ impl<'a> CodeGen<'a> {
                 let undefined_reg = self.alloc_reg();
                 let method_reg = self.alloc_reg();
                 if computed_key_reg.is_none() {
-                    let public_name_id = self.intern(&record_name);
+                    let public_name_id = self.intern(&public_name);
                     self.set_debug_pos(method.key.span().start);
                     self.push(Insn::LdaStr(public_name_id));
                     self.set_debug_pos(method.key.span().start);
@@ -7652,7 +11097,7 @@ impl<'a> CodeGen<'a> {
             if let Some(key_reg) = computed_key_reg {
                 self.push(Insn::StOwnByValue(0, target_reg, key_reg));
             } else {
-                let public_name_id = self.intern(&record_name);
+                let public_name_id = self.intern(&public_name);
                 self.push(Insn::StOwnByName(0, public_name_id, target_reg));
             }
         }
@@ -7661,16 +11106,24 @@ impl<'a> CodeGen<'a> {
         // Mirrors upstream ProcessAutoAccessorProperty: after the class is defined,
         // install getter/setter pairs with the compiled accessor methods.
         let prototype_id = self.intern("prototype");
+        let mut computed_auto_accessor_index = 0usize;
         for element in elements {
             let ClassElement::AccessorProperty(accessor) = element else {
                 continue;
             };
-            let key_name = match &accessor.key {
-                PropertyKey::StaticIdentifier(id) => id.name.as_str().to_string(),
-                PropertyKey::StringLiteral(s) => s.value.as_str().to_string(),
-                _ => continue,
+            let computed_key_reg = if accessor.computed {
+                let key = computed_auto_accessor_key_regs
+                    .get(computed_auto_accessor_index)
+                    .copied()
+                    .expect("computed auto-accessor key must be precomputed");
+                computed_auto_accessor_index = computed_auto_accessor_index.saturating_add(1);
+                Some(key)
+            } else {
+                None
             };
-            let target_reg = if accessor.r#static { class_reg } else {
+            let target_reg = if accessor.r#static {
+                class_reg
+            } else {
                 // prototype
                 self.push(Insn::Lda(class_reg));
                 self.push(Insn::LdObjByName(0, prototype_id));
@@ -7678,20 +11131,23 @@ impl<'a> CodeGen<'a> {
                 self.push(Insn::Sta(proto_r));
                 proto_r
             };
-            // Load the key into a register.
-            let key_id = self.intern(&key_name);
-            let name_reg = self.alloc_reg();
-            self.push(Insn::LdaStr(key_id));
-            self.push(Insn::Sta(name_reg));
+            // Upstream computed auto-accessors use the getter key expression
+            // `backup = originalKey` and the setter key `backup`. The cached
+            // register is the bytecode-level equivalent of that backup binding.
+            let Some(name_reg) =
+                computed_key_reg.or_else(|| self.emit_auto_accessor_static_key_to_reg(accessor))
+            else {
+                continue;
+            };
             // Load the getter method.
-            let getter_method_name = format!("#{class_name}_get_{key_name}#");
+            let getter_method_name = auto_accessor_getter_record_name(class_name, accessor);
             let getter_name_id = self.intern(&getter_method_name);
             let getter_reg = self.alloc_reg();
             self.push(Insn::Lda(target_reg));
             self.push(Insn::DefineMethodShort(0, getter_name_id, 0));
             self.push(Insn::Sta(getter_reg));
             // Load the setter method.
-            let setter_method_name = format!("#{class_name}_set_{key_name}#");
+            let setter_method_name = auto_accessor_setter_record_name(class_name, accessor);
             let setter_name_id = self.intern(&setter_method_name);
             let setter_reg = self.alloc_reg();
             self.push(Insn::Lda(target_reg));
@@ -7710,8 +11166,12 @@ impl<'a> CodeGen<'a> {
         let (private_slots, private_field_count) = collect_class_private_slots(elements);
         if !private_slots.is_empty() {
             let priv_lit_id = self.literal_arrays.len() as u16;
-            self.literal_arrays.push(class_private_methods_literal_array(elements));
-            self.push(Insn::CallRuntimeCreatePrivateProperty(private_field_count, priv_lit_id));
+            self.literal_arrays
+                .push(class_private_methods_literal_array(elements));
+            self.push(Insn::CallRuntimeCreatePrivateProperty(
+                private_field_count,
+                priv_lit_id,
+            ));
             // Reload class_reg into acc (createprivateproperty clobbers it).
             self.push(Insn::Lda(class_reg));
         }
@@ -7754,6 +11214,14 @@ impl<'a> CodeGen<'a> {
     // ── Static member: obj.prop ───────────────────────────────────────────────
 
     fn emit_static_member(&mut self, mem: &oxc_ast::ast::StaticMemberExpression<'_>) {
+        if !matches!(&mem.object, Expression::Super(_)) {
+            self.emit_expr(&mem.object);
+            self.set_debug_pos(mem.property.span.start);
+            let name_id = self.intern(mem.property.name.as_str());
+            self.push(Insn::LdObjByName(0, name_id));
+            return;
+        }
+
         let saved_next_reg = self.next_reg;
         let obj_reg = self.alloc_reg();
         self.emit_expr(&mem.object);
@@ -7963,7 +11431,8 @@ impl<'a> CodeGen<'a> {
                 // `this.#x++` — private field update.
                 let name = expr.field.name.as_str().to_string();
                 self.emit_private_field_load(&name, &expr.object);
-                let (original_reg, updated_reg) = self.emit_update_acc(update.operator, update.prefix);
+                let (original_reg, updated_reg) =
+                    self.emit_update_acc(update.operator, update.prefix);
                 let obj_reg = self.alloc_reg();
                 let slot = self.private_field_slots.get(name.as_str()).copied();
                 self.emit_expr(&expr.object);
@@ -8612,8 +12081,12 @@ impl<'a> CodeGen<'a> {
             self.push(Insn::Sta(new_this_reg));
             self.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
             self.push(Insn::ThrowIfSuperNotCorrectCall(1));
-            self.push(Insn::Lda(new_this_reg));
-            self.push(Insn::Sta(MANDATORY_PARAM_THIS_REG));
+            if self.lowering.standalone_ecmascript_input() {
+                self.derived_new_this_reg = Some(new_this_reg);
+            } else {
+                self.push(Insn::Lda(new_this_reg));
+                self.push(Insn::Sta(MANDATORY_PARAM_THIS_REG));
+            }
             self.next_reg = saved_next_reg;
             return;
         }
@@ -8622,7 +12095,13 @@ impl<'a> CodeGen<'a> {
             let reg = self.alloc_reg();
             self.push(Insn::LdUndefined);
             self.push(Insn::Sta(reg));
-            reg
+            if self.lowering.standalone_ecmascript_input() {
+                let copied_reg = self.alloc_reg();
+                self.push(Insn::MovV4(copied_reg, reg));
+                copied_reg
+            } else {
+                reg
+            }
         } else {
             let reg = self.next_reg;
             for (i, arg) in call.arguments.iter().enumerate() {
@@ -8638,8 +12117,12 @@ impl<'a> CodeGen<'a> {
         self.push(Insn::Sta(new_this_reg));
         self.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
         self.push(Insn::ThrowIfSuperNotCorrectCall(1));
-        self.push(Insn::Lda(new_this_reg));
-        self.push(Insn::Sta(MANDATORY_PARAM_THIS_REG));
+        if self.lowering.standalone_ecmascript_input() {
+            self.derived_new_this_reg = Some(new_this_reg);
+        } else {
+            self.push(Insn::Lda(new_this_reg));
+            self.push(Insn::Sta(MANDATORY_PARAM_THIS_REG));
+        }
         self.next_reg = saved_next_reg;
     }
 

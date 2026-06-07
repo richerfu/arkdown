@@ -148,10 +148,51 @@ pub struct ModuleJson5Module {
     /// Used by `ProcessStartupConfig` to locate the startup task list for this module.
     #[serde(default)]
     pub app_startup: Option<String>,
-    /// Cross-app shared component config entries exported by this HSP module.
-    /// Populated by `ProcessShareConfig` when merging HSP dep manifests.
-    #[serde(default)]
-    pub cross_app_shared_config: Vec<CrossAppSharedConfigEntry>,
+    /// Cross-app shared component config exported by this HSP module.
+    ///
+    /// Hvigor accepts either a `$profile:<name>` reference string or an inline
+    /// array. Keep the two shapes distinct so ProcessShareConfig can read the
+    /// referenced profile file instead of silently dropping it.
+    #[serde(default, rename = "crossAppSharedConfig")]
+    pub cross_app_shared_config: CrossAppSharedConfig,
+    /// Permissions requested by this module, preserved verbatim in the output `module.json`.
+    #[serde(
+        rename = "requestPermissions",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub request_permissions: Vec<serde_json::Value>,
+    /// Permissions defined/exported by this module.
+    #[serde(
+        rename = "definePermissions",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub define_permissions: Vec<serde_json::Value>,
+    /// Proxy data entries (cross-app data proxy configuration), preserved verbatim.
+    #[serde(rename = "proxyData", default, skip_serializing_if = "Vec::is_empty")]
+    pub proxy_data: Vec<serde_json::Value>,
+    /// HAP module field pointing at the HSP form widget module.
+    #[serde(rename = "formWidgetModule", default)]
+    pub form_widget_module: Option<String>,
+    /// HSP module field pointing at the HAP form extension module.
+    #[serde(rename = "formExtensionModule", default)]
+    pub form_extension_module: Option<String>,
+    /// Module dependencies declared in `module.json5` (HSP inter-module deps).
+    /// Each entry has at minimum `bundleName` and `moduleName` fields.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<serde_json::Value>,
+    /// Raw `deliveryWithInstall` flag used by hvigor's form module checks.
+    #[serde(rename = "deliveryWithInstall", default)]
+    pub delivery_with_install: Option<bool>,
+    /// Raw `compileMode` field from `module.json5`.
+    ///
+    /// Valid hvigor values are `"esmodule"` (default, Stage model) and
+    /// `"jsbundle"` (legacy FA model).  arkdown only supports `"esmodule"`.
+    /// The value is stored as a raw `Option<String>` so the CLI can detect
+    /// and reject `"jsbundle"` before starting the build pipeline.
+    #[serde(rename = "compileMode", default)]
+    pub compile_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -232,6 +273,83 @@ pub struct CrossAppSharedConfigEntry {
     pub src_entry: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum CrossAppSharedConfig {
+    None,
+    Profile(String),
+    Inline(Vec<CrossAppSharedConfigEntry>),
+}
+
+impl Default for CrossAppSharedConfig {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+impl CrossAppSharedConfig {
+    pub fn inline_entries(&self) -> &[CrossAppSharedConfigEntry] {
+        match self {
+            Self::Inline(entries) => entries,
+            Self::None | Self::Profile(_) => &[],
+        }
+    }
+
+    pub fn profile_name(&self) -> Option<&str> {
+        let Self::Profile(value) = self else {
+            return None;
+        };
+        value.strip_prefix("$profile:").or(Some(value.as_str()))
+    }
+}
+
+impl Serialize for CrossAppSharedConfig {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::None => Vec::<CrossAppSharedConfigEntry>::new().serialize(serializer),
+            Self::Profile(value) => value.serialize(serializer),
+            Self::Inline(entries) => entries.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for CrossAppSharedConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de;
+
+        struct Visitor;
+
+        impl<'de> de::Visitor<'de> for Visitor {
+            type Value = CrossAppSharedConfig;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str(
+                    "a crossAppSharedConfig array or \"$profile:<name>\" reference string",
+                )
+            }
+
+            fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(CrossAppSharedConfig::Profile(value.to_string()))
+            }
+
+            fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                let mut entries = Vec::new();
+                while let Some(entry) = seq.next_element::<CrossAppSharedConfigEntry>()? {
+                    entries.push(entry);
+                }
+                Ok(CrossAppSharedConfig::Inline(entries))
+            }
+        }
+
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
 /// Startup task entry from a module's `appStartup` profile JSON.
 ///
 /// Written to `temp-startup-config.json` after merging all HAR/HSP dep startup tasks.
@@ -248,6 +366,9 @@ pub struct StartupTask {
     /// Whether this task waits for all preceding tasks to finish.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait_on_main_thread: Option<bool>,
+    /// Whether the startup entry is excluded from automatic startup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclude_from_auto_start: Option<bool>,
     /// Explicit dependencies on other startup task names.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependencies: Vec<String>,
@@ -263,6 +384,9 @@ pub struct StartupTask {
     /// Path to the startup config JSON that declared this task.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub startup_config_path: Option<String>,
+    /// Whether an app preload SO task came from a remote ByteCode HAR.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_remote_byte_code_har: Option<bool>,
 }
 
 /// Merged startup config written to `temp-startup-config.json`.
@@ -278,6 +402,9 @@ pub struct MergedStartupConfig {
     /// App preload hint tasks (run before the first ability is created).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub app_preload_hint_startup_tasks: Vec<StartupTask>,
+    /// System preload hint tasks merged from ByteCode HAR `META-INF/preload.json`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub system_preload_hint_startup_tasks: Vec<StartupTask>,
 }
 
 /// Raw parsed app startup profile JSON (`resources/base/profile/<name>.json`).
@@ -325,4 +452,52 @@ pub struct PackageMetadata {
     pub workers: Vec<String>,
     #[serde(default)]
     pub dependency_pkg_version: FxHashMap<String, String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cross_app_shared_config_deserializes_profile_ref() {
+        let parsed: ModuleJson5 = serde_json::from_str(
+            r#"{
+                "module": {
+                    "crossAppSharedConfig": "$profile:cross_app_shared_config"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            parsed.module.cross_app_shared_config.profile_name(),
+            Some("cross_app_shared_config")
+        );
+        assert!(parsed
+            .module
+            .cross_app_shared_config
+            .inline_entries()
+            .is_empty());
+    }
+
+    #[test]
+    fn test_cross_app_shared_config_deserializes_inline_entries() {
+        let parsed: ModuleJson5 = serde_json::from_str(
+            r#"{
+                "module": {
+                    "crossAppSharedConfig": [
+                        { "uri": "myapp://shared/Foo", "srcEntry": "./ets/Foo.ets" }
+                    ]
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let entries = parsed.module.cross_app_shared_config.inline_entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].uri, "myapp://shared/Foo");
+        assert_eq!(entries[0].src_entry.as_deref(), Some("./ets/Foo.ets"));
+        assert_eq!(entries[0].package_name, "");
+        assert_eq!(parsed.module.cross_app_shared_config.profile_name(), None);
+    }
 }

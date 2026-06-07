@@ -7,7 +7,7 @@
 //!
 //! 1. Reads the current module's own `appStartup` profile (if declared in
 //!    `module.json5` as `module.appStartup = "$profile:<name>"`).
-//! 2. Scans `oh_modules/` under the module root for installed HAR and HSP packages.
+//! 2. Walks host/project declared dependencies for installed HAR and HSP packages.
 //! 3. For each dependency that declares `module.appStartup`, reads its startup
 //!    profile JSON from `resources/base/profile/<name>.json`.
 //! 4. Merges `startupTasks` and `appPreloadHintStartupTasks` arrays, annotating
@@ -24,10 +24,12 @@
 //! <module_root>/build/default/intermediates/startup_config/default/temp-startup-config.json
 //! ```
 
+use indexmap::IndexMap;
 use rustc_hash::FxHashSet;
+use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
-use arkdown_core::{AppStartupProfile, MergedStartupConfig, StartupTask};
+use arkdown_core::{AppStartupProfile, ArkdownError, MergedStartupConfig, StartupTask};
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -35,13 +37,22 @@ use arkdown_core::{AppStartupProfile, MergedStartupConfig, StartupTask};
 
 /// Input for the startup-config merge pass.
 pub struct StartupConfigInput<'a> {
+    /// Root directory of the project containing the module.
+    pub project_root: &'a Path,
     /// Root directory of the consuming module (e.g. `/project/entry`).
     pub module_root: &'a Path,
     /// Name of the consuming module (e.g. `"entry"`).
     pub module_name: &'a str,
+    /// Bundle name (e.g. `"com.example.app"`), used for OHM URL generation.
+    /// When `None`, `ohmurl` fields are left empty.
+    pub bundle_name: Option<&'a str>,
     /// Value of `module.appStartup` from the module's own `module.json5`, e.g.
     /// `"$profile:startup_config"`.  `None` when the module has no startup config.
     pub app_startup: Option<String>,
+    /// Whether to merge ByteCode HAR `META-INF/preload.json` system preload tasks.
+    /// The caller computes hvigor's target gate:
+    /// HAP module, not preview/cold/local/ohosTest, and `buildOption.preloadSystemSo`.
+    pub collect_preload_system_so: bool,
 }
 
 /// Merged startup config result.
@@ -51,13 +62,22 @@ pub struct StartupConfigOutput {
     pub config: Option<MergedStartupConfig>,
 }
 
+#[derive(Deserialize)]
+struct StartupDependencyPackageJson {
+    #[serde(default)]
+    dependencies: IndexMap<String, String>,
+}
+
 /// Collect and merge startup task configs from the module and all its
 /// HAR/HSP dependencies, returning the merged result.
 ///
+/// Returns `Err` when two tasks in the same category share the same name —
+/// this is a hard build error matching hvigor's `printErrorExit` call.
 /// Missing or malformed config files in individual dependencies are silently
-/// skipped (matching hvigor's behaviour where packages without `appStartup`
-/// simply contribute nothing).
-pub fn merge_startup_config(input: StartupConfigInput<'_>) -> StartupConfigOutput {
+/// skipped.
+pub fn merge_startup_config(
+    input: StartupConfigInput<'_>,
+) -> Result<StartupConfigOutput, ArkdownError> {
     let mut merged = MergedStartupConfig::default();
     let mut found_any = false;
 
@@ -69,9 +89,10 @@ pub fn merge_startup_config(input: StartupConfigInput<'_>) -> StartupConfigOutpu
                 .join("src/main/resources/base/profile")
                 .join(format!("{}.json", profile_name));
             if let Some(profile) = StartupConfigInput::read_startup_profile(&profile_path) {
-                StartupConfigInput::merge_tasks_from_profile(
+                StartupConfigInput::merge_tasks_from_profile_with_bundle(
                     &profile,
                     input.module_name,
+                    input.bundle_name,
                     &profile_path,
                     &mut merged,
                 );
@@ -80,26 +101,34 @@ pub fn merge_startup_config(input: StartupConfigInput<'_>) -> StartupConfigOutpu
         }
     }
 
-    // 2. Walk oh_modules/ to find HAR/HSP dependencies with startup configs.
-    let oh_modules_dir = input.module_root.join("oh_modules");
-    if oh_modules_dir.is_dir() {
-        StartupConfigInput::collect_from_oh_modules(&oh_modules_dir, &mut merged, &mut found_any);
+    // 2. Walk declared oh_modules dependencies to find HAR/HSP startup configs.
+    let dependency_roots = StartupConfigInput::collect_declared_dependency_roots(
+        input.project_root,
+        input.module_root,
+    );
+    StartupConfigInput::collect_from_dependencies(&dependency_roots, &mut merged, &mut found_any);
+    if input.collect_preload_system_so {
+        StartupConfigInput::collect_system_preload_from_bytecode_hars(
+            &dependency_roots,
+            &mut merged,
+            &mut found_any,
+        );
     }
 
     if !found_any {
-        return StartupConfigOutput { config: None };
+        return Ok(StartupConfigOutput { config: None });
     }
 
     // 3. Validate: no two tasks in the same category may share the same name.
-    StartupConfigInput::check_duplicate_task_names(&merged.startup_tasks, "startupTask");
+    StartupConfigInput::check_duplicate_task_names(&merged.startup_tasks, "startupTask")?;
     StartupConfigInput::check_duplicate_task_names(
         &merged.app_preload_hint_startup_tasks,
         "appPreloadHintStartupTask",
-    );
+    )?;
 
-    StartupConfigOutput {
+    Ok(StartupConfigOutput {
         config: Some(merged),
-    }
+    })
 }
 
 /// Write the merged startup config to `output_path`.
@@ -153,47 +182,100 @@ impl<'a> StartupConfigInput<'a> {
     }
 
     /// Merge tasks from a parsed profile into `merged`, annotating each task with
-    /// `module_name` and `startup_config_path`.
+    /// `module_name`, `startup_config_path`, `ohmurl`, and `src_entry_absolute_path`.
+    ///
+    /// Matches hvigor's `processModuleStartupConfig()` which populates all four
+    /// fields on each startup task for downstream loader.json and runtime use.
     fn merge_tasks_from_profile(
         profile: &AppStartupProfile,
         module_name: &str,
         profile_path: &Path,
         merged: &mut MergedStartupConfig,
     ) {
+        Self::merge_tasks_from_profile_with_bundle(profile, module_name, None, profile_path, merged)
+    }
+
+    fn merge_tasks_from_profile_with_bundle(
+        profile: &AppStartupProfile,
+        module_name: &str,
+        bundle_name: Option<&str>,
+        profile_path: &Path,
+        merged: &mut MergedStartupConfig,
+    ) {
         let config_path_str = profile_path.to_string_lossy().into_owned();
 
-        for task in &profile.startup_tasks {
+        let annotate = |task: &StartupTask| -> StartupTask {
             let mut t = task.clone();
             t.module_name = Some(module_name.to_string());
             t.startup_config_path = Some(config_path_str.clone());
-            merged.startup_tasks.push(t);
+
+            // src_entry_absolute_path: resolve src_entry relative to the
+            // owning module's src/main directory.  Source packages place the
+            // profile at <module>/src/main/resources/base/profile/<name>.json;
+            // prebuilt packages may place it at <module>/resources/base/profile.
+            if t.src_entry_absolute_path.is_none() {
+                if let Some(src_main_root) = Self::src_main_root_for_profile(profile_path) {
+                    let src = task.src_entry.trim_start_matches("./");
+                    let abs = src_main_root.join(src);
+                    t.src_entry_absolute_path = Some(abs.to_string_lossy().into_owned());
+                }
+            }
+
+            // ohmurl: @bundle:<bundleName>/<moduleName>/<srcEntryWithoutExt>
+            // Matches hvigor's processModuleStartupConfig() OHM URL format.
+            if t.ohmurl.is_none() {
+                let src = task
+                    .src_entry
+                    .trim_start_matches("./")
+                    .trim_end_matches(".ets")
+                    .trim_end_matches(".ts");
+                let ohm = if let Some(bn) = bundle_name {
+                    format!("@bundle:{}/{}/{}", bn, module_name, src)
+                } else {
+                    format!("@bundle:__bundle__/{}/{}", module_name, src)
+                };
+                t.ohmurl = Some(ohm);
+            }
+
+            t
+        };
+
+        for task in &profile.startup_tasks {
+            merged.startup_tasks.push(annotate(task));
         }
 
         for task in &profile.app_preload_hint_startup_tasks {
-            let mut t = task.clone();
-            t.module_name = Some(module_name.to_string());
-            t.startup_config_path = Some(config_path_str.clone());
-            merged.app_preload_hint_startup_tasks.push(t);
+            merged.app_preload_hint_startup_tasks.push(annotate(task));
         }
     }
 
-    /// Walk `oh_modules_dir`, find packages with `appStartup` declared in their
+    fn src_main_root_for_profile(profile_path: &Path) -> Option<PathBuf> {
+        let profile_dir = profile_path.parent()?;
+        let base_dir = profile_dir.parent()?;
+        let resources_dir = base_dir.parent()?;
+        let owner = resources_dir.parent()?;
+
+        if owner.file_name().and_then(|name| name.to_str()) == Some("main")
+            && owner
+                .parent()
+                .and_then(|parent| parent.file_name())
+                .and_then(|name| name.to_str())
+                == Some("src")
+        {
+            return Some(owner.to_path_buf());
+        }
+
+        Some(owner.join("src/main"))
+    }
+
+    /// Walk declared dependency roots, find packages with `appStartup` declared in their
     /// `module.json5`, and merge their startup tasks.
-    fn collect_from_oh_modules(
-        oh_modules_dir: &Path,
+    fn collect_from_dependencies(
+        dependency_roots: &[PathBuf],
         merged: &mut MergedStartupConfig,
         found_any: &mut bool,
     ) {
-        let Ok(read_dir) = std::fs::read_dir(oh_modules_dir) else {
-            return;
-        };
-
-        for entry in read_dir.flatten() {
-            let pkg_dir = entry.path();
-            if !pkg_dir.is_dir() {
-                continue;
-            }
-
+        for pkg_dir in dependency_roots {
             let pkg_name = pkg_dir
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -213,6 +295,108 @@ impl<'a> StartupConfigInput<'a> {
                 }
             }
         }
+    }
+
+    fn collect_system_preload_from_bytecode_hars(
+        dependency_roots: &[PathBuf],
+        merged: &mut MergedStartupConfig,
+        found_any: &mut bool,
+    ) {
+        for pkg_dir in dependency_roots {
+            if !Self::is_bytecode_har_package(&pkg_dir) {
+                continue;
+            }
+            let preload_json = pkg_dir.join("META-INF/preload.json");
+            let Some(mut preload) = Self::read_system_preload_profile(&preload_json) else {
+                continue;
+            };
+            if preload.system_preload_hint_startup_tasks.is_empty() {
+                continue;
+            }
+            merged
+                .system_preload_hint_startup_tasks
+                .append(&mut preload.system_preload_hint_startup_tasks);
+            *found_any = true;
+        }
+    }
+
+    fn collect_declared_dependency_roots(project_root: &Path, module_root: &Path) -> Vec<PathBuf> {
+        let mut roots = Vec::new();
+        let mut queue = Vec::new();
+        let mut seen = FxHashSet::default();
+        queue.push(module_root.to_path_buf());
+        if project_root != module_root {
+            queue.push(project_root.to_path_buf());
+        }
+
+        while let Some(pkg_root) = queue.pop() {
+            let Some(pkg) = Self::read_dependency_package_json(&pkg_root) else {
+                continue;
+            };
+            for dep_name in pkg.dependencies.keys() {
+                let Some(dep_root) =
+                    Self::resolve_dependency_root(&pkg_root, project_root, dep_name)
+                else {
+                    continue;
+                };
+                let dep_key = dep_root.to_string_lossy().into_owned();
+                if !seen.insert(dep_key) {
+                    continue;
+                }
+                queue.push(dep_root.clone());
+                roots.push(dep_root);
+            }
+        }
+
+        roots
+    }
+
+    fn read_dependency_package_json(pkg_root: &Path) -> Option<StartupDependencyPackageJson> {
+        let content = std::fs::read_to_string(pkg_root.join("oh-package.json5")).ok()?;
+        json5::from_str::<StartupDependencyPackageJson>(&content).ok()
+    }
+
+    fn resolve_dependency_root(
+        issuer_root: &Path,
+        project_root: &Path,
+        dep_name: &str,
+    ) -> Option<PathBuf> {
+        let mut current = Some(issuer_root);
+        while let Some(root) = current {
+            let candidate = root.join("oh_modules").join(dep_name);
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
+            if root == project_root {
+                break;
+            }
+            current = root.parent();
+        }
+        let candidate = project_root.join("oh_modules").join(dep_name);
+        candidate.is_dir().then_some(candidate)
+    }
+
+    fn read_system_preload_profile(path: &Path) -> Option<MergedStartupConfig> {
+        let content = std::fs::read_to_string(path).ok()?;
+        json5::from_str::<MergedStartupConfig>(&content).ok()
+    }
+
+    fn is_bytecode_har_package(pkg_dir: &Path) -> bool {
+        if pkg_dir.join("ets/modules.abc").is_file() || pkg_dir.join("index.abc").is_file() {
+            return true;
+        }
+        let package_json = pkg_dir.join("oh-package.json5");
+        let Ok(content) = std::fs::read_to_string(package_json) else {
+            return false;
+        };
+        json5::from_str::<serde_json::Value>(&content)
+            .ok()
+            .and_then(|value| {
+                value
+                    .pointer("/metadata/byteCodeHar")
+                    .and_then(|value| value.as_bool())
+            })
+            .unwrap_or(false)
     }
 
     /// Read the `appStartup` reference and module name from an installed package's
@@ -277,22 +461,23 @@ impl<'a> StartupConfigInput<'a> {
         None
     }
 
-    /// Emit a warning when two tasks in the same category share the same name.
+    /// Returns `Err` when two tasks in the same category share the same name.
     ///
-    /// Hvigor calls `printErrorExit` here; arkdown downgrades to a non-fatal
-    /// warning so the build can continue.
-    fn check_duplicate_task_names(tasks: &[StartupTask], category: &str) {
+    /// Hvigor calls `printErrorExit` here; arkdown now matches that hard-error behaviour.
+    fn check_duplicate_task_names(
+        tasks: &[StartupTask],
+        category: &str,
+    ) -> Result<(), ArkdownError> {
         let mut seen: FxHashSet<&str> = FxHashSet::default();
         for task in tasks {
             if !seen.insert(task.name.as_str()) {
-                tracing::warn!(
-                    category,
-                    name = task.name,
-                    module_name = ?task.module_name,
-                    "startup config duplicate task name"
-                );
+                return Err(ArkdownError::Bundler(format!(
+                    "ProcessStartupConfig: duplicate {} name '{}'",
+                    category, task.name
+                )));
             }
         }
+        Ok(())
     }
 }
 
@@ -314,10 +499,14 @@ mod tests {
     fn test_merge_startup_config_no_startup() {
         let tmp = tempfile::tempdir().unwrap();
         let output = merge_startup_config(StartupConfigInput {
+            bundle_name: None,
+            project_root: tmp.path(),
             module_root: tmp.path(),
             module_name: "entry",
             app_startup: None,
-        });
+            collect_preload_system_so: false,
+        })
+        .unwrap();
         assert!(output.config.is_none());
     }
 
@@ -337,10 +526,14 @@ mod tests {
         );
 
         let output = merge_startup_config(StartupConfigInput {
+            bundle_name: None,
+            project_root: tmp.path(),
             module_root: tmp.path(),
             module_name: "entry",
             app_startup: Some("$profile:startup_config".to_string()),
-        });
+            collect_preload_system_so: false,
+        })
+        .unwrap();
 
         let config = output.config.unwrap();
         assert_eq!(config.startup_tasks.len(), 1);
@@ -352,10 +545,60 @@ mod tests {
     }
 
     #[test]
+    fn test_merge_startup_config_populates_ohmurl_and_absolute_src_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let profile_path = tmp
+            .path()
+            .join("src/main/resources/base/profile/startup_config.json");
+        write_file(
+            &profile_path,
+            r#"{
+                "startupTasks": [
+                    { "name": "MyTask", "srcEntry": "./ets/startup/MyTask.ets" }
+                ]
+            }"#,
+        );
+
+        let output = merge_startup_config(StartupConfigInput {
+            bundle_name: Some("com.example.app"),
+            project_root: tmp.path(),
+            module_root: tmp.path(),
+            module_name: "entry",
+            app_startup: Some("$profile:startup_config".to_string()),
+            collect_preload_system_so: false,
+        })
+        .unwrap();
+
+        let task = &output.config.unwrap().startup_tasks[0];
+        let expected_abs = tmp
+            .path()
+            .join("src/main/ets/startup/MyTask.ets")
+            .to_string_lossy()
+            .into_owned();
+        let expected_profile = profile_path.to_string_lossy().into_owned();
+        assert_eq!(
+            task.ohmurl.as_deref(),
+            Some("@bundle:com.example.app/entry/ets/startup/MyTask")
+        );
+        assert_eq!(
+            task.src_entry_absolute_path.as_deref(),
+            Some(expected_abs.as_str())
+        );
+        assert_eq!(
+            task.startup_config_path.as_deref(),
+            Some(expected_profile.as_str())
+        );
+    }
+
+    #[test]
     fn test_merge_startup_config_dep_profile() {
         let tmp = tempfile::tempdir().unwrap();
         let oh_modules = tmp.path().join("oh_modules");
         let dep_dir = oh_modules.join("my-har");
+        write_file(
+            &tmp.path().join("oh-package.json5"),
+            r#"{ dependencies: { "my-har": "1.0.0" } }"#,
+        );
 
         // Write dep's module.json5
         write_file(
@@ -379,10 +622,14 @@ mod tests {
         );
 
         let output = merge_startup_config(StartupConfigInput {
+            bundle_name: None,
+            project_root: tmp.path(),
             module_root: tmp.path(),
             module_name: "entry",
             app_startup: None,
-        });
+            collect_preload_system_so: false,
+        })
+        .unwrap();
 
         let config = output.config.unwrap();
         assert_eq!(config.startup_tasks.len(), 1);
@@ -391,6 +638,70 @@ mod tests {
             config.startup_tasks[0].module_name.as_deref(),
             Some("my-har")
         );
+    }
+
+    #[test]
+    fn test_merge_startup_config_ignores_undeclared_dependency_profile() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dep_dir = tmp.path().join("oh_modules/undeclared-har");
+        write_file(
+            &dep_dir.join("src/main/module.json5"),
+            r#"{ "module": { "name": "undeclared-har", "type": "har", "appStartup": "$profile:startup_config" } }"#,
+        );
+        write_file(
+            &dep_dir.join("src/main/resources/base/profile/startup_config.json"),
+            r#"{ "startupTasks": [{ "name": "UndeclaredTask", "srcEntry": "./ets/startup/UndeclaredTask.ets" }] }"#,
+        );
+
+        let output = merge_startup_config(StartupConfigInput {
+            bundle_name: None,
+            project_root: tmp.path(),
+            module_root: tmp.path(),
+            module_name: "entry",
+            app_startup: None,
+            collect_preload_system_so: false,
+        })
+        .unwrap();
+
+        assert!(output.config.is_none());
+    }
+
+    #[test]
+    fn test_merge_startup_config_follows_transitive_declared_dependency_profile() {
+        let tmp = tempfile::tempdir().unwrap();
+        let module_root = tmp.path().join("entry");
+        let direct_dir = module_root.join("oh_modules/direct-har");
+        let transitive_dir = module_root.join("oh_modules/transitive-har");
+        write_file(
+            &module_root.join("oh-package.json5"),
+            r#"{ dependencies: { "direct-har": "1.0.0" } }"#,
+        );
+        write_file(
+            &direct_dir.join("oh-package.json5"),
+            r#"{ dependencies: { "transitive-har": "1.0.0" } }"#,
+        );
+        write_file(
+            &transitive_dir.join("src/main/module.json5"),
+            r#"{ "module": { "name": "transitive-har", "type": "har", "appStartup": "$profile:startup_config" } }"#,
+        );
+        write_file(
+            &transitive_dir.join("src/main/resources/base/profile/startup_config.json"),
+            r#"{ "startupTasks": [{ "name": "TransitiveTask", "srcEntry": "./ets/startup/TransitiveTask.ets" }] }"#,
+        );
+
+        let output = merge_startup_config(StartupConfigInput {
+            bundle_name: None,
+            project_root: tmp.path(),
+            module_root: &module_root,
+            module_name: "entry",
+            app_startup: None,
+            collect_preload_system_so: false,
+        })
+        .unwrap();
+
+        let config = output.config.unwrap();
+        assert_eq!(config.startup_tasks.len(), 1);
+        assert_eq!(config.startup_tasks[0].name, "TransitiveTask");
     }
 
     #[test]
@@ -413,6 +724,10 @@ mod tests {
         // Dep startup profile
         let dep_dir = tmp.path().join("oh_modules/dep-har");
         write_file(
+            &tmp.path().join("oh-package.json5"),
+            r#"{ dependencies: { "dep-har": "1.0.0" } }"#,
+        );
+        write_file(
             &dep_dir.join("src/main/module.json5"),
             r#"{ "module": { "name": "dep-har", "type": "har", "appStartup": "$profile:startup_config" } }"#,
         );
@@ -422,10 +737,14 @@ mod tests {
         );
 
         let output = merge_startup_config(StartupConfigInput {
+            bundle_name: None,
+            project_root: tmp.path(),
             module_root: tmp.path(),
             module_name: "entry",
             app_startup: Some("$profile:startup_config".to_string()),
-        });
+            collect_preload_system_so: false,
+        })
+        .unwrap();
 
         let config = output.config.unwrap();
         assert_eq!(config.startup_tasks.len(), 2);
@@ -452,13 +771,16 @@ mod tests {
                     src_entry: "./ets/startup/Task1.ets".to_string(),
                     run_on_thread: None,
                     wait_on_main_thread: None,
+                    exclude_from_auto_start: None,
                     dependencies: vec![],
                     module_name: Some("entry".to_string()),
                     ohmurl: None,
                     src_entry_absolute_path: None,
                     startup_config_path: None,
+                    is_remote_byte_code_har: None,
                 }],
                 app_preload_hint_startup_tasks: vec![],
+                system_preload_hint_startup_tasks: vec![],
             }),
         };
         write_startup_config(&output, &out_path).unwrap();
@@ -510,16 +832,24 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dep_dir = tmp.path().join("oh_modules/missing-profile-har");
         write_file(
+            &tmp.path().join("oh-package.json5"),
+            r#"{ dependencies: { "missing-profile-har": "1.0.0" } }"#,
+        );
+        write_file(
             &dep_dir.join("src/main/module.json5"),
             r#"{ "module": { "name": "missing-profile-har", "type": "har", "appStartup": "$profile:startup_config" } }"#,
         );
         // No profile JSON file written.
 
         let output = merge_startup_config(StartupConfigInput {
+            bundle_name: None,
+            project_root: tmp.path(),
             module_root: tmp.path(),
             module_name: "entry",
             app_startup: None,
-        });
+            collect_preload_system_so: false,
+        })
+        .unwrap();
         // No tasks found → config is None (no panic).
         assert!(output.config.is_none());
     }
@@ -540,14 +870,130 @@ mod tests {
         );
 
         let output = merge_startup_config(StartupConfigInput {
+            bundle_name: None,
+            project_root: tmp.path(),
             module_root: tmp.path(),
             module_name: "entry",
             app_startup: Some("$profile:startup_config".to_string()),
-        });
+            collect_preload_system_so: false,
+        })
+        .unwrap();
 
         let config = output.config.unwrap();
         assert!(config.startup_tasks.is_empty());
         assert_eq!(config.app_preload_hint_startup_tasks.len(), 1);
         assert_eq!(config.app_preload_hint_startup_tasks[0].name, "PreloadTask");
+    }
+
+    #[test]
+    fn test_merge_startup_config_collects_bytecode_har_system_preload_tasks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dep_dir = tmp.path().join("oh_modules/bytecode-har");
+        write_file(
+            &tmp.path().join("oh-package.json5"),
+            r#"{ dependencies: { "bytecode-har": "1.0.0" } }"#,
+        );
+        write_file(
+            &dep_dir.join("oh-package.json5"),
+            r#"{ name: "bytecode-har", metadata: { byteCodeHar: true } }"#,
+        );
+        write_file(&dep_dir.join("ets/modules.abc"), "PANDA");
+        write_file(
+            &dep_dir.join("META-INF/preload.json"),
+            r#"{
+                systemPreloadHintStartupTasks: [
+                    {
+                        name: "PreloadLibCrypto",
+                        srcEntry: "libcrypto.z.so",
+                        ohmurl: "@normalized:Y&bytecode_har&com.example.app&libcrypto.z.so&1.0.0"
+                    }
+                ]
+            }"#,
+        );
+
+        let output = merge_startup_config(StartupConfigInput {
+            bundle_name: None,
+            project_root: tmp.path(),
+            module_root: tmp.path(),
+            module_name: "entry",
+            app_startup: None,
+            collect_preload_system_so: true,
+        })
+        .unwrap();
+
+        let config = output.config.expect("system preload config");
+        assert!(config.startup_tasks.is_empty());
+        assert!(config.app_preload_hint_startup_tasks.is_empty());
+        assert_eq!(config.system_preload_hint_startup_tasks.len(), 1);
+        let task = &config.system_preload_hint_startup_tasks[0];
+        assert_eq!(task.name, "PreloadLibCrypto");
+        assert_eq!(task.src_entry, "libcrypto.z.so");
+        assert_eq!(
+            task.ohmurl.as_deref(),
+            Some("@normalized:Y&bytecode_har&com.example.app&libcrypto.z.so&1.0.0")
+        );
+    }
+
+    #[test]
+    fn test_merge_startup_config_skips_bytecode_har_system_preload_when_disabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dep_dir = tmp.path().join("oh_modules/bytecode-har");
+        write_file(
+            &tmp.path().join("oh-package.json5"),
+            r#"{ dependencies: { "bytecode-har": "1.0.0" } }"#,
+        );
+        write_file(
+            &dep_dir.join("oh-package.json5"),
+            r#"{ name: "bytecode-har", metadata: { byteCodeHar: true } }"#,
+        );
+        write_file(
+            &dep_dir.join("META-INF/preload.json"),
+            r#"{ systemPreloadHintStartupTasks: [{ name: "PreloadLibCrypto", srcEntry: "libcrypto.z.so", ohmurl: "@app:com.example.app/entry/crypto.z" }] }"#,
+        );
+
+        let output = merge_startup_config(StartupConfigInput {
+            bundle_name: None,
+            project_root: tmp.path(),
+            module_root: tmp.path(),
+            module_name: "entry",
+            app_startup: None,
+            collect_preload_system_so: false,
+        })
+        .unwrap();
+
+        assert!(output.config.is_none());
+    }
+
+    #[test]
+    fn test_merge_startup_config_duplicate_task_names_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let profile_path = tmp
+            .path()
+            .join("src/main/resources/base/profile/startup_config.json");
+        write_file(
+            &profile_path,
+            r#"{
+                "startupTasks": [
+                    { "name": "SameTask", "srcEntry": "./ets/startup/A.ets" },
+                    { "name": "SameTask", "srcEntry": "./ets/startup/B.ets" }
+                ]
+            }"#,
+        );
+
+        let err = merge_startup_config(StartupConfigInput {
+            bundle_name: None,
+            project_root: tmp.path(),
+            module_root: tmp.path(),
+            module_name: "entry",
+            app_startup: Some("$profile:startup_config".to_string()),
+            collect_preload_system_so: false,
+        })
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("duplicate startupTask name 'SameTask'"),
+            "duplicate startup task names must be a hard error: {err}"
+        );
     }
 }

@@ -87,7 +87,7 @@ fn run_build(fixture: &PathBuf) -> PathBuf {
     use arkdown_plugin_json5::Json5Plugin;
     use arkdown_plugin_module_meta::ModuleMetaPlugin;
     use arkdown_plugin_ohos_resolve::OhosResolvePlugin;
-    use arkdown_profile::{scan_bytecode_har_deps, ProfileProcessor};
+    use arkdown_profile::ProfileProcessor;
     use arkdown_resolver::ResolverConfig;
     use arkdown_resource::{ResourceCompileConfig, ResourceCompileInput, ResourceCompiler};
     use arkdown_ts2abc::{compile_to_abc, Ts2abcOptions};
@@ -152,6 +152,7 @@ fn run_build(fixture: &PathBuf) -> PathBuf {
                 use_normalized_ohm_url: false,
                 case_sensitive_check: false,
                 oh_modules_roots: vec![],
+                source_set_overlays: vec![],
             },
             fixture.clone(),
             false,
@@ -212,13 +213,22 @@ fn run_build(fixture: &PathBuf) -> PathBuf {
             inputs: ts2abc_inputs,
             output: modules_abc.clone(),
             target_api_sub_version: None,
+            enable_annotations: false,
             debug_info: true,
             opt_level: 0,
+            optimize_try_catch_func: true,
             target_api_version: config.sdk_config.compile_api_version,
             merge_abc: true,
-            cache_file: None,
             module: true,
             commonjs: false,
+            input_extension: "js".to_string(),
+            module_record_field_name: None,
+            cache_file: None,
+            output_proto: None,
+            compile_context_info: Default::default(),
+            enable_abc_input: false,
+            dump_deps_info: false,
+            remove_redundant_file: false,
             npm_module_entry_list: None,
         })
         .expect("abc compile");
@@ -257,6 +267,9 @@ fn run_build(fixture: &PathBuf) -> PathBuf {
             bundle_type: "app".to_string(),
             integrated_hsps: vec![],
             privacy_profile_path: None,
+            device_types: vec![],
+            installation_free: false,
+            delivery_with_install: true,
             source_maps_path: bundle_out.source_maps_path.clone(),
             abilities: vec![],
         })
@@ -282,12 +295,16 @@ fn collect_js_chunks_from_output(
             let meta = record_name_map.get(chunk_name.as_str());
             arkdown_ts2abc::Ts2abcInput {
                 path: path.clone(),
+                output: None,
+                cache_file: None,
                 record_name: meta
                     .map(|meta| meta.record_name.clone())
                     .unwrap_or_else(|| chunk_name.clone()),
                 source_file: meta.and_then(|meta| meta.source_file.clone()),
                 package_name: None,
                 is_commonjs: false,
+                is_shared_module: false,
+                origin_source_lang: String::new(),
                 source_map: None,
             }
         })
@@ -320,8 +337,11 @@ fn run_build_har(fixture: &PathBuf) -> PathBuf {
             module_name,
             source_dir,
             resources_dir,
+            resource_str_dir: None,
             oh_package_json,
             output_path: output.clone(),
+            declarations_dir: None,
+            consumer_rules_path: None,
         })
         .expect("pack_har");
     output
@@ -340,7 +360,7 @@ fn run_build_hsp(fixture: &PathBuf) -> PathBuf {
     use arkdown_plugin_json5::Json5Plugin;
     use arkdown_plugin_module_meta::ModuleMetaPlugin;
     use arkdown_plugin_ohos_resolve::OhosResolvePlugin;
-    use arkdown_profile::{scan_bytecode_har_deps, ProfileProcessor};
+    use arkdown_profile::ProfileProcessor;
     use arkdown_resolver::ResolverConfig;
     use arkdown_resource::{ResourceCompileConfig, ResourceCompileInput, ResourceCompiler};
     use arkdown_ts2abc::{compile_to_abc, Ts2abcOptions};
@@ -401,6 +421,7 @@ fn run_build_hsp(fixture: &PathBuf) -> PathBuf {
                 use_normalized_ohm_url: false,
                 case_sensitive_check: false,
                 oh_modules_roots: vec![],
+                source_set_overlays: vec![],
             },
             fixture.clone(),
             false,
@@ -456,13 +477,22 @@ fn run_build_hsp(fixture: &PathBuf) -> PathBuf {
             inputs: ts2abc_inputs,
             output: modules_abc.clone(),
             target_api_sub_version: None,
+            enable_annotations: false,
             debug_info: true,
             opt_level: 0,
+            optimize_try_catch_func: true,
             target_api_version: config.sdk_config.compile_api_version,
             merge_abc: true,
-            cache_file: None,
             module: true,
             commonjs: false,
+            input_extension: "js".to_string(),
+            module_record_field_name: None,
+            cache_file: None,
+            output_proto: None,
+            compile_context_info: Default::default(),
+            enable_abc_input: false,
+            dump_deps_info: false,
+            remove_redundant_file: false,
             npm_module_entry_list: None,
         })
         .expect("abc compile");
@@ -494,12 +524,93 @@ fn run_build_hsp(fixture: &PathBuf) -> PathBuf {
             bundle_type: "app".to_string(),
             integrated_hsps: vec![],
             privacy_profile_path: None,
+            device_types: vec![],
+            installation_free: false,
+            delivery_with_install: true,
             source_maps_path: bundle_out.source_maps_path.clone(),
             abilities: vec![],
         })
         .expect("pack_hsp");
 
     output
+}
+
+fn run_full_cli_build_hap(fixture_src: &PathBuf) -> PathBuf {
+    let fixture = isolated_fixture(fixture_src);
+
+    let build_profile = r#"{
+  app: {
+    products: [
+      {
+        name: "default",
+        targetSdkVersion: "5.0.5(17)",
+        compatibleSdkVersion: "5.0.5(17)",
+        runtimeOS: "HarmonyOS",
+        buildOption: {
+          preloadSystemSo: true,
+          strictMode: {
+            caseSensitiveCheck: false,
+            useNormalizedOHMUrl: false
+          }
+        }
+      }
+    ],
+    buildModeSet: [
+      { name: "debug" },
+      { name: "release" }
+    ]
+  },
+  modules: [
+    {
+      name: "entry",
+      srcPath: "./entry",
+      targets: [
+        {
+          name: "default",
+          applyToProducts: [ "default" ]
+        }
+      ]
+    }
+  ]
+}"#;
+    std::fs::write(fixture.join("build-profile.json5"), build_profile)
+        .expect("write build-profile.json5");
+
+    let preload_dir = fixture.join("entry/oh_modules/bc-har-dep/META-INF");
+    std::fs::create_dir_all(&preload_dir).expect("create preload dir");
+    std::fs::write(
+        preload_dir.join("preload.json"),
+        r#"{
+  systemPreloadHintStartupTasks: [
+    {
+      name: "PreloadLibCrypto",
+      srcEntry: "libcrypto.z.so",
+      ohmurl: "@bundle:com.example.arkdown.test/entry/crypto.z"
+    }
+  ]
+}"#,
+    )
+    .expect("write preload.json");
+
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    rt.block_on(arkdown_cli::cmd::build::run(
+        arkdown_cli::cmd::build::BuildArgs {
+            target: "hap".to_string(),
+            mode: "debug".to_string(),
+            module: None,
+            product: None,
+            project: Some(fixture.clone()),
+            build_target_name: None,
+            watch: false,
+            coverage: false,
+            preview: false,
+            disable_abc_cache: false,
+            cache_file: None,
+        },
+    ))
+    .expect("full CLI build");
+
+    fixture.join("entry/build/default/outputs/default/entry-default-signed.hap")
 }
 
 #[test]
@@ -666,6 +777,52 @@ fn test_hap_resource_files_present() {
         names.iter().any(|n| n.starts_with("resources/")),
         "HAP should contain resource files under resources/; entries: {:?}",
         names
+    );
+}
+
+#[test]
+fn test_preload_system_so_adds_startup_profile_and_module_ref() {
+    let fixture = bc_har_fixture_root();
+    let hap_path = run_full_cli_build_hap(&fixture);
+
+    let file = std::fs::File::open(&hap_path).expect("open HAP");
+    let mut archive = zip::ZipArchive::new(file).expect("open ZIP");
+
+    let module_json: serde_json::Value = {
+        let mut entry = archive.by_name("module.json").expect("no module.json");
+        let mut content = String::new();
+        use std::io::Read;
+        entry
+            .read_to_string(&mut content)
+            .expect("read module.json");
+        serde_json::from_str(&content).expect("parse module.json")
+    };
+    assert_eq!(
+        module_json["module"]["appStartup"].as_str(),
+        Some("$profile:startup_config")
+    );
+
+    let startup_profile: serde_json::Value = {
+        let mut entry = archive
+            .by_name("resources/base/profile/startup_config.json")
+            .expect("no startup_config profile");
+        let mut content = String::new();
+        use std::io::Read;
+        entry
+            .read_to_string(&mut content)
+            .expect("read startup_config profile");
+        serde_json::from_str(&content).expect("parse startup_config profile")
+    };
+
+    let tasks = startup_profile["systemPreloadHintStartupTasks"]
+        .as_array()
+        .expect("systemPreloadHintStartupTasks must be array");
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0]["name"].as_str(), Some("PreloadLibCrypto"));
+    assert_eq!(tasks[0]["srcEntry"].as_str(), Some("libcrypto.z.so"));
+    assert_eq!(
+        tasks[0]["ohmurl"].as_str(),
+        Some("@bundle:com.example.arkdown.test/entry/crypto.z")
     );
 }
 
@@ -1082,6 +1239,7 @@ fn run_build_bc_har(fixture_src: &PathBuf) -> (PathBuf, PathBuf) {
                 use_normalized_ohm_url: false,
                 case_sensitive_check: false,
                 oh_modules_roots: vec![],
+                source_set_overlays: vec![],
             },
             fixture.clone(),
             false,
@@ -1121,7 +1279,17 @@ fn run_build_bc_har(fixture_src: &PathBuf) -> (PathBuf, PathBuf) {
         process_importees(&bundle_out.chunk_graph, &importee_cfg).expect("process_importees");
     loader_json.compiled_importees = importee_result.compiled_importees;
 
-    // ByteCode HAR OHM URLs not available in ByteCodeHarScanEntry
+    // Add ByteCode HAR OHM URLs to compiledImportees.  BC HAR packages are
+    // pre-compiled ABC files absent from the bundle's ChunkGraph;
+    // process_importees cannot discover them automatically.
+    // Format: `@bundle:<bundleName>/<packageName>/<mainEntryStem>`
+    for dep in &bc_har_deps {
+        if let Some(ohm_url) = dep.ohm_url(&config.product.bundle_name) {
+            if !loader_json.compiled_importees.contains(&ohm_url) {
+                loader_json.compiled_importees.push(ohm_url);
+            }
+        }
+    }
 
     // Write importee.json cache so the test can read it back
     let importee_json_path = intermediates_dir
@@ -1174,13 +1342,22 @@ fn run_build_bc_har(fixture_src: &PathBuf) -> (PathBuf, PathBuf) {
             inputs: ts2abc_inputs,
             output: modules_abc.clone(),
             target_api_sub_version: None,
+            enable_annotations: false,
             debug_info: true,
             opt_level: 0,
+            optimize_try_catch_func: true,
             target_api_version: config.sdk_config.compile_api_version,
             merge_abc: true,
-            cache_file: None,
             module: true,
             commonjs: false,
+            input_extension: "js".to_string(),
+            module_record_field_name: None,
+            cache_file: None,
+            output_proto: None,
+            compile_context_info: Default::default(),
+            enable_abc_input: false,
+            dump_deps_info: false,
+            remove_redundant_file: false,
             npm_module_entry_list: None,
         })
         .expect("abc compile");
@@ -1191,14 +1368,22 @@ fn run_build_bc_har(fixture_src: &PathBuf) -> (PathBuf, PathBuf) {
         }
     }
 
-    // Merge ByteCode HAR .abc files
-    for dep in &bc_har_deps {}
+    // BC HAR .abc files are kept separate on disk; ArkRuntime loads them via
+    // `byteCodeHarInfo` in loader.json — no binary merge into modules.abc.
+    // Validate that each BC HAR dep has a reachable .abc path.
+    for dep in &bc_har_deps {
+        assert!(
+            dep.abc_path.exists(),
+            "BC HAR '{}' abc_path must exist: {:?}",
+            dep.package_name,
+            dep.abc_path
+        );
+    }
 
     (modules_abc, importee_json_path)
 }
 
 #[test]
-#[ignore = "bc_har ohm_url field not available"]
 fn test_bc_har_compiled_importees_contains_ohm_url() {
     let fixture = bc_har_fixture_root();
     let (_modules_abc, importee_json_path) = run_build_bc_har(&fixture);
@@ -1224,36 +1409,59 @@ fn test_bc_har_compiled_importees_contains_ohm_url() {
     );
 }
 
+/// Verify that the ByteCode HAR dependency is correctly represented in
+/// loader.json's `byteCodeHarInfo` map.
+///
+/// hvigor keeps BC HAR .abc files as separate on-disk artifacts and references
+/// them via `byteCodeHarInfo`; it does NOT merge them into `modules.abc`.
+/// ArkRuntime loads each HAR's ABC independently using that map.
 #[test]
-#[ignore = "bc_har ohm_url field not available"]
-fn test_bc_har_modules_abc_contains_har_bytes() {
+fn test_bc_har_loader_json_contains_bytecode_har_info() {
     let fixture = bc_har_fixture_root();
-    let (modules_abc, _importee_json) = run_build_bc_har(&fixture);
+    let fixture = isolated_fixture(&fixture);
 
+    use std::sync::Arc;
+
+    use arkdown_config::load_config;
+    use arkdown_core::{BuildMode, ModuleJson5, OutputTarget};
+    use arkdown_profile::ProfileProcessor;
+
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let _ = rt; // keep alive
+
+    let config = load_config(&fixture, BuildMode::Debug, OutputTarget::Hap, None, None)
+        .expect("load_config");
+    let config = Arc::new(config);
+
+    let processor = ProfileProcessor::new(config.clone());
+    let module = &config.modules[0];
+
+    let module_json5_path = module.src_path.join("src/main/module.json5");
+    let module_json5_content =
+        fs_err::read_to_string(&module_json5_path).expect("read module.json5");
+    let module_json5: ModuleJson5 =
+        json5::from_str(&module_json5_content).expect("parse module.json5");
+
+    let (_manifest, loader_json) = processor
+        .process_module(module, &module_json5)
+        .expect("process_module");
+
+    // The BC HAR dep must appear in byteCodeHarInfo.
     assert!(
-        modules_abc.exists(),
-        "modules.abc not found at {:?}",
-        modules_abc
+        !loader_json.byte_code_har_info.is_empty(),
+        "byteCodeHarInfo must be non-empty when a BC HAR dep is declared"
     );
-
-    let data = std::fs::read(&modules_abc).expect("read modules.abc");
-
-    // File must start with the PANDA magic from the main compiled module.
-    assert_eq!(
-        &data[..8],
-        b"PANDA\x00\x00\x00",
-        "modules.abc must start with PANDA magic; got: {:02x?}",
-        &data[..8]
-    );
-
-    // The BC HAR fixture's marker bytes (0xBC 0x4D) must appear somewhere after
-    // the main module bytecode — this confirms the HAR's .abc was merged in.
-    let marker = b"\xbc\x4d";
-    let found = data.windows(marker.len()).any(|window| window == marker);
     assert!(
-        found,
-        "modules.abc must contain BC HAR marker bytes 0xBC 0x4D; file size={}, first 32 bytes={:02x?}",
-        data.len(),
-        &data[..data.len().min(32)]
+        loader_json.byte_code_har_info.contains_key("bc-har-dep"),
+        "byteCodeHarInfo must contain 'bc-har-dep'; keys: {:?}",
+        loader_json.byte_code_har_info.keys().collect::<Vec<_>>()
     );
+    let entry = &loader_json.byte_code_har_info["bc-har-dep"];
+    assert!(
+        entry.abc_path.contains("ets/modules.abc") || entry.abc_path.contains("ets\\modules.abc"),
+        "BC HAR entry abc_path must point to ets/modules.abc; got: {}",
+        entry.abc_path
+    );
+
+    let _ = std::fs::remove_dir_all(&fixture);
 }

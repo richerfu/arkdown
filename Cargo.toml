@@ -39,6 +39,7 @@ arkdown-obfuscate = { path = "crates/arkdown-obfuscate" }
 arkdown-pack = { path = "crates/arkdown-pack" }
 arkdown-plugin-duplicate-check = { path = "crates/arkdown-plugin-duplicate-check" }
 arkdown-plugin-ets-transform = { path = "crates/arkdown-plugin-ets-transform" }
+arkdown-plugin-har-dedup = { path = "crates/arkdown-plugin-har-dedup" }
 arkdown-plugin-json5 = { path = "crates/arkdown-plugin-json5" }
 arkdown-plugin-module-meta = { path = "crates/arkdown-plugin-module-meta" }
 arkdown-plugin-ohos-resolve = { path = "crates/arkdown-plugin-ohos-resolve" }
@@ -86,7 +87,17 @@ indexmap = { version = "2", features = ["serde"] }
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
 json5 = "0.4"
+prost = "0.14.3"
+
+# HTTP client (OHPM registry integration)
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+# Tarball extraction (OHPM package download)
+flate2 = "1"
+tar = "0.4"
+# Base64 encoding (OHPM integrity verification)
+base64 = "0.22"
 
 # Error handling
 thiserror = "2"

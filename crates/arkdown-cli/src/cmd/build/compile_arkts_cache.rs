@@ -41,9 +41,30 @@ impl<'a> CompileArktsCacheWriter<'a> {
             ));
         }
 
+        // Collect pre-existing handoff source files to enable stale cleanup.
+        // After writing, files that are no longer in the module graph (orphaned
+        // by renames or removals) are deleted.  This mirrors hvigor's
+        // invalid-cache plugin behaviour that prevents stale `.ts` files from
+        // reaching the ABC compiler on subsequent incremental builds.
+        let pre_existing_ts: FxHashMap<PathBuf, ()> = if self.cache_root.exists() {
+            walkdir::WalkDir::new(&self.cache_root)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_file())
+                .filter(|e| {
+                    let ext = e.path().extension().and_then(|x| x.to_str());
+                    matches!(ext, Some("ts") | Some("ets") | Some("js"))
+                })
+                .map(|e| (e.path().to_path_buf(), ()))
+                .collect()
+        } else {
+            FxHashMap::default()
+        };
+
         let mut source_map_lines = Vec::new();
         let mut compile_infos = Vec::new();
         let mut pkg_entries = PackageEntryInfos::default();
+        let mut written_ts: FxHashMap<PathBuf, ()> = FxHashMap::default();
 
         for module_id in module_ids {
             let is_commonjs = chunk_graph
@@ -51,6 +72,7 @@ impl<'a> CompileArktsCacheWriter<'a> {
                 .get(&module_id)
                 .copied()
                 .unwrap_or(false);
+            let before_len = compile_infos.len();
             self.write_module(
                 &module_id,
                 is_commonjs,
@@ -58,12 +80,29 @@ impl<'a> CompileArktsCacheWriter<'a> {
                 &mut pkg_entries,
                 &mut source_map_lines,
             )?;
+            // Track the .ts path that was just written (if any).
+            if compile_infos.len() > before_len {
+                let info = &compile_infos[compile_infos.len() - 1];
+                written_ts.insert(info.ts_path.clone(), ());
+            }
         }
 
         if compile_infos.is_empty() {
             return Err(anyhow::anyhow!(
                 "CompileArkTS module graph had no compilable project modules"
             ));
+        }
+
+        // Remove stale handoff sources (files that existed before but were not
+        // written in this build).  Ignore deletion failures — missing file is fine.
+        for stale_path in pre_existing_ts.keys() {
+            if !written_ts.contains_key(stale_path) {
+                let _ = std::fs::remove_file(stale_path);
+                tracing::trace!(
+                    path = %stale_path.display(),
+                    "invalid-cache: removed stale CompileArkTS handoff file"
+                );
+            }
         }
 
         self.write_source_maps(&source_map_lines)?;

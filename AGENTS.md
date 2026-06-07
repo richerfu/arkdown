@@ -6,6 +6,21 @@
 
 Design notes and specs are in `meta/design/` and `meta/tasks/`; read the relevant spec before changing a crate. Test plans are in `meta/tests/`. Shared OHOS fixtures and assets are under `tests/fixtures/`.
 
+Repository-level Codex skills live under `.codex/skills/` and are part of the
+engineering rules for this repository. When a task matches a skill description,
+load and follow that skill before planning or editing. These skills are
+mandatory for all contributors and agents, not local preferences:
+
+- `rust-architecture-standards`: Rust workspace, crate, Cargo, path,
+  performance, OXC, and Rolldown standards.
+- `arkdown-refactor-plan`: SPEC-048 crate-boundary and migration contract.
+- `arkdown-build-session`: build session, context propagation, snapshots, and
+  repeated-read elimination.
+- `arkdown-path-portability`: cross-platform path and artifact serialization
+  rules.
+- `arkdown-performance-memory`: parallel execution, dense IDs, memory ownership,
+  and deterministic performance rules.
+
 ## Build, Test, and Development Commands
 
 - `cargo build`: build the full workspace.

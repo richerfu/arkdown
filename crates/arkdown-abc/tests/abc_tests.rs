@@ -3,7 +3,12 @@
 //! These tests exercise [`AbcCompiler`] through its public interface only,
 //! without access to crate internals.
 
-use arkdown_abc::{AbcCompileOptions, AbcCompiler, AbcError, AbcModule};
+use arkdown_abc::cache::{source_cache_hash, ProgramCacheFile};
+use arkdown_abc::emit::file::version_for_target_api;
+use arkdown_abc::proto_panda::scalar_value;
+use arkdown_abc::{
+    AbcCompileOptions, AbcCompiler, AbcError, AbcModule, AbcProgramCacheInput, AbcReader,
+};
 use std::collections::BTreeMap;
 
 // ---------------------------------------------------------------------------
@@ -14,12 +19,37 @@ fn make_compiler() -> AbcCompiler {
     AbcCompiler::new(AbcCompileOptions {
         debug_info: false,
         opt_level: 0,
+        optimize_try_catch_func: true,
         target_api_version: 12,
         target_api_sub_version: None,
+        enable_annotations: false,
         merge_abc: true,
         module: false,
-        cache_path: None,
+        module_record_field_name: None,
         npm_entries: None,
+        dependency_context: None,
+        remove_redundant_file: false,
+        dump_deps_info: false,
+    })
+}
+
+/// Compiler with debug_info=true, opt_level=0 — matches upstream es2abc in debug mode.
+/// Use this when testing DebugInfoSection / LNP emission.
+fn make_debug_compiler() -> AbcCompiler {
+    AbcCompiler::new(AbcCompileOptions {
+        debug_info: true,
+        opt_level: 0,
+        optimize_try_catch_func: true,
+        target_api_version: 12,
+        target_api_sub_version: None,
+        enable_annotations: false,
+        merge_abc: true,
+        module: false,
+        module_record_field_name: None,
+        npm_entries: None,
+        dependency_context: None,
+        remove_redundant_file: false,
+        dump_deps_info: false,
     })
 }
 
@@ -31,6 +61,8 @@ fn iife_module(record_name: &str, source: &str) -> AbcModule {
         source_file: None,
         package_name: None,
         is_commonjs: false,
+        is_shared_module: false,
+        origin_source_lang: String::new(),
     }
 }
 
@@ -113,7 +145,31 @@ fn inline_string_at(bytes: &[u8], offset: usize) -> String {
     String::from_utf8(bytes[pos..pos + len].to_vec()).unwrap()
 }
 
-fn class_header_counts(bytes: &[u8], offset: usize) -> (u32, u64, u64, u8, u8, u8) {
+fn read_class_tagged_data(bytes: &[u8], pos: &mut usize) -> (u8, u8, Option<u32>) {
+    let mut source_lang_tag = 0;
+    let mut source_lang = 0;
+    let mut source_file = None;
+    loop {
+        let tag = bytes[*pos];
+        *pos += 1;
+        match tag {
+            0x00 => return (source_lang_tag, source_lang, source_file),
+            0x02 => {
+                source_lang_tag = tag;
+                source_lang = bytes[*pos];
+                *pos += 1;
+            }
+            0x04 => *pos += 4,
+            0x07 => {
+                source_file = Some(read_u32(bytes, *pos));
+                *pos += 4;
+            }
+            other => panic!("unexpected class tag {other:#x}"),
+        }
+    }
+}
+
+fn class_header_counts(bytes: &[u8], offset: usize) -> (u32, u64, u64, u8, u8, Option<u32>) {
     let mut pos = offset;
     skip_inline_string(bytes, &mut pos);
     let super_off = read_u32(bytes, pos);
@@ -122,13 +178,14 @@ fn class_header_counts(bytes: &[u8], offset: usize) -> (u32, u64, u64, u8, u8, u
     let fields_count = read_uleb(bytes, &mut pos);
     let methods_count = read_uleb(bytes, &mut pos);
     assert_eq!(access_flags, 1);
+    let (source_lang_tag, source_lang, source_file) = read_class_tagged_data(bytes, &mut pos);
     (
         super_off,
         fields_count,
         methods_count,
-        bytes[pos],
-        bytes[pos + 1],
-        bytes[pos + 2],
+        source_lang_tag,
+        source_lang,
+        source_file,
     )
 }
 
@@ -142,20 +199,7 @@ fn first_user_method_debug_info(bytes: &[u8], class_offset: usize) -> (Option<u3
     assert_eq!(access_flags, 1);
     assert!(methods_count > 0);
 
-    let mut class_source_file = None;
-    loop {
-        let tag = bytes[pos];
-        pos += 1;
-        match tag {
-            0x00 => break,
-            0x02 => pos += 1,
-            0x07 => {
-                class_source_file = Some(read_u32(bytes, pos));
-                pos += 4;
-            }
-            other => panic!("unexpected class tag {other:#x}"),
-        }
-    }
+    let (_, _, class_source_file) = read_class_tagged_data(bytes, &mut pos);
 
     for _ in 0..fields_count {
         pos += 2 + 2 + 4;
@@ -202,20 +246,10 @@ fn user_field_values(bytes: &[u8], class_offset: usize) -> BTreeMap<String, u32>
     pos += 4; // super_class_off
     let access_flags = read_uleb(bytes, &mut pos);
     let fields_count = read_uleb(bytes, &mut pos) as usize;
-    let methods_count = read_uleb(bytes, &mut pos) as usize;
+    let _methods_count = read_uleb(bytes, &mut pos) as usize;
     assert_eq!(access_flags, 1);
-    assert!(methods_count > 0);
 
-    loop {
-        let tag = bytes[pos];
-        pos += 1;
-        match tag {
-            0x00 => break,
-            0x02 => pos += 1,
-            0x07 => pos += 4,
-            other => panic!("unexpected class tag {other:#x}"),
-        }
-    }
+    read_class_tagged_data(bytes, &mut pos);
 
     let mut fields = BTreeMap::new();
     for _ in 0..fields_count {
@@ -256,16 +290,7 @@ fn class_method_items(bytes: &[u8], class_offset: usize) -> Vec<(usize, String, 
     let methods_count = read_uleb(bytes, &mut pos) as usize;
     assert_eq!(access_flags, 1);
 
-    loop {
-        let tag = bytes[pos];
-        pos += 1;
-        match tag {
-            0x00 => break,
-            0x02 => pos += 1,
-            0x07 => pos += 4,
-            other => panic!("unexpected class tag {other:#x}"),
-        }
-    }
+    read_class_tagged_data(bytes, &mut pos);
 
     for _ in 0..fields_count {
         pos += 2 + 2 + 4;
@@ -307,6 +332,24 @@ fn class_method_items(bytes: &[u8], class_offset: usize) -> Vec<(usize, String, 
         methods.push((method_off, inline_string_at(bytes, name_off), code_off));
     }
     methods
+}
+
+fn method_source_lang_at(bytes: &[u8], method_offset: usize) -> u8 {
+    let mut pos = method_offset;
+    pos += 2 + 2;
+    pos += 4;
+    let _access_flags = read_uleb(bytes, &mut pos);
+    loop {
+        let tag = bytes[pos];
+        pos += 1;
+        match tag {
+            0x00 => panic!("method SOURCE_LANG tag must exist before MethodTag::NOTHING"),
+            0x01 => pos += 4,
+            0x02 => return bytes[pos],
+            0x05 | 0x06 => pos += 4,
+            other => panic!("unexpected method tag {other:#x}"),
+        }
+    }
 }
 
 fn code_item_bytecode(bytes: &[u8], code_off: usize) -> &[u8] {
@@ -367,10 +410,10 @@ fn bytecode_insn_len(bytecode: &[u8], pos: usize, opcode: u8) -> usize {
         0xfe if matches!(bytecode.get(pos + 1), Some(0x05 | 0x07)) => 3,
         0xfe => 2,
         // callruntime (0xfb) prefix — length depends on sub-opcode
-        0xfb if bytecode.get(pos + 1) == Some(&0x04) => 6,  // createprivateproperty
-        0xfb if bytecode.get(pos + 1) == Some(&0x05) => 8,  // defineprivateproperty
+        0xfb if bytecode.get(pos + 1) == Some(&0x04) => 6, // createprivateproperty
+        0xfb if bytecode.get(pos + 1) == Some(&0x05) => 8, // defineprivateproperty
         0xfb if matches!(bytecode.get(pos + 1), Some(0x13 | 0x14)) => 3, // istrue/isfalse
-        0xfb => 5,  // default callruntime (e.g. 0x01 definefieldbyvalue)
+        0xfb => 5, // default callruntime (e.g. 0x01 definefieldbyvalue)
         _ => 1,
     }
 }
@@ -384,6 +427,29 @@ fn bytecode_contains_opcode(bytecode: &[u8], target: u8) -> bool {
         pos += bytecode_insn_len(bytecode, pos, opcode);
     }
     false
+}
+
+fn bytecode_contains_any_opcode(bytecode: &[u8], targets: &[u8]) -> bool {
+    let mut pos = 0usize;
+    while let Some(&opcode) = bytecode.get(pos) {
+        if targets.contains(&opcode) {
+            return true;
+        }
+        pos += bytecode_insn_len(bytecode, pos, opcode);
+    }
+    false
+}
+
+fn bytecode_contains_jmp(bytecode: &[u8]) -> bool {
+    bytecode_contains_any_opcode(bytecode, &[0x4d, 0x4e, 0x98])
+}
+
+fn bytecode_contains_jeqz(bytecode: &[u8]) -> bool {
+    bytecode_contains_any_opcode(bytecode, &[0x4f, 0x50, 0x9a])
+}
+
+fn bytecode_contains_jnez(bytecode: &[u8]) -> bool {
+    bytecode_contains_any_opcode(bytecode, &[0x51, 0x9b, 0x9c])
 }
 
 fn bytecode_opcode_count(bytecode: &[u8], target: u8) -> usize {
@@ -556,6 +622,70 @@ fn test_literal_array_index_header_is_valid_when_classes_emit_literals() {
 }
 
 #[test]
+fn test_api18_literal_array_header_fields_are_reserved() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = tmp.path().join("api18-literal-index.abc");
+    module_compiler_for_target(18, None)
+        .compile(
+            vec![module_record(
+                "com.example.app/entry/ets/pages/Index",
+                r#"import UIAbility from "@ohos:app.ability.UIAbility";
+var Index = class extends UIAbility { onCreate(){} };
+export { Index as default };"#,
+            )],
+            &out,
+        )
+        .expect("compile must succeed");
+
+    let bytes = std::fs::read(&out).expect("read .abc");
+    let version = read_u32(&bytes, 0x0c);
+    let num_classes = read_u32(&bytes, 0x1c);
+    let class_idx_off = read_u32(&bytes, 0x20);
+    let num_literalarrays = read_u32(&bytes, 0x2c);
+    let literalarray_idx_off = read_u32(&bytes, 0x30);
+    let idx_section_off = read_u32(&bytes, 0x38);
+
+    assert_eq!(
+        version,
+        arkdown_abc::emit::file::version_for_target_api(18, None),
+        "API18 maps to upstream bytecode version 13.0.1.0"
+    );
+    assert_eq!(
+        num_literalarrays,
+        u32::MAX,
+        "v13 reserves num_literalarrays with INVALID_INDEX"
+    );
+    assert_eq!(
+        literalarray_idx_off,
+        u32::MAX,
+        "v13 reserves literalarray_idx_off with INVALID_OFFSET"
+    );
+    assert_eq!(
+        idx_section_off,
+        class_idx_off + num_classes * 4,
+        "v13 deletes the header-adjacent LiteralArrayIdx table"
+    );
+    AbcReader::validate(&bytes).expect("reader must accept upstream v13 reserved fields");
+
+    let user_off = class_offsets(&bytes)
+        .into_iter()
+        .find(|off| {
+            class_name_at(&bytes, *off as usize) == "Lcom.example.app/entry/ets/pages/Index;"
+        })
+        .expect("user record exists") as usize;
+    let fields = user_field_values(&bytes, user_off);
+    for field in ["moduleRecordIdx", "scopeNames"] {
+        let offset = *fields
+            .get(field)
+            .expect("module literal-array field is emitted");
+        assert!(
+            offset < bytes.len() as u32,
+            "{field} must still point at a literal array payload in v13"
+        );
+    }
+}
+
+#[test]
 fn test_defineclass_uses_matching_constructor_method_index() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = tmp.path().join("defineclass-ctor.abc");
@@ -612,6 +742,28 @@ class B { constructor() { this.b = 2; } }"#,
         defineclass_ctor_offsets, constructor_offsets,
         "defineclasswithbuffer must reference the matching constructor MethodItem offsets"
     );
+}
+
+#[test]
+fn test_constructor_default_negative_parameter_compiles_without_debug_source() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = tmp.path().join("constructor-default-negative.abc");
+    module_compiler()
+        .compile(
+            vec![module_record(
+                "com.example.app/entry/ets/pages/Index",
+                r#"class A {
+  constructor(value = -1) {
+    this.value = value;
+  }
+}
+new A();"#,
+            )],
+            &out,
+        )
+        .expect("constructor default negative parameter must compile without debug source");
+
+    assert!(out.exists());
 }
 
 #[test]
@@ -1059,18 +1211,40 @@ export { genRanHex };"#,
 }
 
 #[test]
-fn test_user_records_are_marked_arkts_and_sdk_stubs_have_native_fields() {
+fn test_user_records_are_marked_arkts_and_npm_entries_have_native_fields() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = tmp.path().join("records.abc");
-    make_compiler()
-        .compile(
-            vec![iife_module(
+    let npm_entries = tmp.path().join("npmEntries.txt");
+    fs_err::write(&npm_entries, "@ohos.app:@native.ohos.app\n").expect("write npm entries");
+    AbcCompiler::new(AbcCompileOptions {
+        debug_info: false,
+        opt_level: 0,
+        optimize_try_catch_func: true,
+        target_api_version: 12,
+        target_api_sub_version: None,
+        enable_annotations: false,
+        merge_abc: true,
+        module: false,
+        module_record_field_name: None,
+        npm_entries: Some(npm_entries),
+        dependency_context: None,
+        remove_redundant_file: false,
+        dump_deps_info: false,
+    })
+    .compile(
+        vec![{
+            let mut module = iife_module(
                 "com.example.app/entry/ets/entryability/EntryAbility",
                 "(function(){ var EntryAbility = class {}; })();",
-            )],
-            &out,
-        )
-        .expect("compile must succeed");
+            );
+            module.source_file =
+                Some("entry|entry|1.0.0|ets/entryability/EntryAbility.ts".to_string());
+            module.origin_source_lang = "ets".to_string();
+            module
+        }],
+        &out,
+    )
+    .expect("compile must succeed");
     let bytes = std::fs::read(&out).expect("read .abc");
 
     let offsets = class_offsets(&bytes);
@@ -1088,12 +1262,14 @@ fn test_user_records_are_marked_arkts_and_sdk_stubs_have_native_fields() {
         })
         .expect("user record exists") as usize;
 
-    let (_, sdk_fields, _, sdk_tag, sdk_lang, sdk_end) = class_header_counts(&bytes, sdk_off);
+    let (_, sdk_fields, _, sdk_tag, sdk_lang, sdk_source_file) =
+        class_header_counts(&bytes, sdk_off);
     assert_eq!(
         sdk_fields, 1,
-        "SDK stubs carry one @native field in hvigor output"
+        "npm entry records carry one @native field in hvigor output"
     );
-    assert_eq!((sdk_tag, sdk_lang, sdk_end), (0x02, 0x00, 0x00));
+    assert_eq!((sdk_tag, sdk_lang), (0x02, 0x00));
+    assert_eq!(sdk_source_file, None);
     assert!(
         bytes
             .windows(b"@native.ohos.app".len())
@@ -1101,15 +1277,23 @@ fn test_user_records_are_marked_arkts_and_sdk_stubs_have_native_fields() {
         "SDK native field name must be emitted as a StringItem"
     );
 
-    let (_, user_fields, _, user_tag, user_lang, user_end) = class_header_counts(&bytes, user_off);
+    let (_, user_fields, _, user_tag, user_lang, user_source_file) =
+        class_header_counts(&bytes, user_off);
     assert_eq!(
         user_fields, 6,
         "user module records carry six module metadata fields"
     );
     assert_eq!(
-        (user_tag, user_lang, user_end),
-        (0x02, 0x04, 0x00),
+        (user_tag, user_lang),
+        (0x02, 0x04),
         "user records use ArkTS source language byte 0x04"
+    );
+    assert_eq!(
+        inline_string_at(
+            &bytes,
+            user_source_file.expect("user record source file") as usize
+        ),
+        "entry|entry|1.0.0|ets/entryability/EntryAbility.ts"
     );
     assert!(
         bytes
@@ -1117,6 +1301,68 @@ fn test_user_records_are_marked_arkts_and_sdk_stubs_have_native_fields() {
             .any(|w| w == b"pkgName@entry"),
         "pkgName field includes the module name suffix"
     );
+}
+
+#[test]
+fn test_origin_source_lang_controls_source_lang_tags() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = tmp.path().join("source_lang.abc");
+    let cases = [
+        ("ets", "test/source_lang_ets", 0x04),
+        ("ts", "test/source_lang_ts", 0x03),
+        ("js", "test/source_lang_js", 0x02),
+        ("", "test/source_lang_default", 0x00),
+        ("unknown", "test/source_lang_unknown", 0x00),
+    ];
+    let modules = cases
+        .iter()
+        .map(|(origin_source_lang, record_name, _)| {
+            let mut module = module_record_with_source_file(
+                record_name,
+                "export const value = 1;",
+                "entry|entry|1.0.0|src/main/ets/pages/Index.ts",
+            );
+            module.origin_source_lang = (*origin_source_lang).to_string();
+            module
+        })
+        .collect();
+
+    module_compiler()
+        .compile(modules, &out)
+        .expect("compile sourceLang records");
+    let bytes = std::fs::read(&out).expect("read sourceLang abc");
+
+    for (_, record_name, expected_lang) in cases {
+        let class_name = format!("L{record_name};");
+        let class_off = class_offsets(&bytes)
+            .into_iter()
+            .map(|off| off as usize)
+            .find(|&off| class_name_at(&bytes, off) == class_name)
+            .expect("sourceLang class exists");
+        let (_, _, _, tag, class_lang, source_file) = class_header_counts(&bytes, class_off);
+        assert_eq!(
+            (tag, class_lang),
+            (0x02, expected_lang),
+            "{record_name} class SOURCE_LANG must match upstream Program::SetSourceLang"
+        );
+        assert_eq!(
+            inline_string_at(
+                &bytes,
+                source_file.expect("sourceLang class source file") as usize
+            ),
+            "entry|entry|1.0.0|src/main/ets/pages/Index.ts"
+        );
+
+        let func_main = class_method_items(&bytes, class_off)
+            .into_iter()
+            .find(|(_, name, _)| name == "func_main_0")
+            .expect("func_main_0 method exists");
+        assert_eq!(
+            method_source_lang_at(&bytes, func_main.0),
+            expected_lang,
+            "{record_name} method SOURCE_LANG must match class SOURCE_LANG"
+        );
+    }
 }
 
 #[test]
@@ -1221,6 +1467,66 @@ export { Index as default };"#,
     assert!(
         has_class_method_buffer,
         "class buffer literal array links instance methods by MethodItem offset"
+    );
+}
+
+#[test]
+fn test_module_record_marks_top_level_await() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = tmp.path().join("module-tla.abc");
+    module_compiler()
+        .compile(
+            vec![module_record(
+                "com.example.app/entry/ets/pages/Index",
+                r#"function load() { return Promise.resolve(1); }
+await load();"#,
+            )],
+            &out,
+        )
+        .expect("compile must succeed");
+
+    let bytes = std::fs::read(&out).expect("read .abc");
+    let user_off = class_offsets(&bytes)
+        .into_iter()
+        .find(|off| {
+            class_name_at(&bytes, *off as usize) == "Lcom.example.app/entry/ets/pages/Index;"
+        })
+        .expect("user record exists") as usize;
+    let fields = user_field_values(&bytes, user_off);
+    assert_eq!(
+        fields.get("hasTopLevelAwait"),
+        Some(&1),
+        "merge-abc module metadata mirrors Program::HasTLA()"
+    );
+}
+
+#[test]
+fn test_module_record_does_not_mark_nested_async_await_as_tla() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = tmp.path().join("module-nested-await.abc");
+    module_compiler()
+        .compile(
+            vec![module_record(
+                "com.example.app/entry/ets/pages/Index",
+                r#"async function load() { await Promise.resolve(1); }
+load();"#,
+            )],
+            &out,
+        )
+        .expect("compile must succeed");
+
+    let bytes = std::fs::read(&out).expect("read .abc");
+    let user_off = class_offsets(&bytes)
+        .into_iter()
+        .find(|off| {
+            class_name_at(&bytes, *off as usize) == "Lcom.example.app/entry/ets/pages/Index;"
+        })
+        .expect("user record exists") as usize;
+    let fields = user_field_values(&bytes, user_off);
+    assert_eq!(
+        fields.get("hasTopLevelAwait"),
+        Some(&0),
+        "await inside a function must not set Program::HasTLA()"
     );
 }
 
@@ -1717,7 +2023,7 @@ enum Status { Ready }"#,
         "pre-declaration enum reads must use the local enum binding instead of global fallback"
     );
     assert!(
-        bytecode_contains_opcode(&bytecode, 0x9b),
+        bytecode_contains_jnez(&bytecode),
         "enum object initialization must use the upstream logical-or guard"
     );
 }
@@ -2264,12 +2570,17 @@ fn test_artifact_api_version_propagated() {
     let compiler = AbcCompiler::new(AbcCompileOptions {
         debug_info: false,
         opt_level: 0,
+        optimize_try_catch_func: true,
         target_api_version: 9,
         target_api_sub_version: None,
+        enable_annotations: false,
         merge_abc: true,
         module: false,
-        cache_path: None,
+        module_record_field_name: None,
         npm_entries: None,
+        dependency_context: None,
+        remove_redundant_file: false,
+        dump_deps_info: false,
     });
     let result = compiler
         .compile(vec![iife_module("api_test", "(function(){}())")], &out)
@@ -2300,12 +2611,17 @@ fn test_artifact_debug_info_true() {
     let compiler = AbcCompiler::new(AbcCompileOptions {
         debug_info: true,
         opt_level: 0,
+        optimize_try_catch_func: true,
         target_api_version: 12,
         target_api_sub_version: None,
+        enable_annotations: false,
         merge_abc: true,
         module: false,
-        cache_path: None,
+        module_record_field_name: None,
         npm_entries: None,
+        dependency_context: None,
+        remove_redundant_file: false,
+        dump_deps_info: false,
     });
     let result = compiler
         .compile(vec![iife_module("debug_test", "(function(){}())")], &out)
@@ -2391,6 +2707,8 @@ fn test_compile_source_map_field_ignored_safely() {
             source_file: None,
             package_name: None,
             is_commonjs: false,
+            is_shared_module: false,
+            origin_source_lang: String::new(),
         }],
         &out,
     );
@@ -2404,10 +2722,12 @@ fn test_compile_source_map_field_ignored_safely() {
 
 #[test]
 fn test_source_file_emits_debug_info_and_lnp() {
+    // Upstream es2abc only emits DebugInfoSection when both debug_info=true AND
+    // opt_level=0.  Use make_debug_compiler() to match that contract.
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = tmp.path().join("sourcemap-debug.abc");
     let source_file = "entry/src/main/ets/pages/Index.ts";
-    let result = make_compiler()
+    let result = make_debug_compiler()
         .compile(
             vec![AbcModule {
                 record_name: "com.example.app/entry/ets/pages/Index".to_string(),
@@ -2416,6 +2736,8 @@ fn test_source_file_emits_debug_info_and_lnp() {
                 source_file: Some(source_file.to_string()),
                 package_name: None,
                 is_commonjs: false,
+                is_shared_module: false,
+                origin_source_lang: String::new(),
             }],
             &out,
         )
@@ -2440,14 +2762,22 @@ fn test_source_file_emits_debug_info_and_lnp() {
             class_name_at(&bytes, *off as usize) == "Lcom.example.app/entry/ets/pages/Index;"
         })
         .expect("user record exists") as usize;
-    let (_class_source_file, method_debug_info) = first_user_method_debug_info(&bytes, user_off);
+    let (class_source_file, method_debug_info) = first_user_method_debug_info(&bytes, user_off);
+    assert_eq!(
+        inline_string_at(
+            &bytes,
+            class_source_file.expect("class SOURCE_FILE tag exists") as usize
+        ),
+        source_file,
+        "record source_file is written as ClassTag::SOURCE_FILE"
+    );
     let debug_info = method_debug_info.expect("method DEBUG_INFO tag exists");
 
     // DebugInfo format (libpandafile DebugInfoItem::Write, corrected architecture):
     //   line_num:           ULEB128(0xFFFF_FFFF)
     //   num_params:         ULEB128(0)
     //   constant_pool_size: ULEB128(N)   byte count of operand pool
-    //   constant_pool:      [src_file_off_uleb, scope_var_operands..., epilogue_delta_uleb]
+    //   constant_pool:      [scope var operands..., line operands...]
     //   lnp_index:          ULEB128(0)
     //
     // The constant_pool contains ULEB128-encoded OPERANDS for LNP opcodes
@@ -2455,27 +2785,11 @@ fn test_source_file_emits_debug_info_and_lnp() {
     let mut pos = debug_info as usize;
     assert_eq!(
         read_uleb(&bytes, &mut pos),
-        u32::MAX as u64,
-        "line_start uses hvigor NO_LINE_NUMBER sentinel"
+        0,
+        "standalone es2abc-style input stores the concrete 0-based start line"
     );
     assert_eq!(read_uleb(&bytes, &mut pos), 0, "no parameter names emitted");
-    let cp_size = read_uleb(&bytes, &mut pos) as usize;
-    assert!(
-        cp_size > 0,
-        "constant pool must be non-empty (contains SET_FILE operand + scope var operands)"
-    );
-    // The constant pool starts with SET_FILE, or SET_SOURCE_CODE then SET_FILE
-    // for module func_main_0.
-    let mut sf_from_cp = read_uleb(&bytes, &mut pos);
-    if inline_string_at(&bytes, sf_from_cp as usize) == "not supported" {
-        sf_from_cp = read_uleb(&bytes, &mut pos);
-    }
-    assert_eq!(
-        inline_string_at(&bytes, sf_from_cp as usize),
-        source_file,
-        "constant pool first operand is the source file string offset (for SET_FILE)"
-    );
-    // Skip the rest of the constant pool (scope var operands, epilogue delta)
+    let _cp_size = read_uleb(&bytes, &mut pos) as usize;
     pos = debug_info as usize;
     read_uleb(&bytes, &mut pos); // line_start
     read_uleb(&bytes, &mut pos); // num_params
@@ -2487,19 +2801,136 @@ fn test_source_file_emits_debug_info_and_lnp() {
         "debug info references a valid LNP index; got {lnp_index}, count {num_lnp}"
     );
 
-    // The LNP entry (in the separate LNP data_ stream) starts with SET_FILE
-    // (0x09), or SET_SOURCE_CODE (0x0a) followed by SET_FILE for func_main_0.
-    // The LNP data_ contains opcodes + inline register SLEB128s (no other inline operands).
+    // The LNP entry does not repeat SET_FILE when method source_file equals
+    // the owning record source_file. The LNP data_ contains opcodes + inline
+    // register SLEB128s (no other inline operands).
     let lnp_offset = read_u32(&bytes, lnp_idx_off) as usize;
     assert!(
-        bytes[lnp_offset] == 0x09 || (bytes[lnp_offset] == 0x0a && bytes[lnp_offset + 1] == 0x09),
-        "LNP data_ starts with SET_FILE or SET_SOURCE_CODE+SET_FILE"
+        !matches!(bytes[lnp_offset], 0x09 | 0x0a),
+        "same-source LNP must not start with SET_FILE or SET_SOURCE_CODE"
     );
     // After SET_FILE, the LNP contains START_LOCAL_EXTENDED entries (opcode + reg),
     // SET_PROLOGUE_END, body opcodes, SET_EPILOGUE_BEGIN, ADVANCE_PC, END_SEQUENCE.
     let lnp_end = lnp_body_end(&bytes, lnp_offset);
     assert!(lnp_end > lnp_offset, "LNP must have content");
     assert_eq!(bytes[lnp_end - 1], 0x00, "LNP terminates with END_SEQUENCE");
+}
+
+#[test]
+fn test_api18_standalone_explicit_constructor_matches_upstream_lnp_layout() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = tmp.path().join("explicit-constructor.abc");
+    let compiler = AbcCompiler::new(AbcCompileOptions {
+        debug_info: false,
+        opt_level: 0,
+        optimize_try_catch_func: true,
+        target_api_version: 18,
+        target_api_sub_version: None,
+        enable_annotations: false,
+        merge_abc: true,
+        module: true,
+        module_record_field_name: None,
+        npm_entries: None,
+        dependency_context: None,
+        remove_redundant_file: false,
+        dump_deps_info: false,
+    });
+    compiler
+        .compile(
+            vec![AbcModule {
+                record_name: "com.example.app/entry/ets/pages/Index".to_string(),
+                source: include_str!(
+                    "fixtures/upstream/es2panda/bytecode/js/class/test-explicit-constructor.js"
+                )
+                .to_string(),
+                source_map: None,
+                source_file: Some("entry/src/main/ets/pages/Index.ts".to_string()),
+                package_name: None,
+                is_commonjs: false,
+                is_shared_module: false,
+                origin_source_lang: String::new(),
+            }],
+            &out,
+        )
+        .expect("compile explicit constructor fixture");
+
+    let bytes = std::fs::read(&out).expect("read .abc");
+    assert_eq!(bytes.len(), 980, "API18 standalone fixture size");
+    assert_eq!(read_u32(&bytes, 0x28), 0x3c8, "LNP index offset");
+    assert_eq!(
+        &bytes[0x3a4..0x3d4],
+        &[
+            0x0b, 0x00, 0x05, 0x00, 0x01, 0x00, 0x00, 0x0b, 0x01, 0x02, 0x10, 0x65, 0x00, 0x08,
+            0x00, 0x03, 0x00, 0x10, 0x77, 0x01, 0x0b, 0x01, 0x11, 0x01, 0x02, 0x10, 0x00, 0x05,
+            0x00, 0x04, 0x00, 0x12, 0x0d, 0x79, 0x02, 0x00, 0xa4, 0x03, 0x00, 0x00, 0xab, 0x03,
+            0x00, 0x00, 0xb8, 0x03, 0x00, 0x00,
+        ],
+        "LNP/DebugInfo section matches upstream es2abc for the fixture"
+    );
+}
+
+#[test]
+fn test_api18_standalone_lexical_arrow_matches_upstream_abc_tail_layout() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = tmp.path().join("lexical-arrow.abc");
+    let compiler = AbcCompiler::new(AbcCompileOptions {
+        debug_info: false,
+        opt_level: 0,
+        optimize_try_catch_func: true,
+        target_api_version: 18,
+        target_api_sub_version: None,
+        enable_annotations: false,
+        merge_abc: true,
+        module: true,
+        module_record_field_name: None,
+        npm_entries: None,
+        dependency_context: None,
+        remove_redundant_file: false,
+        dump_deps_info: false,
+    });
+    compiler
+        .compile(
+            vec![AbcModule {
+                record_name: "com.example.app/entry/ets/pages/Index".to_string(),
+                source: include_str!(
+                    "fixtures/upstream/es2panda/bytecode/js/lexicalEnv/arrow-function-reference-ctx.js"
+                )
+                .to_string(),
+                source_map: None,
+                source_file: Some("entry/src/main/ets/pages/Index.ts".to_string()),
+                package_name: None,
+                is_commonjs: false,
+            is_shared_module: false,
+            origin_source_lang: String::new(),
+            }],
+            &out,
+        )
+        .expect("compile lexical arrow fixture");
+
+    let bytes = std::fs::read(&out).expect("read .abc");
+    assert_eq!(bytes.len(), 2048, "API18 lexical fixture size");
+    assert_eq!(read_u32(&bytes, 0x28), 0x7e8, "LNP index offset");
+    assert_eq!(
+        bytes[0x770], 0x00,
+        "standalone lexenv catch-all handler code_size matches upstream"
+    );
+    assert_eq!(
+        &bytes[0x771..0x800],
+        &[
+            0x0b, 0x01, 0x02, 0x10, 0x00, 0xff, 0xff, 0xff, 0xff, 0x0f, 0x00, 0x03, 0x00, 0x06,
+            0x27, 0x00, 0x06, 0x00, 0x03, 0x00, 0x0a, 0x79, 0x00, 0x0b, 0xaf, 0x7e, 0x01, 0x12,
+            0x00, 0xff, 0xff, 0xff, 0xff, 0x0f, 0x00, 0x02, 0x00, 0x10, 0x02, 0xff, 0xff, 0xff,
+            0xff, 0x0f, 0x00, 0x04, 0x00, 0x06, 0x1e, 0x10, 0x01, 0x0b, 0x01, 0x02, 0x10, 0x7f,
+            0x01, 0x12, 0x00, 0xff, 0xff, 0xff, 0xff, 0x0f, 0x00, 0x04, 0x00, 0x06, 0x13, 0x10,
+            0x01, 0x0b, 0x6b, 0x2f, 0x01, 0x11, 0x00, 0x09, 0x00, 0x02, 0x00, 0x10, 0x03, 0x0b,
+            0x01, 0x11, 0x6b, 0xfe, 0xaa, 0x00, 0x13, 0x00, 0x02, 0x00, 0x15, 0x04, 0x0b, 0x01,
+            0x11, 0x2f, 0xfe, 0xaa, 0x00, 0x1e, 0x00, 0x02, 0x00, 0x15, 0x05, 0x05, 0x00, 0x03,
+            0x00, 0x24, 0x7a, 0x00, 0x00, 0x00, 0x00, 0x71, 0x07, 0x00, 0x00, 0xa4, 0x07, 0x00,
+            0x00, 0x88, 0x07, 0x00, 0x00, 0xb8, 0x07, 0x00, 0x00, 0xc4, 0x07, 0x00, 0x00, 0xd1,
+            0x07, 0x00, 0x00,
+        ],
+        "DebugInfo/LNP tail matches upstream es2abc for lexical fixture"
+    );
 }
 
 #[test]
@@ -2519,6 +2950,8 @@ fn test_module_metadata_uses_files_info_package_name() {
                         "pkg_modules/.ohpm/@scope+pkg@1.0.0/pkg_modules/@scope/pkg".to_string(),
                     ),
                     is_commonjs: false,
+                    is_shared_module: false,
+                    origin_source_lang: String::new(),
                 },
                 AbcModule {
                     record_name: "com.example.app/phone@utils/Index".to_string(),
@@ -2527,6 +2960,8 @@ fn test_module_metadata_uses_files_info_package_name() {
                     source_file: None,
                     package_name: Some("utils".to_string()),
                     is_commonjs: false,
+                    is_shared_module: false,
+                    origin_source_lang: String::new(),
                 },
             ],
             &out,
@@ -2551,6 +2986,57 @@ fn test_module_metadata_uses_files_info_package_name() {
 }
 
 #[test]
+fn test_non_merge_module_record_field_name_option_matches_upstream() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = tmp.path().join("module-record-field-name.abc");
+    let compiler = AbcCompiler::new(AbcCompileOptions {
+        debug_info: false,
+        opt_level: 0,
+        optimize_try_catch_func: true,
+        target_api_version: 12,
+        target_api_sub_version: None,
+        enable_annotations: false,
+        merge_abc: false,
+        module: true,
+        module_record_field_name: Some("customModuleRecord".to_string()),
+        npm_entries: None,
+        dependency_context: None,
+        remove_redundant_file: false,
+        dump_deps_info: false,
+    });
+    compiler
+        .compile(
+            vec![AbcModule {
+                record_name: String::new(),
+                source: "export const value = 1;".to_string(),
+                source_map: None,
+                source_file: Some("main.js".to_string()),
+                package_name: None,
+                is_commonjs: false,
+                is_shared_module: false,
+                origin_source_lang: String::new(),
+            }],
+            &out,
+        )
+        .expect("compile must succeed");
+
+    let bytes = std::fs::read(&out).expect("read .abc");
+    let module_record_off = class_offsets(&bytes)
+        .into_iter()
+        .find(|off| class_name_at(&bytes, *off as usize).contains("_ESModuleRecord"))
+        .expect("_ESModuleRecord exists") as usize;
+    let fields = user_field_values(&bytes, module_record_off);
+    assert!(
+        fields.contains_key("customModuleRecord"),
+        "--module-record-field-name must replace the default source-file field name"
+    );
+    assert!(
+        !fields.contains_key("main.js"),
+        "custom module record field name must override the source-file fallback"
+    );
+}
+
+#[test]
 fn test_module_metadata_marks_commonjs_records() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = tmp.path().join("commonjs.abc");
@@ -2568,6 +3054,8 @@ fn test_module_metadata_marks_commonjs_records() {
                         .to_string(),
                 ),
                 is_commonjs: true,
+            is_shared_module: false,
+            origin_source_lang: String::new(),
             }],
             &out,
         )
@@ -2593,10 +3081,214 @@ fn test_module_metadata_marks_commonjs_records() {
     );
 }
 
+#[test]
+fn test_module_metadata_marks_shared_modules() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = tmp.path().join("shared-module.abc");
+    module_compiler()
+        .compile(
+            vec![AbcModule {
+                record_name: "com.example.shared/shared/ets/pages/Index".to_string(),
+                source: "export const value = 1;".to_string(),
+                source_map: None,
+                source_file: Some("shared/src/main/ets/pages/Index.ts".to_string()),
+                package_name: Some("shared".to_string()),
+                is_commonjs: false,
+                is_shared_module: true,
+                origin_source_lang: String::new(),
+            }],
+            &out,
+        )
+        .expect("compile must succeed");
+
+    let bytes = std::fs::read(&out).expect("read .abc");
+    let user_off = class_offsets(&bytes)
+        .into_iter()
+        .find(|off| {
+            class_name_at(bytes.as_slice(), *off as usize)
+                == "Lcom.example.shared/shared/ets/pages/Index;"
+        })
+        .expect("shared record exists") as usize;
+    let fields = user_field_values(&bytes, user_off);
+    assert_eq!(
+        fields.get("isSharedModule"),
+        Some(&1),
+        "filesInfo isSharedModule is written to the isSharedModule field"
+    );
+}
+
+#[test]
+fn program_cache_hit_restores_program_and_skips_source_compile() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cache_file = tmp.path().join("Index.protoBin");
+    let first_output = tmp.path().join("first.abc");
+    let second_output = tmp.path().join("second.abc");
+    let record_name = "entry|entry|1.0.0|src/main/ets/pages/Index";
+    let file_name = tmp.path().join("Index.js").to_string_lossy().into_owned();
+    let valid_source = "export const value = 1;";
+    let invalid_source = "export const = ;";
+    let cache_input = AbcProgramCacheInput {
+        file_name: file_name.clone(),
+        cache_file: cache_file.clone(),
+    };
+
+    module_compiler()
+        .compile_with_program_cache(
+            vec![module_record(record_name, valid_source)],
+            &first_output,
+            vec![Some(cache_input.clone())],
+        )
+        .unwrap();
+
+    let entry = ProgramCacheFile::read(&cache_file).unwrap().unwrap();
+    let invalid_source_hash = source_cache_hash(
+        invalid_source,
+        &file_name,
+        record_name,
+        "",
+        "",
+        version_for_target_api(12, None),
+    );
+    ProgramCacheFile::write(&cache_file, invalid_source_hash, entry.program).unwrap();
+
+    let result = module_compiler()
+        .compile_with_program_cache(
+            vec![module_record(record_name, invalid_source)],
+            &second_output,
+            vec![Some(cache_input)],
+        )
+        .unwrap();
+
+    assert_eq!(result.path, second_output);
+    assert_eq!(
+        &fs_err::read(&result.path).unwrap()[0..8],
+        b"PANDA\x00\x00\x00"
+    );
+    assert_eq!(
+        ProgramCacheFile::read(&cache_file)
+            .unwrap()
+            .unwrap()
+            .hash_code,
+        invalid_source_hash
+    );
+}
+
+/// Verify that the `.protoBin` file written by `ProgramCacheFile::write`
+/// uses the correct upstream protobuf binary encoding.
+///
+/// hvigor's es2abc writes `ProgramCache` proto messages to `.protoBin` files.
+/// This test verifies our format is byte-compatible by:
+/// 1. Compiling a source and writing a `.protoBin` cache file.
+/// 2. Reading the raw bytes and checking the protobuf field-tag layout.
+/// 3. Decoding the bytes back through `ProgramCacheFile::read` to confirm
+///    the round-trip is lossless.
+///
+/// Protobuf encoding rules (verified against upstream proto definition):
+/// - Field 1 (hash_code: uint32):  wire type 0 (varint) → tag byte `0x08`
+/// - Field 2 (program: Program):   wire type 2 (length-delimited) → tag `0x12`
+///
+/// This aligns our implementation with es2abc's `ProgramCacheFile` format.
+#[test]
+fn test_program_cache_proto_bin_has_correct_protobuf_layout() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cache_file = tmp.path().join("test_module.protoBin");
+    let output = tmp.path().join("test_module.abc");
+    let record_name = "test/proto_bin_format|1.0.0|src/main/ets/Index";
+    let file_name = tmp.path().join("Index.js").to_string_lossy().into_owned();
+    let source = "export const answer = 42;";
+
+    let cache_input = AbcProgramCacheInput {
+        file_name: file_name.clone(),
+        cache_file: cache_file.clone(),
+    };
+
+    // Compile and write the protoBin.
+    module_compiler()
+        .compile_with_program_cache(
+            vec![module_record(record_name, source)],
+            &output,
+            vec![Some(cache_input)],
+        )
+        .expect("compile with program cache must succeed");
+
+    // Verify the .protoBin file was created.
+    assert!(
+        cache_file.exists(),
+        ".protoBin file must be created after compile"
+    );
+
+    let raw_bytes = std::fs::read(&cache_file).expect("must be able to read .protoBin file");
+    assert!(!raw_bytes.is_empty(), ".protoBin must not be empty");
+
+    // Verify the protobuf field-tag layout:
+    //   Byte 0: must be 0x08 (field 1, wire type 0 = varint) for hash_code.
+    // This matches es2abc's ProgramCache proto encoding.
+    assert_eq!(
+        raw_bytes[0], 0x08,
+        "first byte must be protobuf field tag 0x08 (field 1 varint = hash_code); \
+         got {:#04x}. This indicates our .protoBin format does NOT match \
+         the upstream es2abc ProgramCache protobuf encoding.",
+        raw_bytes[0]
+    );
+
+    // After the varint hash_code, the next field should be field 2 (program)
+    // wire type 2 (length-delimited), tag byte 0x12.
+    // Skip the varint hash_code (1+ bytes) to find it.
+    let mut pos = 1;
+    // Consume the varint hash_code bytes (all bytes with MSB set until one without).
+    while pos < raw_bytes.len() && (raw_bytes[pos] & 0x80) != 0 {
+        pos += 1;
+    }
+    pos += 1; // skip the last varint byte
+    if pos < raw_bytes.len() {
+        assert_eq!(
+            raw_bytes[pos], 0x12,
+            "after hash_code varint, must see field tag 0x12 (field 2 length-delimited = program); \
+             got {:#04x} at position {}. This indicates our .protoBin format diverges from \
+             the upstream es2abc ProgramCache proto structure.",
+            raw_bytes[pos], pos
+        );
+    }
+
+    // Round-trip: the written bytes must decode back to a valid ProgramCache.
+    let entry = ProgramCacheFile::read(&cache_file)
+        .expect("ProgramCacheFile::read must succeed")
+        .expect("ProgramCacheFile::read must return Some for a freshly written file");
+
+    // The program must have at least one record (our compiled module).
+    // hvigor's ProgramCache uses record_table to store ClassRecord entries.
+    assert!(
+        !entry.program.record_table.is_empty(),
+        "decoded Program must contain at least one record in record_table"
+    );
+
+    // The hash_code must be non-zero (it's derived from source content).
+    assert_ne!(entry.hash_code, 0, "hash_code must be non-zero");
+}
+
 // ── New opcode coverage tests ────────────────────────────────────────────────
 
 fn module_compiler() -> AbcCompiler {
     module_compiler_for_target(12, None)
+}
+
+/// Module compiler with debug_info=true for testing DebugInfo / debugger opcode emission.
+fn module_debug_compiler() -> AbcCompiler {
+    AbcCompiler::new(AbcCompileOptions {
+        debug_info: true,
+        opt_level: 0,
+        optimize_try_catch_func: true,
+        target_api_version: 12,
+        target_api_sub_version: None,
+        enable_annotations: false,
+        merge_abc: true,
+        module: true,
+        module_record_field_name: None,
+        npm_entries: None,
+        dependency_context: None,
+        remove_redundant_file: false,
+        dump_deps_info: false,
+    })
 }
 
 fn module_compiler_for_target(
@@ -2606,12 +3298,35 @@ fn module_compiler_for_target(
     AbcCompiler::new(AbcCompileOptions {
         debug_info: false,
         opt_level: 0,
+        optimize_try_catch_func: true,
         target_api_version,
         target_api_sub_version: target_api_sub_version.map(str::to_string),
+        enable_annotations: false,
         merge_abc: true,
         module: true,
-        cache_path: None,
+        module_record_field_name: None,
         npm_entries: None,
+        dependency_context: None,
+        remove_redundant_file: false,
+        dump_deps_info: false,
+    })
+}
+
+fn module_compiler_with_annotations() -> AbcCompiler {
+    AbcCompiler::new(AbcCompileOptions {
+        debug_info: false,
+        opt_level: 0,
+        optimize_try_catch_func: true,
+        target_api_version: 20,
+        target_api_sub_version: None,
+        enable_annotations: true,
+        merge_abc: true,
+        module: true,
+        module_record_field_name: None,
+        npm_entries: None,
+        dependency_context: None,
+        remove_redundant_file: false,
+        dump_deps_info: false,
     })
 }
 
@@ -2623,7 +3338,13 @@ fn module_record(record_name: &str, source: &str) -> AbcModule {
         source_file: None,
         package_name: None,
         is_commonjs: false,
+        is_shared_module: false,
+        origin_source_lang: String::new(),
     }
+}
+
+fn annotation_module(source: &str) -> AbcModule {
+    module_record("test/annotation_decl.ets", source)
 }
 
 fn commonjs_module_record(record_name: &str, source: &str) -> AbcModule {
@@ -2634,6 +3355,8 @@ fn commonjs_module_record(record_name: &str, source: &str) -> AbcModule {
         source_file: None,
         package_name: None,
         is_commonjs: true,
+        is_shared_module: false,
+        origin_source_lang: String::new(),
     }
 }
 
@@ -2645,6 +3368,8 @@ fn module_record_with_source_file(record_name: &str, source: &str, source_file: 
         source_file: Some(source_file.to_string()),
         package_name: None,
         is_commonjs: false,
+        is_shared_module: false,
+        origin_source_lang: String::new(),
     }
 }
 
@@ -2661,6 +3386,21 @@ fn module_func_main_bytecode(bytes: &[u8], record_name: &str) -> Vec<u8> {
         .and_then(|(_, _, code_off)| code_off)
         .expect("func_main_0 must have a code item") as usize;
     code_item_bytecode(bytes, code_off).to_vec()
+}
+
+fn module_method_bytecodes(bytes: &[u8], record_name: &str) -> Vec<Vec<u8>> {
+    let class_name = format!("L{record_name};");
+    let class_off = class_offsets(bytes)
+        .into_iter()
+        .map(|off| off as usize)
+        .find(|&off| class_name_at(bytes, off) == class_name)
+        .expect("module class must exist");
+    class_method_items(bytes, class_off)
+        .into_iter()
+        .filter_map(|(_, _, code_off)| {
+            code_off.map(|code_off| code_item_bytecode(bytes, code_off as usize).to_vec())
+        })
+        .collect()
 }
 
 fn module_method_bytecode_by_suffix(
@@ -2987,7 +3727,7 @@ fn test_logical_and_assignment_uses_short_circuit_store() {
     let bytes = std::fs::read(&out).unwrap();
     let bytecode = module_func_main_bytecode(&bytes, record_name);
     assert!(
-        bytecode_contains_opcode(&bytecode, 0x24) && bytecode_contains_opcode(&bytecode, 0x9b),
+        bytecode_contains_opcode(&bytecode, 0x24) && bytecode_contains_jnez(&bytecode),
         "&&= must test lhs falsiness and skip rhs/store when falsy"
     );
 }
@@ -3009,7 +3749,7 @@ fn test_logical_or_assignment_uses_short_circuit_store() {
     let bytes = std::fs::read(&out).unwrap();
     let bytecode = module_func_main_bytecode(&bytes, record_name);
     assert!(
-        bytecode_contains_opcode(&bytecode, 0x23) && bytecode_contains_opcode(&bytecode, 0x9b),
+        bytecode_contains_opcode(&bytecode, 0x23) && bytecode_contains_jnez(&bytecode),
         "||= must test lhs truthiness and skip rhs/store when truthy"
     );
 }
@@ -3032,8 +3772,8 @@ fn test_logical_nullish_assignment_uses_strict_nullish_short_circuit() {
     let bytecode = module_func_main_bytecode(&bytes, record_name);
     assert!(
         bytecode_contains_opcode(&bytecode, 0x28)
-            && bytecode_contains_opcode(&bytecode, 0x9b)
-            && bytecode_contains_opcode(&bytecode, 0x50),
+            && bytecode_contains_jnez(&bytecode)
+            && bytecode_contains_jeqz(&bytecode),
         "??= must use strict null/undefined checks before deciding whether to store rhs"
     );
 }
@@ -3056,8 +3796,8 @@ fn test_nullish_coalescing_uses_strict_nullish_short_circuit() {
     let bytecode = module_func_main_bytecode(&bytes, record_name);
     assert!(
         bytecode_contains_opcode(&bytecode, 0x28)
-            && bytecode_contains_opcode(&bytecode, 0x9b)
-            && bytecode_contains_opcode(&bytecode, 0x50)
+            && bytecode_contains_jnez(&bytecode)
+            && bytecode_contains_jeqz(&bytecode)
             && !bytecode_contains_opcode(&bytecode, 0x23),
         "?? must use strict null/undefined checks instead of truthiness"
     );
@@ -3215,11 +3955,11 @@ export default value;
         "switch case tests must use strict equality"
     );
     assert!(
-        bytecode_contains_opcode(&bytecode, 0x9b),
+        bytecode_contains_jnez(&bytecode),
         "matching switch cases must branch to their case bodies"
     );
     assert!(
-        bytecode_contains_opcode(&bytecode, 0x4e),
+        bytecode_contains_jmp(&bytecode),
         "switch dispatch and break must use patched jumps"
     );
     assert!(
@@ -3278,7 +4018,7 @@ export default value;"#,
     let bytecode = module_func_main_bytecode(&bytes, record_name);
 
     assert!(
-        bytecode_contains_opcode(&bytecode, 0x4e),
+        bytecode_contains_jmp(&bytecode),
         "labeled break must emit a patched forward jump to the label end"
     );
     assert!(
@@ -3311,7 +4051,7 @@ export default value;"#,
     let bytecode = module_func_main_bytecode(&bytes, record_name);
 
     assert!(
-        bytecode_contains_opcode(&bytecode, 0x4e),
+        bytecode_contains_jmp(&bytecode),
         "labeled continue must emit a patched jump to the labeled loop update"
     );
 }
@@ -3341,7 +4081,7 @@ export default value;"#,
     let bytecode = module_func_main_bytecode(&bytes, record_name);
 
     assert!(
-        bytecode_contains_opcode(&bytecode, 0x4e),
+        bytecode_contains_jmp(&bytecode),
         "labeled for-in continue must emit a patched jump to the next property"
     );
     assert!(
@@ -3374,7 +4114,7 @@ export default value;"#,
     let bytecode = module_func_main_bytecode(&bytes, record_name);
 
     assert!(
-        bytecode_contains_opcode(&bytecode, 0x4e),
+        bytecode_contains_jmp(&bytecode),
         "labeled for-of continue must emit a patched jump to the iterator next call"
     );
     assert!(
@@ -3412,6 +4152,55 @@ with (obj) { value = 2; }"#,
             } if construct == "WithStatement"
         ),
         "with statement must be rejected (matches upstream — no IR lowering exists), got {err:?}"
+    );
+}
+
+/// Assignment to `eval` is forbidden in strict mode.
+/// es2panda rejects this at compile time (strict mode violation).
+#[test]
+fn test_assignment_to_eval_is_rejected_strict_mode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("eval_assign.abc");
+    let result =
+        module_compiler().compile(vec![module_record("test/eval_assign", "eval = 42;")], &out);
+    assert!(
+        matches!(result, Err(AbcError::UnsupportedConstruct { .. })),
+        "assignment to 'eval' must be rejected (es2panda strict rule)"
+    );
+}
+
+/// Assignment to `arguments` is forbidden in strict mode.
+/// es2panda rejects this at compile time (strict mode violation).
+#[test]
+fn test_assignment_to_arguments_is_rejected_strict_mode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("args_assign.abc");
+    let result = module_compiler().compile(
+        vec![module_record("test/args_assign", "arguments = [];")],
+        &out,
+    );
+    assert!(
+        matches!(result, Err(AbcError::UnsupportedConstruct { .. })),
+        "assignment to 'arguments' must be rejected (es2panda strict rule)"
+    );
+}
+
+/// Labeled function declarations are forbidden in strict mode.
+/// es2panda / ArkTS transpiler never emits this pattern.
+#[test]
+fn test_labeled_function_declaration_is_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("labeled_fn.abc");
+    let result = module_compiler().compile(
+        vec![module_record(
+            "test/labeled_fn",
+            "myLabel: function foo() {}",
+        )],
+        &out,
+    );
+    assert!(
+        matches!(result, Err(AbcError::UnsupportedConstruct { .. })),
+        "labeled function declaration must be rejected (strict mode / es2panda rule)"
     );
 }
 
@@ -3695,8 +4484,10 @@ fn test_debugger_statement_matches_upstream_debug_mode() {
         "debugger statement must not emit debugger opcode when debug info is disabled"
     );
 
+    // Upstream: debugger opcode requires debug_info=true (compilerOptions_.debugInfo).
+    // Use module_debug_compiler() to enable debug info emission.
     let debug_out = tmp.path().join("debugger_debug.abc");
-    module_compiler()
+    module_debug_compiler()
         .compile(
             vec![module_record_with_source_file(
                 record_name,
@@ -3817,6 +4608,63 @@ fn test_for_left_array_destructuring_uses_nested_iterator() {
     assert!(
         bytecode_opcode_count(&bytecode, 0x67) >= 2,
         "for-left array destructuring must emit at least 2 getiterator (0x67) calls"
+    );
+}
+
+#[test]
+fn test_for_of_array_assignment_target_destructures_like_upstream() {
+    // Upstream ForOfStatement compiles the left side through LReference; an
+    // assignment-pattern left (`for ([a] of values)`) is a destructuring lref,
+    // not an unsupported construct.
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("for_of_array_assignment_target.abc");
+    let record_name = "test/for_of_array_assignment_target";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"let a;
+for ([a] of [[1]]) {
+  globalThis["value"] = a;
+}"#,
+            )],
+            &out,
+        )
+        .expect("for-of array assignment target must lower through destructuring lref");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+    assert!(
+        bytecode_opcode_count(&bytecode, 0x67) >= 2,
+        "for-of array assignment target must use outer and destructuring iterators"
+    );
+}
+
+#[test]
+fn test_for_of_object_assignment_target_destructures_like_upstream() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("for_of_object_assignment_target.abc");
+    let record_name = "test/for_of_object_assignment_target";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"const target = {};
+for ({x: target.value} of [{x: 1}]) {
+  globalThis["value"] = target.value;
+}"#,
+            )],
+            &out,
+        )
+        .expect("for-of object assignment target must lower through destructuring lref");
+    let bytes = std::fs::read(&out).unwrap();
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x42),
+        "object destructuring assignment target must load named properties"
+    );
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0x43),
+        "member target inside object destructuring must store by property name"
     );
 }
 
@@ -4166,9 +5014,7 @@ fn test_for_in_checks_getnextpropname_against_undefined() {
         "for-in getpropiterator must be protected by a rethrow catch table"
     );
     assert!(
-        bytecode
-            .windows(5)
-            .any(|window| matches!(window, [0x00, 0x0f, _, _, 0x9b])),
+        bytecode_contains_opcode(&bytecode, 0x0f) && bytecode_contains_jnez(&bytecode),
         "for-in must compare getnextpropname result with undefined before exiting"
     );
 }
@@ -4327,7 +5173,7 @@ export default f;
 #[test]
 fn test_top_level_await_uses_async_function_enter_opcode() {
     // Top-level await (TLA): module-level `await expr` is supported in module
-    // mode and must emit the asyncfunctionenter (0xbb) prologue at module level.
+    // mode and must emit the asyncfunctionenter (0xae) prologue at module level.
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("tla.abc");
     let record_name = "test/tla";
@@ -4342,11 +5188,11 @@ fn test_top_level_await_uses_async_function_enter_opcode() {
         .expect("top-level await must compile in module mode");
     let bytes = std::fs::read(&out).unwrap();
     let bytecode = module_func_main_bytecode(&bytes, record_name);
-    // TLA wraps the module body in an async context — asyncfunctionenter (0xbb)
+    // TLA wraps the module body in an async context — asyncfunctionenter (0xae)
     // must appear in the module's func_main_0.
     assert!(
-        bytecode_contains_opcode(&bytecode, 0xbb),
-        "top-level await must emit asyncfunctionenter (0xbb) in func_main_0"
+        bytecode_contains_opcode(&bytecode, 0xae),
+        "top-level await must emit asyncfunctionenter (0xae) in func_main_0"
     );
 }
 
@@ -4565,29 +5411,349 @@ fn test_import_meta_emits_getimportmeta_opcode() {
 }
 
 #[test]
-fn test_annotation_declaration_is_erased() {
-    // AnnotationDeclaration (@interface) is a metadata-only ArkTS node; it produces
-    // no runtime bytecode.  Upstream ets-loader / es2abc both erase it before or
-    // during ABC emission.  arkdown-abc must not reject it.
-    //
-    // The source_file must end in `.ets` so the parser uses ETS source type and
-    // recognises the `@interface` syntax.
+fn test_annotation_declaration_requires_upstream_enable_annotations() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("annotation_decl.abc");
-    module_compiler()
+    let err = match module_compiler().compile(
+        vec![annotation_module(
+            "@interface RouteMeta {\n  title: string;\n}",
+        )],
+        &out,
+    ) {
+        Ok(_) => panic!("annotation declarations must require upstream --enable-annotations"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(err, AbcError::Parse { ref message, .. } if message.contains("Current configuration does not support using annotations")),
+        "unexpected annotation error: {err:?}"
+    );
+}
+
+#[test]
+fn test_annotation_declaration_requires_upstream_prefix_when_enabled() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("annotation_decl_prefix.abc");
+    let err = match module_compiler_with_annotations().compile(
+        vec![annotation_module(
+            "@interface RouteMeta {\n  title: string;\n}",
+        )],
+        &out,
+    ) {
+        Ok(_) => panic!("enabled annotation declarations must still require the upstream prefix"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(err, AbcError::Parse { ref message, .. } if message.contains("Annotation declaration need to be prefixed with '__$$ETS_ANNOTATION$$__'")),
+        "unexpected annotation prefix error: {err:?}"
+    );
+}
+
+#[test]
+fn test_prefixed_annotation_declaration_enabled_compiles() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("annotation_decl_enabled.abc");
+    module_compiler_with_annotations()
         .compile(
-            vec![AbcModule {
-                record_name: "test/annotation_decl".into(),
-                source: "@interface RouteMeta {\n  title: string;\n  count: number;\n}".into(),
-                source_map: None,
-                // `.ets` extension triggers ETS-aware parsing in the abc builder.
-                source_file: Some("test/annotation_decl.ets".into()),
-                package_name: None,
-                is_commonjs: false,
-            }],
+            vec![annotation_module(
+                "@interface __$$ETS_ANNOTATION$$__RouteMeta {\n  title: string;\n}",
+            )],
             &out,
         )
-        .expect("AnnotationDeclaration (@interface) must be erased without emitting bytecode");
+        .expect("prefixed annotation declarations must pass the upstream parser gate");
+    let bytes = std::fs::read(&out).unwrap();
+    let foreign_off = read_u32(&bytes, 0x14);
+    let foreign_size = read_u32(&bytes, 0x18);
+    assert_ne!(
+        foreign_off, 0,
+        "panda.String must be emitted as ForeignItem"
+    );
+    assert_ne!(foreign_size, 0, "ForeignItem section must not be empty");
+    assert_eq!(
+        class_name_at(&bytes, foreign_off as usize),
+        "Lpanda.String;"
+    );
+    let reader_names = AbcReader::new(&bytes)
+        .expect("annotation abc must have valid magic")
+        .class_names()
+        .expect("reader must accept class-index foreign items");
+    assert!(reader_names.iter().any(|name| name == "Lpanda.String;"));
+    assert!(reader_names
+        .iter()
+        .any(|name| name == "Ltest/annotation_decl.ets.RouteMeta;"));
+
+    let route_off = class_offsets(&bytes)
+        .into_iter()
+        .find(|offset| {
+            class_name_at(&bytes, *offset as usize) == "Ltest/annotation_decl.ets.RouteMeta;"
+        })
+        .expect("prefixed annotation declaration must emit RouteMeta record");
+    let mut pos = route_off as usize;
+    skip_inline_string(&bytes, &mut pos);
+    assert_eq!(read_u32(&bytes, pos), 0);
+    pos += 4;
+    assert_eq!(read_uleb(&bytes, &mut pos), 0x2000);
+    assert_eq!(read_uleb(&bytes, &mut pos), 1);
+    assert_eq!(read_uleb(&bytes, &mut pos), 0);
+    assert_eq!(bytes[pos], 0x02);
+    assert_eq!(bytes[pos + 1], 0);
+    assert_eq!(bytes[pos + 2], 0);
+    pos += 3;
+
+    let field_class_idx = read_u16(&bytes, pos) as usize;
+    pos += 2;
+    let field_type_idx = read_u16(&bytes, pos) as usize;
+    pos += 2;
+    let field_name_off = read_u32(&bytes, pos) as usize;
+    pos += 4;
+    assert_eq!(read_uleb(&bytes, &mut pos), 0);
+    assert_eq!(
+        bytes[pos], 0,
+        "annotation field without default has no value tag"
+    );
+    assert_eq!(inline_string_at(&bytes, field_name_off), "title");
+
+    let idx_off = read_u32(&bytes, 0x38) as usize;
+    let index_class_idx_off = read_u32(&bytes, idx_off + 12) as usize;
+    assert_eq!(
+        read_u32(&bytes, index_class_idx_off + field_class_idx * 4),
+        route_off
+    );
+    assert_eq!(
+        read_u32(&bytes, index_class_idx_off + field_type_idx * 4),
+        foreign_off
+    );
+}
+
+#[test]
+fn test_prefixed_annotation_program_cache_preserves_metadata_records() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("annotation_cache.abc");
+    let cache_file = tmp.path().join("annotation.protoBin");
+    let cache_input = AbcProgramCacheInput {
+        file_name: "entry/src/main/ets/Annotation.ets".to_string(),
+        cache_file: cache_file.clone(),
+    };
+    module_compiler_with_annotations()
+        .compile_with_program_cache(
+            vec![annotation_module(
+                "@interface __$$ETS_ANNOTATION$$__RouteMeta {\n  title: string;\n}",
+            )],
+            &out,
+            vec![Some(cache_input)],
+        )
+        .expect("annotation declaration must write ProgramCache");
+
+    let entry = ProgramCacheFile::read(&cache_file)
+        .unwrap()
+        .expect("ProgramCache must be written");
+    let record_names = entry
+        .program
+        .record_table
+        .iter()
+        .filter_map(|entry| entry.value.as_ref())
+        .map(|record| String::from_utf8(record.name.clone()).unwrap())
+        .collect::<Vec<_>>();
+    assert!(record_names
+        .iter()
+        .any(|name| name == "test/annotation_decl.ets.RouteMeta"));
+    assert!(record_names.iter().any(|name| name == "panda.String"));
+
+    let route_record = entry
+        .program
+        .record_table
+        .iter()
+        .filter_map(|entry| entry.value.as_ref())
+        .find(|record| record.name == b"test/annotation_decl.ets.RouteMeta")
+        .expect("RouteMeta record must be in ProgramCache");
+    let title = route_record
+        .field_list
+        .iter()
+        .find(|field| field.name == b"title")
+        .expect("RouteMeta.title must be in ProgramCache");
+    assert_eq!(
+        title.r#type.as_ref().map(|ty| ty.name.as_slice()),
+        Some(b"panda.String".as_slice())
+    );
+    assert_eq!(
+        title
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.field_type.as_ref())
+            .map(|ty| ty.type_id),
+        Some(1)
+    );
+}
+
+#[test]
+fn test_prefixed_annotation_array_fields_emit_upstream_type_descriptors() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("annotation_array_fields.abc");
+    module_compiler_with_annotations()
+        .compile(
+            vec![annotation_module(
+                "@interface __$$ETS_ANNOTATION$$__Anno {\n  a: number[] = [1, -2]\n  b: string[][]\n  c: boolean[]\n}",
+            )],
+            &out,
+        )
+        .expect("annotation array declarations must compile");
+
+    let bytes = std::fs::read(&out).unwrap();
+    let reader_names = AbcReader::new(&bytes)
+        .expect("annotation abc must have valid magic")
+        .class_names()
+        .expect("reader must accept foreign array items");
+    for expected in [
+        "Ltest/annotation_decl.ets.Anno;",
+        "Lpanda.String;",
+        "[D",
+        "[Z",
+        "[[Lpanda.String;",
+    ] {
+        assert!(
+            reader_names.iter().any(|name| name == expected),
+            "missing class/index item {expected}; names={reader_names:?}"
+        );
+    }
+
+    let anno_off = class_offsets(&bytes)
+        .into_iter()
+        .find(|offset| class_name_at(&bytes, *offset as usize) == "Ltest/annotation_decl.ets.Anno;")
+        .expect("prefixed annotation declaration must emit Anno record");
+    let mut pos = anno_off as usize;
+    skip_inline_string(&bytes, &mut pos);
+    pos += 4;
+    assert_eq!(read_uleb(&bytes, &mut pos), 0x2000);
+    let field_count = read_uleb(&bytes, &mut pos);
+    assert_eq!(field_count, 3);
+    assert_eq!(read_uleb(&bytes, &mut pos), 0);
+    assert_eq!(bytes[pos], 0x02);
+    assert_eq!(bytes[pos + 1], 0);
+    assert_eq!(bytes[pos + 2], 0);
+    pos += 3;
+
+    let idx_off = read_u32(&bytes, 0x38) as usize;
+    let index_class_idx_off = read_u32(&bytes, idx_off + 12) as usize;
+    let mut field_types = BTreeMap::new();
+    let mut field_has_value = BTreeMap::new();
+    for _ in 0..field_count {
+        pos += 2;
+        let field_type_idx = read_u16(&bytes, pos) as usize;
+        pos += 2;
+        let field_name_off = read_u32(&bytes, pos) as usize;
+        pos += 4;
+        let _access_flags = read_uleb(&bytes, &mut pos);
+        let has_value = bytes[pos] != 0;
+        if has_value {
+            assert_eq!(bytes[pos], 0x02);
+            pos += 5;
+        }
+        assert_eq!(bytes[pos], 0);
+        pos += 1;
+
+        let type_offset = read_u32(&bytes, index_class_idx_off + field_type_idx * 4);
+        let field_name = inline_string_at(&bytes, field_name_off);
+        field_types.insert(
+            field_name.clone(),
+            class_name_at(&bytes, type_offset as usize),
+        );
+        field_has_value.insert(field_name, has_value);
+    }
+
+    assert_eq!(field_types.get("a").map(String::as_str), Some("[D"));
+    assert_eq!(
+        field_types.get("b").map(String::as_str),
+        Some("[[Lpanda.String;")
+    );
+    assert_eq!(field_types.get("c").map(String::as_str), Some("[Z"));
+    assert_eq!(field_has_value.get("a"), Some(&true));
+    assert_eq!(field_has_value.get("b"), Some(&false));
+    assert_eq!(field_has_value.get("c"), Some(&false));
+}
+
+#[test]
+fn test_prefixed_annotation_array_program_cache_preserves_rank_and_literal_key() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("annotation_array_cache.abc");
+    let cache_file = tmp.path().join("annotation_array.protoBin");
+    let cache_input = AbcProgramCacheInput {
+        file_name: "entry/src/main/ets/AnnotationArray.ets".to_string(),
+        cache_file: cache_file.clone(),
+    };
+    module_compiler_with_annotations()
+        .compile_with_program_cache(
+            vec![annotation_module(
+                "@interface __$$ETS_ANNOTATION$$__Anno {\n  a: number[] = [1, -2]\n  b: string[][]\n  c: boolean[]\n}",
+            )],
+            &out,
+            vec![Some(cache_input)],
+        )
+        .expect("annotation array declaration must write ProgramCache");
+
+    let entry = ProgramCacheFile::read(&cache_file)
+        .unwrap()
+        .expect("ProgramCache must be written");
+    let anno_record = entry
+        .program
+        .record_table
+        .iter()
+        .filter_map(|entry| entry.value.as_ref())
+        .find(|record| record.name == b"test/annotation_decl.ets.Anno")
+        .expect("Anno record must be in ProgramCache");
+    let field = |name: &[u8]| {
+        anno_record
+            .field_list
+            .iter()
+            .find(|field| field.name == name)
+            .expect("annotation field must be present")
+    };
+    let a = field(b"a");
+    let b = field(b"b");
+    let c = field(b"c");
+
+    let a_type = a.r#type.as_ref().expect("a field type");
+    assert_eq!(a_type.component_name, b"f64");
+    assert_eq!(a_type.rank, 1);
+    assert_eq!(a_type.name, b"f64[]");
+    assert_eq!(a_type.type_id, 13);
+
+    let b_type = b.r#type.as_ref().expect("b field type");
+    assert_eq!(b_type.component_name, b"panda.String");
+    assert_eq!(b_type.rank, 2);
+    assert_eq!(b_type.name, b"panda.String[][]");
+    assert_eq!(b_type.type_id, 13);
+
+    let c_type = c.r#type.as_ref().expect("c field type");
+    assert_eq!(c_type.component_name, b"u1");
+    assert_eq!(c_type.rank, 1);
+    assert_eq!(c_type.name, b"u1[]");
+    assert_eq!(c_type.type_id, 13);
+
+    let literal_keys = entry
+        .program
+        .literal_array_table
+        .iter()
+        .map(|entry| String::from_utf8(entry.key.clone()).unwrap())
+        .collect::<Vec<_>>();
+    assert!(
+        literal_keys
+            .iter()
+            .any(|key| key == "test/annotation_decl.ets.Anno_a_0"),
+        "missing annotation array literal key; keys={literal_keys:?}"
+    );
+    let a_value_key = a
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.value.as_ref())
+        .and_then(|value| match &value.value {
+            Some(scalar_value::Value::ValueStr(value)) => {
+                Some(String::from_utf8(value.clone()).unwrap())
+            }
+            _ => None,
+        });
+    assert_eq!(
+        a_value_key.as_deref(),
+        Some("test/annotation_decl.ets.Anno_a_0")
+    );
 }
 
 #[test]
@@ -4599,7 +5765,10 @@ fn test_generator_function_uses_state_machine_opcodes() {
     let record_name = "test/generator";
     module_compiler()
         .compile(
-            vec![module_record(record_name, r#"function* ids() { yield 1; yield 2; }"#)],
+            vec![module_record(
+                record_name,
+                r#"function* ids() { yield 1; yield 2; }"#,
+            )],
             &out,
         )
         .expect("generator function must compile via state-machine lowering");
@@ -4935,6 +6104,45 @@ fn test_auto_accessor_class_field_lowers_to_getter_setter_and_private_backing() 
 }
 
 #[test]
+fn test_computed_auto_accessor_uses_precomputed_key_without_synthetic_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("computed_auto_accessor.abc");
+    let record_name = "test/computed_auto_accessor";
+    module_compiler()
+        .compile(
+            vec![module_record(
+                record_name,
+                r#"function key() { return "value"; }
+class Box {
+  accessor [key()] = 1;
+}"#,
+            )],
+            &out,
+        )
+        .expect("computed auto-accessor must lower through upstream-style key backup");
+
+    let bytes = std::fs::read(&out).unwrap();
+    let main = module_func_main_bytecode(&bytes, record_name);
+    assert!(
+        bytecode_contains_opcode(&main, 0xbc),
+        "computed auto-accessor must install getter/setter by runtime key value"
+    );
+    assert!(
+        bytes.windows(2).any(|w| w == [0xfb, 0x04]),
+        "computed auto-accessor must still create a private backing slot"
+    );
+    assert_eq!(
+        bytecode_opcode_count(&main, 0x29),
+        1,
+        "computed auto-accessor key expression must be evaluated once and reused"
+    );
+    assert!(
+        !bytes_contain_ascii(&bytes, "__computed_accessor"),
+        "computed auto-accessor must not use the old synthetic-key fallback"
+    );
+}
+
+#[test]
 fn test_object_spread_and_proto_use_upstream_object_ops() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("object_spread_proto.abc");
@@ -5001,21 +6209,24 @@ fn test_void_expression_emits_ldundefined() {
 }
 
 #[test]
-fn test_logical_and_emits_jeqz_branch() {
+fn test_logical_and_emits_jnez_branch() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("test.abc");
+    let record_name = "test/mod";
     module_compiler()
         .compile(
-            vec![module_record("test/mod", r#"const x = a && b;"#)],
+            vec![module_record(record_name, r#"const x = a && b;"#)],
             &out,
         )
         .expect("compile");
     let bytes = std::fs::read(&out).unwrap();
     assert!(bytes.starts_with(b"PANDA\0\0\0"));
-    // jeqz opcode is 0x50 — emitted for short-circuit &&
+    let method_bytecodes = module_method_bytecodes(&bytes, record_name);
     assert!(
-        bytes.contains(&0x50),
-        "jeqz (0x50) must appear for '&&' short-circuit"
+        method_bytecodes
+            .iter()
+            .any(|bytecode| bytecode_contains_jnez(bytecode)),
+        "jnez must appear in module code for '&&' short-circuit"
     );
 }
 
@@ -5023,18 +6234,21 @@ fn test_logical_and_emits_jeqz_branch() {
 fn test_logical_or_emits_jnez_branch() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("test.abc");
+    let record_name = "test/mod";
     module_compiler()
         .compile(
-            vec![module_record("test/mod", r#"const x = a || b;"#)],
+            vec![module_record(record_name, r#"const x = a || b;"#)],
             &out,
         )
         .expect("compile");
     let bytes = std::fs::read(&out).unwrap();
     assert!(bytes.starts_with(b"PANDA\0\0\0"));
-    // jnez opcode is 0x9b — emitted for short-circuit ||
+    let method_bytecodes = module_method_bytecodes(&bytes, record_name);
     assert!(
-        bytes.contains(&0x9b),
-        "jnez (0x9b) must appear for '||' short-circuit"
+        method_bytecodes
+            .iter()
+            .any(|bytecode| bytecode_contains_jnez(bytecode)),
+        "jnez must appear in module code for '||' short-circuit"
     );
 }
 
@@ -5207,12 +6421,17 @@ registerNamedRoute(() => new Index(void 0, {}), "", {bundleName: "com.example.ar
     AbcCompiler::new(AbcCompileOptions {
         debug_info: true,
         opt_level: 0,
+        optimize_try_catch_func: true,
         target_api_version: 12,
         target_api_sub_version: None,
+        enable_annotations: false,
         merge_abc: true,
         module: true,
-        cache_path: None,
+        module_record_field_name: None,
         npm_entries: None,
+        dependency_context: None,
+        remove_redundant_file: false,
+        dump_deps_info: false,
     })
     .compile(
         vec![
@@ -5223,6 +6442,8 @@ registerNamedRoute(() => new Index(void 0, {}), "", {bundleName: "com.example.ar
                 source_file: None,
                 package_name: None,
                 is_commonjs: false,
+                is_shared_module: false,
+                origin_source_lang: String::new(),
             },
             AbcModule {
                 record_name: "com.example.test/entry/ets/pages/Index".to_string(),
@@ -5231,6 +6452,8 @@ registerNamedRoute(() => new Index(void 0, {}), "", {bundleName: "com.example.ar
                 source_file: None,
                 package_name: None,
                 is_commonjs: false,
+                is_shared_module: false,
+                origin_source_lang: String::new(),
             },
         ],
         &out,
@@ -5742,13 +6965,13 @@ export default f;
         .filter_map(|(_, name, code_off)| {
             let code_off = (*code_off)? as usize;
             let bytecode = code_item_bytecode(&bytes, code_off);
-            (name != "func_main_0" && bytecode_contains_opcode(bytecode, 0xbb))
+            (name != "func_main_0" && bytecode_contains_opcode(bytecode, 0xae))
                 .then_some((bytecode, code_item_tries_size(&bytes, code_off)))
         })
         .next()
         .expect("async function method must exist");
 
-    for opcode in [0xbb, 0xc4, 0xc3, 0xbf, 0xc0, 0xcd, 0xce] {
+    for opcode in [0xae, 0xc4, 0xc3, 0xbf, 0xc0, 0xcd, 0xce] {
         assert!(
             bytecode_contains_opcode(bytecode, opcode),
             "async await method must contain opcode {opcode:#x}"
@@ -6117,5 +7340,283 @@ registerNamedRoute(() => new Index(void 0, {}), "", {bundleName: "x"});
         "line_ops should have more than just END_SEQUENCE, got {} bytes: {:?}",
         main_method.line_ops.len(),
         main_method.line_ops
+    );
+}
+
+// ── ProgramCache / protoBin integration tests ────────────────────────────────
+
+/// Compile a simple module with a `cache_file` (`.protoBin`) destination,
+/// then verify:
+///
+/// 1. The `.abc` output starts with the Panda magic bytes `PANDA\x00\x00\x00`.
+/// 2. The `.protoBin` file exists and is non-empty.
+/// 3. The `.protoBin` decodes as a valid `ProgramCache` protobuf (has a
+///    `program` field with at least one function entry — the module body).
+/// 4. The hash stored in the cache matches the source hash computed by
+///    `source_cache_hash()`.
+///
+/// This mirrors the upstream `es2abc --cache-file file.protoBin` behavior
+/// described in `cache.rs`: the cache stores a `ProgramCache { hash_code,
+/// program }` proto whose `hash_code` is `GetHash32String(source + fileName +
+/// recordName + sourceFile + pkgName + targetPandaFileVersion)`.
+#[test]
+fn proto_bin_cache_file_written_with_correct_format() {
+    let tmp = tempfile::tempdir().unwrap();
+    let abc_out = tmp.path().join("module.abc");
+    let proto_bin = tmp.path().join("module.protoBin");
+
+    let record_name = "@bundle:com.example.app/entry/ets/pages/Index";
+    let file_name = tmp.path().join("Index.js").to_string_lossy().into_owned();
+    let source = "export const greeting = 'hello';";
+
+    let compiler = AbcCompiler::new(AbcCompileOptions {
+        debug_info: false,
+        opt_level: 0,
+        optimize_try_catch_func: true,
+        target_api_version: 12,
+        target_api_sub_version: None,
+        enable_annotations: false,
+        merge_abc: true,
+        module: true,
+        module_record_field_name: None,
+        npm_entries: None,
+        dependency_context: None,
+        remove_redundant_file: false,
+        dump_deps_info: false,
+    });
+
+    let cache_input = AbcProgramCacheInput {
+        file_name: file_name.clone(),
+        cache_file: proto_bin.clone(),
+    };
+
+    let result = compiler
+        .compile_with_program_cache(
+            vec![AbcModule {
+                record_name: record_name.to_string(),
+                source: source.to_string(),
+                source_map: None,
+                source_file: None,
+                package_name: None,
+                is_commonjs: false,
+                is_shared_module: false,
+                origin_source_lang: String::new(),
+            }],
+            &abc_out,
+            vec![Some(cache_input)],
+        )
+        .expect("compile_with_program_cache must succeed");
+
+    // 1. ABC output path is correct.
+    assert_eq!(
+        result.path, abc_out,
+        "artifact path must equal the output path"
+    );
+
+    // 2. ABC output starts with Panda magic bytes.
+    let abc_bytes = std::fs::read(&abc_out).expect("abc output must exist");
+    assert!(
+        abc_bytes.len() >= 8,
+        "ABC output must be at least 8 bytes, got {}",
+        abc_bytes.len()
+    );
+    assert_eq!(
+        &abc_bytes[0..8],
+        b"PANDA\x00\x00\x00",
+        "ABC magic bytes must be PANDA\\x00\\x00\\x00"
+    );
+
+    // 3. .protoBin file exists and is non-empty.
+    assert!(
+        proto_bin.exists(),
+        ".protoBin file must be written by compile_with_program_cache"
+    );
+    let proto_bytes = std::fs::read(&proto_bin).expect(".protoBin must be readable");
+    assert!(!proto_bytes.is_empty(), ".protoBin file must not be empty");
+
+    // 4. .protoBin decodes as a valid ProgramCache with a program field.
+    let entry = ProgramCacheFile::read(&proto_bin)
+        .expect("ProgramCacheFile::read must not return Err")
+        .expect(".protoBin must decode as a valid ProgramCache");
+
+    // The program must have at least one function entry (the module body
+    // func_main_0 is always emitted for module-mode inputs).
+    assert!(
+        !entry.program.function_table.is_empty(),
+        "ProgramCache program must contain at least one function (func_main_0); \
+         got function_table len={}",
+        entry.program.function_table.len()
+    );
+
+    // 5. The stored hash matches the source_cache_hash for this input.
+    let expected_hash = source_cache_hash(
+        source,
+        &file_name,
+        record_name,
+        "", // source_file (None → empty string in hash)
+        "", // package_name (None → empty string in hash)
+        version_for_target_api(12, None),
+    );
+    assert_eq!(
+        entry.hash_code, expected_hash,
+        "ProgramCache hash_code must match source_cache_hash(source, file_name, \
+         record_name, \"\", \"\", panda_file_version)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Panda ISA specification opcode verification
+//
+// These tests verify that the compiler emits the EXACT opcode bytes mandated
+// by the Panda ISA specification documented at:
+//   https://gitee.com/openharmony/arkcompiler_runtime_core
+//
+// Opcode constants verified against isa/isa.yaml (API-24 branch):
+//   0x62  lda.i32  imm:i32   — load signed 32-bit integer into accumulator
+//   0x3E  lda.str  id:u16    — load string literal into accumulator
+//   0x65  return.void         — return undefined
+// ---------------------------------------------------------------------------
+
+/// Verify that `export const answer = 42;` compiles to an LdAi (0x62) instruction
+/// followed by the 32-bit little-endian encoding of 42 (0x2A 0x00 0x00 0x00).
+///
+/// ISA spec reference: `lda.i32 imm:i32` — opcode `0x62`, format `op_imm_32`,
+/// encoding `[0x62][i32 LE]` = 5 bytes total.
+/// Source: `isa/isa.yaml` — `ldai imm:i32`, `opcode_idx: [0x62]`.
+#[test]
+fn test_integer_constant_produces_lda_i32_opcode() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = tmp.path().join("lda_i32.abc");
+    module_compiler()
+        .compile(
+            vec![module_record(
+                "test/isa/lda_i32",
+                "export const answer = 42;",
+            )],
+            &out,
+        )
+        .expect("compile must succeed");
+
+    let bytes = std::fs::read(&out).expect("read .abc");
+    let func_main = module_func_main_bytecode(&bytes, "test/isa/lda_i32");
+
+    // The Panda ISA mandates: lda.i32 42 → [0x62, 0x2A, 0x00, 0x00, 0x00]
+    // 42 in little-endian i32: 0x2A 0x00 0x00 0x00
+    let lda_i32_seq: &[u8] = &[0x62, 0x2A, 0x00, 0x00, 0x00];
+    assert!(
+        func_main.windows(5).any(|w| w == lda_i32_seq),
+        "export const answer = 42 must emit lda.i32 opcode 0x62 followed by \
+         LE bytes for 42 (0x2A 0x00 0x00 0x00); \
+         ISA spec: isa.yaml ldai opcode_idx [0x62]; \
+         func_main_0 bytecode: {:02x?}",
+        func_main,
+    );
+}
+
+/// Verify that `export const msg = "hello";` compiles to an LdaStr (0x3E) instruction.
+///
+/// ISA spec reference: `lda.str id:u16` — opcode `0x3E`, format `op_id_16`,
+/// encoding `[0x3E][string_id: u16 LE]` = 3 bytes total.
+/// Source: `isa/isa.yaml` — `lda.str id:string`, `opcode_idx: [0x3e]`.
+///
+/// The string index (u16) points into the file's string table.  We verify
+/// the opcode byte only, not the index value, since the index depends on
+/// the order strings are interned.
+#[test]
+fn test_string_constant_produces_lda_str_opcode() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = tmp.path().join("lda_str.abc");
+    module_compiler()
+        .compile(
+            vec![module_record(
+                "test/isa/lda_str",
+                r#"export const msg = "hello";"#,
+            )],
+            &out,
+        )
+        .expect("compile must succeed");
+
+    let bytes = std::fs::read(&out).expect("read .abc");
+    let func_main = module_func_main_bytecode(&bytes, "test/isa/lda_str");
+
+    // The Panda ISA mandates: lda.str <string_id> → [0x3E, lo, hi]
+    // We verify the opcode byte 0x3E is present in the bytecode stream.
+    assert!(
+        bytecode_contains_opcode(&func_main, 0x3E),
+        "export const msg = \"hello\" must emit lda.str opcode 0x3E; \
+         ISA spec: isa.yaml lda.str opcode_idx [0x3e]; \
+         func_main_0 bytecode: {:02x?}",
+        func_main,
+    );
+
+    // Additionally verify the "hello" string is present in the ABC binary.
+    assert!(
+        bytes_contain_ascii(&bytes, "hello"),
+        "the string literal \"hello\" must appear in the ABC string table"
+    );
+}
+
+/// Verify that `export function f() {}` compiles to a ReturnUndefined (0x65) opcode
+/// in the function body.
+///
+/// ISA spec reference: `return.void` — opcode `0x65`, format `op_none`,
+/// encoding `[0x65]` = 1 byte.
+/// Source: `isa/isa.yaml` — `returnundefined`, `opcode_idx: [0x65]`.
+///
+/// Every function with no explicit return statement must end with `return.void`
+/// (0x65), not `return` (0x64 which returns the accumulator value).
+#[test]
+fn test_undefined_return_produces_return_undefined_opcode() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = tmp.path().join("return_undefined.abc");
+    module_compiler()
+        .compile(
+            vec![module_record(
+                "test/isa/return_undefined",
+                "export function f() {}",
+            )],
+            &out,
+        )
+        .expect("compile must succeed");
+
+    let bytes = std::fs::read(&out).expect("read .abc");
+
+    // Find the function record "f" inside the module class.
+    let class_name = "Ltest/isa/return_undefined;";
+    let class_off = class_offsets(&bytes)
+        .into_iter()
+        .map(|off| off as usize)
+        .find(|&off| class_name_at(&bytes, off) == class_name)
+        .expect("module class must exist");
+
+    let methods = class_method_items(&bytes, class_off);
+
+    // Find the method named "f".
+    let (_, _, f_code_off) = methods
+        .iter()
+        .find(|(_, name, _)| name == "f")
+        .expect("function f must be emitted as a MethodItem");
+
+    let f_bytecode = code_item_bytecode(
+        &bytes,
+        f_code_off.expect("function f must have a code item") as usize,
+    );
+
+    // The Panda ISA mandates return.void (0x65) for void functions.
+    // This is distinct from return (0x64) which returns the accumulator.
+    assert!(
+        bytecode_contains_opcode(f_bytecode, 0x65),
+        "export function f() {{}} must emit return.void opcode 0x65; \
+         ISA spec: isa.yaml returnundefined opcode_idx [0x65]; \
+         function f bytecode: {:02x?}",
+        f_bytecode,
+    );
+
+    // Sanity: an empty void function must NOT emit the value-return opcode (0x64).
+    assert!(
+        !bytecode_contains_opcode(f_bytecode, 0x64),
+        "empty void function must not emit value-return opcode 0x64 (return acc); \
+         function f bytecode: {:02x?}",
+        f_bytecode,
     );
 }

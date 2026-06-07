@@ -363,6 +363,7 @@ mod tests {
         assert!(cfg.es2abc_path.to_string_lossy().contains("ets-loader"));
         assert!(cfg.restool_path.to_string_lossy().contains("restool"));
         assert!(cfg.ets_loader_path.to_string_lossy().contains("ets-loader"));
+        assert!(cfg.pac_schema_path().is_none());
     }
 
     #[test]
@@ -382,6 +383,48 @@ mod tests {
         assert!(cfg
             .ets_loader_path
             .starts_with(root.join("default").join("openharmony")));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn test_sdk_config_discovers_pac_schema_when_present() {
+        let root = temp_root("pac-schema");
+        let ets_dir = root.join("default").join("openharmony").join("ets");
+        let schema = root
+            .join("default")
+            .join("openharmony")
+            .join("toolchains/paccheck/pacSchema.json");
+        fs::create_dir_all(&ets_dir).expect("create sdk metadata dir");
+        fs::create_dir_all(schema.parent().unwrap()).expect("create pac schema dir");
+        fs::write(&schema, "{}").expect("write pac schema");
+
+        let cfg = sdk_config_from_root(&root, 12);
+
+        assert_eq!(cfg.pac_schema_path().as_deref(), Some(schema.as_path()));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn test_sdk_config_discovers_permission_module_when_present() {
+        let root = temp_root("permission-module");
+        let ets_dir = root.join("default").join("openharmony").join("ets");
+        let permission_module = root
+            .join("default")
+            .join("openharmony")
+            .join("previewer/common/resources/module.json");
+        fs::create_dir_all(&ets_dir).expect("create sdk metadata dir");
+        fs::create_dir_all(permission_module.parent().unwrap())
+            .expect("create permission module dir");
+        fs::write(&permission_module, "{}").expect("write permission module");
+
+        let cfg = sdk_config_from_root(&root, 12);
+
+        assert_eq!(
+            cfg.permission_module_json_path().as_deref(),
+            Some(permission_module.as_path())
+        );
 
         let _ = fs::remove_dir_all(root);
     }

@@ -1,3 +1,7 @@
+pub mod deveco_ws;
+pub use deveco_ws::{DevEcoEvent, DevEcoServerHandle, DevEcoWsServer, DEVECO_WS_PORT};
+pub mod hot_reload;
+
 use rustc_hash::FxHashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -157,8 +161,16 @@ mod tests {
                     ark_options: None,
                     res_options: None,
                     source_option: None,
+                    preload_system_so: false,
                     preload_so: vec![],
+                    remove_permissions: vec![],
+                    aot_compile_mode: None,
+                    host_pgo: None,
+                    ap_path: None,
+                    abi_filters: vec![],
                 },
+                version_code: None,
+                version_name: None,
             },
             modules: vec![],
             sdk_config: arkdown_core::SdkConfig {

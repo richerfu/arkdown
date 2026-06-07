@@ -1,0 +1,7 @@
+interface:
+  display_name: "Arkdown Path Portability"
+  short_description: "Typed cross-platform path rules"
+  default_prompt: "Use $arkdown-path-portability to enforce typed cross-platform arkdown paths."
+
+policy:
+  allow_implicit_invocation: true

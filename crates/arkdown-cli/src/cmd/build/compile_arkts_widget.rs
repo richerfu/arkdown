@@ -4,20 +4,9 @@ use super::compile_arkts_modules::{
 };
 use super::compile_arkts_package_entries::PackageEntryInfos;
 use super::*;
+use arkdown_config::build_profile::parse_api_version;
+use arkdown_profile::{collect_module_form_sources, ModuleFormProfileInput};
 use rustc_hash::{FxHashMap, FxHashSet};
-
-#[derive(Debug, serde::Deserialize)]
-struct FormConfigFile {
-    #[serde(default)]
-    forms: Vec<FormConfigEntry>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct FormConfigEntry {
-    src: Option<String>,
-    #[serde(rename = "uiSyntax")]
-    ui_syntax: Option<String>,
-}
 
 pub(super) fn compile_widget_pass(
     module: &ModuleConfig,
@@ -30,7 +19,7 @@ pub(super) fn compile_widget_pass(
         return Ok(());
     }
 
-    let widget_sources = widget_sources(module, &manifest.extension_abilities)?;
+    let widget_sources = widget_sources(config, module, manifest)?;
     if widget_sources.is_empty() {
         return Ok(());
     }
@@ -112,6 +101,7 @@ pub(super) fn compile_widget_pass(
             source_file: entry_info.source_file_info.clone(),
             package_name: entry_info.package_name.clone(),
             origin_source_lang: entry_info.origin_source_lang.clone(),
+            is_shared_module: entry_info.is_shared_module,
             abc_cache_path: None,
         });
     }
@@ -148,27 +138,33 @@ pub(super) fn compile_widget_pass(
     )?;
 
     let widget_abc = PathBuf::from(&loader_json.ace_module_build).join("widgets.abc");
-    let widget_cache_file = module
-        .src_path
-        .join("build/default/cache/abc/widgets.abc.cache");
-    if let Some(parent) = widget_cache_file.parent() {
-        fs_err::create_dir_all(parent)?;
-    }
+    // Widget cache uses its own handoff modules.cache, matching
+    // es2abc --cache-file @... without reusing the main module manifest.
+    let modules_cache_path = handoff.modules_cache_path.clone();
     compile_to_abc(Ts2abcOptions {
         inputs: handoff.inputs,
         output: widget_abc,
         target_api_version: config.sdk_config.compile_api_version,
         target_api_sub_version: config.product.compatible_sdk_version_stage.clone(),
+        enable_annotations: false,
         debug_info: matches!(config.build_mode, BuildMode::Debug),
         opt_level: if matches!(config.build_mode, BuildMode::Release) {
             2
         } else {
             0
         },
+        optimize_try_catch_func: true,
         merge_abc: true,
         module: true,
         commonjs: false,
-        cache_file: Some(widget_cache_file),
+        input_extension: "js".to_string(),
+        module_record_field_name: None,
+        cache_file: modules_cache_path,
+        output_proto: None,
+        compile_context_info: Default::default(),
+        enable_abc_input: false,
+        dump_deps_info: false,
+        remove_redundant_file: false,
         npm_module_entry_list: handoff.npm_entries_path,
     })
     .map_err(|e| anyhow::anyhow!("widget ABC compile failed: {}", e))?;
@@ -177,62 +173,31 @@ pub(super) fn compile_widget_pass(
 }
 
 fn widget_sources(
+    config: &ArkdownConfig,
     module: &ModuleConfig,
-    extension_abilities: &[ExtensionAbilityEntry],
+    manifest: &arkdown_core::HapManifest,
 ) -> Result<Vec<PathBuf>> {
     let mut sources = Vec::new();
     let mut seen = FxHashSet::default();
-    for ability in extension_abilities {
-        let extension_type = ability.extension_type.to_ascii_lowercase();
-        if extension_type != "form" && extension_type != "formextension" {
+    let module_json_path = module.src_path.join("src/main/module.json5");
+    let form_sources = collect_module_form_sources(ModuleFormProfileInput {
+        module_name: &module.name,
+        module_root: &module.src_path,
+        module_type: &module.module_type,
+        module_json_path: &module_json_path,
+        extension_abilities: &manifest.extension_abilities,
+        project_modules: &config.modules,
+        compatible_api_version: parse_api_version(&config.product.compatible_sdk_version)
+            .or(Some(config.sdk_config.compile_api_version)),
+    })?;
+    for source in form_sources {
+        if !source.is_arkts() {
             continue;
         }
-        let profile_names = form_profile_names(ability);
-        for profile_name in profile_names {
-            let profile_path = module
-                .src_path
-                .join("src/main/resources/base/profile")
-                .join(format!("{profile_name}.json"));
-            if !profile_path.exists() {
-                continue;
-            }
-            let content = fs_err::read_to_string(&profile_path)?;
-            let form_config: FormConfigFile = json5::from_str(&content)
-                .with_context(|| format!("failed to parse {}", profile_path.display()))?;
-            for form in form_config.forms {
-                if let Some(ui_syntax) = &form.ui_syntax {
-                    if ui_syntax != "arkts" {
-                        continue;
-                    }
-                }
-                let Some(src) = form.src else {
-                    continue;
-                };
-                let source_path = module
-                    .src_path
-                    .join("src/main")
-                    .join(src.trim_start_matches("./"));
-                if seen.insert(source_path.clone()) {
-                    sources.push(source_path);
-                }
-            }
+        if seen.insert(source.source_path.clone()) {
+            sources.push(source.source_path);
         }
     }
     sources.sort();
     Ok(sources)
-}
-
-fn form_profile_names(ability: &ExtensionAbilityEntry) -> Vec<String> {
-    let names: Vec<String> = ability
-        .metadata
-        .iter()
-        .filter_map(|metadata| metadata.resource.as_deref())
-        .filter_map(|resource| resource.strip_prefix("$profile:"))
-        .map(str::to_string)
-        .collect();
-    if names.is_empty() {
-        vec!["form_config".to_string()]
-    } else {
-        names
-    }
 }

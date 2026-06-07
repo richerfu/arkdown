@@ -26,8 +26,33 @@
 /// uses for inline caching.  On first call this should be 0; the runtime fills
 /// it in dynamically.  Our compiler always emits `0` for this field.
 #[derive(Debug, Clone, PartialEq)]
+pub struct PandasmInsn {
+    pub opcode: u32,
+    pub regs: Vec<u32>,
+    pub ids: Vec<Vec<u8>>,
+    pub imms: Vec<PandasmImm>,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PandasmImm {
+    Int(i64),
+    Double(f64),
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Insn {
     // ── Constant loaders (1 byte) ────────────────────────────────────────────
+    /// `0xD5` `op_none` — no operation.
+    Nop,
+
+    /// ABC input instruction materialized through upstream ISA metadata.
+    ///
+    /// This keeps bytecode that is not yet represented by a dedicated Rust
+    /// variant in the same structured shape that upstream `abc2program`
+    /// serializes into `protoPanda.Ins`.
+    Pandasm(PandasmInsn),
+
     /// `0x00` `op_none` — load `undefined` into accumulator.
     LdUndefined,
     /// `0x01` `op_none` — load `null` into accumulator.
@@ -148,6 +173,9 @@ pub enum Insn {
     TypeOf(u8),
     /// `0x1D` — `acc = ToNumber(acc)`.
     ToNumber(u8),
+
+    /// `0x1E` — `acc = ToNumeric(acc)`.
+    ToNumeric(u8),
     /// `0x1F` — `acc = -acc`.
     Neg(u8),
     /// `0x20` — `acc = ~acc` (bitwise NOT).
@@ -250,6 +278,10 @@ pub enum Insn {
     /// Encoding: `[0x32] [slot: u8] [argc: u8] [first_arg_vreg: u8]` = 4 bytes.
     SuperCallThisRange(u8, u8, u8),
 
+    /// `0xBB` `op_imm1_8_imm2_8_v_8` — call superclass arrow constructor with range args.
+    /// Encoding: `[0xBB] [slot: u8] [argc: u8] [first_arg_vreg: u8]` = 4 bytes.
+    SuperCallArrowRange(u8, u8, u8),
+
     /// `0xB9` `op_imm_8_v_8` — call superclass constructor with a spread arguments array.
     /// Accumulator holds the function object; `args_vreg` holds the array object.
     SuperCallSpread(u8, u8),
@@ -300,6 +332,9 @@ pub enum Insn {
     /// `0x09` — create an anonymous lexical environment.
     NewLexEnv(u8),
 
+    /// `0x69` — pop the current lexical environment.
+    PopLexEnv,
+
     /// `0xFE 0x09` — throw if accumulator is hole, using name string id.
     ThrowUndefinedIfHoleWithName(u16),
 
@@ -338,6 +373,10 @@ pub enum Insn {
     /// Encoding: `[0xFB] [0x01] [slot: u8] [key_vreg: u8] [obj_vreg: u8]` = 5 bytes.
     CallRuntimeDefineFieldByValue(u8, u8, u8),
 
+    /// `0xFB 0x06` — call an instance initializer method for a class instance.
+    /// Encoding: `[0xFB] [0x06] [slot:u8] [this_vreg:u8]` = 4 bytes.
+    CallRuntimeCallInit(u8, u8),
+
     // ── Private class field access ────────────────────────────────────────────
     //
     // Private fields use a two-dimensional address: `(level, slot)` where
@@ -347,7 +386,6 @@ pub enum Insn {
     //
     // Reference: `pandagen.cpp` `LoadPrivateProperty` / `StorePrivateProperty` /
     // `DefineClassPrivateField` / `TestIn`.
-
     /// `0xD8` `op_imm1_8_imm2_16_imm3_16` — load private field `(level, slot)`
     /// from the object in the accumulator.
     ///
@@ -640,16 +678,16 @@ pub enum Insn {
     CopyRestArgs(u8),
 
     // ── Async function ────────────────────────────────────────────────────────
-    /// `0xBB` `op_none` — enter an async function; creates the async object.
+    /// `0xAE` `op_none` — enter an async function; creates the async object.
     ///
     /// Result (the async generator object) is placed in the accumulator.
     /// Store it to a vreg immediately so it can be referenced by
     /// `AsyncFunctionResolve`/`AsyncFunctionReject` at return sites.
     ///
-    /// Encoding: `[0xBB]` = 1 byte.
+    /// Encoding: `[0xAE]` = 1 byte.
     ///
     /// Source: `isa.yaml` — `asyncfunctionenter`, format `op_none`,
-    /// `opcode_idx: [0xbb]`.
+    /// `opcode_idx: [0xae]`.
     AsyncFunctionEnter,
 
     /// `0xC4` `op_v_8` — await in an async function; async object register operand.
@@ -665,7 +703,242 @@ pub enum Insn {
     AsyncFunctionReject(u8),
 }
 
+const ARG_PLACEHOLDER_BASE: u8 = 192;
+
+fn physicalize_argument_register(reg: u16, num_vregs: u16) -> Option<u16> {
+    if reg < ARG_PLACEHOLDER_BASE as u16 {
+        Some(reg)
+    } else {
+        Some(num_vregs + (reg - ARG_PLACEHOLDER_BASE as u16))
+    }
+}
+
+fn map_u8(reg: &mut u8, map: &mut impl FnMut(u16) -> Option<u16>) {
+    let Some(mapped) = map(*reg as u16) else {
+        return;
+    };
+    if let Ok(mapped) = u8::try_from(mapped) {
+        *reg = mapped;
+    }
+}
+
+fn map_u16(reg: &mut u16, map: &mut impl FnMut(u16) -> Option<u16>) {
+    if let Some(mapped) = map(*reg) {
+        *reg = mapped;
+    }
+}
+
 impl Insn {
+    pub fn assign_inline_cache_slot(&mut self, current_slot: u32) -> Option<u8> {
+        let slot = current_slot.min(u8::MAX as u32) as u8;
+        match self {
+            Insn::CreateEmptyArray(value) => {
+                *value = slot as u16;
+                Some(1)
+            }
+            Insn::CreateArrayWithBuffer(value, _)
+            | Insn::Add2(value, _)
+            | Insn::Sub2(value, _)
+            | Insn::Mul2(value, _)
+            | Insn::Div2(value, _)
+            | Insn::Mod2(value, _)
+            | Insn::Eq(value, _)
+            | Insn::NotEq(value, _)
+            | Insn::Less(value, _)
+            | Insn::LessEq(value, _)
+            | Insn::Greater(value, _)
+            | Insn::GreaterEq(value, _)
+            | Insn::Shl2(value, _)
+            | Insn::Shr2(value, _)
+            | Insn::Ashr2(value, _)
+            | Insn::And2(value, _)
+            | Insn::Or2(value, _)
+            | Insn::Xor2(value, _)
+            | Insn::Exp(value, _)
+            | Insn::ToNumeric(value)
+            | Insn::Neg(value)
+            | Insn::BitNot(value)
+            | Insn::Inc(value)
+            | Insn::Dec(value)
+            | Insn::IsIn(value, _)
+            | Insn::InstanceOf(value, _)
+            | Insn::StrictNotEq(value, _)
+            | Insn::StrictEq(value, _)
+            | Insn::TryLdGlobalByName(value, _)
+            | Insn::TryStGlobalByName(value, _)
+            | Insn::DefineFuncShort(value, _, _)
+            | Insn::DefineMethodShort(value, _, _)
+            | Insn::DefineClassWithBuffer(value, _, _, _, _)
+            | Insn::CreateObjectWithBuffer(value, _)
+            | Insn::CallRuntimeIsTrue(value)
+            | Insn::CallRuntimeIsFalse(value) => {
+                *value = slot;
+                Some(1)
+            }
+            Insn::TypeOf(value)
+            | Insn::CallArg0(value)
+            | Insn::CallArg1(value, _)
+            | Insn::CallArgs2(value, _, _)
+            | Insn::CallArgs3(value, _, _, _)
+            | Insn::CallRange(value, _, _)
+            | Insn::CallThis0(value, _)
+            | Insn::CallThis1(value, _, _)
+            | Insn::CallThis2(value, _, _, _)
+            | Insn::CallThis3(value, _, _, _, _)
+            | Insn::CallThisRange(value, _, _)
+            | Insn::SuperCallThisRange(value, _, _)
+            | Insn::SuperCallArrowRange(value, _, _)
+            | Insn::CallRuntimeDefineFieldByValue(value, _, _)
+            | Insn::CallRuntimeCallInit(value, _)
+            | Insn::LdObjByName(value, _)
+            | Insn::StObjByName(value, _, _)
+            | Insn::DefinePropertyByName(value, _, _)
+            | Insn::DefineFieldByName(value, _, _)
+            | Insn::LdObjByValue(value, _)
+            | Insn::StObjByValue(value, _, _)
+            | Insn::SetObjectWithProto(value, _)
+            | Insn::StOwnByName(value, _, _)
+            | Insn::StOwnByNameWithNameSet(value, _, _)
+            | Insn::StOwnByValueWithNameSet(value, _, _)
+            | Insn::StOwnByValue(value, _, _)
+            | Insn::NewObjRange(value, _, _)
+            | Insn::NewObjApply(value, _)
+            | Insn::SuperCallSpread(value, _)
+            | Insn::Apply(value, _, _) => {
+                *value = slot;
+                Some(2)
+            }
+            Insn::StOwnByIndex(value, _, _) => {
+                *value = slot as u16;
+                Some(2)
+            }
+            Insn::Pandasm(_) => None,
+            _ => None,
+        }
+    }
+
+    pub fn patch_jump_offset(&mut self, offset: i32) {
+        match self {
+            Insn::JmpShort(value) => *value = offset as i8,
+            Insn::Jmp(value) => *value = offset as i16,
+            Insn::JmpWide(value) => *value = offset,
+            Insn::JeqzShort(value) => *value = offset as i8,
+            Insn::Jeqz(value) => *value = offset as i16,
+            Insn::JeqzWide(value) => *value = offset,
+            Insn::JnezShort(value) => *value = offset as i8,
+            Insn::Jnez(value) => *value = offset as i16,
+            Insn::JnezWide(value) => *value = offset,
+            _ => {}
+        }
+    }
+
+    pub fn physicalize_argument_registers(&mut self, num_vregs: u16) {
+        self.remap_register_operands(|reg| physicalize_argument_register(reg, num_vregs));
+    }
+
+    pub(crate) fn remap_register_operands<F>(&mut self, mut map: F)
+    where
+        F: FnMut(u16) -> Option<u16>,
+    {
+        self.map_register_operands(&mut map);
+    }
+
+    fn map_register_operands(&mut self, map: &mut impl FnMut(u16) -> Option<u16>) {
+        match self {
+            Insn::Lda(reg)
+            | Insn::Sta(reg)
+            | Insn::ThrowIfNotObject(reg)
+            | Insn::CopyDataProperties(reg)
+            | Insn::DelObjProp(reg)
+            | Insn::GetNextPropName(reg)
+            | Insn::CreateGeneratorObj(reg)
+            | Insn::SuspendGenerator(reg)
+            | Insn::AsyncFunctionAwaitUncaught(reg)
+            | Insn::AsyncFunctionResolve(reg)
+            | Insn::AsyncFunctionReject(reg) => map_u8(reg, map),
+            Insn::MovV4(dst, src) | Insn::MovV8(dst, src) => {
+                map_u8(dst, map);
+                map_u8(src, map);
+            }
+            Insn::MovV16(dst, src) => {
+                map_u16(dst, map);
+                map_u16(src, map);
+            }
+            Insn::Add2(_, reg)
+            | Insn::Sub2(_, reg)
+            | Insn::Mul2(_, reg)
+            | Insn::Div2(_, reg)
+            | Insn::Mod2(_, reg)
+            | Insn::Eq(_, reg)
+            | Insn::NotEq(_, reg)
+            | Insn::Less(_, reg)
+            | Insn::LessEq(_, reg)
+            | Insn::Greater(_, reg)
+            | Insn::GreaterEq(_, reg)
+            | Insn::Shl2(_, reg)
+            | Insn::Shr2(_, reg)
+            | Insn::Ashr2(_, reg)
+            | Insn::And2(_, reg)
+            | Insn::Or2(_, reg)
+            | Insn::Xor2(_, reg)
+            | Insn::Exp(_, reg)
+            | Insn::IsIn(_, reg)
+            | Insn::InstanceOf(_, reg)
+            | Insn::StrictNotEq(_, reg)
+            | Insn::StrictEq(_, reg)
+            | Insn::CallArg1(_, reg)
+            | Insn::CallThis0(_, reg)
+            | Insn::LdObjByValue(_, reg)
+            | Insn::LdSuperByValue(_, reg)
+            | Insn::SetObjectWithProto(_, reg)
+            | Insn::SuperCallSpread(_, reg)
+            | Insn::NewObjApply(_, reg)
+            | Insn::CloseIterator(_, reg)
+            | Insn::CallRuntimeCallInit(_, reg)
+            | Insn::NewObjRange(_, _, reg)
+            | Insn::CallRange(_, _, reg)
+            | Insn::CallThisRange(_, _, reg)
+            | Insn::SuperCallThisRange(_, _, reg)
+            | Insn::SuperCallArrowRange(_, _, reg)
+            | Insn::StObjByName(_, _, reg)
+            | Insn::StSuperByName(_, _, reg)
+            | Insn::DefinePropertyByName(_, _, reg)
+            | Insn::DefineFieldByName(_, _, reg)
+            | Insn::StOwnByName(_, _, reg)
+            | Insn::StOwnByNameWithNameSet(_, _, reg)
+            | Insn::StOwnByIndex(_, reg, _)
+            | Insn::DefineClassWithBuffer(_, _, _, _, reg)
+            | Insn::StPrivateProperty(_, _, _, reg)
+            | Insn::CallRuntimeDefinePrivateProperty(_, _, _, reg) => map_u8(reg, map),
+            Insn::CallArgs2(_, a, b)
+            | Insn::CallThis1(_, a, b)
+            | Insn::StObjByValue(_, a, b)
+            | Insn::StSuperByValue(_, a, b)
+            | Insn::StOwnByValue(_, a, b)
+            | Insn::StOwnByValueWithNameSet(_, a, b)
+            | Insn::CallRuntimeDefineFieldByValue(_, a, b)
+            | Insn::Apply(_, a, b)
+            | Insn::StArraySpread(a, b)
+            | Insn::CreateObjectWithExcludedKeys(_, a, b) => {
+                map_u8(a, map);
+                map_u8(b, map);
+            }
+            Insn::CallArgs3(_, a, b, c) | Insn::CallThis2(_, a, b, c) => {
+                map_u8(a, map);
+                map_u8(b, map);
+                map_u8(c, map);
+            }
+            Insn::CallThis3(_, a, b, c, d) | Insn::DefineGetterSetterByValue(a, b, c, d) => {
+                map_u8(a, map);
+                map_u8(b, map);
+                map_u8(c, map);
+                map_u8(d, map);
+            }
+            Insn::Pandasm(_) => {}
+            _ => {}
+        }
+    }
+
     /// Byte offsets, relative to this instruction's encoded bytes, that carry
     /// vreg operands.  This lets the lowering layer rewrite late-bound argument
     /// registers without decoding raw bytecode by opcode.
@@ -717,6 +990,7 @@ impl Insn {
             Insn::SetObjectWithProto(_, _) => &[2],
             Insn::DefineGetterSetterByValue(_, _, _, _) => &[1, 2, 3, 4],
             Insn::CallRuntimeDefineFieldByValue(_, _, _) => &[3, 4],
+            Insn::CallRuntimeCallInit(_, _) => &[3],
             // Private property: obj operand is at byte offset 6 within the encoded instruction.
             Insn::StPrivateProperty(_, _, _, _) => &[6],
             // callruntime.defineprivateproperty: obj operand at byte offset 7.
@@ -726,6 +1000,7 @@ impl Insn {
             Insn::CallRange(_, _, _)
             | Insn::CallThisRange(_, _, _)
             | Insn::SuperCallThisRange(_, _, _)
+            | Insn::SuperCallArrowRange(_, _, _)
             | Insn::NewObjRange(_, _, _) => &[3],
             Insn::SuperCallSpread(_, _) | Insn::NewObjApply(_, _) => &[2],
             Insn::Apply(_, _, _) => &[2, 3],
@@ -740,6 +1015,7 @@ impl Insn {
             Insn::StOwnByIndex(_, _, _) => &[3],
             Insn::StArraySpread(_, _) => &[1, 2],
             Insn::GetNextPropName(_) | Insn::CreateGeneratorObj(_) => &[1],
+            Insn::Pandasm(_) => &[],
             _ => &[],
         }
     }
@@ -753,6 +1029,8 @@ impl Insn {
     /// All multi-byte operands are little-endian.
     pub fn encode(&self, _strings: &mut crate::emit::strings::StringTable) -> Vec<u8> {
         match self {
+            Insn::Pandasm(raw) => raw.bytes.clone(),
+
             // ── constant loaders ─────────────────────────────────────────────
             Insn::LdUndefined => vec![0x00],
             Insn::LdNull => vec![0x01],
@@ -785,7 +1063,7 @@ impl Insn {
                 v
             }
             Insn::DynamicImport => vec![0xbd],
-            Insn::GetImportMeta => vec![0xd5],
+            Insn::Nop | Insn::GetImportMeta => vec![0xd5],
             Insn::Debugger => vec![0xb0],
 
             // ── register moves ───────────────────────────────────────────────
@@ -832,6 +1110,7 @@ impl Insn {
             // ── unary operators ───────────────────────────────────────────────
             Insn::TypeOf(slot) => vec![0x1C, *slot],
             Insn::ToNumber(slot) => vec![0x1d, *slot],
+            Insn::ToNumeric(slot) => vec![0x1e, *slot],
             Insn::Neg(slot) => vec![0x1F, *slot],
             Insn::BitNot(slot) => vec![0x20, *slot],
             Insn::Inc(slot) => vec![0x21, *slot],
@@ -865,6 +1144,9 @@ impl Insn {
             Insn::CallThis3(slot, this, v0, v1, v2) => vec![0x30, *slot, *this, *v0, *v1, *v2],
             Insn::CallThisRange(slot, argc, this_vreg) => vec![0x31, *slot, *argc, *this_vreg],
             Insn::SuperCallThisRange(slot, argc, v_start) => vec![0x32, *slot, *argc, *v_start],
+            Insn::SuperCallArrowRange(slot, argc, v_start) => {
+                vec![0xbb, *slot, *argc, *v_start]
+            }
             Insn::SuperCallSpread(slot, args_vreg) => vec![0xb9, *slot, *args_vreg],
             Insn::Apply(slot, this_vreg, args_vreg) => vec![0xba, *slot, *this_vreg, *args_vreg],
             Insn::GetTemplateObject(slot) if *slot <= u8::MAX as u16 => vec![0x76, *slot as u8],
@@ -902,6 +1184,7 @@ impl Insn {
                 v
             }
             Insn::NewLexEnv(count) => vec![0x09, *count],
+            Insn::PopLexEnv => vec![0x69],
             Insn::ThrowUndefinedIfHoleWithName(name_id) => {
                 let mut v = vec![0xfe, 0x09];
                 v.extend_from_slice(&name_id.to_le_bytes());
@@ -948,6 +1231,7 @@ impl Insn {
             Insn::CallRuntimeDefineFieldByValue(slot, key, obj) => {
                 vec![0xfb, 0x01, *slot, *key, *obj]
             }
+            Insn::CallRuntimeCallInit(slot, this_vreg) => vec![0xfb, 0x06, *slot, *this_vreg],
             Insn::LdPrivateProperty(ic, level, slot) => {
                 let mut v = vec![0xd8, *ic];
                 v.extend_from_slice(&level.to_le_bytes());
@@ -1130,7 +1414,7 @@ impl Insn {
 
             // ── rest parameters / async ───────────────────────────────────────
             Insn::CopyRestArgs(n) => vec![0xA1, *n],
-            Insn::AsyncFunctionEnter => vec![0xBB],
+            Insn::AsyncFunctionEnter => vec![0xAE],
             Insn::AsyncFunctionAwaitUncaught(async_reg) => vec![0xC4, *async_reg],
             Insn::AsyncFunctionResolve(async_reg) => vec![0xCD, *async_reg],
             Insn::AsyncFunctionReject(async_reg) => vec![0xCE, *async_reg],
@@ -1140,7 +1424,9 @@ impl Insn {
     /// Return the encoded byte length of this instruction without encoding it.
     pub fn byte_len(&self) -> usize {
         match self {
-            Insn::LdUndefined
+            Insn::Pandasm(raw) => raw.bytes.len(),
+            Insn::Nop
+            | Insn::LdUndefined
             | Insn::LdNull
             | Insn::LdTrue
             | Insn::LdFalse
@@ -1180,6 +1466,7 @@ impl Insn {
             | Insn::StrictEq(_, _) => 3,
             Insn::TypeOf(_)
             | Insn::ToNumber(_)
+            | Insn::ToNumeric(_)
             | Insn::Neg(_)
             | Insn::BitNot(_)
             | Insn::Inc(_)
@@ -1198,6 +1485,7 @@ impl Insn {
             Insn::CallThis3(_, _, _, _, _) => 6,
             Insn::CallThisRange(_, _, _) => 4,
             Insn::SuperCallThisRange(_, _, _) => 4,
+            Insn::SuperCallArrowRange(_, _, _) => 4,
             Insn::SuperCallSpread(_, _) => 3,
             Insn::Apply(_, _, _) => 4,
             Insn::GetTemplateObject(slot) => {
@@ -1220,6 +1508,7 @@ impl Insn {
                 }
             }
             Insn::NewLexEnv(_) => 2,
+            Insn::PopLexEnv => 1,
             Insn::NewLexEnvWithName(_, _) => 4,
             Insn::ThrowUndefinedIfHoleWithName(_) => 4,
             Insn::ThrowIfSuperNotCorrectCall(_) => 3,
@@ -1230,6 +1519,7 @@ impl Insn {
             | Insn::DefineFieldByName(_, _, _)
             | Insn::StOwnByNameWithNameSet(_, _, _) => 5,
             Insn::CallRuntimeDefineFieldByValue(_, _, _) => 5,
+            Insn::CallRuntimeCallInit(_, _) => 4,
             Insn::LdPrivateProperty(_, _, _) | Insn::TestIn(_, _, _) => 6,
             Insn::StPrivateProperty(_, _, _, _) => 7,
             Insn::CallRuntimeCreatePrivateProperty(_, _) => 6,

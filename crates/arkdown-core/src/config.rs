@@ -127,6 +127,19 @@ pub struct ProductConfig {
     pub runtime_os: String,
     pub signing_config: Option<SigningConfig>,
     pub build_option: BuildOption,
+    /// Product-level `versionCode` override from `build-profile.json5`.
+    ///
+    /// When present, overrides the `versionCode` field from `AppScope/app.json5`
+    /// in the compiled `module.json` app section.  Matches hvigor's product-level
+    /// app override semantics.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub version_code: Option<u64>,
+    /// Product-level `versionName` override from `build-profile.json5`.
+    ///
+    /// When present, overrides the `versionName` field from `AppScope/app.json5`
+    /// in the compiled `module.json` app section.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub version_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,11 +148,36 @@ pub struct BuildOption {
     pub ark_options: Option<ArkOptions>,
     pub res_options: Option<ResOptions>,
     pub source_option: Option<SourceOption>,
+    /// Whether hvigor's `buildOption.preloadSystemSo` collection is enabled.
+    /// This gates startup/resource handling for ByteCode HAR `META-INF/preload.json`.
+    #[serde(default)]
+    pub preload_system_so: bool,
     /// SO file paths listed under `buildOption.preloadSo` in `build-profile.json5`.
     /// Each path is resolved relative to the project root; files are embedded in the
     /// HAP under `libs/arm64-v8a/`.
     #[serde(default)]
     pub preload_so: Vec<PathBuf>,
+    /// Permissions to remove from HAR/HSP dependency `requestPermissions`.
+    /// Matches hvigor's `MergeProfile.getRemovePermissionSet()` behavior.
+    #[serde(default)]
+    pub remove_permissions: Vec<String>,
+    /// AOT compile mode from `buildOption.aotCompileMode` or
+    /// `buildOption.arkOptions.aotCompileMode`: `""`, `"type"`, or `"partial"`.
+    /// API 10+ ignores this value in hvigor and derives the mode from `hostPGO`.
+    #[serde(default)]
+    pub aot_compile_mode: Option<String>,
+    /// Whether `buildOption.arkOptions.hostPGO` requests partial AOT on API 10+.
+    #[serde(default)]
+    pub host_pgo: Option<bool>,
+    /// Path to AOT profile data (`.ap` file) for PGO-based AOT. Relative paths
+    /// are module-root relative, matching hvigor's `TargetTaskService.getApPath()`.
+    #[serde(default)]
+    pub ap_path: Option<PathBuf>,
+    /// ABI filter list from `buildOption.externalNativeOptions.abiFilters`.
+    /// Controls which native SO library directories are collected.
+    /// Empty means default: `["arm64-v8a"]`.
+    #[serde(default)]
+    pub abi_filters: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -153,6 +191,10 @@ pub struct ArkOptions {
     pub obfuscation: Option<ObfuscationConfig>,
     pub types: Vec<String>,
     pub runtime_only: Option<RuntimeOnlyConfig>,
+    /// Whether to allow the bundler to split output into multiple chunks
+    /// (`buildOption.arkOptions.supportChunks` in `build-profile.json5`).
+    #[serde(default)]
+    pub support_chunks: bool,
 }
 
 /// Obfuscation configuration (from `buildOption.arkOptions.obfuscation` in
@@ -180,12 +222,29 @@ impl ObfuscationConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResOptions {
     pub res_path: Option<PathBuf>,
+    /// Whether to include AppScope/resources in the resource compilation.
+    /// Defaults to `true` in hvigor; set to `false` for shared modules that
+    /// don't need the app-scope resources.
+    #[serde(default = "default_true")]
+    pub include_app_scope_res: bool,
+    /// Additional resource directories to include (from `buildOption.resOptions.directories`).
+    #[serde(default)]
+    pub resource_directories: Vec<PathBuf>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Source language options.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceOption {
     pub source_language: Option<String>,
+    /// Worker entry files from `buildOption.sourceOption.workers` in
+    /// `build-profile.json5`. Resolved to absolute paths relative to the
+    /// project root during config resolution.
+    #[serde(default)]
+    pub workers: Vec<PathBuf>,
 }
 
 /// Runtime-only package configuration.
@@ -224,6 +283,36 @@ impl SdkConfig {
     /// ETS root is two levels up: `<sdk>/ets`.
     fn ets_root(&self) -> Option<&std::path::Path> {
         self.ets_loader_path.parent()?.parent()
+    }
+
+    /// Derive the SDK component root from `ets_loader_path`.
+    ///
+    /// `ets_loader_path` is e.g. `<sdk>/ets/build-tools/ets-loader`, so the
+    /// component root is three levels up: `<sdk>`.
+    fn component_root(&self) -> Option<&std::path::Path> {
+        self.ets_root()?.parent()
+    }
+
+    /// Return the SDK PAC schema path when this SDK provides one.
+    ///
+    /// hvigor skips PAC/privacy processing when `toolchains/paccheck/pacSchema.json`
+    /// is absent, so callers should treat `None` as "task should not run".
+    pub fn pac_schema_path(&self) -> Option<std::path::PathBuf> {
+        let path = self
+            .component_root()?
+            .join("toolchains/paccheck/pacSchema.json");
+        path.is_file().then_some(path)
+    }
+
+    /// SDK permission oracle used by hvigor for requestPermissions checks.
+    ///
+    /// The previewer component stores SDK `definePermissions` in
+    /// `<sdk>/previewer/common/resources/module.json`.
+    pub fn permission_module_json_path(&self) -> Option<std::path::PathBuf> {
+        let path = self
+            .component_root()?
+            .join("previewer/common/resources/module.json");
+        path.is_file().then_some(path)
     }
 
     /// Candidate directories containing `@ohos/*` API declaration files.

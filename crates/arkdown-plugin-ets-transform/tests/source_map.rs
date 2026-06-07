@@ -28,7 +28,13 @@ fn make_plugin() -> EtsTransformPlugin {
             runtime_os: "OpenHarmony".to_string(),
             signing_config: None,
             build_option: BuildOption {
+                preload_system_so: false,
                 preload_so: vec![],
+                remove_permissions: vec![],
+                aot_compile_mode: None,
+                host_pgo: None,
+                ap_path: None,
+                abi_filters: vec![],
                 strict_mode: StrictModeConfig {
                     case_sensitive_check: false,
                     use_normalized_ohm_url: true,
@@ -37,6 +43,8 @@ fn make_plugin() -> EtsTransformPlugin {
                 res_options: None,
                 source_option: None,
             },
+            version_code: None,
+            version_name: None,
         },
         modules: vec![],
         sdk_config: SdkConfig {

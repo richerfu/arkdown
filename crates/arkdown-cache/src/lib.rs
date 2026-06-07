@@ -10,6 +10,10 @@ use arkdown_core::ArkdownConfig;
 /// Mirrors hvigor's `getCompileEnv()` which joins these fields with `"#"` to
 /// produce a cache-invalidation key.  When any field changes between builds,
 /// ALL per-module cache entries must be discarded.
+///
+/// `build_mode` is included so that switching between debug and release builds
+/// always invalidates the cache — hvigor similarly gates its ProgramCache on
+/// the build mode as part of the compileEnv key.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CompileEnv {
     pub compile_sdk_version: String,
@@ -19,6 +23,9 @@ pub struct CompileEnv {
     pub obfuscation_enabled: bool,
     pub module_type: String,
     pub cache_path: String,
+    /// `"debug"` or `"release"`.  Ensures a release build never reuses
+    /// cached debug ABC (or vice-versa), matching hvigor compileEnv semantics.
+    pub build_mode: String,
 }
 
 impl CompileEnv {
@@ -37,6 +44,11 @@ impl CompileEnv {
             .first()
             .map(|m| format!("{:?}", m.module_type))
             .unwrap_or_default();
+        let build_mode = match config.build_mode {
+            arkdown_core::BuildMode::Debug => "debug",
+            arkdown_core::BuildMode::Release => "release",
+        }
+        .to_string();
         CompileEnv {
             compile_sdk_version: config.sdk_config.compile_sdk_version.clone(),
             compatible_sdk_version: config.product.compatible_sdk_version.clone(),
@@ -49,13 +61,16 @@ impl CompileEnv {
             obfuscation_enabled,
             module_type,
             cache_path: cache_path.to_string(),
+            build_mode,
         }
     }
 
     /// Produce the `#`-joined key string used for cache invalidation.
+    ///
+    /// Field order matches hvigor's `getCompileEnv()` concatenation.
     pub fn to_key_string(&self) -> String {
         format!(
-            "{}#{}#{}#{}#{}#{}#{}",
+            "{}#{}#{}#{}#{}#{}#{}#{}",
             self.compile_sdk_version,
             self.compatible_sdk_version,
             self.runtime_os,
@@ -63,6 +78,7 @@ impl CompileEnv {
             self.obfuscation_enabled,
             self.module_type,
             self.cache_path,
+            self.build_mode,
         )
     }
 }
@@ -253,6 +269,37 @@ impl BuildCache {
         self.memory.is_empty()
     }
 
+    /// Return the path to the bundle-level cache manifest file.
+    ///
+    /// hvigor writes `build/default/cache/bundle/bundle.json` after each
+    /// successful Rollup/Rolldown bundle run.  Subsequent builds read this file
+    /// to verify that the bundle inputs are unchanged before skipping the
+    /// bundle step.
+    pub fn bundle_manifest_path(&self) -> std::path::PathBuf {
+        self.cache_dir.join("bundle.json")
+    }
+
+    /// Persist `key` as the bundle-level cache manifest.
+    ///
+    /// Written to `<cache_dir>/bundle.json` after each successful bundle run.
+    /// Returns `Ok(())` on success; IO/serialization errors are returned to the
+    /// caller so they can be treated as non-fatal warnings.
+    pub fn write_bundle_manifest(&self, key: &BundleCacheKey) -> Result<(), CacheError> {
+        fs_err::create_dir_all(&self.cache_dir)?;
+        let json = serde_json::to_string_pretty(key)?;
+        fs_err::write(self.bundle_manifest_path(), json)?;
+        Ok(())
+    }
+
+    /// Read the stored bundle-level cache manifest and return it if it exists
+    /// and parses successfully.  Returns `None` on a cache miss (first build,
+    /// corrupt file, etc.).
+    pub fn read_bundle_manifest(&self) -> Option<BundleCacheKey> {
+        let path = self.bundle_manifest_path();
+        let content = fs_err::read_to_string(&path).ok()?;
+        serde_json::from_str(&content).ok()
+    }
+
     fn hash_id(id: &str) -> String {
         format!("{:016x}", arkdown_utils::fnv1a_hash(id))
     }
@@ -271,6 +318,9 @@ pub fn compute_content_hash(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT_TEMP_ID: AtomicUsize = AtomicUsize::new(0);
 
     fn make_entry(id: &str, content_hash: &str) -> CachedEntry {
         CachedEntry {
@@ -285,9 +335,18 @@ mod tests {
         }
     }
 
+    fn temp_cache_dir(name: &str) -> PathBuf {
+        let seq = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "arkdown_cache_{name}_{}_{}",
+            std::process::id(),
+            seq
+        ))
+    }
+
     #[test]
     fn test_cache_roundtrip() {
-        let tmp = std::env::temp_dir().join("arkdown_cache_roundtrip_test");
+        let tmp = temp_cache_dir("roundtrip_test");
         let _ = std::fs::remove_dir_all(&tmp);
 
         let mut cache = BuildCache::new(tmp.clone());
@@ -312,7 +371,7 @@ mod tests {
 
     #[test]
     fn test_cache_miss_on_changed_content_hash() {
-        let tmp = std::env::temp_dir().join("arkdown_cache_miss_test");
+        let tmp = temp_cache_dir("miss_test");
         let _ = std::fs::remove_dir_all(&tmp);
 
         let mut cache = BuildCache::new(tmp.clone());
@@ -330,7 +389,7 @@ mod tests {
 
     #[test]
     fn test_cache_miss_on_changed_config_hash() {
-        let tmp = std::env::temp_dir().join("arkdown_cache_config_miss_test");
+        let tmp = temp_cache_dir("config_miss_test");
         let _ = std::fs::remove_dir_all(&tmp);
 
         let mut cache = BuildCache::new(tmp.clone());
@@ -348,7 +407,7 @@ mod tests {
 
     #[test]
     fn test_invalidate_all_clears_memory_and_disk() {
-        let tmp = std::env::temp_dir().join("arkdown_cache_invalidate_test");
+        let tmp = temp_cache_dir("invalidate_test");
         let _ = std::fs::remove_dir_all(&tmp);
 
         let mut cache = BuildCache::new(tmp.clone());
@@ -368,7 +427,7 @@ mod tests {
 
     #[test]
     fn test_load_from_empty_dir_is_ok() {
-        let tmp = std::env::temp_dir().join("arkdown_cache_empty_dir_test");
+        let tmp = temp_cache_dir("empty_dir_test");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
 
@@ -381,7 +440,7 @@ mod tests {
 
     #[test]
     fn test_load_from_nonexistent_dir_is_ok() {
-        let tmp = std::env::temp_dir().join("arkdown_cache_nodir_test_nonexistent");
+        let tmp = temp_cache_dir("nodir_test_nonexistent");
         let _ = std::fs::remove_dir_all(&tmp);
 
         let mut cache = BuildCache::new(tmp);
@@ -393,7 +452,7 @@ mod tests {
 
     #[test]
     fn test_get_returns_inserted_entry() {
-        let tmp = std::env::temp_dir().join("arkdown_cache_get_test");
+        let tmp = temp_cache_dir("get_test");
         let _ = std::fs::remove_dir_all(&tmp);
 
         let mut cache = BuildCache::new(tmp.clone());
@@ -409,7 +468,7 @@ mod tests {
 
     #[test]
     fn test_get_returns_none_for_unknown_id() {
-        let tmp = std::env::temp_dir().join("arkdown_cache_get_none_test");
+        let tmp = temp_cache_dir("get_none_test");
         let _ = std::fs::remove_dir_all(&tmp);
 
         let mut cache = BuildCache::new(tmp.clone());
@@ -425,7 +484,7 @@ mod tests {
 
     #[test]
     fn test_len_tracks_insertions() {
-        let tmp = std::env::temp_dir().join("arkdown_cache_len_test");
+        let tmp = temp_cache_dir("len_test");
         let _ = std::fs::remove_dir_all(&tmp);
 
         let mut cache = BuildCache::new(tmp.clone());
@@ -507,7 +566,7 @@ mod tests {
     #[test]
     fn test_concurrent_inserts_to_different_dirs_do_not_corrupt() {
         // Each thread gets its own cache directory so they never conflict.
-        let base = std::env::temp_dir().join("arkdown_cache_concurrent_test");
+        let base = temp_cache_dir("concurrent_test");
         let _ = std::fs::remove_dir_all(&base);
 
         let dir_a = base.join("a");
@@ -583,7 +642,7 @@ mod tests {
 
     #[test]
     fn test_compile_env_same_env_no_invalidation() {
-        let tmp = std::env::temp_dir().join("arkdown_cache_compile_env_same");
+        let tmp = temp_cache_dir("compile_env_same");
         let _ = std::fs::remove_dir_all(&tmp);
 
         let env = "sdk12#12#OpenHarmony#/sdk/ets-loader#false#Entry#/tmp/cache";
@@ -615,7 +674,7 @@ mod tests {
 
     #[test]
     fn test_compile_env_different_env_invalidates_all() {
-        let tmp = std::env::temp_dir().join("arkdown_cache_compile_env_diff");
+        let tmp = temp_cache_dir("compile_env_diff");
         let _ = std::fs::remove_dir_all(&tmp);
 
         let mut cache = BuildCache::new(tmp.clone());
@@ -667,11 +726,35 @@ mod tests {
             obfuscation_enabled: false,
             module_type: "Entry".to_string(),
             cache_path: "/tmp/cache".to_string(),
+            build_mode: "debug".to_string(),
         };
         let key = env.to_key_string();
+        // build_mode is appended last, matching hvigor compileEnv key semantics.
         assert_eq!(
             key,
-            "6.0.0.47#12#OpenHarmony#/sdk/ets-loader#false#Entry#/tmp/cache"
+            "6.0.0.47#12#OpenHarmony#/sdk/ets-loader#false#Entry#/tmp/cache#debug"
+        );
+    }
+
+    /// Switching build_mode from debug to release must produce a different key,
+    /// preventing stale debug ABC from being reused for release builds.
+    #[test]
+    fn test_compile_env_debug_and_release_produce_different_keys() {
+        let make_env = |mode: &str| CompileEnv {
+            compile_sdk_version: "6.0.0.47".to_string(),
+            compatible_sdk_version: "12".to_string(),
+            runtime_os: "OpenHarmony".to_string(),
+            ets_loader_path: "/sdk/ets-loader".to_string(),
+            obfuscation_enabled: false,
+            module_type: "Entry".to_string(),
+            cache_path: "/tmp/cache".to_string(),
+            build_mode: mode.to_string(),
+        };
+        let debug_key = make_env("debug").to_key_string();
+        let release_key = make_env("release").to_key_string();
+        assert_ne!(
+            debug_key, release_key,
+            "debug and release must produce distinct cache keys"
         );
     }
 }

@@ -17,25 +17,43 @@
 //!     ▼  ir::builder
 //! ClassRecord + MethodRecord (IR)
 //!     │
+//!     ▼  optimizer (opt_level > 0)
+//! MethodRecord bytecode + compacted register frame
+//!     │
 //!     ▼  emit::file
 //! .abc binary
 //! ```
 //!
 //! # Status
 //!
-//! The binary format skeleton and public API are complete.  The code-generation
-//! pass (AST → opcodes) currently emits only `ReturnUndefined` stubs; full
-//! statement lowering is a SPEC-009 follow-up task.
+//! The binary format skeleton and public API are complete. The code-generation
+//! pass lowers supported JS/TS syntax directly to Panda bytecode. The release
+//! optimizer path is being ported from upstream `bytecode_optimizer`: non-zero
+//! opt levels run the Rust optimizer entry and currently include encoded
+//! bytecode register-frame compaction.
 
+mod abc2program;
+pub mod abc_reader;
 pub mod cache;
 pub mod compiler;
+mod dependency;
 pub mod emit;
 pub mod error;
 pub mod ir;
+pub(crate) mod isa;
+pub(crate) mod names;
 mod npm_entries;
+mod optimizer;
+mod program_cache;
+pub mod proto_panda;
 pub mod widget;
 
-pub use compiler::{AbcArtifactResult, AbcCompileOptions, AbcCompiler, AbcModule};
+pub use abc_reader::{AbcClassInfo, AbcReadError, AbcReader, AbcSectionHashes, ParsedAbcSummary};
+pub use compiler::{
+    AbcArtifactResult, AbcCompileOptions, AbcCompiler, AbcInputFile, AbcModule,
+    AbcProgramCacheInput,
+};
+pub use dependency::AbcDependencyContext;
 pub use error::AbcError;
 pub use widget::{
     collect_form_json_paths, need_widget_compile, ExtensionAbilityRef, WidgetCompileConfig,
@@ -136,12 +154,17 @@ mod tests {
         AbcCompiler::new(AbcCompileOptions {
             debug_info: false,
             opt_level: 0,
+            optimize_try_catch_func: true,
             target_api_version: 12,
             target_api_sub_version: None,
+            enable_annotations: false,
             merge_abc: true,
             module: false,
-            cache_path: None,
+            module_record_field_name: None,
             npm_entries: None,
+            dependency_context: None,
+            remove_redundant_file: false,
+            dump_deps_info: false,
         })
     }
 
@@ -155,6 +178,8 @@ mod tests {
             source_file: None,
             package_name: None,
             is_commonjs: false,
+            is_shared_module: false,
+            origin_source_lang: String::new(),
         }];
         let tmp = std::env::temp_dir().join("test_abc_minimal.abc");
         let result = compiler.compile(modules, &tmp);
@@ -179,6 +204,8 @@ mod tests {
                 source_file: None,
                 package_name: None,
                 is_commonjs: false,
+                is_shared_module: false,
+                origin_source_lang: String::new(),
             },
             AbcModule {
                 record_name: "@bundle:com.example/entry/ets/utils/Helper".to_string(),
@@ -187,6 +214,8 @@ mod tests {
                 source_file: None,
                 package_name: None,
                 is_commonjs: false,
+                is_shared_module: false,
+                origin_source_lang: String::new(),
             },
         ];
         let tmp = std::env::temp_dir().join("test_abc_multi.abc");
@@ -198,16 +227,251 @@ mod tests {
         );
         let bytes = std::fs::read(&tmp).unwrap();
         assert_eq!(&bytes[0..8], b"PANDA\x00\x00\x00");
-        // API 13+ / hvigorw: num_classes = 2 user modules + 7 SDK framework stubs
-        // (L@ohos.app, L@ohos.curves, L@ohos.matrix4, L@system.app, L@system.curves,
-        //  L@system.matrix4, L@system.router) + 2 annotation stubs
-        // (L_ESConcurrentModuleRequestsAnnotation, L_ESSlotNumberAnnotation) = 11 total.
+        // Upstream es2abc only emits records supplied by source files plus
+        // annotation stubs. SDK/native package records are supplied separately
+        // through --npm-module-entry-list, not synthesized by the file emitter.
         let num_classes = u32::from_le_bytes(bytes[0x1C..0x20].try_into().unwrap());
         assert_eq!(
-            num_classes, 11,
-            "num_classes must be user_modules(2) + sdk_stubs(7) + annotation_stubs(2) = 11"
+            num_classes, 4,
+            "num_classes must be user_modules(2) + annotation_stubs(2) without npm entries"
         );
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn test_non_merge_single_module_compiles() {
+        let compiler = AbcCompiler::new(AbcCompileOptions {
+            debug_info: false,
+            opt_level: 0,
+            optimize_try_catch_func: true,
+            target_api_version: 12,
+            target_api_sub_version: None,
+            enable_annotations: false,
+            merge_abc: false,
+            module: true,
+            module_record_field_name: None,
+            npm_entries: None,
+            dependency_context: None,
+            remove_redundant_file: false,
+            dump_deps_info: false,
+        });
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+
+        let result = compiler
+            .compile(
+                vec![AbcModule {
+                    record_name: "nonmerge/main".to_string(),
+                    source: "export const value = 1;".to_string(),
+                    source_map: None,
+                    source_file: Some("main.js".to_string()),
+                    package_name: None,
+                    is_commonjs: false,
+                    is_shared_module: false,
+                    origin_source_lang: String::new(),
+                }],
+                tmp.path(),
+            )
+            .expect("single-source non-merge compile must succeed");
+
+        assert_eq!(result.path, tmp.path());
+        let bytes = std::fs::read(tmp.path()).unwrap();
+        assert_eq!(&bytes[0..8], b"PANDA\x00\x00\x00");
+        let class_names = AbcReader::new(&bytes).unwrap().class_names().unwrap();
+        assert!(
+            class_names.iter().any(|name| name == "_ESModuleRecord"),
+            "non-merge module output must emit upstream _ESModuleRecord, got {class_names:?}"
+        );
+        assert!(
+            class_names.iter().any(|name| name == "_ESScopeNamesRecord"),
+            "non-merge module output must emit upstream _ESScopeNamesRecord, got {class_names:?}"
+        );
+        assert!(
+            !bytes
+                .windows("moduleRecordIdx".len())
+                .any(|window| window == b"moduleRecordIdx"),
+            "non-merge module field name must be the source file, not moduleRecordIdx"
+        );
+    }
+
+    #[test]
+    fn test_non_merge_multiple_modules_rejected_for_single_output_api() {
+        let compiler = AbcCompiler::new(AbcCompileOptions {
+            debug_info: false,
+            opt_level: 0,
+            optimize_try_catch_func: true,
+            target_api_version: 12,
+            target_api_sub_version: None,
+            enable_annotations: false,
+            merge_abc: false,
+            module: true,
+            module_record_field_name: None,
+            npm_entries: None,
+            dependency_context: None,
+            remove_redundant_file: false,
+            dump_deps_info: false,
+        });
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+
+        let err = match compiler.compile(
+            vec![
+                AbcModule {
+                    record_name: "nonmerge/a".to_string(),
+                    source: "export const a = 1;".to_string(),
+                    source_map: None,
+                    source_file: Some("a.js".to_string()),
+                    package_name: None,
+                    is_commonjs: false,
+                    is_shared_module: false,
+                    origin_source_lang: String::new(),
+                },
+                AbcModule {
+                    record_name: "nonmerge/b".to_string(),
+                    source: "export const b = 2;".to_string(),
+                    source_map: None,
+                    source_file: Some("b.js".to_string()),
+                    package_name: None,
+                    is_commonjs: false,
+                    is_shared_module: false,
+                    origin_source_lang: String::new(),
+                },
+            ],
+            tmp.path(),
+        ) {
+            Ok(_) => panic!("non-merge multi-source compile needs per-input outputs"),
+            Err(err) => err,
+        };
+
+        assert!(
+            matches!(err, AbcError::UnsupportedConstruct { ref construct, .. } if construct.contains("merge_abc=false")),
+            "expected merge_abc=false unsupported construct, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_non_merge_top_level_await_emits_upstream_metadata_record() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        AbcCompiler::new(AbcCompileOptions {
+            debug_info: false,
+            opt_level: 0,
+            optimize_try_catch_func: true,
+            target_api_version: 12,
+            target_api_sub_version: None,
+            enable_annotations: false,
+            merge_abc: false,
+            module: true,
+            module_record_field_name: None,
+            npm_entries: None,
+            dependency_context: None,
+            remove_redundant_file: false,
+            dump_deps_info: false,
+        })
+        .compile(
+            vec![AbcModule {
+                record_name: String::new(),
+                source: "await Promise.resolve();".to_string(),
+                source_map: None,
+                source_file: Some("tla.js".to_string()),
+                package_name: None,
+                is_commonjs: false,
+                is_shared_module: false,
+                origin_source_lang: String::new(),
+            }],
+            tmp.path(),
+        )
+        .expect("non-merge top-level await module must compile");
+
+        let bytes = std::fs::read(tmp.path()).unwrap();
+        let class_names = AbcReader::new(&bytes).unwrap().class_names().unwrap();
+        assert!(
+            class_names.iter().any(|name| name == "_HasTopLevelAwait"),
+            "non-merge top-level await must emit _HasTopLevelAwait, got {class_names:?}"
+        );
+    }
+
+    #[test]
+    fn test_non_merge_shared_module_emits_upstream_metadata_record() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        AbcCompiler::new(AbcCompileOptions {
+            debug_info: false,
+            opt_level: 0,
+            optimize_try_catch_func: true,
+            target_api_version: 12,
+            target_api_sub_version: None,
+            enable_annotations: false,
+            merge_abc: false,
+            module: true,
+            module_record_field_name: None,
+            npm_entries: None,
+            dependency_context: None,
+            remove_redundant_file: false,
+            dump_deps_info: false,
+        })
+        .compile(
+            vec![AbcModule {
+                record_name: String::new(),
+                source: "export const value = 1;".to_string(),
+                source_map: None,
+                source_file: Some("shared.js".to_string()),
+                package_name: None,
+                is_commonjs: false,
+                is_shared_module: true,
+                origin_source_lang: String::new(),
+            }],
+            tmp.path(),
+        )
+        .expect("non-merge shared module must compile");
+
+        let bytes = std::fs::read(tmp.path()).unwrap();
+        let class_names = AbcReader::new(&bytes).unwrap().class_names().unwrap();
+        assert!(
+            class_names.iter().any(|name| name == "_SharedModuleRecord"),
+            "non-merge shared module must emit _SharedModuleRecord, got {class_names:?}"
+        );
+    }
+
+    #[test]
+    fn test_non_merge_commonjs_emits_upstream_metadata_record() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        AbcCompiler::new(AbcCompileOptions {
+            debug_info: false,
+            opt_level: 0,
+            optimize_try_catch_func: true,
+            target_api_version: 12,
+            target_api_sub_version: None,
+            enable_annotations: false,
+            merge_abc: false,
+            module: false,
+            module_record_field_name: None,
+            npm_entries: None,
+            dependency_context: None,
+            remove_redundant_file: false,
+            dump_deps_info: false,
+        })
+        .compile(
+            vec![AbcModule {
+                record_name: String::new(),
+                source: "exports.value = 1;".to_string(),
+                source_map: None,
+                source_file: Some("commonjs.js".to_string()),
+                package_name: None,
+                is_commonjs: true,
+                is_shared_module: false,
+                origin_source_lang: String::new(),
+            }],
+            tmp.path(),
+        )
+        .expect("non-merge CommonJS source must compile");
+
+        let bytes = std::fs::read(tmp.path()).unwrap();
+        let class_names = AbcReader::new(&bytes).unwrap().class_names().unwrap();
+        assert!(
+            class_names.iter().any(|name| name == "_CommonJsRecord"),
+            "non-merge CommonJS must emit _CommonJsRecord, got {class_names:?}"
+        );
+        assert!(
+            !class_names.iter().any(|name| name == "_ESModuleRecord"),
+            "non-merge CommonJS must not emit _ESModuleRecord, got {class_names:?}"
+        );
     }
 
     #[test]
@@ -220,6 +484,8 @@ mod tests {
             source_file: None,
             package_name: None,
             is_commonjs: false,
+            is_shared_module: false,
+            origin_source_lang: String::new(),
         }];
         let tmp = std::env::temp_dir().join("test_abc_parse_error.abc");
         let result = compiler.compile(modules, &tmp);
@@ -239,6 +505,8 @@ mod tests {
             source_file: None,
             package_name: None,
             is_commonjs: false,
+            is_shared_module: false,
+            origin_source_lang: String::new(),
         }];
         let tmp = std::env::temp_dir().join("test_abc_result_fields.abc");
         let result = compiler.compile(modules, &tmp).unwrap();
@@ -261,12 +529,17 @@ mod tests {
         let compiler = AbcCompiler::new(AbcCompileOptions {
             debug_info: false,
             opt_level: 0,
+            optimize_try_catch_func: true,
             target_api_version: 12,
             target_api_sub_version: None,
+            enable_annotations: false,
             merge_abc: true,
             module: true,
-            cache_path: None,
+            module_record_field_name: None,
             npm_entries: None,
+            dependency_context: None,
+            remove_redundant_file: false,
+            dump_deps_info: false,
         });
         let source = r#"import UIAbility from "@ohos:app.ability.UIAbility";
 import hilog from "@ohos:hilog";
@@ -278,6 +551,8 @@ globalThis["test"] = "hello";"#;
             source_file: None,
             package_name: None,
             is_commonjs: false,
+            is_shared_module: false,
+            origin_source_lang: String::new(),
         }];
         let tmp = std::env::temp_dir().join("test_abc_module_requests.abc");
         compiler.compile(modules, &tmp).unwrap();
@@ -525,143 +800,160 @@ registerNamedRoute(() => new Index(undefined, {}), "", {});
         );
     }
 
-    // ── Incremental cache tests (SPEC-025) ──────────────────────────────────
+    // ── Auto-accessor regression test ───────────────────────────────────────
 
-    /// Verify that a cache hit avoids recompilation: compile once with a cache
-    /// directory, then compile again with the same sources.  The second call
-    /// must return the same bytecode without running the IR lowering pass
-    /// (verified by checking the output is byte-for-byte identical).
+    /// Regression: auto-accessor getter/setter was emitted once per class
+    /// element (N duplicates) because the accessor loop was nested inside
+    /// the method-definition loop.  This test compiles at the IR level and
+    /// counts MethodRecords directly — not binary substrings — to verify
+    /// exactly one getter and one setter is produced regardless of how many
+    /// other class elements are present.
     #[test]
-    fn test_cache_hit_avoids_recompile() {
-        let cache_dir = tempfile::tempdir().expect("create temp dir");
-        let out1 = std::env::temp_dir().join("test_cache_hit_1.abc");
-        let out2 = std::env::temp_dir().join("test_cache_hit_2.abc");
+    fn test_auto_accessor_no_duplicate_records() {
+        use crate::emit::strings::StringTable;
+        use crate::ir::builder::build_record_with_debug_and_package_for_target;
 
-        let make_opts = || AbcCompileOptions {
-            debug_info: false,
-            opt_level: 0,
-            target_api_version: 12,
-            target_api_sub_version: None,
-            merge_abc: true,
-            module: false,
-            cache_path: Some(cache_dir.path().to_path_buf()),
-            npm_entries: None,
-        };
+        // Class has 4 elements: 1 auto-accessor + 3 regular methods.
+        // Buggy code emitted N getter+setter pairs (N = number of elements);
+        // correct code emits exactly 1 pair for the single auto-accessor.
+        let source = r#"
+class Counter {
+    accessor count = 0;
+    method1() { return 1; }
+    method2() { return 2; }
+    method3() { return 3; }
+}
+"#;
+        let mut strings = StringTable::default();
+        let mut literals = Vec::new();
+        let record = build_record_with_debug_and_package_for_target(
+            source,
+            "test/AutoAccessor",
+            &mut strings,
+            &mut literals,
+            None,  // source_file
+            None,  // package_name
+            false, // is_commonjs
+            false, // is_module
+            12,    // target_api_version
+            None,  // sub_version
+        )
+        .expect("auto-accessor class must compile");
 
-        let modules = || {
-            vec![AbcModule {
-                record_name: "entry/main".to_string(),
-                source: "(function () { var x = 42; })()".to_string(),
-                source_map: None,
-                source_file: None,
-                package_name: None,
-                is_commonjs: false,
-            }]
-        };
+        // Count getter/setter MethodRecords by name pattern.
+        let getters: Vec<_> = record
+            .methods
+            .iter()
+            .filter(|m| m.name.contains("_get_count"))
+            .collect();
+        let setters: Vec<_> = record
+            .methods
+            .iter()
+            .filter(|m| m.name.contains("_set_count"))
+            .collect();
 
-        // First compile — populates the cache.
-        let compiler1 = AbcCompiler::new(make_opts());
-        compiler1.compile(modules(), &out1).expect("first compile");
-
-        // Second compile — should be a cache hit.
-        let compiler2 = AbcCompiler::new(make_opts());
-        compiler2
-            .compile(modules(), &out2)
-            .expect("second compile (cache hit)");
-
-        let bytes1 = std::fs::read(&out1).expect("read out1");
-        let bytes2 = std::fs::read(&out2).expect("read out2");
         assert_eq!(
-            bytes1, bytes2,
-            "cache hit must produce byte-for-byte identical output"
+            getters.len(),
+            1,
+            "expected exactly 1 auto-accessor getter record; found {}: {:?}",
+            getters.len(),
+            getters.iter().map(|m| &m.name).collect::<Vec<_>>(),
         );
-
-        // Verify the cache file was created.
-        let cache_file_path = crate::cache::CacheFile::path_for(cache_dir.path());
-        assert!(
-            cache_file_path.exists(),
-            "cache file must exist at {:?}",
-            cache_file_path
+        assert_eq!(
+            setters.len(),
+            1,
+            "expected exactly 1 auto-accessor setter record; found {}: {:?}",
+            setters.len(),
+            setters.iter().map(|m| &m.name).collect::<Vec<_>>(),
         );
-
-        let _ = std::fs::remove_file(&out1);
-        let _ = std::fs::remove_file(&out2);
     }
 
-    /// Verify that the cache is invalidated when the source changes: compile
-    /// with source A, then compile with source B.  The second compile must
-    /// produce different bytecode and update the cache entry.
-    #[test]
-    fn test_cache_invalidates_on_source_change() {
-        let cache_dir = tempfile::tempdir().expect("create temp dir");
-        let out1 = std::env::temp_dir().join("test_cache_inval_1.abc");
-        let out2 = std::env::temp_dir().join("test_cache_inval_2.abc");
+    // ── opt_level semantics tests ───────────────────────────────────────────
 
-        let make_opts = || AbcCompileOptions {
-            debug_info: false,
+    /// opt_level=0 with debug_info=true should emit debug information.
+    /// Non-zero opt levels run the local Rust bytecode optimizer path and
+    /// suppress debug payloads, matching upstream release output semantics.
+    #[test]
+    fn test_nonzero_opt_level_runs_optimizer_path() {
+        let source = "export const x = 1;".to_string();
+        let tmp_debug = tempfile::NamedTempFile::new().unwrap();
+
+        // opt_level=0 + debug_info=true → has_debug_info must be true.
+        let compiler_debug = AbcCompiler::new(AbcCompileOptions {
+            debug_info: true,
             opt_level: 0,
+            optimize_try_catch_func: true,
             target_api_version: 12,
             target_api_sub_version: None,
+            enable_annotations: false,
             merge_abc: true,
-            module: false,
-            cache_path: Some(cache_dir.path().to_path_buf()),
+            module: true,
+            module_record_field_name: None,
             npm_entries: None,
-        };
-
-        // Compile module A — the record name appears in the ABC string table, so
-        // different record names guarantee different bytecode output even when
-        // the IR lowering stubs out the function body.
-        let compiler1 = AbcCompiler::new(make_opts());
-        compiler1
+            dependency_context: None,
+            remove_redundant_file: false,
+            dump_deps_info: false,
+        });
+        let result_debug = compiler_debug
             .compile(
                 vec![AbcModule {
-                    record_name: "entry/moduleA".to_string(),
-                    source: "(function () { var x = 1; })()".to_string(),
+                    record_name: "test/debug".to_string(),
+                    source: source.clone(),
                     source_map: None,
-                    source_file: None,
+                    source_file: Some("test.js".to_string()),
                     package_name: None,
                     is_commonjs: false,
+                    is_shared_module: false,
+                    origin_source_lang: String::new(),
                 }],
-                &out1,
+                tmp_debug.path(),
             )
-            .expect("compile module A");
-
-        // Compile module B (different record name — cache must miss and produce
-        // different output because the class name string differs in the ABC).
-        let compiler2 = AbcCompiler::new(make_opts());
-        compiler2
-            .compile(
-                vec![AbcModule {
-                    record_name: "entry/moduleB".to_string(),
-                    source: "(function () { var x = 1; })()".to_string(),
-                    source_map: None,
-                    source_file: None,
-                    package_name: None,
-                    is_commonjs: false,
-                }],
-                &out2,
-            )
-            .expect("compile module B");
-
-        let bytes1 = std::fs::read(&out1).expect("read out1");
-        let bytes2 = std::fs::read(&out2).expect("read out2");
-
-        // The two outputs must differ because the record names differ (the class
-        // name string is embedded in the ABC binary).
-        assert_ne!(
-            bytes1, bytes2,
-            "different record name must produce different bytecode (cache invalidated)"
+            .expect("compile with debug_info=true, opt_level=0");
+        assert!(
+            result_debug.has_debug_info,
+            "opt_level=0 + debug_info=true must produce debug info"
         );
 
-        // The cache file must now contain 2 distinct entries.
-        let cache = crate::cache::CacheFile::load(cache_dir.path());
-        assert_eq!(
-            cache.entries.len(),
-            2,
-            "cache must have 2 entries after compiling 2 distinct sources"
-        );
-
-        let _ = std::fs::remove_file(&out1);
-        let _ = std::fs::remove_file(&out2);
+        for opt_level in [1, 2] {
+            let tmp_release = tempfile::NamedTempFile::new().unwrap();
+            let compiler_release = AbcCompiler::new(AbcCompileOptions {
+                debug_info: true,
+                opt_level,
+                optimize_try_catch_func: true,
+                target_api_version: 12,
+                target_api_sub_version: None,
+                enable_annotations: false,
+                merge_abc: true,
+                module: true,
+                module_record_field_name: None,
+                npm_entries: None,
+                dependency_context: None,
+                remove_redundant_file: false,
+                dump_deps_info: false,
+            });
+            let result_release = compiler_release
+                .compile(
+                    vec![AbcModule {
+                        record_name: "test/debug".to_string(),
+                        source: source.clone(),
+                        source_map: None,
+                        source_file: Some("test.js".to_string()),
+                        package_name: None,
+                        is_commonjs: false,
+                        is_shared_module: false,
+                        origin_source_lang: String::new(),
+                    }],
+                    tmp_release.path(),
+                )
+                .expect("compile with non-zero opt_level");
+            assert!(
+                !result_release.has_debug_info,
+                "opt_level={opt_level} must suppress debug info"
+            );
+            assert!(
+                tmp_release.path().metadata().unwrap().len() > 0,
+                "opt_level={opt_level} must write ABC output"
+            );
+        }
     }
 }

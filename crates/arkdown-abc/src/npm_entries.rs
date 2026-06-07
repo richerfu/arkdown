@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::emit::record::{ClassRecord, FieldRecord, FieldValue, FIELD_OWNER_CLASS_IDX};
+use crate::emit::record::{ClassRecord, FieldRecord, FieldType, FieldValue, FIELD_OWNER_CLASS_IDX};
 use crate::error::AbcError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,14 +40,26 @@ fn npm_entry_record(entry: NpmEntry) -> ClassRecord {
         source_code_strings: vec![],
         access_flags: 1,
         source_lang: 0,
+        metadata_attrs: Default::default(),
+        conflict: false,
+        params_num: 0,
+        body_presence: false,
+        file_location: None,
+        standalone_ecmascript_input: false,
         source_file: None,
+        annotations: vec![],
         module_requests: vec![],
         fields: vec![FieldRecord {
             name: entry.field_name,
             class_idx: FIELD_OWNER_CLASS_IDX,
             type_idx: 0,
+            field_type: FieldType::U8,
+            metadata_field_type: None,
             access_flags: 0,
             value: Some(FieldValue::U8(0)),
+            annotations: vec![],
+            metadata_attrs: Default::default(),
+            source: Default::default(),
         }],
     }
 }

@@ -124,62 +124,135 @@ pub fn load_config(
             use_normalized_ohm_url: false,
         });
 
-    let ark_options = raw_product
+    let raw_build_option = raw_product.build_option.as_ref();
+    let raw_ark_options = raw_build_option.and_then(|bo| bo.ark_options.as_ref());
+
+    let ark_options = raw_ark_options.map(|ao| {
+        let obfuscation = ao.obfuscation.as_ref().map(|o| {
+            let enable = o.rule_options.as_ref().map(|r| r.enable).unwrap_or(false);
+            // Resolve rule file paths relative to the project root.
+            let rule_files: Vec<std::path::PathBuf> = o
+                .rule_options
+                .as_ref()
+                .map(|r| {
+                    r.rules
+                        .iter()
+                        .map(|p| {
+                            let p = std::path::Path::new(p);
+                            if p.is_absolute() {
+                                p.to_path_buf()
+                            } else {
+                                root.join(p)
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            ObfuscationConfig {
+                enable_obfuscation: enable,
+                rule_files,
+            }
+        });
+        let runtime_only = ao
+            .runtime_only
+            .as_ref()
+            .map(|runtime_only| RuntimeOnlyConfig {
+                packages: runtime_only.packages.clone(),
+                sources: runtime_only.sources.clone(),
+            });
+        ArkOptions {
+            obfuscation,
+            types: Vec::new(),
+            runtime_only,
+            support_chunks: ao.support_chunks.unwrap_or(false),
+        }
+    });
+
+    let preload_so = raw_build_option
+        .map(|bo| bo.preload_so.clone())
+        .unwrap_or_default();
+
+    let preload_system_so = raw_build_option
+        .map(|bo| bo.preload_system_so)
+        .unwrap_or(false);
+
+    let remove_permissions = raw_build_option
+        .map(|bo| bo.remove_permissions.clone())
+        .unwrap_or_default();
+
+    let aot_compile_mode = raw_ark_options
+        .and_then(|ao| ao.aot_compile_mode.clone())
+        .or_else(|| raw_build_option.and_then(|bo| bo.aot_compile_mode.clone()));
+
+    let host_pgo = raw_ark_options.and_then(|ao| ao.host_pgo);
+
+    let ap_path = raw_ark_options
+        .and_then(|ao| ao.ap_path.clone())
+        .or_else(|| raw_build_option.and_then(|bo| bo.ap_path.as_ref()).cloned());
+
+    let source_option = raw_product
         .build_option
         .as_ref()
-        .and_then(|bo| bo.ark_options.as_ref())
-        .map(|ao| {
-            let obfuscation = ao.obfuscation.as_ref().map(|o| {
-                let enable = o.rule_options.as_ref().map(|r| r.enable).unwrap_or(false);
-                // Resolve rule file paths relative to the project root.
-                let rule_files: Vec<std::path::PathBuf> = o
-                    .rule_options
-                    .as_ref()
-                    .map(|r| {
-                        r.rules
-                            .iter()
-                            .map(|p| {
-                                let p = std::path::Path::new(p);
-                                if p.is_absolute() {
-                                    p.to_path_buf()
-                                } else {
-                                    root.join(p)
-                                }
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                ObfuscationConfig {
-                    enable_obfuscation: enable,
-                    rule_files,
-                }
-            });
-            let runtime_only = ao
-                .runtime_only
-                .as_ref()
-                .map(|runtime_only| RuntimeOnlyConfig {
-                    packages: runtime_only.packages.clone(),
-                    sources: runtime_only.sources.clone(),
-                });
-            ArkOptions {
-                obfuscation,
-                types: Vec::new(),
-                runtime_only,
+        .and_then(|bo| bo.source_option.as_ref())
+        .map(|so| {
+            let workers = so
+                .workers
+                .iter()
+                .map(|w| {
+                    let p = std::path::Path::new(w);
+                    if p.is_absolute() {
+                        p.to_path_buf()
+                    } else {
+                        root.join(p)
+                    }
+                })
+                .collect();
+            arkdown_core::SourceOption {
+                source_language: None,
+                workers,
             }
         });
 
-    let preload_so = raw_product
+    // ABI filters from buildOption.externalNativeOptions.abiFilters.
+    // When not configured, use the hvigor default of ["arm64-v8a"].
+    let abi_filters = raw_product
         .build_option
         .as_ref()
-        .map(|bo| bo.preload_so.clone())
-        .unwrap_or_default();
+        .and_then(|bo| bo.external_native_options.as_ref())
+        .map(|eno| eno.abi_filters.clone())
+        .filter(|filters| !filters.is_empty())
+        .unwrap_or_else(|| vec!["arm64-v8a".to_string()]);
 
     let build_option = BuildOption {
         strict_mode,
         ark_options,
-        res_options: None,
-        source_option: None,
+        res_options: raw_product
+            .build_option
+            .as_ref()
+            .and_then(|bo| bo.res_options.as_ref())
+            .map(|ro| arkdown_core::ResOptions {
+                res_path: None,
+                include_app_scope_res: ro.include_app_scope_res,
+                resource_directories: ro
+                    .directories
+                    .iter()
+                    .map(|p| {
+                        if p.is_absolute() {
+                            p.clone()
+                        } else {
+                            root.join(p)
+                        }
+                    })
+                    .collect(),
+            }),
+        source_option,
+        preload_system_so,
         preload_so,
+        remove_permissions,
+        aot_compile_mode,
+        host_pgo,
+        ap_path,
+        abi_filters,
     };
 
     let product = ProductConfig {
@@ -190,6 +263,8 @@ pub fn load_config(
         runtime_os: raw_product.runtime_os,
         signing_config,
         build_option,
+        version_code: raw_product.version_code,
+        version_name: raw_product.version_name,
     };
 
     // -----------------------------------------------------------------------

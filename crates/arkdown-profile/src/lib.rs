@@ -15,31 +15,72 @@
 //! ```
 
 pub mod bytecode_har;
+pub mod dependency_graph;
+pub use dependency_graph::{
+    DependencyGraphService, DependencyNode, DependencyNodeType, DependencyResolutionConfig,
+    LocalDependencyGraph,
+};
+pub mod ohpm_registry;
+pub use ohpm_registry::{
+    cache_dir_for, OfflineOhpmCache, OhpmInstallOptions, OhpmRegistryClient, OhpmRegistryError,
+    PackageMetadata, VersionInfo,
+};
+pub mod lockfile;
+pub use lockfile::{LockfileEntry, OhPackageLockfile};
+pub mod form_profile;
 pub mod har_abilities;
 pub mod loader_json;
 pub(crate) mod module_json_writer;
+pub mod process_distro_filter;
+pub mod process_permission_reason;
+pub mod process_privacy_profile;
 pub mod process_profile;
 pub mod process_share_config;
+pub mod process_shortcut_profile;
 pub mod process_startup_config;
 pub mod router_map;
+pub mod validate_permissions;
 
 pub use arkdown_core::PkgBriefInfo;
 pub use bytecode_har::{
+    collect_bytecode_har_other_compile_files, collect_bytecode_har_update_version_info,
     collect_dynamic_import_lib_info, scan_bytecode_har_deps, ByteCodeHarScanEntry,
     DynamicImportLibEntry, HostModuleInfo,
 };
+pub use form_profile::{
+    collect_form_profiles, collect_form_sources, collect_module_form_sources, FormProfileEntry,
+    FormProfileInput, FormSourceEntry, ModuleFormProfileInput,
+};
 pub use har_abilities::{collect_har_abilities, HarAbility};
 pub use loader_json::{ByteCodeHarEntry, LoaderJson};
+pub use process_distro_filter::{
+    process_distro_filter_profile, DistroFilterProfileInput, DistroFilterProfileOutput,
+};
+pub use process_permission_reason::{
+    merge_dependency_permission_reason_resources, process_permission_reason_resources,
+    DependencyPermissionReasonResourceInput, PermissionReasonResourceInput,
+};
+pub use process_privacy_profile::{
+    privacy_profile_is_enabled, process_module_privacy_profile, process_project_privacy_profile,
+    PrivacyProfileInput, PrivacyProfileOutput, ProjectPrivacyProfileInput,
+    ProjectPrivacyProfileOutput,
+};
 pub use process_profile::{
     ark_virtual_machine_from_version, process_profile, process_profile_with_ark_vm_version,
+    validate_compile_mode,
 };
 pub use process_share_config::{
     merge_share_config, write_share_config, ShareConfigInput, ShareConfigOutput,
 };
+pub use process_shortcut_profile::{process_shortcut_profiles, ShortcutProfileInput};
 pub use process_startup_config::{
     merge_startup_config, write_startup_config, StartupConfigInput, StartupConfigOutput,
 };
 pub use router_map::{collect_router_entries, RouterMapEntry};
+pub use validate_permissions::{
+    collect_sdk_permission_data, collect_sdk_permission_names, validate_request_permissions,
+    RequestPermissionValidationInput, SdkPermissionData,
+};
 
 use rustc_hash::FxHashMap;
 use std::path::Path;
@@ -79,7 +120,7 @@ impl ProfileProcessor {
             &self.config.sdk_config.ets_loader_path,
             self.config.sdk_config.compile_api_version,
         );
-        let manifest = if let Some(ark_vm_version) = discovered_ark_vm_version {
+        let mut manifest = if let Some(ark_vm_version) = discovered_ark_vm_version {
             process_profile_with_ark_vm_version(
                 module_json5,
                 &ark_vm_version,
@@ -94,7 +135,43 @@ impl ProfileProcessor {
                 CompileMode::EsModule,
             )
         };
-        let loader = LoaderJson::generate(&self.config, module_cfg, &manifest);
+
+        // Auto-derive HSP dependencies from workspace modules.
+        //
+        // hvigor's ProcessProfile.addModuleDependencies() automatically collects
+        // Shared-type workspace modules (HSPs) and adds them to module.dependencies
+        // so the HAP's module.json correctly lists all HSP dependencies.
+        //
+        // For workspace HSPs, the bundleName is the app's bundleName (they share
+        // the same app bundle).  We add workspace HSPs not already in the list.
+        if matches!(
+            manifest.module_type,
+            arkdown_core::OhosModuleType::Entry | arkdown_core::OhosModuleType::Feature
+        ) {
+            let existing_module_names: std::collections::HashSet<String> = manifest
+                .dependencies
+                .iter()
+                .map(|d| d.module_name.clone())
+                .collect();
+            for workspace_module in &self.config.modules {
+                if workspace_module.name == module_cfg.name {
+                    continue; // skip self
+                }
+                if workspace_module.module_type != arkdown_core::OhosModuleType::Shared {
+                    continue; // only SharedHsp
+                }
+                if existing_module_names.contains(&workspace_module.name) {
+                    continue; // already declared
+                }
+                // Workspace SharedHsp: bundleName = app bundleName (same project)
+                manifest.dependencies.push(arkdown_core::HspDependency {
+                    bundle_name: self.config.product.bundle_name.clone(),
+                    module_name: workspace_module.name.clone(),
+                });
+            }
+        }
+
+        let loader = LoaderJson::try_generate(&self.config, module_cfg, &manifest)?;
         Ok((manifest, loader))
     }
 
@@ -108,6 +185,28 @@ impl ProfileProcessor {
         let json = serde_json::to_string_pretty(loader)
             .map_err(|e| ArkdownError::Io(std::io::Error::other(e.to_string())))?;
         fs_err::write(path, json)?;
+
+        // Also write pkgContextInfo.json alongside loader.json.
+        //
+        // hvigor writes `build/default/intermediates/pkgContextInfo/default/pkgContextInfo.json`
+        // containing the package context map.  For compatibility, we write the
+        // pkgNameToPkgBriefInfo data from the loader into the same directory.
+        // The parity test searches for this file using the "pkgContextInfo" path fragment.
+        if let Some(loader_dir) = path.parent() {
+            let pkg_ctx_dir = loader_dir
+                .parent()
+                .unwrap_or(loader_dir)
+                .join("pkgContextInfo/default");
+            if let Ok(()) = std::fs::create_dir_all(&pkg_ctx_dir) {
+                let pkg_ctx_path = pkg_ctx_dir.join("pkgContextInfo.json");
+                if let Ok(pkg_ctx_json) =
+                    serde_json::to_string_pretty(&loader.pkg_name_to_pkg_brief_info)
+                {
+                    let _ = fs_err::write(&pkg_ctx_path, pkg_ctx_json);
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -170,8 +269,16 @@ mod tests {
                     ark_options: None,
                     res_options: None,
                     source_option: None,
+                    preload_system_so: false,
                     preload_so: vec![],
+                    remove_permissions: vec![],
+                    aot_compile_mode: None,
+                    host_pgo: None,
+                    ap_path: None,
+                    abi_filters: vec![],
                 },
+                version_code: None,
+                version_name: None,
             },
             modules: vec![],
             sdk_config: SdkConfig {
@@ -210,7 +317,8 @@ mod tests {
                 src_entry: None,
                 metadata: vec![],
                 app_startup: None,
-                cross_app_shared_config: vec![],
+                cross_app_shared_config: Default::default(),
+                ..Default::default()
             },
         }
     }
@@ -382,7 +490,8 @@ fi
                 src_entry: None,
                 metadata: vec![],
                 app_startup: None,
-                cross_app_shared_config: vec![],
+                cross_app_shared_config: Default::default(),
+                ..Default::default()
             },
         };
 
@@ -515,5 +624,56 @@ fi
 
         // Cleanup
         let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    /// Verify that workspace SharedHsp modules are automatically added to
+    /// manifest.dependencies in process_module().
+    ///
+    /// This mirrors hvigor's ProcessProfile.addModuleDependencies() which
+    /// collects all Shared-type workspace modules and adds them to the HAP's
+    /// module.dependencies so the final module.json lists HSP dependencies.
+    ///
+    /// Addresses section 3.2: '由依赖图自动派生的 HSP metadata、transitive/order'
+    #[test]
+    fn test_process_module_auto_derives_workspace_hsp_dependencies() {
+        let mut config = make_config();
+        // Add a SharedHsp workspace module alongside the entry module.
+        config.modules = vec![
+            ModuleConfig {
+                name: "entry".to_string(),
+                src_path: PathBuf::from("/project/entry"),
+                module_type: OhosModuleType::Entry,
+            },
+            ModuleConfig {
+                name: "mySharedHsp".to_string(),
+                src_path: PathBuf::from("/project/mySharedHsp"),
+                module_type: OhosModuleType::Shared,
+            },
+        ];
+
+        let processor = ProfileProcessor::new(Arc::new(config.clone()));
+        let module_cfg = make_module_cfg(); // entry module
+        let module_json5 = make_module_json5(); // no explicit dependencies
+
+        let (manifest, _) = processor
+            .process_module(&module_cfg, &module_json5)
+            .expect("process_module failed");
+
+        // The SharedHsp workspace module must be auto-derived into dependencies.
+        assert!(
+            manifest
+                .dependencies
+                .iter()
+                .any(|d| d.module_name == "mySharedHsp"),
+            "workspace SharedHsp must be auto-added to manifest.dependencies; got: {:?}",
+            manifest.dependencies
+        );
+        // bundleName should be the app's bundleName.
+        let hsp_dep = manifest
+            .dependencies
+            .iter()
+            .find(|d| d.module_name == "mySharedHsp")
+            .unwrap();
+        assert_eq!(hsp_dep.bundle_name, "com.example.testapp");
     }
 }

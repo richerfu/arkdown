@@ -9,10 +9,16 @@
 
 ## Summary
 
-After resource compilation, collect preloaded system SO file paths from the module's
-`abilities` and HAR dependency `abilities` that are home abilities. Write the collected
-paths to a preload SO file list at the intermediates path. This list is embedded in the
-HAP archive so the ArkRuntime can preload the specified shared libraries at app launch.
+After ArkTS compilation, hvigor uses `buildOption.preloadSystemSo` to collect source
+entry files from the module's home abilities, module `srcEntry`, and source-HAR
+home abilities. The ArkTS compiler/loader then emits a `preload.json` system
+preload profile. Resource/package tasks consume that profile by adding
+`systemPreloadHintStartupTasks` to the startup resource profile and ensuring
+`module.appStartup` points at `$profile:startup_config`.
+
+Correction: this is **not** direct native `.so` embedding under `libs/arm64-v8a/`.
+`buildOption.preloadSo` is a legacy/older arkdown diagnostic path and should not be
+treated as hvigor's current preload-system-SO package payload.
 
 ---
 
@@ -74,9 +80,9 @@ function isHomeAbility(ability) {
 }
 ```
 
-The preload SO file path is `pathInfo.getPreloadSoFilePath()`:
+The preload SO JSON path is `pathInfo.getPreloadSoFilePath()`:
 ```
-<module>/build/default/intermediates/ets/default/preloadSoFileList.json
+<module>/build/default/intermediates/preload/default/preload.json
 ```
 
 From `declareOutputFiles()`:
@@ -145,69 +151,59 @@ pub fn collect_preload_so_files(
 }
 ```
 
-### 3. `PreloadSoFileList` Struct and Serialization
+### 3. Compiler Handoff JSON
 
 ```rust
-#[derive(Debug, Serialize, Deserialize)]
-pub struct PreloadSoFileList {
-    /// Absolute paths to .ets files for home abilities that need SO preloading.
-    pub files: Vec<PathBuf>,
-}
-
-impl PreloadSoFileList {
-    pub fn write(&self, path: &Path) -> std::io::Result<()> {
-        let json = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, json)?;
-        Ok(())
-    }
-}
+// hvigor passes `needPreloadSoFileSet` and `preloadSoFilePath` to the ArkTS
+// compiler/loader. The generated file is:
+// build/default/intermediates/preload/default/preload.json
+//
+// Its effective runtime payload is `systemPreloadHintStartupTasks`, not an
+// archive entry containing the source-entry path set.
 ```
 
 ### 4. Activation Condition
 
 Preload SO collection is only active when:
-- `isPreloadSoEnabled` is true in the project config (set by the SDK based on API level).
+- `buildOption.preloadSystemSo` is true.
 - The module is NOT an HSP.
+- Widget compilation is not active.
 
 ```rust
 pub fn should_collect_preload_so(
     config: &ArkdownConfig,
     module: &ModuleConfig,
 ) -> bool {
-    config.is_preload_so_enabled && module.module_type != ModuleType::Hsp
+    config.product.build_option.preload_system_so && module.module_type != ModuleType::Hsp
 }
 ```
 
-### 5. HAP Packaging Integration
+### 5. HAP Resource/Package Integration
 
-In `arkdown-pack::pack_hap()`, include `preloadSoFileList.json` in the HAP archive
-when the file exists:
+For HAP packaging, the important visible outputs are the generated startup profile
+under resources and the module reference. `GeneratePkgModuleJson.ensureAppStartup()`
+adds `module.appStartup = "$profile:startup_config"` when the preload JSON is
+effective.
 
 ```rust
-// In pack_hap():
-let preload_so_path = intermediates_dir.join("preloadSoFileList.json");
-if preload_so_path.exists() {
-    zip.add_file("preloadSoFileList.json", &preload_so_path)?;
-}
+// After resource startup profile generation:
+ensure_startup_profile_ref_in_module_json(
+    &module_json_out,
+    &startup_out,
+)?;
 ```
+
+For ByteCode HAR packaging, hvigor copies the effective preload file to
+`META-INF/preload.json`.
 
 ### 6. CLI Integration
 
-In the build pipeline, after profile processing:
+In the build pipeline, after startup/preload profile processing:
 
 ```rust
-if should_collect_preload_so(&config, &module) {
-    let preload_files = collect_preload_so_files(
-        &module_json, &module_src_main_path, &har_deps
-    );
-    if !preload_files.is_empty() {
-        let list = PreloadSoFileList {
-            files: preload_files.into_iter().sorted().collect(),
-        };
-        let output_path = config.intermediates_dir.join("preloadSoFileList.json");
-        list.write(&output_path)?;
-    }
-}
+write_startup_config(&startup_out, &temp_startup_config)?;
+write_startup_resource_profile(&startup_out, &res_profile_dir)?;
+ensure_startup_profile_ref_in_module_json(&module_json_out, &startup_out)?;
 ```
 
 ---
@@ -215,14 +211,12 @@ if should_collect_preload_so(&config, &module) {
 ## Files to Change
 
 ```
-crates/arkdown-pack/src/
-├── preload_so.rs    — NEW: collect_preload_so_files(), is_home_ability(),
-│                      PreloadSoFileList, should_collect_preload_so()
-└── lib.rs           — re-export; include preloadSoFileList.json in pack_hap()
-
+crates/arkdown-profile/src/
+└── process_startup_config.rs — merge ByteCode HAR META-INF/preload.json tasks
 crates/arkdown-cli/src/
-└── build.rs         — call collect_preload_so_files() after profile processing;
-                       write preloadSoFileList.json to intermediates
+└── build.rs         — write startup resource profile and ensure module.appStartup
+crates/arkdown-pack/src/
+└── lib.rs           — keep buildOption.preloadSo separate from native lib embedding
 ```
 
 ---
@@ -238,10 +232,12 @@ crates/arkdown-cli/src/
 - `collect_preload_so_files()` skips ByteCode HAR deps.
 - `collect_preload_so_files()` returns empty set when no home abilities exist.
 - `should_collect_preload_so()` returns `false` for HSP modules.
-- `should_collect_preload_so()` returns `false` when `is_preload_so_enabled = false`.
-- `PreloadSoFileList::write()` produces valid JSON at the specified path.
-- HAP archive includes `preloadSoFileList.json` when the file exists in intermediates.
-- HAP archive does NOT include `preloadSoFileList.json` when no home abilities exist.
+- `should_collect_preload_so()` returns `false` when `preloadSystemSo = false`.
+- HAP `resources/base/profile/startup_config.json` includes
+  `systemPreloadHintStartupTasks` when ByteCode HAR preload metadata is effective.
+- HAP `module.json` includes `appStartup: "$profile:startup_config"` when the
+  startup profile was generated only by dependency/preload tasks.
+- `buildOption.preloadSo` is not embedded as `libs/arm64-v8a/*.so`.
 
 ---
 

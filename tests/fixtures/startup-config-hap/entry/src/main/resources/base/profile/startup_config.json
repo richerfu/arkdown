@@ -1,0 +1,8 @@
+{
+  "startupTasks": [
+    {
+      "name": "MyStartupTask",
+      "srcEntry": "./ets/startup/MyStartupTask.ets"
+    }
+  ]
+}

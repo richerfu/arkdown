@@ -2,8 +2,9 @@ use std::fs;
 use std::path::PathBuf;
 
 use arkdown_core::{
-    AbilityEntry, ArkOptions, ArkdownConfig, BuildMode, BuildOption, HapManifest, ModuleConfig,
-    OhosModuleType, OutputTarget, ProductConfig, RuntimeOnlyConfig, SdkConfig, StrictModeConfig,
+    AbilityEntry, ArkOptions, ArkdownConfig, BuildMode, BuildOption, ExtensionAbilityEntry,
+    HapManifest, MetadataEntry, ModuleConfig, OhosModuleType, OutputTarget, ProductConfig,
+    RuntimeOnlyConfig, SdkConfig, StrictModeConfig,
 };
 
 use super::*;
@@ -28,8 +29,16 @@ fn make_config(use_normalized_ohm_url: bool) -> ArkdownConfig {
                 ark_options: None,
                 res_options: None,
                 source_option: None,
+                preload_system_so: false,
                 preload_so: vec![],
+                remove_permissions: vec![],
+                aot_compile_mode: None,
+                host_pgo: None,
+                ap_path: None,
+                abi_filters: vec![],
             },
+            version_code: None,
+            version_name: None,
         },
         modules: vec![],
         sdk_config: SdkConfig {
@@ -77,6 +86,75 @@ fn make_manifest() -> HapManifest {
         description: None,
         src_entry: None,
     }
+}
+
+fn form_extension_ability(profile_name: &str) -> ExtensionAbilityEntry {
+    ExtensionAbilityEntry {
+        name: "EntryFormAbility".to_string(),
+        src_entry: "./ets/form/EntryFormAbility.ets".to_string(),
+        extension_type: "form".to_string(),
+        label: None,
+        description: None,
+        metadata: vec![MetadataEntry {
+            name: "ohos.extension.form".to_string(),
+            value: None,
+            resource: Some(format!("$profile:{profile_name}")),
+        }],
+    }
+}
+
+fn write_minimal_module_json5(module_root: &std::path::Path) {
+    fs::create_dir_all(module_root.join("src/main")).expect("create module src/main");
+    fs::write(
+        module_root.join("src/main/module.json5"),
+        r#"{ module: { name: "entry", type: "entry" } }"#,
+    )
+    .expect("write module.json5");
+}
+
+#[test]
+fn test_loader_json_does_not_scan_unreferenced_form_profiles() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let module_root = tmp.path().join("entry");
+    let profile_dir = module_root.join("src/main/resources/base/profile");
+    fs::create_dir_all(&profile_dir).expect("create profile dir");
+    write_minimal_module_json5(&module_root);
+    fs::write(
+        profile_dir.join("unused_form.json"),
+        r#"{ forms: [{ src: "./ets/forms/Unused.ets", uiSyntax: "arkts" }] }"#,
+    )
+    .expect("write unused form profile");
+
+    let mut config = make_config(true);
+    config.project_root = tmp.path().to_path_buf();
+    let mut module_cfg = make_module_cfg();
+    module_cfg.src_path = module_root;
+    let loader = LoaderJson::try_generate(&config, &module_cfg, &make_manifest()).unwrap();
+
+    assert!(
+        !loader
+            .compile_entry
+            .iter()
+            .any(|entry| entry.contains("Unused.ets")),
+        "unreferenced form profile sources must not be added to compile_entry: {:?}",
+        loader.compile_entry
+    );
+}
+
+#[test]
+fn test_loader_json_rejects_missing_form_profile_reference() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let module_root = tmp.path().join("entry");
+    write_minimal_module_json5(&module_root);
+    let mut config = make_config(true);
+    config.project_root = tmp.path().to_path_buf();
+    let mut module_cfg = make_module_cfg();
+    module_cfg.src_path = module_root;
+    let mut manifest = make_manifest();
+    manifest.extension_abilities = vec![form_extension_ability("missing_form")];
+
+    let error = LoaderJson::try_generate(&config, &module_cfg, &manifest).unwrap_err();
+    assert!(error.to_string().contains("CAN_NOT_RESOLVE_SYMBOL"));
 }
 
 #[test]
@@ -128,6 +206,146 @@ fn test_loader_json_collects_bytecode_har_declaration_entry() {
     assert!(entry.abc_path.ends_with("ets/modules.abc"));
 }
 
+#[test]
+fn test_loader_json_populates_bytecode_har_update_version_info() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_root = tmp.path().to_path_buf();
+    let module_root = project_root.join("entry");
+    let oh_modules = module_root.join("oh_modules");
+    let bytecode_har = oh_modules.join("bytecode-har");
+
+    fs::create_dir_all(bytecode_har.join("ets")).expect("create bytecode har");
+    fs::write(
+        bytecode_har.join("ets").join("modules.abc"),
+        b"PANDA\x00\x00\x00",
+    )
+    .expect("write abc");
+    fs::write(
+        bytecode_har.join("oh-package.json5"),
+        r#"{
+              name: "bytecode-har",
+              metadata: {
+                byteCodeHar: true,
+                dependencyPkgVersion: { "dep-a": "1.0.0" }
+              }
+            }"#,
+    )
+    .expect("write bytecode har package");
+    fs::create_dir_all(oh_modules.join("dep-a")).expect("create dep package");
+    fs::write(
+        oh_modules.join("dep-a").join("oh-package.json5"),
+        r#"{ name: "dep-a", version: "1.1.0" }"#,
+    )
+    .expect("write dep package");
+
+    let mut config = make_config(true);
+    config.project_root = project_root;
+    let mut module_cfg = make_module_cfg();
+    module_cfg.src_path = module_root;
+    let loader = LoaderJson::generate(&config, &module_cfg, &make_manifest());
+
+    assert_eq!(
+        loader
+            .update_version_info
+            .get("bytecode-har")
+            .and_then(|v| v.get("dep-a")),
+        Some(&serde_json::Value::String("1.1.0".to_string()))
+    );
+}
+
+#[test]
+fn test_loader_json_populates_bytecode_har_other_compile_files() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_root = tmp.path().to_path_buf();
+    let module_root = project_root.join("entry");
+    let oh_modules = module_root.join("oh_modules");
+    let bytecode_har = oh_modules.join("bytecode-har");
+    let source_har = oh_modules.join("source-har");
+    let extra_pkg = oh_modules.join("extra-pkg");
+
+    fs::create_dir_all(&module_root).expect("create module root");
+    fs::write(
+        module_root.join("oh-package.json5"),
+        r#"{ dependencies: { "bytecode-har": "1.0.0" } }"#,
+    )
+    .expect("write module oh-package");
+    fs::create_dir_all(bytecode_har.join("ets")).expect("create bytecode har");
+    fs::write(
+        bytecode_har.join("ets").join("modules.abc"),
+        b"PANDA\x00\x00\x00",
+    )
+    .expect("write abc");
+    fs::write(
+        bytecode_har.join("oh-package.json5"),
+        r#"{
+              name: "bytecode-har",
+              dependencies: { "source-har": "1.0.0" },
+              metadata: {
+                byteCodeHar: true,
+                extraImportees: ["extra-pkg/src/feature"]
+              }
+            }"#,
+    )
+    .expect("write bytecode har package");
+    fs::create_dir_all(&source_har).expect("create source har package root");
+    fs::write(
+        source_har.join("oh-package.json5"),
+        r#"{ name: "source-har", main: "src/main/ets/index.ets" }"#,
+    )
+    .expect("write source har package");
+    fs::create_dir_all(source_har.join("src/main")).expect("create source har module dir");
+    fs::write(
+        source_har.join("src/main/module.json5"),
+        r#"{ module: { name: "source", type: "har" } }"#,
+    )
+    .expect("write source har module json");
+    fs::create_dir_all(source_har.join("src/main/ets/pages")).expect("create source har ets dir");
+    fs::write(
+        source_har.join("src/main/ets/index.ets"),
+        "export default 1;\n",
+    )
+    .expect("write source har entry");
+    fs::write(
+        source_har.join("src/main/ets/pages/Page.ets"),
+        "export default 2;\n",
+    )
+    .expect("write source har page");
+    fs::create_dir_all(&extra_pkg).expect("create extra package root");
+    fs::write(
+        extra_pkg.join("oh-package.json5"),
+        r#"{ name: "extra-pkg" }"#,
+    )
+    .expect("write extra package");
+    fs::create_dir_all(extra_pkg.join("src")).expect("create extra package src");
+    fs::write(extra_pkg.join("src/feature.ets"), "export default 3;\n")
+        .expect("write extra feature");
+
+    let mut config = make_config(true);
+    config.project_root = project_root;
+    let mut module_cfg = make_module_cfg();
+    module_cfg.src_path = module_root;
+    let loader = LoaderJson::generate(&config, &module_cfg, &make_manifest());
+
+    assert!(loader
+        .other_compile_files
+        .iter()
+        .any(|path| path.ends_with("source-har/src/main/ets/index.ets")));
+    assert!(loader
+        .other_compile_files
+        .iter()
+        .any(|path| path.ends_with("source-har/src/main/ets/pages/Page.ets")));
+    assert!(loader
+        .other_compile_files
+        .iter()
+        .any(|path| path.ends_with("extra-pkg/src/feature.ets")));
+    for path in &loader.other_compile_files {
+        assert!(
+            loader.compile_entry.contains(path),
+            "otherCompileFiles entry must also be compiled by arkdown: {path}"
+        );
+    }
+}
+
 /// Verify loader.json round-trips through serde correctly.
 #[test]
 fn test_loader_json_serialization() {
@@ -157,7 +375,7 @@ fn test_loader_json_serialization() {
     assert_eq!(loader2.module_name, "entry");
     assert!(loader2.module_path_map.contains_key("entry"));
     assert_eq!(loader2.module_path_map["entry"], "/project/entry");
-    assert_eq!(loader2.an_build_mode, "type");
+    assert_eq!(loader2.an_build_mode.as_deref(), Some("type"));
 }
 
 #[test]
@@ -344,6 +562,78 @@ fn test_loader_json_module_path_map() {
 }
 
 #[test]
+fn test_loader_json_module_path_map_and_pkg_brief_follow_declared_dependencies() {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    let project_root = tmp.path();
+    let module_root = project_root.join("entry");
+    let source_har = module_root.join("oh_modules/source-har");
+    let transitive_pkg = source_har.join("oh_modules/@scope/transitive");
+    let undeclared_pkg = project_root.join("oh_modules/undeclared");
+
+    fs::create_dir_all(&module_root).expect("create module root");
+    fs::write(
+        module_root.join("oh-package.json5"),
+        r#"{ dependencies: { "source-har": "1.0.0" } }"#,
+    )
+    .expect("write module oh-package");
+
+    fs::create_dir_all(source_har.join("src/main/ets")).expect("create source har ets");
+    fs::write(
+        source_har.join("oh-package.json5"),
+        r#"{
+            name: "source-har",
+            dependencies: { "@scope/transitive": "1.0.0" }
+        }"#,
+    )
+    .expect("write source har oh-package");
+    fs::write(
+        source_har.join("src/main/ets/index.ets"),
+        "export default 1;",
+    )
+    .expect("write source har entry");
+
+    fs::create_dir_all(transitive_pkg.join("src/main/ets")).expect("create transitive ets");
+    fs::write(
+        transitive_pkg.join("oh-package.json5"),
+        r#"{ name: "@scope/transitive" }"#,
+    )
+    .expect("write transitive oh-package");
+    fs::write(
+        transitive_pkg.join("src/main/ets/index.ets"),
+        "export default 2;",
+    )
+    .expect("write transitive entry");
+
+    fs::create_dir_all(undeclared_pkg.join("src/main/ets")).expect("create undeclared ets");
+    fs::write(
+        undeclared_pkg.join("oh-package.json5"),
+        r#"{ name: "undeclared" }"#,
+    )
+    .expect("write undeclared oh-package");
+    fs::write(
+        undeclared_pkg.join("src/main/ets/index.ets"),
+        "export default 3;",
+    )
+    .expect("write undeclared entry");
+
+    let mut config = make_config(false);
+    config.project_root = project_root.to_path_buf();
+    let mut module_cfg = make_module_cfg();
+    module_cfg.src_path = module_root;
+
+    let loader = LoaderJson::generate(&config, &module_cfg, &make_manifest());
+
+    assert!(loader.module_path_map.contains_key("source-har"));
+    assert!(loader.module_path_map.contains_key("@scope/transitive"));
+    assert!(!loader.module_path_map.contains_key("undeclared"));
+    assert!(loader.pkg_name_to_pkg_brief_info.contains_key("source-har"));
+    assert!(loader
+        .pkg_name_to_pkg_brief_info
+        .contains_key("@scope/transitive"));
+    assert!(!loader.pkg_name_to_pkg_brief_info.contains_key("undeclared"));
+}
+
+#[test]
 fn test_loader_json_normalizes_dot_segments_in_hvigor_paths() {
     let config = ArkdownConfig {
         project_root: PathBuf::from("/project/./app"),
@@ -363,8 +653,8 @@ fn test_loader_json_normalizes_dot_segments_in_hvigor_paths() {
         "/project/app/entry/build/default/intermediates/loader_out/default/node_modules"
     );
     assert_eq!(
-        loader.an_build_out_put,
-        "/project/app/entry/build/default/intermediates/loader_out/default/an/arm64-v8a"
+        loader.an_build_out_put.as_deref(),
+        Some("/project/app/entry/build/default/intermediates/loader_out/default/an/arm64-v8a")
     );
 }
 
@@ -376,6 +666,346 @@ fn test_loader_json_fallback_an_build_is_false() {
 
     let loader = LoaderJson::generate(&config, &module_cfg, &manifest);
     assert!(!loader.fallback_an_build);
+}
+
+#[test]
+fn test_loader_json_writes_ap_path_and_copies_ap_when_present() {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    let project_root = tmp.path();
+    let module_root = project_root.join("entry");
+    std::fs::create_dir_all(&module_root).expect("create module root");
+    std::fs::write(module_root.join("modules.ap"), b"profile guided data").expect("write ap");
+
+    let mut config = make_config(false);
+    config.project_root = project_root.to_path_buf();
+    let mut module_cfg = make_module_cfg();
+    module_cfg.src_path = module_root.clone();
+
+    let loader = LoaderJson::generate(&config, &module_cfg, &make_manifest());
+
+    let source_ap = module_root.join("modules.ap");
+    let canonical_module_root = std::fs::canonicalize(&module_root).expect("canonical module root");
+    let canonical_source_ap = std::fs::canonicalize(&source_ap).expect("canonical ap");
+    assert_eq!(
+        loader.an_build_out_put.as_deref(),
+        Some(
+            canonical_module_root
+                .join("build/default/intermediates/loader_out/default/an/arm64-v8a")
+                .to_string_lossy()
+                .as_ref()
+        )
+    );
+    assert_eq!(loader.an_build_mode.as_deref(), Some("type"));
+    assert_eq!(
+        loader.ap_path.as_deref(),
+        Some(canonical_source_ap.to_string_lossy().as_ref())
+    );
+    let copied_ap = module_root.join("build/default/intermediates/ap/entry.ap");
+    assert_eq!(
+        std::fs::read(&copied_ap).expect("read copied ap"),
+        b"profile guided data"
+    );
+    let value = serde_json::to_value(&loader).expect("serialize loader");
+    assert_eq!(
+        value["apPath"].as_str(),
+        Some(canonical_source_ap.to_string_lossy().as_ref())
+    );
+}
+
+#[test]
+fn test_loader_json_api9_without_aot_omits_aot_fields() {
+    let mut config = make_config(false);
+    config.sdk_config.compile_api_version = 9;
+    let loader = LoaderJson::generate(&config, &make_module_cfg(), &make_manifest());
+    let value = serde_json::to_value(&loader).expect("serialize loader");
+
+    assert!(loader.an_build_out_put.is_none());
+    assert!(loader.an_build_mode.is_none());
+    assert!(loader.ap_path.is_none());
+    assert!(value.get("anBuildOutPut").is_none());
+    assert!(value.get("anBuildMode").is_none());
+    assert!(value.get("apPath").is_none());
+}
+
+#[test]
+fn test_loader_json_api10_ignores_aot_compile_mode_without_host_pgo() {
+    let mut config = make_config(false);
+    config.product.build_option.aot_compile_mode = Some("partial".to_string());
+
+    let loader = LoaderJson::generate(&config, &make_module_cfg(), &make_manifest());
+
+    assert_eq!(loader.an_build_mode.as_deref(), Some("type"));
+    assert!(loader.ap_path.is_none());
+}
+
+#[test]
+fn test_loader_json_openharmony_old_aot_sdk_omits_aot_fields() {
+    let mut config = make_config(false);
+    config.product.runtime_os = "OpenHarmony".to_string();
+    config.sdk_config.compile_sdk_version = "4.0.8.1".to_string();
+
+    let loader = LoaderJson::generate(&config, &make_module_cfg(), &make_manifest());
+    let value = serde_json::to_value(&loader).expect("serialize loader");
+
+    assert!(loader.an_build_out_put.is_none());
+    assert!(loader.an_build_mode.is_none());
+    assert!(loader.ap_path.is_none());
+    assert!(value.get("anBuildOutPut").is_none());
+    assert!(value.get("anBuildMode").is_none());
+    assert!(value.get("apPath").is_none());
+}
+
+#[test]
+fn test_loader_json_openharmony_fixed_aot_sdk_writes_type_mode() {
+    let mut config = make_config(false);
+    config.product.runtime_os = "OpenHarmony".to_string();
+    config.sdk_config.compile_sdk_version = "4.0.8.2".to_string();
+
+    let loader = LoaderJson::generate(&config, &make_module_cfg(), &make_manifest());
+
+    assert_eq!(loader.an_build_mode.as_deref(), Some("type"));
+    assert!(loader.ap_path.is_none());
+}
+
+#[test]
+fn test_loader_json_harmonyos_ignores_openharmony_aot_fixed_gate() {
+    let mut config = make_config(false);
+    config.sdk_config.compile_sdk_version = "4.0.8.1".to_string();
+
+    let loader = LoaderJson::generate(&config, &make_module_cfg(), &make_manifest());
+
+    assert_eq!(loader.an_build_mode.as_deref(), Some("type"));
+    assert!(loader.ap_path.is_none());
+}
+
+#[test]
+fn test_loader_json_har_fallback_omits_aot_fields() {
+    let mut module_cfg = make_module_cfg();
+    module_cfg.module_type = OhosModuleType::Har;
+    let mut manifest = make_manifest();
+    manifest.module_type = OhosModuleType::Har;
+
+    let loader = LoaderJson::generate(&make_config(false), &module_cfg, &manifest);
+    let value = serde_json::to_value(&loader).expect("serialize loader");
+
+    assert!(loader.fallback_an_build);
+    assert!(loader.an_build_out_put.is_none());
+    assert!(loader.an_build_mode.is_none());
+    assert!(loader.ap_path.is_none());
+    assert!(value.get("anBuildOutPut").is_none());
+    assert!(value.get("anBuildMode").is_none());
+    assert!(value.get("apPath").is_none());
+}
+
+#[test]
+fn test_loader_json_serializes_patch_config_from_build_config() {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    let project_root = tmp.path();
+    let module_root = project_root.join("entry");
+    let build_config = module_root.join("build/default/config/buildConfig.json");
+    fs::create_dir_all(build_config.parent().unwrap()).expect("create build config dir");
+    fs::write(
+        &build_config,
+        r#"{
+            "compileConfig": { "watchMode": "false" },
+            "patchConfig": {
+                "mode": "hotReload",
+                "changedFileList": "changed-files.json"
+            }
+        }"#,
+    )
+    .expect("write build config");
+
+    let mut config = make_config(false);
+    config.project_root = project_root.to_path_buf();
+    let mut module_cfg = make_module_cfg();
+    module_cfg.src_path = module_root;
+
+    let loader = LoaderJson::generate(&config, &module_cfg, &make_manifest());
+    let value = serde_json::to_value(&loader).expect("serialize loader");
+
+    assert_eq!(
+        value
+            .get("patchConfig")
+            .and_then(|patch| patch.get("mode"))
+            .and_then(serde_json::Value::as_str),
+        Some("hotReload")
+    );
+    assert!(value.get("buildConfigPath").is_none());
+}
+
+#[test]
+fn test_loader_json_omits_patch_config_for_test_target() {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    let project_root = tmp.path();
+    let module_root = project_root.join("entry");
+    let build_config = module_root.join("build/default/config/buildConfig.json");
+    fs::create_dir_all(build_config.parent().unwrap()).expect("create build config dir");
+    fs::write(
+        &build_config,
+        r#"{ "patchConfig": { "mode": "hotReload" } }"#,
+    )
+    .expect("write build config");
+
+    let mut config = make_config(false);
+    config.project_root = project_root.to_path_buf();
+    config.output_target = OutputTarget::Test;
+    let mut module_cfg = make_module_cfg();
+    module_cfg.src_path = module_root;
+
+    let loader = LoaderJson::generate(&config, &module_cfg, &make_manifest());
+    let value = serde_json::to_value(&loader).expect("serialize loader");
+
+    assert!(value.get("patchConfig").is_none());
+}
+
+#[test]
+fn test_loader_json_preview_serializes_build_config_path() {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    let project_root = tmp.path();
+    let module_root = project_root.join("entry");
+    let build_config = module_root.join("build/default/config/buildConfig.json");
+    fs::create_dir_all(build_config.parent().unwrap()).expect("create build config dir");
+    fs::write(
+        &build_config,
+        r#"{ "patchConfig": { "mode": "coldReload" } }"#,
+    )
+    .expect("write build config");
+
+    let mut config = make_config(false);
+    config.project_root = project_root.to_path_buf();
+    config.output_target = OutputTarget::Preview;
+    let mut module_cfg = make_module_cfg();
+    module_cfg.src_path = module_root;
+
+    let loader = LoaderJson::generate(&config, &module_cfg, &make_manifest());
+    let value = serde_json::to_value(&loader).expect("serialize loader");
+
+    assert_eq!(
+        value
+            .get("buildConfigPath")
+            .and_then(serde_json::Value::as_str),
+        Some("build/default/config/buildConfig.json")
+    );
+    assert_eq!(
+        value
+            .get("patchConfig")
+            .and_then(|patch| patch.get("mode"))
+            .and_then(serde_json::Value::as_str),
+        Some("coldReload")
+    );
+}
+
+#[test]
+fn test_loader_json_preview_and_test_compile_entry_uses_mock_config_sources() {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    let project_root = tmp.path().to_path_buf();
+    let module_root = project_root.join("entry");
+    let insight_dir = module_root.join("src/main/resources/base/profile");
+    let ets_dir = module_root.join("src/main/ets");
+    let mock_dir = module_root.join("src/mock");
+    fs::create_dir_all(&insight_dir).expect("create insight dir");
+    fs::create_dir_all(&ets_dir).expect("create ets dir");
+    fs::create_dir_all(&mock_dir).expect("create mock dir");
+
+    let insight = ets_dir.join("Insight.ets");
+    let mock_service = mock_dir.join("MockService.ets");
+    let mock_page = mock_dir.join("PageMock.ts");
+    fs::write(&insight, "export class Insight {}").expect("write insight source");
+    fs::write(&mock_service, "export class MockService {}").expect("write mock service");
+    fs::write(&mock_page, "export const page = true;").expect("write mock page");
+    fs::write(mock_dir.join("types.d.ts"), "export interface Types {}").expect("write types");
+    fs::write(
+        insight_dir.join("insight_intent.json"),
+        r#"{
+            insightIntentsSrcEntry: [
+                { srcEntry: "ets/Insight.ets" }
+            ]
+        }"#,
+    )
+    .expect("write insight profile");
+    fs::write(
+        mock_dir.join("mock-config.json5"),
+        r#"{
+            service: { source: "src/mock/MockService.ets" },
+            page: { source: "./src/mock/PageMock.ts" },
+            declaration: { source: "src/mock/types.d.ts" },
+            missing: { source: "src/mock/Missing.ets" },
+            empty: { source: "" }
+        }"#,
+    )
+    .expect("write mock config");
+
+    for output_target in [OutputTarget::Preview, OutputTarget::Test] {
+        let mut config = make_config(false);
+        config.project_root = project_root.clone();
+        config.output_target = output_target;
+        let mut module_cfg = make_module_cfg();
+        module_cfg.src_path = module_root.clone();
+
+        let loader = LoaderJson::generate(&config, &module_cfg, &make_manifest());
+
+        assert_eq!(
+            loader.hvigor_compile_entry,
+            vec![
+                to_absolute_path_string(&insight),
+                to_absolute_path_string(&mock_service),
+                to_absolute_path_string(&mock_page),
+            ]
+        );
+        assert!(loader
+            .compile_entry
+            .contains(&"./ets/Insight.ets".to_string()));
+        assert!(loader
+            .compile_entry
+            .contains(&to_absolute_path_string(&mock_service)));
+        assert!(loader
+            .compile_entry
+            .contains(&to_absolute_path_string(&mock_page)));
+        assert!(!loader
+            .hvigor_compile_entry
+            .iter()
+            .any(|entry| entry.ends_with("types.d.ts")));
+    }
+}
+
+#[test]
+fn test_loader_json_hap_compile_entry_ignores_mock_config_sources() {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    let project_root = tmp.path().to_path_buf();
+    let module_root = project_root.join("entry");
+    let mock_dir = module_root.join("src/mock");
+    fs::create_dir_all(&mock_dir).expect("create mock dir");
+    let mock_service = mock_dir.join("MockService.ets");
+    fs::write(&mock_service, "export class MockService {}").expect("write mock service");
+    fs::write(
+        mock_dir.join("mock-config.json5"),
+        r#"{
+            service: { source: "src/mock/MockService.ets" }
+        }"#,
+    )
+    .expect("write mock config");
+
+    let mut config = make_config(false);
+    config.project_root = project_root;
+    let mut module_cfg = make_module_cfg();
+    module_cfg.src_path = module_root;
+
+    let loader = LoaderJson::generate(&config, &module_cfg, &make_manifest());
+
+    assert!(loader.hvigor_compile_entry.is_empty());
+    assert!(!loader
+        .compile_entry
+        .contains(&to_absolute_path_string(&mock_service)));
+}
+
+#[test]
+#[should_panic(expected = "PARTIAL_INVALID_PATH")]
+fn test_loader_json_host_pgo_requires_existing_ap() {
+    let mut config = make_config(false);
+    config.product.build_option.host_pgo = Some(true);
+
+    let _ = LoaderJson::generate(&config, &make_module_cfg(), &make_manifest());
 }
 
 /// Verify that relative src_path / project_root inputs produce absolute paths in the
@@ -422,9 +1052,9 @@ fn test_loader_json_relative_paths_become_absolute() {
     );
 
     assert!(
-        std::path::Path::new(&loader.an_build_out_put).is_absolute(),
+        std::path::Path::new(loader.an_build_out_put.as_deref().unwrap()).is_absolute(),
         "anBuildOutPut must be absolute: {}",
-        loader.an_build_out_put
+        loader.an_build_out_put.as_deref().unwrap()
     );
 
     for (_, path) in &loader.module_path_map {
@@ -478,6 +1108,315 @@ fn test_loader_json_golden_hvigor_key_set() {
     assert_eq!(
         actual_keys, expected_keys,
         "serialized key set must match golden hvigor output"
+    );
+}
+
+#[test]
+fn test_loader_json_hsp_resources_map_collects_resource_table() {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    let project_root = tmp.path().to_path_buf();
+    let module_root = project_root.join("entry");
+    fs::create_dir_all(&module_root).expect("create module dir");
+    fs::write(
+        module_root.join("oh-package.json5"),
+        r#"{ dependencies: { "shared-hsp": "1.0.0" } }"#,
+    )
+    .expect("write module oh-package");
+
+    let hsp_root = project_root.join("oh_modules/shared-hsp");
+    fs::create_dir_all(hsp_root.join("src/main")).expect("create hsp dir");
+    fs::write(
+        hsp_root.join("oh-package.json5"),
+        r#"{ name: "shared-hsp" }"#,
+    )
+    .expect("write hsp oh-package");
+    fs::write(
+        hsp_root.join("src/main/module.json5"),
+        r#"{
+            "module": {
+                "name": "shared",
+                "type": "shared"
+            }
+        }"#,
+    )
+    .expect("write hsp module.json5");
+    fs::write(hsp_root.join("ResourceTable.txt"), "resource table")
+        .expect("write hsp ResourceTable");
+
+    let mut config = make_config(false);
+    config.project_root = project_root;
+    let module_cfg = ModuleConfig {
+        name: "entry".to_string(),
+        src_path: module_root,
+        module_type: OhosModuleType::Entry,
+    };
+
+    let loader = LoaderJson::generate(&config, &module_cfg, &make_manifest());
+
+    let resource_table = loader
+        .hsp_resources_map
+        .get("shared-hsp")
+        .expect("hspResourcesMap entry");
+    assert!(
+        resource_table.ends_with("oh_modules/shared-hsp/ResourceTable.txt"),
+        "hspResourcesMap must point at the HSP ResourceTable.txt: {resource_table}"
+    );
+}
+
+#[test]
+fn test_loader_json_hsp_resources_map_follows_transitive_scoped_dependencies() {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    let project_root = tmp.path().to_path_buf();
+    let module_root = project_root.join("entry");
+    let source_har = module_root.join("oh_modules/source-har");
+    let scoped_hsp = source_har.join("oh_modules/@scope/shared-hsp");
+    let undeclared_hsp = project_root.join("oh_modules/undeclared-hsp");
+
+    fs::create_dir_all(&module_root).expect("create module dir");
+    fs::write(
+        module_root.join("oh-package.json5"),
+        r#"{ dependencies: { "source-har": "1.0.0" } }"#,
+    )
+    .expect("write module oh-package");
+
+    fs::create_dir_all(source_har.join("src/main")).expect("create source har dir");
+    fs::write(
+        source_har.join("oh-package.json5"),
+        r#"{
+            name: "source-har",
+            dependencies: { "@scope/shared-hsp": "1.0.0" }
+        }"#,
+    )
+    .expect("write source har oh-package");
+    fs::write(
+        source_har.join("src/main/module.json5"),
+        r#"{ module: { name: "source_har", type: "har" } }"#,
+    )
+    .expect("write source har module");
+
+    fs::create_dir_all(scoped_hsp.join("src/main")).expect("create scoped hsp dir");
+    fs::write(
+        scoped_hsp.join("oh-package.json5"),
+        r#"{ name: "@scope/shared-hsp" }"#,
+    )
+    .expect("write scoped hsp oh-package");
+    fs::write(
+        scoped_hsp.join("src/main/module.json5"),
+        r#"{ module: { name: "shared_hsp", type: "shared" } }"#,
+    )
+    .expect("write scoped hsp module");
+    fs::write(scoped_hsp.join("ResourceTable.txt"), "resource table")
+        .expect("write scoped hsp ResourceTable");
+
+    fs::create_dir_all(undeclared_hsp.join("src/main")).expect("create undeclared hsp dir");
+    fs::write(
+        undeclared_hsp.join("oh-package.json5"),
+        r#"{ name: "undeclared-hsp" }"#,
+    )
+    .expect("write undeclared hsp oh-package");
+    fs::write(
+        undeclared_hsp.join("src/main/module.json5"),
+        r#"{ module: { name: "undeclared_hsp", type: "shared" } }"#,
+    )
+    .expect("write undeclared hsp module");
+    fs::write(undeclared_hsp.join("ResourceTable.txt"), "resource table")
+        .expect("write undeclared hsp ResourceTable");
+
+    let mut config = make_config(false);
+    config.project_root = project_root;
+    let module_cfg = ModuleConfig {
+        name: "entry".to_string(),
+        src_path: module_root,
+        module_type: OhosModuleType::Entry,
+    };
+
+    let loader = LoaderJson::generate(&config, &module_cfg, &make_manifest());
+
+    let resource_table = loader
+        .hsp_resources_map
+        .get("@scope/shared-hsp")
+        .expect("transitive scoped hspResourcesMap entry");
+    assert!(
+        resource_table.ends_with("oh_modules/@scope/shared-hsp/ResourceTable.txt"),
+        "hspResourcesMap must point at transitive scoped HSP ResourceTable.txt: {resource_table}"
+    );
+    assert!(
+        !loader.hsp_resources_map.contains_key("undeclared-hsp"),
+        "undeclared HSP must not be collected"
+    );
+}
+
+#[test]
+fn test_loader_json_hsp_har_ohm_maps_follow_declared_dependencies() {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    let project_root = tmp.path();
+    let module_root = project_root.join("entry");
+    let direct_hsp = module_root.join("oh_modules/direct-hsp");
+    let direct_har = module_root.join("oh_modules/direct-har");
+    let transitive_hsp = direct_har.join("oh_modules/@scope/transitive-hsp");
+    let undeclared_har = project_root.join("oh_modules/undeclared-har");
+
+    fs::create_dir_all(&module_root).expect("create module root");
+    fs::write(
+        module_root.join("oh-package.json5"),
+        r#"{ dependencies: { "direct-hsp": "1.0.0", "direct-har": "1.0.0" } }"#,
+    )
+    .expect("write module oh-package");
+
+    fs::create_dir_all(direct_hsp.join("src/main/ets")).expect("create hsp ets");
+    fs::write(
+        direct_hsp.join("oh-package.json5"),
+        r#"{ name: "direct-hsp", main: "src/main/ets/HspEntry.ets" }"#,
+    )
+    .expect("write hsp oh-package");
+    fs::write(
+        direct_hsp.join("src/main/module.json5"),
+        r#"{ module: { name: "direct_hsp_module", type: "shared" } }"#,
+    )
+    .expect("write hsp module");
+    fs::write(direct_hsp.join("src/main/ets/HspEntry.ets"), "export {}").expect("write hsp entry");
+
+    fs::create_dir_all(direct_har.join("src/main/ets")).expect("create har ets");
+    fs::write(
+        direct_har.join("oh-package.json5"),
+        r#"{
+            name: "direct-har",
+            main: "src/main/ets/HarEntry.ts",
+            dependencies: { "@scope/transitive-hsp": "1.0.0" }
+        }"#,
+    )
+    .expect("write har oh-package");
+    fs::write(
+        direct_har.join("src/main/module.json5"),
+        r#"{ module: { name: "direct_har_module", type: "har" } }"#,
+    )
+    .expect("write har module");
+    fs::write(direct_har.join("src/main/ets/HarEntry.ts"), "export {}").expect("write har entry");
+
+    fs::create_dir_all(transitive_hsp.join("src/main/ets")).expect("create transitive hsp ets");
+    fs::write(
+        transitive_hsp.join("oh-package.json5"),
+        r#"{ name: "@scope/transitive-hsp" }"#,
+    )
+    .expect("write transitive hsp oh-package");
+    fs::write(
+        transitive_hsp.join("src/main/module.json5"),
+        r#"{ module: { name: "transitive_hsp_module", type: "shared" } }"#,
+    )
+    .expect("write transitive hsp module");
+    fs::write(transitive_hsp.join("src/main/ets/index.ets"), "export {}")
+        .expect("write transitive hsp entry");
+
+    fs::create_dir_all(undeclared_har.join("src/main/ets")).expect("create undeclared har ets");
+    fs::write(
+        undeclared_har.join("oh-package.json5"),
+        r#"{ name: "undeclared-har", main: "src/main/ets/index.ets" }"#,
+    )
+    .expect("write undeclared har oh-package");
+    fs::write(
+        undeclared_har.join("src/main/module.json5"),
+        r#"{ module: { name: "undeclared_har_module", type: "har" } }"#,
+    )
+    .expect("write undeclared har module");
+    fs::write(undeclared_har.join("src/main/ets/index.ets"), "export {}")
+        .expect("write undeclared har entry");
+
+    let mut config = make_config(false);
+    config.project_root = project_root.to_path_buf();
+    let mut module_cfg = make_module_cfg();
+    module_cfg.src_path = module_root;
+
+    let loader = LoaderJson::generate(&config, &module_cfg, &make_manifest());
+
+    assert_eq!(
+        loader.hsp_name_ohm_map.get("direct-hsp"),
+        Some(&"@bundle:com.example.app/direct_hsp_module/src/main/ets/HspEntry".to_string())
+    );
+    assert_eq!(
+        loader.hsp_name_ohm_map.get("@scope/transitive-hsp"),
+        Some(&"@bundle:com.example.app/transitive_hsp_module/src/main/ets/index".to_string())
+    );
+    assert_eq!(
+        loader.har_name_ohm_map.get("direct-har"),
+        Some(&"@bundle:com.example.app/direct_har_module/src/main/ets/HarEntry".to_string())
+    );
+    assert!(
+        !loader.har_name_ohm_map.contains_key("undeclared-har"),
+        "undeclared HAR must not be collected"
+    );
+}
+
+/// Verify that hspNameOhmMap/harNameOhmMap use `@normalized:N&...` format
+/// when `useNormalizedOHMUrl=true`.
+///
+/// Addresses: "normalized-off 模式仍未证明" — proves both modes work.
+#[test]
+fn test_loader_json_hsp_har_ohm_maps_normalized_mode() {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    let project_root = tmp.path();
+    let module_root = project_root.join("entry");
+    let direct_hsp = module_root.join("oh_modules/my-hsp");
+
+    fs::create_dir_all(&module_root).expect("create module root");
+    fs::write(
+        module_root.join("oh-package.json5"),
+        r#"{ dependencies: { "my-hsp": "1.0.0" } }"#,
+    )
+    .expect("write module oh-package");
+
+    fs::create_dir_all(direct_hsp.join("src/main/ets")).expect("create hsp ets");
+    fs::write(
+        direct_hsp.join("oh-package.json5"),
+        r#"{ name: "my-hsp", version: "1.2.3", main: "index.ets" }"#,
+    )
+    .expect("write hsp oh-package");
+    fs::write(
+        direct_hsp.join("src/main/module.json5"),
+        r#"{ module: { name: "myHsp", type: "shared" } }"#,
+    )
+    .expect("write hsp module");
+    fs::write(direct_hsp.join("index.ets"), "export {}").expect("write hsp entry");
+
+    // Test normalized mode.
+    let mut config = make_config(true); // use_normalized_ohm_url = true
+    config.project_root = project_root.to_path_buf();
+    let mut module_cfg = make_module_cfg();
+    module_cfg.src_path = module_root.clone();
+
+    let loader = LoaderJson::generate(&config, &module_cfg, &make_manifest());
+
+    let ohm = loader
+        .hsp_name_ohm_map
+        .get("my-hsp")
+        .expect("my-hsp must be in map");
+    assert!(
+        ohm.starts_with("@normalized:N&"),
+        "normalized mode must use @normalized:N& prefix; got: {ohm}"
+    );
+    assert!(
+        ohm.contains("&myHsp&"),
+        "normalized OHM URL must contain module name; got: {ohm}"
+    );
+    assert!(
+        ohm.contains("&1.2.3"),
+        "normalized OHM URL must contain version; got: {ohm}"
+    );
+
+    // Test non-normalized mode.
+    let mut config2 = make_config(false);
+    config2.project_root = project_root.to_path_buf();
+    let mut module_cfg2 = make_module_cfg();
+    module_cfg2.src_path = module_root;
+
+    let loader2 = LoaderJson::generate(&config2, &module_cfg2, &make_manifest());
+
+    let ohm2 = loader2
+        .hsp_name_ohm_map
+        .get("my-hsp")
+        .expect("my-hsp must be in map");
+    assert!(
+        ohm2.starts_with("@bundle:"),
+        "non-normalized mode must use @bundle: prefix; got: {ohm2}"
     );
 }
 
@@ -584,6 +1523,437 @@ fn test_loader_json_serialized_compile_entry_is_separate_from_internal_entries()
             .len(),
         0
     );
+}
+
+#[test]
+fn test_loader_json_compile_entry_includes_startup_config_and_tasks() {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    let project_root = tmp.path();
+    let module_root = project_root.join("entry");
+    let profile_dir = module_root.join("src/main/resources/base/profile");
+    let startup_dir = module_root.join("src/main/ets/startup");
+    std::fs::create_dir_all(&profile_dir).expect("create profile dir");
+    std::fs::create_dir_all(&startup_dir).expect("create startup dir");
+    std::fs::write(
+        module_root.join("src/main/module.json5"),
+        r#"{ "module": { "name": "entry", "type": "entry", "appStartup": "$profile:startup_config" } }"#,
+    )
+    .expect("write module.json5");
+    std::fs::write(
+        profile_dir.join("startup_config.json"),
+        r#"{
+            "configEntry": "ets/startup/AppStartupConfig.ets",
+            "startupTasks": [{ "name": "Task", "srcEntry": "ets/startup/StartupTask.ets" }]
+        }"#,
+    )
+    .expect("write startup profile");
+    let config_entry = startup_dir.join("AppStartupConfig.ets");
+    let startup_task = startup_dir.join("StartupTask.ets");
+    std::fs::write(&config_entry, "export default class AppStartupConfig {}")
+        .expect("write config entry");
+    std::fs::write(&startup_task, "export default class StartupTask {}")
+        .expect("write startup task");
+
+    let temp_startup = module_root
+        .join("build/default/intermediates/startup_config/default/temp-startup-config.json");
+    std::fs::create_dir_all(temp_startup.parent().unwrap()).expect("create temp startup dir");
+    std::fs::write(
+        &temp_startup,
+        serde_json::json!({
+            "startupTasks": [{
+                "name": "Task",
+                "srcEntry": "ets/startup/StartupTask.ets",
+                "srcEntryAbsolutePath": startup_task
+            }]
+        })
+        .to_string(),
+    )
+    .expect("write temp startup");
+
+    let mut config = make_config(false);
+    config.project_root = project_root.to_path_buf();
+    let mut module_cfg = make_module_cfg();
+    module_cfg.src_path = module_root;
+
+    let loader = LoaderJson::generate(&config, &module_cfg, &make_manifest());
+    let value = serde_json::to_value(&loader).expect("serialize loader");
+    let compile_entry = value["compileEntry"].as_array().expect("compileEntry");
+    let entries: Vec<_> = compile_entry
+        .iter()
+        .filter_map(|entry| entry.as_str())
+        .collect();
+
+    let expected_config_entry = std::fs::canonicalize(&config_entry)
+        .expect("canonical config entry")
+        .to_string_lossy()
+        .into_owned();
+    let expected_startup_task = std::fs::canonicalize(&startup_task)
+        .expect("canonical startup task")
+        .to_string_lossy()
+        .into_owned();
+    assert!(entries.contains(&expected_config_entry.as_str()));
+    assert!(entries.contains(&expected_startup_task.as_str()));
+    assert!(loader
+        .compile_entry
+        .contains(&"./ets/startup/AppStartupConfig.ets".to_string()));
+    assert!(loader
+        .compile_entry
+        .contains(&"./ets/startup/StartupTask.ets".to_string()));
+}
+
+#[test]
+fn test_loader_json_compile_entry_includes_insight_intent_entries() {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    let project_root = tmp.path();
+    let module_root = project_root.join("entry");
+    let profile_dir = module_root.join("src/main/resources/base/profile");
+    let insight_dir = module_root.join("src/main/ets/insight");
+    std::fs::create_dir_all(&profile_dir).expect("create profile dir");
+    std::fs::create_dir_all(&insight_dir).expect("create insight dir");
+    let intent = insight_dir.join("IntentExecutor.ets");
+    let intent_entry = insight_dir.join("IntentEntry.ts");
+    std::fs::write(&intent, "export default class IntentExecutor {}").expect("write intent");
+    std::fs::write(&intent_entry, "export default class IntentEntry {}")
+        .expect("write intent entry");
+    std::fs::write(
+        profile_dir.join("insight_intent.json"),
+        r#"{
+            "insightIntents": [{ "srcEntry": "ets/insight/IntentExecutor.ets" }],
+            "insightIntentsSrcEntry": [{ "srcEntry": "ets/insight/IntentEntry.ts" }]
+        }"#,
+    )
+    .expect("write insight intent");
+
+    let mut config = make_config(false);
+    config.project_root = project_root.to_path_buf();
+    let mut module_cfg = make_module_cfg();
+    module_cfg.src_path = module_root;
+
+    let loader = LoaderJson::generate(&config, &module_cfg, &make_manifest());
+    let value = serde_json::to_value(&loader).expect("serialize loader");
+    let compile_entry = value["compileEntry"].as_array().expect("compileEntry");
+    let entries: Vec<_> = compile_entry
+        .iter()
+        .filter_map(|entry| entry.as_str())
+        .collect();
+
+    let expected_intent = std::fs::canonicalize(&intent)
+        .expect("canonical intent")
+        .to_string_lossy()
+        .into_owned();
+    let expected_intent_entry = std::fs::canonicalize(&intent_entry)
+        .expect("canonical intent entry")
+        .to_string_lossy()
+        .into_owned();
+    assert!(entries.contains(&expected_intent.as_str()));
+    assert!(entries.contains(&expected_intent_entry.as_str()));
+    assert!(loader
+        .compile_entry
+        .contains(&"./ets/insight/IntentExecutor.ets".to_string()));
+    assert!(loader
+        .compile_entry
+        .contains(&"./ets/insight/IntentEntry.ts".to_string()));
+}
+
+#[test]
+fn test_loader_json_compile_entry_includes_source_har_ability_entries() {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    let project_root = tmp.path();
+    let module_root = project_root.join("entry");
+    let oh_modules = module_root.join("oh_modules");
+    let source_har = oh_modules.join("dep-har");
+    let shared_hsp = oh_modules.join("dep-hsp");
+    let bytecode_har = oh_modules.join("bytecode-har");
+
+    fs::create_dir_all(&module_root).expect("create module root");
+    fs::write(
+        module_root.join("oh-package.json5"),
+        r#"{
+            dependencies: {
+                "dep-har": "1.0.0",
+                "dep-hsp": "1.0.0",
+                "bytecode-har": "1.0.0"
+            }
+        }"#,
+    )
+    .expect("write module oh-package");
+
+    let ability_entry = source_har.join("src/main/ets/DepAbility.ets");
+    let extension_entry = source_har.join("src/main/ets/DepExtension.ts");
+    fs::create_dir_all(ability_entry.parent().unwrap()).expect("create source har ets dir");
+    fs::write(&ability_entry, "export default class DepAbility {}").expect("write dep ability");
+    fs::write(&extension_entry, "export default class DepExtension {}")
+        .expect("write dep extension ability");
+    fs::write(
+        source_har.join("oh-package.json5"),
+        r#"{ name: "dep-har" }"#,
+    )
+    .expect("write source har oh-package");
+    fs::write(
+        source_har.join("src/main/module.json5"),
+        r#"{
+            module: {
+                name: "dep_har",
+                type: "har",
+                abilities: [{ name: "DepAbility", srcEntry: "./ets/DepAbility.ets" }],
+                extensionAbilities: [{ name: "DepExtension", srcEntry: "ets/DepExtension.ts" }]
+            }
+        }"#,
+    )
+    .expect("write source har module");
+
+    let hsp_entry = shared_hsp.join("src/main/ets/HspAbility.ets");
+    fs::create_dir_all(hsp_entry.parent().unwrap()).expect("create shared hsp ets dir");
+    fs::write(&hsp_entry, "export default class HspAbility {}").expect("write hsp ability");
+    fs::write(
+        shared_hsp.join("oh-package.json5"),
+        r#"{ name: "dep-hsp" }"#,
+    )
+    .expect("write hsp oh-package");
+    fs::write(
+        shared_hsp.join("src/main/module.json5"),
+        r#"{
+            module: {
+                name: "dep_hsp",
+                type: "shared",
+                abilities: [{ name: "HspAbility", srcEntry: "ets/HspAbility.ets" }]
+            }
+        }"#,
+    )
+    .expect("write hsp module");
+
+    let bytecode_entry = bytecode_har.join("src/main/ets/BytecodeAbility.ets");
+    fs::create_dir_all(bytecode_entry.parent().unwrap()).expect("create bytecode har ets dir");
+    fs::create_dir_all(bytecode_har.join("ets")).expect("create bytecode har abc dir");
+    fs::write(&bytecode_entry, "export default class BytecodeAbility {}")
+        .expect("write bytecode ability");
+    fs::write(bytecode_har.join("ets/modules.abc"), b"PANDA\x00\x00\x00")
+        .expect("write bytecode abc");
+    fs::write(
+        bytecode_har.join("oh-package.json5"),
+        r#"{ name: "bytecode-har", metadata: { byteCodeHar: true } }"#,
+    )
+    .expect("write bytecode oh-package");
+    fs::write(
+        bytecode_har.join("src/main/module.json5"),
+        r#"{
+            module: {
+                name: "bytecode_har",
+                type: "har",
+                abilities: [{ name: "BytecodeAbility", srcEntry: "ets/BytecodeAbility.ets" }]
+            }
+        }"#,
+    )
+    .expect("write bytecode module");
+
+    let mut config = make_config(false);
+    config.project_root = project_root.to_path_buf();
+    let mut module_cfg = make_module_cfg();
+    module_cfg.src_path = module_root;
+
+    let loader = LoaderJson::generate(&config, &module_cfg, &make_manifest());
+    let value = serde_json::to_value(&loader).expect("serialize loader");
+    let entries: Vec<_> = value["compileEntry"]
+        .as_array()
+        .expect("compileEntry")
+        .iter()
+        .filter_map(|entry| entry.as_str())
+        .collect();
+
+    let expected_ability = std::fs::canonicalize(&ability_entry)
+        .expect("canonical ability")
+        .to_string_lossy()
+        .into_owned();
+    let expected_extension = std::fs::canonicalize(&extension_entry)
+        .expect("canonical extension")
+        .to_string_lossy()
+        .into_owned();
+    let skipped_hsp = std::fs::canonicalize(&hsp_entry)
+        .expect("canonical hsp")
+        .to_string_lossy()
+        .into_owned();
+    let skipped_bytecode = std::fs::canonicalize(&bytecode_entry)
+        .expect("canonical bytecode")
+        .to_string_lossy()
+        .into_owned();
+
+    assert!(entries.contains(&expected_ability.as_str()));
+    assert!(entries.contains(&expected_extension.as_str()));
+    assert!(!entries.contains(&skipped_hsp.as_str()));
+    assert!(!entries.contains(&skipped_bytecode.as_str()));
+    assert!(loader.compile_entry.contains(&expected_ability));
+    assert!(loader.compile_entry.contains(&expected_extension));
+}
+
+#[test]
+fn test_loader_json_compile_entry_includes_source_har_insight_intent_entries() {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    let project_root = tmp.path();
+    let module_root = project_root.join("entry");
+    let oh_modules = module_root.join("oh_modules");
+    let source_har = oh_modules.join("dep-har");
+    let custom_resource_har = oh_modules.join("dep-har-custom");
+    let shared_hsp = oh_modules.join("dep-hsp");
+    let bytecode_har = oh_modules.join("bytecode-har");
+
+    fs::create_dir_all(&module_root).expect("create module root");
+    fs::write(
+        module_root.join("oh-package.json5"),
+        r#"{
+            dependencies: {
+                "dep-har": "1.0.0",
+                "dep-har-custom": "1.0.0",
+                "dep-hsp": "1.0.0",
+                "bytecode-har": "1.0.0"
+            }
+        }"#,
+    )
+    .expect("write module oh-package");
+
+    let default_entry = source_har.join("src/main/ets/insight/DefaultInsight.ts");
+    let ignored_default_entry = source_har.join("src/main/ets/insight/IgnoredInsight.ets");
+    fs::create_dir_all(default_entry.parent().unwrap()).expect("create source har insight dir");
+    fs::create_dir_all(source_har.join("src/main/resources/base/profile"))
+        .expect("create default profile dir");
+    fs::write(&default_entry, "export default class DefaultInsight {}")
+        .expect("write default insight");
+    fs::write(
+        &ignored_default_entry,
+        "export default class IgnoredInsight {}",
+    )
+    .expect("write ignored insight");
+    fs::write(
+        source_har.join("oh-package.json5"),
+        r#"{ name: "dep-har" }"#,
+    )
+    .expect("write source har oh-package");
+    fs::write(
+        source_har.join("src/main/module.json5"),
+        r#"{ module: { name: "dep_har", type: "har" } }"#,
+    )
+    .expect("write source har module");
+    fs::write(
+        source_har.join("src/main/resources/base/profile/insight_intent.json"),
+        r#"{
+            insightIntents: [{ srcEntry: "ets/insight/IgnoredInsight.ets" }],
+            insightIntentsSrcEntry: [{ srcEntry: "ets/insight/DefaultInsight.ts" }]
+        }"#,
+    )
+    .expect("write source har insight intent");
+
+    let custom_entry = custom_resource_har.join("src/main/ets/insight/CustomInsight.ets");
+    fs::create_dir_all(custom_entry.parent().unwrap()).expect("create custom har insight dir");
+    fs::create_dir_all(custom_resource_har.join("custom/resources/base/profile"))
+        .expect("create custom profile dir");
+    fs::write(&custom_entry, "export default class CustomInsight {}")
+        .expect("write custom insight");
+    fs::write(
+        custom_resource_har.join("oh-package.json5"),
+        r#"{
+            name: "dep-har-custom",
+            metadata: { resource: { directories: ["custom/resources"] } }
+        }"#,
+    )
+    .expect("write custom har oh-package");
+    fs::write(
+        custom_resource_har.join("src/main/module.json5"),
+        r#"{ module: { name: "dep_har_custom", type: "har" } }"#,
+    )
+    .expect("write custom har module");
+    fs::write(
+        custom_resource_har.join("custom/resources/base/profile/insight_intent.json"),
+        r#"{ insightIntentsSrcEntry: [{ srcEntry: "./ets/insight/CustomInsight.ets" }] }"#,
+    )
+    .expect("write custom har insight intent");
+
+    let hsp_entry = shared_hsp.join("src/main/ets/insight/HspInsight.ets");
+    fs::create_dir_all(hsp_entry.parent().unwrap()).expect("create hsp insight dir");
+    fs::create_dir_all(shared_hsp.join("src/main/resources/base/profile"))
+        .expect("create hsp profile dir");
+    fs::write(&hsp_entry, "export default class HspInsight {}").expect("write hsp insight");
+    fs::write(
+        shared_hsp.join("oh-package.json5"),
+        r#"{ name: "dep-hsp" }"#,
+    )
+    .expect("write hsp oh-package");
+    fs::write(
+        shared_hsp.join("src/main/module.json5"),
+        r#"{ module: { name: "dep_hsp", type: "shared" } }"#,
+    )
+    .expect("write hsp module");
+    fs::write(
+        shared_hsp.join("src/main/resources/base/profile/insight_intent.json"),
+        r#"{ insightIntentsSrcEntry: [{ srcEntry: "ets/insight/HspInsight.ets" }] }"#,
+    )
+    .expect("write hsp insight intent");
+
+    let bytecode_entry = bytecode_har.join("src/main/ets/insight/BytecodeInsight.ets");
+    fs::create_dir_all(bytecode_entry.parent().unwrap()).expect("create bytecode insight dir");
+    fs::create_dir_all(bytecode_har.join("ets")).expect("create bytecode abc dir");
+    fs::create_dir_all(bytecode_har.join("src/main/resources/base/profile"))
+        .expect("create bytecode profile dir");
+    fs::write(&bytecode_entry, "export default class BytecodeInsight {}")
+        .expect("write bytecode insight");
+    fs::write(bytecode_har.join("ets/modules.abc"), b"PANDA\x00\x00\x00")
+        .expect("write bytecode abc");
+    fs::write(
+        bytecode_har.join("oh-package.json5"),
+        r#"{ name: "bytecode-har", metadata: { byteCodeHar: true } }"#,
+    )
+    .expect("write bytecode oh-package");
+    fs::write(
+        bytecode_har.join("src/main/module.json5"),
+        r#"{ module: { name: "bytecode_har", type: "har" } }"#,
+    )
+    .expect("write bytecode module");
+    fs::write(
+        bytecode_har.join("src/main/resources/base/profile/insight_intent.json"),
+        r#"{ insightIntentsSrcEntry: [{ srcEntry: "ets/insight/BytecodeInsight.ets" }] }"#,
+    )
+    .expect("write bytecode insight intent");
+
+    let mut config = make_config(false);
+    config.project_root = project_root.to_path_buf();
+    let mut module_cfg = make_module_cfg();
+    module_cfg.src_path = module_root;
+
+    let loader = LoaderJson::generate(&config, &module_cfg, &make_manifest());
+    let value = serde_json::to_value(&loader).expect("serialize loader");
+    let entries: Vec<_> = value["compileEntry"]
+        .as_array()
+        .expect("compileEntry")
+        .iter()
+        .filter_map(|entry| entry.as_str())
+        .collect();
+
+    let expected_default = std::fs::canonicalize(&default_entry)
+        .expect("canonical default insight")
+        .to_string_lossy()
+        .into_owned();
+    let expected_custom = std::fs::canonicalize(&custom_entry)
+        .expect("canonical custom insight")
+        .to_string_lossy()
+        .into_owned();
+    let skipped_default_intent = std::fs::canonicalize(&ignored_default_entry)
+        .expect("canonical ignored insight")
+        .to_string_lossy()
+        .into_owned();
+    let skipped_hsp = std::fs::canonicalize(&hsp_entry)
+        .expect("canonical hsp")
+        .to_string_lossy()
+        .into_owned();
+    let skipped_bytecode = std::fs::canonicalize(&bytecode_entry)
+        .expect("canonical bytecode")
+        .to_string_lossy()
+        .into_owned();
+
+    assert!(entries.contains(&expected_default.as_str()));
+    assert!(entries.contains(&expected_custom.as_str()));
+    assert!(!entries.contains(&skipped_default_intent.as_str()));
+    assert!(!entries.contains(&skipped_hsp.as_str()));
+    assert!(!entries.contains(&skipped_bytecode.as_str()));
+    assert!(loader.compile_entry.contains(&expected_default));
+    assert!(loader.compile_entry.contains(&expected_custom));
 }
 
 #[test]
@@ -745,6 +2115,7 @@ fn test_loader_json_dynamic_import_lib_info_uses_runtime_only_packages() {
             packages: vec!["@runtime/feature".to_string()],
             sources: vec![],
         }),
+        support_chunks: false,
     });
     let module_cfg = ModuleConfig {
         name: "entry".to_string(),
@@ -795,6 +2166,7 @@ fn test_loader_json_compile_entry_uses_runtime_only_sources() {
             packages: vec![],
             sources: vec!["src/main/ets/runtime".to_string()],
         }),
+        support_chunks: false,
     });
     let module_cfg = ModuleConfig {
         name: "entry".to_string(),
@@ -897,6 +2269,132 @@ fn test_loader_json_dynamic_import_lib_info_uses_dependency_runtime_only_package
     );
 }
 
+#[test]
+fn test_loader_json_runtime_only_metadata_follows_declared_transitive_scoped_dependencies() {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    let project_root = tmp.path().to_path_buf();
+    let module_root = project_root.join("entry");
+    std::fs::create_dir_all(&module_root).expect("create module dir");
+    std::fs::write(
+        module_root.join("oh-package.json5"),
+        r#"{
+              name: "entry",
+              dependencies: {
+                "source-har": "1.0.0"
+              }
+            }"#,
+    )
+    .expect("write entry oh-package");
+
+    let source_har = project_root.join("oh_modules").join("source-har");
+    std::fs::create_dir_all(&source_har).expect("create source har");
+    std::fs::write(
+        source_har.join("oh-package.json5"),
+        r#"{
+              name: "source-har",
+              dependencies: {
+                "@scope/transitive-har": "1.0.0"
+              }
+            }"#,
+    )
+    .expect("write source har oh-package");
+
+    let transitive_har = project_root
+        .join("oh_modules")
+        .join("@scope")
+        .join("transitive-har");
+    let transitive_runtime_dir = transitive_har.join("src/main/ets/runtime");
+    std::fs::create_dir_all(&transitive_runtime_dir).expect("create transitive runtime dir");
+    let transitive_source = transitive_runtime_dir.join("TransitiveRuntime.ets");
+    std::fs::write(
+        &transitive_source,
+        "export default class TransitiveRuntime {}",
+    )
+    .expect("write transitive source");
+    std::fs::write(
+        transitive_har.join("oh-package.json5"),
+        r#"{
+              name: "@scope/transitive-har",
+              metadata: {
+                runtimeOnly: {
+                  sources: ["src/main/ets/runtime"],
+                  packages: ["@runtime/transitive"]
+                }
+              }
+            }"#,
+    )
+    .expect("write transitive har oh-package");
+
+    let runtime_pkg = project_root
+        .join("oh_modules")
+        .join("@runtime")
+        .join("transitive");
+    let runtime_index = runtime_pkg.join("src/main/ets/Index.ets");
+    std::fs::create_dir_all(runtime_index.parent().unwrap()).expect("create runtime package");
+    std::fs::write(
+        runtime_pkg.join("oh-package.json5"),
+        r#"{ name: "@runtime/transitive", main: "src/main/ets/Index.ets" }"#,
+    )
+    .expect("write runtime package oh-package");
+    std::fs::write(&runtime_index, "export default class RuntimePackage {}")
+        .expect("write runtime package entry");
+
+    let undeclared_har = project_root.join("oh_modules").join("undeclared-har");
+    std::fs::create_dir_all(&undeclared_har).expect("create undeclared har");
+    std::fs::write(
+        undeclared_har.join("oh-package.json5"),
+        r#"{
+              name: "undeclared-har",
+              metadata: {
+                runtimeOnly: {
+                  packages: ["@runtime/undeclared"]
+                }
+              }
+            }"#,
+    )
+    .expect("write undeclared har oh-package");
+    let undeclared_pkg = project_root
+        .join("oh_modules")
+        .join("@runtime")
+        .join("undeclared");
+    std::fs::create_dir_all(undeclared_pkg.join("src/main/ets"))
+        .expect("create undeclared runtime package");
+    std::fs::write(
+        undeclared_pkg.join("oh-package.json5"),
+        r#"{ name: "@runtime/undeclared", main: "src/main/ets/Index.ets" }"#,
+    )
+    .expect("write undeclared runtime package oh-package");
+
+    let mut config = make_config(false);
+    config.project_root = project_root.clone();
+    let module_cfg = ModuleConfig {
+        name: "entry".to_string(),
+        src_path: module_root,
+        module_type: OhosModuleType::Entry,
+    };
+
+    let loader = LoaderJson::generate(&config, &module_cfg, &make_manifest());
+
+    assert!(loader
+        .hvigor_compile_entry
+        .contains(&to_absolute_path_string(&transitive_source)));
+    assert!(loader
+        .hvigor_compile_entry
+        .contains(&to_absolute_path_string(&runtime_index)));
+    assert!(
+        loader
+            .dynamic_import_lib_info
+            .contains_key("@runtime/transitive"),
+        "transitive dependency metadata.runtimeOnly.packages must feed dynamicImportLibInfo"
+    );
+    assert!(
+        !loader
+            .dynamic_import_lib_info
+            .contains_key("@runtime/undeclared"),
+        "undeclared package metadata.runtimeOnly must not leak into dynamicImportLibInfo"
+    );
+}
+
 /// Verify `byteCodeHarInfo` is populated when an oh_modules package has index.abc.
 #[test]
 fn test_loader_json_byte_code_har_info_populated_from_oh_modules() {
@@ -936,4 +2434,168 @@ fn test_loader_json_byte_code_har_info_populated_from_oh_modules() {
     assert_eq!(entry.compatible_sdk_version, "5.0.0(12)");
     assert!(entry.abc_path.ends_with("index.abc"));
     assert!(entry.source_maps_path.is_none());
+}
+
+/// Verify that a non-default effective target's `src/<target>/ets/` directory
+/// appears in `pkgNameToPkgBriefInfo.sourceRoots` when the directory exists.
+///
+/// Addresses section 3.1 gap:
+///   "sourceRoots/originalSourceRoots 严格语义和字段顺序仍不完整"
+#[test]
+fn test_loader_json_target_ets_src_added_to_source_roots() {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    let project_root = tmp.path().to_path_buf();
+    let module_root = project_root.join("entry");
+
+    // Create the default source directory.
+    std::fs::create_dir_all(module_root.join("src/main/ets")).expect("create src/main/ets");
+
+    // Create a target-specific ETS directory.
+    let target_ets = module_root.join("src/phone/ets");
+    std::fs::create_dir_all(&target_ets).expect("create src/phone/ets");
+
+    // Create a build-profile.json5 with a non-default "phone" target.
+    std::fs::write(
+        project_root.join("build-profile.json5"),
+        r#"{
+          app: { products: [{ name: "default" }] },
+          modules: [{
+            name: "entry",
+            srcPath: "./entry",
+            targets: [{
+              name: "phone",
+              applyToProducts: ["default"],
+              buildModeSet: [{ name: "debug" }]
+            }]
+          }]
+        }"#,
+    )
+    .expect("write build-profile");
+
+    let mut config = make_config(false);
+    config.project_root = project_root.clone();
+    let module_cfg = ModuleConfig {
+        name: "entry".to_string(),
+        src_path: module_root.clone(),
+        module_type: OhosModuleType::Entry,
+    };
+    let manifest = make_manifest();
+
+    let loader = LoaderJson::generate(&config, &module_cfg, &manifest);
+
+    let pkg_info = loader
+        .pkg_name_to_pkg_brief_info
+        .get("entry")
+        .expect("entry must be in pkgBriefInfo");
+
+    // sourceRoots should include the target-specific path BEFORE src/main/ets.
+    assert!(
+        pkg_info.source_roots.len() >= 2,
+        "sourceRoots must include target-specific dir; got: {:?}",
+        pkg_info.source_roots
+    );
+    let has_target_ets = pkg_info
+        .source_roots
+        .iter()
+        .any(|r| r.contains("src/phone/ets"));
+    assert!(
+        has_target_ets,
+        "sourceRoots must contain src/phone/ets; got: {:?}",
+        pkg_info.source_roots
+    );
+
+    // originalSourceRoots should still be src/main/ets only.
+    assert_eq!(
+        pkg_info.original_source_roots.len(),
+        1,
+        "originalSourceRoots must be [src/main/ets]; got: {:?}",
+        pkg_info.original_source_roots
+    );
+    assert!(
+        pkg_info.original_source_roots[0].contains("src/main/ets"),
+        "originalSourceRoots[0] must be src/main/ets; got: {}",
+        pkg_info.original_source_roots[0]
+    );
+}
+
+/// Verify that `src/ohosTest/ets/` sources are added to compileEntry when
+/// building in Test (ohosTest) mode, and excluded in debug/release mode.
+///
+/// Addresses section 3.4/3.1: 'local-test 注入態'
+/// hvigor's collectOhosTestEntry() scans src/ohosTest/ets/ for test sources.
+#[test]
+fn test_loader_json_ohos_test_sources_injected_in_test_mode() {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    let project_root = tmp.path().to_path_buf();
+    let module_root = project_root.join("entry");
+
+    // Create src/main/ets/Index.ets (main source)
+    fs::create_dir_all(module_root.join("src/main/ets")).expect("create main ets");
+    fs::write(module_root.join("src/main/ets/Index.ets"), "export {}").expect("write main");
+
+    // Create src/ohosTest/ets/ with test sources
+    let test_ets = module_root.join("src/ohosTest/ets");
+    fs::create_dir_all(&test_ets).expect("create test ets");
+    fs::write(
+        test_ets.join("TestRunner.ets"),
+        "export class TestRunner {}",
+    )
+    .expect("write test runner");
+    fs::write(test_ets.join("index.ets"), "export * from './TestRunner'")
+        .expect("write test index");
+    // A .d.ts file should NOT be included
+    fs::write(test_ets.join("TestTypes.d.ts"), "export type T = {}").expect("write types");
+
+    // Test mode should include ohosTest sources
+    let mut test_config = make_config(false);
+    test_config.project_root = project_root.clone();
+    test_config.output_target = arkdown_core::OutputTarget::Test;
+    let mut module_cfg = make_module_cfg();
+    module_cfg.src_path = module_root.clone();
+
+    let loader = LoaderJson::generate(&test_config, &module_cfg, &make_manifest());
+
+    let has_test_runner = loader
+        .hvigor_compile_entry
+        .iter()
+        .any(|e| e.contains("TestRunner"));
+    assert!(
+        has_test_runner,
+        "TestRunner.ets must be in compileEntry for ohosTest mode; entries: {:?}",
+        loader.hvigor_compile_entry
+    );
+    let has_test_index = loader
+        .hvigor_compile_entry
+        .iter()
+        .any(|e| e.contains("ohosTest") && e.contains("index"));
+    assert!(
+        has_test_index,
+        "index.ets must be in compileEntry for ohosTest mode; entries: {:?}",
+        loader.hvigor_compile_entry
+    );
+    let has_types = loader
+        .hvigor_compile_entry
+        .iter()
+        .any(|e| e.ends_with(".d.ts"));
+    assert!(
+        !has_types,
+        "declaration files must not be included in ohosTest compileEntry; entries: {:?}",
+        loader.hvigor_compile_entry
+    );
+
+    // Debug mode should NOT include ohosTest sources
+    let debug_config = make_config(false);
+    let mut debug_module_cfg = make_module_cfg();
+    debug_module_cfg.src_path = module_root;
+
+    let debug_loader = LoaderJson::generate(&debug_config, &debug_module_cfg, &make_manifest());
+    let has_ohos_test = debug_loader
+        .hvigor_compile_entry
+        .iter()
+        .any(|e| e.contains("ohosTest"));
+    assert!(
+        !has_ohos_test,
+        "ohosTest sources must not be included in debug compileEntry; entries: {:?}",
+        debug_loader.hvigor_compile_entry
+    );
 }

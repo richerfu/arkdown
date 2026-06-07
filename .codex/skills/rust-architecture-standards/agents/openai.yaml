@@ -1,0 +1,7 @@
+interface:
+  display_name: "Rust Architecture Standards"
+  short_description: "Mandatory Rust workspace and crate rules"
+  default_prompt: "Use $rust-architecture-standards to audit and implement Rust workspace changes."
+
+policy:
+  allow_implicit_invocation: true

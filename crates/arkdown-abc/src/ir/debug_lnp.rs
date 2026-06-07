@@ -163,7 +163,8 @@ fn source_map_base64_value(ch: char) -> Option<u32> {
 ///
 /// Architecture: opcodes go to `data_` (ops), operands go to `constant_pool` (cp).
 /// Format of `finish()` output: [ops][0x00=END][cp_len:u32LE][cp]
-pub(super) struct LineTracker {
+pub(crate) struct LineTracker {
+    start_line: u32,
     current_line: u32,
     current_pc: u32,
     /// Pending PC increment (accumulated since last column/line emit).
@@ -181,8 +182,9 @@ const LNP_LINE_BASE: i32 = -4;
 const LNP_LINE_RANGE: u32 = 15;
 
 impl LineTracker {
-    pub(super) fn new(start_line: u32) -> Self {
+    pub(crate) fn new(start_line: u32) -> Self {
         Self {
+            start_line,
             current_line: start_line,
             current_pc: 0,
             pending_pc: 0,
@@ -190,6 +192,10 @@ impl LineTracker {
             ops: Vec::new(),
             cp: Vec::new(),
         }
+    }
+
+    pub(crate) fn start_line(&self) -> u32 {
+        self.start_line
     }
 
     /// Emit SPECIAL(pc_inc, line_inc) if encodable; returns true on success.
@@ -254,14 +260,14 @@ impl LineTracker {
         self.prev_col = col;
     }
 
-    pub(super) fn emit_epilogue_column_reset(&mut self) {
+    pub(crate) fn emit_epilogue_column_reset(&mut self) {
         self.prev_col = 0;
         self.emit_column(u32::MAX);
     }
 
     /// Per-instruction advance: EmitLineNumber + EmitColumnNumber + accumulate pc.
     /// Matches libpandafile BuildLineNumberProgram inner loop exactly.
-    pub(super) fn advance_with_col(&mut self, new_line: u32, col: u32, insn_size: u32) {
+    pub(crate) fn advance_with_col(&mut self, new_line: u32, col: u32, insn_size: u32) {
         let line_inc = new_line as i32 - self.current_line as i32;
         if line_inc != 0 {
             self.emit_number(self.pending_pc, line_inc);
@@ -271,30 +277,17 @@ impl LineTracker {
         self.pending_pc += insn_size;
     }
 
-    /// Per-statement advance (no column). Kept for compatibility.
-    #[allow(dead_code)]
-    fn advance(&mut self, new_pc: u32, new_line: u32) {
-        let pc_delta = new_pc.saturating_sub(self.current_pc);
-        let line_delta = new_line as i32 - self.current_line as i32;
-        if pc_delta == 0 && line_delta == 0 {
-            return;
-        }
-        self.pending_pc += pc_delta;
-        if line_delta != 0 {
-            self.emit_number(self.pending_pc, line_delta);
-            self.pending_pc = 0;
-        }
-    }
-
     /// Finish and return encoded bytes: [ops][0x00=END][cp_len:u32LE][cp].
-    pub(super) fn finish(mut self) -> Vec<u8> {
-        if self.pending_pc > 0 {
-            self.emit_adv_pc(self.pending_pc);
-        }
-        self.ops.push(0x00);
-        let cp_len = self.cp.len() as u32;
-        self.ops.extend_from_slice(&cp_len.to_le_bytes());
-        self.ops.extend_from_slice(&self.cp);
-        self.ops
+    ///
+    /// Mirrors libpandafile `BuildLineNumberProgram`: after the last
+    /// instruction it emits only END_SEQUENCE; it does not flush the final
+    /// accumulated pc_inc.
+    pub(crate) fn finish(self) -> Vec<u8> {
+        let mut self_ = self;
+        self_.ops.push(0x00);
+        let cp_len = self_.cp.len() as u32;
+        self_.ops.extend_from_slice(&cp_len.to_le_bytes());
+        self_.ops.extend_from_slice(&self_.cp);
+        self_.ops
     }
 }

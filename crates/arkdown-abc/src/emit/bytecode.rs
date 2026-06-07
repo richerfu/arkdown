@@ -1,5 +1,7 @@
 use rustc_hash::FxHashMap;
 
+use crate::isa::{id_operands as isa_id_operands, instruction_len as isa_instruction_len, IdKind};
+
 pub(super) fn patch_bytecode_index_operands(
     bytecode: &[u8],
     string_pool_indices: &FxHashMap<u16, u16>,
@@ -104,9 +106,146 @@ pub(super) fn patch_bytecode_index_operands(
             pos += 4;
             continue;
         }
+        if let Some(len) = patch_isa_id_operands(
+            &mut patched,
+            pos,
+            string_pool_indices,
+            literal_pool_indices,
+            definemethod_pool_indices_by_name,
+        ) {
+            pos += len;
+            continue;
+        }
         pos += instruction_len(opcode, patched.get(pos + 1).copied());
     }
     patched
+}
+
+pub(crate) fn remap_literal_array_ids(bytecode: &mut [u8], literal_indices: &FxHashMap<u16, u16>) {
+    if literal_indices.is_empty() {
+        return;
+    }
+
+    let mut pos = 0;
+    while pos < bytecode.len() {
+        let Some(opcode) = bytecode.get(pos).copied() else {
+            break;
+        };
+        match opcode {
+            // newlexenvwithname imm:u8, literalarray_id
+            0xb6 if pos + 3 < bytecode.len() => {
+                rewrite_u16_operand(bytecode, pos + 2, literal_indices);
+                pos += 4;
+                continue;
+            }
+            // defineclasswithbuffer imm:u8, method_id, literalarray_id, imm:u16, v:u8
+            0x35 if pos + 8 < bytecode.len() => {
+                rewrite_u16_operand(bytecode, pos + 4, literal_indices);
+                pos += 9;
+                continue;
+            }
+            // createarraywithbuffer/createobjectwithbuffer imm:u8, literalarray_id
+            0x06 | 0x07 if pos + 3 < bytecode.len() => {
+                rewrite_u16_operand(bytecode, pos + 2, literal_indices);
+                pos += 4;
+                continue;
+            }
+            // callruntime.createprivateproperty imm:u16, literalarray_id
+            0xfb if bytecode.get(pos + 1) == Some(&0x04) && pos + 5 < bytecode.len() => {
+                rewrite_u16_operand(bytecode, pos + 4, literal_indices);
+                pos += 6;
+                continue;
+            }
+            _ => {}
+        }
+        if let Some(len) = remap_isa_literal_array_ids(bytecode, pos, literal_indices) {
+            pos += len;
+            continue;
+        }
+        pos += instruction_len(opcode, bytecode.get(pos + 1).copied());
+    }
+}
+
+fn patch_isa_id_operands(
+    bytecode: &mut [u8],
+    pos: usize,
+    string_pool_indices: &FxHashMap<u16, u16>,
+    literal_pool_indices: &FxHashMap<u16, u16>,
+    method_pool_indices: &FxHashMap<u16, u16>,
+) -> Option<usize> {
+    let len = isa_instruction_len(bytecode, pos)?;
+    if pos.checked_add(len)? > bytecode.len() {
+        return None;
+    }
+    let operands = isa_id_operands(bytecode, pos)?;
+    for operand in operands {
+        let operand_pos = pos.checked_add(operand.offset)?;
+        let old = read_id_operand(bytecode, operand_pos, operand.width)?;
+        let new = match operand.kind {
+            IdKind::String => string_pool_indices.get(&(old as u16)).copied(),
+            IdKind::Method => method_pool_indices.get(&(old as u16)).copied(),
+            IdKind::LiteralArray => literal_pool_indices.get(&(old as u16)).copied(),
+            IdKind::Other => None,
+        };
+        if let Some(new) = new {
+            write_id_operand(bytecode, operand_pos, operand.width, new as u32)?;
+        }
+    }
+    Some(len)
+}
+
+fn remap_isa_literal_array_ids(
+    bytecode: &mut [u8],
+    pos: usize,
+    literal_indices: &FxHashMap<u16, u16>,
+) -> Option<usize> {
+    let len = isa_instruction_len(bytecode, pos)?;
+    if pos.checked_add(len)? > bytecode.len() {
+        return None;
+    }
+    for operand in isa_id_operands(bytecode, pos)? {
+        if operand.kind != IdKind::LiteralArray {
+            continue;
+        }
+        let operand_pos = pos.checked_add(operand.offset)?;
+        let old = read_id_operand(bytecode, operand_pos, operand.width)?;
+        if let Some(&new) = literal_indices.get(&(old as u16)) {
+            write_id_operand(bytecode, operand_pos, operand.width, new as u32)?;
+        }
+    }
+    Some(len)
+}
+
+fn read_id_operand(bytecode: &[u8], operand_pos: usize, width: u8) -> Option<u32> {
+    match width {
+        16 => {
+            Some(
+                u16::from_le_bytes([*bytecode.get(operand_pos)?, *bytecode.get(operand_pos + 1)?])
+                    as u32,
+            )
+        }
+        32 => Some(u32::from_le_bytes([
+            *bytecode.get(operand_pos)?,
+            *bytecode.get(operand_pos + 1)?,
+            *bytecode.get(operand_pos + 2)?,
+            *bytecode.get(operand_pos + 3)?,
+        ])),
+        _ => None,
+    }
+}
+
+fn write_id_operand(bytecode: &mut [u8], operand_pos: usize, width: u8, value: u32) -> Option<()> {
+    match width {
+        16 => {
+            let value = u16::try_from(value).ok()?;
+            bytecode[operand_pos..operand_pos + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        32 => {
+            bytecode[operand_pos..operand_pos + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        _ => return None,
+    }
+    Some(())
 }
 
 pub(super) fn assign_inline_cache_slots(bytecode: &mut [u8]) -> u32 {
@@ -136,7 +275,7 @@ fn inline_cache_slot_operand(bytecode: &[u8], pos: usize, opcode: u8) -> Option<
         }
         let inc = match sub_opcode {
             0x13 | 0x14 => 1,
-            0x01 => 2,
+            0x01 | 0x06 => 2,
             _ => return None,
         };
         return Some((operand_pos, inc));
@@ -151,7 +290,7 @@ fn inline_cache_slot_operand(bytecode: &[u8], pos: usize, opcode: u8) -> Option<
         | 0x06
         | 0x07
         | 0x0a..=0x1b
-        | 0x1f..=0x22
+        | 0x1e..=0x22
         | 0x27
         | 0x28
         | 0x34
@@ -227,31 +366,50 @@ pub(super) fn collect_bytecode_string_indices(bytecode: &[u8], indices: &mut Vec
     }
 }
 
-fn instruction_len(opcode: u8, next: Option<u8>) -> usize {
+pub(crate) fn instruction_len(opcode: u8, next: Option<u8>) -> usize {
     match opcode {
-        0x00..=0x03 | 0x64 | 0x65 | 0x70 | 0xbf | 0xc0 => 1,
-        0x05 | 0x09 | 0x1c | 0x29 | 0x36 | 0x3c | 0x3d | 0x44 | 0x4d | 0x4f | 0x51 | 0x60
-        | 0x61 | 0x67 | 0x7c | 0x7d | 0x7e | 0xb1 | 0xc3 | 0xc4 | 0xc5 | 0xcd | 0xce => 2,
-        0x2a | 0x2d | 0x3e | 0x45 | 0x50 | 0x68 | 0x77 | 0x8a | 0x8b | 0x9b | 0x4e | 0xb4
-        | 0xb9 | 0xc6 => 3,
+        0x00..=0x04
+        | 0x64
+        | 0x65
+        | 0x66
+        | 0x69
+        | 0x6d
+        | 0x6f
+        | 0x70
+        | 0xae
+        | 0xb0
+        | 0xbd
+        | 0xbf
+        | 0xc0
+        | 0xd5 => 1,
+        0x05 | 0x09 | 0x1c | 0x1d | 0x29 | 0x36 | 0x3c | 0x3d | 0x44 | 0x4d | 0x4f | 0x51
+        | 0x60 | 0x61 | 0x67 | 0x76 | 0x7c | 0x7d | 0x7e | 0xa1 | 0xb1 | 0xc2 | 0xc3 | 0xc4
+        | 0xc5 | 0xcd | 0xce => 2,
+        0x2a | 0x2d | 0x39 | 0x3e | 0x45 | 0x50 | 0x68 | 0x77 | 0x8a | 0x8b | 0x9b | 0x4e
+        | 0xb4 | 0xb9 | 0xc1 | 0xc6 | 0xd3 => 3,
         0x0a..=0x1b | 0x25 | 0x26 | 0x27 | 0x28 => 3,
-        0x1f..=0x22 => 2,
-        0x06 | 0x07 | 0x08 | 0x2b | 0x2e | 0x31 | 0x32 | 0x38 | 0x3f | 0x40 | 0x42 | 0x73
-        | 0x78 | 0x99 | 0xb3 | 0xb6 | 0xba => 4,
+        0x1e..=0x22 => 2,
+        0x06 | 0x07 | 0x08 | 0x2b | 0x2e | 0x31 | 0x32 | 0x38 | 0x3f | 0x40 | 0x42 | 0x46
+        | 0x73 | 0x78 | 0x99 | 0xb3 | 0xb6 | 0xba | 0xbb | 0xc9 => 4,
         0x37 => 3,
         0x2c | 0x33 | 0x34 | 0x43 | 0x62 | 0x79 | 0x7a | 0x8e | 0x8f | 0x98 | 0x9a | 0x9c
-        | 0xbc | 0xdb | 0xdc => 5,
+        | 0xbc | 0xd0 | 0xdb | 0xdc => 5,
         0x2f => 5,
-        0x30 => 6,
+        0x30 | 0xd8 | 0xda => 6,
+        0xd9 => 7,
         0x35 | 0x63 => 9,
         0xcf => 2,
         0x80 => 3,
         0xcb => 6,
         0xfd if next == Some(0x00) => 6,
         0xfe if next == Some(0x00) => 2,
+        0xfe if next == Some(0x02) => 2,
         0xfe if matches!(next, Some(0x05 | 0x07)) => 3,
         0xfe if next == Some(0x09) => 4,
         0xfb if next == Some(0x01) => 5,
+        0xfb if next == Some(0x04) => 6,
+        0xfb if next == Some(0x05) => 8,
+        0xfb if next == Some(0x06) => 4,
         0xfb if matches!(next, Some(0x13 | 0x14)) => 3,
         _ => 1,
     }

@@ -18,6 +18,16 @@ enum Commands {
     Build(cmd::build::BuildArgs),
     /// Remove build outputs
     Clean(cmd::clean::CleanArgs),
+    /// Run ETS struct-decoration checks without building (M5 — SPEC-023 lint mode)
+    Check(cmd::check::CheckArgs),
+    /// Dump the resolved effective build configuration as JSON.
+    ///
+    /// Implements the hvigor effective-config oracle dump mode (gap analysis
+    /// section 3.1).  Use this to compare arkdown's resolved config against
+    /// hvigor's `--dump-config` output to detect divergences without running
+    /// a full build.
+    #[command(name = "dump-config")]
+    DumpConfig(cmd::dump_config::DumpConfigArgs),
 }
 
 #[tokio::main]
@@ -25,9 +35,11 @@ async fn main() {
     init_tracing();
 
     let cli = Cli::parse();
-    let result = match cli.command {
+    let result: anyhow::Result<()> = match cli.command {
         Commands::Build(args) => cmd::build::run(args).await,
         Commands::Clean(args) => cmd::clean::run(args),
+        Commands::Check(args) => cmd::check::run(args),
+        Commands::DumpConfig(args) => cmd::dump_config::run(args),
     };
     if let Err(e) = result {
         eprintln!("error: {}", e);

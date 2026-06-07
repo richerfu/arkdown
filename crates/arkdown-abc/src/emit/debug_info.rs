@@ -1,5 +1,6 @@
 use crate::emit::file::StringItemWriter;
 use crate::emit::record::{uleb128, ClassRecord, MethodRecord};
+use std::cmp::Ordering;
 
 const MANDATORY_PARAM_THIS_REG: u8 = 2;
 const LNP_LINE_BASE: i32 = -4;
@@ -22,8 +23,11 @@ pub(super) fn encode_sleb128_bytes(mut value: i32) -> Vec<u8> {
 pub(super) struct MidLocalEvent {
     pc: u32,
     kind: MidLocalKind,
+    order: usize,
     reg: i32,
     name_off: u32,
+    type_off: u32,
+    type_signature_off: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +40,7 @@ pub(super) fn infer_func_main_class_local_events(
     method: &MethodRecord,
     class: &ClassRecord,
     string_items: &StringItemWriter,
+    any_type_off: u32,
 ) -> Vec<MidLocalEvent> {
     if method.name != "func_main_0" {
         return Vec::new();
@@ -73,16 +78,132 @@ pub(super) fn infer_func_main_class_local_events(
         MidLocalEvent {
             pc: start_pc,
             kind: MidLocalKind::Start,
+            order: 0,
             reg,
             name_off,
+            type_off: any_type_off,
+            type_signature_off: Some(any_type_off),
         },
         MidLocalEvent {
             pc: end_pc,
             kind: MidLocalKind::End,
+            order: 1,
             reg,
             name_off,
+            type_off: any_type_off,
+            type_signature_off: Some(any_type_off),
         },
     ]
+}
+
+pub(super) fn local_variable_debug_param_offsets(
+    method: &MethodRecord,
+    string_items: &StringItemWriter,
+) -> Vec<u32> {
+    method
+        .debug_info
+        .as_ref()
+        .map(|debug| {
+            debug
+                .local_variables
+                .iter()
+                .filter(|local| local.is_parameter(method.num_vregs))
+                .filter_map(|local| string_items.id_of(&local.name))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub(super) fn local_variable_debug_events(
+    method: &MethodRecord,
+    string_items: &StringItemWriter,
+) -> Vec<MidLocalEvent> {
+    let Some(debug) = method.debug_info.as_ref() else {
+        return Vec::new();
+    };
+    if debug.local_variables.is_empty() {
+        return Vec::new();
+    }
+
+    let mut pairs = Vec::new();
+    for (idx, local) in debug.local_variables.iter().enumerate() {
+        if local.is_parameter(method.num_vregs) {
+            continue;
+        }
+        pairs.push(LocalVariablePair {
+            insn_order: local.start,
+            variable_index: idx,
+            kind: MidLocalKind::Start,
+        });
+        pairs.push(LocalVariablePair {
+            insn_order: local.start.saturating_add(local.length),
+            variable_index: idx,
+            kind: MidLocalKind::End,
+        });
+    }
+
+    pairs.sort_by(|a, b| {
+        let a_var = &debug.local_variables[a.variable_index];
+        let b_var = &debug.local_variables[b.variable_index];
+        match a.insn_order.cmp(&b.insn_order) {
+            Ordering::Equal if a_var.reg == b_var.reg => a_var.start.cmp(&b_var.start),
+            other => other,
+        }
+    });
+
+    let instruction_offsets = instruction_pc_offsets(method);
+    pairs
+        .into_iter()
+        .enumerate()
+        .map(|(order, pair)| {
+            let local = &debug.local_variables[pair.variable_index];
+            let name_off = string_items
+                .id_of(&local.name)
+                .expect("local variable name must be interned before LNP emit");
+            let type_off = string_items
+                .id_of(&local.signature)
+                .expect("local variable signature must be interned before LNP emit");
+            let type_signature_off = (!local.signature_type.is_empty()).then(|| {
+                string_items
+                    .id_of(&local.signature_type)
+                    .expect("local variable signature_type must be interned before LNP emit")
+            });
+            MidLocalEvent {
+                pc: pc_for_instruction_order(&instruction_offsets, pair.insn_order),
+                kind: pair.kind,
+                order,
+                reg: local.reg,
+                name_off,
+                type_off,
+                type_signature_off,
+            }
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone)]
+struct LocalVariablePair {
+    insn_order: u32,
+    variable_index: usize,
+    kind: MidLocalKind,
+}
+
+fn instruction_pc_offsets(method: &MethodRecord) -> Vec<u32> {
+    let mut offsets = Vec::with_capacity(method.pandasm_insns.len() + 1);
+    let mut pc = 0u32;
+    offsets.push(pc);
+    for insn in &method.pandasm_insns {
+        pc = pc.saturating_add(insn.byte_len() as u32);
+        offsets.push(pc);
+    }
+    offsets
+}
+
+fn pc_for_instruction_order(offsets: &[u32], instruction_order: u32) -> u32 {
+    offsets
+        .get(instruction_order as usize)
+        .copied()
+        .unwrap_or_else(|| offsets.last().copied().unwrap_or_default())
 }
 
 fn class_short_name(class_name: &str) -> Option<String> {
@@ -133,10 +254,11 @@ fn infer_nth_line_change_pc(
                     }
                 }
             }
-            0x04 => {
+            0x03 | 0x04 => {
                 let (_, next_op) = read_sleb128_from(ops, op_pos)?;
                 op_pos = next_op;
-                for _ in 0..3 {
+                let cp_count = if op == 0x04 { 3 } else { 2 };
+                for _ in 0..cp_count {
                     let (_, next_cp) = read_uleb128_from(cp, cp_pos)?;
                     cp_pos = next_cp;
                 }
@@ -184,31 +306,34 @@ pub(super) fn append_line_ops_with_mid_locals(
     method_ops: &[u8],
     base_pc: u32,
     mid_locals: &[MidLocalEvent],
-    any_type_off: u32,
     lnp_data: &mut Vec<u8>,
     cp: &mut Vec<u8>,
 ) {
     let Some((ops, method_cp)) = split_line_ops(method_ops) else {
         lnp_data.extend_from_slice(method_ops);
+        let mut events = mid_locals.to_vec();
+        events.sort_by_key(|event| (event.pc, event.order));
+        let mut event_pos = 0usize;
+        let mut pc = base_pc;
+        while event_pos < events.len() {
+            let event_pc = events[event_pos].pc;
+            if event_pc > pc {
+                emit_adv_pc(event_pc - pc, lnp_data, cp);
+                pc = event_pc;
+            }
+            emit_mid_local_events_at_pc(event_pc, &events, &mut event_pos, lnp_data, cp);
+        }
         return;
     };
     let mut events = mid_locals.to_vec();
-    events.sort_by_key(|event| {
-        (
-            event.pc,
-            match event.kind {
-                MidLocalKind::Start => 0u8,
-                MidLocalKind::End => 1u8,
-            },
-        )
-    });
+    events.sort_by_key(|event| (event.pc, event.order));
     let mut event_pos = 0usize;
     let mut pc = base_pc;
     let mut op_pos = 0usize;
     let mut cp_pos = 0usize;
 
     while op_pos < ops.len() {
-        emit_mid_local_events_at_pc(pc, &events, &mut event_pos, any_type_off, lnp_data, cp);
+        emit_mid_local_events_at_pc(pc, &events, &mut event_pos, lnp_data, cp);
 
         let op = ops[op_pos];
         op_pos += 1;
@@ -221,7 +346,6 @@ pub(super) fn append_line_ops_with_mid_locals(
                     &mut pc,
                     &events,
                     &mut event_pos,
-                    any_type_off,
                     lnp_data,
                     cp,
                 );
@@ -232,13 +356,14 @@ pub(super) fn append_line_ops_with_mid_locals(
                 lnp_data.push(0x02);
                 cp.extend_from_slice(&encode_sleb128_bytes(delta));
             }
-            0x04 => {
+            0x03 | 0x04 => {
                 let reg_start = op_pos;
                 let (_, next_op) = read_sleb128_from(ops, op_pos).unwrap_or((0, op_pos));
                 op_pos = next_op;
-                lnp_data.push(0x04);
+                lnp_data.push(op);
                 lnp_data.extend_from_slice(&ops[reg_start..next_op]);
-                for _ in 0..3 {
+                let cp_count = if op == 0x04 { 3 } else { 2 };
+                for _ in 0..cp_count {
                     let (value, next_cp) =
                         read_uleb128_from(method_cp, cp_pos).unwrap_or((0, cp_pos));
                     cp_pos = next_cp;
@@ -269,7 +394,6 @@ pub(super) fn append_line_ops_with_mid_locals(
                         &mut pc,
                         &events,
                         &mut event_pos,
-                        any_type_off,
                         lnp_data,
                         cp,
                     );
@@ -282,7 +406,7 @@ pub(super) fn append_line_ops_with_mid_locals(
             _ => lnp_data.push(op),
         }
     }
-    emit_mid_local_events_at_pc(pc, &events, &mut event_pos, any_type_off, lnp_data, cp);
+    emit_mid_local_events_at_pc(pc, &events, &mut event_pos, lnp_data, cp);
 }
 
 fn split_line_ops(method_ops: &[u8]) -> Option<(&[u8], &[u8])> {
@@ -305,7 +429,6 @@ fn append_pc_advance_with_events(
     pc: &mut u32,
     events: &[MidLocalEvent],
     event_pos: &mut usize,
-    any_type_off: u32,
     lnp_data: &mut Vec<u8>,
     cp: &mut Vec<u8>,
 ) {
@@ -316,7 +439,7 @@ fn append_pc_advance_with_events(
             emit_adv_pc(event_pc - *pc, lnp_data, cp);
             *pc = event_pc;
         }
-        emit_mid_local_events_at_pc(event_pc, events, event_pos, any_type_off, lnp_data, cp);
+        emit_mid_local_events_at_pc(event_pc, events, event_pos, lnp_data, cp);
     }
     if target > *pc {
         emit_adv_pc(target - *pc, lnp_data, cp);
@@ -364,7 +487,6 @@ fn emit_mid_local_events_at_pc(
     pc: u32,
     events: &[MidLocalEvent],
     event_pos: &mut usize,
-    any_type_off: u32,
     lnp_data: &mut Vec<u8>,
     cp: &mut Vec<u8>,
 ) {
@@ -372,11 +494,17 @@ fn emit_mid_local_events_at_pc(
         let event = &events[*event_pos];
         match event.kind {
             MidLocalKind::Start => {
-                lnp_data.push(0x04);
+                if event.type_signature_off.is_some() {
+                    lnp_data.push(0x04);
+                } else {
+                    lnp_data.push(0x03);
+                }
                 lnp_data.extend_from_slice(&encode_sleb128_bytes(event.reg));
                 cp.extend_from_slice(&uleb128(event.name_off as u64));
-                cp.extend_from_slice(&uleb128(any_type_off as u64));
-                cp.extend_from_slice(&uleb128(any_type_off as u64));
+                cp.extend_from_slice(&uleb128(event.type_off as u64));
+                if let Some(type_signature_off) = event.type_signature_off {
+                    cp.extend_from_slice(&uleb128(type_signature_off as u64));
+                }
             }
             MidLocalKind::End => {
                 lnp_data.push(0x05);
@@ -435,15 +563,17 @@ fn read_sleb128_from(bytes: &[u8], mut pos: usize) -> Option<(i32, usize)> {
 /// data_ stream that need them (SET_FILE src_off, START_LOCAL_EXTENDED operands,
 /// ADVANCE_PC delta, ADVANCE_LINE delta, etc.).
 pub(super) fn encode_debug_info_with_cp(
-    _line_start: u32,
+    line_start: u32,
     param_name_offsets: &[u32],
     constant_pool: &[u8],
     lnp_index: u32,
+    no_line_number: bool,
 ) -> Vec<u8> {
     let mut out = Vec::with_capacity(8 + constant_pool.len());
     // es2abc leaves the source line in the LineNumberProgram and writes the
     // DebugInfo line_num field as NO_LINE_NUMBER.
-    out.extend_from_slice(&uleb128(u32::MAX as u64));
+    let line_num = if no_line_number { u32::MAX } else { line_start };
+    out.extend_from_slice(&uleb128(line_num as u64));
     out.extend_from_slice(&uleb128(param_name_offsets.len() as u64));
     for &off in param_name_offsets {
         out.extend_from_slice(&uleb128(off as u64));
@@ -453,19 +583,6 @@ pub(super) fn encode_debug_info_with_cp(
     out.extend_from_slice(constant_pool);
     out.extend_from_slice(&uleb128(lnp_index as u64));
     out
-}
-
-/// Encode a Panda `DebugInfoItem` with a minimal constant_pool containing only
-/// the SET_FILE operand. Used as a fallback when no LNP tracking is available.
-#[allow(dead_code)]
-fn encode_debug_info(
-    line_start: u32,
-    param_name_offsets: &[u32],
-    source_file_offset: u32,
-    lnp_index: u32,
-) -> Vec<u8> {
-    let cp = uleb128(source_file_offset as u64);
-    encode_debug_info_with_cp(line_start, param_name_offsets, &cp, lnp_index)
 }
 
 pub(super) fn debug_scope_start_pc(method: &MethodRecord) -> u32 {

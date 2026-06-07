@@ -1,6 +1,31 @@
 use arkdown_core::{
-    AbilityEntry, CompileMode, ExtensionAbilityEntry, HapManifest, ModuleJson5, OhosModuleType,
+    AbilityEntry, ArkdownError, CompileMode, ExtensionAbilityEntry, HapManifest, HspDependency,
+    ModuleJson5, OhosModuleType,
 };
+
+/// Validate the raw `compileMode` field in a [`ModuleJson5`].
+///
+/// Hvigor supports two modes:
+/// - `"esmodule"` (default) — Stage model, ECMAScript module output.  Supported.
+/// - `"jsbundle"` — Legacy FA model, CommonJS bundle output.  **Not supported** by arkdown.
+///
+/// When a module declares `compileMode: "jsbundle"`, this function returns an
+/// `ArkdownError` describing the limitation.  This matches hvigor's behavior of
+/// producing JSBUNDLE output for such modules; arkdown explicitly rejects the
+/// mode rather than silently producing incorrect ESModule output.
+pub fn validate_compile_mode(module_json5: &ModuleJson5, file: &str) -> Result<(), ArkdownError> {
+    if let Some(mode) = module_json5.module.compile_mode.as_deref() {
+        if mode.eq_ignore_ascii_case("jsbundle") {
+            return Err(ArkdownError::Bundler(format!(
+                "UNSUPPORTED_COMPILE_MODE: module '{}' in '{}' uses compileMode \"jsbundle\" \
+                 (legacy FA model).  arkdown only supports Stage model (compileMode \
+                 \"esmodule\").  Migrate to the Stage model to use arkdown.",
+                module_json5.module.name, file
+            )));
+        }
+    }
+    Ok(())
+}
 
 /// Transform a raw [`ModuleJson5`] into a processed [`HapManifest`].
 ///
@@ -67,7 +92,22 @@ pub fn process_profile_with_ark_vm_version(
         compile_mode,
         abilities,
         extension_abilities,
-        dependencies: vec![],
+        // Populate HSP dependencies from module.json5#module.dependencies.
+        // Hvigor's ProcessProfile.addModuleDependencies() collects HSP dependency
+        // metadata; we use the raw field from module.json5 for each dep entry.
+        dependencies: module_json5
+            .module
+            .dependencies
+            .iter()
+            .filter_map(|dep| {
+                let bundle = dep.get("bundleName").and_then(|v| v.as_str())?;
+                let module_n = dep.get("moduleName").and_then(|v| v.as_str())?;
+                Some(HspDependency {
+                    bundle_name: bundle.to_string(),
+                    module_name: module_n.to_string(),
+                })
+            })
+            .collect(),
         router_map: module_json5.module.router_map.clone(),
         pages: module_json5.module.pages.clone(),
         main_element: module_json5.module.main_element.clone(),
@@ -115,7 +155,8 @@ mod tests {
                 src_entry: None,
                 metadata: vec![],
                 app_startup: None,
-                cross_app_shared_config: vec![],
+                cross_app_shared_config: Default::default(),
+                ..Default::default()
             },
         }
     }
@@ -171,6 +212,79 @@ mod tests {
             let manifest = process_profile(&mj, 10, "com.example.app", CompileMode::EsModule);
             assert_eq!(manifest.module_type, expected, "type_ = {type_str}");
         }
+    }
+
+    /// JSBUNDLE compile mode must be rejected with a clear hard error.
+    /// Section 3.7: "JSBUNDLE fixture 一致或拒绝一致" — arkdown rejects JSBUNDLE.
+    #[test]
+    fn test_validate_compile_mode_rejects_jsbundle() {
+        let mut mj = make_module_json5("entry", "entry");
+        mj.module.compile_mode = Some("jsbundle".to_string());
+        let result = validate_compile_mode(&mj, "entry/src/main/module.json5");
+        assert!(result.is_err(), "jsbundle must be rejected");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("UNSUPPORTED_COMPILE_MODE"),
+            "error must contain UNSUPPORTED_COMPILE_MODE, got: {err}"
+        );
+        assert!(
+            err.contains("jsbundle"),
+            "error must mention jsbundle, got: {err}"
+        );
+    }
+
+    /// JSBUNDLE reject is case-insensitive (hvigor accepts both cases).
+    #[test]
+    fn test_validate_compile_mode_rejects_jsbundle_case_insensitive() {
+        let mut mj = make_module_json5("entry", "entry");
+        mj.module.compile_mode = Some("JSBUNDLE".to_string());
+        assert!(
+            validate_compile_mode(&mj, "module.json5").is_err(),
+            "JSBUNDLE (uppercase) must also be rejected"
+        );
+    }
+
+    /// esmodule mode is valid and must not produce an error.
+    #[test]
+    fn test_validate_compile_mode_accepts_esmodule() {
+        let mut mj = make_module_json5("entry", "entry");
+        mj.module.compile_mode = Some("esmodule".to_string());
+        assert!(
+            validate_compile_mode(&mj, "module.json5").is_ok(),
+            "esmodule must be accepted"
+        );
+    }
+
+    /// Absent compileMode field (default) is valid (esmodule is the default).
+    #[test]
+    fn test_validate_compile_mode_accepts_absent() {
+        let mj = make_module_json5("entry", "entry");
+        // compile_mode is None by default in ModuleJson5Module
+        assert_eq!(mj.module.compile_mode, None);
+        assert!(
+            validate_compile_mode(&mj, "module.json5").is_ok(),
+            "absent compileMode must be accepted (defaults to esmodule)"
+        );
+    }
+
+    #[test]
+    fn test_process_profile_maps_hsp_dependencies() {
+        let mut mj = make_module_json5("entry", "entry");
+        mj.module.dependencies = vec![
+            serde_json::json!({
+                "bundleName": "com.example.shared",
+                "moduleName": "shared_hsp"
+            }),
+            serde_json::json!({
+                "bundleName": "com.example.incomplete"
+            }),
+        ];
+
+        let manifest = process_profile(&mj, 12, "com.example.app", CompileMode::EsModule);
+
+        assert_eq!(manifest.dependencies.len(), 1);
+        assert_eq!(manifest.dependencies[0].bundle_name, "com.example.shared");
+        assert_eq!(manifest.dependencies[0].module_name, "shared_hsp");
     }
 
     #[test]

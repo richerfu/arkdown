@@ -48,9 +48,10 @@ Each SPEC file contains three standard sections:
 
 ## P1 — Production Builds (continued)
 
-| ID       | Title                         | Crate           | Blocked By |
-| -------- | ----------------------------- | --------------- | ---------- |
-| SPEC-044 | Integrated HSP Processing     | `arkdown-pack`  | SPEC-012   |
+| ID       | Title                              | Crate           | Blocked By                |
+| -------- | ---------------------------------- | --------------- | ------------------------- |
+| SPEC-044 | Integrated HSP Processing          | `arkdown-pack`  | SPEC-012                  |
+| SPEC-048 | Build Session Architecture Refactor | multi-crate     | SPEC-005, SPEC-010, SPEC-019 |
 
 ## P2 — Advanced Features
 

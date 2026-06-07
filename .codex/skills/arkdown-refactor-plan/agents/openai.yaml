@@ -1,0 +1,7 @@
+interface:
+  display_name: "Arkdown Refactor Plan"
+  short_description: "Mandatory SPEC-048 refactor contract"
+  default_prompt: "Use $arkdown-refactor-plan to apply the arkdown SPEC-048 architecture contract."
+
+policy:
+  allow_implicit_invocation: true

@@ -28,6 +28,14 @@ use rustc_hash::FxHashMap;
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
 
+// F2/J2 — per-file transform content cache.
+// Maps FNV content-hash → cached transform output (code string).
+// This is the rolldown-level equivalent of hvigor's invalidCachePlugin /
+// RollupCacheService: any `.ets` file whose content hash is in the cache
+// has its transform result returned immediately, skipping the full
+// ETS/ViewPU lowering pipeline.
+type TransformCacheMap = FxHashMap<u64, String>;
+
 use arkdown_core::{ArkdownConfig, ModuleSource, ModuleType, ResolvedId};
 use hvigor_format::{format_hvigor_standard_ts, module_name_from_id};
 use module_rewrite::{rewrite_type_only_reexports, split_type_only_named_imports};
@@ -64,6 +72,11 @@ pub struct EtsTransformPlugin {
     pub config: Arc<ArkdownConfig>,
     resource_refs: Arc<FxHashMap<String, ResourceReference>>,
     component_metadata: Arc<Mutex<Option<transform::component_meta::ComponentMetadata>>>,
+    /// F2/J2: in-process per-file transform content cache.
+    /// Populated across all `do_transform` calls within this plugin instance.
+    /// Disk persistence uses `arkdown-cache::BuildCache` via the cache directory
+    /// from `config.modules[0].src_path/build/default/cache/ets_transform/`.
+    transform_cache: Arc<Mutex<TransformCacheMap>>,
 }
 
 impl std::fmt::Debug for EtsTransformPlugin {
@@ -74,10 +87,12 @@ impl std::fmt::Debug for EtsTransformPlugin {
 
 impl EtsTransformPlugin {
     pub fn new(config: Arc<ArkdownConfig>) -> Self {
+        let cache = Self::load_transform_cache(&config);
         EtsTransformPlugin {
             config,
             resource_refs: Arc::new(FxHashMap::default()),
             component_metadata: Arc::new(Mutex::new(None)),
+            transform_cache: Arc::new(Mutex::new(cache)),
         }
     }
 
@@ -85,10 +100,44 @@ impl EtsTransformPlugin {
         config: Arc<ArkdownConfig>,
         resource_refs: FxHashMap<String, ResourceReference>,
     ) -> Self {
+        let cache = Self::load_transform_cache(&config);
         EtsTransformPlugin {
             config,
             resource_refs: Arc::new(resource_refs),
             component_metadata: Arc::new(Mutex::new(None)),
+            transform_cache: Arc::new(Mutex::new(cache)),
+        }
+    }
+
+    /// Load the per-file transform cache from disk (F2/E4/J2/G6 equivalent).
+    ///
+    /// The cache is stored as a simple JSON map at
+    /// `build/default/cache/ets_transform/transform_cache.json` under the
+    /// first module's source path.  It maps FNV-1a(source_content) hashes to
+    /// cached transform output strings, allowing incremental builds to skip the
+    /// full ETS/ViewPU transform for unchanged files.
+    fn load_transform_cache(config: &ArkdownConfig) -> TransformCacheMap {
+        let Some(module) = config.modules.first() else {
+            return FxHashMap::default();
+        };
+        let cache_path = module
+            .src_path
+            .join("build/default/cache/ets_transform/transform_cache.json");
+        let Ok(content) = std::fs::read_to_string(&cache_path) else {
+            return FxHashMap::default();
+        };
+        serde_json::from_str::<FxHashMap<u64, String>>(&content).unwrap_or_default()
+    }
+
+    /// Persist the transform cache to disk.
+    fn save_transform_cache(config: &ArkdownConfig, cache: &TransformCacheMap) {
+        let Some(module) = config.modules.first() else {
+            return;
+        };
+        let cache_dir = module.src_path.join("build/default/cache/ets_transform");
+        let _ = std::fs::create_dir_all(&cache_dir);
+        if let Ok(json) = serde_json::to_string(cache) {
+            let _ = std::fs::write(cache_dir.join("transform_cache.json"), json);
         }
     }
 
@@ -117,6 +166,19 @@ impl EtsTransformPlugin {
 
         if !is_ets && !is_ts {
             return Ok(None);
+        }
+
+        // F2/J2 — per-file transform cache lookup.
+        // Hash the source content; if we have a cached transform result for this
+        // exact content, return it immediately without running the ETS pipeline.
+        let content_hash = arkdown_utils::fnv1a_hash(code);
+        if let Ok(cache) = self.transform_cache.lock() {
+            if let Some(cached_code) = cache.get(&content_hash).cloned() {
+                return Ok(Some(HookTransformOutput {
+                    code: Some(cached_code),
+                    ..Default::default()
+                }));
+            }
         }
 
         let original_source = code;
@@ -316,6 +378,7 @@ impl Plugin for EtsTransformPlugin {
                 config,
                 resource_refs,
                 component_metadata,
+                transform_cache: Arc::new(Mutex::new(FxHashMap::default())),
             }
             .do_transform(&code, &id)?;
             Ok(output.map(|output| HookLoadOutput {
@@ -335,13 +398,30 @@ impl Plugin for EtsTransformPlugin {
         let config = Arc::clone(&self.config);
         let resource_refs = Arc::clone(&self.resource_refs);
         let component_metadata = Arc::clone(&self.component_metadata);
+        let transform_cache = Arc::clone(&self.transform_cache);
         async move {
-            EtsTransformPlugin {
-                config,
+            let plugin = EtsTransformPlugin {
+                config: Arc::clone(&config),
                 resource_refs,
                 component_metadata,
+                transform_cache: Arc::clone(&transform_cache),
+            };
+            let result = plugin.do_transform(&code, &id);
+            // G6/J2: persist successful transform results to the content cache.
+            if let Ok(Some(ref output)) = result {
+                if let Some(ref transformed_code) = output.code {
+                    let hash = arkdown_utils::fnv1a_hash(&code);
+                    if let Ok(mut cache) = transform_cache.lock() {
+                        cache.insert(hash, transformed_code.clone());
+                    }
+                    // Async-persist to disk so future builds can reuse the result.
+                    EtsTransformPlugin::save_transform_cache(
+                        &config,
+                        &transform_cache.lock().unwrap_or_else(|p| p.into_inner()),
+                    );
+                }
             }
-            .do_transform(&code, &id)
+            result
         }
     }
 }
@@ -439,8 +519,16 @@ mod tests {
                     ark_options: None,
                     res_options: None,
                     source_option: None,
+                    preload_system_so: false,
                     preload_so: vec![],
+                    remove_permissions: vec![],
+                    aot_compile_mode: None,
+                    host_pgo: None,
+                    ap_path: None,
+                    abi_filters: vec![],
                 },
+                version_code: None,
+                version_name: None,
             },
             modules: vec![],
             sdk_config: SdkConfig {

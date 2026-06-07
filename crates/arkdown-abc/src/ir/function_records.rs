@@ -18,6 +18,13 @@ pub(super) enum FunctionRecordNode<'a> {
 pub(super) struct FunctionRecord<'a> {
     pub(super) name: String,
     pub(super) node: FunctionRecordNode<'a>,
+    pub(super) flavor: FunctionRecordFlavor,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FunctionRecordFlavor {
+    Function,
+    ObjectMethod,
 }
 
 impl<'a> FunctionRecord<'a> {
@@ -33,11 +40,15 @@ pub(super) fn collect_function_records<'a>(
     program: &'a Program<'a>,
     stmts: &'a [Statement<'a>],
     names: &mut FunctionNameAllocator<'a>,
+    standalone_ecmascript_input: bool,
 ) -> Vec<FunctionRecord<'a>> {
     let mut collector = FunctionRecordCollector {
         names,
         records: Vec::new(),
         seen_spans: FxHashSet::default(),
+        standalone_ecmascript_input,
+        standalone_class_stack: Vec::new(),
+        standalone_method_depth: 0,
     };
 
     // func_main_0 is represented by the Program scope and is emitted by the caller.
@@ -56,6 +67,15 @@ struct FunctionRecordCollector<'a, 'names> {
     names: &'names mut FunctionNameAllocator<'a>,
     records: Vec<FunctionRecord<'a>>,
     seen_spans: FxHashSet<(u32, u32)>,
+    standalone_ecmascript_input: bool,
+    standalone_class_stack: Vec<StandaloneClassFunctionContext>,
+    standalone_method_depth: usize,
+}
+
+#[derive(Debug)]
+struct StandaloneClassFunctionContext {
+    class_name: String,
+    next_arrow_index: u32,
 }
 
 #[derive(Debug, Default)]
@@ -123,7 +143,12 @@ impl<'a, 'names> FunctionRecordCollector<'a, 'names> {
                 self.push_function(function, inferred);
                 self.scan_function_body(function);
             }
-            Statement::ClassDeclaration(class) => self.scan_class_elements(&class.body.body),
+            Statement::ClassDeclaration(class) => {
+                self.scan_class_elements(
+                    class.id.as_ref().map(|id| id.name.as_str()),
+                    &class.body.body,
+                );
+            }
             Statement::IfStatement(stmt) => {
                 self.scan_expr(&stmt.test, None);
                 self.scan_stmt(&stmt.consequent);
@@ -219,7 +244,14 @@ impl<'a, 'names> FunctionRecordCollector<'a, 'names> {
                     self.scan_function_body(function);
                 }
                 ExportDefaultDeclarationKind::ClassDeclaration(class) => {
-                    self.scan_class_elements(&class.body.body);
+                    self.scan_class_elements(
+                        class
+                            .id
+                            .as_ref()
+                            .map(|id| id.name.as_str())
+                            .or(Some("default")),
+                        &class.body.body,
+                    );
                 }
                 _ => {
                     if let Some(expr) = export.declaration.as_expression() {
@@ -236,7 +268,10 @@ impl<'a, 'names> FunctionRecordCollector<'a, 'names> {
                             self.scan_function_body(function);
                         }
                         Declaration::ClassDeclaration(class) => {
-                            self.scan_class_elements(&class.body.body);
+                            self.scan_class_elements(
+                                class.id.as_ref().map(|id| id.name.as_str()),
+                                &class.body.body,
+                            );
                         }
                         Declaration::VariableDeclaration(decl) => {
                             for declarator in &decl.declarations {
@@ -292,7 +327,19 @@ impl<'a, 'names> FunctionRecordCollector<'a, 'names> {
                     let ObjectPropertyKind::ObjectProperty(property) = property else {
                         continue;
                     };
-                    self.scan_expr(&property.value, property_key_name(&property.key));
+                    let inferred = property_key_name(&property.key);
+                    if property.method {
+                        if let Expression::FunctionExpression(function) = &property.value {
+                            self.push_function_with_flavor(
+                                function,
+                                inferred,
+                                FunctionRecordFlavor::ObjectMethod,
+                            );
+                            self.scan_function_body(function);
+                            continue;
+                        }
+                    }
+                    self.scan_expr(&property.value, inferred);
                 }
             }
             Expression::ArrayExpression(array) => {
@@ -326,7 +373,12 @@ impl<'a, 'names> FunctionRecordCollector<'a, 'names> {
                 self.scan_expr(&expr.expression, inferred_name);
             }
             Expression::ChainExpression(_) => {}
-            Expression::ClassExpression(class) => self.scan_class_elements(&class.body.body),
+            Expression::ClassExpression(class) => {
+                self.scan_class_elements(
+                    class.id.as_ref().map(|id| id.name.as_str()),
+                    &class.body.body,
+                );
+            }
             Expression::TSAsExpression(expr) => self.scan_expr(&expr.expression, inferred_name),
             Expression::TSSatisfiesExpression(expr) => {
                 self.scan_expr(&expr.expression, inferred_name)
@@ -345,10 +397,26 @@ impl<'a, 'names> FunctionRecordCollector<'a, 'names> {
         }
     }
 
-    fn scan_class_elements(&mut self, elements: &'a [ClassElement<'a>]) {
+    fn scan_class_elements(
+        &mut self,
+        class_name: Option<&'a str>,
+        elements: &'a [ClassElement<'a>],
+    ) {
+        let pushed_context = if self.standalone_ecmascript_input {
+            let class_name = class_name.unwrap_or("_");
+            self.standalone_class_stack
+                .push(StandaloneClassFunctionContext {
+                    class_name: class_name.to_string(),
+                    next_arrow_index: 0,
+                });
+            true
+        } else {
+            false
+        };
         for element in elements {
             match element {
                 ClassElement::MethodDefinition(method) => {
+                    self.standalone_method_depth = self.standalone_method_depth.saturating_add(1);
                     for stmt in method
                         .value
                         .body
@@ -357,6 +425,7 @@ impl<'a, 'names> FunctionRecordCollector<'a, 'names> {
                     {
                         self.scan_stmt(stmt);
                     }
+                    self.standalone_method_depth = self.standalone_method_depth.saturating_sub(1);
                 }
                 ClassElement::PropertyDefinition(property) => {
                     if let Some(value) = &property.value {
@@ -371,6 +440,9 @@ impl<'a, 'names> FunctionRecordCollector<'a, 'names> {
                 _ => {}
             }
         }
+        if pushed_context {
+            self.standalone_class_stack.pop();
+        }
     }
 
     fn scan_function_body(&mut self, function: &'a Function<'a>) {
@@ -382,6 +454,15 @@ impl<'a, 'names> FunctionRecordCollector<'a, 'names> {
     }
 
     fn push_function(&mut self, function: &'a Function<'a>, inferred_name: Option<&'a str>) {
+        self.push_function_with_flavor(function, inferred_name, FunctionRecordFlavor::Function);
+    }
+
+    fn push_function_with_flavor(
+        &mut self,
+        function: &'a Function<'a>,
+        inferred_name: Option<&'a str>,
+        flavor: FunctionRecordFlavor,
+    ) {
         if is_type_only_function(function) {
             return;
         }
@@ -398,6 +479,7 @@ impl<'a, 'names> FunctionRecordCollector<'a, 'names> {
         self.records.push(FunctionRecord {
             name,
             node: FunctionRecordNode::Function(function),
+            flavor,
         });
     }
 
@@ -411,12 +493,30 @@ impl<'a, 'names> FunctionRecordCollector<'a, 'names> {
             return;
         }
         let name = self
-            .names
-            .bind(arrow.span.start, arrow.span.end, inferred_name);
+            .standalone_class_arrow_name(inferred_name)
+            .unwrap_or_else(|| {
+                self.names
+                    .bind(arrow.span.start, arrow.span.end, inferred_name)
+            });
         self.records.push(FunctionRecord {
             name,
             node: FunctionRecordNode::Arrow(arrow),
+            flavor: FunctionRecordFlavor::Function,
         });
+    }
+
+    fn standalone_class_arrow_name(&mut self, inferred_name: Option<&'a str>) -> Option<String> {
+        if !self.standalone_ecmascript_input || self.standalone_method_depth == 0 {
+            return None;
+        }
+        let context = self.standalone_class_stack.last_mut()?;
+        let index = context.next_arrow_index;
+        context.next_arrow_index = context.next_arrow_index.saturating_add(1);
+        let suffix = inferred_name
+            .filter(|name| !name.is_empty())
+            .map(|name| format!("*#{name}"))
+            .unwrap_or_default();
+        Some(format!("#~{}>@{index}{suffix}", context.class_name))
     }
 }
 

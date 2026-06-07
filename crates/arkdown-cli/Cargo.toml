@@ -27,6 +27,7 @@ arkdown-plugin-ets-transform = { workspace = true }
 arkdown-plugin-ohos-resolve = { workspace = true }
 arkdown-plugin-module-meta = { workspace = true }
 arkdown-plugin-duplicate-check = { workspace = true }
+arkdown-plugin-har-dedup = { workspace = true }
 arkdown-plugin-json5 = { workspace = true }
 arkdown-plugin-router-map = { workspace = true }
 arkdown-resolver = { workspace = true }
@@ -43,8 +44,13 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 walkdir = { workspace = true }
 zip = { workspace = true }
+indexmap = { workspace = true }
 index_vec = { workspace = true }
 rustc-hash = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+serde = { workspace = true }
+walkdir = { workspace = true }
