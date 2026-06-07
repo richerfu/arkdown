@@ -17,7 +17,8 @@
 pub mod bytecode_har;
 pub mod dependency_graph;
 pub use dependency_graph::{
-    DependencyGraphService, DependencyNode, DependencyNodeType, LocalDependencyGraph,
+    DependencyGraphService, DependencyNode, DependencyNodeType, DependencyResolutionConfig,
+    LocalDependencyGraph,
 };
 pub mod ohpm_registry;
 pub use ohpm_registry::{

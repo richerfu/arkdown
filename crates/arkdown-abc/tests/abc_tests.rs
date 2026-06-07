@@ -3173,6 +3173,96 @@ fn program_cache_hit_restores_program_and_skips_source_compile() {
     );
 }
 
+/// Verify that the `.protoBin` file written by `ProgramCacheFile::write`
+/// uses the correct upstream protobuf binary encoding.
+///
+/// hvigor's es2abc writes `ProgramCache` proto messages to `.protoBin` files.
+/// This test verifies our format is byte-compatible by:
+/// 1. Compiling a source and writing a `.protoBin` cache file.
+/// 2. Reading the raw bytes and checking the protobuf field-tag layout.
+/// 3. Decoding the bytes back through `ProgramCacheFile::read` to confirm
+///    the round-trip is lossless.
+///
+/// Protobuf encoding rules (verified against upstream proto definition):
+/// - Field 1 (hash_code: uint32):  wire type 0 (varint) → tag byte `0x08`
+/// - Field 2 (program: Program):   wire type 2 (length-delimited) → tag `0x12`
+///
+/// This aligns our implementation with es2abc's `ProgramCacheFile` format.
+#[test]
+fn test_program_cache_proto_bin_has_correct_protobuf_layout() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cache_file = tmp.path().join("test_module.protoBin");
+    let output = tmp.path().join("test_module.abc");
+    let record_name = "test/proto_bin_format|1.0.0|src/main/ets/Index";
+    let file_name = tmp.path().join("Index.js").to_string_lossy().into_owned();
+    let source = "export const answer = 42;";
+
+    let cache_input = AbcProgramCacheInput {
+        file_name: file_name.clone(),
+        cache_file: cache_file.clone(),
+    };
+
+    // Compile and write the protoBin.
+    module_compiler()
+        .compile_with_program_cache(
+            vec![module_record(record_name, source)],
+            &output,
+            vec![Some(cache_input)],
+        )
+        .expect("compile with program cache must succeed");
+
+    // Verify the .protoBin file was created.
+    assert!(cache_file.exists(), ".protoBin file must be created after compile");
+
+    let raw_bytes = std::fs::read(&cache_file).expect("must be able to read .protoBin file");
+    assert!(!raw_bytes.is_empty(), ".protoBin must not be empty");
+
+    // Verify the protobuf field-tag layout:
+    //   Byte 0: must be 0x08 (field 1, wire type 0 = varint) for hash_code.
+    // This matches es2abc's ProgramCache proto encoding.
+    assert_eq!(
+        raw_bytes[0], 0x08,
+        "first byte must be protobuf field tag 0x08 (field 1 varint = hash_code); \
+         got {:#04x}. This indicates our .protoBin format does NOT match \
+         the upstream es2abc ProgramCache protobuf encoding.",
+        raw_bytes[0]
+    );
+
+    // After the varint hash_code, the next field should be field 2 (program)
+    // wire type 2 (length-delimited), tag byte 0x12.
+    // Skip the varint hash_code (1+ bytes) to find it.
+    let mut pos = 1;
+    // Consume the varint hash_code bytes (all bytes with MSB set until one without).
+    while pos < raw_bytes.len() && (raw_bytes[pos] & 0x80) != 0 {
+        pos += 1;
+    }
+    pos += 1; // skip the last varint byte
+    if pos < raw_bytes.len() {
+        assert_eq!(
+            raw_bytes[pos], 0x12,
+            "after hash_code varint, must see field tag 0x12 (field 2 length-delimited = program); \
+             got {:#04x} at position {}. This indicates our .protoBin format diverges from \
+             the upstream es2abc ProgramCache proto structure.",
+            raw_bytes[pos], pos
+        );
+    }
+
+    // Round-trip: the written bytes must decode back to a valid ProgramCache.
+    let entry = ProgramCacheFile::read(&cache_file)
+        .expect("ProgramCacheFile::read must succeed")
+        .expect("ProgramCacheFile::read must return Some for a freshly written file");
+
+    // The program must have at least one record (our compiled module).
+    // hvigor's ProgramCache uses record_table to store ClassRecord entries.
+    assert!(
+        !entry.program.record_table.is_empty(),
+        "decoded Program must contain at least one record in record_table"
+    );
+
+    // The hash_code must be non-zero (it's derived from source content).
+    assert_ne!(entry.hash_code, 0, "hash_code must be non-zero");
+}
+
 // ── New opcode coverage tests ────────────────────────────────────────────────
 
 fn module_compiler() -> AbcCompiler {
