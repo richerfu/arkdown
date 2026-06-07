@@ -72,7 +72,7 @@
 //! - Graceful connection close when clients disconnect.
 //! - Ping/pong keep-alive (RFC 6455 §5.5.2/5.5.3).
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -154,8 +154,8 @@ pub struct PreviewParams {
     ///
     /// Stored as a nested object under the `"extra"` key rather than flattened
     /// to avoid serde's flatten+HashMap conflict with adjacent Option fields.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub extra: HashMap<String, serde_json::Value>,
+    #[serde(default, skip_serializing_if = "FxHashMap::is_empty")]
+    pub extra: FxHashMap<String, serde_json::Value>,
 }
 
 /// Typed representation of every DevEco WebSocket protocol message.
@@ -555,7 +555,7 @@ impl DevEcoEvent {
 #[derive(Debug, Default)]
 pub struct DevEcoRoom {
     /// IDs of clients currently in this room.
-    pub client_ids: HashSet<u64>,
+    pub client_ids: FxHashSet<u64>,
 }
 
 impl DevEcoRoom {
@@ -598,7 +598,7 @@ struct ClientState {
     room: Option<String>,
     /// Set of event `cmd` names this client has subscribed to.
     /// Empty means "all events".
-    subscriptions: HashSet<String>,
+    subscriptions: FxHashSet<String>,
     /// Role declared at room-join time.
     client_type: ClientType,
 }
@@ -608,7 +608,7 @@ impl ClientState {
         ClientState {
             id,
             room: None,
-            subscriptions: HashSet::new(),
+            subscriptions: FxHashSet::default(),
             client_type: ClientType::Ide,
         }
     }
@@ -623,9 +623,9 @@ impl ClientState {
 #[derive(Debug, Default)]
 struct ServerState {
     /// Map from client ID to client state.
-    clients: HashMap<u64, ClientState>,
+    clients: FxHashMap<u64, ClientState>,
     /// Map from room name to room.
-    rooms: HashMap<String, DevEcoRoom>,
+    rooms: FxHashMap<String, DevEcoRoom>,
     /// Monotonically increasing client ID counter.
     next_id: u64,
 }
@@ -1592,7 +1592,7 @@ mod tests {
                     width: Some(360),
                     height: Some(780),
                     density: None,
-                    extra: HashMap::new(),
+                    extra: FxHashMap::default(),
                 },
             },
             DevEcoMessage::Ping,
@@ -1619,7 +1619,7 @@ mod tests {
                 width: Some(360),
                 height: Some(780),
                 density: Some(2.0),
-                extra: HashMap::new(),
+                extra: FxHashMap::default(),
             },
         };
         let json = serialize_message(&msg).expect("serialize");
