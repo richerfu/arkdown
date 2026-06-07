@@ -11,17 +11,16 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 pub(super) fn compile_widget_pass(
     module: &ModuleConfig,
-    manifest: &arkdown_core::HapManifest,
     loader_json: &arkdown_profile::LoaderJson,
     config: &Arc<ArkdownConfig>,
     resource_refs: &FxHashMap<String, ResourceReference>,
     abc_compile_plan: &AbcCompilePlan,
+    widget_sources: &[PathBuf],
 ) -> Result<()> {
     if matches!(module.module_type, OhosModuleType::Har) {
         return Ok(());
     }
 
-    let widget_sources = widget_sources(config, module, manifest)?;
     if widget_sources.is_empty() {
         return Ok(());
     }
@@ -152,7 +151,7 @@ pub(super) fn compile_widget_pass(
     Ok(())
 }
 
-fn widget_sources(
+pub(super) fn collect_widget_sources(
     config: &ArkdownConfig,
     module: &ModuleConfig,
     manifest: &arkdown_core::HapManifest,

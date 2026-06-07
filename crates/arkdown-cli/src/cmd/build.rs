@@ -73,7 +73,7 @@ use custom_config::load_custom_config;
 mod generate_har_declarations;
 use generate_har_declarations::generate_har_declarations;
 mod compile_arkts_widget;
-use compile_arkts_widget::compile_widget_pass;
+use compile_arkts_widget::{collect_widget_sources, compile_widget_pass};
 mod intermediates;
 use intermediates::{
     canonical_or_owned, copy_ets_assets_to_loader_out, copy_if_exists, extract_zip_entry,
@@ -745,7 +745,8 @@ pub async fn run(args: BuildArgs) -> Result<()> {
     progress.step(3, 6, "Bundling");
     let mut bundle_outs: Vec<(BundleOutput, bool)> = Vec::new();
     let mut compile_arkts_handoffs_by_bundle: Vec<CompileArkTsHandoff> = Vec::new();
-    for (module, _manifest, loader_json, resource_refs) in &loader_jsons {
+    let mut widget_sources_by_bundle: Vec<Vec<PathBuf>> = Vec::new();
+    for (module, manifest, loader_json, resource_refs) in &loader_jsons {
         let cache_dir = PathBuf::from(&loader_json.cache_path);
         let output_dir = PathBuf::from(&loader_json.ace_module_build);
         let cached_abc = output_dir.join("modules.abc");
@@ -766,6 +767,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 true,
             ));
             compile_arkts_handoffs_by_bundle.push(CompileArkTsHandoff::default());
+            widget_sources_by_bundle.push(Vec::new());
             continue;
         }
 
@@ -983,6 +985,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             .await
             .map_err(|e| anyhow::anyhow!("Bundle failed: {}", e))?;
         let resolved_imports = ohos_resolve_plugin.resolved_import_map_snapshot();
+        let widget_sources = collect_widget_sources(&config_arc, module, manifest)?;
         let compile_arkts_handoff = CompileArktsCacheWriter::new(
             module,
             loader_json,
@@ -990,9 +993,10 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             resource_refs,
             &resolved_imports,
         )
-        .write(&bundle_out.chunk_graph)?;
+        .write(&bundle_out.chunk_graph, &widget_sources)?;
         bundle_outs.push((bundle_out, false));
         compile_arkts_handoffs_by_bundle.push(compile_arkts_handoff);
+        widget_sources_by_bundle.push(widget_sources);
 
         // Write bundle-level cache manifest after a successful bundle run.
         // Mirrors hvigor's `build/default/cache/bundle/bundle.json` write after
@@ -1324,11 +1328,14 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             copy_ets_assets_to_loader_out(module, loader_json)?;
             compile_widget_pass(
                 module,
-                _manifest,
                 loader_json,
                 &config_arc,
                 resource_refs,
                 &abc_compile_plan,
+                widget_sources_by_bundle
+                    .get(bundle_index)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
             )?;
 
             // H13: ArkData compile pass — separate ABC invocation for cloud

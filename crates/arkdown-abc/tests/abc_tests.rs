@@ -3,6 +3,7 @@
 //! These tests exercise [`AbcCompiler`] through its public interface only,
 //! without access to crate internals.
 
+use arkdown_abc::abc_reader::AbcLiteralEntry;
 use arkdown_abc::cache::{source_cache_hash, ProgramCacheFile};
 use arkdown_abc::emit::file::version_for_target_api;
 use arkdown_abc::proto_panda::scalar_value;
@@ -670,7 +671,8 @@ export { Index as default };"#,
     let user_off = class_offsets(&bytes)
         .into_iter()
         .find(|off| {
-            class_name_at(&bytes, *off as usize) == "Lcom.example.app/entry/ets/pages/Index;"
+            (*off as usize) < bytes.len()
+                && class_name_at(&bytes, *off as usize) == "Lcom.example.app/entry/ets/pages/Index;"
         })
         .expect("user record exists") as usize;
     let fields = user_field_values(&bytes, user_off);
@@ -1370,7 +1372,7 @@ fn test_module_record_scope_names_and_class_buffer_literals_are_linked() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = tmp.path().join("module-record.abc");
     // Uses ESM format — IIFE/CJS unwrapping is removed from the compiler.
-    module_compiler()
+    module_compiler_for_target(20, None)
         .compile(
             vec![module_record(
                 "com.example.app/entry/ets/pages/Index",
@@ -1382,23 +1384,30 @@ export { Index as default };"#,
         )
         .expect("compile must succeed");
     let bytes = std::fs::read(&out).expect("read .abc");
-
-    let num_literalarrays = read_u32(&bytes, 0x2c) as usize;
-    let literalarray_idx_off = read_u32(&bytes, 0x30) as usize;
+    let reader = AbcReader::new(&bytes).expect("abc reader");
+    let literal_offsets = reader
+        .literal_array_offsets()
+        .expect("literal array offsets");
     assert!(
-        num_literalarrays >= 3,
+        literal_offsets.len() >= 3,
         "class buffer, module record, and scopeNames literal arrays are emitted"
     );
-    let literal_offsets: Vec<u32> = (0..num_literalarrays)
-        .map(|idx| read_u32(&bytes, literalarray_idx_off + idx * 4))
-        .collect();
 
     let user_off = class_offsets(&bytes)
         .into_iter()
         .find(|off| {
-            class_name_at(&bytes, *off as usize) == "Lcom.example.app/entry/ets/pages/Index;"
+            (*off as usize) < bytes.len()
+                && class_name_at(&bytes, *off as usize) == "Lcom.example.app/entry/ets/pages/Index;"
         })
         .expect("user record exists") as usize;
+    let method_names = class_method_items(&bytes, user_off)
+        .into_iter()
+        .map(|(_, name, _)| name)
+        .collect::<Vec<_>>();
+    assert!(
+        method_names.contains(&"#~@0>#onCreate".to_string()),
+        "API20 module class methods must use upstream scope-info names; got {method_names:?}"
+    );
     let fields = user_field_values(&bytes, user_off);
     let module_record = *fields
         .get("moduleRecordIdx")
@@ -1406,6 +1415,8 @@ export { Index as default };"#,
     let scope_names = *fields
         .get("scopeNames")
         .expect("scopeNames field has a literal-array value");
+    assert!((module_record as usize) < bytes.len());
+    assert!((scope_names as usize) < bytes.len());
     assert!(literal_offsets.contains(&module_record));
     assert!(literal_offsets.contains(&scope_names));
 
@@ -1436,37 +1447,107 @@ export { Index as default };"#,
     assert_eq!(inline_string_at(&bytes, local_name), "UIAbility");
     assert_eq!(inline_string_at(&bytes, import_name), "default");
 
-    let mut scope_pos = scope_names as usize;
-    let scope_item_count = read_u32(&bytes, scope_pos);
-    scope_pos += 4;
-    // hvigor format: scopeNames contains (class_name, method_with_closures)
-    // pairs — two tagged strings per class method that has call-arg arrow
-    // functions.  For a source without any call-arg closures the array is
-    // empty (item_count == 0).  Either way the item count must be even.
-    assert!(
-        scope_item_count % 2 == 0,
-        "scopeNames item count must be even, got {scope_item_count}"
+    let scope_names_item = reader
+        .read_literal_array_item(scope_names)
+        .expect("scopeNames literal array");
+    let scope_values = scope_names_item
+        .entries
+        .iter()
+        .filter_map(|entry| match entry {
+            AbcLiteralEntry::String { value, .. } => Some(value.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        scope_names_item.raw_item_count, 2,
+        "API20 scopeNames stores one tagged string for compressed class scope"
     );
-    if scope_item_count > 0 {
-        assert_eq!(
-            bytes[scope_pos], 0x05,
-            "non-empty scopeNames entries are tagged strings"
-        );
-    }
+    assert_eq!(scope_values, vec!["Index"]);
 
     let has_class_method_buffer = literal_offsets.iter().any(|offset| {
-        let offset = *offset as usize;
-        read_u32(&bytes, offset) == 8
-            && bytes[offset + 4] == 0x05
-            && inline_string_at(&bytes, read_u32(&bytes, offset + 5) as usize) == "onCreate"
-            && bytes[offset + 9] == 0x06
-            && bytes[offset + 14] == 0x09
-            && bytes[offset + 17] == 0x02
-            && read_u32(&bytes, offset + 18) == 1
+        reader.read_literal_array_item(*offset).is_ok_and(|item| {
+            let has_public_name = item.entries.iter().any(|entry| {
+                    matches!(entry, AbcLiteralEntry::String { value, .. } if value == "onCreate")
+                });
+            let has_internal_method = item.entries.iter().any(|entry| {
+                matches!(
+                    entry,
+                    AbcLiteralEntry::Method {
+                        name: Some(name),
+                        ..
+                    } if name == "#~@0>#onCreate"
+                )
+            });
+            has_public_name && has_internal_method
+        })
     });
     assert!(
         has_class_method_buffer,
-        "class buffer literal array links instance methods by MethodItem offset"
+        "class buffer literal array links instance methods by upstream internal MethodItem name"
+    );
+}
+
+#[test]
+fn test_api20_scope_info_names_follow_upstream_optimization() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = tmp.path().join("scope-info-names.abc");
+    module_compiler_for_target(20, None)
+        .compile(
+            vec![module_record(
+                "com.example.app/entry/ets/pages/Index",
+                r#"
+class A { constructor() {} foo() {} }
+class AA { test() { let cb = () => this.a; return cb; } }
+export { A, AA };"#,
+            )],
+            &out,
+        )
+        .expect("compile must succeed");
+    let bytes = std::fs::read(&out).expect("read .abc");
+    let reader = AbcReader::new(&bytes).expect("abc reader");
+
+    let user_off = class_offsets(&bytes)
+        .into_iter()
+        .find(|off| {
+            class_name_at(&bytes, *off as usize) == "Lcom.example.app/entry/ets/pages/Index;"
+        })
+        .expect("user record exists") as usize;
+    let method_names = class_method_items(&bytes, user_off)
+        .into_iter()
+        .map(|(_, name, _)| name)
+        .collect::<Vec<_>>();
+
+    assert!(
+        method_names.contains(&"#~A=#A".to_string()),
+        "short class names are not index-compressed by upstream OptimizeSelfScopeName; got {method_names:?}"
+    );
+    assert!(method_names.contains(&"#~A>#foo".to_string()));
+    assert!(method_names.contains(&"#~AA>#test".to_string()));
+    assert!(method_names.contains(&"#~AA>@0*#cb".to_string()));
+    assert!(
+        !method_names
+            .iter()
+            .any(|name| name.starts_with("#~@0>#test")),
+        "method record final self name must stay raw; only descendant full scope uses @ index"
+    );
+
+    let scope_names = *user_field_values(&bytes, user_off)
+        .get("scopeNames")
+        .expect("scopeNames field has a literal-array value");
+    let scope_values = reader
+        .read_literal_array_item(scope_names)
+        .expect("scopeNames literal array")
+        .entries
+        .into_iter()
+        .filter_map(|entry| match entry {
+            AbcLiteralEntry::String { value, .. } => Some(value),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        scope_values,
+        vec!["test".to_string()],
+        "scopeNames must contain only names that upstream compressed to @ indexes"
     );
 }
 

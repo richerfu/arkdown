@@ -44,6 +44,9 @@ impl CompileModuleInfo {
         config: &ArkdownConfig,
     ) -> Option<CompileModuleInfo> {
         let source_path = canonical_or_owned(&source_path);
+        if is_package_manager_module_source(&source_path) {
+            return Self::compute_remote(&source_path, cache_root, loader_json);
+        }
         let source_ext = source_path
             .extension()
             .and_then(|ext| ext.to_str())
@@ -451,6 +454,10 @@ fn package_root_from_modules_dir(source_path: &Path) -> Option<PathBuf> {
     Some(root)
 }
 
+fn is_package_manager_module_source(source_path: &Path) -> bool {
+    package_root_from_modules_dir(source_path).is_some()
+}
+
 pub(super) fn package_name_or_dir(package_root: &Path) -> String {
     OhPackage::load_from_root(package_root)
         .and_then(|pkg| pkg.name().map(str::to_string))
@@ -758,6 +765,49 @@ mod tests {
         assert_eq!(
             ohm,
             "@package:pkg_modules/.ohpm/@hw-agconnect+cloud@1.0.2/pkg_modules/@hw-agconnect/cloud/index"
+        );
+    }
+
+    #[test]
+    fn package_manager_sources_keep_pkg_modules_record_even_in_module_path_map() {
+        let temp = TempDir::new().unwrap();
+        let project = temp.path();
+        let phone_root = project.join("phone");
+        let package_root = project
+            .join("oh_modules/.ohpm/@hw-agconnect+cloud@1.0.2/oh_modules/@hw-agconnect/cloud");
+        let source_path = package_root.join("src/main/ets/auth/Auth.ets");
+        fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+        fs::write(
+            package_root.join("oh-package.json5"),
+            r#"{"name":"@hw-agconnect/cloud","version":"1.0.2","main":"index.ets"}"#,
+        )
+        .unwrap();
+        fs::write(&source_path, "export class Auth {}\n").unwrap();
+
+        let loader_json = make_loader_json(
+            project,
+            &[
+                ("phone", &phone_root),
+                ("@hw-agconnect/cloud", &package_root),
+            ],
+        );
+        let config = make_config(project, &phone_root);
+        let cache_root = project.join("cache");
+
+        let info = CompileModuleInfo::compute(&source_path, &cache_root, &loader_json, &config)
+            .expect("package module info");
+
+        assert_eq!(
+            info.record_name,
+            "pkg_modules/.ohpm/@hw-agconnect+cloud@1.0.2/pkg_modules/@hw-agconnect/cloud/src/main/ets/auth/Auth"
+        );
+        assert_eq!(
+            compile_module_ohm_url(&info),
+            "@package:pkg_modules/.ohpm/@hw-agconnect+cloud@1.0.2/pkg_modules/@hw-agconnect/cloud/src/main/ets/auth/Auth"
+        );
+        assert_eq!(
+            info.source_file_info,
+            "phone|@hw-agconnect/cloud|1.0.2|src/main/ets/auth/Auth.ts"
         );
     }
 

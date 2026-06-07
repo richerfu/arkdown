@@ -31,12 +31,11 @@ use crate::emit::strings::StringTable;
 use crate::error::AbcError;
 use crate::ir::ast_analysis::{
     arrow_captures_from_body, is_condition_comparison, is_global_this, is_new_target_meta,
-    is_undefined_literal, method_body_contains_arrow, negative_integer_literal,
-    stmts_capture_this_in_arrow, ArrowCaptures,
+    is_undefined_literal, negative_integer_literal, stmts_capture_this_in_arrow, ArrowCaptures,
 };
 use crate::ir::class_layout::{
-    class_buffer_literal_array, class_method_inferred_name, class_method_num_args,
-    class_method_record_name, class_method_upstream_name, class_private_methods_literal_array,
+    class_buffer_literal_array, class_method_num_args, class_method_record_name,
+    class_method_upstream_name, class_private_methods_literal_array,
     computed_class_method_record_name, computed_instance_class_field_key_name,
     constructor_required_param_count, is_class_buffer_method, method_key_name,
     static_initializer_record_name,
@@ -47,7 +46,7 @@ use crate::ir::function_records::{
     collect_function_records, FunctionNameAllocator, FunctionRecord, FunctionRecordFlavor,
     FunctionRecordNode,
 };
-use crate::ir::lowering_context::LoweringContext;
+use crate::ir::lowering_context::{is_default_api_version_for, LoweringContext};
 use crate::ir::module_lexical::collect_module_lexical_bindings;
 use crate::ir::module_record::{collect_module_record, DEFAULT_LOCAL_NAME};
 use crate::ir::opcodes::Insn;
@@ -388,17 +387,20 @@ pub fn build_record_with_debug_and_source_map_for_target_with_mode(
     let function_lexical_infos = collect_function_lexical_bindings(&program);
     let scan_stmts: &[Statement<'_>] = statement_scan_body(&program, is_module);
     let has_top_level_await = is_module && stmts_have_top_level_await(scan_stmts);
-    let mut function_names = FunctionNameAllocator::new(source);
+    let use_scope_info_names =
+        !is_default_api_version_for(target_api_version, target_api_sub_version);
+    let mut function_names = FunctionNameAllocator::new(source, use_scope_info_names);
     let function_records = collect_function_records(
         &program,
         scan_stmts,
         &mut function_names,
         standalone_ecmascript_input,
     );
-    let function_names_by_span = function_records
+    let mut function_names_by_span: FxHashMap<(u32, u32), String> = function_records
         .iter()
         .map(|record| (record.span(), record.name.clone()))
         .collect();
+    function_names_by_span.extend(function_names.class_method_names_by_span());
     let lowering = LoweringContext::from_module_record(
         &module_record,
         lexical_bindings,
@@ -544,11 +546,7 @@ pub fn build_record_with_debug_and_source_map_for_target_with_mode(
     let bytecode_literal_end = literal_arrays.len();
 
     let scope_names_idx = literal_arrays.len();
-    literal_arrays.push(scope_names_literal_array(
-        scan_stmts,
-        record_name,
-        standalone_ecmascript_input,
-    ));
+    literal_arrays.push(scope_names_literal_array(function_names.scope_names()));
     // Collect module import/export records so that the ABC serializer can emit
     // the compact libpandafile module record buffer used by hvigor/es2abc.
     // Upstream only runs CompileModuleRecordJob for ScriptKind::MODULE;
@@ -1688,154 +1686,15 @@ fn lexical_indices<'a>(names: impl IntoIterator<Item = &'a str>) -> FxHashMap<St
         .collect()
 }
 
-fn scope_names_literal_array(
-    stmts: &[Statement<'_>],
-    record_name: &str,
-    standalone_ecmascript_input: bool,
-) -> LiteralArray {
-    if standalone_ecmascript_input {
-        return LiteralArray {
-            entries: standalone_scope_names(stmts)
-                .into_iter()
-                .map(LiteralEntry::TaggedString)
-                .collect(),
-            explicit_key: None,
-        };
-    }
-
-    let Some(owner_method) = first_scope_names_owner_method(stmts) else {
-        // No call-arg closures in this class → no scopeNames payload.
-        return LiteralArray {
-            entries: vec![],
-            explicit_key: None,
-        };
-    };
-
-    let class_short = record_name
-        .rsplit('/')
-        .next()
-        .unwrap_or(record_name)
-        .to_string();
-
+fn scope_names_literal_array(scope_names: &[String]) -> LiteralArray {
     LiteralArray {
-        entries: vec![
-            LiteralEntry::TaggedString(class_short),
-            LiteralEntry::TaggedString(owner_method),
-        ],
+        entries: scope_names
+            .iter()
+            .cloned()
+            .map(LiteralEntry::TaggedString)
+            .collect(),
         explicit_key: None,
     }
-}
-
-fn standalone_scope_names(stmts: &[Statement<'_>]) -> Vec<String> {
-    let mut names = Vec::new();
-    for stmt in stmts {
-        match stmt {
-            Statement::ClassDeclaration(class) if !class.declare => {
-                collect_class_scope_names(&class.body.body, &mut names);
-            }
-            Statement::ExportDefaultDeclaration(export) => {
-                if let ExportDefaultDeclarationKind::ClassDeclaration(class) = &export.declaration {
-                    if !class.declare {
-                        collect_class_scope_names(&class.body.body, &mut names);
-                    }
-                }
-            }
-            Statement::ExportNamedDeclaration(export) => {
-                if let Some(Declaration::ClassDeclaration(class)) = &export.declaration {
-                    if !class.declare {
-                        collect_class_scope_names(&class.body.body, &mut names);
-                    }
-                }
-            }
-            Statement::VariableDeclaration(decl) => {
-                for declarator in &decl.declarations {
-                    if let Some(Expression::ClassExpression(class)) = &declarator.init {
-                        collect_class_scope_names(&class.body.body, &mut names);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    names
-}
-
-fn collect_class_scope_names(elements: &[ClassElement<'_>], names: &mut Vec<String>) {
-    for element in elements {
-        let ClassElement::MethodDefinition(method) = element else {
-            continue;
-        };
-        if method.kind == MethodDefinitionKind::Constructor || method.r#static {
-            continue;
-        }
-        if let Some(name) = method_key_name(&method.key) {
-            names.push(name);
-        }
-    }
-}
-
-fn first_scope_names_owner_method(stmts: &[Statement<'_>]) -> Option<String> {
-    for stmt in stmts {
-        match stmt {
-            Statement::ClassDeclaration(class) => {
-                if class.declare {
-                    continue;
-                }
-                if let Some(name) = first_scope_names_owner_in_class(&class.body.body) {
-                    return Some(name);
-                }
-            }
-            Statement::ExportDefaultDeclaration(export) => {
-                if let ExportDefaultDeclarationKind::ClassDeclaration(class) = &export.declaration {
-                    if class.declare {
-                        continue;
-                    }
-                    if let Some(name) = first_scope_names_owner_in_class(&class.body.body) {
-                        return Some(name);
-                    }
-                }
-            }
-            Statement::ExportNamedDeclaration(export) => {
-                if let Some(Declaration::ClassDeclaration(class)) = &export.declaration {
-                    if class.declare {
-                        continue;
-                    }
-                    if let Some(name) = first_scope_names_owner_in_class(&class.body.body) {
-                        return Some(name);
-                    }
-                }
-            }
-            Statement::VariableDeclaration(decl) => {
-                for declarator in &decl.declarations {
-                    if let Some(Expression::ClassExpression(class)) = &declarator.init {
-                        if let Some(name) = first_scope_names_owner_in_class(&class.body.body) {
-                            return Some(name);
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn first_scope_names_owner_in_class(elements: &[ClassElement<'_>]) -> Option<String> {
-    for element in elements {
-        let ClassElement::MethodDefinition(method) = element else {
-            continue;
-        };
-        if method.kind == MethodDefinitionKind::Constructor {
-            continue;
-        }
-        if !method_body_contains_arrow(method) {
-            continue;
-        }
-        if let Some(name) = class_method_inferred_name(method, "_") {
-            return Some(name);
-        }
-    }
-    None
 }
 
 struct ConcurrentImportRequests<'a> {
@@ -2883,7 +2742,11 @@ fn compile_class_elements(
                 private_field_slots.clone(),
             )
         };
-        let constructor_name = if lowering.standalone_ecmascript_input() {
+        let constructor_name = if let Some(name) =
+            function_names.default_constructor_name((class_span_start, class_span_end), class_name)
+        {
+            name
+        } else if lowering.standalone_ecmascript_input() {
             format!("#~{class_name}=#{class_name}")
         } else {
             function_names.bind(0, 0, Some(class_name))
@@ -3060,6 +2923,8 @@ fn compile_class_elements(
             let Some(key_name) = class_method_record_name(
                 method,
                 class_name,
+                class_span_start,
+                class_span_end,
                 function_names,
                 lowering.standalone_ecmascript_input(),
             ) else {
@@ -6872,6 +6737,7 @@ impl<'a> CodeGen<'a> {
                             class_name.unwrap_or(&name),
                             &cls.body.body,
                             self.lowering.standalone_ecmascript_input(),
+                            Some(self.lowering),
                         ));
                         let formal_count = constructor_required_param_count(&cls.body.body);
                         self.set_debug_pos(cls.body.span.start);
@@ -6934,6 +6800,7 @@ impl<'a> CodeGen<'a> {
                         class_name.unwrap_or(&name),
                         &cls.body.body,
                         self.lowering.standalone_ecmascript_input(),
+                        Some(self.lowering),
                     ));
                     let formal_count = constructor_required_param_count(&cls.body.body);
                     self.set_debug_pos(cls.body.span.start);
@@ -7010,6 +6877,7 @@ impl<'a> CodeGen<'a> {
                         class_name,
                         &cls.body.body,
                         self.lowering.standalone_ecmascript_input(),
+                        Some(self.lowering),
                     ));
                     let formal_count = constructor_required_param_count(&cls.body.body);
                     self.set_debug_pos(cls.body.span.start);
@@ -10676,6 +10544,7 @@ impl<'a> CodeGen<'a> {
             class_name.unwrap_or("_"),
             elements,
             self.lowering.standalone_ecmascript_input(),
+            Some(self.lowering),
         ));
 
         let formal_count = constructor_required_param_count(elements);
@@ -10744,6 +10613,7 @@ impl<'a> CodeGen<'a> {
             class_name,
             &cls.body.body,
             self.lowering.standalone_ecmascript_input(),
+            Some(self.lowering),
         ));
         let formal_count = constructor_required_param_count(&cls.body.body);
         self.set_debug_pos(cls.body.span.start);
@@ -10806,8 +10676,12 @@ impl<'a> CodeGen<'a> {
         self.push(Insn::Sta(1));
 
         let lit_arr_id = self.literal_arrays.len() as u16;
-        self.literal_arrays
-            .push(class_buffer_literal_array(class_name, &cls.body.body, true));
+        self.literal_arrays.push(class_buffer_literal_array(
+            class_name,
+            &cls.body.body,
+            true,
+            Some(self.lowering),
+        ));
         let formal_count = constructor_required_param_count(&cls.body.body);
         self.set_debug_pos(cls.body.span.start);
         self.push(Insn::DefineClassWithBuffer(
@@ -10873,8 +10747,12 @@ impl<'a> CodeGen<'a> {
         };
 
         let lit_arr_id = self.literal_arrays.len() as u16;
-        self.literal_arrays
-            .push(class_buffer_literal_array(class_name, &cls.body.body, true));
+        self.literal_arrays.push(class_buffer_literal_array(
+            class_name,
+            &cls.body.body,
+            true,
+            Some(self.lowering),
+        ));
         let formal_count = constructor_required_param_count(&cls.body.body);
         self.set_debug_pos(cls.body.span.start);
         self.push(Insn::DefineClassWithBuffer(
@@ -11019,7 +10897,12 @@ impl<'a> CodeGen<'a> {
             } else {
                 continue;
             };
-            let method_record_name = if self.lowering.standalone_ecmascript_input() {
+            let method_record_name = if let Some(name) = self
+                .lowering
+                .function_name(method.value.span.start, method.value.span.end)
+            {
+                name.to_string()
+            } else if self.lowering.standalone_ecmascript_input() {
                 class_method_upstream_name(method, class_name)
                     .unwrap_or_else(|| public_name.clone())
             } else {

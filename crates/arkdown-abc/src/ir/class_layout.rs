@@ -5,13 +5,28 @@ use oxc_span::GetSpan;
 
 use crate::emit::file::{LiteralArray, LiteralEntry};
 use crate::ir::function_records::FunctionNameAllocator;
+use crate::ir::lowering_context::LoweringContext;
 
 pub(super) fn class_method_record_name(
     method: &MethodDefinition<'_>,
     class_name: &str,
+    class_span_start: u32,
+    class_span_end: u32,
     function_names: &mut FunctionNameAllocator<'_>,
     standalone_ecmascript_input: bool,
 ) -> Option<String> {
+    if let Some(name) =
+        function_names.class_method_name(method.value.span.start, method.value.span.end)
+    {
+        return Some(name.to_string());
+    }
+    if function_names.uses_scope_info_names() {
+        return function_names.bind_class_method(
+            (class_span_start, class_span_end),
+            method,
+            class_name,
+        );
+    }
     if standalone_ecmascript_input {
         return class_method_upstream_name(method, class_name);
     }
@@ -80,6 +95,7 @@ pub(super) fn class_buffer_literal_array(
     class_name: &str,
     elements: &[ClassElement<'_>],
     standalone_ecmascript_input: bool,
+    lowering: Option<&LoweringContext>,
 ) -> LiteralArray {
     let mut entries = Vec::new();
     let mut instance_method_count = 0u32;
@@ -95,7 +111,11 @@ pub(super) fn class_buffer_literal_array(
         let Some(public_name) = method_key_name(&method.key) else {
             continue;
         };
-        let method_name = if standalone_ecmascript_input {
+        let method_name = if let Some(name) = lowering.and_then(|lowering| {
+            lowering.function_name(method.value.span.start, method.value.span.end)
+        }) {
+            name.to_string()
+        } else if standalone_ecmascript_input {
             class_method_upstream_name(method, class_name).unwrap_or_else(|| public_name.clone())
         } else {
             public_name.clone()

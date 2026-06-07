@@ -4349,7 +4349,7 @@ mod tests {
                 std::str::from_utf8(&entry.key)
                     .map(|key| {
                         let short = key.rsplit('.').next().unwrap_or(key);
-                        short == name || short.ends_with(&format!("#*#{name}"))
+                        function_short_name_matches(short, name)
                     })
                     .unwrap_or(false)
             })
@@ -4367,11 +4367,19 @@ mod tests {
                 std::str::from_utf8(&entry.key)
                     .map(|key| {
                         let short = key.rsplit('.').next().unwrap_or(key);
-                        short == name || short.ends_with(&format!("#*#{name}"))
+                        function_short_name_matches(short, name)
                     })
                     .unwrap_or(false)
             })
             .and_then(|entry| entry.value.as_mut())
+    }
+
+    fn function_short_name_matches(short: &str, name: &str) -> bool {
+        short == name
+            || short.ends_with(&format!("*#{name}"))
+            || short.ends_with(&format!(">#{name}"))
+            || short.ends_with(&format!("<#{name}"))
+            || short.ends_with(&format!("=#{name}"))
     }
 
     fn functions_by_short_suffix<'a>(program: &'a Program, name: &str) -> Vec<&'a Function> {

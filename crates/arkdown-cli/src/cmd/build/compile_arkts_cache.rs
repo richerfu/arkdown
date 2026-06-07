@@ -1,5 +1,5 @@
 use super::*;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 pub(super) struct CompileArktsCacheWriter<'a> {
     loader_json: &'a arkdown_profile::LoaderJson,
@@ -33,9 +33,13 @@ impl<'a> CompileArktsCacheWriter<'a> {
         }
     }
 
-    pub(super) fn write(&self, chunk_graph: &ChunkGraph) -> Result<CompileArkTsHandoff> {
+    pub(super) fn write(
+        &self,
+        chunk_graph: &ChunkGraph,
+        extra_sources: &[PathBuf],
+    ) -> Result<CompileArkTsHandoff> {
         let module_ids = chunk_graph.all_module_ids();
-        if module_ids.is_empty() {
+        if module_ids.is_empty() && extra_sources.is_empty() {
             return Err(anyhow::anyhow!(
                 "CompileArkTS module graph is empty; hvigor compiles Rollup getModuleIds(), so arkdown cannot continue without rolldown module_ids"
             ));
@@ -65,8 +69,15 @@ impl<'a> CompileArktsCacheWriter<'a> {
         let mut compile_infos = Vec::new();
         let mut pkg_entries = PackageEntryInfos::default();
         let mut written_ts: FxHashMap<PathBuf, ()> = FxHashMap::default();
+        let mut seen_sources: FxHashSet<PathBuf> = FxHashSet::default();
 
         for module_id in module_ids {
+            let Some(source_path) = module_id_to_source_path(&module_id) else {
+                continue;
+            };
+            if !seen_sources.insert(source_path.clone()) {
+                continue;
+            }
             let is_commonjs = chunk_graph
                 .full_module_is_commonjs
                 .get(&module_id)
@@ -75,12 +86,33 @@ impl<'a> CompileArktsCacheWriter<'a> {
             let before_len = compile_infos.len();
             self.write_module(
                 &module_id,
+                &source_path,
                 is_commonjs,
                 &mut compile_infos,
                 &mut pkg_entries,
                 &mut source_map_lines,
             )?;
             // Track the .ts path that was just written (if any).
+            if compile_infos.len() > before_len {
+                let info = &compile_infos[compile_infos.len() - 1];
+                written_ts.insert(info.ts_path.clone(), ());
+            }
+        }
+        for source_path in extra_sources {
+            let source_path = canonical_or_owned(source_path);
+            if !seen_sources.insert(source_path.clone()) {
+                continue;
+            }
+            let module_id = path_string(&source_path);
+            let before_len = compile_infos.len();
+            self.write_module(
+                &module_id,
+                &source_path,
+                false,
+                &mut compile_infos,
+                &mut pkg_entries,
+                &mut source_map_lines,
+            )?;
             if compile_infos.len() > before_len {
                 let info = &compile_infos[compile_infos.len() - 1];
                 written_ts.insert(info.ts_path.clone(), ());
@@ -113,16 +145,14 @@ impl<'a> CompileArktsCacheWriter<'a> {
     fn write_module(
         &self,
         module_id: &str,
+        source_path: &Path,
         is_commonjs: bool,
         compile_infos: &mut Vec<CompileArkTsInfo>,
         pkg_entries: &mut PackageEntryInfos,
         source_map_lines: &mut Vec<String>,
     ) -> Result<()> {
-        let Some(source_path) = module_id_to_source_path(module_id) else {
-            return Ok(());
-        };
         let Some(mut entry_info) = CompileModuleInfo::compute(
-            &source_path,
+            source_path,
             &self.cache_root,
             self.loader_json,
             self.config,

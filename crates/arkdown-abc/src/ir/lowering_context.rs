@@ -8,6 +8,16 @@ const DEFAULT_TARGET_API_SUB_VERSION: &str = "beta1";
 const DEFAULT_API_SUB_VERSION_1: &str = "beta1";
 const DEFAULT_API_SUB_VERSION_2: &str = "beta2";
 
+pub(super) fn is_default_api_version_for(
+    target_api_version: u32,
+    target_api_sub_version: Option<&str>,
+) -> bool {
+    let sub_api = target_api_sub_version.unwrap_or(DEFAULT_TARGET_API_SUB_VERSION);
+    target_api_version < DEFAULT_TARGET_API_VERSION
+        || (target_api_version == DEFAULT_TARGET_API_VERSION
+            && (sub_api == DEFAULT_API_SUB_VERSION_1 || sub_api == DEFAULT_API_SUB_VERSION_2))
+}
+
 #[derive(Debug, Default)]
 pub(super) struct LoweringContext {
     import_indices: FxHashMap<String, u8>,
@@ -76,13 +86,10 @@ impl LoweringContext {
     }
 
     pub(super) fn is_default_api_version(&self) -> bool {
-        let sub_api = self
-            .target_api_sub_version
-            .as_deref()
-            .unwrap_or(DEFAULT_TARGET_API_SUB_VERSION);
-        self.target_api_version < DEFAULT_TARGET_API_VERSION
-            || (self.target_api_version == DEFAULT_TARGET_API_VERSION
-                && (sub_api == DEFAULT_API_SUB_VERSION_1 || sub_api == DEFAULT_API_SUB_VERSION_2))
+        is_default_api_version_for(
+            self.target_api_version,
+            self.target_api_sub_version.as_deref(),
+        )
     }
 
     pub(super) fn target_api_version(&self) -> u32 {
