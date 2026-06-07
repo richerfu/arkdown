@@ -43,6 +43,8 @@ const KNOWN_ARKUI_DECORATORS: &[&str] = &[
     "Computed",
     "Monitor",
     "SyncMonitor",
+    "Observed",
+    "ObservedV2",
     "ComponentInit",
     "ComponentAppear",
     "ComponentBuilt",
@@ -90,11 +92,20 @@ fn statement_has_arkts_transform_syntax(statement: &Statement<'_>) -> bool {
                     Some(Declaration::FunctionDeclaration(function))
                         if decorators_have_arkui_syntax(&function.decorators)
                 )
+                || matches!(
+                    export.declaration.as_ref(),
+                    Some(Declaration::ClassDeclaration(class))
+                        if decorators_have_arkui_syntax(&class.decorators)
+                )
         }
         Statement::ExportDefaultDeclaration(export) => {
             matches!(
                 &export.declaration,
                 ExportDefaultDeclarationKind::StructStatement(_)
+            ) || matches!(
+                &export.declaration,
+                ExportDefaultDeclarationKind::ClassDeclaration(class)
+                    if decorators_have_arkui_syntax(&class.decorators)
             )
         }
         _ => false,
@@ -105,5 +116,9 @@ fn decorators_have_arkui_syntax(decorators: &[Decorator<'_>]) -> bool {
     decorators
         .iter()
         .map(decorator_name)
-        .any(|name| KNOWN_ARKUI_DECORATORS.contains(&name))
+        .any(is_known_arkui_decorator_name)
+}
+
+pub(super) fn is_known_arkui_decorator_name(name: &str) -> bool {
+    KNOWN_ARKUI_DECORATORS.contains(&name)
 }

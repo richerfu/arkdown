@@ -304,7 +304,10 @@ struct DependencyRootScanner<'a> {
 
 impl<'a> DependencyRootScanner<'a> {
     fn new(project_root: &'a Path, module_root: &'a Path) -> Self {
-        Self { project_root, module_root }
+        Self {
+            project_root,
+            module_root,
+        }
     }
 
     /// Collect all locally-installed package roots reachable from this module.
@@ -317,11 +320,17 @@ impl<'a> DependencyRootScanner<'a> {
             queue.push_back(self.project_root.to_path_buf());
         }
         while let Some(pkg_root) = queue.pop_front() {
-            let Some(pkg) = self.read_package_json(&pkg_root) else { continue };
+            let Some(pkg) = self.read_package_json(&pkg_root) else {
+                continue;
+            };
             for dep_name in pkg.dependencies.keys() {
-                let Some(dep_root) = self.resolve_root(&pkg_root, dep_name) else { continue };
+                let Some(dep_root) = self.resolve_root(&pkg_root, dep_name) else {
+                    continue;
+                };
                 let dep_key = arkdown_path::to_slash(&dep_root);
-                if !seen.insert(dep_key) { continue }
+                if !seen.insert(dep_key) {
+                    continue;
+                }
                 queue.push_back(dep_root.clone());
                 roots.push(dep_root);
             }
@@ -331,15 +340,18 @@ impl<'a> DependencyRootScanner<'a> {
 
     /// Collect `ResourceTable.txt` paths for resource compilation.
     fn collect_resource_tables(&self) -> Vec<serde_json::Value> {
-        self.collect_roots().into_iter().filter_map(|pkg_root| {
-            let rt = [
-                pkg_root.join("build/default/intermediates/res/default/ResourceTable.txt"),
-                pkg_root.join("ResourceTable.txt"),
-            ]
+        self.collect_roots()
             .into_iter()
-            .find(|p| p.is_file())?;
-            Some(serde_json::json!({ "resourceTable": path_string(&rt) }))
-        }).collect()
+            .filter_map(|pkg_root| {
+                let rt = [
+                    pkg_root.join("build/default/intermediates/res/default/ResourceTable.txt"),
+                    pkg_root.join("ResourceTable.txt"),
+                ]
+                .into_iter()
+                .find(|p| p.is_file())?;
+                Some(serde_json::json!({ "resourceTable": path_string(&rt) }))
+            })
+            .collect()
     }
 
     fn read_package_json(&self, pkg_root: &Path) -> Option<ResourceDependencyPackageJson> {
@@ -351,8 +363,12 @@ impl<'a> DependencyRootScanner<'a> {
         let mut current = Some(issuer_root);
         while let Some(root) = current {
             let candidate = root.join("oh_modules").join(dep_name);
-            if candidate.is_dir() { return Some(candidate); }
-            if root == self.project_root { break; }
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
+            if root == self.project_root {
+                break;
+            }
             current = root.parent();
         }
         let candidate = self.project_root.join("oh_modules").join(dep_name);

@@ -4155,6 +4155,39 @@ with (obj) { value = 2; }"#,
     );
 }
 
+#[test]
+fn test_commonjs_direct_eval_optional_require_matches_upstream_es2abc() {
+    // API20 upstream es2abc compiles @protobufjs/inquire's optional-require
+    // probe as plain CommonJS bytecode. It is not a compile-time hard error;
+    // if `eval` or Node `require` is unavailable at runtime, the package's own
+    // try/catch returns null.
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("protobufjs_inquire.abc");
+    module_compiler()
+        .compile(
+            vec![commonjs_module_record(
+                "pkg_modules/.ohpm/@protobufjs+inquire@1.1.0/pkg_modules/@protobufjs/inquire/index",
+                r#""use strict";
+module.exports = inquire;
+
+function inquire(moduleName) {
+    try {
+        var mod = eval("quire".replace(/^/,"re"))(moduleName);
+        if (mod && (mod.length || Object.keys(mod).length))
+            return mod;
+    } catch (e) {}
+    return null;
+}
+"#,
+            )],
+            &out,
+        )
+        .expect("direct eval optional require must compile like upstream es2abc");
+
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PANDA\0\0\0"));
+}
+
 /// Assignment to `eval` is forbidden in strict mode.
 /// es2panda rejects this at compile time (strict mode violation).
 #[test]

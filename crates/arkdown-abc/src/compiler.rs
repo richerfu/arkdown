@@ -1020,7 +1020,6 @@ impl AbcCompiler {
 ///
 /// Strict mode violations:
 /// - `with` statement — forbidden in strict mode.
-/// - Direct `eval()` call — ArkRuntime does not support `eval`.
 /// - `arguments.callee` — forbidden in strict mode.
 /// - `delete unqualifiedName` — deleting an unqualified variable name
 ///   (`delete x`) is a strict mode error; deleting a property (`delete o.x`)
@@ -1069,21 +1068,6 @@ pub(crate) fn check_unsupported_syntax(
                 });
             }
             walk::walk_with_statement(self, stmt);
-        }
-
-        fn visit_call_expression(&mut self, expr: &oxc_ast::ast::CallExpression<'b>) {
-            if self.error.is_none() {
-                // Direct eval() call: callee is an Identifier named "eval".
-                if let Expression::Identifier(id) = &expr.callee {
-                    if id.name.as_str() == "eval" {
-                        self.error = Some(crate::error::AbcError::UnsupportedConstruct {
-                            construct: "direct eval() call".to_string(),
-                            file: self.record_name.to_string(),
-                        });
-                    }
-                }
-            }
-            walk::walk_call_expression(self, expr);
         }
 
         fn visit_member_expression(&mut self, expr: &MemberExpression<'b>) {

@@ -21,11 +21,11 @@ use std::path::{Path, PathBuf};
 use arkdown_core::ModuleSource;
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    Declaration, Decorator, ExportDefaultDeclarationKind, Function, Statement, StructElement,
-    StructStatement,
+    ClassElement, Declaration, Decorator, ExportDefaultDeclarationKind, Function, Statement,
+    StructElement, StructStatement,
 };
 use oxc_parser::Parser;
-use oxc_span::{GetSpan, SourceType};
+use oxc_span::{GetSpan, SourceType, Span};
 
 use crate::error::EtsTransformError;
 use crate::transform::build_fn::{
@@ -60,6 +60,7 @@ use crate::transform::source_text::{
     type_annotation_text,
 };
 pub(crate) use crate::transform::syntax::has_arkts_transform_syntax;
+use crate::transform::syntax::is_known_arkui_decorator_name;
 use crate::transform::syntax::program_has_arkts_transform_syntax;
 use crate::transform::viewpu_finalize::finalize_viewpu_output;
 pub use crate::transform::viewpu_source_map::transform_ets_viewpu_with_source_map;
@@ -305,6 +306,12 @@ fn transform_non_component_statement(
                 span_text(statement.span(), source_text).replacen("import lazy", "import", 1);
             Some((statement.span().start as usize, text))
         }
+        Statement::ClassDeclaration(class) => ClassDecoratorStripper::new(source_text)
+            .strip_statement(
+                statement.span(),
+                class.decorators.iter(),
+                class.body.body.iter(),
+            ),
         Statement::FunctionDeclaration(function) => transform_decorated_function(
             function,
             source_text,
@@ -351,11 +358,88 @@ fn transform_non_component_statement(
                     ParamsInterfaceEmitter::new(annotation, source_text).emit_exported(),
                 ))
             }
+            Some(Declaration::ClassDeclaration(class)) => ClassDecoratorStripper::new(source_text)
+                .strip_statement(
+                    statement.span(),
+                    export.decorators.iter().chain(class.decorators.iter()),
+                    class.body.body.iter(),
+                ),
+            _ => None,
+        },
+        Statement::ExportDefaultDeclaration(export) => match &export.declaration {
+            ExportDefaultDeclarationKind::ClassDeclaration(class) => {
+                ClassDecoratorStripper::new(source_text).strip_statement(
+                    statement.span(),
+                    class.decorators.iter(),
+                    class.body.body.iter(),
+                )
+            }
             _ => None,
         },
         _ => None,
     };
     Ok(replacement)
+}
+
+struct ClassDecoratorStripper<'a> {
+    source_text: &'a str,
+}
+
+impl<'a> ClassDecoratorStripper<'a> {
+    fn new(source_text: &'a str) -> Self {
+        Self { source_text }
+    }
+
+    fn strip_statement<'b>(
+        &self,
+        statement_span: Span,
+        class_decorators: impl Iterator<Item = &'b Decorator<'b>>,
+        class_elements: impl Iterator<Item = &'b ClassElement<'b>>,
+    ) -> Option<(usize, String)> {
+        let end = statement_span.end as usize;
+        let decorators = class_decorators
+            .chain(class_elements.flat_map(class_element_decorators))
+            .filter(|decorator| is_strippable_class_decorator(decorator_name(decorator)))
+            .collect::<Vec<_>>();
+
+        if decorators.is_empty() {
+            return None;
+        }
+
+        let start = decorators
+            .iter()
+            .map(|decorator| decorator.span.start)
+            .min()
+            .unwrap_or(statement_span.start)
+            .min(statement_span.start) as usize;
+        let mut patches = decorators
+            .into_iter()
+            .map(|decorator| SourcePatch {
+                start: decorator.span.start as usize - start,
+                end: decorator.span.end as usize - start,
+                replacement: String::new(),
+            })
+            .collect::<Vec<_>>();
+
+        patches.sort_by_key(|patch| patch.start);
+        Some((
+            start,
+            apply_source_patches(&self.source_text[start..end], patches),
+        ))
+    }
+}
+
+fn class_element_decorators<'a>(element: &'a ClassElement<'a>) -> &'a [Decorator<'a>] {
+    match element {
+        ClassElement::PropertyDefinition(property) => &property.decorators,
+        ClassElement::AccessorProperty(accessor) => &accessor.decorators,
+        ClassElement::MethodDefinition(method) => &method.decorators,
+        ClassElement::StaticBlock(_) | ClassElement::TSIndexSignature(_) => &[],
+    }
+}
+
+fn is_strippable_class_decorator(name: &str) -> bool {
+    matches!(name, "Observed" | "ObservedV2") || is_known_arkui_decorator_name(name)
 }
 
 fn transform_decorated_function(

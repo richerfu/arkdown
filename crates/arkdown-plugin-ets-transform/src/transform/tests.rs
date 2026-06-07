@@ -23,6 +23,69 @@ fn test_non_component_passthrough() {
 }
 
 #[test]
+fn test_strips_arkui_decorators_from_regular_class() {
+    let src = "@Observed\nexport class UserModel {\n  @Trace name: string = 'guest';\n}";
+    let result = transform_ets(&make_source("entry/src/main/ets/model/UserModel.ets", src))
+        .expect("regular observed class must transform");
+
+    assert!(result.contains("export class UserModel"));
+    assert!(result.contains("name: string = 'guest';"));
+    assert!(
+        !result.contains("@Observed"),
+        "@Observed must be consumed before ABC:\n{result}"
+    );
+    assert!(
+        !result.contains("@Trace"),
+        "@Trace must be consumed before ABC:\n{result}"
+    );
+
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(
+        &allocator,
+        &result,
+        oxc_span::SourceType::ts().with_module(true),
+    )
+    .parse();
+    assert!(
+        parsed.errors.is_empty(),
+        "decorator-stripped class must be standard TypeScript: {:?}\n{}",
+        parsed.errors,
+        result
+    );
+}
+
+#[test]
+fn test_strips_arkui_decorators_from_default_export_class() {
+    let src = "@Observed\nexport default class LazyDataSource<T> {\n  dataArray: T[] = [];\n}";
+    let result = transform_ets(&make_source(
+        "commons/utils/src/main/ets/utils/LazyDataSource.ets",
+        src,
+    ))
+    .expect("default export observed class must transform");
+
+    assert!(result.contains("export default class LazyDataSource<T>"));
+    assert!(result.contains("dataArray: T[] = [];"));
+    assert!(
+        !result.contains("@Observed"),
+        "@Observed must be consumed before ABC:\n{result}"
+    );
+
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(
+        &allocator,
+        &result,
+        oxc_span::SourceType::ts().with_module(true),
+    )
+    .parse();
+    assert!(
+        parsed.errors.is_empty(),
+        "decorator-stripped default export class must be standard TypeScript: {:?}\n{}",
+        parsed.errors,
+        result
+    );
+}
+
+#[test]
 fn test_transforms_component_struct_with_empty_build() {
     let src = "@Component\nstruct MyView {\n  build() {}\n}";
     let result = transform_ets(&make_source("entry/src/main/ets/pages/MyView.ets", src)).unwrap();

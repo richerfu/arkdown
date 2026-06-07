@@ -36,7 +36,7 @@ use arkdown_profile::{
 use arkdown_resolver::ResolverConfig;
 use arkdown_resource::{ResourceCompileConfig, ResourceCompileInput, ResourceCompiler};
 use arkdown_sign::HapSigner;
-use arkdown_ts2abc::{compile_to_abc, Ts2abcInput, Ts2abcOptions};
+use arkdown_ts2abc::{compile_to_abc, Ts2abcInput};
 use arkdown_watcher::FileWatcher;
 use rolldown_plugin::__inner::SharedPluginable;
 
@@ -44,6 +44,8 @@ use crate::progress::Progress;
 use crate::task_cache::TaskInputs;
 use arkdown_cache::{BuildCache, BundleCacheKey, CacheKey};
 
+mod compile_arkts_abc;
+use compile_arkts_abc::{AbcCompilePlan, AbcCompileRequest};
 mod compile_arkts_cache;
 use compile_arkts_cache::CompileArktsCacheWriter;
 mod compile_arkts_handoff;
@@ -202,6 +204,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
 
     let config_arc = Arc::new(config);
     let build_modules = build_modules_for_target(config_arc.as_ref(), module_filter.as_deref());
+    let abc_compile_plan = AbcCompilePlan::from_config(config_arc.as_ref());
 
     // F20: Coverage instrumentation mode.
     // When --coverage is set, the build is prepared for code coverage collection.
@@ -281,7 +284,8 @@ pub async fn run(args: BuildArgs) -> Result<()> {
     } else {
         None
     };
-    let app_scope_bundle_name = AppScopeReader::new(&project_root).bundle_name()
+    let app_scope_bundle_name = AppScopeReader::new(&project_root)
+        .bundle_name()
         .unwrap_or_else(|| config_arc.product.bundle_name.clone());
     let pac_schema_path = config_arc.sdk_config.pac_schema_path();
     if matches!(&config_arc.output_target, OutputTarget::Hap) {
@@ -299,8 +303,8 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         // Read module.json5 early so device_types are available for resource
         // compilation (which must precede profile processing so IDs are known).
         let module_json5_path = module.src_path.join("src/main/module.json5");
-        let module_json5_early = ModuleJsonReader::new(&module.src_path)
-            .parse_module_json5(&module_json5_path)?;
+        let module_json5_early =
+            ModuleJsonReader::new(&module.src_path).parse_module_json5(&module_json5_path)?;
         // Reject legacy FA model (JSBUNDLE) as early as possible.
         // Section 3.7: JSBUNDLE fixture must consistently reject.
         arkdown_profile::validate_compile_mode(
@@ -335,7 +339,8 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             .src_path
             .join("build/default/intermediates/res/default");
         // Include AppScope/resources so app-level icon/label IDs are assigned.
-        let include_app_scope = ResourceDirSelector::new(config_arc.as_ref(), module).include_app_scope();
+        let include_app_scope =
+            ResourceDirSelector::new(config_arc.as_ref(), module).include_app_scope();
         let mut res_dirs: Vec<PathBuf> = vec![];
         let app_scope_res = project_root.join("AppScope/resources");
         if include_app_scope && app_scope_res.exists() {
@@ -350,7 +355,9 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             }
         }
         for resource_module in resource_modules_for_build(config_arc.as_ref(), module) {
-            for module_res_dir in ResourceDirSelector::new(config_arc.as_ref(), resource_module).select() {
+            for module_res_dir in
+                ResourceDirSelector::new(config_arc.as_ref(), resource_module).select()
+            {
                 if module_res_dir.exists() && !res_dirs.contains(&module_res_dir) {
                     res_dirs.push(module_res_dir);
                 }
@@ -670,10 +677,12 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         // the default `src/main/resources/`) so the hvigor parity report
         // compares the correct resource inputs.
         {
-            let module_res_dirs: Vec<PathBuf> = ResourceDirSelector::new(config_arc.as_ref(), module).select()
-                .into_iter()
-                .filter(|d| d.exists())
-                .collect();
+            let module_res_dirs: Vec<PathBuf> =
+                ResourceDirSelector::new(config_arc.as_ref(), module)
+                    .select()
+                    .into_iter()
+                    .filter(|d| d.exists())
+                    .collect();
             if module_res_dirs.is_empty() {
                 write_resource_config_files(&project_root, module, &config_arc, &res_out)?;
             } else {
@@ -980,7 +989,8 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             &config_arc,
             resource_refs,
             &resolved_imports,
-        ).write(&bundle_out.chunk_graph)?;
+        )
+        .write(&bundle_out.chunk_graph)?;
         bundle_outs.push((bundle_out, false));
         compile_arkts_handoffs_by_bundle.push(compile_arkts_handoff);
 
@@ -1289,32 +1299,12 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             ));
         }
         if !ts2abc_inputs.is_empty() {
-            compile_to_abc(Ts2abcOptions {
+            compile_to_abc(abc_compile_plan.ts2abc_options(AbcCompileRequest {
                 inputs: ts2abc_inputs,
                 output: bundle_out.modules_abc_path.clone(),
-                target_api_version: config_arc.sdk_config.compile_api_version,
-                target_api_sub_version: config_arc.product.compatible_sdk_version_stage.clone(),
-                enable_annotations: false,
-                debug_info: matches!(config_arc.build_mode, BuildMode::Debug),
-                opt_level: if matches!(config_arc.build_mode, BuildMode::Release) {
-                    2
-                } else {
-                    0
-                },
-                optimize_try_catch_func: true,
-                merge_abc: true,
-                module: true,
-                commonjs: false,
-                input_extension: "js".to_string(),
-                module_record_field_name: None,
                 cache_file: effective_cache_file,
-                output_proto: None,
-                compile_context_info: Default::default(),
-                enable_abc_input: false,
-                dump_deps_info: false,
-                remove_redundant_file: false,
                 npm_module_entry_list: compile_arkts_handoff.npm_entries_path,
-            })
+            }))
             .map_err(|e| anyhow::anyhow!("ABC compile failed: {}", e))?;
             write_hvigor_source_maps(
                 bundle_out,
@@ -1332,11 +1322,24 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 )?;
             }
             copy_ets_assets_to_loader_out(module, loader_json)?;
-            compile_widget_pass(module, _manifest, loader_json, &config_arc, resource_refs)?;
+            compile_widget_pass(
+                module,
+                _manifest,
+                loader_json,
+                &config_arc,
+                resource_refs,
+                &abc_compile_plan,
+            )?;
 
             // H13: ArkData compile pass — separate ABC invocation for cloud
             // database schema files using @kit.ArkData decorators.
-            compile_arkdata_pass(module, loader_json, &config_arc, resource_refs)?;
+            compile_arkdata_pass(
+                module,
+                loader_json,
+                &config_arc,
+                resource_refs,
+                &abc_compile_plan,
+            )?;
 
             for (_chunk_name, path) in &bundle_out.chunk_files {
                 if path.extension().and_then(|e| e.to_str()) == Some("js") && path.exists() {
@@ -1657,9 +1660,12 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                                     label: a.label.clone(),
                                 })
                                 .collect();
-                            let bundle_version_code = AppScopeReader::new(&project_root).version_code();
-                            let bundle_version_name = AppScopeReader::new(&project_root).version_name();
-                            let bundle_type = AppScopeReader::new(&project_root).bundle_type(&config_arc);
+                            let bundle_version_code =
+                                AppScopeReader::new(&project_root).version_code();
+                            let bundle_version_name =
+                                AppScopeReader::new(&project_root).version_name();
+                            let bundle_type =
+                                AppScopeReader::new(&project_root).bundle_type(&config_arc);
                             let delivery_with_install =
                                 ModuleJsonReader::new(&module.src_path).delivery_with_install();
                             Some(
@@ -1673,7 +1679,8 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                                             &project_root,
                                             module,
                                             &config_arc.product.build_option.abi_filters,
-                                        ).collect(),
+                                        )
+                                        .collect(),
                                         output_path: output.clone(),
                                         resources_src_dir: Some(module.src_path.join(
                                             "build/default/intermediates/res/default/resources",
@@ -1690,7 +1697,8 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                                             config_arc.as_ref(),
                                             &config_arc.product.bundle_name,
                                             bundle_version_code,
-                                        ).collect()?,
+                                        )
+                                        .collect()?,
                                         device_types: manifest.device_types.clone(),
                                         // installationFree: true for atomicService bundles
                                         installation_free: bundle_type == "atomicService",
@@ -1829,10 +1837,8 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 // Check the importer map to see if any of the changed files
                 // transitively affect an entry point.  If no entry point is
                 // reachable from the changed files, skip the rebuild.
-                let changed_strs: Vec<String> = changed
-                    .iter()
-                    .map(|p| arkdown_path::to_slash(p))
-                    .collect();
+                let changed_strs: Vec<String> =
+                    changed.iter().map(|p| arkdown_path::to_slash(p)).collect();
 
                 // Find which chunk names contain the changed files.
                 let mut affected_chunks: FxHashSet<String> = FxHashSet::default();
@@ -1955,30 +1961,54 @@ impl<'a> AppScopeReader<'a> {
 
     /// Read `app.bundleName`.
     fn bundle_name(&self) -> Option<String> {
-        self.read_parsed()
-            .and_then(|v| v.get("app")?.get("bundleName")?.as_str().map(str::to_string))
+        self.read_parsed().and_then(|v| {
+            v.get("app")?
+                .get("bundleName")?
+                .as_str()
+                .map(str::to_string)
+        })
     }
 
     /// Read `app.versionCode`. Falls back to `1000000` when absent.
     fn version_code(&self) -> u64 {
         #[derive(serde::Deserialize)]
-        struct AppJson { app: AppSection }
+        struct AppJson {
+            app: AppSection,
+        }
         #[derive(serde::Deserialize)]
         #[serde(rename_all = "camelCase")]
-        struct AppSection { #[serde(default)] version_code: Option<u64> }
-        let Ok(content) = std::fs::read_to_string(self.app_json5_path()) else { return 1000000 };
-        json5::from_str::<AppJson>(&content).ok().and_then(|a| a.app.version_code).unwrap_or(1000000)
+        struct AppSection {
+            #[serde(default)]
+            version_code: Option<u64>,
+        }
+        let Ok(content) = std::fs::read_to_string(self.app_json5_path()) else {
+            return 1000000;
+        };
+        json5::from_str::<AppJson>(&content)
+            .ok()
+            .and_then(|a| a.app.version_code)
+            .unwrap_or(1000000)
     }
 
     /// Read `app.versionName`. Falls back to `"1.0.0"` when absent.
     fn version_name(&self) -> String {
         #[derive(serde::Deserialize)]
-        struct AppJson { app: AppSection }
+        struct AppJson {
+            app: AppSection,
+        }
         #[derive(serde::Deserialize)]
         #[serde(rename_all = "camelCase")]
-        struct AppSection { #[serde(default)] version_name: Option<String> }
-        let Ok(content) = std::fs::read_to_string(self.app_json5_path()) else { return "1.0.0".to_string() };
-        json5::from_str::<AppJson>(&content).ok().and_then(|a| a.app.version_name).unwrap_or_else(|| "1.0.0".to_string())
+        struct AppSection {
+            #[serde(default)]
+            version_name: Option<String>,
+        }
+        let Ok(content) = std::fs::read_to_string(self.app_json5_path()) else {
+            return "1.0.0".to_string();
+        };
+        json5::from_str::<AppJson>(&content)
+            .ok()
+            .and_then(|a| a.app.version_name)
+            .unwrap_or_else(|| "1.0.0".to_string())
     }
 
     /// Determine the bundle type string.
@@ -1991,12 +2021,22 @@ impl<'a> AppScopeReader<'a> {
             return "shared".to_string();
         }
         #[derive(serde::Deserialize)]
-        struct AppJson { app: AppSection }
+        struct AppJson {
+            app: AppSection,
+        }
         #[derive(serde::Deserialize)]
         #[serde(rename_all = "camelCase")]
-        struct AppSection { #[serde(default)] bundle_type: Option<String> }
-        let Ok(content) = std::fs::read_to_string(self.app_json5_path()) else { return "app".to_string() };
-        json5::from_str::<AppJson>(&content).ok().and_then(|a| a.app.bundle_type).unwrap_or_else(|| "app".to_string())
+        struct AppSection {
+            #[serde(default)]
+            bundle_type: Option<String>,
+        }
+        let Ok(content) = std::fs::read_to_string(self.app_json5_path()) else {
+            return "app".to_string();
+        };
+        json5::from_str::<AppJson>(&content)
+            .ok()
+            .and_then(|a| a.app.bundle_type)
+            .unwrap_or_else(|| "app".to_string())
     }
 }
 
@@ -2057,14 +2097,25 @@ impl<'a> ResourceDirSelector<'a> {
             .iter()
             .filter(|dir| !dir.as_os_str().is_empty())
             .map(|dir| {
-                if dir.is_absolute() { dir.clone() } else { self.module.src_path.join(dir) }
+                if dir.is_absolute() {
+                    dir.clone()
+                } else {
+                    self.module.src_path.join(dir)
+                }
             })
             .collect()
     }
 
     fn source_set_dir(&self, target_name: &str) -> Option<PathBuf> {
-        if target_name == "default" { return None; }
-        let dir = self.module.src_path.join("src").join(target_name).join("resources");
+        if target_name == "default" {
+            return None;
+        }
+        let dir = self
+            .module
+            .src_path
+            .join("src")
+            .join(target_name)
+            .join("resources");
         dir.exists().then_some(dir)
     }
 
@@ -2075,8 +2126,12 @@ impl<'a> ResourceDirSelector<'a> {
         let Some(res_options) = self.config.product.build_option.res_options.as_ref() else {
             return true;
         };
-        if res_options.include_app_scope_res { return true; }
-        if matches!(self.module.module_type, OhosModuleType::Shared) { return false; }
+        if res_options.include_app_scope_res {
+            return true;
+        }
+        if matches!(self.module.module_type, OhosModuleType::Shared) {
+            return false;
+        }
         tracing::warn!(
             module = %self.module.name,
             module_type = %self.module.module_type,
@@ -2119,7 +2174,11 @@ struct NativeDependencyPackageJson {
 
 impl<'a> NativeLibCollector<'a> {
     fn new(project_root: &'a Path, module: &'a ModuleConfig, abi_filters: &'a [String]) -> Self {
-        Self { project_root, module, abi_filters }
+        Self {
+            project_root,
+            module,
+            abi_filters,
+        }
     }
 
     /// Collect all native `.so` files for this module and its dependencies.
@@ -2136,10 +2195,14 @@ impl<'a> NativeLibCollector<'a> {
             tracing::debug!(module = %self.module.src_path.display(), "native: scanning for pre-built .so files");
         }
         let native_out = native_cfg.run();
-        for warning in &native_out.warnings { tracing::warn!("{}", warning); }
+        for warning in &native_out.warnings {
+            tracing::warn!("{}", warning);
+        }
         for (_, so_path) in native_out.libs_by_abi {
             let canonical = std::fs::canonicalize(&so_path).unwrap_or(so_path.clone());
-            if seen.insert(canonical.clone()) { libs.push(so_path); }
+            if seen.insert(canonical.clone()) {
+                libs.push(so_path);
+            }
         }
 
         for dep_root in self.dependency_roots() {
@@ -2159,15 +2222,33 @@ impl<'a> NativeLibCollector<'a> {
             .collect()
     }
 
-    fn collect_from_root(&self, root: &Path, seen: &mut FxHashSet<PathBuf>, libs: &mut Vec<PathBuf>) {
-        if !root.exists() { return; }
-        for entry in walkdir::WalkDir::new(root).into_iter().filter_map(|e| e.ok()).filter(|e| e.file_type().is_file()) {
+    fn collect_from_root(
+        &self,
+        root: &Path,
+        seen: &mut FxHashSet<PathBuf>,
+        libs: &mut Vec<PathBuf>,
+    ) {
+        if !root.exists() {
+            return;
+        }
+        for entry in walkdir::WalkDir::new(root)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+        {
             let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("so") { continue; }
-            let comps: Vec<_> = path.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("so") {
+                continue;
+            }
+            let comps: Vec<_> = path
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect();
             if self.abi_filters.iter().any(|abi| comps.contains(abi)) {
                 let path = canonical_or_owned(path);
-                if seen.insert(path.clone()) { libs.push(path); }
+                if seen.insert(path.clone()) {
+                    libs.push(path);
+                }
             }
         }
     }
@@ -2196,13 +2277,21 @@ impl<'a> ModuleJsonReader<'a> {
 
     /// Read `module.deliveryWithInstall`. Defaults to `true` when absent.
     fn delivery_with_install(&self) -> bool {
-        let Ok(content) = std::fs::read_to_string(self.module_json5_path()) else { return true };
+        let Ok(content) = std::fs::read_to_string(self.module_json5_path()) else {
+            return true;
+        };
         #[derive(serde::Deserialize)]
-        struct ModuleJson { module: ModuleSection }
+        struct ModuleJson {
+            module: ModuleSection,
+        }
         #[derive(serde::Deserialize)]
         #[serde(rename_all = "camelCase")]
-        struct ModuleSection { #[serde(default)] delivery_with_install: Option<bool> }
-        json5::from_str::<ModuleJson>(&content).ok()
+        struct ModuleSection {
+            #[serde(default)]
+            delivery_with_install: Option<bool>,
+        }
+        json5::from_str::<ModuleJson>(&content)
+            .ok()
             .and_then(|m| m.module.delivery_with_install)
             .unwrap_or(true)
     }
@@ -2241,7 +2330,9 @@ impl<'a> ModuleJsonReader<'a> {
         startup_out: &arkdown_profile::StartupConfigOutput,
         write_json: &dyn Fn(&Path, &serde_json::Value) -> Result<()>,
     ) -> Result<()> {
-        let Some(startup_config) = startup_out.config.as_ref() else { return Ok(()); };
+        let Some(startup_config) = startup_out.config.as_ref() else {
+            return Ok(());
+        };
         if startup_config.startup_tasks.is_empty()
             && startup_config.app_preload_hint_startup_tasks.is_empty()
             && startup_config.system_preload_hint_startup_tasks.is_empty()
@@ -2254,8 +2345,13 @@ impl<'a> ModuleJsonReader<'a> {
             .get_mut("module")
             .and_then(|v| v.as_object_mut())
             .context("module.json missing module object")?;
-        if module.contains_key("appStartup") { return Ok(()); }
-        module.insert("appStartup".to_string(), serde_json::Value::String("$profile:startup_config".to_string()));
+        if module.contains_key("appStartup") {
+            return Ok(());
+        }
+        module.insert(
+            "appStartup".to_string(),
+            serde_json::Value::String("$profile:startup_config".to_string()),
+        );
         write_json(module_json_path, &value)
     }
 }
@@ -2276,51 +2372,103 @@ struct IntegratedHspCollector<'a> {
 }
 
 impl<'a> IntegratedHspCollector<'a> {
-    fn new(module: &'a ModuleConfig, config: &'a ArkdownConfig, bundle_name: &'a str, version_code: u64) -> Self {
-        Self { module, config, bundle_name, version_code }
+    fn new(
+        module: &'a ModuleConfig,
+        config: &'a ArkdownConfig,
+        bundle_name: &'a str,
+        version_code: u64,
+    ) -> Self {
+        Self {
+            module,
+            config,
+            bundle_name,
+            version_code,
+        }
     }
 
     fn collect(&self) -> Result<Vec<arkdown_pack::IntegratedHspEntry>> {
         use arkdown_pack::{normalize_integrated_hsps, IntegratedHspEntry};
 
         #[derive(serde::Deserialize)]
-        struct DepMetadata { #[serde(rename = "isIntegratedHsp", default)] is_integrated_hsp: bool }
+        struct DepMetadata {
+            #[serde(rename = "isIntegratedHsp", default)]
+            is_integrated_hsp: bool,
+        }
         #[derive(serde::Deserialize)]
-        struct DepPkg { #[serde(default)] metadata: Option<DepMetadata>, #[serde(default)] version: Option<String> }
+        struct DepPkg {
+            #[serde(default)]
+            metadata: Option<DepMetadata>,
+            #[serde(default)]
+            version: Option<String>,
+        }
 
         let mut raw_entries: Vec<IntegratedHspEntry> = Vec::new();
-        for (dep_name, pkg_dir) in DependencyPackageScanner::new(&self.config.project_root).collect_with_alias(&self.module.src_path) {
+        for (dep_name, pkg_dir) in DependencyPackageScanner::new(&self.config.project_root)
+            .collect_with_alias(&self.module.src_path)
+        {
             let dep_pkg_json = pkg_dir.join("oh-package.json5");
-            let Ok(dep_content) = std::fs::read_to_string(&dep_pkg_json) else { continue };
-            let Ok(dep_pkg) = json5::from_str::<DepPkg>(&dep_content) else { continue };
-            if !dep_pkg.metadata.as_ref().map_or(false, |m| m.is_integrated_hsp) { continue }
+            let Ok(dep_content) = std::fs::read_to_string(&dep_pkg_json) else {
+                continue;
+            };
+            let Ok(dep_pkg) = json5::from_str::<DepPkg>(&dep_content) else {
+                continue;
+            };
+            if !dep_pkg
+                .metadata
+                .as_ref()
+                .map_or(false, |m| m.is_integrated_hsp)
+            {
+                continue;
+            }
             let hsp_name = dep_name.rsplit('/').next().unwrap_or(dep_name.as_str());
             let hsp_path = pkg_dir.join(format!("{}.hsp", hsp_name));
             if !hsp_path.exists() {
-                tracing::warn!(dep = dep_name, "K5: integrated HSP dependency has no pre-built .hsp file; skipping");
+                tracing::warn!(
+                    dep = dep_name,
+                    "K5: integrated HSP dependency has no pre-built .hsp file; skipping"
+                );
                 continue;
             }
-            let version = dep_pkg.version.filter(|v| !v.trim().is_empty()).unwrap_or_else(|| "1.0.0".to_string());
+            let version = dep_pkg
+                .version
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or_else(|| "1.0.0".to_string());
             raw_entries.push(IntegratedHspEntry {
                 hsp_dir_name: format!("{}@{}", hsp_name, version),
                 hsp_file_name: format!("{}.hsp", hsp_name),
                 hsp_path,
             });
         }
-        if raw_entries.is_empty() { return Ok(vec![]); }
-        let compatible_api = parse_api_version(&self.config.product.compatible_sdk_version).unwrap_or(self.config.sdk_config.compile_api_version);
+        if raw_entries.is_empty() {
+            return Ok(vec![]);
+        }
+        let compatible_api = parse_api_version(&self.config.product.compatible_sdk_version)
+            .unwrap_or(self.config.sdk_config.compile_api_version);
         if self.config.sdk_config.compile_api_version <= 11 || compatible_api <= 11 {
             return Err(anyhow::anyhow!("INTEGRATED_HSP_UNSUPPORTED_API: integrated HSP requires compile and compatible API greater than 11"));
         }
-        let out_dir = self.module.src_path.join("build/default/intermediates/integrated_hsp");
+        let out_dir = self
+            .module
+            .src_path
+            .join("build/default/intermediates/integrated_hsp");
         std::fs::create_dir_all(&out_dir).ok();
-        match normalize_integrated_hsps(&raw_entries, self.bundle_name, self.version_code, &out_dir) {
-            Ok(normalized_paths) => Ok(raw_entries.into_iter().zip(normalized_paths).map(|(mut e, p)| { e.hsp_path = p; e }).collect()),
-            Err(e) => { tracing::warn!(error = %e, "K5: failed to normalize integrated HSPs"); Ok(vec![]) }
+        match normalize_integrated_hsps(&raw_entries, self.bundle_name, self.version_code, &out_dir)
+        {
+            Ok(normalized_paths) => Ok(raw_entries
+                .into_iter()
+                .zip(normalized_paths)
+                .map(|(mut e, p)| {
+                    e.hsp_path = p;
+                    e
+                })
+                .collect()),
+            Err(e) => {
+                tracing::warn!(error = %e, "K5: failed to normalize integrated HSPs");
+                Ok(vec![])
+            }
         }
     }
 }
-
 
 /// Collect declared dependency roots with their aliases (name → path).
 ///
@@ -2352,8 +2500,12 @@ impl<'a> DependencyPackageScanner<'a> {
         let mut current = Some(issuer_root);
         while let Some(root) = current {
             let candidate = root.join("oh_modules").join(dep_name);
-            if candidate.is_dir() { return Some(candidate); }
-            if root == self.project_root { break; }
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
+            if root == self.project_root {
+                break;
+            }
             current = root.parent();
         }
         let candidate = self.project_root.join("oh_modules").join(dep_name);
@@ -2370,11 +2522,17 @@ impl<'a> DependencyPackageScanner<'a> {
             queue.push_back(self.project_root.to_path_buf());
         }
         while let Some(pkg_root) = queue.pop_front() {
-            let Some(pkg) = self.read_package_json(&pkg_root) else { continue };
+            let Some(pkg) = self.read_package_json(&pkg_root) else {
+                continue;
+            };
             for dep_name in pkg.dependencies.keys() {
-                let Some(dep_root) = self.resolve_dep_root(&pkg_root, dep_name) else { continue };
+                let Some(dep_root) = self.resolve_dep_root(&pkg_root, dep_name) else {
+                    continue;
+                };
                 let key = arkdown_path::to_slash(&dep_root);
-                if !seen.insert(key) { continue }
+                if !seen.insert(key) {
+                    continue;
+                }
                 queue.push_back(dep_root.clone());
                 roots.push((dep_name.clone(), dep_root));
             }
@@ -2636,11 +2794,13 @@ mod tests {
         assert_eq!(AppScopeReader::new(tmp.path()).version_code(), 42);
         assert_eq!(AppScopeReader::new(tmp.path()).version_name(), "2.3.4");
         assert_eq!(
-            AppScopeReader::new(tmp.path()).bundle_type(&test_config(tmp.path(), OutputTarget::Hap)),
+            AppScopeReader::new(tmp.path())
+                .bundle_type(&test_config(tmp.path(), OutputTarget::Hap)),
             "atomicService"
         );
         assert_eq!(
-            AppScopeReader::new(tmp.path()).bundle_type(&test_config(tmp.path(), OutputTarget::Hsp)),
+            AppScopeReader::new(tmp.path())
+                .bundle_type(&test_config(tmp.path(), OutputTarget::Hsp)),
             "shared",
             "HSP output must override AppScope bundleType in pack.info"
         );
@@ -2675,7 +2835,8 @@ mod tests {
             }),
         };
 
-        ModuleJsonReader::new(&module_json.parent().unwrap_or(&module_json)).ensure_startup_profile_ref(&module_json, &startup_out, &write_json_pretty)
+        ModuleJsonReader::new(&module_json.parent().unwrap_or(&module_json))
+            .ensure_startup_profile_ref(&module_json, &startup_out, &write_json_pretty)
             .expect("ensure appStartup");
 
         let value: serde_json::Value =
@@ -2715,7 +2876,8 @@ mod tests {
             }),
         };
 
-        ModuleJsonReader::new(&module_json.parent().unwrap_or(&module_json)).ensure_startup_profile_ref(&module_json, &startup_out, &write_json_pretty)
+        ModuleJsonReader::new(&module_json.parent().unwrap_or(&module_json))
+            .ensure_startup_profile_ref(&module_json, &startup_out, &write_json_pretty)
             .expect("ensure appStartup");
 
         let value: serde_json::Value =
@@ -2858,7 +3020,8 @@ mod tests {
         config.sdk_config.compile_api_version = 11;
         config.product.compatible_sdk_version = "4.1.0(11)".to_string();
 
-        let err = IntegratedHspCollector::new(&module, &config, "com.host.app", 1000000).collect()
+        let err = IntegratedHspCollector::new(&module, &config, "com.host.app", 1000000)
+            .collect()
             .expect_err("integrated HSP must require API > 11");
         assert!(
             err.to_string().contains("INTEGRATED_HSP_UNSUPPORTED_API"),
@@ -2914,7 +3077,8 @@ mod tests {
             module_type: OhosModuleType::Entry,
         };
         let config = test_config(project_root, OutputTarget::Hap);
-        let entries = IntegratedHspCollector::new(&module, &config, "com.host.app", 1000000).collect()
+        let entries = IntegratedHspCollector::new(&module, &config, "com.host.app", 1000000)
+            .collect()
             .expect("collect integrated HSPs");
 
         assert_eq!(entries.len(), 1);
@@ -2989,12 +3153,17 @@ struct RouterMapCacheInvalidator<'a> {
 
 impl<'a> RouterMapCacheInvalidator<'a> {
     fn new(router_map_path: &'a Path, cache_path: &'a Path) -> Self {
-        Self { router_map_path, cache_path }
+        Self {
+            router_map_path,
+            cache_path,
+        }
     }
 
     /// Return `true` when the router map cache should be invalidated.
     fn should_invalidate(&self) -> bool {
-        let Ok(content) = std::fs::read_to_string(self.router_map_path) else { return false };
+        let Ok(content) = std::fs::read_to_string(self.router_map_path) else {
+            return false;
+        };
         let current_hash = arkdown_cache::fnv1a_hash(&content);
         let cached: u64 = match std::fs::read_to_string(self.cache_path) {
             Ok(s) => s.trim().parse().unwrap_or(0),

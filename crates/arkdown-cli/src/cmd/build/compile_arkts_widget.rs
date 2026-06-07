@@ -1,3 +1,4 @@
+use super::compile_arkts_abc::{AbcCompilePlan, AbcCompileRequest};
 use super::compile_arkts_handoff::{write_compile_arkts_abc_handoff, CompileArkTsInfo};
 use super::compile_arkts_modules::{
     compile_source_passthrough, rewrite_compile_module_imports_to_ohm, slash_path,
@@ -14,6 +15,7 @@ pub(super) fn compile_widget_pass(
     loader_json: &arkdown_profile::LoaderJson,
     config: &Arc<ArkdownConfig>,
     resource_refs: &FxHashMap<String, ResourceReference>,
+    abc_compile_plan: &AbcCompilePlan,
 ) -> Result<()> {
     if matches!(module.module_type, OhosModuleType::Har) {
         return Ok(());
@@ -141,32 +143,12 @@ pub(super) fn compile_widget_pass(
     // Widget cache uses its own handoff modules.cache, matching
     // es2abc --cache-file @... without reusing the main module manifest.
     let modules_cache_path = handoff.modules_cache_path.clone();
-    compile_to_abc(Ts2abcOptions {
+    compile_to_abc(abc_compile_plan.ts2abc_options(AbcCompileRequest {
         inputs: handoff.inputs,
         output: widget_abc,
-        target_api_version: config.sdk_config.compile_api_version,
-        target_api_sub_version: config.product.compatible_sdk_version_stage.clone(),
-        enable_annotations: false,
-        debug_info: matches!(config.build_mode, BuildMode::Debug),
-        opt_level: if matches!(config.build_mode, BuildMode::Release) {
-            2
-        } else {
-            0
-        },
-        optimize_try_catch_func: true,
-        merge_abc: true,
-        module: true,
-        commonjs: false,
-        input_extension: "js".to_string(),
-        module_record_field_name: None,
         cache_file: modules_cache_path,
-        output_proto: None,
-        compile_context_info: Default::default(),
-        enable_abc_input: false,
-        dump_deps_info: false,
-        remove_redundant_file: false,
         npm_module_entry_list: handoff.npm_entries_path,
-    })
+    }))
     .map_err(|e| anyhow::anyhow!("widget ABC compile failed: {}", e))?;
 
     Ok(())
