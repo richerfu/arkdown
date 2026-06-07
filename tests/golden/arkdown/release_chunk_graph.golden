@@ -1,0 +1,9 @@
+{
+  "build_mode": "release",
+  "treeshake": true,
+  "chunk_count": 2,
+  "chunk_names": [
+    "EntryAbility",
+    "Index"
+  ]
+}

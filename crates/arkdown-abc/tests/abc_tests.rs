@@ -7461,3 +7461,160 @@ fn proto_bin_cache_file_written_with_correct_format() {
          record_name, \"\", \"\", panda_file_version)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Panda ISA specification opcode verification
+//
+// These tests verify that the compiler emits the EXACT opcode bytes mandated
+// by the Panda ISA specification documented at:
+//   https://gitee.com/openharmony/arkcompiler_runtime_core
+//
+// Opcode constants verified against isa/isa.yaml (API-24 branch):
+//   0x62  lda.i32  imm:i32   — load signed 32-bit integer into accumulator
+//   0x3E  lda.str  id:u16    — load string literal into accumulator
+//   0x65  return.void         — return undefined
+// ---------------------------------------------------------------------------
+
+/// Verify that `export const answer = 42;` compiles to an LdAi (0x62) instruction
+/// followed by the 32-bit little-endian encoding of 42 (0x2A 0x00 0x00 0x00).
+///
+/// ISA spec reference: `lda.i32 imm:i32` — opcode `0x62`, format `op_imm_32`,
+/// encoding `[0x62][i32 LE]` = 5 bytes total.
+/// Source: `isa/isa.yaml` — `ldai imm:i32`, `opcode_idx: [0x62]`.
+#[test]
+fn test_integer_constant_produces_lda_i32_opcode() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = tmp.path().join("lda_i32.abc");
+    module_compiler()
+        .compile(
+            vec![module_record(
+                "test/isa/lda_i32",
+                "export const answer = 42;",
+            )],
+            &out,
+        )
+        .expect("compile must succeed");
+
+    let bytes = std::fs::read(&out).expect("read .abc");
+    let func_main = module_func_main_bytecode(&bytes, "test/isa/lda_i32");
+
+    // The Panda ISA mandates: lda.i32 42 → [0x62, 0x2A, 0x00, 0x00, 0x00]
+    // 42 in little-endian i32: 0x2A 0x00 0x00 0x00
+    let lda_i32_seq: &[u8] = &[0x62, 0x2A, 0x00, 0x00, 0x00];
+    assert!(
+        func_main.windows(5).any(|w| w == lda_i32_seq),
+        "export const answer = 42 must emit lda.i32 opcode 0x62 followed by \
+         LE bytes for 42 (0x2A 0x00 0x00 0x00); \
+         ISA spec: isa.yaml ldai opcode_idx [0x62]; \
+         func_main_0 bytecode: {:02x?}",
+        func_main,
+    );
+}
+
+/// Verify that `export const msg = "hello";` compiles to an LdaStr (0x3E) instruction.
+///
+/// ISA spec reference: `lda.str id:u16` — opcode `0x3E`, format `op_id_16`,
+/// encoding `[0x3E][string_id: u16 LE]` = 3 bytes total.
+/// Source: `isa/isa.yaml` — `lda.str id:string`, `opcode_idx: [0x3e]`.
+///
+/// The string index (u16) points into the file's string table.  We verify
+/// the opcode byte only, not the index value, since the index depends on
+/// the order strings are interned.
+#[test]
+fn test_string_constant_produces_lda_str_opcode() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = tmp.path().join("lda_str.abc");
+    module_compiler()
+        .compile(
+            vec![module_record(
+                "test/isa/lda_str",
+                r#"export const msg = "hello";"#,
+            )],
+            &out,
+        )
+        .expect("compile must succeed");
+
+    let bytes = std::fs::read(&out).expect("read .abc");
+    let func_main = module_func_main_bytecode(&bytes, "test/isa/lda_str");
+
+    // The Panda ISA mandates: lda.str <string_id> → [0x3E, lo, hi]
+    // We verify the opcode byte 0x3E is present in the bytecode stream.
+    assert!(
+        bytecode_contains_opcode(&func_main, 0x3E),
+        "export const msg = \"hello\" must emit lda.str opcode 0x3E; \
+         ISA spec: isa.yaml lda.str opcode_idx [0x3e]; \
+         func_main_0 bytecode: {:02x?}",
+        func_main,
+    );
+
+    // Additionally verify the "hello" string is present in the ABC binary.
+    assert!(
+        bytes_contain_ascii(&bytes, "hello"),
+        "the string literal \"hello\" must appear in the ABC string table"
+    );
+}
+
+/// Verify that `export function f() {}` compiles to a ReturnUndefined (0x65) opcode
+/// in the function body.
+///
+/// ISA spec reference: `return.void` — opcode `0x65`, format `op_none`,
+/// encoding `[0x65]` = 1 byte.
+/// Source: `isa/isa.yaml` — `returnundefined`, `opcode_idx: [0x65]`.
+///
+/// Every function with no explicit return statement must end with `return.void`
+/// (0x65), not `return` (0x64 which returns the accumulator value).
+#[test]
+fn test_undefined_return_produces_return_undefined_opcode() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = tmp.path().join("return_undefined.abc");
+    module_compiler()
+        .compile(
+            vec![module_record(
+                "test/isa/return_undefined",
+                "export function f() {}",
+            )],
+            &out,
+        )
+        .expect("compile must succeed");
+
+    let bytes = std::fs::read(&out).expect("read .abc");
+
+    // Find the function record "f" inside the module class.
+    let class_name = "Ltest/isa/return_undefined;";
+    let class_off = class_offsets(&bytes)
+        .into_iter()
+        .map(|off| off as usize)
+        .find(|&off| class_name_at(&bytes, off) == class_name)
+        .expect("module class must exist");
+
+    let methods = class_method_items(&bytes, class_off);
+
+    // Find the method named "f".
+    let (_, _, f_code_off) = methods
+        .iter()
+        .find(|(_, name, _)| name == "f")
+        .expect("function f must be emitted as a MethodItem");
+
+    let f_bytecode = code_item_bytecode(
+        &bytes,
+        f_code_off.expect("function f must have a code item") as usize,
+    );
+
+    // The Panda ISA mandates return.void (0x65) for void functions.
+    // This is distinct from return (0x64) which returns the accumulator.
+    assert!(
+        bytecode_contains_opcode(f_bytecode, 0x65),
+        "export function f() {{}} must emit return.void opcode 0x65; \
+         ISA spec: isa.yaml returnundefined opcode_idx [0x65]; \
+         function f bytecode: {:02x?}",
+        f_bytecode,
+    );
+
+    // Sanity: an empty void function must NOT emit the value-return opcode (0x64).
+    assert!(
+        !bytecode_contains_opcode(f_bytecode, 0x64),
+        "empty void function must not emit value-return opcode 0x64 (return acc); \
+         function f bytecode: {:02x?}",
+        f_bytecode,
+    );
+}

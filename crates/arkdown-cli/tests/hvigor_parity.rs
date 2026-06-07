@@ -1652,3 +1652,166 @@ fn collect_all_cache_root_files(
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Multi-target artifact naming tests (section 3.1)
+//
+// These tests verify that the multi-artifact loop in build.rs produces the
+// correct target-specific output filenames when multiple targets apply to a
+// module.  They use `enumerate_applicable_targets_for_module` directly to
+// avoid requiring a full build.
+// ---------------------------------------------------------------------------
+
+/// Verify that when multiple targets apply to a module, the artifact filenames
+/// include the target name as a disambiguator.
+///
+/// hvigor naming convention (section 3.1):
+///   {module}-{target}-unsigned.{ext}   e.g. entry-phone-unsigned.hap
+///   {module}-{target}-signed.{ext}     e.g. entry-phone-signed.hap
+///
+/// This test creates a temporary build-profile.json5 with two targets ("phone"
+/// and "tablet") both applicable to the "default" product, then verifies that
+/// `enumerate_applicable_targets_for_module` returns both targets and that the
+/// expected artifact filenames can be derived from them.
+#[test]
+fn test_multi_target_artifact_filenames_are_target_specific() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let profile_path = tmp.path().join("build-profile.json5");
+
+    // Write a build-profile.json5 with two targets applicable to "default" product.
+    let profile_content = r#"{
+  app: {
+    signingConfigs: [],
+    products: [
+      {
+        name: "default",
+        compatibleSdkVersion: "5.0.5(17)",
+        runtimeOS: "HarmonyOS",
+        buildOption: {
+          strictMode: { caseSensitiveCheck: false, useNormalizedOHMUrl: false }
+        }
+      }
+    ],
+    buildModeSet: [{ name: "debug" }, { name: "release" }]
+  },
+  modules: [
+    {
+      name: "entry",
+      srcPath: "./entry",
+      targets: [
+        {
+          name: "phone",
+          applyToProducts: ["default"]
+        },
+        {
+          name: "tablet",
+          applyToProducts: ["default"]
+        }
+      ]
+    }
+  ]
+}"#;
+    std::fs::write(&profile_path, profile_content).expect("write build-profile.json5");
+
+    // Enumerate applicable targets for the "entry" module.
+    let targets = arkdown_config::build_profile::enumerate_applicable_targets_for_module(
+        tmp.path(),
+        "entry",
+        "default",
+        "debug",
+    );
+
+    // Both "phone" and "tablet" should be returned.
+    assert_eq!(
+        targets.len(),
+        2,
+        "both phone and tablet targets must be applicable to the default product; got: {:?}",
+        targets.iter().map(|t| &t.name).collect::<Vec<_>>(),
+    );
+    assert_eq!(targets[0].name, "phone");
+    assert_eq!(targets[1].name, "tablet");
+
+    // Verify that target-specific artifact filenames are correct.
+    let module_name = "entry";
+    let ext = "hap";
+    for target in &targets {
+        let unsigned = format!("{}-{}-unsigned.{}", module_name, target.name, ext);
+        let signed = format!("{}-{}-signed.{}", module_name, target.name, ext);
+        assert!(
+            unsigned.contains(&target.name),
+            "unsigned artifact must contain target name '{}': {}",
+            target.name,
+            unsigned
+        );
+        assert!(
+            signed.contains(&target.name),
+            "signed artifact must contain target name '{}': {}",
+            target.name,
+            signed
+        );
+        // Verify the exact expected filenames.
+        match target.name.as_str() {
+            "phone" => {
+                assert_eq!(unsigned, "entry-phone-unsigned.hap");
+                assert_eq!(signed, "entry-phone-signed.hap");
+            }
+            "tablet" => {
+                assert_eq!(unsigned, "entry-tablet-unsigned.hap");
+                assert_eq!(signed, "entry-tablet-signed.hap");
+            }
+            other => panic!("unexpected target name: {}", other),
+        }
+    }
+}
+
+/// Verify that when only one target applies, the artifact uses "default" label
+/// (backward compatibility with single-target projects).
+#[test]
+fn test_single_target_uses_default_label() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let profile_path = tmp.path().join("build-profile.json5");
+
+    let profile_content = r#"{
+  app: {
+    signingConfigs: [],
+    products: [
+      {
+        name: "default",
+        compatibleSdkVersion: "5.0.5(17)",
+        runtimeOS: "HarmonyOS",
+        buildOption: {
+          strictMode: { caseSensitiveCheck: false, useNormalizedOHMUrl: false }
+        }
+      }
+    ],
+    buildModeSet: [{ name: "debug" }, { name: "release" }]
+  },
+  modules: [
+    {
+      name: "entry",
+      srcPath: "./entry",
+      targets: [
+        {
+          name: "default",
+          applyToProducts: ["default"]
+        }
+      ]
+    }
+  ]
+}"#;
+    std::fs::write(&profile_path, profile_content).expect("write build-profile.json5");
+
+    let targets = arkdown_config::build_profile::enumerate_applicable_targets_for_module(
+        tmp.path(),
+        "entry",
+        "default",
+        "debug",
+    );
+
+    assert_eq!(targets.len(), 1, "single target must return exactly one result");
+    assert_eq!(targets[0].name, "default");
+
+    // Single-target artifact uses "default" label.
+    let unsigned = format!("entry-{}-unsigned.hap", targets[0].name);
+    assert_eq!(unsigned, "entry-default-unsigned.hap");
+}

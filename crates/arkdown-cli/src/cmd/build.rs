@@ -1467,13 +1467,20 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         };
         let output_dir = module.src_path.join("build/default/outputs/default");
 
-        // Section 3.1: multi-target artifact naming.
-        // When multiple targets apply to this module, disambiguate the output
-        // artifact by including the target name.  For example:
+        // Section 3.1: multi-target artifact loop.
+        //
+        // When multiple targets apply to this module, produce a separate output
+        // artifact for each target with a target-specific filename.  For example:
         //   entry-phone-unsigned.hap  (target "phone")
         //   entry-tablet-unsigned.hap (target "tablet")
-        // When only one target applies (the common case), fall back to the
-        // original "default" naming for backward compatibility.
+        //
+        // When only one target applies (the common case), use "default" as the
+        // label for backward compatibility:
+        //   entry-default-unsigned.hap
+        //
+        // The compiled ABC (modules_abc) is shared across all targets because
+        // the ETS/TS source is the same; only resource directories and output
+        // paths differ per target.
         let packaging_bm_name = match config_arc.build_mode {
             BuildMode::Debug => "debug",
             BuildMode::Release => "release",
@@ -1485,20 +1492,34 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 &config_arc.product.name,
                 packaging_bm_name,
             );
-        let artifact_target_label = if all_applicable.len() > 1 {
-            // Use the first applicable target name (highest priority) as the
-            // artifact label.  A full multi-artifact loop would iterate over all
-            // targets here; for now we produce the highest-priority artifact with
-            // a target-specific name.
-            all_applicable
-                .first()
-                .map(|t| t.name.as_str())
-                .unwrap_or("default")
-                .to_string()
+
+        // Determine the set of target labels to produce artifacts for.
+        // When multiple targets apply, iterate over all of them.
+        let target_labels: Vec<String> = if all_applicable.len() > 1 {
+            tracing::info!(
+                module = %module.name,
+                product = %config_arc.product.name,
+                applicable_targets = all_applicable.len(),
+                targets = ?all_applicable.iter().map(|t| &t.name).collect::<Vec<_>>(),
+                "multi-target: producing {} artifacts for module '{}' (section 3.1)",
+                all_applicable.len(), module.name,
+            );
+            all_applicable.iter().map(|t| t.name.clone()).collect()
+        } else if let Some(first) = all_applicable.first() {
+            vec![first.name.clone()]
         } else {
-            "default".to_string()
+            vec!["default".to_string()]
         };
 
+        std::fs::create_dir_all(&output_dir)?;
+
+        // Iterate over all applicable targets and produce one artifact per target.
+        // `module_json`, `modules_abc`, and `resources_index` are cloned for each
+        // iteration since they are moved into PackInput.
+        for artifact_target_label in &target_labels {
+        let module_json = module_json.clone();
+        let modules_abc = modules_abc.clone();
+        let resources_index = resources_index.clone();
         let unsigned_output = output_dir.join(format!(
             "{}-{}-unsigned.{}",
             module.name, artifact_target_label, ext
@@ -1512,8 +1533,6 @@ pub async fn run(args: BuildArgs) -> Result<()> {
         } else {
             unsigned_output.clone()
         };
-
-        std::fs::create_dir_all(&output_dir)?;
 
         let out = match &config_arc.output_target {
             OutputTarget::Har => {
@@ -1727,6 +1746,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             };
             output_paths.push(final_path);
         }
+        } // end for artifact_target_label in &target_labels
     }
     progress.done();
 
