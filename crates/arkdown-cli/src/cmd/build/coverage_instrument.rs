@@ -13,7 +13,7 @@
 //! Upstream ref: `loadSdkFunctions → buildInstrument` in hvigor, which delegates
 //! to `istanbul-lib-instrument` via the SDK's `compile_plugin.js`.
 
-use arkdown_utils::fnv1a_hash;
+use arkdown_cache::fnv1a_hash;
 
 /// Instrument a JS/TS source chunk with Istanbul-style coverage counters.
 ///
@@ -46,7 +46,7 @@ if (!{cov}["{fid}"]) {{
 var {cov_var} = {cov}["{fid}"];
 "#,
         cov = "__coverage__",
-        fid = file_id.replace('\\', "/"),
+        fid = arkdown_path::to_slash(std::path::Path::new(&file_id)),
         cov_var = cov_var,
         sc = stmt_count,
         fc = func_count,

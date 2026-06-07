@@ -259,7 +259,7 @@ impl WrittenOutput {
 mod tests {
     use super::*;
     use arkdown_core::ArkChunk;
-    use index_vec::IndexVec;
+    use oxc_index::IndexVec;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_output_dir(test_name: &str) -> PathBuf {

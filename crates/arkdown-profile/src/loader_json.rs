@@ -221,7 +221,7 @@ impl AotLoaderFields {
         let ap_exists = ap_path.as_ref().is_some_and(|path| path.exists());
         let has_ap_path = ap_path.is_some();
         let ap_suffix_valid = ap_path.as_ref().map_or(true, |path| {
-            path.to_string_lossy().replace('\\', "/").ends_with("ap")
+            path.extension().map_or(false, |ext| ext == "ap")
         });
 
         if api_version == 9 && an_build_mode != "partial" && has_ap_path {
@@ -388,6 +388,13 @@ impl LoaderJson {
         module_cfg: &ModuleConfig,
         manifest: &HapManifest,
     ) -> Result<Self, ArkdownError> {
+        // Build the dependency graph ONCE per try_generate() invocation.
+        // Per SPEC-048: the same snapshot feeds all downstream helpers.
+        let dep_graph = crate::dependency_graph::LocalDependencyGraph::build(
+            &module_cfg.src_path,
+            &config.project_root,
+        );
+
         // Collect compile_entry from abilities' srcEntry values.
         let mut compile_entry: Vec<String> = manifest
             .abilities
@@ -507,12 +514,8 @@ impl LoaderJson {
         serialized_compile_entry.extend(Self::collect_dependency_router_map_source_files(
             config, module_cfg,
         ));
-        serialized_compile_entry.extend(Self::collect_dependency_ability_source_files(
-            config, module_cfg,
-        ));
-        serialized_compile_entry.extend(Self::collect_dependency_insight_intent_src_entries(
-            config, module_cfg,
-        ));
+        serialized_compile_entry.extend(Self::collect_dependency_ability_source_files(&dep_graph));
+        serialized_compile_entry.extend(Self::collect_dependency_insight_intent_src_entries(&dep_graph));
         dedupe_paths(&mut serialized_compile_entry);
 
         let hvigor_compile_entry: Vec<String> = serialized_compile_entry
@@ -576,21 +579,14 @@ impl LoaderJson {
         if module_path_map.is_empty() {
             module_path_map.insert(module_cfg.name.clone(), module_root.clone());
         }
-        // Add resolved dependency packages to modulePathMap using LocalDependencyGraph
-        // for BFS-consistent ordering and type classification.
-        // All locally-found packages (SourceHar, SharedHsp, BytecodeHar, NativeSo) are
-        // included; RemoteOrUnknown with no on-disk root are skipped.
-        {
-            use crate::dependency_graph::LocalDependencyGraph;
-            let graph = LocalDependencyGraph::build(&module_cfg.src_path, &config.project_root);
-            for node in graph.nodes.values() {
-                if node.pkg_root.as_os_str().is_empty() {
-                    continue; // not installed locally
-                }
-                module_path_map
-                    .entry(node.package_name.clone())
-                    .or_insert_with(|| to_absolute_path_string(&node.pkg_root));
+        // Add resolved dependency packages to modulePathMap using the shared dep_graph.
+        for node in dep_graph.nodes.values() {
+            if node.pkg_root.as_os_str().is_empty() {
+                continue; // not installed locally
             }
+            module_path_map
+                .entry(node.package_name.clone())
+                .or_insert_with(|| to_absolute_path_string(&node.pkg_root));
         }
 
         let byte_code_har_info: FxHashMap<String, ByteCodeHarEntry> = bytecode_har_deps
@@ -640,7 +636,7 @@ impl LoaderJson {
             };
             if is_bytecode_har {
                 for ability_entry in &manifest.abilities {
-                    let path = ability_entry.src_entry.trim_start_matches("./");
+                    let path = arkdown_path::strip_relative_prefix(&ability_entry.src_entry);
                     let ohm = format!(
                         "@bundle:{}/{}/{}",
                         bundle_name,
@@ -650,7 +646,7 @@ impl LoaderJson {
                     entries.push(ohm);
                 }
                 for ext_ability in &manifest.extension_abilities {
-                    let path = ext_ability.src_entry.trim_start_matches("./");
+                    let path = arkdown_path::strip_relative_prefix(&ext_ability.src_entry);
                     let ohm = format!(
                         "@bundle:{}/{}/{}",
                         bundle_name,
@@ -690,7 +686,7 @@ impl LoaderJson {
 
         // --- D5: basic hspNameOhmMap/harNameOhmMap from direct oh_modules deps ---
         let (hsp_name_ohm_map, har_name_ohm_map) =
-            Self::collect_hsp_har_ohm_maps(config, module_cfg);
+            Self::collect_hsp_har_ohm_maps(config, &dep_graph);
 
         let aot_fields = AotLoaderFields::from_config(config, module_cfg, manifest, &module_root);
         let build_config_path = Self::loader_build_config_path(module_cfg);
@@ -728,7 +724,7 @@ impl LoaderJson {
             other_compile_files,
             dynamic_import_lib_info,
             router_map,
-            hsp_resources_map: Self::collect_hsp_resources_map(config, module_cfg),
+            hsp_resources_map: Self::collect_hsp_resources_map(&dep_graph),
             update_version_info,
             an_build_out_put: aot_fields.an_build_out_put,
             an_build_mode: aot_fields.an_build_mode,
@@ -759,7 +755,7 @@ impl LoaderJson {
             use_normalized_ohm_url,
             api_version: config.sdk_config.compile_api_version,
             fallback_an_build: aot_fields.fallback_an_build,
-            pkg_name_to_pkg_brief_info: Self::build_pkg_brief_info(config, module_cfg),
+            pkg_name_to_pkg_brief_info: Self::build_pkg_brief_info(config, module_cfg, &dep_graph),
             workers: discovered_workers,
         })
     }
@@ -813,7 +809,7 @@ pub struct ByteCodeHarEntry {
 ///    - If `path` is already absolute: normalize `.`/`..` segments in place.
 ///    - If `path` is relative: join it onto the current working directory, then
 ///      normalize.
-pub(super) use arkdown_utils::to_unix_path;
+pub(super) use arkdown_path::to_slash as to_unix_path;
 
 pub(super) fn to_absolute_path_string(path: &Path) -> String {
     // Fast path: canonicalize works for real, existing paths.
@@ -1013,20 +1009,18 @@ impl LoaderJson {
     }
 
     fn collect_dependency_ability_source_files(
-        config: &ArkdownConfig,
-        host_module: &ModuleConfig,
+        graph: &crate::dependency_graph::LocalDependencyGraph,
     ) -> Vec<PathBuf> {
-        Self::collect_dependency_source_har_roots(config, host_module)
+        Self::collect_dependency_source_har_roots(graph)
             .into_iter()
             .flat_map(|dep_root| Self::collect_dependency_module_ability_source_files(&dep_root))
             .collect()
     }
 
     fn collect_dependency_insight_intent_src_entries(
-        config: &ArkdownConfig,
-        host_module: &ModuleConfig,
+        graph: &crate::dependency_graph::LocalDependencyGraph,
     ) -> Vec<PathBuf> {
-        Self::collect_dependency_source_har_roots(config, host_module)
+        Self::collect_dependency_source_har_roots(graph)
             .into_iter()
             .flat_map(|dep_root| {
                 Self::collect_dependency_module_insight_intent_src_entries(&dep_root)
@@ -1035,64 +1029,14 @@ impl LoaderJson {
     }
 
     fn collect_dependency_source_har_roots(
-        config: &ArkdownConfig,
-        host_module: &ModuleConfig,
+        graph: &crate::dependency_graph::LocalDependencyGraph,
     ) -> Vec<PathBuf> {
-        use crate::dependency_graph::LocalDependencyGraph;
-        let graph = LocalDependencyGraph::build(&host_module.src_path, &config.project_root);
         graph
             .source_hars()
             .into_iter()
             .filter(|node| !node.pkg_root.as_os_str().is_empty())
             .map(|node| node.pkg_root.clone())
             .collect()
-    }
-
-    /// Legacy BFS-based dependency root collection.
-    /// Superseded by `LocalDependencyGraph` in most pipeline stages.
-    /// Kept for reference; use `LocalDependencyGraph::build()` for new code.
-    #[allow(dead_code)]
-    fn collect_declared_dependency_roots(
-        config: &ArkdownConfig,
-        host_module: &ModuleConfig,
-    ) -> Vec<PathBuf> {
-        let host_oh_modules = host_module.src_path.join("oh_modules");
-        let project_oh_modules = config.project_root.join("oh_modules");
-        let mut roots = Vec::new();
-        let mut visited: FxHashSet<String> = FxHashSet::default();
-        let mut queue: std::collections::VecDeque<PathBuf> = std::collections::VecDeque::new();
-        queue.push_back(host_module.src_path.clone());
-        if config.project_root != host_module.src_path {
-            queue.push_back(config.project_root.clone());
-        }
-
-        while let Some(pkg_root) = queue.pop_front() {
-            let Some(pkg) = Self::read_dependency_package_json(&pkg_root) else {
-                continue;
-            };
-
-            for dep_alias in pkg.dependencies.keys() {
-                let current_oh_modules = pkg_root.join("oh_modules");
-                let Some(dep_root) =
-                    Self::resolve_dep_dir(dep_alias, &current_oh_modules, &project_oh_modules)
-                        .or_else(|| {
-                            Self::resolve_dep_dir(dep_alias, &host_oh_modules, &project_oh_modules)
-                        })
-                else {
-                    continue;
-                };
-
-                let dep_root_key = to_absolute_path_string(&dep_root);
-                if !visited.insert(dep_root_key) {
-                    continue;
-                }
-
-                roots.push(dep_root.clone());
-                queue.push_back(dep_root);
-            }
-        }
-
-        roots
     }
 
     #[allow(dead_code)]
@@ -1116,7 +1060,7 @@ impl LoaderJson {
             .iter()
             .chain(module_json.module.extension_abilities.iter())
             .filter_map(|ability| ability.src_entry.as_deref())
-            .map(|src_entry| src_main.join(src_entry.trim_start_matches("./")))
+            .map(|src_entry| src_main.join(arkdown_path::strip_relative_prefix(src_entry)))
             .filter(|path| Self::is_existing_loader_code_file(path))
             .collect()
     }
@@ -1151,7 +1095,7 @@ impl LoaderJson {
                     .insight_intents_src_entry
                     .iter()
                     .filter_map(|entry| entry.src_entry.as_deref())
-                    .map(|src_entry| src_main.join(src_entry.trim_start_matches("./")))
+                    .map(|src_entry| src_main.join(arkdown_path::strip_relative_prefix(src_entry)))
                     .filter(|path| Self::is_existing_loader_code_file(path)),
             );
         }
@@ -1171,7 +1115,7 @@ impl LoaderJson {
 
         directories
             .into_iter()
-            .map(|directory| dep_root.join(directory.trim_start_matches("./")))
+            .map(|directory| dep_root.join(arkdown_path::strip_relative_prefix(&directory)))
             .collect()
     }
 
@@ -1285,7 +1229,7 @@ impl LoaderJson {
             let Some(src_entry) = entry.src_entry.as_deref() else {
                 continue;
             };
-            let path = src_main.join(src_entry.trim_start_matches("./"));
+            let path = src_main.join(arkdown_path::strip_relative_prefix(src_entry));
             if Self::is_existing_loader_code_file(&path) {
                 entries.push(path);
             }
@@ -1409,7 +1353,7 @@ impl LoaderJson {
         let path = module_cfg
             .src_path
             .join("src/main")
-            .join(config_entry.trim_start_matches("./"));
+            .join(arkdown_path::strip_relative_prefix(&config_entry));
         Self::is_existing_loader_code_file(&path)
             .then_some(path)
             .into_iter()
@@ -1503,12 +1447,9 @@ impl LoaderJson {
     /// correct type classification (only SharedHsp nodes contribute).
     /// Matches hvigor's `getHspResourcesMap()` for HSP dependencies.
     fn collect_hsp_resources_map(
-        config: &ArkdownConfig,
-        module_cfg: &ModuleConfig,
+        graph: &crate::dependency_graph::LocalDependencyGraph,
     ) -> FxHashMap<String, String> {
-        use crate::dependency_graph::LocalDependencyGraph;
         let mut map = FxHashMap::default();
-        let graph = LocalDependencyGraph::build(&module_cfg.src_path, &config.project_root);
 
         for node in graph.shared_hsps() {
             if node.pkg_root.as_os_str().is_empty() {
@@ -1569,9 +1510,9 @@ impl LoaderJson {
     ///   - `true`:  `@normalized:N&<bundleName>&<moduleName>&<entryRelPath>&<version>`
     fn collect_hsp_har_ohm_maps(
         config: &ArkdownConfig,
-        module_cfg: &ModuleConfig,
+        graph: &crate::dependency_graph::LocalDependencyGraph,
     ) -> (FxHashMap<String, String>, FxHashMap<String, String>) {
-        use crate::dependency_graph::{DependencyNodeType, LocalDependencyGraph};
+        use crate::dependency_graph::DependencyNodeType;
         let bundle_name = &config.product.bundle_name;
         let use_normalized = config
             .product
@@ -1581,9 +1522,6 @@ impl LoaderJson {
 
         let mut hsp_map: FxHashMap<String, String> = FxHashMap::default();
         let mut har_map: FxHashMap<String, String> = FxHashMap::default();
-
-        // Use LocalDependencyGraph for BFS-consistent ordering and type classification.
-        let graph = LocalDependencyGraph::build(&module_cfg.src_path, &config.project_root);
 
         for node in graph.nodes.values() {
             // Only handle SourceHar and SharedHsp nodes; skip RemoteOrUnknown/NativeSo/BytecodeHar.
@@ -1678,8 +1616,7 @@ impl LoaderJson {
 
         if let Some(main) = main_file {
             // Strip leading ./ and known extensions.
-            let rel = main
-                .trim_start_matches("./")
+            let rel = arkdown_path::strip_relative_prefix(&main)
                 .trim_end_matches(".ets")
                 .trim_end_matches(".ts")
                 .trim_end_matches(".js");
@@ -1706,6 +1643,7 @@ impl LoaderJson {
     fn build_pkg_brief_info(
         config: &ArkdownConfig,
         module_cfg: &ModuleConfig,
+        graph: &crate::dependency_graph::LocalDependencyGraph,
     ) -> FxHashMap<String, PkgBriefInfo> {
         let mut map = FxHashMap::default();
         let module_root = to_absolute_path_string(&module_cfg.src_path);
@@ -1764,14 +1702,10 @@ impl LoaderJson {
             );
         }
 
-        // Add source-type dependency packages using LocalDependencyGraph.
+        // Add source-type dependency packages from the shared dependency graph.
         // BytecodeHar and NativeSo are excluded (no ETS sources to compile).
-        // RemoteOrUnknown packages with src/main/ets/ are also included — they
-        // may lack module.json5 (common in simple test packages and some HAR
-        // fixtures that only have src/main/ets/ without a module.json5).
         {
-            use crate::dependency_graph::{DependencyNodeType, LocalDependencyGraph};
-            let graph = LocalDependencyGraph::build(&module_cfg.src_path, &config.project_root);
+            use crate::dependency_graph::DependencyNodeType;
             for node in graph.nodes.values() {
                 if matches!(
                     node.node_type,

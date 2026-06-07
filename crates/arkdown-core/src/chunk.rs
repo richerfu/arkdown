@@ -1,4 +1,4 @@
-use index_vec::IndexVec;
+use oxc_index::IndexVec;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::graph::ModuleIdx;
@@ -8,10 +8,17 @@ use crate::module::SourceMap;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ChunkIdx(u32);
 
-impl index_vec::Idx for ChunkIdx {
+impl oxc_index::Idx for ChunkIdx {
+    const MAX: usize = u32::MAX as usize;
+
     fn from_usize(n: usize) -> Self {
         ChunkIdx(n as u32)
     }
+
+    unsafe fn from_usize_unchecked(n: usize) -> Self {
+        ChunkIdx(n as u32)
+    }
+
     fn index(self) -> usize {
         self.0 as usize
     }
@@ -140,7 +147,7 @@ impl ChunkGraph {
 mod tests {
     use super::*;
     use crate::graph::ModuleIdx;
-    use index_vec::Idx as _;
+    use oxc_index::Idx as _;
 
     // ── ChunkIdx ─────────────────────────────────────────────────────────────
 

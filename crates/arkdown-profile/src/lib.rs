@@ -15,18 +15,13 @@
 //! ```
 
 pub mod bytecode_har;
-pub mod dependency_graph;
-pub use dependency_graph::{
-    DependencyGraphService, DependencyNode, DependencyNodeType, DependencyResolutionConfig,
-    LocalDependencyGraph,
-};
-pub mod ohpm_registry;
-pub use ohpm_registry::{
-    cache_dir_for, OfflineOhpmCache, OhpmInstallOptions, OhpmRegistryClient, OhpmRegistryError,
-    PackageMetadata, VersionInfo,
-};
-pub mod lockfile;
-pub use lockfile::{LockfileEntry, OhPackageLockfile};
+// Per SPEC-048 Phase 2A: `lockfile` and `ohpm_registry` have been deleted
+// from arkdown-profile. Their functionality is now owned by `arkdown-ohpm`.
+//
+// `dependency_graph` is kept `pub(crate)` during Phase 3 migration; it still
+// provides `LocalDependencyGraph` used by internal profile processors.
+// It will move to `arkdown-session::dependency_graph` in Phase 3.
+pub(crate) mod dependency_graph;
 pub mod form_profile;
 pub mod har_abilities;
 pub mod loader_json;

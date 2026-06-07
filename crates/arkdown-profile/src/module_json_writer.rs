@@ -792,7 +792,7 @@ impl ModuleJsonWriter {
                 else {
                     continue;
                 };
-                let key = dep_root.to_string_lossy().replace('\\', "/");
+                let key = arkdown_path::to_slash(&dep_root);
                 if !seen.insert(key) {
                     continue;
                 }

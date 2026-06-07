@@ -50,26 +50,35 @@ arkdown/
 │   ├── design/               ← architecture docs (READ BEFORE CODING)
 │   └── tasks/                ← implementation specs per crate
 ├── crates/
-│   ├── arkdown-core/         ← shared types + ArkdownPlugin trait (SPEC-001)
-│   ├── arkdown-config/       ← JSON5 config parser (SPEC-002)
-│   ├── arkdown-resolver/     ← OHOS module resolution library (SPEC-003)
-│   ├── arkdown-loader/       ← parallel module loading + plugin pipeline (SPEC-004)
-│   ├── arkdown/              ← bundler core: link, tree-shake, chunk-split (SPEC-005)
+│   ├── arkdown-core/         ← domain-neutral types, errors, chunk/graph structs (SPEC-001)
+│   ├── arkdown-path/         ← typed path newtypes: AbsPath, RelPath, ArtifactPath, OhmUrl (SPEC-048 Phase 1)
+│   ├── arkdown-ohos-schema/  ← raw OHOS JSON/JSON5 schema structs (SPEC-048 Phase 1)
+│   ├── arkdown-ohpm/         ← OHPM lockfile, cache, registry, tarball, integrity (SPEC-048 Phase 2A)
+│   ├── arkdown-session/      ← build session snapshots, dependency graph, SDK, profiles (SPEC-048 Phase 2)
+│   ├── arkdown-config/       ← JSON5 config parser + SDK manifest probing (SPEC-002)
+│   ├── arkdown-resolver/     ← OHOS module resolution + case-check (SPEC-003; SPEC-048 Phase 1)
+│   ├── arkdown-loader/       ← legacy loader pipeline (SPEC-048: delete after rolldown migration)
+│   ├── arkdown/              ← rolldown-backed bundler (SPEC-005)
 │   ├── arkdown-plugin-json5/          ← JSON/JSON5 import (SPEC-007)
 │   ├── arkdown-plugin-duplicate-check/ ← filename uniqueness check (SPEC-008)
 │   ├── arkdown-plugin-module-meta/    ← per-module OHOS metadata (SPEC-014)
 │   ├── arkdown-plugin-ohos-resolve/   ← resolve plugin wrapping resolver (SPEC-015)
 │   ├── arkdown-plugin-har-dedup/      ← HAR deduplication for HSP builds (SPEC-016)
-│   ├── arkdown-plugin-router-map/     ← router map cache invalidation (SPEC-017)
-│   ├── arkdown-plugin-sensitive-check/ ← case-sensitivity import check (SPEC-018)
-│   ├── arkdown-plugin-ets-transform/  ← pure Rust ArkTS transform, ports ets-loader (SPEC-004a)
+│   ├── arkdown-plugin-ets-transform/  ← pure Rust ArkTS transform (SPEC-004a)
 │   ├── arkdown-abc/          ← Rust ArkCompiler bytecode compiler (SPEC-009)
 │   ├── arkdown-resource/     ← Rust resource compiler, ports restool (SPEC-011)
 │   ├── arkdown-profile/      ← module.json5 processor + loader.json gen (SPEC-010)
 │   ├── arkdown-pack/         ← HAP/HSP/HAR zip assembly (SPEC-012)
-│   ├── arkdown-cache/        ← incremental build cache (SPEC-019)
-│   ├── arkdown-sign/         ← HAP signing via hap-sign-tool (SPEC-021)
+│   ├── arkdown-cache/        ← incremental build cache + FNV-1a hash (SPEC-019)
+│   ├── arkdown-sign/         ← HAP signing (SPEC-021)
 │   └── arkdown-cli/          ← arkdown CLI binary (SPEC-013)
+│
+│
+│   # DELETED from workspace (SPEC-048):
+│   # arkdown-utils              — helpers moved to arkdown-path + arkdown-cache
+│   # arkdown-loader             — legacy PluginDriver/ArkdownPlugin stack removed; rolldown is the only pipeline
+│   # arkdown-plugin-router-map  — invalidation logic inlined into CLI (→ ProfileStore Phase 4)
+│   # arkdown-plugin-sensitive-check — case-check moved to arkdown-resolver::case_check
 ```
 
 ---
@@ -196,11 +205,30 @@ Magic constants from `developtools_hapsigner`:
 - `rayon` — parallel iteration
 - `serde` + `serde_json` + `json5` — serialization
 - `thiserror` — error types
-- `index_vec` — typed index vectors (mirrors rolldown's IndexVec pattern)
+- `oxc_index` (crates.io `4.1.0`) — typed index vectors; **`index_vec` has been removed** (SPEC-048 Phase 1A)
+- `compact_str` — compact small strings for hot-path identifiers
 - `rustc-hash` (FxHashMap) — fast hashmaps for hot paths
 - `zip` — HAP/HSP/HAR archive creation
 - `clap` — CLI argument parsing (CLI crate only)
 - `notify` — filesystem watching (watcher crate only)
+
+### Foundation crate layering (SPEC-048)
+
+Foundation crates must not depend on session, plugin, bundler, or CLI crates:
+
+```
+arkdown-path → (no workspace deps)
+arkdown-ohos-schema → (no workspace deps)
+arkdown-ohpm → arkdown-path, arkdown-ohos-schema
+arkdown-session → arkdown-core, arkdown-path, arkdown-ohos-schema, arkdown-ohpm
+```
+
+### Forbidden patterns (SPEC-048)
+
+- `path_str.starts_with('/')` — use `Path::is_absolute()`
+- `module_id.contains("oh_modules")` — use `arkdown_path::classify::is_inside_oh_modules()`
+- inline `.replace('\\', "/")` — use `ArtifactPathSerializer::path_to_slash()`
+- `index_vec::IndexVec` — use `oxc_index::IndexVec`
 
 Avoid adding new dependencies without checking if an existing workspace dependency covers
 the need.

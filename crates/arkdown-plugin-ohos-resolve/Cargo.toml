@@ -15,4 +15,4 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-index_vec = { workspace = true }
+oxc_index = { workspace = true }

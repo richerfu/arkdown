@@ -1,0 +1,20 @@
+[package]
+name = "arkdown-session"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+arkdown-core = { workspace = true }
+arkdown-path = { workspace = true }
+arkdown-ohos-schema = { workspace = true }
+oxc_index = { workspace = true }
+compact_str = { workspace = true }
+rustc-hash = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+json5 = { workspace = true }
+thiserror = { workspace = true }
+indexmap = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]

@@ -63,9 +63,9 @@ impl CompileModuleInfo {
             let src_main = module_root.join("src/main");
 
             let source_file = if let Ok(rel) = source_path.strip_prefix(&src_main) {
-                format!("src/main/{}", arkdown_utils::to_unix_path(rel))
+                format!("src/main/{}", arkdown_path::to_slash(rel))
             } else if let Ok(rel) = source_path.strip_prefix(&module_root) {
-                arkdown_utils::to_unix_path(rel)
+                arkdown_path::to_slash(rel)
             } else {
                 continue;
             };
@@ -124,13 +124,13 @@ impl CompileModuleInfo {
         let package_name = package_name_or_dir(&package_root);
         let package_version = package_version_or_default(&package_root);
         let package_entry_name = pkg_modules_package_name(&package_root, loader_json)?;
-        let rel_to_pkg = arkdown_utils::to_unix_path(source_path.strip_prefix(&package_root).ok()?);
+        let rel_to_pkg = arkdown_path::to_slash(source_path.strip_prefix(&package_root).ok()?);
         let out_rel = with_extension(&rel_to_pkg, output_ext);
 
         let project_root = canonical_or_owned(Path::new(&loader_json.project_root_path));
         let cache_rel = source_path.strip_prefix(&project_root).ok()?;
         let ts_path = cache_root.join(with_extension(
-            &arkdown_utils::to_unix_path(cache_rel),
+            &arkdown_path::to_slash(cache_rel),
             output_ext,
         ));
         let record_name = format!(
@@ -499,7 +499,7 @@ pub(super) fn pkg_modules_package_name(
     if let Ok(rel) = package_root.strip_prefix(project_root.join(package_dir)) {
         return Some(format!(
             "pkg_modules/{}",
-            arkdown_utils::to_unix_path(rel).replace(package_dir, "pkg_modules")
+            arkdown_path::to_slash(rel).replace(package_dir, "pkg_modules")
         ));
     }
 
@@ -509,7 +509,7 @@ pub(super) fn pkg_modules_package_name(
             return Some(format!(
                 "pkg_modules@{}/{}",
                 module_name,
-                arkdown_utils::to_unix_path(rel).replace(package_dir, "pkg_modules")
+                arkdown_path::to_slash(rel).replace(package_dir, "pkg_modules")
             ));
         }
     }
@@ -517,8 +517,11 @@ pub(super) fn pkg_modules_package_name(
     None
 }
 
+/// Convert a path to a forward-slash string.
+///
+/// Per SPEC-048: delegates to `arkdown_path::to_slash()`.
 pub(super) fn slash_path(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+    arkdown_path::to_slash(path)
 }
 
 pub(super) fn package_entry_path(package_root: &Path) -> Option<PathBuf> {
@@ -536,7 +539,7 @@ pub(super) fn package_entry_path(package_root: &Path) -> Option<PathBuf> {
 }
 
 fn resolve_package_request(package_root: &Path, request: &str) -> Option<PathBuf> {
-    let request = request.trim_start_matches("./");
+    let request = arkdown_path::strip_relative_prefix(request);
     let base = package_root.join(request);
     if base.is_file() {
         return Some(base);
@@ -589,7 +592,7 @@ pub(super) fn symlink_pkg_module_aliases(
             if !file_type.is_symlink() {
                 continue;
             }
-            let entry_path = arkdown_utils::to_unix_path(entry.path());
+            let entry_path = arkdown_path::to_slash(entry.path());
             if entry_path.contains("/oh_modules/.ohpm/oh_modules/") {
                 continue;
             }
@@ -628,7 +631,7 @@ mod tests {
         OutputTarget, ProductConfig, SdkConfig, StrictModeConfig,
     };
     use fs_err as fs;
-    use index_vec::IndexVec;
+    use oxc_index::IndexVec;
     use rustc_hash::FxHashMap;
     use tempfile::TempDir;
 

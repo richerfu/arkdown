@@ -143,7 +143,6 @@ dependencies = [
  "anyhow",
  "arkdown-config",
  "arkdown-core",
- "arkdown-loader",
  "arkdown-plugin-duplicate-check",
  "arkdown-plugin-ets-transform",
  "arkdown-plugin-json5",
@@ -152,10 +151,10 @@ dependencies = [
  "arkdown-profile",
  "arkdown-resolver",
  "fs-err",
- "index_vec",
  "json5",
  "oxc_allocator 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
  "oxc_codegen 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
+ "oxc_index",
  "oxc_parser 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
  "oxc_semantic 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
  "oxc_span 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
@@ -207,7 +206,6 @@ name = "arkdown-cache"
 version = "0.1.0"
 dependencies = [
  "arkdown-core",
- "arkdown-utils",
  "fs-err",
  "rustc-hash",
  "serde",
@@ -227,26 +225,25 @@ dependencies = [
  "arkdown-core",
  "arkdown-obfuscate",
  "arkdown-pack",
+ "arkdown-path",
  "arkdown-plugin-duplicate-check",
  "arkdown-plugin-ets-transform",
  "arkdown-plugin-har-dedup",
  "arkdown-plugin-json5",
  "arkdown-plugin-module-meta",
  "arkdown-plugin-ohos-resolve",
- "arkdown-plugin-router-map",
  "arkdown-profile",
  "arkdown-resolver",
  "arkdown-resource",
  "arkdown-sign",
  "arkdown-ts2abc",
- "arkdown-utils",
  "arkdown-watcher",
  "clap",
  "fs-err",
  "hex",
- "index_vec",
  "indexmap",
  "json5",
+ "oxc_index",
  "rolldown_plugin",
  "rustc-hash",
  "serde",
@@ -280,7 +277,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bitflags 2.11.1",
- "index_vec",
+ "oxc_index",
  "rustc-hash",
  "serde",
  "serde_json",
@@ -288,30 +285,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "arkdown-loader"
-version = "0.1.0"
-dependencies = [
- "arkdown-core",
- "arkdown-resolver",
- "async-trait",
- "fs-err",
- "oxc_allocator 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
- "oxc_ast 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
- "oxc_parser 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
- "oxc_span 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
- "rayon",
- "rustc-hash",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "arkdown-obfuscate"
 version = "0.1.0"
 dependencies = [
  "arkdown-core",
- "arkdown-utils",
  "oxc_allocator 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
  "oxc_ast 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
  "oxc_codegen 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
@@ -325,11 +302,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "arkdown-ohos-schema"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "arkdown-ohpm"
+version = "0.1.0"
+dependencies = [
+ "arkdown-core",
+ "arkdown-ohos-schema",
+ "arkdown-path",
+ "base64",
+ "flate2",
+ "fs-err",
+ "indexmap",
+ "json5",
+ "reqwest",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "arkdown-pack"
 version = "0.1.0"
 dependencies = [
  "arkdown-core",
- "arkdown-utils",
+ "arkdown-path",
  "fs-err",
  "json5",
  "serde",
@@ -339,6 +346,14 @@ dependencies = [
  "tracing",
  "walkdir",
  "zip",
+]
+
+[[package]]
+name = "arkdown-path"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -358,7 +373,7 @@ dependencies = [
  "anyhow",
  "arkdown-cache",
  "arkdown-core",
- "arkdown-utils",
+ "arkdown-path",
  "oxc_allocator 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
  "oxc_ast 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
  "oxc_ast_visit 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
@@ -435,7 +450,7 @@ dependencies = [
  "anyhow",
  "arkdown-core",
  "arkdown-resolver",
- "index_vec",
+ "oxc_index",
  "rolldown_common",
  "rolldown_plugin",
  "rustc-hash",
@@ -445,39 +460,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "arkdown-plugin-router-map"
-version = "0.1.0"
-dependencies = [
- "arkdown-utils",
- "tempfile",
-]
-
-[[package]]
-name = "arkdown-plugin-sensitive-check"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "rolldown_plugin",
-]
-
-[[package]]
 name = "arkdown-profile"
 version = "0.1.0"
 dependencies = [
  "arkdown-config",
  "arkdown-core",
- "arkdown-utils",
- "base64",
- "flate2",
+ "arkdown-ohpm",
+ "arkdown-path",
  "fs-err",
  "indexmap",
  "json5",
- "reqwest",
  "rustc-hash",
  "serde",
  "serde_json",
- "sha2",
- "tar",
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
@@ -488,7 +483,7 @@ name = "arkdown-resolver"
 version = "0.1.0"
 dependencies = [
  "arkdown-core",
- "arkdown-utils",
+ "arkdown-path",
  "fs-err",
  "json5",
  "oxc_resolver",
@@ -510,6 +505,24 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "walkdir",
+]
+
+[[package]]
+name = "arkdown-session"
+version = "0.1.0"
+dependencies = [
+ "arkdown-core",
+ "arkdown-ohos-schema",
+ "arkdown-path",
+ "compact_str 0.8.2",
+ "indexmap",
+ "json5",
+ "oxc_index",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -555,10 +568,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
 ]
-
-[[package]]
-name = "arkdown-utils"
-version = "0.1.0"
 
 [[package]]
 name = "arkdown-watcher"
@@ -896,6 +905,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab552acb7c0a751c75c3dd4f9b95d31ed85c985ce5c70232a2952ffbe7ecfda5"
 dependencies = [
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "compact_str"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7fd622ebbb56a5b2ccb651b32b911cdeb2a9b4b11776b2473bf26a26a286244e"
+dependencies = [
+ "castaway",
+ "cfg-if",
+ "itoa",
+ "rustversion",
+ "ryu",
+ "serde",
+ "static_assertions",
 ]
 
 [[package]]
@@ -1950,12 +1974,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "index_vec"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "44faf5bb8861a9c72e20d3fb0fdbd59233e43056e2b80475ab0aacdc2e781355"
-
-[[package]]
 name = "indexmap"
 version = "2.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2978,7 +2996,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c64950816ae082c23c9e43e59cf75343f3087a37ae9888c0a174fde95e5f7de"
 dependencies = [
  "cfg-if",
- "compact_str",
+ "compact_str 0.9.1",
  "fast-glob",
  "indexmap",
  "json-strip-comments",
@@ -3075,7 +3093,7 @@ version = "0.133.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d92507cc30d1b8abd38fc1368ef90a33d573e746a048adefaae7434ad1be91ff"
 dependencies = [
- "compact_str",
+ "compact_str 0.9.1",
  "oxc-miette",
  "oxc_allocator 0.133.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "oxc_ast_macros 0.133.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -3089,7 +3107,7 @@ name = "oxc_span"
 version = "0.133.0"
 source = "git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee#c8d02452469e159952f0181b022c1f304e77abee"
 dependencies = [
- "compact_str",
+ "compact_str 0.9.1",
  "oxc-miette",
  "oxc_allocator 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
  "oxc_ast_macros 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
@@ -3103,7 +3121,7 @@ version = "0.133.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4c8413fd0d68722180b2a3568a73920330ae2674975336b35a9cceb691b6f3f2"
 dependencies = [
- "compact_str",
+ "compact_str 0.9.1",
  "hashbrown 0.17.1",
  "oxc_allocator 0.133.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "oxc_estree 0.133.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -3115,7 +3133,7 @@ name = "oxc_str"
 version = "0.133.0"
 source = "git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee#c8d02452469e159952f0181b022c1f304e77abee"
 dependencies = [
- "compact_str",
+ "compact_str 0.9.1",
  "hashbrown 0.17.1",
  "oxc_allocator 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
  "oxc_estree 0.133.0 (git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee)",
@@ -3168,7 +3186,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "de8df164fbaa1b09d98b6f24ef537635e01a72d623c005c52ec411b5f9d11b80"
 dependencies = [
  "base64",
- "compact_str",
+ "compact_str 0.9.1",
  "indexmap",
  "itoa",
  "memchr",
@@ -3197,7 +3215,7 @@ version = "0.133.0"
 source = "git+https://github.com/ohos-rs/oxc?rev=c8d02452469e159952f0181b022c1f304e77abee#c8d02452469e159952f0181b022c1f304e77abee"
 dependencies = [
  "base64",
- "compact_str",
+ "compact_str 0.9.1",
  "indexmap",
  "itoa",
  "memchr",

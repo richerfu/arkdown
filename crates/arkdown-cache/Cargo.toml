@@ -6,7 +6,6 @@ edition = "2021"
 [dependencies]
 rustc-hash = { workspace = true }
 arkdown-core = { workspace = true }
-arkdown-utils = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

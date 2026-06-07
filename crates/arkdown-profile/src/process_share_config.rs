@@ -162,7 +162,7 @@ impl ShareConfigInput<'_> {
                 else {
                     continue;
                 };
-                let dep_key = dep_root.to_string_lossy().replace('\\', "/");
+                let dep_key = arkdown_path::to_slash(&dep_root);
                 if !seen.insert(dep_key) {
                     continue;
                 }

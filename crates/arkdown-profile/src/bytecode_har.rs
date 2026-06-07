@@ -223,7 +223,8 @@ impl ByteCodeHarScanEntry {
             .to_string_lossy()
             .into_owned();
         // Normalise path separators to forward slashes (Windows safety).
-        let stem = stem.replace('\\', "/");
+        // Per SPEC-048: slash conversion delegated to arkdown-path::to_slash().
+        let stem = arkdown_path::to_slash(std::path::Path::new(&stem));
         Some(format!(
             "@bundle:{}/{}/{}",
             bundle_name, self.package_name, stem

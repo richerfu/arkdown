@@ -22,14 +22,13 @@ arkdown-ts2abc = { workspace = true }
 arkdown-pack = { workspace = true }
 arkdown-sign = { workspace = true }
 arkdown-obfuscate = { workspace = true }
-arkdown-utils = { workspace = true }
+arkdown-path = { workspace = true }
 arkdown-plugin-ets-transform = { workspace = true }
 arkdown-plugin-ohos-resolve = { workspace = true }
 arkdown-plugin-module-meta = { workspace = true }
 arkdown-plugin-duplicate-check = { workspace = true }
 arkdown-plugin-har-dedup = { workspace = true }
 arkdown-plugin-json5 = { workspace = true }
-arkdown-plugin-router-map = { workspace = true }
 arkdown-resolver = { workspace = true }
 arkdown-watcher = { workspace = true }
 rolldown_plugin = { workspace = true }
@@ -45,7 +44,7 @@ serde_json = { workspace = true }
 walkdir = { workspace = true }
 zip = { workspace = true }
 indexmap = { workspace = true }
-index_vec = { workspace = true }
+oxc_index = { workspace = true }
 rustc-hash = { workspace = true }
 
 [dev-dependencies]

@@ -487,41 +487,37 @@ fn is_runtime_only_package(dep_name: &str, module_root: &Path, project_root: &Pa
 /// 1. `<issuer_root>/oh_modules/<dep_name>`
 /// 2. `<module_root>/oh_modules/<dep_name>`
 /// 3. `<project_root>/oh_modules/<dep_name>`
-/// 4. OHPM global cache: `$OHPM_HOME/<dep_name>@<ver>/oh_modules/<dep_name>`
-///    where `$OHPM_HOME` defaults to `~/.ohpm` and `<ver>` is read from the
-///    issuer's declared dependency version.
-/// 5. Offline cache lookup via `oh-package-lock.json5` at `project_root`.
-///    Uses [`crate::ohpm_registry::OfflineOhpmCache::resolve_from_lockfile`]
-///    to find packages that are in the global cache but whose version is only
+/// 4. OHPM global cache: `$OHPM_HOME/<dep_name>@<ver>/oh_modules/<dep_name>`.
+/// 5. Offline cache lookup via `oh-package-lock.json5` at `project_root`
+///    (delegates to `arkdown-ohpm::cache`).
+///
+/// Per SPEC-048: registry HTTP fetch has been removed; it is now orchestrated
+/// by `arkdown-session::PackageAcquisitionPlanner` via `arkdown-ohpm`.
 /// Configuration for dependency resolution in `DependencyGraphService`.
 ///
-/// Controls offline mode, registry URL overrides, and automatic remote fetch.
-/// Mirrors hvigor's `DependencyManager` resolution configuration.
+/// Per SPEC-048: OHPM registry network options have been removed. Registry
+/// access is now orchestrated by `arkdown-session` via `arkdown-ohpm`.
+/// This struct is kept for cache-root override in tests only.
 #[derive(Debug, Clone, Default)]
 pub struct DependencyResolutionConfig {
-    /// When `true`, no network requests are made.  Packages not found locally
-    /// or in the OHPM global cache are classified as `RemoteOrUnknown`.
-    /// Equivalent to `ohpm install --offline`.
-    pub offline: bool,
-    /// Override the OHPM registry URL (default: `https://registry.ohpm.openharmony.cn`).
-    pub registry_url: Option<String>,
     /// Override the OHPM global cache root (default: `~/.ohpm`).
     pub ohpm_cache_root: Option<PathBuf>,
+    // `offline` and `registry_url` fields removed per SPEC-048.
+    // Registry access is owned by `arkdown-ohpm` and `arkdown-session`.
 }
 
-/// Full dependency directory resolution with optional network fetch.
+/// Dependency directory resolution: local oh_modules/ and OHPM global cache.
 ///
 /// Implements hvigor's `DependencyManager` resolution order:
 /// 1. issuer oh_modules/ — package-local install
 /// 2. module oh_modules/ — module-level install
 /// 3. project oh_modules/ — project-level install
 /// 4. OHPM global cache `~/.ohpm/<name>@<version>/` (from declared version)
-/// 5. OHPM global cache via lockfile version
-/// 6. OHPM registry fetch (when not offline) — download, verify, install to cache
+/// 5. OHPM global cache via lockfile version (arkdown-ohpm::cache)
 ///
-/// Step 6 is the key difference from a purely local graph: hvigor's
-/// `DependencyManager` will download packages from the OHPM registry when
-/// they are not found locally.  This enables the `RemoteOrUnknown` nodes
+/// Step 5 previously included HTTP registry fetch. That has been removed per
+/// SPEC-048. Registry orchestration is owned by `arkdown-session` and
+/// the nodes
 /// to be resolved to real package directories.
 fn resolve_dep_dir_with_config(
     dep_name: &str,
@@ -576,87 +572,20 @@ fn resolve_dep_dir_with_config(
 
         // Step 5: offline cache lookup via lockfile.
         //
-        // When the declared version in `oh-package.json5` doesn't match what
-        // is actually cached (e.g. the lockfile pins a different resolved
-        // version), load the lockfile from `project_root` and ask
-        // `OfflineOhpmCache` to resolve the path from it.  This covers the
-        // common case where the developer has run `ohpm install` once and the
-        // packages are present in the global cache, but the `oh_modules/`
-        // directories haven't been re-materialised (e.g. after a `git clean`).
-        let lockfile = crate::lockfile::OhPackageLockfile::load(project_root);
-        if !lockfile.is_empty() {
-            // Use an empty version string so resolve_from_lockfile falls back
-            // to the lockfile's recorded version.
-            if let Some(path) = crate::ohpm_registry::OfflineOhpmCache::resolve_from_lockfile(
-                &lockfile,
-                dep_name,
-                "",
-                &cache_root,
-            ) {
-                return Some(path);
-            }
-        }
-
-        // Step 6: OHPM registry fetch (mirrors hvigor's DependencyManager
-        // remote node resolution — the key step that makes remote packages
-        // concrete instead of RemoteOrUnknown).
+        // When the declared version does not match what is cached (e.g. the
+        // lockfile pins a different resolved version), load the lockfile from
+        // `project_root` and look up the package in the OHPM global cache.
         //
-        // When a package is not found in any local or cached location, and
-        // we are not in offline mode, attempt to fetch it from the OHPM
-        // registry, install it to the global cache, and return the installed
-        // path.  This matches hvigor's `DependencyManager.resolveRemotePackage()`
-        // behavior.
-        let is_offline = config.map(|c| c.offline).unwrap_or(false);
-        if !is_offline {
-            // Determine the package version to fetch.
-            let version = declared_dep_version(issuer_root, dep_name)
-                .or_else(|| lockfile.resolved_version(dep_name).map(str::to_string));
-
-            if let Some(version) = version {
-                let registry_url = config
-                    .and_then(|c| c.registry_url.as_deref())
-                    .unwrap_or(crate::ohpm_registry::DEFAULT_REGISTRY);
-
-                // Attempt to fetch and install from the OHPM registry.
-                match crate::ohpm_registry::OhpmRegistryClient::with_registry(registry_url) {
-                    Ok(client) => {
-                        let opts = crate::ohpm_registry::OhpmInstallOptions {
-                            offline: false,
-                            prefer_offline: false,
-                            registry_url: None,
-                        };
-                        tracing::debug!(
-                            package = %dep_name,
-                            version = %version,
-                            registry = %registry_url,
-                            "DependencyManager: fetching remote package from OHPM registry"
-                        );
-                        match client.install(dep_name, &version, &cache_root, &opts) {
-                            Ok(installed_path) => {
-                                tracing::info!(
-                                    package = %dep_name,
-                                    version = %version,
-                                    path = %installed_path.display(),
-                                    "DependencyManager: remote package installed from OHPM registry"
-                                );
-                                return Some(installed_path);
-                            }
-                            Err(e) => {
-                                tracing::debug!(
-                                    package = %dep_name,
-                                    error = %e,
-                                    "DependencyManager: OHPM registry fetch failed, classifying as RemoteOrUnknown"
-                                );
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::debug!(
-                            error = %e,
-                            "DependencyManager: failed to create OHPM registry client"
-                        );
-                    }
-                }
+        // Per SPEC-048: lockfile and cache machinery has moved to
+        // `arkdown-ohpm`. Registry HTTP fetch has been removed from this
+        // function; it now lives in `arkdown-ohpm::acquisition` and is
+        // orchestrated by `arkdown-session`.
+        let lockfile = arkdown_ohpm::lockfile::OhPackageLockfile::load(project_root);
+        if let Ok(pkg_name) = arkdown_ohpm::package_name::PackageName::new(dep_name) {
+            if let Some(hit) =
+                arkdown_ohpm::cache::lookup_via_lockfile(&cache_root, &pkg_name, &lockfile)
+            {
+                return Some(hit.root);
             }
         }
     }
@@ -1000,193 +929,32 @@ mod tests {
         assert_eq!(graph.runtime_only_nodes().len(), 1);
     }
 
-    /// When `offline=true`, packages not found locally must be classified as
-    /// `RemoteOrUnknown` rather than triggering a network fetch.
+    /// Packages not found locally must be classified as `RemoteOrUnknown`.
     ///
-    /// This mirrors hvigor's `--offline` mode where `DependencyManager` skips
-    /// the remote resolution step and returns `RemoteOrUnknown` nodes for
-    /// packages that are not installed locally or in the OHPM global cache.
+    /// Per SPEC-048: the `offline` and `registry_url` fields have been
+    /// removed from `DependencyResolutionConfig`. Registry fetch is now
+    /// orchestrated by `arkdown-session`. This test verifies that unfound
+    /// packages are still correctly classified as `RemoteOrUnknown`.
     #[test]
-    fn test_dependency_resolution_config_offline_mode() {
+    fn test_dependency_resolution_config_unfound_is_remote_or_unknown() {
         let tmp = tempfile::tempdir().unwrap();
-        // Only declare a dependency without installing it.
         fs::write(
             tmp.path().join("oh-package.json5"),
             r#"{ "dependencies": { "not-installed": "1.0.0" } }"#,
         )
         .unwrap();
 
-        let offline_config = DependencyResolutionConfig {
-            offline: true,
-            registry_url: None,
-            ohpm_cache_root: Some(tmp.path().join("empty-cache")), // non-existent cache
+        let config = DependencyResolutionConfig {
+            ohpm_cache_root: Some(tmp.path().join("empty-cache")), // non-existent
         };
         let graph =
-            LocalDependencyGraph::build_with_config(tmp.path(), tmp.path(), Some(&offline_config));
-        let node = graph
-            .nodes
-            .get("not-installed")
-            .expect("node must be in graph");
+            LocalDependencyGraph::build_with_config(tmp.path(), tmp.path(), Some(&config));
+        let node = graph.nodes.get("not-installed").expect("node in graph");
         assert_eq!(
             node.node_type,
             DependencyNodeType::RemoteOrUnknown,
-            "offline mode must classify unfound packages as RemoteOrUnknown, not attempt registry fetch"
+            "packages not found locally must be classified as RemoteOrUnknown"
         );
     }
 
-    /// Integration test: DependencyManager remote resolution (step 6) using a
-    /// real local HTTP server.
-    ///
-    /// This test verifies that `build_with_config()` with `offline=false`
-    /// ACTUALLY fetches and installs a package from an OHPM-compatible registry
-    /// when the package is not found locally.  It uses a local TCP server so
-    /// the test is deterministic and does not require internet access.
-    ///
-    /// The test asserts `SourceHar` unconditionally — if the HTTP server is
-    /// up and serving, the DependencyManager MUST successfully install the
-    /// package and classify it.  Any fallback to `RemoteOrUnknown` is a
-    /// test failure.  This mirrors hvigor's `DependencyManager.resolveRemotePackage()`
-    /// contract: given a reachable registry, remote nodes are always resolved.
-    #[test]
-    fn test_dependency_resolution_config_remote_fetch_via_local_registry() {
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-        use std::sync::{
-            atomic::{AtomicBool, Ordering},
-            Arc as StdArc,
-        };
-
-        let tmp_project = tempfile::tempdir().unwrap();
-        let tmp_cache = tempfile::tempdir().unwrap();
-        let pkg_tgz = create_minimal_har_tgz("test-remote-pkg", "1.0.0");
-
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let registry_url = format!("http://{}", addr);
-
-        // Track whether the tarball was actually served (proof of HTTP roundtrip).
-        let tarball_served = StdArc::new(AtomicBool::new(false));
-        let tarball_served_clone = tarball_served.clone();
-
-        let tgz_bytes = pkg_tgz.clone();
-        std::thread::spawn(move || {
-            for _ in 0..4 {
-                let Ok((mut stream, _)) = listener.accept() else {
-                    break;
-                };
-                let mut buf = [0u8; 8192];
-                let n = stream.read(&mut buf).unwrap_or(0);
-                let req = std::str::from_utf8(&buf[..n]).unwrap_or("");
-
-                if req.contains("/test-remote-pkg") && !req.contains(".tgz") {
-                    let body = format!(
-                        r#"{{"name":"test-remote-pkg","versions":{{"1.0.0":{{"version":"1.0.0","dist":{{"tarball":"http://{addr}/test-remote-pkg/-/test-remote-pkg-1.0.0.tgz"}}}}}}}}"#
-                    );
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        body.len(), body
-                    );
-                    let _ = stream.write_all(response.as_bytes());
-                } else if req.contains(".tgz") {
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        tgz_bytes.len()
-                    );
-                    let _ = stream.write_all(response.as_bytes());
-                    let _ = stream.write_all(&tgz_bytes);
-                    tarball_served_clone.store(true, Ordering::Relaxed);
-                }
-            }
-        });
-
-        std::thread::sleep(std::time::Duration::from_millis(100));
-
-        fs::write(
-            tmp_project.path().join("oh-package.json5"),
-            r#"{ "dependencies": { "test-remote-pkg": "1.0.0" } }"#,
-        )
-        .unwrap();
-
-        let config = DependencyResolutionConfig {
-            offline: false,
-            registry_url: Some(registry_url),
-            ohpm_cache_root: Some(tmp_cache.path().to_path_buf()),
-        };
-
-        let graph = LocalDependencyGraph::build_with_config(
-            tmp_project.path(),
-            tmp_project.path(),
-            Some(&config),
-        );
-
-        let node = graph
-            .nodes
-            .get("test-remote-pkg")
-            .expect("node must be in graph");
-
-        if tarball_served.load(Ordering::Relaxed) {
-            // The HTTP server DID serve the tarball — verify the DependencyManager
-            // resolved the package correctly.  This is the hvigor-equivalent
-            // assertion: resolveRemotePackage() must produce a concrete node type.
-            assert_eq!(
-                node.node_type,
-                DependencyNodeType::SourceHar,
-                "After tarball was served and extracted, package must be SourceHar \
-                 (module.json5 type=har).  Got {:?}.  \
-                 This means the DependencyManager did NOT reclassify the remote package \
-                 after installation, which breaks hvigor DependencyManager equivalence.",
-                node.node_type
-            );
-            assert!(
-                !node.pkg_root.as_os_str().is_empty(),
-                "installed package must have a non-empty pkg_root path"
-            );
-            assert!(
-                node.pkg_root.is_dir(),
-                "pkg_root must point to an actual directory: {}",
-                node.pkg_root.display()
-            );
-        } else {
-            // The HTTP server did NOT serve the tarball (reqwest connection issue
-            // or race condition).  Fail with a diagnostic rather than silently
-            // passing — the test is intended to exercise the HTTP path.
-            panic!(
-                "DependencyManager integration test FAILED: the local HTTP server \
-                 did not serve the tarball.  The remote resolution path (step 6) \
-                 was not exercised.  \
-                 node_type = {:?}, pkg_root = {:?}",
-                node.node_type, node.pkg_root
-            );
-        }
-    }
-
-    /// Create a minimal .tgz archive representing a source HAR package.
-    /// Used by the remote resolution integration test.
-    fn create_minimal_har_tgz(name: &str, _version: &str) -> Vec<u8> {
-        use flate2::{write::GzEncoder, Compression};
-
-        let mut tar_builder = tar::Builder::new(GzEncoder::new(Vec::new(), Compression::default()));
-
-        // Add oh-package.json5.
-        let pkg_json = format!(r#"{{"name": "{}", "version": "1.0.0"}}"#, name);
-        let pkg_bytes = pkg_json.as_bytes();
-        let mut header = tar::Header::new_gnu();
-        header.set_path("package/oh-package.json5").unwrap();
-        header.set_size(pkg_bytes.len() as u64);
-        header.set_mode(0o644);
-        header.set_cksum();
-        tar_builder.append(&header, pkg_bytes).unwrap();
-
-        // Add src/main/module.json5 with type "har" so it's classified as SourceHar.
-        let module_json = r#"{"module":{"name":"test-remote-pkg","type":"har"}}"#;
-        let module_bytes = module_json.as_bytes();
-        let mut header2 = tar::Header::new_gnu();
-        header2.set_path("package/src/main/module.json5").unwrap();
-        header2.set_size(module_bytes.len() as u64);
-        header2.set_mode(0o644);
-        header2.set_cksum();
-        tar_builder.append(&header2, module_bytes).unwrap();
-
-        tar_builder.into_inner().unwrap().finish().unwrap()
-    }
 }

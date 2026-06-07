@@ -171,7 +171,7 @@ impl EtsTransformPlugin {
         // F2/J2 — per-file transform cache lookup.
         // Hash the source content; if we have a cached transform result for this
         // exact content, return it immediately without running the ETS pipeline.
-        let content_hash = arkdown_utils::fnv1a_hash(code);
+        let content_hash = arkdown_cache::fnv1a_hash(code);
         if let Ok(cache) = self.transform_cache.lock() {
             if let Some(cached_code) = cache.get(&content_hash).cloned() {
                 return Ok(Some(HookTransformOutput {
@@ -410,7 +410,7 @@ impl Plugin for EtsTransformPlugin {
             // G6/J2: persist successful transform results to the content cache.
             if let Ok(Some(ref output)) = result {
                 if let Some(ref transformed_code) = output.code {
-                    let hash = arkdown_utils::fnv1a_hash(&code);
+                    let hash = arkdown_cache::fnv1a_hash(&code);
                     if let Ok(mut cache) = transform_cache.lock() {
                         cache.insert(hash, transformed_code.clone());
                     }

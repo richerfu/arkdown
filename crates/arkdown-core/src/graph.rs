@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use index_vec::IndexVec;
+use oxc_index::IndexVec;
 use rustc_hash::FxHashMap;
 
 use crate::module::{ModuleSource, OxcAstRef, ResolvedId};
@@ -10,10 +10,17 @@ use crate::plugin::ImportKind;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct ModuleIdx(pub u32);
 
-impl index_vec::Idx for ModuleIdx {
+impl oxc_index::Idx for ModuleIdx {
+    const MAX: usize = u32::MAX as usize;
+
     fn from_usize(n: usize) -> Self {
         ModuleIdx(n as u32)
     }
+
+    unsafe fn from_usize_unchecked(n: usize) -> Self {
+        ModuleIdx(n as u32)
+    }
+
     fn index(self) -> usize {
         self.0 as usize
     }
@@ -206,7 +213,7 @@ mod tests {
     };
     use crate::module::{ModuleSource, ResolvedId};
     use crate::plugin::ImportKind;
-    use index_vec::Idx as _;
+    use oxc_index::Idx as _;
 
     fn make_normal_module(idx: u32) -> NormalModule {
         NormalModule {

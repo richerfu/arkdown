@@ -24,7 +24,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
-use index_vec::IndexVec;
+use oxc_index::IndexVec;
 
 use arkdown_core::{ArkChunk, ArkdownConfig, ArkdownError, BuildMode, ChunkGraph};
 use arkdown_profile::LoaderJson;

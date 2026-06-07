@@ -1063,7 +1063,7 @@ fn test_hsp_golden_entry_list() {
 
 #[test]
 fn test_non_entry_importees_populated_with_har_dep() {
-    use index_vec::IndexVec;
+    use oxc_index::IndexVec;
 
     use arkdown_core::{ArkChunk, ChunkGraph, ChunkIdx};
     use arkdown_plugin_ohos_resolve::{process_importees, ProcessImporteeConfig};

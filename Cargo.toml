@@ -2,17 +2,16 @@
 resolver = "2"
 members = [
     "crates/arkdown-core",
+    "crates/arkdown-path",
+    "crates/arkdown-ohos-schema",
     "crates/arkdown-config",
     "crates/arkdown-resolver",
-    "crates/arkdown-loader",
     "crates/arkdown",
     "crates/arkdown-plugin-json5",
     "crates/arkdown-plugin-duplicate-check",
     "crates/arkdown-plugin-module-meta",
     "crates/arkdown-plugin-ohos-resolve",
     "crates/arkdown-plugin-har-dedup",
-    "crates/arkdown-plugin-router-map",
-    "crates/arkdown-plugin-sensitive-check",
     "crates/arkdown-plugin-ets-transform",
     "crates/arkdown-abc",
     "crates/arkdown-ts2abc",
@@ -23,8 +22,9 @@ members = [
     "crates/arkdown-sign",
     "crates/arkdown-cli",
     "crates/arkdown-obfuscate",
-    "crates/arkdown-utils",
     "crates/arkdown-watcher",
+    "crates/arkdown-session",
+    "crates/arkdown-ohpm",
 ]
 
 [workspace.dependencies]
@@ -34,7 +34,10 @@ arkdown-abc = { path = "crates/arkdown-abc" }
 arkdown-cache = { path = "crates/arkdown-cache" }
 arkdown-config = { path = "crates/arkdown-config" }
 arkdown-core = { path = "crates/arkdown-core" }
-arkdown-loader = { path = "crates/arkdown-loader" }
+arkdown-ohos-schema = { path = "crates/arkdown-ohos-schema" }
+arkdown-ohpm = { path = "crates/arkdown-ohpm" }
+arkdown-path = { path = "crates/arkdown-path" }
+arkdown-session = { path = "crates/arkdown-session" }
 arkdown-obfuscate = { path = "crates/arkdown-obfuscate" }
 arkdown-pack = { path = "crates/arkdown-pack" }
 arkdown-plugin-duplicate-check = { path = "crates/arkdown-plugin-duplicate-check" }
@@ -43,13 +46,11 @@ arkdown-plugin-har-dedup = { path = "crates/arkdown-plugin-har-dedup" }
 arkdown-plugin-json5 = { path = "crates/arkdown-plugin-json5" }
 arkdown-plugin-module-meta = { path = "crates/arkdown-plugin-module-meta" }
 arkdown-plugin-ohos-resolve = { path = "crates/arkdown-plugin-ohos-resolve" }
-arkdown-plugin-router-map = { path = "crates/arkdown-plugin-router-map" }
 arkdown-profile = { path = "crates/arkdown-profile" }
 arkdown-resolver = { path = "crates/arkdown-resolver" }
 arkdown-resource = { path = "crates/arkdown-resource" }
 arkdown-sign = { path = "crates/arkdown-sign" }
 arkdown-ts2abc = { path = "crates/arkdown-ts2abc" }
-arkdown-utils = { path = "crates/arkdown-utils" }
 arkdown-watcher = { path = "crates/arkdown-watcher" }
 
 # Parser — ohos-rs/oxc fork pinned rev (DO NOT use floating branch or crates.io oxc)
@@ -80,7 +81,8 @@ async-trait = "0.1"
 
 # Data structures
 rustc-hash = "2"
-index_vec = "0.1"
+oxc_index = { version = "4.1.0", features = ["nonmax", "serde"] }
+compact_str = { version = "0.8", features = ["serde"] }
 bitflags = "2"
 indexmap = { version = "2", features = ["serde"] }
 

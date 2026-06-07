@@ -901,7 +901,7 @@ struct ArchivePath;
 
 impl ArchivePath {
     fn resources(rel: &std::path::Path) -> String {
-        format!("resources/{}", arkdown_utils::to_unix_path(rel))
+        format!("resources/{}", arkdown_path::to_slash(rel))
     }
 
     fn native_lib(filename: &str) -> String {
@@ -913,15 +913,15 @@ impl ArchivePath {
     }
 
     fn har_ets(rel: &std::path::Path) -> String {
-        format!("src/main/ets/{}", arkdown_utils::to_unix_path(rel))
+        format!("src/main/ets/{}", arkdown_path::to_slash(rel))
     }
 
     fn har_resources(rel: &std::path::Path) -> String {
-        format!("src/main/resources/{}", arkdown_utils::to_unix_path(rel))
+        format!("src/main/resources/{}", arkdown_path::to_slash(rel))
     }
 
     fn har_resource_str(rel: &std::path::Path) -> String {
-        format!("src/main/resource/{}", arkdown_utils::to_unix_path(rel))
+        format!("src/main/resource/{}", arkdown_path::to_slash(rel))
     }
 
     fn ets(rel_text: &str) -> String {

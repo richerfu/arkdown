@@ -833,7 +833,7 @@ fn hvigor_source_path(id: &str, options: &TransformOptions) -> String {
             let path = Path::new(id);
             if let Some(project_root) = &options.project_root {
                 if let Ok(relative) = path.strip_prefix(project_root) {
-                    return arkdown_utils::to_unix_path(relative)
+                    return arkdown_path::to_slash(relative)
                         .trim_start_matches('/')
                         .to_string();
                 }

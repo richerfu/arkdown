@@ -259,7 +259,7 @@ mod tests {
     use std::path::PathBuf;
 
     use arkdown_core::{ArkChunk, ChunkGraph};
-    use index_vec::IndexVec;
+    use oxc_index::IndexVec;
 
     use super::*;
 

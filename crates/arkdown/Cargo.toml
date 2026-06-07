@@ -5,7 +5,6 @@ edition = "2021"
 
 [dependencies]
 arkdown-core = { workspace = true }
-arkdown-loader = { workspace = true }
 arkdown-profile = { workspace = true }
 oxc_allocator = { workspace = true }
 oxc_parser = { workspace = true }
@@ -20,7 +19,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 fs-err = { workspace = true }
-index_vec = { workspace = true }
+oxc_index = { workspace = true }
 rustc-hash = { workspace = true }
 # rolldown 1.0.3 — core bundling engine replaces the custom link/tree-shake/chunk-split/codegen stages.
 # default-features = false skips NAPI bindings and Vite-specific plugins.

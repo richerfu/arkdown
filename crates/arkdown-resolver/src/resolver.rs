@@ -164,7 +164,7 @@ impl OhosResolver {
         if specifier.starts_with("./") || specifier.starts_with("../") {
             if let Ok(resolution) = self.fs_resolver.resolve_file(importer, specifier) {
                 let resolved_buf = resolution.into_path_buf();
-                let resolved = arkdown_utils::canonicalize_or_owned(&resolved_buf);
+                let resolved = arkdown_path::canonicalize_or_owned(&resolved_buf);
 
                 // Source-set overlay: check if a target-specific file shadows this path.
                 //
@@ -218,7 +218,7 @@ impl OhosResolver {
             .ok()
             .map(|resolution| {
                 let resolved_buf = resolution.into_path_buf();
-                let resolved = arkdown_utils::canonicalize_or_owned(&resolved_buf);
+                let resolved = arkdown_path::canonicalize_or_owned(&resolved_buf);
                 let module_type = ModuleType::infer(&resolved);
                 OhosResolvedModule::RemotePackage {
                     path: resolved,
@@ -312,7 +312,7 @@ impl OhosResolver {
             .ok()
             .map(|resolution| {
                 let buf = resolution.into_path_buf();
-                arkdown_utils::canonicalize_or_owned(&buf)
+                arkdown_path::canonicalize_or_owned(&buf)
             })
     }
 
@@ -327,11 +327,11 @@ impl OhosResolver {
     fn apply_source_set_overlay(&self, resolved: PathBuf) -> PathBuf {
         for (base_root, target_root) in &self.config.source_set_overlays {
             // Canonicalize the base root to match the already-canonicalized resolved path.
-            let canonical_base = arkdown_utils::canonicalize_or_owned(base_root);
+            let canonical_base = arkdown_path::canonicalize_or_owned(base_root);
             if let Ok(relative) = resolved.strip_prefix(&canonical_base) {
                 let candidate = target_root.join(relative);
                 if candidate.is_file() {
-                    return arkdown_utils::canonicalize_or_owned(&candidate);
+                    return arkdown_path::canonicalize_or_owned(&candidate);
                 }
             }
         }
@@ -433,7 +433,7 @@ impl PackageRootIndex {
             index.roots.insert(
                 name.clone(),
                 PackageRoot {
-                    path: arkdown_utils::canonicalize_or_owned(&info.pkg_root),
+                    path: arkdown_path::canonicalize_or_owned(&info.pkg_root),
                     package_name: info.pkg_name.clone(),
                     local_source: true,
                 },
@@ -472,7 +472,7 @@ impl PackageRootIndex {
 
         if let Some(pkg) = OhPackage::load_from_root(dir) {
             for (name, path) in pkg.file_dependencies() {
-                let real_path = arkdown_utils::canonicalize_or_owned(&path);
+                let real_path = arkdown_path::canonicalize_or_owned(&path);
                 self.roots.entry(name.clone()).or_insert(PackageRoot {
                     path: real_path,
                     package_name: name,
@@ -521,7 +521,7 @@ impl PackageRootIndex {
                 self.roots
                     .entry(package_name.clone())
                     .or_insert(PackageRoot {
-                        path: arkdown_utils::canonicalize_or_owned(dir),
+                        path: arkdown_path::canonicalize_or_owned(dir),
                         package_name,
                         local_source,
                     });

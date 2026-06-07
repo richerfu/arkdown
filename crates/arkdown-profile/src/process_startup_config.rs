@@ -215,7 +215,7 @@ impl<'a> StartupConfigInput<'a> {
             // prebuilt packages may place it at <module>/resources/base/profile.
             if t.src_entry_absolute_path.is_none() {
                 if let Some(src_main_root) = Self::src_main_root_for_profile(profile_path) {
-                    let src = task.src_entry.trim_start_matches("./");
+                    let src = arkdown_path::strip_relative_prefix(&task.src_entry);
                     let abs = src_main_root.join(src);
                     t.src_entry_absolute_path = Some(abs.to_string_lossy().into_owned());
                 }
@@ -224,9 +224,7 @@ impl<'a> StartupConfigInput<'a> {
             // ohmurl: @bundle:<bundleName>/<moduleName>/<srcEntryWithoutExt>
             // Matches hvigor's processModuleStartupConfig() OHM URL format.
             if t.ohmurl.is_none() {
-                let src = task
-                    .src_entry
-                    .trim_start_matches("./")
+                let src = arkdown_path::strip_relative_prefix(&task.src_entry)
                     .trim_end_matches(".ets")
                     .trim_end_matches(".ts");
                 let ohm = if let Some(bn) = bundle_name {

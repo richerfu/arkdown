@@ -5,6 +5,27 @@ use serde::{Deserialize, Serialize};
 
 use arkdown_core::ArkdownConfig;
 
+// ---------------------------------------------------------------------------
+// FNV-1a hash helpers (moved from deleted arkdown-utils)
+// ---------------------------------------------------------------------------
+
+/// FNV-1a 64-bit hash of a string slice.
+///
+/// Used for fast, non-cryptographic cache keys and content hashes.
+pub fn fnv1a_hash(s: &str) -> u64 {
+    fnv1a_hash_bytes(s.as_bytes())
+}
+
+/// FNV-1a 64-bit hash of a byte slice.
+pub fn fnv1a_hash_bytes(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in bytes {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
 /// Fields that uniquely identify the compiler environment for a build.
 ///
 /// Mirrors hvigor's `getCompileEnv()` which joins these fields with `"#"` to
@@ -301,7 +322,7 @@ impl BuildCache {
     }
 
     fn hash_id(id: &str) -> String {
-        format!("{:016x}", arkdown_utils::fnv1a_hash(id))
+        format!("{:016x}", fnv1a_hash(id))
     }
 }
 
@@ -310,7 +331,7 @@ impl BuildCache {
 /// Uses FNV-1a 64-bit to avoid adding a SHA-256 dependency; the hex string
 /// is stored in [`CacheKey::content_hash`].
 pub fn compute_content_hash(content: &str) -> String {
-    format!("{:016x}", arkdown_utils::fnv1a_hash(content))
+    format!("{:016x}", fnv1a_hash(content))
 }
 
 /// Derive a stable file-system safe name from a module ID.

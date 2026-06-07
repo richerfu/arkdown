@@ -7,7 +7,7 @@ edition = "2021"
 rustc-hash = { workspace = true }
 arkdown-core = { workspace = true }
 arkdown-cache = { workspace = true }
-arkdown-utils = { workspace = true }
+arkdown-path = { workspace = true }
 
 # Parser and codegen — ohos-rs fork only
 oxc_allocator = { workspace = true }

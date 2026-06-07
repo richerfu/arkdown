@@ -174,7 +174,7 @@ fn collect_declared_dependency_roots(module_root: &Path, project_root: &Path) ->
             let Some(dep_root) = resolve_dependency_root(&pkg_root, project_root, dep_name) else {
                 continue;
             };
-            let key = dep_root.to_string_lossy().replace('\\', "/");
+            let key = arkdown_path::to_slash(&dep_root);
             if !seen.insert(key) {
                 continue;
             }

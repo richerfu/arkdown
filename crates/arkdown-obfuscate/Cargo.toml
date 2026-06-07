@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-arkdown-utils = { workspace = true }
 arkdown-core  = { workspace = true }
 thiserror     = { workspace = true }
 walkdir       = { workspace = true }

@@ -275,43 +275,21 @@ pub(super) fn write_resource_config_files_with_dirs(
     Ok(())
 }
 
-/// Collect ResourceTable.txt paths from declared HSP dependencies in oh_modules/.
+/// Collect ResourceTable.txt paths from declared dependencies in oh_modules/.
 ///
-/// Uses `LocalDependencyGraph` for BFS-consistent ordering.
-/// All locally-installed packages with a `ResourceTable.txt` contribute,
-/// regardless of type — some pre-built HARs/HSPs ship with a resource table.
-/// Matches hvigor's restool config which includes dependency resource tables so
-/// that HSP resource IDs can be resolved during HAP/HSP compilation.
-fn collect_dependency_resource_tables(
-    module_root: &Path,
-    project_root: &Path,
-) -> Vec<serde_json::Value> {
-    use arkdown_profile::dependency_graph::LocalDependencyGraph;
-    let graph = LocalDependencyGraph::build(module_root, project_root);
-    let mut tables = Vec::new();
-
-    for node in graph.nodes.values() {
-        if node.pkg_root.as_os_str().is_empty() {
-            continue; // not installed locally
-        }
-        // Check target intermediates first (locally-built HSP), then package root.
-        // Mirrors hvigor DependencyManager which prefers the target intermediates
-        // ResourceTable.txt when the dependency was built in the same project.
-        let resource_table = [
-            node.pkg_root
-                .join("build/default/intermediates/res/default/ResourceTable.txt"),
-            node.pkg_root.join("ResourceTable.txt"),
-        ]
-        .into_iter()
-        .find(|p| p.is_file());
-        if let Some(resource_table) = resource_table {
-            tables.push(serde_json::json!({
-                "resourceTable": path_string(&resource_table),
-            }));
-        }
-    }
-    tables
-}
+/// Performs a BFS walk over declared dependency packages, collecting
+/// `ResourceTable.txt` files for resource compilation. All locally-installed
+/// packages with a `ResourceTable.txt` contribute regardless of type.
+///
+// ---------------------------------------------------------------------------
+// DependencyRootScanner — owns declared dependency root discovery.
+//
+// Per SPEC-048: dependency traversal belongs to `DependencyGraphBuilder`.
+// This struct consolidates the former free functions
+// `collect_declared_dependency_roots`, `read_dependency_package_json`, and
+// `resolve_dependency_root`. Full migration to `DependencyGraphSnapshot`
+// happens in Phase 3.
+// ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
 struct ResourceDependencyPackageJson {
@@ -319,58 +297,77 @@ struct ResourceDependencyPackageJson {
     dependencies: IndexMap<String, String>,
 }
 
-fn collect_declared_dependency_roots(project_root: &Path, module_root: &Path) -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-    let mut queue = VecDeque::new();
-    let mut seen = FxHashSet::default();
-    queue.push_back(module_root.to_path_buf());
-    if project_root != module_root {
-        queue.push_back(project_root.to_path_buf());
+struct DependencyRootScanner<'a> {
+    project_root: &'a Path,
+    module_root: &'a Path,
+}
+
+impl<'a> DependencyRootScanner<'a> {
+    fn new(project_root: &'a Path, module_root: &'a Path) -> Self {
+        Self { project_root, module_root }
     }
 
-    while let Some(pkg_root) = queue.pop_front() {
-        let Some(pkg) = read_dependency_package_json(&pkg_root) else {
-            continue;
-        };
-        for dep_name in pkg.dependencies.keys() {
-            let Some(dep_root) = resolve_dependency_root(&pkg_root, project_root, dep_name) else {
-                continue;
-            };
-            let dep_key = dep_root.to_string_lossy().into_owned();
-            if !seen.insert(dep_key) {
-                continue;
+    /// Collect all locally-installed package roots reachable from this module.
+    fn collect_roots(&self) -> Vec<PathBuf> {
+        let mut roots = Vec::new();
+        let mut queue = VecDeque::new();
+        let mut seen = FxHashSet::default();
+        queue.push_back(self.module_root.to_path_buf());
+        if self.project_root != self.module_root {
+            queue.push_back(self.project_root.to_path_buf());
+        }
+        while let Some(pkg_root) = queue.pop_front() {
+            let Some(pkg) = self.read_package_json(&pkg_root) else { continue };
+            for dep_name in pkg.dependencies.keys() {
+                let Some(dep_root) = self.resolve_root(&pkg_root, dep_name) else { continue };
+                let dep_key = arkdown_path::to_slash(&dep_root);
+                if !seen.insert(dep_key) { continue }
+                queue.push_back(dep_root.clone());
+                roots.push(dep_root);
             }
-            queue.push_back(dep_root.clone());
-            roots.push(dep_root);
         }
+        roots
     }
 
-    roots
+    /// Collect `ResourceTable.txt` paths for resource compilation.
+    fn collect_resource_tables(&self) -> Vec<serde_json::Value> {
+        self.collect_roots().into_iter().filter_map(|pkg_root| {
+            let rt = [
+                pkg_root.join("build/default/intermediates/res/default/ResourceTable.txt"),
+                pkg_root.join("ResourceTable.txt"),
+            ]
+            .into_iter()
+            .find(|p| p.is_file())?;
+            Some(serde_json::json!({ "resourceTable": path_string(&rt) }))
+        }).collect()
+    }
+
+    fn read_package_json(&self, pkg_root: &Path) -> Option<ResourceDependencyPackageJson> {
+        let content = std::fs::read_to_string(pkg_root.join("oh-package.json5")).ok()?;
+        json5::from_str::<ResourceDependencyPackageJson>(&content).ok()
+    }
+
+    fn resolve_root(&self, issuer_root: &Path, dep_name: &str) -> Option<PathBuf> {
+        let mut current = Some(issuer_root);
+        while let Some(root) = current {
+            let candidate = root.join("oh_modules").join(dep_name);
+            if candidate.is_dir() { return Some(candidate); }
+            if root == self.project_root { break; }
+            current = root.parent();
+        }
+        let candidate = self.project_root.join("oh_modules").join(dep_name);
+        candidate.is_dir().then_some(candidate)
+    }
 }
 
-fn read_dependency_package_json(pkg_root: &Path) -> Option<ResourceDependencyPackageJson> {
-    let content = std::fs::read_to_string(pkg_root.join("oh-package.json5")).ok()?;
-    json5::from_str::<ResourceDependencyPackageJson>(&content).ok()
-}
-
-fn resolve_dependency_root(
-    issuer_root: &Path,
+/// Collect ResourceTable.txt paths from declared dependencies.
+///
+/// Per SPEC-048: dependency traversal owned by `DependencyRootScanner`.
+fn collect_dependency_resource_tables(
+    module_root: &Path,
     project_root: &Path,
-    dep_name: &str,
-) -> Option<PathBuf> {
-    let mut current = Some(issuer_root);
-    while let Some(root) = current {
-        let candidate = root.join("oh_modules").join(dep_name);
-        if candidate.is_dir() {
-            return Some(candidate);
-        }
-        if root == project_root {
-            break;
-        }
-        current = root.parent();
-    }
-    let candidate = project_root.join("oh_modules").join(dep_name);
-    candidate.is_dir().then_some(candidate)
+) -> Vec<serde_json::Value> {
+    DependencyRootScanner::new(project_root, module_root).collect_resource_tables()
 }
 
 pub(super) fn write_static_intermediate_files(module_root: &Path) -> Result<()> {
@@ -436,7 +433,7 @@ pub(super) fn rewrite_package_intermediate_module_json(path: &Path) -> Result<()
     Ok(())
 }
 
-pub(super) use arkdown_utils::canonicalize_or_owned as canonical_or_owned;
+pub(super) use arkdown_path::canonicalize_or_owned as canonical_or_owned;
 
 fn resource_toolchains_dir(restool_path: &Path) -> PathBuf {
     let Some(toolchains_dir) = restool_path.parent() else {
@@ -456,8 +453,12 @@ fn resource_toolchains_dir(restool_path: &Path) -> PathBuf {
     toolchains_dir.to_path_buf()
 }
 
+/// Convert a filesystem path to a slash-separated string for artifact JSON fields.
+///
+/// Per SPEC-048: all slash conversion uses `arkdown_path::to_slash()`.
+/// This function centralizes the conversion for hvigor intermediate artifact JSON.
 pub(super) fn path_string(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
+    arkdown_path::to_slash(path)
 }
 
 pub(super) fn write_hap_metadata(

@@ -594,7 +594,7 @@ fn collect_dependency_package_dirs(project_root: &Path, modules: &[ModuleConfig]
             let Some(dep_root) = resolve_dependency_root(&pkg_root, project_root, dep_name) else {
                 continue;
             };
-            let key = dep_root.to_string_lossy().replace('\\', "/");
+            let key = arkdown_path::to_slash(&dep_root);
             if !seen.insert(key) {
                 continue;
             }
