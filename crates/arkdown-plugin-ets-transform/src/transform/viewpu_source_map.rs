@@ -180,7 +180,7 @@ pub fn transform_ets_viewpu_with_source_map(
 
     for sr in &struct_results {
         let struct_line_start = final_struct_line_start(&out, sr)
-            .unwrap_or_else(|| out[..sr.out_offset].bytes().filter(|&b| b == b'\n').count());
+            .unwrap_or_else(|| count_newlines_before_byte(&out, sr.out_offset));
 
         for hint in &sr.static_span_hints {
             let abs_gen_line = struct_line_start + hint.body_line;
@@ -223,12 +223,31 @@ pub fn transform_ets_viewpu_with_source_map(
 fn viewpu_class_line_marker(viewpu_code: &str) -> Option<(usize, String)> {
     viewpu_code.lines().enumerate().find_map(|(index, line)| {
         let trimmed = line.trim_start();
-        if trimmed.starts_with("class ") && trimmed.contains(" extends ViewPU") {
+        if is_viewpu_class_line(trimmed) {
             Some((index, trimmed.to_string()))
         } else {
             None
         }
     })
+}
+
+fn is_viewpu_class_line(line: &str) -> bool {
+    (line.starts_with("class ")
+        || line.starts_with("export class ")
+        || line.starts_with("export default class "))
+        && line.contains(" extends ViewPU")
+}
+
+fn count_newlines_before_byte(source: &str, offset: usize) -> usize {
+    let end = previous_char_boundary(source, offset.min(source.len()));
+    source[..end].bytes().filter(|&b| b == b'\n').count()
+}
+
+fn previous_char_boundary(source: &str, mut offset: usize) -> usize {
+    while offset > 0 && !source.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    offset
 }
 
 fn final_struct_line_start(out: &str, sr: &StructResult) -> Option<usize> {
@@ -302,6 +321,28 @@ fn component_with_struct_from_statement<'a>(
             _ => Ok(None),
         },
         _ => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn counts_newlines_before_mid_utf8_byte_offset() {
+        let source = "alpha\n情况\nomega";
+        let mid_char = source.find("况").expect("test fixture contains char") + 1;
+
+        assert_eq!(count_newlines_before_byte(source, mid_char), 1);
+    }
+
+    #[test]
+    fn viewpu_class_marker_accepts_exported_classes() {
+        let named = "export class CommonAlertView extends ViewPU {";
+        let default = "export default class Page extends ViewPU {";
+
+        assert!(is_viewpu_class_line(named));
+        assert!(is_viewpu_class_line(default));
     }
 }
 

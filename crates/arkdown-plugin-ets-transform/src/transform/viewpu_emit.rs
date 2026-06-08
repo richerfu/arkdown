@@ -115,7 +115,9 @@ impl<'a> ViewpuAstEmitter<'a> {
         let property = ast.identifier_name(SPAN, method_name);
         let member = ast.member_expression_static(SPAN, object, property, false);
         let callee = Self::member_expression_to_expression(member);
-        let arguments = Self::parse_arguments_in(args, &allocator);
+        let Some(arguments) = Self::parse_arguments_in(args, &allocator) else {
+            return RawCallStatement::new(self.indent, object_name, method_name, args).emit();
+        };
         let call = ast.expression_call(SPAN, callee, NONE, arguments, false);
         let statement = ast.statement_expression(SPAN, call);
         let program = Self::program_with_statement(ast, statement);
@@ -126,7 +128,9 @@ impl<'a> ViewpuAstEmitter<'a> {
         let allocator = Allocator::default();
         let ast = AstBuilder::new(&allocator);
         let test = ast.expression_identifier(SPAN, "isInitialRender");
-        let body = Self::parse_statements_in(body, &allocator);
+        let Some(body) = Self::parse_statements_in(body, &allocator) else {
+            return RawIfInitialRender::new(self.indent, body).emit();
+        };
         let consequent = ast.statement_block(SPAN, body);
         let statement = ast.statement_if(SPAN, test, consequent, None);
         let program = Self::program_with_statement(ast, statement);
@@ -145,7 +149,15 @@ impl<'a> ViewpuAstEmitter<'a> {
         let property = ast.identifier_name(SPAN, "observeComponentCreation2");
         let member = ast.member_expression_static(SPAN, object, property, false);
         let callee = Self::member_expression_to_expression(member);
-        let arrow = Self::observe_arrow_function(ast, body, &allocator);
+        let Some(arrow) = Self::observe_arrow_function(ast, body, &allocator) else {
+            return RawObserveComponentCreation::new(
+                self.indent,
+                use_parent_context,
+                component_name,
+                body,
+            )
+            .emit();
+        };
         let component = ast.expression_identifier(SPAN, component_name);
         let arguments = ast.vec_from_iter([
             Self::argument_from_expression(arrow),
@@ -176,7 +188,7 @@ impl<'a> ViewpuAstEmitter<'a> {
         ast: AstBuilder<'b>,
         body: &str,
         allocator: &'b Allocator,
-    ) -> Expression<'b> {
+    ) -> Option<Expression<'b>> {
         let mut params = ast.formal_parameters(
             SPAN,
             FormalParameterKind::ArrowFormalParameters,
@@ -187,9 +199,9 @@ impl<'a> ViewpuAstEmitter<'a> {
         params
             .items
             .push(Self::formal_parameter(ast, "isInitialRender"));
-        let statements = Self::parse_statements_in(body, allocator);
+        let statements = Self::parse_statements_in(body, allocator)?;
         let body = ast.function_body(SPAN, ast.vec(), statements);
-        ast.expression_arrow_function(SPAN, false, false, NONE, params, NONE, body)
+        Some(ast.expression_arrow_function(SPAN, false, false, NONE, params, NONE, body))
     }
 
     fn formal_parameter<'b>(
@@ -231,62 +243,70 @@ impl<'a> ViewpuAstEmitter<'a> {
         }
     }
 
-    fn parse_arguments_in<'b>(args: &str, allocator: &'b Allocator) -> OxcVec<'b, Argument<'b>> {
+    fn parse_arguments_in<'b>(
+        args: &str,
+        allocator: &'b Allocator,
+    ) -> Option<OxcVec<'b, Argument<'b>>> {
         if args.trim().is_empty() {
-            return OxcVec::new_in(allocator);
+            return Some(OxcVec::new_in(allocator));
         }
 
         let source = CallArgumentsSnippet::new(args).emit();
         let parse_allocator = Allocator::default();
         let source_type = SourceType::ts().with_module(true);
         let parsed = Parser::new(&parse_allocator, &source, source_type).parse();
-        assert!(
-            parsed.errors.is_empty(),
-            "generated ViewPU call arguments must parse as TypeScript"
-        );
+        if !parsed.errors.is_empty() {
+            return None;
+        }
 
-        let Some(Statement::ExpressionStatement(statement)) = parsed.program.body.first() else {
-            panic!("generated ViewPU call argument wrapper must parse as an expression statement");
+        let Statement::ExpressionStatement(statement) = parsed.program.body.first()? else {
+            return None;
         };
         let Expression::CallExpression(call) = &statement.expression else {
-            panic!("generated ViewPU call argument wrapper must parse as a call expression");
+            return None;
         };
 
         let ast = AstBuilder::new(allocator);
-        ast.vec_from_iter(
-            call.arguments
-                .iter()
-                .map(|argument| argument.clone_in(allocator)),
+        Some(
+            ast.vec_from_iter(
+                call.arguments
+                    .iter()
+                    .map(|argument| argument.clone_in(allocator)),
+            ),
         )
     }
 
-    fn parse_statements_in<'b>(body: &str, allocator: &'b Allocator) -> OxcVec<'b, Statement<'b>> {
+    fn parse_statements_in<'b>(
+        body: &str,
+        allocator: &'b Allocator,
+    ) -> Option<OxcVec<'b, Statement<'b>>> {
         if body.trim().is_empty() {
-            return OxcVec::new_in(allocator);
+            return Some(OxcVec::new_in(allocator));
         }
 
         let source = FunctionBodySnippet::new(body).emit();
         let parse_allocator = Allocator::default();
         let source_type = SourceType::ts().with_module(true);
         let parsed = Parser::new(&parse_allocator, &source, source_type).parse();
-        assert!(
-            parsed.errors.is_empty(),
-            "generated ViewPU observe body must parse as TypeScript"
-        );
+        if !parsed.errors.is_empty() {
+            return None;
+        }
 
-        let Some(Statement::FunctionDeclaration(function)) = parsed.program.body.first() else {
-            panic!("generated ViewPU observe body wrapper must parse as a function declaration");
+        let Statement::FunctionDeclaration(function) = parsed.program.body.first()? else {
+            return None;
         };
         let Some(function_body) = &function.body else {
-            panic!("generated ViewPU observe body wrapper must have a function body");
+            return None;
         };
 
         let ast = AstBuilder::new(allocator);
-        ast.vec_from_iter(
-            function_body
-                .statements
-                .iter()
-                .map(|statement| statement.clone_in(allocator)),
+        Some(
+            ast.vec_from_iter(
+                function_body
+                    .statements
+                    .iter()
+                    .map(|statement| statement.clone_in(allocator)),
+            ),
         )
     }
 
@@ -331,6 +351,103 @@ impl<'a> CallArgumentsSnippet<'a> {
     }
 }
 
+struct RawCallStatement<'a> {
+    indent: &'a str,
+    object_name: &'a str,
+    method_name: &'a str,
+    args: &'a str,
+}
+
+impl<'a> RawCallStatement<'a> {
+    fn new(indent: &'a str, object_name: &'a str, method_name: &'a str, args: &'a str) -> Self {
+        Self {
+            indent,
+            object_name,
+            method_name,
+            args,
+        }
+    }
+
+    fn emit(&self) -> String {
+        let mut source = String::new();
+        write!(
+            source,
+            "{}{}.{}({});\n",
+            self.indent, self.object_name, self.method_name, self.args
+        )
+        .expect("writing to String cannot fail");
+        source
+    }
+}
+
+struct RawObserveComponentCreation<'a> {
+    indent: &'a str,
+    use_parent_context: bool,
+    component_name: &'a str,
+    body: &'a str,
+}
+
+impl<'a> RawObserveComponentCreation<'a> {
+    fn new(
+        indent: &'a str,
+        use_parent_context: bool,
+        component_name: &'a str,
+        body: &'a str,
+    ) -> Self {
+        Self {
+            indent,
+            use_parent_context,
+            component_name,
+            body,
+        }
+    }
+
+    fn emit(&self) -> String {
+        let view_context = if self.use_parent_context {
+            "(parent ? parent : this)"
+        } else {
+            "this"
+        };
+        let mut source = String::new();
+        write!(
+            source,
+            "{}{view_context}.observeComponentCreation2((elmtId, isInitialRender) => {{\n",
+            self.indent
+        )
+        .expect("writing to String cannot fail");
+        source.push_str(self.body);
+        if !self.body.ends_with('\n') {
+            source.push('\n');
+        }
+        write!(source, "{}}}, {});\n", self.indent, self.component_name)
+            .expect("writing to String cannot fail");
+        source
+    }
+}
+
+struct RawIfInitialRender<'a> {
+    indent: &'a str,
+    body: &'a str,
+}
+
+impl<'a> RawIfInitialRender<'a> {
+    fn new(indent: &'a str, body: &'a str) -> Self {
+        Self { indent, body }
+    }
+
+    fn emit(&self) -> String {
+        let mut source = String::new();
+        write!(source, "{}if (isInitialRender) {{\n", self.indent)
+            .expect("writing to String cannot fail");
+        source.push_str(self.body);
+        if !self.body.ends_with('\n') {
+            source.push('\n');
+        }
+        write!(source, "{}}}\n", self.indent).expect("writing to String cannot fail");
+        source
+    }
+}
+
 struct FunctionBodySnippet<'a> {
     body: &'a str,
 }
@@ -345,5 +462,34 @@ impl<'a> FunctionBodySnippet<'a> {
         write!(source, "function __arkdown__() {{\n{}\n}}", self.body)
             .expect("writing to String cannot fail");
         source
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn call_statement_falls_back_to_raw_args_when_ts_parse_fails() {
+        let mut out = String::new();
+        ViewpuWriter::new(&mut out).component_attribute("    ", "Text", "fontColor", "foo: bar");
+
+        assert_eq!(out, "    Text.fontColor(foo: bar);\n");
+    }
+
+    #[test]
+    fn observe_component_creation_falls_back_to_raw_body_when_ts_parse_fails() {
+        let mut out = String::new();
+        ViewpuWriter::new(&mut out).observe_component_creation(
+            "    ",
+            false,
+            "Text",
+            "        foo: bar;\n",
+        );
+
+        assert_eq!(
+            out,
+            "    this.observeComponentCreation2((elmtId, isInitialRender) => {\n        foo: bar;\n    }, Text);\n"
+        );
     }
 }
