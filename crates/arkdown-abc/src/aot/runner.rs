@@ -22,6 +22,7 @@ use crate::aot::cache_store::ProgramCacheStore;
 use crate::aot::compile_queue::CompileFileScheduler;
 use crate::aot::deps::resolve_deps_relation;
 use crate::aot::npm_entries::NpmModuleEntryCompiler;
+use crate::aot::optimizer::ProgramOptimizer;
 use crate::aot::options::AotCompileOptions;
 use crate::aot::output::{AotOutputGenerator, AotOutputResult};
 use crate::aot::program_registry::ProgramRegistry;
@@ -77,6 +78,20 @@ impl AotRunner {
         // 3. Compile all source files.
         let scheduler = CompileFileScheduler::new(&options, &cache_store);
         scheduler.run_all(&mut registry)?;
+
+        // 3b. Global optimization post-analysis pass.
+        //
+        // Upstream: after all programs have been compiled and analyzed, run the
+        // deferred optimization pass on programs that require post-analysis opt.
+        // `optimizationPendingProgs_` in upstream is equivalent to all entries
+        // where `requires_post_analysis_opt = true`.
+        if options.require_global_optimization {
+            let mut optimizer = ProgramOptimizer::from_compile_options(
+                options.opt_level,
+                options.optimize_try_catch_func,
+            );
+            optimizer.optimize_after_analysis(&mut registry);
+        }
 
         // 4. Check merge mode consistency for ABC inputs.
         registry.check_merge_mode_consistency(options.merge_abc)?;
@@ -174,6 +189,7 @@ mod tests {
             module_record_field_name: None,
             enable_annotations: false,
             use_define_semantic: false,
+            require_global_optimization: false,
         }
     }
 
@@ -236,6 +252,7 @@ mod tests {
             module_record_field_name: None,
             enable_annotations: false,
             use_define_semantic: false,
+            require_global_optimization: false,
         };
 
         let runner = AotRunner::new(options);

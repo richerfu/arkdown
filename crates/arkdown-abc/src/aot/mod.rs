@@ -29,15 +29,19 @@ pub mod cache_store;
 pub mod compile_queue;
 pub mod deps;
 pub mod npm_entries;
+pub mod optimizer;
 pub mod options;
 pub mod output;
 pub mod program_registry;
 pub mod runner;
+pub mod source_compiler;
 
 pub use options::{
     AotCompileOptions, AotOutput, CompileContextInfo, FilesInfoError, PkgInfo, ScriptExtension,
     ScriptKind, SourceFile, SourceFileId,
 };
+pub use optimizer::ProgramOptimizer;
 pub use output::AotOutputResult;
 pub use program_registry::ProgramRegistry;
 pub use runner::AotRunner;
+pub use source_compiler::SourceProgramCompiler;

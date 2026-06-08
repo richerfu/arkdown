@@ -23,16 +23,15 @@
 
 use crate::aot::abc_input::AbcInputProgramCompiler;
 use crate::aot::cache_store::ProgramCacheStore;
-use crate::aot::options::{AotCompileOptions, ScriptKind, SourceFile};
-use crate::aot::program_registry::{ProgramRegistry, abc_input_program_key};
-use crate::compiler::check_unsupported_syntax;
+use crate::aot::optimizer::ProgramOptimizer;
+use crate::aot::options::{AotCompileOptions, SourceFile};
+use crate::aot::program_registry::ProgramRegistry;
+use crate::aot::source_compiler::SourceProgramCompiler;
 use crate::emit::file::version_for_target_api;
 use crate::error::AbcError;
-use crate::ir::builder;
-use crate::optimizer::{optimize_records, BytecodeOptimizerOptions};
 use crate::program::ids::SourceFileId;
 use crate::program::model::{Program, ProgramCacheEntry, ProgramMetadata, SourceLang};
-use crate::program_cache::{append_program_to_file, program_for_record};
+use crate::program_cache::append_program_to_file;
 use crate::proto_panda::Program as ProtoProgram;
 
 // ── CompileFileOutput ─────────────────────────────────────────────────────────
@@ -118,6 +117,12 @@ impl<'a> CompileFileJob<'a> {
         );
 
         // 4. Try cache hit.
+        // Upstream `RetrieveProgramFromCacheFiles`: immediately returns false
+        // (cache miss) when `requireGlobalOptimization` is set, because all
+        // programs must be freshly compiled so the global analysis pass can
+        // collect cross-program data.
+        let skip_cache = self.options.require_global_optimization;
+        if !skip_cache {
         if let Some(cache_path) = &cache_path {
             match self.cache_store.read_source_program(cache_path, cache_hash) {
                 Ok(Some(proto_program)) => {
@@ -147,26 +152,45 @@ impl<'a> CompileFileJob<'a> {
                 }
             }
         }
+        } // end if !skip_cache
 
-        // 5. Source compile.
-        let program = self.compile_source_program(&source_text)?;
+        // 5. Source compile via SourceProgramCompiler (Phase 4: SPEC-049).
+        let mut program = SourceProgramCompiler::new(self.options)
+            .compile(self.source, &source_text)?;
 
-        // 6. Optimize.
-        let effective_debug = self.options.effective_debug_info();
-        let program = optimize_program(
-            program,
+        // 6. Optimize via ProgramOptimizer (Phase 9: SPEC-049).
+        //
+        // Upstream `OptimizeAndCacheProgram` control flow:
+        //   if requireGlobalOptimization:
+        //     AnalysisProgram() + mark for deferred optimization
+        //   else if optLevel != 0:
+        //     OptimizeProgram()
+        let mut optimizer = ProgramOptimizer::from_compile_options(
             self.options.opt_level,
             self.options.optimize_try_catch_func,
         );
 
-        let need_update_cache = cache_path.is_some();
+        let requires_post_analysis_opt = if self.options.require_global_optimization {
+            // Global optimization: analyze for cross-program optimization, defer the
+            // actual optimization pass until all programs have been analyzed.
+            optimizer.analyze_for_global_optimization(&program);
+            true
+        } else {
+            // Local optimization: apply register compaction + peephole now.
+            optimizer.optimize_source_program(&mut program);
+            false
+        };
+
+        // Cache writes are disabled when requireGlobalOptimization is set.
+        // Upstream `EmitFileQueue::Schedule()` skips cache emit in this case.
+        let need_update_cache = cache_path.is_some() && !self.options.require_global_optimization;
         let entry = ProgramCacheEntry {
             program,
             hash_code: cache_hash,
             need_update_cache,
             from_cache: false,
             is_source_mode: true,
-            requires_post_analysis_opt: false,
+            requires_post_analysis_opt,
         };
 
         Ok(vec![CompileFileOutput {
@@ -217,135 +241,6 @@ impl<'a> CompileFileJob<'a> {
             }])
         }
     }
-
-    /// Compile a source file to a `Program`.
-    fn compile_source_program(&self, raw_source_text: &str) -> Result<Program, AbcError> {
-        let source = self.source;
-        let file_name = source.file_name.to_string_lossy();
-
-        // Strip TypeScript type annotations before parsing as plain JS, matching
-        // upstream es2abc / old compiler.rs behavior.
-        // OLD path: strip_typescript_types() was called when source_file.is_none().
-        let source_text_owned;
-        let source_text = if source.source_file.is_empty() {
-            source_text_owned = crate::compiler::strip_typescript_types_pub(
-                raw_source_text,
-                file_name.as_ref(),
-            )?;
-            source_text_owned.as_str()
-        } else {
-            raw_source_text
-        };
-
-        // Pre-compile syntax check.
-        check_unsupported_syntax(source_text, file_name.as_ref())?;
-
-        // Determine module mode from script_kind.
-        let is_module = source.script_kind.is_module();
-        let is_commonjs = source.script_kind.is_commonjs();
-
-        // Build the ABC file using the existing IR builder.
-        // The result is a ClassRecord which we wrap in a Program.
-        let mut scratch_file = crate::emit::file::AbcFile::new();
-
-        let standalone_ecmascript_input =
-            crate::ir::record_layout::is_explicit_ecmascript_source_file(
-                source.source_file.as_ref(),
-            );
-
-        let source_file_str = if !source.source_file.is_empty() {
-            source.source_file.as_ref().to_string()
-        } else {
-            // Upstream `source_file_from_record_name` fallback.
-            use arkdown_core::HvigorSourceMapScope;
-            HvigorSourceMapScope::source_file_from_record_name(source.record_name.as_ref())
-                .unwrap_or_else(|| {
-                    source
-                        .record_name
-                        .strip_prefix("@bundle:")
-                        .unwrap_or(source.record_name.as_ref())
-                        .to_string()
-                })
-        };
-
-        let mut record = builder::build_record_with_debug_and_package_for_target_with_mode(
-            source_text,
-            source.record_name.as_ref(),
-            &mut scratch_file.strings,
-            &mut scratch_file.literal_arrays,
-            Some(source_file_str.as_str()),
-            if source.pkg_name.is_empty() {
-                None
-            } else {
-                Some(source.pkg_name.as_ref())
-            },
-            is_commonjs,
-            source.is_shared_module,
-            source.source_lang.as_ref(),
-            is_module,
-            self.options.target_api_version,
-            self.options.target_api_sub_version.as_deref(),
-            self.options.enable_annotations,
-            self.options.effective_debug_info(),
-            standalone_ecmascript_input,
-        )?;
-
-        // Non-merge mode: add upstream metadata records before the main record.
-        // This matches upstream `non_merge_metadata_records` in compiler.rs.
-        if !self.options.merge_abc {
-            let metadata_records = crate::compiler::non_merge_metadata_records_pub(
-                &mut record,
-                source_file_str.as_str(),
-                is_commonjs,
-                is_module,
-                self.options.module_record_field_name.as_deref(),
-            );
-            // Insert metadata records before main record in scratch_file for
-            // proper literal array indexing.
-            for meta in metadata_records {
-                scratch_file.add_record(meta);
-            }
-        }
-
-        // Annotation records (when enable_annotations is true).
-        if self.options.enable_annotations {
-            let ann_records = builder::annotation_records_from_source(
-                source_text,
-                source.record_name.as_ref(),
-                Some(source_file_str.as_str()),
-                self.options.target_api_version,
-                self.options.enable_annotations,
-                &mut scratch_file.literal_arrays,
-            )?;
-            for ann in ann_records {
-                scratch_file.add_record(ann);
-            }
-        }
-
-        // Add the main record last.
-        scratch_file.add_record(record);
-
-        // Build a Program from all accumulated records.
-        // IMPORTANT: Save the local StringTable so program_to_abc_file can
-        // re-intern strings and remap bytecode string indices when merging.
-        let mut program = Program {
-            lang: SourceLang::EcmaScript,
-            metadata: ProgramMetadata {
-                is_source_mode: true,
-                is_generated_from_merged_abc: false,
-                is_shared_module: source.is_shared_module,
-                source_lang: SourceLang::from_origin_str(source.source_lang.as_ref()),
-            },
-            literal_array_table: scratch_file.literal_arrays.into_iter().collect(),
-            strings: scratch_file.strings,
-            ..Program::default()
-        };
-        for rec in scratch_file.records.into_iter() {
-            program.add_record(rec);
-        }
-
-        Ok(program)
-    }
 }
 
 // ── CompileFileScheduler ──────────────────────────────────────────────────────
@@ -381,32 +276,6 @@ impl<'a> CompileFileScheduler<'a> {
 }
 
 // ── Helper functions ──────────────────────────────────────────────────────────
-
-/// Apply program-level optimization matching upstream `OptimizeAndCacheProgram`.
-fn optimize_program(mut program: Program, opt_level: u8, optimize_try_catch: bool) -> Program {
-    if opt_level == 0 {
-        return program;
-    }
-    // Optimization operates on the method bytecode within records.
-    // We create a temporary AbcFile to run the optimizer over.
-    let mut scratch = crate::emit::file::AbcFile::new();
-    for record in program.record_table.iter() {
-        scratch.add_record(record.clone());
-    }
-    let record_count = scratch.records.len();
-    optimize_records(
-        &mut scratch,
-        BytecodeOptimizerOptions::from_compile_options(opt_level, optimize_try_catch),
-        &vec![true; record_count],
-    );
-    // Copy optimized records back.
-    for (idx, record) in program.record_table.iter_mut().enumerate() {
-        if let Some(optimized) = scratch.records.get(idx) {
-            *record = optimized.clone();
-        }
-    }
-    program
-}
 
 /// Convert a proto Program back to our Program type for cache hit path.
 fn proto_to_program(
@@ -482,6 +351,7 @@ mod tests {
             module_record_field_name: None,
             enable_annotations: false,
             use_define_semantic: false,
+            require_global_optimization: false,
         }
     }
 
@@ -538,6 +408,7 @@ mod tests {
             module_record_field_name: None,
             enable_annotations: false,
             use_define_semantic: false,
+            require_global_optimization: false,
         };
 
         let cache_store = ProgramCacheStore::new(12, None);
@@ -600,6 +471,7 @@ mod tests {
             module_record_field_name: None,
             enable_annotations: false,
             use_define_semantic: false,
+            require_global_optimization: false,
         };
 
         let source_id = SourceFileId::from(0usize);
@@ -609,6 +481,141 @@ mod tests {
         assert!(
             outputs[0].entry.from_cache,
             "job must restore from cache on hash match"
+        );
+    }
+
+    #[test]
+    fn compile_file_job_abc_input_routes_to_abc_compiler() {
+        // When a SourceFile has is_source_mode=false (ABC input), the compile job
+        // must route to AbcInputProgramCompiler rather than SourceProgramCompiler.
+        // We test this by verifying that a minimal invalid source text does NOT
+        // produce a compile error when the source file is marked as non-source-mode
+        // (because ABC input jobs don't parse the source text as JS).
+        let cache_store = ProgramCacheStore::new(12, None);
+
+        // Create an ABC input SourceFile with invalid JS source.
+        // If the job incorrectly routes to SourceProgramCompiler, it would fail.
+        // Since we don't have a real ABC file, we use a valid but minimal ABC.
+        let dir = tempfile::tempdir().unwrap();
+        let abc_path = dir.path().join("input.abc");
+
+        // Write a minimal valid ABC (empty program) to disk.
+        let empty_abc = crate::emit::file::AbcFile::new().serialize();
+        std::fs::write(&abc_path, &empty_abc).unwrap();
+
+        let sf = SourceFile::new_abc_input(&abc_path, "abc");
+        assert!(!sf.is_source_mode,
+            "ABC input SourceFile must have is_source_mode=false");
+
+        let options = AotCompileOptions {
+            source_files: IndexVec::new(),
+            output: AotOutput::Path(dir.path().join("out.abc")),
+            merge_abc: false,
+            debug_info: false,
+            enable_column: false,
+            opt_level: 0,
+            optimize_try_catch_func: true,
+            file_threads: 1,
+            function_threads: 1,
+            abc_class_threads: 1,
+            target_api_version: 12,
+            target_api_sub_version: None,
+            cache_files: FxHashMap::default(),
+            npm_module_entry_list: None,
+            compile_context_info: CompileContextInfo::default(),
+            enable_abc_input: true,
+            dump_deps_info: false,
+            remove_redundant_file: false,
+            output_proto: None,
+            module_record_field_name: None,
+            enable_annotations: false,
+            use_define_semantic: false,
+            require_global_optimization: false,
+        };
+
+        let source_id = SourceFileId::from(0usize);
+        let job = CompileFileJob::new(source_id, &sf, &options, &cache_store);
+
+        // The job should try the ABC input path (not source compiler).
+        // An empty ABC file might produce 0 records (ok) or an error for
+        // "no user records" — both are acceptable outcomes, NOT a parse error.
+        let result = job.run();
+        // The important thing: no "parse error" from TS source parsing.
+        if let Err(e) = &result {
+            assert!(
+                !matches!(e, crate::error::AbcError::Parse { .. }),
+                "ABC input job must not produce a JS parse error: {e:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn compile_file_scheduler_output_matches_upstream_program_order() {
+        // Programs in the registry must be ordered by key (program key = source
+        // file name), matching upstream std::map<std::string, ProgramCache*>
+        // lexicographic order.
+        let mut sf1 = SourceFile::new_source("z_last.ts", "ts");
+        sf1.script_kind = ScriptKind::Module;
+        sf1.record_name = Box::from("z/last");
+        sf1.inline_source = Some(Arc::from("export const z = 1;"));
+
+        let mut sf2 = SourceFile::new_source("a_first.ts", "ts");
+        sf2.script_kind = ScriptKind::Module;
+        sf2.record_name = Box::from("a/first");
+        sf2.inline_source = Some(Arc::from("export const a = 1;"));
+
+        let mut sf3 = SourceFile::new_source("m_middle.ts", "ts");
+        sf3.script_kind = ScriptKind::Module;
+        sf3.record_name = Box::from("m/middle");
+        sf3.inline_source = Some(Arc::from("export const m = 1;"));
+
+        let mut sources = IndexVec::new();
+        // Insert in non-alphabetical order.
+        sources.push(sf1); // z_last
+        sources.push(sf2); // a_first
+        sources.push(sf3); // m_middle
+
+        let options = AotCompileOptions {
+            source_files: sources,
+            output: AotOutput::Path(std::path::PathBuf::from("out.abc")),
+            merge_abc: true,
+            debug_info: false,
+            enable_column: false,
+            opt_level: 0,
+            optimize_try_catch_func: true,
+            file_threads: 1,
+            function_threads: 1,
+            abc_class_threads: 1,
+            target_api_version: 12,
+            target_api_sub_version: None,
+            cache_files: FxHashMap::default(),
+            npm_module_entry_list: None,
+            compile_context_info: CompileContextInfo::default(),
+            enable_abc_input: false,
+            dump_deps_info: false,
+            remove_redundant_file: false,
+            output_proto: None,
+            module_record_field_name: None,
+            enable_annotations: false,
+            use_define_semantic: false,
+            require_global_optimization: false,
+        };
+
+        let cache_store = ProgramCacheStore::new(12, None);
+        let scheduler = CompileFileScheduler::new(&options, &cache_store);
+        let mut registry = ProgramRegistry::new(3);
+        scheduler.run_all(&mut registry).unwrap();
+
+        // Programs must be returned in upstream program_key (= source file name)
+        // lexicographic order, regardless of insertion order.
+        let keys: Vec<&str> = registry
+            .iter_in_key_order()
+            .map(|(key, _, _)| key)
+            .collect();
+        assert_eq!(
+            keys,
+            ["a_first.ts", "m_middle.ts", "z_last.ts"],
+            "CompileFileScheduler output must match upstream std::map ordering"
         );
     }
 }

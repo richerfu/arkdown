@@ -35,6 +35,7 @@ use crate::aot::options::CompileContextInfo;
 use crate::aot::program_registry::{is_abc_program_key, ProgramRegistry};
 use crate::emit::file::LiteralEntry;
 use crate::emit::record::{FieldValue, ClassRecord};
+use crate::emit::strings::StringTable;
 use crate::ir::opcodes::Insn;
 
 // OHM URL sentinel values from upstream dependency.rs.
@@ -222,7 +223,13 @@ impl<'a> DepsRelationResolver<'a> {
                     if !method.name.contains(record_name) {
                         continue;
                     }
-                    imports.extend(dynamic_imports_from_insns(&method.pandasm_insns));
+                    // Pass the program's StringTable so LdaStr string IDs can be
+                    // resolved to actual OHM URL strings for BFS traversal.
+                    // Upstream: `VisitDynamicImports<true>` in resolveDepsRelation.cpp.
+                    imports.extend(dynamic_imports_from_insns(
+                        &method.pandasm_insns,
+                        &entry.program.strings,
+                    ));
                 }
             }
         }
@@ -316,18 +323,25 @@ fn static_imports_from_record(
         .collect()
 }
 
-/// Extract dynamic import strings from pandasm instructions.
-fn dynamic_imports_from_insns(insns: &[Insn]) -> Vec<String> {
+/// Extract dynamic import OHM URL strings from pandasm instructions.
+///
+/// Looks for `LdaStr <string_id>` immediately followed by `DynamicImport`,
+/// then resolves the string_id to an actual string using the program's StringTable.
+///
+/// ## Upstream reference
+/// `es2panda/aot/resolveDepsRelation.cpp` `VisitDynamicImports<true>` —
+/// collects OHM URL strings from `lda.str` + `dynamicimport` instruction pairs.
+fn dynamic_imports_from_insns(insns: &[Insn], strings: &StringTable) -> Vec<String> {
     let mut imports = Vec::new();
     for window in insns.windows(2) {
         let [Insn::LdaStr(string_id), Insn::DynamicImport] = window else {
             continue;
         };
-        // The string ID is a u16 index into the program's string table.
-        // We can't resolve it without context here; return the raw index as a placeholder.
-        // The actual string lookup happens in the AbcFile-level resolver.
-        // For the Program-level resolver, we need the string from the record's method.
-        let _ = string_id;
+        // Resolve the string_id to the actual OHM URL string using the Program's
+        // StringTable.  The u16 string_id is the LOCAL index from source compilation.
+        if let Some(s) = strings.get(u32::from(*string_id)) {
+            imports.push(s.to_string());
+        }
     }
     imports
 }

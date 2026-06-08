@@ -78,13 +78,30 @@ impl<'a> AbcInputProgramCompiler<'a> {
             .map(|p| p.as_path());
 
         let hash_code = cache_path.map(|_| {
-            self.cache_store.abc_input_hash(
-                abc_bytes,
-                file_name.as_ref(),
-                source_file.record_name.as_ref(),
-                source_file.source_file.as_ref(),
-                source_file.pkg_name.as_ref(),
-            )
+            // Upstream includes updateVersionInfo[pkgName] version strings in the
+            // hash to invalidate cache when dependency package versions change.
+            let pkg_name = source_file.pkg_name.as_ref();
+            let update_info = self.options.compile_context_info
+                .update_version_info
+                .get(pkg_name);
+            if let Some(version_info) = update_info {
+                self.cache_store.abc_input_hash_with_version_info(
+                    abc_bytes,
+                    file_name.as_ref(),
+                    source_file.record_name.as_ref(),
+                    source_file.source_file.as_ref(),
+                    pkg_name,
+                    version_info,
+                )
+            } else {
+                self.cache_store.abc_input_hash(
+                    abc_bytes,
+                    file_name.as_ref(),
+                    source_file.record_name.as_ref(),
+                    source_file.source_file.as_ref(),
+                    pkg_name,
+                )
+            }
         });
 
         if let (Some(cache_path), Some(hash_code)) = (cache_path, hash_code) {
@@ -319,6 +336,7 @@ mod tests {
             module_record_field_name: None,
             enable_annotations: false,
             use_define_semantic: false,
+            require_global_optimization: false,
         }
     }
 

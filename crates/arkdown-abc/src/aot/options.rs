@@ -414,6 +414,20 @@ pub struct AotCompileOptions {
     pub enable_annotations: bool,
     /// Whether to use define semantics for class fields.
     pub use_define_semantic: bool,
+    /// Whether cross-program global optimization is required.
+    ///
+    /// Upstream `compilerOptions_.requireGlobalOptimization` — set when
+    /// `optLevel > 0 && branchElimination && mergeAbc`.  When true:
+    /// - Cache hits are bypassed (programs must be freshly compiled for analysis).
+    /// - Cache emit is skipped in `EmitFileQueue`.
+    /// - `ProgramOptimizer::analyze_for_global_optimization` is called instead
+    ///   of `optimize_source_program`.
+    /// - `optimize_after_analysis` runs after all programs have been analyzed.
+    ///
+    /// ## Upstream reference
+    /// `es2panda/compiler/core/compileQueue.cpp` `RetrieveProgramFromCacheFiles`
+    /// line 74: returns false immediately when `requireGlobalOptimization`.
+    pub require_global_optimization: bool,
 }
 
 impl AotCompileOptions {
@@ -571,6 +585,7 @@ mod tests {
             module_record_field_name: None,
             enable_annotations: false,
             use_define_semantic: false,
+            require_global_optimization: false,
         };
         // effective_debug_info() must be false when opt_level > 0.
         let opts_release = AotCompileOptions { debug_info: true, opt_level: 2, ..opts.clone() };
@@ -600,6 +615,38 @@ mod tests {
         // This is tested via the cache module; here we just test SourceFile.cache_key().
         let sf = SourceFile::new_source("src/main.ts", "ts");
         assert_eq!(sf.cache_key(), "src/main.ts");
+    }
+
+    #[test]
+    fn parse_cache_file_manifest_maps_by_source_file_name() {
+        // Upstream `--cache-file @modules.cache` reads a semicolon manifest where
+        // column 1 is `SourceFile::fileName` and column 2 is the `.protoBin` path.
+        // Matching `ParseCacheFileOption` in `options.cpp`.
+        use crate::cache::CacheFileMap;
+        use std::path::Path;
+
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("modules.cache");
+        std::fs::write(
+            &manifest,
+            "src/Index.ts;/cache/Index.protoBin\nsrc/Utils.ts;/cache/Utils.protoBin\n",
+        )
+        .unwrap();
+
+        let map = CacheFileMap::read_manifest(&manifest).unwrap();
+        assert_eq!(
+            map.get("src/Index.ts"),
+            Some(Path::new("/cache/Index.protoBin")),
+            "manifest must map source file name to proto bin path"
+        );
+        assert_eq!(
+            map.get("src/Utils.ts"),
+            Some(Path::new("/cache/Utils.protoBin")),
+        );
+        assert!(
+            map.get("nonexistent.ts").is_none(),
+            "unknown source file must not be in cache map"
+        );
     }
 
     #[test]

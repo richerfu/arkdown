@@ -186,16 +186,38 @@ fn build_npm_record(record_name: &str, field_name: &str) -> ClassRecord {
 
 /// Convert a proto Program back to our `Program` type for cache hit path.
 ///
-/// This is a lightweight conversion — we only need the record names and
-/// field values for the npm entries case.
-fn proto_program_to_program(_proto: ProtoProgram) -> Program {
-    // For the npm entries cache path we restore the records from the proto.
-    // The full proto conversion is handled by `program_cache.rs` / `proto_panda.rs`.
-    // For now, return an empty program — the cache hit path in the compile
-    // queue will use the proto_panda round-trip via program_cache.rs.
-    // TODO(spec-049-p5): implement full proto → Program restoration here
-    // when phase 10 (to_abc.rs) is complete.
-    Program::new_ecmascript()
+/// Uses `program_cache::append_program_to_file` to reconstruct the `AbcFile`
+/// from the proto, then wraps the resulting records in a `Program`.
+/// This matches the cache restoration path used by `CompileFileJob` for source
+/// programs.
+///
+/// ## Upstream reference
+/// `es2panda/compiler/core/compileQueue.cpp` `RetrieveProgramFromCacheFiles` —
+/// on cache hit, the proto is decoded and inserted into `progsInfo_` via
+/// `ProtobufSnapshotGenerator::GetProgramFromProtoFile`.
+fn proto_program_to_program(proto: ProtoProgram) -> Program {
+    use crate::emit::file::AbcFile;
+    use crate::program_cache::append_program_to_file;
+
+    let mut scratch = AbcFile::new();
+    match append_program_to_file(&mut scratch, proto) {
+        Ok(_) => {
+            let mut program = Program::new_ecmascript();
+            program.literal_array_table = scratch.literal_arrays.into_iter().collect();
+            program.strings = scratch.strings;
+            for rec in scratch.records {
+                program.add_record(rec);
+            }
+            program
+        }
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "failed to restore npm entries program from proto — using empty program"
+            );
+            Program::new_ecmascript()
+        }
+    }
 }
 
 #[cfg(test)]

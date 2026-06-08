@@ -668,7 +668,8 @@ impl AbcCompiler {
             output_proto,
             module_record_field_name: self.options.module_record_field_name.as_deref().map(Box::from),
             enable_annotations: self.options.enable_annotations,
-            use_define_semantic: false, // AbcCompileOptions does not expose use_define_semantic
+            use_define_semantic: false,
+            require_global_optimization: false, // AbcCompileOptions does not expose use_define_semantic
         })
     }
 

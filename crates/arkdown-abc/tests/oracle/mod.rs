@@ -79,6 +79,7 @@ pub fn run_rust_aot(
         module_record_field_name: None,
         enable_annotations: false,
         use_define_semantic: false,
+            require_global_optimization: false,
     };
 
     AotRunner::new(options).run().unwrap();
@@ -199,6 +200,7 @@ fn oracle_golden_npm_entries_compiles_to_records() {
         module_record_field_name: None,
         enable_annotations: false,
         use_define_semantic: false,
+            require_global_optimization: false,
     };
 
     AotRunner::new(options).run().unwrap();

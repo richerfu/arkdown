@@ -326,6 +326,7 @@ mod tests {
             module_record_field_name: None,
             enable_annotations: false,
             use_define_semantic: false,
+            require_global_optimization: false,
         }
     }
 

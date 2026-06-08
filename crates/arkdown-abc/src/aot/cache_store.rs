@@ -104,7 +104,11 @@ impl ProgramCacheStore {
     /// Compute the ABC input ProgramCache hash.
     ///
     /// Upstream formula: `GetHash32(abcBytes + fileName + recordName +
-    /// sourcefile + pkgName + pandaFileVersion + updateVersionInfo package versions)`.
+    /// sourcefile + pkgName + pandaFileVersion + updateVersionInfo)`.
+    ///
+    /// For each entry in `update_version_info[pkg_name]`, appends
+    /// `"pkgName:version"` to the hash input, matching upstream
+    /// `compileQueue.cpp` lines 101–112.
     pub fn abc_input_hash(
         &self,
         abc_bytes: &[u8],
@@ -121,6 +125,55 @@ impl ProgramCacheStore {
             pkg_name,
             self.panda_file_version(),
         )
+    }
+
+    /// Compute the ABC input ProgramCache hash including `updateVersionInfo`.
+    ///
+    /// When the compile context has package version info for `pkg_name`, the
+    /// version strings are appended to the hash input so that cache files are
+    /// invalidated when dependency package versions change.
+    ///
+    /// ## Upstream reference
+    /// `es2panda/compiler/core/compileQueue.cpp` `RetrieveProgramFromCacheFiles`
+    /// — lines 101–112: appends `pkgName + ":" + pkgInfo.version` for each
+    /// entry in `updateVersionInfo[src_->pkgName]`.
+    pub fn abc_input_hash_with_version_info(
+        &self,
+        abc_bytes: &[u8],
+        file_name: &str,
+        record_name: &str,
+        source_file: &str,
+        pkg_name: &str,
+        update_version_info: &std::collections::BTreeMap<Box<str>, crate::aot::options::PkgInfo>,
+    ) -> u32 {
+        use crate::cache::get_hash32;
+
+        let version = crate::cache::panda_file_version_string(self.panda_file_version());
+        // Build the hash input matching upstream byte sequence:
+        // abcBytes + fileName + recordName + sourcefile + pkgName + pandaFileVersion
+        // + (sorted pkgName:version pairs from updateVersionInfo)
+        let mut bytes = Vec::with_capacity(
+            abc_bytes.len()
+                + file_name.len()
+                + record_name.len()
+                + source_file.len()
+                + pkg_name.len()
+                + version.len()
+                + 64, // reserved for version strings
+        );
+        bytes.extend_from_slice(abc_bytes);
+        bytes.extend_from_slice(file_name.as_bytes());
+        bytes.extend_from_slice(record_name.as_bytes());
+        bytes.extend_from_slice(source_file.as_bytes());
+        bytes.extend_from_slice(pkg_name.as_bytes());
+        bytes.extend_from_slice(version.as_bytes());
+        // Append sorted version strings: "pkgName:version" for each entry.
+        for (dep_pkg, pkg_info) in update_version_info {
+            bytes.extend_from_slice(dep_pkg.as_bytes());
+            bytes.push(b':');
+            bytes.extend_from_slice(pkg_info.version.as_bytes());
+        }
+        get_hash32(&bytes)
     }
 
     /// Compute the npm entries ProgramCache hash.
