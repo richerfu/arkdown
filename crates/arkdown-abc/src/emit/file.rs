@@ -270,7 +270,7 @@ pub enum LiteralEntry {
 ///
 /// The 0-based position of this value in `AbcFile::literal_arrays` is used as
 /// the `buf_id` operand in the `DefineClassWithBuffer` instruction.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LiteralArray {
     /// Entries serialised into the literal-array section.
     pub entries: Vec<LiteralEntry>,

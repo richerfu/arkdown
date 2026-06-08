@@ -34,6 +34,7 @@
 
 mod abc2program;
 pub mod abc_reader;
+pub mod aot;
 pub mod cache;
 pub mod compiler;
 mod dependency;
@@ -44,11 +45,13 @@ pub(crate) mod isa;
 pub(crate) mod names;
 mod npm_entries;
 mod optimizer;
+pub mod program;
 mod program_cache;
 pub mod proto_panda;
 pub mod widget;
 
 pub use abc_reader::{AbcClassInfo, AbcReadError, AbcReader, AbcSectionHashes, ParsedAbcSummary};
+pub use aot::{AotCompileOptions, AotOutput, AotOutputResult, AotRunner, ScriptKind, SourceFile};
 pub use compiler::{
     AbcArtifactResult, AbcCompileOptions, AbcCompiler, AbcInputFile, AbcModule,
     AbcProgramCacheInput,

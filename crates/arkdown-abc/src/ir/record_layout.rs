@@ -141,7 +141,7 @@ impl<'a> RecordLayout<'a> {
     }
 }
 
-pub(super) fn is_explicit_ecmascript_source_file(source_file: &str) -> bool {
+pub(crate) fn is_explicit_ecmascript_source_file(source_file: &str) -> bool {
     !source_file.contains('|') && (source_file.ends_with(".js") || source_file.ends_with(".ts"))
 }
 

@@ -1,11 +1,18 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use arkdown_core::HvigorSourceMapScope;
 use oxc_allocator::Allocator;
 use oxc_codegen::Codegen;
+use oxc_index::IndexVec;
 use oxc_parser::Parser;
 use oxc_span::SourceType;
+use rustc_hash::FxHashMap;
 
+use crate::aot::options::{
+    AotCompileOptions, AotOutput, CompileContextInfo, ScriptKind, SourceFile,
+};
+use crate::aot::runner::AotRunner;
 use crate::cache::{
     abc_input_cache_hash, source_cache_hash, AbcProgramsCacheFile, ProgramCacheFile,
     ProgramProtoFile,
@@ -17,8 +24,8 @@ use crate::emit::file::{version_for_target_api, AbcFile};
 use crate::emit::record::{ClassRecord, FieldRecord, FieldType, FieldValue, FIELD_OWNER_CLASS_IDX};
 use crate::error::AbcError;
 use crate::ir::builder;
-use crate::npm_entries::load_npm_entry_records;
 use crate::optimizer::{optimize_records, BytecodeOptimizerOptions};
+use crate::program::ids::SourceFileId;
 use crate::program_cache::{append_program_to_file, program_for_file};
 use crate::widget::WidgetCompileConfig;
 
@@ -140,12 +147,6 @@ pub struct AbcArtifactResult {
     pub has_debug_info: bool,
 }
 
-struct PendingProgramCacheWrite {
-    record_indices: Vec<usize>,
-    cache_file: PathBuf,
-    hash_code: u32,
-}
-
 struct BuiltAbcFile {
     file: AbcFile,
     has_debug_info: bool,
@@ -166,6 +167,11 @@ struct BuiltAbcFile {
 /// now accepts TypeScript source directly via `SourceType::ts()`, so we
 /// no longer need to fully strip the annotations here.
 ///
+/// Public crate wrapper for stripping TypeScript types.
+pub(crate) fn strip_typescript_types_pub(source: &str, file: &str) -> Result<String, AbcError> {
+    strip_typescript_types(source, file)
+}
+
 fn strip_typescript_types(source: &str, file: &str) -> Result<String, AbcError> {
     if file.ends_with(".ets") {
         return Ok(source.to_string());
@@ -195,8 +201,15 @@ fn source_file_from_record_name(record_name: &str) -> String {
     })
 }
 
-fn is_explicit_ecmascript_source_file(source_file: &str) -> bool {
-    !source_file.contains('|') && (source_file.ends_with(".js") || source_file.ends_with(".ts"))
+/// Public wrapper for compile_queue's use.
+pub(crate) fn non_merge_metadata_records_pub(
+    record: &mut ClassRecord,
+    source_file: &str,
+    is_commonjs: bool,
+    is_module: bool,
+    module_record_field_name: Option<&str>,
+) -> Vec<ClassRecord> {
+    non_merge_metadata_records(record, source_file, is_commonjs, is_module, module_record_field_name)
 }
 
 fn non_merge_metadata_records(
@@ -506,30 +519,156 @@ impl AbcCompiler {
     /// `cache_inputs` is positional and must either be empty or have the same
     /// length as `modules`, matching upstream's per-`SourceFile::fileName`
     /// cache map.
+    ///
+    /// # SPEC-049 Phase 11b
+    ///
+    /// This method is now a thin facade over `AotRunner`.  It converts the
+    /// legacy `AbcModule` input format to the upstream-shaped `AotCompileOptions`
+    /// and delegates all compilation to the `AotRunner` orchestration pipeline.
     pub fn compile_with_program_cache(
         &self,
         modules: Vec<AbcModule>,
         output: &Path,
         cache_inputs: Vec<Option<AbcProgramCacheInput>>,
     ) -> Result<AbcArtifactResult, AbcError> {
-        let built = self.build_abc_file(modules, output, cache_inputs, true)?;
-        let bytes = built.file.serialize_with_version(version_for_target_api(
-            self.options.target_api_version,
-            self.options.target_api_sub_version.as_deref(),
-        ));
+        let aot_options =
+            self.build_aot_options_from_modules(&modules, output, &cache_inputs, None)?;
 
-        // Ensure the output directory exists.
-        if let Some(parent) = output.parent() {
-            if !parent.as_os_str().is_empty() {
-                fs_err::create_dir_all(parent).map_err(AbcError::Io)?;
-            }
-        }
-        std::fs::write(output, &bytes).map_err(AbcError::Io)?;
+        let result = AotRunner::new(aot_options).run()?;
 
         Ok(AbcArtifactResult {
-            path: output.to_path_buf(),
-            api_version: self.options.target_api_version,
-            has_debug_info: built.has_debug_info,
+            path: result.abc_paths.into_iter().next().unwrap_or_else(|| output.to_path_buf()),
+            api_version: result.api_version,
+            has_debug_info: result.has_debug_info,
+        })
+    }
+
+    /// Convert `AbcModule` inputs to upstream-shaped `AotCompileOptions`.
+    ///
+    /// This adapter enables the legacy public API to delegate to `AotRunner`
+    /// without requiring callers to construct `AotCompileOptions` directly.
+    fn build_aot_options_from_modules(
+        &self,
+        modules: &[AbcModule],
+        output: &Path,
+        cache_inputs: &[Option<AbcProgramCacheInput>],
+        output_proto: Option<PathBuf>,
+    ) -> Result<AotCompileOptions, AbcError> {
+        if !cache_inputs.is_empty() && cache_inputs.len() != modules.len() {
+            return Err(AbcError::UnsupportedConstruct {
+                construct: "ProgramCache input count must match source module count".to_string(),
+                file: output.display().to_string(),
+            });
+        }
+
+        if !self.options.merge_abc && modules.len() > 1 {
+            return Err(AbcError::UnsupportedConstruct {
+                construct:
+                    "merge_abc=false with multiple source files requires per-input output files"
+                        .to_string(),
+                file: output.display().to_string(),
+            });
+        }
+
+        // Keep user's opt_level as-is; effective_debug_info() in AotCompileOptions
+        // handles suppression: debug_info is suppressed when opt_level > 0.
+        let effective_opt_level = self.options.opt_level;
+
+        let mut source_files: IndexVec<SourceFileId, SourceFile> = IndexVec::new();
+        let mut cache_files: FxHashMap<Box<str>, PathBuf> = FxHashMap::default();
+
+        for (idx, module) in modules.iter().enumerate() {
+            let cache_input = cache_inputs.get(idx).and_then(Option::as_ref);
+
+            // Determine script kind from module flags.
+            let script_kind = if module.is_commonjs {
+                ScriptKind::CommonJs
+            } else if self.options.module {
+                ScriptKind::Module
+            } else {
+                ScriptKind::Script
+            };
+
+            // Build SourceFile from AbcModule.
+            // Use the record_name as the program key (always unique per module).
+            // The cache key uses file_name from cache_input when available.
+            // NOTE: source_file must NOT be used as the program key because
+            // multiple modules can share the same source_file string (e.g. when
+            // different records from the same file are compiled separately).
+            let file_name_str = cache_input
+                .map(|ci| ci.file_name.clone())
+                .unwrap_or_else(|| module.record_name.clone());
+
+            let mut sf = SourceFile {
+                file_name: PathBuf::from(&file_name_str),
+                record_name: Box::from(module.record_name.as_str()),
+                script_kind,
+                script_extension: crate::aot::options::ScriptExtension::from_filename(
+                    &file_name_str, "ts",
+                ),
+                source_file: Box::from(
+                    module.source_file.as_deref().unwrap_or(""),
+                ),
+                pkg_name: Box::from(
+                    module.package_name.as_deref().unwrap_or(""),
+                ),
+                is_shared_module: module.is_shared_module,
+                source_lang: Box::from(module.origin_source_lang.as_str()),
+                is_source_mode: true,
+                inline_source: Some(Arc::from(module.source.as_str())),
+                hash: None,
+            };
+
+            // Register cache file mapping.
+            if let Some(ci) = cache_input {
+                cache_files.insert(Box::from(file_name_str.as_str()), ci.cache_file.clone());
+            }
+
+            source_files.push(sf);
+        }
+
+        // Build compile context from dependency context if present.
+        let compile_context_info = if let Some(dep_ctx) = &self.options.dependency_context {
+            CompileContextInfo {
+                compile_entries: dep_ctx
+                    .compile_entries
+                    .iter()
+                    .map(|s| Box::from(s.as_str()))
+                    .collect(),
+                hsp_pkg_names: dep_ctx
+                    .external_pkg_names
+                    .iter()
+                    .map(|s| Box::from(s.as_str()))
+                    .collect(),
+                ..Default::default()
+            }
+        } else {
+            CompileContextInfo::default()
+        };
+
+        Ok(AotCompileOptions {
+            source_files,
+            output: AotOutput::Path(output.to_path_buf()),
+            merge_abc: self.options.merge_abc,
+            debug_info: self.options.debug_info,
+            enable_column: false,
+            opt_level: effective_opt_level,
+            optimize_try_catch_func: self.options.optimize_try_catch_func,
+            file_threads: 1,
+            function_threads: 1,
+            abc_class_threads: 1,
+            target_api_version: self.options.target_api_version,
+            target_api_sub_version: self.options.target_api_sub_version.as_deref().map(Box::from),
+            cache_files,
+            npm_module_entry_list: self.options.npm_entries.clone(),
+            compile_context_info,
+            enable_abc_input: false,
+            dump_deps_info: self.options.dump_deps_info,
+            remove_redundant_file: self.options.remove_redundant_file,
+            output_proto,
+            module_record_field_name: self.options.module_record_field_name.as_deref().map(Box::from),
+            enable_annotations: self.options.enable_annotations,
+            use_define_semantic: false, // AbcCompileOptions does not expose use_define_semantic
         })
     }
 
@@ -590,7 +729,8 @@ impl AbcCompiler {
         );
         let mut abc_file = AbcFile::new();
         let mut record_program_keys = Vec::new();
-        let mut record_needs_optimization = Vec::new();
+        // ABC input records are precompiled bytecode and are never re-optimized.
+        // record_needs_optimization removed per SPEC-049 Phase 11b guardrail.
 
         for input in &inputs {
             let hash_code = input.cache_file.as_ref().map(|_| {
@@ -613,8 +753,6 @@ impl AbcCompiler {
                             program_key.clone(),
                             appended_records.len(),
                         ));
-                        record_needs_optimization
-                            .extend(std::iter::repeat_n(false, appended_records.len()));
                     }
                     continue;
                 }
@@ -631,7 +769,6 @@ impl AbcCompiler {
                 })
                 .collect::<Vec<_>>();
             record_program_keys.extend(appended_program_keys.iter().cloned());
-            record_needs_optimization.extend(std::iter::repeat_n(false, appended.len()));
 
             if let (Some(cache_file), Some(hash_code)) = (&input.cache_file, hash_code) {
                 let mut programs = Vec::with_capacity(appended.len());
@@ -669,17 +806,18 @@ impl AbcCompiler {
                     .map(|program_key| resolved.contains_program(program_key))
                     .collect::<Vec<_>>();
                 compact_to_retained_programs(&mut abc_file, &mut record_program_keys, &keep_mask);
-                record_needs_optimization = vec![false; abc_file.records.len()];
             }
         }
 
+        // ABC input records are precompiled bytecode and are never re-optimized.
+        let should_skip_optimization = vec![false; abc_file.records.len()];
         optimize_records(
             &mut abc_file,
             BytecodeOptimizerOptions::from_compile_options(
                 self.options.opt_level,
                 self.options.optimize_try_catch_func,
             ),
-            &record_needs_optimization,
+            &should_skip_optimization,
         );
 
         if abc_file.records.is_empty() {
@@ -700,307 +838,42 @@ impl AbcCompiler {
     ///
     /// Upstream `GenerateProgram()` returns immediately after this snapshot for
     /// a single Program, before `.abc` emission and cache-file emit jobs.
+    /// Compile one upstream pandasm `Program` snapshot and write it as
+    /// `protoPanda::Program`, matching `es2abc --outputProto`.
+    ///
+    /// # SPEC-049 Phase 11b
+    ///
+    /// Routes through `AotRunner` with `output_proto` set, which returns before
+    /// final ABC emission (matching upstream `GenerateProgram` early-return for
+    /// single-program `--outputProto`).
     pub fn compile_program_proto(
         &self,
         modules: Vec<AbcModule>,
         output_proto: &Path,
         cache_inputs: Vec<Option<AbcProgramCacheInput>>,
     ) -> Result<AbcArtifactResult, AbcError> {
-        let built = self.build_abc_file(modules, output_proto, cache_inputs, false)?;
-        let program = program_for_file(&built.file, self.options.target_api_version)?;
-        ProgramProtoFile::write(output_proto, program)?;
+        // Use a dummy output path; AotRunner will not write an ABC file when
+        // output_proto is set and the program count is 1.
+        let dummy_output = output_proto.with_extension("abc");
+        let aot_options = self.build_aot_options_from_modules(
+            &modules,
+            &dummy_output,
+            &cache_inputs,
+            Some(output_proto.to_path_buf()),
+        )?;
+
+        let result = AotRunner::new(aot_options).run()?;
 
         Ok(AbcArtifactResult {
-            path: output_proto.to_path_buf(),
-            api_version: self.options.target_api_version,
-            has_debug_info: built.has_debug_info,
+            path: result.proto_path.unwrap_or_else(|| output_proto.to_path_buf()),
+            api_version: result.api_version,
+            has_debug_info: result.has_debug_info,
         })
     }
 
-    fn build_abc_file(
-        &self,
-        modules: Vec<AbcModule>,
-        diagnostic_path: &Path,
-        cache_inputs: Vec<Option<AbcProgramCacheInput>>,
-        write_program_cache: bool,
-    ) -> Result<BuiltAbcFile, AbcError> {
-        if !cache_inputs.is_empty() && cache_inputs.len() != modules.len() {
-            return Err(AbcError::UnsupportedConstruct {
-                construct: "ProgramCache input count must match source module count".to_string(),
-                file: diagnostic_path.display().to_string(),
-            });
-        }
-
-        // Upstream es2abc (aot/options.cpp): debug info is suppressed when
-        // optLevel is non-zero. Computing this once here ensures both the
-        // cache-hit return value and the full-compile path agree on whether
-        // debug info was emitted.
-        let effective_debug_info = self.options.debug_info && self.options.opt_level == 0;
-
-        tracing::debug!(
-            module_count = modules.len(),
-            npm_entries = ?self.options.npm_entries,
-            debug_info = self.options.debug_info,
-            effective_debug_info,
-            opt_level = self.options.opt_level,
-            write_program_cache,
-            "abc compile start"
-        );
-
-        if !self.options.merge_abc && modules.len() > 1 {
-            return Err(AbcError::UnsupportedConstruct {
-                construct:
-                    "merge_abc=false with multiple source files requires per-input output files"
-                        .to_string(),
-                file: diagnostic_path.display().to_string(),
-            });
-        }
-
-        let mut abc_file = AbcFile::new();
-        let mut has_debug_info = false;
-        let mut pending_cache_writes = Vec::new();
-        let mut record_needs_optimization = Vec::new();
-        let mut record_program_keys = Vec::new();
-        let panda_file_version = version_for_target_api(
-            self.options.target_api_version,
-            self.options.target_api_sub_version.as_deref(),
-        );
-
-        for (module_index, module) in modules.iter().enumerate() {
-            let cache_hash_source_file = module.source_file.as_deref().unwrap_or("");
-            let cache_input = cache_inputs.get(module_index).and_then(Option::as_ref);
-            let program_key = cache_input
-                .map(|cache_input| cache_input.file_name.clone())
-                .or_else(|| module.source_file.clone())
-                .unwrap_or_else(|| module.record_name.clone());
-            let cache_hash_code = cache_input.map(|cache_input| {
-                source_cache_hash(
-                    &module.source,
-                    &cache_input.file_name,
-                    &module.record_name,
-                    cache_hash_source_file,
-                    module.package_name.as_deref().unwrap_or(""),
-                    panda_file_version,
-                )
-            });
-            if let (Some(cache_input), Some(hash_code)) = (cache_input, cache_hash_code) {
-                if let Some(program) =
-                    ProgramCacheFile::read_if_hash_matches(&cache_input.cache_file, hash_code)?
-                {
-                    let appended_records = append_program_to_file(&mut abc_file, program)?;
-                    record_needs_optimization
-                        .extend(std::iter::repeat_n(false, appended_records.len()));
-                    record_program_keys.extend(std::iter::repeat_n(
-                        program_key.clone(),
-                        appended_records.len(),
-                    ));
-                    has_debug_info |= effective_debug_info;
-                    tracing::debug!(
-                        source = %cache_input.file_name,
-                        cache_file = %cache_input.cache_file.display(),
-                        hash_code,
-                        record_count = appended_records.len(),
-                        "restored upstream ProgramCache hit"
-                    );
-                    continue;
-                }
-            }
-
-            // Strip TypeScript type annotations before parsing as plain JS.
-            // The codegen fallback in the loader may preserve TS syntax when
-            // the OXC parser cannot handle `.ets`-specific constructs.
-            let js_source = if module.source_file.is_some() {
-                module.source.clone()
-            } else {
-                strip_typescript_types(&module.source, &module.record_name)?
-            };
-            // Pre-compile check: reject unsupported constructs before lowering.
-            // Section 3.6: "对照 upstream es2panda 补 lowering；unsupported 必须 hard error".
-            // ArkTS runs in implicit strict mode — eval/with/arguments.callee are
-            // forbidden and must produce hard errors rather than silent miscompilation.
-            check_unsupported_syntax(&js_source, &module.record_name)?;
-            // Upstream es2abc emits LineNumberProgram entries even when
-            // --debug-info is not supplied. The debug flag controls the amount
-            // of debug payload, not whether methods have source-file-backed
-            // LNP records at all.
-            let standalone_ecmascript_input = module
-                .source_file
-                .as_deref()
-                .is_some_and(is_explicit_ecmascript_source_file);
-            let source_file = module
-                .source_file
-                .as_deref()
-                .map(|sf| Self::normalize_source_file(&module.record_name, sf.to_string()))
-                .unwrap_or_else(|| source_file_from_record_name(&module.record_name));
-            has_debug_info |= effective_debug_info;
-            let mut record = builder::build_record_with_debug_and_package_for_target_with_mode(
-                &js_source,
-                &module.record_name,
-                &mut abc_file.strings,
-                &mut abc_file.literal_arrays,
-                Some(source_file.as_str()),
-                module.package_name.as_deref(),
-                module.is_commonjs,
-                module.is_shared_module,
-                &module.origin_source_lang,
-                self.options.module,
-                self.options.target_api_version,
-                self.options.target_api_sub_version.as_deref(),
-                self.options.enable_annotations,
-                effective_debug_info,
-                standalone_ecmascript_input,
-            )?;
-            if !self.options.merge_abc {
-                for metadata_record in non_merge_metadata_records(
-                    &mut record,
-                    source_file.as_str(),
-                    module.is_commonjs,
-                    self.options.module,
-                    self.options.module_record_field_name.as_deref(),
-                ) {
-                    abc_file.add_record(metadata_record);
-                    record_needs_optimization.push(false);
-                    record_program_keys.push(program_key.clone());
-                }
-            }
-            let annotation_records = if self.options.enable_annotations {
-                builder::annotation_records_from_source(
-                    &js_source,
-                    &module.record_name,
-                    module.source_file.as_deref(),
-                    self.options.target_api_version,
-                    self.options.enable_annotations,
-                    &mut abc_file.literal_arrays,
-                )?
-            } else {
-                Vec::new()
-            };
-            let mut cache_record_indices = Vec::new();
-            for annotation_record in annotation_records {
-                let annotation_record_index = abc_file.records.len();
-                abc_file.add_record(annotation_record);
-                record_needs_optimization.push(false);
-                record_program_keys.push(program_key.clone());
-                cache_record_indices.push(annotation_record_index);
-            }
-            let record_index = abc_file.records.len();
-            abc_file.add_record(record);
-            record_needs_optimization.push(true);
-            record_program_keys.push(program_key);
-            cache_record_indices.push(record_index);
-
-            if write_program_cache {
-                if let (Some(cache_input), Some(hash_code)) = (cache_input, cache_hash_code) {
-                    pending_cache_writes.push(PendingProgramCacheWrite {
-                        record_indices: cache_record_indices,
-                        cache_file: cache_input.cache_file.clone(),
-                        hash_code,
-                    });
-                }
-            }
-        }
-
-        if let Some(path) = &self.options.npm_entries {
-            let records = load_npm_entry_records(path)?;
-            tracing::debug!(
-                npm_entries = %path.display(),
-                record_count = records.len(),
-                "lowered npm module entry records"
-            );
-            for record in records {
-                abc_file.add_record(record);
-                record_needs_optimization.push(false);
-                record_program_keys.push(path.to_string_lossy().into_owned());
-            }
-        }
-
-        if let Some(context) = &self.options.dependency_context {
-            let resolved = resolve_deps_relation(
-                &abc_file,
-                &record_program_keys,
-                context,
-                self.options.dump_deps_info,
-            );
-            if self.options.remove_redundant_file {
-                let keep_mask = record_program_keys
-                    .iter()
-                    .map(|program_key| resolved.contains_program(program_key))
-                    .collect::<Vec<_>>();
-                let old_record_needs_optimization = std::mem::take(&mut record_needs_optimization);
-                let record_index_map = compact_to_retained_programs(
-                    &mut abc_file,
-                    &mut record_program_keys,
-                    &keep_mask,
-                );
-                record_needs_optimization = old_record_needs_optimization
-                    .into_iter()
-                    .enumerate()
-                    .filter_map(|(old_index, needs_optimization)| {
-                        record_index_map
-                            .contains_key(&old_index)
-                            .then_some(needs_optimization)
-                    })
-                    .collect();
-                pending_cache_writes = pending_cache_writes
-                    .into_iter()
-                    .filter_map(|mut pending| {
-                        let new_indices = pending
-                            .record_indices
-                            .iter()
-                            .map(|old_index| record_index_map.get(old_index).copied())
-                            .collect::<Option<Vec<_>>>()?;
-                        pending.record_indices = new_indices;
-                        Some(pending)
-                    })
-                    .collect();
-            }
-        }
-
-        optimize_records(
-            &mut abc_file,
-            BytecodeOptimizerOptions::from_compile_options(
-                self.options.opt_level,
-                self.options.optimize_try_catch_func,
-            ),
-            &record_needs_optimization,
-        );
-
-        for pending in &pending_cache_writes {
-            let program = if pending.record_indices.len() == 1 {
-                crate::program_cache::program_for_record(
-                    &abc_file,
-                    pending.record_indices[0],
-                    self.options.target_api_version,
-                )?
-            } else {
-                Some(crate::program_cache::program_for_records(
-                    &abc_file,
-                    &pending.record_indices,
-                    self.options.target_api_version,
-                )?)
-            };
-            let Some(program) = program else {
-                return Err(AbcError::UnsupportedConstruct {
-                    construct: format!(
-                        "failed to materialize upstream ProgramCache Program for record indexes {:?}",
-                        pending.record_indices
-                    ),
-                    file: pending.cache_file.display().to_string(),
-                });
-            };
-            ProgramCacheFile::write(&pending.cache_file, pending.hash_code, program)
-                .map_err(AbcError::Io)?;
-        }
-
-        Ok(BuiltAbcFile {
-            file: abc_file,
-            has_debug_info,
-        })
-    }
-
-    fn normalize_source_file(record_name: &str, source_file: String) -> String {
-        HvigorSourceMapScope::normalize_debug_source_file(record_name, &source_file)
-    }
+    // build_abc_file and normalize_source_file were deleted as dead code
+    // (SPEC-049 AOT refactor): all compilation now routes through AotRunner
+    // via build_aot_options_from_modules.
 }
 
 // ---------------------------------------------------------------------------

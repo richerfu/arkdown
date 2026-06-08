@@ -1,0 +1,1 @@
+entry.ts;@bundle:com.example/entry/ets/entry;module;entry|1.0.0|src/main/ets/entry.ts;entry;false;ts

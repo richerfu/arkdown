@@ -2,7 +2,7 @@ use rustc_hash::FxHashMap;
 
 use crate::isa::{id_operands as isa_id_operands, instruction_len as isa_instruction_len, IdKind};
 
-pub(super) fn patch_bytecode_index_operands(
+pub(crate) fn patch_bytecode_index_operands(
     bytecode: &[u8],
     string_pool_indices: &FxHashMap<u16, u16>,
     literal_pool_indices: &FxHashMap<u16, u16>,
