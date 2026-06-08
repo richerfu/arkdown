@@ -134,15 +134,36 @@ impl ProgramOptimizer {
     /// Matches upstream `util::Helpers::AnalysisProgram` called from
     /// `CompileFileJob::OptimizeAndCacheProgram` when `requireGlobalOptimization`.
     ///
-    /// ## Note
+    /// ## Note: AnalysisProgram is a known stub
     ///
-    /// In the current Rust implementation, global optimization analysis is not
-    /// yet ported from upstream `bytecode_optimizer`. This method is a
-    /// correctly-shaped placeholder that does not apply any transformation.
+    /// Upstream `util::Helpers::AnalysisProgram` (called from
+    /// `CompileFileJob::OptimizeAndCacheProgram` when `requireGlobalOptimization`)
+    /// runs the actual cross-program bytecode analysis pass from
+    /// `bytecode_optimizer`.  This pass collects inline cache statistics, call
+    /// frequency data, and other cross-function information needed for branch
+    /// elimination and cross-function inlining.
+    ///
+    /// **Current status**: The bytecode_optimizer analysis pass is not yet ported
+    /// from upstream C++.  This method is a correctly-wired call site that does
+    /// nothing.  The control flow is correct:
+    /// - Cache is bypassed (`require_global_optimization = true` skips cache hit).
+    /// - Programs are marked `requires_post_analysis_opt = true`.
+    /// - `optimize_after_analysis` is called after all programs are compiled.
+    ///
+    /// What is MISSING: the actual analysis data is never collected, so
+    /// `optimize_after_analysis` runs `optimize_source_program` on each program
+    /// (applying local optimization only, not global cross-program optimization).
+    ///
+    /// **Functional impact**: Setting `require_global_optimization = true`
+    /// currently behaves like `optLevel > 0` without the global analysis benefit.
+    /// For standard TypeScript/JavaScript sources, local optimization still
+    /// produces correct (though not globally optimal) ABC.
+    ///
+    /// **Tracking**: A follow-up SPEC will port `bytecode_optimizer::AnalysisProgram`
+    /// once the pandasm IR graph (CFG) is available in Rust.
     pub fn analyze_for_global_optimization(&mut self, _program: &Program) {
         // Upstream: util::Helpers::AnalysisProgram(prog, src_->fileName)
-        // The full port of the analysis pass is tracked in a follow-up SPEC.
-        // This placeholder ensures the call site is correctly wired.
+        // Stub — see doc comment above.
     }
 
     /// Apply global optimization after all programs have been analyzed.

@@ -25,6 +25,28 @@
 //! GetHash32String(npmEntriesFileContent)
 //! ```
 //!
+//! ## `pandaFileVersion` semantic difference vs upstream
+//!
+//! Upstream `compileQueue.cpp` uses `panda::panda_file::GetVersion(panda::panda_file::version)`
+//! where `panda_file::version` is a **compile-time constant** of the es2abc binary itself
+//! (e.g. `"12.0.6.0"` for an SDK built against API 12 patch 6).  This means upstream
+//! cache files are invalidated when the SDK binary is upgraded, not when the target API
+//! changes.
+//!
+//! Our implementation uses `version_for_target_api(target_api_version)` which maps the
+//! *requested* target API version to the corresponding bytecode version string.  This is
+//! semantically more correct for our use case (we compile for a specific API level, not
+//! for a specific SDK binary).  The trade-off:
+//!
+//! - ✅ Our cache files are **internally consistent**: same target API → same version string.
+//! - ✅ Cache is invalidated when the target API version changes.
+//! - ❌ Cache files produced by our tool and the real SDK `es2abc` binary are **not
+//!   interchangeable** because their `pandaFileVersion` strings differ (unless the SDK
+//!   binary happens to be at exactly `version_for_target_api(target_api_version)`).
+//!
+//! This is an intentional design choice.  Cross-tool cache sharing with `es2abc` is not
+//! a supported use case.
+//!
 //! ## Upstream reference
 //! - `es2panda/compiler/core/compileQueue.cpp` — `RetrieveProgramFromCacheFiles`
 //! - `es2panda/util/moduleHelpers.cpp` — npm entries cache lookup

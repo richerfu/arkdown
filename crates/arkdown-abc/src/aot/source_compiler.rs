@@ -20,10 +20,9 @@
 
 use crate::aot::options::{AotCompileOptions, SourceFile};
 use crate::compiler::{non_merge_metadata_records_pub, strip_typescript_types_pub};
-use crate::emit::file::AbcFile;
 use crate::error::AbcError;
 use crate::ir::{builder, record_layout::is_explicit_ecmascript_source_file};
-use crate::program::model::{Program, ProgramMetadata, SourceLang};
+use crate::program::model::{Program, SourceLang};
 
 /// Upstream-equivalent source program compiler.
 ///
@@ -106,15 +105,14 @@ impl<'a> SourceProgramCompiler<'a> {
         let standalone_ecmascript_input =
             is_explicit_ecmascript_source_file(source_file.source_file.as_ref());
 
-        // Step 4: Build OXC AST and lower to ClassRecord via IR builder.
-        // This is the Rust equivalent of `Compiler::CompileFile` which parses,
-        // binds, checks, and lowers to `pandasm::Program`.
-        let mut scratch_file = AbcFile::new();
-        let mut record = builder::build_record_with_debug_and_package_for_target_with_mode(
+        // Step 4: Build OXC AST and lower to Program via ir::builder Program API.
+        //
+        // `builder::build_program_with_mode` is the Program-level entry point
+        // introduced in SPEC-049 Phase 4.  It owns its own StringTable and
+        // LiteralArray table, matching upstream `pandasm::Program` semantics.
+        let mut program = builder::build_program_with_mode(
             source_text,
             source_file.record_name.as_ref(),
-            &mut scratch_file.strings,
-            &mut scratch_file.literal_arrays,
             Some(source_file_str.as_str()),
             if source_file.pkg_name.is_empty() {
                 None
@@ -131,54 +129,57 @@ impl<'a> SourceProgramCompiler<'a> {
             self.options.effective_debug_info(),
             standalone_ecmascript_input,
         )?;
+        // Propagate source_lang metadata.
+        program.metadata.source_lang = SourceLang::from_origin_str(source_file.source_lang.as_ref());
+        program.metadata.is_shared_module = source_file.is_shared_module;
 
         // Step 5: Non-merge mode metadata records.
+        //
         // Upstream `compiler/compiler.cpp` builds `_ESModuleRecord`, `_CommonJsRecord`,
-        // `_ESScopeNamesRecord`, etc. in the non-merge compile path.
+        // `_ESScopeNamesRecord`, etc. in the non-merge compile path.  The metadata
+        // fields are extracted from the main record (mutating it) and returned as
+        // additional ClassRecord values to insert into the Program.
         if !self.options.merge_abc {
-            for meta in non_merge_metadata_records_pub(
-                &mut record,
-                source_file_str.as_str(),
-                is_commonjs,
-                is_module,
-                self.options.module_record_field_name.as_deref(),
-            ) {
-                scratch_file.add_record(meta);
+            let meta_records = {
+                let main_record = program.record_table.iter_mut()
+                    .next()
+                    .expect("build_program_with_mode must produce at least one record");
+                non_merge_metadata_records_pub(
+                    main_record,
+                    source_file_str.as_str(),
+                    is_commonjs,
+                    is_module,
+                    self.options.module_record_field_name.as_deref(),
+                )
+            };
+            for meta in meta_records {
+                program.add_record(meta);
             }
         }
 
         // Step 6: Annotation records (API 20+ with --enable-annotations).
+        //
+        // `annotation_records_from_source` appends NEW literal arrays starting
+        // at the current length of the provided Vec.  We collect the Program's
+        // existing literals into a Vec, pass it to the function (so annotation
+        // literal indices are correct absolute indices into the final table),
+        // then rebuild the Program's literal_array_table from the extended Vec.
         if self.options.enable_annotations {
-            for ann in builder::annotation_records_from_source(
+            let mut lits: Vec<crate::emit::file::LiteralArray> =
+                program.literal_array_table.iter().cloned().collect();
+            let ann_records = builder::annotation_records_from_source(
                 source_text,
                 source_file.record_name.as_ref(),
                 Some(source_file_str.as_str()),
                 self.options.target_api_version,
                 self.options.enable_annotations,
-                &mut scratch_file.literal_arrays,
-            )? {
-                scratch_file.add_record(ann);
+                &mut lits,
+            )?;
+            // Rebuild literal_array_table with the extended literal set.
+            program.literal_array_table = lits.into_iter().collect();
+            for ann in ann_records {
+                program.add_record(ann);
             }
-        }
-
-        // Step 7: Add the main source record last.
-        scratch_file.add_record(record);
-
-        // Step 7b: Wrap into Program, preserving local StringTable for merge.
-        let mut program = Program {
-            lang: SourceLang::EcmaScript,
-            metadata: ProgramMetadata {
-                is_source_mode: true,
-                is_generated_from_merged_abc: false,
-                is_shared_module: source_file.is_shared_module,
-                source_lang: SourceLang::from_origin_str(source_file.source_lang.as_ref()),
-            },
-            literal_array_table: scratch_file.literal_arrays.into_iter().collect(),
-            strings: scratch_file.strings,
-            ..Program::default()
-        };
-        for rec in scratch_file.records {
-            program.add_record(rec);
         }
 
         tracing::debug!(

@@ -280,16 +280,32 @@ pub fn resolve_deps_relation(
 // ── Helper functions ──────────────────────────────────────────────────────────
 
 /// Extract static import OHM URLs from a record's module literal array.
+///
+/// ## Internal representation vs upstream
+///
+/// Upstream `VisitStaticImports` (`commonUtil.h` line 83–99) reads the
+/// `moduleRecordIdx` field as a **string key** (`GetValue<std::string>()`) and
+/// looks it up in `program.literalarray_table` (a `std::map<string, LiteralArray>`).
+///
+/// Our internal representation is different:
+/// - Source-compiled programs: `moduleRecordIdx` stores `FieldValue::LiteralArray(idx)`
+///   where `idx` is a numeric index into `Program.literal_array_table`.
+/// - ABC-input programs: `record.module_requests` is pre-populated by `abc2program.rs`,
+///   so the field lookup is bypassed entirely (fast path).
+///
+/// Both representations produce the same import URL list.  The difference is purely
+/// in the key type (string vs usize) which is an internal representation detail.
 fn static_imports_from_record(
     record: &ClassRecord,
     program: &crate::program::model::Program,
 ) -> Vec<String> {
-    // Check pre-parsed module_requests first (from ABC input programs).
+    // Fast path: ABC-input programs pre-populate module_requests during decoding.
     if !record.module_requests.is_empty() {
         return record.module_requests.clone();
     }
 
-    // Otherwise decode from the module record literal array.
+    // Source-compiled path: read moduleRecordIdx field (numeric index) and look
+    // up the literal array by position.
     let Some(module_record_idx) = record.fields.iter().find_map(|field| {
         (field.name == MODULE_RECORD_IDX)
             .then_some(field.value.as_ref())
@@ -325,20 +341,50 @@ fn static_imports_from_record(
 
 /// Extract dynamic import OHM URL strings from pandasm instructions.
 ///
-/// Looks for `LdaStr <string_id>` immediately followed by `DynamicImport`,
-/// then resolves the string_id to an actual string using the program's StringTable.
+/// Matches upstream `VisitDyanmicImports<true>` in `commonUtil.h`:
+///
+/// ```cpp
+/// // Upstream iterates forward, finds DynamicImport, checks prev is LdaStr.
+/// if ((*iter)->GetOpcode() != DYNAMICIMPORT || (*iter)->IsLabel()) continue;
+/// auto prevIns = iter - 1;
+/// if ((*prevIns)->GetOpcode() != LDA_STR) continue;
+/// cb((*prevIns)->GetId(0));   // the string from lda.str
+/// ```
+///
+/// ## Label check status
+///
+/// Upstream skips `DynamicImport` instructions that are jump targets
+/// (`IsLabel()` returns true), because in that case the string argument
+/// comes from a variable, not a constant `import("string")` expression.
+///
+/// Our `Insn` enum does not carry the "is jump target" bit, and the
+/// `program_labels` byte-offset table cannot be matched against Insn indices
+/// without a full instruction-encoding pass.  As a result:
+///
+/// - We correctly exclude cases where a non-`LdaStr` instruction immediately
+///   precedes `DynamicImport` (variable argument path).
+/// - We CANNOT exclude the rare case where `DynamicImport` at a constant
+///   `import("string")` site is also a jump target, which would cause us to
+///   include a dynamic import that upstream would skip.
+///
+/// This is a known minor gap — the ArkTS compiler does not emit
+/// constant-string `import()` expressions at jump targets in normal code.
 ///
 /// ## Upstream reference
-/// `es2panda/aot/resolveDepsRelation.cpp` `VisitDynamicImports<true>` —
-/// collects OHM URL strings from `lda.str` + `dynamicimport` instruction pairs.
+/// `es2panda/util/commonUtil.h` `VisitDyanmicImports<true>` (note typo in upstream).
 fn dynamic_imports_from_insns(insns: &[Insn], strings: &StringTable) -> Vec<String> {
     let mut imports = Vec::new();
-    for window in insns.windows(2) {
-        let [Insn::LdaStr(string_id), Insn::DynamicImport] = window else {
+    // Iterate forward, find DynamicImport, look back at the previous instruction.
+    // This matches the upstream iteration order.
+    for i in 1..insns.len() {
+        let Insn::DynamicImport = &insns[i] else {
             continue;
         };
-        // Resolve the string_id to the actual OHM URL string using the Program's
-        // StringTable.  The u16 string_id is the LOCAL index from source compilation.
+        // Upstream: check previous instruction is lda.str (constant string import).
+        let Insn::LdaStr(string_id) = &insns[i - 1] else {
+            continue;
+        };
+        // Resolve the LOCAL string_id from the Program's StringTable.
         if let Some(s) = strings.get(u32::from(*string_id)) {
             imports.push(s.to_string());
         }

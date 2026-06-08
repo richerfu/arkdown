@@ -617,6 +617,80 @@ pub fn build_record_with_debug_and_source_map_for_target_with_mode(
     })
 }
 
+// ── Program-level build API (SPEC-049 Phase 4) ───────────────────────────────
+
+/// Build a complete `Program` from source text.
+///
+/// This is the **Program-level** counterpart to
+/// `build_record_with_debug_and_package_for_target_with_mode`.  It manages
+/// its own `StringTable` and `Vec<LiteralArray>` so callers do not need to
+/// supply shared state.  The resulting `Program` owns its string table and
+/// literal arrays, enabling independent emit in `program/to_abc.rs` with
+/// correct string-index remapping on merge.
+///
+/// Called by `SourceProgramCompiler::compile()`.  All records produced here
+/// (the main source record plus any annotation records) are stored in
+/// `Program.record_table`; the string table is in `Program.strings`.
+///
+/// ## Upstream reference
+/// `es2panda/compiler/core/compileQueue.cpp` `CompileFileJob::CompileProgram` →
+/// `Compiler::CompileFile` — builds `pandasm::Program` from source.
+#[allow(clippy::too_many_arguments)]
+pub fn build_program_with_mode(
+    source: &str,
+    record_name: &str,
+    source_file: Option<&str>,
+    package_name: Option<&str>,
+    is_commonjs: bool,
+    is_shared_module: bool,
+    origin_source_lang: &str,
+    is_module: bool,
+    target_api_version: u32,
+    target_api_sub_version: Option<&str>,
+    enable_annotations: bool,
+    emit_debugger: bool,
+    standalone_ecmascript_input: bool,
+) -> Result<crate::program::model::Program, AbcError> {
+    use crate::program::model::{Program, ProgramMetadata, SourceLang};
+
+    let mut strings = StringTable::default();
+    let mut literal_arrays: Vec<LiteralArray> = Vec::new();
+
+    let record = build_record_with_debug_and_package_for_target_with_mode(
+        source,
+        record_name,
+        &mut strings,
+        &mut literal_arrays,
+        source_file,
+        package_name,
+        is_commonjs,
+        is_shared_module,
+        origin_source_lang,
+        is_module,
+        target_api_version,
+        target_api_sub_version,
+        enable_annotations,
+        emit_debugger,
+        standalone_ecmascript_input,
+    )?;
+
+    let source_lang = SourceLang::from_origin_str(origin_source_lang);
+    let mut program = Program {
+        lang: SourceLang::EcmaScript,
+        metadata: ProgramMetadata {
+            is_source_mode: true,
+            is_generated_from_merged_abc: false,
+            is_shared_module,
+            source_lang,
+        },
+        literal_array_table: literal_arrays.into_iter().collect(),
+        strings,
+        ..Program::default()
+    };
+    program.add_record(record);
+    Ok(program)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AnnotationEnumValueKind {
     Number,
