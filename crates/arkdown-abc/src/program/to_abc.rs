@@ -138,7 +138,7 @@ fn merge_program_into_file(program: &Program, file: &mut AbcFile) {
 /// | 0xdb   | same          | bytes 2-3             |
 /// | 0xdc   | same          | bytes 2-3             |
 /// | 0xfe09 | wide lda.str  | bytes 2-3             |
-fn remap_bytecode_string_indices(bytecode: &[u8], string_remap: &FxHashMap<u16, u16>) -> Vec<u8> {
+pub(crate) fn remap_bytecode_string_indices(bytecode: &[u8], string_remap: &FxHashMap<u16, u16>) -> Vec<u8> {
     if string_remap.is_empty() {
         return bytecode.to_vec();
     }

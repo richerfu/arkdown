@@ -163,7 +163,36 @@ impl ProgramOptimizer {
     /// once the pandasm IR graph (CFG) is available in Rust.
     pub fn analyze_for_global_optimization(&mut self, _program: &Program) {
         // Upstream: util::Helpers::AnalysisProgram(prog, src_->fileName)
-        // Stub — see doc comment above.
+        //
+        // The full upstream analysis pass builds a Control Flow Graph (CFG)
+        // and runs liveness analysis for cross-program branch elimination and
+        // inlining (from `bytecode_optimizer`).  The analysis READS the program
+        // to collect statistics (IC data, call frequency, type profiles) and
+        // stores them for the later `OptimizeProgram` pass.
+        //
+        // ## Implementation status
+        //
+        // The bytecode_optimizer CFG analysis is not yet ported from upstream C++.
+        // The CONTROL FLOW is fully aligned with upstream:
+        //
+        // 1. Cache is bypassed when `requireGlobalOptimization = true` ✅
+        // 2. Programs are compiled fresh and marked `requires_post_analysis_opt` ✅
+        // 3. `optimize_after_analysis` runs LOCAL optimization after all programs
+        //    are compiled, matching upstream's deferred optimization pass ✅
+        //
+        // What is MISSING: the cross-program analysis data (IC statistics,
+        // call frequency, type profiles) that upstream uses for inter-procedural
+        // optimizations like branch elimination and inlining.  Without this data,
+        // `optimize_after_analysis` applies LOCAL optimization only (register
+        // compaction + peephole), not global optimization.
+        //
+        // **Functional impact**: programs compiled with `requireGlobalOptimization=true`
+        // are correctly optimized at the local level.  Cross-program optimization
+        // benefits (devirtualization, cross-function inlining) are not applied.
+        //
+        // **Upstream function signature**: `AnalysisProgram(pandasm::Program*, fileName)`
+        // takes a non-const pointer — it MAY modify the program for inlining stubs.
+        // Our `&Program` (immutable) matches the READ-ONLY analysis contract.
     }
 
     /// Apply global optimization after all programs have been analyzed.

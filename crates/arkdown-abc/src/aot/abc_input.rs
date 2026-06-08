@@ -33,6 +33,8 @@
 //! - `es2panda/util/moduleHelpers.cpp` — package version update, replace records
 
 use crate::aot::cache_store::ProgramCacheStore;
+use rustc_hash::FxHashMap;
+
 use crate::aot::ohmurl::{
     update_bundle_name_if_needed, update_package_name_if_needed, update_package_version_if_needed,
 };
@@ -41,7 +43,9 @@ use crate::aot::program_registry::abc_input_program_key;
 use crate::emit::file::AbcFile;
 use crate::emit::record::ClassRecord;
 use crate::error::AbcError;
+use crate::ir::opcodes::Insn;
 use crate::program::model::{Program, ProgramCacheEntry, ProgramMetadata, SourceLang};
+use crate::program::to_abc::remap_bytecode_string_indices;
 
 // ── AbcInputProgramCompiler ───────────────────────────────────────────────────
 
@@ -147,7 +151,7 @@ impl<'a> AbcInputProgramCompiler<'a> {
         }
 
         // No cache — decode ABC and split into per-record Programs.
-        let records = decode_abc_to_records(abc_bytes, file_name.as_ref())?;
+        let (records, decoded_strings) = decode_abc_to_records(abc_bytes, file_name.as_ref())?;
 
         let mut results = Vec::new();
         let mut proto_programs = Vec::new();
@@ -179,6 +183,9 @@ impl<'a> AbcInputProgramCompiler<'a> {
                     is_shared_module: source_file.is_shared_module,
                     source_lang: SourceLang::from_origin_str(source_file.source_lang.as_ref()),
                 },
+                // Each Program gets its own copy of the decoded string table so
+                // OHM URL transforms can modify strings independently per record.
+                strings: decoded_strings.clone(),
                 ..Program::default()
             };
             program.add_record(record);
@@ -227,7 +234,7 @@ impl<'a> AbcInputProgramCompiler<'a> {
     ) -> Result<(String, ProgramCacheEntry), AbcError> {
         let file_name = source_file.file_name.to_string_lossy();
 
-        let records = decode_abc_to_records(abc_bytes, file_name.as_ref())?;
+        let (records, decoded_strings) = decode_abc_to_records(abc_bytes, file_name.as_ref())?;
 
         let mut program = Program {
             lang: SourceLang::EcmaScript,
@@ -237,6 +244,7 @@ impl<'a> AbcInputProgramCompiler<'a> {
                 is_shared_module: source_file.is_shared_module,
                 source_lang: SourceLang::from_origin_str(source_file.source_lang.as_ref()),
             },
+            strings: decoded_strings,
             ..Program::default()
         };
 
@@ -267,15 +275,40 @@ impl<'a> AbcInputProgramCompiler<'a> {
 ///
 /// Uses the existing `abc2program::append_abc_file` path which is already
 /// fully implemented and upstream-compatible.
-fn decode_abc_to_records(abc_bytes: &[u8], file_name: &str) -> Result<Vec<ClassRecord>, AbcError> {
+/// Decode ABC bytes into a list of `ClassRecord` values AND the string table.
+///
+/// Returns `(records, string_table)` where `string_table` is the global string
+/// table built during decode.  The `string_table` is required for OHM URL
+/// rewriting of dynamic imports.
+///
+/// ## String table and LdaStr operands
+///
+/// `abc2program::append_abc_file` calls `unpatch_bytecode_index_operands` which:
+/// 1. Reads the per-class METHOD POOL (method index section for strings).
+/// 2. For each pool entry, interns the string value into `file.strings`.
+/// 3. Rewrites `lda.str METHOD_POOL_IDX` in the bytecode to use the
+///    `file.strings` GLOBAL STRING TABLE INDEX instead.
+///
+/// After decode, `Insn::LdaStr(x)` in `method.pandasm_insns` has `x` as a
+/// GLOBAL STRING TABLE INDEX into the returned `string_table`.  This means
+/// `string_table.get(x as u32)` gives the actual string value.
+///
+/// ## Upstream reference
+/// `abc2program.rs::unpatch_bytecode_index_operands` line 1832:
+/// `rewrite_pool_u16(&mut out, pos + 1, &string_pool)` — remaps pool indices
+/// to global string table indices before instruction decode.
+fn decode_abc_to_records(
+    abc_bytes: &[u8],
+    file_name: &str,
+) -> Result<(Vec<ClassRecord>, crate::emit::strings::StringTable), AbcError> {
     let mut scratch = AbcFile::new();
     let indices = crate::abc2program::append_abc_file(&mut scratch, abc_bytes)?;
-    // Extract only the newly appended records.
+    // Extract only the newly appended records (preserve insertion order).
     let records = indices
         .into_iter()
         .filter_map(|idx| scratch.records.get(idx).cloned())
         .collect();
-    Ok(records)
+    Ok((records, scratch.strings))
 }
 
 /// Return `true` if this record should be removed per `replaceRecords`.
@@ -393,7 +426,110 @@ fn apply_ohmurl_transforms(
                 }
             }
 
-            let _ = original; // used for comparison in future dynamic import update
+            let _ = original;
+        }
+    }
+
+    // ── Dynamic import OHM URL rewriting (UpdateDynamicImport) ───────────────
+    //
+    // After `abc2program::append_abc_file` decodes the ABC binary, the
+    // `unpatch_bytecode_index_operands` function resolves per-class METHOD POOL
+    // indices in LdaStr bytecodes to GLOBAL STRING TABLE indices into
+    // `program.strings`.  This means:
+    //   - `Insn::LdaStr(x)` in `method.pandasm_insns` has `x` as a global
+    //     string table index — `program.strings.get(x as u32)` gives the string.
+    //   - `method.bytecode` also has global string indices at LdaStr positions.
+    //
+    // This allows us to scan pandasm_insns for `[LdaStr(x), DynamicImport]`
+    // patterns, look up string x, apply OHM URL transforms, and remap.
+    //
+    // Upstream reference:
+    //   compileQueue.cpp `UpdateDynamicImport` → `VisitDyanmicImports<false>`.
+    //   abc2program.rs `unpatch_bytecode_index_operands` line 1831-1834.
+    let mut string_remap: FxHashMap<u16, u16> = FxHashMap::default();
+
+    for record in program.record_table.iter() {
+        for method in &record.methods {
+            // Find [LdaStr(x), DynamicImport] pairs in pandasm_insns.
+            for i in 1..method.pandasm_insns.len() {
+                let Insn::DynamicImport = &method.pandasm_insns[i] else {
+                    continue;
+                };
+                let Insn::LdaStr(string_id) = &method.pandasm_insns[i - 1] else {
+                    continue;
+                };
+                let old_idx = *string_id;
+                if string_remap.contains_key(&old_idx) {
+                    continue; // already processed
+                }
+                // Look up the OHM URL string via the global string table.
+                let Some(ohmurl) = program.strings.get(u32::from(old_idx)) else {
+                    continue;
+                };
+                let mut current = ohmurl.to_string();
+
+                // Apply the same transforms as static imports.
+                if let Some(modified_pkg) = modified_pkg_name {
+                    let updated = update_package_name_if_needed(&current, modified_pkg);
+                    if updated.as_ref() != current.as_str() {
+                        current = updated.into_owned();
+                    }
+                }
+                if context.need_modify_record && !context.bundle_name.is_empty() {
+                    let updated = update_bundle_name_if_needed(
+                        &current,
+                        &context.bundle_name,
+                        &context.hsp_pkg_names,
+                    );
+                    if updated.as_ref() != current.as_str() {
+                        current = updated.into_owned();
+                    }
+                }
+                if let Some(version_info) = version_info {
+                    let updated = update_package_version_if_needed(&current, version_info);
+                    if updated.as_ref() != current.as_str() {
+                        current = updated.into_owned();
+                    }
+                }
+
+                if current != ohmurl {
+                    // String changed: intern the new value and record the remap.
+                    let new_idx = program.strings.intern(&current) as u16;
+                    string_remap.insert(old_idx, new_idx);
+                    any_changed = true;
+                }
+            }
+        }
+    }
+
+    // Apply string remapping to bytecodes and update pandasm_insns.
+    if !string_remap.is_empty() {
+        for record in program.record_table.iter_mut() {
+            // Update string_indices: replace remapped old indices with new ones.
+            record.string_indices = record
+                .string_indices
+                .iter()
+                .map(|&idx| {
+                    string_remap
+                        .get(&(idx as u16))
+                        .map(|&new| new as u32)
+                        .unwrap_or(idx)
+                })
+                .collect();
+
+            for method in record.methods.iter_mut() {
+                // Remap raw bytecodes.
+                method.bytecode = remap_bytecode_string_indices(&method.bytecode, &string_remap);
+
+                // Remap pandasm_insns LdaStr operands.
+                for insn in method.pandasm_insns.iter_mut() {
+                    if let Insn::LdaStr(id) = insn {
+                        if let Some(&new_id) = string_remap.get(id) {
+                            *id = new_id;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -402,14 +538,10 @@ fn apply_ohmurl_transforms(
             abc_pkg_name,
             need_modify_record = context.need_modify_record,
             has_version_info = has_update_version_info,
-            "applied OHM URL transforms to ABC input program"
+            dynamic_remaps = string_remap.len(),
+            "applied OHM URL transforms to ABC input program (static + dynamic)"
         );
     }
-
-    // Note: Dynamic import OHM URL updates (UpdateDynamicImport) are not yet
-    // implemented because updating LdaStr strings in raw bytecodes requires
-    // re-encoding the per-class method pool and string section.  Static imports
-    // (module_requests) cover the primary use case for incremental ABC merge.
 }
 
 /// Filter ResourceTable programs when the package name is being modified.
@@ -473,7 +605,7 @@ fn build_abc_program_from_bytes(
     context: &CompileContextInfo,
 ) -> Result<Program, AbcError> {
     let file_name = source_file.file_name.to_string_lossy();
-    let records = decode_abc_to_records(abc_bytes, file_name.as_ref())?;
+    let (records, decoded_strings) = decode_abc_to_records(abc_bytes, file_name.as_ref())?;
 
     let mut program = Program {
         lang: SourceLang::EcmaScript,
@@ -483,6 +615,7 @@ fn build_abc_program_from_bytes(
             is_shared_module: source_file.is_shared_module,
             source_lang: SourceLang::from_origin_str(source_file.source_lang.as_ref()),
         },
+        strings: decoded_strings,
         ..Program::default()
     };
 
@@ -635,6 +768,111 @@ mod tests {
         };
         program.add_record(record);
         program
+    }
+
+    #[test]
+    fn apply_ohmurl_transforms_updates_dynamic_import_in_pandasm_insns() {
+        // Upstream UpdateDynamicImport rewrites OHM URL strings in dynamic imports.
+        // In our decoded programs, LdaStr(x) has global string table indices,
+        // so we can look up the string and apply the same transforms as static imports.
+        use crate::emit::record::{MethodKind, MethodLabelStyle, MethodRecord};
+        use crate::ir::opcodes::Insn;
+
+        // Ohmurl to update
+        let old_url = "@normalized:N&module&bundle&entry/src/index&1.0.0";
+        let new_version = "2.0.0";
+
+        let mut program = crate::program::model::Program::new_ecmascript();
+        // Intern the OHM URL into the string table at index 0.
+        let string_idx = program.strings.intern(old_url);
+        assert_eq!(string_idx, 0, "first interned string must be at index 0");
+
+        // Build a method with [LdaStr(0), DynamicImport] in pandasm_insns.
+        let method = MethodRecord {
+            name: "func_main_0".to_string(),
+            bytecode: vec![0x3e, 0x00, 0x00, 0xbd], // LdaStr(0) + DynamicImport
+            pandasm_insns: vec![Insn::LdaStr(0), Insn::DynamicImport],
+            pandasm_debug: vec![],
+            num_vregs: 1,
+            num_args: 3,
+            value_of_first_param: 0,
+            slots_num: None,
+            debug_info: None,
+            line_ops: vec![],
+            catch_entries: vec![],
+            program_labels: vec![],
+            label_table: vec![],
+            kind: MethodKind::Module,
+            function_kind: 1,
+            source_lang: None,
+            concurrent_module_requests: vec![],
+            method_pool_entry: false,
+            expected_property_count: None,
+            annotations: vec![],
+            metadata_attrs: Default::default(),
+            param_annotations: vec![],
+            definefunc_order: None,
+            label_style: MethodLabelStyle::Source,
+            param_types: vec![],
+            return_type: None,
+            body_presence: None,
+            body_location: None,
+            file_location: None,
+        };
+        let record = crate::emit::record::ClassRecord {
+            name: "test/main".to_string(),
+            methods: vec![method],
+            fields: vec![],
+            string_indices: vec![0],
+            literal_indices: vec![],
+            module_literal_indices: vec![],
+            source_code_strings: vec![],
+            access_flags: 1,
+            source_lang: 0,
+            metadata_attrs: Default::default(),
+            conflict: false,
+            params_num: 0,
+            body_presence: true,
+            file_location: None,
+            standalone_ecmascript_input: false,
+            source_file: None,
+            annotations: vec![],
+            module_requests: vec![],
+        };
+        program.add_record(record);
+
+        // Apply version update transform.
+        let mut context = CompileContextInfo::default();
+        let mut version_info = std::collections::BTreeMap::new();
+        version_info.insert(Box::from("entry"), crate::aot::options::PkgInfo {
+            package_name: Box::from("entry"),
+            version: Box::from(new_version),
+        });
+        context.pkg_context_info = version_info;
+
+        apply_ohmurl_transforms(&mut program, "pkg", &context, None);
+
+        // Verify: pandasm_insns LdaStr operand was updated.
+        let record = program.record_table.iter().next().unwrap();
+        let method = &record.methods[0];
+
+        // The LdaStr operand should be updated to the new string index.
+        if let Insn::LdaStr(new_idx) = &method.pandasm_insns[0] {
+            let new_string = program.strings.get(*new_idx as u32).unwrap();
+            assert!(
+                new_string.contains("2.0.0"),
+                "dynamic import OHM URL must be updated to new version; got: {}",
+                new_string
+            );
+        } else {
+            panic!("first pandasm_insn must still be LdaStr");
+        }
+
+        // Verify: raw bytecodes were also updated.
+        if let Insn::LdaStr(idx) = &method.pandasm_insns[0] {
+            let bc_idx = u16::from_le_bytes([method.bytecode[1], method.bytecode[2]]);
+            assert_eq!(bc_idx, *idx, "bytecode LdaStr operand must match pandasm_insns");
+        }
     }
 
     #[test]
