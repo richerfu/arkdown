@@ -99,7 +99,10 @@ impl AotRunner {
         // 5. Compile npm module entries (if requested).
         if let Some(npm_path) = &options.npm_module_entry_list {
             let npm_compiler = NpmModuleEntryCompiler::new(&cache_store);
-            let cache_path = options.cache_files.get("npmEntries.txt").cloned();
+            // Upstream: `options.cacheFiles.find(entriesInfo)` uses the FULL PATH of
+            // the entries file as the cache key (not a fixed "npmEntries.txt" string).
+            let npm_cache_key: Box<str> = Box::from(npm_path.to_string_lossy().as_ref());
+            let cache_path = options.cache_files.get(&npm_cache_key).cloned();
             let npm_entry = npm_compiler.compile(
                 npm_path,
                 cache_path.as_deref(),
@@ -118,7 +121,8 @@ impl AotRunner {
         }
 
         // 6. Dependency resolution.
-        if options.compile_context_info.needs_dependency_relation() {
+        // Upstream: NeedCollectDepsRelation = enableAbcInput && !compileEntries.empty().
+        if options.compile_context_info.needs_dependency_relation(options.enable_abc_input) {
             let resolved = resolve_deps_relation(
                 &registry,
                 &options.compile_context_info,
@@ -190,6 +194,7 @@ mod tests {
             enable_annotations: false,
             use_define_semantic: false,
             require_global_optimization: false,
+            modified_pkg_name: None,
         }
     }
 
@@ -253,6 +258,7 @@ mod tests {
             enable_annotations: false,
             use_define_semantic: false,
             require_global_optimization: false,
+            modified_pkg_name: None,
         };
 
         let runner = AotRunner::new(options);

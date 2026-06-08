@@ -330,8 +330,16 @@ pub struct CompileContextInfo {
 }
 
 impl CompileContextInfo {
-    pub fn needs_dependency_relation(&self) -> bool {
-        !self.compile_entries.is_empty()
+    /// Upstream `NeedCollectDepsRelation` in `options.cpp` line 463:
+    /// ```cpp
+    /// return compilerOptions_.enableAbcInput &&
+    ///        !compilerOptions_.compileContextInfo.compileEntries.empty();
+    /// ```
+    ///
+    /// Note: this takes `enable_abc_input` as a parameter because `CompileContextInfo`
+    /// does not own that flag (it lives on `AotCompileOptions`).
+    pub fn needs_dependency_relation(&self, enable_abc_input: bool) -> bool {
+        enable_abc_input && !self.compile_entries.is_empty()
     }
 
     pub fn needs_package_version_update(&self) -> bool {
@@ -414,6 +422,11 @@ pub struct AotCompileOptions {
     pub enable_annotations: bool,
     /// Whether to use define semantics for class fields.
     pub use_define_semantic: bool,
+    /// Upstream `modifiedPkgName` — `"srcPkg:dstPkg"` format.
+    ///
+    /// When set, rewrites OHM URL package names in ABC input records.
+    /// Corresponds to `--src-package-name srcPkg:dstPkg` in es2abc CLI.
+    pub modified_pkg_name: Option<Box<str>>,
     /// Whether cross-program global optimization is required.
     ///
     /// Upstream `compilerOptions_.requireGlobalOptimization` — set when
@@ -586,6 +599,7 @@ mod tests {
             enable_annotations: false,
             use_define_semantic: false,
             require_global_optimization: false,
+            modified_pkg_name: None,
         };
         // effective_debug_info() must be false when opt_level > 0.
         let opts_release = AotCompileOptions { debug_info: true, opt_level: 2, ..opts.clone() };

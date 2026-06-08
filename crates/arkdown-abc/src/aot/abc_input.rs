@@ -33,7 +33,10 @@
 //! - `es2panda/util/moduleHelpers.cpp` — package version update, replace records
 
 use crate::aot::cache_store::ProgramCacheStore;
-use crate::aot::options::{AotCompileOptions, CompileContextInfo, SourceFile};
+use crate::aot::ohmurl::{
+    update_bundle_name_if_needed, update_package_name_if_needed, update_package_version_if_needed,
+};
+use crate::aot::options::{AotCompileOptions, CompileContextInfo, PkgInfo, SourceFile};
 use crate::aot::program_registry::abc_input_program_key;
 use crate::emit::file::AbcFile;
 use crate::emit::record::ClassRecord;
@@ -180,6 +183,16 @@ impl<'a> AbcInputProgramCompiler<'a> {
             };
             program.add_record(record);
 
+            // Apply OHM URL transforms matching upstream `CompileAbcClassJob::Run()`.
+            // Updates package versions, bundle names, and package name substitutions
+            // in the record's module_requests (static imports).
+            apply_ohmurl_transforms(
+                &mut program,
+                source_file.pkg_name.as_ref(),
+                &self.options.compile_context_info,
+                self.options.modified_pkg_name.as_deref(),
+            );
+
             let entry = ProgramCacheEntry {
                 program,
                 hash_code: hash_code.unwrap_or(0),
@@ -190,6 +203,14 @@ impl<'a> AbcInputProgramCompiler<'a> {
             };
             results.push((key.clone(), entry));
             proto_programs.push(key);
+        }
+
+        // Filter ResourceTable record when modifiedPkgName changes the pkg identity.
+        // Upstream `FilterAbcProgramsForModifiedPkgName` in compileQueue.cpp.
+        if let Some(modified) = self.options.modified_pkg_name.as_deref() {
+            if !modified.is_empty() {
+                filter_resource_table_programs(&mut results, modified, source_file.pkg_name.as_ref());
+            }
         }
 
         Ok(results)
@@ -224,6 +245,14 @@ impl<'a> AbcInputProgramCompiler<'a> {
                 program.add_record(record);
             }
         }
+
+        // Apply OHM URL transforms.
+        apply_ohmurl_transforms(
+            &mut program,
+            source_file.pkg_name.as_ref(),
+            &self.options.compile_context_info,
+            self.options.modified_pkg_name.as_deref(),
+        );
 
         let key = file_name.to_string();
         let entry = ProgramCacheEntry::new_abc_input(program);
@@ -268,6 +297,171 @@ fn should_replace_record(
         }
     }
     false
+}
+
+/// Apply OHM URL transformations to all records in a decoded ABC Program.
+///
+/// Implements the three mutually exclusive transform cases from upstream
+/// `CompileAbcClassJob::Run()` in `compileQueue.cpp` (lines 318–337):
+///
+/// ```text
+/// if (!options_.modifiedPkgName.empty()) {
+///     UpdatePkgNameOfImportOhmurl(program, options_);
+/// } else if (...compileOhmurlVersionConfigPath...) {
+///     UpdateAbcImportAndStrings(program, options_);  // not implemented (TODO)
+/// } else if (needModifyRecord || updatePkgVersionForAbcInput) {
+///     UpdateImportOhmurl(program, options_);
+/// }
+/// ```
+///
+/// ## What is updated
+///
+/// - `record.module_requests`: static import OHM URLs (populated by `abc2program`
+///   from the module record literal array).
+/// - Dynamic imports in method bytecodes: **not yet updated** because the raw
+///   bytecode string indices reference a per-class method pool, not the global
+///   string table.  Updating them would require re-encoding the method pool,
+///   which is tracked as a follow-up.
+///
+/// ## Upstream reference
+/// `es2panda/compiler/core/compileQueue.cpp` — `CompileAbcClassJob::UpdateImportOhmurl`,
+/// `UpdatePkgNameOfImportOhmurl`, `UpdateStaticImport`.
+fn apply_ohmurl_transforms(
+    program: &mut Program,
+    abc_pkg_name: &str,
+    context: &CompileContextInfo,
+    modified_pkg_name: Option<&str>,
+) {
+    let has_update_version_info = !context.update_version_info.is_empty()
+        || !context.pkg_context_info.is_empty();
+    let needs_transform =
+        modified_pkg_name.is_some() || context.need_modify_record || has_update_version_info;
+
+    if !needs_transform {
+        return;
+    }
+
+    // Determine which pkg_context_info to use for version updates.
+    // Upstream: if updateVersionInfo is non-empty, use updateVersionInfo[abcPkgName].
+    //           Else, use pkgContextInfo.
+    let version_info: Option<&std::collections::BTreeMap<Box<str>, PkgInfo>> =
+        if !context.update_version_info.is_empty() {
+            context.update_version_info.get(abc_pkg_name)
+        } else if !context.pkg_context_info.is_empty() {
+            Some(&context.pkg_context_info)
+        } else {
+            None
+        };
+
+    let mut any_changed = false;
+
+    for record in program.record_table.iter_mut() {
+        // Update static imports (module_requests).
+        for ohmurl in record.module_requests.iter_mut() {
+            let original = ohmurl.clone();
+
+            if let Some(modified_pkg) = modified_pkg_name {
+                // Case 1: modifiedPkgName — replace package name in OHM URLs.
+                let updated = update_package_name_if_needed(ohmurl, modified_pkg);
+                if updated.as_ref() != ohmurl.as_str() {
+                    *ohmurl = updated.into_owned();
+                    any_changed = true;
+                    continue;
+                }
+            }
+
+            // Case 3: needModifyRecord or updateVersionInfo.
+            if context.need_modify_record && !context.bundle_name.is_empty() {
+                // Update bundle name first.
+                let updated = update_bundle_name_if_needed(
+                    ohmurl,
+                    &context.bundle_name,
+                    &context.hsp_pkg_names,
+                );
+                if updated.as_ref() != ohmurl.as_str() {
+                    *ohmurl = updated.into_owned();
+                    any_changed = true;
+                }
+            }
+
+            if let Some(version_info) = version_info {
+                // Update package version.
+                let updated = update_package_version_if_needed(ohmurl, version_info);
+                if updated.as_ref() != ohmurl.as_str() {
+                    *ohmurl = updated.into_owned();
+                    any_changed = true;
+                }
+            }
+
+            let _ = original; // used for comparison in future dynamic import update
+        }
+    }
+
+    if any_changed {
+        tracing::debug!(
+            abc_pkg_name,
+            need_modify_record = context.need_modify_record,
+            has_version_info = has_update_version_info,
+            "applied OHM URL transforms to ABC input program"
+        );
+    }
+
+    // Note: Dynamic import OHM URL updates (UpdateDynamicImport) are not yet
+    // implemented because updating LdaStr strings in raw bytecodes requires
+    // re-encoding the per-class method pool and string section.  Static imports
+    // (module_requests) cover the primary use case for incremental ABC merge.
+}
+
+/// Filter ResourceTable programs when the package name is being modified.
+///
+/// Upstream `FilterAbcProgramsForModifiedPkgName` in `compileQueue.cpp` lines 205–229:
+/// When `modifiedPkgName` is set and the source package name differs from the
+/// destination, the ResourceTable record is removed to prevent duplicate resource
+/// tables after the package name change.
+///
+/// Upstream uses `std::regex_match(it->first, BUILD_RESOURCE_TABLE_REGEX)` where
+/// the regex is `.+?&((?!@)[\w]+/build|@[\w]+/[\w]+/build)/.+?/ResourceTable&`.
+///
+/// Our simplified check: a ResourceTable program key ends with `|` + an OHM URL
+/// containing `/ResourceTable&` in the record name.  This covers the production
+/// case without requiring a full regex match.
+fn filter_resource_table_programs(
+    results: &mut Vec<(String, ProgramCacheEntry)>,
+    modified_pkg_name: &str,
+    src_pkg_name: &str,
+) {
+    if modified_pkg_name.is_empty() {
+        return;
+    }
+    // Upstream: skip when curPkgName.empty() OR curPkgName == dstPkgName.
+    let dst_pkg_name = modified_pkg_name.split(':').nth(1).unwrap_or("");
+    if src_pkg_name.is_empty() || src_pkg_name == dst_pkg_name {
+        return;
+    }
+
+    // Find and remove the first ResourceTable program key.
+    // Upstream: `std::regex_match(key, BUILD_RESOURCE_TABLE_REGEX)` matches keys where
+    // the record name portion contains `/<pkgPath>/build/.../ResourceTable&`.
+    if let Some(pos) = results.iter().position(|(key, _)| is_resource_table_key(key)) {
+        tracing::debug!(
+            key = &results[pos].0,
+            "filtering ResourceTable program for modified pkg name"
+        );
+        results.remove(pos);
+    }
+}
+
+/// Return `true` if a program key represents a ResourceTable record.
+///
+/// Upstream regex: `.+?&((?!@)[\w]+/build|@[\w]+/[\w]+/build)/.+?/ResourceTable&`
+///
+/// Simplified: the record portion of the key (`abcFile|recordName`) must contain
+/// `/ResourceTable&` — this matches the normalized OHM URL format for resource tables.
+fn is_resource_table_key(program_key: &str) -> bool {
+    // Program keys for ABC input are "abcFile|recordName".
+    // The record name for a ResourceTable is a normalized OHM URL containing
+    // ".../ResourceTable&" (where the version follows the last &).
+    program_key.contains("/ResourceTable&")
 }
 
 /// Build a Program from ABC bytes for a specific record, applying transforms.
@@ -337,6 +531,7 @@ mod tests {
             enable_annotations: false,
             use_define_semantic: false,
             require_global_optimization: false,
+            modified_pkg_name: None,
         }
     }
 
@@ -403,5 +598,180 @@ mod tests {
     fn abc_keys_match_upstream_format() {
         let key = abc_input_program_key("modules/input.abc", "entry/main");
         assert_eq!(key, "modules/input.abc|entry/main");
+    }
+
+    // ── OHM URL transform tests ───────────────────────────────────────────────
+
+    fn make_program_with_module_requests(requests: &[&str]) -> crate::program::model::Program {
+        use crate::emit::record::ClassRecord;
+        use crate::program::model::{Program, ProgramMetadata, SourceLang};
+        let mut program = Program {
+            metadata: ProgramMetadata {
+                is_source_mode: false,
+                is_generated_from_merged_abc: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut record = ClassRecord {
+            name: "entry/main".to_string(),
+            module_requests: requests.iter().map(|s| s.to_string()).collect(),
+            methods: vec![],
+            fields: vec![],
+            string_indices: vec![],
+            literal_indices: vec![],
+            module_literal_indices: vec![],
+            source_code_strings: vec![],
+            access_flags: 1,
+            source_lang: 0,
+            metadata_attrs: Default::default(),
+            conflict: false,
+            params_num: 0,
+            body_presence: false,
+            file_location: None,
+            standalone_ecmascript_input: false,
+            source_file: None,
+            annotations: vec![],
+        };
+        program.add_record(record);
+        program
+    }
+
+    #[test]
+    fn apply_ohmurl_transforms_updates_package_version() {
+        // Upstream UpdateImportOhmurl → UpdateStaticImport → UpdatePackageVersionIfNeeded
+        let mut program = make_program_with_module_requests(&[
+            "@normalized:N&module&bundle&entry/src/index&1.0.0",
+            "@normalized:N&module&bundle&utils/src/helper&2.0.0",
+        ]);
+
+        let mut context = CompileContextInfo::default();
+        let mut version_info = std::collections::BTreeMap::new();
+        version_info.insert(Box::from("entry"), crate::aot::options::PkgInfo {
+            package_name: Box::from("entry"),
+            version: Box::from("1.1.0"),
+        });
+        context.pkg_context_info = version_info;
+
+        apply_ohmurl_transforms(&mut program, "entry_pkg", &context, None);
+
+        let requests = &program.record_table.iter().next().unwrap().module_requests;
+        assert_eq!(
+            requests[0],
+            "@normalized:N&module&bundle&entry/src/index&1.1.0",
+            "package version must be updated to 1.1.0"
+        );
+        assert_eq!(
+            requests[1],
+            "@normalized:N&module&bundle&utils/src/helper&2.0.0",
+            "unmatched package must remain unchanged"
+        );
+    }
+
+    #[test]
+    fn apply_ohmurl_transforms_updates_bundle_name() {
+        // Upstream UpdateBundleNameIfNeeded: fills empty bundle name position.
+        let mut program = make_program_with_module_requests(&[
+            "@normalized:N&module&&entry/src/index&1.0.0", // empty bundle name
+        ]);
+
+        let mut context = CompileContextInfo::default();
+        context.need_modify_record = true;
+        context.bundle_name = Box::from("com.example.app");
+
+        apply_ohmurl_transforms(&mut program, "entry", &context, None);
+
+        let requests = &program.record_table.iter().next().unwrap().module_requests;
+        assert!(
+            requests[0].contains("com.example.app"),
+            "empty bundle name must be filled with bundleName; got: {}",
+            requests[0]
+        );
+    }
+
+    #[test]
+    fn apply_ohmurl_transforms_updates_package_name() {
+        // Upstream UpdatePkgNameOfImportOhmurl: replaces srcPkg with dstPkg.
+        let mut program = make_program_with_module_requests(&[
+            "@normalized:N&module&bundle&old_pkg/src/index&1.0.0",
+        ]);
+
+        let context = CompileContextInfo::default();
+        apply_ohmurl_transforms(&mut program, "old_pkg", &context, Some("old_pkg:new_pkg"));
+
+        let requests = &program.record_table.iter().next().unwrap().module_requests;
+        assert!(
+            requests[0].contains("new_pkg"),
+            "package name must be replaced with dstPkg; got: {}",
+            requests[0]
+        );
+    }
+
+    #[test]
+    fn apply_ohmurl_transforms_skips_non_normalized_urls() {
+        // Non-@normalized: URLs must not be modified by any transform.
+        let mut program = make_program_with_module_requests(&[
+            "@bundle:com.example/entry/ets/pages/Index",
+        ]);
+        let mut context = CompileContextInfo::default();
+        context.need_modify_record = true;
+        context.bundle_name = Box::from("new.bundle");
+
+        apply_ohmurl_transforms(&mut program, "", &context, None);
+
+        let requests = &program.record_table.iter().next().unwrap().module_requests;
+        assert_eq!(
+            requests[0],
+            "@bundle:com.example/entry/ets/pages/Index",
+            "non-normalized URLs must not be modified"
+        );
+    }
+
+    #[test]
+    fn filter_resource_table_programs_removes_first_match() {
+        // Upstream FilterAbcProgramsForModifiedPkgName: remove ResourceTable record.
+        let entry = crate::program::model::ProgramCacheEntry::new_abc_input(
+            crate::program::model::Program::default()
+        );
+        let mut results = vec![
+            ("abc.abc|entry/main".to_string(), entry.clone()),
+            ("abc.abc|@normalized:N&m&b&entry/build/ets/ResourceTable&1.0.0".to_string(), entry.clone()),
+            ("abc.abc|utils/helper".to_string(), entry),
+        ];
+
+        filter_resource_table_programs(&mut results, "old:new", "old");
+
+        assert_eq!(
+            results.len(),
+            2,
+            "ResourceTable program must be removed; remaining: {:?}",
+            results.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>()
+        );
+        assert!(!results.iter().any(|(k, _)| k.contains("ResourceTable")),
+            "ResourceTable record must not be in results");
+    }
+
+    #[test]
+    fn filter_resource_table_programs_skips_when_src_equals_dst() {
+        // Upstream: skip when curPkgName == dstPkgName (no rename needed).
+        let entry = crate::program::model::ProgramCacheEntry::new_abc_input(
+            crate::program::model::Program::default()
+        );
+        let mut results = vec![
+            ("abc.abc|@normalized:N&m&b&entry/build/ets/ResourceTable&1.0.0".to_string(), entry),
+        ];
+        filter_resource_table_programs(&mut results, "entry:entry", "entry");
+        assert_eq!(results.len(), 1, "must not filter when srcPkg == dstPkg");
+    }
+
+    #[test]
+    fn is_resource_table_key_matches_correct_patterns() {
+        assert!(is_resource_table_key(
+            "abc.abc|@normalized:N&m&b&entry/build/ResourceTable&1.0.0"
+        ));
+        assert!(!is_resource_table_key("abc.abc|entry/main"));
+        assert!(!is_resource_table_key("abc.abc|entry/ResourceTable"));
+        // Must have trailing & (version separator)
+        assert!(!is_resource_table_key("abc.abc|entry/ResourceTable"));
     }
 }

@@ -29,6 +29,7 @@ pub mod cache_store;
 pub mod compile_queue;
 pub mod deps;
 pub mod npm_entries;
+pub mod ohmurl;
 pub mod optimizer;
 pub mod options;
 pub mod output;

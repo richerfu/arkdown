@@ -90,7 +90,18 @@ impl<'a> AotOutputGenerator<'a> {
         }
 
         // Step 3: single Program with --outputProto → write proto, return early.
-        if registry.count() == 1 {
+        //
+        // Upstream `GenerateProgram` in `main.cpp` line 197–200:
+        // ```cpp
+        // if (options->CompilerProtoOutput().size() > 0 &&
+        //     !options->CompilerOptions().requireGlobalOptimization) {
+        //     GenerateSnapshot(*prog, options->CompilerProtoOutput());
+        //     return true;
+        // }
+        // ```
+        // The early return is skipped when requireGlobalOptimization is set —
+        // cross-program optimization must run before proto output.
+        if registry.count() == 1 && !self.options.require_global_optimization {
             if let Some(proto_path) = &self.options.output_proto {
                 let proto_result = self.emit_output_proto(registry, proto_path, panda_version)?;
                 return Ok(AotOutputResult {
@@ -104,12 +115,18 @@ impl<'a> AotOutputGenerator<'a> {
         }
 
         // Step 5: emit cache files for programs that need it.
-        self.emit_cache_jobs(registry, panda_version)?;
-
-        // Step 6: emit merged or per-file ABC.
+        //
+        // Upstream `EmitFileQueue::Schedule()` in `emitFiles.cpp` line 52–58:
+        // cache emit jobs are ONLY scheduled in merge-abc mode, and are skipped
+        // when `requireGlobalOptimization` is set (prevent stale cache after
+        // cross-program analysis).  In our implementation, `need_update_cache`
+        // is already set to `false` for `requireGlobalOptimization`, so we only
+        // need to gate on `merge_abc` here.
         let abc_paths = if self.options.merge_abc {
+            self.emit_cache_jobs(registry, panda_version)?;
             self.emit_merged_abc(registry, panda_version)?
         } else {
+            // Step 6 (non-merge): emit one ABC per Program.
             self.emit_single_abcs(registry, panda_version)?
         };
 
@@ -327,6 +344,7 @@ mod tests {
             enable_annotations: false,
             use_define_semantic: false,
             require_global_optimization: false,
+            modified_pkg_name: None,
         }
     }
 

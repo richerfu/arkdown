@@ -31,6 +31,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+use crate::aot::ohmurl::{is_external_pkg_name, record_name_from_normalized_ohmurl};
 use crate::aot::options::CompileContextInfo;
 use crate::aot::program_registry::{is_abc_program_key, ProgramRegistry};
 use crate::emit::file::LiteralEntry;
@@ -38,18 +39,14 @@ use crate::emit::record::{FieldValue, ClassRecord};
 use crate::emit::strings::StringTable;
 use crate::ir::opcodes::Insn;
 
-// OHM URL sentinel values from upstream dependency.rs.
+// Sentinel values used by the BFS resolver.
 const NPM_ENTRIES: &str = "npmEntries.txt";
 const IS_COMMONJS: &str = "isCommonjs";
 const JSON_FILE_CONTENT: &str = "jsonFileContent";
 const MODULE_RECORD_IDX: &str = "moduleRecordIdx";
+/// Non-SO normalized OHM URL prefix — the only URL type that participates in BFS.
+/// Upstream `util::NORMALIZED_OHMURL_NOT_SO` = `"@normalized:N"`.
 const NORMALIZED_OHMURL_NOT_SO: &str = "@normalized:N";
-const NORMALIZED_OHMURL_SEPARATOR: char = '&';
-const NORMALIZED_OHMURL_PREFIX: char = '@';
-const SLASH_TAG: char = '/';
-const BUNDLE_NAME_POS: usize = 2;
-const NORMALIZED_IMPORT_POS: usize = 3;
-const VERSION_POS: usize = 4;
 
 /// The resolved dependency relation map.
 ///
@@ -164,8 +161,12 @@ impl<'a> DepsRelationResolver<'a> {
                 }
 
                 // CommonJS / JSON records: always retain.
+                // Upstream uses `break` here (FillRecord2ProgramMap line 65-67) —
+                // after the first CommonJS/JSON record is found for a program, stop
+                // processing that program's records.  CommonJS programs have one
+                // record, so this is an early-exit optimization.
                 if self.collect_commonjs_and_json_record(record, key) {
-                    continue;
+                    break;
                 }
 
                 record_to_program.insert(Box::from(record.name.as_str()), Box::from(key));
@@ -246,9 +247,10 @@ impl<'a> DepsRelationResolver<'a> {
         if is_external_pkg_name(ohmurl, &self.context.hsp_pkg_names) {
             return;
         }
-        let Some(record_name) = record_name_from_normalized_ohmurl(ohmurl) else {
+        let Some(record_name_str) = record_name_from_normalized_ohmurl(ohmurl) else {
             return;
         };
+        let record_name: Box<str> = Box::from(record_name_str.as_str());
         if self.resolved_records.insert(record_name.clone()) {
             self.deps_to_be_resolved.push_back(record_name);
         }
@@ -406,45 +408,9 @@ fn raw_string(entry: &LiteralEntry) -> Option<&str> {
     }
 }
 
-fn record_name_from_normalized_ohmurl(ohmurl: &str) -> Option<Box<str>> {
-    let items: Vec<_> = ohmurl.split(NORMALIZED_OHMURL_SEPARATOR).collect();
-    if items.len() <= VERSION_POS {
-        return None;
-    }
-    Some(Box::from(format!(
-        "{}{}{}{}{}",
-        items[BUNDLE_NAME_POS],
-        NORMALIZED_OHMURL_SEPARATOR,
-        items[NORMALIZED_IMPORT_POS],
-        NORMALIZED_OHMURL_SEPARATOR,
-        items[VERSION_POS]
-    )))
-}
-
-fn is_external_pkg_name(
-    ohmurl: &str,
-    external_pkg_names: &std::collections::BTreeSet<Box<str>>,
-) -> bool {
-    let Some(pkg_name) = pkg_name_from_normalized_ohmurl(ohmurl) else {
-        return false;
-    };
-    external_pkg_names.contains(&*pkg_name)
-}
-
-fn pkg_name_from_normalized_ohmurl(ohmurl: &str) -> Option<Box<str>> {
-    let items: Vec<_> = ohmurl.split(NORMALIZED_OHMURL_SEPARATOR).collect();
-    let normalized_import = items.get(NORMALIZED_IMPORT_POS)?;
-    pkg_name_from_normalized_import(normalized_import).map(Box::from)
-}
-
-fn pkg_name_from_normalized_import(normalized_import: &str) -> Option<&str> {
-    let mut pos = normalized_import.find(SLASH_TAG)?;
-    if normalized_import.starts_with(NORMALIZED_OHMURL_PREFIX) {
-        let next = normalized_import[pos + 1..].find(SLASH_TAG)?;
-        pos += 1 + next;
-    }
-    Some(&normalized_import[..pos])
-}
+// Local functions record_name_from_normalized_ohmurl, is_external_pkg_name,
+// pkg_name_from_normalized_ohmurl, pkg_name_from_normalized_import were removed
+// in favor of the implementations in `crate::aot::ohmurl`.
 
 fn display_program_file(program_key: &str) -> &str {
     let abc_separator = program_key.rfind('|').unwrap_or(program_key.len());
