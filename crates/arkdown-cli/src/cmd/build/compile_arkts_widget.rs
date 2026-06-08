@@ -1,7 +1,7 @@
 use super::compile_arkts_abc::{AbcCompilePlan, AbcCompileRequest};
 use super::compile_arkts_handoff::{write_compile_arkts_abc_handoff, CompileArkTsInfo};
 use super::compile_arkts_modules::{
-    compile_source_passthrough, rewrite_compile_module_imports_to_ohm,
+    compile_source_passthrough, rewrite_compile_module_imports_to_ohm, CompileModuleImportResolver,
 };
 use super::compile_arkts_package_entries::PackageEntryInfos;
 use super::*;
@@ -16,6 +16,7 @@ pub(super) fn compile_widget_pass(
     resource_refs: &FxHashMap<String, ResourceReference>,
     abc_compile_plan: &AbcCompilePlan,
     widget_sources: &[PathBuf],
+    disable_abc_cache: bool,
 ) -> Result<()> {
     if matches!(module.module_type, OhosModuleType::Har) {
         return Ok(());
@@ -64,13 +65,18 @@ pub(super) fn compile_widget_pass(
             .as_ref()
             .and_then(|output| output.code.clone())
             .unwrap_or_else(|| compile_source_passthrough(&source, &entry_info.source_ext));
-        let code = rewrite_compile_module_imports_to_ohm(
-            &code,
-            &entry_info.source_path,
+        let import_resolver = CompileModuleImportResolver::new(
             &cache_root,
             loader_json,
             config,
             &resolved_imports,
+            None,
+        );
+        let code = rewrite_compile_module_imports_to_ohm(
+            &code,
+            &entry_info.ts_path,
+            &entry_info.source_path,
+            &import_resolver,
         );
         if let Some(parent) = entry_info.ts_path.parent() {
             fs_err::create_dir_all(parent)?;
@@ -115,7 +121,10 @@ pub(super) fn compile_widget_pass(
         pkg_entries.add_dynamic_imports(loader_json, config);
     }
     pkg_entries.add_native_entries();
-    let handoff = write_compile_arkts_abc_handoff(&cache_root, &compile_infos, &pkg_entries)?;
+    let mut handoff = write_compile_arkts_abc_handoff(&cache_root, &compile_infos, &pkg_entries)?;
+    if disable_abc_cache {
+        handoff = handoff.without_program_cache();
+    }
 
     let collection_value = serde_json::Value::Object(component_collection);
     let collection_bytes = serde_json::to_vec_pretty(&collection_value)?;

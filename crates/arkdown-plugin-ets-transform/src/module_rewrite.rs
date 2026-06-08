@@ -110,6 +110,42 @@ pub fn rewrite_static_module_specifiers_with(
     id: &str,
     mut rewrite: impl FnMut(&str) -> Option<String>,
 ) -> String {
+    rewrite_static_module_specifiers_with_policy(
+        source,
+        id,
+        TypeOnlySpecifierPolicy::RewriteNonRelative,
+        &mut rewrite,
+    )
+}
+
+/// Rewrites only value-bearing static `import` / `export ... from` module
+/// specifiers.  This matches hvigor `import_path_expand`, which does not expand
+/// pure type imports.
+pub fn rewrite_value_static_module_specifiers_with(
+    source: &str,
+    id: &str,
+    mut rewrite: impl FnMut(&str) -> Option<String>,
+) -> String {
+    rewrite_static_module_specifiers_with_policy(
+        source,
+        id,
+        TypeOnlySpecifierPolicy::Skip,
+        &mut rewrite,
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TypeOnlySpecifierPolicy {
+    RewriteNonRelative,
+    Skip,
+}
+
+fn rewrite_static_module_specifiers_with_policy(
+    source: &str,
+    id: &str,
+    type_only_policy: TypeOnlySpecifierPolicy,
+    rewrite: &mut impl FnMut(&str) -> Option<String>,
+) -> String {
     let allocator = Allocator::default();
     let source_type =
         SourceType::from_path(id).unwrap_or_else(|_| SourceType::ts().with_module(true));
@@ -122,21 +158,37 @@ pub fn rewrite_static_module_specifiers_with(
     for statement in &parsed.program.body {
         match statement {
             Statement::ImportDeclaration(import) => {
-                if import.import_kind.is_type() && import.source.value.as_str().starts_with('.') {
-                    continue;
+                if import.import_kind.is_type() {
+                    match type_only_policy {
+                        TypeOnlySpecifierPolicy::Skip => continue,
+                        TypeOnlySpecifierPolicy::RewriteNonRelative
+                            if import.source.value.as_str().starts_with('.') =>
+                        {
+                            continue;
+                        }
+                        TypeOnlySpecifierPolicy::RewriteNonRelative => {}
+                    }
                 }
-                push_module_specifier_patch(&import.source, &mut rewrite, &mut patches);
+                push_module_specifier_patch(&import.source, rewrite, &mut patches);
             }
             Statement::ExportNamedDeclaration(export) => {
                 if let Some(source) = &export.source {
-                    if export.export_kind.is_type() && source.value.as_str().starts_with('.') {
-                        continue;
+                    if export.export_kind.is_type() {
+                        match type_only_policy {
+                            TypeOnlySpecifierPolicy::Skip => continue,
+                            TypeOnlySpecifierPolicy::RewriteNonRelative
+                                if source.value.as_str().starts_with('.') =>
+                            {
+                                continue;
+                            }
+                            TypeOnlySpecifierPolicy::RewriteNonRelative => {}
+                        }
                     }
-                    push_module_specifier_patch(source, &mut rewrite, &mut patches);
+                    push_module_specifier_patch(source, rewrite, &mut patches);
                 }
             }
             Statement::ExportAllDeclaration(export) => {
-                push_module_specifier_patch(&export.source, &mut rewrite, &mut patches);
+                push_module_specifier_patch(&export.source, rewrite, &mut patches);
             }
             _ => {}
         }

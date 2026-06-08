@@ -141,8 +141,24 @@ impl<'a> RecordLayout<'a> {
     }
 }
 
-pub(super) fn is_explicit_ecmascript_source_file(source_file: &str) -> bool {
-    !source_file.contains('|') && (source_file.ends_with(".js") || source_file.ends_with(".ts"))
+pub(crate) fn source_file_entry_path(source_file: &str) -> &str {
+    source_file
+        .rsplit_once('|')
+        .map_or(source_file, |(_, path)| path)
+}
+
+pub(crate) fn is_explicit_ecmascript_source_file(source_file: &str) -> bool {
+    let source_file = source_file_entry_path(source_file);
+    source_file.ends_with(".js") || source_file.ends_with(".ts")
+}
+
+pub(crate) fn is_typescript_source_file(source_file: &str) -> bool {
+    let source_file = source_file_entry_path(source_file);
+    source_file.ends_with(".ts") && !source_file.ends_with(".d.ts")
+}
+
+pub(crate) fn is_ets_source_file(source_file: &str) -> bool {
+    source_file_entry_path(source_file).ends_with(".ets")
 }
 
 fn module_u8_field(name: impl Into<String>) -> FieldRecord {

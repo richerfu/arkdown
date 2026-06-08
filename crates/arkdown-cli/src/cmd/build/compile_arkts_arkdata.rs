@@ -22,7 +22,7 @@ use arkdown_ts2abc::{compile_to_abc, Ts2abcInput};
 
 use super::compile_arkts_abc::{AbcCompilePlan, AbcCompileRequest};
 use super::compile_arkts_modules::{
-    compile_source_passthrough, rewrite_compile_module_imports_to_ohm,
+    compile_source_passthrough, rewrite_compile_module_imports_to_ohm, CompileModuleImportResolver,
 };
 use super::intermediates::{canonical_or_owned, path_string};
 use super::ResolvedImportMap;
@@ -138,13 +138,18 @@ pub(super) fn compile_arkdata_pass(
             .as_ref()
             .and_then(|o| o.code.clone())
             .unwrap_or_else(|| compile_source_passthrough(&source, &ext));
-        let code = rewrite_compile_module_imports_to_ohm(
-            &code,
-            &source_path,
+        let import_resolver = CompileModuleImportResolver::new(
             &cache_root,
             loader_json,
             config,
             &resolved_imports,
+            None,
+        );
+        let code = rewrite_compile_module_imports_to_ohm(
+            &code,
+            &cache_path,
+            &source_path,
+            &import_resolver,
         );
 
         if let Err(e) = std::fs::write(&cache_path, &code) {

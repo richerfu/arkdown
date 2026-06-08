@@ -90,6 +90,7 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
         &index_sections,
         &class_name_by_offset,
     )?);
+    literal_offsets.extend(collect_annotation_literal_offsets(data, &classes)?);
     let literal_offsets = literal_offsets.into_iter().collect::<Vec<_>>();
     let literal_base_index = file.literal_arrays.len();
     let literal_offset_to_index = literal_offsets
@@ -108,11 +109,6 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
         file.literal_arrays.push(literal);
     }
 
-    let method_pool_offsets = index_sections
-        .iter()
-        .flat_map(|section| section.method_offsets.iter().copied())
-        .filter(|offset| method_names.contains_key(offset))
-        .collect::<BTreeSet<_>>();
     let method_call_infos = build_method_call_infos(&reader, &classes)?;
 
     let mut appended = Vec::new();
@@ -271,7 +267,6 @@ pub(crate) fn append_abc_file(file: &mut AbcFile, data: &[u8]) -> Result<Vec<usi
                     function_kind: abc_default_function_kind(kind),
                     source_lang: Some(method.source_lang.unwrap_or(0)),
                     concurrent_module_requests: Vec::new(),
-                    method_pool_entry: method_pool_offsets.contains(&method.offset),
                     expected_property_count: annotations.expected_property_count,
                     annotations: annotations.custom,
                     metadata_attrs: Default::default(),
@@ -1379,6 +1374,107 @@ fn collect_array_field_literal_offsets(
     Ok(offsets)
 }
 
+fn collect_annotation_literal_offsets(
+    data: &[u8],
+    classes: &[AbcClassItem],
+) -> Result<BTreeSet<u32>, AbcError> {
+    let mut offsets = BTreeSet::new();
+    for class in classes {
+        for &annotation_off in &class.annotation_offsets {
+            collect_annotation_item_literal_offsets(
+                data,
+                &class.name,
+                annotation_off,
+                &mut offsets,
+            )?;
+        }
+        for field in &class.fields {
+            for &annotation_off in &field.annotation_offsets {
+                collect_annotation_item_literal_offsets(
+                    data,
+                    &class.name,
+                    annotation_off,
+                    &mut offsets,
+                )?;
+            }
+        }
+        for method in &class.methods {
+            for &annotation_off in &method.annotation_offsets {
+                collect_annotation_item_literal_offsets(
+                    data,
+                    &class.name,
+                    annotation_off,
+                    &mut offsets,
+                )?;
+            }
+            if let Some(param_annotation_off) = method.param_annotation_offset {
+                collect_param_annotation_literal_offsets(
+                    data,
+                    &class.name,
+                    param_annotation_off,
+                    &mut offsets,
+                )?;
+            }
+        }
+    }
+    Ok(offsets)
+}
+
+fn collect_param_annotation_literal_offsets(
+    data: &[u8],
+    owner_name: &str,
+    param_annotation_off: u32,
+    offsets: &mut BTreeSet<u32>,
+) -> Result<(), AbcError> {
+    let mut cursor = param_annotation_off as usize;
+    let param_count = read_at_u32(data, cursor, "parameter annotation count")? as usize;
+    cursor += 4;
+    for _ in 0..param_count {
+        let annotation_count =
+            read_at_u32(data, cursor, "parameter annotation item count")? as usize;
+        cursor += 4;
+        for _ in 0..annotation_count {
+            let annotation_off = read_at_u32(data, cursor, "parameter annotation offset")?;
+            cursor += 4;
+            collect_annotation_item_literal_offsets(data, owner_name, annotation_off, offsets)?;
+        }
+    }
+    Ok(())
+}
+
+fn collect_annotation_item_literal_offsets(
+    data: &[u8],
+    owner_name: &str,
+    annotation_off: u32,
+    offsets: &mut BTreeSet<u32>,
+) -> Result<(), AbcError> {
+    let mut cursor = annotation_off as usize;
+    read_at_u16(data, cursor, "annotation class_idx")?;
+    cursor += 2;
+    let count = read_at_u16(data, cursor, "annotation element count")? as usize;
+    cursor += 2;
+    let mut values = Vec::with_capacity(count);
+    for _ in 0..count {
+        read_at_u32(data, cursor, "annotation element name")?;
+        cursor += 4;
+        values.push(read_at_u32(data, cursor, "annotation element value")?);
+        cursor += 4;
+    }
+    for (element_idx, value) in values.into_iter().enumerate() {
+        let tag =
+            *data
+                .get(cursor + element_idx)
+                .ok_or_else(|| AbcError::UnsupportedConstruct {
+                    construct: "ABC annotation tag out of bounds".to_string(),
+                    file: owner_name.to_string(),
+                })?;
+        if tag == b'#' {
+            offsets.insert(value);
+        }
+    }
+    Ok(())
+}
+
 fn mark_literal_explicit_key(file: &mut AbcFile, index: usize, record_name: &str, offset: u32) {
     let key = literal_array_key(record_name, offset as usize);
     mark_literal_explicit_key_by_key(file, index, &key);
@@ -2175,7 +2271,7 @@ fn decode_one(
         0x9a => Insn::JeqzWide(i32_at(1)),
         0x9b => Insn::Jnez(i16_at(1)),
         0x9c => Insn::JnezWide(i32_at(1)),
-        0xa1 | 0xcf => Insn::CopyRestArgs(at(1)),
+        0xcf => Insn::CopyRestArgs(at(1)),
         0xb0 => Insn::Debugger,
         0xb1 => Insn::CreateGeneratorObj(at(1)),
         0xb3 => Insn::CreateObjectWithExcludedKeys(at(1) as u16, at(2), at(3)),
@@ -2235,6 +2331,7 @@ fn decode_one(
             0x06 => Insn::CallRuntimeCallInit(at(2), at(3)),
             0x13 => Insn::CallRuntimeIsTrue(at(2)),
             0x14 => Insn::CallRuntimeIsFalse(at(2)),
+            0x19 => Insn::CallRuntimeSuperCallForwardAllArgs(at(2)),
             sub => {
                 return decode_generic_pandasm(
                     bytecode,

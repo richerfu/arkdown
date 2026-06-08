@@ -1,13 +1,14 @@
 use std::collections::BTreeSet;
 
 use crate::emit::bytecode::{
-    assign_inline_cache_slots, collect_bytecode_string_indices, patch_bytecode_index_operands,
+    assign_inline_cache_slots, patch_bytecode_index_operands, BytecodeIndexPlan,
 };
 use crate::emit::debug_info::{
     append_line_ops_with_mid_locals, debug_scope_start_pc, encode_debug_info_with_cp,
     encode_sleb128_bytes, infer_func_main_class_local_events, local_variable_debug_events,
     local_variable_debug_param_offsets,
 };
+use crate::emit::index_section::{IndexSectionPlanner, MethodIndexItem};
 use crate::emit::record::{
     encode_code_item_with_catch_types, inline_string, uleb128, AnnotationRecord, AnnotationValue,
     ArrayValueRecord, ClassAnnotationOffsets, ClassRecord, DebugInfoRecord, FieldAnnotationOffsets,
@@ -592,6 +593,8 @@ impl AbcFile {
             .map(|cls| cls.with_upstream_method_order())
             .collect();
         let all_classes: Vec<&ClassRecord> = all_classes_owned.iter().collect();
+        let index_section_plan =
+            IndexSectionPlanner::new(&self.strings, &self.literal_arrays).build(&all_classes);
         let mut foreign_class_name_set = BTreeSet::new();
         for class in &all_classes {
             for field in &class.fields {
@@ -611,14 +614,7 @@ impl AbcFile {
 
         let total_classes = all_classes.len() as u32 + foreign_class_names.len() as u32;
         let class_idx_off = HEADER_SIZE as u32; // 0x3C
-        let method_index_count = all_classes
-            .iter()
-            .map(|class| {
-                method_index_string_refs(class, &self.strings).len()
-                    + class.method_pool_entry_indices().len()
-                    + class.literal_indices.len()
-            })
-            .sum::<usize>() as u32;
+        let method_index_count = index_section_plan.index_entry_count() as u32;
         let has_expected_property_count_annotations = all_classes.iter().any(|class| {
             class
                 .methods
@@ -710,23 +706,10 @@ impl AbcFile {
         let string_section_start =
             class_section_start + class_item_sizes.iter().sum::<usize>() as u32;
 
-        // Build the class-OHM-URL prefix (strip "L" prefix and ";" suffix).
-        let class_ohm_urls: Vec<String> = all_classes
-            .iter()
-            .map(|c| {
-                c.name
-                    .strip_prefix('L')
-                    .and_then(|s| s.strip_suffix(';'))
-                    .unwrap_or(&c.name)
-                    .to_string()
-            })
-            .collect();
-
         let mut string_items = StringItemWriter::new(string_section_start);
 
         let mut bytecode_string_offsets = vec![0u32; self.strings.len()];
         let mut emitted_bytecode_strings = vec![false; self.strings.len()];
-        let mut supplemental_string_offsets = FxHashMap::<(usize, String), u32>::default();
         let mut method_string_offsets: Vec<Vec<u32>> = all_classes
             .iter()
             .map(|class| vec![0; class.methods.len()])
@@ -759,50 +742,22 @@ impl AbcFile {
                 .map(|class| vec![None; class.methods.len()])
                 .collect();
 
-        for (class_idx, class) in all_classes.iter().enumerate() {
-            let mut class_pool_strings = Vec::new();
-            for string_ref in method_index_string_refs(class, &self.strings) {
-                match &string_ref {
-                    MethodIndexStringRef::Bytecode(string_idx) => {
-                        let string_idx = *string_idx as usize;
-                        if emitted_bytecode_strings[string_idx] {
-                            continue;
-                        }
-                        emitted_bytecode_strings[string_idx] = true;
-                    }
-                    MethodIndexStringRef::Supplemental(_) => {}
+        for item in &index_section_plan.items {
+            if let MethodIndexItem::String(string_idx) = item {
+                let string_idx = *string_idx as usize;
+                if emitted_bytecode_strings[string_idx] {
+                    continue;
                 }
-                class_pool_strings.push(PoolStringItem::MethodIndex(string_ref));
+                emitted_bytecode_strings[string_idx] = true;
+                let value = self
+                    .strings
+                    .get(string_idx as u32)
+                    .expect("method-index string id must be interned");
+                bytecode_string_offsets[string_idx] = string_items.get_or_create(value);
             }
-            let ohm_url = &class_ohm_urls[class_idx];
-            for method_idx in class.method_pool_entry_indices() {
-                class_pool_strings.push(PoolStringItem::FullMethodName(format!(
-                    "{ohm_url}.{}",
-                    class.methods[method_idx].name
-                )));
-            }
-            class_pool_strings.sort_by(|a, b| {
-                a.value(&self.strings)
-                    .cmp(b.value(&self.strings))
-                    .then_with(|| a.kind_order().cmp(&b.kind_order()))
-            });
-            for item in class_pool_strings {
-                match item {
-                    PoolStringItem::MethodIndex(MethodIndexStringRef::Bytecode(string_idx)) => {
-                        let off =
-                            string_items.get_or_create(self.strings.get(string_idx).unwrap_or(""));
-                        bytecode_string_offsets[string_idx as usize] = off;
-                    }
-                    PoolStringItem::MethodIndex(MethodIndexStringRef::Supplemental(name)) => {
-                        let off = string_items.get_or_create(&name);
-                        supplemental_string_offsets.insert((class_idx, name.clone()), off);
-                    }
-                    PoolStringItem::FullMethodName(name) => {
-                        string_items.get_or_create(&name);
-                    }
-                }
-            }
+        }
 
+        for (class_idx, class) in all_classes.iter().enumerate() {
             for annotation in &class.annotations {
                 intern_annotation_strings(annotation, &mut string_items);
             }
@@ -1129,7 +1084,6 @@ impl AbcFile {
             })
             .collect();
 
-        let method_pool_layouts = Self::build_method_pool_layouts(&all_classes, &self.strings);
         let literal_emit_order =
             Self::build_literal_emit_order(&all_classes, self.literal_arrays.len());
         let literal_header_order = if literal_arrays_in_header {
@@ -1307,20 +1261,17 @@ impl AbcFile {
             .map(|class| vec![0; class.methods.len()])
             .collect();
         for (class_idx, class) in all_classes.iter().enumerate() {
-            let layout = &method_pool_layouts[class_idx];
-            let mut defineclass_cursor = 0usize;
-            let mut definefunc_cursor = 0usize;
             for (method_idx, method) in class.methods.iter().enumerate() {
-                let mut bytecode = patch_bytecode_index_operands(
-                    &method.bytecode,
-                    &layout.string_pool_indices,
-                    &layout.literal_pool_indices,
-                    &layout.ctor_pool_indices,
-                    &layout.definefunc_pool_indices,
-                    &layout.definemethod_pool_indices_by_name,
-                    &mut defineclass_cursor,
-                    &mut definefunc_cursor,
+                let method_plan = index_section_plan.method_plan(class_idx, method_idx);
+                let index_plan = BytecodeIndexPlan::new(
+                    &self.strings,
+                    &method_plan.string_pool_indices,
+                    &method_plan.literal_pool_indices,
+                    &method_plan.method_pool_indices,
+                    &class.name,
+                    &method.name,
                 );
+                let mut bytecode = patch_bytecode_index_operands(&method.bytecode, &index_plan);
                 slot_counts_per_class[class_idx][method_idx] = method
                     .slots_num
                     .unwrap_or_else(|| assign_inline_cache_slots(&mut bytecode));
@@ -1586,20 +1537,17 @@ impl AbcFile {
         for (class_idx, class) in all_classes.iter().enumerate() {
             let mut class_code_offs = vec![0u32; class.methods.len()];
             let mut class_code_items = Vec::with_capacity(class.methods.len());
-            let layout = &method_pool_layouts[class_idx];
-            let mut defineclass_cursor = 0usize;
-            let mut definefunc_cursor = 0usize;
-            for method in &class.methods {
-                let bytecode = patch_bytecode_index_operands(
-                    &method.bytecode,
-                    &layout.string_pool_indices,
-                    &layout.literal_pool_indices,
-                    &layout.ctor_pool_indices,
-                    &layout.definefunc_pool_indices,
-                    &layout.definemethod_pool_indices_by_name,
-                    &mut defineclass_cursor,
-                    &mut definefunc_cursor,
+            for (method_idx, method) in class.methods.iter().enumerate() {
+                let method_plan = index_section_plan.method_plan(class_idx, method_idx);
+                let index_plan = BytecodeIndexPlan::new(
+                    &self.strings,
+                    &method_plan.string_pool_indices,
+                    &method_plan.literal_pool_indices,
+                    &method_plan.method_pool_indices,
+                    &class.name,
+                    &method.name,
                 );
+                let bytecode = patch_bytecode_index_operands(&method.bytecode, &index_plan);
                 let mut bytecode = bytecode;
                 let slot_count = assign_inline_cache_slots(&mut bytecode);
                 slot_counts_per_class[class_idx][class_code_items.len()] =
@@ -2021,36 +1969,20 @@ impl AbcFile {
         let total_size = post_lnp_offset;
 
         let mut method_index_offsets = Vec::with_capacity(method_index_count as usize);
-        // Method index ordering follows libpandafile's per-record region:
-        // this record's bytecode strings, method literals referenced by bytecode,
-        // then literal arrays referenced by bytecode.  It is not a single global
-        // [all strings | all methods | all literals] block.
-        for (class_idx, ((class, &class_off), layout)) in all_classes
-            .iter()
-            .zip(class_item_offsets.iter())
-            .zip(method_pool_layouts.iter())
-            .enumerate()
-        {
-            for string_ref in &layout.string_refs {
-                match string_ref {
-                    MethodIndexStringRef::Bytecode(string_idx) => {
-                        method_index_offsets.push(bytecode_string_offsets[*string_idx as usize]);
-                    }
-                    MethodIndexStringRef::Supplemental(name) => {
-                        let off = supplemental_string_offsets
-                            .get(&(class_idx, name.clone()))
-                            .copied()
-                            .expect("supplemental method-index string offset must be resolved");
-                        method_index_offsets.push(off);
-                    }
+        for item in &index_section_plan.items {
+            match *item {
+                MethodIndexItem::String(string_idx) => {
+                    method_index_offsets.push(bytecode_string_offsets[string_idx as usize]);
                 }
-            }
-            let method_item_offsets = class.method_item_offsets(class_off);
-            for &method_idx in &layout.method_indices {
-                method_index_offsets.push(method_item_offsets[method_idx]);
-            }
-            for &literal_idx in &class.literal_indices {
-                method_index_offsets.push(literal_array_offsets[literal_idx]);
+                MethodIndexItem::Method(method_key) => {
+                    let class = all_classes[method_key.class_idx];
+                    let class_off = class_item_offsets[method_key.class_idx];
+                    method_index_offsets
+                        .push(class.method_item_offsets(class_off)[method_key.method_idx]);
+                }
+                MethodIndexItem::LiteralArray(literal_idx) => {
+                    method_index_offsets.push(literal_array_offsets[literal_idx]);
+                }
             }
         }
         debug_assert_eq!(method_index_offsets.len() as u32, method_index_count);
@@ -2375,17 +2307,6 @@ fn pandasm_reference_descriptor(component_name: &str) -> String {
     descriptor.push_str(component_name);
     descriptor.push(';');
     descriptor
-}
-
-#[derive(Debug, Default)]
-struct MethodPoolLayout {
-    string_refs: Vec<MethodIndexStringRef>,
-    string_pool_indices: FxHashMap<u16, u16>,
-    literal_pool_indices: FxHashMap<u16, u16>,
-    definemethod_pool_indices_by_name: FxHashMap<u16, u16>,
-    method_indices: Vec<usize>,
-    definefunc_pool_indices: Vec<u16>,
-    ctor_pool_indices: Vec<u16>,
 }
 
 pub(super) struct StringItemWriter {
@@ -3232,42 +3153,6 @@ fn primitive_descriptor_for_name(value: &str) -> Option<char> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum MethodIndexStringRef {
-    Bytecode(u32),
-    Supplemental(String),
-}
-
-impl MethodIndexStringRef {
-    fn value<'a>(&'a self, strings: &'a StringTable) -> &'a str {
-        match self {
-            MethodIndexStringRef::Bytecode(idx) => strings.get(*idx).unwrap_or(""),
-            MethodIndexStringRef::Supplemental(value) => value.as_str(),
-        }
-    }
-}
-
-enum PoolStringItem {
-    MethodIndex(MethodIndexStringRef),
-    FullMethodName(String),
-}
-
-impl PoolStringItem {
-    fn value<'a>(&'a self, strings: &'a StringTable) -> &'a str {
-        match self {
-            PoolStringItem::MethodIndex(string_ref) => string_ref.value(strings),
-            PoolStringItem::FullMethodName(name) => name.as_str(),
-        }
-    }
-
-    fn kind_order(&self) -> u8 {
-        match self {
-            PoolStringItem::MethodIndex(_) => 0,
-            PoolStringItem::FullMethodName(_) => 1,
-        }
-    }
-}
-
 impl ClassRecord {
     fn with_upstream_method_order(mut self) -> Self {
         self.methods.sort_by(|a, b| {
@@ -3277,58 +3162,6 @@ impl ClassRecord {
         });
         self
     }
-}
-
-fn method_index_string_refs(
-    class: &ClassRecord,
-    strings: &StringTable,
-) -> Vec<MethodIndexStringRef> {
-    let mut indices = Vec::new();
-    for method in &class.methods {
-        collect_bytecode_string_indices(&method.bytecode, &mut indices);
-    }
-    indices.retain(|idx| strings.get(*idx).is_some());
-    indices.sort_unstable();
-    indices.dedup();
-    indices.sort_by(|a, b| {
-        strings
-            .get(*a)
-            .unwrap_or("")
-            .cmp(strings.get(*b).unwrap_or(""))
-            .then_with(|| a.cmp(b))
-    });
-    let use_page_method_pool_supplements =
-        class.name.contains("/ets/pages/") && !class.standalone_ecmascript_input;
-    if use_page_method_pool_supplements {
-        indices.retain(|idx| {
-            !matches!(
-                strings.get(*idx).unwrap_or(""),
-                "__localStorage"
-                    | "elmtId"
-                    | "extraInfo"
-                    | "params"
-                    | "paramsLambda"
-                    | "parent"
-                    | "prototype"
-            )
-        });
-    }
-    let mut refs: Vec<MethodIndexStringRef> = indices
-        .into_iter()
-        .map(MethodIndexStringRef::Bytecode)
-        .collect();
-    if use_page_method_pool_supplements {
-        for required in ["getEntryName", "initialRender", "rerender"] {
-            if !refs
-                .iter()
-                .any(|string_ref| string_ref.value(strings) == required)
-            {
-                refs.push(MethodIndexStringRef::Supplemental(required.to_string()));
-            }
-        }
-    }
-    refs.sort_by(|a, b| a.value(strings).cmp(b.value(strings)));
-    refs
 }
 
 fn debug_source_file_differs_from_record(class: &ClassRecord, debug: &DebugInfoRecord) -> bool {
@@ -3343,99 +3176,6 @@ impl Default for AbcFile {
 }
 
 impl AbcFile {
-    fn build_method_pool_layouts(
-        classes: &[&ClassRecord],
-        strings: &StringTable,
-    ) -> Vec<MethodPoolLayout> {
-        let mut next_pool_index = 0u16;
-        let mut global_string_pool_indices = FxHashMap::<u16, u16>::default();
-        classes
-            .iter()
-            .map(|class| {
-                let mut layout = MethodPoolLayout::default();
-                let mut all_bytecode_string_indices = Vec::new();
-                for method in &class.methods {
-                    collect_bytecode_string_indices(
-                        &method.bytecode,
-                        &mut all_bytecode_string_indices,
-                    );
-                }
-                all_bytecode_string_indices.sort_unstable();
-                all_bytecode_string_indices.dedup();
-
-                layout.string_refs = method_index_string_refs(class, strings);
-                for string_ref in &layout.string_refs {
-                    if let MethodIndexStringRef::Bytecode(string_idx) = string_ref {
-                        let string_idx = *string_idx as u16;
-                        layout
-                            .string_pool_indices
-                            .insert(string_idx, next_pool_index);
-                        global_string_pool_indices
-                            .entry(string_idx)
-                            .or_insert(next_pool_index);
-                    }
-                    next_pool_index = next_pool_index.saturating_add(1);
-                }
-                for string_idx in all_bytecode_string_indices {
-                    let string_idx = string_idx as u16;
-                    if layout.string_pool_indices.contains_key(&string_idx) {
-                        continue;
-                    }
-                    if let Some(&pool_index) = global_string_pool_indices.get(&string_idx) {
-                        layout.string_pool_indices.insert(string_idx, pool_index);
-                    }
-                }
-
-                layout.method_indices = class.method_pool_entry_indices();
-                let mut method_pool_indices_by_method_idx = FxHashMap::<usize, u16>::default();
-                let mut definefunc_methods = Vec::new();
-                for &method_idx in &layout.method_indices {
-                    let pool_index = next_pool_index;
-                    let method = &class.methods[method_idx];
-                    method_pool_indices_by_method_idx.insert(method_idx, pool_index);
-                    if matches!(
-                        method.kind,
-                        MethodKind::Anonymous | MethodKind::FunctionLiteral
-                    ) {
-                        if let Some(order) = method.definefunc_order {
-                            definefunc_methods.push((order, pool_index));
-                        }
-                    }
-                    if let Some(name_id) = strings.id_of(&method.name) {
-                        layout
-                            .definemethod_pool_indices_by_name
-                            .insert(name_id as u16, pool_index);
-                    }
-                    next_pool_index = next_pool_index.saturating_add(1);
-                }
-                definefunc_methods.sort_by_key(|(order, _)| *order);
-                layout.definefunc_pool_indices = definefunc_methods
-                    .into_iter()
-                    .map(|(_, pool_index)| pool_index)
-                    .collect();
-                layout.ctor_pool_indices = class
-                    .methods
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(method_idx, method)| {
-                        (method.kind == MethodKind::Constructor && method.method_pool_entry)
-                            .then(|| method_pool_indices_by_method_idx.get(&method_idx).copied())
-                            .flatten()
-                    })
-                    .collect();
-
-                for &literal_idx in &class.literal_indices {
-                    layout
-                        .literal_pool_indices
-                        .insert(literal_idx as u16, next_pool_index);
-                    next_pool_index = next_pool_index.saturating_add(1);
-                }
-
-                layout
-            })
-            .collect()
-    }
-
     fn build_literal_emit_order(classes: &[&ClassRecord], literal_count: usize) -> Vec<usize> {
         let mut seen = vec![false; literal_count];
         let mut order = Vec::with_capacity(literal_count);

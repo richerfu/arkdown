@@ -23,6 +23,26 @@ pub fn generate_entry_registration(
     EntryRegistrationEmitter::new(component_name, info).emit()
 }
 
+#[derive(Debug, Default)]
+pub struct EntryRegistrationBlock {
+    registrations: Vec<String>,
+}
+
+impl EntryRegistrationBlock {
+    pub fn push(&mut self, registration: String) {
+        self.registrations.push(registration);
+    }
+
+    pub fn append_to(&self, out: &mut String) {
+        for registration in &self.registrations {
+            if !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(registration);
+        }
+    }
+}
+
 struct EntryRegistrationEmitter<'a> {
     component_name: &'a str,
     info: Option<&'a EntryRegistrationInfo>,

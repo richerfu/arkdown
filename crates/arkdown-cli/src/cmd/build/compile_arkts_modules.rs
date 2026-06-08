@@ -1,7 +1,7 @@
 use super::compile_arkts_handoff::CompileArkTsInfo;
 use super::*;
 use arkdown_plugin_ohos_resolve::ResolvedImportMap;
-use arkdown_resolver::OhPackage;
+use arkdown_resolver::{OhPackage, OhosResolver};
 
 const OHM_PACKAGES_PREFIX: &str = "pkg_modules";
 
@@ -231,15 +231,7 @@ impl CompileModuleInfo {
     }
 }
 
-pub(super) fn module_id_to_source_path(module_id: &str) -> Option<PathBuf> {
-    if module_id.starts_with('\0') || module_id.starts_with("virtual:") {
-        return None;
-    }
-    let module_id = module_id
-        .split_once('?')
-        .map(|(path, _)| path)
-        .unwrap_or(module_id);
-    let path = Path::new(module_id);
+fn source_path_if_compilable(path: &Path) -> Option<PathBuf> {
     if !path.is_absolute() || !path.exists() {
         return None;
     }
@@ -257,26 +249,88 @@ pub(super) fn module_id_to_source_path(module_id: &str) -> Option<PathBuf> {
     Some(canonical_or_owned(path))
 }
 
-pub(super) fn rewrite_compile_module_imports_to_ohm(
-    source: &str,
-    importer: &Path,
-    cache_root: &Path,
-    loader_json: &arkdown_profile::LoaderJson,
-    config: &ArkdownConfig,
-    resolved_imports: &ResolvedImportMap,
-) -> String {
-    rewrite_static_module_specifiers_with(source, &importer.to_string_lossy(), |specifier| {
-        compile_module_ohm_for_specifier(
-            specifier,
-            importer,
+pub(super) fn module_id_to_source_path(module_id: &str) -> Option<PathBuf> {
+    if module_id.starts_with('\0') || module_id.starts_with("virtual:") {
+        return None;
+    }
+    let module_id = module_id
+        .split_once('?')
+        .map(|(path, _)| path)
+        .unwrap_or(module_id);
+    source_path_if_compilable(Path::new(module_id))
+}
+
+pub(super) struct CompileModuleImportResolver<'a> {
+    cache_root: &'a Path,
+    loader_json: &'a arkdown_profile::LoaderJson,
+    config: &'a ArkdownConfig,
+    resolved_imports: &'a ResolvedImportMap,
+    ohos_resolver: Option<&'a OhosResolver>,
+}
+
+impl<'a> CompileModuleImportResolver<'a> {
+    pub(super) fn new(
+        cache_root: &'a Path,
+        loader_json: &'a arkdown_profile::LoaderJson,
+        config: &'a ArkdownConfig,
+        resolved_imports: &'a ResolvedImportMap,
+        ohos_resolver: Option<&'a OhosResolver>,
+    ) -> Self {
+        Self {
             cache_root,
             loader_json,
             config,
             resolved_imports,
+            ohos_resolver,
+        }
+    }
+
+    pub(super) fn rewrite_source(&self, source: &str, source_id: &Path, importer: &Path) -> String {
+        rewrite_value_static_module_specifiers_with(
+            source,
+            &source_id.to_string_lossy(),
+            |specifier| self.ohm_for_specifier(specifier, importer),
         )
-    })
+    }
+
+    fn ohm_for_specifier(&self, specifier: &str, importer: &Path) -> Option<String> {
+        if let Some(ohm_url) = system_api_or_lib_ohm_url(specifier, self.loader_json, self.config) {
+            return Some(ohm_url);
+        }
+
+        if is_ohm_url_specifier(specifier) {
+            return None;
+        }
+
+        let resolved = self.resolve_specifier(specifier, importer)?;
+        let info =
+            CompileModuleInfo::compute(&resolved, self.cache_root, self.loader_json, self.config)?;
+        Some(compile_module_ohm_url(&info))
+    }
+
+    fn resolve_specifier(&self, specifier: &str, importer: &Path) -> Option<PathBuf> {
+        if let Some(resolved) =
+            resolve_compile_module_specifier_from_map(specifier, importer, self.resolved_imports)
+        {
+            return Some(resolved);
+        }
+
+        let resolved = self.ohos_resolver?.resolve(specifier, importer).ok()?;
+        let path = resolved.local_path()?;
+        source_path_if_compilable(path)
+    }
 }
 
+pub(super) fn rewrite_compile_module_imports_to_ohm(
+    source: &str,
+    source_id: &Path,
+    importer: &Path,
+    import_resolver: &CompileModuleImportResolver<'_>,
+) -> String {
+    import_resolver.rewrite_source(source, source_id, importer)
+}
+
+#[cfg(test)]
 fn compile_module_ohm_for_specifier(
     specifier: &str,
     importer: &Path,
@@ -285,17 +339,8 @@ fn compile_module_ohm_for_specifier(
     config: &ArkdownConfig,
     resolved_imports: &ResolvedImportMap,
 ) -> Option<String> {
-    if let Some(ohm_url) = system_api_or_lib_ohm_url(specifier, loader_json, config) {
-        return Some(ohm_url);
-    }
-
-    if is_ohm_url_specifier(specifier) {
-        return None;
-    }
-
-    let resolved = resolve_compile_module_specifier(specifier, importer, resolved_imports)?;
-    let info = CompileModuleInfo::compute(&resolved, cache_root, loader_json, config)?;
-    Some(compile_module_ohm_url(&info))
+    CompileModuleImportResolver::new(cache_root, loader_json, config, resolved_imports, None)
+        .ohm_for_specifier(specifier, importer)
 }
 
 fn system_api_or_lib_ohm_url(
@@ -364,7 +409,7 @@ fn compile_module_ohm_url(info: &CompileModuleInfo) -> String {
     }
 }
 
-fn resolve_compile_module_specifier(
+fn resolve_compile_module_specifier_from_map(
     specifier: &str,
     importer: &Path,
     resolved_imports: &ResolvedImportMap,
@@ -851,6 +896,74 @@ mod tests {
         .unwrap();
 
         assert_eq!(ohm, "@bundle:com.example.hmosworld/phone@utils/ets/Index");
+    }
+
+    #[test]
+    fn compile_module_ohm_resolves_scoped_local_package_when_map_misses() {
+        let temp = TempDir::new().unwrap();
+        let project = temp.path();
+        let phone_root = project.join("products/phone");
+        let mine_root = project.join("features/mine");
+        let datastore_root = project.join("commons/datastore");
+        let importer = mine_root.join("src/main/ets/model/UserModel.ets");
+        let datastore_entry = datastore_root.join("Index.ets");
+
+        fs::create_dir_all(importer.parent().unwrap()).unwrap();
+        fs::create_dir_all(&datastore_root).unwrap();
+        fs::write(&importer, "").unwrap();
+        fs::write(&datastore_entry, "export class PreferenceManager {}\n").unwrap();
+        fs::write(
+            mine_root.join("oh-package.json5"),
+            r#"{"name":"mine","dependencies":{"@ohos/datastore":"file:../../commons/datastore"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            datastore_root.join("oh-package.json5"),
+            r#"{"name":"datastore","version":"1.0.0","main":"Index.ets"}"#,
+        )
+        .unwrap();
+
+        let loader_json = make_loader_json(
+            project,
+            &[
+                ("phone", &phone_root),
+                ("mine", &mine_root),
+                ("datastore", &datastore_root),
+            ],
+        );
+        let config = make_config(project, &phone_root);
+        let cache_root = project.join("cache");
+        let resolved_imports = ResolvedImportMap::default();
+        let ohos_resolver = OhosResolver::new(arkdown_resolver::ResolverConfig {
+            project_root: project.to_path_buf(),
+            sdk_api_dirs: vec![],
+            sdk_kits_dirs: vec![],
+            pkg_name_to_pkg_info: FxHashMap::default(),
+            use_normalized_ohm_url: false,
+            case_sensitive_check: false,
+            oh_modules_roots: vec![mine_root.join("oh_modules"), project.join("oh_modules")],
+            source_set_overlays: vec![],
+        });
+        let import_resolver = CompileModuleImportResolver::new(
+            &cache_root,
+            &loader_json,
+            &config,
+            &resolved_imports,
+            Some(&ohos_resolver),
+        );
+
+        let ohm = import_resolver
+            .ohm_for_specifier("@ohos/datastore", &importer)
+            .unwrap();
+        assert_eq!(ohm, "@bundle:com.example.hmosworld/phone@datastore/Index");
+
+        let rewritten = import_resolver.rewrite_source(
+            "import { PreferenceManager } from '@ohos/datastore';\nimport type { UserAccount } from '@ohos/login';\n",
+            &cache_root.join("mine/src/main/ets/model/UserModel.ts"),
+            &importer,
+        );
+        assert!(rewritten.contains("from \"@bundle:com.example.hmosworld/phone@datastore/Index\""));
+        assert!(rewritten.contains("from '@ohos/login'"));
     }
 
     #[test]

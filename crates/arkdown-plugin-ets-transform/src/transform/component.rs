@@ -174,6 +174,13 @@ pub fn generate_view_pu_class(info: &ComponentInfo) -> String {
     ViewPuClassEmitter::new(info).emit()
 }
 
+impl ComponentInfo {
+    pub fn entry_registration_code(&self) -> Option<String> {
+        self.is_entry
+            .then(|| generate_entry_registration(&self.name, self.entry_registration.as_ref()))
+    }
+}
+
 struct ViewPuClassEmitter<'a> {
     info: &'a ComponentInfo,
     out: String,
@@ -211,7 +218,6 @@ impl<'a> ViewPuClassEmitter<'a> {
         self.push_rerender();
         self.push_entry_name();
         self.out.push_str("}\n");
-        self.push_entry_registration();
         self.out
     }
 
@@ -442,15 +448,6 @@ impl<'a> ViewPuClassEmitter<'a> {
         self.out.push_str("    }\n");
     }
 
-    fn push_entry_registration(&mut self) {
-        if self.info.is_entry {
-            self.out.push_str(&generate_entry_registration(
-                &self.info.name,
-                self.info.entry_registration.as_ref(),
-            ));
-        }
-    }
-
     fn export_prefix(&self) -> &'static str {
         if self.info.is_default_export {
             "export default "
@@ -629,8 +626,11 @@ mod tests {
         let mut info = make_counter_component();
         info.is_entry = true;
         let out = generate_view_pu_class(&info);
+        let registration = info
+            .entry_registration_code()
+            .expect("entry component must expose route registration");
         assert!(
-            out.contains("registerNamedRoute(() => new Counter(undefined, {})"),
+            registration.contains("registerNamedRoute(() => new Counter(undefined, {})"),
             "missing entry registration"
         );
         assert!(

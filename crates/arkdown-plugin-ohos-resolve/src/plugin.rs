@@ -34,8 +34,20 @@ impl OhosResolvePlugin {
         project_root: PathBuf,
         case_sensitive: bool,
     ) -> Self {
+        Self::with_resolver(
+            Arc::new(OhosResolver::new(resolver_config)),
+            project_root,
+            case_sensitive,
+        )
+    }
+
+    pub fn with_resolver(
+        resolver: Arc<OhosResolver>,
+        project_root: PathBuf,
+        case_sensitive: bool,
+    ) -> Self {
         OhosResolvePlugin {
-            resolver: Arc::new(OhosResolver::new(resolver_config)),
+            resolver,
             project_root,
             case_sensitive,
             resolved_imports: Arc::new(Mutex::new(FxHashMap::default())),

@@ -1,10 +1,12 @@
 use super::*;
+use arkdown_resolver::OhosResolver;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 pub(super) struct CompileArktsCacheWriter<'a> {
     loader_json: &'a arkdown_profile::LoaderJson,
     config: &'a Arc<ArkdownConfig>,
     resolved_imports: &'a arkdown_plugin_ohos_resolve::ResolvedImportMap,
+    ohos_resolver: Arc<OhosResolver>,
     cache_root: PathBuf,
     transformer: EtsTransformPlugin,
 }
@@ -16,6 +18,7 @@ impl<'a> CompileArktsCacheWriter<'a> {
         config: &'a Arc<ArkdownConfig>,
         resource_refs: &FxHashMap<String, ResourceReference>,
         resolved_imports: &'a arkdown_plugin_ohos_resolve::ResolvedImportMap,
+        ohos_resolver: Arc<OhosResolver>,
     ) -> Self {
         let cache_root = module
             .src_path
@@ -28,6 +31,7 @@ impl<'a> CompileArktsCacheWriter<'a> {
             loader_json,
             config,
             resolved_imports,
+            ohos_resolver,
             cache_root,
             transformer,
         }
@@ -224,13 +228,18 @@ impl<'a> CompileArktsCacheWriter<'a> {
             entry_info.source_ext.as_str(),
             "ets" | "ts" | "js" | "mjs" | "cjs"
         ) {
-            rewrite_compile_module_imports_to_ohm(
-                &code,
-                &entry_info.source_path,
+            let import_resolver = CompileModuleImportResolver::new(
                 &self.cache_root,
                 self.loader_json,
                 self.config,
                 self.resolved_imports,
+                Some(self.ohos_resolver.as_ref()),
+            );
+            rewrite_compile_module_imports_to_ohm(
+                &code,
+                &entry_info.ts_path,
+                &entry_info.source_path,
+                &import_resolver,
             )
         } else {
             code

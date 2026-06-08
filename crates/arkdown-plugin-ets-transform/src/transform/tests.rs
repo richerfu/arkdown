@@ -378,6 +378,43 @@ fn test_transforms_entry_component_with_hvigor_route_registration() {
 }
 
 #[test]
+fn test_entry_route_registration_is_emitted_after_sibling_components() {
+    let src = r#"
+@Entry
+@Component
+struct SplashPage {
+  build() {
+    ImgItem()
+  }
+}
+
+@Component
+struct ImgItem {
+  build() {}
+}
+"#;
+    let result = transform_ets(&make_source(
+        "products/phone/src/main/ets/pages/SplashPage.ets",
+        src,
+    ))
+    .unwrap();
+    let splash = result.find("class SplashPage extends ViewPU").unwrap();
+    let img = result.find("class ImgItem extends ViewPU").unwrap();
+    let route = result
+        .find("registerNamedRoute(() => new SplashPage")
+        .unwrap();
+
+    assert!(
+        splash < img,
+        "component class order must follow source order"
+    );
+    assert!(
+        img < route,
+        "entry route registration must be emitted after sibling component classes like hvigor"
+    );
+}
+
+#[test]
 fn test_minimal_index_component_lowers_arkui_semantics() {
     let src =
         include_str!("../../../../tests/fixtures/minimal-hap/entry/src/main/ets/pages/Index.ets");

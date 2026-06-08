@@ -52,7 +52,7 @@ use crate::transform::declaration_emit::{
 use crate::transform::decorator::{
     decorator_arg_text, decorator_name, decorator_string_arg, is_state_decorator,
 };
-use crate::transform::entry::EntryRegistrationInfo;
+use crate::transform::entry::{EntryRegistrationBlock, EntryRegistrationInfo};
 use crate::transform::global_rewrite::rewrite_global_context_calls_in_function_text;
 use crate::transform::source_text::{
     balanced_method_text, component_replacement_start, decorator_first_arg_text,
@@ -173,6 +173,7 @@ pub fn transform_ets_with_options(
     let builder_functions = collect_builder_function_names(&parsed.program, &source.id.id, options);
 
     let mut patches = Vec::new();
+    let mut entry_registrations = EntryRegistrationBlock::default();
     let mut transformed_any = false;
 
     for statement in &parsed.program.body {
@@ -189,6 +190,9 @@ pub fn transform_ets_with_options(
             &hvigor_source_id,
         )? {
             let start = component_replacement_start(statement, content);
+            if let Some(registration) = component.entry_registration_code() {
+                entry_registrations.push(registration);
+            }
             patches.push(SourcePatch {
                 start,
                 end: span.end as usize,
@@ -219,6 +223,7 @@ pub fn transform_ets_with_options(
         while out.ends_with("\n\n") {
             out.pop();
         }
+        entry_registrations.append_to(&mut out);
         Ok(finalize_viewpu_output(&out))
     } else {
         Ok(content.clone())

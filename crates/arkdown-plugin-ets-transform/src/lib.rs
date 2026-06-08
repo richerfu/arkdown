@@ -55,9 +55,11 @@ use rolldown_plugin::{
 };
 use rolldown_sourcemap::SourceMap as RolldownSourceMap;
 
-pub use module_rewrite::rewrite_static_module_specifiers_with;
 #[cfg(test)]
 pub(crate) use module_rewrite::{exported_binding_kinds, ExportBindingKind};
+pub use module_rewrite::{
+    rewrite_static_module_specifiers_with, rewrite_value_static_module_specifiers_with,
+};
 pub use resource_transform::ResourceReference;
 pub(crate) use source_edit::{
     apply_source_patches, apply_source_patches_with_offsets, module_export_name_text, SourcePatch,

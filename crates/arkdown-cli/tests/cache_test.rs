@@ -361,6 +361,7 @@ fn run_pipeline(fixture: &Path) -> PathBuf {
                 target_api_version: config.sdk_config.compile_api_version,
                 target_api_sub_version: None,
                 enable_annotations: false,
+                use_define_semantic: false,
                 debug_info: true,
                 opt_level: 0,
                 optimize_try_catch_func: true,

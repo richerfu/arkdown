@@ -22,7 +22,7 @@ use arkdown_obfuscate::{should_obfuscate, ObfuscationOptions, Obfuscator};
 use arkdown_pack::{HarPackInput, PackAbility, PackInput, Packager};
 use arkdown_plugin_duplicate_check::DuplicateCheckPlugin;
 use arkdown_plugin_ets_transform::{
-    load_system_resource_references, rewrite_static_module_specifiers_with,
+    load_system_resource_references, rewrite_value_static_module_specifiers_with,
     transform::collect_arkui_component_names, EtsTransformPlugin, ResourceReference,
 };
 use arkdown_plugin_json5::Json5Plugin;
@@ -33,7 +33,7 @@ use arkdown_plugin_ohos_resolve::{
 use arkdown_profile::{
     scan_bytecode_har_deps, ByteCodeHarEntry, ByteCodeHarScanEntry, ProfileProcessor,
 };
-use arkdown_resolver::ResolverConfig;
+use arkdown_resolver::{OhosResolver, ResolverConfig};
 use arkdown_resource::{ResourceCompileConfig, ResourceCompileInput, ResourceCompiler};
 use arkdown_sign::HapSigner;
 use arkdown_ts2abc::{compile_to_abc, Ts2abcInput};
@@ -55,7 +55,7 @@ use compile_arkts_handoff::{
 mod compile_arkts_modules;
 use compile_arkts_modules::{
     compile_source_passthrough, module_id_to_source_path, rewrite_compile_module_imports_to_ohm,
-    CompileModuleInfo,
+    CompileModuleImportResolver, CompileModuleInfo,
 };
 mod compile_arkts_output;
 use compile_arkts_output::{
@@ -881,28 +881,29 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             }
         };
 
-        let ohos_resolve_plugin = Arc::new(OhosResolvePlugin::new(
-            ResolverConfig {
-                project_root: project_root.clone(),
-                sdk_api_dirs: config_arc.sdk_config.ets_api_dirs(),
-                sdk_kits_dirs: config_arc.sdk_config.ets_kits_dirs(),
-                pkg_name_to_pkg_info: FxHashMap::default(),
-                use_normalized_ohm_url: config_arc
-                    .product
-                    .build_option
-                    .strict_mode
-                    .use_normalized_ohm_url,
-                case_sensitive_check: config_arc
-                    .product
-                    .build_option
-                    .strict_mode
-                    .case_sensitive_check,
-                oh_modules_roots: vec![
-                    module.src_path.join("oh_modules"),
-                    project_root.join("oh_modules"),
-                ],
-                source_set_overlays,
-            },
+        let ohos_resolver = Arc::new(OhosResolver::new(ResolverConfig {
+            project_root: project_root.clone(),
+            sdk_api_dirs: config_arc.sdk_config.ets_api_dirs(),
+            sdk_kits_dirs: config_arc.sdk_config.ets_kits_dirs(),
+            pkg_name_to_pkg_info: FxHashMap::default(),
+            use_normalized_ohm_url: config_arc
+                .product
+                .build_option
+                .strict_mode
+                .use_normalized_ohm_url,
+            case_sensitive_check: config_arc
+                .product
+                .build_option
+                .strict_mode
+                .case_sensitive_check,
+            oh_modules_roots: vec![
+                module.src_path.join("oh_modules"),
+                project_root.join("oh_modules"),
+            ],
+            source_set_overlays,
+        }));
+        let ohos_resolve_plugin = Arc::new(OhosResolvePlugin::with_resolver(
+            ohos_resolver.clone(),
             project_root.clone(),
             config_arc
                 .product
@@ -992,6 +993,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             &config_arc,
             resource_refs,
             &resolved_imports,
+            ohos_resolver,
         )
         .write(&bundle_out.chunk_graph, &widget_sources)?;
         bundle_outs.push((bundle_out, false));
@@ -1287,10 +1289,13 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                 ))
             })
             .collect();
-        let compile_arkts_handoff = compile_arkts_handoffs_by_bundle
+        let mut compile_arkts_handoff = compile_arkts_handoffs_by_bundle
             .get(bundle_index)
             .cloned()
             .unwrap_or_default();
+        if disable_abc_cache {
+            compile_arkts_handoff = compile_arkts_handoff.without_program_cache();
+        }
         let modules_cache_path = compile_arkts_handoff.modules_cache_path.clone();
         // --cache-file CLI override takes precedence over the automatically derived
         // per-module cache path from the handoff. This matches upstream es2abc
@@ -1336,6 +1341,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                     .get(bundle_index)
                     .map(Vec::as_slice)
                     .unwrap_or(&[]),
+                disable_abc_cache,
             )?;
 
             // H13: ArkData compile pass — separate ABC invocation for cloud

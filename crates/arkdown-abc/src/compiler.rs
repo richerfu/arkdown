@@ -17,6 +17,7 @@ use crate::emit::file::{version_for_target_api, AbcFile};
 use crate::emit::record::{ClassRecord, FieldRecord, FieldType, FieldValue, FIELD_OWNER_CLASS_IDX};
 use crate::error::AbcError;
 use crate::ir::builder;
+use crate::ir::record_layout::is_explicit_ecmascript_source_file;
 use crate::npm_entries::load_npm_entry_records;
 use crate::optimizer::{optimize_records, BytecodeOptimizerOptions};
 use crate::program_cache::{append_program_to_file, program_for_file};
@@ -38,6 +39,13 @@ pub struct AbcCompileOptions {
     pub target_api_sub_version: Option<String>,
     /// Match upstream `--enable-annotations`, effective only for API 20+.
     pub enable_annotations: bool,
+    /// Match upstream `--use-define-semantic`.
+    ///
+    /// DevEco 6.0 es2abc defaults this to false. With the default value,
+    /// non-static public class fields are not lowered through class instance
+    /// initializers because the ArkTS/TypeScript frontend has already lowered
+    /// them into constructor assignments.
+    pub use_define_semantic: bool,
     /// Merge all records into a single `.abc` output file.
     pub merge_abc: bool,
     /// Parse and lower inputs as ECMAScript modules, matching upstream
@@ -193,10 +201,6 @@ fn source_file_from_record_name(record_name: &str) -> String {
             .unwrap_or(record_name)
             .to_string()
     })
-}
-
-fn is_explicit_ecmascript_source_file(source_file: &str) -> bool {
-    !source_file.contains('|') && (source_file.ends_with(".js") || source_file.ends_with(".ts"))
 }
 
 fn non_merge_metadata_records(
@@ -836,10 +840,14 @@ impl AbcCompiler {
             // --debug-info is not supplied. The debug flag controls the amount
             // of debug payload, not whether methods have source-file-backed
             // LNP records at all.
-            let standalone_ecmascript_input = module
-                .source_file
-                .as_deref()
-                .is_some_and(is_explicit_ecmascript_source_file);
+            let standalone_ecmascript_input = match module.origin_source_lang.as_str() {
+                "ets" => false,
+                "ts" | "js" => true,
+                _ => module
+                    .source_file
+                    .as_deref()
+                    .is_some_and(is_explicit_ecmascript_source_file),
+            };
             let source_file = module
                 .source_file
                 .as_deref()
@@ -862,6 +870,7 @@ impl AbcCompiler {
                 self.options.enable_annotations,
                 effective_debug_info,
                 standalone_ecmascript_input,
+                self.options.use_define_semantic,
             )?;
             if !self.options.merge_abc {
                 for metadata_record in non_merge_metadata_records(

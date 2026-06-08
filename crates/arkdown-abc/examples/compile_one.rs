@@ -18,6 +18,7 @@ fn main() {
         target_api_version: 18,
         target_api_sub_version: None,
         enable_annotations: false,
+        use_define_semantic: false,
         merge_abc: true,
         module: true,
         module_record_field_name: None,

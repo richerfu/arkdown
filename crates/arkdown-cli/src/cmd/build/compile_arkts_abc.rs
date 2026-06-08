@@ -8,6 +8,7 @@ pub(super) struct AbcCompilePlan {
     target_api_version: u32,
     target_api_sub_version: Option<String>,
     enable_annotations: bool,
+    use_define_semantic: bool,
     debug_info: bool,
     opt_level: u8,
 }
@@ -29,6 +30,7 @@ impl AbcCompilePlan {
             // to true and passes `--enable-annotations` for esmodule builds. The
             // ABC backend still gates annotation records by target API.
             enable_annotations: true,
+            use_define_semantic: false,
             debug_info: matches!(config.build_mode, BuildMode::Debug),
             opt_level: if matches!(config.build_mode, BuildMode::Release) {
                 2
@@ -45,6 +47,7 @@ impl AbcCompilePlan {
             target_api_version: self.target_api_version,
             target_api_sub_version: self.target_api_sub_version.clone(),
             enable_annotations: self.enable_annotations,
+            use_define_semantic: false,
             debug_info: self.debug_info,
             opt_level: self.opt_level,
             optimize_try_catch_func: true,

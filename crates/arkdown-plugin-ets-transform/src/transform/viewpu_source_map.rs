@@ -16,6 +16,7 @@ use crate::transform::component_analysis::{
     collect_builder_function_names, collect_custom_component_names,
     collect_imported_component_names, collect_local_component_update_props, SimpleTypeContext,
 };
+use crate::transform::entry::EntryRegistrationBlock;
 use crate::transform::viewpu_finalize::finalize_viewpu_output;
 use crate::{apply_source_patches_with_offsets, SourcePatch};
 
@@ -88,6 +89,7 @@ pub fn transform_ets_viewpu_with_source_map(
 
     let mut patches = Vec::new();
     let mut struct_results: Vec<StructResult> = Vec::new();
+    let mut entry_registrations = EntryRegistrationBlock::default();
     let mut transformed_any = false;
 
     for statement in &parsed.program.body {
@@ -105,6 +107,9 @@ pub fn transform_ets_viewpu_with_source_map(
         )? {
             let start = component_replacement_start(statement, content);
             let span_hints = component.initial_render_span_hints.clone();
+            if let Some(registration) = component.entry_registration_code() {
+                entry_registrations.push(registration);
+            }
             let viewpu_code = generate_view_pu_class(&component);
             let (class_line_in_viewpu, class_line_text) =
                 viewpu_class_line_marker(&viewpu_code).unwrap_or((0, String::new()));
@@ -168,6 +173,7 @@ pub fn transform_ets_viewpu_with_source_map(
     while out.ends_with("\n\n") {
         out.pop();
     }
+    entry_registrations.append_to(&mut out);
     out = finalize_viewpu_output(&out);
 
     let mut entries: Vec<MapEntry> = Vec::new();

@@ -20,6 +20,16 @@ pub(super) struct CompileArkTsHandoff {
     pub(super) modules_cache_path: Option<PathBuf>,
 }
 
+impl CompileArkTsHandoff {
+    pub(super) fn without_program_cache(mut self) -> Self {
+        for input in &mut self.inputs {
+            input.cache_file = None;
+        }
+        self.modules_cache_path = None;
+        self
+    }
+}
+
 pub(super) fn write_compile_arkts_abc_handoff(
     cache_root: &Path,
     infos: &[CompileArkTsInfo],

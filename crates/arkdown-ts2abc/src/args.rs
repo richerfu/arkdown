@@ -42,6 +42,7 @@ struct ArgParser {
     target_api_version: u32,
     target_api_sub_version: Option<String>,
     enable_annotations: bool,
+    use_define_semantic: bool,
     output: Option<PathBuf>,
     default_output_source: Option<PathBuf>,
     record_name: Option<String>,
@@ -80,6 +81,7 @@ impl ArgParser {
             target_api_version: DEFAULT_TARGET_API_VERSION,
             target_api_sub_version: None,
             enable_annotations: false,
+            use_define_semantic: false,
             output: None,
             default_output_source: None,
             record_name: None,
@@ -182,6 +184,7 @@ impl ArgParser {
             target_api_version: self.target_api_version,
             target_api_sub_version: self.target_api_sub_version.clone(),
             enable_annotations: self.enable_annotations,
+            use_define_semantic: false,
             debug_info: self.debug_info,
             opt_level: self.opt_level,
             optimize_try_catch_func: self.optimize_try_catch_func,
@@ -323,13 +326,14 @@ impl ArgParser {
             }
             "--enable-abc-input" => self.enable_abc_input = true,
             "--enable-annotations" => self.enable_annotations = true,
+            "--use-define-semantic" => self.use_define_semantic = true,
             "--dump-deps-info" => self.dump_deps_info = true,
             "--remove-redundant-file" => self.remove_redundant_file = true,
             "--module-record-field-name" => {
                 self.module_record_field_name = Some(self.value(flag, value)?);
             }
             // No-op flags: accepted by upstream, accepted here without action.
-            "--enable-release-column" | "--use-define-semantic" => {}
+            "--enable-release-column" => {}
             _ => return Err(Ts2abcError::UnsupportedFlag(flag.to_string())),
         }
         Ok(())

@@ -1,10 +1,15 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use oxc_ast::ast::{
-    Argument, ArrowFunctionExpression, AssignmentTarget, BindingPattern, ClassElement, Declaration,
+    Argument, ArrowFunctionExpression, AssignmentTarget, BindingPattern, CallExpression,
+    ChainElement, ChainExpression, ClassElement, ComputedMemberExpression, Declaration,
     ExportDefaultDeclarationKind, Expression, Function, MethodDefinition, MethodDefinitionKind,
-    ObjectPropertyKind, Program, PropertyKey, Statement,
+    ObjectPropertyKind, PrivateFieldExpression, Program, PropertyKey, Statement,
+    StaticMemberExpression,
 };
+
+use crate::ir::class_layout::{class_needs_static_initializer, ClassStaticInitializationMode};
+
 const FNV_PRIME: u64 = 1_099_511_628_211;
 const FNV_OFFSET: u64 = 14_695_981_039_346_656_037;
 
@@ -41,12 +46,14 @@ pub(super) fn collect_function_records<'a>(
     stmts: &'a [Statement<'a>],
     names: &mut FunctionNameAllocator<'a>,
     standalone_ecmascript_input: bool,
+    static_initialization_mode: ClassStaticInitializationMode,
 ) -> Vec<FunctionRecord<'a>> {
     let mut collector = FunctionRecordCollector {
         names,
         records: Vec::new(),
         seen_spans: FxHashSet::default(),
         standalone_ecmascript_input,
+        static_initialization_mode,
         standalone_class_stack: Vec::new(),
         standalone_method_depth: 0,
     };
@@ -68,6 +75,7 @@ struct FunctionRecordCollector<'a, 'names> {
     records: Vec<FunctionRecord<'a>>,
     seen_spans: FxHashSet<(u32, u32)>,
     standalone_ecmascript_input: bool,
+    static_initialization_mode: ClassStaticInitializationMode,
     standalone_class_stack: Vec<StandaloneClassFunctionContext>,
     standalone_method_depth: usize,
 }
@@ -87,6 +95,8 @@ pub(super) struct FunctionNameAllocator<'a> {
     scope_names: Vec<String>,
     class_scopes: FxHashMap<(u32, u32), ScopeFrame>,
     class_method_names: FxHashMap<(u32, u32), String>,
+    default_constructor_names: FxHashMap<(u32, u32), String>,
+    static_initializer_names: FxHashMap<(u32, u32), String>,
     scoped_functions: FxHashMap<(u32, u32), ScopedFunction>,
     scope_stack: Vec<ScopeFrame>,
     source: Option<&'a str>,
@@ -117,6 +127,8 @@ impl<'a> FunctionNameAllocator<'a> {
             scope_names: Vec::new(),
             class_scopes: FxHashMap::default(),
             class_method_names: FxHashMap::default(),
+            default_constructor_names: FxHashMap::default(),
+            static_initializer_names: FxHashMap::default(),
             scoped_functions: FxHashMap::default(),
             scope_stack: Vec::new(),
             source: Some(source),
@@ -243,6 +255,27 @@ impl<'a> FunctionNameAllocator<'a> {
         Some(name)
     }
 
+    pub(super) fn bind_inferred_class_method(
+        &mut self,
+        method: &MethodDefinition<'_>,
+        class_name: &str,
+    ) -> Option<String> {
+        if self.use_scope_info_names {
+            return None;
+        }
+        let inferred_name = class_method_scope_name(method, class_name)?;
+        let name = self.bind(
+            method.value.span.start,
+            method.value.span.end,
+            Some(&inferred_name),
+        );
+        self.class_method_names.insert(
+            (method.value.span.start, method.value.span.end),
+            name.clone(),
+        );
+        Some(name)
+    }
+
     pub(super) fn class_method_name(&self, start: u32, end: u32) -> Option<&str> {
         self.class_method_names
             .get(&(start, end))
@@ -254,19 +287,46 @@ impl<'a> FunctionNameAllocator<'a> {
         class_span: (u32, u32),
         class_name: &str,
     ) -> Option<String> {
+        if let Some(name) = self.default_constructor_names.get(&class_span) {
+            return Some(name.clone());
+        }
         if !self.use_scope_info_names {
-            return None;
+            let name = self.bind(0, 0, Some(class_name));
+            self.default_constructor_names
+                .insert(class_span, name.clone());
+            return Some(name);
         }
         let class_scope = self.class_scopes.get(&class_span)?;
         let class_full_name = class_scope.full_name.clone();
         let class_name = scope_self_name(class_name);
         let duplicate_index = self.duplicate_index_for_class_child(class_span, '=', &class_name);
-        Some(scoped_internal_name(
-            &class_full_name,
-            '=',
-            &class_name,
-            duplicate_index,
-        ))
+        let name = scoped_internal_name(&class_full_name, '=', &class_name, duplicate_index);
+        self.default_constructor_names
+            .insert(class_span, name.clone());
+        Some(name)
+    }
+
+    pub(super) fn static_initializer_name(
+        &mut self,
+        class_span: (u32, u32),
+        class_name: &str,
+    ) -> Option<String> {
+        if let Some(name) = self.static_initializer_names.get(&class_span) {
+            return Some(name.clone());
+        }
+        let name = if self.use_scope_info_names {
+            let class_scope = self.class_scopes.get(&class_span)?;
+            let class_full_name = class_scope.full_name.clone();
+            let initializer_name = "static_initializer";
+            let duplicate_index =
+                self.duplicate_index_for_class_child(class_span, '>', initializer_name);
+            scoped_internal_name(&class_full_name, '>', initializer_name, duplicate_index)
+        } else {
+            format!("#~{class_name}>#static_initializer")
+        };
+        self.static_initializer_names
+            .insert(class_span, name.clone());
+        Some(name)
     }
 
     pub(super) fn class_method_names_by_span(
@@ -277,8 +337,44 @@ impl<'a> FunctionNameAllocator<'a> {
             .map(|(span, name)| (*span, name.clone()))
     }
 
+    pub(super) fn static_initializer_names_by_class_span(
+        &self,
+    ) -> impl Iterator<Item = ((u32, u32), String)> + '_ {
+        self.static_initializer_names
+            .iter()
+            .map(|(span, name)| (*span, name.clone()))
+    }
+
+    pub(super) fn default_constructor_names_by_class_span(
+        &self,
+    ) -> impl Iterator<Item = ((u32, u32), String)> + '_ {
+        self.default_constructor_names
+            .iter()
+            .map(|(span, name)| (*span, name.clone()))
+    }
+
     pub(super) fn scope_names(&self) -> &[String] {
         &self.scope_names
+    }
+
+    pub(super) fn enter_commonjs_wrapper_scope(&mut self) -> bool {
+        if !self.use_scope_info_names {
+            return false;
+        }
+        self.scope_stack.push(ScopeFrame {
+            // Scope frames store the path without the leading `#`. The
+            // synthetic CommonJS wrapper method is `#*#`, so children use `*`
+            // as their parent path and become names such as `#**#factory`.
+            full_name: "*".to_string(),
+            child_duplicate_indices: FxHashMap::default(),
+        });
+        true
+    }
+
+    pub(super) fn exit_commonjs_wrapper_scope(&mut self) {
+        if self.use_scope_info_names {
+            self.scope_stack.pop();
+        }
     }
 
     fn bind_scoped_function(&mut self, start: u32, end: u32, name: Option<&str>) -> String {
@@ -556,10 +652,7 @@ impl<'a, 'names> FunctionRecordCollector<'a, 'names> {
                 self.scan_expr(&assign.right, inferred);
             }
             Expression::CallExpression(call) => {
-                self.scan_expr(&call.callee, None);
-                for argument in &call.arguments {
-                    self.scan_argument(argument);
-                }
+                self.scan_call_expression(call);
             }
             Expression::NewExpression(new_expr) => {
                 self.scan_expr(&new_expr.callee, None);
@@ -612,12 +705,18 @@ impl<'a, 'names> FunctionRecordCollector<'a, 'names> {
                 self.scan_expr(&expr.left, None);
                 self.scan_expr(&expr.right, None);
             }
+            Expression::AwaitExpression(expr) => self.scan_expr(&expr.argument, None),
+            Expression::ImportExpression(expr) => self.scan_expr(&expr.source, None),
+            Expression::TaggedTemplateExpression(expr) => self.scan_expr(&expr.tag, None),
             Expression::UnaryExpression(expr) => self.scan_expr(&expr.argument, None),
             Expression::UpdateExpression(_) => {}
             Expression::ParenthesizedExpression(expr) => {
                 self.scan_expr(&expr.expression, inferred_name);
             }
-            Expression::ChainExpression(_) => {}
+            Expression::ChainExpression(chain) => self.scan_chain_expression(chain),
+            Expression::ComputedMemberExpression(member) => self.scan_computed_member(member),
+            Expression::StaticMemberExpression(member) => self.scan_static_member(member),
+            Expression::PrivateFieldExpression(member) => self.scan_private_field(member),
             Expression::ClassExpression(class) => {
                 self.scan_class_elements(
                     class
@@ -636,9 +735,46 @@ impl<'a, 'names> FunctionRecordCollector<'a, 'names> {
             Expression::TSNonNullExpression(expr) => {
                 self.scan_expr(&expr.expression, inferred_name)
             }
+            Expression::TSInstantiationExpression(expr) => {
+                self.scan_expr(&expr.expression, inferred_name)
+            }
             Expression::TSTypeAssertion(expr) => self.scan_expr(&expr.expression, inferred_name),
             _ => {}
         }
+    }
+
+    fn scan_call_expression(&mut self, call: &'a CallExpression<'a>) {
+        self.scan_expr(&call.callee, None);
+        for argument in &call.arguments {
+            self.scan_argument(argument);
+        }
+    }
+
+    fn scan_chain_expression(&mut self, chain: &'a ChainExpression<'a>) {
+        self.scan_chain_element(&chain.expression);
+    }
+
+    fn scan_chain_element(&mut self, element: &'a ChainElement<'a>) {
+        match element {
+            ChainElement::CallExpression(call) => self.scan_call_expression(call),
+            ChainElement::TSNonNullExpression(expr) => self.scan_expr(&expr.expression, None),
+            ChainElement::ComputedMemberExpression(member) => self.scan_computed_member(member),
+            ChainElement::StaticMemberExpression(member) => self.scan_static_member(member),
+            ChainElement::PrivateFieldExpression(member) => self.scan_private_field(member),
+        }
+    }
+
+    fn scan_computed_member(&mut self, member: &'a ComputedMemberExpression<'a>) {
+        self.scan_expr(&member.object, None);
+        self.scan_expr(&member.expression, None);
+    }
+
+    fn scan_static_member(&mut self, member: &'a StaticMemberExpression<'a>) {
+        self.scan_expr(&member.object, None);
+    }
+
+    fn scan_private_field(&mut self, member: &'a PrivateFieldExpression<'a>) {
+        self.scan_expr(&member.object, None);
     }
 
     fn scan_argument(&mut self, argument: &'a Argument<'a>) {
@@ -654,9 +790,21 @@ impl<'a, 'names> FunctionRecordCollector<'a, 'names> {
         elements: &'a [ClassElement<'a>],
     ) {
         let class_scope_pushed = self.names.enter_class_scope(class_span, class_name);
+        let class_name = class_name.unwrap_or("_");
+        if !class_has_constructor(elements)
+            && (!self.standalone_ecmascript_input || self.names.uses_scope_info_names())
+        {
+            self.names.default_constructor_name(class_span, class_name);
+        }
+        if self
+            .static_initialization_mode
+            .uses_external_initializer_method()
+            && class_needs_static_initializer(elements)
+        {
+            self.names.static_initializer_name(class_span, class_name);
+        }
 
         let pushed_context = if self.standalone_ecmascript_input {
-            let class_name = class_name.unwrap_or("_");
             self.standalone_class_stack
                 .push(StandaloneClassFunctionContext {
                     class_name: class_name.to_string(),
@@ -669,8 +817,11 @@ impl<'a, 'names> FunctionRecordCollector<'a, 'names> {
         for element in elements {
             match element {
                 ClassElement::MethodDefinition(method) => {
-                    let class_name = class_name.unwrap_or("_");
-                    self.names.bind_class_method(class_span, method, class_name);
+                    if self.names.uses_scope_info_names() {
+                        self.names.bind_class_method(class_span, method, class_name);
+                    } else if !self.standalone_ecmascript_input {
+                        self.names.bind_inferred_class_method(method, class_name);
+                    }
                     self.standalone_method_depth = self.standalone_method_depth.saturating_add(1);
                     let method_scope_pushed = self.names.uses_scope_info_names()
                         && method
@@ -939,10 +1090,7 @@ fn expr_contains_function_like(expr: &Expression<'_>) -> bool {
         Expression::FunctionExpression(function) => !is_type_only_function(function),
         Expression::ArrowFunctionExpression(_) | Expression::ClassExpression(_) => true,
         Expression::AssignmentExpression(assign) => expr_contains_function_like(&assign.right),
-        Expression::CallExpression(call) => {
-            expr_contains_function_like(&call.callee)
-                || call.arguments.iter().any(argument_contains_function_like)
-        }
+        Expression::CallExpression(call) => call_contains_function_like(call),
         Expression::NewExpression(new_expr) => {
             expr_contains_function_like(&new_expr.callee)
                 || new_expr
@@ -979,13 +1127,48 @@ fn expr_contains_function_like(expr: &Expression<'_>) -> bool {
         Expression::LogicalExpression(expr) => {
             expr_contains_function_like(&expr.left) || expr_contains_function_like(&expr.right)
         }
+        Expression::AwaitExpression(expr) => expr_contains_function_like(&expr.argument),
+        Expression::ImportExpression(expr) => expr_contains_function_like(&expr.source),
+        Expression::TaggedTemplateExpression(expr) => expr_contains_function_like(&expr.tag),
         Expression::UnaryExpression(expr) => expr_contains_function_like(&expr.argument),
         Expression::ParenthesizedExpression(expr) => expr_contains_function_like(&expr.expression),
+        Expression::ChainExpression(chain) => chain_contains_function_like(chain),
+        Expression::ComputedMemberExpression(member) => {
+            expr_contains_function_like(&member.object)
+                || expr_contains_function_like(&member.expression)
+        }
+        Expression::StaticMemberExpression(member) => expr_contains_function_like(&member.object),
+        Expression::PrivateFieldExpression(member) => expr_contains_function_like(&member.object),
         Expression::TSAsExpression(expr) => expr_contains_function_like(&expr.expression),
         Expression::TSSatisfiesExpression(expr) => expr_contains_function_like(&expr.expression),
         Expression::TSNonNullExpression(expr) => expr_contains_function_like(&expr.expression),
+        Expression::TSInstantiationExpression(expr) => {
+            expr_contains_function_like(&expr.expression)
+        }
         Expression::TSTypeAssertion(expr) => expr_contains_function_like(&expr.expression),
         _ => false,
+    }
+}
+
+fn call_contains_function_like(call: &CallExpression<'_>) -> bool {
+    expr_contains_function_like(&call.callee)
+        || call.arguments.iter().any(argument_contains_function_like)
+}
+
+fn chain_contains_function_like(chain: &ChainExpression<'_>) -> bool {
+    chain_element_contains_function_like(&chain.expression)
+}
+
+fn chain_element_contains_function_like(element: &ChainElement<'_>) -> bool {
+    match element {
+        ChainElement::CallExpression(call) => call_contains_function_like(call),
+        ChainElement::TSNonNullExpression(expr) => expr_contains_function_like(&expr.expression),
+        ChainElement::ComputedMemberExpression(member) => {
+            expr_contains_function_like(&member.object)
+                || expr_contains_function_like(&member.expression)
+        }
+        ChainElement::StaticMemberExpression(member) => expr_contains_function_like(&member.object),
+        ChainElement::PrivateFieldExpression(member) => expr_contains_function_like(&member.object),
     }
 }
 
@@ -1021,6 +1204,16 @@ fn property_key_name<'a>(key: &'a PropertyKey<'a>) -> Option<&'a str> {
         PropertyKey::StringLiteral(literal) => Some(literal.value.as_str()),
         _ => None,
     }
+}
+
+fn class_has_constructor(elements: &[ClassElement<'_>]) -> bool {
+    elements.iter().any(|element| {
+        matches!(
+            element,
+            ClassElement::MethodDefinition(method)
+                if method.kind == MethodDefinitionKind::Constructor
+        )
+    })
 }
 
 fn class_method_scope_tag(method: &MethodDefinition<'_>) -> char {

@@ -6,13 +6,13 @@ use oxc_ast::ast::{
     AnnotationDeclaration, AnnotationElement, Argument, ArrayAssignmentTarget,
     ArrayExpressionElement, ArrayPattern, AssignmentOperator, AssignmentTarget,
     AssignmentTargetMaybeDefault, AssignmentTargetProperty, BindingPattern, ClassElement,
-    Declaration, Decorator, ExportDefaultDeclarationKind, Expression, ForInStatement,
+    CallExpression, Declaration, Decorator, ExportDefaultDeclarationKind, Expression, ForInStatement,
     ForOfStatement, ForStatementLeft, FormalParameter, Function, FunctionBody,
     ImportDeclarationSpecifier, ImportOrExportKind, LogicalOperator, MethodDefinitionKind,
     NewExpression, ObjectAssignmentTarget, ObjectPattern, ObjectPropertyKind, Program, PropertyKey,
     SimpleAssignmentTarget, Statement, TSEnumDeclaration, TSEnumMemberName,
     TSImportEqualsDeclaration, TSModuleDeclaration, TSModuleReference, TSQualifiedName, TSType,
-    TSTypeName, UnaryOperator, UpdateExpression, YieldExpression,
+    TSTypeName, UnaryOperator, UpdateExpression, VariableDeclarationKind, YieldExpression,
 };
 use oxc_ast_visit::{walk, Visit};
 use oxc_parser::{Parser, ParserReturn};
@@ -34,23 +34,33 @@ use crate::ir::ast_analysis::{
     is_undefined_literal, negative_integer_literal, stmts_capture_this_in_arrow, ArrowCaptures,
 };
 use crate::ir::class_layout::{
-    class_buffer_literal_array, class_method_num_args, class_method_record_name,
-    class_method_upstream_name, class_private_methods_literal_array,
-    computed_class_method_record_name, computed_instance_class_field_key_name,
-    constructor_required_param_count, is_class_buffer_method, method_key_name,
-    static_initializer_record_name,
+    accessor_needs_instance_initializer, class_method_num_args, class_method_record_name,
+    class_method_upstream_name, class_needs_instance_initializer, class_needs_static_initializer,
+    class_private_methods_literal_array, class_requires_external_instance_initializer,
+    computed_class_method_record_name, constructor_required_param_count,
+    method_is_instance_private, method_key_name, property_needs_instance_initializer,
+    property_needs_constructor_assignment, property_needs_static_initializer,
+    static_initializer_record_name, ClassPublicBuffer, ClassStaticInitializationMode,
+    DEFAULT_USE_DEFINE_SEMANTIC,
 };
 use crate::ir::debug_lnp::{argument_span_start, col_at, line_at, LineTracker, SourceMapper};
-use crate::ir::function_lexical::collect_function_lexical_bindings;
+use crate::ir::function_lexical::{
+    collect_function_lexical_bindings, FunctionLexicalBinding, FunctionLexicalBindingKind,
+};
 use crate::ir::function_records::{
     collect_function_records, FunctionNameAllocator, FunctionRecord, FunctionRecordFlavor,
     FunctionRecordNode,
 };
 use crate::ir::lowering_context::{is_default_api_version_for, LoweringContext};
-use crate::ir::module_lexical::collect_module_lexical_bindings;
-use crate::ir::module_record::{collect_module_record, DEFAULT_LOCAL_NAME};
+use crate::ir::module_lexical::{
+    collect_commonjs_wrapper_lexical_bindings, collect_module_lexical_bindings,
+    split_scoped_class_lexical_bindings,
+};
+use crate::ir::module_record::{collect_module_record, ModuleRecordInfo, DEFAULT_LOCAL_NAME};
 use crate::ir::opcodes::Insn;
-use crate::ir::record_layout::{is_explicit_ecmascript_source_file, RecordLayout};
+use crate::ir::record_layout::{
+    is_ets_source_file, is_explicit_ecmascript_source_file, is_typescript_source_file, RecordLayout,
+};
 use crate::names::pandasm_record_name;
 
 const ARG_SENTINEL_BASE: u8 = 192;
@@ -59,6 +69,11 @@ const MANDATORY_PARAM_FUNCTION_REG: u8 = ARG_SENTINEL_BASE;
 const MANDATORY_PARAM_NEW_TARGET_REG: u8 = ARG_SENTINEL_BASE + 1;
 const MANDATORY_PARAM_THIS_REG: u8 = ARG_SENTINEL_BASE + 2;
 const MAX_RANGE_CALL_ARG: usize = 128;
+const COMMONJS_WRAPPER_METHOD_NAME: &str = "#*#";
+const COMMONJS_WRAPPER_FORMAL_COUNT: u8 = 5;
+const COMMONJS_MAIN_ARG_COUNT: u16 = 8;
+const COMMONJS_WRAPPER_PARAM_NAMES: [&str; 5] =
+    ["exports", "require", "module", "__filename", "__dirname"];
 
 fn is_type_only_function(func: &Function<'_>) -> bool {
     func.declare || func.body.is_none()
@@ -179,6 +194,7 @@ pub fn build_record_with_debug_and_package_for_target(
         false,
         source_file.is_some(),
         source_file.is_some_and(is_explicit_ecmascript_source_file),
+        DEFAULT_USE_DEFINE_SEMANTIC,
     )
 }
 
@@ -199,6 +215,7 @@ pub fn build_record_with_debug_and_package_for_target_with_mode(
     enable_annotations: bool,
     emit_debugger: bool,
     standalone_ecmascript_input: bool,
+    use_define_semantic: bool,
 ) -> Result<ClassRecord, AbcError> {
     build_record_with_debug_and_source_map_for_target_with_mode(
         source,
@@ -217,6 +234,7 @@ pub fn build_record_with_debug_and_package_for_target_with_mode(
         enable_annotations,
         emit_debugger,
         standalone_ecmascript_input,
+        use_define_semantic,
     )
 }
 
@@ -277,6 +295,7 @@ pub fn build_record_with_debug_and_source_map_for_target(
         false,
         source_file.is_some(),
         source_file.is_some_and(is_explicit_ecmascript_source_file),
+        DEFAULT_USE_DEFINE_SEMANTIC,
     )
 }
 
@@ -298,6 +317,7 @@ pub fn build_record_with_debug_and_source_map_for_target_with_mode(
     enable_annotations: bool,
     emit_debugger: bool,
     standalone_ecmascript_input: bool,
+    use_define_semantic: bool,
 ) -> Result<ClassRecord, AbcError> {
     let source_mapper = SourceMapper::from_json(source_map);
     let source_mapper = source_mapper.as_ref();
@@ -308,15 +328,26 @@ pub fn build_record_with_debug_and_source_map_for_target_with_mode(
     // Use ETS source type when the source file is a `.ets` file so that
     // ArkTS-specific syntax (AnnotationDeclaration, StructStatement, etc.)
     // is parsed correctly.  Plain `.ts`/`.js` sources use the standard TS type.
+    let is_arkts_origin = origin_source_lang == "ets";
     let is_ets = source_file
         .or(Some(record_name))
-        .map(|s| s.ends_with(".ets"))
-        .unwrap_or(false);
+        .is_some_and(is_ets_source_file);
+    let is_explicit_ts = origin_source_lang == "ts"
+        || source_file
+            .or(Some(record_name))
+            .is_some_and(is_typescript_source_file);
+    let static_initialization_mode = if is_explicit_ts && !is_arkts_origin {
+        ClassStaticInitializationMode::InlineInModuleMain
+    } else {
+        ClassStaticInitializationMode::ExternalInitializerMethod
+    };
     let source_type = if is_ets {
         // SourceType::ets() sets LanguageVariant::Arkui, enabling @interface, struct, etc.
         SourceType::ets()
     } else {
-        SourceType::ts().with_module(is_module)
+        SourceType::ts()
+            .with_module(is_module && !is_commonjs)
+            .with_commonjs(is_commonjs)
     };
     let ParserReturn {
         mut program,
@@ -378,36 +409,95 @@ pub fn build_record_with_debug_and_source_map_for_target_with_mode(
     let annotations_enabled =
         enable_annotations && target_api_version >= ANNOTATION_SUPPORTED_API_VERSION;
 
+    let effective_is_module = is_module && !is_commonjs;
+
     // Collect module import/export records before lowering so bytecode can use
     // hvigor/es2abc's module-variable opcodes instead of global lookups.
-    let module_record = collect_module_record(&program, is_module, scoping_ref);
+    // Upstream CommonJS is a synthetic wrapper around the original body and
+    // does not run the module-record job; require/module.exports stay runtime
+    // object operations inside that wrapper.
+    let module_record = if is_commonjs {
+        ModuleRecordInfo::default()
+    } else {
+        collect_module_record(&program, effective_is_module, scoping_ref)
+    };
     let concurrent_import_requests =
         ConcurrentImportRequests::new(&program, &module_record, scoping_ref, record_name)?;
-    let lexical_bindings = collect_module_lexical_bindings(&program, is_module, &module_record);
-    let function_lexical_infos = collect_function_lexical_bindings(&program);
-    let scan_stmts: &[Statement<'_>] = statement_scan_body(&program, is_module);
-    let has_top_level_await = is_module && stmts_have_top_level_await(scan_stmts);
+    let lexical_bindings = if is_commonjs {
+        collect_commonjs_wrapper_lexical_bindings(
+            &program,
+            &COMMONJS_WRAPPER_PARAM_NAMES,
+            use_define_semantic,
+        )
+    } else {
+        collect_module_lexical_bindings(
+            &program,
+            effective_is_module,
+            &module_record,
+            standalone_ecmascript_input,
+            use_define_semantic,
+        )
+    };
+    let (lexical_bindings, scoped_class_lexical_layout) = if is_commonjs {
+        (
+            lexical_bindings,
+            crate::ir::module_lexical::ScopedClassLexicalLayout::default(),
+        )
+    } else {
+        split_scoped_class_lexical_bindings(
+            &program,
+            lexical_bindings,
+            &module_record,
+            standalone_ecmascript_input,
+            use_define_semantic,
+            static_initialization_mode,
+        )
+    };
+    let function_lexical_infos = collect_function_lexical_bindings(
+        &program,
+        standalone_ecmascript_input,
+        use_define_semantic,
+    );
+    let scan_stmts: &[Statement<'_>] = statement_scan_body(&program, effective_is_module);
+    let has_top_level_await = effective_is_module && stmts_have_top_level_await(scan_stmts);
     let use_scope_info_names =
         !is_default_api_version_for(target_api_version, target_api_sub_version);
     let mut function_names = FunctionNameAllocator::new(source, use_scope_info_names);
+    let entered_commonjs_wrapper_scope =
+        is_commonjs && function_names.enter_commonjs_wrapper_scope();
     let function_records = collect_function_records(
         &program,
         scan_stmts,
         &mut function_names,
         standalone_ecmascript_input,
+        static_initialization_mode,
     );
+    if entered_commonjs_wrapper_scope {
+        function_names.exit_commonjs_wrapper_scope();
+    }
     let mut function_names_by_span: FxHashMap<(u32, u32), String> = function_records
         .iter()
         .map(|record| (record.span(), record.name.clone()))
         .collect();
     function_names_by_span.extend(function_names.class_method_names_by_span());
+    let default_constructor_names_by_class_span: FxHashMap<(u32, u32), String> = function_names
+        .default_constructor_names_by_class_span()
+        .collect();
+    let static_initializer_names_by_class_span: FxHashMap<(u32, u32), String> = function_names
+        .static_initializer_names_by_class_span()
+        .collect();
     let lowering = LoweringContext::from_module_record(
         &module_record,
         lexical_bindings,
         function_names_by_span,
+        default_constructor_names_by_class_span,
+        static_initializer_names_by_class_span,
         function_lexical_infos,
+        scoped_class_lexical_layout,
         target_api_version,
         target_api_sub_version.map(str::to_string),
+        use_define_semantic,
+        static_initialization_mode,
         emit_debugger,
         standalone_ecmascript_input,
     );
@@ -416,19 +506,91 @@ pub fn build_record_with_debug_and_source_map_for_target_with_mode(
 
     // Build the `func_main_0` method — the module execution entry point.
     //
-    // ArkRuntime always invokes `func_main_0` when executing a module buffer.
-    // It passes exactly 3 arguments (JSThread*, this, args[]), so `num_args`
-    // must be 3 regardless of the actual JS parameter list.
-    //
+    // Upstream es2panda uses 3 mandatory arguments for ESM/script module
+    // entries. ScriptKind::COMMONJS is different: parser/commonjs.cpp wraps the
+    // original source in a synthetic function with 5 user parameters and emits
+    // a `Reflect.apply` call from `func_main_0`, so the main method has 8
+    // arguments.
+    if is_commonjs {
+        let wrapper_param_names = commonjs_wrapper_param_names();
+        let wrapper_body = if source_file.is_some() {
+            compile_commonjs_wrapper_body_tracked(
+                &program,
+                strings,
+                literal_arrays,
+                &lowering,
+                source,
+                source_mapper,
+                &wrapper_param_names,
+                &runtime_ts_import_equals,
+            )
+        } else {
+            compile_commonjs_wrapper_body(
+                &program,
+                strings,
+                literal_arrays,
+                &lowering,
+                source,
+                &wrapper_param_names,
+                &runtime_ts_import_equals,
+            )
+        };
+        methods.push(MethodRecord {
+            name: COMMONJS_WRAPPER_METHOD_NAME.to_string(),
+            bytecode: wrapper_body.bytecode,
+            pandasm_insns: wrapper_body.pandasm_insns,
+            pandasm_debug: wrapper_body.pandasm_debug,
+            num_vregs: wrapper_body.vregs,
+            num_args: u16::from(COMMONJS_WRAPPER_FORMAL_COUNT) + 3,
+            value_of_first_param: -1,
+            slots_num: None,
+            debug_info: source_file.map(|path| DebugInfoRecord {
+                line_start: wrapper_body.debug_line_start.unwrap_or_else(|| {
+                    first_runtime_stmt_start(scan_stmts)
+                        .map(|start| debug_line_start(Some(source), source_mapper, start))
+                        .unwrap_or(1)
+                }),
+                source_file: path.to_string(),
+                source_code: None,
+                param_names: wrapper_param_names,
+                lexical_this: false,
+                local_variables: Vec::new(),
+                infer_scope_locals: true,
+                line_ops_include_local_variables: false,
+            }),
+            line_ops: wrapper_body.line_ops,
+            catch_entries: wrapper_body.catches,
+            program_labels: wrapper_body.program_labels,
+            label_table: Vec::new(),
+            kind: MethodKind::FunctionLiteral,
+            function_kind: function_kind::FUNCTION,
+            source_lang: None,
+            concurrent_module_requests: Vec::new(),
+            expected_property_count: None,
+            annotations: Vec::new(),
+            metadata_attrs: Default::default(),
+            param_annotations: Vec::new(),
+            definefunc_order: None,
+            label_style: MethodLabelStyle::Source,
+            param_types: Vec::new(),
+            return_type: None,
+            body_presence: None,
+            body_location: None,
+            file_location: None,
+        });
+    }
+
     // When source-file debug info is requested, we also compute a Panda
     // LineNumberProgram for func_main_0 using statement span offsets.
-    let func_main = if source_file.is_some() {
+    let func_main = if is_commonjs {
+        compile_commonjs_main_body(strings, literal_arrays, &lowering)
+    } else if source_file.is_some() {
         compile_program_body_tracked(
             &program,
             strings,
             literal_arrays,
             &lowering,
-            is_module,
+            effective_is_module,
             source,
             source_mapper,
             has_top_level_await,
@@ -440,7 +602,7 @@ pub fn build_record_with_debug_and_source_map_for_target_with_mode(
             strings,
             literal_arrays,
             &lowering,
-            is_module,
+            effective_is_module,
             source,
             has_top_level_await,
             &runtime_ts_import_equals,
@@ -452,7 +614,11 @@ pub fn build_record_with_debug_and_source_map_for_target_with_mode(
         pandasm_insns: func_main.pandasm_insns,
         pandasm_debug: func_main.pandasm_debug,
         num_vregs: func_main.vregs,
-        num_args: 3,
+        num_args: if is_commonjs {
+            COMMONJS_MAIN_ARG_COUNT
+        } else {
+            3
+        },
         value_of_first_param: -1,
         slots_num: None,
         debug_info: source_file.map(|path| DebugInfoRecord {
@@ -477,7 +643,6 @@ pub fn build_record_with_debug_and_source_map_for_target_with_mode(
         function_kind: function_kind::FUNCTION,
         source_lang: None,
         concurrent_module_requests: Vec::new(),
-        method_pool_entry: false,
         expected_property_count: None,
         annotations: Vec::new(),
         metadata_attrs: Default::default(),
@@ -644,8 +809,7 @@ pub fn annotation_records_from_source(
     let allocator = Allocator::default();
     let is_ets = source_file
         .or(Some(record_name))
-        .map(|s| s.ends_with(".ets"))
-        .unwrap_or(false);
+        .is_some_and(is_ets_source_file);
     let source_type = if is_ets {
         SourceType::ets()
     } else {
@@ -1678,11 +1842,51 @@ fn source_lang_from_origin_source_lang(origin_source_lang: &str) -> u8 {
     }
 }
 
-fn lexical_indices<'a>(names: impl IntoIterator<Item = &'a str>) -> FxHashMap<String, u8> {
+#[derive(Clone, Copy)]
+struct LexicalBindingSlot {
+    slot: u8,
+    kind: FunctionLexicalBindingKind,
+}
+
+#[derive(Clone, Copy)]
+struct LexicalLookup {
+    level: u8,
+    slot: u8,
+    kind: FunctionLexicalBindingKind,
+}
+
+fn lexical_indices<'a>(
+    names: impl IntoIterator<Item = &'a str>,
+    kind: FunctionLexicalBindingKind,
+) -> FxHashMap<String, LexicalBindingSlot> {
     names
         .into_iter()
         .enumerate()
-        .filter_map(|(idx, name)| u8::try_from(idx).ok().map(|idx| (name.to_string(), idx)))
+        .filter_map(|(idx, name)| {
+            u8::try_from(idx)
+                .ok()
+                .map(|slot| (name.to_string(), LexicalBindingSlot { slot, kind }))
+        })
+        .collect()
+}
+
+fn function_lexical_indices(
+    bindings: &[FunctionLexicalBinding],
+) -> FxHashMap<String, LexicalBindingSlot> {
+    bindings
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, binding)| {
+            u8::try_from(idx).ok().map(|slot| {
+                (
+                    binding.name.clone(),
+                    LexicalBindingSlot {
+                        slot,
+                        kind: binding.kind,
+                    },
+                )
+            })
+        })
         .collect()
 }
 
@@ -1937,6 +2141,50 @@ fn statement_scan_body<'a>(program: &'a Program<'_>, _is_module: bool) -> &'a [S
     program.body.as_slice()
 }
 
+fn is_string_literal_expression_statement(stmt: &Statement<'_>) -> bool {
+    matches!(
+        stmt,
+        Statement::ExpressionStatement(expr)
+            if matches!(&expr.expression, Expression::StringLiteral(_))
+    )
+}
+
+fn stmt_contains_super_call(stmt: &Statement<'_>) -> bool {
+    struct SuperCallFinder {
+        found: bool,
+    }
+
+    impl<'a> Visit<'a> for SuperCallFinder {
+        fn visit_call_expression(&mut self, it: &CallExpression<'a>) {
+            if self.found {
+                return;
+            }
+            if matches!(&it.callee, Expression::Super(_)) {
+                self.found = true;
+                return;
+            }
+            walk::walk_call_expression(self, it);
+        }
+
+        fn visit_function(&mut self, _it: &Function<'a>, _flags: ScopeFlags) {}
+
+        fn visit_arrow_function_expression(&mut self, _it: &oxc_ast::ast::ArrowFunctionExpression<'a>) {}
+
+        fn visit_class(&mut self, _it: &oxc_ast::ast::Class<'a>) {}
+    }
+
+    let mut finder = SuperCallFinder { found: false };
+    finder.visit_statement(stmt);
+    finder.found
+}
+
+fn commonjs_wrapper_param_names() -> Vec<String> {
+    COMMONJS_WRAPPER_PARAM_NAMES
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn compile_function_record(
     function: FunctionRecord<'_>,
@@ -2064,7 +2312,6 @@ fn compile_function_record(
                 function_kind: upstream_function_kind,
                 source_lang: None,
                 concurrent_module_requests,
-                method_pool_entry: true,
                 expected_property_count,
                 annotations: Vec::new(),
                 metadata_attrs: Default::default(),
@@ -2129,7 +2376,6 @@ fn compile_function_record(
                 },
                 source_lang: None,
                 concurrent_module_requests: Vec::new(),
-                method_pool_entry: true,
                 expected_property_count,
                 annotations: Vec::new(),
                 metadata_attrs: Default::default(),
@@ -2243,8 +2489,8 @@ fn object_method_literal_entry(record_name: String, function: &Function<'_>) -> 
 ///
 /// Each class lifecycle method (`onCreate`, `onWindowStageCreate`, etc.) gets
 /// its own bytecode record so ArkRuntime can dispatch to the real implementation.
-fn compile_class_method_bodies(
-    stmts: &[Statement<'_>],
+fn compile_class_method_bodies<'ast>(
+    stmts: &'ast [Statement<'ast>],
     strings: &mut StringTable,
     literal_arrays: &mut Vec<LiteralArray>,
     lowering: &LoweringContext,
@@ -2252,145 +2498,442 @@ fn compile_class_method_bodies(
     source: Option<&str>,
     source_file_path: Option<&str>,
     source_mapper: Option<&SourceMapper>,
-    function_names: &mut FunctionNameAllocator<'_>,
+    function_names: &mut FunctionNameAllocator<'ast>,
     concurrent_import_requests: &ConcurrentImportRequests<'_>,
     record_name: &str,
     annotations_enabled: bool,
     enum_infos: &FxHashMap<String, AnnotationEnumInfo>,
     annotation_literal_array_counter: &mut usize,
 ) -> Result<(), AbcError> {
-    for stmt in stmts {
-        // Handle `class Foo { ... }` (ClassDeclaration)
-        if let Statement::ClassDeclaration(cls) = stmt {
-            if cls.declare {
+    ClassMethodBodyCompiler {
+        strings,
+        literal_arrays,
+        lowering,
+        methods,
+        source,
+        source_file_path,
+        source_mapper,
+        function_names,
+        concurrent_import_requests,
+        record_name,
+        annotations_enabled,
+        enum_infos,
+        annotation_literal_array_counter,
+    }
+    .compile_stmts(stmts)
+}
+
+struct ClassMethodBodyCompiler<'ctx, 'ast> {
+    strings: &'ctx mut StringTable,
+    literal_arrays: &'ctx mut Vec<LiteralArray>,
+    lowering: &'ctx LoweringContext,
+    methods: &'ctx mut Vec<MethodRecord>,
+    source: Option<&'ctx str>,
+    source_file_path: Option<&'ctx str>,
+    source_mapper: Option<&'ctx SourceMapper>,
+    function_names: &'ctx mut FunctionNameAllocator<'ast>,
+    concurrent_import_requests: &'ctx ConcurrentImportRequests<'ctx>,
+    record_name: &'ctx str,
+    annotations_enabled: bool,
+    enum_infos: &'ctx FxHashMap<String, AnnotationEnumInfo>,
+    annotation_literal_array_counter: &'ctx mut usize,
+}
+
+impl<'ctx, 'ast> ClassMethodBodyCompiler<'ctx, 'ast> {
+    fn compile_stmts(&mut self, stmts: &'ast [Statement<'ast>]) -> Result<(), AbcError> {
+        for stmt in stmts {
+            self.compile_stmt(stmt)?;
+        }
+        Ok(())
+    }
+
+    fn compile_stmt(&mut self, stmt: &'ast Statement<'ast>) -> Result<(), AbcError> {
+        match stmt {
+            Statement::ClassDeclaration(class) => {
+                if !class.declare {
+                    self.compile_class(
+                        class.id.as_ref().map(|id| id.name.as_str()),
+                        class.super_class.is_some(),
+                        class.span.start,
+                        class.span.end,
+                        &class.decorators,
+                        &class.body.body,
+                    )?;
+                }
+            }
+            Statement::ExportDefaultDeclaration(export) => match &export.declaration {
+                ExportDefaultDeclarationKind::ClassDeclaration(class) => {
+                    if !class.declare {
+                        let class_name = class
+                            .id
+                            .as_ref()
+                            .map_or(DEFAULT_LOCAL_NAME, |id| id.name.as_str());
+                        self.compile_class(
+                            Some(class_name),
+                            class.super_class.is_some(),
+                            class.span.start,
+                            class.span.end,
+                            &class.decorators,
+                            &class.body.body,
+                        )?;
+                    }
+                }
+                ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
+                    self.compile_function_body(function.body.as_deref())?;
+                }
+                _ => {
+                    if let Some(expr) = export.declaration.as_expression() {
+                        self.compile_expr(expr, Some(DEFAULT_LOCAL_NAME))?;
+                    }
+                }
+            },
+            Statement::ExportNamedDeclaration(export) => {
+                if let Some(declaration) = &export.declaration {
+                    match declaration {
+                        Declaration::ClassDeclaration(class) => {
+                            if !class.declare {
+                                self.compile_class(
+                                    class.id.as_ref().map(|id| id.name.as_str()),
+                                    class.super_class.is_some(),
+                                    class.span.start,
+                                    class.span.end,
+                                    &class.decorators,
+                                    &class.body.body,
+                                )?;
+                            }
+                        }
+                        Declaration::FunctionDeclaration(function) => {
+                            self.compile_function_body(function.body.as_deref())?;
+                        }
+                        Declaration::VariableDeclaration(decl) => {
+                            self.compile_variable_declaration(decl)?;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Statement::VariableDeclaration(decl) => {
+                self.compile_variable_declaration(decl)?;
+            }
+            Statement::ExpressionStatement(stmt) => {
+                self.compile_expr(&stmt.expression, None)?;
+            }
+            Statement::ReturnStatement(stmt) => {
+                if let Some(expr) = &stmt.argument {
+                    self.compile_expr(expr, None)?;
+                }
+            }
+            Statement::ThrowStatement(stmt) => self.compile_expr(&stmt.argument, None)?,
+            Statement::IfStatement(stmt) => {
+                self.compile_expr(&stmt.test, None)?;
+                self.compile_stmt(&stmt.consequent)?;
+                if let Some(alternate) = &stmt.alternate {
+                    self.compile_stmt(alternate)?;
+                }
+            }
+            Statement::BlockStatement(block) => self.compile_stmts(&block.body)?,
+            Statement::WhileStatement(stmt) => {
+                self.compile_expr(&stmt.test, None)?;
+                self.compile_stmt(&stmt.body)?;
+            }
+            Statement::DoWhileStatement(stmt) => {
+                self.compile_stmt(&stmt.body)?;
+                self.compile_expr(&stmt.test, None)?;
+            }
+            Statement::ForStatement(stmt) => {
+                if let Some(init) = &stmt.init {
+                    match init {
+                        oxc_ast::ast::ForStatementInit::VariableDeclaration(decl) => {
+                            self.compile_variable_declaration(decl)?;
+                        }
+                        oxc_ast::ast::ForStatementInit::AssignmentExpression(assign) => {
+                            self.compile_expr(
+                                &assign.right,
+                                class_scan_assignment_target_name(&assign.left),
+                            )?;
+                        }
+                        oxc_ast::ast::ForStatementInit::SequenceExpression(seq) => {
+                            for expr in &seq.expressions {
+                                self.compile_expr(expr, None)?;
+                            }
+                        }
+                        expr => self.compile_expr(expr.to_expression(), None)?,
+                    }
+                }
+                if let Some(test) = &stmt.test {
+                    self.compile_expr(test, None)?;
+                }
+                if let Some(update) = &stmt.update {
+                    self.compile_expr(update, None)?;
+                }
+                self.compile_stmt(&stmt.body)?;
+            }
+            Statement::ForInStatement(stmt) => {
+                self.compile_expr(&stmt.right, None)?;
+                self.compile_stmt(&stmt.body)?;
+            }
+            Statement::ForOfStatement(stmt) => {
+                self.compile_expr(&stmt.right, None)?;
+                self.compile_stmt(&stmt.body)?;
+            }
+            Statement::TryStatement(stmt) => {
+                self.compile_stmts(&stmt.block.body)?;
+                if let Some(handler) = &stmt.handler {
+                    self.compile_stmts(&handler.body.body)?;
+                }
+                if let Some(finalizer) = &stmt.finalizer {
+                    self.compile_stmts(&finalizer.body)?;
+                }
+            }
+            Statement::SwitchStatement(stmt) => {
+                self.compile_expr(&stmt.discriminant, None)?;
+                for case in &stmt.cases {
+                    if let Some(test) = &case.test {
+                        self.compile_expr(test, None)?;
+                    }
+                    self.compile_stmts(&case.consequent)?;
+                }
+            }
+            Statement::FunctionDeclaration(function) => {
+                self.compile_function_body(function.body.as_deref())?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn compile_variable_declaration(
+        &mut self,
+        decl: &'ast oxc_ast::ast::VariableDeclaration<'ast>,
+    ) -> Result<(), AbcError> {
+        for declarator in &decl.declarations {
+            let inferred = class_scan_binding_name(&declarator.id);
+            if let Some(Expression::ClassExpression(class)) = &declarator.init {
+                let class_name = class.id.as_ref().map(|id| id.name.as_str()).or(inferred);
+                self.compile_class(
+                    class_name,
+                    class.super_class.is_some(),
+                    class.span.start,
+                    class.span.end,
+                    &class.decorators,
+                    &class.body.body,
+                )?;
                 continue;
             }
-            let class_name = cls.id.as_ref().map(|id| id.name.as_str());
-            compile_class_elements(
-                class_name,
-                cls.super_class.is_some(),
-                cls.span.start,
-                cls.span.end,
-                &cls.decorators,
-                &cls.body.body,
-                strings,
-                literal_arrays,
-                lowering,
-                methods,
-                source,
-                source_file_path,
-                source_mapper,
-                function_names,
-                concurrent_import_requests,
-                record_name,
-                annotations_enabled,
-                enum_infos,
-                annotation_literal_array_counter,
-            )?;
-            continue;
+            if let Some(init) = &declarator.init {
+                self.compile_expr(init, inferred)?;
+            }
         }
-        if let Statement::ExportDefaultDeclaration(export) = stmt {
-            if let ExportDefaultDeclarationKind::ClassDeclaration(cls) = &export.declaration {
-                if cls.declare {
-                    continue;
-                }
-                let class_name = cls
+        Ok(())
+    }
+
+    fn compile_expr(
+        &mut self,
+        expr: &'ast Expression<'ast>,
+        inferred_name: Option<&'ast str>,
+    ) -> Result<(), AbcError> {
+        match expr {
+            Expression::FunctionExpression(function) => {
+                self.compile_function_body(function.body.as_deref())?;
+            }
+            Expression::ArrowFunctionExpression(arrow) => {
+                self.compile_stmts(&arrow.body.statements)?;
+            }
+            Expression::ClassExpression(class) => {
+                let class_name = class
                     .id
                     .as_ref()
-                    .map_or(DEFAULT_LOCAL_NAME, |id| id.name.as_str());
-                compile_class_elements(
-                    Some(class_name),
-                    cls.super_class.is_some(),
-                    cls.span.start,
-                    cls.span.end,
-                    &cls.decorators,
-                    &cls.body.body,
-                    strings,
-                    literal_arrays,
-                    lowering,
-                    methods,
-                    source,
-                    source_file_path,
-                    source_mapper,
-                    function_names,
-                    concurrent_import_requests,
-                    record_name,
-                    annotations_enabled,
-                    enum_infos,
-                    annotation_literal_array_counter,
-                )?;
-            }
-            continue;
-        }
-        if let Statement::ExportNamedDeclaration(export) = stmt {
-            if let Some(Declaration::ClassDeclaration(cls)) = &export.declaration {
-                if cls.declare {
-                    continue;
-                }
-                let class_name = cls.id.as_ref().map(|id| id.name.as_str());
-                compile_class_elements(
+                    .map(|id| id.name.as_str())
+                    .or(inferred_name);
+                self.compile_class(
                     class_name,
-                    cls.super_class.is_some(),
-                    cls.span.start,
-                    cls.span.end,
-                    &cls.decorators,
-                    &cls.body.body,
-                    strings,
-                    literal_arrays,
-                    lowering,
-                    methods,
-                    source,
-                    source_file_path,
-                    source_mapper,
-                    function_names,
-                    concurrent_import_requests,
-                    record_name,
-                    annotations_enabled,
-                    enum_infos,
-                    annotation_literal_array_counter,
+                    class.super_class.is_some(),
+                    class.span.start,
+                    class.span.end,
+                    &class.decorators,
+                    &class.body.body,
                 )?;
             }
-            continue;
-        }
-        // Handle `var Foo = class extends Bar { ... }` (VariableDeclaration with ClassExpression)
-        // Handles `var Foo = class extends Bar { ... }` (rolldown ESM output pattern).
-        if let Statement::VariableDeclaration(var_decl) = stmt {
-            for declarator in &var_decl.declarations {
-                // Extract binding name (skip destructuring).
-                let name = match &declarator.id {
-                    BindingPattern::BindingIdentifier(id) => id.name.as_str().to_string(),
-                    _ => continue,
-                };
-
-                if let Some(Expression::ClassExpression(cls)) = &declarator.init {
-                    let class_name = cls.id.as_ref().map_or(name.as_str(), |id| id.name.as_str());
-                    compile_class_elements(
-                        Some(class_name),
-                        cls.super_class.is_some(),
-                        cls.span.start,
-                        cls.span.end,
-                        &cls.decorators,
-                        &cls.body.body,
-                        strings,
-                        literal_arrays,
-                        lowering,
-                        methods,
-                        source,
-                        source_file_path,
-                        source_mapper,
-                        function_names,
-                        concurrent_import_requests,
-                        record_name,
-                        annotations_enabled,
-                        enum_infos,
-                        annotation_literal_array_counter,
-                    )?;
-                    continue;
+            Expression::AssignmentExpression(assign) => {
+                self.compile_expr(
+                    &assign.right,
+                    class_scan_assignment_target_name(&assign.left),
+                )?;
+            }
+            Expression::CallExpression(call) => {
+                self.compile_expr(&call.callee, None)?;
+                for argument in &call.arguments {
+                    self.compile_argument(argument)?;
                 }
             }
+            Expression::NewExpression(new_expr) => {
+                self.compile_expr(&new_expr.callee, None)?;
+                for argument in &new_expr.arguments {
+                    self.compile_argument(argument)?;
+                }
+            }
+            Expression::ObjectExpression(object) => {
+                for property in &object.properties {
+                    let ObjectPropertyKind::ObjectProperty(property) = property else {
+                        continue;
+                    };
+                    self.compile_expr(
+                        &property.value,
+                        class_scan_property_key_name(&property.key),
+                    )?;
+                }
+            }
+            Expression::ArrayExpression(array) => {
+                for element in &array.elements {
+                    if let Some(expr) = element.as_expression() {
+                        self.compile_expr(expr, None)?;
+                    }
+                }
+            }
+            Expression::SequenceExpression(seq) => {
+                for expr in &seq.expressions {
+                    self.compile_expr(expr, None)?;
+                }
+            }
+            Expression::ConditionalExpression(cond) => {
+                self.compile_expr(&cond.test, None)?;
+                self.compile_expr(&cond.consequent, inferred_name)?;
+                self.compile_expr(&cond.alternate, inferred_name)?;
+            }
+            Expression::BinaryExpression(expr) => {
+                self.compile_expr(&expr.left, None)?;
+                self.compile_expr(&expr.right, None)?;
+            }
+            Expression::LogicalExpression(expr) => {
+                self.compile_expr(&expr.left, None)?;
+                self.compile_expr(&expr.right, None)?;
+            }
+            Expression::UnaryExpression(expr) => self.compile_expr(&expr.argument, None)?,
+            Expression::ParenthesizedExpression(expr) => {
+                self.compile_expr(&expr.expression, inferred_name)?;
+            }
+            Expression::TSAsExpression(expr) => {
+                self.compile_expr(&expr.expression, inferred_name)?
+            }
+            Expression::TSSatisfiesExpression(expr) => {
+                self.compile_expr(&expr.expression, inferred_name)?;
+            }
+            Expression::TSNonNullExpression(expr) => {
+                self.compile_expr(&expr.expression, inferred_name)?;
+            }
+            Expression::TSTypeAssertion(expr) => {
+                self.compile_expr(&expr.expression, inferred_name)?;
+            }
+            _ => {}
         }
+        Ok(())
     }
-    Ok(())
+
+    fn compile_argument(&mut self, argument: &'ast Argument<'ast>) -> Result<(), AbcError> {
+        if let Some(expr) = argument.as_expression() {
+            self.compile_expr(expr, None)?;
+        }
+        Ok(())
+    }
+
+    fn compile_function_body(
+        &mut self,
+        body: Option<&'ast FunctionBody<'ast>>,
+    ) -> Result<(), AbcError> {
+        if let Some(body) = body {
+            self.compile_stmts(&body.statements)?;
+        }
+        Ok(())
+    }
+
+    fn compile_class(
+        &mut self,
+        class_name: Option<&str>,
+        has_super_class: bool,
+        class_span_start: u32,
+        class_span_end: u32,
+        decorators: &'ast [Decorator<'ast>],
+        elements: &'ast [ClassElement<'ast>],
+    ) -> Result<(), AbcError> {
+        compile_class_elements(
+            class_name,
+            has_super_class,
+            class_span_start,
+            class_span_end,
+            decorators,
+            elements,
+            self.strings,
+            self.literal_arrays,
+            self.lowering,
+            self.methods,
+            self.source,
+            self.source_file_path,
+            self.source_mapper,
+            self.function_names,
+            self.concurrent_import_requests,
+            self.record_name,
+            self.annotations_enabled,
+            self.enum_infos,
+            self.annotation_literal_array_counter,
+        )?;
+        self.compile_class_children(elements)
+    }
+
+    fn compile_class_children(
+        &mut self,
+        elements: &'ast [ClassElement<'ast>],
+    ) -> Result<(), AbcError> {
+        for element in elements {
+            match element {
+                ClassElement::MethodDefinition(method) => {
+                    self.compile_function_body(method.value.body.as_deref())?;
+                }
+                ClassElement::PropertyDefinition(property) => {
+                    let should_compile_value = property.r#static
+                        || property_needs_instance_initializer(
+                            property,
+                            self.lowering.use_define_semantic(),
+                        )
+                        || property_needs_constructor_assignment(
+                            property,
+                            self.lowering.use_define_semantic(),
+                        );
+                    if should_compile_value {
+                        if let Some(value) = &property.value {
+                            self.compile_expr(value, class_scan_property_key_name(&property.key))?;
+                        }
+                    }
+                }
+                ClassElement::StaticBlock(block) => self.compile_stmts(&block.body)?,
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+fn class_scan_property_key_name<'a>(key: &'a PropertyKey<'a>) -> Option<&'a str> {
+    match key {
+        PropertyKey::StaticIdentifier(identifier) => Some(identifier.name.as_str()),
+        PropertyKey::StringLiteral(literal) => Some(literal.value.as_str()),
+        _ => None,
+    }
+}
+
+fn class_scan_binding_name<'a>(pattern: &'a BindingPattern<'a>) -> Option<&'a str> {
+    match pattern {
+        BindingPattern::BindingIdentifier(identifier) => Some(identifier.name.as_str()),
+        _ => None,
+    }
+}
+
+fn class_scan_assignment_target_name<'a>(target: &'a AssignmentTarget<'a>) -> Option<&'a str> {
+    match target {
+        AssignmentTarget::AssignmentTargetIdentifier(identifier) => Some(identifier.name.as_str()),
+        AssignmentTarget::StaticMemberExpression(member) => Some(member.property.name.as_str()),
+        AssignmentTarget::PrivateFieldExpression(member) => Some(member.field.name.as_str()),
+        _ => None,
+    }
 }
 
 fn expected_property_count_enabled(lowering: &LoweringContext) -> bool {
@@ -2619,66 +3162,9 @@ fn compile_class_elements(
 ) -> Result<(), AbcError> {
     let class_name = class_name.unwrap_or("_");
 
-    // Collect non-static instance fields for injection into the constructor.
-    let instance_fields: Vec<ClassFieldInit<'_>> = elements
-        .iter()
-        .filter_map(|e| {
-            let ClassElement::PropertyDefinition(prop) = e else {
-                return None;
-            };
-            if prop.r#static {
-                return None;
-            }
-            let key = if prop.computed {
-                ClassFieldKey::CapturedComputed {
-                    key: &prop.key,
-                    capture_name: computed_instance_class_field_key_name(prop),
-                }
-            } else {
-                ClassFieldKey::Static(method_key_name(&prop.key)?)
-            };
-            Some(ClassFieldInit {
-                key,
-                value: prop.value.as_ref(),
-                span_start: prop.span.start,
-            })
-        })
-        .collect();
-
-    // Collect private field slot map and instance private field initializers.
-    let (private_field_slots, _private_field_count) = collect_class_private_slots(elements);
-    let private_instance_fields: Vec<ClassPrivateFieldInit<'_>> = elements
-        .iter()
-        .filter_map(|e| match e {
-            ClassElement::PropertyDefinition(prop) => {
-                if prop.r#static {
-                    return None;
-                }
-                let PropertyKey::PrivateIdentifier(id) = &prop.key else {
-                    return None;
-                };
-                let slot = *private_field_slots.get(id.name.as_str())?;
-                Some(ClassPrivateFieldInit {
-                    slot,
-                    value: prop.value.as_ref(),
-                    span_start: prop.span.start,
-                })
-            }
-            ClassElement::AccessorProperty(accessor) => {
-                if accessor.r#static {
-                    return None;
-                }
-                let backing_name = accessor_backing_field_name(accessor);
-                let slot = *private_field_slots.get(&backing_name)?;
-                Some(ClassPrivateFieldInit {
-                    slot,
-                    value: accessor.value.as_ref(),
-                    span_start: accessor.span.start,
-                })
-            }
-            _ => None,
-        })
-        .collect();
+    let private_layout = ClassPrivateLayout::collect(elements);
+    let instance_initializer =
+        ClassInstanceInitializer::collect(elements, &private_layout, lowering);
     let class_expected_property_count =
         expected_property_count_option(compute_class_expected_property_count(elements, lowering));
 
@@ -2689,17 +3175,25 @@ fn compile_class_elements(
                 if method.kind == MethodDefinitionKind::Constructor
         )
     });
+    let external_initializer_call = class_requires_external_instance_initializer(
+        elements,
+        has_super_class,
+        lowering.standalone_ecmascript_input(),
+        lowering.use_define_semantic(),
+    )
+    .then(InstanceInitializerCall::current_class_slot_zero);
     if !has_constructor {
-        // Synthesize a default constructor that still runs field initializers.
-        let is_default_derived_constructor =
-            has_super_class && instance_fields.is_empty() && private_instance_fields.is_empty();
+        // Synthesize a default constructor that still runs the class instance initializer.
+        let is_default_derived_constructor = has_super_class;
+        let has_constructor_assignments = instance_initializer.has_constructor_assignments();
         let is_standalone_base_default_constructor = lowering.standalone_ecmascript_input()
             && !has_super_class
-            && instance_fields.is_empty()
-            && private_instance_fields.is_empty();
+            && external_initializer_call.is_none()
+            && !has_constructor_assignments;
         let is_standalone_base_callinit_constructor = lowering.standalone_ecmascript_input()
             && !has_super_class
-            && (!instance_fields.is_empty() || !private_instance_fields.is_empty());
+            && external_initializer_call.is_some()
+            && !has_constructor_assignments;
         let compiled = if is_standalone_base_default_constructor {
             compile_default_base_constructor(
                 strings,
@@ -2719,43 +3213,48 @@ fn compile_class_elements(
                 class_span_start,
                 class_span_end,
             )
-        } else if is_default_derived_constructor {
+        } else if is_default_derived_constructor && !has_constructor_assignments {
             let line_ops = if source.is_some() {
                 default_derived_constructor_line_ops()
             } else {
                 Vec::new()
             };
-            compile_default_derived_constructor(line_ops)
+            compile_default_derived_constructor(line_ops, external_initializer_call)
+        } else if is_default_derived_constructor {
+            compile_default_derived_constructor_with_constructor_assignments(
+                strings,
+                literal_arrays,
+                lowering,
+                source,
+                source_mapper,
+                external_initializer_call,
+                &instance_initializer,
+                private_layout.clone(),
+            )
         } else {
-            compile_constructor_with_fields(
+            compile_constructor_body(
                 None,
                 &[],
                 0,
-                &instance_fields,
                 strings,
                 literal_arrays,
                 lowering,
                 &[],
                 has_super_class,
                 None,
-                &private_instance_fields,
-                private_field_slots.clone(),
+                &instance_initializer,
+                private_layout.clone(),
             )
         };
-        let constructor_name = if let Some(name) =
-            function_names.default_constructor_name((class_span_start, class_span_end), class_name)
-        {
-            name
-        } else if lowering.standalone_ecmascript_input() {
-            format!("#~{class_name}=#{class_name}")
-        } else {
-            function_names.bind(0, 0, Some(class_name))
-        };
-        let constructor_num_args =
-            if is_standalone_base_default_constructor || is_standalone_base_callinit_constructor {
-                3
+        let constructor_name =
+            if lowering.standalone_ecmascript_input() && !function_names.uses_scope_info_names() {
+                format!("#~{class_name}=#{class_name}")
+            } else if let Some(name) = function_names
+                .default_constructor_name((class_span_start, class_span_end), class_name)
+            {
+                name
             } else {
-                4
+                function_names.bind(0, 0, Some(class_name))
             };
         let constructor_annotations = annotation_records_from_decorators(
             class_decorators,
@@ -2782,7 +3281,7 @@ fn compile_class_elements(
             pandasm_insns: compiled.pandasm_insns,
             pandasm_debug: compiled.pandasm_debug,
             num_vregs: compiled.vregs,
-            num_args: constructor_num_args,
+            num_args: 3,
             value_of_first_param: -1,
             slots_num: None,
             debug_info,
@@ -2794,7 +3293,6 @@ fn compile_class_elements(
             function_kind: function_kind::FUNCTION,
             source_lang: None,
             concurrent_module_requests: Vec::new(),
-            method_pool_entry: true,
             expected_property_count: class_expected_property_count,
             annotations: constructor_annotations,
             metadata_attrs: Default::default(),
@@ -2809,20 +3307,17 @@ fn compile_class_elements(
         });
     }
 
-    if lowering.standalone_ecmascript_input()
-        && (!instance_fields.is_empty() || !private_instance_fields.is_empty())
-    {
+    if external_initializer_call.is_some() {
         let initializer_name = format!("#~{class_name}>#instance_initializer");
-        let compiled = compile_standalone_instance_initializer(
-            &instance_fields,
-            &private_instance_fields,
+        let compiled = compile_instance_initializer(
+            &instance_initializer,
             strings,
             literal_arrays,
             lowering,
             source,
             source_mapper,
             class_span_start,
-            private_field_slots.clone(),
+            private_layout.clone(),
         );
         methods.push(MethodRecord {
             name: initializer_name,
@@ -2851,7 +3346,6 @@ fn compile_class_elements(
             function_kind: function_kind::NONE,
             source_lang: None,
             concurrent_module_requests: Vec::new(),
-            method_pool_entry: true,
             expected_property_count: None,
             annotations: Vec::new(),
             metadata_attrs: Default::default(),
@@ -2866,7 +3360,13 @@ fn compile_class_elements(
         });
     }
 
-    if let Some(static_initializer_name) = static_initializer_record_name(class_name, elements) {
+    if let Some(static_initializer_name) = static_initializer_record_name(
+        class_name,
+        class_span_start,
+        class_span_end,
+        elements,
+        Some(lowering),
+    ) {
         let static_key_count = static_computed_class_field_count(elements);
         let compiled = compile_static_class_initializer(
             elements,
@@ -2903,7 +3403,6 @@ fn compile_class_elements(
             function_kind: function_kind::NONE,
             source_lang: None,
             concurrent_module_requests: Vec::new(),
-            method_pool_entry: true,
             expected_property_count: None,
             annotations: Vec::new(),
             metadata_attrs: Default::default(),
@@ -2955,14 +3454,12 @@ fn compile_class_elements(
             let is_constructor = method.kind == MethodDefinitionKind::Constructor;
 
             let compiled = if is_constructor {
-                // Constructor: inject instance field initializers as prologue.
                 if let Some(src) = source {
-                    compile_constructor_with_fields_tracked(
+                    compile_constructor_body_tracked(
                         method.value.body.as_deref(),
                         &method.value.params.items,
                         method.value.span.start,
                         method.span.end,
-                        &instance_fields,
                         strings,
                         literal_arrays,
                         lowering,
@@ -2971,23 +3468,22 @@ fn compile_class_elements(
                         src,
                         source_mapper,
                         Some((method.value.span.start, method.value.span.end)),
-                        &private_instance_fields,
-                        private_field_slots.clone(),
+                        &instance_initializer,
+                        private_layout.clone(),
                     )
                 } else {
-                    compile_constructor_with_fields(
+                    compile_constructor_body(
                         method.value.body.as_deref(),
                         &method.value.params.items,
                         method.value.span.start,
-                        &instance_fields,
                         strings,
                         literal_arrays,
                         lowering,
                         &param_names,
                         has_super_class,
                         Some((method.value.span.start, method.value.span.end)),
-                        &private_instance_fields,
-                        private_field_slots.clone(),
+                        &instance_initializer,
+                        private_layout.clone(),
                     )
                 }
             } else if rest_info.is_some() || is_method_async || method.value.generator {
@@ -3003,7 +3499,7 @@ fn compile_class_elements(
                     source,
                     source_mapper,
                     Some((method.value.span.start, method.value.span.end)),
-                    private_field_slots.clone(),
+                    private_layout.clone(),
                 )
             } else if let Some(src) = source {
                 compile_body_stmts_tracked_with_private(
@@ -3022,7 +3518,7 @@ fn compile_class_elements(
                     Some(method.span.end),
                     Some((method.value.span.start, method.value.span.end)),
                     &FxHashSet::default(),
-                    private_field_slots.clone(),
+                    private_layout.clone(),
                 )
             } else {
                 // No source tracking but private slots still need to be set.
@@ -3038,7 +3534,7 @@ fn compile_class_elements(
                     lowering,
                     &param_names,
                     Some((method.value.span.start, method.value.span.end)),
-                    private_field_slots.clone(),
+                    private_layout.clone(),
                 )
             };
             let num_vregs = compiled.vregs;
@@ -3105,9 +3601,6 @@ fn compile_class_elements(
                 function_kind: upstream_function_kind,
                 source_lang: None,
                 concurrent_module_requests,
-                method_pool_entry: !(lowering.standalone_ecmascript_input()
-                    && !is_constructor
-                    && is_class_buffer_method(method)),
                 expected_property_count: is_constructor
                     .then_some(class_expected_property_count)
                     .flatten(),
@@ -3141,14 +3634,14 @@ fn compile_class_elements(
             continue;
         };
         let backing_name = accessor_backing_field_name(accessor);
-        let Some(&slot) = private_field_slots.get(&backing_name) else {
+        let Some(slot) = private_layout.slot(&backing_name) else {
             continue;
         };
         // Getter: `get <key>() { return this.#backing; }`
         let getter_name = auto_accessor_getter_record_name(class_name, accessor);
         let getter_compiled = {
             let mut cg = CodeGen::new(strings, literal_arrays, lowering);
-            cg.private_field_slots = private_field_slots.clone();
+            cg.private_layout = private_layout.clone();
             cg.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
             cg.push(Insn::LdPrivateProperty(0, 0, slot));
             cg.push_with_epilogue(Insn::Return);
@@ -3173,7 +3666,6 @@ fn compile_class_elements(
             function_kind: function_kind::NONE,
             source_lang: None,
             concurrent_module_requests: Vec::new(),
-            method_pool_entry: true,
             expected_property_count: None,
             annotations: Vec::new(),
             metadata_attrs: Default::default(),
@@ -3191,7 +3683,7 @@ fn compile_class_elements(
         let setter_name = auto_accessor_setter_record_name(class_name, accessor);
         let setter_compiled = {
             let mut cg = CodeGen::new(strings, literal_arrays, lowering);
-            cg.private_field_slots = private_field_slots.clone();
+            cg.private_layout = private_layout.clone();
             let val_reg = cg.alloc_reg();
             let this_reg = cg.alloc_reg();
             // Load the value argument (first user param = arg index 3).
@@ -3224,7 +3716,6 @@ fn compile_class_elements(
             function_kind: function_kind::NONE,
             source_lang: None,
             concurrent_module_requests: Vec::new(),
-            method_pool_entry: true,
             expected_property_count: None,
             annotations: Vec::new(),
             metadata_attrs: Default::default(),
@@ -3281,6 +3772,107 @@ fn compile_program_body(
         has_top_level_await,
         runtime_ts_import_equals,
     )
+}
+
+fn compile_commonjs_wrapper_body(
+    program: &Program<'_>,
+    strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
+    lowering: &LoweringContext,
+    source: &str,
+    param_names: &[String],
+    runtime_ts_import_equals: &FxHashSet<(u32, u32)>,
+) -> BodyCompileResult {
+    let mut cg = CodeGen::new(strings, literal_arrays, lowering);
+    cg.source = Some(source);
+    cg.runtime_ts_import_equals = runtime_ts_import_equals.clone();
+    emit_commonjs_wrapper_stmts(&mut cg, &program.body, param_names);
+    cg.finish_with_catches()
+}
+
+fn compile_commonjs_wrapper_body_tracked(
+    program: &Program<'_>,
+    strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
+    lowering: &LoweringContext,
+    source: &str,
+    source_mapper: Option<&SourceMapper>,
+    param_names: &[String],
+    runtime_ts_import_equals: &FxHashSet<(u32, u32)>,
+) -> BodyCompileResult {
+    let mut cg = CodeGen::new_with_source(strings, literal_arrays, lowering, source, source_mapper);
+    if let Some(start) = first_runtime_stmt_start(&program.body) {
+        cg.reset_line_tracker_start(start);
+    }
+    cg.runtime_ts_import_equals = runtime_ts_import_equals.clone();
+    emit_commonjs_wrapper_stmts(&mut cg, &program.body, param_names);
+    cg.finish_with_line_ops_and_catches()
+}
+
+fn emit_commonjs_wrapper_stmts<'ast>(
+    cg: &mut CodeGen<'ast>,
+    stmts: &'ast [Statement<'ast>],
+    param_names: &[String],
+) {
+    cg.use_module_lexical_env();
+    cg.emit_function_lex_env_prologue();
+    cg.bind_function_mandatory_lexical_names();
+    cg.bind_function_param_names(param_names);
+    cg.emit_function_hoists(stmts);
+    for stmt in stmts {
+        if is_hoisted_function_declaration(stmt) {
+            continue;
+        }
+        cg.emit_stmt(stmt);
+        if cg.returned {
+            break;
+        }
+    }
+}
+
+fn compile_commonjs_main_body(
+    strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
+    lowering: &LoweringContext,
+) -> BodyCompileResult {
+    let mut cg = CodeGen::new(strings, literal_arrays, lowering);
+    let reflect_id = cg.intern("Reflect");
+    cg.push(Insn::TryLdGlobalByName(0, reflect_id));
+    let reflect_reg = cg.alloc_reg();
+    cg.push(Insn::Sta(reflect_reg));
+
+    let apply_id = cg.intern("apply");
+    cg.push(Insn::LdObjByName(0, apply_id));
+    let apply_reg = cg.alloc_reg();
+    cg.push(Insn::Sta(apply_reg));
+
+    let wrapper_id = cg.intern(COMMONJS_WRAPPER_METHOD_NAME);
+    cg.push(Insn::DefineFuncShort(
+        0,
+        wrapper_id,
+        COMMONJS_WRAPPER_FORMAL_COUNT,
+    ));
+    let wrapper_reg = cg.alloc_reg();
+    cg.push(Insn::Sta(wrapper_reg));
+
+    cg.push(Insn::CreateEmptyArray(0));
+    let args_array_reg = cg.alloc_reg();
+    cg.push(Insn::Sta(args_array_reg));
+
+    for (idx, _) in COMMONJS_WRAPPER_PARAM_NAMES.iter().enumerate() {
+        cg.push(Insn::Lda(function_arg_register(3 + idx as u16)));
+        cg.push(Insn::StOwnByIndex(0, args_array_reg, idx as u16));
+    }
+
+    cg.push(Insn::Lda(apply_reg));
+    cg.push(Insn::CallThis3(
+        0,
+        reflect_reg,
+        wrapper_reg,
+        function_arg_register(3),
+        args_array_reg,
+    ));
+    cg.finish_with_catches()
 }
 
 /// Compile a function body's statements; returns `(bytecode, catch_entries)`.
@@ -3542,50 +4134,36 @@ fn compile_standalone_callinit_constructor<'src>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn compile_standalone_instance_initializer<'src>(
-    fields: &[ClassFieldInit<'src>],
-    private_fields: &[ClassPrivateFieldInit<'src>],
+fn compile_instance_initializer<'src>(
+    initializer: &ClassInstanceInitializer<'src>,
     strings: &mut StringTable,
     literal_arrays: &mut Vec<LiteralArray>,
     lowering: &LoweringContext,
     source: Option<&'src str>,
     source_mapper: Option<&'src SourceMapper>,
     class_span_start: u32,
-    private_field_slots: FxHashMap<String, u16>,
+    private_layout: ClassPrivateLayout,
 ) -> BodyCompileResult {
     let mut cg = if let Some(src) = source {
         CodeGen::new_with_source(strings, literal_arrays, lowering, src, source_mapper)
     } else {
         CodeGen::new(strings, literal_arrays, lowering)
     };
-    cg.private_field_slots = private_field_slots;
-    let initializer_start = fields
-        .first()
-        .map(|field| field.span_start)
-        .or_else(|| private_fields.first().map(|field| field.span_start))
-        .unwrap_or(class_span_start);
-    cg.reset_line_tracker_start(initializer_start);
-    for field in fields {
-        match &field.key {
-            ClassFieldKey::Static(name) => {
-                if let Some(value) = field.value {
-                    cg.emit_expr(value);
-                } else {
-                    cg.push(Insn::LdUndefined);
-                }
-                let name_id = cg.intern(name);
-                cg.push(Insn::DefinePropertyByName(
-                    0,
-                    name_id,
-                    MANDATORY_PARAM_THIS_REG,
-                ));
-            }
-            ClassFieldKey::CapturedComputed { .. } => {
-                cg.emit_class_field_definition(field, MANDATORY_PARAM_THIS_REG, None);
-            }
-        }
+    cg.private_layout = private_layout;
+    cg.reset_line_tracker_start(initializer.initializer_start(class_span_start));
+    if let Some(slot) = initializer.private_method_validation_slot {
+        cg.push(Insn::LdUndefined);
+        cg.push(Insn::CallRuntimeDefinePrivateProperty(
+            0,
+            0,
+            slot,
+            MANDATORY_PARAM_THIS_REG,
+        ));
     }
-    for field in private_fields {
+    for field in &initializer.fields {
+        cg.emit_instance_class_field_initialization(field, MANDATORY_PARAM_THIS_REG);
+    }
+    for field in &initializer.private_fields {
         if let Some(value) = field.value {
             cg.emit_expr(value);
         } else {
@@ -3605,26 +4183,22 @@ fn compile_standalone_instance_initializer<'src>(
     cg.finish_with_line_ops_and_catches()
 }
 
-fn compile_default_derived_constructor(line_ops: Vec<u8>) -> BodyCompileResult {
-    // Upstream es2panda emits a GENERATED_CONSTRUCTOR as `super(...args)`.
-    // See:
-    // - compiler/core/function.cpp: CompileFunctionParameterDeclaration
-    // - ir/expressions/callExpression.cpp: CompileSuperCallWithSpreadArgs
-    // - compiler/function/functionBuilder.cpp: ImplicitReturn
-    //
-    // This is the API<13 path used by the fixture: copy rest args, call
-    // supercallspread, validate/set `this`, then return `this`.
-    let insns = vec![
-        Insn::MovV4(0, 6),
-        Insn::MovV4(1, 7),
-        Insn::MovV4(2, 8),
-        Insn::MovV4(3, 9),
-        Insn::CopyRestArgs(0),
-        Insn::Sta(3),
-        Insn::Lda(3),
-        Insn::Sta(5),
+fn compile_default_derived_constructor(
+    line_ops: Vec<u8>,
+    initializer_call: Option<InstanceInitializerCall>,
+) -> BodyCompileResult {
+    // DevEco 6.0 es2abc lowers a GENERATED_CONSTRUCTOR to the dedicated
+    // `callruntime.supercallforwardallargs` path instead of materializing
+    // `...args`. This mirrors the official pandasm for:
+    // `class Derived extends Base {}`.
+    let mut insns = vec![
+        Insn::MovV4(0, MANDATORY_PARAM_FUNCTION_REG),
+        Insn::MovV4(1, MANDATORY_PARAM_NEW_TARGET_REG),
+        Insn::MovV4(2, MANDATORY_PARAM_THIS_REG),
+        Insn::MovV4(3, ARG_SENTINEL_BASE + 3),
         Insn::Lda(0),
-        Insn::SuperCallSpread(0, 5),
+        Insn::Sta(5),
+        Insn::CallRuntimeSuperCallForwardAllArgs(5),
         Insn::Sta(5),
         Insn::Lda(2),
         Insn::ThrowIfSuperNotCorrectCall(1),
@@ -3634,7 +4208,59 @@ fn compile_default_derived_constructor(line_ops: Vec<u8>) -> BodyCompileResult {
         Insn::ThrowIfSuperNotCorrectCall(0),
         Insn::Return,
     ];
+    if let Some(call) = initializer_call {
+        insns.splice(
+            12..12,
+            [
+                Insn::LdLexVar(call.lexical_level, call.lexical_slot),
+                Insn::CallRuntimeCallInit(0, 5),
+            ],
+        );
+    }
     BodyCompileResult::from_static_insns(insns, line_ops, Vec::new(), 6)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compile_default_derived_constructor_with_constructor_assignments<'src>(
+    strings: &mut StringTable,
+    literal_arrays: &mut Vec<LiteralArray>,
+    lowering: &LoweringContext,
+    source: Option<&'src str>,
+    source_mapper: Option<&'src SourceMapper>,
+    initializer_call: Option<InstanceInitializerCall>,
+    initializer: &'src ClassInstanceInitializer<'src>,
+    private_layout: ClassPrivateLayout,
+) -> BodyCompileResult {
+    let mut cg = if let Some(src) = source {
+        CodeGen::new_with_source(strings, literal_arrays, lowering, src, source_mapper)
+    } else {
+        CodeGen::new(strings, literal_arrays, lowering)
+    };
+    cg.instance_initializer = Some(initializer);
+    cg.private_layout = private_layout;
+
+    cg.push(Insn::MovV4(0, MANDATORY_PARAM_FUNCTION_REG));
+    cg.push(Insn::MovV4(1, MANDATORY_PARAM_NEW_TARGET_REG));
+    cg.push(Insn::MovV4(2, MANDATORY_PARAM_THIS_REG));
+    cg.push(Insn::MovV4(3, ARG_SENTINEL_BASE + 3));
+    cg.push(Insn::Lda(0));
+    cg.push(Insn::Sta(5));
+    cg.push(Insn::CallRuntimeSuperCallForwardAllArgs(5));
+    cg.push(Insn::Sta(5));
+    cg.push(Insn::Lda(2));
+    cg.push(Insn::ThrowIfSuperNotCorrectCall(1));
+    cg.push(Insn::Lda(5));
+    cg.push(Insn::Sta(2));
+    if let Some(call) = initializer_call {
+        cg.push(Insn::LdLexVar(call.lexical_level, call.lexical_slot));
+        cg.push(Insn::CallRuntimeCallInit(0, 5));
+    }
+    cg.emit_constructor_class_field_assignments(2);
+    cg.push(Insn::Lda(2));
+    cg.push(Insn::ThrowIfSuperNotCorrectCall(0));
+    cg.push(Insn::Return);
+    cg.returned = true;
+    cg.finish_with_line_ops_and_catches()
 }
 
 fn default_derived_constructor_line_ops() -> Vec<u8> {
@@ -3643,14 +4269,15 @@ fn default_derived_constructor_line_ops() -> Vec<u8> {
     // only mirrors es2panda's source-position stream for that body.
     let mut tracker = LineTracker::new(1);
 
-    // copyrestargs/sta/lda stay at the class start position.
-    tracker.advance_with_col(2, 0, 2);
-    tracker.advance_with_col(2, 0, 2);
-    tracker.advance_with_col(2, 0, 2);
+    // Generated argument-copy prologue and function-object temp setup stay at
+    // the class start position.
+    for size in [2, 2, 2, 2, 2, 2] {
+        tracker.advance_with_col(2, 0, size);
+    }
 
-    // supercallspread and derived-constructor validation inherit the class body
-    // position until the final "this" validation pair.
-    for size in [2, 2, 3, 2, 2, 3, 2, 2] {
+    // super forwarding and derived-constructor validation inherit the class
+    // body position until the final "this" validation pair.
+    for size in [3, 2, 2, 3, 2, 2] {
         tracker.advance_with_col(8, 15, size);
     }
 
@@ -3663,23 +4290,18 @@ fn default_derived_constructor_line_ops() -> Vec<u8> {
     tracker.finish()
 }
 
-/// Compile a constructor body, prepending instance field initializer code.
-///
-/// Mirrors upstream `CompileField`: load the initializer value, or `undefined`
-/// when absent, then `DefineOwnProperty` on `this`.
-fn compile_constructor_with_fields<'src>(
+fn compile_constructor_body<'src>(
     body: Option<&FunctionBody<'src>>,
     params: &[FormalParameter<'src>],
     function_span_start: u32,
-    fields: &[ClassFieldInit<'src>],
     strings: &mut StringTable,
     literal_arrays: &mut Vec<LiteralArray>,
     lowering: &LoweringContext,
     param_names: &[String],
     has_super_class: bool,
     current_function_span: Option<(u32, u32)>,
-    private_fields: &[ClassPrivateFieldInit<'src>],
-    private_field_slots: FxHashMap<String, u16>,
+    instance_initializer: &'src ClassInstanceInitializer<'src>,
+    private_layout: ClassPrivateLayout,
 ) -> BodyCompileResult {
     let stmts: &[_] = match body {
         Some(fb) => fb.statements.as_slice(),
@@ -3687,7 +4309,8 @@ fn compile_constructor_with_fields<'src>(
     };
     let mut cg = CodeGen::new(strings, literal_arrays, lowering);
     cg.derived_constructor = has_super_class;
-    cg.private_field_slots = private_field_slots;
+    cg.instance_initializer = Some(instance_initializer);
+    cg.private_layout = private_layout;
     cg.use_function_lexical_env(current_function_span);
     if current_function_span.is_none() {
         cg.use_module_outer_lexical_env();
@@ -3696,43 +4319,38 @@ fn compile_constructor_with_fields<'src>(
     cg.bind_function_mandatory_lexical_names();
     cg.bind_function_param_names(param_names);
     cg.emit_default_parameters(params, Some(function_span_start));
-    let this_reg =
-        if fields.is_empty() && private_fields.is_empty() && lowering.standalone_ecmascript_input()
-        {
-            None
-        } else {
-            let reg = cg.alloc_reg();
-            cg.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
-            cg.push(Insn::Sta(reg));
-            Some(reg)
-        };
-    if !fields.is_empty() {
-        let this_reg = this_reg.expect("field initializers need a this register");
-        for field in fields {
-            cg.emit_class_field_definition(field, this_reg, None);
-        }
+    if !has_super_class {
+        cg.emit_instance_initializer_inline(MANDATORY_PARAM_THIS_REG);
     }
-    // Emit private field initializations via callruntime.defineprivateproperty.
-    for pf in private_fields {
-        if let Some(value) = pf.value {
-            cg.emit_expr(value);
-        } else {
-            cg.push(Insn::LdUndefined);
-        }
-        cg.push(Insn::CallRuntimeDefinePrivateProperty(
-            0,
-            0,
-            pf.slot,
-            this_reg.expect("private field initializers need a this register"),
-        ));
-    }
+    let mut constructor_assignments_emitted = false;
     for stmt in stmts {
+        if !has_super_class
+            && !constructor_assignments_emitted
+            && !is_string_literal_expression_statement(stmt)
+        {
+            cg.emit_constructor_class_field_assignments(MANDATORY_PARAM_THIS_REG);
+            constructor_assignments_emitted = true;
+        }
         cg.emit_stmt(stmt);
+        if has_super_class && !constructor_assignments_emitted && stmt_contains_super_call(stmt) {
+            let this_reg = cg
+                .derived_new_this_reg
+                .unwrap_or(MANDATORY_PARAM_THIS_REG);
+            cg.emit_constructor_class_field_assignments(this_reg);
+            constructor_assignments_emitted = true;
+        }
         if cg.returned {
             break;
         }
     }
-    if has_super_class && !cg.returned {
+    if !has_super_class && !constructor_assignments_emitted {
+        cg.emit_constructor_class_field_assignments(MANDATORY_PARAM_THIS_REG);
+    }
+    if !has_super_class && !cg.returned {
+        cg.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
+        cg.push(Insn::Return);
+        cg.returned = true;
+    } else if has_super_class && !cg.returned {
         if let Some(new_this_reg) = cg.derived_new_this_reg {
             cg.push(Insn::Lda(new_this_reg));
             cg.push(Insn::ThrowIfSuperNotCorrectCall(0));
@@ -3747,12 +4365,11 @@ fn compile_constructor_with_fields<'src>(
     cg.finish_with_catches()
 }
 
-fn compile_constructor_with_fields_tracked<'src>(
+fn compile_constructor_body_tracked<'src>(
     body: Option<&FunctionBody<'src>>,
     params: &[FormalParameter<'src>],
     function_span_start: u32,
     function_span_end: u32,
-    fields: &[ClassFieldInit<'src>],
     strings: &mut StringTable,
     literal_arrays: &mut Vec<LiteralArray>,
     lowering: &LoweringContext,
@@ -3761,8 +4378,8 @@ fn compile_constructor_with_fields_tracked<'src>(
     source: &'src str,
     source_mapper: Option<&'src SourceMapper>,
     current_function_span: Option<(u32, u32)>,
-    private_fields: &[ClassPrivateFieldInit<'src>],
-    private_field_slots: FxHashMap<String, u16>,
+    instance_initializer: &'src ClassInstanceInitializer<'src>,
+    private_layout: ClassPrivateLayout,
 ) -> BodyCompileResult {
     let stmts: &[_] = match body {
         Some(fb) => fb.statements.as_slice(),
@@ -3776,7 +4393,8 @@ fn compile_constructor_with_fields_tracked<'src>(
     }
     let _ = function_span_start;
     cg.derived_constructor = has_super_class;
-    cg.private_field_slots = private_field_slots;
+    cg.instance_initializer = Some(instance_initializer);
+    cg.private_layout = private_layout;
     cg.use_function_lexical_env(current_function_span);
     if current_function_span.is_none() {
         cg.use_module_outer_lexical_env();
@@ -3785,43 +4403,39 @@ fn compile_constructor_with_fields_tracked<'src>(
     cg.bind_function_mandatory_lexical_names();
     cg.bind_function_param_names(param_names);
     cg.emit_default_parameters(params, Some(function_span_start));
-    let this_reg =
-        if fields.is_empty() && private_fields.is_empty() && lowering.standalone_ecmascript_input()
-        {
-            None
-        } else {
-            let reg = cg.alloc_reg();
-            cg.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
-            cg.push(Insn::Sta(reg));
-            Some(reg)
-        };
-    if !fields.is_empty() {
-        let this_reg = this_reg.expect("field initializers need a this register");
-        for field in fields {
-            cg.emit_class_field_definition(field, this_reg, None);
-        }
+    if !has_super_class {
+        cg.emit_instance_initializer_inline(MANDATORY_PARAM_THIS_REG);
     }
-    // Emit private field initializations.
-    for pf in private_fields {
-        if let Some(value) = pf.value {
-            cg.emit_expr(value);
-        } else {
-            cg.push(Insn::LdUndefined);
-        }
-        cg.push(Insn::CallRuntimeDefinePrivateProperty(
-            0,
-            0,
-            pf.slot,
-            this_reg.expect("private field initializers need a this register"),
-        ));
-    }
+    let mut constructor_assignments_emitted = false;
     for stmt in stmts {
+        if !has_super_class
+            && !constructor_assignments_emitted
+            && !is_string_literal_expression_statement(stmt)
+        {
+            cg.emit_constructor_class_field_assignments(MANDATORY_PARAM_THIS_REG);
+            constructor_assignments_emitted = true;
+        }
         cg.emit_stmt(stmt);
+        if has_super_class && !constructor_assignments_emitted && stmt_contains_super_call(stmt) {
+            let this_reg = cg
+                .derived_new_this_reg
+                .unwrap_or(MANDATORY_PARAM_THIS_REG);
+            cg.emit_constructor_class_field_assignments(this_reg);
+            constructor_assignments_emitted = true;
+        }
         if cg.returned {
             break;
         }
     }
-    if has_super_class && !cg.returned {
+    if !has_super_class && !constructor_assignments_emitted {
+        cg.emit_constructor_class_field_assignments(MANDATORY_PARAM_THIS_REG);
+    }
+    if !has_super_class && !cg.returned {
+        cg.set_debug_pos(function_span_end);
+        cg.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
+        cg.push(Insn::Return);
+        cg.returned = true;
+    } else if has_super_class && !cg.returned {
         let standalone_ecmascript_input = lowering.standalone_ecmascript_input();
         if !standalone_ecmascript_input {
             cg.current_line = u32::MAX;
@@ -3869,6 +4483,8 @@ fn compile_static_class_initializer<'src>(
     } else {
         CodeGen::new(strings, literal_arrays, lowering)
     };
+    cg.use_module_outer_lexical_env();
+    let private_layout = ClassPrivateLayout::collect(elements);
     let this_reg = cg.alloc_reg();
     cg.push(Insn::LdThis);
     cg.push(Insn::Sta(this_reg));
@@ -3876,7 +4492,18 @@ fn compile_static_class_initializer<'src>(
     for element in elements {
         match element {
             ClassElement::PropertyDefinition(property) => {
-                if !property.r#static {
+                if !property_needs_static_initializer(property) {
+                    continue;
+                }
+                if let PropertyKey::PrivateIdentifier(id) = &property.key {
+                    if let Some(value) = property.value.as_ref() {
+                        cg.emit_expr(value);
+                    } else {
+                        cg.push(Insn::LdUndefined);
+                    }
+                    if let Some(slot) = private_layout.slot(id.name.as_str()) {
+                        cg.push(Insn::CallRuntimeDefinePrivateProperty(0, 0, slot, this_reg));
+                    }
                     continue;
                 }
                 let key = if property.computed {
@@ -4102,14 +4729,6 @@ fn is_simple_standalone_class(elements: &[ClassElement<'_>]) -> bool {
             ClassElement::MethodDefinition(method)
                 if method.kind == MethodDefinitionKind::Constructor
         )
-    })
-}
-
-fn has_standalone_instance_initializer(elements: &[ClassElement<'_>]) -> bool {
-    elements.iter().any(|element| match element {
-        ClassElement::PropertyDefinition(property) => !property.r#static,
-        ClassElement::AccessorProperty(accessor) => !accessor.r#static,
-        _ => false,
     })
 }
 
@@ -4514,10 +5133,10 @@ fn compile_body_stmts_with_private(
     lowering: &LoweringContext,
     param_names: &[String],
     current_function_span: Option<(u32, u32)>,
-    private_field_slots: FxHashMap<String, u16>,
+    private_layout: ClassPrivateLayout,
 ) -> BodyCompileResult {
     let mut cg = CodeGen::new(strings, literal_arrays, lowering);
-    cg.private_field_slots = private_field_slots;
+    cg.private_layout = private_layout;
     cg.use_function_lexical_env(current_function_span);
     cg.emit_function_lex_env_prologue();
     cg.bind_function_mandatory_lexical_names();
@@ -4550,12 +5169,12 @@ fn compile_body_stmts_tracked_with_private(
     function_end: Option<u32>,
     current_function_span: Option<(u32, u32)>,
     runtime_ts_import_equals: &FxHashSet<(u32, u32)>,
-    private_field_slots: FxHashMap<String, u16>,
+    private_layout: ClassPrivateLayout,
 ) -> BodyCompileResult {
     let mut cg = CodeGen::new_with_source(strings, literal_arrays, lowering, source, source_mapper);
     cg.function_end = function_end;
     cg.runtime_ts_import_equals = runtime_ts_import_equals.clone();
-    cg.private_field_slots = private_field_slots;
+    cg.private_layout = private_layout;
     cg.module_body = false;
     cg.use_function_lexical_env(current_function_span);
     cg.emit_function_lex_env_prologue();
@@ -4588,7 +5207,7 @@ fn compile_function_body_ext_tracked_with_private<'src>(
     source: Option<&str>,
     source_mapper: Option<&SourceMapper>,
     current_function_span: Option<(u32, u32)>,
-    private_field_slots: FxHashMap<String, u16>,
+    private_layout: ClassPrivateLayout,
 ) -> BodyCompileResult {
     let stmts: &[_] = match body {
         Some(fb) => fb.statements.as_slice(),
@@ -4603,7 +5222,7 @@ fn compile_function_body_ext_tracked_with_private<'src>(
     };
     cg.is_async = is_async;
     cg.is_generator = is_generator;
-    cg.private_field_slots = private_field_slots;
+    cg.private_layout = private_layout;
     cg.use_function_lexical_env(current_function_span);
     cg.emit_function_lex_env_prologue();
     cg.bind_function_mandatory_lexical_names();
@@ -4748,61 +5367,6 @@ fn auto_accessor_setter_record_name(
 ) -> String {
     let key_part = auto_accessor_key_record_part(accessor);
     format!("#{class_name}_set_{key_part}#")
-}
-
-/// Build a private field name → slot map for a class.
-///
-/// Private fields (#name) are assigned slots 0, 1, 2... in declaration order.
-/// Private methods (including getters/setters) get slots after private fields
-/// (matching upstream `ClassScope::AddPrivateName`).
-/// Returns `(field_slots, field_count)` where `field_count` is the number of
-/// private *fields* (not methods).
-fn collect_class_private_slots(elements: &[ClassElement<'_>]) -> (FxHashMap<String, u16>, u16) {
-    let mut slots: FxHashMap<String, u16> = FxHashMap::default();
-    let mut slot = 0u16;
-    // Private fields first.
-    for element in elements {
-        match element {
-            ClassElement::PropertyDefinition(prop) => {
-                if let PropertyKey::PrivateIdentifier(id) = &prop.key {
-                    slots
-                        .entry(id.name.as_str().to_string())
-                        .or_insert_with(|| {
-                            let s = slot;
-                            slot += 1;
-                            s
-                        });
-                }
-            }
-            ClassElement::AccessorProperty(accessor) => {
-                // auto-accessor: allocate a slot for the synthesized backing field.
-                let backing_name = accessor_backing_field_name(accessor);
-                slots.entry(backing_name).or_insert_with(|| {
-                    let s = slot;
-                    slot += 1;
-                    s
-                });
-            }
-            _ => {}
-        }
-    }
-    let field_count = slot;
-    // Private methods after fields.
-    for element in elements {
-        let ClassElement::MethodDefinition(method) = element else {
-            continue;
-        };
-        if let PropertyKey::PrivateIdentifier(id) = &method.key {
-            slots
-                .entry(id.name.as_str().to_string())
-                .or_insert_with(|| {
-                    let s = slot;
-                    slot += 1;
-                    s
-                });
-        }
-    }
-    (slots, field_count)
 }
 
 /// Returns true if any function parameter uses a destructuring binding pattern.
@@ -5699,11 +6263,14 @@ impl BodyCompileResult {
     }
 
     fn from_static_insns(
-        pandasm_insns: Vec<Insn>,
+        mut pandasm_insns: Vec<Insn>,
         line_ops: Vec<u8>,
         catches: Vec<CatchEntry>,
         vregs: u16,
     ) -> Self {
+        for insn in &mut pandasm_insns {
+            insn.physicalize_argument_registers(vregs);
+        }
         let mut strings = StringTable::default();
         let bytecode = pandasm_insns
             .iter()
@@ -5861,12 +6428,241 @@ struct ClassPrivateFieldInit<'a> {
     span_start: u32,
 }
 
+#[derive(Clone, Copy)]
+struct InstanceInitializerCall {
+    lexical_level: u8,
+    lexical_slot: u8,
+}
+
+impl InstanceInitializerCall {
+    const fn current_class_slot_zero() -> Self {
+        Self {
+            lexical_level: 0,
+            lexical_slot: 0,
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+struct ClassPrivateLayout {
+    slots: FxHashMap<String, u16>,
+    private_field_count: u16,
+    instance_private_method_names: FxHashSet<String>,
+    static_private_method_names: FxHashSet<String>,
+    instance_method_validation_slot: Option<u16>,
+    static_method_validation_slot: Option<u16>,
+}
+
+impl ClassPrivateLayout {
+    fn collect(elements: &[ClassElement<'_>]) -> Self {
+        let mut layout = Self::default();
+        let mut next_slot = 0u16;
+
+        for element in elements {
+            match element {
+                ClassElement::PropertyDefinition(prop) => {
+                    if let PropertyKey::PrivateIdentifier(id) = &prop.key {
+                        layout
+                            .slots
+                            .entry(id.name.as_str().to_string())
+                            .or_insert_with(|| {
+                                let slot = next_slot;
+                                next_slot = next_slot.saturating_add(1);
+                                slot
+                            });
+                    }
+                }
+                ClassElement::AccessorProperty(accessor) => {
+                    let backing_name = accessor_backing_field_name(accessor);
+                    layout.slots.entry(backing_name).or_insert_with(|| {
+                        let slot = next_slot;
+                        next_slot = next_slot.saturating_add(1);
+                        slot
+                    });
+                }
+                _ => {}
+            }
+        }
+        layout.private_field_count = next_slot;
+
+        for element in elements {
+            let ClassElement::MethodDefinition(method) = element else {
+                continue;
+            };
+            if !method_is_instance_private(method) {
+                continue;
+            }
+            if let PropertyKey::PrivateIdentifier(id) = &method.key {
+                let name = id.name.as_str().to_string();
+                layout.instance_private_method_names.insert(name.clone());
+                layout.slots.entry(name).or_insert_with(|| {
+                    let slot = next_slot;
+                    next_slot = next_slot.saturating_add(1);
+                    slot
+                });
+            }
+        }
+
+        for element in elements {
+            let ClassElement::MethodDefinition(method) = element else {
+                continue;
+            };
+            if !method.r#static || !matches!(method.key, PropertyKey::PrivateIdentifier(_)) {
+                continue;
+            }
+            if let PropertyKey::PrivateIdentifier(id) = &method.key {
+                let name = id.name.as_str().to_string();
+                layout.static_private_method_names.insert(name.clone());
+                layout.slots.entry(name).or_insert_with(|| {
+                    let slot = next_slot;
+                    next_slot = next_slot.saturating_add(1);
+                    slot
+                });
+            }
+        }
+
+        if !layout.instance_private_method_names.is_empty() {
+            layout.instance_method_validation_slot = Some(next_slot);
+            next_slot = next_slot.saturating_add(1);
+        }
+        if !layout.static_private_method_names.is_empty() {
+            layout.static_method_validation_slot = Some(next_slot);
+        }
+
+        layout
+    }
+
+    fn slot(&self, name: &str) -> Option<u16> {
+        self.slots.get(name).copied()
+    }
+
+    fn private_in_slot(&self, name: &str) -> Option<u16> {
+        if self.instance_private_method_names.contains(name) {
+            return self.instance_method_validation_slot;
+        }
+        if self.static_private_method_names.contains(name) {
+            return self.slot(name);
+        }
+        self.slot(name)
+    }
+
+    fn has_private_elements(&self) -> bool {
+        !self.slots.is_empty()
+    }
+}
+
+struct ClassInstanceInitializer<'a> {
+    fields: Vec<ClassFieldInit<'a>>,
+    constructor_assignments: Vec<ClassFieldInit<'a>>,
+    private_fields: Vec<ClassPrivateFieldInit<'a>>,
+    private_method_validation_slot: Option<u16>,
+}
+
+impl<'a> ClassInstanceInitializer<'a> {
+    fn collect(
+        elements: &'a [ClassElement<'a>],
+        private_layout: &ClassPrivateLayout,
+        lowering: &LoweringContext,
+    ) -> Self {
+        let fields = elements
+            .iter()
+            .filter_map(|element| {
+                let ClassElement::PropertyDefinition(prop) = element else {
+                    return None;
+                };
+                if !property_needs_instance_initializer(prop, lowering.use_define_semantic()) {
+                    return None;
+                }
+                let key = if prop.computed {
+                    ClassFieldKey::Computed(&prop.key)
+                } else {
+                    ClassFieldKey::Static(method_key_name(&prop.key)?)
+                };
+                Some(ClassFieldInit {
+                    key,
+                    value: prop.value.as_ref(),
+                    span_start: prop.span.start,
+                })
+            })
+            .collect();
+
+        let constructor_assignments = elements
+            .iter()
+            .filter_map(|element| {
+                let ClassElement::PropertyDefinition(prop) = element else {
+                    return None;
+                };
+                if !property_needs_constructor_assignment(prop, lowering.use_define_semantic()) {
+                    return None;
+                }
+                let key = if prop.computed {
+                    ClassFieldKey::Computed(&prop.key)
+                } else {
+                    ClassFieldKey::Static(method_key_name(&prop.key)?)
+                };
+                Some(ClassFieldInit {
+                    key,
+                    value: prop.value.as_ref(),
+                    span_start: prop.span.start,
+                })
+            })
+            .collect();
+
+        let private_fields = elements
+            .iter()
+            .filter_map(|element| match element {
+                ClassElement::PropertyDefinition(prop) => {
+                    if prop.r#static {
+                        return None;
+                    }
+                    let PropertyKey::PrivateIdentifier(id) = &prop.key else {
+                        return None;
+                    };
+                    Some(ClassPrivateFieldInit {
+                        slot: private_layout.slot(id.name.as_str())?,
+                        value: prop.value.as_ref(),
+                        span_start: prop.span.start,
+                    })
+                }
+                ClassElement::AccessorProperty(accessor) => {
+                    if !accessor_needs_instance_initializer(accessor) {
+                        return None;
+                    }
+                    let backing_name = accessor_backing_field_name(accessor);
+                    Some(ClassPrivateFieldInit {
+                        slot: private_layout.slot(&backing_name)?,
+                        value: accessor.value.as_ref(),
+                        span_start: accessor.span.start,
+                    })
+                }
+                _ => None,
+            })
+            .collect();
+
+        Self {
+            fields,
+            constructor_assignments,
+            private_fields,
+            private_method_validation_slot: private_layout.instance_method_validation_slot,
+        }
+    }
+
+    fn has_constructor_assignments(&self) -> bool {
+        !self.constructor_assignments.is_empty()
+    }
+
+    fn initializer_start(&self, class_span_start: u32) -> u32 {
+        self.fields
+            .first()
+            .map(|field| field.span_start)
+            .or_else(|| self.private_fields.first().map(|field| field.span_start))
+            .unwrap_or(class_span_start)
+    }
+}
+
 enum ClassFieldKey<'a> {
     Static(String),
-    CapturedComputed {
-        key: &'a PropertyKey<'a>,
-        capture_name: String,
-    },
+    Computed(&'a PropertyKey<'a>),
 }
 
 enum ClassFieldRuntimeKey {
@@ -5908,6 +6704,7 @@ struct CodeGen<'a> {
     arrow_captures: ArrowCaptures,
     derived_constructor: bool,
     derived_new_this_reg: Option<u8>,
+    instance_initializer: Option<&'a ClassInstanceInitializer<'a>>,
     /// Original source text used for line-number computation, or `None` when
     /// debug line tracking is disabled for this compilation unit.
     source: Option<&'a str>,
@@ -5939,19 +6736,35 @@ struct CodeGen<'a> {
     module_body: bool,
     inferred_function_name: Option<String>,
     current_lexical_names: Vec<String>,
-    current_lexical_indices: FxHashMap<String, u8>,
-    outer_lexical_envs: Vec<FxHashMap<String, u8>>,
+    current_lexical_indices: FxHashMap<String, LexicalBindingSlot>,
+    outer_lexical_envs: Vec<FxHashMap<String, LexicalBindingSlot>>,
+    scoped_lexical_env_stack: Vec<ScopedLexicalEnvState>,
     runtime_ts_import_equals: FxHashSet<(u32, u32)>,
+    prefer_module_export_loads: FxHashSet<String>,
+    class_static_this_reg: Option<u8>,
+    class_static_this_export: Option<(u8, String)>,
     /// Private field name → slot index for the current class scope.
     /// Populated before compiling class methods and constructors that have private fields.
     /// `level` is always 0 (current class scope) in our single-class implementation.
-    private_field_slots: FxHashMap<String, u16>,
+    private_layout: ClassPrivateLayout,
 }
 
 struct LabelContext {
     name: String,
     break_patches: Vec<usize>,
     continue_patches: Vec<usize>,
+}
+
+#[derive(Clone)]
+struct LexicalEnvState {
+    current_lexical_names: Vec<String>,
+    current_lexical_indices: FxHashMap<String, LexicalBindingSlot>,
+    outer_lexical_envs: Vec<FxHashMap<String, LexicalBindingSlot>>,
+}
+
+struct ScopedLexicalEnvState {
+    previous: LexicalEnvState,
+    try_begin: u32,
 }
 
 impl<'a> CodeGen<'a> {
@@ -5976,6 +6789,7 @@ impl<'a> CodeGen<'a> {
             arrow_captures: ArrowCaptures::default(),
             derived_constructor: false,
             derived_new_this_reg: None,
+            instance_initializer: None,
             source: None,
             source_mapper: None,
             line_tracker: None,
@@ -6003,8 +6817,12 @@ impl<'a> CodeGen<'a> {
             current_lexical_names: Vec::new(),
             current_lexical_indices: FxHashMap::default(),
             outer_lexical_envs: Vec::new(),
+            scoped_lexical_env_stack: Vec::new(),
             runtime_ts_import_equals: FxHashSet::default(),
-            private_field_slots: FxHashMap::default(),
+            prefer_module_export_loads: FxHashSet::default(),
+            class_static_this_reg: None,
+            class_static_this_export: None,
+            private_layout: ClassPrivateLayout::default(),
         }
     }
 
@@ -6058,12 +6876,12 @@ impl<'a> CodeGen<'a> {
         let Some(span) = span else {
             return;
         };
-        self.set_current_lexical_env(self.lowering.function_lexical_names(span).to_vec());
+        self.set_current_function_lexical_env(self.lowering.function_lexical_bindings(span));
         self.outer_lexical_envs = self
             .lowering
             .outer_lexical_envs(span)
             .into_iter()
-            .map(|names| lexical_indices(names.iter().map(String::as_str)))
+            .map(|bindings| function_lexical_indices(&bindings))
             .collect();
     }
 
@@ -6076,26 +6894,62 @@ impl<'a> CodeGen<'a> {
                 .module_lexical_names
                 .iter()
                 .map(String::as_str),
+            FunctionLexicalBindingKind::Lexical,
         )];
     }
 
     fn set_current_lexical_env(&mut self, names: Vec<String>) {
-        self.current_lexical_indices = lexical_indices(names.iter().map(String::as_str));
+        self.current_lexical_indices = lexical_indices(
+            names.iter().map(String::as_str),
+            FunctionLexicalBindingKind::Lexical,
+        );
         self.current_lexical_names = names;
     }
 
-    fn current_lexical_slot(&self, name: &str) -> Option<u8> {
-        self.current_lexical_indices.get(name).copied()
+    fn set_current_function_lexical_env(&mut self, bindings: &[FunctionLexicalBinding]) {
+        self.current_lexical_indices = function_lexical_indices(bindings);
+        self.current_lexical_names = bindings
+            .iter()
+            .map(|binding| binding.name.clone())
+            .collect();
     }
 
-    fn lexical_lookup(&self, name: &str) -> Option<(u8, u8)> {
-        if let Some(slot) = self.current_lexical_slot(name) {
-            return Some((0, slot));
+    fn lexical_env_state(&self) -> LexicalEnvState {
+        LexicalEnvState {
+            current_lexical_names: self.current_lexical_names.clone(),
+            current_lexical_indices: self.current_lexical_indices.clone(),
+            outer_lexical_envs: self.outer_lexical_envs.clone(),
+        }
+    }
+
+    fn restore_lexical_env_state(&mut self, state: LexicalEnvState) {
+        self.current_lexical_names = state.current_lexical_names;
+        self.current_lexical_indices = state.current_lexical_indices;
+        self.outer_lexical_envs = state.outer_lexical_envs;
+    }
+
+    fn current_lexical_slot(&self, name: &str) -> Option<u8> {
+        self.current_lexical_indices
+            .get(name)
+            .map(|binding| binding.slot)
+    }
+
+    fn lexical_lookup(&self, name: &str) -> Option<LexicalLookup> {
+        if let Some(binding) = self.current_lexical_indices.get(name).copied() {
+            return Some(LexicalLookup {
+                level: 0,
+                slot: binding.slot,
+                kind: binding.kind,
+            });
         }
         let mut level = u8::from(!self.current_lexical_names.is_empty());
         for env in &self.outer_lexical_envs {
-            if let Some(slot) = env.get(name).copied() {
-                return Some((level, slot));
+            if let Some(binding) = env.get(name).copied() {
+                return Some(LexicalLookup {
+                    level,
+                    slot: binding.slot,
+                    kind: binding.kind,
+                });
             }
             level = level.saturating_add(1);
         }
@@ -6114,17 +6968,82 @@ impl<'a> CodeGen<'a> {
         self.ensure_next_reg_at_least(if reserves_class_binding { 5 } else { 4 });
     }
 
+    fn enter_standalone_class_lexical_env(&mut self, class_name: &str) -> bool {
+        if !self.module_body || !self.uses_scoped_class_lexical_envs() {
+            return false;
+        }
+        let class_lexical_names = self.lowering.class_lexical_names(class_name);
+        if class_lexical_names.is_empty() {
+            return false;
+        }
+        let previous = self.lexical_env_state();
+        let mut outer_lexical_envs = Vec::new();
+        if !previous.current_lexical_names.is_empty() {
+            outer_lexical_envs.push(previous.current_lexical_indices.clone());
+        }
+        outer_lexical_envs.extend(previous.outer_lexical_envs.clone());
+        self.set_current_lexical_env(class_lexical_names.to_vec());
+        self.outer_lexical_envs = outer_lexical_envs;
+        self.push(Insn::NewLexEnv(self.current_lexical_names.len() as u8));
+        let try_begin = self.insns.len() as u32;
+        self.scoped_lexical_env_stack.push(ScopedLexicalEnvState {
+            previous,
+            try_begin,
+        });
+        true
+    }
+
+    fn exit_standalone_class_lexical_env(&mut self, entered: bool) {
+        if !entered {
+            return;
+        }
+        let Some(state) = self.scoped_lexical_env_stack.pop() else {
+            return;
+        };
+        self.emit_scoped_lexical_env_epilogue(state.try_begin);
+        self.restore_lexical_env_state(state.previous);
+    }
+
+    fn emit_scoped_lexical_env_epilogue(&mut self, try_begin: u32) {
+        let try_end = self.insns.len() as u32;
+        let jump_to_normal_exit = self.insns.len();
+        self.push(Insn::Jmp(0));
+        let catch_begin = self.insns.len() as u32;
+        let exception_reg = self.alloc_reg();
+        self.push(Insn::Sta(exception_reg));
+        self.push(Insn::PopLexEnv);
+        self.push(Insn::Lda(exception_reg));
+        self.push(Insn::Throw);
+        let catch_end = self.insns.len() as u32;
+        self.patch_jump_to(jump_to_normal_exit, catch_end as usize);
+        self.push(Insn::PopLexEnv);
+        self.push_catch_entry(CatchEntry {
+            try_begin,
+            try_end,
+            catch_begin,
+            catch_end,
+            exception_record: None,
+        });
+    }
+
+    fn uses_scoped_class_lexical_envs(&self) -> bool {
+        !self.lowering.is_default_api_version()
+    }
+
     fn emit_function_lex_env_prologue(&mut self) {
         if self.current_lexical_names.is_empty() {
             return;
         }
         self.push(Insn::NewLexEnv(self.current_lexical_names.len() as u8));
-        if self.lowering.standalone_ecmascript_input() {
-            return;
-        }
-        for slot in 0..self.current_lexical_names.len() {
+        for name in self.current_lexical_names.clone() {
+            let Some(binding) = self.current_lexical_indices.get(&name).copied() else {
+                continue;
+            };
+            if !binding.kind.initializes_to_undefined() {
+                continue;
+            }
             self.push(Insn::LdUndefined);
-            self.push(Insn::StLexVar(0, slot as u8));
+            self.push(Insn::StLexVar(0, binding.slot));
         }
     }
 
@@ -6154,7 +7073,14 @@ impl<'a> CodeGen<'a> {
             return;
         }
         if let Some(id) = &func.id {
-            let name_id = self.intern(id.name.as_str());
+            let record_name = self
+                .lowering
+                .function_name(func.span.start, func.span.end)
+                .map(str::to_string);
+            let name_id = record_name
+                .as_deref()
+                .map(|name| self.intern(name))
+                .unwrap_or_else(|| self.intern(id.name.as_str()));
             let length = func.params.items.len() as u8;
             self.push(Insn::DefineFuncShort(0, name_id, length));
             let name = id.name.as_str().to_string();
@@ -6702,150 +7628,25 @@ impl<'a> CodeGen<'a> {
                 if cls.declare {
                     return;
                 }
-                let super_class = cls.super_class.as_ref();
                 let class_name = cls.id.as_ref().map(|id| id.name.as_str());
                 if self.lowering.standalone_ecmascript_input() {
                     if let Some(class_name) = class_name {
-                        if self.emit_standalone_class_with_instance_initializer(class_name, cls) {
-                            return;
-                        }
-                        if self.emit_simple_standalone_class_declaration(class_name, cls) {
+                        if self.lowering.export_index(class_name).is_none()
+                            && self.emit_simple_standalone_class_declaration(class_name, cls)
+                        {
                             return;
                         }
                     }
                 }
                 if let Some(id) = &cls.id {
-                    let name = id.name.as_str().to_string();
-                    if let Some(export_index) = self.lowering.export_index(&name) {
-                        let class_reg = self.alloc_reg();
-                        let var_reg = self.alloc_reg();
-                        self.var_regs.insert(name.clone(), var_reg);
-                        let proto_vreg = if let Some(sc) = super_class {
-                            self.emit_expr(sc);
-                            let reg = self.alloc_reg();
-                            self.set_debug_pos(cls.body.span.start);
-                            self.push(Insn::Sta(reg));
-                            reg
-                        } else {
-                            self.push(Insn::LdHole);
-                            self.push(Insn::Sta(class_reg));
-                            class_reg
-                        };
-                        let computed_keys = self.emit_class_computed_keys(&cls.body.body);
-                        let lit_arr_id = self.literal_arrays.len() as u16;
-                        self.literal_arrays.push(class_buffer_literal_array(
-                            class_name.unwrap_or(&name),
-                            &cls.body.body,
-                            self.lowering.standalone_ecmascript_input(),
-                            Some(self.lowering),
-                        ));
-                        let formal_count = constructor_required_param_count(&cls.body.body);
-                        self.set_debug_pos(cls.body.span.start);
-                        self.push(Insn::DefineClassWithBuffer(
-                            0,
-                            lit_arr_id,
-                            lit_arr_id,
-                            formal_count,
-                            proto_vreg,
-                        ));
-                        self.set_debug_pos(cls.body.span.start);
-                        self.push(Insn::Sta(class_reg));
-                        self.set_debug_pos(id.span.start);
-                        self.push(Insn::Sta(var_reg));
-                        self.emit_class_missing_properties(
-                            class_name.unwrap_or(&name),
-                            &cls.body.body,
-                            class_reg,
-                            cls.body.span.start,
-                            &computed_keys.method_regs,
-                            &computed_keys.auto_accessor_regs,
-                        );
-                        self.emit_class_static_initializer(
-                            class_name.unwrap_or(&name),
-                            &cls.body.body,
-                            class_reg,
-                            cls.body.span.start,
-                            &computed_keys.static_field_regs,
-                        );
-                        if let Some(lex_idx) = self.current_lexical_slot(&name) {
-                            self.push(Insn::Lda(class_reg));
-                            self.push(Insn::StLexVar(0, lex_idx));
-                        }
-                        self.push(Insn::Lda(class_reg));
-                        self.push(Insn::StModuleVar(export_index));
-                        return;
-                    }
-                }
-                // Emit defineclasswithbuffer; result → accumulator.
-                if let Some(id) = &cls.id {
-                    let name = id.name.as_str().to_string();
-                    let saved_next_reg = self.next_reg;
-                    let class_reg = self.alloc_reg();
-                    let var_reg = self.alloc_reg();
-                    self.var_regs.insert(name.clone(), var_reg);
-                    let proto_vreg = if let Some(sc) = super_class {
-                        self.emit_expr(sc);
-                        let reg = self.alloc_reg();
-                        self.set_debug_pos(cls.body.span.start);
-                        self.push(Insn::Sta(reg));
-                        reg
-                    } else {
-                        self.push(Insn::LdHole);
-                        self.push(Insn::Sta(class_reg));
-                        class_reg
-                    };
-                    let computed_keys = self.emit_class_computed_keys(&cls.body.body);
-                    let lit_arr_id = self.literal_arrays.len() as u16;
-                    self.literal_arrays.push(class_buffer_literal_array(
-                        class_name.unwrap_or(&name),
-                        &cls.body.body,
-                        self.lowering.standalone_ecmascript_input(),
-                        Some(self.lowering),
-                    ));
-                    let formal_count = constructor_required_param_count(&cls.body.body);
-                    self.set_debug_pos(cls.body.span.start);
-                    self.push(Insn::DefineClassWithBuffer(
-                        0,
-                        lit_arr_id,
-                        lit_arr_id,
-                        formal_count,
-                        proto_vreg,
-                    ));
-                    self.set_debug_pos(cls.body.span.start);
-                    self.push(Insn::Sta(class_reg));
-                    self.set_debug_pos(id.span.start);
-                    self.push(Insn::Sta(var_reg));
-                    self.emit_class_missing_properties(
-                        class_name.unwrap_or(&name),
-                        &cls.body.body,
-                        class_reg,
-                        cls.body.span.start,
-                        &computed_keys.method_regs,
-                        &computed_keys.auto_accessor_regs,
-                    );
-                    self.emit_class_static_initializer(
-                        class_name.unwrap_or(&name),
-                        &cls.body.body,
-                        class_reg,
-                        cls.body.span.start,
-                        &computed_keys.static_field_regs,
-                    );
-                    if let Some(lex_idx) = self.current_lexical_slot(&name) {
-                        self.set_debug_pos(cls.body.span.start);
-                        self.push(Insn::Lda(class_reg));
-                        self.set_debug_pos(id.span.start);
-                        self.push(Insn::Sta(class_reg));
-                        self.push(Insn::Lda(class_reg));
-                        self.push(Insn::StLexVar(0, lex_idx));
-                        self.var_regs.remove(&name);
-                        self.next_reg = saved_next_reg;
-                    }
-                    if let Some(export_index) = self.lowering.export_index(&name) {
-                        self.push(Insn::Lda(class_reg));
-                        self.push(Insn::StModuleVar(export_index));
-                    }
+                    self.emit_class_var_decl(id.name.as_str(), cls);
                 } else {
-                    self.emit_class_inner(class_name, &cls.body.body, super_class);
+                    self.emit_class_inner(
+                        class_name,
+                        &cls.body.body,
+                        cls.super_class.as_ref(),
+                        (cls.span.start, cls.span.end),
+                    );
                 }
             }
             Statement::ExportDefaultDeclaration(export) => {
@@ -6854,90 +7655,7 @@ impl<'a> CodeGen<'a> {
                         return;
                     }
                     let local_name = cls.id.as_ref().map(|id| id.name.as_str());
-                    let class_name = local_name.unwrap_or(DEFAULT_LOCAL_NAME);
-                    let class_reg = self.alloc_reg();
-                    if let Some(name) = local_name {
-                        self.var_regs.insert(name.to_string(), class_reg + 1);
-                        self.ensure_next_reg_at_least(class_reg.saturating_add(2));
-                    }
-                    let proto_vreg = if let Some(sc) = &cls.super_class {
-                        self.emit_expr(sc);
-                        let reg = self.alloc_reg();
-                        self.set_debug_pos(cls.body.span.start);
-                        self.push(Insn::Sta(reg));
-                        reg
-                    } else {
-                        self.push(Insn::LdHole);
-                        self.push(Insn::Sta(class_reg));
-                        class_reg
-                    };
-                    let computed_keys = self.emit_class_computed_keys(&cls.body.body);
-                    let lit_arr_id = self.literal_arrays.len() as u16;
-                    self.literal_arrays.push(class_buffer_literal_array(
-                        class_name,
-                        &cls.body.body,
-                        self.lowering.standalone_ecmascript_input(),
-                        Some(self.lowering),
-                    ));
-                    let formal_count = constructor_required_param_count(&cls.body.body);
-                    self.set_debug_pos(cls.body.span.start);
-                    self.push(Insn::DefineClassWithBuffer(
-                        0,
-                        lit_arr_id,
-                        lit_arr_id,
-                        formal_count,
-                        proto_vreg,
-                    ));
-                    self.set_debug_pos(cls.body.span.start);
-                    self.push(Insn::Sta(class_reg));
-                    if let Some(name) = local_name {
-                        if let Some(id) = &cls.id {
-                            self.set_debug_pos(id.span.start);
-                        }
-                        self.push(Insn::Sta(class_reg + 1));
-                        self.emit_class_missing_properties(
-                            class_name,
-                            &cls.body.body,
-                            class_reg,
-                            cls.body.span.start,
-                            &computed_keys.method_regs,
-                            &computed_keys.auto_accessor_regs,
-                        );
-                        self.emit_class_static_initializer(
-                            class_name,
-                            &cls.body.body,
-                            class_reg,
-                            cls.body.span.start,
-                            &computed_keys.static_field_regs,
-                        );
-                        if let Some(export_index) = self.lowering.export_index(name) {
-                            self.push(Insn::Lda(class_reg));
-                            if let Some(id) = &cls.id {
-                                self.set_debug_pos(id.span.start);
-                            }
-                            self.push(Insn::StModuleVar(export_index));
-                        }
-                    } else {
-                        self.emit_class_missing_properties(
-                            class_name,
-                            &cls.body.body,
-                            class_reg,
-                            cls.body.span.start,
-                            &computed_keys.method_regs,
-                            &computed_keys.auto_accessor_regs,
-                        );
-                        self.emit_class_static_initializer(
-                            class_name,
-                            &cls.body.body,
-                            class_reg,
-                            cls.body.span.start,
-                            &computed_keys.static_field_regs,
-                        );
-                        if let Some(export_index) = self.lowering.export_index(DEFAULT_LOCAL_NAME) {
-                            self.push(Insn::Lda(class_reg));
-                            self.push(Insn::StModuleVar(export_index));
-                        }
-                    }
+                    self.emit_class_var_decl(local_name.unwrap_or(DEFAULT_LOCAL_NAME), cls);
                 } else if let Some(expr) = export.declaration.as_expression() {
                     self.emit_expr(expr);
                     if let Some(export_index) = self.lowering.export_index(DEFAULT_LOCAL_NAME) {
@@ -6958,25 +7676,8 @@ impl<'a> CodeGen<'a> {
                             if cls.declare {
                                 return;
                             }
-                            let super_class = cls.super_class.as_ref();
-                            let class_name = cls.id.as_ref().map(|id| id.name.as_str());
                             if let Some(id) = &cls.id {
-                                let name = id.name.as_str().to_string();
-                                let class_reg = self.alloc_reg();
-                                let var_reg = self.alloc_reg();
-                                self.var_regs.insert(name.clone(), var_reg);
-                                self.emit_class_inner(class_name, &cls.body.body, super_class);
-                                self.push(Insn::Sta(class_reg));
-                                self.set_debug_pos(id.span.start);
-                                self.push(Insn::Sta(var_reg));
-                                if let Some(lex_idx) = self.current_lexical_slot(&name) {
-                                    self.push(Insn::Lda(class_reg));
-                                    self.push(Insn::StLexVar(0, lex_idx));
-                                }
-                                if let Some(export_index) = self.lowering.export_index(&name) {
-                                    self.push(Insn::Lda(class_reg));
-                                    self.push(Insn::StModuleVar(export_index));
-                                }
+                                self.emit_class_var_decl(id.name.as_str(), cls);
                             }
                         }
                         _ => {}
@@ -7992,8 +8693,8 @@ impl<'a> CodeGen<'a> {
                 let name = id.name.as_str();
                 if let Some(&reg) = self.var_regs.get(name) {
                     self.push(Insn::Sta(reg));
-                } else if let Some((level, slot)) = self.lexical_lookup(name) {
-                    self.push(Insn::StLexVar(level, slot));
+                } else if let Some(lookup) = self.lexical_lookup(name) {
+                    self.push(Insn::StLexVar(lookup.level, lookup.slot));
                 } else {
                     let name_id = self.intern(name);
                     self.push(Insn::TryStGlobalByName(0, name_id));
@@ -8049,8 +8750,8 @@ impl<'a> CodeGen<'a> {
                 let name = id.name.as_str();
                 if let Some(&reg) = self.var_regs.get(name) {
                     self.push(Insn::Sta(reg));
-                } else if let Some((level, slot)) = self.lexical_lookup(name) {
-                    self.push(Insn::StLexVar(level, slot));
+                } else if let Some(lookup) = self.lexical_lookup(name) {
+                    self.push(Insn::StLexVar(lookup.level, lookup.slot));
                 } else {
                     let name_id = self.intern(name);
                     self.push(Insn::TryStGlobalByName(0, name_id));
@@ -8252,8 +8953,8 @@ impl<'a> CodeGen<'a> {
                         let id_name = id_prop.binding.name.as_str();
                         if let Some(&reg) = self.var_regs.get(id_name) {
                             self.push(Insn::Sta(reg));
-                        } else if let Some((level, slot)) = self.lexical_lookup(id_name) {
-                            self.push(Insn::StLexVar(level, slot));
+                        } else if let Some(lookup) = self.lexical_lookup(id_name) {
+                            self.push(Insn::StLexVar(lookup.level, lookup.slot));
                         } else {
                             let n_id = self.intern(id_name);
                             self.push(Insn::TryStGlobalByName(0, n_id));
@@ -8264,9 +8965,9 @@ impl<'a> CodeGen<'a> {
                         if let Some(&reg) = self.var_regs.get(id_name) {
                             self.push(Insn::Lda(value_reg));
                             self.push(Insn::Sta(reg));
-                        } else if let Some((level, slot)) = self.lexical_lookup(id_name) {
+                        } else if let Some(lookup) = self.lexical_lookup(id_name) {
                             self.push(Insn::Lda(value_reg));
-                            self.push(Insn::StLexVar(level, slot));
+                            self.push(Insn::StLexVar(lookup.level, lookup.slot));
                         } else {
                             let n_id = self.intern(id_name);
                             self.push(Insn::Lda(value_reg));
@@ -8722,6 +9423,21 @@ impl<'a> CodeGen<'a> {
                 BindingPattern::BindingIdentifier(id) => {
                     let name = id.name.as_str().to_string();
                     let saved_next_reg = self.next_reg;
+                    let var_reg = if decl.kind == VariableDeclarationKind::Var {
+                        if let Some(&reg) = self.var_regs.get(&name) {
+                            Some(reg)
+                        } else {
+                            let reg = self.alloc_reg();
+                            self.var_regs.insert(name.clone(), reg);
+                            self.set_debug_pos(id.span.start);
+                            self.push(Insn::LdUndefined);
+                            self.push(Insn::Sta(reg));
+                            self.store_identifier_binding_from_reg(&name, reg);
+                            Some(reg)
+                        }
+                    } else {
+                        None
+                    };
                     if let Some(init) = &declarator.init {
                         if let Expression::ClassExpression(cls) = init {
                             self.emit_class_var_decl(&name, cls);
@@ -8740,8 +9456,13 @@ impl<'a> CodeGen<'a> {
                     } else {
                         self.push(Insn::LdUndefined);
                     }
-                    let reg = self.alloc_reg();
-                    self.var_regs.insert(name.clone(), reg);
+                    let reg = if let Some(reg) = var_reg {
+                        reg
+                    } else {
+                        let reg = self.alloc_reg();
+                        self.var_regs.insert(name.clone(), reg);
+                        reg
+                    };
                     self.set_debug_pos(id.span.start);
                     self.push(Insn::Sta(reg));
                     if let Some(slot) = self.current_lexical_slot(&name) {
@@ -8750,10 +9471,7 @@ impl<'a> CodeGen<'a> {
                         self.var_regs.remove(&name);
                         self.next_reg = saved_next_reg;
                     }
-                    if let Some(export_index) = self.lowering.export_index(&name) {
-                        self.push(Insn::Lda(reg));
-                        self.push(Insn::StModuleVar(export_index));
-                    }
+                    self.store_identifier_binding_from_reg(&name, reg);
                 }
                 BindingPattern::ArrayPattern(_) | BindingPattern::ObjectPattern(_) => {
                     // Destructuring binding: evaluate the RHS, then lower the pattern.
@@ -9143,8 +9861,8 @@ impl<'a> CodeGen<'a> {
             Expression::MetaProperty(meta) => {
                 if is_new_target_meta(meta) {
                     if self.arrow_captures.new_target_slot.is_some() {
-                        if let Some((level, slot)) = self.lexical_lookup("new.target") {
-                            self.push(Insn::LdLexVar(level, slot));
+                        if let Some(lookup) = self.lexical_lookup("new.target") {
+                            self.push(Insn::LdLexVar(lookup.level, lookup.slot));
                         } else {
                             self.push(Insn::Lda(MANDATORY_PARAM_NEW_TARGET_REG));
                         }
@@ -9202,23 +9920,26 @@ impl<'a> CodeGen<'a> {
                 // so the caller (e.g. emit_var_decl) can assign it as needed.
                 let super_class = cls.super_class.as_ref();
                 let class_name = cls.id.as_ref().map(|id| id.name.as_str());
-                self.emit_class_inner(class_name, &cls.body.body, super_class);
+                self.emit_class_inner(
+                    class_name,
+                    &cls.body.body,
+                    super_class,
+                    (cls.span.start, cls.span.end),
+                );
             }
             Expression::ArrowFunctionExpression(arrow) => {
                 let length = arrow.params.items.len() as u8;
                 let record_name = self
                     .lowering
                     .function_name(arrow.span.start, arrow.span.end)
-                    .map(str::to_string);
-                let method_name_id = record_name
-                    .as_deref()
-                    .map(|name| self.intern(name))
-                    .or_else(|| {
-                        self.inferred_function_name
-                            .clone()
-                            .map(|name| self.intern(&name))
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "missing upstream internal name for arrow function span {}..{}",
+                            arrow.span.start, arrow.span.end
+                        )
                     })
-                    .unwrap_or(0);
+                    .to_string();
+                let method_name_id = self.intern(&record_name);
                 self.push(Insn::DefineFuncShort(0, method_name_id, length));
             }
             Expression::FunctionExpression(func) => {
@@ -9227,17 +9948,14 @@ impl<'a> CodeGen<'a> {
                 let record_name = self
                     .lowering
                     .function_name(func.span.start, func.span.end)
-                    .map(str::to_string);
-                let method_name_id = record_name
-                    .as_deref()
-                    .map(|name| self.intern(name))
-                    .or_else(|| func.id.as_ref().map(|id| self.intern(id.name.as_str())))
-                    .or_else(|| {
-                        self.inferred_function_name
-                            .clone()
-                            .map(|name| self.intern(&name))
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "missing upstream internal name for function expression span {}..{}",
+                            func.span.start, func.span.end
+                        )
                     })
-                    .unwrap_or(0);
+                    .to_string();
+                let method_name_id = self.intern(&record_name);
                 self.push(Insn::DefineFuncShort(0, method_name_id, length));
             }
             Expression::ObjectExpression(obj) => {
@@ -9272,7 +9990,7 @@ impl<'a> CodeGen<'a> {
                 // `#x in obj` — brand-check opcode.
                 let name = expr.left.name.as_str();
                 self.emit_expr(&expr.right);
-                if let Some(slot) = self.private_field_slots.get(name).copied() {
+                if let Some(slot) = self.private_layout.private_in_slot(name) {
                     self.push(Insn::TestIn(0, 0, slot));
                 }
             }
@@ -9284,7 +10002,7 @@ impl<'a> CodeGen<'a> {
 
     /// Emit a private field load: object → acc, then `ldprivateproperty`.
     fn emit_private_field_load(&mut self, field_name: &str, object: &Expression<'_>) {
-        let slot = self.private_field_slots.get(field_name).copied();
+        let slot = self.private_layout.slot(field_name);
         self.emit_expr(object);
         if let Some(slot) = slot {
             self.push(Insn::LdPrivateProperty(0, 0, slot));
@@ -9299,7 +10017,7 @@ impl<'a> CodeGen<'a> {
         object: &Expression<'_>,
         value: &Expression<'_>,
     ) {
-        let slot = self.private_field_slots.get(field_name).copied();
+        let slot = self.private_layout.slot(field_name);
         let obj_reg = self.alloc_reg();
         self.emit_expr(object);
         self.push(Insn::Sta(obj_reg));
@@ -9310,9 +10028,19 @@ impl<'a> CodeGen<'a> {
     }
 
     fn emit_this_value(&mut self) {
+        if let Some((export_index, name)) = self.class_static_this_export.clone() {
+            self.push(Insn::LdLocalModuleVar(export_index));
+            let name_id = self.intern(&name);
+            self.push(Insn::ThrowUndefinedIfHoleWithName(name_id));
+            return;
+        }
+        if let Some(reg) = self.class_static_this_reg {
+            self.push(Insn::Lda(reg));
+            return;
+        }
         if self.arrow_captures.this_slot.is_some() {
-            if let Some((level, slot)) = self.lexical_lookup("this") {
-                self.push(Insn::LdLexVar(level, slot));
+            if let Some(lookup) = self.lexical_lookup("this") {
+                self.push(Insn::LdLexVar(lookup.level, lookup.slot));
             } else {
                 self.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
             }
@@ -9767,36 +10495,72 @@ impl<'a> CodeGen<'a> {
         }
     }
 
-    fn emit_class_field_definition(
+    fn emit_instance_initializer_inline(&mut self, this_reg: u8) {
+        let Some(initializer) = self.instance_initializer else {
+            return;
+        };
+        if let Some(slot) = initializer.private_method_validation_slot {
+            self.push(Insn::LdUndefined);
+            self.push(Insn::CallRuntimeDefinePrivateProperty(0, 0, slot, this_reg));
+        }
+        for field in &initializer.fields {
+            self.emit_instance_class_field_initialization(field, this_reg);
+        }
+        for field in &initializer.private_fields {
+            if let Some(value) = field.value {
+                self.emit_expr(value);
+            } else {
+                self.push(Insn::LdUndefined);
+            }
+            self.push(Insn::CallRuntimeDefinePrivateProperty(
+                0, 0, field.slot, this_reg,
+            ));
+        }
+    }
+
+    fn emit_constructor_class_field_assignments(&mut self, this_reg: u8) {
+        let Some(initializer) = self.instance_initializer else {
+            return;
+        };
+        for field in &initializer.constructor_assignments {
+            self.emit_constructor_class_field_assignment(field, this_reg);
+        }
+    }
+
+    fn emit_class_field_value(&mut self, value: Option<&Expression<'_>>) {
+        if let Some(init_expr) = value {
+            self.emit_expr(init_expr);
+        } else {
+            self.push(Insn::LdUndefined);
+        }
+    }
+
+    fn emit_instance_class_field_initialization(
         &mut self,
         field: &ClassFieldInit<'_>,
         obj_reg: u8,
-        precomputed_key_reg: Option<u8>,
     ) {
         let key = match &field.key {
             ClassFieldKey::Static(name) => ClassFieldRuntimeKey::Static(name.clone()),
-            ClassFieldKey::CapturedComputed { key, capture_name } => {
-                ClassFieldRuntimeKey::ComputedReg(
-                    precomputed_key_reg
-                        .unwrap_or_else(|| self.emit_captured_class_key_to_reg(capture_name, key)),
-                )
+            ClassFieldKey::Computed(key) => {
+                ClassFieldRuntimeKey::ComputedReg(self.emit_property_key_to_reg(key))
             }
         };
-        self.emit_class_field_definition_with_key(field.value, key, obj_reg);
+        self.emit_instance_class_field_initialization_with_key(field.value, key, obj_reg);
     }
 
-    fn emit_captured_class_key_to_reg(&mut self, capture_name: &str, key: &PropertyKey<'_>) -> u8 {
-        if let Some((level, slot)) = self.lexical_lookup(capture_name) {
-            let key_reg = self.alloc_reg();
-            self.push(Insn::LdLexVar(level, slot));
-            self.push(Insn::Sta(key_reg));
-            return key_reg;
-        }
-        debug_assert!(
-            false,
-            "missing lexical capture for computed instance class field key"
-        );
-        self.emit_property_key_to_reg(key)
+    fn emit_constructor_class_field_assignment(
+        &mut self,
+        field: &ClassFieldInit<'_>,
+        obj_reg: u8,
+    ) {
+        let key = match &field.key {
+            ClassFieldKey::Static(name) => ClassFieldRuntimeKey::Static(name.clone()),
+            ClassFieldKey::Computed(key) => {
+                ClassFieldRuntimeKey::ComputedReg(self.emit_property_key_to_reg(key))
+            }
+        };
+        self.emit_constructor_class_field_assignment_with_key(field.value, key, obj_reg);
     }
 
     fn emit_class_field_definition_with_key(
@@ -9805,14 +10569,7 @@ impl<'a> CodeGen<'a> {
         key: ClassFieldRuntimeKey,
         obj_reg: u8,
     ) {
-        if let Some(init_expr) = value {
-            self.emit_expr(init_expr);
-        } else {
-            self.push(Insn::LdUndefined);
-        }
-        let value_reg = self.alloc_reg();
-        self.push(Insn::Sta(value_reg));
-        self.push(Insn::Lda(value_reg));
+        self.emit_class_field_value(value);
         match key {
             ClassFieldRuntimeKey::Static(name) => {
                 let name_id = self.intern(&name);
@@ -9820,6 +10577,42 @@ impl<'a> CodeGen<'a> {
             }
             ClassFieldRuntimeKey::ComputedReg(key_reg) => {
                 self.define_own_property_by_value(key_reg, obj_reg);
+            }
+        }
+    }
+
+    fn emit_instance_class_field_initialization_with_key(
+        &mut self,
+        value: Option<&Expression<'_>>,
+        key: ClassFieldRuntimeKey,
+        obj_reg: u8,
+    ) {
+        self.emit_class_field_value(value);
+        match key {
+            ClassFieldRuntimeKey::Static(name) => {
+                let name_id = self.intern(&name);
+                self.push(Insn::StOwnByName(0, name_id, obj_reg));
+            }
+            ClassFieldRuntimeKey::ComputedReg(key_reg) => {
+                self.push(Insn::StOwnByValue(0, obj_reg, key_reg));
+            }
+        }
+    }
+
+    fn emit_constructor_class_field_assignment_with_key(
+        &mut self,
+        value: Option<&Expression<'_>>,
+        key: ClassFieldRuntimeKey,
+        obj_reg: u8,
+    ) {
+        self.emit_class_field_value(value);
+        match key {
+            ClassFieldRuntimeKey::Static(name) => {
+                let name_id = self.intern(&name);
+                self.push(Insn::StObjByName(0, name_id, obj_reg));
+            }
+            ClassFieldRuntimeKey::ComputedReg(key_reg) => {
+                self.push(Insn::StObjByValue(0, obj_reg, key_reg));
             }
         }
     }
@@ -10355,9 +11148,7 @@ impl<'a> CodeGen<'a> {
             if arg_reg != target {
                 self.push(Insn::Lda(arg_reg));
                 self.push(Insn::Sta(target));
-                if self.next_reg <= target {
-                    self.next_reg = target.saturating_add(1);
-                }
+                self.ensure_next_reg_at_least(target.saturating_add(1));
             }
         }
     }
@@ -10523,7 +11314,11 @@ impl<'a> CodeGen<'a> {
         class_name: Option<&str>,
         elements: &[ClassElement<'_>],
         super_class: Option<&Expression<'_>>,
+        class_span: (u32, u32),
     ) {
+        let class_lexical_env = class_name
+            .map(|name| self.enter_standalone_class_lexical_env(name))
+            .unwrap_or(false);
         // Load the prototype (parent class) if present.
         let proto_vreg = if let Some(sc) = super_class {
             self.emit_expr(sc);
@@ -10539,22 +11334,24 @@ impl<'a> CodeGen<'a> {
         let computed_keys = self.emit_class_computed_keys(elements);
 
         // Register the class literal buffer and use its index as buf_id.
-        let lit_arr_id = self.literal_arrays.len() as u16;
-        self.literal_arrays.push(class_buffer_literal_array(
+        let class_public_buffer = ClassPublicBuffer::build(
             class_name.unwrap_or("_"),
             elements,
             self.lowering.standalone_ecmascript_input(),
             Some(self.lowering),
-        ));
+        );
+        let (literal_array, class_buffer_compiled_methods) = class_public_buffer.into_parts();
+        let lit_arr_id = self.literal_arrays.len() as u16;
+        self.literal_arrays.push(literal_array);
+        let ctor_id = self.class_constructor_id(class_name.unwrap_or("_"), elements, class_span);
 
         let formal_count = constructor_required_param_count(elements);
 
-        // Emit defineclasswithbuffer:
-        //   slot=0, ctor_id=lit_arr_id (stub), buf_id=lit_arr_id,
-        //   proto_argc, proto_vreg
+        // Emit defineclasswithbuffer with the constructor method symbol and
+        // class literal buffer, matching upstream pandasm lowering.
         self.push(Insn::DefineClassWithBuffer(
             0,
-            lit_arr_id,
+            ctor_id,
             lit_arr_id,
             formal_count,
             proto_vreg,
@@ -10564,19 +11361,73 @@ impl<'a> CodeGen<'a> {
         self.emit_class_missing_properties(
             class_name.unwrap_or("_"),
             elements,
+            &class_buffer_compiled_methods,
             class_reg,
             0,
             &computed_keys.method_regs,
             &computed_keys.auto_accessor_regs,
         );
-        self.emit_class_static_initializer(
+        self.emit_class_instance_initializer(class_name.unwrap_or("_"), elements, class_reg, 0);
+        self.emit_class_static_initialization_epilogue(
             class_name.unwrap_or("_"),
             elements,
             class_reg,
+            class_span,
             0,
             &computed_keys.static_field_regs,
+            class_lexical_env,
+            None,
         );
         self.push(Insn::Lda(class_reg));
+    }
+
+    fn class_constructor_id(
+        &mut self,
+        class_name: &str,
+        elements: &[ClassElement<'_>],
+        class_span: (u32, u32),
+    ) -> u16 {
+        let constructor_name = self.class_constructor_name(class_name, elements, class_span);
+        self.intern(&constructor_name)
+    }
+
+    fn class_constructor_name(
+        &self,
+        class_name: &str,
+        elements: &[ClassElement<'_>],
+        class_span: (u32, u32),
+    ) -> String {
+        for element in elements {
+            let ClassElement::MethodDefinition(method) = element else {
+                continue;
+            };
+            if method.kind != MethodDefinitionKind::Constructor {
+                continue;
+            }
+            if let Some(name) = self
+                .lowering
+                .function_name(method.value.span.start, method.value.span.end)
+            {
+                return name.to_string();
+            }
+            if self.lowering.standalone_ecmascript_input() {
+                return class_method_upstream_name(method, class_name)
+                    .unwrap_or_else(|| format!("#~{class_name}=#{class_name}"));
+            }
+            return class_name.to_string();
+        }
+
+        if let Some(name) = self
+            .lowering
+            .default_constructor_name(class_span.0, class_span.1)
+        {
+            return name.to_string();
+        }
+        if self.lowering.standalone_ecmascript_input() {
+            format!("#~{class_name}=#{class_name}")
+        } else {
+            class_name.to_string()
+        }
     }
 
     fn emit_class_var_decl(&mut self, name: &str, cls: &oxc_ast::ast::Class<'_>) {
@@ -10594,6 +11445,7 @@ impl<'a> CodeGen<'a> {
         if lexical_slot.is_none() {
             self.var_regs.insert(name.to_string(), var_reg);
         }
+        let class_lexical_env = self.enter_standalone_class_lexical_env(class_name);
 
         let proto_vreg = if let Some(sc) = &cls.super_class {
             self.emit_expr(sc);
@@ -10608,18 +11460,22 @@ impl<'a> CodeGen<'a> {
         };
         let computed_keys = self.emit_class_computed_keys(&cls.body.body);
 
-        let lit_arr_id = self.literal_arrays.len() as u16;
-        self.literal_arrays.push(class_buffer_literal_array(
+        let class_public_buffer = ClassPublicBuffer::build(
             class_name,
             &cls.body.body,
             self.lowering.standalone_ecmascript_input(),
             Some(self.lowering),
-        ));
+        );
+        let (literal_array, class_buffer_compiled_methods) = class_public_buffer.into_parts();
+        let lit_arr_id = self.literal_arrays.len() as u16;
+        self.literal_arrays.push(literal_array);
+        let ctor_id =
+            self.class_constructor_id(class_name, &cls.body.body, (cls.span.start, cls.span.end));
         let formal_count = constructor_required_param_count(&cls.body.body);
         self.set_debug_pos(cls.body.span.start);
         self.push(Insn::DefineClassWithBuffer(
             0,
-            lit_arr_id,
+            ctor_id,
             lit_arr_id,
             formal_count,
             proto_vreg,
@@ -10630,20 +11486,23 @@ impl<'a> CodeGen<'a> {
             self.set_debug_pos(id.span.start);
         }
         self.push(Insn::Sta(var_reg));
+        if cls.id.is_some() {
+            self.initialize_class_name_binding_from_reg(class_name, class_reg);
+        }
         self.emit_class_missing_properties(
             class_name,
             &cls.body.body,
+            &class_buffer_compiled_methods,
             class_reg,
             cls.body.span.start,
             &computed_keys.method_regs,
             &computed_keys.auto_accessor_regs,
         );
-        self.emit_class_static_initializer(
+        self.emit_class_instance_initializer(
             class_name,
             &cls.body.body,
             class_reg,
             cls.body.span.start,
-            &computed_keys.static_field_regs,
         );
         if let Some(slot) = lexical_slot {
             self.push(Insn::Lda(class_reg));
@@ -10652,77 +11511,16 @@ impl<'a> CodeGen<'a> {
             self.push(Insn::StLexVar(0, slot));
             self.next_reg = saved_next_reg;
         }
-        if let Some(export_index) = export_slot {
-            self.push(Insn::Lda(class_reg));
-            self.push(Insn::StModuleVar(export_index));
-        }
-    }
-
-    fn emit_standalone_class_with_instance_initializer(
-        &mut self,
-        class_name: &str,
-        cls: &oxc_ast::ast::Class<'_>,
-    ) -> bool {
-        if cls.super_class.is_some() || !has_standalone_instance_initializer(&cls.body.body) {
-            return false;
-        }
-
-        self.ensure_next_reg_at_least(2);
-        self.push(Insn::Nop);
-        self.push(Insn::NewLexEnv(1));
-
-        let try_begin = self.insns.len() as u32;
-        self.push(Insn::LdHole);
-        self.push(Insn::Sta(1));
-
-        let lit_arr_id = self.literal_arrays.len() as u16;
-        self.literal_arrays.push(class_buffer_literal_array(
+        self.emit_class_static_initialization_epilogue(
             class_name,
             &cls.body.body,
-            true,
-            Some(self.lowering),
-        ));
-        let formal_count = constructor_required_param_count(&cls.body.body);
-        self.set_debug_pos(cls.body.span.start);
-        self.push(Insn::DefineClassWithBuffer(
-            0,
-            lit_arr_id,
-            lit_arr_id,
-            formal_count,
-            1,
-        ));
-
-        let prototype_id = self.intern("prototype");
-        self.push(Insn::LdObjByName(0, prototype_id));
-        let initializer_name = format!("#~{class_name}>#instance_initializer");
-        let initializer_id = self.intern(&initializer_name);
-        self.push(Insn::DefineMethodShort(0, initializer_id, 0));
-        self.push(Insn::StLexVar(0, 0));
-        let try_end = self.insns.len() as u32;
-
-        let jump_past_handler = self.insns.len();
-        self.push(Insn::JmpShort(0));
-        let catch_begin = self.insns.len() as u32;
-        self.push(Insn::Sta(0));
-        self.push(Insn::PopLexEnv);
-        self.push(Insn::Lda(0));
-        self.push(Insn::Throw);
-        let catch_end = self.insns.len() as u32;
-        self.patch_jump_to(jump_past_handler, catch_end as usize);
-        self.push_catch_entry(CatchEntry {
-            try_begin,
-            try_end,
-            catch_begin,
-            catch_end: catch_begin,
-            exception_record: None,
-        });
-
-        self.push(Insn::PopLexEnv);
-        self.current_line = u32::MAX;
-        self.current_col = 0;
-        self.push(Insn::ReturnUndefined);
-        self.returned = true;
-        true
+            class_reg,
+            (cls.span.start, cls.span.end),
+            cls.body.span.start,
+            &computed_keys.static_field_regs,
+            class_lexical_env,
+            export_slot,
+        );
     }
 
     fn emit_simple_standalone_class_declaration(
@@ -10746,18 +11544,18 @@ impl<'a> CodeGen<'a> {
             reg
         };
 
+        let class_public_buffer =
+            ClassPublicBuffer::build(class_name, &cls.body.body, true, Some(self.lowering));
+        let (literal_array, _) = class_public_buffer.into_parts();
         let lit_arr_id = self.literal_arrays.len() as u16;
-        self.literal_arrays.push(class_buffer_literal_array(
-            class_name,
-            &cls.body.body,
-            true,
-            Some(self.lowering),
-        ));
+        self.literal_arrays.push(literal_array);
+        let ctor_id =
+            self.class_constructor_id(class_name, &cls.body.body, (cls.span.start, cls.span.end));
         let formal_count = constructor_required_param_count(&cls.body.body);
         self.set_debug_pos(cls.body.span.start);
         self.push(Insn::DefineClassWithBuffer(
             0,
-            lit_arr_id,
+            ctor_id,
             lit_arr_id,
             formal_count,
             proto_vreg,
@@ -10790,20 +11588,10 @@ impl<'a> CodeGen<'a> {
         for element in elements {
             match element {
                 ClassElement::PropertyDefinition(property)
-                    if property.r#static && property.computed =>
+                    if property_needs_static_initializer(property) && property.computed =>
                 {
                     keys.static_field_regs
                         .push(self.emit_property_key_to_reg(&property.key));
-                }
-                ClassElement::PropertyDefinition(property)
-                    if !property.r#static && property.computed =>
-                {
-                    let key_reg = self.emit_property_key_to_reg(&property.key);
-                    let capture_name = computed_instance_class_field_key_name(property);
-                    if let Some(slot) = self.current_lexical_slot(&capture_name) {
-                        self.push(Insn::Lda(key_reg));
-                        self.push(Insn::StLexVar(0, slot));
-                    }
                 }
                 ClassElement::MethodDefinition(method) if method.computed => {
                     keys.method_regs
@@ -10819,22 +11607,281 @@ impl<'a> CodeGen<'a> {
         keys
     }
 
-    fn emit_class_static_initializer(
+    fn emit_class_static_initialization_epilogue(
         &mut self,
         class_name: &str,
         elements: &[ClassElement<'_>],
         class_reg: u8,
-        class_span_start: u32,
+        class_span: (u32, u32),
+        class_body_start: u32,
+        computed_key_regs: &[u8],
+        class_lexical_env: bool,
+        export_index: Option<u8>,
+    ) {
+        if self
+            .lowering
+            .static_initialization_mode()
+            .inlines_in_module_main()
+        {
+            if let Some(export_index) = export_index {
+                self.exit_standalone_class_lexical_env(class_lexical_env);
+                self.push(Insn::Lda(class_reg));
+                self.push(Insn::StModuleVar(export_index));
+                self.emit_inline_class_static_initializers(
+                    class_name,
+                    elements,
+                    class_reg,
+                    class_body_start,
+                    computed_key_regs,
+                    Some(export_index),
+                );
+            } else {
+                self.emit_inline_class_static_initializers(
+                    class_name,
+                    elements,
+                    class_reg,
+                    class_body_start,
+                    computed_key_regs,
+                    None,
+                );
+                self.exit_standalone_class_lexical_env(class_lexical_env);
+            }
+            self.push(Insn::Lda(class_reg));
+            return;
+        }
+
+        let export_prebound =
+            export_index.is_some() && !self.lowering.standalone_ecmascript_input();
+        if let Some(export_index) = export_index.filter(|_| export_prebound) {
+            self.push(Insn::Lda(class_reg));
+            self.push(Insn::StModuleVar(export_index));
+        }
+
+        self.emit_external_class_static_initializer(
+            class_name,
+            elements,
+            class_reg,
+            class_span,
+            class_body_start,
+            computed_key_regs,
+        );
+        self.exit_standalone_class_lexical_env(class_lexical_env);
+        if let Some(export_index) = export_index.filter(|_| !export_prebound) {
+            self.push(Insn::Lda(class_reg));
+            self.push(Insn::StModuleVar(export_index));
+        }
+        self.push(Insn::Lda(class_reg));
+    }
+
+    fn emit_inline_class_static_initializers(
+        &mut self,
+        class_name: &str,
+        elements: &[ClassElement<'_>],
+        class_reg: u8,
+        class_body_start: u32,
+        computed_key_regs: &[u8],
+        export_index: Option<u8>,
+    ) {
+        if !class_needs_static_initializer(elements) {
+            return;
+        }
+
+        self.set_debug_pos(class_body_start);
+        let prefer_module_binding = export_index.is_some()
+            && self.lowering.export_index(class_name).is_some()
+            && self
+                .prefer_module_export_loads
+                .insert(class_name.to_string());
+        let private_layout = ClassPrivateLayout::collect(elements);
+        let target_reg = self.alloc_reg();
+        let mut computed_key_index = 0usize;
+        let previous_class_static_this_reg = self.class_static_this_reg;
+        let previous_class_static_this_export = self.class_static_this_export.clone();
+        self.class_static_this_reg = Some(class_reg);
+        self.class_static_this_export =
+            export_index.map(|export_index| (export_index, class_name.to_string()));
+
+        for element in elements {
+            match element {
+                ClassElement::PropertyDefinition(property) => {
+                    if !property_needs_static_initializer(property) {
+                        continue;
+                    }
+                    self.set_debug_pos(property.span.start);
+                    let target_reg = self.emit_class_static_target_to_reg(
+                        class_name,
+                        class_reg,
+                        target_reg,
+                        export_index,
+                    );
+                    if let PropertyKey::PrivateIdentifier(id) = &property.key {
+                        if let Some(value) = property.value.as_ref() {
+                            self.emit_expr(value);
+                        } else {
+                            self.push(Insn::LdUndefined);
+                        }
+                        if let Some(slot) = private_layout.slot(id.name.as_str()) {
+                            self.push(Insn::CallRuntimeDefinePrivateProperty(
+                                0, 0, slot, target_reg,
+                            ));
+                        }
+                        continue;
+                    }
+                    let key = if property.computed {
+                        let Some(key_reg) = computed_key_regs.get(computed_key_index).copied()
+                        else {
+                            continue;
+                        };
+                        computed_key_index = computed_key_index.saturating_add(1);
+                        ClassFieldRuntimeKey::ComputedReg(key_reg)
+                    } else {
+                        let Some(name) = method_key_name(&property.key) else {
+                            continue;
+                        };
+                        ClassFieldRuntimeKey::Static(name)
+                    };
+                    self.emit_inline_class_static_field_assignment(
+                        property.value.as_ref(),
+                        key,
+                        target_reg,
+                    );
+                }
+                ClassElement::StaticBlock(block) => {
+                    self.set_debug_pos(block.span.start);
+                    for stmt in &block.body {
+                        self.emit_inline_static_block_stmt(stmt);
+                        if self.returned {
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            if self.returned {
+                break;
+            }
+        }
+
+        self.class_static_this_reg = previous_class_static_this_reg;
+        self.class_static_this_export = previous_class_static_this_export;
+        if prefer_module_binding {
+            self.prefer_module_export_loads.remove(class_name);
+        }
+    }
+
+    fn emit_inline_static_block_stmt(&mut self, stmt: &Statement<'_>) {
+        self.set_debug_pos(stmt.span().start);
+        match stmt {
+            Statement::ExpressionStatement(es) => {
+                if matches!(&es.expression, Expression::StringLiteral(_)) {
+                    return;
+                }
+                let saved_next_reg = self.next_reg;
+                self.emit_expr(&es.expression);
+                self.next_reg = saved_next_reg;
+            }
+            Statement::VariableDeclaration(decl) => self.emit_var_decl(decl),
+            Statement::BlockStatement(block) => {
+                for stmt in &block.body {
+                    self.emit_inline_static_block_stmt(stmt);
+                    if self.returned {
+                        break;
+                    }
+                }
+            }
+            Statement::IfStatement(if_stmt) => {
+                let else_jump = self.emit_branch_if_false(&if_stmt.test);
+                self.emit_inline_static_block_stmt(&if_stmt.consequent);
+                if let Some(alternate) = &if_stmt.alternate {
+                    let end_jump = self.insns.len();
+                    self.push(Insn::Jmp(0));
+                    let else_target = self.insns.len();
+                    self.patch_jump_to(else_jump, else_target);
+                    self.emit_inline_static_block_stmt(alternate);
+                    let end = self.insns.len();
+                    self.patch_jump_to(end_jump, end);
+                } else {
+                    let end = self.insns.len();
+                    self.patch_jump_to(else_jump, end);
+                }
+            }
+            Statement::ThrowStatement(throw) => {
+                self.emit_expr(&throw.argument);
+                self.push(Insn::Throw);
+            }
+            Statement::DebuggerStatement(_) => {
+                if self.emit_debugger {
+                    self.push(Insn::Debugger);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn emit_inline_class_static_field_assignment(
+        &mut self,
+        value: Option<&Expression<'_>>,
+        key: ClassFieldRuntimeKey,
+        target_reg: u8,
+    ) {
+        if let Some(init_expr) = value {
+            self.emit_expr(init_expr);
+        } else {
+            self.push(Insn::LdUndefined);
+        }
+        match key {
+            ClassFieldRuntimeKey::Static(name) => {
+                let name_id = self.intern(&name);
+                self.push(Insn::StObjByName(0, name_id, target_reg));
+            }
+            ClassFieldRuntimeKey::ComputedReg(key_reg) => {
+                self.push(Insn::StObjByValue(0, target_reg, key_reg));
+            }
+        }
+    }
+
+    fn emit_class_static_target_to_reg(
+        &mut self,
+        class_name: &str,
+        class_reg: u8,
+        target_reg: u8,
+        export_index: Option<u8>,
+    ) -> u8 {
+        if let Some(export_index) = export_index {
+            self.push(Insn::LdLocalModuleVar(export_index));
+            self.push(Insn::Sta(target_reg));
+            let name_id = self.intern(class_name);
+            self.push(Insn::ThrowUndefinedIfHoleWithName(name_id));
+            return target_reg;
+        }
+        self.push(Insn::Lda(class_reg));
+        self.push(Insn::Sta(target_reg));
+        target_reg
+    }
+
+    fn emit_external_class_static_initializer(
+        &mut self,
+        class_name: &str,
+        elements: &[ClassElement<'_>],
+        class_reg: u8,
+        class_span: (u32, u32),
+        class_body_start: u32,
         computed_key_regs: &[u8],
     ) {
-        let Some(initializer_name) = static_initializer_record_name(class_name, elements) else {
+        let Some(initializer_name) = static_initializer_record_name(
+            class_name,
+            class_span.0,
+            class_span.1,
+            elements,
+            Some(self.lowering),
+        ) else {
             return;
         };
         let callee_reg = self.alloc_reg();
         let this_reg = self.alloc_reg();
         let method_name_id = self.intern(&initializer_name);
-        self.set_debug_pos(class_span_start);
-        self.push(Insn::DefineFuncShort(0, method_name_id, 0));
+        self.set_debug_pos(class_body_start);
+        self.push(Insn::DefineMethodShort(0, method_name_id, 0));
         self.push(Insn::Sta(callee_reg));
         self.push(Insn::Lda(class_reg));
         self.push(Insn::Sta(this_reg));
@@ -10858,10 +11905,49 @@ impl<'a> CodeGen<'a> {
         self.push(Insn::Lda(class_reg));
     }
 
+    fn emit_class_instance_initializer(
+        &mut self,
+        class_name: &str,
+        elements: &[ClassElement<'_>],
+        class_reg: u8,
+        class_span_start: u32,
+    ) {
+        if !class_needs_instance_initializer(elements, self.lowering.use_define_semantic()) {
+            return;
+        }
+
+        let initializer_name = format!("#~{class_name}>#instance_initializer");
+        let Some(slot) = self.current_lexical_slot(&initializer_name) else {
+            return;
+        };
+
+        let prototype_id = self.intern("prototype");
+        self.set_debug_pos(class_span_start);
+        self.push(Insn::Lda(class_reg));
+        self.push(Insn::LdObjByName(0, prototype_id));
+        let initializer_id = self.intern(&initializer_name);
+        self.push(Insn::DefineMethodShort(0, initializer_id, 0));
+        self.push(Insn::StLexVar(0, slot));
+        self.push(Insn::Lda(class_reg));
+    }
+
+    fn initialize_class_name_binding_from_reg(&mut self, name: &str, class_reg: u8) {
+        if let Some(reg) = self.var_regs.get(name).copied() {
+            self.push(Insn::Lda(class_reg));
+            self.push(Insn::Sta(reg));
+        }
+        if let Some(slot) = self.current_lexical_slot(name) {
+            self.push(Insn::Lda(class_reg));
+            self.push(Insn::StLexVar(0, slot));
+        }
+        self.push(Insn::Lda(class_reg));
+    }
+
     fn emit_class_missing_properties(
         &mut self,
         class_name: &str,
         elements: &[ClassElement<'_>],
+        class_buffer_compiled_methods: &[bool],
         class_reg: u8,
         class_span_start: u32,
         computed_method_key_regs: &[u8],
@@ -10876,7 +11962,7 @@ impl<'a> CodeGen<'a> {
         self.push(Insn::Sta(prototype_reg));
 
         let mut computed_method_index = 0usize;
-        for element in elements {
+        for (element_index, element) in elements.iter().enumerate() {
             let ClassElement::MethodDefinition(method) = element else {
                 continue;
             };
@@ -10887,7 +11973,12 @@ impl<'a> CodeGen<'a> {
             } else {
                 None
             };
-            if method.kind == MethodDefinitionKind::Constructor || is_class_buffer_method(method) {
+            if method.kind == MethodDefinitionKind::Constructor
+                || class_buffer_compiled_methods
+                    .get(element_index)
+                    .copied()
+                    .unwrap_or(false)
+            {
                 continue;
             }
             let public_name = if method.computed {
@@ -11046,13 +12137,13 @@ impl<'a> CodeGen<'a> {
         // Emit callruntime.createprivateproperty if the class has private elements.
         // Mirrors upstream classDefinition.cpp: done AFTER CompileMissingProperties,
         // BEFORE StaticInitializer.
-        let (private_slots, private_field_count) = collect_class_private_slots(elements);
-        if !private_slots.is_empty() {
+        let private_layout = ClassPrivateLayout::collect(elements);
+        if private_layout.has_private_elements() {
             let priv_lit_id = self.literal_arrays.len() as u16;
             self.literal_arrays
                 .push(class_private_methods_literal_array(elements));
             self.push(Insn::CallRuntimeCreatePrivateProperty(
-                private_field_count,
+                private_layout.private_field_count,
                 priv_lit_id,
             ));
             // Reload class_reg into acc (createprivateproperty clobbers it).
@@ -11125,14 +12216,24 @@ impl<'a> CodeGen<'a> {
     // ── Assignment: lhs = rhs ─────────────────────────────────────────────────
 
     fn emit_identifier_load(&mut self, name: &str) {
+        if self.prefer_module_export_loads.contains(name) {
+            if let Some(export_index) = self.lowering.export_index(name) {
+                self.push(Insn::LdLocalModuleVar(export_index));
+                let name_id = self.intern(name);
+                self.push(Insn::ThrowUndefinedIfHoleWithName(name_id));
+                return;
+            }
+        }
         if let Some(&reg) = self.var_regs.get(name) {
             self.push(Insn::Lda(reg));
+        } else if let Some(lookup) = self.lexical_lookup(name) {
+            self.push(Insn::LdLexVar(lookup.level, lookup.slot));
+            if lookup.kind.is_tdz() {
+                let name_id = self.intern(name);
+                self.push(Insn::ThrowUndefinedIfHoleWithName(name_id));
+            }
         } else if let Some(export_index) = self.lowering.export_index(name) {
             self.push(Insn::LdLocalModuleVar(export_index));
-            let name_id = self.intern(name);
-            self.push(Insn::ThrowUndefinedIfHoleWithName(name_id));
-        } else if let Some((level, slot)) = self.lexical_lookup(name) {
-            self.push(Insn::LdLexVar(level, slot));
             let name_id = self.intern(name);
             self.push(Insn::ThrowUndefinedIfHoleWithName(name_id));
         } else if let Some(import_index) = self.lowering.import_index(name) {
@@ -11145,11 +12246,19 @@ impl<'a> CodeGen<'a> {
         }
     }
 
+    fn store_identifier_binding_from_reg(&mut self, name: &str, reg: u8) {
+        if let Some(export_index) = self.lowering.export_index(name) {
+            self.push(Insn::Lda(reg));
+            self.push(Insn::StModuleVar(export_index));
+        }
+    }
+
     fn emit_identifier_store(&mut self, name: &str) {
         if let Some(&reg) = self.var_regs.get(name) {
             self.push(Insn::Sta(reg));
-        } else if let Some((level, slot)) = self.lexical_lookup(name) {
-            self.push(Insn::StLexVar(level, slot));
+            self.store_identifier_binding_from_reg(name, reg);
+        } else if let Some(lookup) = self.lexical_lookup(name) {
+            self.push(Insn::StLexVar(lookup.level, lookup.slot));
         } else if let Some(export_index) = self.lowering.export_index(name) {
             self.push(Insn::StModuleVar(export_index));
         } else {
@@ -11317,7 +12426,7 @@ impl<'a> CodeGen<'a> {
                 let (original_reg, updated_reg) =
                     self.emit_update_acc(update.operator, update.prefix);
                 let obj_reg = self.alloc_reg();
-                let slot = self.private_field_slots.get(name.as_str()).copied();
+                let slot = self.private_layout.slot(name.as_str());
                 self.emit_expr(&expr.object);
                 self.push(Insn::Sta(obj_reg));
                 self.push(Insn::Lda(updated_reg));
@@ -11370,7 +12479,7 @@ impl<'a> CodeGen<'a> {
                 self.emit_private_field_load(&name, &expr.object);
                 let (original_reg, updated_reg) = self.emit_update_acc(operator, prefix);
                 let obj_reg = self.alloc_reg();
-                let slot = self.private_field_slots.get(name.as_str()).copied();
+                let slot = self.private_layout.slot(name.as_str());
                 self.emit_expr(&expr.object);
                 self.push(Insn::Sta(obj_reg));
                 self.push(Insn::Lda(updated_reg));
@@ -11716,20 +12825,6 @@ impl<'a> CodeGen<'a> {
             return;
         }
 
-        // ── require("module_specifier") → tryldglobalbyname ──────────────────
-        // ArkRuntime exposes module exports as globals through its `require`
-        // mechanism.  We lower `require("@ohos:foo.bar")` directly to a
-        // global lookup rather than emitting an actual function call.
-        if let Expression::Identifier(id) = &call.callee {
-            if id.name.as_str() == "require" && call.arguments.len() == 1 {
-                if let Some(Expression::StringLiteral(s)) = call.arguments[0].as_expression() {
-                    let name_id = self.intern(s.value.as_str());
-                    self.push(Insn::TryLdGlobalByName(0, name_id));
-                    return;
-                }
-            }
-        }
-
         let is_method = matches!(
             &call.callee,
             Expression::StaticMemberExpression(_) | Expression::ComputedMemberExpression(_)
@@ -11964,6 +13059,7 @@ impl<'a> CodeGen<'a> {
             self.push(Insn::Sta(new_this_reg));
             self.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
             self.push(Insn::ThrowIfSuperNotCorrectCall(1));
+            self.emit_instance_initializer_inline(new_this_reg);
             if self.lowering.standalone_ecmascript_input() {
                 self.derived_new_this_reg = Some(new_this_reg);
             } else {
@@ -12000,6 +13096,7 @@ impl<'a> CodeGen<'a> {
         self.push(Insn::Sta(new_this_reg));
         self.push(Insn::Lda(MANDATORY_PARAM_THIS_REG));
         self.push(Insn::ThrowIfSuperNotCorrectCall(1));
+        self.emit_instance_initializer_inline(new_this_reg);
         if self.lowering.standalone_ecmascript_input() {
             self.derived_new_this_reg = Some(new_this_reg);
         } else {
@@ -12093,9 +13190,7 @@ impl<'a> CodeGen<'a> {
         self.emit_argument(arg);
         self.set_debug_pos(argument_span_start(arg));
         self.push(Insn::Sta(reg));
-        if self.next_reg <= reg {
-            self.next_reg = reg.saturating_add(1);
-        }
+        self.ensure_next_reg_at_least(reg.saturating_add(1));
     }
 
     /// Compile an argument expression into a fresh register; return the register.
@@ -12262,9 +13357,7 @@ impl<'a> CodeGen<'a> {
                 self.push(Insn::LdUndefined);
             }
             UnaryOperator::Typeof => {
-                self.emit_expr(&unary.argument);
-                self.set_debug_pos(unary.span.start);
-                self.push(Insn::TypeOf(0));
+                self.emit_typeof_expr(&unary.argument, unary.span.start);
             }
             UnaryOperator::UnaryNegation => {
                 let operand_reg = self.emit_unary_operand_to_reg(&unary.argument);
@@ -12294,6 +13387,28 @@ impl<'a> CodeGen<'a> {
         let operand_reg = self.alloc_reg();
         self.push(Insn::Sta(operand_reg));
         operand_reg
+    }
+
+    fn emit_typeof_expr(&mut self, argument: &Expression<'_>, span_start: u32) {
+        if let Expression::Identifier(id) = argument {
+            let name = id.name.as_str();
+            if self.is_bound_identifier(name) {
+                self.emit_identifier_load(name);
+            } else {
+                let saved_next_reg = self.next_reg;
+                let global_reg = self.alloc_reg();
+                self.push(Insn::LdGlobal);
+                self.push(Insn::Sta(global_reg));
+                let name_id = self.intern(name);
+                self.push(Insn::Lda(global_reg));
+                self.push(Insn::LdObjByName(0, name_id));
+                self.next_reg = saved_next_reg;
+            }
+        } else {
+            self.emit_expr(argument);
+        }
+        self.set_debug_pos(span_start);
+        self.push(Insn::TypeOf(0));
     }
 
     fn emit_delete_expr(&mut self, argument: &Expression<'_>) {

@@ -1,3 +1,4 @@
+pub(super) mod assignment_targets;
 pub(super) mod ast_analysis;
 pub mod builder;
 pub(super) mod class_layout;
