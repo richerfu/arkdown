@@ -52,6 +52,7 @@ Each SPEC file contains three standard sections:
 | -------- | ---------------------------------- | --------------- | ------------------------- |
 | SPEC-044 | Integrated HSP Processing          | `arkdown-pack`  | SPEC-012                  |
 | SPEC-048 | Build Session Architecture Refactor | multi-crate     | SPEC-005, SPEC-010, SPEC-019 |
+| SPEC-049 | Rust ABC AOT Backend Upstream-Chain Refactor | `arkdown-abc`, `arkdown-ts2abc`, `arkdown-cli` | SPEC-009, SPEC-025, SPEC-028 |
 
 ## P2 — Advanced Features
 

@@ -180,7 +180,7 @@ impl SelfConsistencyOracle {
     /// `extra_args` are forwarded to [`arkdown_cli::cmd::build::run`] via the
     /// [`BuildArgs`] struct.  The project root is always set to `project_path`.
     pub fn run_build(project_path: &Path, disable_abc_cache: bool) -> BuildOutput {
-        use arkdown_cli::cmd::build::{run, BuildArgs};
+        use arkdown_cli::cmd::build::{run, AbcBackendChoice, BuildArgs};
 
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         rt.block_on(run(BuildArgs {
@@ -195,6 +195,7 @@ impl SelfConsistencyOracle {
             preview: false,
             disable_abc_cache,
             cache_file: None,
+            abc_backend: AbcBackendChoice::Auto,
         }))
         .expect("arkdown build must succeed");
 

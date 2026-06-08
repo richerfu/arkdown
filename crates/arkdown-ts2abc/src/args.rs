@@ -184,7 +184,7 @@ impl ArgParser {
             target_api_version: self.target_api_version,
             target_api_sub_version: self.target_api_sub_version.clone(),
             enable_annotations: self.enable_annotations,
-            use_define_semantic: false,
+            use_define_semantic: self.use_define_semantic,
             debug_info: self.debug_info,
             opt_level: self.opt_level,
             optimize_try_catch_func: self.optimize_try_catch_func,

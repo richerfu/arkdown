@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use clap::Args;
+use clap::{Args, ValueEnum};
 use indexmap::IndexMap;
 
 use arkdown::{compile_entry::CompileEntryNamer, BundleOutput, Bundler};
@@ -36,7 +36,7 @@ use arkdown_profile::{
 use arkdown_resolver::{OhosResolver, ResolverConfig};
 use arkdown_resource::{ResourceCompileConfig, ResourceCompileInput, ResourceCompiler};
 use arkdown_sign::HapSigner;
-use arkdown_ts2abc::{compile_to_abc, Ts2abcInput};
+use arkdown_ts2abc::Ts2abcInput;
 use arkdown_watcher::FileWatcher;
 use rolldown_plugin::__inner::SharedPluginable;
 
@@ -84,6 +84,13 @@ use intermediates::{
 };
 mod module_plan;
 use module_plan::{build_modules_for_target, resource_modules_for_build};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum AbcBackendChoice {
+    Auto,
+    Sdk,
+    Rust,
+}
 
 #[derive(Args)]
 pub struct BuildArgs {
@@ -146,6 +153,10 @@ pub struct BuildArgs {
     /// Section 3.6: "实现 upstream ProgramCache/protoBin".
     #[arg(long = "cache-file")]
     pub cache_file: Option<PathBuf>,
+    /// ABC compiler backend: auto uses SDK es2abc when available, otherwise
+    /// arkdown's Rust backend.
+    #[arg(long = "abc-backend", value_enum, default_value = "auto")]
+    pub abc_backend: AbcBackendChoice,
 }
 
 pub async fn run(args: BuildArgs) -> Result<()> {
@@ -170,6 +181,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
     }
     let disable_abc_cache = args.disable_abc_cache;
     let cli_cache_file = args.cache_file.clone();
+    let abc_backend = args.abc_backend;
     let project_root = args
         .project
         .unwrap_or_else(|| std::env::current_dir().expect("failed to get current directory"));
@@ -204,7 +216,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
 
     let config_arc = Arc::new(config);
     let build_modules = build_modules_for_target(config_arc.as_ref(), module_filter.as_deref());
-    let abc_compile_plan = AbcCompilePlan::from_config(config_arc.as_ref());
+    let abc_compile_plan = AbcCompilePlan::from_config(config_arc.as_ref(), abc_backend);
 
     // F20: Coverage instrumentation mode.
     // When --coverage is set, the build is prepared for code coverage collection.
@@ -1308,13 +1320,15 @@ pub async fn run(args: BuildArgs) -> Result<()> {
             ));
         }
         if !ts2abc_inputs.is_empty() {
-            compile_to_abc(abc_compile_plan.ts2abc_options(AbcCompileRequest {
-                inputs: ts2abc_inputs,
-                output: bundle_out.modules_abc_path.clone(),
-                cache_file: effective_cache_file,
-                npm_module_entry_list: compile_arkts_handoff.npm_entries_path,
-            }))
-            .map_err(|e| anyhow::anyhow!("ABC compile failed: {}", e))?;
+            abc_compile_plan
+                .compile(AbcCompileRequest {
+                    inputs: ts2abc_inputs,
+                    output: bundle_out.modules_abc_path.clone(),
+                    input_file_list: compile_arkts_handoff.files_info_path,
+                    cache_file: effective_cache_file,
+                    npm_module_entry_list: compile_arkts_handoff.npm_entries_path,
+                })
+                .map_err(|e| anyhow::anyhow!("ABC compile failed: {}", e))?;
             write_hvigor_source_maps(
                 bundle_out,
                 module,
@@ -1923,6 +1937,7 @@ pub async fn run(args: BuildArgs) -> Result<()> {
                     preview: false, // inner rebuild handles resource compilation
                     disable_abc_cache: false,
                     cache_file: None,
+                    abc_backend,
                 };
                 if let Err(e) = rt.block_on(run(rebuild_args)) {
                     eprintln!("[watch] rebuild failed: {e:#}");

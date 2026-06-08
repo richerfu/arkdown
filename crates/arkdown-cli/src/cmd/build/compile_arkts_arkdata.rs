@@ -18,7 +18,7 @@ use walkdir::WalkDir;
 use arkdown_core::{ArkdownConfig, BuildMode, ModuleConfig, OhosModuleType};
 use arkdown_plugin_ets_transform::{EtsTransformPlugin, ResourceReference};
 use arkdown_profile::LoaderJson;
-use arkdown_ts2abc::{compile_to_abc, Ts2abcInput};
+use arkdown_ts2abc::Ts2abcInput;
 
 use super::compile_arkts_abc::{AbcCompilePlan, AbcCompileRequest};
 use super::compile_arkts_modules::{
@@ -183,13 +183,15 @@ pub(super) fn compile_arkdata_pass(
     let output_dir = PathBuf::from(&loader_json.ace_module_build);
     let data_abc_path = output_dir.join("data.abc");
 
-    compile_to_abc(abc_compile_plan.ts2abc_options(AbcCompileRequest {
-        inputs,
-        output: data_abc_path,
-        cache_file: None,
-        npm_module_entry_list: None,
-    }))
-    .map_err(|e| anyhow::anyhow!("H13: ArkData ABC compile failed: {}", e))?;
+    abc_compile_plan
+        .compile(AbcCompileRequest {
+            inputs,
+            output: data_abc_path,
+            input_file_list: None,
+            cache_file: None,
+            npm_module_entry_list: None,
+        })
+        .map_err(|e| anyhow::anyhow!("H13: ArkData ABC compile failed: {}", e))?;
 
     Ok(())
 }

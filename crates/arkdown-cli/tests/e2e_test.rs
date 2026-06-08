@@ -608,6 +608,7 @@ fn run_full_cli_build_hap(fixture_src: &PathBuf) -> PathBuf {
             preview: false,
             disable_abc_cache: false,
             cache_file: None,
+            abc_backend: arkdown_cli::cmd::build::AbcBackendChoice::Auto,
         },
     ))
     .expect("full CLI build");

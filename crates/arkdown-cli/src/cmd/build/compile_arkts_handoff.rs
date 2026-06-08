@@ -16,6 +16,7 @@ pub(super) struct CompileArkTsInfo {
 #[derive(Clone, Debug, Default)]
 pub(super) struct CompileArkTsHandoff {
     pub(super) inputs: Vec<Ts2abcInput>,
+    pub(super) files_info_path: Option<PathBuf>,
     pub(super) npm_entries_path: Option<PathBuf>,
     pub(super) modules_cache_path: Option<PathBuf>,
 }
@@ -72,6 +73,7 @@ pub(super) fn write_compile_arkts_abc_handoff(
 
     Ok(CompileArkTsHandoff {
         inputs,
+        files_info_path: Some(cache_root.join("filesInfo.txt")),
         npm_entries_path: Some(npm_entries_path),
         modules_cache_path: Some(cache_root.join("modules.cache")),
     })

@@ -5,7 +5,10 @@ use arkdown_abc::cache::{
 use arkdown_abc::emit::file::version_for_target_api;
 use arkdown_abc::proto_panda::{annotation_element, scalar_value, Function, Program};
 use arkdown_abc::AbcReader;
-use arkdown_ts2abc::{CompileContextInfo, Ts2abcError, Ts2abcInput, Ts2abcOptions};
+use arkdown_ts2abc::{
+    compile_to_abc_with_backend, CompileContextInfo, SdkEs2abcBackend, Ts2abcError, Ts2abcInput,
+    Ts2abcOptions,
+};
 
 fn assert_main_function_matches_upstream_program_shape(program: &Program, key: &[u8]) {
     let function = program
@@ -190,6 +193,51 @@ fn compile_to_abc_uses_rust_backend_and_writes_panda_file() {
 }
 
 #[test]
+fn sdk_backend_reports_missing_compiler() {
+    let tmp = tempfile::tempdir().unwrap();
+    let source = tmp.path().join("Index.js");
+    let output = tmp.path().join("modules.abc");
+
+    let options = Ts2abcOptions {
+        inputs: vec![Ts2abcInput {
+            path: source,
+            output: None,
+            cache_file: None,
+            record_name: "entry|entry|1.0.0|src/main/ets/pages/Index".to_string(),
+            source_file: Some("entry/src/main/ets/pages/Index.ts".to_string()),
+            package_name: None,
+            is_commonjs: false,
+            is_shared_module: false,
+            origin_source_lang: String::new(),
+            source_map: None,
+        }],
+        output,
+        target_api_version: 17,
+        target_api_sub_version: Some("Release".to_string()),
+        enable_annotations: false,
+        use_define_semantic: false,
+        debug_info: false,
+        opt_level: 0,
+        optimize_try_catch_func: true,
+        merge_abc: true,
+        module: true,
+        commonjs: false,
+        input_extension: "js".to_string(),
+        module_record_field_name: None,
+        cache_file: None,
+        output_proto: None,
+        compile_context_info: Default::default(),
+        enable_abc_input: false,
+        dump_deps_info: false,
+        remove_redundant_file: false,
+        npm_module_entry_list: None,
+    };
+    let backend = SdkEs2abcBackend::new(tmp.path().join("missing-es2abc"));
+    let err = compile_to_abc_with_backend(options, &backend).unwrap_err();
+    assert!(matches!(err, Ts2abcError::SdkCompilerNotFound(_)));
+}
+
+#[test]
 fn compile_to_abc_writes_upstream_program_cache_proto_bin() {
     let tmp = tempfile::tempdir().unwrap();
     let source = tmp.path().join("Index.js");
@@ -248,6 +296,7 @@ fn compile_to_abc_writes_upstream_program_cache_proto_bin() {
             source_file,
             package_name,
             version_for_target_api(17, Some("Release")),
+            17,
         )
     );
     assert_eq!(entry.program.record_table.len(), 3);

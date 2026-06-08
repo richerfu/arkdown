@@ -1,10 +1,17 @@
 use std::path::PathBuf;
 
+use super::AbcBackendChoice;
+use anyhow::Result;
 use arkdown_core::{ArkdownConfig, BuildMode};
-use arkdown_ts2abc::{Ts2abcInput, Ts2abcOptions};
+use arkdown_ts2abc::{
+    compile_to_abc, compile_to_abc_with_backend, SdkEs2abcBackend, Ts2abcInput, Ts2abcOptions,
+    Ts2abcOutput,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct AbcCompilePlan {
+    backend: AbcBackendChoice,
+    sdk_es2abc_path: PathBuf,
     target_api_version: u32,
     target_api_sub_version: Option<String>,
     enable_annotations: bool,
@@ -17,13 +24,16 @@ pub(super) struct AbcCompilePlan {
 pub(super) struct AbcCompileRequest {
     pub inputs: Vec<Ts2abcInput>,
     pub output: PathBuf,
+    pub input_file_list: Option<PathBuf>,
     pub cache_file: Option<PathBuf>,
     pub npm_module_entry_list: Option<PathBuf>,
 }
 
 impl AbcCompilePlan {
-    pub(super) fn from_config(config: &ArkdownConfig) -> Self {
+    pub(super) fn from_config(config: &ArkdownConfig, backend: AbcBackendChoice) -> Self {
         Self {
+            backend,
+            sdk_es2abc_path: config.sdk_config.es2abc_path.clone(),
             target_api_version: config.sdk_config.compile_api_version,
             target_api_sub_version: config.product.compatible_sdk_version_stage.clone(),
             // Upstream ets-loader initializes `projectConfig.allowEtsAnnotations`
@@ -37,6 +47,28 @@ impl AbcCompilePlan {
             } else {
                 0
             },
+        }
+    }
+
+    pub(super) fn compile(&self, request: AbcCompileRequest) -> Result<Ts2abcOutput> {
+        let input_file_list = request.input_file_list.clone();
+        let options = self.ts2abc_options(request);
+        match self.backend {
+            AbcBackendChoice::Rust => compile_to_abc(options).map_err(Into::into),
+            AbcBackendChoice::Sdk => {
+                let backend = SdkEs2abcBackend::new(self.sdk_es2abc_path.clone())
+                    .with_input_file_list(input_file_list);
+                compile_to_abc_with_backend(options, &backend).map_err(Into::into)
+            }
+            AbcBackendChoice::Auto => {
+                if self.sdk_es2abc_path.exists() {
+                    let backend = SdkEs2abcBackend::new(self.sdk_es2abc_path.clone())
+                        .with_input_file_list(input_file_list);
+                    compile_to_abc_with_backend(options, &backend).map_err(Into::into)
+                } else {
+                    compile_to_abc(options).map_err(Into::into)
+                }
+            }
         }
     }
 
@@ -130,14 +162,41 @@ mod tests {
         AbcCompileRequest {
             inputs: Vec::new(),
             output: PathBuf::from("/out/modules.abc"),
+            input_file_list: None,
             cache_file: Some(PathBuf::from("/cache/modules.cache")),
             npm_module_entry_list: Some(PathBuf::from("/cache/npm_entries.txt")),
         }
     }
 
+    fn compile_request(tmp: &tempfile::TempDir) -> AbcCompileRequest {
+        let source = tmp.path().join("Index.js");
+        fs_err::write(&source, "export const value = 1;").unwrap();
+        AbcCompileRequest {
+            inputs: vec![Ts2abcInput {
+                path: source,
+                output: None,
+                cache_file: None,
+                record_name: "entry|entry|1.0.0|src/main/ets/pages/Index".to_string(),
+                source_file: Some("entry/src/main/ets/pages/Index.ts".to_string()),
+                package_name: Some("entry".to_string()),
+                is_commonjs: false,
+                is_shared_module: false,
+                origin_source_lang: "ets".to_string(),
+                source_map: None,
+            }],
+            output: tmp.path().join("modules.abc"),
+            input_file_list: None,
+            cache_file: None,
+            npm_module_entry_list: None,
+        }
+    }
+
     #[test]
     fn target_api_uses_discovered_sdk_api() {
-        let plan = AbcCompilePlan::from_config(&config_for("5.0.0(12)", 20, BuildMode::Debug));
+        let plan = AbcCompilePlan::from_config(
+            &config_for("5.0.0(12)", 20, BuildMode::Debug),
+            AbcBackendChoice::Rust,
+        );
         let options = plan.ts2abc_options(empty_request());
 
         assert_eq!(options.target_api_version, 20);
@@ -148,7 +207,10 @@ mod tests {
 
     #[test]
     fn target_api_falls_back_to_discovered_sdk_api() {
-        let plan = AbcCompilePlan::from_config(&config_for("6.0.0", 19, BuildMode::Debug));
+        let plan = AbcCompilePlan::from_config(
+            &config_for("6.0.0", 19, BuildMode::Debug),
+            AbcBackendChoice::Rust,
+        );
         let options = plan.ts2abc_options(empty_request());
 
         assert_eq!(options.target_api_version, 19);
@@ -157,7 +219,10 @@ mod tests {
 
     #[test]
     fn release_build_preserves_stage_and_optimization() {
-        let plan = AbcCompilePlan::from_config(&config_for("6.0.0(20)", 20, BuildMode::Release));
+        let plan = AbcCompilePlan::from_config(
+            &config_for("6.0.0(20)", 20, BuildMode::Release),
+            AbcBackendChoice::Rust,
+        );
         let options = plan.ts2abc_options(empty_request());
 
         assert_eq!(options.target_api_version, 20);
@@ -172,6 +237,34 @@ mod tests {
         assert_eq!(
             options.npm_module_entry_list.as_deref(),
             Some(std::path::Path::new("/cache/npm_entries.txt"))
+        );
+    }
+
+    #[test]
+    fn auto_backend_falls_back_to_rust_when_sdk_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plan = AbcCompilePlan::from_config(
+            &config_for("6.0.0(20)", 20, BuildMode::Debug),
+            AbcBackendChoice::Auto,
+        );
+
+        let output = plan.compile(compile_request(&tmp)).unwrap();
+        assert!(output.abc_path.exists());
+    }
+
+    #[test]
+    fn sdk_backend_requires_existing_es2abc() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plan = AbcCompilePlan::from_config(
+            &config_for("6.0.0(20)", 20, BuildMode::Debug),
+            AbcBackendChoice::Sdk,
+        );
+
+        let err = plan.compile(compile_request(&tmp)).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("SDK es2abc compiler does not exist"),
+            "unexpected error: {err:#}"
         );
     }
 }

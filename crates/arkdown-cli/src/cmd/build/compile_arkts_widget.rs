@@ -149,13 +149,15 @@ pub(super) fn compile_widget_pass(
     // Widget cache uses its own handoff modules.cache, matching
     // es2abc --cache-file @... without reusing the main module manifest.
     let modules_cache_path = handoff.modules_cache_path.clone();
-    compile_to_abc(abc_compile_plan.ts2abc_options(AbcCompileRequest {
-        inputs: handoff.inputs,
-        output: widget_abc,
-        cache_file: modules_cache_path,
-        npm_module_entry_list: handoff.npm_entries_path,
-    }))
-    .map_err(|e| anyhow::anyhow!("widget ABC compile failed: {}", e))?;
+    abc_compile_plan
+        .compile(AbcCompileRequest {
+            inputs: handoff.inputs,
+            output: widget_abc,
+            input_file_list: handoff.files_info_path,
+            cache_file: modules_cache_path,
+            npm_module_entry_list: handoff.npm_entries_path,
+        })
+        .map_err(|e| anyhow::anyhow!("widget ABC compile failed: {}", e))?;
 
     Ok(())
 }

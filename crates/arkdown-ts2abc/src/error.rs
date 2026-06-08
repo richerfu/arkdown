@@ -20,6 +20,16 @@ pub enum Ts2abcError {
     /// (options.cpp: "cannot use --module and --commonjs at the same time").
     #[error("cannot use --module and --commonjs at the same time")]
     ConflictingFlags,
+    #[error("SDK es2abc compiler does not exist: {0}")]
+    SdkCompilerNotFound(PathBuf),
+    #[error("failed to run SDK es2abc {program}: {source}")]
+    SdkCompilerIo {
+        program: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("SDK es2abc failed with status {status}: {stderr}")]
+    SdkCompilerFailed { status: String, stderr: String },
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]

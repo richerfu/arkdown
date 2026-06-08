@@ -463,6 +463,7 @@ fn accepts_hvigor_compat_flags() {
                 Some("moduleRecordField")
             );
             assert!(opts.enable_annotations);
+            assert!(opts.use_define_semantic);
         }
         other => panic!("expected compile command, got {other:?}"),
     }
