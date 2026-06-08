@@ -24,7 +24,32 @@
 | 11 — AotRunner | ✅ Complete | `aot/runner.rs` matching upstream `main.cpp Run()` |
 | 11b — Facade migration + deletion | ✅ Complete | `compiler.rs` facade over AotRunner; build_abc_file deleted |
 
-382 tests pass after upstream C++ alignment fixes. Guardrail: `rg build_abc_file|record_needs_optimization|load_npm_entry_records` → 0 production hits.
+382 tests pass. 3 GPG-signed commits. Guardrail: `rg build_abc_file|record_needs_optimization|load_npm_entry_records` → 0 production hits.
+
+### Final C++ Alignment Status (commit 43d9b60)
+
+| Area | Status |
+|------|--------|
+| MurmurHash3 algorithm | ✅ Correct — test vectors verified |
+| Program key format (source/ABC/npm) | ✅ Correct |
+| `_GLOBAL` merge-mode consistency check | ✅ Correct |
+| ir::builder returns Program | ✅ `build_program_with_mode` added, SourceProgramCompiler uses it |
+| Dependency BFS structure | ✅ Correct |
+| Static import moduleRecordIdx lookup | ✅ Correct (numeric index vs upstream string key — different internal repr, same output) |
+| Dynamic import `[DynamicImport ← LdaStr]` iteration order | ✅ Fixed to match upstream forward-iteration pattern |
+| Dynamic import `IsLabel()` check | ⚠️ Not replicable — Insn enum has no jump-target bit; documented; rare in practice |
+| npm entries compilation | ✅ Correct |
+| Non-merge metadata records | ✅ Correct |
+| ProgramOptimizer local optimization | ✅ Correct |
+| `analyze_for_global_optimization` | ⚠️ Stub — documented; call site wired correctly; body is no-op |
+| Annotation records | ✅ Correct for source programs; unverified against ets2panda |
+| String table merge | ✅ Correct |
+| `pandaFileVersion` in cache hash | ⚠️ Semantic difference — documented; no cross-tool cache interop with es2abc; self-consistent within arkdown |
+| ABC input cache hash + updateVersionInfo | ✅ `abc_input_hash_with_version_info` implemented |
+| npm entries proto cache restore | ✅ Fixed via `append_program_to_file` |
+| `requireGlobalOptimization` flag | ✅ Added; cache bypass + post-analysis wiring correct |
+| `proto_program_to_program` | ✅ Fixed via `append_program_to_file` |
+| Dynamic import BFS tracking | ✅ Fixed (was stub) |
 
 ### Upstream C++ Alignment (systematic comparison vs local `/Users/ranger/Desktop/project/ohos-rs/arkcompiler_ets_frontend`)
 
